@@ -561,6 +561,18 @@ const FortiManagerConfigSchema = z.object({
   // selection (/api/v2/cmdb/system/sdwan). Surfaced on the asset's SD-WAN tab.
   // FortiOS-only; default off. Mirrored on FortiGateConfigSchema for parity.
   pullSdwan: z.boolean().optional().default(false),
+  // ARP presence sweep. When true, right before each discovery cycle reads a
+  // FortiGate's ARP table, Polaris fires one fire-and-forget UDP datagram at
+  // every active dhcp_reservation IP on that device's subnets — forcing the
+  // gate to ARP-resolve them so live-but-quiet devices (statically
+  // configured, ICMP-firewalled) land in the table and stamp
+  // Reservation.lastSeenArp for stale detection. Requires Polaris→subnet
+  // routing + a permitting firewall policy to have any effect; where the
+  // packet can't reach, the sweep silently does nothing (absence of an ARP
+  // entry is never treated as evidence of absence). Default off — an
+  // unannounced sweep of every reserved IP is IDS-visible, so operators must
+  // opt in. Mirrored on FortiGateConfigSchema for parity.
+  arpPresenceSweep: z.boolean().optional().default(false),
   // Description sync (Polaris-primary). When true, operator descriptions in
   // Polaris are written back to the devices this integration discovered —
   // interface comments (AssetInterfaceOverride) to FortiGate system/interface
@@ -620,6 +632,9 @@ const FortiGateConfigSchema = z.object({
   // selection on each system-info pass. See FortiManagerConfigSchema.pullSdwan
   // for shape + semantics. FortiOS-only; default off.
   pullSdwan: z.boolean().optional().default(false),
+  // ARP presence sweep — see FortiManagerConfigSchema.arpPresenceSweep for
+  // shape + semantics. Default off.
+  arpPresenceSweep: z.boolean().optional().default(false),
   // Description sync (Polaris-primary) — see FortiManagerConfigSchema
   // .syncDescriptions for shape + semantics. Default off.
   syncDescriptions: z.boolean().optional().default(false),
@@ -1960,6 +1975,54 @@ async function buildFmgWarmCacheIps(
   }
 }
 
+/**
+ * Build the ARP presence-sweep target map for a Fortinet integration:
+ * lowercased FortiGate device name (fmgNameKey convention) → active
+ * dhcp_reservation IPs on that device's non-deprecated subnets. Empty when
+ * the integration hasn't opted in (`config.arpPresenceSweep !== true`), so
+ * callers can pass the result through unconditionally. Errors are swallowed:
+ * the sweep is a presence-evidence enhancer, never a discovery blocker.
+ *
+ * Scale: one indexed query bounded by total dhcp_reservation count (low
+ * thousands at most); the map is grouped per device so each FortiGate is
+ * swept with only its own subnets' IPs right before its ARP-table read —
+ * never a fleet-wide blast.
+ */
+async function buildArpSweepTargets(
+  integrationId: string,
+  config: Record<string, unknown>,
+): Promise<Map<string, string[]>> {
+  const empty = new Map<string, string[]>();
+  try {
+    if (config.arpPresenceSweep !== true) return empty;
+    const rows = await prisma.reservation.findMany({
+      where: {
+        status: "active",
+        sourceType: "dhcp_reservation",
+        ipAddress: { not: null },
+        subnet: {
+          discoveredBy: integrationId,
+          status: { not: "deprecated" },
+          fortigateDevice: { not: null },
+        },
+      },
+      select: { ipAddress: true, subnet: { select: { fortigateDevice: true } } },
+    });
+    const map = new Map<string, string[]>();
+    for (const r of rows) {
+      const dev = r.subnet.fortigateDevice;
+      if (!dev || !r.ipAddress) continue;
+      const key = dev.toLowerCase();
+      const list = map.get(key);
+      if (list) list.push(r.ipAddress);
+      else map.set(key, [r.ipAddress]);
+    }
+    return map;
+  } catch {
+    return empty;
+  }
+}
+
 export async function runPreflightTest(integration: { id: string; type: string; config: unknown }): Promise<{ ok: boolean; message: string }> {
   const config = integration.config as Record<string, unknown>;
   if (integration.type === "fortimanager") return fortimanager.testConnection(config as any, integration.id);
@@ -2167,8 +2230,15 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       syncTotals.skipped.push(...r.skipped);
       syncTotals.deprecated.push(...r.deprecated);
     } else if (integration.type === "fortigate") {
-      // Single FortiGate — no per-device iteration, sync the full result in one pass
-      discoveryResult = await fortigate.discoverDhcpSubnets(config as any, ac.signal, onProgress);
+      // Single FortiGate — no per-device iteration, sync the full result in one pass.
+      // ARP presence sweep (opt-in): one device, so flatten the per-device
+      // target map into a single list and ride it on the config object.
+      const fgSweepIps = [...(await buildArpSweepTargets(integrationId, config)).values()].flat();
+      discoveryResult = await fortigate.discoverDhcpSubnets(
+        (fgSweepIps.length ? { ...(config as any), arpSweepIps: fgSweepIps } : config) as any,
+        ac.signal,
+        onProgress,
+      );
       if (!ac.signal.aborted) {
         const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
         syncTotals.created.push(...r.created);
@@ -2189,7 +2259,10 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       // monitor unseeded) returns 0 rows and the resolver path runs as
       // before. Skipped in proxy mode.
       const warmCacheIps = await buildFmgWarmCacheIps(integrationId, config);
-      discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete, integrationId, warmCacheIps);
+      // ARP presence sweep targets (opt-in): per-FortiGate reserved-IP lists,
+      // swept by processDevice right before each device's ARP-table read.
+      const arpSweepTargets = await buildArpSweepTargets(integrationId, config);
+      discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete, integrationId, warmCacheIps, arpSweepTargets.size > 0 ? arpSweepTargets : undefined);
       // Skip Phase 2 (stale deprecation) if the run was aborted — an aborted
       // run shouldn't take destructive actions, even though the FMG device
       // roster used for deprecation is captured up front (not per-device).
@@ -6254,6 +6327,68 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       let okCount = 0;
       for (const r of results) if (r.status === "fulfilled") okCount++;
       syncLog("info", `Enriched ${okCount} asset(s) from FortiSwitch macmap + FortiGate ARP (switch-port + IP)`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Phase 7.6 — ARP presence evidence for DHCP reservations
+  phaseMark("7.6");
+  //
+  // A FortiGate ARP entry is minutes-fresh L2 proof the device holding a MAC
+  // was alive at that IP (FortiOS GCs unreferenced neighbor-cache entries
+  // within ~1–5 min). When the table shows a dhcp_reservation's IP bound to
+  // its reserved MAC on the owning device, stamp Reservation.lastSeenArp and
+  // clear stale-alert state exactly like a live lease does — this is what
+  // keeps statically-configured / ICMP-silent devices (which never lease)
+  // out of the stale list. MAC match is REQUIRED: the reserved IP answering
+  // from a different MAC is not presence of the reserved device. Runs on
+  // whatever ARP data this cycle carries — the opt-in arpPresenceSweep
+  // toggle only controls the active pre-read cache priming, not whether
+  // passively-observed bindings count as evidence. Scoped per (device, ip)
+  // so overlapping RFC1918 subnets behind different FortiGates on one FMG
+  // can't cross-match.
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  if (result.arpTable && result.arpTable.length > 0) {
+    const arpMacByDevIp = new Map<string, string>();
+    for (const row of result.arpTable) {
+      if (!row.ip || !row.fortigateDevice) continue;
+      const macKey = normalizeMacKey(row.mac);
+      if (!macKey) continue;
+      arpMacByDevIp.set(`${row.fortigateDevice.toLowerCase()}|${row.ip}`, macKey);
+    }
+    if (arpMacByDevIp.size > 0) {
+      const arpDevices = [...new Set(result.arpTable.map((r) => r.fortigateDevice).filter(Boolean))];
+      // One indexed query bounded by this device batch's dhcp_reservation
+      // count; matching is O(1) map lookups. Safe at 2000+ reservations.
+      const arpCandidateRows = await prisma.reservation.findMany({
+        where: {
+          status: "active",
+          sourceType: "dhcp_reservation",
+          ipAddress: { not: null },
+          macAddress: { not: null },
+          subnet: { discoveredBy: integrationId, fortigateDevice: { in: arpDevices } },
+        },
+        select: { id: true, ipAddress: true, macAddress: true, subnet: { select: { fortigateDevice: true } } },
+      });
+      const arpConfirmedIds: string[] = [];
+      for (const r of arpCandidateRows) {
+        const dev = r.subnet.fortigateDevice;
+        if (!dev || !r.ipAddress) continue;
+        const arpMac = arpMacByDevIp.get(`${dev.toLowerCase()}|${r.ipAddress}`);
+        if (!arpMac) continue;
+        const resMac = normalizeMacKey(r.macAddress);
+        if (resMac && resMac === arpMac) arpConfirmedIds.push(r.id);
+      }
+      if (arpConfirmedIds.length > 0) {
+        // Same re-arm semantics as a live lease: clearing staleNotifiedAt /
+        // staleSnoozedUntil lets a row that later goes silent alert cleanly.
+        await prisma.reservation.updateMany({
+          where: { id: { in: arpConfirmedIds } },
+          data: { lastSeenArp: new Date(), staleNotifiedAt: null, staleSnoozedUntil: null },
+        });
+        syncLog("info", `ARP presence: ${arpConfirmedIds.length} DHCP reservation(s) confirmed live by FortiGate ARP (IP+MAC match)`);
+      }
     }
   }
 

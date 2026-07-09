@@ -19,10 +19,19 @@
  * monitor probe). To avoid flagging those as stale, detection also folds in
  * `Asset.lastSeen` (the no-regress verified-presence timestamp from
  * `bumpLastSeen`) for any Asset that correlates to the reservation by MAC
- * (authoritative — DHCP reservations are MAC→IP) or, failing that, by IP. The
- * effective "last signal" is the freshest of the lease and the matched asset;
- * a device that is genuinely gone has neither a fresh lease nor a fresh asset
- * lastSeen, so it still flags correctly.
+ * (authoritative — DHCP reservations are MAC→IP) or, failing that, by IP.
+ *
+ * A third signal, `lastSeenArp`, is stamped by the discovery sync (Phase 7.6
+ * in integrations.ts) when the owning FortiGate's ARP table binds the
+ * reservation's IP to its reserved MAC — minutes-fresh L2 proof of life that
+ * needs no lease, no asset record, and no ICMP reply. The opt-in per-
+ * integration `arpPresenceSweep` toggle actively primes the gate's ARP cache
+ * (fire-and-forget UDP at each reserved IP, see arpPrimeService.ts) right
+ * before the table read so even quiet devices resolve.
+ *
+ * The effective "last signal" is the freshest of the lease, the ARP
+ * confirmation, and the matched asset; a device that is genuinely gone has
+ * none of the three fresh, so it still flags correctly.
  *
  * Threshold is admin-tunable via the `reservationStale` Setting
  * (`staleAfterDays`, default 60, 0 = disabled). The grace baseline below
@@ -114,8 +123,13 @@ export interface ReservationAlertEntry {
   subnetName: string;
   createdAt: Date;
   lastSeenLeased: Date | null;
+  // ARP presence evidence: last time discovery saw the FortiGate ARP table
+  // bind this reservation's IP to its reserved MAC (Phase 7.6 stamp in
+  // integrations.ts; the opt-in arpPresenceSweep toggle actively primes the
+  // gate's cache first). Real presence evidence, same standing as the lease.
+  lastSeenArp: Date | null;
   staleNotifiedAt: Date | null;
-  daysSinceSeen: number; // since the freshest of {lease, matched asset} OR baseline
+  daysSinceSeen: number; // since the freshest of {lease, ARP, matched asset} OR baseline
   fortigateDevice: string | null;
   pushedToId: string | null;
   pushedToName: string | null;
@@ -137,22 +151,27 @@ interface AssetPresence {
 
 /**
  * Pick the freshest "last signal" for a reservation from the available
- * evidence. The lease timestamp and the matched-asset timestamp are both real
- * evidence; the baseline is only a fallback used when NO real evidence exists
- * (cold-start grace — see module header). Pure + exported for unit testing.
+ * evidence. The lease timestamp, the ARP-confirmation timestamp, and the
+ * matched-asset timestamp are all real evidence; the baseline is only a
+ * fallback used when NO real evidence exists (cold-start grace — see module
+ * header). Pure + exported for unit testing.
  *
  * Note the baseline is a fallback, not a floor: a reservation with a genuine
- * but old lease/asset signal uses that real timestamp even when it predates
- * the baseline, so a long-dead reservation still flags during the cold-start
- * window rather than being spared.
+ * but old lease/ARP/asset signal uses that real timestamp even when it
+ * predates the baseline, so a long-dead reservation still flags during the
+ * cold-start window rather than being spared.
  */
 export function effectiveLastSignalMs(opts: {
   lastSeenLeasedMs: number | null;
+  lastSeenArpMs?: number | null;
   assetLastSeenMs: number | null;
   baselineMs: number;
-}): { ms: number; evidence: "lease" | "asset" | "baseline" } {
-  let best: { ms: number; evidence: "lease" | "asset" } | null = null;
+}): { ms: number; evidence: "lease" | "arp" | "asset" | "baseline" } {
+  let best: { ms: number; evidence: "lease" | "arp" | "asset" } | null = null;
   if (opts.lastSeenLeasedMs != null) best = { ms: opts.lastSeenLeasedMs, evidence: "lease" };
+  if (opts.lastSeenArpMs != null && (best == null || opts.lastSeenArpMs > best.ms)) {
+    best = { ms: opts.lastSeenArpMs, evidence: "arp" };
+  }
   if (opts.assetLastSeenMs != null && (best == null || opts.assetLastSeenMs > best.ms)) {
     best = { ms: opts.assetLastSeenMs, evidence: "asset" };
   }
@@ -295,9 +314,10 @@ export async function snoozeReservation(reservationId: string, actor?: string): 
  * List all currently-stale reservations. A row is stale when the threshold
  * is non-zero AND its freshest presence signal is older than the threshold.
  * The freshest signal is the most recent of (a) `lastSeenLeased` (the DHCP
- * lease) and (b) the lastSeen of an Asset that correlates to the reservation
- * by MAC or IP (so a statically-addressed device that never leases but is up
- * still clears). When neither exists, the effective baseline
+ * lease), (b) `lastSeenArp` (FortiGate ARP table binding the reserved IP to
+ * the reserved MAC), and (c) the lastSeen of an Asset that correlates to the
+ * reservation by MAC or IP (so a statically-addressed device that never
+ * leases but is up still clears). When none exists, the effective baseline
  * `max(createdAt, detectionStartedAt)` is used so the cold-start grace window
  * doesn't flood the alert list before discovery has populated either signal.
  *
@@ -335,6 +355,7 @@ export async function listStaleReservations(
       const presence = resolvePresence(r);
       const { ms: lastSignalMs } = effectiveLastSignalMs({
         lastSeenLeasedMs: r.lastSeenLeased?.getTime() ?? null,
+        lastSeenArpMs: r.lastSeenArp?.getTime() ?? null,
         assetLastSeenMs: presence.lastSeen?.getTime() ?? null,
         baselineMs: r.createdAt.getTime(),
       });
@@ -348,6 +369,7 @@ export async function listStaleReservations(
         subnetName: r.subnet.name,
         createdAt: r.createdAt,
         lastSeenLeased: r.lastSeenLeased,
+        lastSeenArp: r.lastSeenArp,
         staleNotifiedAt: r.staleNotifiedAt,
         daysSinceSeen: Math.floor((nowMs - lastSignalMs) / (24 * 60 * 60 * 1000)),
         fortigateDevice: r.subnet.fortigateDevice,
@@ -403,6 +425,7 @@ export async function listStaleReservations(
     const presence = resolvePresence(r);
     const { ms: lastSignalMs } = effectiveLastSignalMs({
       lastSeenLeasedMs: r.lastSeenLeased?.getTime() ?? null,
+      lastSeenArpMs: r.lastSeenArp?.getTime() ?? null,
       assetLastSeenMs: presence.lastSeen?.getTime() ?? null,
       baselineMs: baseline,
     });
@@ -419,6 +442,7 @@ export async function listStaleReservations(
       subnetName: r.subnet.name,
       createdAt: r.createdAt,
       lastSeenLeased: r.lastSeenLeased,
+      lastSeenArp: r.lastSeenArp,
       staleNotifiedAt: r.staleNotifiedAt,
       daysSinceSeen,
       fortigateDevice: r.subnet.fortigateDevice,
@@ -509,7 +533,9 @@ export async function flagStaleReservations(): Promise<number> {
     const dayWord = (n: number) => `${n} day${n === 1 ? "" : "s"}`;
     const sinceLabel = row.lastSeenLeased
       ? `${dayWord(row.daysSinceSeen)} since last seen leased`
-      : `never seen leased — ${dayWord(row.daysSinceSeen)} since detection baseline`;
+      : row.lastSeenArp
+        ? `never seen leased — ${dayWord(row.daysSinceSeen)} since last ARP confirmation`
+        : `never seen leased — ${dayWord(row.daysSinceSeen)} since detection baseline`;
     // When an asset correlates, the row is only here because that asset is ALSO
     // stale (a fresh asset would have excluded it). Say so — it tells the
     // operator the device is absent from every presence signal, not just DHCP.
@@ -532,6 +558,7 @@ export async function flagStaleReservations(): Promise<number> {
         fortigateDevice: row.fortigateDevice,
         pushedTo: row.pushedToName,
         lastSeenLeased: row.lastSeenLeased?.toISOString() ?? null,
+        lastSeenArp: row.lastSeenArp?.toISOString() ?? null,
         assetLastSeen: row.assetLastSeen?.toISOString() ?? null,
         assetPresenceMatch: row.assetPresenceMatch,
         daysSinceSeen: row.daysSinceSeen,

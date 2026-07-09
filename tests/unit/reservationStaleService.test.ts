@@ -77,4 +77,48 @@ describe("effectiveLastSignalMs", () => {
     const out = effectiveLastSignalMs({ lastSeenLeasedMs: leaseMs, assetLastSeenMs: assetMs, baselineMs });
     expect(out).toEqual({ ms: assetMs, evidence: "asset" });
   });
+
+  it("rescues a never-leased, asset-less reservation via ARP confirmation (the ICMP-silent static case)", () => {
+    // The device never DHCPs and was never discovered as an Asset, but the
+    // FortiGate's ARP table bound its reserved MAC to the IP this cycle.
+    const arpMs = 1_200 * DAY;
+    const baselineMs = 1_000 * DAY;
+    expect(
+      effectiveLastSignalMs({ lastSeenLeasedMs: null, lastSeenArpMs: arpMs, assetLastSeenMs: null, baselineMs }),
+    ).toEqual({ ms: arpMs, evidence: "arp" });
+  });
+
+  it("picks the freshest across all three real signals", () => {
+    expect(
+      effectiveLastSignalMs({ lastSeenLeasedMs: 100 * DAY, lastSeenArpMs: 300 * DAY, assetLastSeenMs: 200 * DAY, baselineMs: 0 }),
+    ).toEqual({ ms: 300 * DAY, evidence: "arp" });
+    expect(
+      effectiveLastSignalMs({ lastSeenLeasedMs: 400 * DAY, lastSeenArpMs: 300 * DAY, assetLastSeenMs: 200 * DAY, baselineMs: 0 }),
+    ).toEqual({ ms: 400 * DAY, evidence: "lease" });
+    expect(
+      effectiveLastSignalMs({ lastSeenLeasedMs: 100 * DAY, lastSeenArpMs: 300 * DAY, assetLastSeenMs: 500 * DAY, baselineMs: 0 }),
+    ).toEqual({ ms: 500 * DAY, evidence: "asset" });
+  });
+
+  it("uses a real-but-old ARP signal over the baseline (fallback, not floor) and still lets the row flag", () => {
+    const arpMs = 10 * DAY;
+    const baselineMs = 900 * DAY;
+    expect(
+      effectiveLastSignalMs({ lastSeenLeasedMs: null, lastSeenArpMs: arpMs, assetLastSeenMs: null, baselineMs }),
+    ).toEqual({ ms: arpMs, evidence: "arp" });
+  });
+
+  it("prefers the lease over ARP on an exact tie (deterministic)", () => {
+    const ms = 250 * DAY;
+    expect(
+      effectiveLastSignalMs({ lastSeenLeasedMs: ms, lastSeenArpMs: ms, assetLastSeenMs: null, baselineMs: 0 }),
+    ).toEqual({ ms, evidence: "lease" });
+  });
+
+  it("omitting lastSeenArpMs entirely preserves pre-feature behavior", () => {
+    const leaseMs = 500 * DAY;
+    expect(
+      effectiveLastSignalMs({ lastSeenLeasedMs: leaseMs, assetLastSeenMs: null, baselineMs: 1_000 * DAY }),
+    ).toEqual({ ms: leaseMs, evidence: "lease" });
+  });
 });
