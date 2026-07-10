@@ -525,7 +525,6 @@ async function loadIntegrations() {
       var config = intg.config || {};
       var statusDot = intg.lastTestOk === true ? "dot-ok" : intg.lastTestOk === false ? "dot-fail" : "dot-unknown";
       var statusText = intg.lastTestOk === true ? "Connected" : intg.lastTestOk === false ? "Failed" : "Not tested";
-      var lastTest = intg.lastTestAt ? formatDate(intg.lastTestAt) : "Never";
       var typeBadge =
         intg.type === "windowsserver" ? "Windows Server" :
         intg.type === "fortigate" ? "FortiGate" :
@@ -671,7 +670,6 @@ async function loadIntegrations() {
           '<div class="detail-row"><span class="detail-label">Next Auto-Discovery</span><span class="detail-value">' + nextDiscoveryText + '</span></div>' +
           avgRow +
           '<div class="detail-row"><span class="detail-label">Status</span><span class="detail-value">' + (intg.enabled ? '<span class="badge badge-active">Enabled</span>' : '<span class="badge badge-deprecated">Disabled</span>') + '</span></div>' +
-          '<div class="detail-row"><span class="detail-label">Last Tested</span><span class="detail-value">' + lastTest + '</span></div>' +
           fmgActivityRow +
         '</div>' +
       '</div>';
