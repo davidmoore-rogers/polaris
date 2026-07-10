@@ -5496,6 +5496,8 @@ function openApiQueryModal(id, adom, useProxy) {
           '<select id="fmg-fgt-method" style="width:auto">' +
             '<option value="GET">GET</option>' +
             '<option value="POST">POST</option>' +
+            '<option value="PUT">PUT</option>' +
+            '<option value="DELETE">DELETE</option>' +
           '</select>' +
         '</div>' +
         '<div class="form-group" style="margin:0">' +
@@ -5511,6 +5513,11 @@ function openApiQueryModal(id, adom, useProxy) {
       '<div class="form-group">' +
         '<label>Query Parameters <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(one per line — <code>key=value</code>)</span></label>' +
         '<textarea id="fmg-fgt-query" rows="4" style="font-family:monospace;font-size:0.82rem" placeholder="vdom=root&#10;format=mac|ip|hostname">vdom=root</textarea>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Body <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(JSON — sent for POST/PUT only)</span></label>' +
+        '<textarea id="fmg-fgt-body" rows="4" style="font-family:monospace;font-size:0.82rem" placeholder=\'{"description": "IDF closet switch"}\'></textarea>' +
+        '<p class="hint">Writes hit the live device config and are logged to Events. Leave empty for reads.</p>' +
       '</div>' +
     '</div>' +
     '<div style="display:flex;justify-content:flex-end;margin-bottom:0.75rem"><button class="btn btn-primary" id="fmg-send">Send</button></div>' +
@@ -5589,6 +5596,7 @@ function openApiQueryModal(id, adom, useProxy) {
         // operator already typed.
         if (q.deviceName) document.getElementById("fmg-fgt-device").value = q.deviceName;
         document.getElementById("fmg-fgt-query").value = q.query || "";
+        document.getElementById("fmg-fgt-body").value = q.body || "";
       } else {
         showToast("This saved query targets a FortiGate directly — disable FMG proxy on the integration to load it", "error");
         return;
@@ -5628,6 +5636,7 @@ function openApiQueryModal(id, adom, useProxy) {
         path: document.getElementById("fmg-fgt-path").value.trim(),
         deviceName: document.getElementById("fmg-fgt-device").value.trim(),
         query: document.getElementById("fmg-fgt-query").value,
+        body: document.getElementById("fmg-fgt-body").value,
       };
     } else {
       entry = {
@@ -5659,6 +5668,19 @@ function openApiQueryModal(id, adom, useProxy) {
       var path = document.getElementById("fmg-fgt-path").value.trim();
       if (!deviceName) { showToast("Enter the FMG device name of the FortiGate", "error"); return; }
       if (!path) { showToast("Enter a path (e.g. /api/v2/monitor/system/status)", "error"); return; }
+      var fgtMethod = document.getElementById("fmg-fgt-method").value;
+      var bodyRaw = document.getElementById("fmg-fgt-body").value.trim();
+      var bodyJson;
+      if (bodyRaw) {
+        if (fgtMethod !== "POST" && fgtMethod !== "PUT") {
+          showToast("A body is only sent for POST/PUT — switch the method or clear the body", "error");
+          return;
+        }
+        try { bodyJson = JSON.parse(bodyRaw); } catch (e) {
+          showToast("Invalid body JSON: " + e.message, "error");
+          return;
+        }
+      }
       var query = {};
       document.getElementById("fmg-fgt-query").value.split("\n").forEach(function (line) {
         var trimmed = line.trim();
@@ -5672,10 +5694,11 @@ function openApiQueryModal(id, adom, useProxy) {
       payload = {
         mode: "fortigate",
         deviceName: deviceName,
-        method: document.getElementById("fmg-fgt-method").value,
+        method: fgtMethod,
         path: path,
         query: query,
       };
+      if (bodyJson !== undefined) payload.body = bodyJson;
       // Remember the target per integration so reopening the modal doesn't
       // force retyping it. Prefilled on modal open below.
       try { localStorage.setItem("polaris-fmg-query-device-" + id, deviceName); } catch (_) { /* private mode */ }
@@ -5824,6 +5847,8 @@ function openFgtApiQueryModal(id, vdom) {
         '<select id="fgt-method" style="width:auto">' +
           '<option value="GET">GET</option>' +
           '<option value="POST">POST</option>' +
+          '<option value="PUT">PUT</option>' +
+          '<option value="DELETE">DELETE</option>' +
         '</select>' +
       '</div>' +
       '<div class="form-group" style="margin:0">' +
@@ -5835,6 +5860,11 @@ function openFgtApiQueryModal(id, vdom) {
       '<label>Query Parameters <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(one per line — <code>key=value</code>)</span></label>' +
       '<textarea id="fgt-query" rows="4" style="font-family:monospace;font-size:0.82rem" placeholder="vdom=' + escapeHtml(vdom) + '&#10;format=mac|ip|hostname">vdom=' + escapeHtml(vdom) + '</textarea>' +
       '<p class="hint">VDOM is set here; add other parameters like <code>format=…</code> or <code>filter=…</code> as needed.</p>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Body <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(JSON — sent for POST/PUT only)</span></label>' +
+      '<textarea id="fgt-body" rows="4" style="font-family:monospace;font-size:0.82rem" placeholder=\'{"description": "IDF closet switch"}\'></textarea>' +
+      '<p class="hint">Writes hit the live device config and are logged to Events. Leave empty for reads.</p>' +
     '</div>' +
     '<div style="display:flex;justify-content:flex-end;margin-bottom:0.75rem"><button class="btn btn-primary" id="fgt-send">Send</button></div>' +
     '<div style="display:flex;gap:6px;align-items:center;margin-bottom:0.25rem">' +
@@ -5863,6 +5893,7 @@ function openFgtApiQueryModal(id, vdom) {
     document.getElementById("fgt-method").value = q.method || "GET";
     document.getElementById("fgt-path").value = q.path || "";
     document.getElementById("fgt-query").value = q.query || "";
+    document.getElementById("fgt-body").value = q.body || "";
     document.getElementById("fgt-save-name").value = q.name;
   });
 
@@ -5882,9 +5913,10 @@ function openFgtApiQueryModal(id, vdom) {
     var method = document.getElementById("fgt-method").value;
     var path = document.getElementById("fgt-path").value.trim();
     var query = document.getElementById("fgt-query").value;
+    var bodyText = document.getElementById("fgt-body").value;
     var existIdx = -1;
     savedQueries.forEach(function (q, i) { if (q.name === name) existIdx = i; });
-    var entry = { name: name, method: method, path: path, query: query };
+    var entry = { name: name, method: method, path: path, query: query, body: bodyText };
     if (existIdx >= 0) {
       savedQueries[existIdx] = entry;
     } else {
@@ -5901,6 +5933,18 @@ function openFgtApiQueryModal(id, vdom) {
     var method = document.getElementById("fgt-method").value;
     var path = document.getElementById("fgt-path").value.trim();
     if (!path) { showToast("Enter a path (e.g. /api/v2/monitor/system/status)", "error"); return; }
+    var bodyRaw = document.getElementById("fgt-body").value.trim();
+    var bodyJson;
+    if (bodyRaw) {
+      if (method !== "POST" && method !== "PUT") {
+        showToast("A body is only sent for POST/PUT — switch the method or clear the body", "error");
+        return;
+      }
+      try { bodyJson = JSON.parse(bodyRaw); } catch (e) {
+        showToast("Invalid body JSON: " + e.message, "error");
+        return;
+      }
+    }
     var queryRaw = document.getElementById("fgt-query").value;
     var query = {};
     queryRaw.split("\n").forEach(function (line) {
@@ -5917,7 +5961,9 @@ function openFgtApiQueryModal(id, vdom) {
     var responseWrap = document.getElementById("fgt-response-wrap");
     var responsePre = document.getElementById("fgt-response");
     try {
-      var result = await api.integrations.query(id, { method: method, path: path, query: query });
+      var fgtPayload = { method: method, path: path, query: query };
+      if (bodyJson !== undefined) fgtPayload.body = bodyJson;
+      var result = await api.integrations.query(id, fgtPayload);
       responseWrap.style.display = "";
       responsePre.textContent = JSON.stringify(result, null, 2);
     } catch (err) {

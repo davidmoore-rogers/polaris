@@ -1386,13 +1386,22 @@ router.post("/:id/query", async (req, res, next) => {
       const mode = (req.body && typeof req.body === "object" && (req.body as any).mode) || "fmg";
 
       if (mode === "fortigate") {
-        const { deviceName, method, path, query } = z.object({
+        const { deviceName, method, path, query, body } = z.object({
           mode: z.literal("fortigate"),
           deviceName: z.string().min(1),
-          method: z.enum(["GET", "POST"]).optional().default("GET"),
+          method: z.enum(["GET", "POST", "PUT", "DELETE"]).optional().default("GET"),
           path: z.string().min(1),
           query: z.record(z.string()).optional(),
+          // JSON request body for POST/PUT (e.g. CMDB writes when testing the
+          // description-sync surfaces). Ignored for GET/DELETE — fetch rejects
+          // GET bodies outright.
+          body: z.unknown().optional(),
         }).parse(req.body);
+        const effectiveBody = method === "POST" || method === "PUT" ? body : undefined;
+        // A non-GET through the ad-hoc tool can mutate device config — audit it.
+        if (method !== "GET") {
+          logEvent({ action: "integration.query.write", resourceType: "integration", resourceId: integration.id, resourceName: integration.name, actor: req.session?.username, level: "warning", message: `Ad-hoc ${method} ${path} sent directly to FortiGate "${deviceName}"`, details: { deviceName, method, path, ...(effectiveBody !== undefined ? { body: effectiveBody } : {}) } });
+        }
         const result = await fortimanager.proxyQueryViaFortigate(
           integration.config as any,
           deviceName,
@@ -1400,6 +1409,7 @@ router.post("/:id/query", async (req, res, next) => {
           path,
           query,
           integration.id,
+          effectiveBody,
         );
         sendProxyJson(res, result);
         return;
@@ -1416,12 +1426,19 @@ router.post("/:id/query", async (req, res, next) => {
     }
 
     if (integration.type === "fortigate") {
-      const { method, path, query } = z.object({
-        method: z.enum(["GET", "POST"]).optional().default("GET"),
+      const { method, path, query, body } = z.object({
+        method: z.enum(["GET", "POST", "PUT", "DELETE"]).optional().default("GET"),
         path: z.string().min(1),
         query: z.record(z.string()).optional(),
+        // JSON request body for POST/PUT — same semantics as the FMG
+        // direct-to-FortiGate mode above.
+        body: z.unknown().optional(),
       }).parse(req.body);
-      const result = await fortigate.proxyQuery(integration.config as any, method, path, query);
+      const effectiveBody = method === "POST" || method === "PUT" ? body : undefined;
+      if (method !== "GET") {
+        logEvent({ action: "integration.query.write", resourceType: "integration", resourceId: integration.id, resourceName: integration.name, actor: req.session?.username, level: "warning", message: `Ad-hoc ${method} ${path} sent to FortiGate`, details: { method, path, ...(effectiveBody !== undefined ? { body: effectiveBody } : {}) } });
+      }
+      const result = await fortigate.proxyQuery(integration.config as any, method, path, query, effectiveBody);
       sendProxyJson(res, result);
       return;
     }

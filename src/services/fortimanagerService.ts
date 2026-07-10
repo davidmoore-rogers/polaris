@@ -771,10 +771,11 @@ export async function setFmgDeviceMetavarCoords(
 export async function proxyQueryViaFortigate(
   config: FortiManagerConfig,
   deviceName: string,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   query?: Record<string, string>,
   integrationId?: string,
+  body?: unknown,
 ): Promise<unknown> {
   if (!config.fortigateApiToken) {
     throw new AppError(400, 'Direct mode requires "FortiGate API Token" to be set on this integration');
@@ -800,7 +801,7 @@ export async function proxyQueryViaFortigate(
     mgmtInterface: mgmtIfaceName,
   };
 
-  return fgProxyQuery(fgConfig, method, path, query);
+  return fgProxyQuery(fgConfig, method, path, query, body);
 }
 
 // ─── DHCP Discovery ─────────────────────────────────────────────────────────
