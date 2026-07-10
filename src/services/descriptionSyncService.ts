@@ -44,10 +44,14 @@
  *
  * VERIFY ON A REAL FortiOS 7.x DEVICE before trusting in production (same
  * caveat posture as the SD-WAN collectors): the `system/global.alias` field
- * name + its short length cap, the managed-switch mkey (`switch-id` = serial),
- * child-table PUT patch semantics on `ports/<port>`, and whether `wtp` rows
- * carry a `comment` attribute at all. When the wtp read shows no comment
- * support, the FortiAP surface is skipped (logged once per reconcile).
+ * name + its short length cap, child-table PUT patch semantics on
+ * `ports/<port>`, and whether `wtp` rows carry a `comment` attribute at all.
+ * When the wtp read shows no comment support, the FortiAP surface is skipped
+ * (logged once per reconcile). CONFIRMED on FortiOS 7.6.7: the managed-switch
+ * mkey (`switch-id`) is NOT reliably the serial — FortiLink setups rename it
+ * (e.g. to the hostname) and a serial-keyed PUT 404s ("Invalid url"), so
+ * serial-keyed callers resolve the row via `matchManagedSwitchRow` (switch-id
+ * OR sn); the 63-char managed-switch/port description cap is also confirmed.
  *
  * Failure posture: best-effort with per-row status, never throws to callers
  * (coord-push posture). Transport/read errors leave sync state untouched
@@ -181,6 +185,25 @@ function listResults<T>(res: unknown): T[] {
   return [];
 }
 
+// The managed-switch mkey (`switch-id`) DEFAULTS to the switch serial but is
+// frequently renamed (e.g. to the hostname) in FortiLink setups — confirmed on
+// FortiOS 7.6.7, where a serial-keyed PUT 404s ("Invalid url"). Polaris assets
+// carry the serial, so every serial-keyed entry into this table must match on
+// `switch-id` OR `sn` and then address the device by the row's real mkey.
+function matchManagedSwitchRow(
+  rows: FortiOsManagedSwitchRow[],
+  serialOrId: string,
+): FortiOsManagedSwitchRow | null {
+  const want = serialOrId.trim().toUpperCase();
+  if (!want) return null;
+  for (const r of rows) {
+    const id = String(r?.["switch-id"] || "").trim().toUpperCase();
+    const sn = String(r?.sn || "").trim().toUpperCase();
+    if (id === want || sn === want) return r;
+  }
+  return null;
+}
+
 // ─── Push results ────────────────────────────────────────────────────────────
 
 export type DescPushResult =
@@ -273,26 +296,42 @@ export async function pushInterfaceDescription(
   }
 }
 
-/** FortiSwitch port `description` (managed-switch child table, via parent FG). */
+/**
+ * FortiSwitch port `description` (managed-switch child table, via parent FG).
+ * `switchId` may be the asset's serial OR the real `switch-id` mkey: the
+ * save-time path (no currentDeviceValue) lists the managed-switch table and
+ * resolves the row by either key, since the mkey is often renamed away from
+ * the serial. The reconcile path passes the already-resolved mkey +
+ * currentDeviceValue and skips the read.
+ */
 export async function pushSwitchPortDescription(
   p: DescPushBaseParams & { switchId: string; portName: string },
 ): Promise<DescPushResult> {
   const context = `switch ${p.switchId} port ${p.portName} via ${p.deviceName}`;
-  const base = `/api/v2/cmdb/switch-controller/managed-switch/${encodeURIComponent(p.switchId)}`;
-  const portPath = `${base}/ports/${encodeURIComponent(p.portName)}`;
   const value = capDescriptionForTarget(p.value, "switch-port");
   try {
     const t = await resolveTransport(p);
+    let switchId = p.switchId;
     let current = p.currentDeviceValue;
     if (current === undefined) {
-      const res = await callFortiOs<unknown>(t, "GET", base);
-      const row = firstResult<FortiOsManagedSwitchRow>(res);
-      const port = (row?.ports ?? []).find((x) => x?.["port-name"] === p.portName);
+      const res = await callFortiOs<unknown>(t, "GET", "/api/v2/cmdb/switch-controller/managed-switch");
+      const row = matchManagedSwitchRow(listResults<FortiOsManagedSwitchRow>(res), p.switchId);
+      const resolvedId = String(row?.["switch-id"] || "").trim();
+      if (!row || !resolvedId) {
+        return {
+          ok: false,
+          error: `[permanent] ${context}: switch not found in the controller's managed-switch table`,
+          errorKind: "permanent",
+        };
+      }
+      switchId = resolvedId;
+      const port = (row.ports ?? []).find((x) => x?.["port-name"] === p.portName);
       current = normalizeDescription(port?.description);
     }
     if (normalizeDescription(current) === normalizeDescription(value)) {
       return { ok: true, previousDeviceValue: current ?? null };
     }
+    const portPath = `/api/v2/cmdb/switch-controller/managed-switch/${encodeURIComponent(switchId)}/ports/${encodeURIComponent(p.portName)}`;
     return await putAndVerify<{ description?: string }>(
       t, portPath, { description: value }, portPath, (r) => r?.description, value, context, current ?? null,
     );
@@ -329,17 +368,30 @@ export async function pushDeviceDescription(
       );
     }
     if (p.target.kind === "managed-switch") {
-      const context = `managed-switch ${p.target.switchId} via ${p.deviceName}`;
-      const path = `/api/v2/cmdb/switch-controller/managed-switch/${encodeURIComponent(p.target.switchId)}`;
+      // Same serial-vs-mkey rule as pushSwitchPortDescription: the save-time
+      // caller passes the asset serial; resolve the row's real switch-id.
       const value = capDescriptionForTarget(p.value, "managed-switch");
+      let switchId = p.target.switchId;
       let current = p.currentDeviceValue;
       if (current === undefined) {
-        const res = await callFortiOs<unknown>(t, "GET", path);
-        current = normalizeDescription(firstResult<FortiOsManagedSwitchRow>(res)?.description);
+        const res = await callFortiOs<unknown>(t, "GET", "/api/v2/cmdb/switch-controller/managed-switch");
+        const row = matchManagedSwitchRow(listResults<FortiOsManagedSwitchRow>(res), switchId);
+        const resolvedId = String(row?.["switch-id"] || "").trim();
+        if (!row || !resolvedId) {
+          return {
+            ok: false,
+            error: `[permanent] managed-switch ${switchId} via ${p.deviceName}: switch not found in the controller's managed-switch table`,
+            errorKind: "permanent",
+          };
+        }
+        switchId = resolvedId;
+        current = normalizeDescription(row.description);
       }
       if (normalizeDescription(current) === normalizeDescription(value)) {
         return { ok: true, previousDeviceValue: current ?? null };
       }
+      const context = `managed-switch ${switchId} via ${p.deviceName}`;
+      const path = `/api/v2/cmdb/switch-controller/managed-switch/${encodeURIComponent(switchId)}`;
       return await putAndVerify<FortiOsManagedSwitchRow>(
         t, path, { description: value }, path, (r) => r?.description, value, context, current ?? null,
       );
@@ -847,11 +899,16 @@ async function reconcileDevice(
   if (group.switches.length > 0) {
     try {
       const res = await callFortiOs<unknown>(transport, "GET", "/api/v2/cmdb/switch-controller/managed-switch");
-      switchRows = new Map(
-        listResults<FortiOsManagedSwitchRow>(res)
-          .map((r) => [String(r?.["switch-id"] || r?.sn || "").trim().toUpperCase(), r] as const)
-          .filter(([k]) => k.length > 0),
-      );
+      // Key each row by BOTH switch-id and sn: assets look up by serial, but
+      // the mkey is often renamed (e.g. to the hostname) — a switch-id-only
+      // key silently skips those switches. switch-id wins on collision.
+      switchRows = new Map();
+      for (const r of listResults<FortiOsManagedSwitchRow>(res)) {
+        for (const key of [r?.["switch-id"], r?.sn]) {
+          const k = String(key || "").trim().toUpperCase();
+          if (k && !switchRows.has(k)) switchRows.set(k, r);
+        }
+      }
     } catch { /* surface skipped */ }
   }
   if (group.aps.length > 0) {
