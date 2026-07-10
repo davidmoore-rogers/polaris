@@ -123,6 +123,6 @@ describe("capDescriptionForTarget", () => {
     expect(capDescriptionForTarget(long, "fortigate-global")).toHaveLength(35);
     expect(capDescriptionForTarget(long, "managed-switch")).toHaveLength(63);
     expect(capDescriptionForTarget(long, "switch-port")).toHaveLength(63);
-    expect(capDescriptionForTarget(long, "wtp")).toHaveLength(255);
+    expect(capDescriptionForTarget(long, "wtp")).toHaveLength(35); // wtp `location`
   });
 });

@@ -246,18 +246,18 @@ describe("pushDeviceDescription", () => {
     expect(callMock.mock.calls[1][2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01");
   });
 
-  it("wtp target writes the AP comment", async () => {
+  it("wtp target writes the AP location (AP Manager's field — not comment)", async () => {
     callMock
-      .mockResolvedValueOnce([{ "wtp-id": "FP231F123", comment: "old" }])
+      .mockResolvedValueOnce([{ "wtp-id": "FP231F123", location: "old" }])
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce([{ comment: "lobby AP" }]);
+      .mockResolvedValueOnce([{ location: "lobby AP" }]);
     const res = await pushDeviceDescription({
       integration, deviceName: "FG-HQ",
       target: { kind: "wtp", wtpId: "FP231F123" }, value: "lobby AP",
     });
     expect(res).toEqual({ ok: true, previousDeviceValue: "old" });
     expect(callMock.mock.calls[1][2]).toBe("/api/v2/cmdb/wireless-controller/wtp/FP231F123");
-    expect(callMock.mock.calls[1][3]).toEqual({ comment: "lobby AP" });
+    expect(callMock.mock.calls[1][3]).toEqual({ location: "lobby AP" });
   });
 
   it("a failed verify read reports transient (PUT landed, re-check next cycle)", async () => {
@@ -319,10 +319,12 @@ describe("runDescriptionSyncForIntegration", () => {
     expect(fmgQueryMock).not.toHaveBeenCalled();
   });
 
-  // Central AP management: FMG's ADOM-level AP Manager copy is what installs
-  // push, so a device-side push must also mirror there (a JSON-RPC set —
-  // never an install) or the next install reverts it.
-  it("mirrors a pushed wtp comment into FMG's ADOM DB when central AP mgmt is detected", async () => {
+  // Central AP management: the per-AP rows AP Manager displays live in each
+  // controller FortiGate's device DB on FMG, and the field is `location`
+  // (comment doesn't exist in FMG's copy — installs strip it). A device-side
+  // push must mirror there via a JSON-RPC update — never a set (which would
+  // create objects), never an install.
+  it("mirrors a pushed wtp location into FMG's device DB when central AP mgmt is detected", async () => {
     vi.mocked(prisma.asset.findMany).mockResolvedValue([{
       id: "ap1",
       hostname: "lobby-ap",
@@ -335,25 +337,26 @@ describe("runDescriptionSyncForIntegration", () => {
     vi.mocked(prisma.asset.update).mockResolvedValue({} as any);
     callMock.mockImplementation(async (_t, method, path) => {
       if (method === "GET" && path === "/api/v2/cmdb/wireless-controller/wtp") {
-        return [{ "wtp-id": "FP231FTF00000001", comment: "" }]; // comment attr present → surface enabled
+        return [{ "wtp-id": "FP231FTF00000001", location: "" }]; // location attr present → surface enabled
       }
       if (method === "PUT" && path === "/api/v2/cmdb/wireless-controller/wtp/FP231FTF00000001") return {};
       if (method === "GET" && path === "/api/v2/cmdb/wireless-controller/wtp/FP231FTF00000001") {
-        return [{ "wtp-id": "FP231FTF00000001", comment: "lobby AP" }];
+        return [{ "wtp-id": "FP231FTF00000001", location: "lobby AP" }];
       }
       throw new Error(`unexpected FortiOS call: ${method} ${path}`);
     });
     const fmgEnvelope = (data: unknown) => ({ result: [{ status: { code: 0 }, data }] });
+    const FMG_WTP = "/pm/config/device/JEFFERSON-101F-1/vdom/root/wireless-controller/wtp";
     fmgQueryMock.mockImplementation(async (_cfg, method, params) => {
       const p = (params as Array<{ url: string; data?: unknown }>)[0];
-      if (method === "get" && p.url === "/pm/config/adom/root/obj/wireless-controller/wtp") {
-        return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", comment: "stale FMG copy" }]);
+      if (method === "get" && p.url === FMG_WTP) {
+        return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", location: "stale FMG copy" }]);
       }
-      if (method === "set" && p.url === "/pm/config/adom/root/obj/wireless-controller/wtp/FP231FTF00000001") {
+      if (method === "update" && p.url === `${FMG_WTP}/FP231FTF00000001`) {
         return fmgEnvelope({});
       }
-      if (method === "get" && p.url === "/pm/config/adom/root/obj/wireless-controller/wtp/FP231FTF00000001") {
-        return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", comment: "lobby AP" }]); // read-back verify
+      if (method === "get" && p.url === `${FMG_WTP}/FP231FTF00000001`) {
+        return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", location: "lobby AP" }]); // read-back verify
       }
       throw new Error(`unexpected FMG call: ${method} ${JSON.stringify(p)}`);
     });
@@ -365,12 +368,12 @@ describe("runDescriptionSyncForIntegration", () => {
     });
 
     expect(summary.pushed).toBe(1);        // device-side wtp PUT
-    expect(summary.fmgMirrored).toBe(1);   // ADOM DB set
+    expect(summary.fmgMirrored).toBe(1);   // FMG device-DB update
     expect(summary.fmgMirrorFailed).toBe(0);
-    const set = fmgQueryMock.mock.calls.find((c) => c[1] === "set");
-    expect((set?.[2] as Array<{ url: string; data?: unknown }>)[0]).toEqual({
-      url: "/pm/config/adom/root/obj/wireless-controller/wtp/FP231FTF00000001",
-      data: { comment: "lobby AP" },
+    const write = fmgQueryMock.mock.calls.find((c) => c[1] === "update");
+    expect((write?.[2] as Array<{ url: string; data?: unknown }>)[0]).toEqual({
+      url: `${FMG_WTP}/FP231FTF00000001`,
+      data: { location: "lobby AP" },
     });
   });
 
@@ -387,18 +390,19 @@ describe("runDescriptionSyncForIntegration", () => {
     vi.mocked(prisma.asset.update).mockResolvedValue({} as any);
     callMock.mockImplementation(async (_t, method, path) => {
       if (method === "GET" && path === "/api/v2/cmdb/wireless-controller/wtp") {
-        return [{ "wtp-id": "FP231FTF00000001", comment: "lobby AP" }]; // device already agrees
+        return [{ "wtp-id": "FP231FTF00000001", location: "lobby AP" }]; // device already agrees
       }
       throw new Error(`unexpected FortiOS call: ${method} ${path}`);
     });
     const fmgEnvelope = (data: unknown) => ({ result: [{ status: { code: 0 }, data }] });
+    const FMG_WTP = "/pm/config/device/JEFFERSON-101F-1/vdom/root/wireless-controller/wtp";
     fmgQueryMock.mockImplementation(async (_cfg, method, params) => {
       const p = (params as Array<{ url: string; data?: unknown }>)[0];
-      if (method === "get" && p.url === "/pm/config/adom/root/obj/wireless-controller/wtp") {
-        return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", comment: "" }]); // FMG copy stale
+      if (method === "get" && p.url === FMG_WTP) {
+        return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", location: "" }]); // FMG copy stale
       }
-      if (method === "set") return fmgEnvelope({});
-      if (method === "get") return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", comment: "lobby AP" }]);
+      if (method === "update") return fmgEnvelope({});
+      if (method === "get") return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", location: "lobby AP" }]);
       throw new Error("unexpected FMG call");
     });
 

@@ -989,7 +989,9 @@ function _readPushQuarantineToggle() {
 function _centralMgmtLabel(cm, key, countKey, noun) {
   if (!cm || typeof cm[key] !== "boolean") return "Unknown (detected at next discovery)";
   if (!cm[key]) return "Disabled (per-device — descriptions write to the device DB)";
-  var count = typeof cm[countKey] === "number" ? cm[countKey] : null;
+  // Count only when the ADOM object table holds rows — AP rows normally live
+  // in each controller's device DB, so 0 here is expected, not meaningful.
+  var count = typeof cm[countKey] === "number" && cm[countKey] > 0 ? cm[countKey] : null;
   return "Enabled" + (count !== null ? " (" + count + " " + noun + (count === 1 ? "" : "s") + ")" : "") + " — description pushes mirror to FortiManager";
 }
 
@@ -1014,7 +1016,7 @@ function descriptionSyncFormHTML(syncDescriptions, useProxy) {
       '</div>' +
       '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
         '<li><strong>Interface comments.</strong> The Interface Comments box on an asset\'s interface panel writes to the FortiGate\'s <code>system/interface</code> description (or the FortiSwitch port description via the parent controller). Clearing a comment in Polaris leaves the device value in place.</li>' +
-        '<li><strong>Device descriptions.</strong> An asset\'s Description field writes to the FortiGate alias, FortiSwitch description, or FortiAP comment. An empty Polaris Description is seeded from the device on the next discovery.</li>' +
+        '<li><strong>Device descriptions.</strong> An asset\'s Description field writes to the FortiGate alias, FortiSwitch description, or FortiAP location (the field FortiManager\'s AP Manager shows). An empty Polaris Description is seeded from the device on the next discovery.</li>' +
         '<li><strong>When it runs.</strong> Immediately on save (your edit is always the newest, so it pushes), plus a reconcile on every discovery cycle that re-pushes after transient failures, pulls in device-side edits, and flags conflicts.</li>' +
         '<li><strong>FMG central management.</strong> When this ADOM centrally manages FortiAPs or FortiSwitches (detected at each discovery; shown on the integration card), pushes for that class are also mirrored into FortiManager\'s AP Manager / FortiSwitch Manager database so a later install doesn\'t revert them. Polaris never triggers an install.</li>' +
       '</ul>' +

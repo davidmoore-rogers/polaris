@@ -40,14 +40,19 @@
  *       PUT /api/v2/cmdb/switch-controller/managed-switch/<switch-id>/ports/<port>
  *                                                               { description }
  *   - FortiAP device description (via parent FortiGate):
- *       GET/PUT /api/v2/cmdb/wireless-controller/wtp/<wtp-id>   { comment }
+ *       GET/PUT /api/v2/cmdb/wireless-controller/wtp/<wtp-id>   { location }
+ *     `location` — NOT `comment` — is the FortiAP surface: it's the field
+ *     FortiManager's AP Manager displays/edits, and it exists in FMG's
+ *     device-DB copy of the wtp row (confirmed on a live FMG 7.x, where the
+ *     rows carry `location` but no `comment` at all — so an FMG install
+ *     STRIPS a device-side comment while location round-trips).
  *
  * VERIFY ON A REAL FortiOS 7.x DEVICE before trusting in production (same
  * caveat posture as the SD-WAN collectors): the `system/global.alias` field
  * name + its short length cap, child-table PUT patch semantics on
- * `ports/<port>`, and whether `wtp` rows carry a `comment` attribute at all.
- * When the wtp read shows no comment support, the FortiAP surface is skipped
- * (logged once per reconcile). CONFIRMED on FortiOS 7.6.7: the managed-switch
+ * `ports/<port>`, and the wtp `location` length cap. When the wtp read shows
+ * no `location` attribute, the FortiAP surface is skipped (logged once per
+ * reconcile). CONFIRMED on FortiOS 7.6.7: the managed-switch
  * mkey (`switch-id`) is NOT reliably the serial — FortiLink setups rename it
  * (e.g. to the hostname) and a serial-keyed PUT 404s ("Invalid url"), so
  * serial-keyed callers resolve the row via `matchManagedSwitchRow` (switch-id
@@ -138,9 +143,9 @@ export type DescTargetKind =
 export const DESCRIPTION_CAPS: Record<DescTargetKind, number> = {
   "fortigate-interface": 255,
   "fortigate-global": 35, // system/global `alias` is a short field
-  "managed-switch": 63,
+  "managed-switch": 63,   // 63-char cap confirmed on FortiOS 7.6.7
   "switch-port": 63,
-  "wtp": 255,
+  "wtp": 35,              // wtp `location` is a short field (unverified cap)
 };
 
 export function capDescriptionForTarget(value: string, target: DescTargetKind): string {
@@ -170,7 +175,7 @@ interface FortiOsManagedSwitchRow {
 interface FortiOsWtpRow {
   "wtp-id"?: string;
   name?: string;
-  comment?: string;
+  location?: string;
 }
 
 // FortiOS GETs return `results` as an array (even for mkey reads); some
@@ -346,7 +351,7 @@ export type DeviceDescTarget =
   | { kind: "managed-switch"; switchId: string }
   | { kind: "wtp"; wtpId: string };
 
-/** Device-level description (FortiGate alias / switch description / wtp comment). */
+/** Device-level description (FortiGate alias / switch description / wtp location). */
 export async function pushDeviceDescription(
   p: DescPushBaseParams & { target: DeviceDescTarget },
 ): Promise<DescPushResult> {
@@ -397,20 +402,21 @@ export async function pushDeviceDescription(
         t, path, { description: value }, path, (r) => r?.description, value, context, current ?? null,
       );
     }
-    // wtp
+    // wtp — the description surface is `location` (AP Manager's field), not
+    // `comment` (absent from FMG's copy, so installs strip it — see header).
     const context = `wtp ${p.target.wtpId} via ${p.deviceName}`;
     const path = `/api/v2/cmdb/wireless-controller/wtp/${encodeURIComponent(p.target.wtpId)}`;
     const value = capDescriptionForTarget(p.value, "wtp");
     let current = p.currentDeviceValue;
     if (current === undefined) {
       const res = await callFortiOs<unknown>(t, "GET", path);
-      current = normalizeDescription(firstResult<FortiOsWtpRow>(res)?.comment);
+      current = normalizeDescription(firstResult<FortiOsWtpRow>(res)?.location);
     }
     if (normalizeDescription(current) === normalizeDescription(value)) {
       return { ok: true, previousDeviceValue: current ?? null };
     }
     return await putAndVerify<FortiOsWtpRow>(
-      t, path, { comment: value }, path, (r) => r?.comment, value, context, current ?? null,
+      t, path, { location: value }, path, (r) => r?.location, value, context, current ?? null,
     );
   } catch (err) {
     return pushFailure(err, `device description on ${p.deviceName}`);
@@ -442,23 +448,30 @@ function syncEnabled(config: unknown): boolean {
 //
 // FortiManager ADOMs manage FortiAPs (AP Manager) and FortiSwitches
 // (FortiSwitch Manager) in either central or per-device mode. In central mode
-// FMG's ADOM-level database copy is authoritative from FMG's point of view: a
-// device-direct description write works at runtime, but the next install from
-// the central pane diffs FMG's copy against the device and REVERTS it. So
-// when discovery has stamped `Integration.config.centralManagement.{wtp,fsw}`
+// FMG's own database copy is authoritative from FMG's point of view: a
+// device-direct description write works at runtime, but the next install
+// diffs FMG's copy against the device and REVERTS it. So when discovery has
+// stamped `Integration.config.centralManagement.{wtp,fsw}`
 // (detectCentralManagement, run at FMG discovery start), a successful
-// device-side push is also mirrored into FMG's ADOM database — a plain
-// JSON-RPC `set`, NEVER an install (an install would push everything an FMG
-// admin has staged). The reconcile additionally batch-heals FMG-side drift
-// for values the device already agrees on, which covers pushes that predate
-// the mirror and mirror sets that failed transiently. Caveats: FMG's ADOM
-// copy is treated as a projection of the device value, not an edit surface —
-// an AP Manager edit that was saved but never installed gets overwritten by
-// the mirror (an *installed* edit reaches the device and flows back through
-// the normal adopt path). ADOM object shapes (mkey, whether `comment` lives
-// top-level or per dynamic_mapping) are UNVERIFIED on a real FMG — same
-// posture as the FortiOS shapes above; failures surface as warning Events
-// and never affect the device-side sync state.
+// device-side push is also mirrored into FMG's database — a plain JSON-RPC
+// `update` (never `set`, which would CREATE missing objects; and NEVER an
+// install, which would push everything an FMG admin has staged). Where FMG
+// keeps each copy (confirmed on a live FMG 7.x):
+//   - FortiAP `location`: the per-AP rows AP Manager displays live in each
+//     controller FortiGate's DEVICE DB —
+//     /pm/config/device/<fgt>/vdom/root/wireless-controller/wtp/<wtp-id> —
+//     NOT in the ADOM object table (empty on the confirmed box).
+//   - FortiSwitch description / port description: the ADOM-level
+//     /pm/config/adom/<adom>/obj/fsp/managed-switch table (UNVERIFIED —
+//     the confirmed box manages switches per-device, so this path is inert
+//     there; failures surface as warning Events).
+// The reconcile additionally batch-heals FMG-side drift for values the
+// device already agrees on, which covers pushes that predate the mirror and
+// mirror updates that failed transiently. Caveat: FMG's copy is treated as a
+// projection of the device value, not an edit surface — an AP Manager edit
+// that was saved but never installed gets overwritten by the mirror (an
+// *installed* edit reaches the device and flows back through the normal
+// adopt path). Failures never affect the device-side sync state.
 
 function centralFlags(config: unknown): { wtp: boolean; fsw: boolean } {
   const cm = (config as { centralManagement?: { wtp?: boolean; fsw?: boolean } } | null)?.centralManagement;
@@ -472,11 +485,13 @@ function fmgAdom(config: unknown): string {
 
 interface FmgOpResult { ok: boolean; data?: unknown; error?: string }
 
-// One JSON-RPC call against FMG's ADOM DB. FMG-level errors come back in the
+// One JSON-RPC call against FMG's database. FMG-level errors come back in the
 // envelope (status.code != 0), transport errors throw — both map to ok:false.
+// Mirror writes use "update" (modify-existing-only) — "set" would create
+// objects FMG never had, which a later install would then push.
 async function fmgAdomOp(
   integration: { id: string; config: unknown },
-  method: "get" | "set",
+  method: "get" | "update",
   url: string,
   data?: Record<string, unknown>,
 ): Promise<FmgOpResult> {
@@ -498,36 +513,39 @@ async function fmgAdomOp(
 }
 
 type FmgMirrorTarget =
-  | { kind: "wtp"; wtpId: string }
+  | { kind: "wtp"; wtpId: string; deviceName: string }
   | { kind: "managed-switch"; switchId: string }
   | { kind: "switch-port"; switchId: string; portName: string };
 
 // FMG JSON-RPC urls are plain strings, not URL-encoded — mkeys (serials,
-// port names) carry no reserved characters.
-function fmgMirrorUrl(adom: string, t: FmgMirrorTarget): { url: string; field: "comment" | "description" } {
+// port names) carry no reserved characters. wtp rows live in the controller
+// FortiGate's device DB; switch rows at the ADOM level (see section header).
+function fmgMirrorUrl(adom: string, t: FmgMirrorTarget): { url: string; field: "location" | "description" } {
+  if (t.kind === "wtp") {
+    return { url: `/pm/config/device/${t.deviceName}/vdom/root/wireless-controller/wtp/${t.wtpId}`, field: "location" };
+  }
   const base = `/pm/config/adom/${adom}/obj`;
-  if (t.kind === "wtp") return { url: `${base}/wireless-controller/wtp/${t.wtpId}`, field: "comment" };
   if (t.kind === "managed-switch") return { url: `${base}/fsp/managed-switch/${t.switchId}`, field: "description" };
   return { url: `${base}/fsp/managed-switch/${t.switchId}/ports/${t.portName}`, field: "description" };
 }
 
-/** `set` + read-back verify against FMG's ADOM copy. Best-effort, never throws. */
+/** `update` + read-back verify against FMG's copy. Best-effort, never throws. */
 async function mirrorToFmg(
   integration: { id: string; config: unknown },
   target: FmgMirrorTarget,
   value: string,
 ): Promise<FmgOpResult> {
   const { url, field } = fmgMirrorUrl(fmgAdom(integration.config), target);
-  const set = await fmgAdomOp(integration, "set", url, { [field]: value });
-  if (!set.ok) return { ok: false, error: `set ${url}: ${set.error}` };
+  const write = await fmgAdomOp(integration, "update", url, { [field]: value });
+  if (!write.ok) return { ok: false, error: `update ${url}: ${write.error}` };
   const back = await fmgAdomOp(integration, "get", url);
-  if (!back.ok) return { ok: true }; // set landed; read-back is best-effort
+  if (!back.ok) return { ok: true }; // update landed; read-back is best-effort
   const row = firstResult<Record<string, unknown>>(back.data);
   const landed = normalizeDescription(row?.[field]);
   if (landed !== normalizeDescription(value)) {
     return {
       ok: false,
-      error: `verify mismatch on ${url} — FMG kept ${JSON.stringify(landed)} (field may live in dynamic_mapping)`,
+      error: `verify mismatch on ${url} — FMG kept ${JSON.stringify(landed)}`,
     };
   }
   return { ok: true };
@@ -683,14 +701,16 @@ export async function syncDescriptionsOnSave(params: {
     await stampAssetSyncState(asset.id, result, value);
     await logDevicePushEvent(asset, value, result, params.actor);
     // Central AP / FortiSwitch management: mirror the device description
-    // (wtp comment / managed-switch description) into FMG's ADOM DB.
+    // (wtp location / managed-switch description) into FMG's database.
     if (result.ok && ctx.integration.type === "fortimanager") {
       const flags = centralFlags(ctx.integration.config);
       const serial = (asset.serialNumber || "").trim();
       if (serial && ((ctx.role === "fortiap" && flags.wtp) || (ctx.role === "fortiswitch" && flags.fsw))) {
         const mirror = await mirrorToFmg(
           ctx.integration,
-          ctx.role === "fortiap" ? { kind: "wtp", wtpId: serial } : { kind: "managed-switch", switchId: serial },
+          ctx.role === "fortiap"
+            ? { kind: "wtp", wtpId: serial, deviceName: ctx.deviceName }
+            : { kind: "managed-switch", switchId: serial },
           value,
         );
         await logFmgMirrorEvent(asset, { scope: "device", value, result: mirror });
@@ -1046,7 +1066,7 @@ async function reconcileDevice(
   let globalAlias: string | null | undefined; // undefined = read failed
   let switchRows: Map<string, FortiOsManagedSwitchRow> | null = null;
   let wtpRows: Map<string, FortiOsWtpRow> | null = null;
-  let wtpSupportsComment = false;
+  let wtpSupportsLocation = false;
 
   if (group.firewall) {
     try {
@@ -1081,18 +1101,18 @@ async function reconcileDevice(
     try {
       const res = await callFortiOs<unknown>(transport, "GET", "/api/v2/cmdb/wireless-controller/wtp");
       const rows = listResults<FortiOsWtpRow>(res);
-      // Comment support gate: only trust the surface when at least one row
-      // carries the attribute (older FortiOS may not expose it — see header).
-      wtpSupportsComment = rows.some((r) => r && Object.prototype.hasOwnProperty.call(r, "comment"));
+      // Location support gate: only trust the surface when at least one row
+      // carries the attribute (see header — `location` is the AP surface).
+      wtpSupportsLocation = rows.some((r) => r && Object.prototype.hasOwnProperty.call(r, "location"));
       wtpRows = new Map(
         rows
           .map((r) => [String(r?.["wtp-id"] || "").trim().toUpperCase(), r] as const)
           .filter(([k]) => k.length > 0),
       );
-      if (!wtpSupportsComment && rows.length > 0) {
+      if (!wtpSupportsLocation && rows.length > 0) {
         logger.info(
           { integrationId: integration.id, deviceName },
-          "description_sync.wtp_comment_unsupported",
+          "description_sync.wtp_location_unsupported",
         );
       }
     } catch { /* surface skipped */ }
@@ -1117,7 +1137,7 @@ async function reconcileDevice(
     );
   }
   // ── Device-level: APs ──
-  if (wtpSupportsComment && wtpRows) {
+  if (wtpSupportsLocation && wtpRows) {
     for (const ap of group.aps) {
       const serial = (ap.serialNumber || "").trim().toUpperCase();
       const row = serial ? wtpRows.get(serial) : undefined;
@@ -1125,7 +1145,7 @@ async function reconcileDevice(
       await reconcileDeviceLevel(
         integration, deviceName, transport, ap,
         { kind: "wtp", wtpId: String(row["wtp-id"] || ap.serialNumber || "").trim() },
-        normalizeDescription(row.comment), summary, pushedThisRun,
+        normalizeDescription(row.location), summary, pushedThisRun,
       );
     }
   }
@@ -1370,26 +1390,39 @@ async function mirrorCentralDbDrift(
     };
 
     if (flags.wtp) {
-      const res = await fmgAdomOp(integration, "get", `/pm/config/adom/${adom}/obj/wireless-controller/wtp`);
-      if (res.ok && Array.isArray(res.data)) {
+      // The per-AP rows AP Manager displays live in each controller
+      // FortiGate's device DB (see section header) — group APs by controller
+      // and read one table per controller.
+      const apsByController = new Map<string, ReconcileAsset[]>();
+      for (const a of assets) {
+        const topo = (a.fortinetTopology ?? {}) as TopologyBlob;
+        if (topo.role !== "fortiap") continue;
+        const ctrl = (topo.controllerFortigate || "").trim();
+        if (!ctrl) continue;
+        const list = apsByController.get(ctrl) ?? [];
+        list.push(a);
+        apsByController.set(ctrl, list);
+      }
+      for (const [deviceName, aps] of apsByController) {
+        const res = await fmgAdomOp(integration, "get", `/pm/config/device/${deviceName}/vdom/root/wireless-controller/wtp`);
+        if (!res.ok || !Array.isArray(res.data)) continue;
         const byKey = new Map<string, Record<string, unknown>>();
         for (const r of res.data as Array<Record<string, unknown>>) {
           // Key by wtp-id AND name — same defensive dual-keying as the
-          // device-side switch map (the ADOM mkey may not be the serial).
+          // device-side switch map.
           for (const k of [r?.["wtp-id"], r?.name]) {
             const key = String(k || "").trim().toUpperCase();
             if (key && !byKey.has(key)) byKey.set(key, r);
           }
         }
-        for (const a of assets) {
-          if (((a.fortinetTopology ?? {}) as TopologyBlob).role !== "fortiap") continue;
+        for (const a of aps) {
           const agreed = agreedDeviceValue(a);
           if (agreed === null) continue;
           const row = byKey.get(String(a.serialNumber || "").trim().toUpperCase());
-          if (!row) continue; // AP not in the central table — nothing to align
-          if (normalizeDescription(row.comment) === agreed) continue;
+          if (!row) continue; // AP not in FMG's device DB — nothing to align
+          if (normalizeDescription(row.location) === agreed) continue;
           const mkey = String(row["wtp-id"] || a.serialNumber || "").trim();
-          const result = await mirrorToFmg(integration, { kind: "wtp", wtpId: mkey }, agreed);
+          const result = await mirrorToFmg(integration, { kind: "wtp", wtpId: mkey, deviceName }, agreed);
           if (result.ok) summary.fmgMirrored++; else summary.fmgMirrorFailed++;
           await logFmgMirrorEvent({ id: a.id, hostname: a.hostname }, { scope: "device", value: agreed, result });
         }
