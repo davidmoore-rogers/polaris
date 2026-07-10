@@ -137,7 +137,6 @@ instead.
 | `npm run db:studio` | Prisma Studio DB browser |
 | `npm run check:docs` | Doc-index structural check (also runs as a pre-commit hook) |
 | `npm run test:fmg` | FortiManager connectivity smoke test |
-| `npm run demo` | `demo.mjs` feature walkthrough |
 
 To run any of these inside the containerized app:
 `podman compose -f compose.dev.yml run --rm app <command>` (or `exec` against

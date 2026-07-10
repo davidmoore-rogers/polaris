@@ -19,7 +19,6 @@ tests
 scripts/*
 !scripts/copy-build-assets.mjs
 deploy
-demo.mjs
 *.log
 npm-debug.log*
 .DS_Store

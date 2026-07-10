@@ -124,14 +124,6 @@ Discovery pre-loads subnets, reservations, and assets for O(1) lookups; peak mem
 
 The dashboard is at `http://localhost:3000`; the API at `http://localhost:3000/api/v1`. On first visit the **Setup Wizard** walks through DB connection, admin account, and initial config (skip steps 1–2 above if you use it).
 
-### Demo mode
-
-```bash
-node demo.mjs
-```
-
-In-memory server on port 3000 with sample data. No database required.
-
 ## Production deployment
 
 Automated scripts install Node.js 20, PostgreSQL 15, the `polaris` system user, the database, app code (to `/opt/polaris` or `C:\polaris`), a random `SESSION_SECRET`, and a hardened service — then open port 3000 in the firewall.

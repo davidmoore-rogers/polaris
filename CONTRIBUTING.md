@@ -78,7 +78,6 @@ and the integration suite against a `postgres:15` service container
 - **Version is automatic** — patch = git commit count (`src/utils/version.ts`).
   Never edit the patch in `package.json`; bump the minor only when cutting a
   named release.
-- **Keep `demo.mjs` current** when you add a significant entity/field/feature.
 - **Before pushing**, re-read `README.md`, `docs/INSTALL.md`, the `deploy/`
   scripts, and the Dockerfile for anything the change invalidated.
 
