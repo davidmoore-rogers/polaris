@@ -47,10 +47,11 @@ export type AutoMonitorStorageSelection = {
   all?:        StorageAllBlock;
 } | null;
 
-// Reuses AutoMonitorClass' workstation/server members. Storage auto-monitor is
-// AD/Entra-only, so only these two are valid here; the resolver/apply functions
-// take a narrowed type.
-export type StorageClass = "workstation" | "server";
+// Reuses AutoMonitorClass' workstation/server members (plus vCenter's
+// virtual_machine class — VM guest mounts are agent-fed exactly like the
+// directory classes). Fortinet classes are not valid here; the resolver/apply
+// functions take a narrowed type.
+export type StorageClass = "workstation" | "server" | "virtual_machine";
 
 /** Minimal mount shape consumed by the resolver. */
 export interface ResolverMount {
@@ -60,6 +61,7 @@ export interface ResolverMount {
 const CLASS_TO_ASSET_TYPE: Record<StorageClass, string> = {
   workstation: "workstation",
   server: "server",
+  virtual_machine: "virtual_machine",
 };
 
 // ─── Pure resolver ──────────────────────────────────────────────────────────
@@ -185,6 +187,9 @@ const STORAGE_CLASSES_BY_TYPE: Record<string, StorageClass[]> = {
   entraid:         ["workstation", "server"],
   activedirectory: ["workstation", "server"],
   windowsserver:   ["workstation", "server"],
+  // VMs only — ESXi datastore capacity is the VcenterDatastore table, not
+  // the per-asset storage stream.
+  vcenter:         ["virtual_machine"],
 };
 
 export interface CachedStorageRow {

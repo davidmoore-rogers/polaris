@@ -395,6 +395,8 @@ var ASSET_TYPE_LABELS = {
   printer: "Printer",
   access_point: "AP",
   other: "Other",
+  virtual_machine: "Virtual Machine",
+  hypervisor: "Hypervisor",
 };
 
 // Bulk-bar State dropdown options. quarantined is intentionally omitted —
@@ -3452,7 +3454,13 @@ async function openViewModal(id) {
       viewRow("Notes", a.notes, false, true) +
       viewRow("Created", formatDate(a.createdAt)) +
       viewRow("Updated", formatDate(a.updatedAt)) +
-    '</div></div>' + dependencyTreeMountHTML;
+    '</div></div>' +
+    // Virtualization section (vCenter VMs + ESXi hosts) — async-fetched;
+    // stays empty for assets without vCenter data.
+    (a.virtualization
+      ? '<div data-shot-section="virtualization" data-shot-label="Virtualization"><div id="asset-virt-mount-' + escapeHtml(a.id) + '"></div></div>'
+      : '') +
+    dependencyTreeMountHTML;
 
     var monitoringHTML = assetMonitoringViewHTML(a);
     var agentSubpanelHTML = ""; // filled in after the parallel load below
@@ -3693,6 +3701,19 @@ async function openViewModal(id) {
         mclagMount.innerHTML = html;
         _wireDependencyTreeLinks(mclagMount);
       }).catch(function (err) { console.warn("Failed to load MCLAG peers", err); });
+    }
+    // Virtualization section (General tab) — vCenter VMs show their running
+    // host (clickable), cluster, power state, Tools status, vCPU/RAM,
+    // virtual disks (with datastore + backing array) and guest filesystems;
+    // ESXi hosts show cluster/state, mounted datastores, and the VMs
+    // currently placed on them. Async-fetched from /assets/:id/virtualization.
+    var virtMount = document.getElementById("asset-virt-mount-" + a.id);
+    if (virtMount && a.virtualization) {
+      api.assets.virtualization(a.id).then(function (res) {
+        if (!res || !res.virtualization) return;
+        virtMount.innerHTML = _assetVirtualizationHTML(res);
+        _wireDependencyTreeLinks(virtMount);
+      }).catch(function (err) { console.warn("Failed to load virtualization info", err); });
     }
     // Mount the Polaris Agent panel into the System tab placeholder + wire
     // its buttons. The wiring helper also starts the install-progress
@@ -6330,6 +6351,142 @@ function _fmtBytes(n) {
   var i = 0, v = Math.abs(n);
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return (v < 10 && i > 0 ? v.toFixed(2) : v.toFixed(0)) + " " + units[i];
+}
+
+// ─── Virtualization section (vCenter VMs + ESXi hosts) ─────────────────────
+// Renders the General-tab Virtualization block from GET /assets/:id/
+// virtualization. VM role: host link / cluster / power / Tools / vCPU+RAM /
+// disks (datastore + backing array) / guest filesystems. Host role: cluster +
+// connection state / datastores table / VMs-on-host list.
+
+function _vcPowerBadge(state) {
+  var s = String(state || "").toUpperCase();
+  var label = s === "POWERED_ON" ? "Powered On" : s === "POWERED_OFF" ? "Powered Off" : s === "SUSPENDED" ? "Suspended" : (state || "—");
+  var color = s === "POWERED_ON" ? "var(--color-success,#4caf50)" : s === "SUSPENDED" ? "var(--color-warning,#ffb74d)" : "var(--color-text-tertiary)";
+  return '<span style="color:' + color + '">●</span> ' + escapeHtml(label);
+}
+
+function _vcUsageBar(usedBytes, totalBytes) {
+  if (usedBytes == null || totalBytes == null || !(totalBytes > 0)) return "";
+  var pct = Math.min(100, Math.max(0, (usedBytes / totalBytes) * 100));
+  var color = pct >= 90 ? "var(--color-danger,#ef5350)" : pct >= 75 ? "var(--color-warning,#ffb74d)" : "var(--color-primary,#4fc3f7)";
+  return '<div style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:4px;height:6px;overflow:hidden;min-width:70px">' +
+    '<div style="width:' + pct.toFixed(1) + '%;height:100%;background:' + color + '"></div></div>' +
+    '<span style="font-size:0.75rem;color:var(--color-text-tertiary)">' + pct.toFixed(0) + '%</span>';
+}
+
+function _assetVirtualizationHTML(res) {
+  var v = res.virtualization || {};
+  var header = '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:1.25rem 0 0.75rem 0">Virtualization</p>';
+  var tableStyle = 'width:100%;border-collapse:collapse;font-size:0.83rem';
+  var thStyle = 'text-align:left;padding:4px 8px;color:var(--color-text-tertiary);font-weight:500;border-bottom:1px solid var(--color-border)';
+  var tdStyle = 'padding:4px 8px;border-bottom:1px solid var(--color-border)';
+
+  if (v.role === "vm") {
+    var hostAsset = res.hostAsset || null;
+    var hostHtml = hostAsset
+      ? '<a href="#" class="dep-tree-link" data-asset-id="' + escapeHtml(hostAsset.id) + '">' + escapeHtml(hostAsset.hostname || v.hostName || v.hostMoref || "host") + '</a>'
+      : escapeHtml(v.hostName || v.hostMoref || "—");
+    var dsByMoref = {};
+    (res.diskDatastores || []).forEach(function (d) { dsByMoref[d.moref] = d; });
+
+    var rows =
+      '<div class="asset-view-grid">' +
+        '<div class="detail-row"><span class="detail-label">Running Host</span><span class="detail-value">' + hostHtml + (v.standaloneHost ? ' <span style="color:var(--color-text-tertiary);font-size:0.8em">(standalone)</span>' : '') + '</span></div>' +
+        (v.clusterName ? '<div class="detail-row"><span class="detail-label">Cluster</span><span class="detail-value">' + escapeHtml(v.clusterName) + '</span></div>' : '') +
+        '<div class="detail-row"><span class="detail-label">Power State</span><span class="detail-value">' + _vcPowerBadge(v.powerState) + '</span></div>' +
+        (v.toolsRunState ? '<div class="detail-row"><span class="detail-label">VMware Tools</span><span class="detail-value">' + escapeHtml(v.toolsRunState) + (v.toolsVersionStatus ? ' <span style="color:var(--color-text-tertiary);font-size:0.85em">(' + escapeHtml(v.toolsVersionStatus) + ')</span>' : '') + '</span></div>' : '') +
+        (v.cpuCount != null ? '<div class="detail-row"><span class="detail-label">vCPUs</span><span class="detail-value">' + v.cpuCount + (v.cpuUsageMhz != null ? ' <span style="color:var(--color-text-tertiary);font-size:0.85em">(' + v.cpuUsageMhz + ' MHz in use' + (v.cpuMaxMhz ? ' of ' + v.cpuMaxMhz : '') + ')</span>' : '') + '</span></div>' : '') +
+        (v.memoryMiB != null ? '<div class="detail-row"><span class="detail-label">Memory</span><span class="detail-value">' + _fmtBytes(v.memoryMiB * 1024 * 1024) + (v.memUsedBytes != null ? ' <span style="color:var(--color-text-tertiary);font-size:0.85em">(' + _fmtBytes(v.memUsedBytes) + ' in use)</span>' : '') + '</span></div>' : '') +
+      '</div>';
+
+    var disksHtml = "";
+    if (Array.isArray(v.disks) && v.disks.length > 0) {
+      disksHtml = '<div style="margin-top:0.75rem;overflow-x:auto"><table style="' + tableStyle + '">' +
+        '<thead><tr><th style="' + thStyle + '">Disk</th><th style="' + thStyle + '">Capacity</th><th style="' + thStyle + '">Datastore</th><th style="' + thStyle + '">Backing</th></tr></thead><tbody>' +
+        v.disks.map(function (d) {
+          var ds = d.datastoreMoref ? dsByMoref[d.datastoreMoref] : null;
+          return '<tr>' +
+            '<td style="' + tdStyle + '">' + escapeHtml(d.label || d.key) + '</td>' +
+            '<td style="' + tdStyle + '">' + _fmtBytes(d.capacityBytes) + '</td>' +
+            '<td style="' + tdStyle + '">' + escapeHtml((ds && ds.name) || d.datastoreName || "—") + '</td>' +
+            '<td style="' + tdStyle + '">' + escapeHtml((ds && ds.backingLabel) || "—") + '</td>' +
+          '</tr>';
+        }).join("") +
+      '</tbody></table></div>';
+    }
+
+    var fsHtml = "";
+    if (Array.isArray(v.guestFilesystems) && v.guestFilesystems.length > 0) {
+      fsHtml = '<div style="margin-top:0.75rem;overflow-x:auto"><table style="' + tableStyle + '">' +
+        '<thead><tr><th style="' + thStyle + '">Guest Filesystem</th><th style="' + thStyle + '">Capacity</th><th style="' + thStyle + '">Free</th><th style="' + thStyle + '">Usage</th></tr></thead><tbody>' +
+        v.guestFilesystems.map(function (f) {
+          var used = (f.capacityBytes != null && f.freeBytes != null) ? f.capacityBytes - f.freeBytes : null;
+          return '<tr>' +
+            '<td style="' + tdStyle + '" class="mono">' + escapeHtml(f.path) + '</td>' +
+            '<td style="' + tdStyle + '">' + _fmtBytes(f.capacityBytes) + '</td>' +
+            '<td style="' + tdStyle + '">' + _fmtBytes(f.freeBytes) + '</td>' +
+            '<td style="' + tdStyle + '"><div style="display:flex;align-items:center;gap:6px">' + _vcUsageBar(used, f.capacityBytes) + '</div></td>' +
+          '</tr>';
+        }).join("") +
+      '</tbody></table></div>';
+    }
+
+    return header + rows + disksHtml + fsHtml;
+  }
+
+  if (v.role === "host") {
+    var rowsHost =
+      '<div class="asset-view-grid">' +
+        (v.clusterName
+          ? '<div class="detail-row"><span class="detail-label">Cluster</span><span class="detail-value">' + escapeHtml(v.clusterName) + '</span></div>'
+          : '<div class="detail-row"><span class="detail-label">Cluster</span><span class="detail-value" style="color:var(--color-text-tertiary)">Standalone host</span></div>') +
+        (v.connectionState ? '<div class="detail-row"><span class="detail-label">Connection</span><span class="detail-value">' + escapeHtml(v.connectionState) + '</span></div>' : '') +
+        (v.powerState ? '<div class="detail-row"><span class="detail-label">Power State</span><span class="detail-value">' + _vcPowerBadge(v.powerState) + '</span></div>' : '') +
+      '</div>';
+
+    var dsRows = res.datastores || [];
+    var dsHtml = "";
+    if (dsRows.length > 0) {
+      dsHtml = '<div style="margin-top:0.75rem;overflow-x:auto"><table style="' + tableStyle + '">' +
+        '<thead><tr><th style="' + thStyle + '">Datastore</th><th style="' + thStyle + '">Type</th><th style="' + thStyle + '">Capacity</th><th style="' + thStyle + '">Free</th><th style="' + thStyle + '">Provisioned</th><th style="' + thStyle + '">Backing</th><th style="' + thStyle + '">Usage</th></tr></thead><tbody>' +
+        dsRows.map(function (d) {
+          var cap = d.capacityBytes != null ? Number(d.capacityBytes) : null;
+          var free = d.freeBytes != null ? Number(d.freeBytes) : null;
+          var prov = d.provisionedBytes != null ? Number(d.provisionedBytes) : null;
+          var used = (cap != null && free != null) ? cap - free : null;
+          return '<tr>' +
+            '<td style="' + tdStyle + '">' + escapeHtml(d.name) + (d.accessible === false ? ' <span style="color:var(--color-danger,#ef5350);font-size:0.8em">(inaccessible)</span>' : '') + '</td>' +
+            '<td style="' + tdStyle + '">' + escapeHtml(d.dsType || "—") + '</td>' +
+            '<td style="' + tdStyle + '">' + _fmtBytes(cap) + '</td>' +
+            '<td style="' + tdStyle + '">' + _fmtBytes(free) + '</td>' +
+            '<td style="' + tdStyle + '">' + (prov != null ? _fmtBytes(prov) : "—") + '</td>' +
+            '<td style="' + tdStyle + '">' + escapeHtml(d.backingLabel || "—") + '</td>' +
+            '<td style="' + tdStyle + '"><div style="display:flex;align-items:center;gap:6px">' + _vcUsageBar(used, cap) + '</div></td>' +
+          '</tr>';
+        }).join("") +
+      '</tbody></table></div>';
+    }
+
+    var vms = res.vms || [];
+    var vmsHtml = "";
+    if (vms.length > 0) {
+      vmsHtml = '<div style="margin-top:0.75rem;overflow-x:auto"><table style="' + tableStyle + '">' +
+        '<thead><tr><th style="' + thStyle + '">Virtual Machine</th><th style="' + thStyle + '">Power</th><th style="' + thStyle + '">Monitor</th></tr></thead><tbody>' +
+        vms.map(function (vm) {
+          return '<tr>' +
+            '<td style="' + tdStyle + '"><a href="#" class="dep-tree-link" data-asset-id="' + escapeHtml(vm.id) + '">' + escapeHtml(vm.hostname || vm.id) + '</a></td>' +
+            '<td style="' + tdStyle + '">' + _vcPowerBadge(vm.powerState) + '</td>' +
+            '<td style="' + tdStyle + '">' + (vm.monitored ? escapeHtml(vm.monitorStatus || "—") : '<span style="color:var(--color-text-tertiary)">not monitored</span>') + '</td>' +
+          '</tr>';
+        }).join("") +
+      '</tbody></table></div>';
+    }
+
+    return header + rowsHost + dsHtml + vmsHtml;
+  }
+
+  return "";
 }
 
 function _fmtSpeed(bps) {

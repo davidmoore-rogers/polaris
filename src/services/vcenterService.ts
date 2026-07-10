@@ -1,0 +1,1159 @@
+/**
+ * src/services/vcenterService.ts — VMware vCenter discovery + telemetry client
+ *
+ * Discovers virtual machines, ESXi hosts, and datastores from a vCenter
+ * server. Produces assets only — no subnets, reservations, or VIPs (the
+ * AD/Entra "assets-only" pathway; syncVcenterDevices in integrations.ts
+ * consumes the result).
+ *
+ * Two transports against the same vCenter:
+ *
+ *  - vSphere Automation REST (`/api/...`, vCenter 7.0U2+): session auth via
+ *    POST /api/session (Basic) → `vmware-api-session-id` header. Used for
+ *    inventory (clusters, hosts, per-host VM lists, per-VM detail + VMware
+ *    Tools guest identity/networking/filesystems) and the Query API modal.
+ *
+ *  - Narrow SOAP property-collector calls (`/sdk`, vim25) for the data the
+ *    REST surface does not expose (WinRM-Identify hand-rolled-envelope
+ *    precedent; no XML dependency — targeted regex parsing of a shape we
+ *    request ourselves):
+ *      1. VM quickStats — CPU MHz / RAM usage for EVERY VM in one batched
+ *         call. Feeds discovery snapshots AND the per-minute cpuMemory
+ *         telemetry warm cache (fetchVcenterQuickStats).
+ *      2. Datastore facts — summary capacity/free/uncommitted, host mount
+ *         list (the REST datastore list can't filter by host), and backing
+ *         info (VMFS extent NAA device ids → array vendor via vendorFromNaa,
+ *         NFS remote host/path).
+ *    Every SOAP surface degrades to nulls independently — a vCenter that
+ *    blocks /sdk still yields full REST inventory.
+ *
+ * VM identity: instanceUuid (survives vMotion and host moves; unique per
+ * vCenter) with a `${integrationId}:${moref}` fallback — see pickVmExternalId.
+ */
+
+import { request as httpsRequest } from "node:https";
+import { AppError } from "../utils/errors.js";
+import { getConfiguredResolver } from "./dnsService.js";
+import { logger } from "../utils/logger.js";
+
+export interface VcenterConfig {
+  host: string;
+  port?: number;
+  verifyTls?: boolean;
+  username: string;
+  password: string;
+  vmInclude?: string[]; // Wildcards matched against the VM name (e.g. "prod-*")
+  vmExclude?: string[]; // Ignored when vmInclude is non-empty
+}
+
+export interface DiscoveredVcenterCluster {
+  moref: string; // "domain-c8"
+  name: string;
+}
+
+export interface DiscoveredVcenterHost {
+  moref: string; // "host-12"
+  name: string; // usually the FQDN the host was added by
+  connectionState: string; // CONNECTED | DISCONNECTED | NOT_RESPONDING
+  powerState: string; // POWERED_ON | POWERED_OFF | STANDBY
+  clusterMoref: string | null;
+  clusterName: string | null;
+  datastoreMorefs: string[]; // filled from the SOAP datastore host-mount list
+  resolvedIp: string | null; // DNS-resolved from `name` (REST exposes no mgmt IP)
+}
+
+export interface VcenterVmDisk {
+  key: string; // hardware device key, e.g. "2000"
+  label: string; // "Hard disk 1"
+  capacityBytes: number | null;
+  datastoreMoref: string | null;
+  datastoreName: string | null; // parsed from the "[datastore] path.vmdk" backing file
+}
+
+export interface VcenterGuestFilesystem {
+  path: string; // mount point ("/", "C:\\")
+  capacityBytes: number | null;
+  freeBytes: number | null;
+}
+
+export interface DiscoveredVcenterVm {
+  moref: string; // "vm-123"
+  instanceUuid: string | null;
+  biosUuid: string | null;
+  name: string;
+  powerState: string; // POWERED_ON | POWERED_OFF | SUSPENDED
+  hostMoref: string; // placement at discovery time
+  guestHostname: string | null; // VMware Tools guest identity
+  guestIp: string | null;
+  guestOsFullName: string | null;
+  toolsRunState: string | null; // RUNNING | NOT_RUNNING | EXECUTING_SCRIPTS
+  toolsVersionStatus: string | null;
+  cpuCount: number | null;
+  memoryMiB: number | null;
+  // SOAP quickStats snapshot (null when the SOAP surface is unavailable):
+  cpuUsageMhz: number | null;
+  cpuMaxMhz: number | null;
+  memUsedBytes: number | null;
+  nicMacs: Array<{ mac: string; connected: boolean }>;
+  disks: VcenterVmDisk[];
+  guestFilesystems: VcenterGuestFilesystem[] | null; // null = Tools absent/off
+}
+
+export interface VcenterDatastoreBacking {
+  vmfs?: Array<{ diskName: string; vendor: string | null }>;
+  nas?: { remoteHost: string; remotePath: string };
+}
+
+export interface DiscoveredVcenterDatastore {
+  moref: string; // "datastore-45"
+  name: string;
+  dsType: string | null; // VMFS | NFS | NFS41 | vsan | VVOL
+  capacityBytes: number | null;
+  freeBytes: number | null;
+  provisionedBytes: number | null; // capacity - free + uncommitted (SOAP only)
+  accessible: boolean | null;
+  hostMorefs: string[];
+  backing: VcenterDatastoreBacking | null;
+  backingLabel: string | null; // "Pure Storage", "NFS: filer01", ...
+}
+
+export interface VcenterDiscoveryResult {
+  clusters: DiscoveredVcenterCluster[];
+  hosts: DiscoveredVcenterHost[];
+  vms: DiscoveredVcenterVm[];
+  datastores: DiscoveredVcenterDatastore[];
+}
+
+export type VcenterDiscoveryProgressCallback = (
+  step: string,
+  level: "info" | "error",
+  message: string,
+) => void;
+
+// Per-VM guest-detail fan-out concurrency (≤5 REST calls per VM). Bounded so
+// a 2000-VM inventory doesn't open thousands of sockets against vCenter.
+const VM_DETAIL_CONCURRENCY = 8;
+const REST_TIMEOUT_MS = 20_000;
+const SOAP_TIMEOUT_MS = 45_000; // batched property fetches return large bodies
+
+// ─── Low-level HTTPS ────────────────────────────────────────────────────────
+
+interface RawResponse {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  body: string;
+}
+
+function rawRequest(
+  config: VcenterConfig,
+  method: string,
+  path: string,
+  opts: {
+    headers?: Record<string, string>;
+    body?: string;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<RawResponse> {
+  return new Promise<RawResponse>((resolve, reject) => {
+    if (opts.signal?.aborted) return reject(new AppError(499, "Aborted"));
+    const req = httpsRequest(
+      {
+        hostname: config.host,
+        port: config.port || 443,
+        path,
+        method,
+        headers: {
+          Accept: "application/json",
+          ...(opts.body !== undefined
+            ? { "Content-Length": Buffer.byteLength(opts.body).toString() }
+            : {}),
+          ...(opts.headers || {}),
+        },
+        rejectUnauthorized: config.verifyTls !== false,
+        timeout: opts.timeoutMs ?? REST_TIMEOUT_MS,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode || 0,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
+    );
+    const onAbort = () => {
+      try { req.destroy(); } catch { /* noop */ }
+      reject(new AppError(499, "Aborted"));
+    };
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    req.on("timeout", () => {
+      try { req.destroy(); } catch { /* noop */ }
+      reject(new AppError(504, `vCenter request timed out (${method} ${path.split("?")[0]})`));
+    });
+    req.on("error", (err: any) => {
+      opts.signal?.removeEventListener("abort", onAbort);
+      reject(translateNetworkError(err, config));
+    });
+    req.on("close", () => opts.signal?.removeEventListener("abort", onAbort));
+    if (opts.body !== undefined) req.write(opts.body);
+    req.end();
+  });
+}
+
+function translateNetworkError(err: any, config: VcenterConfig): AppError {
+  const code = err?.code;
+  if (code === "ECONNREFUSED") return new AppError(502, `Connection refused — ${config.host}:${config.port || 443}`);
+  if (code === "ENOTFOUND") return new AppError(502, `Host not found — ${config.host}`);
+  if (code === "ETIMEDOUT") return new AppError(504, `Connection timed out — ${config.host}:${config.port || 443}`);
+  if (
+    code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
+    code === "DEPTH_ZERO_SELF_SIGNED_CERT" ||
+    code === "SELF_SIGNED_CERT_IN_CHAIN" ||
+    code === "CERT_HAS_EXPIRED" ||
+    code === "ERR_TLS_CERT_ALTNAME_INVALID"
+  ) {
+    return new AppError(502, `TLS certificate error (${code}) — try disabling TLS verification`);
+  }
+  return new AppError(502, err?.message || "vCenter connection error");
+}
+
+// ─── REST session ───────────────────────────────────────────────────────────
+
+/**
+ * vSphere Automation REST session. Login once, re-auth at most once on a
+ * mid-run 401 (vCenter sessions idle out at ~5 min inactivity), logout in
+ * the caller's `finally` — unlike FMG api-key sessions, vCenter sessions are
+ * per-login and DELETE /api/session is the correct hygiene.
+ */
+class VcenterRestSession {
+  private token: string | null = null;
+  private reauthed = false;
+
+  constructor(private readonly config: VcenterConfig) {}
+
+  async login(signal?: AbortSignal): Promise<void> {
+    const basic = Buffer.from(`${this.config.username}:${this.config.password}`).toString("base64");
+    const res = await rawRequest(this.config, "POST", "/api/session", {
+      headers: { Authorization: `Basic ${basic}` },
+      body: "",
+      signal,
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new AppError(502, "vCenter authentication failed — check username and password");
+    }
+    if (res.status !== 200 && res.status !== 201) {
+      throw new AppError(502, `vCenter session create returned HTTP ${res.status}${vcErrorDetail(res.body)}`);
+    }
+    // Body is the bare JSON-encoded session id string: "abc123..."
+    try {
+      this.token = JSON.parse(res.body);
+    } catch {
+      this.token = res.body.replace(/^"|"$/g, "").trim();
+    }
+    if (!this.token) throw new AppError(502, "vCenter session create returned an empty token");
+  }
+
+  async request<T>(
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+    path: string,
+    opts: { query?: Record<string, string | string[]>; body?: unknown; signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<T> {
+    if (!this.token) await this.login(opts.signal);
+
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(opts.query || {})) {
+      if (Array.isArray(v)) for (const item of v) qs.append(k, item);
+      else qs.append(k, v);
+    }
+    const fullPath = `${path}${qs.toString() ? (path.includes("?") ? "&" : "?") + qs.toString() : ""}`;
+
+    const doCall = () =>
+      rawRequest(this.config, method, fullPath, {
+        headers: {
+          "vmware-api-session-id": this.token!,
+          ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        signal: opts.signal,
+        timeoutMs: opts.timeoutMs,
+      });
+
+    let res = await doCall();
+    if (res.status === 401 && !this.reauthed) {
+      // Session idled out mid-run — re-auth exactly once, then fail fast.
+      this.reauthed = true;
+      this.token = null;
+      await this.login(opts.signal);
+      res = await doCall();
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new AppError(502, `vCenter rejected the session (HTTP ${res.status})${vcErrorDetail(res.body)}`);
+    }
+    if (res.status === 404) {
+      throw new AppError(404, `vCenter endpoint not found: ${path}`);
+    }
+    if (res.status === 503) {
+      // Guest-ops endpoints return 503 SERVICE_UNAVAILABLE when VMware Tools
+      // isn't running — callers catch this per-call and degrade to null.
+      throw new AppError(503, `vCenter service unavailable for ${path}${vcErrorDetail(res.body)}`);
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new AppError(502, `vCenter returned HTTP ${res.status} for ${path}${vcErrorDetail(res.body)}`);
+    }
+    if (!res.body) return undefined as T;
+    try {
+      return JSON.parse(res.body) as T;
+    } catch {
+      throw new AppError(502, `vCenter returned a non-JSON body for ${path}`);
+    }
+  }
+
+  async logout(): Promise<void> {
+    if (!this.token) return;
+    try {
+      await rawRequest(this.config, "DELETE", "/api/session", {
+        headers: { "vmware-api-session-id": this.token },
+      });
+    } catch {
+      // Best-effort — the session idles out server-side regardless.
+    }
+    this.token = null;
+  }
+}
+
+/** Pull the vCenter structured-error `default_message` out of a response body. */
+function vcErrorDetail(body: string): string {
+  if (!body) return "";
+  try {
+    const parsed = JSON.parse(body);
+    const msg =
+      parsed?.messages?.[0]?.default_message ??
+      parsed?.value?.messages?.[0]?.default_message ??
+      parsed?.error_type;
+    return msg ? ` — ${String(msg)}` : "";
+  } catch {
+    return "";
+  }
+}
+
+// ─── Connection test ────────────────────────────────────────────────────────
+
+export async function testConnection(config: VcenterConfig): Promise<{ ok: boolean; message: string }> {
+  if (!config.host) return { ok: false, message: "Host is required" };
+  if (!config.username) return { ok: false, message: "Username is required" };
+  if (!config.password) return { ok: false, message: "Password is required" };
+
+  const session = new VcenterRestSession(config);
+  try {
+    await session.login();
+    const hosts = await session.request<Array<{ host: string; name: string }>>("GET", "/api/vcenter/host");
+    const vms = await session.request<Array<{ vm: string }>>("GET", "/api/vcenter/vm");
+    return {
+      ok: true,
+      message: `Connected — ${hosts.length} ESXi host(s), ${vms.length} VM(s) visible`,
+    };
+  } catch (err: any) {
+    return { ok: false, message: err instanceof AppError ? err.message : err?.message || "Unknown error" };
+  } finally {
+    await session.logout();
+  }
+}
+
+// ─── Manual query (UI tool) ─────────────────────────────────────────────────
+
+/**
+ * Proxy an arbitrary vSphere Automation REST call using stored credentials.
+ * Backs the Query API modal. REST surface only — the path must start with
+ * "/api/" (the SOAP /sdk endpoint is not exposed to the modal).
+ */
+export async function proxyQuery(
+  config: VcenterConfig,
+  method: "GET" | "POST",
+  path: string,
+  query?: Record<string, string>,
+): Promise<unknown> {
+  if (!path.startsWith("/api/")) {
+    throw new AppError(400, 'Path must start with "/api/" (vSphere Automation REST surface)');
+  }
+  const session = new VcenterRestSession(config);
+  try {
+    await session.login();
+    return await session.request<unknown>(method, path, { query });
+  } finally {
+    await session.logout();
+  }
+}
+
+// ─── SOAP (vim25) property collector ────────────────────────────────────────
+
+interface SoapSession {
+  cookie: string;
+  rootFolder: string;
+  propertyCollector: string;
+  viewManager: string;
+}
+
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function soapEnvelope(inner: string): string {
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>` +
+    `<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" ` +
+    `xmlns:xsd="http://www.w3.org/2001/XMLSchema" ` +
+    `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ` +
+    `xmlns:vim25="urn:vim25">` +
+    `<soapenv:Body>${inner}</soapenv:Body></soapenv:Envelope>`
+  );
+}
+
+async function soapCall(
+  config: VcenterConfig,
+  inner: string,
+  opts: { cookie?: string; signal?: AbortSignal } = {},
+): Promise<RawResponse> {
+  const body = soapEnvelope(inner);
+  const res = await rawRequest(config, "POST", "/sdk", {
+    headers: {
+      "Content-Type": "text/xml; charset=utf-8",
+      SOAPAction: "urn:vim25/8.0.0.0",
+      ...(opts.cookie ? { Cookie: opts.cookie } : {}),
+    },
+    body,
+    timeoutMs: SOAP_TIMEOUT_MS,
+    signal: opts.signal,
+  });
+  if (res.status !== 200) {
+    const fault = res.body.match(/<faultstring>([\s\S]*?)<\/faultstring>/)?.[1]?.trim();
+    throw new AppError(502, `vCenter SOAP call failed (HTTP ${res.status})${fault ? ` — ${fault}` : ""}`);
+  }
+  return res;
+}
+
+/** Login to /sdk. Resolves service-content morefs first (rootFolder can differ per install). */
+async function soapLogin(config: VcenterConfig, signal?: AbortSignal): Promise<SoapSession> {
+  const scRes = await soapCall(
+    config,
+    `<vim25:RetrieveServiceContent><vim25:_this type="ServiceInstance">ServiceInstance</vim25:_this></vim25:RetrieveServiceContent>`,
+    { signal },
+  );
+  const rootFolder = scRes.body.match(/<rootFolder[^>]*>([^<]+)<\/rootFolder>/)?.[1];
+  const propertyCollector = scRes.body.match(/<propertyCollector[^>]*>([^<]+)<\/propertyCollector>/)?.[1];
+  const viewManager = scRes.body.match(/<viewManager[^>]*>([^<]+)<\/viewManager>/)?.[1];
+  const sessionManager = scRes.body.match(/<sessionManager[^>]*>([^<]+)<\/sessionManager>/)?.[1];
+  if (!rootFolder || !propertyCollector || !viewManager || !sessionManager) {
+    throw new AppError(502, "vCenter SOAP service content missing expected manager references");
+  }
+
+  const loginRes = await soapCall(
+    config,
+    `<vim25:Login><vim25:_this type="SessionManager">${xmlEscape(sessionManager)}</vim25:_this>` +
+      `<vim25:userName>${xmlEscape(config.username)}</vim25:userName>` +
+      `<vim25:password>${xmlEscape(config.password)}</vim25:password></vim25:Login>`,
+    { signal },
+  );
+  const setCookie = loginRes.headers["set-cookie"];
+  const cookieHeader = Array.isArray(setCookie) ? setCookie[0] : setCookie;
+  const cookie = cookieHeader?.match(/vmware_soap_session="?[^";]+"?/)?.[0];
+  if (!cookie) throw new AppError(502, "vCenter SOAP login did not return a session cookie");
+  return { cookie, rootFolder, propertyCollector, viewManager };
+}
+
+async function soapLogout(config: VcenterConfig, session: SoapSession): Promise<void> {
+  try {
+    await soapCall(
+      config,
+      `<vim25:Logout><vim25:_this type="SessionManager">SessionManager</vim25:_this></vim25:Logout>`,
+      { cookie: session.cookie },
+    );
+  } catch {
+    // Best-effort.
+  }
+}
+
+/**
+ * RetrievePropertiesEx over a ContainerView of `objType` for the given
+ * property paths, following the continuation token until drained. Returns
+ * the raw `<objects>…</objects>` XML blocks (one per managed object).
+ */
+async function retrieveAllProperties(
+  config: VcenterConfig,
+  session: SoapSession,
+  objType: "VirtualMachine" | "Datastore",
+  pathSet: string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const viewRes = await soapCall(
+    config,
+    `<vim25:CreateContainerView><vim25:_this type="ViewManager">${xmlEscape(session.viewManager)}</vim25:_this>` +
+      `<vim25:container type="Folder">${xmlEscape(session.rootFolder)}</vim25:container>` +
+      `<vim25:type>${objType}</vim25:type><vim25:recursive>true</vim25:recursive></vim25:CreateContainerView>`,
+    { cookie: session.cookie, signal },
+  );
+  const view = viewRes.body.match(/<returnval[^>]*>([^<]+)<\/returnval>/)?.[1];
+  if (!view) throw new AppError(502, "vCenter SOAP CreateContainerView returned no view");
+
+  const paths = pathSet.map((p) => `<vim25:pathSet>${xmlEscape(p)}</vim25:pathSet>`).join("");
+  const retrieveBody =
+    `<vim25:RetrievePropertiesEx><vim25:_this type="PropertyCollector">${xmlEscape(session.propertyCollector)}</vim25:_this>` +
+    `<vim25:specSet>` +
+    `<vim25:propSet><vim25:type>${objType}</vim25:type>${paths}</vim25:propSet>` +
+    `<vim25:objectSet><vim25:obj type="ContainerView">${xmlEscape(view)}</vim25:obj><vim25:skip>true</vim25:skip>` +
+    `<vim25:selectSet xsi:type="vim25:TraversalSpec"><vim25:name>view</vim25:name><vim25:type>ContainerView</vim25:type>` +
+    `<vim25:path>view</vim25:path><vim25:skip>false</vim25:skip></vim25:selectSet>` +
+    `</vim25:objectSet></vim25:specSet><vim25:options/></vim25:RetrievePropertiesEx>`;
+
+  const blocks: string[] = [];
+  let res = await soapCall(config, retrieveBody, { cookie: session.cookie, signal });
+  for (;;) {
+    blocks.push(...extractObjectBlocks(res.body));
+    const token = res.body.match(/<token>([^<]+)<\/token>/)?.[1];
+    if (!token) break;
+    res = await soapCall(
+      config,
+      `<vim25:ContinueRetrievePropertiesEx><vim25:_this type="PropertyCollector">${xmlEscape(session.propertyCollector)}</vim25:_this>` +
+        `<vim25:token>${xmlEscape(token)}</vim25:token></vim25:ContinueRetrievePropertiesEx>`,
+      { cookie: session.cookie, signal },
+    );
+  }
+  // The view is session-scoped; destroy it so long-lived sessions don't leak.
+  try {
+    await soapCall(
+      config,
+      `<vim25:DestroyView><vim25:_this type="ContainerView">${xmlEscape(view)}</vim25:_this></vim25:DestroyView>`,
+      { cookie: session.cookie },
+    );
+  } catch { /* best-effort */ }
+  return blocks;
+}
+
+/** Split a RetrievePropertiesEx response into per-object XML blocks. Exported for tests. */
+export function extractObjectBlocks(xml: string): string[] {
+  const out: string[] = [];
+  const re = /<objects>([\s\S]*?)<\/objects>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) out.push(m[1]);
+  return out;
+}
+
+/** Read the managed-object reference id (`<obj type="X">id</obj>`) from an object block. Exported for tests. */
+export function parseObjRef(block: string): string | null {
+  return block.match(/<obj [^>]*>([^<]+)<\/obj>/)?.[1] ?? null;
+}
+
+/** Read a scalar propSet value by property name from an object block. Exported for tests. */
+export function parsePropValue(block: string, name: string): string | null {
+  const re = new RegExp(
+    `<propSet><name>${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</name><val[^>]*>([\\s\\S]*?)</val></propSet>`,
+  );
+  return block.match(re)?.[1]?.trim() ?? null;
+}
+
+function parsePropNumber(block: string, name: string): number | null {
+  const raw = parsePropValue(block, name);
+  if (raw === null || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** The raw propSet XML (nested values like `host` mounts or `info`) by property name. */
+function parsePropXml(block: string, name: string): string | null {
+  const re = new RegExp(
+    `<propSet><name>${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</name><val[^>]*>([\\s\\S]*?)</val></propSet>`,
+  );
+  return block.match(re)?.[1] ?? null;
+}
+
+// ─── SOAP: VM quickStats ────────────────────────────────────────────────────
+
+export interface VcenterVmQuickStats {
+  moref: string;
+  instanceUuid: string | null;
+  cpuUsageMhz: number | null;
+  cpuMaxMhz: number | null;
+  guestMemUsageMB: number | null;
+  hostMemUsageMB: number | null;
+  memTotalMB: number | null;
+  powerState: string | null;
+}
+
+const QUICKSTATS_PATHS = [
+  "config.instanceUuid",
+  "config.hardware.memoryMB",
+  "runtime.powerState",
+  "summary.quickStats.overallCpuUsage",
+  "summary.quickStats.guestMemoryUsage",
+  "summary.quickStats.hostMemoryUsage",
+  "summary.runtime.maxCpuUsage",
+];
+
+/** Parse one RetrievePropertiesEx object block into quickStats. Exported for tests. */
+export function parseQuickStatsBlock(block: string): VcenterVmQuickStats | null {
+  const moref = parseObjRef(block);
+  if (!moref) return null;
+  return {
+    moref,
+    instanceUuid: parsePropValue(block, "config.instanceUuid"),
+    cpuUsageMhz: parsePropNumber(block, "summary.quickStats.overallCpuUsage"),
+    cpuMaxMhz: parsePropNumber(block, "summary.runtime.maxCpuUsage"),
+    guestMemUsageMB: parsePropNumber(block, "summary.quickStats.guestMemoryUsage"),
+    hostMemUsageMB: parsePropNumber(block, "summary.quickStats.hostMemoryUsage"),
+    memTotalMB: parsePropNumber(block, "config.hardware.memoryMB"),
+    powerState: parsePropValue(block, "runtime.powerState"),
+  };
+}
+
+/**
+ * ONE batched SOAP call returning quickStats for every VM in the vCenter.
+ * Used by discovery (usage snapshot) and by the telemetry warm cache in
+ * monitoringService (per-minute cpuMemory stream) — the cache layer keys
+ * results by instanceUuid AND moref so both lookups hit.
+ */
+export async function fetchVcenterQuickStats(
+  config: VcenterConfig,
+  signal?: AbortSignal,
+): Promise<VcenterVmQuickStats[]> {
+  const session = await soapLogin(config, signal);
+  try {
+    const blocks = await retrieveAllProperties(config, session, "VirtualMachine", QUICKSTATS_PATHS, signal);
+    const out: VcenterVmQuickStats[] = [];
+    for (const block of blocks) {
+      const parsed = parseQuickStatsBlock(block);
+      if (parsed) out.push(parsed);
+    }
+    return out;
+  } finally {
+    await soapLogout(config, session);
+  }
+}
+
+// ─── SOAP: datastore facts ──────────────────────────────────────────────────
+
+const DATASTORE_PATHS = [
+  "name",
+  "summary.type",
+  "summary.capacity",
+  "summary.freeSpace",
+  "summary.uncommitted",
+  "summary.accessible",
+  "host",
+  "info",
+];
+
+/** Parse one datastore object block. Exported for tests. */
+export function parseDatastoreBlock(block: string): DiscoveredVcenterDatastore | null {
+  const moref = parseObjRef(block);
+  if (!moref) return null;
+  const name = parsePropValue(block, "name") || moref;
+  const capacity = parsePropNumber(block, "summary.capacity");
+  const free = parsePropNumber(block, "summary.freeSpace");
+  const uncommitted = parsePropNumber(block, "summary.uncommitted");
+  const accessibleRaw = parsePropValue(block, "summary.accessible");
+
+  // Host mounts: <val ...><DatastoreHostMount><key type="HostSystem">host-12</key>…
+  const hostMorefs: string[] = [];
+  const hostXml = parsePropXml(block, "host");
+  if (hostXml) {
+    const re = /<key[^>]*type="HostSystem"[^>]*>([^<]+)<\/key>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(hostXml)) !== null) hostMorefs.push(m[1]);
+  }
+
+  // Backing: VmfsDatastoreInfo extents / NasDatastoreInfo remote host+path.
+  let backing: VcenterDatastoreBacking | null = null;
+  const infoXml = parsePropXml(block, "info");
+  if (infoXml) {
+    const diskNames: string[] = [];
+    const extentRe = /<extent>[\s\S]*?<diskName>([^<]+)<\/diskName>[\s\S]*?<\/extent>/g;
+    let m: RegExpExecArray | null;
+    while ((m = extentRe.exec(infoXml)) !== null) diskNames.push(m[1]);
+    const remoteHost = infoXml.match(/<remoteHost>([^<]+)<\/remoteHost>/)?.[1];
+    const remotePath = infoXml.match(/<remotePath>([^<]+)<\/remotePath>/)?.[1];
+    if (diskNames.length > 0) {
+      backing = { vmfs: diskNames.map((d) => ({ diskName: d, vendor: vendorFromNaa(d) })) };
+    } else if (remoteHost && remotePath) {
+      backing = { nas: { remoteHost, remotePath } };
+    }
+  }
+
+  // Provisioned = used + all thin allocations not yet written:
+  //   capacity - freeSpace + uncommitted. Only meaningful when all three exist.
+  const provisioned =
+    capacity !== null && free !== null && uncommitted !== null ? capacity - free + uncommitted : null;
+
+  return {
+    moref,
+    name,
+    dsType: parsePropValue(block, "summary.type"),
+    capacityBytes: capacity,
+    freeBytes: free,
+    provisionedBytes: provisioned,
+    accessible: accessibleRaw === null ? null : accessibleRaw === "true" || accessibleRaw === "1",
+    hostMorefs,
+    backing,
+    backingLabel: backingLabelFor(backing),
+  };
+}
+
+async function fetchDatastoresSoap(
+  config: VcenterConfig,
+  signal?: AbortSignal,
+): Promise<DiscoveredVcenterDatastore[]> {
+  const session = await soapLogin(config, signal);
+  try {
+    const blocks = await retrieveAllProperties(config, session, "Datastore", DATASTORE_PATHS, signal);
+    const out: DiscoveredVcenterDatastore[] = [];
+    for (const block of blocks) {
+      const parsed = parseDatastoreBlock(block);
+      if (parsed) out.push(parsed);
+    }
+    return out;
+  } finally {
+    await soapLogout(config, session);
+  }
+}
+
+// ─── NAA vendor identification ──────────────────────────────────────────────
+
+/**
+ * NAA type-6 device ids embed the array vendor's IEEE OUI in the six hex
+ * digits after "naa.6". Conservative map of the arrays operators actually
+ * name (unknown OUIs → null; the raw diskName still renders).
+ * Exported for tests + the frontend backing label.
+ */
+const NAA_VENDOR_PREFIXES: ReadonlyArray<[prefix: string, vendor: string]> = [
+  ["naa.624a9370", "Pure Storage"],
+  ["naa.600a0980", "NetApp"], // FAS/AFF ONTAP
+  ["naa.60a98000", "NetApp"], // older ONTAP format
+  ["naa.60060160", "Dell EMC Unity/VNX"],
+  ["naa.60000970", "Dell EMC PowerMax/VMAX"],
+  ["naa.60060e80", "Hitachi Vantara"],
+  ["naa.60050768", "IBM"], // SVC / Storwize / FlashSystem
+  ["naa.60002ac0", "HPE 3PAR/Primera"],
+  ["naa.6000d310", "Dell Compellent/SC"],
+  ["naa.6589cfc0", "TrueNAS/iXsystems"],
+  ["naa.60003ff4", "Microsoft iSCSI Target"],
+  ["naa.6001405", "Linux LIO Target"],
+  ["naa.6000c29", "VMware Virtual Disk"],
+];
+
+export function vendorFromNaa(diskName: string | null | undefined): string | null {
+  if (!diskName) return null;
+  const d = diskName.toLowerCase().trim();
+  for (const [prefix, vendor] of NAA_VENDOR_PREFIXES) {
+    if (d.startsWith(prefix)) return vendor;
+  }
+  return null;
+}
+
+/** Derive the display label for a datastore's backing. Exported for tests. */
+export function backingLabelFor(backing: VcenterDatastoreBacking | null): string | null {
+  if (!backing) return null;
+  if (backing.vmfs && backing.vmfs.length > 0) {
+    const vendors = [...new Set(backing.vmfs.map((e) => e.vendor).filter((v): v is string => !!v))];
+    if (vendors.length > 0) return vendors.join(" + ");
+    return null;
+  }
+  if (backing.nas) return `NFS: ${backing.nas.remoteHost}`;
+  return null;
+}
+
+// ─── Pure helpers (exported for tests + syncVcenterDevices) ─────────────────
+
+/**
+ * VM externalId for the AssetSource identity key. instanceUuid survives
+ * vMotion and host moves and is unique per vCenter; when the detail call
+ * couldn't produce one, fall back to the integration-scoped moref (morefs
+ * like "vm-42" repeat across different vCenters).
+ */
+export function pickVmExternalId(
+  vm: Pick<DiscoveredVcenterVm, "moref" | "instanceUuid">,
+  integrationId: string,
+): string {
+  return vm.instanceUuid || `${integrationId}:${vm.moref}`;
+}
+
+/** Host externalId — always integration-scoped (no REST-visible hardware UUID). */
+export function hostExternalId(hostMoref: string, integrationId: string): string {
+  return `${integrationId}:${hostMoref}`;
+}
+
+/** cluster moref → member host morefs, from the per-cluster host listing. */
+export function buildClusterHostMap(
+  hostsByCluster: ReadonlyArray<{ clusterMoref: string; hostMorefs: string[] }>,
+): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const entry of hostsByCluster) out.set(entry.clusterMoref, [...entry.hostMorefs]);
+  return out;
+}
+
+/**
+ * Build VM→host dependency edges, vMotion-safe:
+ *  - VM on a CLUSTERED host → one edge per cluster-member host asset. Under
+ *    the all-down multi-parent semantics the VM suppresses only when the
+ *    whole cluster is down, so an intra-cluster vMotion between discovery
+ *    cycles can never cause a false Dep. Down.
+ *  - VM on a standalone host → single edge.
+ * Hosts without a Polaris asset (not yet synced / filtered) are skipped.
+ * Returns deduped (assetId, parentAssetId) pairs.
+ */
+export function buildVcenterDependencyEdges(
+  placements: ReadonlyArray<{ vmAssetId: string; hostMoref: string }>,
+  hostAssetIdByMoref: ReadonlyMap<string, string>,
+  clusterMorefByHostMoref: ReadonlyMap<string, string>,
+  clusterHostMorefs: ReadonlyMap<string, string[]>,
+): Array<{ assetId: string; parentAssetId: string }> {
+  const seen = new Set<string>();
+  const out: Array<{ assetId: string; parentAssetId: string }> = [];
+  for (const p of placements) {
+    const clusterMoref = clusterMorefByHostMoref.get(p.hostMoref);
+    const parentMorefs =
+      clusterMoref !== undefined
+        ? clusterHostMorefs.get(clusterMoref) ?? [p.hostMoref]
+        : [p.hostMoref];
+    for (const hostMoref of parentMorefs) {
+      const parentAssetId = hostAssetIdByMoref.get(hostMoref);
+      if (!parentAssetId || parentAssetId === p.vmAssetId) continue;
+      const key = `${p.vmAssetId}::${parentAssetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ assetId: p.vmAssetId, parentAssetId });
+    }
+  }
+  return out;
+}
+
+/** Wildcard match (same semantics as the AD OU filters). Exported for tests. */
+export function matchesVmWildcard(pattern: string, value: string): boolean {
+  const p = pattern.toLowerCase();
+  const v = value.toLowerCase();
+  if (p === "*") return true;
+  if (p.startsWith("*") && p.endsWith("*") && p.length > 2) return v.includes(p.slice(1, -1));
+  if (p.startsWith("*")) return v.endsWith(p.slice(1));
+  if (p.endsWith("*")) return v.startsWith(p.slice(0, -1));
+  return v === p;
+}
+
+export function filterVms<T extends { name: string }>(
+  vms: T[],
+  include?: string[],
+  exclude?: string[],
+): T[] {
+  if (include && include.length > 0) {
+    return vms.filter((vm) => include.some((p) => matchesVmWildcard(p, vm.name)));
+  }
+  if (exclude && exclude.length > 0) {
+    return vms.filter((vm) => !exclude.some((p) => matchesVmWildcard(p, vm.name)));
+  }
+  return vms;
+}
+
+/**
+ * Parse the REST VM detail body into the discovery shape (guest + quickStats
+ * fields are merged by the caller). Defensive — every field is optional.
+ * Exported for tests.
+ */
+export function parseVmDetail(
+  moref: string,
+  hostMoref: string,
+  listName: string,
+  listPowerState: string,
+  detail: any,
+  datastoreMorefByName: ReadonlyMap<string, string>,
+): DiscoveredVcenterVm {
+  const identity = detail?.identity ?? {};
+  const cpu = detail?.cpu ?? {};
+  const memory = detail?.memory ?? {};
+
+  const nicMacs: Array<{ mac: string; connected: boolean }> = [];
+  for (const nic of Object.values<any>(detail?.nics ?? {})) {
+    const mac = typeof nic?.mac_address === "string" ? nic.mac_address : null;
+    if (!mac) continue;
+    nicMacs.push({ mac, connected: nic?.state === "CONNECTED" });
+  }
+
+  const disks: VcenterVmDisk[] = [];
+  for (const [key, disk] of Object.entries<any>(detail?.disks ?? {})) {
+    const vmdk = typeof disk?.backing?.vmdk_file === "string" ? disk.backing.vmdk_file : "";
+    // Backing file format: "[datastoreName] path/to/file.vmdk"
+    const dsName = vmdk.match(/^\[([^\]]+)\]/)?.[1] ?? null;
+    disks.push({
+      key,
+      label: typeof disk?.label === "string" ? disk.label : `Disk ${key}`,
+      capacityBytes: typeof disk?.capacity === "number" ? disk.capacity : null,
+      datastoreName: dsName,
+      datastoreMoref: dsName ? datastoreMorefByName.get(dsName) ?? null : null,
+    });
+  }
+
+  return {
+    moref,
+    instanceUuid: typeof identity?.instance_uuid === "string" ? identity.instance_uuid : null,
+    biosUuid: typeof identity?.bios_uuid === "string" ? identity.bios_uuid : null,
+    name: typeof detail?.name === "string" && detail.name ? detail.name : listName,
+    powerState: typeof detail?.power_state === "string" ? detail.power_state : listPowerState,
+    hostMoref,
+    guestHostname: null,
+    guestIp: null,
+    guestOsFullName: null,
+    toolsRunState: null,
+    toolsVersionStatus: null,
+    cpuCount: typeof cpu?.count === "number" ? cpu.count : null,
+    memoryMiB: typeof memory?.size_MiB === "number" ? memory.size_MiB : null,
+    cpuUsageMhz: null,
+    cpuMaxMhz: null,
+    memUsedBytes: null,
+    nicMacs,
+    disks,
+    guestFilesystems: null,
+  };
+}
+
+// ─── Inventory discovery ────────────────────────────────────────────────────
+
+/** Run `fn` over `items` with bounded concurrency; aborts stop new starts. */
+async function mapBounded<T, R>(
+  items: T[],
+  limit: number,
+  signal: AbortSignal | undefined,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      if (signal?.aborted) return;
+      const idx = next++;
+      if (idx >= items.length) return;
+      results[idx] = await fn(items[idx]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+export async function discoverInventory(
+  config: VcenterConfig,
+  signal?: AbortSignal,
+  onProgress?: VcenterDiscoveryProgressCallback,
+): Promise<VcenterDiscoveryResult> {
+  const log = onProgress || (() => {});
+
+  if (!config.host) throw new AppError(400, "Host is required");
+  if (!config.username) throw new AppError(400, "Username is required");
+  if (!config.password) throw new AppError(400, "Password is required");
+
+  const session = new VcenterRestSession(config);
+  try {
+    await session.login(signal);
+
+    // Phase 1 — clusters + hosts + membership.
+    const clusterRows = await session.request<Array<{ cluster: string; name: string }>>(
+      "GET",
+      "/api/vcenter/cluster",
+      { signal },
+    );
+    const clusters: DiscoveredVcenterCluster[] = clusterRows.map((c) => ({ moref: c.cluster, name: c.name }));
+
+    const hostRows = await session.request<
+      Array<{ host: string; name: string; connection_state?: string; power_state?: string }>
+    >("GET", "/api/vcenter/host", { signal });
+
+    const clusterByHost = new Map<string, DiscoveredVcenterCluster>();
+    for (const cluster of clusters) {
+      if (signal?.aborted) throw new AppError(499, "Aborted");
+      try {
+        const members = await session.request<Array<{ host: string }>>("GET", "/api/vcenter/host", {
+          query: { clusters: cluster.moref },
+          signal,
+        });
+        for (const member of members) clusterByHost.set(member.host, cluster);
+      } catch (err: any) {
+        log("discover.vcenter.cluster", "error", `vCenter: failed to list hosts for cluster ${cluster.name} — ${err?.message}`);
+      }
+    }
+
+    const hosts: DiscoveredVcenterHost[] = hostRows.map((h) => ({
+      moref: h.host,
+      name: h.name,
+      connectionState: h.connection_state || "",
+      powerState: h.power_state || "",
+      clusterMoref: clusterByHost.get(h.host)?.moref ?? null,
+      clusterName: clusterByHost.get(h.host)?.name ?? null,
+      datastoreMorefs: [],
+      resolvedIp: null,
+    }));
+    log("discover.vcenter.inventory", "info", `vCenter: ${hosts.length} ESXi host(s), ${clusters.length} cluster(s)`);
+
+    // Phase 2 — datastores. SOAP-primary (host mounts + backing + provisioned);
+    // REST fallback keeps capacity figures when /sdk is unreachable.
+    let datastores: DiscoveredVcenterDatastore[] = [];
+    try {
+      datastores = await fetchDatastoresSoap(config, signal);
+      log("discover.vcenter.datastores", "info", `vCenter: ${datastores.length} datastore(s) (with backing detail)`);
+    } catch (err: any) {
+      if (signal?.aborted) throw err;
+      log("discover.vcenter.datastores", "error", `vCenter: SOAP datastore fetch failed — ${err?.message}; falling back to REST list`);
+      try {
+        const dsRows = await session.request<
+          Array<{ datastore: string; name: string; type?: string; capacity?: number; free_space?: number }>
+        >("GET", "/api/vcenter/datastore", { signal });
+        datastores = dsRows.map((d) => ({
+          moref: d.datastore,
+          name: d.name,
+          dsType: d.type ?? null,
+          capacityBytes: typeof d.capacity === "number" ? d.capacity : null,
+          freeBytes: typeof d.free_space === "number" ? d.free_space : null,
+          provisionedBytes: null,
+          accessible: null,
+          hostMorefs: [],
+          backing: null,
+          backingLabel: null,
+        }));
+      } catch (restErr: any) {
+        log("discover.vcenter.datastores", "error", `vCenter: REST datastore list also failed — ${restErr?.message}`);
+      }
+    }
+    const datastoreMorefByName = new Map<string, string>();
+    for (const ds of datastores) datastoreMorefByName.set(ds.name, ds.moref);
+    // Project datastore host-mounts onto the host rows.
+    const hostByMoref = new Map(hosts.map((h) => [h.moref, h]));
+    for (const ds of datastores) {
+      for (const hostMoref of ds.hostMorefs) {
+        hostByMoref.get(hostMoref)?.datastoreMorefs.push(ds.moref);
+      }
+    }
+
+    // Phase 3 — VM lists per host (pins VM→host placement; also sidesteps the
+    // 4000-item global list cap).
+    type VmListRow = { vm: string; name: string; power_state?: string; hostMoref: string };
+    const vmRows: VmListRow[] = [];
+    for (const host of hosts) {
+      if (signal?.aborted) throw new AppError(499, "Aborted");
+      log("discover.device.start", "info", `vCenter: listing VMs on ${host.name}`);
+      try {
+        const rows = await session.request<Array<{ vm: string; name: string; power_state?: string }>>(
+          "GET",
+          "/api/vcenter/vm",
+          { query: { hosts: host.moref }, signal },
+        );
+        for (const row of rows) vmRows.push({ ...row, hostMoref: host.moref });
+        log("discover.device.complete", "info", `vCenter: ${host.name} — ${rows.length} VM(s)`);
+      } catch (err: any) {
+        if (signal?.aborted) throw err;
+        log("discover.device.skip", "error", `vCenter: VM list failed for ${host.name} — ${err?.message}`);
+      }
+    }
+    log("discover.devices", "info", `Found ${vmRows.length} virtual machine(s) across ${hosts.length} host(s)`);
+
+    // Name filter BEFORE the per-VM detail fan-out — excluded VMs cost nothing.
+    const filteredRows = filterVms(vmRows, config.vmInclude, config.vmExclude);
+    const droppedByFilter = vmRows.length - filteredRows.length;
+    if (droppedByFilter > 0) {
+      log("discover.filter", "info", `VM filter: ${filteredRows.length} included, ${droppedByFilter} excluded`);
+    }
+
+    // Phase 4 — per-VM detail + Tools guest info (bounded fan-out).
+    const vms = (
+      await mapBounded(filteredRows, VM_DETAIL_CONCURRENCY, signal, async (row): Promise<DiscoveredVcenterVm | null> => {
+        let detail: any = null;
+        try {
+          detail = await session.request<any>("GET", `/api/vcenter/vm/${row.vm}`, { signal });
+        } catch (err: any) {
+          if (signal?.aborted) return null;
+          log("discover.device.skip", "error", `vCenter: VM detail failed for ${row.name} (${row.vm}) — ${err?.message}`);
+          return null;
+        }
+        const vm = parseVmDetail(row.vm, row.hostMoref, row.name, row.power_state || "", detail, datastoreMorefByName);
+
+        // Tools state — cheap and works regardless of guest state.
+        try {
+          const tools = await session.request<any>("GET", `/api/vcenter/vm/${row.vm}/tools`, { signal });
+          vm.toolsRunState = typeof tools?.run_state === "string" ? tools.run_state : null;
+          vm.toolsVersionStatus = typeof tools?.version_status === "string" ? tools.version_status : null;
+        } catch { /* older FTools endpoints may 404 — treat as unknown */ }
+
+        // Guest surfaces need running Tools (503 otherwise) — each degrades alone.
+        if (vm.toolsRunState === "RUNNING") {
+          try {
+            const identity = await session.request<any>("GET", `/api/vcenter/vm/${row.vm}/guest/identity`, { signal });
+            vm.guestHostname = typeof identity?.host_name === "string" && identity.host_name ? identity.host_name : null;
+            vm.guestIp = typeof identity?.ip_address === "string" && identity.ip_address ? identity.ip_address : null;
+            vm.guestOsFullName = typeof identity?.full_name?.default_message === "string"
+              ? identity.full_name.default_message
+              : typeof identity?.full_name === "string" ? identity.full_name : null;
+          } catch { /* null */ }
+          try {
+            const filesystems = await session.request<Record<string, any>>(
+              "GET",
+              `/api/vcenter/vm/${row.vm}/guest/local-filesystem`,
+              { signal },
+            );
+            const parsed: VcenterGuestFilesystem[] = [];
+            for (const [path, fs] of Object.entries(filesystems || {})) {
+              parsed.push({
+                path,
+                capacityBytes: typeof fs?.capacity === "number" ? fs.capacity : null,
+                freeBytes: typeof fs?.free_space === "number" ? fs.free_space : null,
+              });
+            }
+            vm.guestFilesystems = parsed;
+          } catch { /* null */ }
+        }
+        return vm;
+      })
+    ).filter((vm): vm is DiscoveredVcenterVm => vm !== null);
+
+    if (signal?.aborted) throw new AppError(499, "Aborted");
+
+    // Phase 5 — SOAP quickStats merge (usage snapshot; graceful absence).
+    try {
+      const stats = await fetchVcenterQuickStats(config, signal);
+      const byMoref = new Map(stats.map((s) => [s.moref, s]));
+      for (const vm of vms) {
+        const s = byMoref.get(vm.moref);
+        if (!s) continue;
+        vm.cpuUsageMhz = s.cpuUsageMhz;
+        vm.cpuMaxMhz = s.cpuMaxMhz;
+        vm.memUsedBytes = s.guestMemUsageMB !== null ? s.guestMemUsageMB * 1024 * 1024 : null;
+        if (vm.instanceUuid === null && s.instanceUuid) vm.instanceUuid = s.instanceUuid;
+      }
+      log("discover.vcenter.quickstats", "info", `vCenter: usage stats merged for ${stats.length} VM(s)`);
+    } catch (err: any) {
+      if (signal?.aborted) throw err;
+      log("discover.vcenter.quickstats", "error", `vCenter: SOAP quickStats fetch failed — ${err?.message}; usage figures unavailable this cycle`);
+    }
+
+    // Phase 6 — resolve host FQDNs to IPs (REST exposes no host mgmt IP).
+    try {
+      const resolver = await getConfiguredResolver();
+      await mapBounded(hosts, 6, signal, async (host) => {
+        if (!host.name || /^\d{1,3}(\.\d{1,3}){3}$/.test(host.name)) {
+          // Host was added by IP — use it directly.
+          host.resolvedIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host.name) ? host.name : null;
+          return;
+        }
+        try {
+          const records = await resolver.lookup(host.name);
+          host.resolvedIp = records[0]?.address ?? null;
+        } catch { /* unresolvable — leave null */ }
+      });
+    } catch (err: any) {
+      logger.debug({ err: err?.message }, "vcenter: host DNS resolution unavailable");
+    }
+
+    return { clusters, hosts, vms, datastores };
+  } finally {
+    await session.logout();
+  }
+}

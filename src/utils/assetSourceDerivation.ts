@@ -172,7 +172,16 @@ export function deriveAssetSources(asset: AssetSnapshot): DerivedSource[] {
     }
   }
 
-  // 3. Manual fallback when no source tag matched.
+  // 3. vCenter-discovered assets (tag "vcenter") are owned by explicit
+  //    vcenter-vm / vcenter-host source rows written by syncVcenterDevices.
+  //    There is no legacy tag convention to derive from — suppress the
+  //    manual fallback so the shadow-write doesn't mint a spurious manual
+  //    row in the window before the explicit upsert lands.
+  if (out.length === 0 && tags.includes("vcenter")) {
+    return [];
+  }
+
+  // 4. Manual fallback when no source tag matched.
   if (out.length === 0) {
     out.push({
       sourceKind: "manual",

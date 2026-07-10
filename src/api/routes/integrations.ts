@@ -14,6 +14,7 @@ import * as fortigate from "../../services/fortigateService.js";
 import * as windowsServer from "../../services/windowsServerService.js";
 import * as entraId from "../../services/entraIdService.js";
 import * as activeDirectory from "../../services/activeDirectoryService.js";
+import * as vcenter from "../../services/vcenterService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps, isPrivateIpv4 } from "../../utils/cidr.js";
 import { normalizeMacsDistinct } from "../../utils/mac.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
@@ -743,6 +744,39 @@ const ActiveDirectoryConfigSchema = z.object({
   verboseLogging: z.boolean().optional().default(false),
 }).superRefine(refineConfigHost);
 
+// Reduced per-class block for vCenter's ESXi-host class: no agent deploy
+// (the Polaris Agent doesn't run on ESXi) and no interface/storage
+// auto-monitor (those pins are agent-fed). Streams still resolve per the
+// monitor-settings hierarchy; datastore capacity renders from the
+// current-state VcenterDatastore table, not the storage stream.
+const VcenterHostClassMonitorSchema = z.object({
+  enabled:        z.boolean().optional().default(true),
+  addAsMonitored: z.boolean().optional().default(false),
+  streams:        ClassStreamsSchema.optional(),
+}).optional().default({ enabled: true, addAsMonitored: false });
+
+const VcenterConfigSchema = z.object({
+  host:      z.string().optional().default(""),
+  port:      z.number().int().min(1).max(65535).optional().default(443),
+  // Default verify-ON for NEW integrations (same posture as FortiGate/AD).
+  verifyTls: z.boolean().optional().default(true),
+  username:  z.string().optional().default(""),
+  password:  z.string().optional().default(""),
+  // Wildcard filters matched against the VM name (e.g. "prod-*"). Include
+  // wins when both are set (AD OU-filter semantics).
+  vmInclude: z.array(z.string()).optional().default([]),
+  vmExclude: z.array(z.string()).optional().default([]),
+  // Post-sync network-presence verification — see EntraIdConfigSchema note.
+  verifyPresence: z.boolean().optional().default(true),
+  // Per-class per-stream config: VMs get the full workstation/server-style
+  // block (they're guest OSes — agent deploy + auto-monitor apply); ESXi
+  // hosts get the reduced block above.
+  vmMonitor:   WorkstationServerClassMonitorSchema,
+  hostMonitor: VcenterHostClassMonitorSchema,
+  // Per-integration verbose debug logging.
+  verboseLogging: z.boolean().optional().default(false),
+}).superRefine(refineConfigHost);
+
 const CreateIntegrationSchema = z.discriminatedUnion("type", [
   z.object({
     type:         z.literal("fortimanager"),
@@ -780,6 +814,14 @@ const CreateIntegrationSchema = z.discriminatedUnion("type", [
     type:         z.literal("activedirectory"),
     name:         z.string().min(1, "Name is required"),
     config:       ActiveDirectoryConfigSchema,
+    enabled:      z.boolean().optional().default(true),
+    autoDiscover: z.boolean().optional().default(true),
+    pollInterval: z.number().int().min(1).max(24).optional().default(12),
+  }),
+  z.object({
+    type:         z.literal("vcenter"),
+    name:         z.string().min(1, "Name is required"),
+    config:       VcenterConfigSchema,
     enabled:      z.boolean().optional().default(true),
     autoDiscover: z.boolean().optional().default(true),
     pollInterval: z.number().int().min(1).max(24).optional().default(12),
@@ -1467,6 +1509,19 @@ router.post("/:id/query", async (req, res, next) => {
       return;
     }
 
+    if (integration.type === "vcenter") {
+      // vSphere Automation REST surface only — proxyQuery rejects paths
+      // outside "/api/" (the SOAP /sdk endpoint is not exposed to the modal).
+      const { method, path, query } = z.object({
+        method: z.enum(["GET", "POST"]).optional().default("GET"),
+        path:   z.string().min(1),
+        query:  z.record(z.string()).optional(),
+      }).parse(req.body);
+      const result = await vcenter.proxyQuery(integration.config as any, method, path, query);
+      sendProxyJson(res, result);
+      return;
+    }
+
     throw new AppError(400, "API query is not supported for this integration type");
   } catch (err) {
     next(err);
@@ -1485,8 +1540,9 @@ router.post("/:id/query", async (req, res, next) => {
 // `autoMonitorInterfaces` and validated by the existing PUT handler.
 
 // fortigate/fortiswitch/fortiap = FMG/FortiGate classes; workstation/server =
-// AD/Entra classes (interface auto-monitor is class-agnostic in the service).
-const ClassQuerySchema = z.enum(["fortigate", "fortiswitch", "fortiap", "workstation", "server"]);
+// AD/Entra classes; virtual_machine = the vCenter VM class (interface auto-
+// monitor is class-agnostic in the service; ESXi hosts carry no auto-monitor).
+const ClassQuerySchema = z.enum(["fortigate", "fortiswitch", "fortiap", "workstation", "server", "virtual_machine"]);
 
 // Map an auto-monitor class to the Integration.config block that holds its
 // `autoMonitorInterfaces` / `autoMonitorStorage` selection.
@@ -1497,6 +1553,7 @@ function classToBlockKey(klass: z.infer<typeof ClassQuerySchema>): string {
     case "fortiap":     return "fortiapMonitor";
     case "workstation": return "workstationMonitor";
     case "server":      return "serverMonitor";
+    case "virtual_machine": return "vmMonitor";
   }
 }
 
@@ -1631,7 +1688,7 @@ router.post("/:id/interface-aggregate/apply", async (req, res, next) => {
 //   - POST ../storage-aggregate/preview     → live preview while editing
 //   - POST ../storage-aggregate/apply       → "Save and apply now" trigger
 
-const StorageClassQuerySchema = z.enum(["workstation", "server"]);
+const StorageClassQuerySchema = z.enum(["workstation", "server", "virtual_machine"]);
 
 const StoragePreviewBodySchema = z.object({
   class:     StorageClassQuerySchema,
@@ -2048,6 +2105,7 @@ export async function runPreflightTest(integration: { id: string; type: string; 
   if (integration.type === "windowsserver") return windowsServer.testConnection(config as any);
   if (integration.type === "entraid") return entraId.testConnection(config as any);
   if (integration.type === "activedirectory") return activeDirectory.testConnection(config as any);
+  if (integration.type === "vcenter") return vcenter.testConnection(config as any);
   return { ok: false, message: `Unknown integration type: ${integration.type}` };
 }
 
@@ -2079,6 +2137,10 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
       if (!config.bindDn) throw new AppError(400, "Integration has no bind DN configured");
       if (!config.bindPassword) throw new AppError(400, "Integration has no bind password configured");
       if (!config.baseDn) throw new AppError(400, "Integration has no base DN configured");
+    }
+    if (integration.type === "vcenter") {
+      if (!config.username) throw new AppError(400, "Integration has no username configured");
+      if (!config.password) throw new AppError(400, "Integration has no password configured");
     }
   }
 
@@ -2116,7 +2178,7 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
   const integrationName = integration.name;
   const integrationType = integration.type;
   const label = actor === "auto-discovery" ? "Scheduled" : "Manual";
-  const kindLabel = (integration.type === "entraid" || integration.type === "activedirectory") ? "device discovery" : "DHCP discovery";
+  const kindLabel = (integration.type === "entraid" || integration.type === "activedirectory" || integration.type === "vcenter") ? "device discovery" : "DHCP discovery";
 
   // No inline preflight — `integrationConnectionTester` refreshes lastTestOk
   // every 10 min, and the discovery scheduler filters on `lastTestOk: true`,
@@ -2237,6 +2299,16 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
         syncTotals.updated.push(...r.updated);
         syncTotals.skipped.push(...r.skipped);
       }
+    } else if (integration.type === "vcenter") {
+      // vCenter discovery produces assets only — VMs + ESXi hosts (plus the
+      // current-state datastore table). No subnets, reservations, or VIPs.
+      const result = await vcenter.discoverInventory(config as any, ac.signal, onProgress);
+      if (!ac.signal.aborted) {
+        const r = await syncVcenterDevices(integrationId, integrationName, config, result, actor);
+        syncTotals.created.push(...r.created);
+        syncTotals.updated.push(...r.updated);
+        syncTotals.skipped.push(...r.skipped);
+      }
     } else if (integration.type === "windowsserver") {
       const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
       const wsHost = (config as any).host as string;
@@ -2329,7 +2401,7 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       }
     }
 
-    const assetsOnly = integration.type === "entraid" || integration.type === "activedirectory";
+    const assetsOnly = integration.type === "entraid" || integration.type === "activedirectory" || integration.type === "vcenter";
 
     // ── AD/Entra post-sync passes (agent auto-deploy + interface/storage
     // auto-monitor) ──────────────────────────────────────────────────────────
@@ -2425,8 +2497,9 @@ async function applyWorkstationServerAutoMonitor(
 ): Promise<void> {
   const cfg = (config ?? {}) as Record<string, any>;
   for (const [klass, blockKey] of [
-    ["workstation", "workstationMonitor"],
-    ["server",      "serverMonitor"],
+    ["workstation",     "workstationMonitor"],
+    ["server",          "serverMonitor"],
+    ["virtual_machine", "vmMonitor"], // vCenter VM class (ESXi hosts carry no auto-monitor)
   ] as const) {
     const block = cfg[blockKey];
     if (!block) continue;
@@ -2472,8 +2545,11 @@ async function runWorkstationServerAgentAutoDeploy(
 ): Promise<void> {
   const cfg = (config ?? {}) as Record<string, any>;
   const classes = [
-    { klass: "workstation" as const, assetType: "workstation", deploy: cfg.workstationMonitor?.agentDeploy },
-    { klass: "server" as const,      assetType: "server",      deploy: cfg.serverMonitor?.agentDeploy },
+    { klass: "workstation" as const,     assetType: "workstation",     deploy: cfg.workstationMonitor?.agentDeploy },
+    { klass: "server" as const,          assetType: "server",          deploy: cfg.serverMonitor?.agentDeploy },
+    // vCenter VMs are guest OSes — agent deploy applies. ESXi hosts never
+    // get the agent (no hostMonitor.agentDeploy exists in the schema).
+    { klass: "virtual_machine" as const, assetType: "virtual_machine", deploy: cfg.vmMonitor?.agentDeploy },
   ].filter((c) => c.deploy?.enabled === true);
   if (classes.length === 0) return;
 
@@ -2537,6 +2613,9 @@ router.post("/test", async (req, res, next) => {
         if (input.type === "activedirectory" && needsRestore(cfg.bindPassword)) {
           cfg.bindPassword = stored.bindPassword;
         }
+        if (input.type === "vcenter" && needsRestore(cfg.password)) {
+          cfg.password = stored.password;
+        }
       }
     }
 
@@ -2550,6 +2629,8 @@ router.post("/test", async (req, res, next) => {
       result = await entraId.testConnection(input.config);
     } else if (input.type === "activedirectory") {
       result = await activeDirectory.testConnection(input.config);
+    } else if (input.type === "vcenter") {
+      result = await vcenter.testConnection(input.config);
     } else {
       result = { ok: false, message: `Unknown integration type: ${(input as any).type}` };
     }
@@ -8490,6 +8571,619 @@ async function syncActiveDirectoryDevices(
   }
 
   syncLog("info", `Active Directory sync: ${created.length} created, ${updated.length} updated, ${skipped.length} skipped`);
+  return { created, updated, skipped };
+}
+
+// ─── vCenter asset sync ──────────────────────────────────────────────────────
+
+// Tags the vCenter discovery auto-assigns each run (stripped and re-added on
+// update). Cross-integration identity lives on AssetSource, never in tags.
+function isVcenterManagedTag(t: string): boolean {
+  if (t.startsWith("vcenter")) return true;
+  return t === "auto-discovered";
+}
+
+function buildVcenterHostObservedBlob(
+  host: vcenter.DiscoveredVcenterHost,
+  syncedAt: Date,
+): Record<string, unknown> {
+  return {
+    kind: "vcenter-host",
+    syncedAt: syncedAt.toISOString(),
+    moref: host.moref,
+    name: host.name || null,
+    connectionState: host.connectionState || null,
+    powerState: host.powerState || null,
+    clusterMoref: host.clusterMoref,
+    clusterName: host.clusterName,
+    resolvedIp: host.resolvedIp,
+  };
+}
+
+function buildVcenterVmObservedBlob(
+  vm: vcenter.DiscoveredVcenterVm,
+  syncedAt: Date,
+): Record<string, unknown> {
+  return {
+    kind: "vcenter-vm",
+    syncedAt: syncedAt.toISOString(),
+    moref: vm.moref,
+    instanceUuid: vm.instanceUuid,
+    biosUuid: vm.biosUuid,
+    name: vm.name || null,
+    guestHostname: vm.guestHostname,
+    guestIp: vm.guestIp,
+    guestOsFullName: vm.guestOsFullName,
+    powerState: vm.powerState || null,
+    toolsRunState: vm.toolsRunState,
+    toolsVersionStatus: vm.toolsVersionStatus,
+    cpuCount: vm.cpuCount,
+    memoryMiB: vm.memoryMiB,
+  };
+}
+
+// Upsert one vcenter-vm / vcenter-host AssetSource row, then sweep stale rows
+// of the same kind on the same asset whose externalId changed (a VM
+// re-registered under a new instanceUuid must not leave the prior identity
+// linked — the Entra deviceId-sweep pattern).
+async function upsertVcenterAssetSource(
+  assetId: string,
+  integrationId: string,
+  sourceKind: "vcenter-vm" | "vcenter-host",
+  externalId: string,
+  observed: Record<string, unknown>,
+  syncedAt: Date,
+  lastSeen: Date,
+): Promise<void> {
+  await prisma.assetSource.upsert({
+    where: { sourceKind_externalId: { sourceKind, externalId } },
+    create: { assetId, sourceKind, externalId, integrationId, observed: observed as any, inferred: false, syncedAt, firstSeen: lastSeen, lastSeen },
+    update: { assetId, integrationId, observed: observed as any, inferred: false, syncedAt, lastSeen },
+  });
+  await prisma.assetSource.deleteMany({
+    where: { assetId, sourceKind, externalId: { not: externalId } },
+  });
+}
+
+async function syncVcenterDevices(
+  integrationId: string,
+  integrationName: string,
+  integrationConfig: Record<string, unknown> | null,
+  result: vcenter.VcenterDiscoveryResult,
+  actor?: string,
+): Promise<{ created: string[]; updated: string[]; skipped: string[] }> {
+  const syncLog = (level: "info" | "error" | "warning", message: string) => {
+    logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
+  };
+  const created: string[] = [];
+  const updated: string[] = [];
+  const skipped: string[] = [];
+  const now = new Date();
+
+  // Per-class addAsMonitored snapshot for the auto-monitor sweep.
+  const vmAddAs   = getAddAsMonitoredFromConfig("vcenter", integrationConfig, "virtual_machine");
+  const hostAddAs = getAddAsMonitoredFromConfig("vcenter", integrationConfig, "hypervisor");
+  const resolveAddAs = (assetType: string | null | undefined): boolean | null =>
+    assetType === "virtual_machine" ? vmAddAs
+    : assetType === "hypervisor"    ? hostAddAs
+    : null;
+
+  // Load the full asset table (MAC rows hydrated for the vNIC identity join)
+  // plus the vcenter AssetSource index.
+  const allAssetsWithRows = await prisma.asset.findMany({
+    include: { macAddressRows: { select: MAC_ROW_SELECT } },
+  });
+  const allAssets = allAssetsWithRows.map((a: any) => ({
+    ...a,
+    macAddresses: shapeMacRows(a.macAddressRows),
+  }));
+  const assetById = new Map<string, any>();
+  for (const a of allAssets) assetById.set(a.id, a);
+
+  const vcenterSources = await prisma.assetSource.findMany({
+    where: { sourceKind: { in: ["vcenter-vm", "vcenter-host"] } },
+  });
+  const assetByVmExternalId = new Map<string, any>();
+  const assetByHostExternalId = new Map<string, any>();
+  const assetIdsWithVcenterSource = new Set<string>();
+  // Asset ids that carried a vcenter-vm source from THIS integration before
+  // this run — captured pre-sweep so the dependency-edge delete-replace can
+  // clear edges off VMs that vanished from the inventory.
+  const priorVmAssetIds = new Set<string>();
+  for (const src of vcenterSources) {
+    assetIdsWithVcenterSource.add(src.assetId);
+    const a = assetById.get(src.assetId);
+    if (src.sourceKind === "vcenter-vm") {
+      if (a) assetByVmExternalId.set(src.externalId, a);
+      if (src.integrationId === integrationId) priorVmAssetIds.add(src.assetId);
+    } else if (a) {
+      assetByHostExternalId.set(src.externalId, a);
+    }
+  }
+
+  // Hostname-collision map (assets with no vcenter source — directory /
+  // Fortinet / manual) and the all-assets MAC index for the vNIC join.
+  const assetByHostnameNoVcenter = new Map<string, any>();
+  const assetByMac = new Map<string, any>();
+  for (const a of allAssets) {
+    if (a.hostname && !assetIdsWithVcenterSource.has(a.id)) {
+      indexHostname(assetByHostnameNoVcenter, a.hostname, a);
+    }
+    const primaryKey = normalizeMacKey(a.macAddress);
+    if (primaryKey && !assetByMac.has(primaryKey)) assetByMac.set(primaryKey, a);
+    if (Array.isArray(a.macAddresses)) {
+      for (const m of a.macAddresses as any[]) {
+        const k = normalizeMacKey(m?.mac);
+        if (k && !assetByMac.has(k)) assetByMac.set(k, a);
+      }
+    }
+  }
+
+  // Cluster context (drives the vMotion-safe multi-parent dependency edges).
+  const clusterMorefByHostMoref = new Map<string, string>();
+  const clusterHostMorefs = new Map<string, string[]>();
+  const hostByMoref = new Map<string, vcenter.DiscoveredVcenterHost>();
+  for (const host of result.hosts) {
+    hostByMoref.set(host.moref, host);
+    if (host.clusterMoref) {
+      clusterMorefByHostMoref.set(host.moref, host.clusterMoref);
+      const members = clusterHostMorefs.get(host.clusterMoref) ?? [];
+      members.push(host.moref);
+      clusterHostMorefs.set(host.clusterMoref, members);
+    }
+  }
+  const datastoreByMoref = new Map(result.datastores.map((d) => [d.moref, d]));
+
+  // ── Pass A — ESXi hosts (first, so VM rows can link hostAssetId) ──────────
+  const hostAssetIdByMoref = new Map<string, string>();
+  const currentHostExternalIds: string[] = [];
+
+  for (const host of result.hosts) {
+    const externalId = vcenter.hostExternalId(host.moref, integrationId);
+    currentHostExternalIds.push(externalId);
+    const observed = buildVcenterHostObservedBlob(host, now);
+    const virtualization = {
+      role: "host",
+      vcenterIntegrationId: integrationId,
+      hostMoref: host.moref,
+      clusterMoref: host.clusterMoref,
+      clusterName: host.clusterName,
+      standalone: host.clusterMoref === null,
+      connectionState: host.connectionState || null,
+      powerState: host.powerState || null,
+      datastoreMorefs: host.datastoreMorefs,
+    };
+    const connected = host.connectionState === "CONNECTED";
+
+    const existing: any = assetByHostExternalId.get(externalId) ?? null;
+
+    if (!existing) {
+      // Hostname collision with a non-vcenter asset → pending Conflict for
+      // the operator (an ESXi host may already exist as a manually-created
+      // or directory-discovered server).
+      if (host.name) {
+        const collision = lookupHostname(assetByHostnameNoVcenter, host.name);
+        if (collision) {
+          try {
+            await upsertAssetConflict({
+              collisionAssetId: collision.asset.id,
+              integrationId,
+              proposedDeviceId: externalId,
+              proposedAssetFields: {
+                sourceType: "vcenter",
+                deviceId: externalId,
+                hostname: host.name,
+                os: "VMware ESXi",
+                assetType: "hypervisor",
+                clusterName: host.clusterName,
+                ipAddress: host.resolvedIp,
+                collisionReason: "untagged-collision",
+                matchedVia: collision.via,
+              },
+              existingAsset: collision.asset,
+            });
+            syncLog("warning", `Hostname collision queued for review — ESXi host "${host.name}" matches existing asset ${collision.asset.id}${collision.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
+          } catch (err: any) {
+            syncLog("error", `Failed to queue hostname-collision conflict for ESXi host "${host.name}": ${err.message || "Unknown error"}`);
+          }
+          skipped.push(`${host.name} (hostname collision — pending review)`);
+          continue;
+        }
+      }
+
+      // Create the hypervisor asset.
+      try {
+        const { projected } = projectAssetFromSources([
+          { sourceKind: "vcenter-host", inferred: false, observed },
+        ]);
+        const createData: Record<string, unknown> = {
+          hostname: projected.hostname ?? host.name ?? host.moref,
+          ipAddress: projected.ipAddress,
+          os: projected.os,
+          assetType: "hypervisor",
+          status: "active",
+          statusChangedAt: now,
+          statusChangedBy: integrationName,
+          manufacturer: projected.manufacturer,
+          model: projected.model,
+          notes: `Auto-discovered from vCenter integration "${integrationName}"${host.clusterName ? ` (cluster: ${host.clusterName})` : ""}`,
+          tags: ["vcenter", "auto-discovered"],
+          virtualization: virtualization as any,
+          dependencyLayer: 1,
+          discoveredByIntegrationId: integrationId,
+        };
+        if (connected) bumpLastSeen(createData, null, now, "vcenter");
+        Object.assign(createData, buildMonitoredSweep(hostAddAs, { monitored: false, monitorOverride: false }));
+        clampAcquiredToLastSeen(createData);
+        const newAsset = await prisma.asset.create({ data: createData as any });
+        try {
+          await upsertVcenterAssetSource(newAsset.id, integrationId, "vcenter-host", externalId, observed, now, connected ? now : now);
+        } catch (err: any) {
+          syncLog("warning", `Created asset for ESXi host ${host.name} but failed to upsert AssetSource row: ${err.message || "Unknown error"}`);
+        }
+        logDiscoveryAssetCreated(newAsset.id, host.name || host.moref, {
+          integrationName, integrationId, sourceKind: "vcenter-host", actor,
+        });
+        assetById.set(newAsset.id, newAsset);
+        assetByHostExternalId.set(externalId, newAsset);
+        assetIdsWithVcenterSource.add(newAsset.id);
+        hostAssetIdByMoref.set(host.moref, newAsset.id);
+        created.push(host.name || host.moref);
+      } catch (err: any) {
+        syncLog("error", `Failed to create asset for ESXi host ${host.name || host.moref}: ${err.message || "Unknown error"}`);
+      }
+      continue;
+    }
+
+    // Update the existing host asset (source-first, then projection, single write).
+    try {
+      await upsertVcenterAssetSource(existing.id, integrationId, "vcenter-host", externalId, observed, now, connected ? now : (existing.lastSeen ?? now));
+    } catch (err: any) {
+      syncLog("warning", `Failed to upsert vcenter-host AssetSource row for ${host.name || host.moref}: ${err.message || "Unknown error"}`);
+    }
+    try {
+      const sourceRows = await prisma.assetSource.findMany({
+        where: { assetId: existing.id },
+        select: { sourceKind: true, inferred: true, observed: true },
+      });
+      const { projected } = projectAssetFromSources(
+        sourceRows.map((s) => ({ sourceKind: s.sourceKind, inferred: s.inferred, observed: s.observed as Record<string, unknown> | null })),
+      );
+      const hostBefore = snapshotMaterialAssetFields(existing);
+      const updateData: Record<string, unknown> = {
+        virtualization: virtualization as any,
+      };
+      if (projected.hostname !== null) updateData.hostname = projected.hostname;
+      if (projected.os !== null) updateData.os = projected.os;
+      if (projected.ipAddress !== null) updateData.ipAddress = projected.ipAddress;
+      // Layer stamp only on vcenter-typed assets — never clobber a Fortinet-
+      // computed layer on some exotic merge target.
+      if (existing.assetType === "hypervisor") updateData.dependencyLayer = 1;
+      if (existing.assetType === "other") updateData.assetType = "hypervisor";
+      if (connected) bumpLastSeen(updateData, existing, now, "vcenter");
+      Object.assign(updateData, buildMonitoredSweep(resolveAddAs((updateData.assetType as string) ?? existing.assetType), existing));
+      const preserved = ((existing.tags as string[]) || []).filter((t) => !isVcenterManagedTag(t));
+      const freshTags = ["vcenter", "auto-discovered"];
+      updateData.tags = [...preserved, ...freshTags.filter((t) => !preserved.includes(t))];
+      clampAcquiredToLastSeen(updateData, existing);
+      await prisma.asset.update({ where: { id: existing.id }, data: updateData });
+      logDiscoveryAssetUpdated(hostBefore, updateData, existing.id, host.name || host.moref, {
+        integrationName, integrationId, sourceKind: "vcenter-host", actor,
+      });
+      hostAssetIdByMoref.set(host.moref, existing.id);
+      updated.push(host.name || host.moref);
+    } catch (err: any) {
+      syncLog("error", `Failed to update asset for ESXi host ${host.name || host.moref}: ${err.message || "Unknown error"}`);
+    }
+  }
+
+  // ── Pass B — virtual machines ──────────────────────────────────────────────
+  const currentVmExternalIds: string[] = [];
+  const placements: Array<{ vmAssetId: string; hostMoref: string }> = [];
+
+  for (const vm of result.vms) {
+    const externalId = vcenter.pickVmExternalId(vm, integrationId);
+    currentVmExternalIds.push(externalId);
+    const displayName = vm.guestHostname || vm.name || vm.moref;
+    const observed = buildVcenterVmObservedBlob(vm, now);
+    const hostRow = hostByMoref.get(vm.hostMoref) ?? null;
+    const poweredOn = vm.powerState === "POWERED_ON";
+    const virtualization = {
+      role: "vm",
+      vcenterIntegrationId: integrationId,
+      vmMoref: vm.moref,
+      instanceUuid: vm.instanceUuid,
+      biosUuid: vm.biosUuid,
+      hostMoref: vm.hostMoref,
+      hostAssetId: hostAssetIdByMoref.get(vm.hostMoref) ?? null,
+      hostName: hostRow?.name ?? null,
+      clusterMoref: hostRow?.clusterMoref ?? null,
+      clusterName: hostRow?.clusterName ?? null,
+      standaloneHost: (hostRow?.clusterMoref ?? null) === null,
+      powerState: vm.powerState || null,
+      toolsRunState: vm.toolsRunState,
+      toolsVersionStatus: vm.toolsVersionStatus,
+      guestOsFullName: vm.guestOsFullName,
+      cpuCount: vm.cpuCount,
+      memoryMiB: vm.memoryMiB,
+      cpuUsageMhz: vm.cpuUsageMhz,
+      cpuMaxMhz: vm.cpuMaxMhz,
+      memUsedBytes: vm.memUsedBytes,
+      disks: vm.disks.map((d) => ({
+        key: d.key,
+        label: d.label,
+        capacityBytes: d.capacityBytes,
+        datastoreMoref: d.datastoreMoref,
+        datastoreName: d.datastoreName ?? (d.datastoreMoref ? datastoreByMoref.get(d.datastoreMoref)?.name ?? null : null),
+      })),
+      guestFilesystems: vm.guestFilesystems,
+    };
+
+    // vNIC MAC entries, connected-first so the primary MAC is stable.
+    const nowIso = now.toISOString();
+    const vmMacEntries = [...vm.nicMacs]
+      .sort((a, b) => Number(b.connected) - Number(a.connected))
+      .map((n) => ({ mac: n.mac, source: "vcenter-vnic" }));
+    const mergeVmMacs = (existingMacs: any[]): { primary: string | null; merged: any[] } => {
+      const merged = Array.isArray(existingMacs) ? [...existingMacs] : [];
+      for (const e of vmMacEntries) {
+        const key = normalizeMacKey(e.mac);
+        if (!key) continue;
+        const hit = merged.find((m: any) => normalizeMacKey(m?.mac) === key);
+        if (hit) {
+          hit.lastSeen = nowIso;
+          hit.source = e.source;
+        } else {
+          merged.push({ mac: e.mac, lastSeen: nowIso, source: e.source });
+        }
+      }
+      merged.sort((a: any, b: any) => new Date(b.lastSeen || 0).getTime() - new Date(a.lastSeen || 0).getTime());
+      return { primary: merged[0]?.mac ?? null, merged };
+    };
+
+    // Match cascade: (1) vcenter-vm source by externalId → (2) vNIC MAC
+    // (positive identity — the VM already exists via AD/Entra/FortiGate) →
+    // (3) hostname collision → Conflict → (4) create.
+    let existing: any = assetByVmExternalId.get(externalId) ?? null;
+    if (!existing) {
+      for (const nic of vmMacEntries) {
+        const key = normalizeMacKey(nic.mac);
+        if (!key) continue;
+        const macMatch = assetByMac.get(key);
+        if (macMatch) {
+          existing = macMatch;
+          syncLog("info", `MAC cross-link: vCenter VM "${displayName}" vNIC MAC ${nic.mac} matched existing asset ${macMatch.hostname || macMatch.id}${assetIdsWithVcenterSource.has(macMatch.id) ? "" : " (taking over)"}.`);
+          break;
+        }
+      }
+    }
+
+    if (existing) {
+      try {
+        await upsertVcenterAssetSource(existing.id, integrationId, "vcenter-vm", externalId, observed, now, poweredOn ? now : (existing.lastSeen ?? now));
+      } catch (err: any) {
+        syncLog("warning", `Failed to upsert vcenter-vm AssetSource row for ${displayName}: ${err.message || "Unknown error"}`);
+      }
+      try {
+        const sourceRows = await prisma.assetSource.findMany({
+          where: { assetId: existing.id },
+          select: { sourceKind: true, inferred: true, observed: true },
+        });
+        const { projected } = projectAssetFromSources(
+          sourceRows.map((s) => ({ sourceKind: s.sourceKind, inferred: s.inferred, observed: s.observed as Record<string, unknown> | null })),
+        );
+        const vmBefore = snapshotMaterialAssetFields(existing);
+        const updateData: Record<string, unknown> = {
+          virtualization: virtualization as any,
+        };
+        if (projected.hostname !== null) updateData.hostname = projected.hostname;
+        if (projected.os !== null) updateData.os = projected.os;
+        if (projected.osVersion !== null) updateData.osVersion = projected.osVersion;
+        if (projected.manufacturer !== null) updateData.manufacturer = projected.manufacturer;
+        if (projected.model !== null) updateData.model = projected.model;
+        if (projected.ipAddress !== null) updateData.ipAddress = projected.ipAddress;
+        // Type flip only from the "other" default — a directory-typed
+        // workstation/server keeps its class (and thus its monitoring
+        // class-block); the Virtualization section marks it as a VM anyway.
+        if (existing.assetType === "other") updateData.assetType = "virtual_machine";
+        if (((updateData.assetType as string) ?? existing.assetType) === "virtual_machine") updateData.dependencyLayer = 2;
+        let vmMergedMacs: MacJsonEntry[] | null = null;
+        if (vmMacEntries.length > 0) {
+          const { primary, merged } = mergeVmMacs(existing.macAddresses as any[]);
+          vmMergedMacs = merged as MacJsonEntry[];
+          if (primary) updateData.macAddress = primary;
+        }
+        if (poweredOn) bumpLastSeen(updateData, existing, now, "vcenter");
+        Object.assign(updateData, buildMonitoredSweep(resolveAddAs((updateData.assetType as string) ?? existing.assetType), existing));
+        const preserved = ((existing.tags as string[]) || []).filter((t) => !isVcenterManagedTag(t));
+        const freshTags = ["vcenter", "auto-discovered"];
+        updateData.tags = [...preserved, ...freshTags.filter((t) => !preserved.includes(t))];
+        clampAcquiredToLastSeen(updateData, existing);
+        await prisma.asset.update({ where: { id: existing.id }, data: updateData });
+        logDiscoveryAssetUpdated(vmBefore, updateData, existing.id, displayName, {
+          integrationName, integrationId, sourceKind: "vcenter-vm", actor,
+        });
+        if (vmMergedMacs) await reconcileMacAddresses(existing.id, vmMergedMacs);
+        assetByVmExternalId.set(externalId, existing);
+        assetIdsWithVcenterSource.add(existing.id);
+        placements.push({ vmAssetId: existing.id, hostMoref: vm.hostMoref });
+        updated.push(displayName);
+      } catch (err: any) {
+        syncLog("error", `Failed to update asset for vCenter VM ${displayName}: ${err.message || "Unknown error"}`);
+      }
+      continue;
+    }
+
+    // Hostname collision with a non-vcenter asset → pending Conflict.
+    const collisionName = vm.guestHostname || vm.name;
+    if (collisionName) {
+      const collision = lookupHostname(assetByHostnameNoVcenter, collisionName);
+      if (collision) {
+        try {
+          await upsertAssetConflict({
+            collisionAssetId: collision.asset.id,
+            integrationId,
+            proposedDeviceId: externalId,
+            proposedAssetFields: {
+              sourceType: "vcenter",
+              deviceId: externalId,
+              hostname: collisionName,
+              macAddress: vmMacEntries[0]?.mac ?? null,
+              os: vm.guestOsFullName,
+              assetType: "virtual_machine",
+              ipAddress: vm.guestIp,
+              powerState: vm.powerState || null,
+              hostName: hostRow?.name ?? null,
+              clusterName: hostRow?.clusterName ?? null,
+              collisionReason: "untagged-collision",
+              matchedVia: collision.via,
+            },
+            existingAsset: collision.asset,
+          });
+          syncLog("warning", `Hostname collision queued for review — vCenter VM "${displayName}" (${externalId}) matches existing asset ${collision.asset.id}${collision.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
+        } catch (err: any) {
+          syncLog("error", `Failed to queue hostname-collision conflict for VM "${displayName}": ${err.message || "Unknown error"}`);
+        }
+        skipped.push(`${displayName} (hostname collision — pending review)`);
+        continue;
+      }
+    }
+
+    // Create the VM asset.
+    try {
+      const { projected } = projectAssetFromSources([
+        { sourceKind: "vcenter-vm", inferred: false, observed },
+      ]);
+      const seeded = mergeVmMacs([]);
+      const createData: Record<string, unknown> = {
+        hostname: projected.hostname ?? vm.name,
+        macAddress: seeded.primary,
+        ...(seeded.merged.length > 0
+          ? { macAddressRows: { create: buildMacRowsForCreate(seeded.merged as MacJsonEntry[]) } }
+          : {}),
+        ipAddress: projected.ipAddress,
+        os: projected.os,
+        osVersion: projected.osVersion,
+        manufacturer: projected.manufacturer,
+        model: projected.model,
+        assetType: "virtual_machine",
+        status: "active",
+        statusChangedAt: now,
+        statusChangedBy: integrationName,
+        notes: `Auto-discovered from vCenter integration "${integrationName}"${hostRow?.clusterName ? ` (cluster: ${hostRow.clusterName})` : ""}`,
+        tags: ["vcenter", "auto-discovered"],
+        virtualization: virtualization as any,
+        dependencyLayer: 2,
+        discoveredByIntegrationId: integrationId,
+      };
+      if (poweredOn) bumpLastSeen(createData, null, now, "vcenter");
+      Object.assign(createData, buildMonitoredSweep(vmAddAs, { monitored: false, monitorOverride: false }));
+      clampAcquiredToLastSeen(createData);
+      const newAsset = await prisma.asset.create({ data: createData as any });
+      try {
+        await upsertVcenterAssetSource(newAsset.id, integrationId, "vcenter-vm", externalId, observed, now, poweredOn ? now : now);
+      } catch (err: any) {
+        syncLog("warning", `Created asset for vCenter VM ${displayName} but failed to upsert AssetSource row: ${err.message || "Unknown error"}`);
+      }
+      logDiscoveryAssetCreated(newAsset.id, displayName, {
+        integrationName, integrationId, sourceKind: "vcenter-vm", actor,
+      });
+      assetById.set(newAsset.id, newAsset);
+      assetByVmExternalId.set(externalId, newAsset);
+      assetIdsWithVcenterSource.add(newAsset.id);
+      // Index the fresh MACs so a later VM in this run can't duplicate.
+      for (const e of vmMacEntries) {
+        const k = normalizeMacKey(e.mac);
+        if (k && !assetByMac.has(k)) assetByMac.set(k, newAsset);
+      }
+      placements.push({ vmAssetId: newAsset.id, hostMoref: vm.hostMoref });
+      created.push(displayName);
+    } catch (err: any) {
+      syncLog("error", `Failed to create asset for vCenter VM ${displayName}: ${err.message || "Unknown error"}`);
+    }
+  }
+
+  // ── Pass C — dependency edges (vMotion-safe multi-parent) ─────────────────
+  // Clustered VM → one edge per cluster-member host, so the all-down
+  // multi-parent semantics suppress it only when the whole cluster is dark.
+  // Delete-replace scoped strictly to source="vcenter" rows on this
+  // integration's VM assets (prior + current) — never touches the Fortinet
+  // "computed" rows or operator "override" rows.
+  try {
+    const edges = vcenter.buildVcenterDependencyEdges(
+      placements,
+      hostAssetIdByMoref,
+      clusterMorefByHostMoref,
+      clusterHostMorefs,
+    );
+    const scopeIds = [...new Set([...priorVmAssetIds, ...placements.map((p) => p.vmAssetId)])];
+    await prisma.$transaction([
+      ...(scopeIds.length > 0
+        ? [prisma.assetDependencyParent.deleteMany({ where: { source: "vcenter", assetId: { in: scopeIds } } })]
+        : []),
+      ...(edges.length > 0
+        ? [prisma.assetDependencyParent.createMany({
+            data: edges.map((e) => ({ assetId: e.assetId, parentAssetId: e.parentAssetId, source: "vcenter", detectedVia: "hypervisor" })),
+            skipDuplicates: true,
+          })]
+        : []),
+    ]);
+    if (edges.length > 0) {
+      syncLog("info", `Dependency edges refreshed — ${edges.length} VM→host edge(s) across ${hostAssetIdByMoref.size} host(s).`);
+    }
+  } catch (err: any) {
+    syncLog("error", `Failed to refresh VM→host dependency edges: ${err.message || "Unknown error"}`);
+  }
+
+  // ── Pass D — datastores (current-state delete-replace) + stale sweep ──────
+  try {
+    const toBigInt = (n: number | null): bigint | null =>
+      n === null || !Number.isFinite(n) ? null : BigInt(Math.round(n));
+    await prisma.$transaction([
+      prisma.vcenterDatastore.deleteMany({ where: { integrationId } }),
+      ...(result.datastores.length > 0
+        ? [prisma.vcenterDatastore.createMany({
+            data: result.datastores.map((d) => ({
+              integrationId,
+              moref: d.moref,
+              name: d.name,
+              dsType: d.dsType,
+              capacityBytes: toBigInt(d.capacityBytes),
+              freeBytes: toBigInt(d.freeBytes),
+              provisionedBytes: toBigInt(d.provisionedBytes),
+              accessible: d.accessible,
+              hostMorefs: d.hostMorefs,
+              backing: (d.backing ?? undefined) as any,
+              backingLabel: d.backingLabel,
+            })),
+          })]
+        : []),
+    ]);
+  } catch (err: any) {
+    syncLog("error", `Failed to persist datastores: ${err.message || "Unknown error"}`);
+  }
+
+  // Stale AssetSource sweep — rows from THIS integration whose externalId no
+  // longer appears in the inventory (VM deleted / filtered out, host removed).
+  // The asset row itself is untouched; decommissionStaleAssets owns aging.
+  try {
+    const sweep = await prisma.assetSource.deleteMany({
+      where: {
+        integrationId,
+        OR: [
+          { sourceKind: "vcenter-vm",   externalId: { notIn: currentVmExternalIds } },
+          { sourceKind: "vcenter-host", externalId: { notIn: currentHostExternalIds } },
+        ],
+      },
+    });
+    if (sweep.count > 0) {
+      syncLog("info", `Swept ${sweep.count} stale vcenter AssetSource row(s) no longer present in the inventory.`);
+    }
+  } catch (err: any) {
+    syncLog("error", `Failed to sweep stale vcenter AssetSource rows: ${err.message || "Unknown error"}`);
+  }
+
+  syncLog("info", `vCenter sync: ${created.length} created, ${updated.length} updated, ${skipped.length} skipped (${result.hosts.length} host(s), ${result.vms.length} VM(s), ${result.datastores.length} datastore(s))`);
   return { created, updated, skipped };
 }
 

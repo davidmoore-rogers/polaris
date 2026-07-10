@@ -17,6 +17,9 @@
  *   Active Directory  → ICMP, WinRM, SSH, Agent                  (no REST API — AD-bound hosts have no shared API)
  *   Entra ID / Intune → ICMP, WinRM, SSH, Agent                  (same — cloud-managed Windows / mobile)
  *   Windows Server    → ICMP, WinRM, SSH, Agent                  (DHCP discovery surfaces Windows hosts)
+ *   vCenter           → ICMP, SNMP, WinRM, SSH, Agent, vCenter   (VMs are guest OSes → the directory-set methods
+ *                                                                 apply; ESXi hosts answer SNMP/SSH; "vcenter" is
+ *                                                                 the hypervisor-view cpuMemory stream — see below)
  *   Manual            → any                                       (operator-chosen)
  *
  * The "agent" method represents a Polaris-managed agent installed locally
@@ -26,11 +29,26 @@
  * because Fortinet appliances can't run third-party binaries. See the
  * "Polaris Agent" section in CLAUDE.md.
  *
+ * The "vcenter" method is cpuMemory-only (enforced in isMethodValidForStream):
+ * per-minute CPU/RAM figures come from the vCenter server's batched
+ * quickStats fetch (one SOAP call per integration per tick, warm-cached in
+ * monitoringService) rather than from the asset itself. It applies to any
+ * asset carrying a vcenter-vm AssetSource — INCLUDING assets discovered by
+ * AD/Entra/Windows Server that a vCenter sync later merged into (their
+ * discoveredByIntegration still points at the directory integration). The
+ * matrix therefore allows "vcenter" on those source kinds too; the hard
+ * requirement — a vcenter-vm AssetSource row to resolve the integration
+ * through — is enforced where it's cheap: the per-asset PUT validation in
+ * assets.ts (one lookup) and the collector itself (soft error when the VM
+ * isn't in the quickStats cache). Threading a per-asset "has vcenter
+ * source" flag through the hot-loop resolver was rejected — it would cost
+ * an AssetSource lookup per asset per tick.
+ *
  * Locked with the user during the design exchange; see CLAUDE.md
  * "Polling-method compatibility matrix".
  */
 
-export type PollingMethod = "rest_api" | "snmp" | "winrm" | "ssh" | "icmp" | "disabled" | "agent";
+export type PollingMethod = "rest_api" | "snmp" | "winrm" | "ssh" | "icmp" | "disabled" | "agent" | "vcenter";
 
 /** Streams resolved independently by the four-tier monitor settings hierarchy. */
 export type Stream =
@@ -48,9 +66,10 @@ export type AssetSourceKind =
   | "activedirectory"
   | "entraid"
   | "windowsserver"
+  | "vcenter"
   | "manual";
 
-const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"];
+const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"];
 
 // Each entry is the full set of valid methods for that source. A `Set` is
 // O(1) lookup which matters for the resolver running in the hot monitor
@@ -61,9 +80,15 @@ const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "snmp", "winrm", 
 const COMPATIBILITY: Readonly<Record<AssetSourceKind, ReadonlySet<PollingMethod>>> = {
   fortimanager:    new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled"]),
   fortigate:       new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled"]),
-  activedirectory: new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent"]),
-  entraid:         new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent"]),
-  windowsserver:   new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent"]),
+  // "vcenter" on the directory sources covers VMs those integrations
+  // discovered FIRST that a vCenter sync merged into — see header note.
+  activedirectory: new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
+  entraid:         new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
+  windowsserver:   new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
+  // Union across the two vCenter classes: VMs are guest OSes (icmp / winrm /
+  // ssh / agent like the directory sources), ESXi hosts answer snmp/ssh, and
+  // "vcenter" delivers the hypervisor-view cpuMemory stream for VMs.
+  vcenter:         new Set<PollingMethod>(["icmp", "snmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
   manual:          new Set<PollingMethod>(ALL_METHODS),
 };
 
@@ -80,6 +105,7 @@ export function assetSourceKindFromIntegrationType(integrationType: string | nul
     case "activedirectory": return "activedirectory";
     case "entraid":         return "entraid";
     case "windowsserver":   return "windowsserver";
+    case "vcenter":         return "vcenter";
     default:                return "manual";
   }
 }
@@ -109,16 +135,22 @@ export function isPollingMethodCompatible(source: AssetSourceKind, method: Polli
  * restriction allow any method (the source matrix + route-level ICMP rule
  * still apply). Used by the resolver, the monitorSettings routes, and the UI
  * to gate the cross-transport streams (processes / eventLog).
+ *
+ * The "vcenter" method is valid ONLY for cpuMemory — it reads the vCenter
+ * server's batched VM quickStats, which carry no response-time, interface,
+ * storage, process, or log data. (Expressed as a method-level guard rather
+ * than a cpuMemory STREAM_METHODS entry so the unrestricted streams keep
+ * allowing every other method.)
  */
 export function isMethodValidForStream(stream: Stream, method: PollingMethod): boolean {
+  if (method === "vcenter") return stream === "cpuMemory";
   const allowed = STREAM_METHODS[stream];
   return allowed ? allowed.has(method) : true;
 }
 
 /** Methods valid for `stream`, in display order. Empty restriction → all methods. */
 export function methodsForStream(stream: Stream): ReadonlyArray<PollingMethod> {
-  const allowed = STREAM_METHODS[stream];
-  return allowed ? ALL_METHODS.filter((m) => allowed.has(m)) : ALL_METHODS;
+  return ALL_METHODS.filter((m) => isMethodValidForStream(stream, m));
 }
 
 /** Returns the methods valid for `source`, in display order (matches ALL_METHODS). */
@@ -147,5 +179,6 @@ export function pollingMethodLabel(method: PollingMethod): string {
     case "icmp":     return "ICMP";
     case "disabled": return "Disabled";
     case "agent":    return "Polaris Agent";
+    case "vcenter":  return "vCenter";
   }
 }

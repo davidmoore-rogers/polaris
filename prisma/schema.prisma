@@ -233,6 +233,7 @@ model Integration {
   fortigateSightings    AssetFortigateSighting[] // Back-relation: sightings recorded against this integration's discovered FortiGates
   assetSources          AssetSource[] // Back-relation: per-source asset rows attributed to this integration
   monitorClassOverrides MonitorClassOverride[] // Back-relation: (assetType, integration) override rows
+  vcenterDatastores     VcenterDatastore[] // Back-relation: current-state datastore rows (vcenter type only)
 
   @@index([type])
   @@index([enabled])
@@ -563,6 +564,21 @@ model Asset {
   // sysLocation string). Surfaced as "Address" on the asset details General tab.
   learnedAddress        String?
   fortinetTopology Json? // { role: "fortigate" | "fortiswitch" | "fortiap", deviceName?, controllerFortigate?, uplinkInterface?, parentSwitch?, parentPort?, parentVlan? } — real connection graph from FMG/FortiGate discovery. deviceName (firewall role) = FMG/dvmdb device name for device-targeted write paths (description sync)
+  // Current-state virtualization facts from vCenter discovery (single writer:
+  // syncVcenterDevices; fortinetTopology precedent — refreshed in full every
+  // discovery cycle). Two role-discriminated shapes:
+  //   { role:"vm",   vcenterIntegrationId, vmMoref, instanceUuid?, biosUuid?,
+  //     hostMoref, hostAssetId?, hostName?, clusterMoref?, clusterName?,
+  //     standaloneHost, powerState, toolsRunState?, toolsVersionStatus?,
+  //     guestOsFullName?, cpuCount?, memoryMiB?, cpuUsageMhz?, cpuMaxMhz?,
+  //     memUsedBytes?, disks:[{key,label,capacityBytes,datastoreMoref?,datastoreName?}],
+  //     guestFilesystems:[{path,capacityBytes,freeBytes}]|null }
+  //   { role:"host", vcenterIntegrationId, hostMoref, clusterMoref?, clusterName?,
+  //     standalone, connectionState, powerState, datastoreMorefs:[...] }
+  // Usage fields on the vm shape are a discovery-time snapshot; live per-minute
+  // figures ride the cpuMemory telemetry stream (polling method "vcenter").
+  // hostAssetId is re-resolved every cycle so vMotion staleness self-heals.
+  virtualization   Json?
   acquiredAt       DateTime? // Acquisition / purchase date
   warrantyExpiry   DateTime? // Warranty end date
   purchaseOrder    String? // PO or invoice reference
@@ -1342,6 +1358,44 @@ model AssetSdwanRule {
   @@unique([assetId, ruleName])
   @@index([assetId])
   @@map("asset_sdwan_rules")
+}
+
+// CURRENT-STATE vCenter datastore inventory — one row per (integration,
+// datastore). Plain table, NOT a hypertable: replaced in full per discovery
+// run by syncVcenterDevices Pass D (delete-replace, like AssetSdwanRule /
+// AssetLldpNeighbor). Datastores are shared across cluster hosts, so rows
+// live per-integration (not per-asset) with `hostMorefs` carrying the
+// mounting ESXi hosts; the asset-details endpoint joins on that array.
+// No history/time-series — capacity figures are a discovery-time snapshot.
+model VcenterDatastore {
+  id            String      @id @default(uuid())
+  integrationId String
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  moref         String // vCenter MoRef, e.g. "datastore-123" (unique per vCenter, not across)
+  name          String
+  dsType        String? // VMFS | NFS | NFS41 | vSAN | VVOL | ...
+  capacityBytes BigInt?
+  freeBytes     BigInt?
+  // Total provisioned across VMs incl. thin overcommit. Nullable — not
+  // exposed by the vSphere REST list; populated only when the SOAP
+  // datastore-info call yields summary/uncommitted figures.
+  provisionedBytes BigInt?
+  accessible    Boolean?
+  hostMorefs    String[] @default([]) // ESXi hosts mounting this datastore
+  // Backing detail from the SOAP datastore-info call (graceful-null when the
+  // call fails or the shape is unrecognized):
+  //   { vmfs?: [{ diskName, vendor? }], nas?: { remoteHost, remotePath } }
+  // diskName is the canonical device id (e.g. "naa.624a9370…") whose NAA
+  // prefix identifies the array vendor (vendorFromNaa in vcenterService).
+  backing       Json?
+  // Derived display label for the backing storage, e.g. "Pure Storage",
+  // "NetApp", "NFS: filer01.corp". Null when backing is unknown.
+  backingLabel  String?
+  updatedAt     DateTime @updatedAt
+
+  @@unique([integrationId, moref])
+  @@index([integrationId])
+  @@map("vcenter_datastores")
 }
 
 // CURRENT-STATE process inventory — one row per running program (aggregated by
@@ -2641,12 +2695,22 @@ model AssetSource {
 // syncDhcpSubnets, plus the standalone FortiGate path). source="override"
 // rows are operator-managed and never touched by the recompute.
 //
+// source="vcenter" rows are written by syncVcenterDevices (delete-replace
+// scoped to its own source value per run): VM→ESXi-host edges, vMotion-safe —
+// a VM on a clustered host gets one edge per cluster-member host, so the
+// all-down multi-parent semantics suppress it only when the entire cluster
+// is dark. The Fortinet recompute never touches them (its deleteMany filters
+// source="computed"); the read-time resolver buckets any non-"override"
+// source as computed, so vcenter edges feed suppression with no special
+// handling and still yield to operator overrides.
+//
 // detectedVia distinguishes the signal that produced a computed row:
 //   - "controller" — Asset.fortinetTopology.controllerFortigate / parentSwitch
 //   - "interface"  — interfaceTopologyService inferred edge (FortiLink /
 //                    MCLAG aggregate naming)
 //   - "lldp"       — AssetLldpNeighbor.matchedAssetId fallback
 //   - "manual"     — operator override (only present on source="override")
+//   - "hypervisor" — vCenter VM→host placement (only on source="vcenter")
 model AssetDependencyParent {
   id            String @id @default(uuid())
   assetId       String
@@ -2654,8 +2718,8 @@ model AssetDependencyParent {
   parentAssetId String
   parent        Asset  @relation("AssetDependencyParent", fields: [parentAssetId], references: [id], onDelete: Cascade)
 
-  source      String // "computed" | "override"
-  detectedVia String // "controller" | "interface" | "lldp" | "manual"
+  source      String // "computed" | "override" | "vcenter"
+  detectedVia String // "controller" | "interface" | "lldp" | "manual" | "hypervisor"
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

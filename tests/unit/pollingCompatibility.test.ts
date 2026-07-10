@@ -33,8 +33,11 @@ describe("compatibility matrix — locked values per asset source", () => {
     expect(isPollingMethodCompatible("fortigate", "agent")).toBe(false);
     expect(isPollingMethodCompatible("fortigate", "disabled")).toBe(true);
   });
-  it("Active Directory: WinRM + SSH + ICMP + Disabled + Agent (display order), no REST API or SNMP", () => {
-    expect(compatibleMethodsFor("activedirectory")).toEqual(["winrm", "ssh", "icmp", "disabled", "agent"]);
+  it("Active Directory: WinRM + SSH + ICMP + Disabled + Agent + vCenter (display order), no REST API or SNMP", () => {
+    // "vcenter" is allowed on the directory sources because a VM those
+    // integrations discovered FIRST can be vCenter-merged; the vcenter-vm
+    // AssetSource requirement is enforced at save/collect time.
+    expect(compatibleMethodsFor("activedirectory")).toEqual(["winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
     expect(isPollingMethodCompatible("activedirectory", "rest_api")).toBe(false);
     expect(isPollingMethodCompatible("activedirectory", "snmp")).toBe(false);
     expect(isPollingMethodCompatible("activedirectory", "winrm")).toBe(true);
@@ -42,6 +45,7 @@ describe("compatibility matrix — locked values per asset source", () => {
     expect(isPollingMethodCompatible("activedirectory", "icmp")).toBe(true);
     expect(isPollingMethodCompatible("activedirectory", "disabled")).toBe(true);
     expect(isPollingMethodCompatible("activedirectory", "agent")).toBe(true);
+    expect(isPollingMethodCompatible("activedirectory", "vcenter")).toBe(true);
   });
   it("Entra ID: same as AD", () => {
     expect(isPollingMethodCompatible("entraid", "rest_api")).toBe(false);
@@ -51,6 +55,7 @@ describe("compatibility matrix — locked values per asset source", () => {
     expect(isPollingMethodCompatible("entraid", "icmp")).toBe(true);
     expect(isPollingMethodCompatible("entraid", "disabled")).toBe(true);
     expect(isPollingMethodCompatible("entraid", "agent")).toBe(true);
+    expect(isPollingMethodCompatible("entraid", "vcenter")).toBe(true);
   });
   it("Windows Server: same as AD", () => {
     expect(isPollingMethodCompatible("windowsserver", "rest_api")).toBe(false);
@@ -58,9 +63,19 @@ describe("compatibility matrix — locked values per asset source", () => {
     expect(isPollingMethodCompatible("windowsserver", "icmp")).toBe(true);
     expect(isPollingMethodCompatible("windowsserver", "disabled")).toBe(true);
     expect(isPollingMethodCompatible("windowsserver", "agent")).toBe(true);
+    expect(isPollingMethodCompatible("windowsserver", "vcenter")).toBe(true);
+  });
+  it("vCenter: ICMP + SNMP + WinRM + SSH + Agent + vCenter (VMs are guest OSes; ESXi answers SNMP/SSH)", () => {
+    expect(compatibleMethodsFor("vcenter")).toEqual(["snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
+    expect(isPollingMethodCompatible("vcenter", "rest_api")).toBe(false);
+    expect(isPollingMethodCompatible("vcenter", "vcenter")).toBe(true);
+  });
+  it("Fortinet appliance sources never get the vcenter method (their telemetry rides FortiOS REST)", () => {
+    expect(isPollingMethodCompatible("fortimanager", "vcenter")).toBe(false);
+    expect(isPollingMethodCompatible("fortigate", "vcenter")).toBe(false);
   });
   it("Manual: every method valid", () => {
-    expect(compatibleMethodsFor("manual")).toEqual(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
+    expect(compatibleMethodsFor("manual")).toEqual(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
     allPollingMethods().forEach((m) => {
       expect(isPollingMethodCompatible("manual", m)).toBe(true);
     });
@@ -74,6 +89,7 @@ describe("integrationType -> AssetSourceKind mapping", () => {
     expect(assetSourceKindFromIntegrationType("activedirectory")).toBe("activedirectory");
     expect(assetSourceKindFromIntegrationType("entraid")).toBe("entraid");
     expect(assetSourceKindFromIntegrationType("windowsserver")).toBe("windowsserver");
+    expect(assetSourceKindFromIntegrationType("vcenter")).toBe("vcenter");
   });
   it("null / undefined / unknown integration types fall back to manual", () => {
     expect(assetSourceKindFromIntegrationType(null)).toBe("manual");
@@ -85,7 +101,7 @@ describe("integrationType -> AssetSourceKind mapping", () => {
 
 describe("isPollingMethod type guard", () => {
   it("accepts every valid polling method", () => {
-    ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"].forEach((m) => {
+    ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"].forEach((m) => {
       expect(isPollingMethod(m)).toBe(true);
     });
   });
@@ -104,10 +120,21 @@ describe("isPollingMethod type guard", () => {
 });
 
 describe("per-stream method restrictions (cross-transport streams)", () => {
-  it("original six streams impose no per-stream restriction (any method allowed)", () => {
+  it("original six streams impose no per-stream restriction beyond the vcenter cpuMemory-only rule", () => {
     (["responseTime", "cpuMemory", "temperature", "interfaces", "lldp", "storage"] as const).forEach((s) => {
-      allPollingMethods().forEach((m) => expect(isMethodValidForStream(s, m)).toBe(true));
-      expect(methodsForStream(s)).toEqual(allPollingMethods());
+      allPollingMethods().forEach((m) => {
+        const expected = m === "vcenter" ? s === "cpuMemory" : true;
+        expect(isMethodValidForStream(s, m), `${s}/${m}`).toBe(expected);
+      });
+    });
+    expect(methodsForStream("cpuMemory")).toEqual(allPollingMethods());
+    expect(methodsForStream("responseTime")).toEqual(allPollingMethods().filter((m) => m !== "vcenter"));
+  });
+
+  it("vcenter is a cpuMemory-only method (quickStats carry no other stream's data)", () => {
+    expect(isMethodValidForStream("cpuMemory", "vcenter")).toBe(true);
+    (["responseTime", "temperature", "interfaces", "lldp", "storage", "processes", "eventLog"] as const).forEach((s) => {
+      expect(isMethodValidForStream(s, "vcenter"), s).toBe(false);
     });
   });
   it("processes: agent/SNMP/SSH/WinRM only — no REST or ICMP", () => {
@@ -139,5 +166,6 @@ describe("pollingMethodLabel — UI strings", () => {
     expect(pollingMethodLabel("icmp")).toBe("ICMP");
     expect(pollingMethodLabel("disabled")).toBe("Disabled");
     expect(pollingMethodLabel("agent")).toBe("Polaris Agent");
+    expect(pollingMethodLabel("vcenter")).toBe("vCenter");
   });
 });

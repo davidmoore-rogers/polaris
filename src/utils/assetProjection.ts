@@ -66,6 +66,8 @@ export type AssetSourceKind =
   | "fortiap"
   | "fortigate-endpoint"
   | "polaris-agent"
+  | "vcenter-vm"
+  | "vcenter-host"
   | "manual";
 
 export interface AssetSourceForProjection {
@@ -143,6 +145,13 @@ const HOSTNAME_RULES: FieldRule[] = [
   // hostname from elsewhere (DNS, MDM enrollment, computer-object name)
   // and can drift from what the host actually answers to.
   { sourceKind: "polaris-agent", pick: (o) => obsString(o, "hostname") },
+  // vCenter is definitive over every source except the in-guest agent
+  // (project decision, 2026-07). The guest hostname comes from VMware Tools
+  // (the OS's own report relayed through the hypervisor) — nearly
+  // agent-grade; the VM display name is the fallback when Tools is off.
+  { sourceKind: "vcenter-vm", pick: (o) => obsString(o, "guestHostname") || obsString(o, "name") },
+  // ESXi hosts: the name they were added to vCenter by (usually the FQDN).
+  { sourceKind: "vcenter-host", pick: (o) => obsString(o, "name") },
   // FQDN from AD wins next — when an AD source has a dnsHostName containing a
   // dot, that's the FQDN form operators search for in DNS / DHCP / logs.
   // Tuned from production shadow-drift logs where ~7k entries per 24h
@@ -197,6 +206,10 @@ const MANUFACTURER_RULES: FieldRule[] = [
       return raw ? normalizeManufacturer(raw) : null;
     }
   },
+  // A vCenter VM's "hardware" is always VMware's virtual platform — constant
+  // pick (the SMBIOS the guest sees says the same thing). No vcenter-host
+  // rule: the REST host list exposes no hardware vendor/model.
+  { sourceKind: "vcenter-vm", pick: () => normalizeManufacturer("VMware, Inc.") },
   // Intune carries the actual hardware vendor ("Dell Inc.", "LENOVO", ...)
   // pre-canonicalization. Run through normalizeManufacturer so the
   // projected value matches what the Prisma extension stamps on
@@ -229,6 +242,9 @@ const MODEL_RULES: FieldRule[] = [
   // registry. Beats Intune for the same DMI-is-authoritative reason as
   // manufacturer; falls through when DMI is unreadable.
   { sourceKind: "polaris-agent", pick: (o) => obsString(o, "model") },
+  // Constant for VMs — matches the SMBIOS product name VMware exposes to
+  // guests, so the agent (when installed) projects the same value.
+  { sourceKind: "vcenter-vm", pick: () => "VMware Virtual Platform" },
   { sourceKind: "intune", pick: (o) => obsString(o, "model") },
   // FortiSwitch's observed blob always carries `model: "FortiSwitch"` which
   // is too generic to be useful — skip it here and let the asset row keep
@@ -250,6 +266,14 @@ const OS_RULES: FieldRule[] = [
   // a domain-joined client re-registers — which can lag months on
   // long-running servers.
   { sourceKind: "polaris-agent", pick: (o) => obsString(o, "os") },
+  // VMware Tools' guest OS full name ("Microsoft Windows Server 2022
+  // (64-bit)", "Ubuntu Linux (64-bit)") — the running OS as the hypervisor
+  // sees it. Beats AD's edition string because Tools reflects the current
+  // install (post-upgrade), while AD lags until re-registration.
+  { sourceKind: "vcenter-vm", pick: (o) => obsString(o, "guestOsFullName") },
+  // ESXi hosts are definitionally ESXi (REST exposes no version — no
+  // OS_VERSION rule below).
+  { sourceKind: "vcenter-host", pick: () => "VMware ESXi" },
   // AD's operatingSystem carries the Windows edition ("Windows 10 Pro",
   // "Windows 11 Enterprise"). Intune/Entra collapse to just "Windows".
   // Edition is operationally meaningful — keep AD when present.
@@ -315,6 +339,16 @@ const IP_ADDRESS_RULES: FieldRule[] = [
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "mgmtIp") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "mgmtIp") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "mgmtIp") },
+  // VMware Tools' live guest IP — the address the OS itself reports through
+  // the hypervisor. Beats the fortigate-endpoint DHCP/ARP sighting
+  // (Tools is current-state; a lease row can be stale), but stays below
+  // the infra mgmtIp rules — a virtual FortiGate's management IP is the
+  // address Polaris must probe, not whichever guest interface Tools
+  // happened to report first.
+  { sourceKind: "vcenter-vm", pick: (o) => obsString(o, "guestIp") },
+  // ESXi hosts: DNS-resolved from the host's vCenter name (REST exposes no
+  // mgmt IP).
+  { sourceKind: "vcenter-host", pick: (o) => obsString(o, "resolvedIp") },
   // Endpoint IPs: fortigate-endpoint sees the live DHCP/ARP binding —
   // freshest signal for plain endpoints (which have no infrastructure
   // source, so this rule is effectively first for them). MDM sources

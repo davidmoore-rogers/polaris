@@ -455,7 +455,7 @@ build auto-prune + boot-time auto-build are layered on top.
 
 **What it is:** The complete callsite catalogue for adding a new integration type (Palo Alto firewall, future device families). Every new type touches the same ~30 callsites across backend dispatch, frontend modal, polling compatibility, asset projection, and source-default polling. Without this checklist a new type drifts on tab layout, config-blob keys, transport dispatch, and projection priority; with it, every integration feels uniform.
 
-The canonical to mirror for a standalone-device-with-its-own-API type (most common new case) is **standalone FortiGate**. For a manager-that-fronts-many-devices type, mirror **FortiManager**. For asset-only types (no subnets/reservations), mirror **Entra ID / Active Directory**. See [TEMPLATES.md → Integration type](TEMPLATES.md#integration-type-config--discovery--sync--frontend-modal) for the model-after instruction. This entry is the authoritative checklist.
+The canonical to mirror for a standalone-device-with-its-own-API type (most common new case) is **standalone FortiGate**. For a manager-that-fronts-many-devices type, mirror **FortiManager**. For asset-only types (no subnets/reservations), mirror **Entra ID / Active Directory** — or **vCenter** when the new type owns multiple asset classes with different capabilities (its `vmMonitor`/`hostMonitor` blocks, `vms`/`hosts` UI subtabs, foreign `AssetDependencyParent.source` value, and warm-cache telemetry polling method are the newest asset-only extensions; vCenter also added per-type entries to `monitorOverrideService`'s block-key maps + both raw-SQL sweeps, `autoMonitorInterfacesService`/`autoMonitorStorageService` class maps, `ClassQuerySchema`/`StorageClassQuerySchema`, `capacityAdvisorService.IntegrationBreakdown`, and the `conflictSourceFor` dispatch in `conflicts.ts` — walk those too for any multi-class type). See [TEMPLATES.md → Integration type](TEMPLATES.md#integration-type-config--discovery--sync--frontend-modal) for the model-after instruction. This entry is the authoritative checklist.
 
 **Writers** (files that need a per-type branch):
 - `src/services/<type>Service.ts` — NEW. Exports `testConnection(config)`, `discoverDhcpSubnets(config, signal?, onProgress?, ...)` returning the shared `DiscoveryResult` shape from `fortimanagerService.ts`, `proxyQuery(config, method, path, query?, body?)` for the manual /query route, and any per-type helpers (e.g. an `xxxRequest()` low-level fetcher used internally).
@@ -1403,6 +1403,33 @@ Listed alphabetically.
 - Destination secrets live ONLY on the channel — delivery rows reference the channel by id, never copy its secrets.
 
 **When changing this:** add a new channel type by extending `CHANNEL_TYPES` + `CHANNEL_TYPE_META` (+ `CHANNEL_TRANSPORT`) in `notificationTypes`, a sender under `notificationChannels/`, and a dispatch arm in `notificationDeliveryService`. Mark secret fields `secret:true` so masking covers them.
+
+---
+
+## services/vcenterService.ts
+
+**What it owns:** VMware vCenter discovery + telemetry client — vSphere Automation REST session client (inventory: clusters, hosts, per-host VM lists, per-VM detail + VMware Tools guest identity/networking/filesystems) plus two narrow SOAP property-collector calls against `/sdk` (batched VM quickStats; datastore summary/host-mounts/backing), the NAA-prefix array-vendor map (`vendorFromNaa`), and the pure vMotion-safe dependency-edge builder.
+
+**Public API:** testConnection, proxyQuery (REST surface only — rejects non-`/api/` paths), discoverInventory, fetchVcenterQuickStats, pickVmExternalId, hostExternalId, buildClusterHostMap, buildVcenterDependencyEdges, matchesVmWildcard, filterVms, vendorFromNaa, backingLabelFor, extractObjectBlocks / parseObjRef / parsePropValue / parseQuickStatsBlock / parseDatastoreBlock (SOAP parsers), parseVmDetail, VcenterConfig + Discovered* types.
+
+**Cross-service deps:** dnsService.getConfiguredResolver (host FQDN → resolvedIp; REST exposes no host mgmt IP).
+
+**Used by:** src/api/routes/integrations.ts — test connection (create-form + preflight), discovery dispatch (`discoverInventory` → `syncVcenterDevices`), Query API proxy branch. src/services/monitoringService.ts — `fetchVcenterQuickStats` behind the per-integration warm cache (`fetchVcenterQuickStatsCached`, 30s TTL + promise-singleton) that backs the "vcenter" cpuMemory polling method.
+
+**Invariants:**
+- VM externalId = `instanceUuid` (survives vMotion), fallback `${integrationId}:${moref}`; host externalId = `${integrationId}:${hostMoref}` ALWAYS (morefs repeat across vCenters). Sync + conflict resolution + telemetry cache all key on these — change them in lockstep or existing AssetSource rows orphan.
+- VM lists are fetched PER HOST (`?hosts=<moref>`) — that's what pins VM→host placement AND sidesteps the 4000-item global list cap. Don't "optimize" to one global list.
+- Every SOAP surface degrades to nulls independently; datastores fall back to the REST list (no mounts/backing/provisioned) when `/sdk` is unreachable. Guest calls are per-call try/caught (Tools-off returns 503).
+- `buildVcenterDependencyEdges`: clustered VM → one edge per cluster-member host (all-down suppression = whole-cluster-dark → vMotion-safe); standalone → single edge; skips hosts with no asset; dedupes; never self-parents. Edges land with `source="vcenter"` / `detectedVia="hypervisor"` — never `"computed"` (the Fortinet recompute deletes that scope).
+- REST session: one automatic re-auth on a mid-run 401, logout in `finally`. SOAP session likewise logged out best-effort.
+- quickStats cache entries are keyed by BOTH externalId forms so the per-asset lookup matches whatever the sync stored.
+
+**When changing this:**
+- Field shapes are verify-on-real-vCenter (7.x/8.x): REST VM detail (`identity`, `nics`, `disks.backing.vmdk_file` bracket format), Tools guest endpoints, SOAP quickStats/datastore-info property paths. The SOAP parsers are regex-based over shapes we request — update tests/unit/vcenterService.test.ts fixtures with real captures.
+- Adding a projected field → also add the `vcenter-vm`/`vcenter-host` rule in `src/utils/assetProjection.ts` (directly below polaris-agent) and mirror the observed-blob key in `buildVcenterVmObservedBlob` / `buildVcenterHostObservedBlob` (integrations.ts).
+- Changing quickStats fields → update `collectTelemetryVcenter` (monitoringService) + the cpuPct/memBytes mapping tests.
+- New datastore fields → `VcenterDatastore` model + migration + the `/assets/:id/virtualization` serializer + assets.js `_assetVirtualizationHTML`.
+- New per-class monitor knobs → `VcenterConfigSchema` (`vmMonitor`/`hostMonitor`) + `monitorOverrideService` block-key maps + `pickClassStreamsBlock` + the integrations.js `vms`/`hosts` subtabs and save readers.
 
 ---
 

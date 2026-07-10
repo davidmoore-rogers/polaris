@@ -113,3 +113,21 @@ describe("bumpLastSeen", () => {
     });
   });
 });
+
+describe("bumpLastSeen — vcenter evidence source", () => {
+  const T0 = new Date("2026-07-01T00:00:00Z");
+  const T2 = new Date("2026-07-02T00:00:00Z");
+
+  it("is deferred on a monitored asset (probe owns presence)", () => {
+    const data: Record<string, unknown> = {};
+    expect(bumpLastSeen(data, { lastSeen: T0, monitored: true }, T2, "vcenter")).toBe(false);
+    expect(data.lastSeen).toBeUndefined();
+  });
+
+  it("advances lastSeen on an unmonitored asset (power_state is real-time hypervisor truth)", () => {
+    const data: Record<string, unknown> = {};
+    expect(bumpLastSeen(data, { lastSeen: T0, monitored: false }, T2, "vcenter")).toBe(true);
+    expect(data.lastSeen).toEqual(T2);
+    expect(data.lastSeenSource).toBe("vcenter");
+  });
+});

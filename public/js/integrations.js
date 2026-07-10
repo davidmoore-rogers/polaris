@@ -17,6 +17,7 @@ var _POLLING_LABELS = {
   icmp:     "ICMP",
   disabled: "Disabled",
   agent:    "Polaris Agent",
+  vcenter:  "vCenter",
 };
 
 // "agent" is intentionally NOT in any of these arrays — the Polaris Agent
@@ -27,13 +28,19 @@ var _POLLING_LABELS = {
 // _POLLING_LABELS map still includes "agent" so the value renders
 // correctly on any surface that displays raw values (audit logs, the
 // asset-list status pill, etc.).
+// "vcenter" (hypervisor-view CPU/RAM from the vCenter server's batched
+// quickStats) appears on the directory sources too — a VM those integrations
+// discovered first can be vCenter-merged; the backend enforces the actual
+// requirement (a vcenter-vm source on the asset) at save time. The stream
+// gate below limits the method to CPU/Memory.
 var _POLLING_COMPAT = {
   fortimanager:    ["rest_api", "snmp", "ssh", "icmp", "disabled"],
   fortigate:       ["rest_api", "snmp", "ssh", "icmp", "disabled"],
-  activedirectory: ["icmp", "winrm", "ssh", "disabled"],
-  entraid:         ["icmp", "winrm", "ssh", "disabled"],
-  windowsserver:   ["icmp", "winrm", "ssh", "disabled"],
-  manual:          ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled"],
+  activedirectory: ["icmp", "winrm", "ssh", "disabled", "vcenter"],
+  entraid:         ["icmp", "winrm", "ssh", "disabled", "vcenter"],
+  windowsserver:   ["icmp", "winrm", "ssh", "disabled", "vcenter"],
+  vcenter:         ["icmp", "snmp", "winrm", "ssh", "disabled", "vcenter"],
+  manual:          ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "vcenter"],
 };
 
 // Per-stream method restriction — mirrors STREAM_METHODS in
@@ -62,6 +69,12 @@ function _polarisSourceDefaultPolling(source, stream) {
     if (stream === "responseTime") return "icmp";
     return "rest_api";
   }
+  if (source === "vcenter") {
+    // Hypervisor-view CPU/RAM out of the box; response time via ICMP.
+    if (stream === "responseTime") return "icmp";
+    if (stream === "cpuMemory") return "vcenter";
+    return null;
+  }
   if (stream === "responseTime") return "icmp";
   return null; // telemetry/interfaces/lldp/storage not delivered on AD/Entra/Win/Manual by default
 }
@@ -73,6 +86,11 @@ function _streamAllowedMethods(source, stream) {
   var restrict = _STREAM_METHODS[stream];
   if (restrict) {
     allowed = allowed.filter(function (m) { return restrict.indexOf(m) !== -1; });
+  }
+  // "vcenter" is cpuMemory-only — mirrors the method-level guard in
+  // isMethodValidForStream (pollingCompatibility.ts).
+  if (stream !== "cpuMemory") {
+    allowed = allowed.filter(function (m) { return m !== "vcenter"; });
   }
   return allowed;
 }
@@ -92,6 +110,7 @@ function _polarisSourceLabel(source, opts) {
   if (source === "activedirectory") return "Active Directory";
   if (source === "entraid")         return "Entra ID";
   if (source === "windowsserver")   return "Windows Server";
+  if (source === "vcenter")         return "vCenter";
   return "Manual";
 }
 
@@ -512,6 +531,7 @@ async function loadIntegrations() {
         intg.type === "fortigate" ? "FortiGate" :
         intg.type === "entraid" ? "Entra ID" :
         intg.type === "activedirectory" ? "Active Directory" :
+        intg.type === "vcenter" ? "vCenter" :
         "FortiManager";
 
       function filterRow(baseLabel, include, exclude) {
@@ -551,6 +571,12 @@ async function loadIntegrations() {
           '<div class="detail-row"><span class="detail-label">Domain</span><span class="detail-value">' + escapeHtml(config.domain || "-") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Use SSL</span><span class="detail-value">' + (config.useSsl ? "Yes" : "No") + '</span></div>' +
           filterRow("DHCP", config.dhcpInclude, config.dhcpExclude);
+      } else if (intg.type === "vcenter") {
+        detailRows =
+          '<div class="detail-row"><span class="detail-label">Host</span><span class="detail-value mono">' + escapeHtml(config.host || "-") + ':' + (config.port || defaultPort) + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Username</span><span class="detail-value">' + escapeHtml(config.username || "-") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Verify TLS</span><span class="detail-value">' + (config.verifyTls !== false ? "Yes" : "No") + '</span></div>' +
+          filterRow("VMs", config.vmInclude, config.vmExclude);
       } else if (intg.type === "fortigate") {
         detailRows =
           '<div class="detail-row"><span class="detail-label">Host</span><span class="detail-value mono">' + escapeHtml(config.host || "-") + ':' + (config.port || defaultPort) + '</span></div>' +
@@ -633,6 +659,7 @@ async function loadIntegrations() {
             (intg.type === "fortigate" ? '<button class="btn btn-sm btn-secondary" onclick="openFgtApiQueryModal(\'' + intg.id + '\', \'' + escapeHtml(config.vdom || 'root') + '\')">Query API</button>' : '') +
             (intg.type === "entraid" ? '<button class="btn btn-sm btn-secondary" onclick="openEntraApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
             (intg.type === "activedirectory" ? '<button class="btn btn-sm btn-secondary" onclick="openAdApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
+            (intg.type === "vcenter" ? '<button class="btn btn-sm btn-secondary" onclick="openVcenterApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
             '<button class="btn btn-sm btn-secondary" onclick="testConnection(\'' + intg.id + '\', this)">Test Connection</button>' +
             '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + intg.id + '\')">Edit</button>' +
             '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + intg.id + '\', \'' + escapeHtml(intg.name) + '\')">Delete</button>' +
@@ -1125,6 +1152,13 @@ var _CLASS_SUBTAB_SPECS = {
       { key: "servers",      label: "Servers"      },
     ],
   },
+  vcenter: {
+    primary: "vms",
+    classes: [
+      { key: "vms",   label: "Virtual Machines" },
+      { key: "hosts", label: "ESXi Hosts"       },
+    ],
+  },
 };
 
 // Streams rendered inside each class subtab. Each entry names:
@@ -1173,6 +1207,10 @@ function _classStreamsBlockFor(klass, opts) {
   // dispatches on Asset.assetType which is also singular.
   if (klass === "workstations" || klass === "workstation") return streamsOf(opts.workstationMonitor);
   if (klass === "servers"      || klass === "server")      return streamsOf(opts.serverMonitor);
+  // vCenter classes: plural UI keys, singular-ish backend blocks
+  // (vmMonitor / hostMonitor → Asset.assetType virtual_machine / hypervisor).
+  if (klass === "vms"   || klass === "virtual_machine") return streamsOf(opts.vmMonitor);
+  if (klass === "hosts" || klass === "hypervisor")      return streamsOf(opts.hostMonitor);
   return null;
 }
 
@@ -1215,7 +1253,8 @@ function _streamsForClass(klass) {
   // NOTE: the integration Monitoring tab uses PLURAL class keys ("workstations"
   // / "servers"); accept both plural and singular so the subtabs actually render
   // (the asset.assetType the resolver keys off is singular).
-  var isHostClass = (klass === "workstation" || klass === "workstations" || klass === "server" || klass === "servers");
+  var isHostClass = (klass === "workstation" || klass === "workstations" || klass === "server" || klass === "servers" ||
+                     klass === "vms" || klass === "virtual_machine"); // vCenter VMs are guest OSes
   var allowProcesses = isHostClass;
   var allowEventLog  = isHostClass || klass === "fortigate";
   return _ALL_STREAMS.filter(function (s) {
@@ -2863,6 +2902,10 @@ function monitorSettingsFormHTML(s, opts) {
   // keys are plural (workstations / servers).
   var workstationCfg = opts.workstationMonitor || { addAsMonitored: false, autoMonitorInterfaces: null };
   var serverCfg      = opts.serverMonitor     || { addAsMonitored: false, autoMonitorInterfaces: null };
+  // vCenter per-class blocks (vmMonitor = full workstation-style block;
+  // hostMonitor = reduced — no agent deploy / auto-monitor on ESXi).
+  var vmCfg   = opts.vmMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null };
+  var hostCfg = opts.hostMonitor || { addAsMonitored: false };
 
   // Stash auto-monitor name seeds for the lazy-loaded checklists.
   function _amonSeedNames(sel) {
@@ -2886,6 +2929,10 @@ function monitorSettingsFormHTML(s, opts) {
     window["__autoMon_seed_f-mon-server-amon-"]      = _amonSeedNames(serverCfg.autoMonitorInterfaces);
     window["__autoMonStor_seed_f-mon-workstation-stor-"] = _storSeedNames(workstationCfg.autoMonitorStorage);
     window["__autoMonStor_seed_f-mon-server-stor-"]      = _storSeedNames(serverCfg.autoMonitorStorage);
+  }
+  if (typeof window !== "undefined" && integrationType === "vcenter") {
+    window["__autoMon_seed_f-mon-vm-amon-"]     = _amonSeedNames(vmCfg.autoMonitorInterfaces);
+    window["__autoMonStor_seed_f-mon-vm-stor-"] = _storSeedNames(vmCfg.autoMonitorStorage);
   }
 
   // Class subtab header content (Discovery defaults at top, then optional
@@ -3023,6 +3070,28 @@ function monitorSettingsFormHTML(s, opts) {
           _agentDeployHTML("f-mon-server-deploy-", "server", serverCfg.agentDeploy || null, credentials) +
         '</section>';
     }
+    // vCenter VMs — full workstation-style card set: addAsMonitored →
+    // auto-monitor interfaces/storage (agent-fed, gated on addAsMonitored) →
+    // agent auto-deploy. Per-minute CPU/RAM rides the "vcenter" polling
+    // method (the CPU/Memory stream subtab default) with no agent needed.
+    if (klass === "vms" || klass === "virtual_machine") {
+      var vmWrapHidden = (vmCfg.addAsMonitored === true) ? "" : "display:none";
+      return '<section style="margin-bottom:1.25rem">' +
+          autoMonitoringHeader() +
+          _classAddAsMonitoredHTML("f-mon-vm-", "virtual machine", vmCfg.addAsMonitored === true) +
+          '<div id="f-mon-vm-automon-wrap" style="' + vmWrapHidden + '">' +
+            _autoMonitorInterfacesHTML("f-mon-vm-amon-", "virtual machine", vmCfg.autoMonitorInterfaces || null, "names", hasId, { hideLldp: true }) +
+            _autoMonitorStorageHTML("f-mon-vm-stor-", "virtual machine", vmCfg.autoMonitorStorage || null, hasId) +
+          '</div>' +
+          _agentDeployHTML("f-mon-vm-deploy-", "virtual machine", vmCfg.agentDeploy || null, credentials) +
+        '</section>';
+    }
+    // vCenter ESXi hosts — addAsMonitored only (no agent, no agent-fed pins;
+    // datastore capacity renders on the asset's Virtualization section).
+    if (klass === "hosts" || klass === "hypervisor") {
+      return '<section style="margin-bottom:1.25rem">' + autoMonitoringHeader() +
+        _classAddAsMonitoredHTML("f-mon-host-", "ESXi host", hostCfg.addAsMonitored === true) + '</section>';
+    }
     return "";
   }
 
@@ -3052,6 +3121,8 @@ function monitorSettingsFormHTML(s, opts) {
         fortiapMonitor:     opts.fortiapMonitor     || {},
         workstationMonitor: opts.workstationMonitor || {},
         serverMonitor:      opts.serverMonitor     || {},
+        vmMonitor:          opts.vmMonitor         || {},
+        hostMonitor:        opts.hostMonitor       || {},
         // Hide per-stream credential rows on FortiSwitch + FortiAP class
         // subtabs — the class-level SNMP/SSH credential picker inside the
         // Direct Polling block is authoritative for those classes (managed
@@ -3070,7 +3141,7 @@ function monitorSettingsFormHTML(s, opts) {
   // probe → single-ping fallback). Stored as config.verifyPresence; read on
   // save by _readVerifyPresenceToggle(). Default ON.
   var verifyPresenceHtml = "";
-  if (integrationType === "activedirectory" || integrationType === "entraid") {
+  if (integrationType === "activedirectory" || integrationType === "entraid" || integrationType === "vcenter") {
     var vpChecked = opts.verifyPresence === false ? "" : "checked";
     verifyPresenceHtml = '<div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin:0 0 1rem 0">' +
         '<input type="checkbox" id="f-verifyPresence" ' + vpChecked + ' style="width:auto;margin-top:3px">' +
@@ -3409,6 +3480,13 @@ function wireWorkstationServerCards(integrationId) {
   _wireAutoMonitorCard("f-mon-server-amon-",      "server",      integrationId || null);
   _wireAutoMonitorStorageCard("f-mon-workstation-stor-", "workstation", integrationId || null);
   _wireAutoMonitorStorageCard("f-mon-server-stor-",      "server",      integrationId || null);
+}
+
+// vCenter analog: the Virtual Machines subtab carries the same interface +
+// storage auto-monitor cards (agent-fed); ESXi hosts carry none.
+function wireVcenterCards(integrationId) {
+  _wireAutoMonitorCard("f-mon-vm-amon-",     "virtual_machine", integrationId || null);
+  _wireAutoMonitorStorageCard("f-mon-vm-stor-", "virtual_machine", integrationId || null);
 }
 
 // Reads the eight integration-tier cadence + retention fields from the
@@ -4229,6 +4307,69 @@ function linesToArray(id) {
   return document.getElementById(id).value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
 }
 
+function vcenterFormHTML(defaults) {
+  var d = defaults || {};
+  var verifyTls = d.verifyTls !== false;
+  var enabledChecked = d.enabled !== false ? "checked" : "";
+  var autoChecked = d.autoDiscover !== false ? "checked" : "";
+  var devMode = (d.vmInclude && d.vmInclude.length > 0) ? "include" : "exclude";
+  var devNames = devMode === "include" ? (d.vmInclude || []) : (d.vmExclude || []);
+  return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Production vCenter"></div>' +
+    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to a <strong style="color:var(--color-text-primary)">VMware vCenter</strong> server (7.0U2+) and discovers virtual machines, ESXi hosts, and datastores. VMs merge with assets discovered by other integrations (matched by vNIC MAC / hostname); vCenter data wins over every source except the Polaris Agent. VMs gain a clickable link to their running host and a vMotion-safe host dependency.</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    '<div style="display:grid;grid-template-columns:1fr auto;gap:8px">' +
+      '<div class="form-group"><label>Host / IP *</label><input type="text" id="f-host" value="' + escapeHtml(d.host || "") + '" placeholder="e.g. vcenter.corp.local"></div>' +
+      '<div class="form-group"><label>Port</label><input type="number" id="f-port" value="' + (d.port || 443) + '" min="1" max="65535" style="width:90px"></div>' +
+    '</div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-verifyTls" ' + (verifyTls ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-verifyTls" style="margin:0">Verify TLS certificate</label>' +
+    '</div>' +
+    '<p class="hint" style="color:var(--color-warning,#d98c00)">Leave enabled. Disabling certificate verification lets a network attacker intercept the connection and capture the vCenter credentials. Disable only for a vCenter with a self-signed certificate you cannot replace.</p>' +
+    '<div class="form-group"><label>Username *</label><input type="text" id="f-username" value="' + escapeHtml(d.username || "") + '" placeholder="e.g. polaris-svc@vsphere.local"><p class="hint">A read-only vCenter account is sufficient — Polaris never writes to vCenter.</p></div>' +
+    '<div class="form-group"><label>Password *</label><input type="password" id="f-password" value="' + (d.passwordPlaceholder ? "" : escapeHtml(d.password || "")) + '" placeholder="' + (d.passwordPlaceholder || "Password") + '"></div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enabled" ' + enabledChecked + ' style="width:auto">' +
+      '<label for="f-enabled" style="margin:0">Enabled</label>' +
+    '</div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-autoDiscover" ' + autoChecked + ' style="width:auto">' +
+      '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
+    '</div>' +
+    '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to re-query vCenter for inventory updates (1–24 hours)</p></div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">VM Filter</p>' +
+    '<div class="form-group">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-deviceMode" style="width:auto">' +
+          '<option value="include"' + (devMode === "include" ? " selected" : "") + '>Include</option>' +
+          '<option value="exclude"' + (devMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these VMs (matched against the vCenter VM name)</span>' +
+      '</div>' +
+      '<textarea id="f-deviceNames" rows="3" placeholder="One per line — e.g.&#10;prod-*&#10;*-template">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to sync every VM. Each line matches the vCenter-side VM name. Wildcards: <code>prod-*</code>, <code>*sql*</code>. ESXi hosts are never filtered.</p>' +
+    '</div>' +
+    verboseLoggingFormHTML(d);
+}
+
+function getVcenterFormConfig() {
+  var port = document.getElementById("f-port").value;
+  var devMode = document.getElementById("f-deviceMode").value;
+  var devNames = linesToArray("f-deviceNames");
+  return {
+    host: val("f-host"),
+    port: port ? parseInt(port, 10) : 443,
+    verifyTls: document.getElementById("f-verifyTls").checked,
+    username: val("f-username"),
+    password: val("f-password"),
+    vmInclude: devMode === "include" ? devNames : [],
+    vmExclude: devMode === "exclude" ? devNames : [],
+    verboseLogging: readVerboseLoggingFromForm(),
+  };
+}
+
 function showTypePicker() {
   var body =
     '<p style="font-size:0.9rem;color:var(--color-text-secondary);margin-bottom:1rem">Select the type of integration to add:</p>' +
@@ -4253,6 +4394,10 @@ function showTypePicker() {
         '<strong>Active Directory</strong>' +
         '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">On-prem computer objects via LDAP</span>' +
       '</button>' +
+      '<button class="btn btn-secondary" id="pick-vc" style="padding:1.2rem;font-size:0.95rem;display:flex;flex-direction:column;align-items:center;gap:6px">' +
+        '<strong>VMware vCenter</strong>' +
+        '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">VMs, ESXi hosts &amp; datastores via REST</span>' +
+      '</button>' +
     '</div>';
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>';
   openModal("Add Integration", body, footer);
@@ -4261,6 +4406,7 @@ function showTypePicker() {
   document.getElementById("pick-win").addEventListener("click", function () { closeModal(); openCreateModal("windowsserver"); });
   document.getElementById("pick-entra").addEventListener("click", function () { closeModal(); openCreateModal("entraid"); });
   document.getElementById("pick-ad").addEventListener("click", function () { closeModal(); openCreateModal("activedirectory"); });
+  document.getElementById("pick-vc").addEventListener("click", function () { closeModal(); openCreateModal("vcenter"); });
 }
 
 function _formHTMLForType(type, defaults) {
@@ -4268,6 +4414,7 @@ function _formHTMLForType(type, defaults) {
   if (type === "fortigate") return fortiGateFormHTML(defaults);
   if (type === "entraid") return entraIdFormHTML(defaults);
   if (type === "activedirectory") return activeDirectoryFormHTML(defaults);
+  if (type === "vcenter") return vcenterFormHTML(defaults);
   return fortiManagerFormHTML(defaults);
 }
 
@@ -4276,6 +4423,7 @@ function _formConfigForType(type) {
   if (type === "fortigate") return getFgtFormConfig();
   if (type === "entraid") return getEntraFormConfig();
   if (type === "activedirectory") return getAdFormConfig();
+  if (type === "vcenter") return getVcenterFormConfig();
   return getFormConfig();
 }
 
@@ -4302,6 +4450,7 @@ function _titleForType(type, action) {
     type === "fortigate" ? "FortiGate" :
     type === "entraid" ? "Entra ID" :
     type === "activedirectory" ? "Active Directory" :
+    type === "vcenter" ? "vCenter" :
     "FortiManager";
   return action + " " + product + " Integration";
 }
@@ -4316,6 +4465,7 @@ async function openCreateModal(type) {
   var isAd  = type === "activedirectory";
   var isEntra = type === "entraid";
   var isWin = type === "windowsserver";
+  var isVc = type === "vcenter";
   var title = _titleForType(type, "Add");
   // FMG / FortiGate / AD / Entra / WindowsServer integrations all expose a
   // Monitoring tab. FMG and FortiGate also get the Discovery Defaults
@@ -4364,18 +4514,25 @@ async function openCreateModal(type) {
     // path (`_readFortigateMonitorBlock`) keeps finding them.
     addTabs.push({ key: "geographicLocation", label: "Geographic Location", html: geographicLocationFormHTML(false, false, false, "Latitude", "Longitude", "", type) });
     body = _intRenderTabbedBody("intg-edit", addTabs);
-  } else if (isAd || isEntra || isWin) {
+  } else if (isAd || isEntra || isWin || isVc) {
     var addMonSettings = {};
     try {
       var addManual = await api.monitorSettings.getManual();
       addMonSettings = addManual || {};
     } catch (e) { /* fall back to defaults */ }
+    // vCenter VM agent auto-deploy needs the credential list for its
+    // SSH/WinRM pickers (same card the AD/Entra classes use).
+    var addNonFortinetCreds = [];
+    if (isVc) {
+      try { var vcCredResp = await api.credentials.list(); addNonFortinetCreds = Array.isArray(vcCredResp) ? vcCredResp : []; } catch (e) { /* pickers just render empty */ }
+    }
     var addNonFortinetTabs = [
-      { key: "general",    label: "General",    html: _formHTMLForType(type, isAd ? { verifyTls: true } : {}) },
+      { key: "general",    label: "General",    html: _formHTMLForType(type, (isAd || isVc) ? { verifyTls: true } : {}) },
       { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(addMonSettings, {
         integrationId:   null,
         integrationType: type,
         integrationName: "",
+        snmpCredentials: addNonFortinetCreds,
       }) },
     ];
     body = _intRenderTabbedBody("intg-edit", addNonFortinetTabs);
@@ -4393,10 +4550,11 @@ async function openCreateModal(type) {
     _wireProbeTimeoutWarning();
     _wireCredentialPickerVisibility();
     _populateUploadedMibsInDropdowns();
-  } else if (isAd || isEntra || isWin) {
+  } else if (isAd || isEntra || isWin || isVc) {
     _intWireModalTabs("intg-edit");
     _wireMonitoringTabSubtabs(type);
     if (isAd || isEntra) wireWorkstationServerCards(null);
+    if (isVc) wireVcenterCards(null);
     _wireProbeTimeoutWarning();
   }
 
@@ -4413,6 +4571,8 @@ async function openCreateModal(type) {
       if (!val("f-host") || !val("f-bindDn") || !val("f-bindPassword") || !val("f-baseDn")) { showToast("Fill in host, bind DN, bind password, and base DN first", "error"); return; }
     } else if (isWin) {
       if (!val("f-host") || !val("f-username")) { showToast("Fill in host and username first", "error"); return; }
+    } else if (isVc) {
+      if (!val("f-host") || !val("f-username") || !val("f-password")) { showToast("Fill in host, username, and password first", "error"); return; }
     } else {
       if (!val("f-host") || !val("f-apiToken")) { showToast("Fill in host and API token first", "error"); return; }
     }
@@ -4472,6 +4632,16 @@ async function openCreateModal(type) {
         var verifyPresenceNew = _readVerifyPresenceToggle();
         if (verifyPresenceNew !== undefined) createConfig.verifyPresence = verifyPresenceNew;
       }
+      if (isVc) {
+        // vCenter per-class blocks: VMs primary (full workstation-style
+        // reader — the host block's extra null fields are stripped by Zod).
+        var vmBlockNew   = _readWorkstationServerMonitorBlock("f-mon-vm-",   { klass: "vms",   isPrimary: true });
+        var hostBlockNew = _readWorkstationServerMonitorBlock("f-mon-host-", { klass: "hosts", isPrimary: false });
+        if (vmBlockNew)   createConfig.vmMonitor   = vmBlockNew;
+        if (hostBlockNew) createConfig.hostMonitor = hostBlockNew;
+        var vcVerifyPresenceNew = _readVerifyPresenceToggle();
+        if (vcVerifyPresenceNew !== undefined) createConfig.verifyPresence = vcVerifyPresenceNew;
+      }
       if (isFmg || isFgt) {
         var pushToggleNew = _readPushReservationsToggle();
         if (pushToggleNew !== undefined) createConfig.pushReservations = pushToggleNew;
@@ -4498,7 +4668,7 @@ async function openCreateModal(type) {
       // Save the new integration's tier-3 monitor settings if the Monitoring
       // tab was rendered. Failures here aren't fatal — the integration is
       // already created; operator can edit and resave.
-      if ((isFmg || isFgt || isAd || isEntra || isWin) && result && result.id) {
+      if ((isFmg || isFgt || isAd || isEntra || isWin || isVc) && result && result.id) {
         try { await api.monitorSettings.setIntegration(result.id, getMonitorSettingsFromForm()); }
         catch (e) { showToast("Integration created, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
       }
@@ -4538,9 +4708,33 @@ async function openEditModal(id) {
     var isFgt = intg.type === "fortigate";
     var isEntra = intg.type === "entraid";
     var isAd = intg.type === "activedirectory";
+    var isVc = intg.type === "vcenter";
     var body, formGetter;
 
-    if (isAd) {
+    if (isVc) {
+      var defaults = {
+        name: intg.name,
+        host: config.host,
+        port: config.port,
+        verifyTls: config.verifyTls !== false,
+        username: config.username,
+        password: "",
+        passwordPlaceholder: "Leave blank to keep current password",
+        enabled: intg.enabled,
+        autoDiscover: intg.autoDiscover !== false,
+        pollInterval: intg.pollInterval,
+        vmInclude: config.vmInclude || [],
+        vmExclude: config.vmExclude || [],
+        verboseLogging: config.verboseLogging === true,
+        verboseLoggingEnabledAt: config.verboseLoggingEnabledAt,
+      };
+      body = vcenterFormHTML(defaults);
+      formGetter = function () {
+        var fc = getVcenterFormConfig();
+        if (!fc.password) delete fc.password;
+        return fc;
+      };
+    } else if (isAd) {
       var defaults = {
         name: intg.name,
         host: config.host,
@@ -4689,15 +4883,20 @@ async function openEditModal(id) {
     // only. Manual tier + cross-source class overrides live on the Assets
     // page Monitoring Settings modal.
     var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
-    var monCapable = isFmgOrFgt || isAd || isEntra || isWin;
+    var monCapable = isFmgOrFgt || isAd || isEntra || isWin || isVc;
     if (!isFmgOrFgt && monCapable) {
-      // AD / Entra / WindowsServer: wrap the existing flat form as the
-      // General tab and add a Monitoring tab alongside it.
+      // AD / Entra / WindowsServer / vCenter: wrap the existing flat form as
+      // the General tab and add a Monitoring tab alongside it.
       var monSettings = {};
       try {
         var resp = await api.monitorSettings.getIntegration(intg.id);
         if (resp && resp.settings) monSettings = resp.settings;
       } catch (e) { /* fall back to defaults */ }
+      // vCenter's VM agent auto-deploy card needs the credential list.
+      var nonFortinetCreds = [];
+      if (isVc) {
+        try { var vcEditCredResp = await api.credentials.list(); nonFortinetCreds = Array.isArray(vcEditCredResp) ? vcEditCredResp : []; } catch (e) { /* pickers render empty */ }
+      }
       var generalTabBody = body;
       var nonFortinetTabs = [
         { key: "general",    label: "General",    html: generalTabBody },
@@ -4706,12 +4905,15 @@ async function openEditModal(id) {
           integrationType: intg.type,
           integrationName: intg.name,
           pollInterval:    intg.pollInterval,
+          snmpCredentials: nonFortinetCreds,
           // Phase 2 — forward AD/Entra/WinSrv per-class blocks so per-class
           // subtabs can render their own saved stream values. Blocks are
           // freshly seeded by the migration job; pre-migration installs see
           // an empty object → overlay no-ops → flat baseline shows through.
           workstationMonitor: config.workstationMonitor || null,
           serverMonitor:      config.serverMonitor      || null,
+          vmMonitor:          config.vmMonitor          || null,
+          hostMonitor:        config.hostMonitor        || null,
           verifyPresence:     config.verifyPresence,
         }) },
       ];
@@ -4814,10 +5016,11 @@ async function openEditModal(id) {
       _wireProbeTimeoutWarning();
       _wireCredentialPickerVisibility();
       _populateUploadedMibsInDropdowns();
-    } else if (isAd || isEntra || isWin) {
+    } else if (isAd || isEntra || isWin || isVc) {
       _intWireModalTabs("intg-edit");
       _wireMonitoringTabSubtabs(intg.type);
       if (isAd || isEntra) wireWorkstationServerCards(id);
+      if (isVc) wireVcenterCards(id);
       _wireProbeTimeoutWarning();
     }
 
@@ -4828,7 +5031,7 @@ async function openEditModal(id) {
       try {
         var formConfig = _formConfigForType(intg.type);
         // Strip blank secrets so the server fills them in from the stored config.
-        if (isWin) { if (!formConfig.password) delete formConfig.password; }
+        if (isWin || isVc) { if (!formConfig.password) delete formConfig.password; }
         else if (isEntra) { if (!formConfig.clientSecret) delete formConfig.clientSecret; }
         else if (isAd) { if (!formConfig.bindPassword) delete formConfig.bindPassword; }
         else {
@@ -4921,6 +5124,16 @@ async function openEditModal(id) {
         if (srvBlock) editConfig.serverMonitor      = srvBlock;
         var verifyPresenceEdit = _readVerifyPresenceToggle();
         if (verifyPresenceEdit !== undefined) editConfig.verifyPresence = verifyPresenceEdit;
+      }
+      if (isVc) {
+        // vCenter per-class blocks: VMs primary. The host block's extra
+        // null fields (auto-monitor / agent-deploy) are stripped by Zod.
+        var vmBlock   = _readWorkstationServerMonitorBlock("f-mon-vm-",   { klass: "vms",   isPrimary: true });
+        var hostBlock = _readWorkstationServerMonitorBlock("f-mon-host-", { klass: "hosts", isPrimary: false });
+        if (vmBlock)   editConfig.vmMonitor   = vmBlock;
+        if (hostBlock) editConfig.hostMonitor = hostBlock;
+        var vcVerifyPresenceEdit = _readVerifyPresenceToggle();
+        if (vcVerifyPresenceEdit !== undefined) editConfig.verifyPresence = vcVerifyPresenceEdit;
       }
       return { editConfig: editConfig, autoDiscoverEl: autoDiscoverEl };
     }
@@ -6400,6 +6613,208 @@ function openAdApiQueryModal(id) {
 
   document.getElementById("ad-copy-btn").addEventListener("click", function () {
     var text = document.getElementById("ad-response").textContent;
+    var btn = this;
+    navigator.clipboard.writeText(text).then(function () {
+      btn.textContent = "Copied!";
+      setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+    }).catch(function () { showToast("Copy failed", "error"); });
+  });
+}
+
+// ─── vCenter API Query modal ────────────────────────────────────────────────
+// vSphere Automation REST surface only — the backend proxy rejects paths
+// outside "/api/". Same saved-query pattern as the FortiGate modal.
+
+var _VC_PRESET_QUERIES = [
+  {
+    name: "All virtual machines",
+    method: "GET",
+    path: "/api/vcenter/vm",
+    query: "",
+  },
+  {
+    name: "All ESXi hosts",
+    method: "GET",
+    path: "/api/vcenter/host",
+    query: "",
+  },
+  {
+    name: "All datastores",
+    method: "GET",
+    path: "/api/vcenter/datastore",
+    query: "",
+  },
+  {
+    name: "All clusters",
+    method: "GET",
+    path: "/api/vcenter/cluster",
+    query: "",
+  },
+  {
+    name: "Powered-on VMs",
+    method: "GET",
+    path: "/api/vcenter/vm",
+    query: "power_states=POWERED_ON",
+  },
+  {
+    name: "VM detail (edit the id)",
+    method: "GET",
+    path: "/api/vcenter/vm/vm-1",
+    query: "",
+  },
+];
+
+var _VC_QUERIES_VERSION = 1;
+
+function _vcLoadQueries() {
+  try {
+    var stored = JSON.parse(localStorage.getItem("polaris-vcenter-queries") || "null");
+    if (!stored || stored.v !== _VC_QUERIES_VERSION) {
+      var initial = { v: _VC_QUERIES_VERSION, queries: _VC_PRESET_QUERIES.slice() };
+      localStorage.setItem("polaris-vcenter-queries", JSON.stringify(initial));
+      return _VC_PRESET_QUERIES.slice();
+    }
+    return stored.queries;
+  } catch (_) { return []; }
+}
+
+function _vcPersistQueries(queries) {
+  localStorage.setItem("polaris-vcenter-queries", JSON.stringify({ v: _VC_QUERIES_VERSION, queries: queries }));
+}
+
+function _vcRenderSavedSelect(queries, selectValue) {
+  var sel = document.getElementById("vc-saved-select");
+  if (!sel) return;
+  sel.innerHTML = '<option value="">— load a saved query —</option>' +
+    queries.map(function (q, i) {
+      return '<option value="' + i + '"' + (String(i) === String(selectValue) ? " selected" : "") + '>' + escapeHtml(q.name) + '</option>';
+    }).join("");
+}
+
+function openVcenterApiQueryModal(id) {
+  var body =
+    '<div style="margin-bottom:0.75rem">' +
+      '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Saved Queries</p>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<select id="vc-saved-select" style="flex:1"></select>' +
+        '<button class="btn btn-sm btn-secondary" id="vc-load-btn">Load</button>' +
+        '<button class="btn btn-sm btn-danger" id="vc-delete-btn">Delete</button>' +
+      '</div>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:0 0 0.75rem">' +
+    '<div style="display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:end">' +
+      '<div class="form-group" style="margin:0">' +
+        '<label>Method</label>' +
+        '<select id="vc-method" style="width:auto">' +
+          '<option value="GET">GET</option>' +
+          '<option value="POST">POST</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="form-group" style="margin:0">' +
+        '<label>Path</label>' +
+        '<input type="text" id="vc-path" value="/api/vcenter/vm" placeholder="/api/vcenter/vm" style="font-family:monospace;font-size:0.85rem">' +
+      '</div>' +
+    '</div>' +
+    '<div class="form-group" style="margin-top:0.75rem">' +
+      '<label>Query Parameters <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(one per line — <code>key=value</code>)</span></label>' +
+      '<textarea id="vc-query" rows="4" style="font-family:monospace;font-size:0.82rem" placeholder="power_states=POWERED_ON&#10;hosts=host-10"></textarea>' +
+      '<p class="hint">vSphere Automation REST surface only (paths must start with <code>/api/</code>). List filters like <code>hosts=…</code>, <code>clusters=…</code>, <code>power_states=…</code> go here.</p>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:0.75rem"><button class="btn btn-primary" id="vc-send">Send</button></div>' +
+    '<div style="display:flex;gap:6px;align-items:center;margin-bottom:0.25rem">' +
+      '<input type="text" id="vc-save-name" placeholder="Name this query to save it…" style="flex:1;font-size:0.85rem">' +
+      '<button class="btn btn-sm btn-secondary" id="vc-save-btn">Save</button>' +
+    '</div>' +
+    '<div id="vc-response-wrap" style="display:none;margin-top:1rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
+        '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
+        '<button class="btn btn-sm btn-secondary" id="vc-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
+      '</div>' +
+      '<pre id="vc-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+    '</div>';
+
+  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
+
+  openModal("vCenter API Query", body, footer, { wide: true });
+
+  var savedQueries = _vcLoadQueries();
+  _vcRenderSavedSelect(savedQueries);
+
+  document.getElementById("vc-load-btn").addEventListener("click", function () {
+    var idx = parseInt(document.getElementById("vc-saved-select").value, 10);
+    if (isNaN(idx) || !savedQueries[idx]) return;
+    var q = savedQueries[idx];
+    document.getElementById("vc-method").value = q.method || "GET";
+    document.getElementById("vc-path").value = q.path || "";
+    document.getElementById("vc-query").value = q.query || "";
+    document.getElementById("vc-save-name").value = q.name;
+  });
+
+  document.getElementById("vc-delete-btn").addEventListener("click", async function () {
+    var idx = parseInt(document.getElementById("vc-saved-select").value, 10);
+    if (isNaN(idx) || !savedQueries[idx]) return;
+    var ok = await showConfirm("Delete saved query \"" + savedQueries[idx].name + "\"?");
+    if (!ok) return;
+    savedQueries.splice(idx, 1);
+    _vcPersistQueries(savedQueries);
+    _vcRenderSavedSelect(savedQueries);
+  });
+
+  document.getElementById("vc-save-btn").addEventListener("click", function () {
+    var name = document.getElementById("vc-save-name").value.trim();
+    if (!name) { showToast("Enter a name for this query", "error"); return; }
+    var method = document.getElementById("vc-method").value;
+    var path = document.getElementById("vc-path").value.trim();
+    var query = document.getElementById("vc-query").value;
+    var existIdx = -1;
+    savedQueries.forEach(function (q, i) { if (q.name === name) existIdx = i; });
+    var entry = { name: name, method: method, path: path, query: query };
+    if (existIdx >= 0) {
+      savedQueries[existIdx] = entry;
+    } else {
+      savedQueries.push(entry);
+      existIdx = savedQueries.length - 1;
+    }
+    _vcPersistQueries(savedQueries);
+    _vcRenderSavedSelect(savedQueries, existIdx);
+    showToast("Query saved");
+  });
+
+  document.getElementById("vc-send").addEventListener("click", async function () {
+    var btn = this;
+    var method = document.getElementById("vc-method").value;
+    var path = document.getElementById("vc-path").value.trim();
+    if (!path) { showToast("Enter a path (e.g. /api/vcenter/vm)", "error"); return; }
+    var queryRaw = document.getElementById("vc-query").value;
+    var query = {};
+    queryRaw.split("\n").forEach(function (line) {
+      var trimmed = line.trim();
+      if (!trimmed) return;
+      var eq = trimmed.indexOf("=");
+      if (eq < 0) { query[trimmed] = ""; return; }
+      var key = trimmed.slice(0, eq).trim();
+      var value = trimmed.slice(eq + 1).trim();
+      if (key) query[key] = value;
+    });
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+    var responseWrap = document.getElementById("vc-response-wrap");
+    var responsePre = document.getElementById("vc-response");
+    try {
+      var result = await api.integrations.query(id, { method: method, path: path, query: query });
+      responseWrap.style.display = "";
+      responsePre.textContent = JSON.stringify(result, null, 2);
+    } catch (err) {
+      responseWrap.style.display = "";
+      responsePre.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Send";
+    }
+  });
+
+  document.getElementById("vc-copy-btn").addEventListener("click", function () {
+    var text = document.getElementById("vc-response").textContent;
     var btn = this;
     navigator.clipboard.writeText(text).then(function () {
       btn.textContent = "Copied!";
