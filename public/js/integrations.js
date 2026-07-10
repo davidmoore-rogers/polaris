@@ -568,6 +568,8 @@ async function loadIntegrations() {
           '<div class="detail-row"><span class="detail-label">ADOM</span><span class="detail-value">' + escapeHtml(config.adom || "root") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">SSL Verify</span><span class="detail-value">' + (config.verifySsl ? "Yes" : "No") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">FMG Proxy</span><span class="detail-value">' + (config.useProxy === false ? "Disabled (direct)" : "Enabled") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Central Mgmt (APs)</span><span class="detail-value">' + _centralMgmtLabel(config.centralManagement, "wtp", "wtpCount", "AP") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Central Mgmt (Switches)</span><span class="detail-value">' + _centralMgmtLabel(config.centralManagement, "fsw", "fswCount", "switch") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Mgmt Interface</span><span class="detail-value mono">' + escapeHtml(config.mgmtInterface || "-") + '</span></div>' +
           filterRow("FortiGates", config.deviceInclude, config.deviceExclude) +
           filterRow("DHCP", config.dhcpInclude, config.dhcpExclude) +
@@ -954,6 +956,16 @@ function _readPushQuarantineToggle() {
   return !!el.checked;
 }
 
+// Label for the FMG central-management detail rows (integration list, after
+// the FMG Proxy row). `cm` = config.centralManagement, stamped by discovery
+// (detectCentralManagement); absent until the first discovery after upgrade.
+function _centralMgmtLabel(cm, key, countKey, noun) {
+  if (!cm || typeof cm[key] !== "boolean") return "Unknown (detected at next discovery)";
+  if (!cm[key]) return "Disabled (per-device — descriptions write to the device DB)";
+  var count = typeof cm[countKey] === "number" ? cm[countKey] : null;
+  return "Enabled" + (count !== null ? " (" + count + " " + noun + (count === 1 ? "" : "s") + ")" : "") + " — description pushes mirror to FortiManager";
+}
+
 // Description Sync tab body. Single master toggle (config.syncDescriptions).
 // Newest-wins three-way merge: the side edited since the last sync wins; both
 // edited → conflict (neither overwritten). `syncDescriptions` is the current
@@ -977,6 +989,7 @@ function descriptionSyncFormHTML(syncDescriptions, useProxy) {
         '<li><strong>Interface comments.</strong> The Interface Comments box on an asset\'s interface panel writes to the FortiGate\'s <code>system/interface</code> description (or the FortiSwitch port description via the parent controller). Clearing a comment in Polaris leaves the device value in place.</li>' +
         '<li><strong>Device descriptions.</strong> An asset\'s Description field writes to the FortiGate alias, FortiSwitch description, or FortiAP comment. An empty Polaris Description is seeded from the device on the next discovery.</li>' +
         '<li><strong>When it runs.</strong> Immediately on save (your edit is always the newest, so it pushes), plus a reconcile on every discovery cycle that re-pushes after transient failures, pulls in device-side edits, and flags conflicts.</li>' +
+        '<li><strong>FMG central management.</strong> When this ADOM centrally manages FortiAPs or FortiSwitches (detected at each discovery; shown on the integration card), pushes for that class are also mirrored into FortiManager\'s AP Manager / FortiSwitch Manager database so a later install doesn\'t revert them. Polaris never triggers an install.</li>' +
       '</ul>' +
     '</section>' +
     '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +

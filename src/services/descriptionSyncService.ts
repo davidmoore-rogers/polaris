@@ -70,6 +70,7 @@ import {
   classifyPushError,
   type Transport,
 } from "./reservationPushService.js";
+import { proxyQuery as fmgQuery } from "./fortimanagerService.js";
 
 // ─── Value normalization + decision ─────────────────────────────────────────
 
@@ -437,6 +438,120 @@ function syncEnabled(config: unknown): boolean {
   return (config as { syncDescriptions?: boolean } | null)?.syncDescriptions === true;
 }
 
+// ─── FMG central-management mirror ──────────────────────────────────────────
+//
+// FortiManager ADOMs manage FortiAPs (AP Manager) and FortiSwitches
+// (FortiSwitch Manager) in either central or per-device mode. In central mode
+// FMG's ADOM-level database copy is authoritative from FMG's point of view: a
+// device-direct description write works at runtime, but the next install from
+// the central pane diffs FMG's copy against the device and REVERTS it. So
+// when discovery has stamped `Integration.config.centralManagement.{wtp,fsw}`
+// (detectCentralManagement, run at FMG discovery start), a successful
+// device-side push is also mirrored into FMG's ADOM database — a plain
+// JSON-RPC `set`, NEVER an install (an install would push everything an FMG
+// admin has staged). The reconcile additionally batch-heals FMG-side drift
+// for values the device already agrees on, which covers pushes that predate
+// the mirror and mirror sets that failed transiently. Caveats: FMG's ADOM
+// copy is treated as a projection of the device value, not an edit surface —
+// an AP Manager edit that was saved but never installed gets overwritten by
+// the mirror (an *installed* edit reaches the device and flows back through
+// the normal adopt path). ADOM object shapes (mkey, whether `comment` lives
+// top-level or per dynamic_mapping) are UNVERIFIED on a real FMG — same
+// posture as the FortiOS shapes above; failures surface as warning Events
+// and never affect the device-side sync state.
+
+function centralFlags(config: unknown): { wtp: boolean; fsw: boolean } {
+  const cm = (config as { centralManagement?: { wtp?: boolean; fsw?: boolean } } | null)?.centralManagement;
+  return { wtp: cm?.wtp === true, fsw: cm?.fsw === true };
+}
+
+function fmgAdom(config: unknown): string {
+  const a = (config as { adom?: string } | null)?.adom;
+  return typeof a === "string" && a.trim() ? a.trim() : "root";
+}
+
+interface FmgOpResult { ok: boolean; data?: unknown; error?: string }
+
+// One JSON-RPC call against FMG's ADOM DB. FMG-level errors come back in the
+// envelope (status.code != 0), transport errors throw — both map to ok:false.
+async function fmgAdomOp(
+  integration: { id: string; config: unknown },
+  method: "get" | "set",
+  url: string,
+  data?: Record<string, unknown>,
+): Promise<FmgOpResult> {
+  try {
+    const res = (await fmgQuery(
+      integration.config as never,
+      method,
+      [{ url, ...(data ? { data } : {}) }],
+      integration.id,
+    )) as { result?: Array<{ status?: { code?: number; message?: string }; data?: unknown }> };
+    const r = res?.result?.[0];
+    if (r?.status?.code !== 0) {
+      return { ok: false, error: r?.status?.message || `FMG code ${r?.status?.code ?? "unknown"}` };
+    }
+    return { ok: true, data: r.data };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+type FmgMirrorTarget =
+  | { kind: "wtp"; wtpId: string }
+  | { kind: "managed-switch"; switchId: string }
+  | { kind: "switch-port"; switchId: string; portName: string };
+
+// FMG JSON-RPC urls are plain strings, not URL-encoded — mkeys (serials,
+// port names) carry no reserved characters.
+function fmgMirrorUrl(adom: string, t: FmgMirrorTarget): { url: string; field: "comment" | "description" } {
+  const base = `/pm/config/adom/${adom}/obj`;
+  if (t.kind === "wtp") return { url: `${base}/wireless-controller/wtp/${t.wtpId}`, field: "comment" };
+  if (t.kind === "managed-switch") return { url: `${base}/fsp/managed-switch/${t.switchId}`, field: "description" };
+  return { url: `${base}/fsp/managed-switch/${t.switchId}/ports/${t.portName}`, field: "description" };
+}
+
+/** `set` + read-back verify against FMG's ADOM copy. Best-effort, never throws. */
+async function mirrorToFmg(
+  integration: { id: string; config: unknown },
+  target: FmgMirrorTarget,
+  value: string,
+): Promise<FmgOpResult> {
+  const { url, field } = fmgMirrorUrl(fmgAdom(integration.config), target);
+  const set = await fmgAdomOp(integration, "set", url, { [field]: value });
+  if (!set.ok) return { ok: false, error: `set ${url}: ${set.error}` };
+  const back = await fmgAdomOp(integration, "get", url);
+  if (!back.ok) return { ok: true }; // set landed; read-back is best-effort
+  const row = firstResult<Record<string, unknown>>(back.data);
+  const landed = normalizeDescription(row?.[field]);
+  if (landed !== normalizeDescription(value)) {
+    return {
+      ok: false,
+      error: `verify mismatch on ${url} — FMG kept ${JSON.stringify(landed)} (field may live in dynamic_mapping)`,
+    };
+  }
+  return { ok: true };
+}
+
+async function logFmgMirrorEvent(
+  asset: { id: string; hostname: string | null },
+  ctx: { scope: "device" | "interface"; ifName?: string; value: string; result: FmgOpResult },
+): Promise<void> {
+  const where = ctx.scope === "interface" ? `switch port ${ctx.ifName}` : "device description";
+  await logEvent({
+    action: ctx.result.ok ? "asset.description.fmg_mirrored" : "asset.description.fmg_mirror_failed",
+    resourceType: "asset",
+    resourceId: asset.id,
+    resourceName: asset.hostname ?? undefined,
+    actor: "system:description-sync",
+    level: ctx.result.ok ? "info" : "warning",
+    message: ctx.result.ok
+      ? `Description for ${where} mirrored to FortiManager's central-management database`
+      : `FortiManager central-database mirror for ${where} failed: ${ctx.result.error} — AP Manager / FortiSwitch Manager may revert the device value on the next install`,
+    details: { scope: ctx.scope, ...(ctx.ifName ? { ifName: ctx.ifName } : {}), value: ctx.value, ...(ctx.result.ok ? {} : { error: ctx.result.error }) },
+  });
+}
+
 /**
  * Resolve whether description sync applies to this asset and, if so, which
  * FortiGate the transport must land on. Null = not eligible (toggle off,
@@ -531,6 +646,16 @@ export async function syncDescriptionsOnSave(params: {
       }
       await stampOverrideSyncState(override.id, result, value);
       await logInterfacePushEvent(asset, params.ifName, value, result, params.actor);
+      // Central FortiSwitch management: mirror the port description into
+      // FMG's ADOM DB so an install doesn't revert it. Serial as the ADOM
+      // mkey (renamed switch-ids heal via the reconcile batch pass).
+      if (result.ok && ctx.role === "fortiswitch" && ctx.integration.type === "fortimanager" && centralFlags(ctx.integration.config).fsw) {
+        const serial = (asset.serialNumber || "").trim();
+        if (serial) {
+          const mirror = await mirrorToFmg(ctx.integration, { kind: "switch-port", switchId: serial, portName: params.ifName }, value);
+          await logFmgMirrorEvent(asset, { scope: "interface", ifName: params.ifName, value, result: mirror });
+        }
+      }
       return result.ok
         ? { attempted: true, status: "synced" }
         : { attempted: true, status: "failed", error: result.error };
@@ -557,6 +682,20 @@ export async function syncDescriptionsOnSave(params: {
     });
     await stampAssetSyncState(asset.id, result, value);
     await logDevicePushEvent(asset, value, result, params.actor);
+    // Central AP / FortiSwitch management: mirror the device description
+    // (wtp comment / managed-switch description) into FMG's ADOM DB.
+    if (result.ok && ctx.integration.type === "fortimanager") {
+      const flags = centralFlags(ctx.integration.config);
+      const serial = (asset.serialNumber || "").trim();
+      if (serial && ((ctx.role === "fortiap" && flags.wtp) || (ctx.role === "fortiswitch" && flags.fsw))) {
+        const mirror = await mirrorToFmg(
+          ctx.integration,
+          ctx.role === "fortiap" ? { kind: "wtp", wtpId: serial } : { kind: "managed-switch", switchId: serial },
+          value,
+        );
+        await logFmgMirrorEvent(asset, { scope: "device", value, result: mirror });
+      }
+    }
     return result.ok
       ? { attempted: true, status: "synced" }
       : { attempted: true, status: "failed", error: result.error };
@@ -745,6 +884,22 @@ export interface DescriptionSyncSummary {
   conflicts: number;
   failed: number;
   skippedDevices: number;
+  /** FMG central-management ADOM-DB mirror writes (see mirrorToFmg). */
+  fmgMirrored: number;
+  fmgMirrorFailed: number;
+}
+
+// Values successfully pushed to devices during THIS reconcile run — the batch
+// mirror pass consults it because the `assets` snapshot's sync-state blobs
+// were loaded before the pushes and are stale for just-pushed rows.
+interface PushedThisRun {
+  device: Map<string, string>; // assetId → pushed value
+  port: Map<string, string>;   // portKey(assetId, ifName) → pushed value
+}
+
+// Asset ids are UUIDs (no spaces), so a space separator is collision-safe.
+function portKey(assetId: string, ifName: string): string {
+  return `${assetId} ${ifName}`;
 }
 
 interface ReconcileAsset {
@@ -778,8 +933,9 @@ interface ReconcileOverride {
 export async function runDescriptionSyncForIntegration(
   integration: { id: string; type: string; config: unknown; name: string },
 ): Promise<DescriptionSyncSummary> {
-  const summary: DescriptionSyncSummary = { devices: 0, pushed: 0, adopted: 0, conflicts: 0, failed: 0, skippedDevices: 0 };
+  const summary: DescriptionSyncSummary = { devices: 0, pushed: 0, adopted: 0, conflicts: 0, failed: 0, skippedDevices: 0, fmgMirrored: 0, fmgMirrorFailed: 0 };
   if (!syncEnabled(integration.config)) return summary;
+  const pushedThisRun: PushedThisRun = { device: new Map(), port: new Map() };
 
   const assets: ReconcileAsset[] = await prisma.asset.findMany({
     where: {
@@ -847,7 +1003,7 @@ export async function runDescriptionSyncForIntegration(
       deviceNames.slice(i, i + CHUNK).map(async (deviceName) => {
         const group = groups.get(deviceName)!;
         try {
-          await reconcileDevice(integration, deviceName, group, overridesByAsset, summary);
+          await reconcileDevice(integration, deviceName, group, overridesByAsset, summary, pushedThisRun);
           summary.devices++;
         } catch (err) {
           // Transport preconditions (missing direct-mode token, unresolvable
@@ -862,6 +1018,15 @@ export async function runDescriptionSyncForIntegration(
       }),
     );
   }
+
+  // Central-management batch heal: for centrally-managed classes, align FMG's
+  // ADOM DB with every Polaris value the device already agrees on. Covers
+  // pushes that predate the mirror feature, mirror sets that failed
+  // transiently, and this run's own pushes (via pushedThisRun — the assets
+  // snapshot's sync-state blobs predate them).
+  if (integration.type === "fortimanager") {
+    await mirrorCentralDbDrift(integration, assets, overridesByAsset, pushedThisRun, summary);
+  }
   return summary;
 }
 
@@ -871,6 +1036,7 @@ async function reconcileDevice(
   group: { firewall?: ReconcileAsset; switches: ReconcileAsset[]; aps: ReconcileAsset[] },
   overridesByAsset: Map<string, ReconcileOverride[]>,
   summary: DescriptionSyncSummary,
+  pushedThisRun: PushedThisRun,
 ): Promise<void> {
   const transport = await buildTransportForIntegration(integration, deviceName);
 
@@ -936,7 +1102,7 @@ async function reconcileDevice(
   if (group.firewall && globalAlias !== undefined) {
     await reconcileDeviceLevel(
       integration, deviceName, transport, group.firewall,
-      { kind: "fortigate-global" }, globalAlias, summary,
+      { kind: "fortigate-global" }, globalAlias, summary, pushedThisRun,
     );
   }
   // ── Device-level: switches ──
@@ -947,7 +1113,7 @@ async function reconcileDevice(
     await reconcileDeviceLevel(
       integration, deviceName, transport, sw,
       { kind: "managed-switch", switchId: String(row["switch-id"] || sw.serialNumber || "").trim() },
-      normalizeDescription(row.description), summary,
+      normalizeDescription(row.description), summary, pushedThisRun,
     );
   }
   // ── Device-level: APs ──
@@ -959,7 +1125,7 @@ async function reconcileDevice(
       await reconcileDeviceLevel(
         integration, deviceName, transport, ap,
         { kind: "wtp", wtpId: String(row["wtp-id"] || ap.serialNumber || "").trim() },
-        normalizeDescription(row.comment), summary,
+        normalizeDescription(row.comment), summary, pushedThisRun,
       );
     }
   }
@@ -975,7 +1141,7 @@ async function reconcileDevice(
         (value, currentDeviceValue) => pushInterfaceDescription({
           integration, deviceName, ifName: o.ifName, value, currentDeviceValue, transport,
         }),
-        summary,
+        summary, pushedThisRun,
       );
     }
   }
@@ -999,7 +1165,7 @@ async function reconcileDevice(
           (value, currentDeviceValue) => pushSwitchPortDescription({
             integration, deviceName, switchId, portName: o.ifName, value, currentDeviceValue, transport,
           }),
-          summary,
+          summary, pushedThisRun,
         );
       }
     }
@@ -1014,6 +1180,7 @@ async function reconcileDeviceLevel(
   target: DeviceDescTarget,
   deviceValue: string | null,
   summary: DescriptionSyncSummary,
+  pushedThisRun: PushedThisRun,
 ): Promise<void> {
   const baseline = readAssetBaseline(asset.descriptionSync);
   const polaris = normalizeDescription(asset.description);
@@ -1033,6 +1200,9 @@ async function reconcileDeviceLevel(
         data: { descriptionSync: { status: "synced", at: new Date().toISOString(), value: polaris } },
       }).catch(() => {});
     }
+    // Confirmed-agreed this run — lets the batch mirror pass align FMG's
+    // central copy even when the stored sync-state snapshot was stale.
+    if (polaris !== null) pushedThisRun.device.set(asset.id, polaris);
     return;
   }
   if (action === "adopt") {
@@ -1078,7 +1248,12 @@ async function reconcileDeviceLevel(
   });
   await stampAssetSyncState(asset.id, result, value);
   await logDevicePushEvent({ id: asset.id, hostname: asset.hostname }, value, result, "system:description-sync");
-  if (result.ok) summary.pushed++; else summary.failed++;
+  if (result.ok) {
+    summary.pushed++;
+    pushedThisRun.device.set(asset.id, value); // batch mirror pass consults this
+  } else {
+    summary.failed++;
+  }
 }
 
 // Converged (Polaris === device): stamp "synced" + record the baseline.
@@ -1106,6 +1281,7 @@ async function reconcileInterfaceOverride(
   deviceName: string,
   push: (value: string, currentDeviceValue: string | null) => Promise<DescPushResult>,
   summary: DescriptionSyncSummary,
+  pushedThisRun: PushedThisRun,
 ): Promise<void> {
   const polaris = normalizeDescription(o.description);
   if (polaris === null) return; // empty override — local clear semantics
@@ -1114,6 +1290,8 @@ async function reconcileInterfaceOverride(
 
   if (action === "none") {
     await markOverrideSyncedIfNeeded(o, polaris);
+    // Confirmed-agreed this run — consulted by the batch mirror pass.
+    pushedThisRun.port.set(portKey(o.assetId, o.ifName), polaris);
     return;
   }
   if (action === "adopt") {
@@ -1150,5 +1328,120 @@ async function reconcileInterfaceOverride(
   const result = await push(polaris, device);
   await stampOverrideSyncState(o.id, result, polaris);
   await logInterfacePushEvent({ id: o.assetId, hostname }, o.ifName, polaris, result, "system:description-sync");
-  if (result.ok) summary.pushed++; else summary.failed++;
+  if (result.ok) {
+    summary.pushed++;
+    pushedThisRun.port.set(portKey(o.assetId, o.ifName), polaris); // batch mirror pass consults this
+  } else {
+    summary.failed++;
+  }
+}
+
+/**
+ * Central-management batch heal (see the FMG mirror section header): one GET
+ * of the ADOM-level table per centrally-managed class, then a `set` per row
+ * whose FMG-side value differs from a Polaris value the device already agrees
+ * on. "Device agrees" = pushed successfully this run (pushedThisRun), or the
+ * stored sync state says synced at the current Polaris value. Never throws.
+ */
+async function mirrorCentralDbDrift(
+  integration: { id: string; type: string; config: unknown; name: string },
+  assets: ReconcileAsset[],
+  overridesByAsset: Map<string, ReconcileOverride[]>,
+  pushedThisRun: PushedThisRun,
+  summary: DescriptionSyncSummary,
+): Promise<void> {
+  try {
+    const flags = centralFlags(integration.config);
+    if (!flags.wtp && !flags.fsw) return;
+    const adom = fmgAdom(integration.config);
+
+    // The Polaris value the device is known to hold, or null when the device
+    // hasn't (yet) agreed — a diverged/conflicted/failed row must not be
+    // mirrored, or FMG would install a value the device never accepted.
+    const agreedDeviceValue = (a: ReconcileAsset): string | null => {
+      const fromRun = pushedThisRun.device.get(a.id);
+      if (fromRun !== undefined) return fromRun;
+      const polaris = normalizeDescription(a.description);
+      if (polaris === null) return null;
+      const blob = a.descriptionSync as { status?: string } | null;
+      if (blob?.status !== "synced") return null;
+      const baseline = readAssetBaseline(a.descriptionSync);
+      return baseline === polaris ? polaris : null;
+    };
+
+    if (flags.wtp) {
+      const res = await fmgAdomOp(integration, "get", `/pm/config/adom/${adom}/obj/wireless-controller/wtp`);
+      if (res.ok && Array.isArray(res.data)) {
+        const byKey = new Map<string, Record<string, unknown>>();
+        for (const r of res.data as Array<Record<string, unknown>>) {
+          // Key by wtp-id AND name — same defensive dual-keying as the
+          // device-side switch map (the ADOM mkey may not be the serial).
+          for (const k of [r?.["wtp-id"], r?.name]) {
+            const key = String(k || "").trim().toUpperCase();
+            if (key && !byKey.has(key)) byKey.set(key, r);
+          }
+        }
+        for (const a of assets) {
+          if (((a.fortinetTopology ?? {}) as TopologyBlob).role !== "fortiap") continue;
+          const agreed = agreedDeviceValue(a);
+          if (agreed === null) continue;
+          const row = byKey.get(String(a.serialNumber || "").trim().toUpperCase());
+          if (!row) continue; // AP not in the central table — nothing to align
+          if (normalizeDescription(row.comment) === agreed) continue;
+          const mkey = String(row["wtp-id"] || a.serialNumber || "").trim();
+          const result = await mirrorToFmg(integration, { kind: "wtp", wtpId: mkey }, agreed);
+          if (result.ok) summary.fmgMirrored++; else summary.fmgMirrorFailed++;
+          await logFmgMirrorEvent({ id: a.id, hostname: a.hostname }, { scope: "device", value: agreed, result });
+        }
+      }
+    }
+
+    if (flags.fsw) {
+      const res = await fmgAdomOp(integration, "get", `/pm/config/adom/${adom}/obj/fsp/managed-switch`);
+      if (res.ok && Array.isArray(res.data)) {
+        const rows = res.data as FortiOsManagedSwitchRow[];
+        for (const a of assets) {
+          if (((a.fortinetTopology ?? {}) as TopologyBlob).role !== "fortiswitch") continue;
+          const serial = String(a.serialNumber || "").trim();
+          if (!serial) continue;
+          const row = matchManagedSwitchRow(rows, serial);
+          if (!row) continue;
+          const mkey = String(row["switch-id"] || serial).trim();
+
+          // Device-level switch description.
+          const agreed = agreedDeviceValue(a);
+          if (agreed !== null && normalizeDescription(row.description) !== agreed) {
+            const result = await mirrorToFmg(integration, { kind: "managed-switch", switchId: mkey }, agreed);
+            if (result.ok) summary.fmgMirrored++; else summary.fmgMirrorFailed++;
+            await logFmgMirrorEvent({ id: a.id, hostname: a.hostname }, { scope: "device", value: agreed, result });
+          }
+
+          // Port descriptions (interface overrides on the switch asset).
+          const fmgPortDesc = new Map(
+            (row.ports ?? [])
+              .filter((x) => typeof x?.["port-name"] === "string" && x["port-name"])
+              .map((x) => [x["port-name"] as string, normalizeDescription(x.description)]),
+          );
+          for (const o of overridesByAsset.get(a.id) ?? []) {
+            const fromRun = pushedThisRun.port.get(portKey(o.assetId, o.ifName));
+            const polaris = normalizeDescription(o.description);
+            const agreedPort = fromRun !== undefined
+              ? fromRun
+              : (polaris !== null && o.syncStatus === "synced" && normalizeDescription(o.syncedValue) === polaris ? polaris : null);
+            if (agreedPort === null) continue;
+            if (!fmgPortDesc.has(o.ifName)) continue; // port absent from the central row
+            if (fmgPortDesc.get(o.ifName) === agreedPort) continue;
+            const result = await mirrorToFmg(integration, { kind: "switch-port", switchId: mkey, portName: o.ifName }, agreedPort);
+            if (result.ok) summary.fmgMirrored++; else summary.fmgMirrorFailed++;
+            await logFmgMirrorEvent({ id: o.assetId, hostname: a.hostname }, { scope: "interface", ifName: o.ifName, value: agreedPort, result });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn(
+      { integrationId: integration.id, err: err instanceof Error ? err.message : String(err) },
+      "description_sync.fmg_mirror_pass_failed",
+    );
+  }
 }
