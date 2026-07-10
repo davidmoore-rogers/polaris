@@ -29,8 +29,10 @@ vi.mock("../../src/services/reservationPushService.js", () => ({
   classifyPushError: (err: unknown) =>
     err instanceof AppError && [400, 404, 409].includes(err.httpStatus) ? "permanent" : "transient",
 }));
+vi.mock("../../src/services/fortimanagerService.js", () => ({ proxyQuery: vi.fn() }));
 
 import { prisma } from "../../src/db.js";
+import { proxyQuery } from "../../src/services/fortimanagerService.js";
 import { callFortiOs, buildTransportForIntegration } from "../../src/services/reservationPushService.js";
 import {
   pushInterfaceDescription,
@@ -41,6 +43,7 @@ import {
 
 const callMock = vi.mocked(callFortiOs);
 const transportMock = vi.mocked(buildTransportForIntegration);
+const fmgQueryMock = vi.mocked(proxyQuery);
 
 const integration = { id: "intg-1", type: "fortimanager", config: {} };
 const fakeTransport = { kind: "direct-fortigate", fgConfig: { host: "10.0.0.1", apiToken: "t" }, vdom: "root" } as any;
@@ -312,5 +315,100 @@ describe("runDescriptionSyncForIntegration", () => {
     const put = callMock.mock.calls.find((c) => c[1] === "PUT");
     expect(put?.[2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01");
     expect(put?.[3]).toEqual({ description: "IDF closet switch" });
+    // Central management not detected on this integration — no FMG DB calls.
+    expect(fmgQueryMock).not.toHaveBeenCalled();
+  });
+
+  // Central AP management: FMG's ADOM-level AP Manager copy is what installs
+  // push, so a device-side push must also mirror there (a JSON-RPC set —
+  // never an install) or the next install reverts it.
+  it("mirrors a pushed wtp comment into FMG's ADOM DB when central AP mgmt is detected", async () => {
+    vi.mocked(prisma.asset.findMany).mockResolvedValue([{
+      id: "ap1",
+      hostname: "lobby-ap",
+      serialNumber: "FP231FTF00000001",
+      description: "lobby AP",
+      descriptionSync: null,
+      fortinetTopology: { role: "fortiap", controllerFortigate: "JEFFERSON-101F-1" },
+    }] as any);
+    vi.mocked(prisma.assetInterfaceOverride.findMany).mockResolvedValue([] as any);
+    vi.mocked(prisma.asset.update).mockResolvedValue({} as any);
+    callMock.mockImplementation(async (_t, method, path) => {
+      if (method === "GET" && path === "/api/v2/cmdb/wireless-controller/wtp") {
+        return [{ "wtp-id": "FP231FTF00000001", comment: "" }]; // comment attr present → surface enabled
+      }
+      if (method === "PUT" && path === "/api/v2/cmdb/wireless-controller/wtp/FP231FTF00000001") return {};
+      if (method === "GET" && path === "/api/v2/cmdb/wireless-controller/wtp/FP231FTF00000001") {
+        return [{ "wtp-id": "FP231FTF00000001", comment: "lobby AP" }];
+      }
+      throw new Error(`unexpected FortiOS call: ${method} ${path}`);
+    });
+    const fmgEnvelope = (data: unknown) => ({ result: [{ status: { code: 0 }, data }] });
+    fmgQueryMock.mockImplementation(async (_cfg, method, params) => {
+      const p = (params as Array<{ url: string; data?: unknown }>)[0];
+      if (method === "get" && p.url === "/pm/config/adom/root/obj/wireless-controller/wtp") {
+        return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", comment: "stale FMG copy" }]);
+      }
+      if (method === "set" && p.url === "/pm/config/adom/root/obj/wireless-controller/wtp/FP231FTF00000001") {
+        return fmgEnvelope({});
+      }
+      if (method === "get" && p.url === "/pm/config/adom/root/obj/wireless-controller/wtp/FP231FTF00000001") {
+        return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", comment: "lobby AP" }]); // read-back verify
+      }
+      throw new Error(`unexpected FMG call: ${method} ${JSON.stringify(p)}`);
+    });
+
+    const summary = await runDescriptionSyncForIntegration({
+      id: "intg-1", type: "fortimanager",
+      config: { syncDescriptions: true, adom: "root", centralManagement: { wtp: true, fsw: false } },
+      name: "FMG",
+    });
+
+    expect(summary.pushed).toBe(1);        // device-side wtp PUT
+    expect(summary.fmgMirrored).toBe(1);   // ADOM DB set
+    expect(summary.fmgMirrorFailed).toBe(0);
+    const set = fmgQueryMock.mock.calls.find((c) => c[1] === "set");
+    expect((set?.[2] as Array<{ url: string; data?: unknown }>)[0]).toEqual({
+      url: "/pm/config/adom/root/obj/wireless-controller/wtp/FP231FTF00000001",
+      data: { comment: "lobby AP" },
+    });
+  });
+
+  it("mirrors an already-agreed value (no push needed) when FMG's copy is stale", async () => {
+    vi.mocked(prisma.asset.findMany).mockResolvedValue([{
+      id: "ap1",
+      hostname: "lobby-ap",
+      serialNumber: "FP231FTF00000001",
+      description: "lobby AP",
+      descriptionSync: { status: "synced", value: "lobby AP" },
+      fortinetTopology: { role: "fortiap", controllerFortigate: "JEFFERSON-101F-1" },
+    }] as any);
+    vi.mocked(prisma.assetInterfaceOverride.findMany).mockResolvedValue([] as any);
+    vi.mocked(prisma.asset.update).mockResolvedValue({} as any);
+    callMock.mockImplementation(async (_t, method, path) => {
+      if (method === "GET" && path === "/api/v2/cmdb/wireless-controller/wtp") {
+        return [{ "wtp-id": "FP231FTF00000001", comment: "lobby AP" }]; // device already agrees
+      }
+      throw new Error(`unexpected FortiOS call: ${method} ${path}`);
+    });
+    const fmgEnvelope = (data: unknown) => ({ result: [{ status: { code: 0 }, data }] });
+    fmgQueryMock.mockImplementation(async (_cfg, method, params) => {
+      const p = (params as Array<{ url: string; data?: unknown }>)[0];
+      if (method === "get" && p.url === "/pm/config/adom/root/obj/wireless-controller/wtp") {
+        return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", comment: "" }]); // FMG copy stale
+      }
+      if (method === "set") return fmgEnvelope({});
+      if (method === "get") return fmgEnvelope([{ "wtp-id": "FP231FTF00000001", comment: "lobby AP" }]);
+      throw new Error("unexpected FMG call");
+    });
+
+    const summary = await runDescriptionSyncForIntegration({
+      id: "intg-1", type: "fortimanager",
+      config: { syncDescriptions: true, adom: "root", centralManagement: { wtp: true, fsw: false } },
+      name: "FMG",
+    });
+
+    expect(summary.pushed).toBe(0);        // nothing to push device-side
+    expect(summary.fmgMirrored).toBe(1);   // but FMG's stale copy got healed
   });
 });

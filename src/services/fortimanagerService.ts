@@ -586,6 +586,62 @@ export async function proxyQuery(
   return rpc(baseUrl, { id: 1, method, params }, config.apiUser, config.apiToken, config.verifySsl, undefined, integrationId);
 }
 
+export interface CentralManagementDetection {
+  wtp: boolean;
+  fsw: boolean;
+  /** Row counts from the ADOM tables (null = table absent / per-device). */
+  wtpCount: number | null;
+  fswCount: number | null;
+  detectedAt: string;
+}
+
+/**
+ * Detect whether this ADOM centrally manages FortiAPs (AP Manager) and/or
+ * FortiSwitches (FortiSwitch Manager). Probe-based: read the ADOM-level
+ * object table each central pane owns —
+ *   APs:      /pm/config/adom/<adom>/obj/wireless-controller/wtp
+ *   Switches: /pm/config/adom/<adom>/obj/fsp/managed-switch
+ * "Central" here means the table read succeeds AND holds at least one row —
+ * exactly the condition under which an install from the central pane would
+ * revert a device-side description write, i.e. when description sync must
+ * mirror into FMG's database. A per-device-managed class errors on (or holds
+ * nothing at) its URL. Row counts ride along for the integrations-page
+ * display. Returns null on transport failure so the caller keeps the
+ * previous stamp. Runs at FMG discovery start (runDiscovery) and lands on
+ * `Integration.config.centralManagement` (system-owned key — the PUT
+ * handler's config merge preserves it across operator edits).
+ */
+export async function detectCentralManagement(
+  config: FortiManagerConfig,
+  integrationId?: string,
+): Promise<CentralManagementDetection | null> {
+  const adom = config.adom || "root";
+  // Row count, or null when FMG rejects the URL (class managed per-device).
+  const probe = async (url: string): Promise<number | null> => {
+    const res = (await proxyQuery(config, "get", [{ url }], integrationId)) as {
+      result?: Array<{ status?: { code?: number }; data?: unknown }>;
+    };
+    const r = res?.result?.[0];
+    if (r?.status?.code !== 0) return null;
+    return Array.isArray(r.data) ? r.data.length : null;
+  };
+  try {
+    const [wtpCount, fswCount] = await Promise.all([
+      probe(`/pm/config/adom/${adom}/obj/wireless-controller/wtp`),
+      probe(`/pm/config/adom/${adom}/obj/fsp/managed-switch`),
+    ]);
+    return {
+      wtp: (wtpCount ?? 0) > 0,
+      fsw: (fswCount ?? 0) > 0,
+      wtpCount,
+      fswCount,
+      detectedAt: new Date().toISOString(),
+    };
+  } catch {
+    return null; // FMG unreachable — keep the previous stamp
+  }
+}
+
 /**
  * Run an arbitrary FortiOS REST call against a managed FortiGate by wrapping
  * it in FortiManager's `/sys/proxy/json` endpoint. Used by the reservation

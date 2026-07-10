@@ -2268,6 +2268,42 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
     } else {
       // FortiManager: onDeviceComplete fires after each managed FortiGate is queried,
       // syncing subnets/assets/reservations incrementally.
+      //
+      // Detect ADOM central-management mode (AP Manager / FortiSwitch
+      // Manager) up front — Phase 13.7 description sync branches on it:
+      // centrally-managed classes mirror description pushes into FMG's ADOM
+      // database so the next install from the central pane doesn't revert
+      // the device-side write. Stamped onto
+      // Integration.config.centralManagement (system-owned key; the PUT
+      // handler's config merge preserves it across operator edits, and the
+      // integrations page renders it after the FMG Proxy row). Best-effort:
+      // a failed detection keeps the previous stamp.
+      try {
+        const detected = await fortimanager.detectCentralManagement(config as any, integrationId);
+        if (detected) {
+          const prev = (config as any).centralManagement as { wtp?: boolean; fsw?: boolean } | undefined;
+          const changed = !prev || prev.wtp !== detected.wtp || prev.fsw !== detected.fsw;
+          (config as any).centralManagement = detected;
+          // Read-modify-write against the freshest row so a concurrent
+          // operator edit isn't clobbered by this run's config snapshot.
+          const fresh = await prisma.integration.findUnique({ where: { id: integrationId }, select: { config: true } });
+          await prisma.integration.update({
+            where: { id: integrationId },
+            data: { config: { ...((fresh?.config ?? {}) as Record<string, unknown>), centralManagement: detected } as any },
+          });
+          if (changed) {
+            logEvent({
+              action: "integration.central_management",
+              resourceType: "integration",
+              resourceId: integrationId,
+              resourceName: integrationName,
+              actor,
+              message: `[${integrationName}] FMG central management detected — APs: ${detected.wtp ? "central" : "per-device"}, FortiSwitches: ${detected.fsw ? "central" : "per-device"}`,
+              details: detected as any,
+            });
+          }
+        }
+      } catch { /* best-effort — detection never blocks discovery */ }
       // Build the warm cache before dispatch — every firewall Asset row
       // discovered by THIS integration that the monitor loop most recently
       // saw as "up" gets its cached management IP fed to discovery so the
@@ -6794,8 +6830,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         });
         if (integrationRow && (integrationRow.config as Record<string, any> | null)?.syncDescriptions === true) {
           const summary = await runDescriptionSyncForIntegration(integrationRow);
-          if (summary.pushed || summary.adopted || summary.failed || summary.skippedDevices) {
-            syncLog("info", `Description sync: pushed ${summary.pushed}, adopted ${summary.adopted}, failed ${summary.failed}${summary.skippedDevices ? `, ${summary.skippedDevices} device(s) skipped` : ""}`);
+          if (summary.pushed || summary.adopted || summary.conflicts || summary.failed || summary.skippedDevices || summary.fmgMirrored || summary.fmgMirrorFailed) {
+            syncLog("info", `Description sync: pushed ${summary.pushed}, adopted ${summary.adopted}, conflicts ${summary.conflicts}, failed ${summary.failed}${summary.fmgMirrored || summary.fmgMirrorFailed ? `, FMG mirror ${summary.fmgMirrored} ok / ${summary.fmgMirrorFailed} failed` : ""}${summary.skippedDevices ? `, ${summary.skippedDevices} device(s) skipped` : ""}`);
           }
         }
       } catch (err: any) {
