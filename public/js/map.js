@@ -830,8 +830,11 @@
   // Re-fetch + re-render WITHOUT destroying the cytoscape instance up
   // front. We capture current node positions before tear-down so the new
   // graph keeps the operator's manual layout where possible.
-  async function refreshTopology() {
+  async function refreshTopology(opts) {
     if (!topoState.siteId) return;
+    // Strict === true so a click listener passing its MouseEvent can't
+    // accidentally silence the toast.
+    var silent = !!(opts && opts.silent === true);
     var btn = document.getElementById("topology-refresh");
     if (btn) btn.disabled = true;
     try {
@@ -841,7 +844,7 @@
       topoState.data = data;
       renderTopologyGraph(data);
       renderTopologyInfo(data);
-      if (typeof showToast === "function") showToast("Topology refreshed");
+      if (!silent && typeof showToast === "function") showToast("Topology refreshed");
     } catch (err) {
       if (typeof showToast === "function") {
         showToast("Refresh failed — " + (err && err.message ? err.message : String(err)), "error");
@@ -863,6 +866,75 @@
     catch (e) { /* quota / private mode — proceed with re-render anyway */ }
     renderTopologyGraph(topoState.data);
     if (typeof showToast === "function") showToast("Layout reset");
+  }
+
+  // ── Right-click description editor ──────────────────────────────────────
+  // cxttap on an asset-backed node opens a small modal editing
+  // Asset.description in place — the fast path for stamping the location
+  // codes (a:/b:/f:/r:/jb:) that drive grouping hulls, row clustering, and
+  // the building/floor switcher. Saves through the normal PUT /assets/:id
+  // pathway (so description sync to the device applies when the integration
+  // has it on), then silently refreshes the topology so the server
+  // re-resolves each node's effective codes.
+  async function openTopologyDescriptionEditor(assetId) {
+    if (typeof canManageAssets === "function" && !canManageAssets()) {
+      if (typeof showToast === "function") showToast("Editing assets requires write access", "error");
+      return;
+    }
+    if (typeof openModal !== "function") return;
+    var asset;
+    try {
+      asset = await api.assets.get(assetId);
+    } catch (err) {
+      if (typeof showToast === "function") {
+        showToast("Failed to load asset — " + (err && err.message ? err.message : String(err)), "error");
+      }
+      return;
+    }
+    var name = asset.hostname || asset.dnsName || asset.ipAddress || "asset";
+    var bodyHtml =
+      '<label for="topo-desc-input" style="display:block;margin-bottom:6px;font-size:0.9rem">Description</label>' +
+      '<textarea id="topo-desc-input" maxlength="255" rows="3" ' +
+        'style="width:100%;resize:vertical;padding:6px 8px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+        escapeHtml(asset.description || "") + '</textarea>' +
+      '<div style="margin-top:10px;font-size:0.8rem;color:var(--color-text-secondary)">' +
+        'Device grouping shortcuts — include anywhere in the description:' +
+        '<div style="margin-top:4px;font-family:monospace">' +
+          'a:<i>Area</i> &nbsp; b:<i>Building</i> &nbsp; f:<i>Floor</i> &nbsp; r:<i>Room</i> &nbsp; jb:<i>Junction box</i>' +
+        '</div>' +
+        '<div style="margin-top:4px;color:var(--color-text-tertiary)">' +
+          'e.g. <code>a:Mine b:Shop f:2 r:North Closet jb:112-305</code> — a value runs until the ' +
+          'next code, so multi-word names need no quotes. Codes in the asset’s Notes override ' +
+          'the same code here.' +
+        '</div>' +
+      '</div>';
+    var footer =
+      '<button type="button" class="btn btn-secondary" id="topo-desc-cancel">Cancel</button>' +
+      '<button type="button" class="btn btn-primary" id="topo-desc-save">Save</button>';
+    openModal("Edit Description — " + name, bodyHtml, footer);
+    setTimeout(function () {
+      var input = document.getElementById("topo-desc-input");
+      var cancel = document.getElementById("topo-desc-cancel");
+      var save = document.getElementById("topo-desc-save");
+      if (input) input.focus();
+      if (cancel) cancel.addEventListener("click", function () {
+        if (typeof closeModal === "function") closeModal();
+      });
+      if (save) save.addEventListener("click", async function () {
+        save.disabled = true;
+        try {
+          await api.assets.update(assetId, { description: input ? input.value.trim() : "" });
+          if (typeof closeModal === "function") closeModal();
+          if (typeof showToast === "function") showToast("Description saved");
+          refreshTopology({ silent: true });
+        } catch (err) {
+          save.disabled = false;
+          if (typeof showToast === "function") {
+            showToast("Save failed — " + (err && err.message ? err.message : String(err)), "error");
+          }
+        }
+      });
+    }, 0);
   }
 
   // ── Legend overlay ────────────────────────────────────────────────────────
@@ -1584,17 +1656,18 @@
     // the asset id from the node: firewall/switch/AP/endpoint use the node id
     // (which IS the asset id); cross-site remotes + matched wireless stations
     // carry it in `assetId`; LLDP ghosts and unmatched stations have no asset.
-    function _openAssetForNode(node) {
-      if (node.data("isPortal")) return; // floor portal — tap navigation, not an asset
-      if (node.data("isLocGroup")) return; // location hull — hover surface only
+    function _assetIdForNode(node) {
+      if (node.data("isPortal")) return null; // floor portal — tap navigation, not an asset
+      if (node.data("isLocGroup")) return null; // location hull — hover surface only
       var role = node.data("role");
-      if (role === "lldp") return; // ghost neighbor — no Polaris asset
-      var assetId;
+      if (role === "lldp") return null; // ghost neighbor — no Polaris asset
       if (role === "wireless-station" || role === "remote-asset") {
-        assetId = node.data("assetId");
-      } else {
-        assetId = node.data("assetId") || node.id();
+        return node.data("assetId") || null;
       }
+      return node.data("assetId") || node.id() || null;
+    }
+    function _openAssetForNode(node) {
+      var assetId = _assetIdForNode(node);
       if (assetId) openViewModal(assetId);
     }
     var _lastNodeTap = { id: null, t: 0 };
@@ -1610,6 +1683,21 @@
       _lastNodeTap = { id: id, t: now };
       // Single tap: selection highlight is handled by Cytoscape automatically.
     });
+
+    // Right-click on an asset-backed node opens the in-place description
+    // editor — the quick path for stamping a:/b:/f:/r:/jb: grouping codes
+    // without opening the full asset slide-over.
+    cyInstance.on("cxttap", "node", function (evt) {
+      var assetId = _assetIdForNode(evt.target);
+      if (assetId) openTopologyDescriptionEditor(assetId);
+    });
+    // The native context menu would cover the editor — suppress it over the
+    // graph. Bound once; the container element survives cytoscape re-renders.
+    var graphEl = document.getElementById("topology-graph");
+    if (graphEl && !graphEl.dataset.ctxMenuBound) {
+      graphEl.dataset.ctxMenuBound = "1";
+      graphEl.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    }
 
     // Auto-clear the connection-path dim if the operator taps any node
     // currently dimmed off-path — they're trying to navigate the rest of
