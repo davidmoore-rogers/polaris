@@ -1308,6 +1308,8 @@ router.post("/:id/test", async (req, res, next) => {
       result = await entraId.testConnection(config as any);
     } else if (integration.type === "activedirectory") {
       result = await activeDirectory.testConnection(config as any);
+    } else if (integration.type === "vcenter") {
+      result = await vcenter.testConnection(config as any);
     } else {
       result = { ok: false, message: `Unknown integration type: ${integration.type}` };
     }
