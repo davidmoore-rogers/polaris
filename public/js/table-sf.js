@@ -609,8 +609,9 @@ TableSF.prototype.apply = function (data) {
 
 /**
  * setupColumnLayout(tableEl, options) — Resizable column widths + show/hide
- * column chooser. Independent of TableSF (works on any <table>) so the Events
- * page (which doesn't use TableSF) can use it too.
+ * column chooser. Independent of TableSF (works on any <table>), but when a
+ * table uses both, construct TableSF FIRST: TableSF._setup rebuilds each
+ * header th via innerHTML, which wipes the resize handles this helper appends.
  *
  * Each <th> is given a stable column id derived from data-sf-key, then
  * data-col-id, then "__col<index>". Columns marked data-col-required="true"

@@ -65,11 +65,6 @@ var _eventsSF = null;
     } catch (_) {}
   }
 
-  var eventsTable = document.querySelector("#events-tbody").closest("table");
-  _eventsLayout = setupColumnLayout(eventsTable, {
-    onChange: _saveEventsPrefs,
-  });
-
   // Cached set of distinct resourceType values for the Resource-column
   // multi-select. Seeded once from GET /events/resource-types (the full
   // distinct set across the whole retention window, so every option is
@@ -203,6 +198,14 @@ var _eventsSF = null;
     currentOffset = 0;
     loadEvents();
     _saveEventsPrefs();
+  });
+
+  // setupColumnLayout AFTER TableSF: TableSF._setup rebuilds each header th
+  // via innerHTML, which would wipe the resize handles setupColumnLayout
+  // appends (canonical order — see notifications.js).
+  var eventsTable = document.querySelector("#events-tbody").closest("table");
+  _eventsLayout = setupColumnLayout(eventsTable, {
+    onChange: _saveEventsPrefs,
   });
 
   var prefsReady;
