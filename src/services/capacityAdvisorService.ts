@@ -152,6 +152,7 @@ export interface IntegrationBreakdown {
   entra: number;
   activedirectory: number;
   windowsserver: number;
+  vcenter: number;
 }
 
 export interface PgRecommendation {
@@ -441,7 +442,9 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     integrations.fortimanagerProxy * 1 +
     Math.min(integrations.fortimanagerDirectParallelismSum, 20) +
     integrations.fortigate * 1 +
-    (integrations.entra + integrations.activedirectory + integrations.windowsserver) * 2;
+    // `?? 0` — older callers/tests may pass a breakdown built before the
+    // vcenter member existed.
+    (integrations.entra + integrations.activedirectory + integrations.windowsserver + (integrations.vcenter ?? 0)) * 2;
 
   // 3. Prisma / pg-boss / max_connections.
   //
@@ -796,6 +799,7 @@ async function readIntegrationBreakdown(): Promise<IntegrationBreakdown> {
     entra: 0,
     activedirectory: 0,
     windowsserver: 0,
+    vcenter: 0,
   };
   for (const r of rows) {
     const cfg = (r.config ?? {}) as Record<string, unknown>;
@@ -815,6 +819,8 @@ async function readIntegrationBreakdown(): Promise<IntegrationBreakdown> {
       out.activedirectory += 1;
     } else if (r.type === "windowsserver") {
       out.windowsserver += 1;
+    } else if (r.type === "vcenter") {
+      out.vcenter += 1;
     }
   }
   return out;

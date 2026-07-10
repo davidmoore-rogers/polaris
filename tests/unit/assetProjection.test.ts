@@ -383,3 +383,73 @@ describe("projectAssetFromSources — hybrid Windows laptop (full integration sc
     expect(provenance.learnedLocation).toBe("ad");
   });
 });
+
+// ─── vCenter sources (definitive below the agent) ───────────────────────────
+
+describe("projectAssetFromSources — vCenter priority", () => {
+  it("vcenter-vm beats AD / Intune / Entra / fortigate-endpoint on every field it carries", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("ad", { dnsHostName: "sql01.corp.local", operatingSystem: "Windows Server 2019 Standard" }),
+      src("intune", { deviceName: "SQL01", operatingSystem: "Windows", manufacturer: "Dell Inc.", model: "PowerEdge R750" }),
+      src("fortigate-endpoint", { hostname: "sql01-dhcp", ipAddress: "10.1.1.50", os: "Windows" }),
+      src("vcenter-vm", {
+        guestHostname: "sql01.corp.local",
+        name: "prod-sql01",
+        guestOsFullName: "Microsoft Windows Server 2022 (64-bit)",
+        guestIp: "10.1.1.51",
+      }),
+    ]);
+    expect(projected.hostname).toBe("sql01.corp.local");
+    expect(provenance.hostname).toBe("vcenter-vm");
+    expect(projected.os).toBe("Microsoft Windows Server 2022 (64-bit)");
+    expect(provenance.os).toBe("vcenter-vm");
+    // Live Tools-reported IP beats the DHCP sighting.
+    expect(projected.ipAddress).toBe("10.1.1.51");
+    expect(provenance.ipAddress).toBe("vcenter-vm");
+    // Constant manufacturer/model for VMs (normalizeManufacturer preserves
+    // the raw vendor string here; the ManufacturerAlias registry canonicalizes
+    // at runtime when the operator has an alias configured).
+    expect(projected.manufacturer).toBe("VMware, Inc.");
+    expect(provenance.manufacturer).toBe("vcenter-vm");
+    expect(projected.model).toBe("VMware Virtual Platform");
+  });
+
+  it("polaris-agent still wins over vcenter-vm (in-guest truth beats hypervisor view)", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("vcenter-vm", { guestHostname: "sql01", guestOsFullName: "Ubuntu Linux (64-bit)" }),
+      src("polaris-agent", { hostname: "sql01.internal", os: "Ubuntu 24.04.1 LTS", manufacturer: "VMware, Inc.", model: "VMware Virtual Platform" }),
+    ]);
+    expect(projected.hostname).toBe("sql01.internal");
+    expect(provenance.hostname).toBe("polaris-agent");
+    expect(projected.os).toBe("Ubuntu 24.04.1 LTS");
+    expect(provenance.os).toBe("polaris-agent");
+  });
+
+  it("vcenter-vm falls back to the VM display name when Tools is off (no guestHostname)", () => {
+    const { projected } = projectAssetFromSources([
+      src("vcenter-vm", { name: "appliance-01", guestHostname: null }),
+    ]);
+    expect(projected.hostname).toBe("appliance-01");
+  });
+
+  it("vcenter-host projects name / constant ESXi os / resolved IP, and never a serial", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("vcenter-host", { name: "esx01.corp.local", resolvedIp: "10.0.0.11" }),
+    ]);
+    expect(projected.hostname).toBe("esx01.corp.local");
+    expect(projected.os).toBe("VMware ESXi");
+    expect(projected.ipAddress).toBe("10.0.0.11");
+    expect(provenance.ipAddress).toBe("vcenter-host");
+    expect(projected.serialNumber).toBeNull();
+    expect(projected.osVersion).toBeNull(); // version not exposed by REST — no rule
+  });
+
+  it("infrastructure mgmtIp still outranks the vcenter-vm guest IP (virtual FortiGate)", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("vcenter-vm", { guestIp: "10.9.9.9", name: "fgt-vm01" }),
+      src("fortigate-firewall", { hostname: "fgt-vm01", mgmtIp: "10.0.0.254" }),
+    ]);
+    expect(projected.ipAddress).toBe("10.0.0.254");
+    expect(provenance.ipAddress).toBe("fortigate-firewall");
+  });
+});

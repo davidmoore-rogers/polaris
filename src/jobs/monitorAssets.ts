@@ -184,6 +184,8 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     // must be excluded here too, otherwise their timestamps never advance and
     // they permanently inflate the pg-boss queue on every tick.
     const isManagedSwitchOrAp = a.assetType === "switch" || a.assetType === "access_point";
+    // "vcenter" (hypervisor-view quickStats) deliberately passes this gate —
+    // it delivers telemetry via the per-integration warm cache.
     const canTelemetry =
       eff.cpuMemoryPolling !== null &&
       eff.cpuMemoryPolling !== "icmp"  &&

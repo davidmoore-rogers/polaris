@@ -452,3 +452,42 @@ describe("evaluateSuppression", () => {
     expect(out.get("sw")).toBe(false);
   });
 });
+
+// ─── vCenter cluster multi-parent (vMotion-safe) ────────────────────────────
+// A clustered VM carries one edge per cluster-member host; all-down semantics
+// suppress it only when the ENTIRE cluster is dark, so an intra-cluster
+// vMotion between discovery cycles can never cause a false Dep. Down.
+
+describe("evaluateSuppression — vCenter cluster hosts", () => {
+  function st2(id: string, layer: number | null, monitorStatus: string | null, monitored = true): SuppressionAssetState {
+    return { id, layer, monitorStatus, monitored, currentlySuppressed: false };
+  }
+
+  it("VM with three cluster-host parents suppresses only when all three are down", () => {
+    const parents = new Map([["vm", ["h1", "h2", "h3"]]]);
+
+    // One host down (the VM's recorded host, say) — the cluster still has
+    // live members, so the VM stays unsuppressed even if placement is stale.
+    let out = evaluateSuppression(
+      [st2("h1", 1, "down"), st2("h2", 1, "up"), st2("h3", 1, "up"), st2("vm", 2, "down")],
+      parents,
+    );
+    expect(out.get("vm")).toBe(false);
+
+    // Whole cluster dark → suppressed.
+    out = evaluateSuppression(
+      [st2("h1", 1, "down"), st2("h2", 1, "down"), st2("h3", 1, "down"), st2("vm", 2, "down")],
+      parents,
+    );
+    expect(out.get("vm")).toBe(true);
+  });
+
+  it("standalone-host VM suppresses when its single host is down", () => {
+    const parents = new Map([["vm", ["h1"]]]);
+    const out = evaluateSuppression(
+      [st2("h1", 1, "down"), st2("vm", 2, "down")],
+      parents,
+    );
+    expect(out.get("vm")).toBe(true);
+  });
+});

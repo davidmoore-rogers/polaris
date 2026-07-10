@@ -51,6 +51,7 @@ import {
 // from monitoringService; implementations live in utils/fortiswitchCmdb.ts.
 export { parseFortiosMemberList, buildFortiswitchTrunkMembers, findFortiswitchUplinkPorts };
 import { fgRequest, type FortiGateConfig } from "./fortigateService.js";
+import { fetchVcenterQuickStats } from "./vcenterService.js";
 import {
   fmgProxyRest,
   resolveDeviceMgmtIpViaFmg,
@@ -775,6 +776,17 @@ function defaultPollingForSource(
   if (source === "activedirectory" || source === "entraid" || source === "windowsserver") {
     return stream === "responseTime" ? "icmp" : null;
   }
+  if (source === "vcenter") {
+    // Response time: ICMP against the guest/host IP. CPU/memory: the
+    // hypervisor-view quickStats stream — one batched vCenter call per
+    // integration per tick serves every monitored VM, no in-guest
+    // credential needed. ESXi hosts have no quickStats row (the collector
+    // returns a soft error for them); the hostMonitor class block routes
+    // their cpuMemory at SNMP when the operator wants host telemetry.
+    if (stream === "responseTime") return "icmp";
+    if (stream === "cpuMemory") return "vcenter";
+    return null;
+  }
   // manual
   return stream === "responseTime" ? "icmp" : null;
 }
@@ -811,6 +823,14 @@ function pickClassStreamsBlock(
     let block: Record<string, unknown> | undefined;
     if (assetType === "workstation") block = cfg.workstationMonitor as Record<string, unknown> | undefined;
     else if (assetType === "server")  block = cfg.serverMonitor      as Record<string, unknown> | undefined;
+    if (!block) return undefined;
+    const streams = block.streams as Record<string, unknown> | undefined;
+    return streams && typeof streams === "object" ? streams : undefined;
+  }
+  if (integrationType === "vcenter") {
+    let block: Record<string, unknown> | undefined;
+    if (assetType === "virtual_machine")   block = cfg.vmMonitor   as Record<string, unknown> | undefined;
+    else if (assetType === "hypervisor")   block = cfg.hostMonitor as Record<string, unknown> | undefined;
     if (!block) return undefined;
     const streams = block.streams as Record<string, unknown> | undefined;
     return streams && typeof streams === "object" ? streams : undefined;
@@ -2225,6 +2245,116 @@ async function fetchFortinetControllerInventory(
   return fetchPromise;
 }
 
+// ─── vCenter quickStats warm cache ─────────────────────────────────────────
+//
+// The "vcenter" cpuMemory polling method reads per-VM CPU/RAM from the
+// vCenter server's batched SOAP quickStats fetch — ONE upstream call per
+// vCenter integration per 30s tick serves every monitored VM (the
+// controller-inventory cache pattern above: TTL + promise-singleton
+// in-flight guard so N heavy workers waking on the same tick coalesce
+// into one call). Entries are keyed by BOTH externalId forms the sync
+// uses (instanceUuid, and `${integrationId}:${moref}` for VMs whose
+// detail call couldn't produce a uuid) so the per-asset lookup always
+// matches the asset's vcenter-vm AssetSource externalId.
+
+interface VcenterQuickStatsCacheEntry {
+  fetchedAt: number;
+  fetchDurationMs: number;
+  stats: Map<string, import("./vcenterService.js").VcenterVmQuickStats>;
+}
+
+const VCENTER_QUICKSTATS_CACHE_TTL_MS = 30_000;
+const vcenterQuickStatsCache = new Map<string, VcenterQuickStatsCacheEntry>();
+const inflightVcenterQuickStats = new Map<string, Promise<VcenterQuickStatsCacheEntry>>();
+
+async function fetchVcenterQuickStatsCached(
+  integration: { id: string; config: Record<string, unknown> },
+): Promise<VcenterQuickStatsCacheEntry> {
+  const cached = vcenterQuickStatsCache.get(integration.id);
+  if (cached && Date.now() - cached.fetchedAt < VCENTER_QUICKSTATS_CACHE_TTL_MS) {
+    return cached;
+  }
+  const inflight = inflightVcenterQuickStats.get(integration.id);
+  if (inflight) return inflight;
+
+  const fetchPromise = (async (): Promise<VcenterQuickStatsCacheEntry> => {
+    const fetchStartedAt = performance.now();
+    try {
+      const rows = await fetchVcenterQuickStats(integration.config as unknown as import("./vcenterService.js").VcenterConfig);
+      const stats = new Map<string, import("./vcenterService.js").VcenterVmQuickStats>();
+      for (const row of rows) {
+        if (row.instanceUuid) stats.set(row.instanceUuid, row);
+        stats.set(`${integration.id}:${row.moref}`, row);
+      }
+      const entry: VcenterQuickStatsCacheEntry = {
+        fetchedAt: Date.now(),
+        fetchDurationMs: Math.max(0, Math.round(performance.now() - fetchStartedAt)),
+        stats,
+      };
+      vcenterQuickStatsCache.set(integration.id, entry);
+      return entry;
+    } finally {
+      inflightVcenterQuickStats.delete(integration.id);
+    }
+  })();
+
+  inflightVcenterQuickStats.set(integration.id, fetchPromise);
+  return fetchPromise;
+}
+
+/**
+ * Hypervisor-view CPU/RAM telemetry for a vCenter VM. Resolves the vCenter
+ * integration through the asset's vcenter-vm AssetSource row — NOT through
+ * discoveredByIntegration, because a VM that AD/Entra discovered first
+ * keeps the directory integration there even after a vCenter sync merges
+ * into it. Reads the warm quickStats cache (one upstream call per
+ * integration per tick), so the per-asset cost is a Map lookup.
+ */
+async function collectTelemetryVcenter(assetId: string): Promise<CollectionResult<TelemetrySample>> {
+  const vmSource = await prisma.assetSource.findFirst({
+    where: { assetId, sourceKind: "vcenter-vm" },
+    select: { externalId: true, integration: { select: { id: true, type: true, config: true, enabled: true } } },
+  });
+  if (!vmSource) {
+    return { supported: true, error: "No vCenter source on file for this asset — vCenter polling requires a vCenter-discovered VM" };
+  }
+  if (!vmSource.integration || vmSource.integration.type !== "vcenter") {
+    return { supported: true, error: "The asset's vCenter source is not linked to a vCenter integration" };
+  }
+  if (vmSource.integration.enabled === false) {
+    return { supported: true, error: "The linked vCenter integration is disabled" };
+  }
+  try {
+    const { stats } = await fetchVcenterQuickStatsCached({
+      id: vmSource.integration.id,
+      config: (vmSource.integration.config ?? {}) as Record<string, unknown>,
+    });
+    const row = stats.get(vmSource.externalId);
+    if (!row) {
+      return { supported: true, error: "VM not present in the vCenter quickStats inventory (removed or renamed?)" };
+    }
+    if (row.powerState && row.powerState !== "poweredOn" && row.powerState !== "POWERED_ON") {
+      return { supported: true, error: `VM is not powered on (${row.powerState})` };
+    }
+    const MIB = 1024 * 1024;
+    const cpuPct =
+      row.cpuUsageMhz !== null && row.cpuMaxMhz !== null && row.cpuMaxMhz > 0
+        ? Math.min(100, Math.max(0, (row.cpuUsageMhz / row.cpuMaxMhz) * 100))
+        : null;
+    return {
+      supported: true,
+      data: {
+        cpuPct,
+        // Absolute bytes — the UI prefers bytes and derives mem% downstream.
+        memUsedBytes:  row.guestMemUsageMB !== null ? row.guestMemUsageMB * MIB : null,
+        memTotalBytes: row.memTotalMB      !== null ? row.memTotalMB * MIB      : null,
+      },
+    };
+  } catch (err: any) {
+    return { supported: true, error: err?.message || "vCenter quickStats fetch failed" };
+  }
+}
+
 // ─── Wireless-station signal overlay ──────────────────────────────────────
 //
 // The SNMP fapStationTable carries no per-client RSSI — signal/noise live only
@@ -3496,6 +3626,13 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
   // out of the way — `recordTelemetryResult` already no-ops on supported=false.
   if (polling === "agent") return { supported: false };
   const telemetryTimeout = effective.cpuMemoryTimeoutMs;
+
+  // vCenter quickStats need no asset IP (the vCenter server is the target),
+  // so this dispatches BEFORE the IP guard below. The collector resolves the
+  // integration via the asset's vcenter-vm AssetSource row.
+  if (polling === "vcenter") {
+    return await collectTelemetryVcenter(assetId);
+  }
 
   // FQDN fallback for credentialed methods that resolve hostnames natively.
   const targetIp =
@@ -9098,6 +9235,8 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     // have REST telemetry via collectTelemetryFortiapRest piggybacking on
     // /api/v2/monitor/wifi/managed_ap, so the rest_api gate excludes
     // switches only — APs are enqueued and dispatched.
+    // "vcenter" (hypervisor-view quickStats) deliberately passes this gate —
+    // it delivers telemetry via the per-integration warm cache.
     const canTelemetry =
       eff.cpuMemoryPolling !== null &&
       eff.cpuMemoryPolling !== "icmp"  &&

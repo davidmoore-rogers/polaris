@@ -36,7 +36,9 @@ export type AddAsMonitoredAssetType =
   | "switch"
   | "access_point"
   | "workstation"
-  | "server";
+  | "server"
+  | "virtual_machine"
+  | "hypervisor";
 
 const FORTINET_TYPES = new Set(["fortimanager", "fortigate"]);
 const WORKSTATION_SERVER_TYPES = new Set([
@@ -44,6 +46,7 @@ const WORKSTATION_SERVER_TYPES = new Set([
   "entraid",
   "windowsserver",
 ]);
+const VCENTER_TYPES = new Set(["vcenter"]);
 
 /**
  * Per-class addAsMonitored is read from the integration's config blob at
@@ -54,6 +57,8 @@ const WORKSTATION_SERVER_TYPES = new Set([
  *   access_point  → fortiapMonitor.addAsMonitored        (fortimanager/fortigate)
  *   workstation   → workstationMonitor.addAsMonitored    (activedirectory/entraid/windowsserver)
  *   server        → serverMonitor.addAsMonitored         (activedirectory/entraid/windowsserver)
+ *   virtual_machine → vmMonitor.addAsMonitored           (vcenter)
+ *   hypervisor      → hostMonitor.addAsMonitored         (vcenter)
  *
  * Returns null when:
  *  - the asset type doesn't map to a per-class block
@@ -91,6 +96,14 @@ export function getAddAsMonitoredFromConfig(
     case "server":
       if (!WORKSTATION_SERVER_TYPES.has(integrationType)) return null;
       blockKey = "serverMonitor";
+      break;
+    case "virtual_machine":
+      if (!VCENTER_TYPES.has(integrationType)) return null;
+      blockKey = "vmMonitor";
+      break;
+    case "hypervisor":
+      if (!VCENTER_TYPES.has(integrationType)) return null;
+      blockKey = "hostMonitor";
       break;
     default:
       return null;
@@ -144,7 +157,7 @@ export function resolveMonitorOverride(input: {
  * and is invisible to the per-class addAsMonitored flag.
  */
 export const AUTO_MONITOR_ASSET_TYPES: ReadonlySet<AddAsMonitoredAssetType> =
-  new Set(["firewall", "switch", "access_point", "workstation", "server"]);
+  new Set(["firewall", "switch", "access_point", "workstation", "server", "virtual_machine", "hypervisor"]);
 
 /** Maps Asset.assetType to its per-class config block key, when one applies. */
 export function classBlockKeyForAssetType(
@@ -156,6 +169,8 @@ export function classBlockKeyForAssetType(
     case "access_point": return "fortiapMonitor";
     case "workstation":  return "workstationMonitor";
     case "server":       return "serverMonitor";
+    case "virtual_machine": return "vmMonitor";
+    case "hypervisor":      return "hostMonitor";
     default:             return null;
   }
 }
@@ -176,6 +191,8 @@ export function snapshotAddAsMonitoredByAssetType(
     access_point: getAddAsMonitoredFromConfig(integrationType, integrationConfig, "access_point"),
     workstation:  getAddAsMonitoredFromConfig(integrationType, integrationConfig, "workstation"),
     server:       getAddAsMonitoredFromConfig(integrationType, integrationConfig, "server"),
+    virtual_machine: getAddAsMonitoredFromConfig(integrationType, integrationConfig, "virtual_machine"),
+    hypervisor:      getAddAsMonitoredFromConfig(integrationType, integrationConfig, "hypervisor"),
   };
 }
 
@@ -209,6 +226,8 @@ export async function recomputeMonitorOverrideForAssets(
           WHEN 'access_point' THEN (i."config" #>> '{fortiapMonitor,addAsMonitored}')::boolean
           WHEN 'workstation'  THEN (i."config" #>> '{workstationMonitor,addAsMonitored}')::boolean
           WHEN 'server'       THEN (i."config" #>> '{serverMonitor,addAsMonitored}')::boolean
+          WHEN 'virtual_machine' THEN (i."config" #>> '{vmMonitor,addAsMonitored}')::boolean
+          WHEN 'hypervisor'      THEN (i."config" #>> '{hostMonitor,addAsMonitored}')::boolean
           ELSE NULL
         END,
         false
@@ -217,7 +236,7 @@ export async function recomputeMonitorOverrideForAssets(
     FROM "integrations" i
     WHERE a."discoveredByIntegrationId" = i."id"
       AND a."id" = ANY(${assetIds}::text[])
-      AND a."assetType" IN ('firewall', 'switch', 'access_point', 'workstation', 'server')
+      AND a."assetType" IN ('firewall', 'switch', 'access_point', 'workstation', 'server', 'virtual_machine', 'hypervisor')
   `;
 }
 
@@ -246,6 +265,8 @@ export async function sweepMonitoredForIntegration(
         WHEN 'access_point' THEN (i."config" #>> '{fortiapMonitor,addAsMonitored}')::boolean
         WHEN 'workstation'  THEN (i."config" #>> '{workstationMonitor,addAsMonitored}')::boolean
         WHEN 'server'       THEN (i."config" #>> '{serverMonitor,addAsMonitored}')::boolean
+        WHEN 'virtual_machine' THEN (i."config" #>> '{vmMonitor,addAsMonitored}')::boolean
+        WHEN 'hypervisor'      THEN (i."config" #>> '{hostMonitor,addAsMonitored}')::boolean
       END,
       false
     )
@@ -253,7 +274,7 @@ export async function sweepMonitoredForIntegration(
     WHERE a."discoveredByIntegrationId" = i."id"
       AND i."id" = ${integrationId}::text
       AND a."monitorOverride" = false
-      AND a."assetType" IN ('firewall', 'switch', 'access_point', 'workstation', 'server')
+      AND a."assetType" IN ('firewall', 'switch', 'access_point', 'workstation', 'server', 'virtual_machine', 'hypervisor')
       AND a."monitored" IS DISTINCT FROM COALESCE(
         CASE a."assetType"
           WHEN 'firewall'     THEN (i."config" #>> '{fortigateMonitor,addAsMonitored}')::boolean
@@ -261,6 +282,8 @@ export async function sweepMonitoredForIntegration(
           WHEN 'access_point' THEN (i."config" #>> '{fortiapMonitor,addAsMonitored}')::boolean
           WHEN 'workstation'  THEN (i."config" #>> '{workstationMonitor,addAsMonitored}')::boolean
           WHEN 'server'       THEN (i."config" #>> '{serverMonitor,addAsMonitored}')::boolean
+          WHEN 'virtual_machine' THEN (i."config" #>> '{vmMonitor,addAsMonitored}')::boolean
+          WHEN 'hypervisor'      THEN (i."config" #>> '{hostMonitor,addAsMonitored}')::boolean
         END,
         false
       )

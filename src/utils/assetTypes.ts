@@ -19,10 +19,15 @@
  */
 
 /**
- * The eight historical AssetType enum values. Stable identifiers — code that
- * branches on assetType uses these literals. Custom types added via the
- * registry are NOT in this list and fall through to "other"-like generic
- * behavior in every code path that uses this constant.
+ * The eight historical AssetType enum values plus the two vCenter built-ins
+ * (`virtual_machine` / `hypervisor`, migration 20260709000000). Stable
+ * identifiers — code that branches on assetType uses these literals. Custom
+ * types added via the registry are NOT in this list and fall through to
+ * "other"-like generic behavior in every code path that uses this constant.
+ * Note the Fortinet special-cases (dependency tree, topology rendering,
+ * polling source defaults) key on firewall/switch/access_point only — the
+ * vCenter built-ins get their special behavior from the vCenter surfaces
+ * (syncVcenterDevices, virtualization endpoint, vcenter polling method).
  */
 export const BUILT_IN_ASSET_TYPES = [
   "server",
@@ -33,6 +38,8 @@ export const BUILT_IN_ASSET_TYPES = [
   "printer",
   "access_point",
   "other",
+  "virtual_machine",
+  "hypervisor",
 ] as const;
 
 export type BuiltInAssetType = (typeof BUILT_IN_ASSET_TYPES)[number];

@@ -139,7 +139,7 @@ export async function runAutoDeployForClass(opts: {
   integrationId: string;
   integrationName: string;
   integrationType: string;
-  klass: "workstation" | "server";
+  klass: "workstation" | "server" | "virtual_machine";
   assetType: string;
   cfg: AgentDeployClassConfig;
   actor: string;

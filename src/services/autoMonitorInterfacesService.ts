@@ -100,7 +100,7 @@ export type AutoMonitorSelection = {
 // classes. Interface auto-monitor is class-agnostic — it resolves a selection
 // against each asset's latest AssetInterfaceSample rows regardless of source —
 // so the only per-class knowledge is the Asset.assetType each maps to.
-export type AutoMonitorClass = "fortigate" | "fortiswitch" | "fortiap" | "workstation" | "server";
+export type AutoMonitorClass = "fortigate" | "fortiswitch" | "fortiap" | "workstation" | "server" | "virtual_machine";
 
 /** Minimal interface shape consumed by the resolver. */
 export interface ResolverInterface {
@@ -154,6 +154,7 @@ const CLASS_TO_ASSET_TYPE: Record<AutoMonitorClass, string> = {
   fortiap: "access_point",
   workstation: "workstation",
   server: "server",
+  virtual_machine: "virtual_machine",
 };
 
 // ─── Pattern compilation (wildcard vs regex) ────────────────────────────────
@@ -764,6 +765,8 @@ const INTERFACE_CLASSES_BY_TYPE: Record<string, AutoMonitorClass[]> = {
   entraid:         ["workstation", "server"],
   activedirectory: ["workstation", "server"],
   windowsserver:   ["workstation", "server"],
+  // VMs only — ESXi hosts have no agent-fed interface samples to pin.
+  vcenter:         ["virtual_machine"],
 };
 
 export interface CachedAggregateRow {

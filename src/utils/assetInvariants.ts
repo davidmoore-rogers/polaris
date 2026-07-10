@@ -35,6 +35,7 @@ export type LastSeenSource =
   | "dhcp-lease"        // live DHCP lease / reservation confirmed actively held
   | "device-inventory"  // FortiGate per-client device inventory (device-reported timestamp)
   | "discovery"         // infra device answered / reported connected during discovery
+  | "vcenter"           // vCenter reported the VM powered-on / the ESXi host connected at scrape time
   | "agent"             // Polaris Agent heartbeat
   | "probe"             // successful monitor probe
   | "ping"              // AD/Entra presence-verification ICMP fallback
@@ -50,7 +51,12 @@ export type LastSeenSource =
  * remembered-connected controller entry. Active/operator sources (probe, agent,
  * ping, conflict-*) are never deferred — they ARE the polling/operator signal.
  */
-const POLLING_DEFERRED_SOURCES = new Set<string>(["discovery", "device-inventory", "dhcp-lease"]);
+// "vcenter" is deferred like "device-inventory": power_state is real-time
+// hypervisor truth at scrape time (unlike stale AD/Entra directory
+// timestamps, which never write lastSeen at all), but for a monitored VM
+// the probe still owns presence — a powered-on-but-network-dead VM must
+// not read as present.
+const POLLING_DEFERRED_SOURCES = new Set<string>(["discovery", "device-inventory", "dhcp-lease", "vcenter"]);
 
 /**
  * Single write path for Asset.lastSeen: advance it to `evidenceAt` (stamping

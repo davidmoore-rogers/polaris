@@ -1052,6 +1052,7 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
         hostname: true,
         ipAddress: true,
         learnedLocation: true,
+        assetType: true,
         discoveredByIntegration: { select: { id: true, type: true, config: true, name: true } },
       },
     });
@@ -1070,7 +1071,19 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
         const obs = (adSource?.observed as Record<string, unknown> | null) || null;
         if (obs && typeof obs.ouPath === "string") adOuPath = obs.ouPath;
       }
-      const filt = assetMatchesIntegrationFilter({ ...filterAsset, adOuPath }, filterAsset.discoveredByIntegration);
+      // For vCenter, the vmInclude/vmExclude filters match the vCenter-side
+      // VM name, which can differ from the merged hostname (guest hostname
+      // wins projection) — same source-preferred pattern as AD's ouPath.
+      let vmName: string | null = null;
+      if (filterAsset.discoveredByIntegration.type === "vcenter") {
+        const vmSource = await prisma.assetSource.findFirst({
+          where: { assetId: id, sourceKind: "vcenter-vm" },
+          select: { observed: true },
+        });
+        const obs = (vmSource?.observed as Record<string, unknown> | null) || null;
+        if (obs && typeof obs.name === "string") vmName = obs.name;
+      }
+      const filt = assetMatchesIntegrationFilter({ ...filterAsset, adOuPath, vmName }, filterAsset.discoveredByIntegration);
       if (!filt.included) {
         const reason = filt.reason || "Excluded by integration filter";
         const label = filterAsset.hostname || filterAsset.ipAddress || id;
@@ -2037,6 +2050,101 @@ router.get("/:id/mclag-peers", requirePermission("assets", "read"), async (req, 
   } catch (err) { next(err); }
 });
 
+// GET /assets/:id/virtualization — current-state vCenter facts for the
+// asset-details Virtualization section. Assembled per role from the
+// Asset.virtualization blob (single writer: syncVcenterDevices):
+//   - VM:   the blob + the running host's asset link (clickable) + cluster
+//           sibling hosts + per-disk datastore/backing labels.
+//   - Host: the blob + mounted datastores (from the current-state
+//           VcenterDatastore table) + the VMs currently placed on it.
+// 404s stay reserved for a missing asset; an asset with no virtualization
+// data returns { virtualization: null } so the UI can skip the section.
+router.get("/:id/virtualization", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: { id: true, virtualization: true },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    const v = asset.virtualization as Record<string, any> | null;
+    if (!v || (v.role !== "vm" && v.role !== "host")) {
+      res.json({ virtualization: null });
+      return;
+    }
+    const integrationId = typeof v.vcenterIntegrationId === "string" ? v.vcenterIntegrationId : null;
+    const bigintToString = (x: bigint | null): string | null => (x === null ? null : x.toString());
+
+    if (v.role === "vm") {
+      // Running host link (hostAssetId is re-resolved every discovery cycle).
+      const hostAsset = typeof v.hostAssetId === "string" && v.hostAssetId
+        ? await prisma.asset.findUnique({
+            where: { id: v.hostAssetId },
+            select: { id: true, hostname: true, monitorStatus: true, monitored: true },
+          })
+        : null;
+      // Datastore names + backing labels for the disks table.
+      const dsMorefs = [...new Set(
+        (Array.isArray(v.disks) ? v.disks : [])
+          .map((d: any) => (typeof d?.datastoreMoref === "string" ? d.datastoreMoref : null))
+          .filter((m: string | null): m is string => !!m),
+      )];
+      const datastores = integrationId && dsMorefs.length > 0
+        ? await prisma.vcenterDatastore.findMany({
+            where: { integrationId, moref: { in: dsMorefs } },
+            select: { moref: true, name: true, dsType: true, backingLabel: true },
+          })
+        : [];
+      res.json({
+        virtualization: v,
+        hostAsset,
+        diskDatastores: datastores,
+      });
+      return;
+    }
+
+    // role === "host"
+    const hostMoref = typeof v.hostMoref === "string" ? v.hostMoref : null;
+    const datastores = integrationId && hostMoref
+      ? await prisma.vcenterDatastore.findMany({
+          where: { integrationId, hostMorefs: { has: hostMoref } },
+          orderBy: { name: "asc" },
+        })
+      : [];
+    // VMs currently placed on this host — their virtualization blobs carry
+    // hostAssetId (re-stamped every cycle), which indexes cheaper than a
+    // JSON-path filter on hostMoref.
+    const vms = await prisma.asset.findMany({
+      where: {
+        virtualization: { path: ["hostAssetId"], equals: id },
+      },
+      select: { id: true, hostname: true, monitorStatus: true, monitored: true, virtualization: true },
+      take: 500,
+    });
+    res.json({
+      virtualization: v,
+      datastores: datastores.map((d) => ({
+        moref: d.moref,
+        name: d.name,
+        dsType: d.dsType,
+        capacityBytes: bigintToString(d.capacityBytes),
+        freeBytes: bigintToString(d.freeBytes),
+        provisionedBytes: bigintToString(d.provisionedBytes),
+        accessible: d.accessible,
+        backingLabel: d.backingLabel,
+        backing: d.backing,
+      })),
+      vms: vms.map((vm) => ({
+        id: vm.id,
+        hostname: vm.hostname,
+        monitorStatus: vm.monitorStatus,
+        monitored: vm.monitored,
+        powerState: (vm.virtualization as Record<string, any> | null)?.powerState ?? null,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /assets/:id/storage-history?mountPath=...&range=... — per-mountpoint usage
 router.get("/:id/storage-history", requirePermission("assets", "read"), async (req, res, next) => {
   try {
@@ -2223,6 +2331,22 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
             400,
             `${pollingMethodLabel(value)} polling is not supported for ${sourceKind} assets (field: ${name})`,
           );
+        }
+        // "vcenter" reads the vCenter server's batched quickStats, so it's
+        // cpuMemory-only AND requires a vcenter-vm AssetSource to resolve
+        // the integration through. The matrix allows the method on the
+        // directory source kinds (merged VMs); this is the precise check.
+        if (value === "vcenter") {
+          if (name !== "cpuMemoryPolling") {
+            throw new AppError(400, `vCenter polling only applies to the CPU/Memory stream (field: ${name})`);
+          }
+          const vmSource = await prisma.assetSource.findFirst({
+            where: { assetId: id, sourceKind: "vcenter-vm" },
+            select: { id: true },
+          });
+          if (!vmSource) {
+            throw new AppError(400, "vCenter polling requires this asset to be a vCenter-discovered VM (no vcenter-vm source on file)");
+          }
         }
       }
     }
@@ -3043,7 +3167,7 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
     // canonical identity link via (sourceKind, externalId). The legacy
     // entra:/ad:/fgt: prefixes were back-compat markers that re-discovery
     // already stopped consulting in Phase 2.
-    let assetType: "firewall" | "switch" | "access_point" | "workstation" | "other" = "other";
+    let assetType: "firewall" | "switch" | "access_point" | "workstation" | "virtual_machine" | "hypervisor" | "other" = "other";
     const tagSet = new Set<string>(["split-from-asset", "auto-discovered"]);
     if (target.sourceKind === "entra") {
       assetType = "workstation";
@@ -3064,6 +3188,12 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
     } else if (target.sourceKind === "fortiap") {
       assetType = "access_point";
       tagSet.add("fortiap");
+    } else if (target.sourceKind === "vcenter-vm") {
+      assetType = "virtual_machine";
+      tagSet.add("vcenter");
+    } else if (target.sourceKind === "vcenter-host") {
+      assetType = "hypervisor";
+      tagSet.add("vcenter");
     }
 
     // Manufacturer fallback — projection only gives "Fortinet" for fortinet
@@ -3913,7 +4043,13 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
     const sourceKind = assetSourceKindFromIntegrationType(asset.discoveredByIntegration?.type ?? null);
     if (!isPollingMethodCompatible(sourceKind, "agent")) {
       throw new AppError(400,
-        `Polaris Agent is not compatible with ${sourceKind} sources. Compatible: manual, activedirectory, entraid, windowsserver.`);
+        `Polaris Agent is not compatible with ${sourceKind} sources. Compatible: manual, activedirectory, entraid, windowsserver, vcenter (VMs).`);
+    }
+    // vCenter VMs are guest OSes and take the agent fine — but ESXi hosts
+    // can't run third-party binaries. Gate on the asset's class, not the
+    // integration type (the vcenter source matrix must allow "agent" for VMs).
+    if (asset.assetType === "hypervisor") {
+      throw new AppError(400, "Polaris Agent cannot be installed on a hypervisor (ESXi) host.");
     }
 
     // Resolve transport: explicit body value wins; otherwise default by

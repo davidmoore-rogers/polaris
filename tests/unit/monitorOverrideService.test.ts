@@ -224,10 +224,10 @@ describe("classBlockKeyForAssetType — assetType → config block key", () => {
   });
 });
 
-describe("AUTO_MONITOR_ASSET_TYPES — the five participating classes", () => {
-  it("contains exactly firewall/switch/access_point/workstation/server", () => {
+describe("AUTO_MONITOR_ASSET_TYPES — the seven participating classes", () => {
+  it("contains exactly firewall/switch/access_point/workstation/server/virtual_machine/hypervisor", () => {
     expect([...AUTO_MONITOR_ASSET_TYPES].sort()).toEqual(
-      ["access_point", "firewall", "server", "switch", "workstation"],
+      ["access_point", "firewall", "hypervisor", "server", "switch", "virtual_machine", "workstation"],
     );
   });
 
@@ -238,6 +238,8 @@ describe("AUTO_MONITOR_ASSET_TYPES — the five participating classes", () => {
       "access_point",
       "workstation",
       "server",
+      "virtual_machine",
+      "hypervisor",
     ];
     for (const c of classes) {
       expect(AUTO_MONITOR_ASSET_TYPES.has(c)).toBe(true);

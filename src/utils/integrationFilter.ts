@@ -15,6 +15,9 @@
  *     can drift between integrations (e.g. a FortiGate-discovered location
  *     overwriting AD's OU path), but the AD source's own observation is
  *     authoritative for AD's own filter.
+ *   - vcenter:                   vmInclude/vmExclude vs the vCenter VM name
+ *     (the vcenter-vm source's observed.name when supplied via vmName; falls
+ *     back to Asset.hostname). ESXi hosts are never name-filtered.
  *
  * Returns { included: true } for any other integration type (we don't have
  * authoritative match data for it) so we never block a refresh on a hunch.
@@ -32,6 +35,13 @@ interface AssetLite {
   // learnedLocation in the activedirectory filter — see header comment for
   // rationale.
   adOuPath?: string | null;
+  // Optional vCenter VM name (the vcenter-vm source's observed.name). The
+  // vmInclude/vmExclude filters match the vCenter-side VM name, which can
+  // differ from the merged Asset.hostname (guest hostname wins projection).
+  vmName?: string | null;
+  // Optional Asset.assetType — lets the vcenter branch skip name-filtering
+  // ESXi hosts (vmInclude/vmExclude apply to VMs only).
+  assetType?: string | null;
 }
 
 function matchesWildcard(pattern: string, value: string): boolean {
@@ -98,6 +108,25 @@ export function assetMatchesIntegrationFilter(
     } else if (exclude.length > 0) {
       const blocked = exclude.find((p) => candidates.some((c) => matchesWildcard(p, c)));
       if (blocked) return { included: false, reason: `Excluded by activedirectory integration ouExclude pattern "${blocked}"` };
+    }
+    return { included: true };
+  }
+
+  // vCenter: filter on the VM name (vmInclude wins over vmExclude, same
+  // semantics as the discovery-side filterVms). Hosts are always in scope.
+  if (type === "vcenter") {
+    if (asset.assetType === "hypervisor") return { included: true };
+    const include = asStringArray(cfg.vmInclude);
+    const exclude = asStringArray(cfg.vmExclude);
+    const candidate = (asset.vmName || asset.hostname || "").trim();
+    if (!candidate) return { included: true };
+
+    if (include.length > 0) {
+      const ok = include.some((p) => matchesWildcard(p, candidate));
+      if (!ok) return { included: false, reason: `Excluded by vcenter integration vmInclude (${candidate} matches no pattern)` };
+    } else if (exclude.length > 0) {
+      const blocked = exclude.find((p) => matchesWildcard(p, candidate));
+      if (blocked) return { included: false, reason: `Excluded by vcenter integration vmExclude pattern "${blocked}"` };
     }
     return { included: true };
   }

@@ -52,6 +52,27 @@ function assetTagPrefixFor(proposed: Record<string, any>): string {
   return ENTRA_ASSET_TAG_PREFIX;
 }
 
+// Which discovery source raised this asset conflict. vCenter conflicts carry
+// `sourceType: "vcenter"` in proposedAssetFields (with assetType
+// discriminating VM vs ESXi host); AD/Entra keep the legacy tag-prefix
+// convention via assetTagPrefixFor.
+type AssetConflictSource = "ad" | "entra" | "vcenter-vm" | "vcenter-host";
+function conflictSourceFor(proposed: Record<string, any>): AssetConflictSource {
+  if (proposed.sourceType === "vcenter") {
+    return proposed.assetType === "hypervisor" ? "vcenter-host" : "vcenter-vm";
+  }
+  return assetTagPrefixFor(proposed) === AD_ASSET_TAG_PREFIX ? "ad" : "entra";
+}
+
+function conflictSourceLabel(src: AssetConflictSource): string {
+  switch (src) {
+    case "ad":           return "Active Directory computer";
+    case "entra":        return "Entra device";
+    case "vcenter-vm":   return "vCenter VM";
+    case "vcenter-host": return "vCenter ESXi host";
+  }
+}
+
 // Per-entity-type visibility. Built-in non-admin roles keep the historical
 // split (networkadmin sees reservation conflicts; assetsadmin sees asset
 // conflicts). Custom roles with discoveryConflicts permission see both
@@ -315,9 +336,10 @@ async function acceptAssetConflict(
   }
 
   const existing = conflict.asset;
-  const prefix = assetTagPrefixFor(proposed);
-  const isAd = prefix === AD_ASSET_TAG_PREFIX;
-  const sourceLabel = isAd ? "Active Directory computer" : "Entra device";
+  const src = conflictSourceFor(proposed);
+  const isAd = src === "ad";
+  const isVcenter = src === "vcenter-vm" || src === "vcenter-host";
+  const sourceLabel = conflictSourceLabel(src);
 
   // Per-field merge. fieldWinners (from POST /:id/merge) overrides the default
   // logic per field: "proposed" = write proposed value, "existing" = keep
@@ -377,10 +399,12 @@ async function acceptAssetConflict(
   // retired the prev-* breadcrumb tags here too — there is no longer a
   // prior assetTag to breadcrumb against, since accept doesn't write
   // assetTag.
-  const sourceTags: string[] = isAd ? ["activedirectory", "auto-discovered"] : ["entraid", "auto-discovered"];
+  const sourceTags: string[] = isVcenter
+    ? ["vcenter", "auto-discovered"]
+    : isAd ? ["activedirectory", "auto-discovered"] : ["entraid", "auto-discovered"];
   if (isAd) {
     if (proposed.disabled === true) sourceTags.push("ad-disabled");
-  } else {
+  } else if (!isVcenter) {
     if (proposed.trustType) sourceTags.push(String(proposed.trustType).toLowerCase());
     if (proposed.complianceState) sourceTags.push(`intune-${String(proposed.complianceState).toLowerCase()}`);
   }
@@ -396,8 +420,13 @@ async function acceptAssetConflict(
   // before we upsert at the bottom, find the ghost (if any), merge its
   // non-empty fields into the accept target, then delete it so the
   // accept target becomes the single canonical record.
-  const sourceKind = isAd ? "ad" : "entra";
-  const externalId = String(conflict.proposedDeviceId).toLowerCase();
+  const sourceKind = src;
+  // AD/Entra ids are case-normalized to lowercase everywhere; vCenter
+  // externalIds (instanceUuid or `${integrationId}:${moref}`) must match the
+  // sync's key verbatim.
+  const externalId = isVcenter
+    ? String(conflict.proposedDeviceId)
+    : String(conflict.proposedDeviceId).toLowerCase();
   const existingSourceForId = await prisma.assetSource.findUnique({
     where: { sourceKind_externalId: { sourceKind, externalId } },
     include: { asset: { include: { macAddressRows: { select: MAC_ROW_SELECT } } } },
@@ -458,7 +487,7 @@ async function acceptAssetConflict(
   // the source row here is what makes the asset findable on the next
   // sync. The observed blob is built from the conflict's snapshot;
   // the next discovery run replaces it with a richer canonical version.
-  await upsertConflictAssetSource(existing.id, conflict, proposed, prefix);
+  await upsertConflictAssetSource(existing.id, conflict, proposed, src);
 
   const ghostNote = ghost ? ` (absorbed and removed ghost asset ${ghost.id})` : "";
   const winnerEntries = Object.entries(fieldWinners);
@@ -480,18 +509,21 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
     throw new AppError(500, "Asset conflict is missing proposedDeviceId");
   }
   const proposed = (conflict.proposedAssetFields || {}) as Record<string, any>;
-  const prefix = assetTagPrefixFor(proposed);
-  const isAd = prefix === AD_ASSET_TAG_PREFIX;
-  const sourceLabel = isAd ? "AD computer" : "Entra device";
+  const src = conflictSourceFor(proposed);
+  const isAd = src === "ad";
+  const isVcenter = src === "vcenter-vm" || src === "vcenter-host";
+  const sourceLabel = conflictSourceLabel(src);
 
   // Phase 4b/4d: cross-integration identity tags (sid:* / ad-guid:*) and
   // the assetTag identity marker are no longer written here. The new
   // asset becomes findable on the next discovery run via the
   // AssetSource row we upsert below.
-  const tags: string[] = isAd ? ["activedirectory", "auto-discovered"] : ["entraid", "auto-discovered"];
+  const tags: string[] = isVcenter
+    ? ["vcenter", "auto-discovered"]
+    : isAd ? ["activedirectory", "auto-discovered"] : ["entraid", "auto-discovered"];
   if (isAd) {
     if (proposed.disabled === true) tags.push("ad-disabled");
-  } else {
+  } else if (!isVcenter) {
     if (proposed.trustType) tags.push(String(proposed.trustType).toLowerCase());
     if (proposed.complianceState) tags.push(`intune-${String(proposed.complianceState).toLowerCase()}`);
   }
@@ -506,7 +538,7 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
     macAddress: proposed.macAddress || null,
     manufacturer: proposed.manufacturer || null,
     model: proposed.model || null,
-    assetType: proposed.assetType || (isAd ? "other" : "workstation"),
+    assetType: proposed.assetType || (isVcenter ? "virtual_machine" : isAd ? "other" : "workstation"),
     status: proposed.status || defaultStatus,
     statusChangedAt: new Date(),
     statusChangedBy: actor ?? "system",
@@ -527,7 +559,7 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
   // source's identity. Same role the legacy `assetTag = entra:<id>` /
   // `ad:<guid>` write used to play — it's what makes the next discovery
   // run match the existing asset instead of re-firing the conflict.
-  await upsertConflictAssetSource(newAsset.id, conflict, proposed, prefix);
+  await upsertConflictAssetSource(newAsset.id, conflict, proposed, src);
 
   logEvent({
     action: "conflict.rejected",
@@ -550,30 +582,52 @@ async function upsertConflictAssetSource(
   assetId: string,
   conflict: any,
   proposed: Record<string, any>,
-  prefix: string,
+  sourceKind: AssetConflictSource,
 ): Promise<void> {
-  const isAd = prefix === AD_ASSET_TAG_PREFIX;
-  const externalId = String(conflict.proposedDeviceId).toLowerCase();
-  const sourceKind = isAd ? "ad" : "entra";
-  const observed: Record<string, unknown> = isAd
-    ? {
-        objectGuid: externalId,
-        cn: proposed.hostname ?? null,
-        dnsHostName: proposed.dnsHostName ?? null,
-        operatingSystem: proposed.os ?? null,
-        operatingSystemVersion: proposed.osVersion ?? null,
-        objectSid: proposed.objectSid ?? null,
-        accountDisabled: proposed.disabled === true,
-      }
-    : {
-        deviceId: externalId,
-        displayName: proposed.hostname ?? null,
-        operatingSystem: proposed.os ?? null,
-        operatingSystemVersion: proposed.osVersion ?? null,
-        accountEnabled: proposed.status !== "disabled" && proposed.status !== "decommissioned",
-        trustType: proposed.trustType ?? null,
-        onPremisesSecurityIdentifier: proposed.onPremisesSecurityIdentifier ?? null,
-      };
+  const isVcenter = sourceKind === "vcenter-vm" || sourceKind === "vcenter-host";
+  // AD/Entra ids are lowercase everywhere; vCenter externalIds must match the
+  // discovery sync's key verbatim (instanceUuid / `${integrationId}:${moref}`).
+  const externalId = isVcenter
+    ? String(conflict.proposedDeviceId)
+    : String(conflict.proposedDeviceId).toLowerCase();
+  let observed: Record<string, unknown>;
+  if (sourceKind === "ad") {
+    observed = {
+      objectGuid: externalId,
+      cn: proposed.hostname ?? null,
+      dnsHostName: proposed.dnsHostName ?? null,
+      operatingSystem: proposed.os ?? null,
+      operatingSystemVersion: proposed.osVersion ?? null,
+      objectSid: proposed.objectSid ?? null,
+      accountDisabled: proposed.disabled === true,
+    };
+  } else if (sourceKind === "entra") {
+    observed = {
+      deviceId: externalId,
+      displayName: proposed.hostname ?? null,
+      operatingSystem: proposed.os ?? null,
+      operatingSystemVersion: proposed.osVersion ?? null,
+      accountEnabled: proposed.status !== "disabled" && proposed.status !== "decommissioned",
+      trustType: proposed.trustType ?? null,
+      onPremisesSecurityIdentifier: proposed.onPremisesSecurityIdentifier ?? null,
+    };
+  } else if (sourceKind === "vcenter-vm") {
+    observed = {
+      kind: "vcenter-vm",
+      name: proposed.hostname ?? null,
+      guestHostname: proposed.hostname ?? null,
+      guestOsFullName: proposed.os ?? null,
+      guestIp: proposed.ipAddress ?? null,
+      powerState: proposed.powerState ?? null,
+    };
+  } else {
+    observed = {
+      kind: "vcenter-host",
+      name: proposed.hostname ?? null,
+      clusterName: proposed.clusterName ?? null,
+      resolvedIp: proposed.ipAddress ?? null,
+    };
+  }
   const lastSeen = proposed.lastSeen ? new Date(proposed.lastSeen) : new Date();
   const now = new Date();
   await prisma.assetSource.upsert({
