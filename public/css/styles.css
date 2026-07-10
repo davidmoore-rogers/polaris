@@ -1274,10 +1274,11 @@ th.sf-th { vertical-align: top; white-space: normal; padding-bottom: 6px; }
 /* Resizable data tables truncate cell content with an ellipsis instead of
    wrapping; widen the column (drag the handle) to reveal the rest. Scoped to
    TableSF-managed tables so non-resizable tables (capacity advisor, etc.) keep
-   wrapping. .actions (button groups) and the tiny cb/fav columns are exempt.
-   Truncation only renders once the table is in table-layout:fixed, which
-   setupColumnLayout seeds on first visible render. */
-table[data-sf-table-id] > tbody > tr > td:not(.actions):not(.cb-col):not(.fav-col) {
+   wrapping. .actions (button groups), the tiny cb/fav columns, and .cell-wrap
+   (long-prose cells that should word-wrap, e.g. the Events Message column)
+   are exempt. Truncation only renders once the table is in table-layout:fixed,
+   which setupColumnLayout seeds on first visible render. */
+table[data-sf-table-id] > tbody > tr > td:not(.actions):not(.cb-col):not(.fav-col):not(.cell-wrap) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
