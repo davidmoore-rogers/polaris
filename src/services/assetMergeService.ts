@@ -132,6 +132,56 @@ function isEmpty(v: unknown): boolean {
   return v === null || v === undefined || (typeof v === "string" && v.trim() === "");
 }
 
+export interface SideTableTransferCounts {
+  movedMacs: number;
+  movedIps: number;
+  movedIpHistory: number;
+  movedSightings: number;
+}
+
+/**
+ * Transfer the four per-asset side tables (AssetMacAddress /
+ * AssetAssociatedIp / AssetIpHistory / AssetFortigateSighting) from one
+ * asset to another inside the caller's transaction. Each is unique on
+ * (assetId, <key>): non-colliding rows re-point to the target, colliding
+ * rows are deleted (the target's row wins). Shared by the operator merge
+ * below and the endpoint-ghost merge in assetGhostMergeService.
+ */
+export async function transferAssetSideTables(
+  tx: any,
+  fromAssetId: string,
+  toAssetId: string,
+): Promise<SideTableTransferCounts> {
+  const moveUnique = async (delegate: any, keyField: string): Promise<number> => {
+    const cur = await delegate.findMany({
+      where: { assetId: toAssetId },
+      select: { [keyField]: true },
+    });
+    const curSet = new Set(cur.map((r: any) => r[keyField]));
+    const incoming = await delegate.findMany({
+      where: { assetId: fromAssetId },
+      select: { id: true, [keyField]: true },
+    });
+    let moved = 0;
+    for (const r of incoming) {
+      if (curSet.has(r[keyField])) {
+        await delegate.delete({ where: { id: r.id } });
+      } else {
+        await delegate.update({ where: { id: r.id }, data: { assetId: toAssetId } });
+        curSet.add(r[keyField]);
+        moved++;
+      }
+    }
+    return moved;
+  };
+  return {
+    movedMacs: await moveUnique(tx.assetMacAddress, "mac"),
+    movedIps: await moveUnique(tx.assetAssociatedIp, "ip"),
+    movedIpHistory: await moveUnique(tx.assetIpHistory, "ip"),
+    movedSightings: await moveUnique(tx.assetFortigateSighting, "fortigateDevice"),
+  };
+}
+
 /**
  * Merge `ghostId` into `canonicalId`. The canonical survives; the ghost is
  * deleted. `fieldWinners` maps a MERGEABLE_FIELDS key to which side wins; any
@@ -214,69 +264,13 @@ export async function mergeAssets(opts: {
     });
     movedSources = srcRes.count;
 
-    // AssetMacAddress — unique (assetId, mac). Delete-on-conflict.
-    {
-      const cur = await tx.assetMacAddress.findMany({ where: { assetId: c.id }, select: { mac: true } });
-      const curSet = new Set(cur.map((m) => m.mac));
-      const incoming = await tx.assetMacAddress.findMany({ where: { assetId: g.id }, select: { id: true, mac: true } });
-      for (const m of incoming) {
-        if (curSet.has(m.mac)) {
-          await tx.assetMacAddress.delete({ where: { id: m.id } });
-        } else {
-          await tx.assetMacAddress.update({ where: { id: m.id }, data: { assetId: c.id } });
-          curSet.add(m.mac);
-          movedMacs++;
-        }
-      }
-    }
-
-    // AssetAssociatedIp — unique (assetId, ip). Delete-on-conflict.
-    {
-      const cur = await tx.assetAssociatedIp.findMany({ where: { assetId: c.id }, select: { ip: true } });
-      const curSet = new Set(cur.map((i) => i.ip));
-      const incoming = await tx.assetAssociatedIp.findMany({ where: { assetId: g.id }, select: { id: true, ip: true } });
-      for (const i of incoming) {
-        if (curSet.has(i.ip)) {
-          await tx.assetAssociatedIp.delete({ where: { id: i.id } });
-        } else {
-          await tx.assetAssociatedIp.update({ where: { id: i.id }, data: { assetId: c.id } });
-          curSet.add(i.ip);
-          movedIps++;
-        }
-      }
-    }
-
-    // AssetIpHistory — unique (assetId, ip). Delete-on-conflict.
-    {
-      const cur = await tx.assetIpHistory.findMany({ where: { assetId: c.id }, select: { ip: true } });
-      const curSet = new Set(cur.map((h) => h.ip));
-      const incoming = await tx.assetIpHistory.findMany({ where: { assetId: g.id }, select: { id: true, ip: true } });
-      for (const h of incoming) {
-        if (curSet.has(h.ip)) {
-          await tx.assetIpHistory.delete({ where: { id: h.id } });
-        } else {
-          await tx.assetIpHistory.update({ where: { id: h.id }, data: { assetId: c.id } });
-          curSet.add(h.ip);
-          movedIpHistory++;
-        }
-      }
-    }
-
-    // AssetFortigateSighting — unique (assetId, fortigateDevice). Delete-on-conflict.
-    {
-      const cur = await tx.assetFortigateSighting.findMany({ where: { assetId: c.id }, select: { fortigateDevice: true } });
-      const curSet = new Set(cur.map((s) => s.fortigateDevice));
-      const incoming = await tx.assetFortigateSighting.findMany({ where: { assetId: g.id }, select: { id: true, fortigateDevice: true } });
-      for (const s of incoming) {
-        if (curSet.has(s.fortigateDevice)) {
-          await tx.assetFortigateSighting.delete({ where: { id: s.id } });
-        } else {
-          await tx.assetFortigateSighting.update({ where: { id: s.id }, data: { assetId: c.id } });
-          curSet.add(s.fortigateDevice);
-          movedSightings++;
-        }
-      }
-    }
+    // Side tables — unique per (assetId, key), delete-on-conflict. Shared
+    // with the endpoint-ghost merge.
+    const sideCounts = await transferAssetSideTables(tx, g.id, c.id);
+    movedMacs = sideCounts.movedMacs;
+    movedIps = sideCounts.movedIps;
+    movedIpHistory = sideCounts.movedIpHistory;
+    movedSightings = sideCounts.movedSightings;
 
     // ManagedAgent — 1:1, unique assetId, cascade-deletes with the ghost. If
     // the survivor has no agent but the ghost does, re-bind it so the

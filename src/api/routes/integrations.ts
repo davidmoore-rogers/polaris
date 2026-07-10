@@ -48,6 +48,7 @@ import {
   type RunAccumulator,
 } from "../../services/discoveryRunState.js";
 import { releaseDnsResolvedAt } from "../../services/dnsResolvedReservationService.js";
+import { isMergeableEndpointGhost, mergeEndpointGhostIntoAsset } from "../../services/assetGhostMergeService.js";
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
 import { getAdMonitorProtocol, invalidateMonitorSettingsCache, persistManagedApLldpNeighbors, invalidateLldpMatchCache } from "../../services/monitoringService.js";
 import { isFortiapStatusOnline } from "../../utils/fortiapMonitorRow.js";
@@ -3123,6 +3124,27 @@ class AssetIndex {
   /** Update indexes after modifying an asset in-place */
   reindex(a: any) { this.add(a); }
 
+  /**
+   * Drop a deleted asset from every index. Only removes entries still
+   * pointing at this exact object — a key another asset has since claimed
+   * (via reindex) is left alone.
+   */
+  remove(a: any) {
+    this.byId.delete(a.id);
+    const drop = (map: Map<string, any>, key: string | null | undefined) => {
+      if (key && map.get(key) === a) map.delete(key);
+    };
+    drop(this.byMac, a.macAddress ? String(a.macAddress).toUpperCase() : null);
+    if (Array.isArray(a.macAddresses)) {
+      for (const m of a.macAddresses as any[]) {
+        drop(this.byMac, m?.mac ? String(m.mac).toUpperCase() : null);
+      }
+    }
+    drop(this.bySerial, a.serialNumber);
+    drop(this.byHostname, a.hostname ? String(a.hostname).toLowerCase() : null);
+    drop(this.byIp, a.ipAddress);
+  }
+
   findBySerial(serial: string) { return this.bySerial.get(serial); }
 
   findByMac(mac: string) { return this.byMac.get(mac.toUpperCase()); }
@@ -4397,14 +4419,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   ): Record<string, unknown> {
     if (!cfg.enabled && !cfg.addAsMonitored && existing?.monitored !== true) {
       // No opt-in and the asset isn't currently monitored — nothing to do.
-      // Re-stamping `discoveredByIntegrationId` is a no-op since the existing
-      // value is already correct on this asset's update path.
+      // (Integration attribution is NOT this function's job: the switch/AP
+      // create + update paths stamp `discoveredByIntegrationId`
+      // unconditionally themselves, so the Inherit-from-integration option
+      // and the decommission sweep work regardless of this toggle.)
       return {};
     }
 
-    const stamp: Record<string, unknown> = {
-      discoveredByIntegrationId: integrationId,
-    };
+    const stamp: Record<string, unknown> = {};
     // Stamp the integration's class credential only when the existing
     // asset has none (or has the same credential — the no-op idempotent
     // case). Anything else (operator-chosen credential of a different
@@ -4455,6 +4477,66 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     if (desired && existing.monitored !== true) return { monitored: true };
     if (!desired && existing.monitored === true) return { monitored: false };
     return {};
+  }
+
+  /**
+   * Sibling endpoint-ghost sweep for the FortiSwitch / FortiAP loops below.
+   *
+   * A managed device's mgmt interface pulls a DHCP lease from its FortiGate,
+   * so the DHCP / device-inventory pathway learns the MAC independently and
+   * creates a separate "fortigate-endpoint" asset — hostname = the device
+   * serial (that's what device inventory reports for the mgmt MAC). Once the
+   * real infrastructure asset exists, the serial match above resolves it
+   * FIRST every cycle, so the MAC / hostname adoption fallbacks never run
+   * against the ghost and it survives forever (the lease pathway keeps
+   * freshening it, and the duplicate-hostname job can't group it — the two
+   * rows have different hostnames).
+   *
+   * Candidates are the strong-identity lookups only (the device's base MAC,
+   * an asset hostnamed exactly the device serial) — never bare IP, which
+   * recycles. Each candidate is validated against its AssetSource rows
+   * (fortigate-endpoint provenance, nothing authoritative) before the merge,
+   * so a hand-created asset or a real discovered device can never be
+   * absorbed. Best-effort: a sweep failure never fails the device sync.
+   */
+  async function sweepEndpointGhostsInto(
+    canonical: any,
+    candidates: Array<any | undefined>,
+    deviceLabel: string,
+  ): Promise<void> {
+    const seen = new Set<string>();
+    for (const ghost of candidates) {
+      if (!ghost || ghost.id === canonical.id || seen.has(ghost.id)) continue;
+      seen.add(ghost.id);
+      try {
+        if (!(await isMergeableEndpointGhost(ghost.id))) continue;
+        const res = await mergeEndpointGhostIntoAsset(canonical.id, ghost.id);
+        assetIdx.remove(ghost);
+        if (res.adoptedMac && !canonical.macAddress) canonical.macAddress = res.adoptedMac;
+        if (res.transferredMonitored) canonical.monitored = true;
+        assetIdx.reindex(canonical);
+        syncLog("info", `Merged duplicate endpoint asset ${ghost.hostname || ghost.id} into ${deviceLabel}`);
+        logEvent({
+          action: "asset.duplicate_merged",
+          resourceType: "asset",
+          resourceId: canonical.id,
+          resourceName: canonical.hostname ?? deviceLabel,
+          actor,
+          level: "info",
+          message: `Discovery merged duplicate endpoint asset ${ghost.hostname || ghost.id} into ${deviceLabel}`,
+          details: {
+            integrationId,
+            integrationName,
+            ghostId: ghost.id,
+            ghostHostname: ghost.hostname ?? null,
+            adoptedMac: res.adoptedMac,
+            transferredMonitored: res.transferredMonitored,
+          },
+        });
+      } catch (err: any) {
+        syncLog("error", `Failed to merge duplicate endpoint asset ${ghost.hostname || ghost.id} into ${deviceLabel}: ${err?.message || "Unknown error"}`);
+      }
+    }
   }
 
   for (const sw of result.fortiSwitches || []) {
@@ -4547,6 +4629,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           ...(swDescSync.notes !== undefined ? { notes: swDescSync.notes } : {}),
           ...(acquiredAtUpdate ? { acquiredAt: acquiredAtUpdate } : {}),
           ...buildClassMonitorStamp(switchMonitorCfg, existingAsset),
+          // Attribution is unconditional for managed infrastructure — the
+          // Monitoring tab's "Inherit from <integration>" option, the
+          // monitor-settings tier-3 resolution, and the Phase 2b
+          // decommission sweep all key off this column, so it must not
+          // depend on the class-monitor toggle (buildClassMonitorStamp only
+          // stamps it when that's enabled). Mirrors the FortiGate paths.
+          ...(existingAsset.discoveredByIntegrationId !== integrationId
+            ? { discoveredByIntegrationId: integrationId }
+            : {}),
         };
         // Presence gate: the managed-switch table includes FortiLink-
         // configured switches that are currently offline (status !=
@@ -4609,7 +4700,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
         if (sw.ipAddress) existingAsset.ipAddress = sw.ipAddress;
         if (reactivate && sw.connected) existingAsset.status = swStatus;
+        if (existingAsset.discoveredByIntegrationId !== integrationId) existingAsset.discoveredByIntegrationId = integrationId;
         assetIdx.reindex(existingAsset);
+        await sweepEndpointGhostsInto(existingAsset, [
+          normalizedSwMac ? assetIdx.findByMac(normalizedSwMac) : undefined,
+          sw.serial ? assetIdx.findByEntry(undefined, sw.serial) : undefined,
+        ], sw.name || sw.serial);
         assetNames.push(`${sw.name} (updated${reactivate ? " — reactivated" : ""})`);
       } else {
         // Phase 3b.1 cutover: project from a synthetic single-source array.
@@ -4638,6 +4734,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // literal here so the create row gets a non-null model.
           model: "FortiSwitch",
           assetType: "switch",
+          // Unconditional attribution — see the update-path comment above.
+          discoveredByIntegrationId: integrationId,
           status: swStatus,
           statusChangedAt: new Date(now),
           statusChangedBy: integrationLabel,
@@ -4665,6 +4763,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           integrationName, integrationId, sourceKind: "fortiswitch", actor,
         });
         assetIdx.add(newAsset);
+        await sweepEndpointGhostsInto(newAsset, [
+          normalizedSwMac ? assetIdx.findByMac(normalizedSwMac) : undefined,
+          sw.serial ? assetIdx.findByEntry(undefined, sw.serial) : undefined,
+        ], sw.name || sw.serial);
         assetNames.push(sw.name || sw.serial);
       }
     } catch (err: any) {
@@ -4808,6 +4910,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // be connected — an offline WTP entry must not undo a decommission.
           ...(existingAsset.status === "decommissioned" && apOnline ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
           ...buildClassMonitorStamp(apMonitorCfg, existingAsset),
+          // Unconditional attribution — see the FortiSwitch update-path comment.
+          ...(existingAsset.discoveredByIntegrationId !== integrationId
+            ? { discoveredByIntegrationId: integrationId }
+            : {}),
         };
         if (apOnline) bumpLastSeen(updateData, existingAsset, new Date(now), "discovery");
         // Mirror the resolved wired-uplink switch/port (from LLDP first, then
@@ -4848,7 +4954,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         });
         if (resolvedIp) existingAsset.ipAddress = resolvedIp;
         if (existingAsset.status === "decommissioned" && apOnline) existingAsset.status = "active";
+        if (existingAsset.discoveredByIntegrationId !== integrationId) existingAsset.discoveredByIntegrationId = integrationId;
         assetIdx.reindex(existingAsset);
+        await sweepEndpointGhostsInto(existingAsset, [
+          normalizedMac ? assetIdx.findByMac(normalizedMac) : undefined,
+          ap.serial ? assetIdx.findByEntry(undefined, ap.serial) : undefined,
+        ], ap.name || ap.serial);
         assetNames.push(`${ap.name} (updated)`);
         apAssetId = existingAsset.id;
       } else {
@@ -4871,6 +4982,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             manufacturer: apCreateProjected.manufacturer || "Fortinet",
             model: apCreateProjected.model || "FortiAP",
             assetType: "access_point",
+            // Unconditional attribution — see the FortiSwitch update-path comment.
+            discoveredByIntegrationId: integrationId,
             status: "active",
             statusChangedAt: new Date(now),
             statusChangedBy: integrationLabel,
@@ -4897,6 +5010,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           integrationName, integrationId, sourceKind: "fortiap", actor,
         });
         assetIdx.add(newAsset);
+        await sweepEndpointGhostsInto(newAsset, [
+          normalizedMac ? assetIdx.findByMac(normalizedMac) : undefined,
+          ap.serial ? assetIdx.findByEntry(undefined, ap.serial) : undefined,
+        ], ap.name || ap.serial);
         assetNames.push(ap.name || ap.serial);
         apAssetId = newAsset.id;
       }
