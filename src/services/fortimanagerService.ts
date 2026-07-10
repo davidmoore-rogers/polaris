@@ -596,20 +596,50 @@ export interface CentralManagementDetection {
 }
 
 /**
+ * Decode the ADOM's central-management state from its dvmdb `flags` value.
+ * Central is the DEFAULT — per-device mode is expressed as explicit
+ * `per_device_wtp` / `per_device_fsw` flags (confirmed against a live FMG
+ * 7.x: the /dvmdb/adom syntax dump lists per_device_wtp=1024,
+ * per_device_fsw=65536, and an ADOM with switches per-device + APs central
+ * carried exactly the per_device_fsw bit). The bit values are read from the
+ * caller-supplied `opts` map (the syntax dump) rather than hardcoded, so a
+ * version that renumbers the enum can't flip the decode. Returns null for a
+ * class whose per-device flag isn't in `opts` (build predates per-device
+ * support for it — the caller falls back to the table probe).
+ *
+ * `flags` arrives as a uint32 bitmask on current builds; verbose builds may
+ * render it as a string array — both are handled. Exported for unit tests.
+ */
+export function decodeCentralManagementFlags(
+  flags: unknown,
+  opts: Record<string, unknown>,
+): { wtp: boolean | null; fsw: boolean | null } {
+  const decode = (flagName: string): boolean | null => {
+    if (Array.isArray(flags)) return !flags.map(String).includes(flagName);
+    const bit = opts[flagName];
+    if (typeof flags !== "number" || typeof bit !== "number") return null;
+    return (flags & bit) === 0; // per-device flag ABSENT = central
+  };
+  return { wtp: decode("per_device_wtp"), fsw: decode("per_device_fsw") };
+}
+
+/**
  * Detect whether this ADOM centrally manages FortiAPs (AP Manager) and/or
- * FortiSwitches (FortiSwitch Manager). Probe-based: read the ADOM-level
- * object table each central pane owns —
+ * FortiSwitches (FortiSwitch Manager).
+ *
+ * Primary signal: the ADOM's dvmdb `flags` (see
+ * decodeCentralManagementFlags) — authoritative and immune to the
+ * empty-table edge. The per-class row counts still come from probing the
+ * ADOM-level object table each central pane owns —
  *   APs:      /pm/config/adom/<adom>/obj/wireless-controller/wtp
  *   Switches: /pm/config/adom/<adom>/obj/fsp/managed-switch
- * "Central" here means the table read succeeds AND holds at least one row —
- * exactly the condition under which an install from the central pane would
- * revert a device-side description write, i.e. when description sync must
- * mirror into FMG's database. A per-device-managed class errors on (or holds
- * nothing at) its URL. Row counts ride along for the integrations-page
- * display. Returns null on transport failure so the caller keeps the
- * previous stamp. Runs at FMG discovery start (runDiscovery) and lands on
- * `Integration.config.centralManagement` (system-owned key — the PUT
- * handler's config merge preserves it across operator edits).
+ * — for the integrations-page display, and the probe ("table readable AND
+ * holds rows") doubles as the fallback verdict when the flags path is
+ * unavailable (older builds, restricted admin). Returns null on transport
+ * failure so the caller keeps the previous stamp. Runs at FMG discovery
+ * start (runDiscovery) and lands on `Integration.config.centralManagement`
+ * (system-owned key — the PUT handler's config merge preserves it across
+ * operator edits).
  */
 export async function detectCentralManagement(
   config: FortiManagerConfig,
@@ -625,14 +655,33 @@ export async function detectCentralManagement(
     if (r?.status?.code !== 0) return null;
     return Array.isArray(r.data) ? r.data.length : null;
   };
+  // ADOM flags verdict, or nulls when any piece is unavailable. The mkey-get
+  // form rejects extra attributes on some builds, so both reads use the
+  // table form (filter / option are table-level attributes).
+  const flagsVerdict = async (): Promise<{ wtp: boolean | null; fsw: boolean | null }> => {
+    try {
+      const [syntaxRes, rowRes] = await Promise.all([
+        proxyQuery(config, "get", [{ url: "/dvmdb/adom", option: ["syntax"] }], integrationId),
+        proxyQuery(config, "get", [{ url: "/dvmdb/adom", filter: ["name", "==", adom], fields: ["name", "flags"] }], integrationId),
+      ]);
+      const opts = (syntaxRes as any)?.result?.[0]?.data?.adom?.attr?.flags?.opts;
+      const rows = (rowRes as any)?.result?.[0]?.data;
+      const row = Array.isArray(rows) ? rows.find((r: any) => r?.name === adom) : null;
+      if (!opts || typeof opts !== "object" || !row) return { wtp: null, fsw: null };
+      return decodeCentralManagementFlags(row.flags, opts as Record<string, unknown>);
+    } catch {
+      return { wtp: null, fsw: null };
+    }
+  };
   try {
-    const [wtpCount, fswCount] = await Promise.all([
+    const [verdict, wtpCount, fswCount] = await Promise.all([
+      flagsVerdict(),
       probe(`/pm/config/adom/${adom}/obj/wireless-controller/wtp`),
       probe(`/pm/config/adom/${adom}/obj/fsp/managed-switch`),
     ]);
     return {
-      wtp: (wtpCount ?? 0) > 0,
-      fsw: (fswCount ?? 0) > 0,
+      wtp: verdict.wtp ?? (wtpCount ?? 0) > 0,
+      fsw: verdict.fsw ?? (fswCount ?? 0) > 0,
       wtpCount,
       fswCount,
       detectedAt: new Date().toISOString(),
