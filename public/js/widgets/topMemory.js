@@ -1,5 +1,5 @@
 /**
- * widgets/topMemory.js — top-N monitored assets by latest memory%. Shares the
+ * widgets/topMemory.js — top-N monitored assets by average memory%. Shares the
  * _topnBar renderer + CPU thresholds; data from noc-summary topMemory[].
  */
 
@@ -16,11 +16,11 @@
   PolarisWidgets.register({
     type: "topMemory",
     category: "Monitoring",
-    label: "Highest Memory",
-    description: "Monitored assets with the highest average memory usage (last 10 polls).",
+    label: "Highest Avg Memory",
+    description: "Monitored assets with the highest average memory usage (averaged over the last N polls — gear-configurable, default 10).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 20, threshold: null, regionScope: "mine" },
+    defaultConfig: { rowLimit: 20, threshold: null, regionScope: "mine", sampleCount: 10 },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
@@ -46,7 +46,8 @@
     renderConfig: function (el, config, onChange) {
       // No "Hide below" control: Row limit governs the top-N shown, and every
       // red row (≥90%) always shows even past the limit (see _topnBar fillTo).
-      PolarisTopN.renderConfig(el, config, onChange, {});
+      // sampleControl = the "Average over" N-samples select (sampleCount).
+      PolarisTopN.renderConfig(el, config, onChange, { sampleControl: true });
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });

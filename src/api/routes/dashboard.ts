@@ -206,6 +206,14 @@ router.get("/noc-summary", async (req, res, next) => {
     const reqLimit = parseInt(String(req.query.limit ?? ""), 10);
     const capLimit = Number.isFinite(reqLimit) && reqLimit > 0 ? Math.min(reqLimit, 1000) : null;
 
+    // ?samples=N — per-asset averaging count for the sample-averaged top-N
+    // feeds (topCpu/topMemory "Average over" gear control). Absent/invalid →
+    // the service default (10); clamped to the service ceiling.
+    const reqSamples = parseInt(String(req.query.samples ?? ""), 10);
+    const sampleCount = Number.isFinite(reqSamples) && reqSamples > 0
+      ? Math.min(reqSamples, nocDashboardService.MAX_TOPN_SAMPLE_COUNT)
+      : null;
+
     res.json(await nocDashboardService.getNocSummaryPayload({
       feeds: parseCsvParam(req.query.feeds),
       canAssets,
@@ -213,6 +221,7 @@ router.get("/noc-summary", async (req, res, next) => {
       assetTypes,
       regionNames,
       capLimit,
+      sampleCount,
     }));
   } catch (err) {
     next(err);
