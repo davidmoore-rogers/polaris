@@ -1,7 +1,7 @@
 /**
  * widgets/_topnBar.js — shared renderer for the NOC top-N metric widgets
- * (Highest CPU, Highest Memory, Slowest Response, Packet Loss, Highest Disk
- * Usage, Highest Temperature). These are structurally identical: a ranked
+ * (Highest Avg CPU, Highest Avg Memory, Slowest Response, Packet Loss, Highest
+ * Disk Usage, Highest Temperature). These are structurally identical: a ranked
  * list of { id, hostname, ipAddress, value, detail?, site? }
  * rows drawn as a name + utilization bar + value, with per-widget units, color
  * thresholds, an optional value floor, and an optional Group-by-Site view
@@ -33,7 +33,7 @@
    * rows     — [{ id, hostname, ipAddress, value }]
    * opts     — { unit:"%"|"ms"|"°C", thresholds, baseColor, emptyText, config, fillTo }
    *            config: { rowLimit, threshold }
-   *            fillTo: red-guarantee mode (Highest CPU/Memory/Disk, Slowest
+   *            fillTo: red-guarantee mode (Highest Avg CPU/Memory, Disk, Slowest
    *            Response). The operator's Row limit governs how many rows show
    *            (top-N by value), EXCEPT that every RED row (at/above the top
    *            color threshold, thresholds[0].over) is always shown even past
@@ -129,7 +129,19 @@
    * Shared gear config: row limit + an optional numeric threshold floor.
    * opts.thresholdOptions — [{ value, label }] for the threshold select; omit
    * to hide the threshold control entirely.
+   * opts.sampleControl — true adds an "Average over" select (config key
+   * `sampleCount`, default 10): how many of each asset's most-recent samples
+   * the server averages before ranking (Highest Avg CPU/Memory; 1 = rank on
+   * the latest sample only).
    */
+  var SAMPLE_COUNT_OPTIONS = [
+    { value: "1", label: "Latest sample only" },
+    { value: "5", label: "5 samples" },
+    { value: "10", label: "10 samples (default)" },
+    { value: "20", label: "20 samples" },
+    { value: "50", label: "50 samples" },
+  ];
+
   function renderConfig(el, config, onChange, opts) {
     opts = opts || {};
     // Group-by (site buckets, default off) + row-limit control (defaults to
@@ -142,6 +154,16 @@
       '</select>' +
       '<label>Row limit</label>' +
       '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit == null ? 20 : config.rowLimit) + '</select>';
+    if (opts.sampleControl) {
+      var curSamples = String(config.sampleCount == null ? 10 : config.sampleCount);
+      html +=
+        '<label>Average over</label>' +
+        '<select data-k="sampleCount">' +
+          SAMPLE_COUNT_OPTIONS.map(function (o) {
+            return '<option value="' + o.value + '"' + (curSamples === o.value ? " selected" : "") + '>' + escapeHtml(o.label) + '</option>';
+          }).join("") +
+        '</select>';
+    }
     if (opts.thresholdOptions) {
       html +=
         '<label>' + escapeHtml(opts.thresholdLabel || "Hide below") + '</label>' +
@@ -159,6 +181,8 @@
           onChange("threshold", s.value === "" ? null : parseFloat(s.value));
         } else if (k === "groupBy") {
           onChange("groupBy", s.value);
+        } else if (k === "sampleCount") {
+          onChange("sampleCount", parseInt(s.value, 10));
         } else {
           onChange("rowLimit", PolarisWidgets.parseRowLimit(s.value));
         }

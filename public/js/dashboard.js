@@ -511,7 +511,7 @@
 
   // Widget header title. When a widget's asset-type filter selects a strict
   // subset of the eight built-ins, the chosen types are appended in parens
-  // (e.g. "Highest CPU (Server, Switch)"); all-on (or no filter) → bare label.
+  // (e.g. "Highest Avg CPU (Server, Switch)"); all-on (or no filter) → bare label.
   function widgetTitleFor(module, w) {
     var base = module ? module.label : (w.type + " (unknown widget)");
     var cfg = (w && w.config) || {};

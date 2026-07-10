@@ -90,6 +90,10 @@
     // are omitted so those widgets keep sharing the one default-capped payload
     // and clip client-side; only the 1000-row widgets fetch their own.
     if (opts.limit) parts.push("limit=" + encodeURIComponent(opts.limit));
+    // Per-asset averaging count for the sample-averaged top-N feeds (Highest
+    // Avg CPU/Memory). Only sent when it differs from the server default (10)
+    // so default-config widgets keep sharing one cached payload.
+    if (opts.samples) parts.push("samples=" + encodeURIComponent(opts.samples));
     return parts.join("&");
   }
 
@@ -149,13 +153,23 @@
   };
 
   // Extract the NOC filter opts a widget should pass to getNocSummary / its
-  // own fetch. Centralized so every widget reads the same two config keys.
+  // own fetch. Centralized so every widget reads the same config keys.
   window.PolarisWidgets.nocFilterOpts = function (config) {
     config = config || {};
     var n = window.PolarisWidgets.serverRowLimit(config.rowLimit);
-    // Only widgets wanting MORE than the default payload holds (the 1000-row
-    // option) request a larger server cap; ≤100 shares the default payload.
-    return { assetTypes: config.assetTypes, regionScope: config.regionScope, limit: n > 100 ? n : undefined };
+    // sampleCount (Highest Avg CPU/Memory "Average over" control): sent only
+    // when it deviates from the server default of 10, so default-config
+    // widgets share the one cached payload. Other widgets carry no
+    // sampleCount config and omit the param entirely.
+    var s = parseInt(config.sampleCount, 10);
+    return {
+      assetTypes: config.assetTypes,
+      regionScope: config.regionScope,
+      // Only widgets wanting MORE than the default payload holds (the 1000-row
+      // option) request a larger server cap; ≤100 shares the default payload.
+      limit: n > 100 ? n : undefined,
+      samples: s > 0 && s !== 10 ? s : undefined,
+    };
   };
 
   // ─── Shared row-limit control ───────────────────────────────────────────

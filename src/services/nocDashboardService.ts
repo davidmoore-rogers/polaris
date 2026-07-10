@@ -398,19 +398,34 @@ async function hydrateNames(ordered: Array<{ assetId: string; value: number }>):
     .filter((r): r is TopNRow => r !== null);
 }
 
+// Default per-asset sample count the top-N averages smooth over. The widgets'
+// "Average over" gear control overrides it per request (?samples=, 1..MAX).
+export const DEFAULT_TOPN_SAMPLE_COUNT = 10;
+export const MAX_TOPN_SAMPLE_COUNT = 100;
+
+// The averaging window must comfortably contain sampleCount samples at any
+// realistic cpuMemory cadence, while staying tight enough for TimescaleDB
+// chunk exclusion. The historical 1h-for-10-samples budget = 6 min/sample.
+function topNWindowMinutes(baseMinutes: number, sampleCount: number): number {
+  return Math.max(baseMinutes, sampleCount * 6);
+}
+
+function clampSampleCount(n: number | null | undefined): number {
+  if (!Number.isFinite(n as number) || (n as number) <= 0) return DEFAULT_TOPN_SAMPLE_COUNT;
+  return Math.min(Math.trunc(n as number), MAX_TOPN_SAMPLE_COUNT);
+}
+
 /**
- * Feed 3a — highest CPU. DISTINCT ON latest-per-asset within the freshness
- * window, ordered desc, capped. The time predicate keeps the scan inside
- * recent Timescale chunks (~one telemetry sample per asset per cadence).
- * Pattern mirrors sampleHistoryService.readSdwanMembers.
+ * Feed 3a — highest CPU, averaged over each asset's most-recent `sampleCount`
+ * samples (default 10 — smooths the single-spike ranking the DISTINCT-ON
+ * latest-value version surfaced; 1 = rank on the latest sample only). The time
+ * predicate keeps the scan inside recent Timescale chunks (~one telemetry
+ * sample per asset per cadence); row_number()<=N takes the newest N per asset.
  */
-export async function getHighestCpu(limit: number | null = 100, sinceMinutes = 60, assetIds: string[] | null = null): Promise<TopNRow[]> {
-  // Average of each asset's most-recent 10 CPU samples (smooths the single-spike
-  // ranking the DISTINCT-ON latest-value version surfaced). 1h window keeps the
-  // telemetry-hypertable scan chunk-excluded and comfortably contains 10 samples
-  // at the cpuMemory cadence; row_number()<=10 takes the newest 10 per asset.
-  const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
-  const params: unknown[] = [String(sinceMinutes), limit];
+export async function getHighestCpu(limit: number | null = 100, sinceMinutes = 60, assetIds: string[] | null = null, sampleCount: number = DEFAULT_TOPN_SAMPLE_COUNT): Promise<TopNRow[]> {
+  const samples = clampSampleCount(sampleCount);
+  const idClause = assetIds ? ` AND s."assetId" = ANY($4::text[])` : "";
+  const params: unknown[] = [String(topNWindowMinutes(sinceMinutes, samples)), limit, samples];
   if (assetIds) params.push(assetIds);
   const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; value: number }>>(
     `WITH recent AS (
@@ -420,7 +435,7 @@ export async function getHighestCpu(limit: number | null = 100, sinceMinutes = 6
        WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval AND s."cpuPct" IS NOT NULL${idClause}
      )
      SELECT "assetId", avg(v)::float AS value
-     FROM recent WHERE rn <= 10
+     FROM recent WHERE rn <= $3
      GROUP BY "assetId"
      ORDER BY value DESC LIMIT $2`,
     ...params,
@@ -429,13 +444,15 @@ export async function getHighestCpu(limit: number | null = 100, sinceMinutes = 6
 }
 
 /**
- * Feed 3b — highest memory, averaged over each asset's most-recent 10 samples
- * (same windowed pattern as CPU). Prefers memPct; falls back to bytes ratio
- * when only absolute bytes were reported (same preference as sampleHistoryService).
+ * Feed 3b — highest memory, averaged over each asset's most-recent
+ * `sampleCount` samples (same windowed pattern as CPU). Prefers memPct; falls
+ * back to bytes ratio when only absolute bytes were reported (same preference
+ * as sampleHistoryService).
  */
-export async function getHighestMemory(limit: number | null = 100, sinceMinutes = 60, assetIds: string[] | null = null): Promise<TopNRow[]> {
-  const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
-  const params: unknown[] = [String(sinceMinutes), limit];
+export async function getHighestMemory(limit: number | null = 100, sinceMinutes = 60, assetIds: string[] | null = null, sampleCount: number = DEFAULT_TOPN_SAMPLE_COUNT): Promise<TopNRow[]> {
+  const samples = clampSampleCount(sampleCount);
+  const idClause = assetIds ? ` AND s."assetId" = ANY($4::text[])` : "";
+  const params: unknown[] = [String(topNWindowMinutes(sinceMinutes, samples)), limit, samples];
   if (assetIds) params.push(assetIds);
   const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; value: number }>>(
     `WITH recent AS (
@@ -447,7 +464,7 @@ export async function getHighestMemory(limit: number | null = 100, sinceMinutes 
          AND (s."memPct" IS NOT NULL OR (s."memUsedBytes" IS NOT NULL AND s."memTotalBytes" IS NOT NULL))${idClause}
      )
      SELECT "assetId", avg(v)::float AS value
-     FROM recent WHERE rn <= 10 AND v IS NOT NULL
+     FROM recent WHERE rn <= $3 AND v IS NOT NULL
      GROUP BY "assetId"
      ORDER BY value DESC LIMIT $2`,
     ...params,
@@ -849,7 +866,10 @@ const EMPTY_STATUS: StatusSummary = {
  *   gate    — which read permission covers it (asset- vs Event-sourced)
  *   empty   — the value a denied caller gets (filter-don't-403 contract)
  *   run     — compute the response value; L(n) resolves the caller's row cap
- *             (?limit=N clamped by the route) against the feed's default
+ *             (?limit=N clamped by the route) against the feed's default;
+ *             `samples` is the caller's per-asset averaging count (?samples=,
+ *             default DEFAULT_TOPN_SAMPLE_COUNT) — only the usesSamples feeds
+ *             consume it (and only those include it in their cache key)
  *   flatten — map the feed value onto response keys. Default is {[feed]: v};
  *             `status` fans out to three top-level keys and `downNodes`
  *             unwraps `.nodes`, both preserved from the pre-feeds response
@@ -858,7 +878,8 @@ const EMPTY_STATUS: StatusSummary = {
 const NOC_FEEDS: Record<NocFeedName, {
   gate: "assets" | "events";
   empty: unknown;
-  run: (L: (n: number) => number | null, assetIds: string[] | null) => Promise<unknown>;
+  usesSamples?: true;
+  run: (L: (n: number) => number | null, assetIds: string[] | null, samples: number) => Promise<unknown>;
   flatten?: (value: unknown) => Record<string, unknown>;
 }> = {
   status: {
@@ -883,8 +904,8 @@ const NOC_FEEDS: Record<NocFeedName, {
   },
   downInterfaces:   { gate: "assets", empty: [], run: (L, ids) => getDownInterfaces(L(100), 240, ids) },
   downIpsecTunnels: { gate: "assets", empty: [], run: (L, ids) => getDownIpsecTunnels(L(100), 240, ids) },
-  topCpu:           { gate: "assets", empty: [], run: (L, ids) => getHighestCpu(L(100), 60, ids) },
-  topMemory:        { gate: "assets", empty: [], run: (L, ids) => getHighestMemory(L(100), 60, ids) },
+  topCpu:           { gate: "assets", empty: [], usesSamples: true, run: (L, ids, samples) => getHighestCpu(L(100), 60, ids, samples) },
+  topMemory:        { gate: "assets", empty: [], usesSamples: true, run: (L, ids, samples) => getHighestMemory(L(100), 60, ids, samples) },
   slowestResponse:  { gate: "assets", empty: [], run: (L, ids) => getSlowestResponse(L(100), ids) },
   packetLoss:       { gate: "assets", empty: [], run: (L, ids) => getPacketLoss(L(100), 15, ids) },
   diskUsage:        { gate: "assets", empty: [], run: (L, ids) => getHighestDiskUsage(L(100), ids) },
@@ -917,8 +938,8 @@ function filterCacheKey(assetTypes: string[] | null, regionNames: string[] | nul
  * (unknown names are dropped silently, mirroring the source-type param
  * convention); null = every feed (the pre-feeds full payload, byte-identical
  * shape). Permission-denied feeds come back as their empty value, never 403.
- * Each (feed, filter, cap) computation goes through the shared TTL cache, as
- * does the filter→assetIds resolution.
+ * Each (feed, filter, cap[, samples]) computation goes through the shared TTL
+ * cache, as does the filter→assetIds resolution.
  */
 export async function getNocSummaryPayload(opts: {
   feeds: string[] | null;
@@ -927,6 +948,7 @@ export async function getNocSummaryPayload(opts: {
   assetTypes: string[] | null;
   regionNames: string[] | null;
   capLimit: number | null;
+  sampleCount?: number | null;
 }): Promise<Record<string, unknown>> {
   const requested: NocFeedName[] = opts.feeds === null
     ? [...NOC_FEED_NAMES]
@@ -945,14 +967,15 @@ export async function getNocSummaryPayload(opts: {
   }
 
   const L = (n: number): number | null => opts.capLimit ?? n;
+  const samples = clampSampleCount(opts.sampleCount);
   const out: Record<string, unknown> = {};
   await Promise.all(requested.map(async (feed) => {
     const def = NOC_FEEDS[feed];
+    // Only sample-averaged feeds key on `samples`, so a ?samples= request
+    // doesn't fragment the cache for feeds the param can't affect.
+    const key = feed + "|" + (opts.capLimit ?? "") + "|" + (def.usesSamples ? samples : "") + "|" + fKey;
     const value = allowed(def.gate)
-      ? await nocFeedCache.getOrCompute(
-          feed + "|" + (opts.capLimit ?? "") + "|" + fKey,
-          () => def.run(L, assetIds),
-        )
+      ? await nocFeedCache.getOrCompute(key, () => def.run(L, assetIds, samples))
       : def.empty;
     Object.assign(out, def.flatten ? def.flatten(value) : { [feed]: value });
   }));

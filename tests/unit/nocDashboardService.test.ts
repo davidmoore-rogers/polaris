@@ -474,6 +474,28 @@ describe("getNocSummaryPayload", () => {
     // getHighestCpu binds LIMIT as the 2nd parameter.
     expect(rawUnsafe.mock.calls[0][2]).toBe(1000);
   });
+
+  it("threads sampleCount into the sample-averaged feeds and keys the cache on it", async () => {
+    rawUnsafe.mockResolvedValue([]);
+    findMany.mockResolvedValue([]);
+
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), sampleCount: 30 });
+    // getHighestCpu binds sampleCount as the 3rd parameter; the window (1st
+    // parameter, minutes) widens to hold 30 samples (30 × 6 = 180).
+    expect(rawUnsafe.mock.calls[0][3]).toBe(30);
+    expect(rawUnsafe.mock.calls[0][1]).toBe("180");
+
+    // Same sampleCount = cache hit; a different sampleCount recomputes.
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), sampleCount: 30 });
+    expect(rawUnsafe).toHaveBeenCalledTimes(1);
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), sampleCount: 5 });
+    expect(rawUnsafe).toHaveBeenCalledTimes(2);
+
+    // Absent sampleCount = the default (10), bound with the historical 60-min window.
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll() });
+    expect(rawUnsafe.mock.calls[2][3]).toBe(10);
+    expect(rawUnsafe.mock.calls[2][1]).toBe("60");
+  });
 });
 
 describe("resolveFilteredAssetIds", () => {
