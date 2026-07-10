@@ -1785,10 +1785,12 @@
   }
 
   // ── Location-view switcher ──────────────────────────────────────────────
-  // Chips at the top-left of the graph: "Flat" (whole site, default) plus one
-  // COLUMN per building — an "All" chip (the whole-building view) with that
-  // building's floors beneath. Rendered only when at least one device
-  // carries a b: or f: code — untagged fleets see no switcher.
+  // Chips at the top-left of the graph, two-row drill-down: row 1 is "Flat"
+  // (whole site, default) plus ONE chip per building; row 2 appears only for
+  // the active building and holds its "All" + floor chips. Keeps the
+  // switcher to two compact rows on many-building sites instead of a
+  // column-per-building wall over the canvas. Rendered only when at least
+  // one device carries a b: or f: code — untagged fleets see no switcher.
   function _setTopologyView(key) {
     if (topoState.activeView === key) return;
     // Persist any manual drags under the OUTGOING view's key before switching.
@@ -1810,8 +1812,7 @@
     wrap.innerHTML = "";
     var views = topoState.floorViews || [];
     if (views.length === 0) { wrap.hidden = true; return; }
-    function chipEl(key, label, title) {
-      var active = topoState.activeView === key;
+    function chipEl(key, label, title, active) {
       var chip = document.createElement("button");
       chip.type = "button";
       chip.className = "topology-type-chip topology-floor-chip" + (active ? " is-active" : "");
@@ -1821,40 +1822,53 @@
       chip.addEventListener("click", function () { _setTopologyView(key); });
       return chip;
     }
-    // "Flat" gets its own mini-column; then one column per building — the
-    // (area-prefixed) building name as the header, an "All" chip for the
-    // whole-building view, and that building's floors beneath.
-    // computeFloorViews is already sorted area → building → building-view-
-    // first → underground-aware floor, so grouping in encounter order
-    // preserves everything. Chips inside a named building's column show only
-    // the floor name — the header carries the building. Buildingless floors
-    // collect under a generic "Floors" column.
-    var flatCol = document.createElement("div");
-    flatCol.className = "topology-floor-col";
-    flatCol.appendChild(chipEl("flat", "Flat", "Whole site"));
-    wrap.appendChild(flatCol);
-    var colsByBuilding = {};
+    // Group views by (area, building). computeFloorViews is already sorted
+    // area → building → building-view-first → underground-aware floor, so
+    // grouping in encounter order preserves everything, and a group's first
+    // view is its whole-building "All" view when one exists (the buildingless
+    // f:-without-b: bucket — grouped under "Floors" — has floors only).
+    var groups = [];
+    var groupsByKey = {};
     views.forEach(function (v) {
-      var colKey = (v.areaName || "") + "|" + (v.buildingName || "");
-      var col = colsByBuilding[colKey];
-      if (!col) {
-        col = document.createElement("div");
-        col.className = "topology-floor-col";
-        var hdr = document.createElement("div");
-        hdr.className = "topology-floor-col-title";
-        hdr.textContent = v.buildingName
-          ? (v.areaName ? v.areaName + " — " + v.buildingName : v.buildingName)
-          : "Floors";
-        col.appendChild(hdr);
-        colsByBuilding[colKey] = col;
-        wrap.appendChild(col);
+      var gKey = (v.areaName || "") + "|" + (v.buildingName || "");
+      var g = groupsByKey[gKey];
+      if (!g) {
+        g = {
+          name: v.buildingName
+            ? (v.areaName ? v.areaName + " — " + v.buildingName : v.buildingName)
+            : "Floors",
+          views: [],
+        };
+        groupsByKey[gKey] = g;
+        groups.push(g);
       }
-      if (v.kind === "building") {
-        col.appendChild(chipEl(v.key, "All", "Show all of " + v.label));
-      } else {
-        col.appendChild(chipEl(v.key, v.buildingName ? v.floorName : v.label, "Show only " + v.label));
-      }
+      g.views.push(v);
     });
+    // Row 1: "Flat" + one chip per building. A building chip lights up while
+    // ANY of its views is active; clicking it selects the group's first view.
+    var buildingsRow = document.createElement("div");
+    buildingsRow.className = "topology-floor-row";
+    buildingsRow.appendChild(chipEl("flat", "Flat", "Whole site", topoState.activeView === "flat"));
+    var activeGroup = null;
+    groups.forEach(function (g) {
+      var groupActive = g.views.some(function (v) { return v.key === topoState.activeView; });
+      if (groupActive) activeGroup = g;
+      buildingsRow.appendChild(chipEl(g.views[0].key, g.name, "Show " + g.views[0].label, groupActive));
+    });
+    wrap.appendChild(buildingsRow);
+    // Row 2: the active building's views, only when it has floors to pick
+    // from — "All" for the whole-building view, floor names beneath it in
+    // the sorted order.
+    if (activeGroup && activeGroup.views.length > 1) {
+      var floorsRow = document.createElement("div");
+      floorsRow.className = "topology-floor-row topology-floor-row-floors";
+      activeGroup.views.forEach(function (v) {
+        var label = v.kind === "building" ? "All" : (v.buildingName ? v.floorName : v.label);
+        var title = v.kind === "building" ? "Show all of " + v.label : "Show only " + v.label;
+        floorsRow.appendChild(chipEl(v.key, label, title, topoState.activeView === v.key));
+      });
+      wrap.appendChild(floorsRow);
+    }
     wrap.hidden = false;
   }
 
