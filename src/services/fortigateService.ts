@@ -31,6 +31,7 @@ import type {
 } from "./fortimanagerService.js";
 import { parseVipServerInfo } from "./fortimanagerService.js";
 import { findFortiswitchUplinkPorts } from "../utils/fortiswitchCmdb.js";
+import { primeArpCache, ARP_SETTLE_MS } from "./arpPrimeService.js";
 
 export interface FortiGateConfig {
   host: string;
@@ -46,6 +47,13 @@ export interface FortiGateConfig {
   dhcpExclude?: string[];
   inventoryExcludeInterfaces?: string[];
   inventoryIncludeInterfaces?: string[];
+  // ARP presence sweep targets (opt-in via Integration.config.arpPresenceSweep;
+  // built by the caller from this device's active dhcp_reservation rows). When
+  // non-empty, Chain D fires one fire-and-forget UDP datagram at each IP and
+  // settles briefly BEFORE reading the ARP table, forcing the FortiGate to
+  // ARP-resolve every reserved IP so live-but-quiet devices (statically
+  // configured, ICMP-firewalled) land in the table. See arpPrimeService.ts.
+  arpSweepIps?: string[];
 }
 
 /**
@@ -867,6 +875,18 @@ export async function discoverDhcpSubnets(
     })(), // end Chain C
     // ─── Chain D: ARP table ──────────────────────────────────────────────
     (async () => {
+      // Step 3e.54: ARP presence sweep (opt-in). Prime the gate's ARP cache
+      // for every reserved IP, then settle briefly so resolutions land
+      // before the table read below. Sweep targets come from the caller
+      // (Polaris reservation rows) rather than Chain A's DHCP data — the
+      // chains run in parallel, so Chain A's entries aren't ready here.
+      if (config.arpSweepIps?.length && !signal?.aborted) {
+        const { sent, dropped } = await primeArpCache(config.arpSweepIps);
+        if (sent > 0) {
+          log("discover.arp", "info", `${deviceHostname}: ARP presence sweep — probed ${sent} reserved IP(s)${dropped > 0 ? ` (${dropped} over cap, skipped)` : ""}`, deviceHostname);
+          await new Promise((resolve) => setTimeout(resolve, ARP_SETTLE_MS));
+        }
+      }
       // Step 3e.55: FortiGate ARP table (mirrors fortimanagerService).
       try {
         const arpResults = await fgRequest<any[]>(config, "GET", "/api/v2/monitor/network/arp", {

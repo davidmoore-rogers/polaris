@@ -1534,7 +1534,15 @@
     // (endpoints/wireless/ghosts/remote) on the odd column right of their
     // parent. Left-to-right here: depth → x, lane → y. Falls back to dagre
     // when there's no firewall root to anchor the solver.
-    var columns = window.PolarisTopologyRender.computeTopologyColumns(elements);
+    //
+    // Location-coded sites get the QUOTIENT layout instead: each top-level
+    // group (area/building) is laid out as its own compact box using local
+    // depth, and the boxes are shelf-packed left-to-right by inter-group
+    // depth — so a building deep in the site's chain no longer renders as a
+    // huge sparse rectangle. Same {depth, lane} grid contract; falls back to
+    // the flat solver on untagged sites (computeGroupedLayout returns null).
+    var columns = window.PolarisTopologyRender.computeGroupedLayout(elements) ||
+      window.PolarisTopologyRender.computeTopologyColumns(elements);
     if (columns) {
       var positions = {};
       Object.keys(columns).forEach(function (id) {
@@ -1672,14 +1680,52 @@
         cyInstance,
         supKinds ? { suppressKinds: supKinds } : undefined
       );
+      // Route cross-group links through the gutters between boxes.
+      window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
     }
+    // Dragging a group box moves its member devices with it; nested boxes
+    // re-fit around the moved members. The RAF drag-follow refresh is
+    // suppressed for the drag's duration (the handlers keep everything
+    // consistent themselves), then a full re-fit + re-route runs on release.
+    var hullDrag = null;
+    cyInstance.on("grab", "node[isLocGroup]", function (evt) {
+      var h = evt.target;
+      var p = h.position();
+      var members = [];
+      (h.data("memberIds") || []).forEach(function (id) {
+        var m = cyInstance.getElementById(id);
+        if (m.length === 0) return;
+        var mp = m.position();
+        members.push({ node: m, x: mp.x, y: mp.y });
+      });
+      hullDrag = { startX: p.x, startY: p.y, members: members };
+    });
+    cyInstance.on("drag", "node[isLocGroup]", function (evt) {
+      if (!hullDrag) return;
+      var p = evt.target.position();
+      var dx = p.x - hullDrag.startX;
+      var dy = p.y - hullDrag.startY;
+      cyInstance.batch(function () {
+        hullDrag.members.forEach(function (m) {
+          m.node.position({ x: m.x + dx, y: m.y + dy });
+        });
+      });
+    });
+    cyInstance.on("free", "node[isLocGroup]", function () {
+      if (!hullDrag) return;
+      hullDrag = null;
+      window.PolarisTopologyRender.refreshLocationGroups(cyInstance);
+      window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
+    });
     var locRefreshPending = false;
     cyInstance.on("position", "node[!isLocGroup]", function () {
-      if (locRefreshPending) return;
+      if (hullDrag || locRefreshPending) return;
       locRefreshPending = true;
       window.requestAnimationFrame(function () {
         locRefreshPending = false;
-        if (cyInstance) window.PolarisTopologyRender.refreshLocationGroups(cyInstance);
+        if (!cyInstance) return;
+        window.PolarisTopologyRender.refreshLocationGroups(cyInstance);
+        window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
       });
     });
 
@@ -1689,6 +1735,43 @@
     _ensureTopologyMapShotButton();
     _renderTopologyTypeToggles(roleCounts, hiddenRoles);
     _renderTopologyFloorViews();
+    _wireCtrlPan();
+  }
+
+  // Ctrl + left-drag pans the viewport from ANYWHERE on the graph —
+  // including on top of device nodes and group boxes, which normally grab
+  // and move. Needed since hulls became draggable: a large building box can
+  // cover most of the canvas, leaving no background to drag-pan on.
+  // Intercepted on the container in capture phase so Cytoscape never sees
+  // the gesture; wired once per page load (the #topology-graph div survives
+  // openTopology's innerHTML wipe) and closes over the module-level
+  // cyInstance so it tracks re-renders. Trade-off: Ctrl+click no longer
+  // toggles node selection (shift+click / shift+drag box-select still do).
+  function _wireCtrlPan() {
+    var graph = document.getElementById("topology-graph");
+    if (!graph || graph.dataset.ctrlPanWired) return;
+    graph.dataset.ctrlPanWired = "1";
+    var panning = null;
+    graph.addEventListener("mousedown", function (e) {
+      if (!e.ctrlKey || e.button !== 0 || !cyInstance) return;
+      panning = { x: e.clientX, y: e.clientY };
+      graph.style.cursor = "grabbing";
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+    window.addEventListener("mousemove", function (e) {
+      if (!panning || !cyInstance) return;
+      cyInstance.panBy({ x: e.clientX - panning.x, y: e.clientY - panning.y });
+      panning = { x: e.clientX, y: e.clientY };
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+    window.addEventListener("mouseup", function (e) {
+      if (!panning) return;
+      panning = null;
+      graph.style.cursor = "";
+      e.stopPropagation();
+    }, true);
   }
 
   // Which hull tiers to hide for the ACTIVE view: a building view IS the
@@ -1873,8 +1956,14 @@
               cyInstance,
               supKinds ? { suppressKinds: supKinds } : undefined
             );
+            window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
           } else {
             window.PolarisTopologyRender.removeLocationGroups(cyInstance);
+            // Routed segments reference the removed boxes — fall back to the
+            // taxi rule by clearing the per-edge style bypass.
+            cyInstance.edges("[isInterGroup]").forEach(function (e) {
+              e.removeStyle("curve-style segment-weights segment-distances edge-distances");
+            });
           }
         }
         locChip.className = "topology-type-chip" + (next ? "" : " is-off");

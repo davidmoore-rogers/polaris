@@ -13,6 +13,7 @@ import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiap
 import type { ApLldpNeighborSample } from "../utils/fortiapLldp.js";
 import { findFortiswitchUplinkPorts } from "../utils/fortiswitchCmdb.js";
 import { getFmgWorker } from "./fmgWorker.js";
+import { primeArpCache, ARP_SETTLE_MS } from "./arpPrimeService.js";
 import {
   discoverDhcpSubnets as discoverViaFortigate,
   testConnection as fgTestConnection,
@@ -1425,6 +1426,14 @@ export async function discoverDhcpSubnets(
   // where a cached IP turned stale. Proxy mode ignores this map (every
   // per-device call is FMG-bound anyway).
   warmCacheIps?: Map<string, string>,
+  // ARP presence sweep targets: fmgNameKey(deviceName) → reserved IPs on
+  // that FortiGate's subnets (built by the caller from active
+  // dhcp_reservation rows when Integration.config.arpPresenceSweep is on;
+  // empty/undefined = sweep disabled). Each device's list is swept
+  // fire-and-forget right before ITS ARP-table read — per-gate, never a
+  // fleet-wide blast — so fresh resolutions land inside the FortiOS
+  // neighbor-cache GC window. See arpPrimeService.ts.
+  arpSweepTargets?: Map<string, string[]>,
 ): Promise<DiscoveryResult> {
   const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
   const adom = config.adom || "root";
@@ -1674,6 +1683,10 @@ export async function discoverDhcpSubnets(
         dhcpExclude: config.dhcpExclude,
         inventoryIncludeInterfaces: config.inventoryIncludeInterfaces,
         inventoryExcludeInterfaces: config.inventoryExcludeInterfaces,
+        // Direct mode delegates the ARP step to fortigateService — hand it
+        // this device's presence-sweep targets so Chain D primes the cache
+        // before its table read, same as the proxy path below.
+        arpSweepIps: arpSweepTargets?.get(fmgNameKey(deviceName)),
       });
       let fgConfig = buildFgConfig(directHost);
 
@@ -2504,6 +2517,18 @@ export async function discoverDhcpSubnets(
     // pipeline enrich existing endpoint assets with both location + IP.
     // Skipped for offline gates (live monitor query).
     if (!offline) try {
+      // Step 3d.54: ARP presence sweep (opt-in — targets prebuilt by the
+      // caller from this device's active dhcp_reservation rows). Fire the
+      // UDP sweep, settle briefly, THEN read the table, so every live
+      // reserved IP resolves into a fresh neighbor-cache entry first.
+      const sweepIps = arpSweepTargets?.get(fmgNameKey(deviceName));
+      if (sweepIps?.length && !signal?.aborted) {
+        const { sent, dropped } = await primeArpCache(sweepIps);
+        if (sent > 0) {
+          log("discover.arp", "info", `${deviceName}: ARP presence sweep — probed ${sent} reserved IP(s)${dropped > 0 ? ` (${dropped} over cap, skipped)` : ""}`, deviceName);
+          await sleepWithAbort(ARP_SETTLE_MS, signal);
+        }
+      }
       const arpPayload: JsonRpcRequest = {
         id: 14,
         method: "exec",

@@ -285,7 +285,36 @@
     });
 
     markPhysicalLoops(elements);
+    markInterGroupEdges(elements);
     return elements;
+  }
+
+  // Stamp `isInterGroup: 1` + a staggered `taxiTurn` (px) on every edge whose
+  // endpoints live in DIFFERENT top-level location groups (area, else
+  // building; uncoded = its own bucket, so coded↔uncoded also counts). The
+  // stylesheet routes these orthogonally (curve-style: taxi) so long
+  // cross-box links travel the gutters between group boxes instead of
+  // slicing diagonally through them, and the per-source turn stagger keeps
+  // parallel links off each other — deterministic: outgoing edges from one
+  // node turn at 40px, 70px, 100px, … in element order.
+  function markInterGroupEdges(elements) {
+    var topKey = {};
+    elements.forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.id || d.source) return;
+      topKey[d.id] = d.locA ? "a|" + d.locA : (d.locB ? "b|" + (d.locA || "") + "|" + d.locB : "");
+    });
+    var turnCount = {};
+    elements.forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.source || !d.target) return;
+      if (!(d.source in topKey) || !(d.target in topKey)) return;
+      if (topKey[d.source] === topKey[d.target]) return;
+      d.isInterGroup = 1;
+      var k = turnCount[d.source] || 0;
+      turnCount[d.source] = k + 1;
+      d.taxiTurn = 40 + k * 30;
+    });
   }
 
   // Physical-loop detection. Stamps `inLoop: 1` on every WIRED edge that lies
@@ -592,6 +621,21 @@
         style: {
           "line-outline-color": "#eab308",
           "line-outline-width": 2,
+        },
+      },
+      // Cross-group links (stamped by markInterGroupEdges) route ORTHOGONALLY
+      // so they travel the gutters between location-group boxes instead of
+      // slicing diagonally through them. taxiTurn staggers each source's
+      // outgoing links (40/70/100…px) so parallel runs never lie on top of
+      // one another. Geometry only — color/dash still come from the edge's
+      // type rules above.
+      {
+        selector: 'edge[isInterGroup = 1]',
+        style: {
+          "curve-style": "taxi",
+          "taxi-direction": "horizontal",
+          "taxi-turn": "data(taxiTurn)",
+          "taxi-turn-min-distance": 12,
         },
       },
       // Location grouping hulls (building / floor / room / jb). Drawn beneath
@@ -1011,7 +1055,11 @@
           memberIds: g.memberIds,
         },
         selectable: false,
-        grabbable: false,
+        // Grabbable: dragging a hull moves the box AND its members (the
+        // desktop drag handlers in map.js translate memberIds by the drag
+        // delta; nested boxes follow because they re-fit around members).
+        // Mobile's autoungrabify keeps them fixed there.
+        grabbable: true,
       });
       n.style({
         shape: cfg.shape,
@@ -1037,6 +1085,152 @@
   // Membership changes require a full renderLocationGroups() instead.
   function refreshLocationGroups(cy) {
     _layoutLocationGroups(cy);
+  }
+
+  // ── Obstacle-aware routing for cross-group links ────────────────────────
+  // A deterministic channel router that exploits the quotient layout's
+  // structure instead of a general-purpose router (libavoid would add a
+  // WASM vendor dep for marginal gain on this geometry): every cross-group
+  // edge is routed as an orthogonal polyline S → (cx, Sy) → (cx, cy) →
+  // (Tx, cy) → T, where cx is a vertical corridor just outside the source
+  // group's box (toward the target) and cy a horizontal corridor. Candidate
+  // corridors (direct at the target's row, above/below the target box,
+  // canvas top/bottom) are scored by how many OTHER top-level boxes the
+  // three runs would cross plus path length — the cheapest clear channel
+  // wins. Corridor usage is counted so edges sharing a channel fan out in
+  // 9px steps instead of stacking. The polyline is rendered with Cytoscape's
+  // `segments` curve style (weights/distances projected onto the S→T line);
+  // edges the router can't place (missing boxes) keep the taxi fallback.
+  var _ROUTE_MARGIN = 26;   // corridor distance outside a box edge
+  var _ROUTE_LABEL_PAD = 22; // extra clearance above a box (its floating label)
+
+  function _rectsFor(cy) {
+    // Top-level hull rects (no ancestor hull present), keyed like topKey.
+    var hulls = cy.nodes("[isLocGroup]").toArray();
+    var infos = hulls.map(function (n) {
+      var cfg = LOC_GROUP_KINDS[n.data("locKind")] || LOC_GROUP_KINDS.building;
+      var p = n.position();
+      var w = n.width();
+      var h = n.height();
+      return {
+        id: n.id(),
+        rank: cfg.rank,
+        scope: n.data("locScope") || [],
+        box: { x1: p.x - w / 2, y1: p.y - h / 2, x2: p.x + w / 2, y2: p.y + h / 2 },
+      };
+    });
+    var top = [];
+    infos.forEach(function (it) {
+      var hasAncestor = infos.some(function (o) {
+        return o !== it && o.rank < it.rank && _isDescendantScope(o.scope, it.scope);
+      });
+      if (!hasAncestor) top.push(it);
+    });
+    return top;
+  }
+
+  function _segIntersectsRect(x1, y1, x2, y2, r) {
+    // Axis-aligned segment vs rect (segments here are always H or V).
+    var lox = Math.min(x1, x2), hix = Math.max(x1, x2);
+    var loy = Math.min(y1, y2), hiy = Math.max(y1, y2);
+    return lox < r.x2 && hix > r.x1 && loy < r.y2 && hiy > r.y1;
+  }
+
+  function routeInterGroupEdges(cy) {
+    var tops = _rectsFor(cy);
+    if (tops.length === 0) return;
+    var rectById = {};
+    tops.forEach(function (t) { rectById[t.id] = t.box; });
+    function hullIdForNode(n) {
+      var a = n.data("locA");
+      var b = n.data("locB");
+      if (a) return "locgroup:a|" + a;
+      if (b) return "locgroup:b|" + (a || "") + "|" + b;
+      return null;
+    }
+    var corridorUse = {}; // rounded corridor coordinate -> count (fan-out stagger)
+    function stagger(kind, coord) {
+      var key = kind + ":" + Math.round(coord / 10) * 10;
+      var k = corridorUse[key] || 0;
+      corridorUse[key] = k + 1;
+      return coord + k * 9;
+    }
+    cy.edges("[isInterGroup]").forEach(function (e) {
+      var sN = e.source();
+      var tN = e.target();
+      var sHull = hullIdForNode(sN);
+      var tHull = hullIdForNode(tN);
+      var bs = sHull ? rectById[sHull] : null;
+      var bt = tHull ? rectById[tHull] : null;
+      var S = sN.position();
+      var T = tN.position();
+      if (!bs && !bt) { e.removeStyle("curve-style segment-weights segment-distances edge-distances"); return; }
+      // Obstacles: every top-level box except the two endpoints' own,
+      // inflated for margin + the floating label above.
+      var obstacles = tops
+        .filter(function (x) { return x.id !== sHull && x.id !== tHull; })
+        .map(function (x) {
+          return { x1: x.box.x1 - 8, y1: x.box.y1 - _ROUTE_LABEL_PAD, x2: x.box.x2 + 8, y2: x.box.y2 + 8 };
+        });
+      var goingRight = T.x >= S.x;
+      var srcBox = bs || { x1: S.x, y1: S.y, x2: S.x, y2: S.y };
+      var tgtBox = bt || { x1: T.x, y1: T.y, x2: T.x, y2: T.y };
+      var cx = goingRight ? srcBox.x2 + _ROUTE_MARGIN : srcBox.x1 - _ROUTE_MARGIN;
+      // Candidate horizontal corridors, best-first preference order.
+      var canvasTop = Math.min.apply(null, tops.map(function (x) { return x.box.y1; })) - _ROUTE_MARGIN - _ROUTE_LABEL_PAD;
+      var canvasBottom = Math.max.apply(null, tops.map(function (x) { return x.box.y2; })) + _ROUTE_MARGIN;
+      var candidates = [
+        T.y,                                          // straight into the target row
+        tgtBox.y1 - _ROUTE_MARGIN - _ROUTE_LABEL_PAD, // just above the target box
+        tgtBox.y2 + _ROUTE_MARGIN,                    // just below the target box
+        canvasTop,
+        canvasBottom,
+      ];
+      var best = null;
+      candidates.forEach(function (cy0, idx) {
+        var crossings = 0;
+        obstacles.forEach(function (r) {
+          if (_segIntersectsRect(cx, S.y, cx, cy0, r)) crossings++;   // vertical out of source
+          if (_segIntersectsRect(cx, cy0, T.x, cy0, r)) crossings++;  // horizontal corridor
+          if (_segIntersectsRect(T.x, cy0, T.x, T.y, r)) crossings++; // vertical into target
+        });
+        var len = Math.abs(S.y - cy0) + Math.abs(T.x - cx) + Math.abs(T.y - cy0);
+        var score = crossings * 100000 + len + idx; // idx = stable tie-break by preference
+        if (!best || score < best.score) best = { cy: cy0, score: score };
+      });
+      var cyPick = best.cy;
+      // Fan out edges sharing a corridor.
+      var cxS = stagger("v", cx);
+      var cyS = Math.abs(cyPick - T.y) < 0.5 ? cyPick : stagger("h", cyPick);
+      // Polyline: drop degenerate bends (e.g. corridor == target row).
+      var pts = [];
+      pts.push({ x: cxS, y: S.y });
+      if (Math.abs(cyS - S.y) > 0.5) pts.push({ x: cxS, y: cyS });
+      if (Math.abs(cyS - T.y) > 0.5) {
+        pts.push({ x: T.x, y: cyS });
+      }
+      // Project bends onto the S→T line for Cytoscape `segments` rendering.
+      var dx = T.x - S.x;
+      var dy = T.y - S.y;
+      var len2 = dx * dx + dy * dy;
+      if (len2 < 1) { e.removeStyle("curve-style segment-weights segment-distances edge-distances"); return; }
+      var norm = Math.sqrt(len2);
+      var weights = [];
+      var dists = [];
+      pts.forEach(function (p) {
+        var px = p.x - S.x;
+        var py = p.y - S.y;
+        weights.push(((px * dx + py * dy) / len2).toFixed(4));
+        // Signed perpendicular distance (positive = right of S→T direction).
+        dists.push((((py * dx - px * dy)) / norm).toFixed(1));
+      });
+      e.style({
+        "curve-style": "segments",
+        "segment-weights": weights.join(" "),
+        "segment-distances": dists.join(" "),
+        "edge-distances": "node-position",
+      });
+    });
   }
 
   // Tooltip content for a hovered hull: the hull's own label plus every
@@ -1861,6 +2055,126 @@
     return out;
   }
 
+  // ── Quotient (two-level) layout for location-coded sites ─────────────────
+  // The flat solver's x is GLOBAL network depth, so a group's width is
+  // dictated by where its members happen to sit in the site-wide column
+  // sequence — a building whose chains start deep in the site renders as a
+  // huge sparse box. This layout fixes that with the classic compound-graph
+  // recipe:
+  //
+  //   1. Run the flat solver once (it encodes every ordering/clustering rule).
+  //   2. Partition nodes into TOP-LEVEL groups — the outermost location tier
+  //      each node carries (its a: area, else its b: building). Uncoded
+  //      nodes (orphans, FortiLink fallbacks, untagged infra) share one
+  //      pseudo-group so they stay clustered.
+  //   3. Compact each group's interior: rank-compress the DISTINCT global
+  //      depth/lane values its members use, so the group is exactly as wide
+  //      and tall as its own subtree — internal shape, ordering, and the
+  //      area→building→floor row clustering are preserved, the dead space
+  //      between them is not.
+  //   4. Lay out the QUOTIENT graph of group boxes: boxes are ordered into
+  //      quotient columns by each group's minimum global depth (so inter-
+  //      group flow still reads left-to-right), stacked within a column by
+  //      minimum global lane, with fixed grid gaps that clear the hull
+  //      padding. This is deterministic shelf packing — no iteration.
+  //
+  // Returns the SAME { id: { depth, lane } } contract as
+  // computeTopologyColumns (units are grid columns/lanes; the caller
+  // multiplies by its px spacing), or null when the flat solver has no
+  // FortiGate root OR no node carries a location code (caller falls back to
+  // the flat solver / dagre).
+  function computeGroupedLayout(elements) {
+    var global = computeTopologyColumns(elements);
+    if (!global) return null;
+    var GAP_X = 2; // grid columns between quotient columns (~260px)
+    var GAP_Y = 2; // grid lanes between stacked boxes (~190px)
+    var order = [];
+    var groups = {};
+    var anyCoded = false;
+    (elements || []).forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.id || d.source) return;
+      if (!(d.id in global)) return;
+      var key = d.locA
+        ? "a|" + d.locA
+        : (d.locB ? "b|" + (d.locA || "") + "|" + d.locB : "");
+      if (key) anyCoded = true;
+      var g = groups[key];
+      if (!g) {
+        g = { key: key, members: [] };
+        groups[key] = g;
+        order.push(g);
+      }
+      g.members.push(d.id);
+    });
+    if (!anyCoded) return null; // untagged site — flat solver is the layout
+    function rankMap(values) {
+      var uniq = Object.keys(values).map(Number).sort(function (a, b) { return a - b; });
+      var m = {};
+      uniq.forEach(function (v, i) { m[v] = i; });
+      return { map: m, count: uniq.length };
+    }
+    order.forEach(function (g) {
+      var dVals = {};
+      var lVals = {};
+      var qDepth = Infinity;
+      var qLane = Infinity;
+      g.members.forEach(function (id) {
+        var p = global[id];
+        dVals[p.depth] = true;
+        lVals[p.lane] = true;
+        if (p.depth < qDepth) qDepth = p.depth;
+        if (p.lane < qLane) qLane = p.lane;
+      });
+      var dr = rankMap(dVals);
+      var lr = rankMap(lVals);
+      g.w = dr.count;
+      g.h = lr.count;
+      g.qDepth = qDepth;
+      g.qLane = qLane;
+      g.local = {};
+      g.members.forEach(function (id) {
+        var p = global[id];
+        g.local[id] = { x: dr.map[p.depth], y: lr.map[p.lane] };
+      });
+    });
+    // Height-budgeted shelf packing. Groups are placed in ascending
+    // entry-depth order (the uncoded pseudo-group's fallback exiles carry
+    // negative depths so it lands leftmost; ties break by entry lane then
+    // key), stacking down the current quotient column and wrapping to a new
+    // column when the stack would exceed the budget — the tallest group's
+    // height, so the canvas is never taller than its biggest box and small
+    // groups (single-AP buildings) tuck under each other instead of each
+    // claiming a whole column.
+    order.sort(function (a, b) {
+      if (a.qDepth !== b.qDepth) return a.qDepth - b.qDepth;
+      if (a.qLane !== b.qLane) return a.qLane - b.qLane;
+      return a.key < b.key ? -1 : 1;
+    });
+    var budget = 0;
+    order.forEach(function (g) { if (g.h > budget) budget = g.h; });
+    var positions = {};
+    var xOffset = 0;
+    var colWidth = 0;
+    var yCursor = 0;
+    order.forEach(function (g) {
+      if (yCursor > 0 && yCursor + g.h > budget) {
+        xOffset += colWidth + GAP_X;
+        colWidth = 0;
+        yCursor = 0;
+      }
+      g.members.forEach(function (id) {
+        positions[id] = {
+          depth: xOffset + g.local[id].x,
+          lane: yCursor + g.local[id].y,
+        };
+      });
+      yCursor += g.h + GAP_Y;
+      if (g.w > colWidth) colWidth = g.w;
+    });
+    return positions;
+  }
+
   window.PolarisTopologyRender = {
     HEALTH_NODE_COLORS: HEALTH_NODE_COLORS,
     fortinetNodeColor: fortinetNodeColor,
@@ -1869,11 +2183,13 @@
     topologyStylesheet: topologyStylesheet,
     topologyLegendSpec: topologyLegendSpec,
     computeTopologyColumns: computeTopologyColumns,
+    computeGroupedLayout: computeGroupedLayout,
     topologyNodeWeight: topologyNodeWeight,
     computeLocationGroups: computeLocationGroups,
     renderLocationGroups: renderLocationGroups,
     removeLocationGroups: removeLocationGroups,
     refreshLocationGroups: refreshLocationGroups,
+    routeInterGroupEdges: routeInterGroupEdges,
     locationGroupTooltipParts: locationGroupTooltipParts,
     compareFloors: compareFloors,
     computeFloorViews: computeFloorViews,

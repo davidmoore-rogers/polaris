@@ -135,6 +135,31 @@ d("stale-reservation asset presence", () => {
     expect(entry!.assetPresenceMatch).toBeNull();
     expect(entry!.assetLastSeen).toBeNull();
   });
+
+  it("keeps a never-leased, asset-less reservation OUT via a fresh ARP confirmation", async () => {
+    // The ICMP-silent static device: never DHCPs, never discovered as an
+    // Asset — but the discovery sync saw the FortiGate ARP table bind its
+    // reserved MAC to the IP (Phase 7.6 stamps lastSeenArp).
+    const { agent, csrf } = await authedAgent(app);
+    const subnet = await scaffold(agent, csrf);
+    const res = await staleCandidate(subnet.id, { lastSeenArp: new Date() });
+
+    const stale = await listStaleReservations("active");
+    expect(stale.find((r) => r.id === res.id)).toBeUndefined();
+  });
+
+  it("flags once the ARP confirmation itself is older than the threshold, and surfaces it on the entry", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const subnet = await scaffold(agent, csrf);
+    const res = await staleCandidate(subnet.id, { lastSeenArp: new Date(Date.now() - 70 * DAY) });
+
+    const stale = await listStaleReservations("active");
+    const entry = stale.find((r) => r.id === res.id);
+    expect(entry).toBeDefined();
+    expect(entry!.lastSeenArp).not.toBeNull();
+    // daysSinceSeen counts from the ARP signal (70d), not the 90d baseline.
+    expect(entry!.daysSinceSeen).toBe(70);
+  });
 });
 
 d("stale-reservation deprecated-subnet exclusion", () => {

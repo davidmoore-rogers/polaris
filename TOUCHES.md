@@ -3270,6 +3270,28 @@ Listed alphabetically.
 
 ---
 
+## services/arpPrimeService.ts
+
+**What it owns:** The ARP-priming presence sweep — fire-and-forget UDP datagrams at reserved IPs so a FortiGate is forced to ARP-resolve each target right before discovery reads its ARP table. Owns the sweep constants (port 33434, batch 256 / pause 25ms, cap 4096, `ARP_SETTLE_MS` 2s). Sends packets; never reads or writes the DB.
+
+**Public API:** `planSweepBatches(ips, batchSize?, maxTargets?)` (pure: dedupe / IPv4-validate / cap / chunk), `primeArpCache(ips)` (paced send, never throws), `ARP_SETTLE_MS`, `ARP_SWEEP_PORT`, `ARP_SWEEP_BATCH_SIZE`, `ARP_SWEEP_MAX_TARGETS`.
+
+**Used by:** `fortimanagerService.discoverDhcpSubnets` Step 3d.54 (proxy mode, per-device, targets from the `arpSweepTargets` map param) and `fortigateService.discoverDhcpSubnets` Chain D Step 3e.54 (standalone + FMG-direct, targets from `FortiGateConfig.arpSweepIps`). Targets are built by `buildArpSweepTargets` in `src/api/routes/integrations.ts` (active dhcp_reservation IPs grouped per FortiGate device) only when `Integration.config.arpPresenceSweep === true`.
+
+**Invariants:**
+- Fire-and-forget: no replies expected, per-datagram errors swallowed, function never throws — a failed sweep degrades to "no priming," never blocks discovery
+- Per-gate targeting only (each FortiGate is swept with its own subnets' reserved IPs immediately before ITS table read) — never a fleet-wide blast; FortiOS GCs unreferenced neighbor-cache entries in ~60–90s so sweep → settle → read must stay contiguous
+- Callers await the send (socket close drops queued datagrams behind the implicit bind) and then settle `ARP_SETTLE_MS` before the ARP query
+- Over-cap overflow is logged (never silent); malformed/non-IPv4 entries are skipped silently (never sweepable)
+- Opt-in per integration (default off — IDS-visible traffic); the Phase 7.6 lastSeenArp stamping is NOT gated by the toggle (passive ARP bindings are equally valid evidence)
+
+**When changing this:**
+- Keep the settle window well inside the FortiOS neighbor-cache GC window (~60s floor) — if you raise `ARP_SETTLE_MS`, remember proxy-mode FMG devices serialize, so N devices pay N × settle per cycle
+- Scale-check pacing at 2000+ reservations per gate (batch × pause math) and confirm the socket send path stays awaited before close
+- If sweep targets gain a new source, keep the per-gate grouping — a global sweep at discovery start ages out before late devices' reads
+
+---
+
 ## services/reservationStaleService.ts
 
 **What it owns:** Stale DHCP-reservation detection, alerting, and alert management (snooze, ignore) — including the lifecycle audit Events (`reservation.stale-settings.updated` / `reservation.stale.snoozed` / `reservation.stale.ignored` / `reservation.stale.unignored`), emitted in-service with the route passing `actor`.
@@ -3278,19 +3300,20 @@ Listed alphabetically.
 
 **Used by:** src/api/routes/reservations.ts (list/snooze/ignore endpoints), src/jobs/flagStaleReservations.ts (flagStaleReservations every 6 hours).
 
-**Reads (cross-signal):** Asset.lastSeen, AssetMacAddress.mac, AssetAssociatedIp.ip — `buildAssetPresenceResolver` correlates each candidate reservation to an Asset (MAC first via `normalizeMacOrNull`, then IP) so a statically-addressed device that never pulls a DHCP lease but is still on the network is NOT flagged stale. Three batched, indexed findMany calls per scan (bounded by candidate-reservation count); no per-row queries.
+**Reads (cross-signal):** Asset.lastSeen, AssetMacAddress.mac, AssetAssociatedIp.ip — `buildAssetPresenceResolver` correlates each candidate reservation to an Asset (MAC first via `normalizeMacOrNull`, then IP) so a statically-addressed device that never pulls a DHCP lease but is still on the network is NOT flagged stale. Three batched, indexed findMany calls per scan (bounded by candidate-reservation count); no per-row queries. Also reads `Reservation.lastSeenArp` — written by `syncDhcpSubnets` Phase 7.6 (integrations.ts) when the owning FortiGate's ARP table binds the reserved IP to the reserved MAC; the opt-in `Integration.config.arpPresenceSweep` toggle makes `arpPrimeService` prime the gate's ARP cache (per-gate UDP sweep) right before each table read so ICMP-silent static devices resolve too.
 
 **Invariants:**
 - Stale threshold (staleAfterDays) defaults to 60 days, 0 = disabled
 - Cold-start grace: effective baseline = max(createdAt, detectionStartedAt) to avoid flooding on first run
-- Effective last signal = freshest of {lastSeenLeased, matched Asset.lastSeen}; baseline is a fallback used only when NEITHER exists (not a floor — a real but old signal still flags during cold-start)
+- Effective last signal = freshest of {lastSeenLeased, lastSeenArp, matched Asset.lastSeen}; baseline is a fallback used only when NONE exists (not a floor — a real but old signal still flags during cold-start)
+- lastSeenArp is stamped only on an exact (device, ip, MAC) match — a different MAC answering the reserved IP is not presence; absence of an ARP entry is never negative evidence (sweep reach depends on routing + firewall policy)
 - A row is stale if effectiveLastSignalMs < (now − threshold) AND (threshold > 0)
 - Active list/count exclude reservations on DEPRECATED subnets (decommissioned-firewall networks) via `where.subnet.status != "deprecated"`; the ignored review list is NOT filtered by subnet status
 - MAC correlation wins over IP (DHCP reservations are MAC→IP, the stable identity); entry carries assetLastSeen + assetPresenceMatch ("mac" | "ip" | null)
 - Snooze extends alert by staleAfterDays from now (not from threshold); clears staleNotifiedAt
 - Ignored rows stay suppressed regardless of threshold; detectionStartedAt persists across runs
 - flagStaleReservations emits one reservation.stale Event per fresh transition (staleNotifiedAt null → timestamp)
-- Discovery clears staleNotifiedAt on re-sighting (re-arms alert for future silence)
+- Discovery clears staleNotifiedAt on re-sighting (re-arms alert for future silence) — both the lease path (Phase 5) and the ARP path (Phase 7.6) clear staleNotifiedAt + staleSnoozedUntil
 
 **When changing this:**
 - Verify staleAfterDays threshold propagates to all callers (threshold=0 should disable all alerts)
