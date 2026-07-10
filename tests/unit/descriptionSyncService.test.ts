@@ -14,7 +14,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { AppError } from "../../src/utils/errors.js";
 
-vi.mock("../../src/db.js", () => ({ prisma: {} }));
+vi.mock("../../src/db.js", () => ({
+  prisma: {
+    asset: { findMany: vi.fn(), update: vi.fn() },
+    assetInterfaceOverride: { findMany: vi.fn(), update: vi.fn() },
+  },
+}));
 vi.mock("../../src/services/eventLogService.js", () => ({ logEvent: vi.fn() }));
 vi.mock("../../src/services/reservationPushService.js", () => ({
   buildTransportForIntegration: vi.fn(),
@@ -25,11 +30,13 @@ vi.mock("../../src/services/reservationPushService.js", () => ({
     err instanceof AppError && [400, 404, 409].includes(err.httpStatus) ? "permanent" : "transient",
 }));
 
+import { prisma } from "../../src/db.js";
 import { callFortiOs, buildTransportForIntegration } from "../../src/services/reservationPushService.js";
 import {
   pushInterfaceDescription,
   pushSwitchPortDescription,
   pushDeviceDescription,
+  runDescriptionSyncForIntegration,
 } from "../../src/services/descriptionSyncService.js";
 
 const callMock = vi.mocked(callFortiOs);
@@ -156,6 +163,39 @@ describe("pushSwitchPortDescription", () => {
     expect(res.ok).toBe(true);
     expect((callMock.mock.calls[1][3] as any).description).toHaveLength(63);
   });
+
+  // switch-id is often renamed away from the serial (confirmed on FortiOS
+  // 7.6.7) — the save-time path passes the asset serial, so it must resolve
+  // the row via `sn` and PUT against the row's real mkey.
+  it("resolves a renamed switch-id by serial (sn match) and PUTs the real mkey", async () => {
+    callMock
+      .mockResolvedValueOnce([
+        { "switch-id": "CORE-SW-2", sn: "S124EPTK00000001", ports: [{ "port-name": "port5", description: "old" }] },
+      ]) // full-table pre-read
+      .mockResolvedValueOnce({}) // PUT
+      .mockResolvedValueOnce([{ description: "patch bay 3" }]); // verify
+    const res = await pushSwitchPortDescription({
+      integration, deviceName: "FG-BRANCH-01",
+      switchId: "S124EPTK00000001", portName: "port5", value: "patch bay 3",
+    });
+    expect(res).toEqual({ ok: true, previousDeviceValue: "old" });
+    expect(callMock.mock.calls[0][2]).toBe("/api/v2/cmdb/switch-controller/managed-switch");
+    expect(callMock.mock.calls[1][2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/CORE-SW-2/ports/port5");
+    expect(callMock.mock.calls[2][2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/CORE-SW-2/ports/port5");
+  });
+
+  it("fails permanent when the switch is in no managed-switch row (id or sn)", async () => {
+    callMock.mockResolvedValueOnce([{ "switch-id": "OTHER-SW", sn: "S999" }]);
+    const res = await pushSwitchPortDescription({
+      integration, deviceName: "FG", switchId: "S124MISSING", portName: "port1", value: "v",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.errorKind).toBe("permanent");
+      expect(res.error).toContain("not found");
+    }
+    expect(callMock).toHaveBeenCalledTimes(1); // no PUT attempted
+  });
 });
 
 describe("pushDeviceDescription", () => {
@@ -188,6 +228,21 @@ describe("pushDeviceDescription", () => {
     expect(callMock.mock.calls[1][3]).toEqual({ description: "IDF-2 stack" });
   });
 
+  it("managed-switch target resolves a renamed switch-id by serial", async () => {
+    callMock
+      .mockResolvedValueOnce([
+        { "switch-id": "JEFFERSON-SW-01", sn: "SR12DPTD00000000", description: "old" },
+      ]) // full-table pre-read
+      .mockResolvedValueOnce({}) // PUT
+      .mockResolvedValueOnce([{ description: "IDF closet" }]); // verify
+    const res = await pushDeviceDescription({
+      integration, deviceName: "JEFFERSON-101F-1",
+      target: { kind: "managed-switch", switchId: "SR12DPTD00000000" }, value: "IDF closet",
+    });
+    expect(res).toEqual({ ok: true, previousDeviceValue: "old" });
+    expect(callMock.mock.calls[1][2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01");
+  });
+
   it("wtp target writes the AP comment", async () => {
     callMock
       .mockResolvedValueOnce([{ "wtp-id": "FP231F123", comment: "old" }])
@@ -215,5 +270,47 @@ describe("pushDeviceDescription", () => {
       expect(res.errorKind).toBe("transient");
       expect(res.error).toContain("verify read");
     }
+  });
+});
+
+describe("runDescriptionSyncForIntegration", () => {
+  // Regression: a FortiLink-renamed switch-id (serial only present on `sn`)
+  // used to make the reconcile's serial lookup miss the CMDB row entirely —
+  // the switch was silently skipped and a Polaris description edit never
+  // pushed. The row map must key by both switch-id and sn.
+  it("pushes to a switch whose switch-id is renamed (serial only on `sn`)", async () => {
+    vi.mocked(prisma.asset.findMany).mockResolvedValue([{
+      id: "a1",
+      hostname: "jefferson-sw-01",
+      serialNumber: "SR12DPTD00000000",
+      description: "IDF closet switch",
+      descriptionSync: null,
+      fortinetTopology: { role: "fortiswitch", controllerFortigate: "JEFFERSON-101F-1" },
+    }] as any);
+    vi.mocked(prisma.assetInterfaceOverride.findMany).mockResolvedValue([] as any);
+    vi.mocked(prisma.asset.update).mockResolvedValue({} as any);
+    callMock.mockImplementation(async (_t, method, path) => {
+      if (method === "GET" && path === "/api/v2/cmdb/switch-controller/managed-switch") {
+        return [{ "switch-id": "JEFFERSON-SW-01", sn: "SR12DPTD00000000", description: "", ports: [] }];
+      }
+      if (method === "PUT" && path === "/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01") {
+        return {};
+      }
+      if (method === "GET" && path === "/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01") {
+        return [{ "switch-id": "JEFFERSON-SW-01", description: "IDF closet switch" }];
+      }
+      throw new Error(`unexpected FortiOS call: ${method} ${path}`);
+    });
+
+    const summary = await runDescriptionSyncForIntegration({
+      id: "intg-1", type: "fortimanager", config: { syncDescriptions: true }, name: "FMG",
+    });
+
+    expect(summary.pushed).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(summary.skippedDevices).toBe(0);
+    const put = callMock.mock.calls.find((c) => c[1] === "PUT");
+    expect(put?.[2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01");
+    expect(put?.[3]).toEqual({ description: "IDF closet switch" });
   });
 });
