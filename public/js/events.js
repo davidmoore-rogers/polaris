@@ -240,7 +240,7 @@ var _eventsSF = null;
         '<td><span class="badge ' + levelClass + '">' + levelLabel + '</span></td>' +
         '<td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ev.action || "") + '</td>' +
         '<td>' + escapeHtml(resourceLabel) + resourceName + '</td>' +
-        '<td>' + escapeHtml(ev.message || "") + '</td>' +
+        '<td class="cell-wrap">' + escapeHtml(ev.message || "") + '</td>' +
         '<td>' + escapeHtml(ev.actor || "-") + '</td>' +
         '<td>' + detailBtn + '</td>' +
         '</tr>';
