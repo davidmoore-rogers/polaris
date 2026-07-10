@@ -17,24 +17,21 @@
  *      switch's mgmt IP, then searches for sibling endpoint assets whose
  *      `ipAddress` matches AND whose `lastSeenSwitch` starts with
  *      `<switch.hostname>/` (the FortiLink-port sighting pattern).
- *   3. When exactly one orphan matches, transfers AssetMacAddress /
- *      AssetAssociatedIp / AssetIpHistory / AssetFortigateSighting rows
- *      from orphan → switch (delete-on-conflict for unique violations),
- *      stamps macAddress on the switch, and deletes the orphan plus its
- *      AssetSource rows. Skip when multiple orphans match (operator review).
+ *   3. When exactly one orphan matches, merges it into the switch via
+ *      `mergeEndpointGhostIntoAsset` (assetGhostMergeService — side-table
+ *      transfer, MAC stamp, orphan delete). Skip when multiple orphans
+ *      match (operator review).
  *
- * Pairs with the inline MAC-fallback lookup added to the FortiSwitch
- * update path in `syncDhcpSubnets`, which prevents the duplication on
- * future discoveries.
+ * Pairs with the inline MAC-fallback lookup + ghost sweep in the
+ * FortiSwitch update path in `syncDhcpSubnets`, which prevent the
+ * duplication on future discoveries.
  *
- * Idempotent: re-running finds zero candidates once convergent. Sample
- * tables (AssetMonitorSample / Telemetry / etc.) cascade-delete with
- * the orphan — endpoint assets are not monitored by default so these
- * are virtually always empty for the orphan side.
+ * Idempotent: re-running finds zero candidates once convergent.
  */
 
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
+import { mergeEndpointGhostIntoAsset } from "../services/assetGhostMergeService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
 const PAGE_SIZE = 200;
@@ -108,7 +105,7 @@ const PAGE_SIZE = 200;
 
           const orphan = orphans[0];
           try {
-            await mergeOrphanIntoSwitch(sw.id, orphan.id, orphan.macAddress);
+            await mergeEndpointGhostIntoAsset(sw.id, orphan.id);
             mergedCount++;
             logger.info(
               { switchId: sw.id, switchHostname: hostname, orphanId: orphan.id, adoptedMac: orphan.macAddress },
@@ -136,114 +133,3 @@ const PAGE_SIZE = 200;
     logger.error({ err }, "mergeFortiswitchEndpointGhosts failed (will retry next boot)");
   }
 })();
-
-async function mergeOrphanIntoSwitch(
-  switchId: string,
-  orphanId: string,
-  orphanMac: string | null,
-): Promise<void> {
-  await prisma.$transaction(async (tx) => {
-    // AssetMacAddress — unique on (assetId, mac). Re-point non-conflicting,
-    // delete conflicting (the switch already has that MAC).
-    {
-      const swMacs = await tx.assetMacAddress.findMany({
-        where: { assetId: switchId },
-        select: { mac: true },
-      });
-      const swMacSet = new Set(swMacs.map((m) => m.mac));
-      const orphanMacs = await tx.assetMacAddress.findMany({
-        where: { assetId: orphanId },
-        select: { id: true, mac: true },
-      });
-      for (const m of orphanMacs) {
-        if (swMacSet.has(m.mac)) {
-          await tx.assetMacAddress.delete({ where: { id: m.id } });
-        } else {
-          await tx.assetMacAddress.update({ where: { id: m.id }, data: { assetId: switchId } });
-        }
-      }
-    }
-
-    // AssetAssociatedIp — unique on (assetId, ip).
-    {
-      const swIps = await tx.assetAssociatedIp.findMany({
-        where: { assetId: switchId },
-        select: { ip: true },
-      });
-      const swIpSet = new Set(swIps.map((i) => i.ip));
-      const orphanIps = await tx.assetAssociatedIp.findMany({
-        where: { assetId: orphanId },
-        select: { id: true, ip: true },
-      });
-      for (const i of orphanIps) {
-        if (swIpSet.has(i.ip)) {
-          await tx.assetAssociatedIp.delete({ where: { id: i.id } });
-        } else {
-          await tx.assetAssociatedIp.update({ where: { id: i.id }, data: { assetId: switchId } });
-        }
-      }
-    }
-
-    // AssetIpHistory — unique on (assetId, ip).
-    {
-      const swHist = await tx.assetIpHistory.findMany({
-        where: { assetId: switchId },
-        select: { ip: true },
-      });
-      const swHistSet = new Set(swHist.map((h) => h.ip));
-      const orphanHist = await tx.assetIpHistory.findMany({
-        where: { assetId: orphanId },
-        select: { id: true, ip: true },
-      });
-      for (const h of orphanHist) {
-        if (swHistSet.has(h.ip)) {
-          await tx.assetIpHistory.delete({ where: { id: h.id } });
-        } else {
-          await tx.assetIpHistory.update({ where: { id: h.id }, data: { assetId: switchId } });
-        }
-      }
-    }
-
-    // AssetFortigateSighting — unique on (assetId, fortigateDevice).
-    {
-      const swSights = await tx.assetFortigateSighting.findMany({
-        where: { assetId: switchId },
-        select: { fortigateDevice: true },
-      });
-      const swSightSet = new Set(swSights.map((s) => s.fortigateDevice));
-      const orphanSights = await tx.assetFortigateSighting.findMany({
-        where: { assetId: orphanId },
-        select: { id: true, fortigateDevice: true },
-      });
-      for (const s of orphanSights) {
-        if (swSightSet.has(s.fortigateDevice)) {
-          await tx.assetFortigateSighting.delete({ where: { id: s.id } });
-        } else {
-          await tx.assetFortigateSighting.update({ where: { id: s.id }, data: { assetId: switchId } });
-        }
-      }
-    }
-
-    // Source rows on the orphan are all by definition placeholders
-    // superseded by the switch's canonical fortiswitch source — drop them.
-    // Cannot re-point them: AssetSource is uniquely keyed on
-    // (sourceKind, externalId), and any conflict would mean the switch
-    // already has a more authoritative row for that source.
-    await tx.assetSource.deleteMany({ where: { assetId: orphanId } });
-
-    // Stamp the adopted MAC onto the switch when we have one.
-    if (orphanMac) {
-      await tx.asset.update({
-        where: { id: switchId },
-        data: { macAddress: orphanMac },
-      });
-    }
-
-    // Cascade-delete the orphan. Any sample tables (monitor / telemetry /
-    // interface / storage / lldp / wireless / custom widget) wipe with it —
-    // endpoint assets are not monitored by default so these are usually
-    // empty. If somehow the orphan was being monitored, those samples are
-    // lost; the switch starts fresh on its own monitoring path.
-    await tx.asset.delete({ where: { id: orphanId } });
-  });
-}

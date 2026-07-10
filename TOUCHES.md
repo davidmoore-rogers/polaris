@@ -1716,15 +1716,37 @@ Listed alphabetically.
 
 ---
 
+## services/assetGhostMergeService.ts
+
+**What it owns:** Automated endpoint-ghost merge — collapses a duplicate `fortigate-endpoint` placeholder Asset (created when a managed FortiSwitch/FortiAP's mgmt interface pulled a DHCP lease and the FortiGate's DHCP/device-inventory pathway learned its MAC as an ordinary client; hostname = the device serial) into the canonical infrastructure asset, then deletes the ghost.
+
+**Public API:** `isMergeableGhostSourceKinds` (pure), `isMergeableEndpointGhost`, `mergeEndpointGhostIntoAsset`, `GhostMergeResult`
+
+**Cross-service deps:** `prisma`, `assetMergeService.transferAssetSideTables` (shared side-table transfer), `monitorOverrideService.recomputeMonitorOverrideForAssets` (after a monitored carry-over).
+
+**Used by:** `src/api/routes/integrations.ts` — the `sweepEndpointGhostsInto` helper called from the FortiSwitch + FortiAP loops of `syncDhcpSubnets` (both update and create branches; candidates = base-MAC lookup + hostname==serial lookup, never bare IP); `src/jobs/mergeFortiswitchEndpointGhosts.ts` (one-shot startup sweep for the legacy NULL-MAC shape).
+
+**Invariants:**
+- Eligibility is provenance-based, never assetType-based: the ghost must carry a `fortigate-endpoint` AssetSource and NO authoritative source (`fortiswitch` / `fortiap` / `fortigate-firewall` / `ad` / `entra` / `intune` / `polaris-agent`). The empty `manual` row an operator edit stamps does NOT disqualify. Hand-created assets and real discovered devices can never be absorbed.
+- Ghost AssetSource rows are DELETED, not re-bound — deliberately different from `assetMergeService.mergeAssets` (see that entry): re-binding would staple a stale fortigate-endpoint / orphaned manual source onto the infra asset. Tags are NOT unioned for the same reason.
+- The ghost's MAC is adopted only when the canonical has none; `monitored=true` carries over only when the ghost was monitored and the canonical wasn't (endpoint ghosts are never auto-monitored, so that flag is operator intent), followed by a best-effort `recomputeMonitorOverrideForAssets`.
+- Ghost sample hypertable rows are orphaned (no Asset FK since migration `20260615000000`) and age out via `drop_chunks` — never row-deleted (compressed-chunk bloat).
+
+**When changing this:**
+- Keep `AUTHORITATIVE_SOURCE_KINDS` in sync with the AssetSource `sourceKind` vocabulary — a new authoritative kind that isn't listed makes its assets eligible for absorption.
+- The discovery-side caller updates the in-memory `AssetIndex` (`remove(ghost)` + `reindex(canonical)`) after each merge — later phases in the same sync would otherwise write to the deleted ghost.
+
+---
+
 ## services/assetMergeService.ts
 
 **What it owns:** Operator-driven asset merge (inverse of split) — re-binds an absorbed ("ghost") asset's multi-source discovery rows + side tables onto a survivor ("canonical") asset, applies per-field winners, then deletes the ghost.
 
-**Public API:** `MERGEABLE_FIELDS`, `MergeableField`, `FieldWinner`, `MergeAssetsResult`, `mergeAssets`
+**Public API:** `MERGEABLE_FIELDS`, `MergeableField`, `FieldWinner`, `MergeAssetsResult`, `mergeAssets`, `transferAssetSideTables`, `SideTableTransferCounts`
 
 **Cross-service deps:** `prisma`, `AppError`, `clampAcquiredToLastSeen`.
 
-**Used by:** `src/api/routes/assets.ts` — `POST /assets/:id/merge`.
+**Used by:** `src/api/routes/assets.ts` — `POST /assets/:id/merge`; `assetGhostMergeService.ts` (imports `transferAssetSideTables`).
 
 **Invariants:**
 - Canonical and ghost must be distinct IDs; all transfers run in a single `$transaction`.
