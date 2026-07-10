@@ -275,38 +275,31 @@
   opacity: 0.6;
 }
 
-/* Floor-view switcher, top-left of the graph area: a "Flat" chip plus one
-   COLUMN per building (building name as the column header, that building's
-   floors stacked beneath in underground-aware order). Rendered only when at
-   least one device carries an f: code. .is-active = the view currently
-   shown. */
+/* Floor-view switcher, top-left of the graph area: two-row drill-down —
+   row 1 is "Flat" + one chip per building, row 2 (only when the active
+   building has floors) is that building's "All" + floor chips in
+   underground-aware order. Rendered only when at least one device carries a
+   b: or f: code. .is-active = the active view's chip, plus the active
+   building's chip in row 1. */
 .topology-floor-views {
   position: absolute;
   top: 10px;
   left: 10px;
   z-index: 6;
   display: flex;
+  flex-direction: column;
   align-items: flex-start;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 6px;
   max-width: calc(100% - 320px);
 }
 .topology-floor-views[hidden] { display: none; }
-.topology-floor-col {
+.topology-floor-row {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  align-items: stretch;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
-.topology-floor-col-title {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--color-text-secondary);
-  padding: 0 4px 2px;
-  white-space: nowrap;
-}
+.topology-floor-row-floors { padding-left: 12px; }
 .topology-floor-chip.is-active {
   opacity: 1;
   font-weight: 600;
