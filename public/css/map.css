@@ -325,6 +325,8 @@
   user-select: none;
 }
 .topology-legend[hidden] { display: none; }
+/* Toolbar toggle buttons that carry an on/off state (Legend). */
+.btn-icon.is-active { color: var(--color-accent); background: var(--color-surface); }
 .topology-legend-header {
   display: flex;
   align-items: center;

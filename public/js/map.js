@@ -803,7 +803,15 @@
   async function openTopology(id, hostname) {
     var overlay = document.getElementById("topology-overlay");
     document.getElementById("topology-title").textContent = hostname || "Site topology";
-    document.getElementById("topology-graph").innerHTML = "";
+    // Wipe the graph container but keep the legend overlay alive — it's
+    // static markup shipped inside #topology-graph (map.html), so a plain
+    // innerHTML wipe would destroy it and every later legend toggle would
+    // silently no-op. Detach + re-append preserves its event listeners
+    // (close button, header drag).
+    var graphEl = document.getElementById("topology-graph");
+    var legendEl = document.getElementById("topology-legend-overlay");
+    graphEl.innerHTML = "";
+    if (legendEl) graphEl.appendChild(legendEl);
     document.getElementById("topology-info").innerHTML = '<p class="muted">Loading…</p>';
     var searchInput = document.getElementById("topology-search-input");
     if (searchInput) searchInput.value = "";
@@ -962,6 +970,14 @@
     var el = document.getElementById("topology-legend-overlay");
     if (!el) return;
     var prefs = _readLegendPrefs();
+    // Reflect the state on the toolbar button so the toggle reads as on/off.
+    var btn = document.getElementById("topology-legend");
+    if (btn) {
+      btn.classList.toggle("is-active", !!prefs.visible);
+      btn.setAttribute("aria-pressed", prefs.visible ? "true" : "false");
+      btn.title = prefs.visible ? "Hide legend" : "Show legend";
+      btn.setAttribute("aria-label", btn.title);
+    }
     if (!prefs.visible) { el.hidden = true; return; }
     var spec = (window.PolarisTopologyRender && window.PolarisTopologyRender.topologyLegendSpec)
       ? window.PolarisTopologyRender.topologyLegendSpec() : null;
@@ -1050,6 +1066,18 @@
       spec.locations.forEach(function (l) { parts.push(row(locationSwatch(l), l.label, l.desc)); });
       parts.push('</div>');
     }
+    // Mouse controls are a property of THIS desktop modal (cytoscape wiring
+    // in map.js), not of the shared render spec — the mobile topology tab
+    // has its own touch gestures.
+    parts.push('<div class="topology-legend-section"><div class="topology-legend-section-title">Mouse controls</div>');
+    [
+      ["Drag empty space", "Pan the view (scroll wheel zooms)"],
+      ["Shift + drag", "Box-select multiple devices"],
+      ["Ctrl + drag a device", "Move the selected devices together"],
+      ["Double-click a device", "Open its asset details"],
+      ["Right-click a device", "Edit its description / grouping codes"],
+    ].forEach(function (c) { parts.push(row("", c[0], c[1])); });
+    parts.push('</div>');
     return parts.join("");
   }
   // Header drag — pointer-events-based so it works on touch laptops too.
