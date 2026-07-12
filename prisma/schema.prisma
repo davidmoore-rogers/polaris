@@ -1073,9 +1073,10 @@ model AssetAssociatedIp {
 //   - AD computer-object sync (source="ad")
 //   - Conflict ghost-merge (preserved from the deleted ghost asset)
 //   - Manual edits via the asset edit panel (source="manual")
-//   - System-info scrape, for the MAC of each operator-pinned monitored
-//     interface (source="monitor-interface"; additive via addMacAddresses,
-//     never a full-replace, so it can't wipe rows owned by other sources)
+//   - System-info scrape + Polaris Agent interfaces push, for the MAC of
+//     each operator-pinned monitored interface (source="monitor-interface";
+//     additive via addMacAddresses, never a full-replace, so it can't wipe
+//     rows owned by other sources)
 //
 // `Asset.macAddress` (the scalar column on Asset) remains the asset's
 // primary MAC — typically the most recently-seen entry. The relation

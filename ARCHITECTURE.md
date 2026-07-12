@@ -752,7 +752,7 @@ AssetMacAddress                 -- All MACs an asset has been seen with. Replace
   firstSeen     DateTime
   lastSeen      DateTime
   @@unique([assetId, mac])
-  -- Persist: discovery code that builds an in-memory mac list (deduped + sorted lastSeen desc) calls `reconcileMacAddresses(assetId, macs)` from src/utils/macAddresses.ts after the asset.update lands. The list/get response serializes the relation back into the legacy `macAddresses: [...]` JSON shape so existing API consumers keep reading the same field name. The system-info scrape additionally folds the MAC of each operator-pinned monitored interface in via `addMacAddresses` (source="monitor-interface") — an additive-only upsert (bumps lastSeen, never deletes), so it coexists with the reconcile-based writers without churn.
+  -- Persist: discovery code that builds an in-memory mac list (deduped + sorted lastSeen desc) calls `reconcileMacAddresses(assetId, macs)` from src/utils/macAddresses.ts after the asset.update lands. The list/get response serializes the relation back into the legacy `macAddresses: [...]` JSON shape so existing API consumers keep reading the same field name. The system-info scrape AND the Polaris Agent `interfaces` push (`agents.ts POST /samples`) additionally fold the MAC of each operator-pinned monitored interface in via `addMacAddresses` (source="monitor-interface") — an additive-only upsert (bumps lastSeen, never deletes), so it coexists with the reconcile-based writers without churn.
 
 AssetAssociatedIp               -- Additional ("secondary") IPs an asset holds beyond Asset.ipAddress. Replaces the legacy Asset.associatedIps JSONB column.
   id            UUID PK
