@@ -2331,10 +2331,9 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Purchase Order</label><input type="text" id="f-purchaseOrder" value="' + escapeHtml(d.purchaseOrder || "") + '" placeholder="PO-12345"></div>' +
   '</div>' +
   '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="255" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
-    '<p class="hint">Device Map grouping codes: <code>a:</code>area &nbsp;<code>b:</code>building &nbsp;<code>f:</code>floor &nbsp;<code>r:</code>room &nbsp;<code>jb:</code>junction box — e.g. <code>a:Mine b:Shop f:2 r:North Closet jb:112-305</code>. Values may contain spaces; each runs until the next code. Codes here (or in Notes, which wins) group this device into building/floor/room shapes and floor views on the topology map.</p>' +
-    '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP comment) — newest edit wins: your save pushes to the device; a device-side edit made after the last sync flows back here on the next discovery. Leave empty to adopt the device\'s value.</p></div>' +
-  '<div class="form-group"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes">' + escapeHtml(d.notes || "") + '</textarea>' +
-    '<p class="hint">Accepts the same <code>a:</code>/<code>b:</code>/<code>f:</code>/<code>r:</code>/<code>jb:</code> grouping codes — Notes override Description and the device-side value per code.</p></div>' +
+    '<p class="hint">Device Map grouping codes: <code>a:</code>area &nbsp;<code>b:</code>building &nbsp;<code>f:</code>floor &nbsp;<code>r:</code>room &nbsp;<code>jb:</code>junction box — e.g. <code>a:Mine b:Shop f:2 r:North Closet jb:112-305</code>. Values may contain spaces; each runs until the next code. Codes here (falling back to the device-side description) group this device into building/floor/room shapes and floor views on the topology map.</p>' +
+    '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP location) — Polaris is primary: a value here always wins and pushes to the device. Leave empty to adopt the device\'s value.</p></div>' +
+  '<div class="form-group"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes">' + escapeHtml(d.notes || "") + '</textarea></div>' +
   tagFieldHTML(d.tags || []);
 }
 
@@ -8619,9 +8618,9 @@ function _renderIfaceCommentSource(state) {
       } else if (sync.status === "conflict") {
         sourceEl.textContent = "Sync conflict — this comment and the device were both edited since the last sync. Neither was overwritten; save to push your value and resolve.";
       } else if (sync.status === "synced") {
-        sourceEl.textContent = "Synced to device" + (sync.lastSyncAt ? " " + timeAgo(sync.lastSyncAt) : "") + " — newest edit wins.";
+        sourceEl.textContent = "Synced to device" + (sync.lastSyncAt ? " " + timeAgo(sync.lastSyncAt) : "") + " — Polaris is primary.";
       } else {
-        sourceEl.textContent = "Will sync to the device on save — newest edit wins.";
+        sourceEl.textContent = "Will sync to the device on save — Polaris is primary.";
       }
     } else if (state.discoveredDescription && state.discoveredDescription !== state.savedValue) {
       sourceEl.textContent = "Override active. Device reports: " + state.discoveredDescription;

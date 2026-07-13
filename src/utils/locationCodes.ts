@@ -1,16 +1,18 @@
 /**
  * src/utils/locationCodes.ts
  *
- * Physical-location codes embedded in FortiSwitch/FortiAP admin descriptions
- * and/or Asset notes, e.g. "a:Mine b:Shop f:2 r:North Closet jb:112-305":
+ * Physical-location codes embedded in FortiSwitch/FortiAP admin descriptions,
+ * e.g. "a:Mine b:Shop f:2 r:North Closet jb:112-305":
  *
  *   a: area    b: building    f: floor    r: room    jb: junction box
  *
  * Hierarchy (outermost first): area > building > floor > room > junction box.
  *
  * Parsed server-side only — the topology endpoint resolves each node's
- * effective codes (notes → Asset.description → device description) and ships
- * the final strings, so the browser never needs the grammar.
+ * effective codes (Asset.description → device description; Asset.notes is
+ * deliberately NOT a source — notes are operator-only and never inform the
+ * topology map) and ships the final strings, so the browser never needs the
+ * grammar.
  *
  * Grammar: keys are case-insensitive and match only at start-of-string or
  * after whitespace, so "hub:5" / "shelf:3" are not tokens. A value runs until
@@ -68,20 +70,18 @@ export function parseLocationCodes(raw: string | null | undefined): LocationCode
 }
 
 /**
- * Resolve a node's effective codes from its three sources, merging PER KEY
- * with precedence notes → Asset.description → device description — so an
- * operator can add just "jb:112-305" in notes without re-typing the
- * device-side b:/f:/r: codes.
+ * Resolve a node's effective codes from its two sources, merging PER KEY
+ * with precedence Asset.description → device description — so an operator
+ * can add just "jb:112-305" in the Polaris description without re-typing the
+ * device-side b:/f:/r: codes. Notes are deliberately not a source.
  */
 export function resolveEffectiveLocation(sources: {
-  notes?: string | null;
   description?: string | null;
   deviceDescription?: string | null;
 }): LocationCodes {
   const layers = [
     parseLocationCodes(sources.deviceDescription),
     parseLocationCodes(sources.description),
-    parseLocationCodes(sources.notes),
   ];
   const out: LocationCodes = { ...EMPTY };
   for (const layer of layers) {
@@ -107,29 +107,7 @@ export function locationGroupKey(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-// Discovery-created switch/AP assets stamp notes with this boilerplate
-// (integrations.ts); the notes sync treats it as overwritable.
-const AUTO_DISCOVERED_NOTES_RE = /^Auto-discovered from FortiGate /;
-
-/**
- * Gate for the discovery-time device-description → Asset.notes sync.
- * Sync (overwrite notes) only when the device carries a description AND the
- * current notes are not operator-authored: empty, exactly what a previous
- * cycle synced (`lastSyncedDescription` = fortinetTopology.notesSyncedFrom),
- * or the auto-discovery boilerplate. Notes that already match the device
- * value need no write. Operator-edited notes always win — and a device that
- * CLEARS its description never clears notes.
- */
-export function shouldSyncDescriptionToNotes(args: {
-  deviceDescription: string | null | undefined;
-  currentNotes: string | null | undefined;
-  lastSyncedDescription: string | null | undefined;
-}): boolean {
-  const device = typeof args.deviceDescription === "string" ? args.deviceDescription.trim() : "";
-  if (!device) return false;
-  const notes = typeof args.currentNotes === "string" ? args.currentNotes : "";
-  if (notes === device) return false;
-  if (!notes.trim()) return true;
-  if (typeof args.lastSyncedDescription === "string" && notes === args.lastSyncedDescription) return true;
-  return AUTO_DISCOVERED_NOTES_RE.test(notes);
-}
+// (The device-description → Asset.notes sync and its shouldSyncDescriptionToNotes
+// gate were removed 2026-07: notes are operator-only. Discovery still stamps the
+// "Auto-discovered from FortiGate …" boilerplate at asset CREATION, but never
+// touches notes on an existing asset.)

@@ -30,7 +30,6 @@ import {
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen, bumpLastSeen } from "../../utils/assetInvariants.js";
-import { shouldSyncDescriptionToNotes } from "../../utils/locationCodes.js";
 import { recordSample, getBaselines, type Baseline } from "../../services/discoveryDurationService.js";
 import { isPgbossRunning, publishDiscoveryJob } from "../../services/queueService.js";
 import {
@@ -3124,35 +3123,19 @@ function buildFortiapObservedBlob(
   };
 }
 
-// Device-description → Asset.notes sync for managed FortiSwitches/FortiAPs.
-// The admin description carries a:/b:/f:/r:/jb: location codes (see
+// Device admin description stamp for managed FortiSwitches/FortiAPs. The
+// description carries a:/b:/f:/r:/jb: location codes (see
 // utils/locationCodes.ts); it's stamped onto fortinetTopology.deviceDescription
-// unconditionally every cycle, and mirrored into Asset.notes only while the
-// notes are not operator-authored (empty, the previous cycle's synced value
-// per the notesSyncedFrom provenance marker, or the auto-discovery
-// boilerplate). Returns the fortinetTopology fields to merge plus the notes
-// write when the gate passes. Pass existingAsset=null on the create path —
-// notes seed from the description when present (caller falls back to its
-// boilerplate otherwise).
-function buildDescriptionSyncStamp(
+// unconditionally every cycle for the Device Map's code resolution
+// (Asset.description → deviceDescription). Asset.notes is operator-only:
+// the former description→notes mirror (and its notesSyncedFrom provenance
+// marker) was removed 2026-07 — discovery seeds notes with the
+// auto-discovered boilerplate at CREATION only and never writes them again.
+function buildDeviceDescriptionStamp(
   description: string | null | undefined,
-  existingAsset: { notes?: string | null; fortinetTopology?: unknown } | null,
-): { topology: { deviceDescription: string | null; notesSyncedFrom: string | null }; notes?: string } {
+): { deviceDescription: string | null } {
   const device = typeof description === "string" && description.trim() ? description.trim() : null;
-  if (!existingAsset) {
-    return { topology: { deviceDescription: device, notesSyncedFrom: device }, ...(device ? { notes: device } : {}) };
-  }
-  const prevTopo = (existingAsset.fortinetTopology ?? {}) as Record<string, unknown>;
-  const prevSynced = typeof prevTopo.notesSyncedFrom === "string" ? prevTopo.notesSyncedFrom : null;
-  const currentNotes = typeof existingAsset.notes === "string" ? existingAsset.notes : null;
-  if (shouldSyncDescriptionToNotes({ deviceDescription: device, currentNotes, lastSyncedDescription: prevSynced })) {
-    return { topology: { deviceDescription: device, notesSyncedFrom: device }, notes: device as string };
-  }
-  // No notes write. Re-anchor provenance when notes already equal the device
-  // value (pre-existing equality counts as "synced"); otherwise carry the
-  // previous marker so a later operator revert re-enables the sync.
-  const notesSyncedFrom = device !== null && currentNotes === device ? device : prevSynced;
-  return { topology: { deviceDescription: device, notesSyncedFrom } };
+  return { deviceDescription: device };
 }
 
 // Generic upsert for the fortiswitch/fortiap source kinds. Same shape as the
@@ -4642,10 +4625,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (!existingAsset && normalizedSwMac) existingAsset = assetIdx.findByMac(normalizedSwMac);
       if (!existingAsset && sw.name) existingAsset = assetIdx.findByEntry(undefined, sw.name, sw.ipAddress || undefined);
 
-      // Device-description → notes sync (location codes). Computed against
-      // the pre-write asset state; merged into swTopology below so the
-      // wholesale fortinetTopology write carries the provenance marker.
-      const swDescSync = buildDescriptionSyncStamp(sw.description, existingAsset);
       const swTopology = {
         role: "fortiswitch" as const,
         controllerFortigate: sw.device || null,
@@ -4661,8 +4640,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // dual-homed switches (left to LLDP). See findFortiswitchUplinkPorts.
         uplinkPhysicalPort: sw.uplinkPhysicalPort ?? null,
         // Raw admin description from the managed-switch CMDB (a:/b:/f:/r:/jb:
-        // location codes) + the notes-sync provenance marker.
-        ...swDescSync.topology,
+        // location codes for the Device Map). Notes are operator-only.
+        ...buildDeviceDescriptionStamp(sw.description),
       };
       if (existingAsset) {
         // Snapshot before the branch retypes assetType / mutates status below.
@@ -4707,9 +4686,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               }
             : {}),
           fortinetTopology: swTopology,
-          // Mirror the device description into notes while they're not
-          // operator-authored (see buildDescriptionSyncStamp).
-          ...(swDescSync.notes !== undefined ? { notes: swDescSync.notes } : {}),
           ...(acquiredAtUpdate ? { acquiredAt: acquiredAtUpdate } : {}),
           ...buildClassMonitorStamp(switchMonitorCfg, existingAsset),
           // Attribution is unconditional for managed infrastructure — the
@@ -4828,9 +4804,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           acquiredAt: swJoinDate,
           ...(sw.connected ? { lastSeen: new Date(now), lastSeenSource: "discovery" } : {}),
           fortinetTopology: swTopology,
-          // Device description seeds notes when present (location codes);
-          // otherwise the auto-discovered boilerplate.
-          notes: swDescSync.notes ?? swNotes,
+          // Notes are operator-only — seed the auto-discovered boilerplate at
+          // creation; discovery never writes notes again after this.
+          notes: swNotes,
           tags: ["fortiswitch", "auto-discovered"],
         };
         clampAcquiredToLastSeen(createData);
@@ -4919,9 +4895,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (!existingAsset && normalizedMac) existingAsset = assetIdx.findByMac(normalizedMac);
       if (!existingAsset && ap.name) existingAsset = assetIdx.findByEntry(undefined, ap.name, resolvedIp || undefined);
 
-      // Device-description → notes sync (location codes) — same pattern as
-      // the FortiSwitch path above.
-      const apDescSync = buildDescriptionSyncStamp(ap.description, existingAsset);
       const apTopology = {
         role: "fortiap" as const,
         controllerFortigate: ap.device || null,
@@ -4948,8 +4921,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         meshUplink: ap.meshUplink ?? null,
         parentApSerial: ap.parentApSerial ?? null,
         // Raw admin description from the wtp CMDB `comment` (a:/b:/f:/r:/jb:
-        // location codes) + the notes-sync provenance marker.
-        ...apDescSync.topology,
+        // location codes for the Device Map). Notes are operator-only.
+        ...buildDeviceDescriptionStamp(ap.description),
       };
       // Presence gate: the managed-AP table includes configured-but-offline
       // WTPs. FortiOS reports "online" on most releases and "connected" on
@@ -4986,9 +4959,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
         const updateData: Record<string, unknown> = {
           fortinetTopology: apTopology,
-          // Mirror the device description into notes while they're not
-          // operator-authored (see buildDescriptionSyncStamp).
-          ...(apDescSync.notes !== undefined ? { notes: apDescSync.notes } : {}),
           // Resurrection, like the lastSeen bump below, requires the AP to
           // be connected — an offline WTP entry must not undo a decommission.
           ...(existingAsset.status === "decommissioned" && apOnline ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
@@ -5076,9 +5046,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             fortinetTopology: apTopology,
             ...(ap.peerSwitch && ap.peerPort ? { lastSeenSwitch: `${ap.peerSwitch}/${ap.peerPort}` } : {}),
             ...buildClassMonitorStamp(apMonitorCfg),
-            // Device description seeds notes when present (location codes);
-            // otherwise the auto-discovered boilerplate.
-            notes: apDescSync.notes ?? `Auto-discovered from FortiGate ${ap.device} via ${integrationLabel}`,
+            // Notes are operator-only — boilerplate at creation, never
+            // written by discovery again.
+            notes: `Auto-discovered from FortiGate ${ap.device} via ${integrationLabel}`,
             tags: ["fortiap", "auto-discovered"],
           },
         });
@@ -7030,8 +7000,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         });
         if (integrationRow && (integrationRow.config as Record<string, any> | null)?.syncDescriptions === true) {
           const summary = await runDescriptionSyncForIntegration(integrationRow);
-          if (summary.pushed || summary.adopted || summary.conflicts || summary.failed || summary.skippedDevices || summary.fmgMirrored || summary.fmgMirrorFailed) {
-            syncLog("info", `Description sync: pushed ${summary.pushed}, adopted ${summary.adopted}, conflicts ${summary.conflicts}, failed ${summary.failed}${summary.fmgMirrored || summary.fmgMirrorFailed ? `, FMG mirror ${summary.fmgMirrored} ok / ${summary.fmgMirrorFailed} failed` : ""}${summary.skippedDevices ? `, ${summary.skippedDevices} device(s) skipped` : ""}`);
+          if (summary.pushed || summary.adopted || summary.failed || summary.skippedDevices || summary.fmgMirrored || summary.fmgMirrorFailed) {
+            syncLog("info", `Description sync: pushed ${summary.pushed}, adopted ${summary.adopted}, failed ${summary.failed}${summary.fmgMirrored || summary.fmgMirrorFailed ? `, FMG mirror ${summary.fmgMirrored} ok / ${summary.fmgMirrorFailed} failed` : ""}${summary.skippedDevices ? `, ${summary.skippedDevices} device(s) skipped` : ""}`);
           }
         }
       } catch (err: any) {
