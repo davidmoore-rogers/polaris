@@ -95,23 +95,28 @@ describe("parseLocationCodes", () => {
 });
 
 describe("resolveEffectiveLocation", () => {
-  it("merges per key with precedence description > deviceDescription", () => {
+  it("a description with codes defines the grouping exclusively (no per-key fall-through)", () => {
+    // Regression: description edited from "b:Mine jb:Fuel" to "a:Mine jb:Fuel"
+    // while the device copy still holds the old value — the removed b: must
+    // NOT show through from deviceDescription.
+    expect(
+      resolveEffectiveLocation({
+        deviceDescription: "b:Mine jb:Fuel",
+        description: "a:Mine jb:Fuel",
+      })
+    ).toEqual({ area: "Mine", building: null, floor: null, room: null, junctionBox: "Fuel" });
+  });
+
+  it("a description with no codes falls back to the device description wholesale", () => {
     expect(
       resolveEffectiveLocation({
         deviceDescription: "b:Shop f:1 r:MDF",
-        description: "f:2 jb:112-305",
+        description: "edge switch by the dock door",
       })
-    ).toEqual({ area: null, building: "Shop", floor: "2", room: "MDF", junctionBox: "112-305" });
-  });
-
-  it("lets the Polaris description add a single key without erasing device-side codes", () => {
-    const codes = resolveEffectiveLocation({
-      deviceDescription: "b:Shop r:North Closet",
-      description: "jb:7",
-    });
-    expect(codes.building).toBe("Shop");
-    expect(codes.room).toBe("North Closet");
-    expect(codes.junctionBox).toBe("7");
+    ).toEqual({ area: null, building: "Shop", floor: "1", room: "MDF", junctionBox: null });
+    expect(
+      resolveEffectiveLocation({ deviceDescription: "b:Shop", description: null })
+    ).toEqual({ area: null, building: "Shop", floor: null, room: null, junctionBox: null });
   });
 
   it("returns all-null when no source carries codes", () => {
