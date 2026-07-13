@@ -49,7 +49,7 @@ import {
   enqueueProcessSamples,
   enqueueProcessLogSamples,
 } from "../../services/sampleWriteBuffer.js";
-import { reconcileMacAddresses, addMacAddresses } from "../../utils/macAddresses.js";
+import { reconcileMacAddresses, reconcileInterfaceMacs } from "../../utils/macAddresses.js";
 import { logEvent } from "./events.js";
 import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
 import { fetchPendingCommands, recordCommandResult } from "../../services/agentCommandService.js";
@@ -409,19 +409,18 @@ agentsRouter.post("/samples", async (req, res, next) => {
       }));
       enqueueInterfaceSamples(rows);
       accepted = rows.length;
-      // Fold the MAC of each operator-pinned monitored interface into the
-      // asset's Associated MACs list (AssetMacAddress) — the same additive
+      // Fold EVERY pushed interface MAC (monitored or not) into the asset's
+      // Associated MACs list (AssetMacAddress) — the same range-coalescing
       // fold recordSystemInfoResult does for the SNMP/REST scrape. For
-      // agent-monitored hosts this push IS the system-info source, so
-      // without it pinned-interface MACs never reach the list. Additive-only
-      // (insert new pairs + bump lastSeen); the enroll/config path's
-      // primaryMac reconcile hydrates existing rows before writing, so rows
-      // added here survive it.
-      const pinnedIfaceMacs = body.samples
-        .filter((s) => pinnedIfaces.has(s.ifName) && s.macAddress)
-        .map((s) => ({ mac: s.macAddress, source: "monitor-interface" }));
-      if (pinnedIfaceMacs.length > 0) {
-        await addMacAddresses(assetId, pinnedIfaceMacs, sampleTs);
+      // agent-monitored hosts this push IS the system-info source. Contiguous
+      // MACs collapse to [mac, macEnd] range rows; the replace is scoped to
+      // source="monitor-interface" so rows owned by discovery/manual writers
+      // (including the enroll path's primaryMac reconcile) are never touched.
+      const ifaceMacs = body.samples
+        .map((s) => s.macAddress)
+        .filter((m): m is string => !!m);
+      if (ifaceMacs.length > 0) {
+        await reconcileInterfaceMacs(assetId, ifaceMacs, sampleTs);
       }
       await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: sampleTs } });
     } else if (body.stream === "eventLog") {

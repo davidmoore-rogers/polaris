@@ -228,10 +228,25 @@ async function buildAssetPresenceResolver(
     }),
     macList.length
       ? prisma.assetMacAddress.findMany({
-          where: { mac: { in: macList } },
-          select: { mac: true, asset: { select: { lastSeen: true } } },
+          where: {
+            OR: [
+              { mac: { in: macList } },
+              // Interface-fold RANGE rows (macEnd set): prefilter to ranges
+              // overlapping the batch's [min, max] MAC interval (canonical
+              // colon-upper, so lexicographic == numeric); exact per-MAC
+              // containment is resolved in the loop below.
+              {
+                AND: [
+                  { macEnd: { not: null } },
+                  { mac: { lte: macList.reduce((a, b) => (a > b ? a : b)) } },
+                  { macEnd: { gte: macList.reduce((a, b) => (a < b ? a : b)) } },
+                ],
+              },
+            ],
+          },
+          select: { mac: true, macEnd: true, asset: { select: { lastSeen: true } } },
         })
-      : Promise.resolve([] as Array<{ mac: string; asset: { lastSeen: Date | null } }>),
+      : Promise.resolve([] as Array<{ mac: string; macEnd: string | null; asset: { lastSeen: Date | null } }>),
     ipList.length
       ? prisma.assetAssociatedIp.findMany({
           where: { ip: { in: ipList } },
@@ -246,6 +261,14 @@ async function buildAssetPresenceResolver(
     if (a.ipAddress && ips.has(a.ipAddress)) bump(byIp, a.ipAddress, a.lastSeen);
   }
   for (const row of macRows) {
+    if (row.macEnd) {
+      // Range row: bump every batch MAC the range contains. Bounded by
+      // (overlapping range rows × batch size), both small.
+      for (const m of macList) {
+        if (m >= row.mac && m <= row.macEnd) bump(byMac, m, row.asset?.lastSeen);
+      }
+      continue;
+    }
     const m = normalizeMacOrNull(row.mac);
     if (m) bump(byMac, m, row.asset?.lastSeen);
   }

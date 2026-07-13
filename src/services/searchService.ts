@@ -109,6 +109,23 @@ export function normalizeMac(raw: string): string | null {
   return compact.toUpperCase().match(/.{2}/g)!.join(":");
 }
 
+/**
+ * Interpret a search term as a partial-MAC PREFIX and return the inclusive
+ * canonical-form bounds of the MAC interval it denotes ("AA:BB:C" →
+ * [AA:BB:C0:00:00:00, AA:BB:CF:FF:FF:FF]). Range rows in AssetMacAddress
+ * overlap that interval iff they contain a MAC with the prefix. Returns null
+ * when the term isn't hex-and-separators (then it can't be a MAC fragment).
+ */
+export function macPrefixBounds(term: string): { low: string; high: string } | null {
+  const compact = term.replace(/[\s:\-.]/g, "");
+  if (!/^[0-9a-fA-F]{1,12}$/.test(compact)) return null;
+  const toColon = (hex: string) => hex.toUpperCase().match(/.{2}/g)!.join(":");
+  return {
+    low: toColon(compact.padEnd(12, "0")),
+    high: toColon(compact.padEnd(12, "f")),
+  };
+}
+
 function isCidrLike(s: string): boolean {
   return /^\d{1,3}(\.\d{1,3}){0,3}(\/\d{1,2})?$/.test(s);
 }
@@ -534,12 +551,34 @@ async function runAssetSearch(terms: string[], mac: string | null, baseFilter: a
     }),
     // Full MAC history (the side table) — `Asset.macAddress` only carries the
     // most-recently-seen value, so historical MACs from prior NICs / sightings
-    // would otherwise be invisible to search.
+    // would otherwise be invisible to search. Range rows (interface-fold rows
+    // with macEnd set — see AssetMacAddress in schema.prisma) match by
+    // lexicographic containment: bounds are canonical colon-uppercase, so
+    // `mac <= X AND macEnd >= X` is numeric containment. A full typed MAC
+    // matches the range containing it; a partial term is additionally tried
+    // as a MAC PREFIX against ranges (a mid-string fragment can't be resolved
+    // against a range without expansion and only matches single-MAC rows).
     prisma.assetMacAddress.findMany({
       where: {
         ...(mac
-          ? { mac: { equals: mac, mode: "insensitive" as const } }
-          : { AND: terms.map((t) => ({ mac: { contains: t, mode: "insensitive" as const } })) }),
+          ? {
+              OR: [
+                { mac: { equals: mac, mode: "insensitive" as const } },
+                { AND: [{ macEnd: { not: null } }, { mac: { lte: mac } }, { macEnd: { gte: mac } }] },
+              ],
+            }
+          : {
+              AND: terms.map((t) => {
+                const clauses: object[] = [{ mac: { contains: t, mode: "insensitive" as const } }];
+                const bounds = macPrefixBounds(t);
+                if (bounds) {
+                  clauses.push({
+                    AND: [{ macEnd: { not: null } }, { mac: { lte: bounds.high } }, { macEnd: { gte: bounds.low } }],
+                  });
+                }
+                return { OR: clauses };
+              }),
+            }),
         asset: baseFilter,
       },
       include: { asset: true },

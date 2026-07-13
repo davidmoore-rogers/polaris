@@ -2214,15 +2214,17 @@ function macCellHTML(asset) {
   var primary = asset.macAddress;
   if (!primary && macs.length === 0) return '-';
 
-  var displayMac = primary || (macs.length > 0 ? macs[0].mac : "-");
+  var displayMac = primary || (macs.length > 0 ? macEntryText(macs[0]) : "-");
   if (macs.length <= 1) return '<span class="copy-cell" title="Click to copy" data-copy="' + escapeHtml(displayMac) + '">' + escapeHtml(displayMac) + '</span>';
 
   var canDelete = canManageNetworks();
 
   // Multiple MACs — show primary with hover tooltip
   var tooltipRows = macs.map(function (m) {
-    var isLatest = m.mac === displayMac;
-    var sourceLine = escapeHtml(m.source || "") + (m.lastSeen ? ' &middot; ' + formatDate(m.lastSeen) : '');
+    var isLatest = m.mac === displayMac || macEntryText(m) === displayMac;
+    var count = macEntryCount(m);
+    var sourceLine = (count > 1 ? count + ' MACs &middot; ' : '') +
+      escapeHtml(m.source || "") + (m.lastSeen ? ' &middot; ' + formatDate(m.lastSeen) : '');
     var subnetLine = '';
     if (m.subnetName || m.subnetCidr) {
       subnetLine = '<span class="mac-tooltip-subnet">';
@@ -2241,7 +2243,7 @@ function macCellHTML(asset) {
           escapeHtml(asset.id) + '" data-mac="' + escapeHtml(m.mac) + '">&times;</button>'
       : '';
     return '<div class="mac-tooltip-row' + (isLatest ? ' mac-tooltip-latest' : '') + '">' +
-      '<span class="mono copy-cell" title="Click to copy" data-copy="' + escapeHtml(m.mac) + '">' + escapeHtml(m.mac) + '</span>' +
+      '<span class="mono copy-cell" title="Click to copy" data-copy="' + escapeHtml(macEntryText(m)) + '">' + escapeHtml(macEntryText(m)) + '</span>' +
       '<span class="mac-tooltip-meta">' +
         subnetLine +
         deviceLine +
@@ -11889,8 +11891,27 @@ function formatMacSource(source) {
     case "dhcp_lease":      return "DHCP lease";
     case "device-inventory":return "Device inventory";
     case "fmg-discovery":   return "FortiManager discovery";
+    case "monitor-interface":return "Interface scrape";
     default: return source || "";
   }
+}
+
+// An interface-scrape entry may be a contiguous RANGE of MACs (macEnd set —
+// e.g. a switch's 48 sequential port MACs folded to one row) rather than a
+// single address.
+function macEntryText(m) {
+  return m.macEnd ? (m.mac + ' – ' + m.macEnd) : m.mac;
+}
+function macEntryCount(m) {
+  if (!m.macEnd) return 1;
+  var s = parseInt(String(m.mac).replace(/:/g, ''), 16);
+  var e = parseInt(String(m.macEnd).replace(/:/g, ''), 16);
+  return (isFinite(s) && isFinite(e) && e >= s) ? (e - s + 1) : 1;
+}
+function macEntriesTotal(macAddresses) {
+  var total = 0;
+  for (var i = 0; i < macAddresses.length; i++) total += macEntryCount(macAddresses[i]);
+  return total;
 }
 
 var _MAC_VIEW_VISIBLE = 3;
@@ -11902,9 +11923,11 @@ function macAddressesViewHTML(macAddresses) {
 
   var rows = shown.map(function (m) {
     var sourceLabel = formatMacSource(m.source);
+    var count = macEntryCount(m);
     return '<div style="display:flex;gap:12px;align-items:center;padding:3px 0">' +
-      '<code class="copy-cell" style="font-size:0.82rem" title="Click to copy" data-copy="' + escapeHtml(m.mac) + '">' + escapeHtml(m.mac) + '</code>' +
+      '<code class="copy-cell" style="font-size:0.82rem" title="Click to copy" data-copy="' + escapeHtml(macEntryText(m)) + '">' + escapeHtml(macEntryText(m)) + '</code>' +
       '<span style="font-size:0.75rem;color:var(--color-text-tertiary)">' +
+        (count > 1 ? count + ' MACs &middot; ' : '') +
         (sourceLabel ? escapeHtml(sourceLabel) : '') +
         (m.lastSeen ? (sourceLabel ? ' &middot; ' : '') + formatDate(m.lastSeen) : '') +
       '</span>' +
@@ -11916,10 +11939,12 @@ function macAddressesViewHTML(macAddresses) {
   // by _wireHoverTriggersIn over the modal body.
   if (hidden.length > 0) {
     var tooltipRows = hidden.map(function (m) {
-      var sourceLine = escapeHtml(formatMacSource(m.source)) +
+      var count = macEntryCount(m);
+      var sourceLine = (count > 1 ? count + ' MACs &middot; ' : '') +
+        escapeHtml(formatMacSource(m.source)) +
         (m.lastSeen ? ' &middot; ' + formatDate(m.lastSeen) : '');
       return '<div class="mac-tooltip-row">' +
-        '<span class="mono copy-cell" title="Click to copy" data-copy="' + escapeHtml(m.mac) + '">' + escapeHtml(m.mac) + '</span>' +
+        '<span class="mono copy-cell" title="Click to copy" data-copy="' + escapeHtml(macEntryText(m)) + '">' + escapeHtml(macEntryText(m)) + '</span>' +
         '<span class="mac-tooltip-meta">' +
           '<span class="mac-tooltip-source">' + sourceLine + '</span>' +
         '</span>' +
@@ -11936,7 +11961,8 @@ function macAddressesViewHTML(macAddresses) {
     '</div>';
   }
 
-  var label = macAddresses.length === 1 ? 'MAC History' : 'All MACs (' + macAddresses.length + ')';
+  var totalMacs = macEntriesTotal(macAddresses);
+  var label = totalMacs === 1 ? 'MAC History' : 'All MACs (' + totalMacs + ')';
   return '<div class="detail-row"><span class="detail-label">' + label + '</span>' +
     '<span class="detail-value">' + rows + '</span></div>';
 }
@@ -14685,7 +14711,9 @@ function _assetQuarantineTabHTML(a) {
   var isQ = a.status === "quarantined";
   var macs = [];
   if (Array.isArray(a.macAddresses)) {
-    macs = a.macAddresses.map(function (m) { return typeof m === "object" ? (m.mac || "") : m; }).filter(Boolean);
+    // Range entries render as "start – end" — the quarantine push expands
+    // them server-side, so the label just needs to convey coverage.
+    macs = a.macAddresses.map(function (m) { return typeof m === "object" ? macEntryText(m) : m; }).filter(Boolean);
   } else if (a.macAddress) {
     macs = [a.macAddress];
   }

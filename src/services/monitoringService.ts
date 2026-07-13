@@ -36,7 +36,7 @@ import { Client as SshClient } from "ssh2";
 import { prisma } from "../db.js";
 import { retryOnDeadlock } from "../utils/dbRetry.js";
 import { AppError } from "../utils/errors.js";
-import { addMacAddresses } from "../utils/macAddresses.js";
+import { reconcileInterfaceMacs, expandMacRange } from "../utils/macAddresses.js";
 import { pingHost } from "../utils/icmpPing.js";
 import {
   fortiosBool,
@@ -7046,20 +7046,19 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           addressingMode: i.addressingMode ?? null,
         })),
       );
-      // Fold the MAC of each operator-pinned monitored interface into the
-      // asset's Associated MACs list (AssetMacAddress). Additive-only — never
-      // wipes rows owned by discovery/agent/manual sources; just inserts new
-      // (assetId, mac) pairs and bumps lastSeen on existing ones. Gated on the
-      // pinned-with-MAC set being non-empty so the no-pinned-interface common
-      // case costs zero extra DB round-trips on the ~10-min slow cadence.
-      const pinnedMacs = d.interfaces
-        .filter((i) => pinnedIfaces.has(i.ifName) && i.macAddress)
-        .map((i) => ({ mac: i.macAddress, source: "monitor-interface" }));
-      if (pinnedMacs.length > 0) {
+      // Fold EVERY scraped interface MAC (monitored or not) into the asset's
+      // Associated MACs list (AssetMacAddress), coalescing contiguous MACs
+      // into range rows so a 48-port switch costs one row instead of 48.
+      // Source-scoped full-replace over source="monitor-interface" only —
+      // rows owned by discovery/agent/manual writers are never touched.
+      const ifaceMacs = d.interfaces
+        .map((i) => i.macAddress)
+        .filter((m): m is string => !!m);
+      if (ifaceMacs.length > 0) {
         const stopMacWrite = startSampleWriteTimer("asset_mac_addresses");
         const endMac = startPhase("systeminfo.persist.iface_macs");
-        await addMacAddresses(assetId, pinnedMacs, now);
-        endMac({ rows: pinnedMacs.length });
+        await reconcileInterfaceMacs(assetId, ifaceMacs, now);
+        endMac({ macs: ifaceMacs.length });
         stopMacWrite();
       }
     }
@@ -8116,7 +8115,7 @@ async function buildLldpAssetMatchIndex(): Promise<{
     select: {
       id: true, ipAddress: true, macAddress: true, hostname: true, dnsName: true,
       associatedIpRows: { select: { ip: true } },
-      macAddressRows:   { select: { mac: true } },
+      macAddressRows:   { select: { mac: true, macEnd: true } },
     },
   });
   logger.info(
@@ -8153,8 +8152,12 @@ async function buildLldpAssetMatchIndex(): Promise<{
       if (!byMac.has(mac)) byMac.set(mac, a.id);
     }
     for (const row of a.macAddressRows) {
-      if (row.mac) {
-        const mac = row.mac.toUpperCase();
+      if (!row.mac) continue;
+      // Range rows (interface-fold, macEnd set) expand so an LLDP neighbor
+      // advertising ANY port MAC in the range still resolves to the asset.
+      // Cap guards the index against a malformed row; real interface ranges
+      // are bounded by physical port counts.
+      for (const mac of expandMacRange(row.mac, row.macEnd, 512)) {
         if (!byMac.has(mac)) byMac.set(mac, a.id);
       }
     }

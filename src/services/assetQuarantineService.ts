@@ -48,6 +48,7 @@ import {
   type FortiManagerConfig,
 } from "./fortimanagerService.js";
 import { getQuarantineCandidates, type AssetSighting } from "./assetSightingService.js";
+import { expandMacRange } from "../utils/macAddresses.js";
 
 // ─── FortiOS user.quarantine shapes (subset) ────────────────────────────
 
@@ -387,13 +388,19 @@ export interface QuarantineTargetRecord {
   error?: string;
 }
 
-function macsForAsset(asset: { macAddress: string | null; macAddressRows?: Array<{ mac: string }> }): string[] {
+function macsForAsset(asset: { macAddress: string | null; macAddressRows?: Array<{ mac: string; macEnd?: string | null }> }): string[] {
   const set = new Set<string>();
   if (asset.macAddress) set.add(normalizeMac(asset.macAddress));
   if (Array.isArray(asset.macAddressRows)) {
     for (const entry of asset.macAddressRows) {
-      const m = entry?.mac ? normalizeMac(entry.mac) : "";
-      if (m) set.add(m);
+      if (!entry?.mac) continue;
+      // Interface-fold range rows expand so quarantine blocks every port MAC
+      // in the range, not just the range start. Capped — a quarantined asset
+      // is an endpoint, so real ranges here are a handful of NICs.
+      for (const mac of expandMacRange(entry.mac, entry.macEnd ?? null, 64)) {
+        const m = normalizeMac(mac);
+        if (m) set.add(m);
+      }
     }
   }
   return Array.from(set).filter((m) => /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(m));
@@ -436,7 +443,7 @@ export async function quarantineAsset(
 ): Promise<QuarantineAssetResult> {
   const asset = await prisma.asset.findUnique({
     where: { id: params.assetId },
-    include: { macAddressRows: { select: { mac: true } } },
+    include: { macAddressRows: { select: { mac: true, macEnd: true } } },
   });
   if (!asset) throw new AppError(404, `Asset ${params.assetId} not found`);
 
@@ -779,7 +786,7 @@ export async function verifyAssetQuarantine(
 }> {
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
-    include: { macAddressRows: { select: { mac: true } } },
+    include: { macAddressRows: { select: { mac: true, macEnd: true } } },
   });
   if (!asset) throw new AppError(404, `Asset ${assetId} not found`);
 
