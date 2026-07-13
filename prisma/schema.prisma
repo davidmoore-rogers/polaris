@@ -585,22 +585,20 @@ model Asset {
   notes            String?     @db.Text
   // Operator-owned device description. When the originating integration's
   // `syncDescriptions` toggle is on (FMG / standalone FortiGate), this field
-  // is description-synced with the device — Polaris is primary: an empty
-  // Three-way merge (newest-wins): where a baseline exists, only the side that
-  // changed since it wins — a device-side edit made after Polaris last synced
-  // flows back into Polaris (adopt); both sides changed → conflict (touch
-  // neither). With no baseline (sync just enabled) it falls back to
-  // Polaris-primary. Device-side write target depends on fortinetTopology.role:
-  // fortigate → system/global `alias`, fortiswitch → managed-switch
-  // `description`, fortiap → wtp `comment`. See descriptionSyncService.
+  // is description-synced with the device — POLARIS-PRIMARY: a non-empty
+  // value here always wins (pushed on save, re-asserted over device-side
+  // edits by every reconcile); an empty value adopts the device's. Device-
+  // side write target depends on fortinetTopology.role: fortigate →
+  // system/global `alias`, fortiswitch → managed-switch `description`,
+  // fortiap → wtp `location` (AP Manager's field). See descriptionSyncService.
   description      String?     @db.VarChar(255)
   // Device-level description sync state:
-  //   { status: "synced"|"failed"|"conflict", at: ISO timestamp,
-  //     value?: string|null,  // three-way-merge baseline (last agreed value;
-  //                            //   key present = baseline known, absent = none)
+  //   { status: "synced"|"failed", at: ISO timestamp,
+  //     value?: string|null,  // last synced value (FMG-mirror bookkeeping)
   //     error?: string,        // failed-push detail
-  //     device?, polaris?      // conflicting current values (status="conflict")
-  //   }. Null = never synced / sync not enabled. JSON-blob precedent:
+  //   }. Null = never synced / sync not enabled. status="conflict" (+ device/
+  // polaris keys) appears only on legacy rows from the retired newest-wins
+  // engine and resolves on the next reconcile. JSON-blob precedent:
   // quarantineTargets.
   descriptionSync  Json?
   tags             String[]    @default([])

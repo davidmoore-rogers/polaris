@@ -1007,15 +1007,15 @@ function descriptionSyncFormHTML(syncDescriptions, useProxy) {
     : "Description writes go through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials.";
   return '<section style="margin-bottom:1.5rem">' +
       '<h4 style="margin:0 0 0.25rem 0">Description Sync</h4>' +
-      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)"><strong style="color:var(--color-text-primary)">Newest edit wins.</strong> Whichever side was edited since the last sync is pushed to the other (every change is audited). A value edited in Polaris pushes to the device; a value edited on the device after the last sync flows back into Polaris. If both sides changed before the next sync, it\'s flagged as a conflict and neither is overwritten.</p>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)"><strong style="color:var(--color-text-primary)">Polaris is primary.</strong> A value in Polaris always wins: it pushes to the device on save and re-asserts on every discovery cycle — device-side edits are overwritten (every change is audited). An empty Polaris field adopts the device\'s value instead.</p>' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<input type="checkbox" id="f-syncDescriptions" ' + checked + ' style="width:auto">' +
-        '<label for="f-syncDescriptions" style="margin:0">Sync descriptions between Polaris and devices (newest edit wins)</label>' +
+        '<label for="f-syncDescriptions" style="margin:0">Sync descriptions between Polaris and devices (Polaris is primary)</label>' +
       '</div>' +
       '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
         '<li><strong>Interface comments.</strong> The Interface Comments box on an asset\'s interface panel writes to the FortiGate\'s <code>system/interface</code> description (or the FortiSwitch port description via the parent controller). Clearing a comment in Polaris leaves the device value in place.</li>' +
         '<li><strong>Device descriptions.</strong> An asset\'s Description field writes to the FortiGate alias, FortiSwitch description, or FortiAP location (the field FortiManager\'s AP Manager shows). An empty Polaris Description is seeded from the device on the next discovery.</li>' +
-        '<li><strong>When it runs.</strong> Immediately on save (your edit is always the newest, so it pushes), plus a reconcile on every discovery cycle that re-pushes after transient failures, pulls in device-side edits, and flags conflicts.</li>' +
+        '<li><strong>When it runs.</strong> Immediately on save, plus a reconcile on every discovery cycle that re-pushes after transient failures, re-asserts Polaris values over device-side edits, and seeds empty Polaris fields from the device.</li>' +
         '<li><strong>FMG central management.</strong> When this ADOM centrally manages FortiAPs or FortiSwitches (detected at each discovery; shown on the integration card), pushes for that class are also mirrored into FortiManager\'s AP Manager / FortiSwitch Manager database so a later install doesn\'t revert them. Polaris never triggers an install.</li>' +
       '</ul>' +
     '</section>' +
@@ -1035,7 +1035,7 @@ function descriptionSyncFormHTML(syncDescriptions, useProxy) {
         '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
       '</ul>' +
       calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for descriptions. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
-      calloutHTML("warning", "Newest edit wins after the first sync", "The very first sync after you enable this is <strong>Polaris-primary</strong> — a description already set in Polaris is pushed to the device (this is how your manual descriptions reach the FortiGates). After a value has synced once, the newest edit wins: edit on the device and it flows back into Polaris; edit both sides before the next sync and it\'s flagged as a conflict for you to resolve.") +
+      calloutHTML("warning", "Polaris overwrites device-side edits", "A description set in Polaris is authoritative: it is pushed on save and re-pushed whenever the device drifts, so a description edited directly on a FortiGate / in FortiManager will be overwritten on the next cycle (audited). To take a device-side value into Polaris instead, clear the Polaris description — the next discovery adopts it.") +
     '</section>';
 }
 

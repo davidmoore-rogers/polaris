@@ -39,9 +39,10 @@ type TopologyMeta = {
   meshUplink?: "ethernet" | "mesh" | null;
   // Raw admin description from the managed-switch CMDB / wtp `comment`,
   // stamped by discovery. Carries a:/b:/f:/r:/jb: location codes — resolved
-  // per node below via resolveEffectiveLocation (notes → Asset.description
-  // → this). notesSyncedFrom is the description→notes sync provenance
-  // marker (consumed by the discovery sync layer, not read here).
+  // per node below via resolveEffectiveLocation (Asset.description → this;
+  // notes are operator-only and never inform the map). notesSyncedFrom is a
+  // legacy provenance marker from the retired description→notes sync — may
+  // linger on old rows, no longer written or read.
   deviceDescription?: string | null;
   notesSyncedFrom?: string | null;
 };
@@ -329,7 +330,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           // Physical-location codes (a:/b:/f:/r:/jb:) resolved from notes →
           // Asset.description → device admin description. Drives the Device
           // Map's grouping hulls + floor views. Null when untagged.
-          location: nodeLocation(resolveEffectiveLocation({ notes: s.notes, description: s.description, deviceDescription: t.deviceDescription })),
+          location: nodeLocation(resolveEffectiveLocation({ description: s.description, deviceDescription: t.deviceDescription })),
           deviceDescription: t.deviceDescription ?? null,
           endpointCount: 0,
           endpoints: [] as EndpointSummary[],
@@ -451,7 +452,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           dependencySuppressed: s.dependencySuppressed,
           iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "access_point" }, iconCache),
           // Same location-code resolution as the switch nodes above.
-          location: nodeLocation(resolveEffectiveLocation({ notes: s.notes, description: s.description, deviceDescription: t.deviceDescription })),
+          location: nodeLocation(resolveEffectiveLocation({ description: s.description, deviceDescription: t.deviceDescription })),
           deviceDescription: t.deviceDescription ?? null,
           stationCount: 0,
           stations: [] as StationSummary[],
@@ -1408,7 +1409,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         // device-side surface would be the 35-char system/global alias), so
         // location codes come from notes / Asset.description only — enough
         // for an operator to pull the FG into a building group.
-        location: nodeLocation(resolveEffectiveLocation({ notes: fg.notes, description: fg.description })),
+        location: nodeLocation(resolveEffectiveLocation({ description: fg.description })),
       },
       switches,
       aps,

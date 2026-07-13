@@ -8,7 +8,6 @@ import {
   resolveEffectiveLocation,
   hasLocationCodes,
   locationGroupKey,
-  shouldSyncDescriptionToNotes,
 } from "../../src/utils/locationCodes.js";
 
 describe("parseLocationCodes", () => {
@@ -96,20 +95,19 @@ describe("parseLocationCodes", () => {
 });
 
 describe("resolveEffectiveLocation", () => {
-  it("merges per key with precedence notes > description > deviceDescription", () => {
+  it("merges per key with precedence description > deviceDescription", () => {
     expect(
       resolveEffectiveLocation({
         deviceDescription: "b:Shop f:1 r:MDF",
-        description: "f:2",
-        notes: "jb:112-305",
+        description: "f:2 jb:112-305",
       })
     ).toEqual({ area: null, building: "Shop", floor: "2", room: "MDF", junctionBox: "112-305" });
   });
 
-  it("lets notes add a single key without erasing device-side codes", () => {
+  it("lets the Polaris description add a single key without erasing device-side codes", () => {
     const codes = resolveEffectiveLocation({
       deviceDescription: "b:Shop r:North Closet",
-      notes: "jb:7",
+      description: "jb:7",
     });
     expect(codes.building).toBe("Shop");
     expect(codes.room).toBe("North Closet");
@@ -117,7 +115,7 @@ describe("resolveEffectiveLocation", () => {
   });
 
   it("returns all-null when no source carries codes", () => {
-    const codes = resolveEffectiveLocation({ notes: "operator remark", description: null });
+    const codes = resolveEffectiveLocation({ description: "plain prose", deviceDescription: null });
     expect(hasLocationCodes(codes)).toBe(false);
   });
 });
@@ -126,72 +124,5 @@ describe("locationGroupKey", () => {
   it("trims, collapses whitespace, and lowercases", () => {
     expect(locationGroupKey("  North   Closet ")).toBe("north closet");
     expect(locationGroupKey("SHOP")).toBe(locationGroupKey("shop"));
-  });
-});
-
-describe("shouldSyncDescriptionToNotes", () => {
-  it("syncs onto empty notes", () => {
-    expect(
-      shouldSyncDescriptionToNotes({ deviceDescription: "b:Shop", currentNotes: "", lastSyncedDescription: null })
-    ).toBe(true);
-    expect(
-      shouldSyncDescriptionToNotes({ deviceDescription: "b:Shop", currentNotes: null, lastSyncedDescription: null })
-    ).toBe(true);
-  });
-
-  it("syncs over the previous cycle's synced value", () => {
-    expect(
-      shouldSyncDescriptionToNotes({
-        deviceDescription: "b:Shop f:2",
-        currentNotes: "b:Shop",
-        lastSyncedDescription: "b:Shop",
-      })
-    ).toBe(true);
-  });
-
-  it("syncs over the auto-discovery boilerplate", () => {
-    expect(
-      shouldSyncDescriptionToNotes({
-        deviceDescription: "b:Shop",
-        currentNotes: "Auto-discovered from FortiGate branch-fw via port5 via HQ FMG",
-        lastSyncedDescription: null,
-      })
-    ).toBe(true);
-    expect(
-      shouldSyncDescriptionToNotes({
-        deviceDescription: "b:Shop",
-        currentNotes: "Auto-discovered from FortiGate device inventory (branch-fw)",
-        lastSyncedDescription: null,
-      })
-    ).toBe(true);
-  });
-
-  it("never overwrites operator-edited notes", () => {
-    expect(
-      shouldSyncDescriptionToNotes({
-        deviceDescription: "b:Shop",
-        currentNotes: "replaced PSU 2026-05, keep an eye on it",
-        lastSyncedDescription: "b:Old",
-      })
-    ).toBe(false);
-  });
-
-  it("is a no-op when notes already match the device description", () => {
-    expect(
-      shouldSyncDescriptionToNotes({
-        deviceDescription: "b:Shop",
-        currentNotes: "b:Shop",
-        lastSyncedDescription: null,
-      })
-    ).toBe(false);
-  });
-
-  it("never syncs an empty/cleared device description", () => {
-    expect(
-      shouldSyncDescriptionToNotes({ deviceDescription: "", currentNotes: "", lastSyncedDescription: "b:Shop" })
-    ).toBe(false);
-    expect(
-      shouldSyncDescriptionToNotes({ deviceDescription: null, currentNotes: "b:Shop", lastSyncedDescription: "b:Shop" })
-    ).toBe(false);
   });
 });
