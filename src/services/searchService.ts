@@ -337,13 +337,17 @@ async function resolveOriginFortigates(
     if (fg.hostname) fgByHostname.set(fg.hostname, { siteId: fg.id, hostname: fg.hostname });
   }
 
+  // A firewall is never its own origin: a pinned FortiGate's sighting /
+  // learnedLocation resolves back to itself, and stamping that would make
+  // the dropdown synthesize a virtual Device Map entry duplicating the
+  // gate's real `sites` hit.
   for (const [assetId, fgHostname] of sightingByAsset) {
     const fg = fgByHostname.get(fgHostname);
-    if (fg) out.set(assetId, fg);
+    if (fg && fg.siteId !== assetId) out.set(assetId, fg);
   }
   for (const [assetId, fgHostname] of learnedByAsset) {
     const fg = fgByHostname.get(fgHostname);
-    if (fg) out.set(assetId, fg);
+    if (fg && fg.siteId !== assetId) out.set(assetId, fg);
   }
   return out;
 }
