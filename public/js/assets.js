@@ -2353,7 +2353,9 @@ function getAssetFormData() {
     acquiredAt:    acq ? new Date(acq).toISOString() : undefined,
     warrantyExpiry:war ? new Date(war).toISOString() : undefined,
     purchaseOrder: val("f-purchaseOrder") || undefined,
-    notes:         val("f-notes") || undefined,
+    // Always sent (including "") — an emptied Notes box clears to null
+    // server-side (notes are operator-only; erasing them must stick).
+    notes:         val("f-notes"),
     // Always sent (including "") — an emptied Description clears to null
     // server-side so the device value can re-seed it (description sync).
     description:   val("f-description"),

@@ -2379,6 +2379,9 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     // is re-seeded from the device on the next discovery when the
     // integration's syncDescriptions toggle is on).
     if (typeof input.description === "string") data.description = input.description.trim() || null;
+    // Notes: empty string clears to null (notes are operator-only — an
+    // emptied box is an intentional clear, not "not provided").
+    if (typeof input.notes === "string") data.notes = input.notes.trim() || null;
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     else if (input.acquiredAt === undefined) delete data.acquiredAt;
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);

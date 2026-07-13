@@ -790,7 +790,7 @@
       // LOC_GROUP_KINDS (all levels are rounded rectangles, identified by a
       // fixed per-level color).
       locations: [
-        { label: "Area",         shape: "rect", style: "solid",  color: "#f472b6", desc: "From a:/a:/b:/f:/r:/jb: codes in device descriptions or asset notes" },
+        { label: "Area",         shape: "rect", style: "solid",  color: "#f472b6", desc: "From a:/b:/f:/r:/jb: codes in the asset description (or the device-side description)" },
         { label: "Building",     shape: "rect", style: "solid",  color: "#4fc3f7" },
         { label: "Floor",        shape: "rect", style: "dashed", color: "#a78bfa" },
         { label: "Room",         shape: "rect", style: "solid",  color: "#4ade80" },
