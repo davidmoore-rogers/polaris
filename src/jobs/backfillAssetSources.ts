@@ -3,8 +3,18 @@
  *
  * One-shot startup job: phase-1 of the multi-source asset model. Walks every
  * Asset row, derives the AssetSource rows it should have under the legacy
- * tag/assetTag conventions, and upserts them. Idempotent — safe to re-run on
- * every startup and complements the shadow-write Prisma extension in db.ts.
+ * tag/assetTag conventions, and creates any that are MISSING. Idempotent —
+ * safe to re-run on every startup and complements the shadow-write Prisma
+ * extension in db.ts.
+ *
+ * CREATE-ONLY — never overwrites an existing row. Post-Phase-3b-cutover the
+ * discovery pathways own the rich observed blobs; the derivation here builds
+ * skeletons FROM the Asset row (osVersion, ipAddress, learnedLocation...).
+ * The original upsert re-stamped every existing row on every boot, clobbering
+ * real discovery-observed blobs with those skeletons — prod incident
+ * 2026-07-14: all ~780 fortiap source rows lost their live os_version /
+ * status on each restart and showed stale Asset-era firmware ("7.4.5 Build
+ * 0734" device-inventory strings) until the next discovery healed them.
  *
  * The `inferred=true` flag is set on AD source rows recovered from
  * "ad-guid:" tags (where Entra has overtaken the assetTag pre-merge); a real
@@ -104,19 +114,14 @@ async function backfillAssetSources(): Promise<void> {
           }
           seenSourceKeys.add(key);
 
-          const updateData: Record<string, unknown> = {
-            assetId: row.id,
-            observed: s.observed as any,
-            syncedAt: now,
-            lastSeen: seen,
-          };
-          if (!s.inferred) updateData.inferred = false;
-          if (s.integrationId) updateData.integrationId = s.integrationId;
-
           try {
-            await prisma.assetSource.upsert({
-              where: { sourceKind_externalId: { sourceKind: s.sourceKind, externalId: s.externalId } },
-              create: {
+            // createMany + skipDuplicates: rows that already exist (real
+            // discovery-owned data) are left completely untouched — the
+            // (sourceKind, externalId) unique constraint absorbs the
+            // conflict without a write. Only genuinely missing rows are
+            // bootstrapped from the legacy-tag derivation.
+            const res = await prisma.assetSource.createMany({
+              data: [{
                 assetId: row.id,
                 sourceKind: s.sourceKind,
                 externalId: s.externalId,
@@ -126,14 +131,14 @@ async function backfillAssetSources(): Promise<void> {
                 syncedAt: now,
                 firstSeen: seen,
                 lastSeen: seen,
-              },
-              update: updateData,
+              }],
+              skipDuplicates: true,
             });
-            sourcesUpserted++;
+            sourcesUpserted += res.count;
           } catch (err: any) {
             logger.warn(
               { err: err?.message, sourceKind: s.sourceKind, externalId: s.externalId, assetId: row.id },
-              "Backfill: failed to upsert AssetSource row",
+              "Backfill: failed to create AssetSource row",
             );
           }
         }
@@ -147,7 +152,7 @@ async function backfillAssetSources(): Promise<void> {
     if (assetsScanned > 0) {
       logger.info(
         { assets: assetsScanned, sources: sourcesUpserted, elapsedMs: Date.now() - start },
-        "Backfilled AssetSource rows from legacy tag conventions",
+        "Backfilled missing AssetSource rows from legacy tag conventions (existing rows untouched)",
       );
     }
     });
