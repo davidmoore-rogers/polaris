@@ -25,6 +25,7 @@ import manufacturerProfilesRouter from "./routes/manufacturerProfiles.js";
 import deviceIconsRouter from "./routes/deviceIcons.js";
 import searchRouter from "./routes/search.js";
 import mapRouter from "./routes/map.js";
+import weatherRouter from "./routes/weather.js";
 import mapRegionsRouter from "./routes/mapRegions.js";
 import allocationTemplatesRouter from "./routes/allocationTemplates.js";
 import credentialsRouter from "./routes/credentials.js";
@@ -112,6 +113,10 @@ router.use("/search", searchRouter);
 // least deviceMap=read.
 router.use("/map/regions", requirePermission("mapRegions", "read"), mapRegionsRouter);
 router.use("/map", mapRouter);
+// Status Map weather proxy — public weather data (RainViewer radar tiles +
+// Open-Meteo temps) cached server-side; any authenticated caller. The widget
+// falls back to the CDNs directly when these fail.
+router.use("/weather", weatherRouter);
 router.use("/conflicts", conflictsRouter);
 router.use("/credentials", credentialsRouter);
 router.use("/manufacturer-aliases", requirePermission("manufacturerAliases", "read"), manufacturerAliasesRouter);

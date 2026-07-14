@@ -3560,7 +3560,7 @@ Listed alphabetically.
 
 **What it owns:** Global typeahead search across all domain entities, with input classification (IP/CIDR/MAC/text), whitespace/quoted-phrase tokenization into AND-combined terms, parallel entity-specific queries capped at 8 results per group, AND scope-prefix shortcuts (`block:`/`b:`, `network:`/`n:`, `asset:`/`a:`, `reservation:`/`r:`, `map:`/`m:`) that bypass the per-group cap.
 
-**Public API:** `searchAll(rawQuery, allowed?)`, `SearchAllowed`, `normalizeMac`, `parseSearchTerms`.
+**Public API:** `searchAll(rawQuery, allowed?)`, `SearchAllowed`, `normalizeMac`, `parseSearchTerms`, `assetMonitorPillState` (+ `AssetMonitorPillFields`).
 
 **Cross-service deps:** none (uses cidr.js utils and prisma directly).
 
@@ -3576,6 +3576,7 @@ Listed alphabetically.
 - Pinned firewalls (assetType=firewall + lat/lng set) are queried as their own group via `searchPinnedFirewalls` so the Device Map section always has an 8-row budget; `searchAssets` passes an empty baseFilter so pinned firewalls ALSO appear in the Assets group (intentional double-listing — operators searching for a firewall hostname expect to find it under Assets too, and `byAsset` hostname match ranks it above the JSON-blob endpoint matches behind it). Both pathways funnel through `runAssetSearch(terms, mac, baseFilter, limit?)` which owns the AND-of-OR clauses + five cross-search pathways + dedup merge — keep them in lock-step when adding new asset-search fields (add the new column to the `assetCols(t)` builder so it's part of every term's OR).
 - `runAssetSearch` runs six parallel pathways merged into one limit-row dedup pipeline: `byAsset` (direct Asset AND-of-OR over the `assetCols` builder, including `assignedTo`, `department`, and the per-term `macAddress` contains / normalized-equals), `sourceHits` (`AssetSource.externalId` with `entra:` / `ad:` / `fgt:` / `intune:` / `fortiswitch:` / `fortiap:` prefix-strip), `macSideHits` (`AssetMacAddress.mac`), `ipSideHits` (`AssetAssociatedIp.ip`), `ipHistHits` (`AssetIpHistory.ip` — historical / since-rotated addresses), and `jsonHitIds` (raw-SQL UNION over `assets.associatedUsers::text` + `asset_sources.observed::text` ILIKE — backed by the GIN trigram indexes from migration `20260507200000_search_json_trgm_indexes`). `byAsset` wins ties; the side / source / JSON pathways fill remaining budget in that order. Apply `baseFilter` to every pathway (including the JSON-id reload) so the firewall vs. non-firewall partition holds.
 - `decorateAssetHit(a, origin)` is the single source of truth for asset-hit shaping + origin-FortiGate context stamping; reused by both the unscoped path's `.map` and the scoped `asset:` path. Adding new fields to an asset hit's `context` belongs in this helper.
+- **Monitor Status pill on asset/site hits:** `assetHit` and `siteHit` stamp `status: { kind, label }` via `assetMonitorPillState` — same precedence as `assetMonitorBadge` in `public/js/assets.js` (unmonitored → Dependency Test → Dep. Down → five-state, unknown/null → Pending; unit-tested in `tests/unit/assetMonitorPillState.test.ts`). The desktop dropdown (`section()` inside `_renderSearchDropdown` in `public/js/app.js`) maps `kind` onto the existing `.badge-monitor-*` classes via `pillClassByKind` + the `.gs-item-pill` size override in `styles.css`. If the assets-table pill gains a state, extend the server helper AND the client class map together.
 - Asset origin resolution (for topology modal focus) prioritizes most-recent DHCP sighting, falls back to `learnedLocation` for Entra/AD-discovered hosts. **A firewall is never its own origin** — a pinned FortiGate's sighting/`learnedLocation` resolves back to itself, and stamping `context.siteId` on it would make both dropdown renderers synthesize a virtual Device Map row duplicating the gate's real `sites` hit.
 - AssetSource externalId search strips `entra:`, `ad:`, `fgt:`, `intune:`, `fortiswitch:`, `fortiap:` prefixes so operators can paste either form.
 
@@ -3869,3 +3870,29 @@ Listed alphabetically.
 - Confirm dhcpInclude/dhcpExclude filtering still matches scope IDs/names correctly.
 - Test DiscoveredDhcpScope mapping (cidr/name/fortigateDevice/dhcpServerId) feeds syncDhcpSubnets correctly.
 - Validate error messages for auth failures, service not running, connection timeouts.
+
+---
+
+## services/weatherProxyService.ts
+
+**What it owns:** Server-side proxy + cache for the Status Map widget's weather overlay: RainViewer radar frame index (5 min TTL, serve-stale ≤30 min on upstream failure), radar tile PNGs (immutable per frame-id content hash → size-bounded FIFO cache, ~48 MB / 4000 entries, no TTL), and Open-Meteo current temperature (20 min TTL per 1.5° grid cell).
+
+**Public API:** `getRadarFrames()`, `getRadarTile(frameId, z, x, y)`, `getTemperature(lat, lng)`, `__resetWeatherProxyCachesForTests()`.
+
+**Cross-service deps:** None (global fetch to api.rainviewer.com / tilecache / api.open-meteo.com; `getAppVersion()` for the User-Agent). No DB, no Events — public weather data only.
+
+**Used by:** src/api/routes/weather.ts (mounted on the main router at `/weather` under requireAuth AND on the Dash listener via its `/weather/` prefix allowlist + `dashWeatherLimiter`). The consumer is public/js/widgets/siteMap.js (proxy-first, direct-CDN fallback).
+
+**Invariants:**
+- Tile requests validate the frame id against the union of the last TWO index generations — grace so an animation started just before an index rotation keeps resolving, and a hard gate so the endpoint can't be used as an open proxy to arbitrary upstream paths.
+- Frame ids are content hashes → a cached tile can never go stale; the route serves `Cache-Control: public, max-age=86400, immutable` (deliberately overriding the Dash listener's blanket no-store).
+- Temperature grid rounding (1.5°) must match siteMap.js loadTemps' grid key, or every viewer becomes a cache miss.
+- Transport failures throw AppError 502 and never poison any cache (geocoderService precedent); the widget interprets non-200 as "fall back to the CDN for this cycle/cell".
+- Tile render options (256px, color scheme 6, "1_1") are hardcoded to match the widget's direct-CDN URL template — a mismatch would make proxy and fallback look different.
+- In-flight dedupe on the index and per-tile fetches — a 14-frame layer add must not stampede upstream.
+
+**When changing this:**
+- Keep the CSP fallback hosts (api.rainviewer.com / *.rainviewer.com / api.open-meteo.com in securityHeaders.ts) as long as the widget's CDN fallback exists.
+- If tile URL options change, change siteMap.js's fallback template in the same commit.
+- The dash rate limiter (`dashWeatherLimiter`, 4000/5min) is sized to radar bursts (~14 frames × viewport tiles); revisit if frame count or tile size assumptions change.
+- Scale check: cache is per-process; in the split-role layout only the web + dash processes serve this (no monitor/discovery involvement).

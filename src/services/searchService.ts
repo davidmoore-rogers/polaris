@@ -16,6 +16,10 @@ export interface SearchHit {
   id: string;
   title: string;       // Primary label (hostname, name, IP, etc.)
   subtitle?: string;   // Secondary label (CIDR, MAC, owner, etc.)
+  // Asset/site hits only: the same five-state monitor pill the assets table
+  // shows (plus the Dep. Down / Dependency Test overlays). `kind` keys the
+  // dropdown's badge-class map; `label` is the display text.
+  status?: { kind: string; label: string };
   // Type-specific context needed for client-side navigation
   context?: Record<string, unknown>;
 }
@@ -681,7 +685,7 @@ async function runAssetSearch(terms: string[], mac: string | null, baseFilter: a
 // the asset was seen on a pinned firewall. Extracted from `searchAll` so the
 // scoped `asset:` path can reuse the same shape.
 function decorateAssetHit(
-  a: { id: string; hostname: string | null; ipAddress: string | null; macAddress: string | null; assetTag: string | null; assetType: string; manufacturer: string | null; model: string | null },
+  a: { id: string; hostname: string | null; ipAddress: string | null; macAddress: string | null; assetTag: string | null; assetType: string; manufacturer: string | null; model: string | null } & AssetMonitorPillFields,
   origin: { siteId: string; hostname: string } | undefined,
 ): SearchHit {
   const hit = assetHit(a);
@@ -777,8 +781,37 @@ function reservationHit(
   };
 }
 
+/** Fields of an Asset row the monitor pill is derived from. */
+export interface AssetMonitorPillFields {
+  monitored: boolean | null;
+  monitorStatus: string | null;
+  dependencySuppressed?: boolean | null;
+  dependencyTestUntil?: Date | null;
+}
+
+/**
+ * Derive the monitor Status pill for a search hit — mirrors the precedence
+ * of `assetMonitorBadge` in public/js/assets.js (the assets-table Status
+ * column): unmonitored → Dependency Test overlay → Dep. Down overlay →
+ * five-state machine (unknown/null renders as Pending). `kind` maps 1:1
+ * onto the existing `.badge-*` monitor classes client-side.
+ */
+export function assetMonitorPillState(a: AssetMonitorPillFields): { kind: string; label: string } {
+  if (!a.monitored) return { kind: "unmonitored", label: "Unmonitored" };
+  if (a.dependencyTestUntil && a.dependencyTestUntil.getTime() > Date.now()) {
+    return { kind: "dep-test", label: "Dependency Test" };
+  }
+  if (a.dependencySuppressed) return { kind: "dep-down", label: "Dep. Down" };
+  const s = a.monitorStatus || "unknown";
+  if (s === "up")         return { kind: "up",         label: "Up" };
+  if (s === "warning")    return { kind: "warning",    label: "Warning" };
+  if (s === "down")       return { kind: "down",       label: "Down" };
+  if (s === "recovering") return { kind: "recovering", label: "Recovering" };
+  return { kind: "pending", label: "Pending" };
+}
+
 function assetHit(
-  a: { id: string; hostname: string | null; ipAddress: string | null; macAddress: string | null; assetTag: string | null; assetType: string; manufacturer: string | null; model: string | null },
+  a: { id: string; hostname: string | null; ipAddress: string | null; macAddress: string | null; assetTag: string | null; assetType: string; manufacturer: string | null; model: string | null } & AssetMonitorPillFields,
 ): SearchHit {
   const secondary = [a.ipAddress, a.macAddress, [a.manufacturer, a.model].filter(Boolean).join(" ")].filter(Boolean).join(" — ");
   return {
@@ -786,11 +819,12 @@ function assetHit(
     id: a.id,
     title: a.hostname || a.assetTag || "asset",
     subtitle: secondary || a.assetType,
+    status: assetMonitorPillState(a),
   };
 }
 
 function siteHit(
-  a: { id: string; hostname: string | null; serialNumber: string | null; ipAddress: string | null; model: string | null; learnedLocation: string | null },
+  a: { id: string; hostname: string | null; serialNumber: string | null; ipAddress: string | null; model: string | null; learnedLocation: string | null } & AssetMonitorPillFields,
 ): SearchHit {
   // Site label leads with hostname; subtitle pulls model + IP/serial so
   // the operator can disambiguate FortiGates whose hostnames overlap
@@ -805,5 +839,6 @@ function siteHit(
     id: a.id,
     title: a.hostname || a.serialNumber || "FortiGate",
     subtitle: bits.join(" — "),
+    status: assetMonitorPillState(a),
   };
 }

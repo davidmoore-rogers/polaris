@@ -859,6 +859,14 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Compact monitor Status pill on asset / Device Map hits — same badge-*
+ * monitor classes as the assets table, shrunk to fit the dropdown row. */
+.gs-item-pill {
+  font-size: 0.64rem;
+  padding: 0 6px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
 .global-search-empty {
   padding: 12px 14px;
   font-size: 0.85rem;
