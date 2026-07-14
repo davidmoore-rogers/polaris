@@ -503,6 +503,15 @@ model Asset {
   ipSource         String? // Where ipAddress was last set from: "manual", "fortimanager", "fortigate", etc.
   macAddress       String? // Most recently seen MAC, e.g. "AA:BB:CC:DD:EE:FF"
   hostname         String?
+  // Operator hostname override (pin) — coordSource-style. When set, this value
+  // IS the effective hostname: the assets PUT handler writes both fields, and
+  // the Prisma extension in src/db.ts re-asserts it over any later write that
+  // sets `hostname` without touching `hostnameOverride` (i.e. every discovery
+  // projection write). Cleared by saving an empty Hostname in the edit form —
+  // hostname then reverts to the discovery-projected value. Overridden assets
+  // are excluded from the duplicate-hostname ghost merge and from hostname
+  // projection-drift logging.
+  hostnameOverride String?
   dnsName          String? // FQDN from PTR lookup, e.g. "server01.corp.local"
   dnsNameFetchedAt DateTime? // When the last PTR lookup ran (success or failure)
   dnsNameTtl       Int? // TTL (seconds) from the PTR record; null = unknown (standard mode)

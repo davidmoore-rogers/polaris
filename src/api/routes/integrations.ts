@@ -4256,8 +4256,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // from churning across failovers (where each member alternates
         // being primary). Best-effort; Phase 13.5 reconciler catches misses.
         if (member.isPrimary) {
+          // Operator hostname pin: the db.ts guard rewrote this cycle's
+          // hostname write back to `hostnameOverride`, so the projected name
+          // never lands on the row — "projected ≠ previous" is the pin
+          // diverging by design, not a rename (it would spuriously fire
+          // every cycle). The pin is the effective hostname for tags.
+          const hostnamePin = (existingAsset.hostnameOverride as string | null | undefined) || null;
           const projectedHostnameRaw = updateData.hostname as string | null | undefined;
-          if (projectedHostnameRaw && previousHostname && projectedHostnameRaw !== previousHostname) {
+          if (!hostnamePin && projectedHostnameRaw && previousHostname && projectedHostnameRaw !== previousHostname) {
             try {
               await applyFirewallRename(previousHostname, projectedHostnameRaw);
             } catch (err: any) {
@@ -4268,7 +4274,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             }
           }
           try {
-            await seedFirewallTagRegistry(projectedHostnameRaw || previousHostname || fgHostname);
+            await seedFirewallTagRegistry(hostnamePin || projectedHostnameRaw || previousHostname || fgHostname);
           } catch { /* best-effort */ }
         }
         // Update in-memory index. For the primary, mirror the cluster IP +

@@ -2277,6 +2277,9 @@ router.post("/", requirePermission("assets", "write"), async (req, res, next) =>
     // is re-seeded from the device on the next discovery when the
     // integration's syncDescriptions toggle is on).
     if (typeof input.description === "string") data.description = input.description.trim() || null;
+    // Hostname: trim; an empty box means "not provided", not "" (the edit
+    // form now always sends the field, including blank).
+    if (typeof input.hostname === "string") data.hostname = input.hostname.trim() || null;
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     if (input.ipAddress) data.ipSource = "manual";
@@ -2382,6 +2385,35 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     // Notes: empty string clears to null (notes are operator-only — an
     // emptied box is an intentional clear, not "not provided").
     if (typeof input.notes === "string") data.notes = input.notes.trim() || null;
+    // Hostname: an edit-time write is an operator override (coordSource-style
+    // pin — the db.ts extension re-asserts it over discovery projection
+    // writes). Only a real change pins, since the edit form echoes the
+    // current hostname back on every save. Clearing (empty string) releases
+    // the pin and reverts hostname to the discovery-projected value (null
+    // when no source has an opinion, e.g. manually-created assets).
+    if (input.hostname !== undefined) {
+      const trimmed = input.hostname.trim();
+      if (!trimmed) {
+        data.hostnameOverride = null;
+        const overrideSources = await prisma.assetSource.findMany({
+          where: { assetId: id },
+          select: { sourceKind: true, inferred: true, observed: true },
+        });
+        const { projected } = projectAssetFromSources(
+          overrideSources.map((s) => ({
+            sourceKind: s.sourceKind,
+            inferred: s.inferred,
+            observed: s.observed as Record<string, unknown> | null,
+          })),
+        );
+        data.hostname = projected.hostname;
+      } else if (trimmed !== existing.hostname) {
+        data.hostname = trimmed;
+        data.hostnameOverride = trimmed;
+      } else {
+        delete data.hostname;
+      }
+    }
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     else if (input.acquiredAt === undefined) delete data.acquiredAt;
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
@@ -2416,7 +2448,7 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     if (input.monitored !== undefined || input.assetType !== undefined) {
       await recomputeMonitorOverrideForAssets(prisma, [id]);
     }
-    const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
+    const trackFields = ["hostname", "hostnameOverride", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
     const before: Record<string, unknown> = {};
     const after: Record<string, unknown> = {};
     for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
