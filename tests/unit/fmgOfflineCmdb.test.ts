@@ -127,9 +127,12 @@ describe("FMG offline-gate CMDB pull", () => {
     expect(result.switchMacTable).toHaveLength(0);
     expect(result.arpTable).toHaveLength(0);
 
-    // 3. CMDB switch/AP rosters preserved (decommission protection).
-    expect(result.cmdbSwitchSerials).toContain("S1234");
-    expect(result.cmdbApSerials).toContain("AP5678");
+    // 3. CMDB switch/AP rosters preserved (decommission protection). Each
+    //    entry carries the source gate so the sync can scope the protection
+    //    per-controller — an offline gate's cached roster must only shield
+    //    devices whose recorded controller IS that gate.
+    expect(result.cmdbSwitchSerials).toContainEqual({ device: DEVICE, serial: "S1234" });
+    expect(result.cmdbApSerials).toContainEqual({ device: DEVICE, serial: "AP5678" });
 
     // 4. The offline device drives NO decommission sweep — excluded from every
     //    "inventoried"/"queried" set even though CMDB VIP/DHCP reads succeeded.

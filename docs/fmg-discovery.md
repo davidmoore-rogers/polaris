@@ -127,7 +127,9 @@ FMG Integration Discovery
 │   └─ Decommission sweep:
 │         controllerFortigate ∈ inventoriedDevices
 │         AND serial ∉ live managed-switch/status table
-│         AND serial ∉ CMDB roster
+│         AND serial ∉ CMDB roster OF THAT CONTROLLER (per-controller scope —
+│             an offline/staged gate's cached roster only protects devices it
+│             owns, never another controller's fleet)
 │           → status = "decommissioned"
 │         (controllers whose inventory query FAILED: switches under them are LEFT alone)
 │

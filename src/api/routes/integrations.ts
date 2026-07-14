@@ -3448,8 +3448,31 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // the live monitor query is "configured but currently offline" — likely
   // a brief post-config-push window or an offline device. Don't decommission
   // it. The CMDB rosters come from native FMG calls (no proxy throttle).
-  for (const serial of result.cmdbSwitchSerials || []) seenSwitchSerials.add(serial);
-  for (const serial of result.cmdbApSerials     || []) seenApSerials.add(serial);
+  // SCOPED PER-CONTROLLER (keyed on lowercased device name — FMG-cased vs
+  // FortiOS-cased names can differ for the same device): a roster entry only
+  // protects a switch/AP whose recorded controllerFortigate IS the gate the
+  // roster was read from. An FMG-offline gate's roster is FMG's CACHED copy
+  // (Step 3d.4 runs offline by design), and a staged replacement gate's
+  // cloned config can list another gate's whole fleet — fleet-wide
+  // protection let exactly that shield ghost APs from the sweep forever
+  // (prod 2026-07: staged JEFFERSON-201G-1 vouched for a deleted AP owned
+  // by the live JEFFERSON-101F-1).
+  const cmdbSwitchSerialsByDevice = new Map<string, Set<string>>();
+  const cmdbApSerialsByDevice     = new Map<string, Set<string>>();
+  for (const e of result.cmdbSwitchSerials || []) {
+    const key = (e.device || "").toLowerCase();
+    if (!key || !e.serial) continue;
+    let set = cmdbSwitchSerialsByDevice.get(key);
+    if (!set) { set = new Set(); cmdbSwitchSerialsByDevice.set(key, set); }
+    set.add(e.serial);
+  }
+  for (const e of result.cmdbApSerials || []) {
+    const key = (e.device || "").toLowerCase();
+    if (!key || !e.serial) continue;
+    let set = cmdbApSerialsByDevice.get(key);
+    if (!set) { set = new Set(); cmdbApSerialsByDevice.set(key, set); }
+    set.add(e.serial);
+  }
   const switchInventoriedDevices = new Set<string>(result.switchInventoriedDevices || []);
   const apInventoriedDevices     = new Set<string>(result.apInventoriedDevices     || []);
 
@@ -3851,7 +3874,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (!controller || !inventoriedSet.has(controller)) continue;
       const seenBySerial   = a.serialNumber && (a.assetType === "switch" ? seenSwitchSerials   : seenApSerials).has(a.serialNumber);
       const seenByHostname = a.hostname     && (a.assetType === "switch" ? seenSwitchHostnames : seenApHostnames).has(a.hostname);
-      if (seenBySerial || seenByHostname) continue;
+      // CMDB decommission protection, scoped to THIS asset's controller —
+      // see the roster-map construction above for why fleet-wide vouching
+      // is wrong (offline/staged gates' cached configs).
+      const cmdbProtected = !!(a.serialNumber &&
+        (a.assetType === "switch" ? cmdbSwitchSerialsByDevice : cmdbApSerialsByDevice)
+          .get(controller.toLowerCase())?.has(a.serialNumber));
+      if (seenBySerial || seenByHostname || cmdbProtected) continue;
       staleIds.push(a.id);
       if (a.assetType === "switch")        decommissionedSwitches.push(a.hostname || a.serialNumber || a.id);
       else if (a.assetType === "access_point") decommissionedAps.push(a.hostname || a.serialNumber || a.id);
