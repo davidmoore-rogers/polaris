@@ -2267,7 +2267,15 @@ function assetFormHTML(defaults) {
   var d = defaults || {};
   var identitySection = d._editing
     ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
-        '<div class="form-group"><label>Hostname</label><div class="form-value">' + escapeHtml(d.hostname || "-") + '</div></div>' +
+        // Hostname is editable on edit as an operator override (coordinate-pin
+        // pattern): a changed value pins hostnameOverride server-side so
+        // discovery can no longer rewrite it; clearing the field releases the
+        // pin and reverts to the discovery-projected hostname.
+        '<div class="form-group"><label>Hostname</label><input type="text" id="f-hostname" value="' + escapeHtml(d.hostname || "") + '" placeholder="e.g. server-01">' +
+          (d.hostnameOverride
+            ? '<p class="hint">Manually overridden — clear the field to resume the discovered hostname.</p>'
+            : (d.discoveredByIntegrationId ? '<p class="hint">Discovered — saving a change pins it as a manual override.</p>' : '')) +
+        '</div>' +
         '<div class="form-group"><label>DNS Name</label><div class="form-value">' + escapeHtml(d.dnsName || "-") + '</div></div>' +
         '<div class="form-group" style="grid-column:1 / -1"><label>Serial Number</label><input type="text" id="f-serialNumber" value="' + escapeHtml(d.serialNumber || "") + '" placeholder="e.g. SN-DELL-001"></div>' +
       '</div>'
@@ -2378,8 +2386,11 @@ function getAssetFormData() {
     data.latitude = lat;
     data.longitude = lng;
   }
-  // These fields are only editable on create, not edit
-  if (document.getElementById("f-hostname"))     data.hostname     = val("f-hostname") || undefined;
+  // These fields are only editable on create, not edit — except hostname,
+  // which is editable on edit as an operator override. Hostname always sends
+  // (including "") so a blanked field clears the override server-side; on
+  // create the server treats "" as not-provided.
+  if (document.getElementById("f-hostname"))     data.hostname     = val("f-hostname");
   if (document.getElementById("f-dnsName"))      data.dnsName      = val("f-dnsName") || undefined;
   if (document.getElementById("f-ipAddress"))    data.ipAddress    = val("f-ipAddress") || undefined;
   if (document.getElementById("f-macAddress"))   data.macAddress   = val("f-macAddress") || undefined;
@@ -3411,7 +3422,9 @@ async function openViewModal(id) {
       '<div class="asset-view-grid">' +
       (a.ipAddress && !a.hostname
         ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value">- <button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\')" title="Reverse DNS lookup (PTR record)">PTR Lookup</button></span></div>'
-        : viewRow("Hostname", a.hostname, false, false, true)) +
+        : (a.hostnameOverride
+          ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value"><span class="copy-cell" title="Click to copy" data-copy="' + escapeHtml(a.hostname || "") + '">' + escapeHtml(a.hostname || "-") + '</span><span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#6b728018;color:#9ca3af;border:1px solid #6b728030;margin-left:6px" title="Hostname manually overridden — discovery will not change it. Clear the Hostname field in Edit to resume the discovered value.">overridden</span></span></div>'
+          : viewRow("Hostname", a.hostname, false, false, true))) +
       viewRow("DNS Name", a.dnsName, false, false, true) +
       ipViewRow(a) +
       viewRow("MAC Address", a.macAddress, true, false, true) +

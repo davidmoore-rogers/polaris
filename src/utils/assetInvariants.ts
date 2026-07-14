@@ -27,6 +27,37 @@ export function clampAcquiredToLastSeen(
 }
 
 /**
+ * Re-assert an operator hostname override over a pending Asset write.
+ *
+ * Discovery projection writes set `hostname` on every cycle. When the row
+ * carries a `hostnameOverride` (operator pin, set via the asset edit form),
+ * those writes must not clobber it — the guard rewrites the staged hostname
+ * back to the override value. Handles both the plain (`hostname: "x"`) and
+ * Prisma nested (`hostname: { set: "x" }`) data shapes.
+ *
+ * A write that itself touches `hostnameOverride` is the operator set/clear
+ * path (the assets PUT handler) — it is authoritative and never rewritten.
+ *
+ * Mutates `data` in place. Returns true when the override was re-asserted.
+ */
+export function applyHostnameOverride(
+  data: Record<string, unknown>,
+  override: string | null | undefined,
+): boolean {
+  if (!data || typeof data !== "object") return false;
+  if (!("hostname" in data)) return false;
+  if ("hostnameOverride" in data) return false;
+  if (!override) return false;
+  const v = data.hostname;
+  if (v && typeof v === "object" && "set" in (v as Record<string, unknown>)) {
+    (v as Record<string, unknown>).set = override;
+  } else {
+    data.hostname = override;
+  }
+  return true;
+}
+
+/**
  * Evidence-source labels for Asset.lastSeenSource. Open set — the UI renders
  * the string verbatim — but every writer should use one of these so operators
  * see a consistent vocabulary.

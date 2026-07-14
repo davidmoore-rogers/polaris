@@ -21,6 +21,10 @@
  *      phase-1 derivation rules. Discovery hasn't cut over to writing
  *      AssetSource directly yet (phase 2), so this keeps the table fresh
  *      for new/edited assets between backfill runs at startup.
+ *   4. Asset update/upsert writes that stage `hostname` without touching
+ *      `hostnameOverride` are checked against the row's operator hostname
+ *      override and rewritten to it when set (enforceHostnameOverride) —
+ *      discovery projection writes can never clobber an operator pin.
  * The base client (_base) is reused for the history + source writes to
  * avoid a circular import.
  */
@@ -30,6 +34,7 @@ import { randomUUID } from "node:crypto";
 import { PrismaClient } from "./generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { normalizeManufacturer } from "./utils/manufacturerNormalize.js";
+import { applyHostnameOverride } from "./utils/assetInvariants.js";
 import { deriveAssetSources, type AssetSnapshot } from "./utils/assetSourceDerivation.js";
 
 // Lazy-resolved to break the import cycle (dnsResolvedReservationService imports
@@ -253,6 +258,38 @@ function clampMonitoredForStatus(data: any): void {
   data.consecutiveFailures = 0;
 }
 
+/**
+ * Enforce the operator hostname override (Asset.hostnameOverride) on a
+ * pending update/upsert. Centralized here (like clampMonitoredForStatus) so
+ * every discovery projection write path — integrations, agents, FMG service,
+ * merge/split endpoints — respects the pin without each writer knowing about
+ * it. The row read only fires when the write stages `hostname` WITHOUT
+ * touching `hostnameOverride` (the operator set/clear path is authoritative),
+ * so the monitor hot paths (probe results, lastSeen bumps) never pay it;
+ * hostname-carrying writes are discovery-cadence, where the extra indexed
+ * point read is in the same budget as the drift-detection reads that already
+ * follow them. updateMany is deliberately not guarded — no current writer
+ * stages hostname through it (verified 2026-07); add the guard if one appears.
+ *
+ * Best-effort: a failed read skips the rewrite rather than failing the write.
+ * Self-healing — projection re-stages hostname every discovery cycle, so the
+ * next guarded write re-asserts the override.
+ */
+async function enforceHostnameOverride(base: PrismaClient, where: unknown, data: unknown): Promise<void> {
+  const d = data as Record<string, unknown> | undefined;
+  if (!d || typeof d !== "object") return;
+  if (!("hostname" in d) || "hostnameOverride" in d) return;
+  try {
+    const row = await base.asset.findFirst({
+      where: where as any,
+      select: { hostnameOverride: true },
+    });
+    applyHostnameOverride(d, row?.hostnameOverride);
+  } catch {
+    // Best-effort — see doc comment.
+  }
+}
+
 function _buildClient(base: PrismaClient) {
   return base.$extends({
     query: {
@@ -278,6 +315,7 @@ function _buildClient(base: PrismaClient) {
         async update({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.data);
           clampMonitoredForStatus(args?.data);
+          await enforceHostnameOverride(base, args?.where, args?.data);
           const result = await query(args);
           const d = args.data as Record<string, unknown> | undefined;
           const ip = typeof d?.ipAddress === "string" ? d.ipAddress : undefined;
@@ -315,6 +353,9 @@ function _buildClient(base: PrismaClient) {
           normalizeManufacturerInData(args?.update);
           clampMonitoredForStatus(args?.create);
           clampMonitoredForStatus(args?.update);
+          // Create branch needs no guard — a brand-new row can't carry an
+          // override; the read is a no-op miss when the row doesn't exist.
+          await enforceHostnameOverride(base, args?.where, args?.update);
           const result = await query(args);
           const updateTouches = touchesAssetSources(args?.update);
           // Always fires after a create branch (we can't tell from the

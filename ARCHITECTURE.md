@@ -513,6 +513,7 @@ Asset
   -- src/utils/macAddresses.ts to sync the side table after the
   -- asset.update lands.
   hostname        String?
+  hostnameOverride String?        -- Operator hostname pin (coordSource-style). Set/cleared ONLY by PUT /assets/:id (`assets:write`): typing a different Hostname in the edit form writes both `hostname` and `hostnameOverride`; blanking the field clears the pin and reverts `hostname` to the fresh discovery projection (null when no source has an opinion). While set, the Prisma extension in src/db.ts (`enforceHostnameOverride` → `applyHostnameOverride` in utils/assetInvariants.ts) rewrites ANY asset update/upsert that stages `hostname` without touching `hostnameOverride` back to the pin — discovery projection writes can never clobber it, and no discovery writer needs to know it exists. A form save echoing the current hostname back is a no-op (does NOT pin). Pinned assets are excluded from `mergeDuplicateHostnameAssets` grouping (a pin colliding with another asset's hostname is operator intent, not a ghost) and from hostname drift in projectionDriftService. Rendered as an "overridden" badge on the asset details General tab.
   dnsName         String?         -- FQDN from PTR lookup
   dnsNameFetchedAt DateTime?      -- When the last PTR lookup ran (success or failure)
   dnsNameTtl      Int?            -- TTL (seconds) from the PTR record; null = unknown (standard mode falls back to 3600s)
