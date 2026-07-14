@@ -3150,6 +3150,20 @@ async function upsertFortinetInfraAssetSource(
   syncedAt: Date,
   lastSeen: Date,
 ): Promise<void> {
+  // osVersion "absent ≠ wipe": a managed_ap/managed-switch row can arrive
+  // without a usable firmware version (os_version missing mid-rejoin, or a
+  // cached-format fallback rejected by isCanonicalFortiapVersion). Keep the
+  // previous scrape's value instead of blanking it — same convention as the
+  // AP LLDP persist. The read only fires on the empty-version case, so the
+  // steady-state cost at fleet scale is zero extra queries.
+  if (!observed.osVersion) {
+    const existing = await prisma.assetSource.findUnique({
+      where: { sourceKind_externalId: { sourceKind, externalId: serial } },
+      select: { observed: true },
+    });
+    const prevVersion = (existing?.observed as Record<string, unknown> | null)?.osVersion;
+    if (typeof prevVersion === "string" && prevVersion) observed.osVersion = prevVersion;
+  }
   await prisma.assetSource.upsert({
     where: { sourceKind_externalId: { sourceKind, externalId: serial } },
     create: { assetId, sourceKind, externalId: serial, integrationId, observed: observed as any, inferred: false, syncedAt, firstSeen: lastSeen, lastSeen },

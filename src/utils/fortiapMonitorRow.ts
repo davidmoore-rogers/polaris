@@ -83,6 +83,21 @@ export function isFortiapStatusOnline(status: string | null | undefined): boolea
   return /^(connected|online)$/i.test(s);
 }
 
+/**
+ * True when a managed_ap version string is the canonical live-firmware shape
+ * FortiOS reports in `os_version`: "FP432F-v7.6.5-build1105" (platform prefix,
+ * dotted version, build). The response rows ALSO carry `version` /
+ * `firmware_version` fields holding a CACHED display-format value
+ * ("7.4.5 Build 0734", a bare "FortiAP" placeholder, or blank) that lags
+ * upgrades — observed fleet-wide on FortiOS 7.6.7 (2026-07: stale versions
+ * persisted for a week after AP upgrades whenever a scrape caught a row
+ * without os_version and the parser fell back to the cached field). Fallback
+ * values are only trusted when they match this canonical shape.
+ */
+export function isCanonicalFortiapVersion(v: string | null | undefined): boolean {
+  return !!v && /^FP[A-Z0-9]*-v\d+\.\d+(\.\d+)?-build\d+$/i.test(v.trim());
+}
+
 export interface FortiapTelemetrySnapshot {
   cpuPct?: number;
   memFreeMb?: number;
@@ -208,7 +223,13 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
     baseMac:    ALL_ZERO_MAC.test(rawApMac) ? "" : rawApMac,
     status:     str(row.status) || str(row.state) || "",
     authorizationState: str(row.state).trim(),
-    osVersion:  str(row.os_version) || str(row.version) || str(row.firmware_version) || "",
+    // os_version is the live running firmware; version/firmware_version are
+    // cached display-format values that lag upgrades — accept them only in
+    // the canonical shape (see isCanonicalFortiapVersion). A row with no
+    // usable version yields "" and the sync layer keeps the previous value.
+    osVersion:  str(row.os_version)
+      || [str(row.version), str(row.firmware_version)].find(isCanonicalFortiapVersion)
+      || "",
     // A wireless-mesh leaf's uplink is its mesh parent AP, not a switch — an
     // LLDP-visible FortiSwitch on a mesh leaf is a switch bridged BEHIND the
     // AP's LAN port (the inverse direction), so stamping it as peerSwitch
