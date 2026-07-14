@@ -564,12 +564,30 @@ function _renderSearchDropdown(results) {
     return;
   }
 
+  // Asset/site hits carry `status` (the assets-table monitor pill, computed
+  // server-side); map its kind onto the existing badge classes so the
+  // dropdown pill matches the assets list exactly.
+  var pillClassByKind = {
+    "unmonitored": "badge-unmonitored",
+    "up":          "badge-monitored",
+    "warning":     "badge-monitor-warning",
+    "down":        "badge-monitor-down",
+    "recovering":  "badge-monitor-recovering",
+    "pending":     "badge-monitor-recovering",
+    "dep-down":    "badge-monitor-dep-down",
+    "dep-test":    "badge-monitor-dep-test",
+  };
+
   function section(label, hits) {
     if (!hits.length) return "";
     var rows = hits.map(function (h) {
+      var pill = "";
+      if (h.status && pillClassByKind[h.status.kind]) {
+        pill = ' <span class="badge gs-item-pill ' + pillClassByKind[h.status.kind] + '">' + escapeHtml(h.status.label) + '</span>';
+      }
       return '<div class="gs-item" data-type="' + h.type + '" data-id="' + escapeHtml(h.id) + '"' +
         (h.context ? ' data-context="' + escapeHtml(JSON.stringify(h.context)) + '"' : '') + '>' +
-        '<div class="gs-item-title">' + escapeHtml(h.title) + '</div>' +
+        '<div class="gs-item-title">' + escapeHtml(h.title) + pill + '</div>' +
         (h.subtitle ? '<div class="gs-item-sub">' + escapeHtml(h.subtitle) + '</div>' : '') +
       '</div>';
     }).join("");
