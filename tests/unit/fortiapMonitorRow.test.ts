@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { deriveFortiapModelFromSerial, parseFortiapMonitorRow, isFortiapStatusOnline, FORTIAP_MONITOR_FORMAT } from "../../src/utils/fortiapMonitorRow.js";
+import { deriveFortiapModelFromSerial, parseFortiapMonitorRow, isFortiapStatusOnline, isCanonicalFortiapVersion, FORTIAP_MONITOR_FORMAT } from "../../src/utils/fortiapMonitorRow.js";
 
 describe("deriveFortiapModelFromSerial", () => {
   it("returns empty for missing/blank serial", () => {
@@ -219,6 +219,65 @@ describe("parseFortiapMonitorRow authorization state", () => {
   it("leaves authorizationState empty when the field is absent", () => {
     const parsed = parseFortiapMonitorRow({ name: "AP-1", status: "connected" });
     expect(parsed.authorizationState).toBe("");
+  });
+});
+
+describe("parseFortiapMonitorRow osVersion (cached-fallback rejection)", () => {
+  // Production incident 2026-07: FortiOS managed_ap rows carry TWO version
+  // representations — os_version (live running firmware, canonical
+  // "FP432F-v7.6.5-build1105") and version/firmware_version (a cached
+  // display-format value like "7.4.5 Build 0734" that lags upgrades, or a
+  // bare "FortiAP" placeholder). Whenever a scrape caught a row without
+  // os_version, the old fallback wrote the stale cached value over the
+  // canonical one — APs upgraded a week earlier still showed pre-upgrade
+  // firmware in Polaris.
+  it("prefers the canonical live os_version", () => {
+    const parsed = parseFortiapMonitorRow({
+      serial: "FP432FTF22003666",
+      os_version: "FP432F-v7.6.5-build1105",
+      version: "7.4.5 Build 0734",
+    });
+    expect(parsed.osVersion).toBe("FP432F-v7.6.5-build1105");
+  });
+
+  it("rejects a cached display-format fallback when os_version is absent", () => {
+    const parsed = parseFortiapMonitorRow({
+      serial: "FP432FTF22003666",
+      version: "7.4.5 Build 0734",
+      firmware_version: "7.4.5 Build 0734",
+    });
+    expect(parsed.osVersion).toBe("");
+  });
+
+  it("rejects the bare 'FortiAP' placeholder some rows carry", () => {
+    const parsed = parseFortiapMonitorRow({ serial: "FP231K5N2509B5EE", version: "FortiAP" });
+    expect(parsed.osVersion).toBe("");
+  });
+
+  it("accepts a canonical-shaped fallback when os_version is absent", () => {
+    const parsed = parseFortiapMonitorRow({
+      serial: "FP231K5N2509B5EH",
+      firmware_version: "FP231K-v7.6.5-build1105",
+    });
+    expect(parsed.osVersion).toBe("FP231K-v7.6.5-build1105");
+  });
+});
+
+describe("isCanonicalFortiapVersion", () => {
+  it("matches live os_version shapes across model families", () => {
+    expect(isCanonicalFortiapVersion("FP432F-v7.6.5-build1105")).toBe(true);
+    expect(isCanonicalFortiapVersion("FP231K-v7.6.2-build0972")).toBe(true);
+    expect(isCanonicalFortiapVersion("FP23JF-v7.6.5-build1105")).toBe(true);
+    expect(isCanonicalFortiapVersion("FPU431F-v7.4.6-build0771")).toBe(true);
+  });
+
+  it("rejects cached display-format and placeholder values", () => {
+    expect(isCanonicalFortiapVersion("7.4.5 Build 0734")).toBe(false);
+    expect(isCanonicalFortiapVersion("7.6.2 Build 0972")).toBe(false);
+    expect(isCanonicalFortiapVersion("FortiAP")).toBe(false);
+    expect(isCanonicalFortiapVersion("")).toBe(false);
+    expect(isCanonicalFortiapVersion(null)).toBe(false);
+    expect(isCanonicalFortiapVersion(undefined)).toBe(false);
   });
 });
 
