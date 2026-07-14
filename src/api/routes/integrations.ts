@@ -4101,6 +4101,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (!existingAsset && member.isPrimary) {
         existingAsset = assetIdx.findByEntry(undefined, fgHostname, device.mgmtIp || undefined);
       }
+      // Serial-mismatch guard — same rule as the FortiSwitch/FortiAP loops:
+      // the hostname/IP fallback exists for serial-less placeholder rows;
+      // it must never bind to an asset carrying a DIFFERENT non-empty
+      // serial (an RMA'd chassis keeping the old hostname is new hardware —
+      // Phase 2a retires the old asset by serial).
+      if (existingAsset && member.serial && existingAsset.serialNumber
+          && String(existingAsset.serialNumber).toUpperCase() !== member.serial.toUpperCase()) {
+        existingAsset = null;
+      }
       if (existingAsset) {
         // Snapshot material fields before the branch mutates existingAsset in
         // place (macAddresses / status below) so the per-asset audit diff is
@@ -4644,6 +4653,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // fortigate-endpoint source row.
       if (!existingAsset && normalizedSwMac) existingAsset = assetIdx.findByMac(normalizedSwMac);
       if (!existingAsset && sw.name) existingAsset = assetIdx.findByEntry(undefined, sw.name, sw.ipAddress || undefined);
+      // Serial-mismatch guard — same rule as the FortiAP loop: a fallback
+      // (MAC/name/IP) match must never bind to an asset carrying a
+      // DIFFERENT non-empty serial (RMA'd replacement hardware inheriting
+      // the old unit's address). Serial-less orphan adoption still binds.
+      if (existingAsset && sw.serial && existingAsset.serialNumber
+          && String(existingAsset.serialNumber).toUpperCase() !== sw.serial.toUpperCase()) {
+        existingAsset = null;
+      }
 
       const swTopology = {
         role: "fortiswitch" as const,
@@ -4914,6 +4931,20 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       let existingAsset: any = ap.serial ? assetIdx.findBySerial(ap.serial) : null;
       if (!existingAsset && normalizedMac) existingAsset = assetIdx.findByMac(normalizedMac);
       if (!existingAsset && ap.name) existingAsset = assetIdx.findByEntry(undefined, ap.name, resolvedIp || undefined);
+      // Serial-mismatch guard on the fallback matches: serial is chassis
+      // identity, so a MAC/name/IP match must never bind this row to an
+      // asset that carries a DIFFERENT non-empty serial. Without it, an
+      // RMA'd replacement AP inheriting the old unit's IP re-binds to the
+      // old asset every cycle — resurrecting it out of decommissioned,
+      // stamping the new unit's MAC onto it, and never getting an asset of
+      // its own, while Phase 2b re-decommissions the old serial each
+      // finalize (prod flap loop, 2026-07: FP231FTF22099Q3E ↔
+      // FP231FTF22024874 at REOSTONE, one decommission Event every run).
+      // Serial-less matches (orphan fortigate-endpoint adoption) still bind.
+      if (existingAsset && ap.serial && existingAsset.serialNumber
+          && String(existingAsset.serialNumber).toUpperCase() !== ap.serial.toUpperCase()) {
+        existingAsset = null;
+      }
 
       const apTopology = {
         role: "fortiap" as const,
