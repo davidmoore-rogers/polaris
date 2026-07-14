@@ -3869,3 +3869,29 @@ Listed alphabetically.
 - Confirm dhcpInclude/dhcpExclude filtering still matches scope IDs/names correctly.
 - Test DiscoveredDhcpScope mapping (cidr/name/fortigateDevice/dhcpServerId) feeds syncDhcpSubnets correctly.
 - Validate error messages for auth failures, service not running, connection timeouts.
+
+---
+
+## services/weatherProxyService.ts
+
+**What it owns:** Server-side proxy + cache for the Status Map widget's weather overlay: RainViewer radar frame index (5 min TTL, serve-stale ≤30 min on upstream failure), radar tile PNGs (immutable per frame-id content hash → size-bounded FIFO cache, ~48 MB / 4000 entries, no TTL), and Open-Meteo current temperature (20 min TTL per 1.5° grid cell).
+
+**Public API:** `getRadarFrames()`, `getRadarTile(frameId, z, x, y)`, `getTemperature(lat, lng)`, `__resetWeatherProxyCachesForTests()`.
+
+**Cross-service deps:** None (global fetch to api.rainviewer.com / tilecache / api.open-meteo.com; `getAppVersion()` for the User-Agent). No DB, no Events — public weather data only.
+
+**Used by:** src/api/routes/weather.ts (mounted on the main router at `/weather` under requireAuth AND on the Dash listener via its `/weather/` prefix allowlist + `dashWeatherLimiter`). The consumer is public/js/widgets/siteMap.js (proxy-first, direct-CDN fallback).
+
+**Invariants:**
+- Tile requests validate the frame id against the union of the last TWO index generations — grace so an animation started just before an index rotation keeps resolving, and a hard gate so the endpoint can't be used as an open proxy to arbitrary upstream paths.
+- Frame ids are content hashes → a cached tile can never go stale; the route serves `Cache-Control: public, max-age=86400, immutable` (deliberately overriding the Dash listener's blanket no-store).
+- Temperature grid rounding (1.5°) must match siteMap.js loadTemps' grid key, or every viewer becomes a cache miss.
+- Transport failures throw AppError 502 and never poison any cache (geocoderService precedent); the widget interprets non-200 as "fall back to the CDN for this cycle/cell".
+- Tile render options (256px, color scheme 6, "1_1") are hardcoded to match the widget's direct-CDN URL template — a mismatch would make proxy and fallback look different.
+- In-flight dedupe on the index and per-tile fetches — a 14-frame layer add must not stampede upstream.
+
+**When changing this:**
+- Keep the CSP fallback hosts (api.rainviewer.com / *.rainviewer.com / api.open-meteo.com in securityHeaders.ts) as long as the widget's CDN fallback exists.
+- If tile URL options change, change siteMap.js's fallback template in the same commit.
+- The dash rate limiter (`dashWeatherLimiter`, 4000/5min) is sized to radar bursts (~14 frames × viewport tiles); revisit if frame count or tile size assumptions change.
+- Scale check: cache is per-process; in the split-role layout only the web + dash processes serve this (no monitor/discovery involvement).

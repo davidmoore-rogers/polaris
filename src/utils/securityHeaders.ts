@@ -42,6 +42,8 @@ export function buildHelmetOptions(): HelmetOptions {
           "https://*.basemaps.cartocdn.com",
           // RainViewer precipitation-radar tiles for the Site Map widget's
           // weather overlay (loaded as <img>, served from tilecache.rainviewer.com).
+          // The widget is proxy-first (/api/v1/weather radar tiles = 'self');
+          // this host stays whitelisted for the direct-CDN fallback path.
           "https://*.rainviewer.com",
         ],
         // The Google Fonts hosts are fetch()ed (not just <link>-loaded) by the
@@ -57,6 +59,8 @@ export function buildHelmetOptions(): HelmetOptions {
           // Site Map widget weather overlay: RainViewer radar frame index +
           // Open-Meteo current-temperature lookups (both fetch()ed). Sends
           // only approximate site lat/long; degrades gracefully when offline.
+          // The widget tries the Polaris weather proxy ('self') first — these
+          // hosts remain whitelisted for the direct-CDN fallback path.
           "https://api.rainviewer.com",
           "https://api.open-meteo.com",
         ],

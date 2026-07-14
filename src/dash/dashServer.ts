@@ -25,7 +25,8 @@
  *      `readonly` Role's snapshot on req.roleSnapshot, so the mounted REAL
  *      route files (dashboard / reservations / map) enforce their existing
  *      requirePermission / hasPermission gates unmodified, resolving as a
- *      readonly caller. An exact-path allowlist in front of them caps the
+ *      readonly caller. An exact-path allowlist (plus a prefix rule for the
+ *      parameterized /weather/ proxy paths) in front of them caps the
  *      exposed surface to the handful of GETs the dashboard widgets call.
  *
  * The process performs NO writes on behalf of dash viewers — widget layout
@@ -41,8 +42,9 @@ import compression from "compression";
 import dashboardRouter from "../api/routes/dashboard.js";
 import reservationsRouter from "../api/routes/reservations.js";
 import mapRouter from "../api/routes/map.js";
+import weatherRouter from "../api/routes/weather.js";
 import { errorHandler } from "../api/middleware/errorHandler.js";
-import { makeRateLimiter } from "../api/middleware/rateLimits.js";
+import { dashWeatherLimiter, makeRateLimiter } from "../api/middleware/rateLimits.js";
 import { isPrivateOrLoopbackIp, ipMatchesAnyCidr } from "../utils/cidr.js";
 import { getDashSettings, type DashSettings } from "../services/dashSettingsService.js";
 import {
@@ -74,6 +76,13 @@ const API_PATH_ALLOWLIST = new Set<string>([
   "/reservations/alerts/count",
   "/map/sites",
 ]);
+
+/**
+ * Prefix-matched additions to the exact-path allowlist above — needed for the
+ * parameterized weather-proxy paths (/weather/radar/:frame/:z/:x/:y). Keep
+ * this list to read-only, parameter-validated surfaces.
+ */
+const API_PREFIX_ALLOWLIST = ["/weather/"];
 
 /**
  * Is this source IP allowed under the current scope? "all" → always; "custom"
@@ -165,13 +174,18 @@ export function buildDashApp(opts: BuildDashAppOptions = {}): express.Express {
     next();
   });
 
-  app.use(
-    makeRateLimiter({
-      windowMs: 5 * 60 * 1000,
-      max: 600,
-      message: "Too many requests to the Dash wallboard. Please slow down.",
-    }),
-  );
+  // Weather-proxy requests ride their own generous limiter (a single radar
+  // refresh is hundreds of small tile GETs — it would exhaust the general
+  // budget in one load); everything else keeps the tight wallboard ceiling.
+  const generalLimiter = makeRateLimiter({
+    windowMs: 5 * 60 * 1000,
+    max: 600,
+    message: "Too many requests to the Dash wallboard. Please slow down.",
+  });
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const limiter = req.path.startsWith("/dash/api/v1/weather/") ? dashWeatherLimiter : generalLimiter;
+    limiter(req, res, next);
+  });
 
   // ── Page ───────────────────────────────────────────────────────────────────
   // Dev nicety when hitting the listener directly: / lands on the wallboard.
@@ -189,8 +203,13 @@ export function buildDashApp(opts: BuildDashAppOptions = {}): express.Express {
   const api = express.Router();
 
   api.use((req: Request, res: Response, next: NextFunction) => {
+    // Blanket no-store — the radar-tile handler overrides with an immutable
+    // max-age (frame tiles never change; see weather.ts).
     res.setHeader("Cache-Control", "no-store");
-    if (!API_PATH_ALLOWLIST.has(req.path)) {
+    if (
+      !API_PATH_ALLOWLIST.has(req.path) &&
+      !API_PREFIX_ALLOWLIST.some((prefix) => req.path.startsWith(prefix))
+    ) {
       next(new AppError(404, "Not found"));
       return;
     }
@@ -234,6 +253,7 @@ export function buildDashApp(opts: BuildDashAppOptions = {}): express.Express {
   api.use("/dashboard", dashboardRouter);
   api.use("/reservations", reservationsRouter);
   api.use("/map", mapRouter);
+  api.use("/weather", weatherRouter);
 
   app.use("/dash/api/v1", api);
 

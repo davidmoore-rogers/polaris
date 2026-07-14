@@ -85,3 +85,16 @@ export const agentBinaryLimiter = makeRateLimiter({
   max: 60,
   message: "Rate limit exceeded — retry shortly.",
 });
+
+/**
+ * Dash wallboard weather proxy. One radar refresh is ~14 frames × the
+ * viewport's tiles — several hundred small GETs in a burst, repeated every
+ * 30 minutes (plus pan/zoom) — so the wallboard's general 600/5min budget
+ * would be eaten by a single load. Generous but still bounds a runaway
+ * client; the main app mounts /weather without a limiter (session-gated).
+ */
+export const dashWeatherLimiter = makeRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 4000,
+  message: "Rate limit exceeded — retry shortly.",
+});
