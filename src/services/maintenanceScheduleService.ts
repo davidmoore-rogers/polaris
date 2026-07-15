@@ -64,6 +64,8 @@ export interface MaintenanceScheduleInput {
   // Optional at the type level (z.unknown() infers optional); normalizeInput
   // rejects a missing/invalid shape with a 400.
   schedule?: unknown;
+  /** In-window assets count as DOWN for child dependency suppression. Default true. */
+  suppressChildren?: boolean;
 }
 
 interface NormalizedInput {
@@ -72,6 +74,7 @@ interface NormalizedInput {
   criteria: TagCriteria | null;
   assetIds: string[];
   schedule: MaintenanceScheduleShape;
+  suppressChildren: boolean;
 }
 
 function normalizeInput(input: MaintenanceScheduleInput): NormalizedInput {
@@ -102,7 +105,14 @@ function normalizeInput(input: MaintenanceScheduleInput): NormalizedInput {
     throw new AppError(400, "Schedule must target at least one asset (criteria or explicit assets)");
   }
 
-  return { name, enabled: input.enabled !== false, criteria, assetIds, schedule };
+  return {
+    name,
+    enabled: input.enabled !== false,
+    criteria,
+    assetIds,
+    schedule,
+    suppressChildren: input.suppressChildren !== false,
+  };
 }
 
 /** Parse a stored schedule blob defensively; null (+ warn) on mismatch. */
@@ -210,6 +220,7 @@ export async function createSchedule(input: MaintenanceScheduleInput, actor?: st
       criteria: (n.criteria ?? undefined) as any,
       assetIds: n.assetIds,
       schedule: n.schedule as any,
+      suppressChildren: n.suppressChildren,
       createdBy: actor ?? null,
     },
   });
@@ -237,6 +248,7 @@ export async function updateSchedule(id: string, input: MaintenanceScheduleInput
       criteria: (n.criteria ?? null) as any,
       assetIds: n.assetIds,
       schedule: n.schedule as any,
+      suppressChildren: n.suppressChildren,
     },
   });
   await logEvent({

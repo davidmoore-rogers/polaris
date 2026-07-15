@@ -1254,7 +1254,7 @@ Listed alphabetically.
 
 **Used by:** `src/jobs/maintenanceScheduler.ts` (30s tick), `src/api/routes/maintenanceSchedules.ts` (CRUD + preview), `src/api/routes/assets.ts` (maintenance-windows + maintenance-info reads; `operatorReleaseAsset` from the PUT handler when an operator moves status off `"maintenance"`).
 
-**Readers of the state it writes:** `MONITOR_CANDIDATE_WHERE` in `monitoringService` + `jobs/monitorAssets` (status="maintenance" excluded from ALL server-driven polling), `dependencyTreeService.evaluateSuppression` (maintenance parent counts as down → children suppress), `notificationEngine.isSuppressedForNotifications` + `notificationEscalationService.runEscalationSweep` (silenced), `presenceVerificationService` + `jobs/decommissionStaleAssets` (skip maintenance assets), the assets-list pill (`badge-maintenance`), and the chart band overlay (`_maintenanceBandLayer` via `/assets/:id/maintenance-windows`).
+**Readers of the state it writes:** `MONITOR_CANDIDATE_WHERE` in `monitoringService` + `jobs/monitorAssets` (status="maintenance" excluded from ALL server-driven polling), `dependencyTreeService.evaluateSuppression` (maintenance parent counts as down → children suppress — unless the schedule's `suppressChildren` is false, OR-ed across the asset's open windows by `reconcileDependencySuppression`'s open-window query), `notificationEngine.isSuppressedForNotifications` + `notificationEscalationService.runEscalationSweep` (silenced), `presenceVerificationService` + `jobs/decommissionStaleAssets` (skip maintenance assets), the assets-list pill (`badge-maintenance`), and the chart band overlay (`_maintenanceBandLayer` via `/assets/:id/maintenance-windows`).
 
 **Invariants:**
 - Open `AssetMaintenanceWindow` rows are the SOLE source of truth for "in maintenance": enter on the first open row, exit on the last close — restart-safe by construction; never flip status without the matching row write.
@@ -1264,7 +1264,7 @@ Listed alphabetically.
 - **Any new writer of `Asset.status` must skip assets with `status === "maintenance"`** (see the guards in integrations.ts Entra/AD/FortiSwitch/lease paths + decommissionStaleAssets); the reconcile self-heal absorbs missed writers but audits them as re-flips.
 - All bulk writes are grouped `updateMany`/`createMany` — no per-asset await loops (2000-asset scale rule); per-row awaits only for transition Events.
 
-**When changing this:** Any change to the enter/exit semantics must keep `reconcileMaintenance()` idempotent (running twice in a row must be a no-op) and update CLAUDE.md business rule 16. If you add a schedule field, thread it through the Zod outer shape in `routes/maintenanceSchedules.ts`, `normalizeInput`, the modal editor in `public/js/assets-maintenance.js` (collect + fill + summary), and the recurrence tests.
+**When changing this:** Any change to the enter/exit semantics must keep `reconcileMaintenance()` idempotent (running twice in a row must be a no-op) and update CLAUDE.md business rule 16. If you add a schedule field, thread it through the Zod outer shape in `routes/maintenanceSchedules.ts`, `normalizeInput`, the modal editor in `public/js/assets-maintenance.js` (collect + fill + summary — INCLUDING the Schedules-tab enable-toggle passthrough, which PUTs the full body: a field it omits snaps back to its `normalizeInput` default, exactly the trap `suppressChildren` documents), and the recurrence tests.
 
 ---
 
@@ -2291,6 +2291,7 @@ Listed alphabetically.
 - All-down semantics: an asset suppresses only when ALL effective parents are down/suppressed; unmonitored parents are transparent (walk continues to grandparents).
 - Only a confirmed-down edge propagates — warning/recovering flapping does not.
 - Operator override rows take precedence over computed rows; the admin Dependency-Test overlay (`dependencyTestUntil`) is a what-if that auto-expires + emits an Event.
+- A `status="maintenance"` parent counts as down (test-overlay semantics, no grandparent walk-through) — UNLESS its schedule opted out (`MaintenanceSchedule.suppressChildren=false` → `SuppressionAssetState.maintenanceSuppressChildren=false`, OR-ed across the asset's open windows by `reconcileDependencySuppression`; a deleted-schedule window or a manual maintenance status with no windows defaults to suppressing), in which case the parent falls through to its frozen `monitorStatus`.
 - `assignLayers` keeps only parent-edges (`parent.layer === child.layer - 1`); preferred edge is interface > lldp > mesh > controller.
 
 **When changing this:**

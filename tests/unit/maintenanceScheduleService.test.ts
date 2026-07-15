@@ -190,6 +190,7 @@ vi.mock("../../src/services/tagAssignmentService.js", () => ({
 import {
   reconcileMaintenance,
   createSchedule,
+  updateSchedule,
   deleteSchedule,
   operatorReleaseAsset,
   previewTargets,
@@ -471,6 +472,31 @@ describe("schedule CRUD", () => {
 
     expect(openWindows()).toHaveLength(1);
     expect(assetById("a1").status).toBe("maintenance");
+  });
+
+  it("suppressChildren defaults to true and persists an explicit false", async () => {
+    h.db.assets.push(asset("a1"));
+
+    const defaulted = await createSchedule(
+      { name: "default", assetIds: ["a1"], schedule: ACTIVE_ONESHOT },
+      "operator1",
+    );
+    expect((defaulted as any).suppressChildren).toBe(true);
+
+    const optedOut = await createSchedule(
+      { name: "opt-out", assetIds: ["a1"], schedule: ACTIVE_ONESHOT, suppressChildren: false },
+      "operator1",
+    );
+    expect((optedOut as any).suppressChildren).toBe(false);
+
+    // Update without the field snaps back to the default (normalizeInput
+    // treats missing as true) — callers must pass it through.
+    const updated = await updateSchedule(optedOut.id, {
+      name: "opt-out",
+      assetIds: ["a1"],
+      schedule: ACTIVE_ONESHOT,
+    });
+    expect((updated as any).suppressChildren).toBe(true);
   });
 
   it("rejects empty targets, status criteria, and malformed schedules", async () => {
