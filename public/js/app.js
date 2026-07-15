@@ -1909,6 +1909,27 @@ function showFormModal(title, formHTML, confirmLabel) {
  * @param {function} onSizeChange  - Called with new page size
  */
 /**
+ * Bound every .table-wrapper-sticky on the page to the viewport so vertical
+ * scrolling happens INSIDE the wrapper: the sticky thead (styles.css) pins to
+ * its top edge, and everything above — bulk bar, top pagination — stays put
+ * because the page itself no longer needs to scroll. The reserve leaves room
+ * for the bottom pagination row below the wrapper. max-height (not height) so
+ * short result sets keep a short table. Called from renderPageControls /
+ * clearPageControls (so it re-measures after every list render — the empty
+ * top pagination row grows when controls first appear, shifting the wrapper's
+ * document-space top) and on window resize; pages with their own pagination
+ * renderer (Events) call it directly. No-op on pages without the class.
+ */
+function sizeStickyTableWrappers() {
+  document.querySelectorAll(".table-wrapper-sticky").forEach(function (w) {
+    var docTop = w.getBoundingClientRect().top + window.scrollY;
+    var h = window.innerHeight - docTop - 72;
+    w.style.maxHeight = Math.max(260, Math.round(h)) + "px";
+  });
+}
+window.addEventListener("resize", sizeStickyTableWrappers);
+
+/**
  * Clear both the bottom and optional top pagination containers.
  */
 function clearPageControls(containerId) {
@@ -1916,6 +1937,7 @@ function clearPageControls(containerId) {
   if (mainEl) mainEl.innerHTML = "";
   var topEl = document.getElementById(containerId + "-top");
   if (topEl) topEl.innerHTML = "";
+  sizeStickyTableWrappers();
 }
 
 function renderPageControls(containerId, total, pageSize, currentPage, onPageChange, onSizeChange, opts) {
@@ -2015,6 +2037,7 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
       right.appendChild(lbl);
     }
   });
+  sizeStickyTableWrappers();
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

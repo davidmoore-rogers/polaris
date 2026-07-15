@@ -293,11 +293,9 @@ document.addEventListener("DOMContentLoaded", async function () {
   _assetsLayout = setupColumnLayout(assetsTable, {
     onChange: _saveAssetsPrefs,
   });
-  // Frozen header + pagination: bound the wrapper so the table scrolls inside
-  // it (see .table-wrapper-sticky in styles.css). Only registered here, so the
-  // listener never runs on pages that merely load assets.js for the slide-over.
-  _sizeAssetsTableWrapper();
-  window.addEventListener("resize", _sizeAssetsTableWrapper);
+  // Frozen header + pagination: the wrapper carries .table-wrapper-sticky and
+  // is viewport-bounded by the shared sizeStickyTableWrappers() in app.js
+  // (hooked into renderPageControls / clearPageControls + window resize).
   // MAC tooltips are promoted to <body>, so delegate on document so the
   // delete button works regardless of where the tooltip lives.
   document.addEventListener("click", _handleMacDeleteClick);
@@ -995,20 +993,6 @@ async function _handleMacDeleteClick(e) {
   }
 }
 
-// Bound the assets table wrapper to the viewport so vertical scrolling happens
-// INSIDE the wrapper: the sticky thead (.table-wrapper-sticky) pins to its top
-// edge, and everything above it — bulk bar + top pagination — stays put
-// because the page itself no longer needs to scroll. The reserve leaves room
-// for the bottom pagination row below the wrapper. max-height (not height) so
-// short result sets keep a short table.
-function _sizeAssetsTableWrapper() {
-  var w = document.getElementById("assets-table-wrapper");
-  if (!w) return;
-  var docTop = w.getBoundingClientRect().top + window.scrollY;
-  var h = window.innerHeight - docTop - 72;
-  w.style.maxHeight = Math.max(260, Math.round(h)) + "px";
-}
-
 function renderAssetsPage() {
   var tbody = document.getElementById("assets-tbody");
   tbody.removeEventListener("click", _handleCopyClick);
@@ -1026,7 +1010,6 @@ function renderAssetsPage() {
       : '<tr><td colspan="19" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
     _assetsUpdateSelectAll();
-    _sizeAssetsTableWrapper();
     return;
   }
   var page = _assetsData;
@@ -1087,10 +1070,6 @@ function renderAssetsPage() {
       },
     ],
   });
-  // Re-measure after the pagination controls render — the top pagination row
-  // is empty at page init, so the wrapper's document-space top shifts once the
-  // controls appear.
-  _sizeAssetsTableWrapper();
 }
 
 // Capture lightweight metadata for a selected asset from the current page, so
