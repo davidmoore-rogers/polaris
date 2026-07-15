@@ -461,7 +461,7 @@ function _buildAssetsQuery() {
 
   // Operator-aware text columns. Param name == column key, except _server→server.
   var textCols = ["hostname", "ipAddress", "serialNumber", "assetTag", "manufacturer",
-    "model", "os", "macAddress", "assignedTo", "purchaseOrder", "dnsName"];
+    "model", "os", "macAddress", "assignedTo", "purchaseOrder", "dnsName", "description"];
   textCols.forEach(function (key) { _pushAssetText(params, key, filters[key]); });
   _pushAssetText(params, "server", filters._server);
 
@@ -564,7 +564,7 @@ async function fetchAssetsPage() {
     _assetsData = all.map(_mapAsset);
     renderAssetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="18" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="19" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -911,8 +911,8 @@ function renderAssetsPage() {
   if (_assetsData.length === 0) {
     var hasFilters = _assetsSF && _assetsSF._filters && Object.keys(_assetsSF._filters).length > 0;
     tbody.innerHTML = hasFilters
-      ? '<tr><td colspan="18" class="empty-state">No results match the current filters.</td></tr>'
-      : '<tr><td colspan="18" class="empty-state">No assets found. Add one to get started.</td></tr>';
+      ? '<tr><td colspan="19" class="empty-state">No results match the current filters.</td></tr>'
+      : '<tr><td colspan="19" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
     _assetsUpdateSelectAll();
     return;
@@ -933,6 +933,7 @@ function renderAssetsPage() {
       '<td>' + assetStatusBadge(a) + '</td>' +
       '<td>' + assetMonitorBadge(a) + '</td>' +
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
+      '<td>' + escapeHtml(a.description || "-") + '</td>' +
       '<td>' + _copyableCell(a.assetTag) + '</td>' +
       '<td>' + escapeHtml(a.manufacturer || "-") + '</td>' +
       '<td>' + escapeHtml(a.model || "-") + '</td>' +
