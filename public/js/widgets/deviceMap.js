@@ -102,8 +102,7 @@
     requiredPermission: { key: "deviceMap", level: "read" },
 
     fetchData: function (config) {
-      var regions = config && config.regionScope === "mine" ? PolarisWidgets.myRegionNames() : null;
-      return api.map.sites(regions).catch(function () { return []; });
+      return api.map.sites(PolarisWidgets.regionNamesForConfig(config)).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -267,8 +266,7 @@
       ro.observe(el);
 
       var siteTimer = setInterval(function () {
-        var regions = config && config.regionScope === "mine" ? PolarisWidgets.myRegionNames() : null;
-        api.map.sites(regions).then(function (sites) { buildMarkers(sites); }).catch(function () {});
+        api.map.sites(PolarisWidgets.regionNamesForConfig(config)).then(function (sites) { buildMarkers(sites); }).catch(function () {});
       }, 60000);
 
       ctx.onUnmount(function () {
