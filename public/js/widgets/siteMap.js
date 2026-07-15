@@ -636,7 +636,9 @@
         el.classList.toggle("sitemap-fullscreen", on);
         btnFull.innerHTML = on ? "✖" : "⛶";
         btnFull.classList.toggle("active", on);
-        setTimeout(function () { try { map.invalidateSize(); } catch (_) {} }, 60);
+        // Re-home after the layout change (and invalidateSize) so the fleet
+        // refits to the new viewport instead of keeping the old framing.
+        setTimeout(function () { try { map.invalidateSize(); } catch (_) {} goHome(); }, 60);
       }
       btnFull.addEventListener("click", function () { setFullscreen(!el.classList.contains("sitemap-fullscreen")); });
       function onKeydown(e) { if (e.key === "Escape" && el.classList.contains("sitemap-fullscreen")) setFullscreen(false); }
