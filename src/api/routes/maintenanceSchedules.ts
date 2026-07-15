@@ -33,6 +33,9 @@ const scheduleInputSchema = z.object({
   criteria: z.unknown().optional(),
   assetIds: z.array(z.string()).max(500).optional(),
   schedule: z.unknown(),
+  // In-window assets count as DOWN for child dependency suppression
+  // (default true — omitting preserves launch behavior).
+  suppressChildren: z.boolean().optional(),
 });
 
 const previewInputSchema = z.object({

@@ -115,7 +115,7 @@ Per-pattern sections:
 **Key conventions:**
 - Single shared `#modal-overlay` element appended to `document.body` on first call; reused across opens.
 - DOM shape: `.modal-overlay > .modal > [.modal-header, .modal-body, .modal-footer]`.
-- Width variants: `options.wide` adds `.modal-wide`; `options.xl` adds `.modal-xl`. Default is the standard width.
+- Width variants: `options.wide` adds `.modal-wide` (672px); `options.large` adds `.modal-large` (≤980px, normal padding — form+table modals like Assets → Maintenance); `options.xl` adds `.modal-xl` (≤1360px, zero body padding — full-bleed). Default is the standard width.
 - Sticky inner tab strip: when a modal body uses `.page-tabs` as a direct child (e.g. integration edit), the strip is auto-pinned to the top of the scrolling `.modal-body` via the `.modal-body > .page-tabs` rule in `styles.css`. Don't roll your own sticky positioning. Nested sub-tab strips (deeper than direct child) are intentionally not sticky.
 - Header is the drag handle (mousedown anywhere outside `.modal-close`).
 - Backdrop click flashes the close button instead of dismissing — explicit close only, to protect in-progress edits.
@@ -127,7 +127,7 @@ Per-pattern sections:
 - Call `openModal(title, bodyHTML, footerHTML, options)` — do not hand-roll a new overlay element.
 - Footer buttons close via explicit `closeModal()` calls bound after open.
 - For destructive actions, wrap with `await showConfirm(...)` first.
-- For wide forms (multi-column / tabbed), pass `{ wide: true }`; reserve `{ xl: true }` for genuinely dense UIs (allocation preview, etc.).
+- For wide forms (multi-column / tabbed), pass `{ wide: true }`; `{ large: true }` when the body carries a real data table; reserve `{ xl: true }` for genuinely dense UIs (allocation preview, etc.).
 - Re-bind any DOM listeners after each open — the body HTML is replaced wholesale.
 
 ---

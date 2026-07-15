@@ -871,7 +871,10 @@ function _showMonitorDisableConfirm(anchorEl, onConfirm, maintOpts) {
       '<div class="mcp-actions" style="align-items:center;gap:6px">' +
         '<input type="datetime-local" class="mcp-maint-until" value="' + escapeHtml(defaultUntil) + '" style="font-size:0.82rem">' +
         '<button type="button" class="mcp-confirm mcp-maint-enter">Enter</button>' +
-      '</div>';
+      '</div>' +
+      '<label class="mcp-message" style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:6px" title="Devices behind this asset go into dependency suppression (notifications paused) for the window. Uncheck when they stay reachable and should keep alerting.">' +
+        '<input type="checkbox" class="mcp-maint-suppress" checked style="width:auto"> Mark dependent devices as down' +
+      '</label>';
   }
 
   var ctl = _showPillPopover(anchorEl, "Disable monitoring",
@@ -890,9 +893,11 @@ function _showMonitorDisableConfirm(anchorEl, onConfirm, maintOpts) {
     ctl.popover.querySelector(".mcp-maint-enter").addEventListener("click", async function () {
       var until = ctl.popover.querySelector(".mcp-maint-until").value;
       if (!until) { showToast("Pick an end date/time", "error"); return; }
+      var suppressCb = ctl.popover.querySelector(".mcp-maint-suppress");
+      var suppress = !suppressCb || suppressCb.checked;
       ctl.close();
       try {
-        await window.maintCreateAdhoc(maintOpts.assetId, maintOpts.hostname, until);
+        await window.maintCreateAdhoc(maintOpts.assetId, maintOpts.hostname, until, { suppressChildren: suppress });
         showToast("Maintenance mode active — schedule created");
         if (typeof loadAssets === "function") loadAssets();
       } catch (err) {
@@ -2819,6 +2824,10 @@ function assetMonitoringFormHTML(asset, managedAgent) {
               '<span>Enter maintenance mode until</span>' +
               '<input type="datetime-local" id="f-maint-until" disabled>' +
             '</label>' +
+            '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px" title="Devices behind this asset go into dependency suppression (notifications paused) for the window. Uncheck when they stay reachable and should keep alerting.">' +
+              '<input type="checkbox" id="f-maint-suppress" checked disabled style="width:auto">' +
+              '<span>Mark dependent devices as down</span>' +
+            '</label>' +
             '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time.</p>'
           : "") +
       '</div>'
@@ -2851,9 +2860,11 @@ function _wireMaintenanceEditSection(asset) {
 
   var enterChk = document.getElementById("f-maint-enter");
   var untilEl = document.getElementById("f-maint-until");
+  var suppressEl = document.getElementById("f-maint-suppress");
   if (enterChk && untilEl) {
     enterChk.addEventListener("change", function () {
       untilEl.disabled = !enterChk.checked;
+      if (suppressEl) suppressEl.disabled = !enterChk.checked;
       if (enterChk.checked && !untilEl.value && typeof window.maintLocalIso === "function") {
         untilEl.value = window.maintLocalIso(new Date(Date.now() + 2 * 60 * 60 * 1000));
       }
@@ -3280,10 +3291,12 @@ async function openEditModal(id) {
         // update (the modal DOM survives, but keep the read close to use).
         var maintChk = document.getElementById("f-maint-enter");
         var maintUntil = document.getElementById("f-maint-until");
+        var maintSuppress = document.getElementById("f-maint-suppress");
         var enterMaint = !!(maintChk && maintChk.checked && maintUntil && maintUntil.value);
         await api.assets.update(id, getAssetFormData());
         if (enterMaint && typeof window.maintCreateAdhoc === "function") {
-          await window.maintCreateAdhoc(id, asset.hostname, maintUntil.value);
+          await window.maintCreateAdhoc(id, asset.hostname, maintUntil.value,
+            { suppressChildren: !maintSuppress || maintSuppress.checked });
         }
         closeModal();
         showToast(enterMaint ? "Asset updated — maintenance mode active" : "Asset updated");

@@ -3162,6 +3162,13 @@ model MaintenanceSchedule {
   criteria  Json? // tagAssignmentService criteria shape; null = explicit assets only
   assetIds  String[] @default([]) // explicit targets, unioned with criteria matches
   schedule  Json // recurrence shape (see maintenanceRecurrence.ts)
+  // Whether an in-window asset counts as DOWN for child dependency
+  // suppression (evaluateSuppression). true (default) = dependents behind it
+  // suppress like a Dependency Test; false = the maintenance status is
+  // ignored by suppression and the parent evaluates by its frozen
+  // monitorStatus (dependents keep monitoring/alerting normally — e.g. a
+  // clustered/redundant parent whose children stay reachable).
+  suppressChildren Boolean @default(true)
   createdBy String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

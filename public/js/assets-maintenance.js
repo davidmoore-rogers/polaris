@@ -130,7 +130,7 @@ async function openMaintenanceModal() {
     "Maintenance",
     body,
     '<button class="btn btn-secondary" onclick="closeModal()">Close</button>',
-    { wide: true }
+    { large: true }
   );
   _wireModalTabs("maint");
   _maintWireEditor();
@@ -256,6 +256,13 @@ function _maintEditorHTML() {
           '<div><label>Active until (optional)</label><input type="date" id="maint-active-until"></div>' +
         '</div>' +
       '</div>' +
+    '</div>' +
+
+    '<div class="form-group" style="border-top:1px solid var(--color-border);padding-top:12px">' +
+      '<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin:0">' +
+        '<input type="checkbox" id="maint-suppress-children" checked style="width:auto"> Mark dependent devices as down' +
+      '</label>' +
+      '<p class="hint" style="margin:4px 0 0">Devices behind an in-maintenance asset go into dependency suppression (their notifications pause) for the window — as if the asset went offline. Uncheck when dependents stay reachable (redundant path, clustered parent) and should keep monitoring and alerting normally.</p>' +
     '</div>' +
 
     '<div class="form-group" style="display:flex;align-items:center;gap:16px;border-top:1px solid var(--color-border);padding-top:12px">' +
@@ -450,6 +457,7 @@ function _maintResetEditor() {
   document.getElementById("maint-name").value = "";
   document.getElementById("maint-rules").innerHTML = _maintRuleRowHTML(null);
   document.getElementById("maint-enabled").checked = true;
+  document.getElementById("maint-suppress-children").checked = true;
   document.getElementById("maint-kind-oneshot").checked = true;
   var now = new Date();
   document.getElementById("maint-start").value = _maintLocalIso(now);
@@ -468,6 +476,7 @@ function _maintLoadIntoEditor(row) {
   _maintEditingAssetIds = Array.isArray(row.assetIds) ? row.assetIds.slice() : [];
   document.getElementById("maint-name").value = row.name || "";
   document.getElementById("maint-enabled").checked = row.enabled !== false;
+  document.getElementById("maint-suppress-children").checked = row.suppressChildren !== false;
 
   var criteria = row.criteria;
   var rulesEl = document.getElementById("maint-rules");
@@ -527,6 +536,7 @@ async function _maintSave() {
       criteria: criteria,
       assetIds: _maintEditingAssetIds,
       schedule: _maintCollectSchedule(),
+      suppressChildren: document.getElementById("maint-suppress-children").checked,
     };
     if (_maintEditingId) {
       await api.maintenanceSchedules.update(_maintEditingId, body);
@@ -577,8 +587,9 @@ async function _maintReloadList() {
     return "<tr>" +
       "<td><a href=\"#\" class=\"maint-edit-link\" data-id=\"" + s.id + "\">" + escapeHtml(s.name) + "</a></td>" +
       "<td>" + escapeHtml(maintScheduleSummary(s.schedule)) + "</td>" +
-      "<td>" + escapeHtml(_maintTargetsSummary(s)) + "</td>" +
-      '<td><label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">' +
+      '<td style="white-space:nowrap">' + escapeHtml(_maintTargetsSummary(s)) + "</td>" +
+      '<td style="white-space:nowrap">' + (s.suppressChildren !== false ? "Marked down" : "Unaffected") + "</td>" +
+      '<td style="white-space:nowrap"><label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">' +
         '<input type="checkbox" class="maint-enable-toggle" data-id="' + s.id + '"' + (s.enabled ? " checked" : "") + ' style="width:auto">' +
         (s.enabled ? "Enabled" : "Disabled") + "</label></td>" +
       '<td style="white-space:nowrap">' +
@@ -588,7 +599,7 @@ async function _maintReloadList() {
   }).join("");
   el.innerHTML =
     '<table class="data-table"><thead><tr>' +
-    "<th>Name</th><th>Schedule</th><th>Targets</th><th>State</th><th></th>" +
+    '<th>Name</th><th>Schedule</th><th>Targets</th><th title="Whether devices behind an in-maintenance asset are dependency-suppressed for the window">Dependents</th><th>State</th><th></th>' +
     "</tr></thead><tbody>" + rows + "</tbody></table>" +
     '<p class="hint" style="margin-top:8px">Disabling or deleting a schedule ends its active maintenance windows immediately and restores asset statuses.</p>';
 
@@ -610,6 +621,9 @@ async function _maintReloadList() {
           criteria: row.criteria || null,
           assetIds: row.assetIds || [],
           schedule: row.schedule,
+          // Pass through — normalizeInput defaults a missing value to true,
+          // which would silently flip an opted-out schedule.
+          suppressChildren: row.suppressChildren !== false,
         });
         showToast(cb.checked ? "Schedule enabled" : "Schedule disabled");
         await _maintReloadList();
@@ -644,8 +658,10 @@ async function _maintReloadList() {
  * Create a one-shot single-asset maintenance schedule starting now. The
  * server reconciles inline, so the asset is already in maintenance when the
  * promise resolves. endLocalIso is a datetime-local value ("YYYY-MM-DDTHH:MM").
+ * opts.suppressChildren (default true) — whether dependents behind the asset
+ * are dependency-suppressed for the window.
  */
-async function maintCreateAdhoc(assetId, hostname, endLocalIso) {
+async function maintCreateAdhoc(assetId, hostname, endLocalIso, opts) {
   return api.maintenanceSchedules.create({
     name: "Ad-hoc — " + (hostname || assetId),
     assetIds: [assetId],
@@ -655,6 +671,7 @@ async function maintCreateAdhoc(assetId, hostname, endLocalIso) {
       startAt: _maintLocalIso(new Date()),
       endAt: endLocalIso,
     },
+    suppressChildren: !(opts && opts.suppressChildren === false),
   });
 }
 
