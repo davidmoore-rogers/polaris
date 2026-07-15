@@ -361,6 +361,7 @@ const ASSET_SORT_COLUMNS: Record<string, string> = {
   assignedTo: "assignedTo",
   purchaseOrder: "purchaseOrder",
   dnsName: "dnsName",
+  description: "description",
   lastSeen: "lastSeen",
   createdAt: "createdAt",
 };
@@ -379,6 +380,7 @@ const ASSET_TEXT_COLUMNS: Record<string, string> = {
   assignedTo: "assignedTo",
   purchaseOrder: "purchaseOrder",
   dnsName: "dnsName",
+  description: "description",
 };
 
 const ASSET_TEXT_OPS = new Set(["contains", "not_contains", "empty", "is_not_empty"]);
@@ -483,6 +485,7 @@ const ASSET_LIST_SELECT = {
   osVersion: true,
   assignedTo: true,
   purchaseOrder: true,
+  description: true,
   assetType: true,
   status: true,
   statusChangedAt: true,
