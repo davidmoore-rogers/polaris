@@ -2980,13 +2980,19 @@ function buildFortigateFirewallObservedBlob(
 // Upsert the fortigate-firewall AssetSource row for a discovered firewall.
 // Best-effort: failures are logged via syncLog but don't unwind the Asset
 // write that already landed.
+// `lastSeen` = null means the gate was OFFLINE in FMG this cycle (cached-CMDB
+// pull): refresh observed/syncedAt but do NOT advance the row's lastSeen —
+// per the schema comment it's "last time this source reported the device as
+// active", and a cached read isn't that. On create the column is non-nullable,
+// so a first-seen-offline gate stamps syncedAt once and freezes until a live
+// cycle.
 async function upsertFortigateFirewallAssetSource(
   assetId: string,
   integrationId: string,
   serial: string,
   observed: Record<string, unknown>,
   syncedAt: Date,
-  lastSeen: Date,
+  lastSeen: Date | null,
 ): Promise<void> {
   await prisma.assetSource.upsert({
     where: { sourceKind_externalId: { sourceKind: "fortigate-firewall", externalId: serial } },
@@ -2998,8 +3004,8 @@ async function upsertFortigateFirewallAssetSource(
       observed: observed as any,
       inferred: false,
       syncedAt,
-      firstSeen: lastSeen,
-      lastSeen,
+      firstSeen: lastSeen ?? syncedAt,
+      lastSeen: lastSeen ?? syncedAt,
     },
     update: {
       assetId,
@@ -3007,7 +3013,7 @@ async function upsertFortigateFirewallAssetSource(
       observed: observed as any,
       inferred: false,
       syncedAt,
-      lastSeen,
+      ...(lastSeen ? { lastSeen } : {}),
     },
   });
   // Pre-`fgt:`-tag firewalls were classified as "manual" by the phase-1
@@ -4155,7 +4161,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           try {
             const syncedAt = new Date(now);
             const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
-            await upsertFortigateFirewallAssetSource(existingAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+            await upsertFortigateFirewallAssetSource(existingAsset.id, integrationId, member.serial, observed, syncedAt, memberDevice.offline ? null : syncedAt);
           } catch (err: any) {
             syncLog("error", `Failed to upsert fortigate-firewall AssetSource for ${memberDevice.hostname || device.name}: ${err?.message || "Unknown error"}`);
           }
@@ -4440,7 +4446,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         try {
           const syncedAt = new Date(now);
           const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
-          await upsertFortigateFirewallAssetSource(newAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+          await upsertFortigateFirewallAssetSource(newAsset.id, integrationId, member.serial, observed, syncedAt, memberDevice.offline ? null : syncedAt);
         } catch (err: any) {
           syncLog("error", `Created FortiGate asset ${memberDevice.hostname || device.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
         }
@@ -6087,6 +6093,18 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // interface (FortiLink, mirror VLAN, stack mgmt port) and would
       // clobber the authoritative connecting_from / mgmtIp value.
       const isInfraAsset = asset.assetType === "firewall" || asset.assetType === "switch" || asset.assetType === "access_point";
+      // Fortinet-discovery-owned infra (carries the fortinetTopology stamp
+      // from its own discovery loop). Presence for these is owned by that
+      // loop — the firewall/switch/AP blocks bump lastSeen only when the
+      // device answered live / reported connected — plus the monitor probe.
+      // A client-side sighting (this box holding a DHCP lease on some gate,
+      // or lingering in device inventory) must NOT freshen it: leases stay
+      // bound past shutdown and FortiOS's cached is_online lags reality, so
+      // an offline-in-FMG gate would otherwise show lastSeen advancing every
+      // discovery run. Operator-typed non-Fortinet "firewall"/"switch" assets
+      // (no topology stamp) keep the endpoint-style presence bumps — the
+      // client sighting is their only evidence.
+      const isFortinetOwnedInfra = isInfraAsset && asset.fortinetTopology != null;
 
       if (entry.device) {
         sightingRows.push({
@@ -6148,7 +6166,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             }
           : {}),
       };
-      if (leasePresence) bumpLastSeen(updateData, asset, new Date(now), "dhcp-lease");
+      if (leasePresence && !isFortinetOwnedInfra) bumpLastSeen(updateData, asset, new Date(now), "dhcp-lease");
       if (!isInfraAsset) {
         updateData.ipAddress = entry.ipAddress;
         updateData.ipSource = entry.device || integrationType;
@@ -6341,8 +6359,20 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const invSeenValid = !Number.isNaN(invSeenAt.getTime());
 
       if (existingAsset) {
+        const invIsFortinetInfra = existingAsset.assetType === "firewall"
+          || existingAsset.assetType === "switch"
+          || existingAsset.assetType === "access_point";
+        // Discovery-owned infra: presence comes from the device's own
+        // discovery loop (bumps only when it answered live / reported
+        // connected) + the monitor probe — never from this client-side
+        // inventory sighting. FortiOS's cached is_online lags reality, so
+        // without this an offline-in-FMG gate sighted as a DHCP client of
+        // another gate keeps its lastSeen advancing every discovery run.
+        // Mirrors the Phase 6 lease-path guard; operator-typed non-Fortinet
+        // infra (no fortinetTopology stamp) keeps the bump.
+        const invIsFortinetOwnedInfra = invIsFortinetInfra && existingAsset.fortinetTopology != null;
         const updateData: Record<string, unknown> = {};
-        if (invSeenValid) bumpLastSeen(updateData, existingAsset, invSeenAt, "device-inventory");
+        if (invSeenValid && !invIsFortinetOwnedInfra) bumpLastSeen(updateData, existingAsset, invSeenAt, "device-inventory");
         // Resurrection requires the device to be online right now — a
         // remembered-but-offline inventory row must not undo an operator's
         // (or the stale-sweep's) decommission.
@@ -6364,9 +6394,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // below re-staled AP firmware minutes after the AP loop healed it,
         // every cycle — and Phase 11's corrective projection pass excludes
         // infra assets, so nothing ever fixed it (prod 2026-07).
-        const invIsFortinetInfra = existingAsset.assetType === "firewall"
-          || existingAsset.assetType === "switch"
-          || existingAsset.assetType === "access_point";
+        // (`invIsFortinetInfra` is defined above the lastSeen bump — this
+        // os-write skip deliberately keys on assetType alone, unlike the
+        // topology-qualified presence guard.)
         if (inv.os && !existingAsset.os && !invIsFortinetInfra) updateData.os = inv.os;
         if (inv.os && (existingAsset as any).assetType === "other") {
           const inferred = inferAssetTypeFromOs(inv.os);
