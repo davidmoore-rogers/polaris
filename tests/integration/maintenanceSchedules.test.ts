@@ -185,11 +185,15 @@ d("maintenance-schedule lifecycle", () => {
 
   it("operator PUT moving status off maintenance closes windows as operator-released and the scheduler does not re-enter", async () => {
     const { agent, csrf } = await authedAgent(app);
+    // TWO explicit assets: a single-asset one-shot is the ad-hoc shape and
+    // self-deletes on operator release — this test exercises the release
+    // suppression on a schedule that SURVIVES the release.
     const asset = await seedAsset("op-release");
+    const peer = await seedAsset("op-release-peer");
     const created = await agent
       .post("/api/v1/maintenance-schedules")
       .set("X-CSRF-Token", csrf)
-      .send({ name: "Release me", assetIds: [asset.id], schedule: activeOneshot() });
+      .send({ name: "Release me", assetIds: [asset.id, peer.id], schedule: activeOneshot() });
     expect(created.status).toBe(201);
     expect((await prisma.asset.findUnique({ where: { id: asset.id } }))!.status).toBe("maintenance");
 
@@ -205,16 +209,43 @@ d("maintenance-schedule lifecycle", () => {
     const windows = await prisma.assetMaintenanceWindow.findMany({ where: { assetId: asset.id } });
     expect(windows).toHaveLength(1);
     expect(windows[0].endReason).toBe("operator");
+    // The peer's window is untouched and the multi-asset schedule survives.
+    expect((await prisma.asset.findUnique({ where: { id: peer.id } }))!.status).toBe("maintenance");
 
     // A fresh reconcile (any schedule write triggers one) must NOT re-enter
     // this occurrence.
     const bump = await agent
       .put(`/api/v1/maintenance-schedules/${created.body.schedule.id}`)
       .set("X-CSRF-Token", csrf)
-      .send({ name: "Release me", assetIds: [asset.id], schedule: created.body.schedule.schedule });
+      .send({ name: "Release me", assetIds: [asset.id, peer.id], schedule: created.body.schedule.schedule });
     expect(bump.status).toBe(200);
     expect((await prisma.asset.findUnique({ where: { id: asset.id } }))!.status).toBe("active");
     expect(await prisma.assetMaintenanceWindow.count({ where: { assetId: asset.id, endedAt: null } })).toBe(0);
+  });
+
+  it("operator release deletes an ad-hoc-shaped schedule (single-asset one-shot, no criteria)", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const asset = await seedAsset("adhoc-release");
+    const created = await agent
+      .post("/api/v1/maintenance-schedules")
+      .set("X-CSRF-Token", csrf)
+      .send({ name: "Ad-hoc — adhoc-release", assetIds: [asset.id], schedule: activeOneshot() });
+    expect(created.status).toBe(201);
+    expect((await prisma.asset.findUnique({ where: { id: asset.id } }))!.status).toBe("maintenance");
+
+    const put = await agent
+      .put(`/api/v1/assets/${asset.id}`)
+      .set("X-CSRF-Token", csrf)
+      .send({ status: "active" });
+    expect(put.status).toBe(200);
+
+    // Spent ad-hoc schedule is gone; window history keeps the name snapshot.
+    expect(await prisma.maintenanceSchedule.findUnique({ where: { id: created.body.schedule.id } })).toBeNull();
+    const windows = await prisma.assetMaintenanceWindow.findMany({ where: { assetId: asset.id } });
+    expect(windows).toHaveLength(1);
+    expect(windows[0].endReason).toBe("operator");
+    expect(windows[0].scheduleId).toBeNull();
+    expect(windows[0].scheduleName).toBe("Ad-hoc — adhoc-release");
   });
 
   it("delete closes the window (deleted) and restores the parked status", async () => {
