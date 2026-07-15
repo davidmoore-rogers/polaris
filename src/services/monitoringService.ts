@@ -9098,6 +9098,26 @@ export async function collectStorageOnlySnmp(
 }
 
 /**
+ * Candidate filter shared by BOTH monitor work-selection paths — the cursor
+ * pass below and the pg-boss publisher in jobs/monitorAssets.ts (which
+ * imports it). This is the single place that decides which assets receive
+ * server-driven polling: `monitored: true`, MINUS assets in maintenance mode
+ * (status="maintenance" — the maintenanceScheduler holds that status while
+ * a window is open; `monitored` itself stays true so the operator's intent
+ * survives the window). Every derived cadence (probe / fastFiltered /
+ * telemetry / systemInfo / lldp / storage) flows through these two queries,
+ * so excluding an asset here stops ALL of its polling. Deliberately NOT
+ * applied to the operator's explicit Poll Now (`POST /assets/:id/probe-now`)
+ * — a manual probe is a diagnostic, and notifications are suppressed during
+ * maintenance anyway. Agent PUSHES also keep landing: maintenance stops
+ * server-driven polling, not inbound agent samples.
+ */
+export const MONITOR_CANDIDATE_WHERE = {
+  monitored: true,
+  status: { not: "maintenance" },
+} as const;
+
+/**
  * One iteration of the monitor job. Picks assets due for the requested
  * cadences and runs the due work in parallel. Each cadence has its own due
  * check + per-asset interval override (`monitorIntervalSec`,
@@ -9127,7 +9147,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   const now = new Date();
 
   const candidates = await prisma.asset.findMany({
-    where: { monitored: true },
+    where: MONITOR_CANDIDATE_WHERE,
     select: {
       id: true,
       assetType: true,

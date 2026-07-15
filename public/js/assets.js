@@ -313,10 +313,15 @@ document.addEventListener("DOMContentLoaded", async function () {
     _assetsUpdateSelectAll();
     _assetsUpdateBulkBar();
   });
-  var settingsBtn = document.getElementById("btn-asset-settings");
-  if (settingsBtn) settingsBtn.addEventListener("click", openAssetSettingsModal);
+  // The merged "Settings" modal (Asset Lifecycle + Manual Monitoring +
+  // Class Overrides) — the standalone Asset Settings modal was folded in.
   var monsetBtn = document.getElementById("btn-monitoring-settings");
   if (monsetBtn) monsetBtn.addEventListener("click", openMonitoringSettingsModal);
+  // Maintenance modal lives in assets-maintenance.js (loaded after this file).
+  var maintBtn = document.getElementById("btn-maintenance");
+  if (maintBtn) maintBtn.addEventListener("click", function () {
+    if (typeof openMaintenanceModal === "function") openMaintenanceModal();
+  });
   await userReady;
   _restoreAssetsPrefs();
   _applyAssetsHashFilters();
@@ -353,25 +358,22 @@ document.addEventListener("DOMContentLoaded", async function () {
 
   var addBtn = document.getElementById("btn-add-asset");
   if (addBtn) addBtn.addEventListener("click", openCreateModal);
-  // ── Import dropdown wiring ──
+  // ── Import items in the merged Import / Export dropdown ──
+  // The dropdown's toggle / outside-close / stopPropagation wiring lives with
+  // the export items (module-level IIFE below); this block only wires the
+  // two import entries to their hidden file inputs.
   (function () {
-    var importMenu = document.getElementById("import-menu");
-    var importBtn  = document.getElementById("btn-import");
-    if (importBtn && importMenu) {
-      importBtn.addEventListener("click", function (e) { e.stopPropagation(); importMenu.classList.toggle("open"); });
-      document.addEventListener("click", function () { importMenu.classList.remove("open"); });
-      importMenu.addEventListener("click", function (e) { e.stopPropagation(); });
-    }
+    var menu = document.getElementById("import-export-menu");
     var csvBtn   = document.getElementById("btn-import-csv");
     var csvInput = document.getElementById("import-csv-input");
     var pdfBtn   = document.getElementById("btn-import-pdf");
     var pdfInput = document.getElementById("import-pdf-input");
     if (csvBtn && csvInput) {
-      csvBtn.addEventListener("click", function () { importMenu && importMenu.classList.remove("open"); csvInput.value = ""; csvInput.click(); });
+      csvBtn.addEventListener("click", function () { menu && menu.classList.remove("open"); csvInput.value = ""; csvInput.click(); });
       csvInput.addEventListener("change", function () { if (this.files[0]) openImportCsvModal(this.files[0]); });
     }
     if (pdfBtn && pdfInput) {
-      pdfBtn.addEventListener("click", function () { importMenu && importMenu.classList.remove("open"); pdfInput.value = ""; pdfInput.click(); });
+      pdfBtn.addEventListener("click", function () { menu && menu.classList.remove("open"); pdfInput.value = ""; pdfInput.click(); });
       pdfInput.addEventListener("change", function () { if (this.files[0]) openImportPdfModal(this.files[0]); });
     }
   })();
@@ -783,17 +785,27 @@ function _handleMonitorPillClick(e) {
   var assetId = pill.getAttribute('data-monitor-toggle');
   var currentlyMonitored = pill.getAttribute('data-monitored') === "true";
 
+  // In a maintenance window: the pill offers "end maintenance now" instead
+  // of the monitoring toggle (monitoring is paused by the window itself).
+  if (pill.getAttribute("data-maintenance") === "true") {
+    _showMaintenanceEndConfirm(pill, assetId, pill.getAttribute("data-return-status") || "active");
+    return;
+  }
+
   if (currentlyMonitored) {
-    _showMonitorDisableConfirm(pill, function () { _flipAssetMonitor(assetId, false); });
+    _showMonitorDisableConfirm(pill, function () { _flipAssetMonitor(assetId, false); }, {
+      assetId: assetId,
+      hostname: pill.getAttribute("data-hostname") || "",
+    });
   } else {
     _flipAssetMonitor(assetId, true);
   }
 }
 
-// Inline confirmation popover for the "disable monitoring" direction.
-// Anchored in viewport coordinates so the parent <td>'s overflow:hidden
-// doesn't clip it. Closes on outside click, Escape, or button click.
-function _showMonitorDisableConfirm(anchorEl, onConfirm) {
+// Shared pill popover shell: builds, positions (viewport coordinates so the
+// parent <td>'s overflow:hidden doesn't clip it), and wires outside-click /
+// Escape dismissal. Returns { popover, close }.
+function _showPillPopover(anchorEl, ariaLabel, innerHtml) {
   // Drop any earlier popover first — clicking another pill while one is
   // open should swap, not stack.
   var existing = document.querySelector(".monitor-confirm-popover");
@@ -802,13 +814,8 @@ function _showMonitorDisableConfirm(anchorEl, onConfirm) {
   var popover = document.createElement("div");
   popover.className = "monitor-confirm-popover";
   popover.setAttribute("role", "dialog");
-  popover.setAttribute("aria-label", "Disable monitoring");
-  popover.innerHTML =
-    '<div class="mcp-message">Disable monitoring on this asset?</div>' +
-    '<div class="mcp-actions">' +
-      '<button type="button" class="mcp-cancel">Cancel</button>' +
-      '<button type="button" class="mcp-confirm">Disable</button>' +
-    '</div>';
+  popover.setAttribute("aria-label", ariaLabel);
+  popover.innerHTML = innerHtml;
   document.body.appendChild(popover);
 
   // Position: prefer below the pill; fall back to above if it would clip
@@ -839,13 +846,84 @@ function _showMonitorDisableConfirm(anchorEl, onConfirm) {
   document.addEventListener("mousedown", onOutside, true);
   document.addEventListener("keydown",   onKey,     true);
 
-  popover.querySelector(".mcp-cancel").addEventListener("click", close);
-  popover.querySelector(".mcp-confirm").addEventListener("click", function () {
-    close();
+  return { popover: popover, close: close };
+}
+
+// Inline confirmation popover for the "disable monitoring" direction, plus
+// (for maintenanceManagement holders) the ad-hoc "enter maintenance mode
+// until…" action — creates a one-shot single-asset schedule that takes
+// effect immediately.
+function _showMonitorDisableConfirm(anchorEl, onConfirm, maintOpts) {
+  var offerMaintenance = !!(maintOpts && maintOpts.assetId &&
+    typeof window.maintCreateAdhoc === "function" &&
+    typeof canManageMaintenance === "function" && canManageMaintenance());
+
+  var maintHtml = "";
+  if (offerMaintenance) {
+    var defaultUntil = typeof window.maintLocalIso === "function"
+      ? window.maintLocalIso(new Date(Date.now() + 2 * 60 * 60 * 1000))
+      : "";
+    maintHtml =
+      '<div class="mcp-message" style="margin-top:8px;border-top:1px solid var(--color-border);padding-top:8px">Or enter maintenance mode until:</div>' +
+      '<div class="mcp-actions" style="align-items:center;gap:6px">' +
+        '<input type="datetime-local" class="mcp-maint-until" value="' + escapeHtml(defaultUntil) + '" style="font-size:0.82rem">' +
+        '<button type="button" class="mcp-confirm mcp-maint-enter">Enter</button>' +
+      '</div>';
+  }
+
+  var ctl = _showPillPopover(anchorEl, "Disable monitoring",
+    '<div class="mcp-message">Disable monitoring on this asset?</div>' +
+    '<div class="mcp-actions">' +
+      '<button type="button" class="mcp-cancel">Cancel</button>' +
+      '<button type="button" class="mcp-confirm">Disable</button>' +
+    '</div>' + maintHtml);
+
+  ctl.popover.querySelector(".mcp-cancel").addEventListener("click", ctl.close);
+  ctl.popover.querySelector(".mcp-confirm").addEventListener("click", function () {
+    ctl.close();
     onConfirm();
   });
+  if (offerMaintenance) {
+    ctl.popover.querySelector(".mcp-maint-enter").addEventListener("click", async function () {
+      var until = ctl.popover.querySelector(".mcp-maint-until").value;
+      if (!until) { showToast("Pick an end date/time", "error"); return; }
+      ctl.close();
+      try {
+        await window.maintCreateAdhoc(maintOpts.assetId, maintOpts.hostname, until);
+        showToast("Maintenance mode active — schedule created");
+        if (typeof loadAssets === "function") loadAssets();
+      } catch (err) {
+        showToast((err && err.message) || "Failed to enter maintenance mode", "error");
+      }
+    });
+  }
   // Focus Cancel by default — accidental Enter shouldn't disable monitoring.
-  setTimeout(function () { popover.querySelector(".mcp-cancel").focus(); }, 0);
+  setTimeout(function () { ctl.popover.querySelector(".mcp-cancel").focus(); }, 0);
+}
+
+// Popover for a pill already in a maintenance window: end it early. The PUT
+// closes the open windows server-side (operator wins; the scheduler won't
+// re-enter this occurrence) and restores the pre-window status.
+function _showMaintenanceEndConfirm(anchorEl, assetId, returnStatus) {
+  if (typeof canManageMaintenance !== "function" || !canManageMaintenance()) return;
+  var ctl = _showPillPopover(anchorEl, "End maintenance",
+    '<div class="mcp-message">End maintenance mode now? Monitoring and notifications resume immediately.</div>' +
+    '<div class="mcp-actions">' +
+      '<button type="button" class="mcp-cancel">Cancel</button>' +
+      '<button type="button" class="mcp-confirm">End Maintenance</button>' +
+    '</div>');
+  ctl.popover.querySelector(".mcp-cancel").addEventListener("click", ctl.close);
+  ctl.popover.querySelector(".mcp-confirm").addEventListener("click", async function () {
+    ctl.close();
+    try {
+      await api.assets.update(assetId, { status: returnStatus || "active" });
+      showToast("Maintenance ended");
+      if (typeof loadAssets === "function") loadAssets();
+    } catch (err) {
+      showToast((err && err.message) || "Failed to end maintenance", "error");
+    }
+  });
+  setTimeout(function () { ctl.popover.querySelector(".mcp-cancel").focus(); }, 0);
 }
 
 // Optimistic-update helper extracted from the click handler so the
@@ -853,7 +931,21 @@ function _showMonitorDisableConfirm(anchorEl, onConfirm) {
 // rollback flow.
 async function _flipAssetMonitor(assetId, nextMonitored) {
   var idx = (_assetsData || []).findIndex(function (a) { return a.id === assetId; });
-  if (idx === -1) return;
+  if (idx === -1) {
+    // Pill lives outside the current table page (slide-over System tab):
+    // no optimistic row to mutate — write through and re-render the panel.
+    try {
+      await api.assets.update(assetId, { monitored: nextMonitored });
+      showToast(nextMonitored ? "Monitoring enabled" : "Monitoring disabled");
+      if (document.getElementById("asset-panel-overlay") &&
+          document.getElementById("asset-panel-overlay").classList.contains("open")) {
+        openViewModal(assetId);
+      }
+    } catch (err) {
+      showToast((err && err.message) || "Failed to update monitoring", "error");
+    }
+    return;
+  }
   var prevSnapshot = Object.assign({}, _assetsData[idx]);
   _assetsData[idx].monitored = nextMonitored;
   if (!nextMonitored) {
@@ -1754,62 +1846,9 @@ async function bulkUnquarantineAssets() {
   }
 }
 
-async function openAssetSettingsModal() {
-  var defaults = { inactivityMonths: 0, historyRetentionDays: 0 };
-  try {
-    var s = await api.events.getAssetDecommissionSettings();
-    var m = Number(s.inactivityMonths);
-    defaults.inactivityMonths = Number.isFinite(m) && m >= 0 ? Math.floor(m) : 0;
-  } catch (_) {}
-  try {
-    var hs = await api.assets.getHistorySettings();
-    var d = Number(hs.retentionDays);
-    defaults.historyRetentionDays = Number.isFinite(d) && d >= 0 ? Math.floor(d) : 0;
-  } catch (_) {}
-
-  var body =
-    '<div class="form-group">' +
-      '<label>Auto-Decommission Threshold (months)</label>' +
-      '<input type="number" id="f-assets-inactivity-months" value="' + escapeHtml(String(defaults.inactivityMonths)) + '" min="0" max="120" style="max-width:120px">' +
-      '<p class="hint">Assets whose <strong>Last Seen</strong> date is older than this many months are automatically moved to <strong>decommissioned</strong> status. ' +
-        'Set to <strong>0</strong> to disable. The job runs every 24 hours.</p>' +
-    '</div>' +
-    '<div class="form-group">' +
-      '<label>IP History Retention (days)</label>' +
-      '<input type="number" id="f-assets-history-retention" value="' + escapeHtml(String(defaults.historyRetentionDays)) + '" min="0" max="3650" style="max-width:120px">' +
-      '<p class="hint">IP address history older than this many days is removed. ' +
-        'Set to <strong>0</strong> to disable retention limits and keep history indefinitely.</p>' +
-    '</div>';
-
-  var footer =
-    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-    '<button class="btn btn-primary" id="btn-asset-settings-save">Save</button>';
-
-  openModal("Asset Settings", body, footer);
-
-  document.getElementById("btn-asset-settings-save").addEventListener("click", async function () {
-    var btn = this;
-    btn.disabled = true;
-    try {
-      var v = parseInt(document.getElementById("f-assets-inactivity-months").value, 10);
-      var r = parseInt(document.getElementById("f-assets-history-retention").value, 10);
-      await Promise.all([
-        api.events.updateAssetDecommissionSettings({
-          inactivityMonths: Number.isFinite(v) && v >= 0 ? v : 0,
-        }),
-        api.assets.updateHistorySettings({
-          retentionDays: Number.isFinite(r) && r >= 0 ? r : 0,
-        }),
-      ]);
-      closeModal();
-      showToast("Asset settings saved");
-    } catch (err) {
-      showToast(err.message, "error");
-    } finally {
-      btn.disabled = false;
-    }
-  });
-}
+// The standalone "Asset Settings" modal was folded into the merged
+// "Settings" modal (openMonitoringSettingsModal) — its two lifecycle fields
+// render as the Asset Lifecycle section there (_monsetLifecycleSectionHTML).
 
 // Bulk-bar dropdown wiring. Three dropdowns share one "only-one-open" model
 // + outside-click-closes pattern: opening one closes the others, and a
@@ -2125,7 +2164,8 @@ function assetStatusBadge(asset) {
 function assetMonitorBadge(asset) {
   var canToggle = typeof canManageAssets === "function" && canManageAssets() && asset && asset.id;
   var toggleAttrs = canToggle
-    ? ' data-monitor-toggle="' + escapeHtml(asset.id) + '" data-monitored="' + (asset.monitored ? "true" : "false") + '" role="button" tabindex="0"'
+    ? ' data-monitor-toggle="' + escapeHtml(asset.id) + '" data-monitored="' + (asset.monitored ? "true" : "false") + '"' +
+      (asset.hostname ? ' data-hostname="' + escapeHtml(asset.hostname) + '"' : "") + ' role="button" tabindex="0"'
     : "";
   if (!asset || asset.monitored === false || asset.monitored == null) {
     var unmonTitle = canToggle ? ' title="Click to enable monitoring"' : "";
@@ -2138,6 +2178,19 @@ function assetMonitorBadge(asset) {
   if (asset.lastMonitorAt) bits.push("Last poll: " + new Date(asset.lastMonitorAt).toLocaleString());
   if (canToggle) bits.push("Click to disable monitoring");
   var clickCls = canToggle ? " badge-clickable" : "";
+  // Maintenance window outranks everything, including the dep-test overlay —
+  // while status="maintenance" the scheduler has paused ALL polling and
+  // notifications, so no live probe state exists to display. Ending the
+  // window early is offered via the pill popover (maintenanceManagement).
+  if (asset.status === "maintenance") {
+    var mBits = ["In a maintenance window — monitoring and notifications paused"];
+    if (asset.maintenanceReturnStatus) mBits.push("Returns to: " + asset.maintenanceReturnStatus);
+    if (canToggle) mBits.push("Click for options");
+    var mTitle = ' title="' + escapeHtml(mBits.join("\n")) + '"';
+    var mAttrs = toggleAttrs + ' data-maintenance="true"' +
+      (asset.maintenanceReturnStatus ? ' data-return-status="' + escapeHtml(asset.maintenanceReturnStatus) + '"' : "");
+    return '<span class="badge badge-maintenance' + clickCls + '"' + mTitle + mAttrs + '>Maintenance</span>';
+  }
   // Admin-only "Dependency Test" overlay takes priority over every other
   // pill state — the operator explicitly asked us to simulate this device
   // going down, so show the simulation label even when the real probe is
@@ -2748,6 +2801,26 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   // ignored at resolution time + see misleading dropdown state.
   var transportBlockShown = !(agentActive || agentInFlight);
 
+  // Maintenance section (edit mode only): shows current windows + covering
+  // schedules (lazily loaded in _wireMonitorEditTab) and, for
+  // maintenanceManagement holders, an ad-hoc "enter maintenance until…"
+  // action realized as a one-shot schedule on save.
+  var canMaint = typeof canManageMaintenance === "function" && canManageMaintenance();
+  var maintSectionHtml = (asset && asset.id)
+    ? '<div class="form-group" id="f-maint-wrap" style="margin-top:0.5rem;padding:0.75rem;border:1px solid var(--color-border);border-radius:6px;background:var(--color-surface-1)">' +
+        '<strong>Maintenance</strong>' +
+        '<div id="f-maint-info" class="hint" style="margin:0.35rem 0 0.5rem">Loading maintenance info…</div>' +
+        (canMaint
+          ? '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex-wrap:wrap">' +
+              '<input type="checkbox" id="f-maint-enter" style="width:auto">' +
+              '<span>Enter maintenance mode until</span>' +
+              '<input type="datetime-local" id="f-maint-until" disabled>' +
+            '</label>' +
+            '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time.</p>'
+          : "") +
+      '</div>'
+    : "";
+
   return (
     '<div class="form-group">' +
       '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
@@ -2756,6 +2829,7 @@ function assetMonitoringFormHTML(asset, managedAgent) {
       '</label>' +
       '<p class="hint">A successful probe means the credential authenticated. Probes write a sample row each cycle; failed probes count as packet loss.</p>' +
     '</div>' +
+    maintSectionHtml +
     agentBlockHtml +
     (transportBlockShown ? transportBlockHtml : '') +
     '<div class="form-group" id="f-asset-overrides-wrap"' + assetIdAttr + ' style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--color-border);display:none">' +
@@ -2763,6 +2837,45 @@ function assetMonitoringFormHTML(asset, managedAgent) {
       '<p class="hint" id="f-asset-overrides-hint">Lists every asset under the same (class, asset source) scope that has its own per-asset overrides.</p>' +
     '</div>'
   );
+}
+
+// Maintenance section of the edit modal's Monitoring tab: current windows +
+// covering schedules (from /assets/:id/maintenance-info), and the ad-hoc
+// enter-until checkbox. Best-effort — a load failure just leaves the hint.
+function _wireMaintenanceEditSection(asset) {
+  var infoEl = document.getElementById("f-maint-info");
+  if (!infoEl || !asset || !asset.id) return;
+
+  var enterChk = document.getElementById("f-maint-enter");
+  var untilEl = document.getElementById("f-maint-until");
+  if (enterChk && untilEl) {
+    enterChk.addEventListener("change", function () {
+      untilEl.disabled = !enterChk.checked;
+      if (enterChk.checked && !untilEl.value && typeof window.maintLocalIso === "function") {
+        untilEl.value = window.maintLocalIso(new Date(Date.now() + 2 * 60 * 60 * 1000));
+      }
+    });
+  }
+
+  api.assets.maintenanceInfo(asset.id).then(function (info) {
+    var lines = [];
+    (info.openWindows || []).forEach(function (w) {
+      lines.push("<div><strong>In maintenance now</strong> — " + escapeHtml(w.scheduleName) +
+        (w.until ? " (until ~" + escapeHtml(new Date(w.until).toLocaleString()) + ")" : "") + "</div>");
+    });
+    (info.schedules || []).forEach(function (s) {
+      var when = s.activeNow
+        ? "active now"
+        : (s.nextStart ? "next: " + new Date(s.nextStart).toLocaleString() : "no upcoming window");
+      lines.push("<div>Covered by schedule: <strong>" + escapeHtml(s.name) + "</strong>" +
+        (s.enabled ? "" : " (disabled)") + " — " + escapeHtml(when) + "</div>");
+    });
+    infoEl.innerHTML = lines.length
+      ? lines.join("")
+      : "Not covered by any maintenance schedule.";
+  }).catch(function () {
+    infoEl.textContent = "Maintenance info unavailable.";
+  });
 }
 
 // Map polling method → which credential type it needs (null = no credential).
@@ -2791,6 +2904,7 @@ function _credentialOptionsForStream(selectedId, credType) {
 
 async function _wireMonitorEditTab(asset) {
   await _ensureCredentials();
+  _wireMaintenanceEditSection(asset);
   var monChk = document.getElementById("f-monitored");
   var intervalEl = document.getElementById("f-monitorInterval");
   var probeTimeoutEl = document.getElementById("f-probeTimeoutMs");
@@ -3159,9 +3273,17 @@ async function openEditModal(id) {
       var btn = this;
       btn.disabled = true;
       try {
+        // Read the Monitoring tab's ad-hoc maintenance request BEFORE the
+        // update (the modal DOM survives, but keep the read close to use).
+        var maintChk = document.getElementById("f-maint-enter");
+        var maintUntil = document.getElementById("f-maint-until");
+        var enterMaint = !!(maintChk && maintChk.checked && maintUntil && maintUntil.value);
         await api.assets.update(id, getAssetFormData());
+        if (enterMaint && typeof window.maintCreateAdhoc === "function") {
+          await window.maintCreateAdhoc(id, asset.hostname, maintUntil.value);
+        }
         closeModal();
-        showToast("Asset updated");
+        showToast(enterMaint ? "Asset updated — maintenance mode active" : "Asset updated");
         loadAssets();
       } catch (err) {
         showToast(err.message, "error");
@@ -3328,6 +3450,12 @@ function _ensureAssetPanelDOM() {
   });
   document.getElementById("asset-panel-close").addEventListener("click", closeAssetPanel);
 
+  // The System-tab status pill is rendered by assetMonitorBadge with the
+  // same data-monitor-toggle attributes as the table pills — delegate the
+  // same click handler here so it's actually actionable in the slide-over
+  // (toggle monitoring / enter or end maintenance).
+  document.getElementById("asset-panel-body").addEventListener("click", _handleMonitorPillClick);
+
   // Escape closes the panel — but only when it's the topmost layer. Nested
   // drilldowns (interface / storage / sensor / IPsec slide-overs) install their
   // own capture-phase Escape handlers that close themselves first; this guard
@@ -3408,7 +3536,13 @@ async function openViewModal(id) {
     if (!_monitorSettingsCache) {
       fetches.push(api.monitorSettings.getManual().catch(function () { return null; }));
     }
+    // Maintenance windows for the chart band overlays — fetched once per
+    // panel open (90-day lookback covers every chart range incl. 30d +
+    // custom), awaited here so every later chart render can read the cache
+    // synchronously. Best-effort: a failure just means no bands.
+    var maintFetch = _loadMaintWindowsCache(id);
     var fetched = await Promise.all(fetches);
+    await maintFetch;
     var a = fetched[0];
     if (fetched[1]) _monitorSettingsCache = fetched[1];
     _currentAssetForRefresh = a;
@@ -6036,6 +6170,65 @@ function _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) {
   return out;
 }
 
+// ─── Maintenance-window chart bands ─────────────────────────────────────────
+//
+// Labeled translucent bands over the plot area showing when the asset was in
+// a maintenance window (polling paused → the sample series has a gap; the
+// band explains the gap instead of leaving blank grid). Window rows are
+// fetched ONCE per asset-panel open (90-day lookback, awaited in
+// openViewModal before any tab renders) into _maintWindowsCache; every chart
+// render function then calls _maintenanceBandLayer(t0, t1, ...) right next
+// to its _dateChangeMarkers(...) call — same coordinate contract.
+
+var _maintWindowsCache = { assetId: null, windows: [] };
+
+function _loadMaintWindowsCache(assetId) {
+  _maintWindowsCache = { assetId: assetId, windows: [] };
+  var to = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  var from = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  return api.assets.maintenanceWindows(assetId, { from: from.toISOString(), to: to.toISOString() })
+    .then(function (res) {
+      if (_maintWindowsCache.assetId !== assetId) return; // panel moved on
+      _maintWindowsCache.windows = (res && res.windows) || [];
+    })
+    .catch(function () { /* no bands — best effort */ });
+}
+
+// SVG band layer for the cached windows clamped to [t0, t1]. Draw BEFORE the
+// series group so the data line stays on top. Each band carries a native
+// <title> tooltip (name + entry → exit), which works uniformly across all
+// chart types without touching their custom hover handlers.
+function _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) {
+  var windows = _maintWindowsCache.windows;
+  if (!windows || !windows.length) return "";
+  var out = "";
+  for (var i = 0; i < windows.length; i++) {
+    var w = windows[i];
+    var ws = new Date(w.startedAt).getTime();
+    var we = w.endedAt ? new Date(w.endedAt).getTime() : Date.now();
+    if (isNaN(ws) || we <= t0 || ws >= t1) continue;
+    var x0 = padL + (Math.max(ws, t0) - t0) / (t1 - t0) * innerW;
+    var x1 = padL + (Math.min(we, t1) - t0) / (t1 - t0) * innerW;
+    if (x1 - x0 < 1) x1 = x0 + 1; // sliver windows stay visible
+    var name = w.scheduleName || "Maintenance";
+    var tip = "Maintenance: " + name + "\n" +
+      new Date(ws).toLocaleString() + " → " +
+      (w.endedAt ? new Date(we).toLocaleString() : "ongoing");
+    out += '<g class="maintenance-band">' +
+      '<rect x="' + x0 + '" y="' + padT + '" width="' + (x1 - x0) + '" height="' + innerH +
+        '" fill="rgba(149,117,205,0.14)" stroke="rgba(149,117,205,0.45)" stroke-width="1" stroke-dasharray="2,3">' +
+        '<title>' + escapeHtml(tip) + '</title>' +
+      '</rect>' +
+      ((x1 - x0) > 46
+        ? '<text x="' + (x0 + 4) + '" y="' + (padT + innerH - 5) + '" font-size="9" fill="#9575cd" opacity="0.9">' +
+            escapeHtml(name.length > Math.floor((x1 - x0) / 6) ? name.slice(0, Math.max(3, Math.floor((x1 - x0) / 6) - 1)) + "…" : name) +
+          '</text>'
+        : "") +
+      '</g>';
+  }
+  return out;
+}
+
 // ─── Per-sensor temperature slide-over ─────────────────────────────────────
 //
 // Sits on top of the asset details panel like the interface and IPsec slide-
@@ -6343,6 +6536,7 @@ function _renderSensorChart(container, samples, opts) {
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       labels + ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
         samples.map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.value) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("") +
@@ -7155,6 +7349,7 @@ function _renderSystemChart(container, data, asset, si) {
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         (cpuPts ? '<polyline points="' + cpuPts + '" fill="none" stroke="' + cpuColor + '" stroke-width="1.5"/>' : '') +
         (memPts ? '<polyline points="' + memPts + '" fill="none" stroke="' + memColor + '" stroke-width="1.5"/>' : '') +
@@ -7262,6 +7457,7 @@ function _renderSessionsChart(container, data, asset) {
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         (pts ? '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' : '') +
         vals.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + color + '"/>'; }).join("") +
@@ -8181,6 +8377,7 @@ function _renderMonitorChart(container, data, transitions) {
       ticks +
       xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       transitionLayer +
       yTitle +
       xTitle +
@@ -8283,7 +8480,10 @@ function _renderMonitorChart(container, data, transitions) {
       return (el && el.dataset.summary) || "";
     },
   });
-  _observeChartResize(container, function (c) { _renderMonitorChart(c, data); });
+  // Pass `transitions` through the resize closure — without it a container
+  // resize silently dropped the polling-transition markers (and would drop
+  // the maintenance bands' companion overlay context).
+  _observeChartResize(container, function (c) { _renderMonitorChart(c, data, transitions); });
 }
 
 // ─── Nested interface details slide-over ───────────────────────────────────
@@ -8983,6 +9183,7 @@ function _renderIfaceThroughputChart(container, derived, opts) {
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         (inPts  ? '<polyline points="' + inPts  + '" fill="none" stroke="' + inColor  + '" stroke-width="1.5"/>' : '') +
         (outPts ? '<polyline points="' + outPts + '" fill="none" stroke="' + outColor + '" stroke-width="1.5"/>' : '') +
@@ -9079,6 +9280,7 @@ function _renderIfaceErrorChart(container, derived, opts) {
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         (inPts  ? '<polyline points="' + inPts  + '" fill="none" stroke="#d32f2f" stroke-width="1.5"/>' : '') +
         (outPts ? '<polyline points="' + outPts + '" fill="none" stroke="#9b5de5" stroke-width="1.5"/>' : '') +
@@ -9463,6 +9665,7 @@ function _renderIpsecStatusChart(container, samples, opts) {
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         bars +
       '</g>' +
@@ -9539,6 +9742,7 @@ function _renderIpsecBpsChart(container, derived, side, opts) {
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' +
         values.map(function (e) { return '<circle cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + color + '"/>'; }).join("") +
@@ -10067,6 +10271,7 @@ function _renderPerfSlaMultiChart(container, series, metricKey, meta, opts) {
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         thresholdLine +
         seriesSvg +
@@ -10758,6 +10963,7 @@ function _renderStorageChart(container, samples, opts) {
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         seriesSvg +
         forecastSvg +
@@ -12089,8 +12295,11 @@ async function singleOuiLookup(id, mac) {
 /* ─── Export (PDF / CSV) ──────────────────────────────────────────────────── */
 
 (function () {
-  var menu = document.getElementById("export-menu");
-  var btn  = document.getElementById("btn-export");
+  // Merged Import / Export dropdown — this IIFE owns the toggle + outside-
+  // close + stopPropagation for the whole menu; the import items are wired
+  // separately in the DOMContentLoaded init.
+  var menu = document.getElementById("import-export-menu");
+  var btn  = document.getElementById("btn-import-export");
   if (!btn || !menu) return;
 
   btn.addEventListener("click", function (e) {
@@ -14959,12 +15168,13 @@ var MON_TIER_DEFAULTS = {
 var _monsetIntegrations  = [];   // for the source picker on add/edit
 var _monsetOverrides     = [];   // class override rows currently rendered
 var _monsetManualValues  = null; // last-fetched manual-tier settings (or null = not yet seeded)
+var _monsetLifecycle     = { inactivityMonths: 0, historyRetentionDays: 0 }; // Asset Lifecycle section values
 
 async function openMonitoringSettingsModal() {
   // Loading shell first so the operator sees instant feedback. Replaced by
-  // _monsetRender() below once the three parallel fetches resolve.
+  // _monsetRender() below once the parallel fetches resolve.
   openModal(
-    "Monitoring Settings",
+    "Settings",
     '<div class="empty-state" style="padding:2rem 0">Loading…</div>',
     '<button class="btn btn-secondary" onclick="closeModal()">Close</button>',
     { wide: true }
@@ -14975,30 +15185,40 @@ async function openMonitoringSettingsModal() {
       api.monitorSettings.listClassOverrides({}).catch(function () { return []; }),
       api.integrations.list().catch(function () { return []; }),
       _ensureCredentials(),
+      api.events.getAssetDecommissionSettings().catch(function () { return null; }),
+      api.assets.getHistorySettings().catch(function () { return null; }),
     ]);
     _monsetManualValues = results[0] || Object.assign({}, MON_TIER_DEFAULTS);
     _monsetOverrides    = Array.isArray(results[1]) ? results[1] : [];
     var intgResp        = results[2];
     _monsetIntegrations = (intgResp && (intgResp.integrations || intgResp)) || [];
+    var decom = results[4], hist = results[5];
+    var m = decom ? Number(decom.inactivityMonths) : NaN;
+    var d = hist ? Number(hist.retentionDays) : NaN;
+    _monsetLifecycle = {
+      inactivityMonths:     Number.isFinite(m) && m >= 0 ? Math.floor(m) : 0,
+      historyRetentionDays: Number.isFinite(d) && d >= 0 ? Math.floor(d) : 0,
+    };
   } catch (err) {
-    showToast(err.message || "Failed to load monitoring settings", "error");
+    showToast(err.message || "Failed to load settings", "error");
     return;
   }
   _monsetRender();
 }
 
 function _monsetRender() {
+  var lifecycleBody = _monsetLifecycleSectionHTML(_monsetLifecycle);
   var manualBody    = _monsetManualSectionHTML(_monsetManualValues);
   var overridesBody = _monsetOverridesSectionHTML(_monsetOverrides);
-  var body = manualBody +
-    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
-    overridesBody;
+  var hr = '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">';
+  var body = lifecycleBody + hr + manualBody + hr + overridesBody;
   openModal(
-    "Monitoring Settings",
+    "Settings",
     body,
     '<button class="btn btn-secondary" onclick="closeModal()">Close</button>',
     { wide: true }
   );
+  document.getElementById("btn-monset-save-lifecycle").addEventListener("click", _monsetSaveLifecycle);
 
   // Wire the Manual Monitoring stream-subtab tab strip so clicking a stream
   // tab activates its panel. Same shared helper the integration Monitoring
@@ -15047,6 +15267,49 @@ function _monsetRender() {
         }
       });
     });
+  }
+}
+
+// Asset Lifecycle section of the merged Settings modal — the two fields that
+// used to be the standalone "Asset Settings" modal.
+function _monsetLifecycleSectionHTML(v) {
+  return (
+    '<h4 style="margin:0 0 0.75rem">Asset Lifecycle</h4>' +
+    '<div class="form-group">' +
+      '<label>Auto-Decommission Threshold (months)</label>' +
+      '<input type="number" id="f-assets-inactivity-months" value="' + escapeHtml(String(v.inactivityMonths)) + '" min="0" max="120" style="max-width:120px">' +
+      '<p class="hint">Assets whose <strong>Last Seen</strong> date is older than this many months are automatically moved to <strong>decommissioned</strong> status. ' +
+        'Set to <strong>0</strong> to disable. The job runs every 24 hours. Assets in a maintenance window are never auto-decommissioned.</p>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>IP History Retention (days)</label>' +
+      '<input type="number" id="f-assets-history-retention" value="' + escapeHtml(String(v.historyRetentionDays)) + '" min="0" max="3650" style="max-width:120px">' +
+      '<p class="hint">IP address history older than this many days is removed. ' +
+        'Set to <strong>0</strong> to disable retention limits and keep history indefinitely.</p>' +
+    '</div>' +
+    '<button class="btn btn-primary btn-sm" id="btn-monset-save-lifecycle">Save Lifecycle Settings</button>'
+  );
+}
+
+async function _monsetSaveLifecycle() {
+  var btn = document.getElementById("btn-monset-save-lifecycle");
+  if (btn) btn.disabled = true;
+  try {
+    var v = parseInt(document.getElementById("f-assets-inactivity-months").value, 10);
+    var r = parseInt(document.getElementById("f-assets-history-retention").value, 10);
+    _monsetLifecycle = {
+      inactivityMonths:     Number.isFinite(v) && v >= 0 ? v : 0,
+      historyRetentionDays: Number.isFinite(r) && r >= 0 ? r : 0,
+    };
+    await Promise.all([
+      api.events.updateAssetDecommissionSettings({ inactivityMonths: _monsetLifecycle.inactivityMonths }),
+      api.assets.updateHistorySettings({ retentionDays: _monsetLifecycle.historyRetentionDays }),
+    ]);
+    showToast("Asset lifecycle settings saved");
+  } catch (err) {
+    showToast(err.message || "Failed to save lifecycle settings", "error");
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 

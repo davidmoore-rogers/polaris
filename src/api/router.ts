@@ -15,6 +15,7 @@ import logFlagRulesRouter from "./routes/logFlagRules.js";
 import eventsRouter from "./routes/events.js";
 import notificationsRouter from "./routes/notifications.js";
 import notificationRulesRouter from "./routes/notificationRules.js";
+import maintenanceSchedulesRouter from "./routes/maintenanceSchedules.js";
 import notificationChannelsRouter from "./routes/notificationChannels.js";
 import pushSubscriptionsRouter from "./routes/pushSubscriptions.js";
 import conflictsRouter from "./routes/conflicts.js";
@@ -103,6 +104,9 @@ router.use("/events", eventsRouter);
 // Notifications: View-tab list + acknowledge/clear (per-route gates inside).
 // notification-rules mounted before so it isn't shadowed by /notifications.
 router.use("/notification-rules", notificationRulesRouter);
+// Maintenance schedules (Assets page → Maintenance modal); per-route gates
+// on the maintenanceManagement function key.
+router.use("/maintenance-schedules", maintenanceSchedulesRouter);
 router.use("/notification-channels", notificationChannelsRouter);
 router.use("/notifications", notificationsRouter);
 router.use("/push-subscriptions", pushSubscriptionsRouter);

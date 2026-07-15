@@ -1244,6 +1244,30 @@ Listed alphabetically.
 
 ---
 
+## services/maintenanceScheduleService.ts
+
+**What it owns:** Maintenance schedules end-to-end — schedule CRUD, target resolution (criteria ∪ explicit assetIds, ∩ monitored), the reconcile tick that enters/exits assets (status flip to/from `"maintenance"` with `Asset.maintenanceReturnStatus` parking), operator release, per-asset reads for chart bands + edit-modal info, and window-row history/pruning.
+
+**Public API:** `listSchedules`/`getSchedule`/`createSchedule`/`updateSchedule`/`deleteSchedule`, `previewTargets`, `getAssetMaintenanceInfo`, `listAssetWindows`, `operatorReleaseAsset`, `reconcileMaintenance` (serialized + coalesced — safe to call from anywhere), `MaintenanceScheduleInput`.
+
+**Cross-service deps:** `prisma`, `eventLogService` (`logEvent` + `logEventsBatch`), `tagAssignmentService` (`normalizeCriteria` + `resolveMatchingAssetIds` — the shared criteria engine), `src/utils/maintenanceRecurrence.ts` (`validateScheduleShape`/`isInWindow`/`currentWindow`/`nextWindow`).
+
+**Used by:** `src/jobs/maintenanceScheduler.ts` (30s tick), `src/api/routes/maintenanceSchedules.ts` (CRUD + preview), `src/api/routes/assets.ts` (maintenance-windows + maintenance-info reads; `operatorReleaseAsset` from the PUT handler when an operator moves status off `"maintenance"`).
+
+**Readers of the state it writes:** `MONITOR_CANDIDATE_WHERE` in `monitoringService` + `jobs/monitorAssets` (status="maintenance" excluded from ALL server-driven polling), `dependencyTreeService.evaluateSuppression` (maintenance parent counts as down → children suppress), `notificationEngine.isSuppressedForNotifications` + `notificationEscalationService.runEscalationSweep` (silenced), `presenceVerificationService` + `jobs/decommissionStaleAssets` (skip maintenance assets), the assets-list pill (`badge-maintenance`), and the chart band overlay (`_maintenanceBandLayer` via `/assets/:id/maintenance-windows`).
+
+**Invariants:**
+- Open `AssetMaintenanceWindow` rows are the SOLE source of truth for "in maintenance": enter on the first open row, exit on the last close — restart-safe by construction; never flip status without the matching row write.
+- `maintenanceReturnStatus` parks the pre-window status; a manually-set `"maintenance"` parks verbatim so exit restores the operator's manual state (no loop). Exit restores ONLY when status is still `"maintenance"` — anything else means an operator/guarded writer moved it and wins.
+- Operator release (`endReason="operator"`) suppresses scheduler re-entry for the CURRENT occurrence (`currentWindow().start` comparison); the next occurrence re-enters normally.
+- Targets are always ∩ `monitored: true`, and criteria may never contain a `status` rule (membership would oscillate as the feature flips status).
+- **Any new writer of `Asset.status` must skip assets with `status === "maintenance"`** (see the guards in integrations.ts Entra/AD/FortiSwitch/lease paths + decommissionStaleAssets); the reconcile self-heal absorbs missed writers but audits them as re-flips.
+- All bulk writes are grouped `updateMany`/`createMany` — no per-asset await loops (2000-asset scale rule); per-row awaits only for transition Events.
+
+**When changing this:** Any change to the enter/exit semantics must keep `reconcileMaintenance()` idempotent (running twice in a row must be a no-op) and update CLAUDE.md business rule 16. If you add a schedule field, thread it through the Zod outer shape in `routes/maintenanceSchedules.ts`, `normalizeInput`, the modal editor in `public/js/assets-maintenance.js` (collect + fill + summary), and the recurrence tests.
+
+---
+
 ## services/notificationRuleService.ts
 
 **What it owns:** Notification RULE logic — scope matching, the "rules matching this asset" lookup, rule CRUD, and the change-type subscription cache that gates the persist* change-detectors.

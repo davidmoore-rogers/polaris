@@ -2379,6 +2379,10 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
  * upstream-suppressed) is unmistakable on the assets list. Striped border
  * makes it stand out further. See Asset.dependencyTestUntil. */
 .badge-monitor-dep-test { background: rgba(186,104,200,0.18); color: #ce93d8; border: 1px dashed rgba(186,104,200,0.55); }
+/* Maintenance window (scheduler-held status="maintenance"): muted purple —
+ * ALL polling + notifications are paused, so no live probe state exists.
+ * Solid border distinguishes it from the dashed dep-test simulation. */
+.badge-maintenance { background: rgba(149,117,205,0.18); color: #b39ddb; border: 1px solid rgba(149,117,205,0.40); }
 [data-theme="light"] .badge-monitored        { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
 [data-theme="light"] .badge-unmonitored      { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
 [data-theme="light"] .badge-monitor-down     { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
@@ -2386,6 +2390,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 [data-theme="light"] .badge-monitor-recovering { background: rgba(79,195,247,0.10); border-color: rgba(79,195,247,0.30); }
 [data-theme="light"] .badge-monitor-dep-down   { background: rgba(96,125,139,0.10); color: #455a64; border-color: rgba(96,125,139,0.30); }
 [data-theme="light"] .badge-monitor-dep-test   { background: rgba(123,31,162,0.10); color: #7b1fa2; border-color: rgba(123,31,162,0.45); }
+[data-theme="light"] .badge-maintenance        { background: rgba(103,58,183,0.10); color: #5e35b1; border-color: rgba(103,58,183,0.35); }
 
 /* Event level badges */
 .badge-level-info    { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }

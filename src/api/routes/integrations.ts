@@ -3797,7 +3797,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       where: {
         discoveredByIntegrationId: integrationId,
         assetType: "firewall",
-        status: { not: "decommissioned" },
+        // A maintenance-window asset is deliberately unreachable — never
+        // decommission it from here (decommissioned would also clamp
+        // monitored=false and break the scheduler's status restore).
+        status: { notIn: ["decommissioned", "maintenance"] },
       },
       select: { id: true, hostname: true, serialNumber: true },
     });
@@ -3860,7 +3863,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       where: {
         discoveredByIntegrationId: integrationId,
         assetType: { in: ["switch", "access_point"] },
-        status: { not: "decommissioned" },
+        // Same maintenance guard as the Phase-2a firewall sweep above.
+        status: { notIn: ["decommissioned", "maintenance"] },
       },
       select: { id: true, hostname: true, serialNumber: true, assetType: true, fortinetTopology: true, status: true },
     });
@@ -4744,8 +4748,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         const updateData: Record<string, unknown> = {
           // Resurrection of a decommissioned switch requires it to be
           // connected right now; ordinary active↔storage state sync is
-          // unaffected.
-          ...(existingAsset.status !== "decommissioned" || sw.connected
+          // unaffected. A maintenance-window asset is scheduler-owned —
+          // never write status over it (the maintenanceScheduler restores
+          // the right state when the window ends).
+          ...(existingAsset.status !== "maintenance" &&
+          (existingAsset.status !== "decommissioned" || sw.connected)
             ? {
                 status: swStatus,
                 ...(swStatus !== existingAsset.status ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
@@ -6132,7 +6139,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // reconcile call inside batchSettled, not as a JSON column write.
       const updateData: Record<string, unknown> = {
         macAddress: macList[0].mac,
-        ...(leasePresence
+        // A live lease must not pull a maintenance-window asset back to
+        // "active" — that status is scheduler-owned until the window ends.
+        ...(leasePresence && asset.status !== "maintenance"
           ? {
               status: "active",
               ...(asset.status !== "active" ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
@@ -7730,8 +7739,16 @@ async function syncEntraDevices(
       // Pre-write snapshot for the per-asset discovery audit diff.
       const entraBefore = snapshotMaterialAssetFields(existing);
       const updateData: Record<string, unknown> = {
-        status,
-        ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+        // Maintenance-window assets are scheduler-owned: don't let the
+        // directory's enabled/disabled state clobber status mid-window (the
+        // maintenanceScheduler's self-heal would fight it; the right state
+        // is restored when the window ends).
+        ...(existing.status !== "maintenance"
+          ? {
+              status,
+              ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+            }
+          : {}),
       };
       // Discovery-owned fields from the projection.
       if (projected.hostname !== null) updateData.hostname = projected.hostname;
@@ -7919,8 +7936,13 @@ async function syncEntraDevices(
               // identity link. Prior assetTag is preserved on the row.
               // (No lastSeen — directory activity stays on the AssetSource
               // rows; Asset.lastSeen is verified network presence.)
-              status,
-              ...(status !== dupEntra.asset.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+              // Maintenance-window assets keep their scheduler-owned status.
+              ...(dupEntra.asset.status !== "maintenance"
+                ? {
+                    status,
+                    ...(status !== dupEntra.asset.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+                  }
+                : {}),
               tags: newTags,
             };
             // Discovery-owned fields from projection.
@@ -8410,8 +8432,14 @@ async function syncActiveDirectoryDevices(
       // Pre-write snapshot for the per-asset discovery audit diff.
       const adBefore = snapshotMaterialAssetFields(existing);
       const updateData: Record<string, unknown> = {
-        status,
-        ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+        // Maintenance-window assets keep their scheduler-owned status (same
+        // guard as the Entra sync — see maintenanceScheduleService).
+        ...(existing.status !== "maintenance"
+          ? {
+              status,
+              ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+            }
+          : {}),
       };
       // Discovery-owned fields from the projection. Only write when
       // projection has a value (null = "no source has an opinion" — leave
