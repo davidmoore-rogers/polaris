@@ -1228,6 +1228,22 @@ code {
   overflow-x: auto;
   box-shadow: var(--shadow-sm);
 }
+/* Sticky-header variant (assets page): the wrapper is height-bounded to the
+   viewport by _sizeAssetsTableWrapper() in assets.js, so vertical scrolling
+   happens INSIDE the wrapper — the header row pins to its top edge and the
+   bulk bar / pagination above never scroll away. table-sf.js cooperates: its
+   position:relative fallback on th (resize handles, gear) only applies when
+   the computed position is static, so the sticky survives (ip-panel
+   precedent). Under border-collapse the th bottom border belongs to the row
+   boundary and scrolls away with the body — repaint it as a box-shadow that
+   travels with the sticky cells. */
+.table-wrapper-sticky { overflow: auto; }
+.table-wrapper-sticky thead th {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: 0 1px 0 var(--color-border);
+}
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1516,6 +1532,13 @@ table thead:hover .sf-col-gear-wrap,
   letter-spacing: 0;
   padding-right: 16px;
   position: relative;
+  /* Same truncation recipe as .sf-multi-button. Without it a set range like
+     "2026-06-01 → 2026-07-15" wraps to several lines in a narrow column and
+     stretches the ENTIRE header row (every other th top-aligns, leaving a dead
+     band under the filter inputs). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sf-date-button::after {
   content: "▾";
