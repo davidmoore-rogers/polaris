@@ -1228,10 +1228,12 @@ code {
   overflow-x: auto;
   box-shadow: var(--shadow-sm);
 }
-/* Sticky-header variant (assets page): the wrapper is height-bounded to the
-   viewport by _sizeAssetsTableWrapper() in assets.js, so vertical scrolling
-   happens INSIDE the wrapper — the header row pins to its top edge and the
-   bulk bar / pagination above never scroll away. table-sf.js cooperates: its
+/* Sticky-header variant (Assets / Events / IPAM Blocks + Networks list
+   tables): the wrapper is height-bounded to the viewport by the shared
+   sizeStickyTableWrappers() in app.js (hooked into renderPageControls /
+   clearPageControls + window resize), so vertical scrolling happens INSIDE
+   the wrapper — the header row pins to its top edge and the bulk bar /
+   pagination above never scroll away. table-sf.js cooperates: its
    position:relative fallback on th (resize handles, gear) only applies when
    the computed position is static, so the sticky survives (ip-panel
    precedent). Under border-collapse the th bottom border belongs to the row

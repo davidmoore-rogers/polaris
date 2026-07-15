@@ -314,6 +314,9 @@ var _eventsSF = null;
         });
       });
     });
+    // Events renders its own pagination (predates renderPageControls), so the
+    // sticky-wrapper re-measure hooked into renderPageControls runs here instead.
+    sizeStickyTableWrappers();
   }
 
   // Page size + Refresh — the only non-TableSF controls left. Every other
