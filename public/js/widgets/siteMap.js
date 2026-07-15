@@ -1,7 +1,8 @@
 /**
  * widgets/siteMap.js — SolarWinds-NOC-style geographic site map.
  *
- * Status DOTS (green/amber/red/grey circle markers) colored by monitor health,
+ * Status DOTS (green/amber/red/purple/grey circle markers) colored by monitor
+ * health (purple = in a maintenance window — planned downtime, never red),
  * with a pulsing white-ringed dot for down sites, click popups, and hover
  * name tooltips. Sites sharing the same coordinates (several gates geocoded to
  * one address) collapse into a single STACK dot with a count badge; clicking it
@@ -34,10 +35,16 @@
 (function () {
   var _iconPathSet = false;
 
-  // SolarWinds status palette.
-  var COLOR = { up: "#00c853", degraded: "#ffd600", down: "#ff1744", unknown: "#757575", dep: "#607d8b" };
+  // SolarWinds status palette. "maint" matches the assets-page purple
+  // maintenance pill (rgba(149,117,205) base).
+  var COLOR = { up: "#00c853", degraded: "#ffd600", down: "#ff1744", unknown: "#757575", dep: "#607d8b", maint: "#9575cd" };
 
   function healthKey(site) {
+    // A maintenance window is planned downtime: the scheduler pauses polling
+    // and freezes monitorStatus at whatever it was on entry (possibly "down"),
+    // so paint purple — never red — while status="maintenance". Checked first
+    // so it also wins over dependency suppression and the unmonitored grey.
+    if (site.status === "maintenance") return "maint";
     if (!site.monitored) return "unknown";
     // Dependency-suppressed sites are excluded from the Down Nodes widget, so
     // never paint them red here — show the distinct "dep" color instead, even
@@ -52,10 +59,12 @@
     }
   }
   function statusColor(site) { return COLOR[healthKey(site)] || COLOR.unknown; }
-  function isDown(site) { return site.monitored && !site.dependencySuppressed && site.monitorHealth === "down"; }
-  function hasIssue(site) { return site.monitored && !site.dependencySuppressed && (site.monitorHealth === "down" || site.monitorHealth === "degraded"); }
+  function inMaintenance(site) { return site.status === "maintenance"; }
+  function isDown(site) { return site.monitored && !site.dependencySuppressed && !inMaintenance(site) && site.monitorHealth === "down"; }
+  function hasIssue(site) { return site.monitored && !site.dependencySuppressed && !inMaintenance(site) && (site.monitorHealth === "down" || site.monitorHealth === "degraded"); }
 
   function monitorLine(site) {
+    if (inMaintenance(site)) return "Maintenance window — monitoring and notifications paused";
     if (!site.monitored) return "Unmonitored";
     var samples = site.monitorRecentSamples || 0, failures = site.monitorRecentFailures || 0;
     if (site.dependencySuppressed) return "Dependency down — upstream parent offline";
@@ -348,7 +357,7 @@
         downMarkers.forEach(function (m) { m.bringToFront(); });
       }
       function stackColor(sitesArr) {
-        var rank = { degraded: 3, unknown: 2, dep: 1, up: 0 };
+        var rank = { degraded: 4, unknown: 3, dep: 2, maint: 1, up: 0 };
         var worst = "up";
         sitesArr.forEach(function (s) {
           var k = healthKey(s);
@@ -586,6 +595,7 @@
           '<span><i style="background:' + COLOR.up + '"></i>Up</span>' +
           '<span><i style="background:' + COLOR.degraded + '"></i>Warn</span>' +
           '<span><i style="background:' + COLOR.down + '"></i>Down</span>' +
+          '<span><i style="background:' + COLOR.maint + '"></i>Maint</span>' +
           '<span><i style="background:' + COLOR.unknown + '"></i>Unknown</span>' +
         '</div>' +
         '<div class="sitemap-wx">' +

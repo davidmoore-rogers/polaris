@@ -112,7 +112,7 @@ d("GET /api/v1/dashboard/noc-summary — bearer token role gate", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.statusCounts).toEqual({
-      total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0,
+      total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, maintenance: 0,
     });
     expect(res.body.activeAlertCount).toBe(0);
     expect(res.body.downNodes).toEqual([]);
