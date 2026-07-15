@@ -13,6 +13,8 @@ import { describe, it, expect } from "vitest";
 
 import {
   validateScheduleShape,
+  resolveStartNow,
+  formatLocalIsoMinute,
   isInWindow,
   currentWindow,
   nextWindow,
@@ -208,5 +210,32 @@ describe("activeFrom / activeUntil", () => {
     expect(isInWindow(t, at(2026, 7, 11, 1, 0))).toBe(true);
     // …but no Jul 11 occurrence starts
     expect(isInWindow(t, at(2026, 7, 11, 23, 0))).toBe(false);
+  });
+});
+
+describe("resolveStartNow", () => {
+  it("stamps a oneshot startNow blob with the supplied server clock and strips the marker", () => {
+    const now = new Date(2026, 6, 15, 13, 42, 30); // seconds truncate away
+    const out = resolveStartNow({ version: 1, kind: "oneshot", startNow: true, endAt: "2026-07-15T19:00" }, now) as any;
+    expect(out.startAt).toBe("2026-07-15T13:42");
+    expect(out.startNow).toBeUndefined();
+    expect(out.endAt).toBe("2026-07-15T19:00");
+    // The resolved blob validates as a plain oneshot.
+    expect(validateScheduleShape(out).kind).toBe("oneshot");
+  });
+
+  it("passes through non-oneshot, non-startNow, and non-object blobs untouched", () => {
+    const recurring = { version: 1, kind: "recurring", freq: "daily" };
+    expect(resolveStartNow(recurring)).toBe(recurring);
+    const concrete = { version: 1, kind: "oneshot", startAt: "2026-07-15T09:00", endAt: "2026-07-15T10:00" };
+    expect(resolveStartNow(concrete)).toBe(concrete);
+    expect(resolveStartNow(null)).toBeNull();
+    expect(resolveStartNow("x")).toBe("x");
+  });
+});
+
+describe("formatLocalIsoMinute", () => {
+  it("zero-pads and truncates to the minute", () => {
+    expect(formatLocalIsoMinute(new Date(2026, 0, 5, 8, 7, 59))).toBe("2026-01-05T08:07");
   });
 });

@@ -43,6 +43,7 @@ import {
 } from "./tagAssignmentService.js";
 import {
   validateScheduleShape,
+  resolveStartNow,
   isInWindow,
   currentWindow,
   nextWindow,
@@ -84,7 +85,9 @@ function normalizeInput(input: MaintenanceScheduleInput): NormalizedInput {
 
   let schedule: MaintenanceScheduleShape;
   try {
-    schedule = validateScheduleShape(input.schedule);
+    // startNow (the ad-hoc "enter maintenance now" path) resolves to a
+    // SERVER-stamped startAt before validation — see resolveStartNow.
+    schedule = validateScheduleShape(resolveStartNow(input.schedule));
   } catch (err: any) {
     const first = err?.issues?.[0];
     throw new AppError(400, `Invalid schedule: ${first?.message ?? "malformed recurrence shape"}`);
@@ -113,6 +116,21 @@ function normalizeInput(input: MaintenanceScheduleInput): NormalizedInput {
     schedule,
     suppressChildren: input.suppressChildren !== false,
   };
+}
+
+/**
+ * The ad-hoc shape: a one-shot schedule targeting exactly one explicit asset
+ * with no criteria — what the status-pill / edit-modal "enter maintenance
+ * until…" path creates. Such a schedule is single-purpose: once its window is
+ * over (operator ended it early, or it ran to its end time) it can never fire
+ * again, so it self-deletes instead of accumulating in the Schedules list.
+ * Multi-asset / criteria-based / recurring schedules are never auto-deleted.
+ */
+function isAdhocShape(
+  row: { criteria: unknown; assetIds: string[] },
+  shape: MaintenanceScheduleShape | null,
+): boolean {
+  return !!shape && shape.kind === "oneshot" && row.criteria == null && row.assetIds.length === 1;
 }
 
 /** Parse a stored schedule blob defensively; null (+ warn) on mismatch. */
@@ -393,7 +411,7 @@ export async function getAssetMaintenanceInfo(assetId: string): Promise<AssetMai
 export async function operatorReleaseAsset(assetId: string, actor?: string): Promise<boolean> {
   const open = await prisma.assetMaintenanceWindow.findMany({
     where: { assetId, endedAt: null },
-    select: { id: true, scheduleName: true },
+    select: { id: true, scheduleId: true, scheduleName: true },
   });
   if (open.length === 0) return false;
   const now = new Date();
@@ -414,6 +432,30 @@ export async function operatorReleaseAsset(assetId: string, actor?: string): Pro
     message: `Maintenance ended by operator (${open.map((w) => w.scheduleName).join(", ")})`,
     details: { reason: "operator", schedules: open.map((w) => w.scheduleName) },
   });
+
+  // Spent ad-hoc cleanup: a released single-asset one-shot can never fire
+  // again (release suppresses its only occurrence), so delete it rather than
+  // leaving a dead row in the Schedules list. Closed window rows keep their
+  // scheduleName snapshot for the chart bands (scheduleId goes SetNull).
+  const schedIds = Array.from(new Set(open.map((w) => w.scheduleId).filter((id): id is string => !!id)));
+  if (schedIds.length > 0) {
+    const rows = await prisma.maintenanceSchedule.findMany({ where: { id: { in: schedIds } } });
+    const spent = rows.filter((s) => isAdhocShape(s, parseStoredShape(s)));
+    if (spent.length > 0) {
+      await prisma.maintenanceSchedule.deleteMany({ where: { id: { in: spent.map((s) => s.id) } } });
+      await logEventsBatch(
+        spent.map((s) => ({
+          action: "maintenance_schedule.deleted",
+          resourceType: "maintenance-schedule",
+          resourceId: s.id,
+          resourceName: s.name,
+          actor: actor ?? SYSTEM_ACTOR,
+          message: `Ad-hoc maintenance schedule "${s.name}" removed (maintenance ended by operator)`,
+          details: { reason: "adhoc-spent-operator" },
+        })),
+      );
+    }
+  }
   return true;
 }
 
@@ -474,18 +516,18 @@ async function runReconcile(): Promise<void> {
   });
 
   // ── Diff ──────────────────────────────────────────────────────────────────
-  const toClose: Array<{ id: string; assetId: string; reason: string }> = [];
+  const toClose: Array<{ id: string; assetId: string; scheduleId: string | null; reason: string }> = [];
   const openPairs = new Set<string>(); // "assetId|scheduleId" for rows staying open
   for (const row of openRows) {
     const sched = row.scheduleId ? scheduleById.get(row.scheduleId) : undefined;
     if (!sched) {
-      toClose.push({ id: row.id, assetId: row.assetId, reason: "deleted" });
+      toClose.push({ id: row.id, assetId: row.assetId, scheduleId: row.scheduleId, reason: "deleted" });
     } else if (!sched.enabled) {
-      toClose.push({ id: row.id, assetId: row.assetId, reason: "disabled" });
+      toClose.push({ id: row.id, assetId: row.assetId, scheduleId: row.scheduleId, reason: "disabled" });
     } else if (!desired.has(sched.id)) {
-      toClose.push({ id: row.id, assetId: row.assetId, reason: "schedule" });
+      toClose.push({ id: row.id, assetId: row.assetId, scheduleId: row.scheduleId, reason: "schedule" });
     } else if (!desired.get(sched.id)!.has(row.assetId)) {
-      toClose.push({ id: row.id, assetId: row.assetId, reason: "criteria" });
+      toClose.push({ id: row.id, assetId: row.assetId, scheduleId: row.scheduleId, reason: "criteria" });
     } else {
       openPairs.add(`${row.assetId}|${row.scheduleId}`);
     }
@@ -688,6 +730,38 @@ async function runReconcile(): Promise<void> {
     .filter(([assetId, n]) => n > 0 && !enteringSet.has(assetId))
     .map(([assetId]) => assetId);
   await selfHealStatuses(staying, now);
+
+  // ── Spent ad-hoc cleanup ──────────────────────────────────────────────────
+  // Single-asset one-shots whose window just ended by SCHEDULE (occurrence
+  // over) can never fire again — delete them so the pill's "enter maintenance
+  // until…" artifacts don't accumulate in the Schedules list. Disabled-closes
+  // are an operator choice and criteria/deleted reasons can't apply to the
+  // ad-hoc shape, so only reason "schedule" qualifies; the nextWindow guard
+  // keeps an edited-to-the-future one-shot alive.
+  const endedScheduleIds = Array.from(new Set(
+    toClose.filter((c) => c.reason === "schedule" && c.scheduleId).map((c) => c.scheduleId as string),
+  ));
+  const spentAdhoc = endedScheduleIds
+    .map((id) => scheduleById.get(id))
+    .filter((s): s is NonNullable<typeof s> => !!s)
+    .filter((s) => {
+      const shape = shapeById.get(s.id) ?? null;
+      return isAdhocShape(s, shape) && shape != null && nextWindow(shape, now) == null;
+    });
+  if (spentAdhoc.length > 0) {
+    await prisma.maintenanceSchedule.deleteMany({ where: { id: { in: spentAdhoc.map((s) => s.id) } } });
+    await logEventsBatch(
+      spentAdhoc.map((s) => ({
+        action: "maintenance_schedule.deleted",
+        resourceType: "maintenance-schedule",
+        resourceId: s.id,
+        resourceName: s.name,
+        actor: SYSTEM_ACTOR,
+        message: `Ad-hoc maintenance schedule "${s.name}" removed (window ended)`,
+        details: { reason: "adhoc-spent" },
+      })),
+    );
+  }
 
   await pruneOldWindows(now);
 }
