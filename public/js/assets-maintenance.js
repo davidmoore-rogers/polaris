@@ -148,7 +148,10 @@ function _maintRuleCellsHTML(field, op, valueStr) {
   var kind = _maintFieldKind(field);
   var opHtml;
   if (kind === "string") {
-    opHtml = '<select class="maint-rule-op" style="flex:0 0 auto">' +
+    // width:auto beats the global `select { width: 100% }` — with basis
+    // `auto` that 100% width becomes the flex basis and the op select
+    // stretches across the row, crushing the value input.
+    opHtml = '<select class="maint-rule-op" style="flex:0 0 auto;width:auto">' +
       MAINT_STRING_OPS.map(function (o) {
         return '<option value="' + o.value + '"' + (o.value === op ? " selected" : "") + '>' + escapeHtml(o.label) + '</option>';
       }).join("") + '</select>';
@@ -185,9 +188,10 @@ function _maintRuleRowHTML(rule) {
 }
 
 function _maintEditorHTML() {
+  // Default all checked = "every day" (collected as freq=daily).
   var weekdayBoxes = MAINT_WEEKDAYS.map(function (w) {
     return '<label style="display:inline-flex;align-items:center;gap:4px;margin-right:10px;cursor:pointer">' +
-      '<input type="checkbox" class="maint-dow" value="' + w.value + '" style="width:auto">' + w.label + '</label>';
+      '<input type="checkbox" class="maint-dow" value="' + w.value + '" checked style="width:auto">' + w.label + '</label>';
   }).join("");
   return (
     '<div id="maint-edit-banner" class="hint" style="display:none;margin-bottom:8px;font-weight:600"></div>' +
@@ -228,8 +232,8 @@ function _maintEditorHTML() {
       '<div id="maint-recurring-block" style="margin-top:10px;display:none">' +
         '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">' +
           '<div><label>Repeats</label>' +
-            '<select id="maint-freq">' +
-              '<option value="daily">Daily</option><option value="weekly">Weekly</option>' +
+            '<select id="maint-freq" style="width:auto">' +
+              '<option value="days">Specific days of the week</option>' +
               '<option value="monthly">Monthly</option><option value="yearly">Yearly</option>' +
             '</select></div>' +
           '<div id="maint-monthly-block" style="display:none"><label>Day of month</label>' +
@@ -242,18 +246,28 @@ function _maintEditorHTML() {
             '<input type="number" id="maint-day" min="1" max="31" value="1" style="max-width:80px">' +
           '</div>' +
         '</div>' +
-        '<div id="maint-weekly-block" style="margin-top:8px;display:none">' + weekdayBoxes + '</div>' +
+        '<div id="maint-weekly-block" style="margin-top:8px">' +
+          '<label>Days</label>' +
+          '<div>' + weekdayBoxes + '</div>' +
+          '<span class="hint">All days checked = every day.</span>' +
+        '</div>' +
         '<div style="margin-top:10px">' +
-          '<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">' +
+          '<label>Time range</label>' +
+          '<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-right:14px">' +
             '<input type="checkbox" id="maint-allday" style="width:auto"> All day' +
           '</label>' +
-          '<span id="maint-time-range" style="margin-left:14px">' +
-            '<input type="time" id="maint-time-start" value="22:00"> &ndash; <input type="time" id="maint-time-end" value="02:00">' +
+          '<span id="maint-time-range">' +
+            '<input type="time" id="maint-time-start" value="20:00"> &ndash; <input type="time" id="maint-time-end" value="02:00">' +
           '</span>' +
+          '<span class="hint" style="display:block">An end at or before the start runs into the next day — 20:00 &ndash; 02:00 ends at 2 AM the following morning (the day checkboxes match the START day).</span>' +
         '</div>' +
-        '<div style="margin-top:10px;display:flex;gap:12px;flex-wrap:wrap">' +
-          '<div><label>Active from (optional)</label><input type="date" id="maint-active-from"></div>' +
-          '<div><label>Active until (optional)</label><input type="date" id="maint-active-until"></div>' +
+        '<div style="margin-top:10px">' +
+          '<label>Date range (optional)</label>' +
+          '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">' +
+            '<input type="date" id="maint-active-from" style="width:auto"> &ndash; ' +
+            '<input type="date" id="maint-active-until" style="width:auto">' +
+          '</div>' +
+          '<span class="hint">First / last day the schedule applies (inclusive). Leave empty for no bounds.</span>' +
         '</div>' +
       '</div>' +
     '</div>' +
@@ -312,12 +326,20 @@ function _maintCollectSchedule() {
   }
   var freq = document.getElementById("maint-freq").value;
   var out = { version: 1, kind: "recurring", freq: freq };
-  if (freq === "weekly") {
-    out.daysOfWeek = Array.prototype.map.call(
+  if (freq === "days") {
+    // UI mode "specific days" maps onto the stored shape: all 7 checked =
+    // freq "daily", a subset = freq "weekly" + daysOfWeek.
+    var days = Array.prototype.map.call(
       document.querySelectorAll(".maint-dow:checked"),
       function (cb) { return Number(cb.value); }
     );
-    if (!out.daysOfWeek.length) throw new Error("Pick at least one day of the week");
+    if (!days.length) throw new Error("Pick at least one day of the week");
+    if (days.length === 7) {
+      out.freq = "daily";
+    } else {
+      out.freq = "weekly";
+      out.daysOfWeek = days;
+    }
   }
   if (freq === "monthly") out.dayOfMonth = parseInt(document.getElementById("maint-daymonth").value, 10) || 1;
   if (freq === "yearly") {
@@ -378,7 +400,7 @@ function _maintSyncScheduleBlocks() {
   document.getElementById("maint-oneshot-block").style.display = oneshot ? "flex" : "none";
   document.getElementById("maint-recurring-block").style.display = oneshot ? "none" : "";
   var freq = document.getElementById("maint-freq").value;
-  document.getElementById("maint-weekly-block").style.display  = (!oneshot && freq === "weekly")  ? "" : "none";
+  document.getElementById("maint-weekly-block").style.display  = (!oneshot && freq === "days")    ? "" : "none";
   document.getElementById("maint-monthly-block").style.display = (!oneshot && freq === "monthly") ? "" : "none";
   document.getElementById("maint-yearly-block").style.display  = (!oneshot && freq === "yearly")  ? "" : "none";
   document.getElementById("maint-time-range").style.display =
@@ -459,6 +481,8 @@ function _maintResetEditor() {
   document.getElementById("maint-enabled").checked = true;
   document.getElementById("maint-suppress-children").checked = true;
   document.getElementById("maint-kind-oneshot").checked = true;
+  document.getElementById("maint-freq").value = "days";
+  document.querySelectorAll(".maint-dow").forEach(function (cb) { cb.checked = true; });
   var now = new Date();
   document.getElementById("maint-start").value = _maintLocalIso(now);
   document.getElementById("maint-end").value = _maintLocalIso(new Date(now.getTime() + 2 * 60 * 60 * 1000));
@@ -492,9 +516,15 @@ function _maintLoadIntoEditor(row) {
     document.getElementById("maint-start").value = String(s.startAt || "").slice(0, 16);
     document.getElementById("maint-end").value = String(s.endAt || "").slice(0, 16);
   } else {
-    document.getElementById("maint-freq").value = s.freq || "daily";
+    // Stored daily/weekly both load as the "specific days" UI mode: daily =
+    // all boxes checked, weekly = its daysOfWeek subset.
+    var storedFreq = s.freq || "daily";
+    var daysMode = storedFreq === "daily" || storedFreq === "weekly";
+    document.getElementById("maint-freq").value = daysMode ? "days" : storedFreq;
     document.querySelectorAll(".maint-dow").forEach(function (cb) {
-      cb.checked = Array.isArray(s.daysOfWeek) && s.daysOfWeek.indexOf(Number(cb.value)) !== -1;
+      cb.checked = storedFreq === "weekly"
+        ? Array.isArray(s.daysOfWeek) && s.daysOfWeek.indexOf(Number(cb.value)) !== -1
+        : true;
     });
     if (s.dayOfMonth) document.getElementById("maint-daymonth").value = s.dayOfMonth;
     if (s.month) document.getElementById("maint-month").value = s.month;
