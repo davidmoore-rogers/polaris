@@ -108,6 +108,7 @@ function isAssetsAdmin() { return currentUserRole === "assetsadmin"; }
 // hardcoded-role behavior. Custom roles with the relevant grant pass.
 function canManageNetworks() { return permAtLeast("subnets", "fullwrite"); }
 function canManageAssets() { return permAtLeast("assets", "write"); }
+function canManageMaintenance() { return permAtLeast("maintenanceManagement", "fullwrite"); }
 function isUserOrAbove() { return permAtLeast("subnets", "write") || permAtLeast("reservations", "write"); }
 function canReviewConflicts() { return permAtLeast("discoveryConflicts", "write"); }
 function canReserveIps() { return permAtLeast("reservations", "write"); }
@@ -2309,6 +2310,9 @@ function hideAdminOnlyElements() {
   });
   document.querySelectorAll("[data-manage-assets]").forEach(function (el) {
     if (!canManageAssets()) el.style.display = "none";
+  });
+  document.querySelectorAll("[data-maintenance-mgmt]").forEach(function (el) {
+    if (!canManageMaintenance()) el.style.display = "none";
   });
   document.querySelectorAll("[data-review-conflicts]").forEach(function (el) {
     if (!canReviewConflicts()) el.style.display = "none";

@@ -162,6 +162,23 @@ async function loadScopeAssets(scope: RuleScope): Promise<ScopeAssetRow[]> {
   return prisma.asset.findMany({ where, select: SCOPE_SELECT });
 }
 
+/**
+ * Assets that must not trigger notifications right now:
+ *  - status="maintenance" — inside a maintenance window (maintenanceScheduler);
+ *    polling is paused so most readings would be stale anyway, and the window
+ *    is announced downtime by definition.
+ *  - dependencySuppressed — everything behind a down (or maintained) parent;
+ *    silencing these keeps a switch's maintenance window from spraying "down"
+ *    alerts for every device behind it.
+ * Suppressed assets are dropped from rule evaluation; their `pending` state
+ * rows reset to clear (a still-bad condition re-earns its full debounce after
+ * the window) and `firing` rows are left frozen (no duplicate fire on exit —
+ * recovery/timed clears still apply).
+ */
+export function isSuppressedForNotifications(a: { status: string; dependencySuppressed: boolean }): boolean {
+  return String(a.status) === "maintenance" || a.dependencySuppressed === true;
+}
+
 function regionSnapshot(tags: string[]): string[] {
   return tags
     .filter((t) => t.toLowerCase().startsWith(REGION_TAG_PREFIX))
@@ -457,16 +474,22 @@ export function buildComposedEmail(comp: EmailComposition, ctx: Record<string, s
 async function evaluateThresholdRule(rule: DbRule): Promise<void> {
   const trigger = rule.trigger;
   let readings: Reading[] = [];
+  // Assets silenced this tick (maintenance window / dependency-suppressed).
+  const suppressedIds = new Set<string>();
 
   if (trigger.type === "host_metric") {
     const r = await resolveHostMetricReading(trigger);
     readings = r ? [r] : [];
-  } else if (trigger.type === "asset_metric") {
+  } else if (trigger.type === "asset_metric" || trigger.type === "asset_state") {
     const assets = await loadScopeAssets(rule.scope);
-    readings = await resolveAssetMetricReadings(trigger, assets);
-  } else if (trigger.type === "asset_state") {
-    const assets = await loadScopeAssets(rule.scope);
-    readings = await resolveAssetStateReadings(trigger, assets);
+    const active: ScopeAssetRow[] = [];
+    for (const a of assets) {
+      if (isSuppressedForNotifications(a)) suppressedIds.add(a.id);
+      else active.push(a);
+    }
+    readings = trigger.type === "asset_metric"
+      ? await resolveAssetMetricReadings(trigger, active)
+      : await resolveAssetStateReadings(trigger, active);
   } else {
     return;
   }
@@ -506,6 +529,19 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
       } else if (st && st.state === "firing") {
         await recover(rule, st);
       }
+    }
+  }
+
+  // Suppressed assets produced no readings this tick. Reset their `pending`
+  // rows (the debounce restarts from scratch after the window — a dropped
+  // reading is not evidence either way) and leave `firing` rows frozen so
+  // exiting maintenance can't double-fire an already-active notification.
+  for (const st of states) {
+    if (st.state === "pending" && st.assetId && suppressedIds.has(st.assetId)) {
+      await prisma.notificationRuleState.update({
+        where: { id: st.id },
+        data: { state: "clear", conditionMetSince: null },
+      });
     }
   }
 
@@ -666,6 +702,11 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       }
       const assetId = ev.resourceType === "asset" ? ev.resourceId ?? null : null;
       const detail = assetId ? await assetDetail(assetId) : null;
+      // Event/change rules honor the same silence as threshold rules: no
+      // notifications for assets in a maintenance window or dependency-
+      // suppressed behind one/an outage. (The event cursor still advances —
+      // suppressed events are skipped, not deferred.)
+      if (detail && isSuppressedForNotifications(detail)) continue;
       const tags = detail?.tags ?? [];
       // Event-path token mapping: {asset}=resourceName, {metric}=action,
       // {value}=event message; threshold/dimension are empty.
@@ -738,10 +779,10 @@ const ASSET_DETAIL_SELECT = {
   hostname: true, ipAddress: true, macAddress: true, assetType: true, status: true,
   location: true, learnedLocation: true, manufacturer: true, model: true,
   serialNumber: true, os: true, osVersion: true, department: true, assignedTo: true,
-  tags: true,
+  tags: true, dependencySuppressed: true,
 } as const;
 
-type AssetDetailRow = AssetTemplateDetail & { hostname: string | null; status: string; tags: string[] };
+type AssetDetailRow = AssetTemplateDetail & { hostname: string | null; status: string; tags: string[]; dependencySuppressed: boolean };
 
 const _assetDetailCache = new Map<string, AssetDetailRow | null>();
 export function clearAssetDetailCache(): void {

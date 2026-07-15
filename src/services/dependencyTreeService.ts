@@ -443,6 +443,14 @@ export interface SuppressionAssetState {
    * Past or null = inactive (auto-expired or never set).
    */
   dependencyTestUntil?: Date | null;
+  /**
+   * Asset lifecycle status. status="maintenance" (scheduler-held while a
+   * maintenance window is open) behaves exactly like an active Dependency
+   * Test overlay: the parent counts as down so its children suppress — a
+   * switch in maintenance takes its downstream devices into dependency
+   * suppression, and the reconciler resumes them when the window ends.
+   */
+  status?: string | null;
 }
 export function evaluateSuppression(
   states: SuppressionAssetState[],
@@ -486,6 +494,12 @@ export function evaluateSuppression(
       // through to grandparents the way an unmonitored parent does, since
       // the operator's intent is "pretend THIS box went offline."
       if (ps.dependencyTestUntil && ps.dependencyTestUntil.getTime() > evalNow) {
+        return false;
+      }
+      // Maintenance window: the parent is deliberately offline — behave
+      // exactly like the test overlay (down, no walk-through to
+      // grandparents; "pretend THIS box went offline" is literally true).
+      if (ps.status === "maintenance") {
         return false;
       }
       if (!ps.monitored) {
@@ -787,6 +801,7 @@ export async function reconcileDependencySuppression(): Promise<{
       assetType: true,
       monitored: true,
       monitorStatus: true,
+      status: true,
       dependencyLayer: true,
       dependencySuppressed: true,
       dependencyTestUntil: true,
@@ -801,6 +816,7 @@ export async function reconcileDependencySuppression(): Promise<{
     layer:               a.dependencyLayer,
     monitored:           a.monitored,
     monitorStatus:       a.monitorStatus,
+    status:              a.status,
     currentlySuppressed: a.dependencySuppressed,
     dependencyTestUntil: a.dependencyTestUntil,
   }));

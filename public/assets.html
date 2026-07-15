@@ -16,31 +16,28 @@
       <div class="page-header">
         <h2>Assets</h2>
         <div class="page-header-actions">
-          <div class="btn-dropdown-wrap" data-manage-assets>
-            <button class="btn btn-secondary" id="btn-import">Import &#9662;</button>
-            <div class="btn-dropdown-menu" id="import-menu">
-              <button id="btn-import-csv">From CSV</button>
-              <button id="btn-import-pdf">From PDF Invoice</button>
-            </div>
-          </div>
           <div class="btn-dropdown-wrap">
-            <button class="btn btn-secondary" id="btn-export">Export &#9662;</button>
-            <div class="btn-dropdown-menu" id="export-menu">
-              <div class="dropdown-heading">PDF</div>
+            <button class="btn btn-secondary" id="btn-import-export">Import / Export &#9662;</button>
+            <div class="btn-dropdown-menu" id="import-export-menu">
+              <div class="dropdown-heading" data-manage-assets>Import</div>
+              <button id="btn-import-csv" data-manage-assets>From CSV</button>
+              <button id="btn-import-pdf" data-manage-assets>From PDF Invoice</button>
+              <div class="dropdown-divider" data-manage-assets></div>
+              <div class="dropdown-heading">Export &mdash; PDF</div>
               <button data-export="page" data-fmt="pdf">Current page</button>
               <button data-export="filtered" data-fmt="pdf">All filtered results</button>
               <button data-export="all" data-fmt="pdf">Entire asset list</button>
               <div class="dropdown-divider"></div>
-              <div class="dropdown-heading">CSV</div>
+              <div class="dropdown-heading">Export &mdash; CSV</div>
               <button data-export="page" data-fmt="csv">Current page</button>
               <button data-export="filtered" data-fmt="csv">All filtered results</button>
               <button data-export="all" data-fmt="csv">Entire asset list</button>
             </div>
           </div>
-          <button class="btn btn-secondary" id="btn-monitoring-settings" data-admin-only title="Manual monitoring tier + class overrides">Monitoring Settings</button>
           <input type="file" id="import-csv-input" accept=".csv" style="display:none">
           <input type="file" id="import-pdf-input" accept=".pdf" style="display:none">
-          <button class="btn btn-secondary" id="btn-asset-settings" data-admin-only title="Asset settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="vertical-align:middle;margin-right:4px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>Settings</button>
+          <button class="btn btn-secondary" id="btn-maintenance" data-maintenance-mgmt title="Maintenance schedules — pause monitoring + notifications on matched assets">Maintenance</button>
+          <button class="btn btn-secondary" id="btn-monitoring-settings" data-admin-only title="Asset lifecycle settings + manual monitoring tier + class overrides"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="vertical-align:middle;margin-right:4px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>Settings</button>
           <button class="btn btn-primary" id="btn-add-asset" data-manage-assets>+ Add Asset</button>
         </div>
       </div>
@@ -125,5 +122,6 @@
   <script src="/js/integrations.js"></script>
   <script src="/js/assets.js"></script>
   <script src="/js/assets-compare.js"></script>
+  <script src="/js/assets-maintenance.js"></script>
 </body>
 </html>

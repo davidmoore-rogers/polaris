@@ -51,6 +51,7 @@ import {
 } from "../../services/sampleHistoryService.js";
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
+import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
 import { requestProcessControl, getCommandStatus } from "../../services/agentCommandService.js";
 import {
   readIpsecHistory,
@@ -503,6 +504,9 @@ const ASSET_LIST_SELECT = {
   dependencyLayer: true,
   dependencySuppressed: true,
   dependencyTestUntil: true,
+  // Maintenance pill: the parked pre-window status shows in the tooltip and
+  // is what the "End maintenance now" popover restores.
+  maintenanceReturnStatus: true,
 } as const;
 
 const ASSET_LIST_DEFAULT_LIMIT = 50;
@@ -1297,6 +1301,27 @@ function bigIntToNumber(v: bigint | null | undefined): number | null {
   if (v == null) return null;
   return Number(v);
 }
+
+// GET /assets/:id/maintenance-windows?range=...|from=...&to=... — maintenance
+// window rows overlapping the chart range. Fetched in parallel with the
+// sample histories (same pattern as the polling-transition Event fetch) and
+// rendered as labeled shaded bands on every asset-details chart.
+router.get("/:id/maintenance-windows", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const { since, until, rangeLabel } = resolveRange(req);
+    const windows = await listAssetWindows(id, since, until);
+    res.json({ range: rangeLabel, since, until, windows });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/maintenance-info — current windows + covering schedules for
+// the edit-modal Monitoring tab / slide-over.
+router.get("/:id/maintenance-info", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    res.json(await getAssetMaintenanceInfo(req.params.id as string));
+  } catch (err) { next(err); }
+});
 
 // GET /assets/:id/telemetry-history?range=...|from=...&to=... — CPU+memory time series
 router.get("/:id/telemetry-history", requirePermission("assets", "read"), async (req, res, next) => {
@@ -2440,6 +2465,17 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     if (input.status !== undefined) {
       data.statusChangedAt = new Date();
       data.statusChangedBy = requestActor(req) ?? "manual";
+    }
+    // Operator moves status OFF "maintenance" while maintenance windows are
+    // open: the operator wins. Close the windows first (endReason "operator"
+    // — suppresses scheduler re-entry for each schedule's current occurrence)
+    // so the reconcile can't re-flip this write.
+    if (
+      input.status !== undefined &&
+      input.status !== "maintenance" &&
+      existing.status === "maintenance"
+    ) {
+      await operatorReleaseAsset(id, requestActor(req) ?? undefined);
     }
     clampMonitoredState(data);
     clampAcquiredToLastSeen(data, existing);

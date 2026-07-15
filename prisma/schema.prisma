@@ -850,6 +850,15 @@ model Asset {
   dependencyTestUntil     DateTime?
   dependencyTestStartedBy String?
 
+  // Scheduler-managed maintenance mode. While one or more open
+  // AssetMaintenanceWindow rows exist for the asset, the maintenanceScheduler
+  // holds status="maintenance" and remembers the status to restore here
+  // (mirrors statusBeforeQuarantine). null = not under scheduler management.
+  // status="maintenance" stops all server-driven polling (monitor candidate
+  // queries exclude it), makes the asset count as "down" for child dependency
+  // suppression, and silences notifications. See maintenanceScheduleService.
+  maintenanceReturnStatus AssetStatus?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -884,6 +893,7 @@ model Asset {
   dependencyParents   AssetDependencyParent[]  @relation("AssetDependencyChild")
   dependencyChildren  AssetDependencyParent[]  @relation("AssetDependencyParent")
   managedAgent        ManagedAgent?
+  maintenanceWindows  AssetMaintenanceWindow[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -3133,6 +3143,57 @@ model NotificationRuleState {
   @@unique([ruleId, assetId, dimensionKey])
   @@index([ruleId])
   @@map("notification_rule_states")
+}
+
+// Operator-defined maintenance window definition. Targets = the union of the
+// criteria matches (tagAssignmentService criteria vocabulary — hostname /
+// subnet-CIDR / model / manufacturer / os / assetType; `status` rules are
+// rejected because the feature itself flips status) and the explicit assetIds
+// list (the ad-hoc "enter maintenance until…" pill path), always intersected
+// with monitored=true. `schedule` is the recurrence JSON validated by
+// src/utils/maintenanceRecurrence.ts (oneshot | recurring daily/weekly/
+// monthly/yearly, optional time-of-day range + active date bounds,
+// server-local wall-clock). Reconciled by the maintenanceScheduler job every
+// 30s and inline on every CRUD mutation.
+model MaintenanceSchedule {
+  id        String   @id @default(uuid())
+  name      String
+  enabled   Boolean  @default(true)
+  criteria  Json? // tagAssignmentService criteria shape; null = explicit assets only
+  assetIds  String[] @default([]) // explicit targets, unioned with criteria matches
+  schedule  Json // recurrence shape (see maintenanceRecurrence.ts)
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  windows AssetMaintenanceWindow[]
+
+  @@index([enabled])
+  @@map("maintenance_schedules")
+}
+
+// One realized maintenance window per (asset, schedule): opened when the
+// scheduler puts the asset into maintenance for that schedule, closed
+// (endedAt + endReason) when the window ends for any reason. Open rows
+// (endedAt IS NULL) are the source of truth for "currently in maintenance" —
+// restart-safe by construction. Closed rows power the chart maintenance
+// bands (scheduleName is snapshotted so labels survive schedule deletion).
+// Plain table — the hypertable no-FK rule does not apply here.
+model AssetMaintenanceWindow {
+  id           String    @id @default(uuid())
+  assetId      String
+  scheduleId   String? // SetNull on schedule delete — history survives
+  scheduleName String // snapshot for chart-band labels after delete
+  startedAt    DateTime  @default(now())
+  endedAt      DateTime? // null = window currently open
+  endReason    String? // "schedule" | "operator" | "disabled" | "deleted" | "criteria"
+
+  asset    Asset                @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  schedule MaintenanceSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+
+  @@index([assetId, startedAt])
+  @@index([endedAt])
+  @@map("asset_maintenance_windows")
 }
 
 // Polaris host CPU / memory / load time-series. Fills the gap where host
