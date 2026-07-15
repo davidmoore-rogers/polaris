@@ -106,6 +106,30 @@ export function validateScheduleShape(raw: unknown): MaintenanceScheduleShape {
   return scheduleShapeSchema.parse(raw);
 }
 
+/** Format a Date as the local-ISO minute string the schedule shapes carry. */
+export function formatLocalIsoMinute(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * Pre-validation resolution for the ad-hoc `startNow` marker: a oneshot blob
+ * carrying `startNow: true` gets `startAt` stamped from the SERVER clock (the
+ * marker is stripped — stored shapes are always concrete). Trusting a
+ * browser-supplied startAt breaks "enter maintenance now" whenever the
+ * operator's clock runs ahead of the server (clock skew, or an operator in a
+ * timezone ahead of the server's): the window sits in the server's future and
+ * the asset doesn't enter until the skew elapses. Non-oneshot / non-startNow
+ * blobs pass through untouched.
+ */
+export function resolveStartNow(raw: unknown, now: Date = new Date()): unknown {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const obj = raw as Record<string, unknown>;
+  if (obj.kind !== "oneshot" || obj.startNow !== true) return raw;
+  const { startNow: _drop, ...rest } = obj;
+  return { ...rest, startAt: formatLocalIsoMinute(now) };
+}
+
 /** Parse "YYYY-MM-DDTHH:MM(:SS)" as server-local time. */
 function parseLocalDateTime(s: string): Date {
   const [datePart, timePart] = s.split("T");

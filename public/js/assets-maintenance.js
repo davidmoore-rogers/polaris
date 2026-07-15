@@ -153,11 +153,24 @@ function _maintRuleCellsHTML(field, op, valueStr) {
 
   // Integration: exact-only, picked from the configured integrations.
   if (kind === "integration") {
-    var opts = (_maintIntegrationsCache || []).map(function (i) {
+    var opLabel = '<span style="flex:0 0 auto;align-self:center;color:var(--color-text-secondary);font-size:0.82rem">is</span>';
+    if (_maintIntegrationsCache === null) {
+      // Lookup fetch still in flight — placeholder select carrying the
+      // desired value so _maintLoadEditorLookups can re-render with it.
+      return opLabel +
+        '<select class="maint-rule-integration" data-pending-value="' + escapeHtml(valueStr || "") + '" style="flex:1;width:auto">' +
+          '<option value="">Loading integrations…</option>' +
+        '</select>';
+    }
+    var known = _maintIntegrationsCache.some(function (i) { return i.id === valueStr; });
+    var opts = _maintIntegrationsCache.map(function (i) {
       return '<option value="' + escapeHtml(i.id) + '"' + (i.id === valueStr ? " selected" : "") + '>' +
         escapeHtml(i.name + " (" + i.type + ")") + '</option>';
     }).join("");
-    return '<span style="flex:0 0 auto;align-self:center;color:var(--color-text-secondary);font-size:0.82rem">is</span>' +
+    // A saved rule referencing a since-deleted integration keeps its id
+    // visible rather than silently rewriting the rule on the next save.
+    if (valueStr && !known) opts += '<option value="' + escapeHtml(valueStr) + '" selected>(deleted integration)</option>';
+    return opLabel +
       '<select class="maint-rule-integration" style="flex:1;width:auto">' +
         (opts || '<option value="">No integrations configured</option>') +
       '</select>';
@@ -446,21 +459,21 @@ function _maintSyncExplicitLine() {
   });
 }
 
-async function _maintWireEditor() {
-  // Asset-type datalist (best-effort).
+// Background fetches for the editor's datalists/selects. Deliberately NOT
+// awaited by _maintWireEditor: these are cosmetic helpers, and blocking on
+// them left the whole editor inert (dead Save button) until three sequential
+// API calls returned — the "can't click Save Changes" bug.
+async function _maintLoadEditorLookups() {
+  if (!_maintAssetTypesCache) {
+    try { _maintAssetTypesCache = await api.assetTypes.list(); } catch (e) { _maintAssetTypesCache = []; }
+  }
   var dl = document.getElementById("maint-assettype-list");
   if (dl) {
-    if (!_maintAssetTypesCache) {
-      try { _maintAssetTypesCache = await api.assetTypes.list(); } catch (e) { _maintAssetTypesCache = []; }
-    }
     dl.innerHTML = (_maintAssetTypesCache || []).map(function (t) {
       return '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.label || t.name) + "</option>";
     }).join("");
   }
 
-  // Integration select cache + Behind-FortiGate datalist (both best-effort —
-  // fetched at modal open so rule cells rendered on a later field switch see
-  // them populated).
   if (!_maintIntegrationsCache) {
     try {
       var ints = await api.integrations.list();
@@ -469,6 +482,17 @@ async function _maintWireEditor() {
       });
     } catch (e) { _maintIntegrationsCache = []; }
   }
+  // Re-render any Integration rule cells that rendered before the cache
+  // landed (field switched early, or edit-load with an integration rule) —
+  // preserving the current selection when there is one.
+  document.querySelectorAll("#maint-rules .maint-rule").forEach(function (row) {
+    var fieldSel = row.querySelector(".maint-rule-field");
+    if (!fieldSel || fieldSel.value !== "integration") return;
+    var cur = row.querySelector(".maint-rule-integration");
+    var selected = cur && cur.value ? cur.value : (cur && cur.getAttribute("data-pending-value")) || "";
+    row.querySelector(".maint-rule-cells").innerHTML = _maintRuleCellsHTML("integration", "exact", selected);
+  });
+
   if (!_maintFortigateNamesCache) {
     try {
       var fw = await api.assets.list({ assetType: "firewall", limit: 500 });
@@ -477,10 +501,16 @@ async function _maintWireEditor() {
   }
   var fgdl = document.getElementById("maint-fortigate-list");
   if (fgdl) {
-    fgdl.innerHTML = _maintFortigateNamesCache.map(function (n) {
+    fgdl.innerHTML = (_maintFortigateNamesCache || []).map(function (n) {
       return '<option value="' + escapeHtml(n) + '"></option>';
     }).join("");
   }
+}
+
+function _maintWireEditor() {
+  // Kick the lookup fetches WITHOUT awaiting — every listener below must be
+  // live the moment the modal paints.
+  _maintLoadEditorLookups().catch(function () { /* best-effort */ });
 
   // Sensible one-shot defaults: now → now + 2h.
   var now = new Date();
@@ -745,7 +775,11 @@ async function maintCreateAdhoc(assetId, hostname, endLocalIso, opts) {
     schedule: {
       version: 1,
       kind: "oneshot",
-      startAt: _maintLocalIso(new Date()),
+      // startNow: the SERVER stamps the start with its own wall clock. A
+      // browser-stamped startAt lands in the server's future whenever the
+      // operator's clock runs fast or sits in a TZ ahead of the server —
+      // the "didn't immediately enter maintenance" bug.
+      startNow: true,
       endAt: endLocalIso,
     },
     suppressChildren: !(opts && opts.suppressChildren === false),

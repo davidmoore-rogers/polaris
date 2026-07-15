@@ -139,7 +139,12 @@ const h = vi.hoisted(() => {
       },
     },
     maintenanceSchedule: {
-      findMany: async () => db.schedules.map((s) => ({ ...s })),
+      findMany: async (args?: any) => {
+        let rows = db.schedules;
+        const idIn = args?.where?.id?.in;
+        if (idIn) rows = rows.filter((s) => idIn.includes(s.id));
+        return rows.map((s) => ({ ...s }));
+      },
       findUnique: async (args: any) => {
         const s = db.schedules.find((x) => x.id === args.where.id);
         return s ? { ...s } : null;
@@ -167,6 +172,15 @@ const h = vi.hoisted(() => {
         // Prisma onDelete: SetNull on the window FK.
         for (const w of db.windows) if (w.scheduleId === row.id) w.scheduleId = null;
         return { ...row };
+      },
+      deleteMany: async (args: any) => {
+        const idIn: string[] = args?.where?.id?.in ?? [];
+        const removed = db.schedules.filter((s) => idIn.includes(s.id));
+        db.schedules = db.schedules.filter((s) => !idIn.includes(s.id));
+        for (const r of removed) {
+          for (const w of db.windows) if (w.scheduleId === r.id) w.scheduleId = null;
+        }
+        return { count: removed.length };
       },
     },
   };
@@ -522,6 +536,79 @@ describe("schedule CRUD", () => {
 
     expect(openWindows()).toHaveLength(0);
     expect(assetById("a1")).toMatchObject({ status: "active", maintenanceReturnStatus: null });
+  });
+});
+
+describe("ad-hoc schedule lifecycle", () => {
+  it("operator release deletes the spent ad-hoc schedule; window history survives", async () => {
+    h.db.assets.push(asset("a1"));
+    await createSchedule({ name: "Ad-hoc — A1", assetIds: ["a1"], schedule: ACTIVE_ONESHOT }, "op");
+    expect(assetById("a1").status).toBe("maintenance");
+
+    await operatorReleaseAsset("a1", "op");
+    expect(h.db.schedules).toHaveLength(0);
+    expect(h.db.windows).toHaveLength(1);
+    expect(h.db.windows[0]!.endReason).toBe("operator");
+    expect(h.db.windows[0]!.scheduleId).toBeNull(); // SetNull — scheduleName snapshot keeps the label
+  });
+
+  it("operator release keeps multi-asset and criteria-based schedules", async () => {
+    h.db.assets.push(asset("a1"), asset("a2"));
+    h.db.schedules.push(schedule("s-multi", ACTIVE_ONESHOT, { assetIds: ["a1", "a2"] }));
+    await reconcileMaintenance();
+    expect(assetById("a1").status).toBe("maintenance");
+
+    await operatorReleaseAsset("a1", "op");
+    expect(h.db.schedules).toHaveLength(1); // two explicit assets → not the ad-hoc shape
+    expect(assetById("a2").status).toBe("maintenance"); // untouched
+  });
+
+  it("reconcile deletes an ad-hoc one-shot once its window ends naturally", async () => {
+    h.db.assets.push(asset("a1"));
+    await createSchedule({ name: "Ad-hoc — A1", assetIds: ["a1"], schedule: ACTIVE_ONESHOT }, "op");
+    expect(assetById("a1").status).toBe("maintenance");
+
+    vi.setSystemTime(new Date(2026, 6, 10, 15, 0)); // past the 14:00 end
+    await reconcileMaintenance();
+    expect(assetById("a1").status).toBe("active");
+    expect(h.db.windows[0]!.endReason).toBe("schedule");
+    expect(h.db.schedules).toHaveLength(0);
+  });
+
+  it("disabling an ad-hoc schedule ends the window but keeps the schedule", async () => {
+    h.db.assets.push(asset("a1"));
+    await createSchedule({ name: "Ad-hoc — A1", assetIds: ["a1"], schedule: ACTIVE_ONESHOT }, "op");
+    h.db.schedules[0]!.enabled = false;
+
+    await reconcileMaintenance();
+    expect(assetById("a1").status).toBe("active");
+    expect(h.db.windows[0]!.endReason).toBe("disabled");
+    expect(h.db.schedules).toHaveLength(1); // operator's explicit disable — not spent
+  });
+
+  it("a single-asset one-shot edited to a future window is not deleted when its old window closes", async () => {
+    h.db.assets.push(asset("a1", { status: "maintenance", maintenanceReturnStatus: "active" }));
+    const future = { version: 1, kind: "oneshot", startAt: "2026-07-12T11:00", endAt: "2026-07-12T14:00" };
+    h.db.schedules.push(schedule("s1", future, { assetIds: ["a1"] }));
+    h.db.windows.push({
+      id: "w1", assetId: "a1", scheduleId: "s1", scheduleName: "Schedule s1",
+      startedAt: new Date(2026, 6, 10, 11, 0), endedAt: null, endReason: null,
+    });
+
+    await reconcileMaintenance();
+    expect(h.db.windows[0]!.endReason).toBe("schedule");
+    expect(h.db.schedules).toHaveLength(1); // nextWindow != null → still has a purpose
+  });
+
+  it("startNow stamps the server clock so entry is immediate regardless of client skew", async () => {
+    h.db.assets.push(asset("a1"));
+    const row = await createSchedule(
+      { name: "Ad-hoc — A1", assetIds: ["a1"], schedule: { version: 1, kind: "oneshot", startNow: true, endAt: "2026-07-10T14:00" } },
+      "op",
+    );
+    expect((row.schedule as any).startAt).toBe("2026-07-10T12:00"); // pinned NOW, server-local
+    expect((row.schedule as any).startNow).toBeUndefined(); // marker stripped — stored shape is concrete
+    expect(assetById("a1").status).toBe("maintenance");
   });
 });
 
