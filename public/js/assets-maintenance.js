@@ -43,6 +43,8 @@ var MAINT_CRITERIA_FIELDS = [
   { value: "os",           label: "Operating system", kind: "string" },
   { value: "osVersion",    label: "OS version",       kind: "string" },
   { value: "assetType",    label: "Asset type",       kind: "assetType" },
+  { value: "integration",  label: "Integration",      kind: "integration" },
+  { value: "fortigate",    label: "Behind FortiGate", kind: "fortigate" },
 ];
 var MAINT_STRING_OPS = [
   { value: "contains", label: "contains" },
@@ -60,6 +62,8 @@ var _maintEditingId = null;     // schedule id being edited (null = create mode)
 var _maintEditingAssetIds = []; // explicit assetIds carried by the edited schedule
 var _maintPreviewTimer = null;
 var _maintAssetTypesCache = null;
+var _maintIntegrationsCache = null; // [{id, name, type}] for the Integration rule select
+var _maintFortigateNamesCache = null; // firewall hostnames for the Behind-FortiGate datalist
 
 // ─── Local-time formatting ──────────────────────────────────────────────────
 
@@ -146,8 +150,21 @@ function _maintFieldKind(field) {
 
 function _maintRuleCellsHTML(field, op, valueStr) {
   var kind = _maintFieldKind(field);
+
+  // Integration: exact-only, picked from the configured integrations.
+  if (kind === "integration") {
+    var opts = (_maintIntegrationsCache || []).map(function (i) {
+      return '<option value="' + escapeHtml(i.id) + '"' + (i.id === valueStr ? " selected" : "") + '>' +
+        escapeHtml(i.name + " (" + i.type + ")") + '</option>';
+    }).join("");
+    return '<span style="flex:0 0 auto;align-self:center;color:var(--color-text-secondary);font-size:0.82rem">is</span>' +
+      '<select class="maint-rule-integration" style="flex:1;width:auto">' +
+        (opts || '<option value="">No integrations configured</option>') +
+      '</select>';
+  }
+
   var opHtml;
-  if (kind === "string") {
+  if (kind === "string" || kind === "fortigate") {
     // width:auto beats the global `select { width: 100% }` — with basis
     // `auto` that 100% width becomes the flex basis and the op select
     // stretches across the row, crushing the value input.
@@ -163,6 +180,7 @@ function _maintRuleCellsHTML(field, op, valueStr) {
   var placeholder, listAttr = "";
   if (kind === "subnet") placeholder = "10.1.0.0/16, 10.2.3.4/32";
   else if (kind === "assetType") { placeholder = "firewall, switch"; listAttr = ' list="maint-assettype-list"'; }
+  else if (kind === "fortigate") { placeholder = "JEFFERSON-FG, or a site prefix with contains"; listAttr = ' list="maint-fortigate-list"'; }
   else placeholder = "value, another value";
   return opHtml +
     '<input type="text" class="maint-rule-input" style="flex:1"' + listAttr +
@@ -174,7 +192,9 @@ function _maintRuleRowHTML(rule) {
   var op = rule ? (rule.op || "contains") : "contains";
   var valueStr = "";
   if (rule) {
-    valueStr = rule.field === "subnet" ? (rule.cidrs || []).join(", ") : (rule.values || []).join(", ");
+    if (rule.field === "subnet") valueStr = (rule.cidrs || []).join(", ");
+    else if (rule.field === "integration") valueStr = (rule.values || [])[0] || ""; // select preselect (single id)
+    else valueStr = (rule.values || []).join(", ");
   }
   var fieldOpts = MAINT_CRITERIA_FIELDS.map(function (f) {
     return '<option value="' + f.value + '"' + (f.value === field ? " selected" : "") + '>' + escapeHtml(f.label) + '</option>';
@@ -207,6 +227,7 @@ function _maintEditorHTML() {
       '<button type="button" id="maint-add-rule" class="btn btn-secondary btn-sm" style="margin-top:4px">+ Add rule</button>' +
       '<div id="maint-explicit" class="hint" style="display:none;margin-top:6px"></div>' +
       '<datalist id="maint-assettype-list"></datalist>' +
+      '<datalist id="maint-fortigate-list"></datalist>' +
     '</div>' +
 
     '<div class="form-group">' +
@@ -293,6 +314,11 @@ function _maintCollectCriteria() {
   var rules = [];
   document.querySelectorAll("#maint-rules .maint-rule").forEach(function (row) {
     var field = row.querySelector(".maint-rule-field").value;
+    if (field === "integration") {
+      var intSel = row.querySelector(".maint-rule-integration");
+      if (intSel && intSel.value) rules.push({ field: "integration", op: "exact", values: [intSel.value] });
+      return;
+    }
     var input = row.querySelector(".maint-rule-input");
     var parts = (input && input.value ? input.value : "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
     if (!parts.length) return;
@@ -304,12 +330,9 @@ function _maintCollectCriteria() {
       });
       rules.push({ field: "subnet", op: "inCidr", cidrs: cidrs });
     } else {
-      var kind = _maintFieldKind(field);
       var op = "exact";
-      if (kind === "string") {
-        var opSel = row.querySelector(".maint-rule-op");
-        if (opSel) op = opSel.value;
-      }
+      var opSel = row.querySelector(".maint-rule-op");
+      if (opSel) op = opSel.value; // string + fortigate kinds render the op select
       rules.push({ field: field, op: op, values: parts });
     }
   });
@@ -432,6 +455,30 @@ async function _maintWireEditor() {
     }
     dl.innerHTML = (_maintAssetTypesCache || []).map(function (t) {
       return '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.label || t.name) + "</option>";
+    }).join("");
+  }
+
+  // Integration select cache + Behind-FortiGate datalist (both best-effort —
+  // fetched at modal open so rule cells rendered on a later field switch see
+  // them populated).
+  if (!_maintIntegrationsCache) {
+    try {
+      var ints = await api.integrations.list();
+      _maintIntegrationsCache = (ints.integrations || ints || []).map(function (i) {
+        return { id: i.id, name: i.name, type: i.type };
+      });
+    } catch (e) { _maintIntegrationsCache = []; }
+  }
+  if (!_maintFortigateNamesCache) {
+    try {
+      var fw = await api.assets.list({ assetType: "firewall", limit: 500 });
+      _maintFortigateNamesCache = (fw.assets || []).map(function (a) { return a.hostname; }).filter(Boolean).sort();
+    } catch (e) { _maintFortigateNamesCache = []; }
+  }
+  var fgdl = document.getElementById("maint-fortigate-list");
+  if (fgdl) {
+    fgdl.innerHTML = _maintFortigateNamesCache.map(function (n) {
+      return '<option value="' + escapeHtml(n) + '"></option>';
     }).join("");
   }
 
