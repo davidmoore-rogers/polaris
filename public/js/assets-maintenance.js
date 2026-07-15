@@ -598,7 +598,7 @@ async function _maintReloadList() {
       "</td></tr>";
   }).join("");
   el.innerHTML =
-    '<table class="data-table"><thead><tr>' +
+    '<table class="data-table"><thead><tr style="white-space:nowrap">' +
     '<th>Name</th><th>Schedule</th><th>Targets</th><th title="Whether devices behind an in-maintenance asset are dependency-suppressed for the window">Dependents</th><th>State</th><th></th>' +
     "</tr></thead><tbody>" + rows + "</tbody></table>" +
     '<p class="hint" style="margin-top:8px">Disabling or deleting a schedule ends its active maintenance windows immediately and restores asset statuses.</p>';
