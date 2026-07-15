@@ -108,10 +108,15 @@ router.get("/summary", async (req, res, next) => {
         where: { status: { notIn: ["decommissioned", "disabled"] } },
       })) : Promise.resolve(emptyAssetRows),
       wants("monitorAlerts") && canAssets ? summaryCache.getOrCompute("monitorAlerts", () => prisma.asset.findMany({
+        // Kept in lockstep with nocDashboardService's ALERT_WHERE (the NOC
+        // active-alert tile count) so the list and the tile never disagree.
+        // status<>maintenance: a maintenance window freezes monitorStatus
+        // (possibly at "down"/"warning") — planned downtime isn't an alert.
         where: {
           monitored: true,
           monitorStatus: { in: ["warning", "down"] },
           dependencySuppressed: false,
+          status: { not: "maintenance" },
         },
         select: {
           id: true,
