@@ -1801,8 +1801,9 @@ function openModal(title, bodyHTML, footerHTML, options) {
   _modalDrag.offsetX = 0;
   _modalDrag.offsetY = 0;
   modal.style.transform = "";
-  modal.classList.remove("modal-wide", "modal-xl");
+  modal.classList.remove("modal-wide", "modal-large", "modal-xl");
   if (options && options.wide) modal.classList.add("modal-wide");
+  if (options && options.large) modal.classList.add("modal-large");
   if (options && options.xl) modal.classList.add("modal-xl");
   overlay.querySelector(".modal-header h3").textContent = title;
   overlay.querySelector(".modal-body").innerHTML = bodyHTML;

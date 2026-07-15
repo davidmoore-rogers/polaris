@@ -1919,6 +1919,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .modal-overlay.open .modal { transform: translateY(0); }
 .modal.modal-wide { max-width: 672px; }
+/* Mid-size between wide (672) and xl (full-bleed 1360): form+table modals
+   like Assets → Maintenance that need real column room but normal padding. */
+.modal.modal-large { max-width: min(90vw, 980px); width: min(90vw, 980px); }
 .modal.modal-xl { max-width: min(92vw, 1360px); width: min(92vw, 1360px); }
 .modal.modal-xl .modal-body { padding: 0; }
 
