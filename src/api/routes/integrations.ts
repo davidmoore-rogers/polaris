@@ -6345,12 +6345,25 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (!handledByDhcp && inv.ipAddress && inv.ipAddress !== existingAsset.ipAddress) {
           updateData.ipAddress = inv.ipAddress;
         }
-        if (inv.os && !existingAsset.os) updateData.os = inv.os;
+        // Fortinet infrastructure (firewall/switch/AP) gets os/osVersion from
+        // its own discovery loop via projection — canonical FortiOS strings
+        // read live from the device. The device-inventory os_version for these
+        // same boxes (they show up as DHCP clients of their gate) is FortiOS's
+        // CACHED client fingerprint in display format ("7.4.5 Build 0734")
+        // and lags upgrades. It must never overwrite the projection-owned
+        // value: Phase 7 runs after the infra loops, so the set-always write
+        // below re-staled AP firmware minutes after the AP loop healed it,
+        // every cycle — and Phase 11's corrective projection pass excludes
+        // infra assets, so nothing ever fixed it (prod 2026-07).
+        const invIsFortinetInfra = existingAsset.assetType === "firewall"
+          || existingAsset.assetType === "switch"
+          || existingAsset.assetType === "access_point";
+        if (inv.os && !existingAsset.os && !invIsFortinetInfra) updateData.os = inv.os;
         if (inv.os && (existingAsset as any).assetType === "other") {
           const inferred = inferAssetTypeFromOs(inv.os);
           if (inferred !== "other") updateData.assetType = inferred;
         }
-        if (inv.osVersion) updateData.osVersion = inv.osVersion;
+        if (inv.osVersion && !invIsFortinetInfra) updateData.osVersion = inv.osVersion;
         if (inv.hardwareVendor && !existingAsset.manufacturer) updateData.manufacturer = inv.hardwareVendor;
         if (inv.device && !existingAsset.learnedLocation) updateData.learnedLocation = inv.device;
         if (switchConn) updateData.lastSeenSwitch = switchConn;
