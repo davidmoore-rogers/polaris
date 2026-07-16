@@ -773,6 +773,16 @@ function setupColumnLayout(tableEl, options) {
   // its right edge meets the table border. No-op for the common case (no
   // colspan first row) — there the column auto-fills correctly and we leave it
   // width:auto so it stays responsive without recomputation.
+  //
+  // The opposite failure is a CRUSHED auto-fill column: when the other visible
+  // columns' widths already sum past the container, fixed layout leaves no
+  // leftover and the auto column collapses to ~0px. Its right edge still meets
+  // the table border, so edge-distance alone reads as "auto-fill worked" — but
+  // the column is invisible, its header content (sort icon, filter controls)
+  // paints past the table border into overflow the wrapper can't scroll to,
+  // and the column-chooser gear (which lives in the rightmost visible th)
+  // appears parked on the previous column. Rescue it by pinning the column's
+  // saved/measured width so the table grows and the wrapper scrollbar reaches it.
   var MIN_LAST_COL_W = 40;
   var pinScheduled = false;
   function pinAutoFillColumn() {
@@ -784,14 +794,21 @@ function setupColumnLayout(tableEl, options) {
     if (!tableRect.width) return;                   // off-screen; nothing to measure
     var lastTh = ths[lastIdx];
     if (!lastTh) return;
-    if (tableRect.right - lastTh.getBoundingClientRect().right <= 1) return; // auto-fill worked
+    var thRect = lastTh.getBoundingClientRect();
+    if (tableRect.right - thRect.right <= 1 && thRect.width >= MIN_LAST_COL_W) return; // auto-fill worked
     var used = 0;
     cols.forEach(function (c, i) {
       if (i === lastIdx || hidden[colIds[i]]) return;
       used += c.getBoundingClientRect().width;
     });
     var target = Math.floor(tableRect.width - used);
-    if (target >= MIN_LAST_COL_W) lastCol.style.width = target + "px";
+    if (target < MIN_LAST_COL_W) {
+      // Crushed: no leftover to fill. Restore the column's saved/measured
+      // width (40px floor) instead of leaving it collapsed.
+      var savedW = widths[colIds[lastIdx]];
+      target = Math.max(MIN_LAST_COL_W, (typeof savedW === "number" && savedW > 0) ? savedW : 0);
+    }
+    lastCol.style.width = target + "px";
   }
   function scheduleAutoFillPin() {
     if (typeof requestAnimationFrame !== "function") { pinAutoFillColumn(); return; }
