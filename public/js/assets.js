@@ -4087,6 +4087,64 @@ async function openViewModal(id) {
         }
       });
     }
+    var rediscoverBtn = document.getElementById("btn-asset-rediscover");
+    if (rediscoverBtn && !rediscoverBtn.disabled) {
+      rediscoverBtn.addEventListener("click", async function () {
+        rediscoverBtn.disabled = true;
+        rediscoverBtn.textContent = "Re-discovering…";
+        var restore = function () {
+          if (!document.getElementById("btn-asset-rediscover")) return; // panel re-rendered/closed
+          rediscoverBtn.disabled = false;
+          rediscoverBtn.textContent = "Re-discover";
+        };
+        try {
+          var resp = await api.assets.rediscover(a.id);
+          if (window._pollDiscoveries) window._pollDiscoveries();
+          // Watch the shared discoveries poll for the run to appear then
+          // finish. /discoveries only lists ACTIVE runs (no terminal status),
+          // so completion reads as appear→disappear; anomalies surface on the
+          // asset's Events tab. Roles without integrations:write can't read
+          // /discoveries at all (the poll silently returns []) — for them the
+          // run never "appears" and the 12s branch below resets the button
+          // with an informational toast instead of watching.
+          var integId = resp.integrationId;
+          var seen = false;
+          var startedAt = Date.now();
+          var watch = setInterval(function () {
+            var active = ((window._getServerDiscoveries && window._getServerDiscoveries()) || [])
+              .some(function (d) { return d.id === integId; });
+            if (active) { seen = true; return; }
+            if (seen) {
+              // Appeared, now gone → the run finished. Refresh the asset.
+              clearInterval(watch);
+              showToast("Re-discovery finished — refreshing asset", "success");
+              api.assets.get(a.id).then(function (fresh) {
+                if (fresh && _isCurrentAsset(a.id)) {
+                  Object.assign(a, fresh);
+                  var pillWrap = document.getElementById("asset-status-pill-wrap");
+                  if (pillWrap) pillWrap.innerHTML = assetMonitorBadge(a) + _assetOverrideBadge(a);
+                }
+              }).catch(function () {});
+              restore();
+              return;
+            }
+            if (Date.now() - startedAt > 12000) {
+              // Never appeared: either the viewer can't read /discoveries or
+              // the run finished inside one poll gap. Stop watching.
+              clearInterval(watch);
+              showToast("Re-discovery started — asset data will refresh within a few minutes", "info");
+              restore();
+            }
+          }, 2000);
+          // Hard cap so an abandoned watch can't spin forever (e.g. a run
+          // that outlives the 15-minute ceiling or a wedged poll).
+          setTimeout(function () { clearInterval(watch); restore(); }, 15 * 60 * 1000);
+        } catch (err) {
+          showToast(err.message || "Re-discovery failed to start", "error");
+          restore();
+        }
+      });
+    }
     document.querySelectorAll(".asset-monitor-range-btn").forEach(function (b) {
       b.addEventListener("click", function () {
         var range = b.getAttribute("data-range");
@@ -7873,6 +7931,33 @@ function _assetOverrideResetBtn(a) {
     'title="Clear this override and let discovery auto-manage the asset per the integration’s Auto-Monitor setting">Reset to integration default</button>';
 }
 
+// "Re-discover" — single-FortiGate scoped re-discovery. Shown only on
+// FortiGate firewall assets (fortinetTopology.role === "fortigate")
+// discovered by a FortiManager or standalone FortiGate integration, to
+// operators with assets:write (the route's gate — a re-discover mutates
+// inventory, unlike Poll Now). If a discovery is already running for the
+// integration the button renders disabled with the live state.
+function _assetRediscoverBtnHTML(a) {
+  var topo = a && a.fortinetTopology;
+  var integ = a && a.discoveredByIntegration;
+  if (!topo || topo.role !== "fortigate" || a.assetType !== "firewall") return "";
+  if (!integ || (integ.type !== "fortimanager" && integ.type !== "fortigate")) return "";
+  if (typeof canManageAssets !== "function" || !canManageAssets()) return "";
+  var running = ((window._getServerDiscoveries && window._getServerDiscoveries()) || [])
+    .find(function (d) { return d.id === integ.id; });
+  if (running) {
+    var deviceName = topo.deviceName || a.hostname || "";
+    var scopedToThis = running.scopeDeviceName && deviceName &&
+      String(running.scopeDeviceName).toLowerCase() === String(deviceName).toLowerCase();
+    var label = scopedToThis ? "Re-discovering…" : "Discovery running…";
+    return '<button class="btn btn-sm btn-secondary" id="btn-asset-rediscover" disabled style="margin-left:6px" ' +
+      'title="A discovery is already running for ' + escapeHtml(integ.name) + '">' + label + '</button>';
+  }
+  return '<button class="btn btn-sm btn-secondary" id="btn-asset-rediscover" style="margin-left:6px" ' +
+    'title="Re-run discovery for this FortiGate only: refresh its subnets, reservations, VIPs, FortiSwitches and FortiAPs without a full ' +
+    (integ.type === "fortimanager" ? "FortiManager sweep" : "discovery cycle") + '">Re-discover</button>';
+}
+
 function assetMonitoringViewHTML(a) {
   if (!a) return '<p class="empty-state">No data.</p>';
   var pill = assetMonitorBadge(a);
@@ -7961,7 +8046,7 @@ function assetMonitoringViewHTML(a) {
       // (a down→up flip would otherwise leave the pill stale). depTestBtn sits
       // outside the wrapper — a probe never changes the dependency-test state.
       '<div class="detail-row"><span class="detail-label">Status</span>' +
-        '<span class="detail-value">' + probeBtn + '<span id="asset-status-pill-wrap">' + pill + overridePill + '</span>' + overrideReset + depTestBtn + '</span></div>' +
+        '<span class="detail-value">' + probeBtn + '<span id="asset-status-pill-wrap">' + pill + overridePill + '</span>' + overrideReset + depTestBtn + _assetRediscoverBtnHTML(a) + '</span></div>' +
       // Last hour intermittency bar — one cell per probe sample, colored
       // by the resolved monitor state at that point. Sits in a single
       // grid column (half the panel); the value cell is flex:1 so the bar

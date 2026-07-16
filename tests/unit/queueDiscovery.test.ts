@@ -20,4 +20,8 @@ describe("queueService — discovery queue", () => {
   it("publishDiscoveryJob returns false when pg-boss is off (caller falls back to in-process)", async () => {
     await expect(publishDiscoveryJob("itg-1", "tester")).resolves.toBe(false);
   });
+
+  it("accepts the scoped-device param (single-FortiGate re-discovery payload)", async () => {
+    await expect(publishDiscoveryJob("itg-1", "tester", "FGT-X")).resolves.toBe(false);
+  });
 });

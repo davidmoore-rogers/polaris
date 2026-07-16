@@ -900,6 +900,10 @@ router.get("/discoveries", async (req, res) => {
       completedCount: row.completedCount,
       skippedOfflineCount: row.skippedOfflineCount,
       skippedErrorCount: row.skippedErrorCount,
+      // Single-FortiGate scoped re-discovery marker (null = full run) —
+      // drives the "Discovering <device>…" label on the integration card
+      // and the asset slide-over's Re-discover busy state.
+      scopeDeviceName: row.scopeDeviceName ?? null,
     };
   });
   res.json({ discoveries: running });
@@ -2120,9 +2124,15 @@ export async function runPreflightTest(integration: { id: string; type: string; 
  *
  * actor: the username triggering the run, or "auto-discovery" for scheduled runs.
  */
-export async function triggerDiscovery(integrationId: string, actor: string): Promise<void> {
+export async function triggerDiscovery(integrationId: string, actor: string, opts?: { scopeDeviceName?: string }): Promise<boolean> {
   const integration = await prisma.integration.findUnique({ where: { id: integrationId } });
   if (!integration) throw new AppError(404, "Integration not found");
+
+  // Scoped single-device re-discovery only makes sense for FortiManager —
+  // it's the only type whose discovery iterates a multi-device roster.
+  if (opts?.scopeDeviceName && integration.type !== "fortimanager") {
+    throw new AppError(400, "Scoped re-discovery is only supported on FortiManager integrations");
+  }
 
   const config = integration.config as Record<string, unknown>;
   if (integration.type === "entraid") {
@@ -2147,18 +2157,22 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
 
   // Coalesce concurrent triggers. The scheduler already gates on
   // isDiscoveryRunning, but the manual route doesn't — and a re-trigger
-  // shouldn't reset the live progress of an in-flight run.
-  if (await isRunActive(integrationId)) return;
+  // shouldn't reset the live progress of an in-flight run. Returns false so
+  // callers that need to distinguish (the per-asset rediscover route 409s
+  // instead of silently no-oping) can; the classic Discover route and the
+  // scheduler ignore the return.
+  if (await isRunActive(integrationId)) return false;
 
-  await upsertQueuedRun({ integrationId, integrationName: integration.name, type: integration.type, actor });
+  await upsertQueuedRun({ integrationId, integrationName: integration.name, type: integration.type, actor, scopeDeviceName: opts?.scopeDeviceName });
 
   // pg-boss live → hand off to the discovery-role worker. Off (cursor mode,
   // single-process) → run in-process detached, the historical behavior. The
   // credential preflight now runs inside runDiscovery (it may execute in a
   // different process), so the manual route returns 202 immediately and a
   // failed preflight surfaces via the DiscoveryRun row + an Event.
-  const enqueued = await publishDiscoveryJob(integrationId, actor);
-  if (!enqueued) void runDiscovery(integrationId, actor);
+  const enqueued = await publishDiscoveryJob(integrationId, actor, opts?.scopeDeviceName);
+  if (!enqueued) void runDiscovery(integrationId, actor, opts?.scopeDeviceName);
+  return true;
 }
 
 /**
@@ -2168,18 +2182,27 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
  * progress accumulator (flushed to the row), and cancellation (polls the row's
  * cancelRequested flag and aborts its local AbortController).
  */
-export async function runDiscovery(integrationId: string, actor: string): Promise<void> {
+export async function runDiscovery(integrationId: string, actor: string, scopeDeviceName?: string): Promise<void> {
   const integration = await prisma.integration.findUnique({ where: { id: integrationId } });
   if (!integration) {
     await finishRun(integrationId, "error").catch(() => {});
     return;
   }
 
+  // Scope is FMG-only (triggerDiscovery enforces it for API callers); a stray
+  // scoped pg-boss payload against another type degrades to a full run.
+  if (scopeDeviceName && integration.type !== "fortimanager") {
+    logger.warn({ integrationId, scopeDeviceName, type: integration.type }, "ignoring scopeDeviceName on non-FortiManager discovery run");
+    scopeDeviceName = undefined;
+  }
+
   const config = integration.config as Record<string, unknown>;
   const integrationName = integration.name;
   const integrationType = integration.type;
   const label = actor === "auto-discovery" ? "Scheduled" : "Manual";
-  const kindLabel = (integration.type === "entraid" || integration.type === "activedirectory" || integration.type === "vcenter") ? "device discovery" : "DHCP discovery";
+  const baseKindLabel = (integration.type === "entraid" || integration.type === "activedirectory" || integration.type === "vcenter") ? "device discovery" : "DHCP discovery";
+  // Scoped runs label every start/complete/abort/error Event with the device.
+  const kindLabel = scopeDeviceName ? `${baseKindLabel} (device "${scopeDeviceName}")` : baseKindLabel;
 
   // No inline preflight — `integrationConnectionTester` refreshes lastTestOk
   // every 10 min, and the discovery scheduler filters on `lastTestOk: true`,
@@ -2189,8 +2212,13 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
 
   const runStartedAt = Date.now();
   await markRunStarted(integrationId, new Date(runStartedAt));
-  await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
-  logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} started for "${integrationName}"` });
+  // Scoped runs deliberately do NOT stamp lastDiscoveryAt — the scheduler
+  // gates the next full run on it, and a per-device refresh must not delay
+  // the fleet-wide cycle by a whole pollInterval.
+  if (!scopeDeviceName) {
+    await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
+  }
+  logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} started for "${integrationName}"`, ...(scopeDeviceName ? { details: { scopeDeviceName } } : {}) });
 
   const acc: RunAccumulator = newRunAccumulator(integrationId, integrationName, integrationType, runStartedAt);
   const ac = new AbortController();
@@ -2389,16 +2417,29 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       // ARP presence sweep targets (opt-in): per-FortiGate reserved-IP lists,
       // swept by processDevice right before each device's ARP-table read.
       const arpSweepTargets = await buildArpSweepTargets(integrationId, config);
-      discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete, integrationId, warmCacheIps, arpSweepTargets.size > 0 ? arpSweepTargets : undefined);
+      discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete, integrationId, warmCacheIps, arpSweepTargets.size > 0 ? arpSweepTargets : undefined, scopeDeviceName);
       // Skip Phase 2 (stale deprecation) if the run was aborted — an aborted
       // run shouldn't take destructive actions, even though the FMG device
       // roster used for deprecation is captured up front (not per-device).
       if (!ac.signal.aborted) {
-        // Run deprecation + DNS/OUI lookups once, now that all devices have been synced.
-        const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "finalize");
-        syncTotals.deprecated.push(...r.deprecated);
-        syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
-        syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
+        // Full run: "finalize" — deprecation + DNS/OUI + fleet-wide reconciles,
+        // once all devices have been synced. Scoped run: "finalize-scoped" —
+        // ONLY the per-controller FortiSwitch/FortiAP decommission (Phase 2b);
+        // the roster-based sweeps would see a one-device fleet and mass-
+        // deprecate/decommission everything else. When the scoped gate's
+        // switch AND AP inventory queries both came back empty/failed, 2b is
+        // a guaranteed no-op — skip the sync call (and its fleet-scale
+        // preload queries) entirely.
+        const finalizeMode: "finalize" | "finalize-scoped" = scopeDeviceName ? "finalize-scoped" : "finalize";
+        const scopedFinalizeIsNoop = scopeDeviceName !== undefined
+          && (discoveryResult.switchInventoriedDevices?.length ?? 0) === 0
+          && (discoveryResult.apInventoriedDevices?.length ?? 0) === 0;
+        if (!scopedFinalizeIsNoop) {
+          const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, finalizeMode);
+          syncTotals.deprecated.push(...r.deprecated);
+          syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
+          syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
+        }
       }
     }
 
@@ -2452,8 +2493,12 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${deprecatedSuffix}${decomSwSuffix}${decomApSuffix}` });
       // Record overall duration sample for slow-run detection. Aborts and
       // errors are intentionally not recorded — a failed run would poison
-      // the rolling average used to compute the "slow" threshold.
-      recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
+      // the rolling average used to compute the "slow" threshold. Scoped
+      // single-device runs are skipped for the same reason in the other
+      // direction: a seconds-long run would drag the full-run baseline down
+      // and false-flag future full runs as slow. (The per-device sample in
+      // onProgress still records — that baseline is per-device and valid.)
+      if (!scopeDeviceName) recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
       recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "success");
       // Refresh the precomputed "By name" checklist sources for the Auto-Monitor
       // cards so the edit modal loads them instantly (no fleet-wide DISTINCT ON on
@@ -3276,7 +3321,27 @@ class AssetIndex {
 // "skip-deprecation"   — run phases 1, 3–7 only (used in per-device syncs; no deprecation or DNS/OUI)
 // "deprecation-only"   — run only phase 2 (legacy; prefer "finalize")
 // "finalize"           — run phase 2 + phases 8–9; called once after all per-device syncs complete
-type SyncMode = "full" | "skip-deprecation" | "deprecation-only" | "finalize";
+// "finalize-scoped"    — the finalize pass of a single-FortiGate scoped re-discovery: Phase 2b ONLY.
+//                        NEVER 2/2a/2c — a scoped run's result carries one device, so the roster-
+//                        based sweeps (knownFirewallSerials is built from result.devices, the
+//                        PROCESSED chunks, not the raw ADOM roster) would see a one-device fleet
+//                        and deprecate/decommission everything else. Phase 2b is inherently safe
+//                        scoped: it only judges assets whose controllerFortigate had a SUCCESSFUL
+//                        inventory query this run. Phases 8–9/12/13.x are fleet-wide reconciles
+//                        owned by full runs (their gates only pass full|finalize).
+export type SyncMode = "full" | "skip-deprecation" | "deprecation-only" | "finalize" | "finalize-scoped";
+
+/**
+ * Pure gate for the destructive/apply sweep phases inside syncDhcpSubnets'
+ * `mode !== "skip-deprecation"` block. Extracted (and exported) so the
+ * mode-to-phase matrix is unit-testable — getting this wrong mass-deprecates
+ * subnets or decommissions healthy firewalls on a scoped run.
+ */
+export function sweepPhaseEnabled(mode: SyncMode, phase: "2" | "2a" | "2b" | "2c"): boolean {
+  if (mode === "skip-deprecation") return false;
+  if (mode === "finalize-scoped") return phase === "2b";
+  return true;
+}
 
 async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full") {
   const syncLog = (level: "info" | "error", message: string) => {
@@ -3736,7 +3801,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   phaseMark("2");
   // ══════════════════════════════════════════════════════════════════════════════
 
-  if (knownDeviceNames.size > 0) {
+  if (sweepPhaseEnabled(mode, "2") && knownDeviceNames.size > 0) {
     // Find stale subnets in-memory first (for the return value).
     // Roster check is case-insensitive: a subnet's fortigateDevice can carry
     // FortiOS-cased casing while the FMG roster carries FMG-cased casing
@@ -3798,7 +3863,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   //
   // A decommissioned firewall is reactivated by the Phase-3b firewall update
   // path above on a future discovery cycle when the device returns to FMG.
-  if (knownDeviceNames.size > 0 && (integrationType === "fortimanager" || integrationType === "fortigate")) {
+  //
+  // NEVER runs in "finalize-scoped": knownFirewallSerials is built from
+  // result.devices — the PROCESSED chunks (one device in a scoped run), not
+  // the raw ADOM roster — so a scoped pass would decommission every fleet
+  // firewall matched by serial only.
+  if (sweepPhaseEnabled(mode, "2a") && knownDeviceNames.size > 0 && (integrationType === "fortimanager" || integrationType === "fortigate")) {
     const candidateFws = await prisma.asset.findMany({
       where: {
         discoveredByIntegrationId: integrationId,
@@ -3864,7 +3934,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // offline" (a controller that timed out doesn't take its switches/APs
   // down with it). A decommissioned switch/AP is automatically reactivated
   // by the Phase-3b update path above when its serial reappears.
-  if (switchInventoriedDevices.size > 0 || apInventoriedDevices.size > 0) {
+  //
+  // The per-controller gating is also why this is the ONE sweep that runs in
+  // "finalize-scoped" (single-FortiGate re-discovery): only assets behind
+  // the scoped, successfully-queried controller are ever judged.
+  if (sweepPhaseEnabled(mode, "2b") && (switchInventoriedDevices.size > 0 || apInventoriedDevices.size > 0)) {
     const candidates = await prisma.asset.findMany({
       where: {
         discoveredByIntegrationId: integrationId,
@@ -3923,7 +3997,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   //
   // Only applies to fortimanager + fortigate integrations. windowsserver /
   // entraid / activeDirectory don't manage Fortinet hardware.
-  if (integrationType === "fortimanager" || integrationType === "fortigate") {
+  if (sweepPhaseEnabled(mode, "2c") && (integrationType === "fortimanager" || integrationType === "fortigate")) {
     const integ = await prisma.integration.findUnique({
       where: { id: integrationId },
       select: { config: true },
@@ -3958,7 +4032,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
   }
 
-  } // end mode !== "skip-deprecation" (Phase 2 + 2b + 2c)
+  } // end mode !== "skip-deprecation" (Phase 2 + 2a + 2b + 2c; "finalize-scoped" runs 2b only — see sweepPhaseEnabled)
 
   if (mode === "full" || mode === "skip-deprecation") {
   // ══════════════════════════════════════════════════════════════════════════════

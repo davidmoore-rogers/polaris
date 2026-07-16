@@ -266,6 +266,7 @@ model DiscoveryRun {
   slowAlertedDevices  Json      @default("[]") // string[] of device names already slow-alerted
   cancelRequested     Boolean   @default(false) // web sets this; the worker polls it and aborts
   workerHeartbeatAt   DateTime? // last write from the worker; drives the stale-run reaper
+  scopeDeviceName     String? // set when the run is scoped to one FortiGate (single-device re-discovery); NULL = full run
   createdAt           DateTime  @default(now())
 
   @@index([status])
