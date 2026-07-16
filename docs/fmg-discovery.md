@@ -237,6 +237,26 @@ FMG Integration Discovery
 | `pushReservations` / `pushQuarantine` | both `false` | Writeback toggles; off by default. |
 | `syncDescriptions` | `false` | Description writeback (Polaris-primary). Polaris descriptions overwrite the device; device values are only imported where Polaris has none. Needs the same Manage Device Configurations RW (proxy mode) / per-FG REST write access (direct mode) as DHCP push. Enable only once Polaris is where your team edits descriptions — device-side edits get reverted. |
 
+## Re-discovering a single FortiGate
+
+The **Re-discover** button on a FortiGate firewall asset's details panel (System tab, next to Poll Now; requires assets write access) re-runs discovery for **that one gate only** — useful after changing DHCP scopes, switch/AP membership, or VIPs on a single site without waiting for (or paying the cost of) a full FMG sweep.
+
+What it does:
+- Runs the normal per-device pipeline for the one gate: subnets, static reservations, leases, interface IPs, VIPs, FortiSwitch/FortiAP sync, endpoint enrichment, stale VIP/reservation release for that gate.
+- Runs the **per-controller switch/AP decommission** for that gate (a FortiSwitch/FortiAP that vanished from behind it is decommissioned — only when the gate's inventory query succeeded, same protection as a full run). This makes Re-discover a per-gate ghost-switch/AP cleanup tool.
+- Shows on the Integrations page as "Discovering \<device\>…" with the normal abort button; a scoped run and a full run never overlap (whichever is running wins; the other request is refused with a clear message).
+
+What it deliberately does NOT do (these wait for the next full discovery):
+- Stale-subnet deprecation and firewall decommission (fleet-roster sweeps).
+- DNS/OUI enrichment, dependency-tree recompute, map-region / firewall-tag / criteria-tag reconciles, description-sync reconcile, auto-monitor apply.
+- Advance the integration's `lastDiscoveryAt` — the next scheduled full run happens exactly when it would have anyway.
+
+Notes:
+- A gate excluded by `deviceInclude`/`deviceExclude` refuses to re-discover (same rule as Poll Now).
+- If the gate is offline in FMG, the run pulls FMG's cached CMDB config only (additive refresh, no decommissions) — same offline semantics as a full run.
+- For an HA cluster, re-discovering any member's asset re-discovers the cluster (the FMG device).
+- On a standalone FortiGate integration the button simply runs that integration's normal discovery — it already is a single gate.
+
 ## Direct mode vs the probe path — same strict behavior
 
 The discovery path (this doc) and the response-time probe controller-redirect path (`fetchFortinetControllerInventory` in `src/services/monitoringService.ts`) both run with `useProxy=false` strict semantics — a precondition failure (missing token, missing mgmtInterface, mgmt-IP not resolvable) **fails loudly per-device** with a clear error rather than silently falling back to FMG proxy. This matters at scale: a silent fallback to proxy turns "I disabled proxy" into "I disabled proxy except when something else is wrong, in which case it silently re-enables itself and overruns FMG's session limit."

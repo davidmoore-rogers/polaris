@@ -1545,6 +1545,14 @@ export async function discoverDhcpSubnets(
   // fleet-wide blast — so fresh resolutions land inside the FortiOS
   // neighbor-cache GC window. See arpPrimeService.ts.
   arpSweepTargets?: Map<string, string[]>,
+  // Single-FortiGate scoped re-discovery: when set, only the roster device
+  // whose name/hostname matches (case-insensitive, fmgNameKey semantics) is
+  // processed. `knownDeviceNames` still carries the FULL raw roster so the
+  // caller's sweep phases keep their fleet view — though a scoped run's
+  // finalize pass ("finalize-scoped") never runs the roster-based sweeps
+  // anyway. No roster match (missing, or excluded by deviceInclude/Exclude)
+  // throws — the failure surfaces on the DiscoveryRun row + error Event.
+  scopeDeviceName?: string,
 ): Promise<DiscoveryResult> {
   const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
   const adom = config.adom || "root";
@@ -1624,12 +1632,33 @@ export async function discoverDhcpSubnets(
 
   // Apply device-level include/exclude filter (FortiGate names or hostnames).
   // Include wins over exclude when both are set.
-  const devicesData = filterDevices(devicesDataRaw, config.deviceInclude, config.deviceExclude);
-  const filteredOut = devicesDataRaw.length - devicesData.length;
-  if (filteredOut > 0) {
-    log("discover.devices", "info", `Found ${devicesDataRaw.length} managed device(s) in ADOM "${adom}" — ${devicesData.length} included, ${filteredOut} filtered by device include/exclude`);
+  let devicesData = filterDevices(devicesDataRaw, config.deviceInclude, config.deviceExclude);
+  if (scopeDeviceName) {
+    // Scoped re-discovery: narrow to the one device AFTER the include/exclude
+    // filter (a filtered-out gate stays un-discoverable) and AFTER the raw
+    // roster was captured into knownDeviceNames (same protection the device
+    // filter gets — nothing outside the scope can ever look "removed").
+    const scopeKey = fmgNameKey(scopeDeviceName);
+    const matchesScope = (d: any) => fmgNameKey(d.name) === scopeKey || fmgNameKey(d.hostname) === scopeKey;
+    const inRoster = (devicesDataRaw as any[]).some(matchesScope);
+    devicesData = devicesData.filter(matchesScope);
+    if (devicesData.length === 0) {
+      const why = inRoster
+        ? `"${scopeDeviceName}" is excluded by the integration's device include/exclude filter`
+        : `"${scopeDeviceName}" was not found in the ADOM "${adom}" device roster`;
+      log("discover.devices", "error", `Scoped re-discovery failed: ${why}`);
+      throw new Error(`Scoped re-discovery failed: ${why}`);
+    }
+    // Phrasing matters: the run accumulator parses "Found <n> managed device"
+    // out of this progress message to set totalDevices.
+    log("discover.devices", "info", `Found 1 managed device(s) — scoped re-discovery of "${scopeDeviceName}" (${devicesDataRaw.length} in ADOM "${adom}" roster)`);
   } else {
-    log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
+    const filteredOut = devicesDataRaw.length - devicesData.length;
+    if (filteredOut > 0) {
+      log("discover.devices", "info", `Found ${devicesDataRaw.length} managed device(s) in ADOM "${adom}" — ${devicesData.length} included, ${filteredOut} filtered by device include/exclude`);
+    } else {
+      log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
+    }
   }
   if (devicesData.length === 0) {
     return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames, fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };

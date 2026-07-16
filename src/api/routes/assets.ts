@@ -70,6 +70,10 @@ import {
   dedupeInferredNeighbors,
   aggregateMembershipMap,
 } from "../../services/peerInferredLldpService.js";
+// Cross-route-file import precedent: serverSettings.ts imports
+// hasActiveDiscoveries from ./integrations.js the same way.
+import { triggerDiscovery } from "./integrations.js";
+import { isRunActive } from "../../services/discoveryRunState.js";
 
 const router = Router();
 
@@ -1184,6 +1188,107 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
     });
 
     res.json({ ...probe, telemetry, hardware, systemInfo });
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/assets/:id/rediscover — re-run discovery for ONE FortiGate.
+// For an FMG-discovered firewall this queues a SCOPED discovery run
+// (triggerDiscovery { scopeDeviceName }): the full run machinery — DiscoveryRun
+// row, progress, abort, pg-boss handoff — narrowed to the one roster device,
+// with the finalize pass in "finalize-scoped" mode (per-controller switch/AP
+// decommission only; no fleet sweeps). For a standalone-FortiGate asset the
+// integration IS the single gate, so a plain full run is the exact equivalent.
+// No request body. Gated assets:write (one notch above Poll Now's
+// assetsProbe:write) because a re-discover mutates inventory — creates/updates
+// assets + reservations, decommissions vanished switches/APs, releases stale
+// VIP/dhcp_reservation rows.
+// HA note: fortinetTopology.deviceName resolves to the FMG cluster device, so
+// re-discovering a standby member's asset re-discovers the whole cluster.
+router.post("/:id/rediscover", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: {
+        hostname: true,
+        ipAddress: true,
+        learnedLocation: true,
+        assetType: true,
+        fortinetTopology: true,
+        discoveredByIntegration: { select: { id: true, type: true, config: true, name: true, enabled: true } },
+      },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    const integration = asset.discoveredByIntegration;
+    if (!integration || (integration.type !== "fortimanager" && integration.type !== "fortigate")) {
+      throw new AppError(400, "Re-discovery is only available for FortiGates discovered by a FortiManager or FortiGate integration");
+    }
+    const topo = (asset.fortinetTopology as Record<string, unknown> | null) || null;
+    if (asset.assetType !== "firewall" || !topo || topo.role !== "fortigate") {
+      throw new AppError(400, "Re-discovery is only available for FortiGate firewall assets");
+    }
+    if (!integration.enabled) throw new AppError(400, `Integration "${integration.name}" is disabled`);
+
+    // FMG device name: the topology stamp's deviceName is FMG/dvmdb truth
+    // (same resolver descriptionSyncService uses for device-targeted writes);
+    // hostname is the legacy-row fallback.
+    const deviceName = (typeof topo.deviceName === "string" && topo.deviceName) || asset.hostname;
+    if (!deviceName) throw new AppError(400, "Asset has no resolvable FortiGate device name");
+
+    // Honor deviceInclude/deviceExclude, same as probe-now: a re-discover
+    // must not pull a device the next full sweep would skip. Checked against
+    // the hostname (assetMatchesIntegrationFilter's match field) and the
+    // resolved FMG device name — the filter patterns can target either.
+    const filtHost = assetMatchesIntegrationFilter(asset, integration);
+    const filtDevice = assetMatchesIntegrationFilter({ ...asset, hostname: deviceName }, integration);
+    if (!filtHost.included && !filtDevice.included) {
+      const reason = filtHost.reason || "Excluded by integration filter";
+      logEvent({
+        action: "asset.rediscover",
+        resourceType: "asset",
+        resourceId: id,
+        resourceName: asset.hostname || asset.ipAddress || undefined,
+        actor: requestActor(req),
+        level: "warning",
+        message: `Re-discovery blocked: ${asset.hostname || deviceName} — ${reason}`,
+        details: { integrationId: integration.id, integrationType: integration.type, deviceName, reason },
+      });
+      res.status(409).json({ message: reason });
+      return;
+    }
+
+    // Pre-check for a friendly message; triggerDiscovery's coalescing return
+    // is the authoritative guard (closes the TOCTOU window).
+    if (await isRunActive(integration.id)) {
+      res.status(409).json({ message: `A discovery is already running for "${integration.name}" — try again when it finishes` });
+      return;
+    }
+    // requestActor covers bearer-token callers ("api:<token name>") as well
+    // as sessions — the actor string labels the run's start/complete Events.
+    const actor = requestActor(req) ?? "";
+    const started = integration.type === "fortimanager"
+      ? await triggerDiscovery(integration.id, actor, { scopeDeviceName: deviceName })
+      : await triggerDiscovery(integration.id, actor);
+    if (!started) {
+      res.status(409).json({ message: `A discovery is already running for "${integration.name}" — try again when it finishes` });
+      return;
+    }
+
+    logEvent({
+      action: "asset.rediscover",
+      resourceType: "asset",
+      resourceId: id,
+      resourceName: asset.hostname || asset.ipAddress || undefined,
+      actor: requestActor(req),
+      message: `Re-discovery requested for FortiGate "${asset.hostname || deviceName}" via "${integration.name}"`,
+      details: { integrationId: integration.id, integrationType: integration.type, deviceName },
+    });
+    res.status(202).json({
+      message: "Re-discovery started",
+      integrationId: integration.id,
+      integrationName: integration.name,
+      deviceName: integration.type === "fortimanager" ? deviceName : null,
+    });
   } catch (err) { next(err); }
 });
 
