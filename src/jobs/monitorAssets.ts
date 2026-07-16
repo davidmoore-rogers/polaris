@@ -40,6 +40,7 @@ import {
   runMonitorPass,
   runRetentionPrune,
   resolveMonitorSettings,
+  MONITOR_CANDIDATE_WHERE,
   type MonitorCadence,
 } from "../services/monitoringService.js";
 import { getBootTimeMode, publishMonitorJob } from "../services/queueService.js";
@@ -107,7 +108,9 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
   const now = new Date();
 
   const candidates = await prisma.asset.findMany({
-    where: { monitored: true },
+    // Shared with runMonitorPass — excludes assets in maintenance mode so
+    // both queue modes stop ALL server-driven polling during a window.
+    where: MONITOR_CANDIDATE_WHERE,
     select: {
       id: true,
       assetType: true,

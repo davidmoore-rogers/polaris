@@ -480,7 +480,10 @@ function _discoverBtnHTML(id, name, discovery, disabled) {
     var style = isSlow
       ? 'background:rgba(255,214,0,0.12);border:1px solid rgba(255,214,0,0.35);color:var(--color-warning)'
       : 'background:rgba(79,195,247,0.1);border:1px solid rgba(79,195,247,0.25);color:var(--color-accent)';
-    var label = isSlow ? 'Discovering — slow' : 'Discovering…';
+    // Scoped single-FortiGate re-discovery names the device so the card
+    // makes clear this isn't a full sweep.
+    var label = isSlow ? 'Discovering — slow'
+      : (discovery.scopeDeviceName ? 'Discovering ' + escapeHtml(discovery.scopeDeviceName) + '…' : 'Discovering…');
     var title = isSlow ? ' title="This discovery is running longer than normal"' : '';
     // Aborting a running discovery/query is admin-only (integrations:fullwrite);
     // mirrors the server-side guard on DELETE /:id/discover so non-admins don't

@@ -266,6 +266,7 @@ model DiscoveryRun {
   slowAlertedDevices  Json      @default("[]") // string[] of device names already slow-alerted
   cancelRequested     Boolean   @default(false) // web sets this; the worker polls it and aborts
   workerHeartbeatAt   DateTime? // last write from the worker; drives the stale-run reaper
+  scopeDeviceName     String? // set when the run is scoped to one FortiGate (single-device re-discovery); NULL = full run
   createdAt           DateTime  @default(now())
 
   @@index([status])
@@ -501,8 +502,31 @@ model Asset {
   id               String      @id @default(uuid())
   ipAddress        String? // IPv4 or IPv6
   ipSource         String? // Where ipAddress was last set from: "manual", "fortimanager", "fortigate", etc.
+  // Operator IP override (pin) — hostnameOverride-style, with one twist:
+  // discovery gets a vote. When set, this value IS the effective ipAddress
+  // (the assets PUT handler writes both fields, and the Prisma extension in
+  // src/db.ts intercepts any later write staging `ipAddress` without touching
+  // `ipOverride`). When a discovery write stages an IP EQUAL to the override,
+  // the override is released (self-disabling — discovery agrees, the pin is
+  // no longer needed); when it stages a DIFFERENT IP, the write is re-asserted
+  // back to the override and a pending Conflict (entityType="asset",
+  // proposedAssetFields.collisionReason="ip-override") is raised — accept
+  // takes the discovered IP and releases the pin, reject keeps the override
+  // (the same discovered IP won't re-raise). Cleared by blanking the IP
+  // Address field in the edit form — ipAddress then reverts to the
+  // discovery-projected value. See src/services/ipOverrideService.ts.
+  ipOverride       String?
   macAddress       String? // Most recently seen MAC, e.g. "AA:BB:CC:DD:EE:FF"
   hostname         String?
+  // Operator hostname override (pin) — coordSource-style. When set, this value
+  // IS the effective hostname: the assets PUT handler writes both fields, and
+  // the Prisma extension in src/db.ts re-asserts it over any later write that
+  // sets `hostname` without touching `hostnameOverride` (i.e. every discovery
+  // projection write). Cleared by saving an empty Hostname in the edit form —
+  // hostname then reverts to the discovery-projected value. Overridden assets
+  // are excluded from the duplicate-hostname ghost merge and from hostname
+  // projection-drift logging.
+  hostnameOverride String?
   dnsName          String? // FQDN from PTR lookup, e.g. "server01.corp.local"
   dnsNameFetchedAt DateTime? // When the last PTR lookup ran (success or failure)
   dnsNameTtl       Int? // TTL (seconds) from the PTR record; null = unknown (standard mode)
@@ -841,6 +865,15 @@ model Asset {
   dependencyTestUntil     DateTime?
   dependencyTestStartedBy String?
 
+  // Scheduler-managed maintenance mode. While one or more open
+  // AssetMaintenanceWindow rows exist for the asset, the maintenanceScheduler
+  // holds status="maintenance" and remembers the status to restore here
+  // (mirrors statusBeforeQuarantine). null = not under scheduler management.
+  // status="maintenance" stops all server-driven polling (monitor candidate
+  // queries exclude it), makes the asset count as "down" for child dependency
+  // suppression, and silences notifications. See maintenanceScheduleService.
+  maintenanceReturnStatus AssetStatus?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -875,6 +908,7 @@ model Asset {
   dependencyParents   AssetDependencyParent[]  @relation("AssetDependencyChild")
   dependencyChildren  AssetDependencyParent[]  @relation("AssetDependencyParent")
   managedAgent        ManagedAgent?
+  maintenanceWindows  AssetMaintenanceWindow[]
   topologyLayouts     TopologyLayout[]
 
   @@index([ipAddress])
@@ -3153,6 +3187,64 @@ model NotificationRuleState {
   @@unique([ruleId, assetId, dimensionKey])
   @@index([ruleId])
   @@map("notification_rule_states")
+}
+
+// Operator-defined maintenance window definition. Targets = the union of the
+// criteria matches (tagAssignmentService criteria vocabulary — hostname /
+// subnet-CIDR / model / manufacturer / os / assetType; `status` rules are
+// rejected because the feature itself flips status) and the explicit assetIds
+// list (the ad-hoc "enter maintenance until…" pill path), always intersected
+// with monitored=true. `schedule` is the recurrence JSON validated by
+// src/utils/maintenanceRecurrence.ts (oneshot | recurring daily/weekly/
+// monthly/yearly, optional time-of-day range + active date bounds,
+// server-local wall-clock). Reconciled by the maintenanceScheduler job every
+// 30s and inline on every CRUD mutation.
+model MaintenanceSchedule {
+  id        String   @id @default(uuid())
+  name      String
+  enabled   Boolean  @default(true)
+  criteria  Json? // tagAssignmentService criteria shape; null = explicit assets only
+  assetIds  String[] @default([]) // explicit targets, unioned with criteria matches
+  schedule  Json // recurrence shape (see maintenanceRecurrence.ts)
+  // Whether an in-window asset counts as DOWN for child dependency
+  // suppression (evaluateSuppression). true (default) = dependents behind it
+  // suppress like a Dependency Test; false = the maintenance status is
+  // ignored by suppression and the parent evaluates by its frozen
+  // monitorStatus (dependents keep monitoring/alerting normally — e.g. a
+  // clustered/redundant parent whose children stay reachable).
+  suppressChildren Boolean @default(true)
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  windows AssetMaintenanceWindow[]
+
+  @@index([enabled])
+  @@map("maintenance_schedules")
+}
+
+// One realized maintenance window per (asset, schedule): opened when the
+// scheduler puts the asset into maintenance for that schedule, closed
+// (endedAt + endReason) when the window ends for any reason. Open rows
+// (endedAt IS NULL) are the source of truth for "currently in maintenance" —
+// restart-safe by construction. Closed rows power the chart maintenance
+// bands (scheduleName is snapshotted so labels survive schedule deletion).
+// Plain table — the hypertable no-FK rule does not apply here.
+model AssetMaintenanceWindow {
+  id           String    @id @default(uuid())
+  assetId      String
+  scheduleId   String? // SetNull on schedule delete — history survives
+  scheduleName String // snapshot for chart-band labels after delete
+  startedAt    DateTime  @default(now())
+  endedAt      DateTime? // null = window currently open
+  endReason    String? // "schedule" | "operator" | "disabled" | "deleted" | "criteria"
+
+  asset    Asset                @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  schedule MaintenanceSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+
+  @@index([assetId, startedAt])
+  @@index([endedAt])
+  @@map("asset_maintenance_windows")
 }
 
 // Polaris host CPU / memory / load time-series. Fills the gap where host

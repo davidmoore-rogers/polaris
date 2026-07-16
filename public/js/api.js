@@ -275,6 +275,9 @@ const api = {
     // active alerts, sites with issues). qs carries the per-widget filter +
     // feeds= subset (built by widgets/index.js getNocSummary).
     nocSummary: (qs) => request("GET", "/dashboard/noc-summary" + (qs ? "?" + qs : ""), undefined, timeoutSignal(DASHBOARD_FETCH_TIMEOUT_MS)),
+    // Available asset types + created region names for widget filter pickers.
+    // Mounted on the dash listener too (dashServer API allowlist).
+    filterOptions: () => request("GET", "/dashboard/filter-options"),
   },
   me: {
     dashboard: {
@@ -350,7 +353,22 @@ const api = {
       }
       return request("GET", `/assets/${id}/monitor-history` + (qs.length ? "?" + qs.join("&") : ""));
     },
+    maintenanceWindows:   (id, opts) => {
+      // Same range/from-to semantics as monitorHistory.
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = [];
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/maintenance-windows` + (qs.length ? "?" + qs.join("&") : ""));
+    },
+    maintenanceInfo:      (id)  => request("GET", `/assets/${id}/maintenance-info`),
     probeNow:             (id)  => request("POST", `/assets/${id}/probe-now`),
+    rediscover:           (id)  => request("POST", `/assets/${id}/rediscover`),
     resetMonitorOverride: (id)  => request("POST", `/assets/${id}/monitor-override/reset`),
     effectiveMonitorSettings: (id) => request("GET", `/assets/${id}/effective-monitor-settings`),
     snmpWalk:             (id, body, signal) => request("POST", `/assets/${id}/snmp-walk`, body, signal),
@@ -587,6 +605,13 @@ const api = {
     key:         ()       => request("GET", "/push-subscriptions/key"),
     subscribe:   (sub)    => request("POST", "/push-subscriptions", sub),
     unsubscribe: (endpoint) => request("DELETE", "/push-subscriptions", { endpoint }),
+  },
+  maintenanceSchedules: {
+    list:    ()      => request("GET", "/maintenance-schedules"),
+    preview: (body)  => request("POST", "/maintenance-schedules/preview", body),
+    create:  (body)  => request("POST", "/maintenance-schedules", body),
+    update:  (id, b) => request("PUT", `/maintenance-schedules/${id}`, b),
+    delete:  (id)    => request("DELETE", `/maintenance-schedules/${id}`),
   },
   notificationRules: {
     list:    ()        => request("GET", "/notification-rules"),

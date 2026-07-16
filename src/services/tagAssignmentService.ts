@@ -49,6 +49,15 @@ const STRING_FIELDS = [
 /** Enum-ish columns; exact-only (validated against their domains). */
 const ENUM_FIELDS = ["assetType", "status"] as const;
 
+/**
+ * Relation-backed fields — matched against discovery provenance rather than an
+ * Asset column. `integration` (exact-only; values are Integration ids) matches
+ * assets the integration discovered (`discoveredByIntegrationId` OR any
+ * AssetSource row). `fortigate` (string ops) matches assets "behind" a
+ * FortiGate by device name — `learnedLocation` OR any AssetFortigateSighting.
+ */
+const RELATION_FIELDS = ["integration", "fortigate"] as const;
+
 const STRING_OPS = ["exact", "contains", "pattern"] as const;
 
 const ASSET_STATUSES = [
@@ -74,7 +83,19 @@ export interface SubnetRule {
   op: "inCidr";
   cidrs: string[];
 }
-export type CriteriaRule = StringRule | SubnetRule;
+/** Discovered-by integration; values are Integration ids. */
+export interface IntegrationRule {
+  field: "integration";
+  op: "exact";
+  values: string[];
+}
+/** "Behind FortiGate" by device name (learnedLocation + DHCP sightings). */
+export interface FortigateRule {
+  field: "fortigate";
+  op: StringOp;
+  values: string[];
+}
+export type CriteriaRule = StringRule | SubnetRule | IntegrationRule | FortigateRule;
 
 export interface TagCriteria {
   version: 1;
@@ -130,13 +151,14 @@ export function normalizeCriteria(raw: unknown): TagCriteria | null {
 
     const isString = (STRING_FIELDS as readonly string[]).includes(field);
     const isEnum = (ENUM_FIELDS as readonly string[]).includes(field);
-    if (!isString && !isEnum) throw new AppError(400, `Unknown criteria field "${field}"`);
+    const isRelation = (RELATION_FIELDS as readonly string[]).includes(field);
+    if (!isString && !isEnum && !isRelation) throw new AppError(400, `Unknown criteria field "${field}"`);
 
     const op = String(rule.op ?? "exact").trim();
-    if (isEnum && op !== "exact") {
+    if ((isEnum || field === "integration") && op !== "exact") {
       throw new AppError(400, `Field "${field}" supports only the "exact" operator`);
     }
-    if (isString && !(STRING_OPS as readonly string[]).includes(op)) {
+    if ((isString || field === "fortigate") && !(STRING_OPS as readonly string[]).includes(op)) {
       throw new AppError(400, `Unknown operator "${op}" for field "${field}"`);
     }
 
@@ -166,7 +188,7 @@ export function normalizeCriteria(raw: unknown): TagCriteria | null {
       for (const v of values) compileWildcard(v);
     }
 
-    rules.push({ field: field as StringField | EnumField, op: op as StringOp, values });
+    rules.push({ field, op, values } as StringRule | IntegrationRule | FortigateRule);
   }
 
   if (rules.length === 0) return null;
@@ -198,6 +220,44 @@ export function buildPrefilterWhere(criteria: TagCriteria): Prisma.AssetWhereInp
 
   for (const rule of criteria.rules) {
     if (isSubnetRule(rule)) continue; // predicate-only
+
+    if (rule.field === "integration") {
+      // Exact id match against either provenance surface — this IS the full
+      // predicate, so it's trivially a safe superset.
+      ands.push({
+        OR: [
+          { discoveredByIntegrationId: { in: rule.values } },
+          { sources: { some: { integrationId: { in: rule.values } } } },
+        ],
+      });
+      continue;
+    }
+    if (rule.field === "fortigate") {
+      // Superset = OR across BOTH haystacks (learnedLocation + sighting rows)
+      // for every value; narrowing on only one surface would drop rows the
+      // predicate matches via the other.
+      if (rule.op === "pattern") {
+        const prefixes = rule.values.map(literalPrefix);
+        if (prefixes.every((p) => p.length > 0)) {
+          ands.push({
+            OR: prefixes.flatMap((p) => [
+              { learnedLocation: { startsWith: p, mode: "insensitive" } },
+              { fortigateSightings: { some: { fortigateDevice: { startsWith: p, mode: "insensitive" } } } },
+            ]),
+          });
+        }
+      } else {
+        const cmp = rule.op === "exact" ? "equals" : "contains";
+        ands.push({
+          OR: rule.values.flatMap((v) => [
+            { learnedLocation: { [cmp]: v, mode: "insensitive" } } as Prisma.AssetWhereInput,
+            { fortigateSightings: { some: { fortigateDevice: { [cmp]: v, mode: "insensitive" } } } } as Prisma.AssetWhereInput,
+          ]),
+        });
+      }
+      continue;
+    }
+
     const col = rule.field;
     if (col === "status") hasStatusRule = true;
 
@@ -243,7 +303,32 @@ const CANDIDATE_SELECT = {
   status: true,
 } satisfies Prisma.AssetSelect;
 
-type CandidateAsset = Prisma.AssetGetPayload<{ select: typeof CANDIDATE_SELECT }>;
+// Relation-backed extras loaded only when the criteria reference them (see
+// buildCandidateSelect) — optional on the type so scalar-only paths stay lean.
+type CandidateAsset = Prisma.AssetGetPayload<{ select: typeof CANDIDATE_SELECT }> & {
+  discoveredByIntegrationId?: string | null;
+  sources?: Array<{ integrationId: string | null }>;
+  learnedLocation?: string | null;
+  fortigateSightings?: Array<{ fortigateDevice: string }>;
+};
+
+/**
+ * CANDIDATE_SELECT plus the relation extras the criteria actually need.
+ * Conditional so the bulk reconcile path doesn't join sources/sightings for
+ * every asset when no rule references them (2000-asset scale rule).
+ */
+function buildCandidateSelect(criteria: TagCriteria): Prisma.AssetSelect {
+  const has = (f: string) => criteria.rules.some((r) => r.field === f);
+  return {
+    ...CANDIDATE_SELECT,
+    ...(has("integration")
+      ? { discoveredByIntegrationId: true, sources: { select: { integrationId: true } } }
+      : {}),
+    ...(has("fortigate")
+      ? { learnedLocation: true, fortigateSightings: { select: { fortigateDevice: true } } }
+      : {}),
+  };
+}
 
 /**
  * For each given IP, the set of input CIDRs that contain it. One round-trip via
@@ -305,6 +390,29 @@ function buildMatcher(
       const cidrs = rule.cidrs;
       return (a) => cidrMatch(a.ipAddress, cidrs);
     }
+    if (rule.field === "integration") {
+      const ids = new Set(rule.values);
+      return (a) =>
+        (a.discoveredByIntegrationId != null && ids.has(a.discoveredByIntegrationId)) ||
+        (a.sources ?? []).some((s) => s.integrationId != null && ids.has(s.integrationId));
+    }
+    if (rule.field === "fortigate") {
+      const haystacks = (a: CandidateAsset): string[] => {
+        const out: string[] = [];
+        if (a.learnedLocation) out.push(a.learnedLocation.toLowerCase());
+        for (const s of a.fortigateSightings ?? []) out.push(s.fortigateDevice.toLowerCase());
+        return out;
+      };
+      if (rule.op === "pattern") {
+        const regexes = rule.values.map((v) => compileWildcard(v.toLowerCase()));
+        return (a) => haystacks(a).some((h) => regexes.some((rx) => rx.test(h)));
+      }
+      const needles = rule.values.map((v) => v.toLowerCase());
+      if (rule.op === "contains") {
+        return (a) => haystacks(a).some((h) => needles.some((n) => h.includes(n)));
+      }
+      return (a) => haystacks(a).some((h) => needles.some((n) => h === n));
+    }
     const col = rule.field as keyof CandidateAsset;
     if (rule.op === "pattern") {
       const regexes = rule.values.map((v) => compileWildcard(v.toLowerCase()));
@@ -349,10 +457,10 @@ export function assetMatchesCriteria(
  * in the DB → compute subnet membership over the candidates → run the predicate.
  */
 export async function resolveMatchingAssetIds(criteria: TagCriteria): Promise<Set<string>> {
-  const candidates = await prisma.asset.findMany({
+  const candidates: CandidateAsset[] = await prisma.asset.findMany({
     where: buildPrefilterWhere(criteria),
-    select: CANDIDATE_SELECT,
-  });
+    select: buildCandidateSelect(criteria),
+  }) as CandidateAsset[];
   const cidrs = collectCidrs(criteria);
   const map = cidrs.length
     ? await cidrContainmentMap(candidates.map((c) => c.ipAddress), cidrs)
@@ -482,10 +590,18 @@ export async function reconcileAllTags(): Promise<TagReconcileSummary> {
  * round-trip for all subnet CIDRs across those tags.
  */
 export async function reconcileTagsForAsset(assetId: string): Promise<TagReconcileSummary> {
-  const asset = await prisma.asset.findUnique({
+  // Single asset — always load the relation extras rather than computing the
+  // union of every managed tag's field needs (trivial cost at n=1).
+  const asset: CandidateAsset | null = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: CANDIDATE_SELECT,
-  });
+    select: {
+      ...CANDIDATE_SELECT,
+      discoveredByIntegrationId: true,
+      sources: { select: { integrationId: true } },
+      learnedLocation: true,
+      fortigateSightings: { select: { fortigateDevice: true } },
+    },
+  }) as CandidateAsset | null;
   if (!asset) return { added: 0, removed: 0 };
 
   const tags = await prisma.tag.findMany({ select: { id: true, name: true, criteria: true } });

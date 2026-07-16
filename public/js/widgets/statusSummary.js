@@ -14,6 +14,10 @@
     { id: "down",    label: "Down",    color: "#ef5350", val: function (d) { return d.statusCounts.down; } },
     { id: "warning", label: "Warning", color: "#ffa726", val: function (d) { return d.statusCounts.warning; } },
     { id: "unknown", label: "Unknown", color: "#90a4ae", val: function (d) { return d.statusCounts.unknown; } },
+    // Maintenance-window assets — excluded from Up/Down/Warning server-side
+    // (their frozen monitorStatus is not live state); purple matches the
+    // assets-page maintenance pill and the Status Map dot.
+    { id: "maintenance", label: "Maint", color: "#9575cd", val: function (d) { return d.statusCounts.maintenance; } },
     { id: "uptime",  label: "Uptime",  color: null,      val: function (d) { return d.uptimePercent; } },
     { id: "alerts",  label: "Alerts",  color: null,      val: function (d) { return d.activeAlertCount; } },
   ];
@@ -72,7 +76,7 @@
     },
 
     renderPreview: function (el) {
-      renderTiles(el, { statusCounts: { total: 312, up: 298, down: 4, warning: 7, unknown: 3, recovering: 0 }, uptimePercent: 99.2, activeAlertCount: 11 }, null);
+      renderTiles(el, { statusCounts: { total: 312, up: 296, down: 4, warning: 7, unknown: 3, recovering: 0, maintenance: 2 }, uptimePercent: 99.2, activeAlertCount: 11 }, null);
     },
 
     renderConfig: function (el, config, onChange) {

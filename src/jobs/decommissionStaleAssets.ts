@@ -35,7 +35,11 @@ async function decommissionStaleAssets(): Promise<void> {
 
     const stale = await prisma.asset.findMany({
       where: {
-        status: { notIn: ["decommissioned", "disabled"] },
+        // maintenance: the window pauses all polling so lastSeen freezes by
+        // design — never age a maintenance-window asset into decommission
+        // (which would also clamp monitored=false and break the
+        // maintenanceScheduler's status restore).
+        status: { notIn: ["decommissioned", "disabled", "maintenance"] },
         lastSeen: { lt: cutoff },
         // Recent directory / agent activity vetoes decommission even when
         // on-network presence is stale (cloud-only laptops, agent-reporting

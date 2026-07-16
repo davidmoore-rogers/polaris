@@ -76,6 +76,16 @@ describe("normalizeCriteria", () => {
     // value is dropped before pattern compilation, leaving no rule → null.
     expect(normalizeCriteria({ rules: [{ field: "os", op: "pattern", values: [""] }] })).toBeNull();
   });
+
+  it("integration is exact-only; fortigate takes the string operators", () => {
+    expect(() => normalizeCriteria({ rules: [{ field: "integration", op: "contains", values: ["id-1"] }] })).toThrow();
+    const i = normalizeCriteria({ rules: [{ field: "integration", op: "exact", values: ["id-1"] }] })!;
+    expect(i.rules[0]).toEqual({ field: "integration", op: "exact", values: ["id-1"] });
+
+    const f = normalizeCriteria({ rules: [{ field: "fortigate", op: "contains", values: ["JEFFERSON"] }] })!;
+    expect(f.rules[0]).toEqual({ field: "fortigate", op: "contains", values: ["JEFFERSON"] });
+    expect(() => normalizeCriteria({ rules: [{ field: "fortigate", op: "regex", values: ["x"] }] })).toThrow();
+  });
 });
 
 describe("assetMatchesCriteria (predicate)", () => {
@@ -115,6 +125,27 @@ describe("assetMatchesCriteria (predicate)", () => {
     const a = asset({ ipAddress: "10.1.5.20" });
     expect(assetMatchesCriteria(a, c, new Set(["10.1.0.0/16"]))).toBe(true);
     expect(assetMatchesCriteria(a, c, new Set())).toBe(false);
+  });
+
+  it("integration matches discoveredByIntegrationId OR any AssetSource row", () => {
+    const c = normalizeCriteria({ rules: [{ field: "integration", op: "exact", values: ["int-1"] }] })!;
+    expect(assetMatchesCriteria(asset({ discoveredByIntegrationId: "int-1" }), c)).toBe(true);
+    expect(assetMatchesCriteria(asset({ sources: [{ integrationId: "int-1" }] }), c)).toBe(true);
+    expect(assetMatchesCriteria(asset({ discoveredByIntegrationId: "int-2", sources: [{ integrationId: null }] }), c)).toBe(false);
+    expect(assetMatchesCriteria(asset({}), c)).toBe(false);
+  });
+
+  it("fortigate matches learnedLocation OR any sighting, with string ops", () => {
+    const exact = normalizeCriteria({ rules: [{ field: "fortigate", op: "exact", values: ["JEFFERSON-FG"] }] })!;
+    expect(assetMatchesCriteria(asset({ learnedLocation: "jefferson-fg" }), exact)).toBe(true);
+    expect(assetMatchesCriteria(asset({ fortigateSightings: [{ fortigateDevice: "JEFFERSON-FG" }] }), exact)).toBe(true);
+    expect(assetMatchesCriteria(asset({ learnedLocation: "OTHER-FG" }), exact)).toBe(false);
+
+    // contains covers a site prefix across every gate at the site.
+    const site = normalizeCriteria({ rules: [{ field: "fortigate", op: "contains", values: ["jefferson"] }] })!;
+    expect(assetMatchesCriteria(asset({ fortigateSightings: [{ fortigateDevice: "JEFFERSON-101F-1" }] }), site)).toBe(true);
+    expect(assetMatchesCriteria(asset({ learnedLocation: "SALINE-FG" }), site)).toBe(false);
+    expect(assetMatchesCriteria(asset({}), site)).toBe(false);
   });
 });
 
@@ -156,5 +187,26 @@ describe("buildPrefilterWhere (superset invariant)", () => {
     };
     // A prefixless value present → skip DB narrowing for the rule entirely.
     expect(JSON.stringify(buildPrefilterWhere(mixed))).not.toContain("startsWith");
+  });
+
+  it("integration narrows on both provenance surfaces", () => {
+    const c = normalizeCriteria({ rules: [{ field: "integration", op: "exact", values: ["int-1"] }] })!;
+    const flat = JSON.stringify(buildPrefilterWhere(c));
+    expect(flat).toContain("discoveredByIntegrationId");
+    expect(flat).toContain("sources");
+  });
+
+  it("fortigate narrows on learnedLocation AND sightings for exact/contains; prefixless pattern adds nothing", () => {
+    const c = normalizeCriteria({ rules: [{ field: "fortigate", op: "contains", values: ["JEFF"] }] })!;
+    const flat = JSON.stringify(buildPrefilterWhere(c));
+    expect(flat).toContain("learnedLocation");
+    expect(flat).toContain("fortigateSightings");
+
+    const prefixless: TagCriteria = {
+      version: 1,
+      match: "all",
+      rules: [{ field: "fortigate", op: "pattern", values: ["*-FG"] }],
+    };
+    expect(JSON.stringify(buildPrefilterWhere(prefixless))).not.toContain("learnedLocation");
   });
 });

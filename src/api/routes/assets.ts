@@ -28,6 +28,7 @@ import { manualCoordPatchError } from "../../utils/geo.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
 import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } from "../../services/assetMergeService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
+import { resolvePendingIpOverrideConflicts } from "../../services/ipOverrideService.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
 import {
   probeAsset, recordProbeResult,
@@ -51,6 +52,7 @@ import {
 } from "../../services/sampleHistoryService.js";
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
+import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
 import { requestProcessControl, getCommandStatus } from "../../services/agentCommandService.js";
 import {
   readIpsecHistory,
@@ -68,6 +70,10 @@ import {
   dedupeInferredNeighbors,
   aggregateMembershipMap,
 } from "../../services/peerInferredLldpService.js";
+// Cross-route-file import precedent: serverSettings.ts imports
+// hasActiveDiscoveries from ./integrations.js the same way.
+import { triggerDiscovery } from "./integrations.js";
+import { isRunActive } from "../../services/discoveryRunState.js";
 
 const router = Router();
 
@@ -186,6 +192,10 @@ const CreateAssetSchema = z.object({
 const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
+  // Unlike create (min(1)), update accepts "" — blanking the IP Address field
+  // releases the operator IP pin (Asset.ipOverride) and reverts to the
+  // discovery-projected address, mirroring the hostname-override clear path.
+  ipAddress:             z.string().optional(),
   monitored:             z.boolean().optional(),
   monitorCredentialId:          z.string().uuid().nullable().optional(),
   responseTimeCredentialId:     z.string().uuid().nullable().optional(),
@@ -361,6 +371,7 @@ const ASSET_SORT_COLUMNS: Record<string, string> = {
   assignedTo: "assignedTo",
   purchaseOrder: "purchaseOrder",
   dnsName: "dnsName",
+  description: "description",
   lastSeen: "lastSeen",
   createdAt: "createdAt",
 };
@@ -379,6 +390,7 @@ const ASSET_TEXT_COLUMNS: Record<string, string> = {
   assignedTo: "assignedTo",
   purchaseOrder: "purchaseOrder",
   dnsName: "dnsName",
+  description: "description",
 };
 
 const ASSET_TEXT_OPS = new Set(["contains", "not_contains", "empty", "is_not_empty"]);
@@ -483,6 +495,7 @@ const ASSET_LIST_SELECT = {
   osVersion: true,
   assignedTo: true,
   purchaseOrder: true,
+  description: true,
   assetType: true,
   status: true,
   statusChangedAt: true,
@@ -500,6 +513,9 @@ const ASSET_LIST_SELECT = {
   dependencyLayer: true,
   dependencySuppressed: true,
   dependencyTestUntil: true,
+  // Maintenance pill: the parked pre-window status shows in the tooltip and
+  // is what the "End maintenance now" popover restores.
+  maintenanceReturnStatus: true,
 } as const;
 
 const ASSET_LIST_DEFAULT_LIMIT = 50;
@@ -1175,6 +1191,107 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
   } catch (err) { next(err); }
 });
 
+// POST /api/v1/assets/:id/rediscover — re-run discovery for ONE FortiGate.
+// For an FMG-discovered firewall this queues a SCOPED discovery run
+// (triggerDiscovery { scopeDeviceName }): the full run machinery — DiscoveryRun
+// row, progress, abort, pg-boss handoff — narrowed to the one roster device,
+// with the finalize pass in "finalize-scoped" mode (per-controller switch/AP
+// decommission only; no fleet sweeps). For a standalone-FortiGate asset the
+// integration IS the single gate, so a plain full run is the exact equivalent.
+// No request body. Gated assets:write (one notch above Poll Now's
+// assetsProbe:write) because a re-discover mutates inventory — creates/updates
+// assets + reservations, decommissions vanished switches/APs, releases stale
+// VIP/dhcp_reservation rows.
+// HA note: fortinetTopology.deviceName resolves to the FMG cluster device, so
+// re-discovering a standby member's asset re-discovers the whole cluster.
+router.post("/:id/rediscover", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: {
+        hostname: true,
+        ipAddress: true,
+        learnedLocation: true,
+        assetType: true,
+        fortinetTopology: true,
+        discoveredByIntegration: { select: { id: true, type: true, config: true, name: true, enabled: true } },
+      },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    const integration = asset.discoveredByIntegration;
+    if (!integration || (integration.type !== "fortimanager" && integration.type !== "fortigate")) {
+      throw new AppError(400, "Re-discovery is only available for FortiGates discovered by a FortiManager or FortiGate integration");
+    }
+    const topo = (asset.fortinetTopology as Record<string, unknown> | null) || null;
+    if (asset.assetType !== "firewall" || !topo || topo.role !== "fortigate") {
+      throw new AppError(400, "Re-discovery is only available for FortiGate firewall assets");
+    }
+    if (!integration.enabled) throw new AppError(400, `Integration "${integration.name}" is disabled`);
+
+    // FMG device name: the topology stamp's deviceName is FMG/dvmdb truth
+    // (same resolver descriptionSyncService uses for device-targeted writes);
+    // hostname is the legacy-row fallback.
+    const deviceName = (typeof topo.deviceName === "string" && topo.deviceName) || asset.hostname;
+    if (!deviceName) throw new AppError(400, "Asset has no resolvable FortiGate device name");
+
+    // Honor deviceInclude/deviceExclude, same as probe-now: a re-discover
+    // must not pull a device the next full sweep would skip. Checked against
+    // the hostname (assetMatchesIntegrationFilter's match field) and the
+    // resolved FMG device name — the filter patterns can target either.
+    const filtHost = assetMatchesIntegrationFilter(asset, integration);
+    const filtDevice = assetMatchesIntegrationFilter({ ...asset, hostname: deviceName }, integration);
+    if (!filtHost.included && !filtDevice.included) {
+      const reason = filtHost.reason || "Excluded by integration filter";
+      logEvent({
+        action: "asset.rediscover",
+        resourceType: "asset",
+        resourceId: id,
+        resourceName: asset.hostname || asset.ipAddress || undefined,
+        actor: requestActor(req),
+        level: "warning",
+        message: `Re-discovery blocked: ${asset.hostname || deviceName} — ${reason}`,
+        details: { integrationId: integration.id, integrationType: integration.type, deviceName, reason },
+      });
+      res.status(409).json({ message: reason });
+      return;
+    }
+
+    // Pre-check for a friendly message; triggerDiscovery's coalescing return
+    // is the authoritative guard (closes the TOCTOU window).
+    if (await isRunActive(integration.id)) {
+      res.status(409).json({ message: `A discovery is already running for "${integration.name}" — try again when it finishes` });
+      return;
+    }
+    // requestActor covers bearer-token callers ("api:<token name>") as well
+    // as sessions — the actor string labels the run's start/complete Events.
+    const actor = requestActor(req) ?? "";
+    const started = integration.type === "fortimanager"
+      ? await triggerDiscovery(integration.id, actor, { scopeDeviceName: deviceName })
+      : await triggerDiscovery(integration.id, actor);
+    if (!started) {
+      res.status(409).json({ message: `A discovery is already running for "${integration.name}" — try again when it finishes` });
+      return;
+    }
+
+    logEvent({
+      action: "asset.rediscover",
+      resourceType: "asset",
+      resourceId: id,
+      resourceName: asset.hostname || asset.ipAddress || undefined,
+      actor: requestActor(req),
+      message: `Re-discovery requested for FortiGate "${asset.hostname || deviceName}" via "${integration.name}"`,
+      details: { integrationId: integration.id, integrationType: integration.type, deviceName },
+    });
+    res.status(202).json({
+      message: "Re-discovery started",
+      integrationId: integration.id,
+      integrationName: integration.name,
+      deviceName: integration.type === "fortimanager" ? deviceName : null,
+    });
+  } catch (err) { next(err); }
+});
+
 // POST /api/v1/assets/:id/snmp-walk — operator-driven SNMP walk used by the
 // asset details "SNMP Walk" tab. Admin-only because the response includes raw
 // device data that the integration filter doesn't touch (e.g. tunnel names,
@@ -1294,6 +1411,27 @@ function bigIntToNumber(v: bigint | null | undefined): number | null {
   if (v == null) return null;
   return Number(v);
 }
+
+// GET /assets/:id/maintenance-windows?range=...|from=...&to=... — maintenance
+// window rows overlapping the chart range. Fetched in parallel with the
+// sample histories (same pattern as the polling-transition Event fetch) and
+// rendered as labeled shaded bands on every asset-details chart.
+router.get("/:id/maintenance-windows", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const { since, until, rangeLabel } = resolveRange(req);
+    const windows = await listAssetWindows(id, since, until);
+    res.json({ range: rangeLabel, since, until, windows });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/maintenance-info — current windows + covering schedules for
+// the edit-modal Monitoring tab / slide-over.
+router.get("/:id/maintenance-info", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    res.json(await getAssetMaintenanceInfo(req.params.id as string));
+  } catch (err) { next(err); }
+});
 
 // GET /assets/:id/telemetry-history?range=...|from=...&to=... — CPU+memory time series
 router.get("/:id/telemetry-history", requirePermission("assets", "read"), async (req, res, next) => {
@@ -2277,6 +2415,9 @@ router.post("/", requirePermission("assets", "write"), async (req, res, next) =>
     // is re-seeded from the device on the next discovery when the
     // integration's syncDescriptions toggle is on).
     if (typeof input.description === "string") data.description = input.description.trim() || null;
+    // Hostname: trim; an empty box means "not provided", not "" (the edit
+    // form now always sends the field, including blank).
+    if (typeof input.hostname === "string") data.hostname = input.hostname.trim() || null;
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     if (input.ipAddress) data.ipSource = "manual";
@@ -2379,11 +2520,76 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     // is re-seeded from the device on the next discovery when the
     // integration's syncDescriptions toggle is on).
     if (typeof input.description === "string") data.description = input.description.trim() || null;
+    // Notes: empty string clears to null (notes are operator-only — an
+    // emptied box is an intentional clear, not "not provided").
+    if (typeof input.notes === "string") data.notes = input.notes.trim() || null;
+    // Discovery projection (lazy, computed at most once) — needed when a
+    // pin-clear reverts hostname or ipAddress to the projected value.
+    let _projection: ReturnType<typeof projectAssetFromSources> | null = null;
+    const loadProjection = async () => {
+      if (!_projection) {
+        const overrideSources = await prisma.assetSource.findMany({
+          where: { assetId: id },
+          select: { sourceKind: true, inferred: true, observed: true },
+        });
+        _projection = projectAssetFromSources(
+          overrideSources.map((s) => ({
+            sourceKind: s.sourceKind,
+            inferred: s.inferred,
+            observed: s.observed as Record<string, unknown> | null,
+          })),
+        );
+      }
+      return _projection;
+    };
+    // Hostname: an edit-time write is an operator override (coordSource-style
+    // pin — the db.ts extension re-asserts it over discovery projection
+    // writes). Only a real change pins, since the edit form echoes the
+    // current hostname back on every save. Clearing (empty string) releases
+    // the pin and reverts hostname to the discovery-projected value (null
+    // when no source has an opinion, e.g. manually-created assets).
+    if (input.hostname !== undefined) {
+      const trimmed = input.hostname.trim();
+      if (!trimmed) {
+        data.hostnameOverride = null;
+        data.hostname = (await loadProjection()).projected.hostname;
+      } else if (trimmed !== existing.hostname) {
+        data.hostname = trimmed;
+        data.hostnameOverride = trimmed;
+      } else {
+        delete data.hostname;
+      }
+    }
+    // IP Address: same operator-override pattern as Hostname, with
+    // discovery-gets-a-vote semantics on later writes (see Asset.ipOverride
+    // in schema.prisma: discovery reporting the pinned IP releases the pin;
+    // a different IP re-asserts it and raises an ip-override Conflict).
+    // Only a real change pins; clearing (empty string) releases the pin and
+    // reverts to the discovery-projected address. Any set/clear here also
+    // closes the asset's pending ip-override conflict — the operator just
+    // made the call the conflict was asking about.
+    let ipOverrideTouched = false;
+    if (input.ipAddress !== undefined) {
+      const trimmed = input.ipAddress.trim();
+      if (!trimmed) {
+        data.ipOverride = null;
+        const { projected, provenance } = await loadProjection();
+        data.ipAddress = projected.ipAddress;
+        data.ipSource = projected.ipAddress ? (provenance.ipAddress ?? "discovery") : null;
+        ipOverrideTouched = !!existing.ipOverride;
+      } else if (trimmed !== existing.ipAddress) {
+        data.ipAddress = trimmed;
+        data.ipOverride = trimmed;
+        data.ipSource = "manual";
+        ipOverrideTouched = true;
+      } else {
+        delete data.ipAddress;
+      }
+    }
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     else if (input.acquiredAt === undefined) delete data.acquiredAt;
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     else if (input.warrantyExpiry === undefined) delete data.warrantyExpiry;
-    if (input.ipAddress) data.ipSource = "manual";
     // Manual coordinates: only a real change stamps coordSource — the edit
     // form echoes the current values back on every save, and silently pinning
     // discovery-stamped coords as "manual" would freeze discovery updates for
@@ -2403,6 +2609,17 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
       data.statusChangedAt = new Date();
       data.statusChangedBy = requestActor(req) ?? "manual";
     }
+    // Operator moves status OFF "maintenance" while maintenance windows are
+    // open: the operator wins. Close the windows first (endReason "operator"
+    // — suppresses scheduler re-entry for each schedule's current occurrence)
+    // so the reconcile can't re-flip this write.
+    if (
+      input.status !== undefined &&
+      input.status !== "maintenance" &&
+      existing.status === "maintenance"
+    ) {
+      await operatorReleaseAsset(id, requestActor(req) ?? undefined);
+    }
     clampMonitoredState(data);
     clampAcquiredToLastSeen(data, existing);
     const asset = await prisma.asset.update({ where: { id }, data: data as any });
@@ -2413,7 +2630,13 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     if (input.monitored !== undefined || input.assetType !== undefined) {
       await recomputeMonitorOverrideForAssets(prisma, [id]);
     }
-    const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
+    // Operator set/cleared the IP pin: any pending ip-override conflict is
+    // now moot (best-effort — a leftover pending row would only linger until
+    // the next discovery cycle refreshes or re-raises it).
+    if (ipOverrideTouched) {
+      resolvePendingIpOverrideConflicts(id, requestActor(req) ?? "manual").catch(() => {});
+    }
+    const trackFields = ["hostname", "hostnameOverride", "ipAddress", "ipOverride", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
     const before: Record<string, unknown> = {};
     const after: Record<string, unknown> = {};
     for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }

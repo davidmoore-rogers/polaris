@@ -26,7 +26,7 @@ import {
   notificationsPageUrl,
 } from "../utils/notificationTemplate.js";
 import { logEvent } from "./eventLogService.js";
-import { buildComposedEmail } from "./notificationEngine.js";
+import { buildComposedEmail, isSuppressedForNotifications } from "./notificationEngine.js";
 import { dedupeEmailRecipients, resolveEmailRecipients } from "./notificationRecipientService.js";
 import type { EmailComposition, EscalationConfig, EscalationTier } from "./notificationTypes.js";
 
@@ -91,11 +91,29 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
       triggeredAt: { lte: new Date(now.getTime() - minAfterMin * 60_000) },
     },
     select: {
-      id: true, ruleId: true, assetHostname: true, severity: true, message: true,
+      id: true, ruleId: true, assetId: true, assetHostname: true, severity: true, message: true,
       triggeredAt: true, acknowledged: true, templateCtx: true, escalationState: true,
     },
   });
   if (notifs.length === 0) return 0;
+
+  // Maintenance / dependency suppression: escalation emails pause while the
+  // notification's asset is silenced (tier timers keep running off
+  // triggeredAt — a still-unhandled notification resumes escalating after
+  // the window ends).
+  const notifAssetIds = Array.from(new Set(notifs.map((n) => n.assetId).filter((id): id is string => !!id)));
+  const suppressedAssetIds = new Set<string>();
+  if (notifAssetIds.length > 0) {
+    const assetRows = await prisma.asset.findMany({
+      where: { id: { in: notifAssetIds } },
+      select: { id: true, status: true, dependencySuppressed: true },
+    });
+    for (const a of assetRows) {
+      if (isSuppressedForNotifications({ status: String(a.status), dependencySuppressed: a.dependencySuppressed })) {
+        suppressedAssetIds.add(a.id);
+      }
+    }
+  }
 
   // Resolve every referenced tier channel once (skip deleted/disabled/non-email).
   const channelIds = Array.from(new Set(Array.from(rules.values()).flatMap((r) => r.escalation.tiers.map((t) => t.channelId))));
@@ -129,6 +147,7 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
     const rule = rules.get(n.ruleId!);
     if (!rule) continue;
     if (rule.escalation.stopOn !== "clear" && n.acknowledged) continue; // "acknowledge" stops on ack
+    if (n.assetId && suppressedAssetIds.has(n.assetId)) continue; // silenced — resumes post-window
 
     const state = stateOf(n.escalationState);
     let dirty = false;

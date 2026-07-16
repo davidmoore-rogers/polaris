@@ -39,6 +39,15 @@ import { createTtlCache } from "../utils/ttlCache.js";
 // types; custom operator types fall outside the gauge by design.
 const INFRA_ASSET_TYPES = ["firewall", "switch", "router", "access_point"];
 
+// An asset inside a maintenance window (scheduler-held status="maintenance")
+// has its polling paused and monitorStatus FROZEN at whatever it was on window
+// entry — a device taken down for planned work stays monitorStatus="down" for
+// the whole window. Every down/warning/stale surface here must exclude the
+// maintenance set or planned downtime reads as an outage (the Status Map
+// widget paints these purple for the same reason). Spread into asset wheres;
+// mirrored as `AND "status" <> 'maintenance'` in the raw-SQL feeds.
+const NOT_IN_MAINTENANCE = { status: { not: "maintenance" as const } };
+
 // monitorAlerts (and therefore the active-alert count) is defined as monitored
 // assets currently in warning/down that aren't dependency-suppressed — kept
 // byte-identical to the /summary monitorAlerts where-clause so the tile count
@@ -47,6 +56,7 @@ const ALERT_WHERE = {
   monitored: true,
   monitorStatus: { in: ["warning", "down"] },
   dependencySuppressed: false,
+  ...NOT_IN_MAINTENANCE,
 };
 
 // The eight built-in asset types the per-widget asset-type filter toggles.
@@ -91,37 +101,41 @@ function idWhere(assetIds: string[] | null): Record<string, unknown> {
 }
 
 export interface StatusSummary {
-  statusCounts: { total: number; up: number; down: number; warning: number; unknown: number; recovering: number };
+  statusCounts: { total: number; up: number; down: number; warning: number; unknown: number; recovering: number; maintenance: number };
   uptimePercent: number | null;
   activeAlertCount: number;
 }
 
 /**
- * Feed 1 — status tiles. Two groupBys + one count, all backed by
+ * Feed 1 — status tiles. Two groupBys + two counts, all backed by
  * @@index([monitored]). Constant query cost regardless of fleet size.
+ * Maintenance-window assets get their own bucket (they still count into
+ * `total`): their frozen monitorStatus must not feed the Up/Down/Warning
+ * tiles or the uptime gauge.
  */
 export async function getStatusSummary(assetIds: string[] | null = null): Promise<StatusSummary> {
   const idf = idWhere(assetIds);
-  const [byStatus, infraByStatus, activeAlertCount] = await Promise.all([
+  const [byStatus, infraByStatus, activeAlertCount, maintenanceCount] = await Promise.all([
     prisma.asset.groupBy({
       by: ["monitorStatus"],
       _count: { _all: true },
-      where: { monitored: true, ...idf },
+      where: { monitored: true, ...NOT_IN_MAINTENANCE, ...idf },
     }),
     prisma.asset.groupBy({
       by: ["monitorStatus"],
       _count: { _all: true },
-      where: { monitored: true, assetType: { in: INFRA_ASSET_TYPES }, ...idf },
+      where: { monitored: true, assetType: { in: INFRA_ASSET_TYPES }, ...NOT_IN_MAINTENANCE, ...idf },
     }),
     prisma.asset.count({ where: { ...ALERT_WHERE, ...idf } }),
+    prisma.asset.count({ where: { monitored: true, status: "maintenance", ...idf } }),
   ]);
 
-  const counts = { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 };
+  const counts = { total: maintenanceCount, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, maintenance: maintenanceCount };
   for (const row of byStatus) {
     const n = row._count._all;
     counts.total += n;
     const key = (row.monitorStatus ?? "unknown") as keyof typeof counts;
-    if (key in counts && key !== "total") counts[key] += n;
+    if (key in counts && key !== "total" && key !== "maintenance") counts[key] += n;
     else counts.unknown += n;
   }
 
@@ -166,7 +180,7 @@ function siteOf(a: { location: string | null; learnedLocation: string | null; sn
  * newest outages are the ones kept.
  */
 export async function getDownNodes(limit: number | null = 100, assetIds: string[] | null = null): Promise<{ nodes: DownNode[]; total: number }> {
-  const where = { monitored: true, monitorStatus: "down", dependencySuppressed: false, ...idWhere(assetIds) };
+  const where = { monitored: true, monitorStatus: "down", dependencySuppressed: false, ...NOT_IN_MAINTENANCE, ...idWhere(assetIds) };
   // `total` is the TRUE down count (indexed count over the same where), not
   // rows.length — the findMany is capped by `limit`, and the widget's header
   // pill must show the overall number even when the list is clipped.
@@ -269,7 +283,7 @@ export async function getDownInterfaces(limit: number | null = 100, sinceMinutes
   if (rows.length === 0) return [];
   const ids = Array.from(new Set(rows.map((r) => r.assetId)));
   const assets = await prisma.asset.findMany({
-    where: { id: { in: ids }, monitored: true, dependencySuppressed: false },
+    where: { id: { in: ids }, monitored: true, dependencySuppressed: false, ...NOT_IN_MAINTENANCE },
     select: {
       id: true, hostname: true, ipAddress: true, assetType: true,
       location: true, learnedLocation: true, snmpLocation: true,
@@ -349,7 +363,7 @@ export async function getDownIpsecTunnels(limit: number | null = 100, sinceMinut
   if (rows.length === 0) return [];
   const ids = Array.from(new Set(rows.map((r) => r.assetId)));
   const assets = await prisma.asset.findMany({
-    where: { id: { in: ids }, monitored: true, dependencySuppressed: false },
+    where: { id: { in: ids }, monitored: true, dependencySuppressed: false, ...NOT_IN_MAINTENANCE },
     select: {
       id: true, hostname: true, ipAddress: true, assetType: true,
       location: true, learnedLocation: true, snmpLocation: true,
@@ -644,6 +658,9 @@ export async function getStalePolls(grace = 3, limit: number | null = 50, assetI
   const candidates = await prisma.asset.findMany({
     where: {
       monitored: true,
+      // Maintenance windows pause polling entirely — without this exclusion
+      // every in-window asset drifts into "stale polls" once past the grace.
+      ...NOT_IN_MAINTENANCE,
       OR: [{ lastMonitorAt: null }, { lastMonitorAt: { lt: new Date(now - COARSE_FLOOR_MS) } }],
       ...idWhere(assetIds),
     },
@@ -766,15 +783,15 @@ export async function getSitesWithIssues(maxSites: number | null = 25, assetIds:
     site: string; down: bigint; warning: bigint; total: bigint; lat: number | null; lng: number | null;
   }>>(
     `SELECT COALESCE(NULLIF("location", ''), NULLIF("learnedLocation", ''), NULLIF("snmpLocation", ''), '(unknown)') AS site,
-            count(*) FILTER (WHERE "monitorStatus" = 'down')    AS down,
-            count(*) FILTER (WHERE "monitorStatus" = 'warning') AS warning,
+            count(*) FILTER (WHERE "monitorStatus" = 'down'    AND "status" <> 'maintenance') AS down,
+            count(*) FILTER (WHERE "monitorStatus" = 'warning' AND "status" <> 'maintenance') AS warning,
             count(*) AS total,
             round(avg("latitude")::numeric, 4)::float8  AS lat,
             round(avg("longitude")::numeric, 4)::float8 AS lng
      FROM "assets"
      WHERE "monitored" = true AND "dependencySuppressed" = false${idClause}
      GROUP BY 1
-     HAVING count(*) FILTER (WHERE "monitorStatus" IN ('down', 'warning')) > 0
+     HAVING count(*) FILTER (WHERE "monitorStatus" IN ('down', 'warning') AND "status" <> 'maintenance') > 0
      ORDER BY down DESC, warning DESC
      LIMIT $1`,
     ...siteParams,
@@ -784,7 +801,7 @@ export async function getSitesWithIssues(maxSites: number | null = 25, assetIds:
   // Pull the affected (down/warning) nodes for these sites in one query, then
   // bucket by site. Bounded by the issue set, not the whole fleet.
   const nodeRows = await prisma.asset.findMany({
-    where: { monitored: true, dependencySuppressed: false, monitorStatus: { in: ["down", "warning"] }, ...idWhere(assetIds) },
+    where: { monitored: true, dependencySuppressed: false, monitorStatus: { in: ["down", "warning"] }, ...NOT_IN_MAINTENANCE, ...idWhere(assetIds) },
     select: {
       id: true, hostname: true, monitorStatus: true,
       location: true, learnedLocation: true, snmpLocation: true, department: true,
@@ -856,7 +873,7 @@ export const NOC_FEED_NAMES = [
 export type NocFeedName = (typeof NOC_FEED_NAMES)[number];
 
 const EMPTY_STATUS: StatusSummary = {
-  statusCounts: { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 },
+  statusCounts: { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, maintenance: 0 },
   uptimePercent: null,
   activeAlertCount: 0,
 };

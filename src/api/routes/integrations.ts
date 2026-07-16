@@ -900,6 +900,10 @@ router.get("/discoveries", async (req, res) => {
       completedCount: row.completedCount,
       skippedOfflineCount: row.skippedOfflineCount,
       skippedErrorCount: row.skippedErrorCount,
+      // Single-FortiGate scoped re-discovery marker (null = full run) —
+      // drives the "Discovering <device>…" label on the integration card
+      // and the asset slide-over's Re-discover busy state.
+      scopeDeviceName: row.scopeDeviceName ?? null,
     };
   });
   res.json({ discoveries: running });
@@ -2120,9 +2124,15 @@ export async function runPreflightTest(integration: { id: string; type: string; 
  *
  * actor: the username triggering the run, or "auto-discovery" for scheduled runs.
  */
-export async function triggerDiscovery(integrationId: string, actor: string): Promise<void> {
+export async function triggerDiscovery(integrationId: string, actor: string, opts?: { scopeDeviceName?: string }): Promise<boolean> {
   const integration = await prisma.integration.findUnique({ where: { id: integrationId } });
   if (!integration) throw new AppError(404, "Integration not found");
+
+  // Scoped single-device re-discovery only makes sense for FortiManager —
+  // it's the only type whose discovery iterates a multi-device roster.
+  if (opts?.scopeDeviceName && integration.type !== "fortimanager") {
+    throw new AppError(400, "Scoped re-discovery is only supported on FortiManager integrations");
+  }
 
   const config = integration.config as Record<string, unknown>;
   if (integration.type === "entraid") {
@@ -2147,18 +2157,22 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
 
   // Coalesce concurrent triggers. The scheduler already gates on
   // isDiscoveryRunning, but the manual route doesn't — and a re-trigger
-  // shouldn't reset the live progress of an in-flight run.
-  if (await isRunActive(integrationId)) return;
+  // shouldn't reset the live progress of an in-flight run. Returns false so
+  // callers that need to distinguish (the per-asset rediscover route 409s
+  // instead of silently no-oping) can; the classic Discover route and the
+  // scheduler ignore the return.
+  if (await isRunActive(integrationId)) return false;
 
-  await upsertQueuedRun({ integrationId, integrationName: integration.name, type: integration.type, actor });
+  await upsertQueuedRun({ integrationId, integrationName: integration.name, type: integration.type, actor, scopeDeviceName: opts?.scopeDeviceName });
 
   // pg-boss live → hand off to the discovery-role worker. Off (cursor mode,
   // single-process) → run in-process detached, the historical behavior. The
   // credential preflight now runs inside runDiscovery (it may execute in a
   // different process), so the manual route returns 202 immediately and a
   // failed preflight surfaces via the DiscoveryRun row + an Event.
-  const enqueued = await publishDiscoveryJob(integrationId, actor);
-  if (!enqueued) void runDiscovery(integrationId, actor);
+  const enqueued = await publishDiscoveryJob(integrationId, actor, opts?.scopeDeviceName);
+  if (!enqueued) void runDiscovery(integrationId, actor, opts?.scopeDeviceName);
+  return true;
 }
 
 /**
@@ -2168,18 +2182,27 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
  * progress accumulator (flushed to the row), and cancellation (polls the row's
  * cancelRequested flag and aborts its local AbortController).
  */
-export async function runDiscovery(integrationId: string, actor: string): Promise<void> {
+export async function runDiscovery(integrationId: string, actor: string, scopeDeviceName?: string): Promise<void> {
   const integration = await prisma.integration.findUnique({ where: { id: integrationId } });
   if (!integration) {
     await finishRun(integrationId, "error").catch(() => {});
     return;
   }
 
+  // Scope is FMG-only (triggerDiscovery enforces it for API callers); a stray
+  // scoped pg-boss payload against another type degrades to a full run.
+  if (scopeDeviceName && integration.type !== "fortimanager") {
+    logger.warn({ integrationId, scopeDeviceName, type: integration.type }, "ignoring scopeDeviceName on non-FortiManager discovery run");
+    scopeDeviceName = undefined;
+  }
+
   const config = integration.config as Record<string, unknown>;
   const integrationName = integration.name;
   const integrationType = integration.type;
   const label = actor === "auto-discovery" ? "Scheduled" : "Manual";
-  const kindLabel = (integration.type === "entraid" || integration.type === "activedirectory" || integration.type === "vcenter") ? "device discovery" : "DHCP discovery";
+  const baseKindLabel = (integration.type === "entraid" || integration.type === "activedirectory" || integration.type === "vcenter") ? "device discovery" : "DHCP discovery";
+  // Scoped runs label every start/complete/abort/error Event with the device.
+  const kindLabel = scopeDeviceName ? `${baseKindLabel} (device "${scopeDeviceName}")` : baseKindLabel;
 
   // No inline preflight — `integrationConnectionTester` refreshes lastTestOk
   // every 10 min, and the discovery scheduler filters on `lastTestOk: true`,
@@ -2189,8 +2212,13 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
 
   const runStartedAt = Date.now();
   await markRunStarted(integrationId, new Date(runStartedAt));
-  await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
-  logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} started for "${integrationName}"` });
+  // Scoped runs deliberately do NOT stamp lastDiscoveryAt — the scheduler
+  // gates the next full run on it, and a per-device refresh must not delay
+  // the fleet-wide cycle by a whole pollInterval.
+  if (!scopeDeviceName) {
+    await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
+  }
+  logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} started for "${integrationName}"`, ...(scopeDeviceName ? { details: { scopeDeviceName } } : {}) });
 
   const acc: RunAccumulator = newRunAccumulator(integrationId, integrationName, integrationType, runStartedAt);
   const ac = new AbortController();
@@ -2389,16 +2417,29 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       // ARP presence sweep targets (opt-in): per-FortiGate reserved-IP lists,
       // swept by processDevice right before each device's ARP-table read.
       const arpSweepTargets = await buildArpSweepTargets(integrationId, config);
-      discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete, integrationId, warmCacheIps, arpSweepTargets.size > 0 ? arpSweepTargets : undefined);
+      discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete, integrationId, warmCacheIps, arpSweepTargets.size > 0 ? arpSweepTargets : undefined, scopeDeviceName);
       // Skip Phase 2 (stale deprecation) if the run was aborted — an aborted
       // run shouldn't take destructive actions, even though the FMG device
       // roster used for deprecation is captured up front (not per-device).
       if (!ac.signal.aborted) {
-        // Run deprecation + DNS/OUI lookups once, now that all devices have been synced.
-        const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "finalize");
-        syncTotals.deprecated.push(...r.deprecated);
-        syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
-        syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
+        // Full run: "finalize" — deprecation + DNS/OUI + fleet-wide reconciles,
+        // once all devices have been synced. Scoped run: "finalize-scoped" —
+        // ONLY the per-controller FortiSwitch/FortiAP decommission (Phase 2b);
+        // the roster-based sweeps would see a one-device fleet and mass-
+        // deprecate/decommission everything else. When the scoped gate's
+        // switch AND AP inventory queries both came back empty/failed, 2b is
+        // a guaranteed no-op — skip the sync call (and its fleet-scale
+        // preload queries) entirely.
+        const finalizeMode: "finalize" | "finalize-scoped" = scopeDeviceName ? "finalize-scoped" : "finalize";
+        const scopedFinalizeIsNoop = scopeDeviceName !== undefined
+          && (discoveryResult.switchInventoriedDevices?.length ?? 0) === 0
+          && (discoveryResult.apInventoriedDevices?.length ?? 0) === 0;
+        if (!scopedFinalizeIsNoop) {
+          const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, finalizeMode);
+          syncTotals.deprecated.push(...r.deprecated);
+          syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
+          syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
+        }
       }
     }
 
@@ -2452,8 +2493,12 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${deprecatedSuffix}${decomSwSuffix}${decomApSuffix}` });
       // Record overall duration sample for slow-run detection. Aborts and
       // errors are intentionally not recorded — a failed run would poison
-      // the rolling average used to compute the "slow" threshold.
-      recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
+      // the rolling average used to compute the "slow" threshold. Scoped
+      // single-device runs are skipped for the same reason in the other
+      // direction: a seconds-long run would drag the full-run baseline down
+      // and false-flag future full runs as slow. (The per-device sample in
+      // onProgress still records — that baseline is per-device and valid.)
+      if (!scopeDeviceName) recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
       recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "success");
       // Refresh the precomputed "By name" checklist sources for the Auto-Monitor
       // cards so the edit modal loads them instantly (no fleet-wide DISTINCT ON on
@@ -2980,13 +3025,19 @@ function buildFortigateFirewallObservedBlob(
 // Upsert the fortigate-firewall AssetSource row for a discovered firewall.
 // Best-effort: failures are logged via syncLog but don't unwind the Asset
 // write that already landed.
+// `lastSeen` = null means the gate was OFFLINE in FMG this cycle (cached-CMDB
+// pull): refresh observed/syncedAt but do NOT advance the row's lastSeen —
+// per the schema comment it's "last time this source reported the device as
+// active", and a cached read isn't that. On create the column is non-nullable,
+// so a first-seen-offline gate stamps syncedAt once and freezes until a live
+// cycle.
 async function upsertFortigateFirewallAssetSource(
   assetId: string,
   integrationId: string,
   serial: string,
   observed: Record<string, unknown>,
   syncedAt: Date,
-  lastSeen: Date,
+  lastSeen: Date | null,
 ): Promise<void> {
   await prisma.assetSource.upsert({
     where: { sourceKind_externalId: { sourceKind: "fortigate-firewall", externalId: serial } },
@@ -2998,8 +3049,8 @@ async function upsertFortigateFirewallAssetSource(
       observed: observed as any,
       inferred: false,
       syncedAt,
-      firstSeen: lastSeen,
-      lastSeen,
+      firstSeen: lastSeen ?? syncedAt,
+      lastSeen: lastSeen ?? syncedAt,
     },
     update: {
       assetId,
@@ -3007,7 +3058,7 @@ async function upsertFortigateFirewallAssetSource(
       observed: observed as any,
       inferred: false,
       syncedAt,
-      lastSeen,
+      ...(lastSeen ? { lastSeen } : {}),
     },
   });
   // Pre-`fgt:`-tag firewalls were classified as "manual" by the phase-1
@@ -3150,6 +3201,20 @@ async function upsertFortinetInfraAssetSource(
   syncedAt: Date,
   lastSeen: Date,
 ): Promise<void> {
+  // osVersion "absent ≠ wipe": a managed_ap/managed-switch row can arrive
+  // without a usable firmware version (os_version missing mid-rejoin, or a
+  // cached-format fallback rejected by isCanonicalFortiapVersion). Keep the
+  // previous scrape's value instead of blanking it — same convention as the
+  // AP LLDP persist. The read only fires on the empty-version case, so the
+  // steady-state cost at fleet scale is zero extra queries.
+  if (!observed.osVersion) {
+    const existing = await prisma.assetSource.findUnique({
+      where: { sourceKind_externalId: { sourceKind, externalId: serial } },
+      select: { observed: true },
+    });
+    const prevVersion = (existing?.observed as Record<string, unknown> | null)?.osVersion;
+    if (typeof prevVersion === "string" && prevVersion) observed.osVersion = prevVersion;
+  }
   await prisma.assetSource.upsert({
     where: { sourceKind_externalId: { sourceKind, externalId: serial } },
     create: { assetId, sourceKind, externalId: serial, integrationId, observed: observed as any, inferred: false, syncedAt, firstSeen: lastSeen, lastSeen },
@@ -3256,7 +3321,27 @@ class AssetIndex {
 // "skip-deprecation"   — run phases 1, 3–7 only (used in per-device syncs; no deprecation or DNS/OUI)
 // "deprecation-only"   — run only phase 2 (legacy; prefer "finalize")
 // "finalize"           — run phase 2 + phases 8–9; called once after all per-device syncs complete
-type SyncMode = "full" | "skip-deprecation" | "deprecation-only" | "finalize";
+// "finalize-scoped"    — the finalize pass of a single-FortiGate scoped re-discovery: Phase 2b ONLY.
+//                        NEVER 2/2a/2c — a scoped run's result carries one device, so the roster-
+//                        based sweeps (knownFirewallSerials is built from result.devices, the
+//                        PROCESSED chunks, not the raw ADOM roster) would see a one-device fleet
+//                        and deprecate/decommission everything else. Phase 2b is inherently safe
+//                        scoped: it only judges assets whose controllerFortigate had a SUCCESSFUL
+//                        inventory query this run. Phases 8–9/12/13.x are fleet-wide reconciles
+//                        owned by full runs (their gates only pass full|finalize).
+export type SyncMode = "full" | "skip-deprecation" | "deprecation-only" | "finalize" | "finalize-scoped";
+
+/**
+ * Pure gate for the destructive/apply sweep phases inside syncDhcpSubnets'
+ * `mode !== "skip-deprecation"` block. Extracted (and exported) so the
+ * mode-to-phase matrix is unit-testable — getting this wrong mass-deprecates
+ * subnets or decommissions healthy firewalls on a scoped run.
+ */
+export function sweepPhaseEnabled(mode: SyncMode, phase: "2" | "2a" | "2b" | "2c"): boolean {
+  if (mode === "skip-deprecation") return false;
+  if (mode === "finalize-scoped") return phase === "2b";
+  return true;
+}
 
 async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full") {
   const syncLog = (level: "info" | "error", message: string) => {
@@ -3434,8 +3519,31 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // the live monitor query is "configured but currently offline" — likely
   // a brief post-config-push window or an offline device. Don't decommission
   // it. The CMDB rosters come from native FMG calls (no proxy throttle).
-  for (const serial of result.cmdbSwitchSerials || []) seenSwitchSerials.add(serial);
-  for (const serial of result.cmdbApSerials     || []) seenApSerials.add(serial);
+  // SCOPED PER-CONTROLLER (keyed on lowercased device name — FMG-cased vs
+  // FortiOS-cased names can differ for the same device): a roster entry only
+  // protects a switch/AP whose recorded controllerFortigate IS the gate the
+  // roster was read from. An FMG-offline gate's roster is FMG's CACHED copy
+  // (Step 3d.4 runs offline by design), and a staged replacement gate's
+  // cloned config can list another gate's whole fleet — fleet-wide
+  // protection let exactly that shield ghost APs from the sweep forever
+  // (prod 2026-07: staged JEFFERSON-201G-1 vouched for a deleted AP owned
+  // by the live JEFFERSON-101F-1).
+  const cmdbSwitchSerialsByDevice = new Map<string, Set<string>>();
+  const cmdbApSerialsByDevice     = new Map<string, Set<string>>();
+  for (const e of result.cmdbSwitchSerials || []) {
+    const key = (e.device || "").toLowerCase();
+    if (!key || !e.serial) continue;
+    let set = cmdbSwitchSerialsByDevice.get(key);
+    if (!set) { set = new Set(); cmdbSwitchSerialsByDevice.set(key, set); }
+    set.add(e.serial);
+  }
+  for (const e of result.cmdbApSerials || []) {
+    const key = (e.device || "").toLowerCase();
+    if (!key || !e.serial) continue;
+    let set = cmdbApSerialsByDevice.get(key);
+    if (!set) { set = new Set(); cmdbApSerialsByDevice.set(key, set); }
+    set.add(e.serial);
+  }
   const switchInventoriedDevices = new Set<string>(result.switchInventoriedDevices || []);
   const apInventoriedDevices     = new Set<string>(result.apInventoriedDevices     || []);
 
@@ -3693,7 +3801,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   phaseMark("2");
   // ══════════════════════════════════════════════════════════════════════════════
 
-  if (knownDeviceNames.size > 0) {
+  if (sweepPhaseEnabled(mode, "2") && knownDeviceNames.size > 0) {
     // Find stale subnets in-memory first (for the return value).
     // Roster check is case-insensitive: a subnet's fortigateDevice can carry
     // FortiOS-cased casing while the FMG roster carries FMG-cased casing
@@ -3755,12 +3863,20 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   //
   // A decommissioned firewall is reactivated by the Phase-3b firewall update
   // path above on a future discovery cycle when the device returns to FMG.
-  if (knownDeviceNames.size > 0 && (integrationType === "fortimanager" || integrationType === "fortigate")) {
+  //
+  // NEVER runs in "finalize-scoped": knownFirewallSerials is built from
+  // result.devices — the PROCESSED chunks (one device in a scoped run), not
+  // the raw ADOM roster — so a scoped pass would decommission every fleet
+  // firewall matched by serial only.
+  if (sweepPhaseEnabled(mode, "2a") && knownDeviceNames.size > 0 && (integrationType === "fortimanager" || integrationType === "fortigate")) {
     const candidateFws = await prisma.asset.findMany({
       where: {
         discoveredByIntegrationId: integrationId,
         assetType: "firewall",
-        status: { not: "decommissioned" },
+        // A maintenance-window asset is deliberately unreachable — never
+        // decommission it from here (decommissioned would also clamp
+        // monitored=false and break the scheduler's status restore).
+        status: { notIn: ["decommissioned", "maintenance"] },
       },
       select: { id: true, hostname: true, serialNumber: true },
     });
@@ -3818,12 +3934,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // offline" (a controller that timed out doesn't take its switches/APs
   // down with it). A decommissioned switch/AP is automatically reactivated
   // by the Phase-3b update path above when its serial reappears.
-  if (switchInventoriedDevices.size > 0 || apInventoriedDevices.size > 0) {
+  //
+  // The per-controller gating is also why this is the ONE sweep that runs in
+  // "finalize-scoped" (single-FortiGate re-discovery): only assets behind
+  // the scoped, successfully-queried controller are ever judged.
+  if (sweepPhaseEnabled(mode, "2b") && (switchInventoriedDevices.size > 0 || apInventoriedDevices.size > 0)) {
     const candidates = await prisma.asset.findMany({
       where: {
         discoveredByIntegrationId: integrationId,
         assetType: { in: ["switch", "access_point"] },
-        status: { not: "decommissioned" },
+        // Same maintenance guard as the Phase-2a firewall sweep above.
+        status: { notIn: ["decommissioned", "maintenance"] },
       },
       select: { id: true, hostname: true, serialNumber: true, assetType: true, fortinetTopology: true, status: true },
     });
@@ -3837,7 +3958,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (!controller || !inventoriedSet.has(controller)) continue;
       const seenBySerial   = a.serialNumber && (a.assetType === "switch" ? seenSwitchSerials   : seenApSerials).has(a.serialNumber);
       const seenByHostname = a.hostname     && (a.assetType === "switch" ? seenSwitchHostnames : seenApHostnames).has(a.hostname);
-      if (seenBySerial || seenByHostname) continue;
+      // CMDB decommission protection, scoped to THIS asset's controller —
+      // see the roster-map construction above for why fleet-wide vouching
+      // is wrong (offline/staged gates' cached configs).
+      const cmdbProtected = !!(a.serialNumber &&
+        (a.assetType === "switch" ? cmdbSwitchSerialsByDevice : cmdbApSerialsByDevice)
+          .get(controller.toLowerCase())?.has(a.serialNumber));
+      if (seenBySerial || seenByHostname || cmdbProtected) continue;
       staleIds.push(a.id);
       if (a.assetType === "switch")        decommissionedSwitches.push(a.hostname || a.serialNumber || a.id);
       else if (a.assetType === "access_point") decommissionedAps.push(a.hostname || a.serialNumber || a.id);
@@ -3870,7 +3997,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   //
   // Only applies to fortimanager + fortigate integrations. windowsserver /
   // entraid / activeDirectory don't manage Fortinet hardware.
-  if (integrationType === "fortimanager" || integrationType === "fortigate") {
+  if (sweepPhaseEnabled(mode, "2c") && (integrationType === "fortimanager" || integrationType === "fortigate")) {
     const integ = await prisma.integration.findUnique({
       where: { id: integrationId },
       select: { config: true },
@@ -3905,7 +4032,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
   }
 
-  } // end mode !== "skip-deprecation" (Phase 2 + 2b + 2c)
+  } // end mode !== "skip-deprecation" (Phase 2 + 2a + 2b + 2c; "finalize-scoped" runs 2b only — see sweepPhaseEnabled)
 
   if (mode === "full" || mode === "skip-deprecation") {
   // ══════════════════════════════════════════════════════════════════════════════
@@ -4087,6 +4214,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (!existingAsset && member.isPrimary) {
         existingAsset = assetIdx.findByEntry(undefined, fgHostname, device.mgmtIp || undefined);
       }
+      // Serial-mismatch guard — same rule as the FortiSwitch/FortiAP loops:
+      // the hostname/IP fallback exists for serial-less placeholder rows;
+      // it must never bind to an asset carrying a DIFFERENT non-empty
+      // serial (an RMA'd chassis keeping the old hostname is new hardware —
+      // Phase 2a retires the old asset by serial).
+      if (existingAsset && member.serial && existingAsset.serialNumber
+          && String(existingAsset.serialNumber).toUpperCase() !== member.serial.toUpperCase()) {
+        existingAsset = null;
+      }
       if (existingAsset) {
         // Snapshot material fields before the branch mutates existingAsset in
         // place (macAddresses / status below) so the per-asset audit diff is
@@ -4099,7 +4235,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           try {
             const syncedAt = new Date(now);
             const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
-            await upsertFortigateFirewallAssetSource(existingAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+            await upsertFortigateFirewallAssetSource(existingAsset.id, integrationId, member.serial, observed, syncedAt, memberDevice.offline ? null : syncedAt);
           } catch (err: any) {
             syncLog("error", `Failed to upsert fortigate-firewall AssetSource for ${memberDevice.hostname || device.name}: ${err?.message || "Unknown error"}`);
           }
@@ -4256,8 +4392,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // from churning across failovers (where each member alternates
         // being primary). Best-effort; Phase 13.5 reconciler catches misses.
         if (member.isPrimary) {
+          // Operator hostname pin: the db.ts guard rewrote this cycle's
+          // hostname write back to `hostnameOverride`, so the projected name
+          // never lands on the row — "projected ≠ previous" is the pin
+          // diverging by design, not a rename (it would spuriously fire
+          // every cycle). The pin is the effective hostname for tags.
+          const hostnamePin = (existingAsset.hostnameOverride as string | null | undefined) || null;
           const projectedHostnameRaw = updateData.hostname as string | null | undefined;
-          if (projectedHostnameRaw && previousHostname && projectedHostnameRaw !== previousHostname) {
+          if (!hostnamePin && projectedHostnameRaw && previousHostname && projectedHostnameRaw !== previousHostname) {
             try {
               await applyFirewallRename(previousHostname, projectedHostnameRaw);
             } catch (err: any) {
@@ -4268,7 +4410,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             }
           }
           try {
-            await seedFirewallTagRegistry(projectedHostnameRaw || previousHostname || fgHostname);
+            await seedFirewallTagRegistry(hostnamePin || projectedHostnameRaw || previousHostname || fgHostname);
           } catch { /* best-effort */ }
         }
         // Update in-memory index. For the primary, mirror the cluster IP +
@@ -4378,7 +4520,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         try {
           const syncedAt = new Date(now);
           const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
-          await upsertFortigateFirewallAssetSource(newAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+          await upsertFortigateFirewallAssetSource(newAsset.id, integrationId, member.serial, observed, syncedAt, memberDevice.offline ? null : syncedAt);
         } catch (err: any) {
           syncLog("error", `Created FortiGate asset ${memberDevice.hostname || device.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
         }
@@ -4624,6 +4766,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // fortigate-endpoint source row.
       if (!existingAsset && normalizedSwMac) existingAsset = assetIdx.findByMac(normalizedSwMac);
       if (!existingAsset && sw.name) existingAsset = assetIdx.findByEntry(undefined, sw.name, sw.ipAddress || undefined);
+      // Serial-mismatch guard — same rule as the FortiAP loop: a fallback
+      // (MAC/name/IP) match must never bind to an asset carrying a
+      // DIFFERENT non-empty serial (RMA'd replacement hardware inheriting
+      // the old unit's address). Serial-less orphan adoption still binds.
+      if (existingAsset && sw.serial && existingAsset.serialNumber
+          && String(existingAsset.serialNumber).toUpperCase() !== sw.serial.toUpperCase()) {
+        existingAsset = null;
+      }
 
       const swTopology = {
         role: "fortiswitch" as const,
@@ -4678,8 +4828,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         const updateData: Record<string, unknown> = {
           // Resurrection of a decommissioned switch requires it to be
           // connected right now; ordinary active↔storage state sync is
-          // unaffected.
-          ...(existingAsset.status !== "decommissioned" || sw.connected
+          // unaffected. A maintenance-window asset is scheduler-owned —
+          // never write status over it (the maintenanceScheduler restores
+          // the right state when the window ends).
+          ...(existingAsset.status !== "maintenance" &&
+          (existingAsset.status !== "decommissioned" || sw.connected)
             ? {
                 status: swStatus,
                 ...(swStatus !== existingAsset.status ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
@@ -4894,6 +5047,20 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       let existingAsset: any = ap.serial ? assetIdx.findBySerial(ap.serial) : null;
       if (!existingAsset && normalizedMac) existingAsset = assetIdx.findByMac(normalizedMac);
       if (!existingAsset && ap.name) existingAsset = assetIdx.findByEntry(undefined, ap.name, resolvedIp || undefined);
+      // Serial-mismatch guard on the fallback matches: serial is chassis
+      // identity, so a MAC/name/IP match must never bind this row to an
+      // asset that carries a DIFFERENT non-empty serial. Without it, an
+      // RMA'd replacement AP inheriting the old unit's IP re-binds to the
+      // old asset every cycle — resurrecting it out of decommissioned,
+      // stamping the new unit's MAC onto it, and never getting an asset of
+      // its own, while Phase 2b re-decommissions the old serial each
+      // finalize (prod flap loop, 2026-07: FP231FTF22099Q3E ↔
+      // FP231FTF22024874 at REOSTONE, one decommission Event every run).
+      // Serial-less matches (orphan fortigate-endpoint adoption) still bind.
+      if (existingAsset && ap.serial && existingAsset.serialNumber
+          && String(existingAsset.serialNumber).toUpperCase() !== ap.serial.toUpperCase()) {
+        existingAsset = null;
+      }
 
       const apTopology = {
         role: "fortiap" as const,
@@ -6000,6 +6167,18 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // interface (FortiLink, mirror VLAN, stack mgmt port) and would
       // clobber the authoritative connecting_from / mgmtIp value.
       const isInfraAsset = asset.assetType === "firewall" || asset.assetType === "switch" || asset.assetType === "access_point";
+      // Fortinet-discovery-owned infra (carries the fortinetTopology stamp
+      // from its own discovery loop). Presence for these is owned by that
+      // loop — the firewall/switch/AP blocks bump lastSeen only when the
+      // device answered live / reported connected — plus the monitor probe.
+      // A client-side sighting (this box holding a DHCP lease on some gate,
+      // or lingering in device inventory) must NOT freshen it: leases stay
+      // bound past shutdown and FortiOS's cached is_online lags reality, so
+      // an offline-in-FMG gate would otherwise show lastSeen advancing every
+      // discovery run. Operator-typed non-Fortinet "firewall"/"switch" assets
+      // (no topology stamp) keep the endpoint-style presence bumps — the
+      // client sighting is their only evidence.
+      const isFortinetOwnedInfra = isInfraAsset && asset.fortinetTopology != null;
 
       if (entry.device) {
         sightingRows.push({
@@ -6052,14 +6231,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // reconcile call inside batchSettled, not as a JSON column write.
       const updateData: Record<string, unknown> = {
         macAddress: macList[0].mac,
-        ...(leasePresence
+        // A live lease must not pull a maintenance-window asset back to
+        // "active" — that status is scheduler-owned until the window ends.
+        ...(leasePresence && asset.status !== "maintenance"
           ? {
               status: "active",
               ...(asset.status !== "active" ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
             }
           : {}),
       };
-      if (leasePresence) bumpLastSeen(updateData, asset, new Date(now), "dhcp-lease");
+      if (leasePresence && !isFortinetOwnedInfra) bumpLastSeen(updateData, asset, new Date(now), "dhcp-lease");
       if (!isInfraAsset) {
         updateData.ipAddress = entry.ipAddress;
         updateData.ipSource = entry.device || integrationType;
@@ -6252,8 +6433,20 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const invSeenValid = !Number.isNaN(invSeenAt.getTime());
 
       if (existingAsset) {
+        const invIsFortinetInfra = existingAsset.assetType === "firewall"
+          || existingAsset.assetType === "switch"
+          || existingAsset.assetType === "access_point";
+        // Discovery-owned infra: presence comes from the device's own
+        // discovery loop (bumps only when it answered live / reported
+        // connected) + the monitor probe — never from this client-side
+        // inventory sighting. FortiOS's cached is_online lags reality, so
+        // without this an offline-in-FMG gate sighted as a DHCP client of
+        // another gate keeps its lastSeen advancing every discovery run.
+        // Mirrors the Phase 6 lease-path guard; operator-typed non-Fortinet
+        // infra (no fortinetTopology stamp) keeps the bump.
+        const invIsFortinetOwnedInfra = invIsFortinetInfra && existingAsset.fortinetTopology != null;
         const updateData: Record<string, unknown> = {};
-        if (invSeenValid) bumpLastSeen(updateData, existingAsset, invSeenAt, "device-inventory");
+        if (invSeenValid && !invIsFortinetOwnedInfra) bumpLastSeen(updateData, existingAsset, invSeenAt, "device-inventory");
         // Resurrection requires the device to be online right now — a
         // remembered-but-offline inventory row must not undo an operator's
         // (or the stale-sweep's) decommission.
@@ -6265,12 +6458,25 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (!handledByDhcp && inv.ipAddress && inv.ipAddress !== existingAsset.ipAddress) {
           updateData.ipAddress = inv.ipAddress;
         }
-        if (inv.os && !existingAsset.os) updateData.os = inv.os;
+        // Fortinet infrastructure (firewall/switch/AP) gets os/osVersion from
+        // its own discovery loop via projection — canonical FortiOS strings
+        // read live from the device. The device-inventory os_version for these
+        // same boxes (they show up as DHCP clients of their gate) is FortiOS's
+        // CACHED client fingerprint in display format ("7.4.5 Build 0734")
+        // and lags upgrades. It must never overwrite the projection-owned
+        // value: Phase 7 runs after the infra loops, so the set-always write
+        // below re-staled AP firmware minutes after the AP loop healed it,
+        // every cycle — and Phase 11's corrective projection pass excludes
+        // infra assets, so nothing ever fixed it (prod 2026-07).
+        // (`invIsFortinetInfra` is defined above the lastSeen bump — this
+        // os-write skip deliberately keys on assetType alone, unlike the
+        // topology-qualified presence guard.)
+        if (inv.os && !existingAsset.os && !invIsFortinetInfra) updateData.os = inv.os;
         if (inv.os && (existingAsset as any).assetType === "other") {
           const inferred = inferAssetTypeFromOs(inv.os);
           if (inferred !== "other") updateData.assetType = inferred;
         }
-        if (inv.osVersion) updateData.osVersion = inv.osVersion;
+        if (inv.osVersion && !invIsFortinetInfra) updateData.osVersion = inv.osVersion;
         if (inv.hardwareVendor && !existingAsset.manufacturer) updateData.manufacturer = inv.hardwareVendor;
         if (inv.device && !existingAsset.learnedLocation) updateData.learnedLocation = inv.device;
         if (switchConn) updateData.lastSeenSwitch = switchConn;
@@ -7650,8 +7856,16 @@ async function syncEntraDevices(
       // Pre-write snapshot for the per-asset discovery audit diff.
       const entraBefore = snapshotMaterialAssetFields(existing);
       const updateData: Record<string, unknown> = {
-        status,
-        ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+        // Maintenance-window assets are scheduler-owned: don't let the
+        // directory's enabled/disabled state clobber status mid-window (the
+        // maintenanceScheduler's self-heal would fight it; the right state
+        // is restored when the window ends).
+        ...(existing.status !== "maintenance"
+          ? {
+              status,
+              ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+            }
+          : {}),
       };
       // Discovery-owned fields from the projection.
       if (projected.hostname !== null) updateData.hostname = projected.hostname;
@@ -7839,8 +8053,13 @@ async function syncEntraDevices(
               // identity link. Prior assetTag is preserved on the row.
               // (No lastSeen — directory activity stays on the AssetSource
               // rows; Asset.lastSeen is verified network presence.)
-              status,
-              ...(status !== dupEntra.asset.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+              // Maintenance-window assets keep their scheduler-owned status.
+              ...(dupEntra.asset.status !== "maintenance"
+                ? {
+                    status,
+                    ...(status !== dupEntra.asset.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+                  }
+                : {}),
               tags: newTags,
             };
             // Discovery-owned fields from projection.
@@ -8330,8 +8549,14 @@ async function syncActiveDirectoryDevices(
       // Pre-write snapshot for the per-asset discovery audit diff.
       const adBefore = snapshotMaterialAssetFields(existing);
       const updateData: Record<string, unknown> = {
-        status,
-        ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+        // Maintenance-window assets keep their scheduler-owned status (same
+        // guard as the Entra sync — see maintenanceScheduleService).
+        ...(existing.status !== "maintenance"
+          ? {
+              status,
+              ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+            }
+          : {}),
       };
       // Discovery-owned fields from the projection. Only write when
       // projection has a value (null = "no source has an opinion" — leave

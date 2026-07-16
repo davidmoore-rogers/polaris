@@ -70,26 +70,22 @@ export function parseLocationCodes(raw: string | null | undefined): LocationCode
 }
 
 /**
- * Resolve a node's effective codes from its two sources, merging PER KEY
- * with precedence Asset.description → device description — so an operator
- * can add just "jb:112-305" in the Polaris description without re-typing the
- * device-side b:/f:/r: codes. Notes are deliberately not a source.
+ * Resolve a node's effective codes: when the Polaris description carries ANY
+ * codes it defines the grouping EXCLUSIVELY (removing a key from the
+ * description removes the node from that group — no per-key fall-through to
+ * a stale device-side copy); a description with no codes falls back to the
+ * device description wholesale. The old per-key merge dated from the
+ * notes-over-description era and made codes impossible to remove while the
+ * device copy lagged a sync/discovery cycle. Notes are deliberately not a
+ * source.
  */
 export function resolveEffectiveLocation(sources: {
   description?: string | null;
   deviceDescription?: string | null;
 }): LocationCodes {
-  const layers = [
-    parseLocationCodes(sources.deviceDescription),
-    parseLocationCodes(sources.description),
-  ];
-  const out: LocationCodes = { ...EMPTY };
-  for (const layer of layers) {
-    for (const field of Object.values(KEY_TO_FIELD)) {
-      if (layer[field] !== null) out[field] = layer[field];
-    }
-  }
-  return out;
+  const fromDescription = parseLocationCodes(sources.description);
+  if (hasLocationCodes(fromDescription)) return fromDescription;
+  return parseLocationCodes(sources.deviceDescription);
 }
 
 /** True when the resolved codes carry at least one value. */

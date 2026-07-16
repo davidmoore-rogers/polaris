@@ -443,6 +443,25 @@ export interface SuppressionAssetState {
    * Past or null = inactive (auto-expired or never set).
    */
   dependencyTestUntil?: Date | null;
+  /**
+   * Asset lifecycle status. status="maintenance" (scheduler-held while a
+   * maintenance window is open) behaves exactly like an active Dependency
+   * Test overlay: the parent counts as down so its children suppress — a
+   * switch in maintenance takes its downstream devices into dependency
+   * suppression, and the reconciler resumes them when the window ends.
+   * Overridable per schedule via `maintenanceSuppressChildren`.
+   */
+  status?: string | null;
+  /**
+   * Per-schedule "mark dependents down" toggle (MaintenanceSchedule
+   * .suppressChildren, OR-ed across the asset's open windows by the
+   * reconciler). Only consulted when status="maintenance". false = the
+   * maintenance status is IGNORED by suppression and the parent evaluates
+   * by its frozen monitorStatus (dependents keep monitoring/alerting —
+   * e.g. a clustered/redundant parent whose children stay reachable).
+   * Omitted/true = launch behavior (maintenance parent counts as down).
+   */
+  maintenanceSuppressChildren?: boolean;
 }
 export function evaluateSuppression(
   states: SuppressionAssetState[],
@@ -486,6 +505,16 @@ export function evaluateSuppression(
       // through to grandparents the way an unmonitored parent does, since
       // the operator's intent is "pretend THIS box went offline."
       if (ps.dependencyTestUntil && ps.dependencyTestUntil.getTime() > evalNow) {
+        return false;
+      }
+      // Maintenance window: the parent is deliberately offline — behave
+      // exactly like the test overlay (down, no walk-through to
+      // grandparents; "pretend THIS box went offline" is literally true).
+      // Unless the schedule opted out (suppressChildren=false): then the
+      // maintenance status is ignored and the parent falls through to the
+      // normal evaluation below (its monitorStatus is frozen at the
+      // pre-window state while polling is paused).
+      if (ps.status === "maintenance" && ps.maintenanceSuppressChildren !== false) {
         return false;
       }
       if (!ps.monitored) {
@@ -787,6 +816,7 @@ export async function reconcileDependencySuppression(): Promise<{
       assetType: true,
       monitored: true,
       monitorStatus: true,
+      status: true,
       dependencyLayer: true,
       dependencySuppressed: true,
       dependencyTestUntil: true,
@@ -796,11 +826,31 @@ export async function reconcileDependencySuppression(): Promise<{
 
   const parentsByChild = await loadEffectiveParents();
 
+  // Per-asset "mark dependents down" resolution for in-maintenance assets:
+  // OR across the asset's OPEN windows' schedules (any suppressing window
+  // suppresses). A window whose schedule was deleted (scheduleId SetNull,
+  // open only until the next maintenance reconcile closes it) counts as
+  // suppressing — the conservative launch default. Open-window counts are
+  // tiny relative to the fleet, so this is one cheap query per pass.
+  const maintenanceSuppress = new Map<string, boolean>();
+  const openWindows = await prisma.assetMaintenanceWindow.findMany({
+    where: { endedAt: null },
+    select: { assetId: true, schedule: { select: { suppressChildren: true } } },
+  });
+  for (const w of openWindows) {
+    const suppresses = w.schedule?.suppressChildren !== false;
+    maintenanceSuppress.set(w.assetId, (maintenanceSuppress.get(w.assetId) ?? false) || suppresses);
+  }
+
   const states: SuppressionAssetState[] = assets.map(a => ({
     id:                  a.id,
     layer:               a.dependencyLayer,
     monitored:           a.monitored,
     monitorStatus:       a.monitorStatus,
+    status:              a.status,
+    // Default true covers an operator-set manual "maintenance" status with
+    // no window rows — that keeps behaving like the launch semantics.
+    maintenanceSuppressChildren: maintenanceSuppress.get(a.id) ?? true,
     currentlySuppressed: a.dependencySuppressed,
     dependencyTestUntil: a.dependencyTestUntil,
   }));

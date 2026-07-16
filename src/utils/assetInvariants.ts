@@ -27,6 +27,114 @@ export function clampAcquiredToLastSeen(
 }
 
 /**
+ * Re-assert an operator hostname override over a pending Asset write.
+ *
+ * Discovery projection writes set `hostname` on every cycle. When the row
+ * carries a `hostnameOverride` (operator pin, set via the asset edit form),
+ * those writes must not clobber it — the guard rewrites the staged hostname
+ * back to the override value. Handles both the plain (`hostname: "x"`) and
+ * Prisma nested (`hostname: { set: "x" }`) data shapes.
+ *
+ * A write that itself touches `hostnameOverride` is the operator set/clear
+ * path (the assets PUT handler) — it is authoritative and never rewritten.
+ *
+ * Mutates `data` in place. Returns true when the override was re-asserted.
+ */
+export function applyHostnameOverride(
+  data: Record<string, unknown>,
+  override: string | null | undefined,
+): boolean {
+  if (!data || typeof data !== "object") return false;
+  if (!("hostname" in data)) return false;
+  if ("hostnameOverride" in data) return false;
+  if (!override) return false;
+  const v = data.hostname;
+  if (v && typeof v === "object" && "set" in (v as Record<string, unknown>)) {
+    (v as Record<string, unknown>).set = override;
+  } else {
+    data.hostname = override;
+  }
+  return true;
+}
+
+/**
+ * Outcome of applying the operator IP override to a pending Asset write.
+ *
+ *   "none"       — no override on the row, write doesn't stage ipAddress, or
+ *                  the write itself touches ipOverride (operator set/clear
+ *                  path — authoritative, never rewritten).
+ *   "released"   — the staged IP equals the override: discovery agrees, so
+ *                  the pin self-disables (data.ipOverride staged to null) and
+ *                  the staged IP passes through untouched.
+ *   "reasserted" — the staged IP differs (or is a clear): the pin wins — the
+ *                  staged ipAddress is rewritten back to the override.
+ *                  `discoveredIp` carries the IP the writer wanted (null when
+ *                  the writer staged a clear) so the caller can raise an
+ *                  ip-override Conflict for a concrete disagreement.
+ */
+export type IpOverrideOutcome =
+  | { action: "none" }
+  | { action: "released"; ip: string }
+  | { action: "reasserted"; discoveredIp: string | null };
+
+/**
+ * Apply the operator IP override (Asset.ipOverride) to a pending Asset write.
+ *
+ * Sibling of applyHostnameOverride with different collision semantics:
+ * discovery gets a vote. A staged ipAddress equal to the override releases
+ * the pin (discovery converged — the override is no longer doing anything);
+ * a staged different IP is rewritten back to the override, and the caller is
+ * told which IP discovery proposed so it can raise a Conflict. A staged
+ * clear (null/empty) is re-asserted without a conflict — a source losing its
+ * opinion is not a disagreement.
+ *
+ * Comparison is a trimmed exact string match — discovery writers stage
+ * canonical address strings, and a formatting mismatch re-asserting the pin
+ * plus raising a conflict is the safe failure mode.
+ *
+ * Handles both the plain (`ipAddress: "x"`) and Prisma nested
+ * (`ipAddress: { set: "x" }`) data shapes. On re-assertion any staged
+ * `ipSource` is rewritten to "manual" so the row's provenance keeps matching
+ * the pinned value. Mutates `data` in place.
+ */
+export function applyIpOverride(
+  data: Record<string, unknown>,
+  override: string | null | undefined,
+): IpOverrideOutcome {
+  if (!data || typeof data !== "object") return { action: "none" };
+  if (!("ipAddress" in data)) return { action: "none" };
+  if ("ipOverride" in data) return { action: "none" };
+  if (!override) return { action: "none" };
+
+  const v = data.ipAddress;
+  const nested = v !== null && typeof v === "object" && "set" in (v as Record<string, unknown>);
+  const rawStaged = nested ? (v as Record<string, unknown>).set : v;
+  const staged = typeof rawStaged === "string" ? rawStaged.trim() || null : null;
+
+  if (staged === override.trim()) {
+    // Discovery agrees with the pin — release it and let the write through.
+    data.ipOverride = null;
+    return { action: "released", ip: staged };
+  }
+
+  // Pin wins: rewrite the staged IP back to the override.
+  if (nested) {
+    (v as Record<string, unknown>).set = override;
+  } else {
+    data.ipAddress = override;
+  }
+  const src = data.ipSource;
+  if (src !== undefined) {
+    if (src !== null && typeof src === "object" && "set" in (src as Record<string, unknown>)) {
+      (src as Record<string, unknown>).set = "manual";
+    } else {
+      data.ipSource = "manual";
+    }
+  }
+  return { action: "reasserted", discoveredIp: staged };
+}
+
+/**
  * Evidence-source labels for Asset.lastSeenSource. Open set — the UI renders
  * the string verbatim — but every writer should use one of these so operators
  * see a consistent vocabulary.

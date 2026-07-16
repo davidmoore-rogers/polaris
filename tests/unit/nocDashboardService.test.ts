@@ -54,10 +54,12 @@ describe("getStatusSummary", () => {
         { monitorStatus: "down", _count: { _all: 1 } },
         { monitorStatus: "warning", _count: { _all: 5 } }, // excluded from uptime denom
       ]);
-    count.mockResolvedValueOnce(3);
+    count
+      .mockResolvedValueOnce(3)  // activeAlertCount
+      .mockResolvedValueOnce(0); // maintenance-window count
 
     const r = await noc.getStatusSummary();
-    expect(r.statusCounts).toEqual({ total: 16, up: 10, down: 2, warning: 1, unknown: 3, recovering: 0 });
+    expect(r.statusCounts).toEqual({ total: 16, up: 10, down: 2, warning: 1, unknown: 3, recovering: 0, maintenance: 0 });
     // 7 / (7 + 1) = 87.5
     expect(r.uptimePercent).toBe(87.5);
     expect(r.activeAlertCount).toBe(3);
@@ -65,10 +67,34 @@ describe("getStatusSummary", () => {
 
   it("returns null uptime when there is no infra up/down to measure", async () => {
     groupBy.mockResolvedValueOnce([{ monitorStatus: "up", _count: { _all: 4 } }]).mockResolvedValueOnce([]);
-    count.mockResolvedValueOnce(0);
+    count.mockResolvedValue(0);
     const r = await noc.getStatusSummary();
     expect(r.uptimePercent).toBeNull();
     expect(r.statusCounts.total).toBe(4);
+  });
+
+  it("buckets maintenance-window assets separately (still in total, never in up/down/warning)", async () => {
+    groupBy
+      // maintenance assets are excluded from both groupBys server-side
+      // (where status<>maintenance), so their frozen "down" never appears here
+      .mockResolvedValueOnce([
+        { monitorStatus: "up", _count: { _all: 10 } },
+        { monitorStatus: "down", _count: { _all: 1 } },
+      ])
+      .mockResolvedValueOnce([{ monitorStatus: "up", _count: { _all: 5 } }]);
+    count
+      .mockResolvedValueOnce(1)  // activeAlertCount
+      .mockResolvedValueOnce(2); // maintenance-window count
+
+    const r = await noc.getStatusSummary();
+    expect(r.statusCounts).toEqual({ total: 13, up: 10, down: 1, warning: 0, unknown: 0, recovering: 0, maintenance: 2 });
+    // Both groupBys must carry the maintenance exclusion.
+    expect(groupBy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      where: expect.objectContaining({ status: { not: "maintenance" } }),
+    }));
+    expect(groupBy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: expect.objectContaining({ status: { not: "maintenance" } }),
+    }));
   });
 });
 
@@ -101,6 +127,15 @@ describe("getDownNodes", () => {
     await noc.getDownNodes();
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
       orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
+    }));
+  });
+
+  it("excludes maintenance-window assets (frozen monitorStatus is not a live outage)", async () => {
+    findMany.mockResolvedValueOnce([]);
+    count.mockResolvedValueOnce(0);
+    await noc.getDownNodes();
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ monitorStatus: "down", status: { not: "maintenance" } }),
     }));
   });
 });
@@ -406,7 +441,10 @@ describe("getNocSummaryPayload", () => {
     groupBy
       .mockResolvedValueOnce([{ monitorStatus: "up", _count: { _all: 3 } }]) // status: all monitored
       .mockResolvedValueOnce([]);                                            // status: infra subset
-    count.mockResolvedValue(1); // status activeAlertCount + downNodes total (concurrent)
+    // activeAlertCount + downNodes total return 1; the status feed's
+    // maintenance-window count (where.status === "maintenance") returns 0.
+    count.mockImplementation((args?: { where?: { status?: unknown } }) =>
+      Promise.resolve(args?.where?.status === "maintenance" ? 0 : 1));
     findMany.mockResolvedValueOnce([
       { id: "a", hostname: "fw", ipAddress: null, assetType: "firewall", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null },
     ]);
@@ -439,7 +477,7 @@ describe("getNocSummaryPayload", () => {
     const r = await noc.getNocSummaryPayload({
       feeds: null, canAssets: false, canEvents: false, assetTypes: null, regionNames: null, capLimit: null,
     });
-    expect(r.statusCounts).toEqual({ total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 });
+    expect(r.statusCounts).toEqual({ total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, maintenance: 0 });
     expect(r.downNodes).toEqual([]);
     expect(r.downNodesTotal).toBe(0);
     expect(r.activeAlerts).toEqual([]);

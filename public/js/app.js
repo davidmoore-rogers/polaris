@@ -108,6 +108,7 @@ function isAssetsAdmin() { return currentUserRole === "assetsadmin"; }
 // hardcoded-role behavior. Custom roles with the relevant grant pass.
 function canManageNetworks() { return permAtLeast("subnets", "fullwrite"); }
 function canManageAssets() { return permAtLeast("assets", "write"); }
+function canManageMaintenance() { return permAtLeast("maintenanceManagement", "fullwrite"); }
 function isUserOrAbove() { return permAtLeast("subnets", "write") || permAtLeast("reservations", "write"); }
 function canReviewConflicts() { return permAtLeast("discoveryConflicts", "write"); }
 function canReserveIps() { return permAtLeast("reservations", "write"); }
@@ -564,12 +565,30 @@ function _renderSearchDropdown(results) {
     return;
   }
 
+  // Asset/site hits carry `status` (the assets-table monitor pill, computed
+  // server-side); map its kind onto the existing badge classes so the
+  // dropdown pill matches the assets list exactly.
+  var pillClassByKind = {
+    "unmonitored": "badge-unmonitored",
+    "up":          "badge-monitored",
+    "warning":     "badge-monitor-warning",
+    "down":        "badge-monitor-down",
+    "recovering":  "badge-monitor-recovering",
+    "pending":     "badge-monitor-recovering",
+    "dep-down":    "badge-monitor-dep-down",
+    "dep-test":    "badge-monitor-dep-test",
+  };
+
   function section(label, hits) {
     if (!hits.length) return "";
     var rows = hits.map(function (h) {
+      var pill = "";
+      if (h.status && pillClassByKind[h.status.kind]) {
+        pill = ' <span class="badge gs-item-pill ' + pillClassByKind[h.status.kind] + '">' + escapeHtml(h.status.label) + '</span>';
+      }
       return '<div class="gs-item" data-type="' + h.type + '" data-id="' + escapeHtml(h.id) + '"' +
         (h.context ? ' data-context="' + escapeHtml(JSON.stringify(h.context)) + '"' : '') + '>' +
-        '<div class="gs-item-title">' + escapeHtml(h.title) + '</div>' +
+        '<div class="gs-item-title">' + escapeHtml(h.title) + pill + '</div>' +
         (h.subtitle ? '<div class="gs-item-sub">' + escapeHtml(h.subtitle) + '</div>' : '') +
       '</div>';
     }).join("");
@@ -1782,8 +1801,9 @@ function openModal(title, bodyHTML, footerHTML, options) {
   _modalDrag.offsetX = 0;
   _modalDrag.offsetY = 0;
   modal.style.transform = "";
-  modal.classList.remove("modal-wide", "modal-xl");
+  modal.classList.remove("modal-wide", "modal-large", "modal-xl");
   if (options && options.wide) modal.classList.add("modal-wide");
+  if (options && options.large) modal.classList.add("modal-large");
   if (options && options.xl) modal.classList.add("modal-xl");
   overlay.querySelector(".modal-header h3").textContent = title;
   overlay.querySelector(".modal-body").innerHTML = bodyHTML;
@@ -1890,6 +1910,27 @@ function showFormModal(title, formHTML, confirmLabel) {
  * @param {function} onSizeChange  - Called with new page size
  */
 /**
+ * Bound every .table-wrapper-sticky on the page to the viewport so vertical
+ * scrolling happens INSIDE the wrapper: the sticky thead (styles.css) pins to
+ * its top edge, and everything above — bulk bar, top pagination — stays put
+ * because the page itself no longer needs to scroll. The reserve leaves room
+ * for the bottom pagination row below the wrapper. max-height (not height) so
+ * short result sets keep a short table. Called from renderPageControls /
+ * clearPageControls (so it re-measures after every list render — the empty
+ * top pagination row grows when controls first appear, shifting the wrapper's
+ * document-space top) and on window resize; pages with their own pagination
+ * renderer (Events) call it directly. No-op on pages without the class.
+ */
+function sizeStickyTableWrappers() {
+  document.querySelectorAll(".table-wrapper-sticky").forEach(function (w) {
+    var docTop = w.getBoundingClientRect().top + window.scrollY;
+    var h = window.innerHeight - docTop - 72;
+    w.style.maxHeight = Math.max(260, Math.round(h)) + "px";
+  });
+}
+window.addEventListener("resize", sizeStickyTableWrappers);
+
+/**
  * Clear both the bottom and optional top pagination containers.
  */
 function clearPageControls(containerId) {
@@ -1897,6 +1938,7 @@ function clearPageControls(containerId) {
   if (mainEl) mainEl.innerHTML = "";
   var topEl = document.getElementById(containerId + "-top");
   if (topEl) topEl.innerHTML = "";
+  sizeStickyTableWrappers();
 }
 
 function renderPageControls(containerId, total, pageSize, currentPage, onPageChange, onSizeChange, opts) {
@@ -1996,6 +2038,7 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
       right.appendChild(lbl);
     }
   });
+  sizeStickyTableWrappers();
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2291,6 +2334,9 @@ function hideAdminOnlyElements() {
   });
   document.querySelectorAll("[data-manage-assets]").forEach(function (el) {
     if (!canManageAssets()) el.style.display = "none";
+  });
+  document.querySelectorAll("[data-maintenance-mgmt]").forEach(function (el) {
+    if (!canManageMaintenance()) el.style.display = "none";
   });
   document.querySelectorAll("[data-review-conflicts]").forEach(function (el) {
     if (!canReviewConflicts()) el.style.display = "none";

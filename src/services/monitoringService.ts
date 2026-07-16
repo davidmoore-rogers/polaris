@@ -37,6 +37,7 @@ import { prisma } from "../db.js";
 import { retryOnDeadlock } from "../utils/dbRetry.js";
 import { AppError } from "../utils/errors.js";
 import { reconcileInterfaceMacs, expandMacRange } from "../utils/macAddresses.js";
+import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
 import {
   fortiosBool,
@@ -5480,13 +5481,30 @@ function buildSnmpSession(host: string, config: Record<string, unknown>, timeout
 }
 
 /**
+ * A broken agent returned an OID that doesn't lexicographically follow the
+ * previous one — net-snmp's walk would re-anchor on it and spin forever
+ * (seen in the field: ControlByWeb X-4xx echoes the queried OID back on
+ * GETBULK). 502 because the device answered, just wrongly.
+ */
+function walkLoopError(baseOid: string, prevOid: string, oid: string): AppError {
+  return new AppError(
+    502,
+    `SNMP walk of ${baseOid} aborted: agent returned a non-increasing OID (${oid} after ${prevOid}) — ` +
+    `the device's SNMP agent is stuck in a GETNEXT/GETBULK loop instead of advancing. ` +
+    `Try an SNMP v1 credential (avoids GETBULK) or a device firmware update.`,
+  );
+}
+
+/**
  * Walk an OID subtree and return varbinds keyed by the index suffix that
- * follows `baseOid.`. Stops once SNMP_WALK_MAX rows have been collected.
+ * follows `baseOid.`. Stops once SNMP_WALK_MAX rows have been collected, or
+ * rejects if the agent stops advancing (walk loop).
  */
 function snmpWalk(session: any, baseOid: string): Promise<Map<string, any>> {
   return new Promise((resolve, reject) => {
     const out = new Map<string, any>();
     const prefix = baseOid + ".";
+    const guard = makeOidMonotonicGuard();
     let done = false;
     const finish = (err?: Error) => {
       if (done) return;
@@ -5501,10 +5519,22 @@ function snmpWalk(session: any, baseOid: string): Promise<Map<string, any>> {
         (varbinds: any[]) => {
           for (const vb of varbinds) {
             if (snmp.isVarbindError(vb)) continue;
-            if (typeof vb.oid !== "string" || !vb.oid.startsWith(prefix)) continue;
+            if (typeof vb.oid !== "string") continue;
+            // Loop guard runs BEFORE the prefix filter: a broken agent that
+            // echoes `baseOid` itself never matches `prefix`, so `out` never
+            // grows and the SNMP_WALK_MAX cap alone would never trip — the
+            // walk would spin forever holding the per-host SNMP gate.
+            if (!guard.advance(vb.oid)) {
+              finish(walkLoopError(baseOid, guard.last()!, vb.oid));
+              return true; // stop the underlying net-snmp walk
+            }
+            if (!vb.oid.startsWith(prefix)) continue;
             const suffix = vb.oid.slice(prefix.length);
             out.set(suffix, vb.value);
-            if (out.size >= SNMP_WALK_MAX) return finish();
+            if (out.size >= SNMP_WALK_MAX) {
+              finish();
+              return true;
+            }
           }
         },
         (err?: Error) => finish(err),
@@ -5623,6 +5653,7 @@ export async function snmpWalkRaw(
   return await withSnmpSession(host, config, (session) => {
     return new Promise<SnmpWalkResult>((resolve, reject) => {
       const rows: SnmpWalkRow[] = [];
+      const guard = makeOidMonotonicGuard();
       let truncated = false;
       let done = false;
       const finish = (err?: Error) => {
@@ -5639,6 +5670,10 @@ export async function snmpWalkRaw(
             for (const vb of varbinds) {
               if (snmp.isVarbindError(vb)) continue;
               if (typeof vb.oid !== "string") continue;
+              if (!guard.advance(vb.oid)) {
+                finish(walkLoopError(baseOid, guard.last()!, vb.oid));
+                return true; // stop the underlying net-snmp walk
+              }
               rows.push({
                 oid: vb.oid,
                 type: snmpTypeName(vb.type),
@@ -5646,7 +5681,8 @@ export async function snmpWalkRaw(
               });
               if (rows.length >= cap) {
                 truncated = true;
-                return finish();
+                finish();
+                return true;
               }
             }
           },
@@ -9062,6 +9098,26 @@ export async function collectStorageOnlySnmp(
 }
 
 /**
+ * Candidate filter shared by BOTH monitor work-selection paths — the cursor
+ * pass below and the pg-boss publisher in jobs/monitorAssets.ts (which
+ * imports it). This is the single place that decides which assets receive
+ * server-driven polling: `monitored: true`, MINUS assets in maintenance mode
+ * (status="maintenance" — the maintenanceScheduler holds that status while
+ * a window is open; `monitored` itself stays true so the operator's intent
+ * survives the window). Every derived cadence (probe / fastFiltered /
+ * telemetry / systemInfo / lldp / storage) flows through these two queries,
+ * so excluding an asset here stops ALL of its polling. Deliberately NOT
+ * applied to the operator's explicit Poll Now (`POST /assets/:id/probe-now`)
+ * — a manual probe is a diagnostic, and notifications are suppressed during
+ * maintenance anyway. Agent PUSHES also keep landing: maintenance stops
+ * server-driven polling, not inbound agent samples.
+ */
+export const MONITOR_CANDIDATE_WHERE = {
+  monitored: true,
+  status: { not: "maintenance" },
+} as const;
+
+/**
  * One iteration of the monitor job. Picks assets due for the requested
  * cadences and runs the due work in parallel. Each cadence has its own due
  * check + per-asset interval override (`monitorIntervalSec`,
@@ -9091,7 +9147,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   const now = new Date();
 
   const candidates = await prisma.asset.findMany({
-    where: { monitored: true },
+    where: MONITOR_CANDIDATE_WHERE,
     select: {
       id: true,
       assetType: true,

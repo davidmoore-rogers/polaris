@@ -105,9 +105,12 @@ export async function runPresenceVerification(opts: {
 
   // Candidates: assets this integration's directory sources discovered.
   // storage / decommissioned / disabled are expected off-network — skip.
+  // maintenance is skipped too: a maintenance window pauses ALL server-driven
+  // contact with the asset (including this presence ping), and its lastSeen
+  // deliberately freezes for the duration.
   const candidates = await prisma.asset.findMany({
     where: {
-      status: { in: ["active", "maintenance", "quarantined"] },
+      status: { in: ["active", "quarantined"] },
       sources: {
         some: {
           integrationId: opts.integrationId,

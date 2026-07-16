@@ -70,6 +70,7 @@ export async function upsertQueuedRun(args: {
   integrationName: string;
   type: string;
   actor: string;
+  scopeDeviceName?: string;
 }): Promise<void> {
   const base = {
     integrationName: args.integrationName,
@@ -87,6 +88,9 @@ export async function upsertQueuedRun(args: {
     slowAlertedDevices: [],
     cancelRequested: false,
     workerHeartbeatAt: null,
+    // Scoped single-FortiGate re-discovery marker; a later full run's upsert
+    // resets it to NULL along with the rest of the counters.
+    scopeDeviceName: args.scopeDeviceName ?? null,
   };
   // createdAt is reset on every enqueue so elapsed-time math against the row
   // reflects the current run's age, not the row's lifetime. The row is keyed

@@ -71,8 +71,9 @@
   // Translate a widget config into a stable query string for /noc-summary.
   // assetTypes is sent only when it's a strict subset of the eight built-ins
   // (all-on = omit = unfiltered). regionScope "mine" expands to the caller's
-  // effective region names (app.js global currentEffectiveRegions); an empty
-  // effective set means "unrestricted", so no param is sent.
+  // effective region names (app.js global currentEffectiveRegions); "custom"
+  // uses the widget's own picked region list (config.regions). An empty list
+  // either way means "unrestricted", so no param is sent.
   function nocQueryString(opts) {
     opts = opts || {};
     var parts = [];
@@ -81,10 +82,10 @@
         && opts.assetTypes.length < window.PolarisWidgets.BUILTIN_ASSET_TYPES.length) {
       parts.push("assetTypes=" + encodeURIComponent(opts.assetTypes.slice().sort().join(",")));
     }
-    if (opts.regionScope === "mine") {
-      var regions = (typeof currentEffectiveRegions !== "undefined" && currentEffectiveRegions) || [];
-      if (regions.length) parts.push("regionTags=" + encodeURIComponent(regions.slice().sort().join(",")));
-    }
+    var regions = null;
+    if (opts.regionScope === "custom") regions = Array.isArray(opts.regions) ? opts.regions : [];
+    else if (opts.regionScope === "mine") regions = (typeof currentEffectiveRegions !== "undefined" && currentEffectiveRegions) || [];
+    if (regions && regions.length) parts.push("regionTags=" + encodeURIComponent(regions.slice().sort().join(",")));
     // Ask the server for a larger cap only when a widget wants more than the
     // default payload holds (>100 → the 1000-row option). Numeric limits ≤100
     // are omitted so those widgets keep sharing the one default-capped payload
@@ -165,6 +166,7 @@
     return {
       assetTypes: config.assetTypes,
       regionScope: config.regionScope,
+      regions: config.regions,
       // Only widgets wanting MORE than the default payload holds (the 1000-row
       // option) request a larger server cap; ≤100 shares the default payload.
       limit: n > 100 ? n : undefined,
@@ -241,6 +243,32 @@
     return ((typeof currentEffectiveRegions !== "undefined" && currentEffectiveRegions) || []).slice();
   };
 
+  // Resolve a widget config's region scope into the region-name list its own
+  // fetch should filter by: "custom" → the widget's picked regions, "mine" →
+  // the caller's effective regions, else null (= unfiltered). Used by the
+  // Status Map / Device Map widgets, which fetch /map/sites directly instead
+  // of riding getNocSummary.
+  window.PolarisWidgets.regionNamesForConfig = function (config) {
+    config = config || {};
+    if (config.regionScope === "custom") return Array.isArray(config.regions) ? config.regions.slice() : [];
+    if (config.regionScope === "mine") return window.PolarisWidgets.myRegionNames();
+    return null;
+  };
+
+  // Created-region names for the "Selected regions" picker, memoized for the
+  // page lifetime (retried on failure). Sourced from /dashboard/filter-options
+  // — the distinct region:<name> tags reconcileMapRegions keeps stamped on
+  // live assets — which is mounted on the dash listener's API allowlist, so
+  // the picker also works on the unauthenticated /dash wallboard.
+  var _regionOptionsPromise = null;
+  window.PolarisWidgets.getRegionOptions = function () {
+    if (_regionOptionsPromise) return _regionOptionsPromise;
+    _regionOptionsPromise = api.dashboard.filterOptions()
+      .then(function (d) { return (d && d.regions) || []; })
+      .catch(function () { _regionOptionsPromise = null; return []; });
+    return _regionOptionsPromise;
+  };
+
   // Open an asset's details slide-in in place when the canonical slide-over
   // (openViewModal from assets.js) is loaded on the page — it is on the
   // dashboard (index.html pulls assets.js + deps), map, and assets pages.
@@ -258,22 +286,32 @@
   };
 
   // Append the shared per-widget filter controls into a gear-popover container.
-  // Region scope (All / My regions) goes on every NOC widget; the asset-type
-  // toggle grid is added only when includeAssetTypes is true (every NOC widget
-  // except the Status Map). onChange(key, value) is the widget's config setter
-  // — key is "regionScope" (string) or "assetTypes" (string[]). Appends, so a
+  // Region scope (All / My regions / Selected regions) goes on every NOC
+  // widget; "Selected regions" reveals a checkbox list of the created regions
+  // (none checked = unfiltered, mirroring the asset-type grid). On the
+  // unauthenticated /dash wallboard "My regions" is hidden — there is no
+  // viewer identity for it to resolve against (a saved "mine" renders and
+  // behaves as "all" there). The asset-type toggle grid is added only when
+  // includeAssetTypes is true (every NOC widget except the maps).
+  // onChange(key, value) is the widget's config setter — key is "regionScope"
+  // (string), "regions" (string[]), or "assetTypes" (string[]). Appends, so a
   // widget can render its own controls first, then call this.
   window.PolarisWidgets.renderNocFilterConfig = function (el, config, onChange, includeAssetTypes) {
     config = config || {};
     var labels = window.PolarisWidgets.ASSET_TYPE_LABELS;
     var BUILTIN = window.PolarisWidgets.BUILTIN_ASSET_TYPES;
-    var scope = config.regionScope === "mine" ? "mine" : "all";
+    var onDash = window.POLARIS_DASH_LOCAL === true;
+    var scope = config.regionScope === "custom" ? "custom"
+      : (config.regionScope === "mine" && !onDash) ? "mine"
+      : "all";
     var html = ''
       + '<label class="widget-config-label">Regions</label>'
       + '<select class="widget-config-select" data-nocf="regionScope">'
       +   '<option value="all"' + (scope === "all" ? " selected" : "") + '>All regions</option>'
-      +   '<option value="mine"' + (scope === "mine" ? " selected" : "") + '>My regions</option>'
-      + '</select>';
+      +   (onDash ? '' : '<option value="mine"' + (scope === "mine" ? " selected" : "") + '>My regions</option>')
+      +   '<option value="custom"' + (scope === "custom" ? " selected" : "") + '>Selected regions…</option>'
+      + '</select>'
+      + '<div class="widget-config-typegrid" data-nocf="regionList" style="display:none"></div>';
     if (includeAssetTypes) {
       var enabled = Array.isArray(config.assetTypes) ? config.assetTypes : BUILTIN.slice();
       html += '<label class="widget-config-label">Asset types</label>'
@@ -288,7 +326,50 @@
     el.insertAdjacentHTML("beforeend", html);
 
     var sel = el.querySelector('[data-nocf="regionScope"]');
-    if (sel) sel.addEventListener("change", function () { onChange("regionScope", sel.value); });
+    var regionListEl = el.querySelector('[data-nocf="regionList"]');
+
+    // Show/populate the region checkbox list only while scope is "custom".
+    // The list is painted once per popover open (region names don't change
+    // under it); checkbox handlers re-read the live DOM, so the stale
+    // `config` snapshot the popover closed over never matters.
+    function paintRegionList() {
+      if (!regionListEl) return;
+      if (sel.value !== "custom") { regionListEl.style.display = "none"; return; }
+      regionListEl.style.display = "";
+      if (regionListEl.childElementCount) return;
+      window.PolarisWidgets.getRegionOptions().then(function (names) {
+        if (!regionListEl.isConnected || sel.value !== "custom" || regionListEl.childElementCount) return;
+        if (!names.length) {
+          regionListEl.innerHTML = '<p style="grid-column:1/-1;font-size:0.8rem;color:var(--color-text-secondary);margin:2px 0">'
+            + 'No regions found — draw regions on the Device Map first.</p>';
+          return;
+        }
+        var selected = Array.isArray(config.regions) ? config.regions : [];
+        regionListEl.innerHTML = names.map(function (name, i) {
+          return '<label class="widget-config-typeopt">'
+            + '<input type="checkbox" data-nocregion="' + i + '"' + (selected.indexOf(name) !== -1 ? " checked" : "") + '> '
+            + escapeHtml(name) + '</label>';
+        }).join("");
+        var boxes = regionListEl.querySelectorAll("[data-nocregion]");
+        Array.prototype.forEach.call(boxes, function (cb) {
+          cb.addEventListener("change", function () {
+            var current = [];
+            Array.prototype.forEach.call(boxes, function (b) {
+              if (b.checked) current.push(names[parseInt(b.getAttribute("data-nocregion"), 10)]);
+            });
+            onChange("regions", current);
+          });
+        });
+      });
+    }
+
+    if (sel) {
+      sel.addEventListener("change", function () {
+        onChange("regionScope", sel.value);
+        paintRegionList();
+      });
+      paintRegionList();
+    }
 
     if (includeAssetTypes) {
       var boxes = el.querySelectorAll("[data-noctype]");

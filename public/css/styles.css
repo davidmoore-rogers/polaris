@@ -859,6 +859,14 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Compact monitor Status pill on asset / Device Map hits — same badge-*
+ * monitor classes as the assets table, shrunk to fit the dropdown row. */
+.gs-item-pill {
+  font-size: 0.64rem;
+  padding: 0 6px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
 .global-search-empty {
   padding: 12px 14px;
   font-size: 0.85rem;
@@ -1220,6 +1228,24 @@ code {
   overflow-x: auto;
   box-shadow: var(--shadow-sm);
 }
+/* Sticky-header variant (Assets / Events / IPAM Blocks + Networks list
+   tables): the wrapper is height-bounded to the viewport by the shared
+   sizeStickyTableWrappers() in app.js (hooked into renderPageControls /
+   clearPageControls + window resize), so vertical scrolling happens INSIDE
+   the wrapper — the header row pins to its top edge and the bulk bar /
+   pagination above never scroll away. table-sf.js cooperates: its
+   position:relative fallback on th (resize handles, gear) only applies when
+   the computed position is static, so the sticky survives (ip-panel
+   precedent). Under border-collapse the th bottom border belongs to the row
+   boundary and scrolls away with the body — repaint it as a box-shadow that
+   travels with the sticky cells. */
+.table-wrapper-sticky { overflow: auto; }
+.table-wrapper-sticky thead th {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: 0 1px 0 var(--color-border);
+}
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1404,17 +1430,22 @@ body.sf-resizing .sf-resize-handle { background: var(--color-accent); opacity: 0
 body.sf-resizing { cursor: col-resize !important; user-select: none; }
 body.sf-resizing * { user-select: none !important; }
 
+/* Zero-height positioning context inserted by setupColumnLayout immediately
+   before the table's scroll wrapper. Being OUTSIDE the overflow container is
+   what lets the gear float at the wrapper's top-right corner regardless of
+   horizontal (or internal vertical) scrolling. */
+.sf-col-gear-anchor { position: relative; height: 0; }
 .sf-col-gear-wrap {
   position: absolute;
-  right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 6;
+  right: 8px;          /* JS refines this on reveal to clear the wrapper's scrollbar */
+  top: 5px;
+  /* Above the sticky header cells (.table-wrapper-sticky thead th, z-index 10). */
+  z-index: 30;
   display: none;
   gap: 4px;            /* space between the optional screenshot button and the gear */
   pointer-events: auto;
 }
-table thead:hover .sf-col-gear-wrap,
+.sf-col-gear-wrap.sf-gear-visible,
 .sf-col-gear-wrap.open { display: inline-flex; }
 .sf-col-gear {
   /* --color-bg doesn't exist (theme defines --color-bg-primary/-secondary/
@@ -1508,6 +1539,13 @@ table thead:hover .sf-col-gear-wrap,
   letter-spacing: 0;
   padding-right: 16px;
   position: relative;
+  /* Same truncation recipe as .sf-multi-button. Without it a set range like
+     "2026-06-01 → 2026-07-15" wraps to several lines in a narrow column and
+     stretches the ENTIRE header row (every other th top-aligns, leaving a dead
+     band under the filter inputs). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sf-date-button::after {
   content: "▾";
@@ -1886,6 +1924,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .modal-overlay.open .modal { transform: translateY(0); }
 .modal.modal-wide { max-width: 672px; }
+/* Mid-size between wide (672) and xl (full-bleed 1360): form+table modals
+   like Assets → Maintenance that need real column room but normal padding. */
+.modal.modal-large { max-width: min(94vw, 1200px); width: min(94vw, 1200px); }
 .modal.modal-xl { max-width: min(92vw, 1360px); width: min(92vw, 1360px); }
 .modal.modal-xl .modal-body { padding: 0; }
 
@@ -2371,6 +2412,10 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
  * upstream-suppressed) is unmistakable on the assets list. Striped border
  * makes it stand out further. See Asset.dependencyTestUntil. */
 .badge-monitor-dep-test { background: rgba(186,104,200,0.18); color: #ce93d8; border: 1px dashed rgba(186,104,200,0.55); }
+/* Maintenance window (scheduler-held status="maintenance"): muted purple —
+ * ALL polling + notifications are paused, so no live probe state exists.
+ * Solid border distinguishes it from the dashed dep-test simulation. */
+.badge-maintenance { background: rgba(149,117,205,0.18); color: #b39ddb; border: 1px solid rgba(149,117,205,0.40); }
 [data-theme="light"] .badge-monitored        { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
 [data-theme="light"] .badge-unmonitored      { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
 [data-theme="light"] .badge-monitor-down     { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
@@ -2378,6 +2423,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 [data-theme="light"] .badge-monitor-recovering { background: rgba(79,195,247,0.10); border-color: rgba(79,195,247,0.30); }
 [data-theme="light"] .badge-monitor-dep-down   { background: rgba(96,125,139,0.10); color: #455a64; border-color: rgba(96,125,139,0.30); }
 [data-theme="light"] .badge-monitor-dep-test   { background: rgba(123,31,162,0.10); color: #7b1fa2; border-color: rgba(123,31,162,0.45); }
+[data-theme="light"] .badge-maintenance        { background: rgba(103,58,183,0.10); color: #5e35b1; border-color: rgba(103,58,183,0.35); }
 
 /* Event level badges */
 .badge-level-info    { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }

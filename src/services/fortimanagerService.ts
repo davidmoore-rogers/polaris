@@ -1251,11 +1251,16 @@ export interface DiscoveryResult {
   // configured at FMG but currently offline / in a brief post-config-push
   // window may be missing from the live monitor query; surfacing the
   // CMDB-known serials lets the decommission sweep treat them as "still
-  // known" rather than declaring them stale. One serial per (FortiGate,
-  // device) pair — duplicates across FortiGates are possible if a
+  // known" rather than declaring them stale. Each entry carries the
+  // FortiGate it was read from so the sweep can scope the protection
+  // per-controller: an FMG-offline gate's CACHED roster must only protect
+  // devices whose recorded controller IS that gate, never vouch fleet-wide
+  // (prod 2026-07: a retired-but-still-in-FMG gate's stale cached wtp
+  // roster listed another site's full AP fleet and shielded ghost APs from
+  // the sweep forever). Duplicates across FortiGates are possible if a
   // misconfigured switch is authorized on two controllers.
-  cmdbSwitchSerials: string[];
-  cmdbApSerials: string[];
+  cmdbSwitchSerials: Array<{ device: string; serial: string }>;
+  cmdbApSerials: Array<{ device: string; serial: string }>;
   // Devices whose managed-switch query returned successfully (including
   // empty results, which mean "no managed switches" rather than "query
   // failed"). Used by the sync pass to decommission switches whose
@@ -1540,6 +1545,14 @@ export async function discoverDhcpSubnets(
   // fleet-wide blast — so fresh resolutions land inside the FortiOS
   // neighbor-cache GC window. See arpPrimeService.ts.
   arpSweepTargets?: Map<string, string[]>,
+  // Single-FortiGate scoped re-discovery: when set, only the roster device
+  // whose name/hostname matches (case-insensitive, fmgNameKey semantics) is
+  // processed. `knownDeviceNames` still carries the FULL raw roster so the
+  // caller's sweep phases keep their fleet view — though a scoped run's
+  // finalize pass ("finalize-scoped") never runs the roster-based sweeps
+  // anyway. No roster match (missing, or excluded by deviceInclude/Exclude)
+  // throws — the failure surfaces on the DiscoveryRun row + error Event.
+  scopeDeviceName?: string,
 ): Promise<DiscoveryResult> {
   const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
   const adom = config.adom || "root";
@@ -1619,12 +1632,33 @@ export async function discoverDhcpSubnets(
 
   // Apply device-level include/exclude filter (FortiGate names or hostnames).
   // Include wins over exclude when both are set.
-  const devicesData = filterDevices(devicesDataRaw, config.deviceInclude, config.deviceExclude);
-  const filteredOut = devicesDataRaw.length - devicesData.length;
-  if (filteredOut > 0) {
-    log("discover.devices", "info", `Found ${devicesDataRaw.length} managed device(s) in ADOM "${adom}" — ${devicesData.length} included, ${filteredOut} filtered by device include/exclude`);
+  let devicesData = filterDevices(devicesDataRaw, config.deviceInclude, config.deviceExclude);
+  if (scopeDeviceName) {
+    // Scoped re-discovery: narrow to the one device AFTER the include/exclude
+    // filter (a filtered-out gate stays un-discoverable) and AFTER the raw
+    // roster was captured into knownDeviceNames (same protection the device
+    // filter gets — nothing outside the scope can ever look "removed").
+    const scopeKey = fmgNameKey(scopeDeviceName);
+    const matchesScope = (d: any) => fmgNameKey(d.name) === scopeKey || fmgNameKey(d.hostname) === scopeKey;
+    const inRoster = (devicesDataRaw as any[]).some(matchesScope);
+    devicesData = devicesData.filter(matchesScope);
+    if (devicesData.length === 0) {
+      const why = inRoster
+        ? `"${scopeDeviceName}" is excluded by the integration's device include/exclude filter`
+        : `"${scopeDeviceName}" was not found in the ADOM "${adom}" device roster`;
+      log("discover.devices", "error", `Scoped re-discovery failed: ${why}`);
+      throw new Error(`Scoped re-discovery failed: ${why}`);
+    }
+    // Phrasing matters: the run accumulator parses "Found <n> managed device"
+    // out of this progress message to set totalDevices.
+    log("discover.devices", "info", `Found 1 managed device(s) — scoped re-discovery of "${scopeDeviceName}" (${devicesDataRaw.length} in ADOM "${adom}" roster)`);
   } else {
-    log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
+    const filteredOut = devicesDataRaw.length - devicesData.length;
+    if (filteredOut > 0) {
+      log("discover.devices", "info", `Found ${devicesDataRaw.length} managed device(s) in ADOM "${adom}" — ${devicesData.length} included, ${filteredOut} filtered by device include/exclude`);
+    } else {
+      log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
+    }
   }
   if (devicesData.length === 0) {
     return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames, fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
@@ -1641,8 +1675,8 @@ export async function discoverDhcpSubnets(
   const vips: DiscoveredVip[] = [];
   const switchMacTable: DiscoveredSwitchMacEntry[] = [];
   const arpTable: DiscoveredArpEntry[] = [];
-  const cmdbSwitchSerials: string[] = [];
-  const cmdbApSerials: string[] = [];
+  const cmdbSwitchSerials: Array<{ device: string; serial: string }> = [];
+  const cmdbApSerials: Array<{ device: string; serial: string }> = [];
 
   type DeviceChunk = {
     device: DiscoveredDevice;
@@ -1656,8 +1690,8 @@ export async function discoverDhcpSubnets(
     vips: DiscoveredVip[];
     switchMacTable: DiscoveredSwitchMacEntry[];
     arpTable: DiscoveredArpEntry[];
-    cmdbSwitchSerials: string[];
-    cmdbApSerials: string[];
+    cmdbSwitchSerials: Array<{ device: string; serial: string }>;
+    cmdbApSerials: Array<{ device: string; serial: string }>;
     // Whether each per-device inventory query returned a usable response.
     // The decommission sweep keys off these flags so a controller whose
     // switch-controller endpoint timed out doesn't take its switches down
@@ -1963,8 +1997,8 @@ export async function discoverDhcpSubnets(
     const localAps: DiscoveredFortiAP[] = [];
     const localSwitchMacTable: DiscoveredSwitchMacEntry[] = [];
     const localArpTable: DiscoveredArpEntry[] = [];
-    const localCmdbSwitchSerials: string[] = [];
-    const localCmdbApSerials: string[] = [];
+    const localCmdbSwitchSerials: Array<{ device: string; serial: string }> = [];
+    const localCmdbApSerials: Array<{ device: string; serial: string }> = [];
     const localVips: DiscoveredVip[] = [];
     // Track whether each inventory query returned a usable response so the
     // sync's decommission pass can distinguish "controller offline" (don't
@@ -2408,7 +2442,7 @@ export async function discoverDhcpSubnets(
           // (matches what the live query reports as `switch-id`). The
           // optional `name` is the operator-set display label.
           const serial = typeof sw["switch-id"] === "string" ? sw["switch-id"].trim() : "";
-          if (serial) localCmdbSwitchSerials.push(serial);
+          if (serial) localCmdbSwitchSerials.push({ device: deviceName, serial });
         }
       }
     } catch (err: any) {
@@ -2488,7 +2522,7 @@ export async function discoverDhcpSubnets(
           // the live monitor query reports as `wtp_id` / `serial`).
           const serial = typeof ap["wtp-id"] === "string" ? ap["wtp-id"].trim() : "";
           if (!serial) continue;
-          localCmdbApSerials.push(serial);
+          localCmdbApSerials.push({ device: deviceName, serial });
           const comment = typeof ap.comment === "string" ? ap.comment.trim() : "";
           if (comment) commentBySerial.set(serial.toUpperCase(), comment);
         }
@@ -2784,6 +2818,10 @@ export async function discoverDhcpSubnets(
     // release or decommission in the sync's Phase 2b / Phase 5b sweeps.
     // cmdbSwitchSerials/cmdbApSerials stay populated — they only protect
     // configured-but-offline switches/APs from decommission, never trigger it.
+    // Each entry carries this device's name, and the sync scopes the
+    // protection to assets whose recorded controller IS this gate — an
+    // offline gate's cached roster (or a staged replacement gate's cloned
+    // config) must never vouch for devices owned by other controllers.
     if (offline) {
       didInventory = false;
       didSwitchQuery = false;

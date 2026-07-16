@@ -251,10 +251,12 @@ router.get("/sites", async (req, res, next) => {
 //   }
 //
 // `location` is { area, building, floor, room, junctionBox } (each
-// string|null) or null when the node carries no a:/a:/b:/f:/r:/jb: codes — resolved server-side by
-// utils/locationCodes.ts from notes → Asset.description → the device admin
-// description discovery stamped on fortinetTopology.deviceDescription. Drives
-// the topology modal's grouping hulls + floor views.
+// string|null) or null when the node carries no a:/b:/f:/r:/jb: codes —
+// resolved server-side by utils/locationCodes.ts: the Asset.description's
+// codes when it carries any (exclusively — no per-key fall-through), else
+// the device admin description discovery stamped on
+// fortinetTopology.deviceDescription. Notes are never a source. Drives the
+// topology modal's grouping hulls + floor views.
 //
 // Every edge references an asset id in this payload, so the frontend can hand
 // the whole object to a graph renderer (Cytoscape) without doing any extra
@@ -361,9 +363,9 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           dependencyLayer: s.dependencyLayer,
           dependencySuppressed: s.dependencySuppressed,
           iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "switch" }, iconCache),
-          // Physical-location codes (a:/b:/f:/r:/jb:) resolved from notes →
-          // Asset.description → device admin description. Drives the Device
-          // Map's grouping hulls + floor views. Null when untagged.
+          // Physical-location codes (a:/b:/f:/r:/jb:): Asset.description's
+          // codes when present, else the device admin description. Drives
+          // the Device Map's grouping hulls + floor views. Null when untagged.
           location: nodeLocation(resolveEffectiveLocation({ description: s.description, deviceDescription: t.deviceDescription })),
           deviceDescription: t.deviceDescription ?? null,
           endpointCount: 0,
@@ -1441,8 +1443,8 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         iconUrl: resolveIconUrl({ manufacturer: fg.manufacturer, model: fg.model, assetType: "firewall" }, iconCache),
         // FortiGates have no discovery-captured device description (their
         // device-side surface would be the 35-char system/global alias), so
-        // location codes come from notes / Asset.description only — enough
-        // for an operator to pull the FG into a building group.
+        // location codes come from Asset.description only — enough for an
+        // operator to pull the FG into a building group.
         location: nodeLocation(resolveEffectiveLocation({ description: fg.description })),
       },
       switches,

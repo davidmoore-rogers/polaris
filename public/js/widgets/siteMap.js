@@ -1,7 +1,8 @@
 /**
  * widgets/siteMap.js — SolarWinds-NOC-style geographic site map.
  *
- * Status DOTS (green/amber/red/grey circle markers) colored by monitor health,
+ * Status DOTS (green/amber/red/purple/grey circle markers) colored by monitor
+ * health (purple = in a maintenance window — planned downtime, never red),
  * with a pulsing white-ringed dot for down sites, click popups, and hover
  * name tooltips. Sites sharing the same coordinates (several gates geocoded to
  * one address) collapse into a single STACK dot with a count badge; clicking it
@@ -12,21 +13,38 @@
  * labels, with °F / RADAR / LOOP toggles and a radar timestamp. A darkened
  * basemap (CSS filter on the tile pane) keeps the dots and radar legible.
  *
- * Reuses the bundled Leaflet stack + the existing GET /map/sites endpoint (no
- * new backend). Per-instance: map, layers, weather state, and every timer live
- * in the render closure and are torn down in ctx.onUnmount (Leaflet throws
+ * Reuses the bundled Leaflet stack + the existing GET /map/sites endpoint.
+ * Per-instance: map, layers, weather state, and every timer live in the
+ * render closure and are torn down in ctx.onUnmount (Leaflet throws
  * "Map container is already initialized" if a container is reused without
- * map.remove()). Weather fetches go to api.rainviewer.com / api.open-meteo.com
- * (whitelisted in the app CSP) and degrade silently when offline.
+ * map.remove()).
+ *
+ * Weather transport is PROXY-FIRST with CDN FALLBACK: each radar refresh
+ * first asks the Polaris weather proxy (/weather/frames + /weather/radar
+ * tiles — server-side cached, works from egress-restricted wallboard VLANs),
+ * and falls back to fetching api.rainviewer.com / tilecache.rainviewer.com
+ * directly when the proxy fails (both hosts stay whitelisted in the CSP for
+ * exactly this). Fall-forward is automatic: the proxy is re-tried on every
+ * refresh cycle, and while on CDN fallback the refresh shortens to ~10 min;
+ * a mid-cycle proxy outage (index answered, tiles erroring) trips an
+ * immediate CDN reload after 5 tile errors. Temperature lookups take the
+ * same per-cell proxy-then-Open-Meteo path. The RADAR button's hover
+ * tooltip names the transport currently in use. Degrades silently offline.
  */
 
 (function () {
   var _iconPathSet = false;
 
-  // SolarWinds status palette.
-  var COLOR = { up: "#00c853", degraded: "#ffd600", down: "#ff1744", unknown: "#757575", dep: "#607d8b" };
+  // SolarWinds status palette. "maint" matches the assets-page purple
+  // maintenance pill (rgba(149,117,205) base).
+  var COLOR = { up: "#00c853", degraded: "#ffd600", down: "#ff1744", unknown: "#757575", dep: "#607d8b", maint: "#9575cd" };
 
   function healthKey(site) {
+    // A maintenance window is planned downtime: the scheduler pauses polling
+    // and freezes monitorStatus at whatever it was on entry (possibly "down"),
+    // so paint purple — never red — while status="maintenance". Checked first
+    // so it also wins over dependency suppression and the unmonitored grey.
+    if (site.status === "maintenance") return "maint";
     if (!site.monitored) return "unknown";
     // Dependency-suppressed sites are excluded from the Down Nodes widget, so
     // never paint them red here — show the distinct "dep" color instead, even
@@ -41,10 +59,12 @@
     }
   }
   function statusColor(site) { return COLOR[healthKey(site)] || COLOR.unknown; }
-  function isDown(site) { return site.monitored && !site.dependencySuppressed && site.monitorHealth === "down"; }
-  function hasIssue(site) { return site.monitored && !site.dependencySuppressed && (site.monitorHealth === "down" || site.monitorHealth === "degraded"); }
+  function inMaintenance(site) { return site.status === "maintenance"; }
+  function isDown(site) { return site.monitored && !site.dependencySuppressed && !inMaintenance(site) && site.monitorHealth === "down"; }
+  function hasIssue(site) { return site.monitored && !site.dependencySuppressed && !inMaintenance(site) && (site.monitorHealth === "down" || site.monitorHealth === "degraded"); }
 
   function monitorLine(site) {
+    if (inMaintenance(site)) return "Maintenance window — monitoring and notifications paused";
     if (!site.monitored) return "Unmonitored";
     var samples = site.monitorRecentSamples || 0, failures = site.monitorRecentFailures || 0;
     if (site.dependencySuppressed) return "Dependency down — upstream parent offline";
@@ -83,8 +103,7 @@
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
-      var regions = config && config.regionScope === "mine" ? PolarisWidgets.myRegionNames() : null;
-      return api.map.sites(regions).catch(function () { return []; });
+      return api.map.sites(PolarisWidgets.regionNamesForConfig(config)).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -338,7 +357,7 @@
         downMarkers.forEach(function (m) { m.bringToFront(); });
       }
       function stackColor(sitesArr) {
-        var rank = { degraded: 3, unknown: 2, dep: 1, up: 0 };
+        var rank = { degraded: 4, unknown: 3, dep: 2, maint: 1, up: 0 };
         var worst = "up";
         sitesArr.forEach(function (s) {
           var k = healthKey(s);
@@ -411,14 +430,44 @@
       goHome();
 
       // ── Weather overlay ────────────────────────────────────────────────
+      var WX_API_BASE = window.__polarisApiBase || "/api/v1";
       var tempEnabled = wxPref("wx-temp", true);
       var radarEnabled = wxPref("wx-radar", true);
       var radarAnimate = wxPref("wx-animate", true);
       var tempLayer = null, tempTimer = null;
       var radarFrames = [], radarTimes = [], radarIdx = 0, radarTimer = null, radarAnimTimer = null;
       var RADAR_FRAME_MS = 500, RADAR_LOOP_PAUSE_MS = 1800, RADAR_OPACITY = 0.6;
+      // Which transport the CURRENT radar frames came from: "proxy" (Polaris
+      // weather proxy) | "cdn" (direct RainViewer fallback) | null (off /
+      // not loaded yet). Drives the RADAR button's hover tooltip and the
+      // shortened fall-forward retry while on the CDN.
+      var wxSource = null;
+      // Set by the mid-cycle tile-error trip: the next loadRadar() skips the
+      // proxy and goes straight to the CDN (the proxy answered the frame
+      // index but its tiles are failing). One-shot — the cycle after that
+      // tries the proxy again.
+      var skipProxyNextLoad = false;
+      var CDN_RETRY_MS = 10 * 60 * 1000;
 
       function wxRefreshMs() { var h = new Date().getHours(); return (h >= 8 && h < 17) ? 30 * 60 * 1000 : 2 * 60 * 60 * 1000; }
+      // Fall-forward: while on the CDN fallback, retry the proxy sooner than
+      // the normal refresh so a recovered proxy is picked up within minutes.
+      function radarRefreshDelay() { return wxSource === "cdn" ? Math.min(wxRefreshMs(), CDN_RETRY_MS) : wxRefreshMs(); }
+
+      // Per-cell temperature: proxy first, direct Open-Meteo on failure.
+      function fetchCellTemp(c) {
+        return fetch(WX_API_BASE + "/weather/temp?lat=" + c.lat + "&lng=" + c.lng)
+          .then(function (r) {
+            if (!r.ok) throw new Error("proxy " + r.status);
+            return r.json();
+          })
+          .then(function (d) { return d.temperature; })
+          .catch(function () {
+            return fetch("https://api.open-meteo.com/v1/forecast?latitude=" + c.lat + "&longitude=" + c.lng + "&current=temperature_2m&temperature_unit=fahrenheit&forecast_days=1")
+              .then(function (r) { return r.json(); })
+              .then(function (d) { return d && d.current && d.current.temperature_2m; });
+          });
+      }
 
       function loadTemps() {
         if (!tempEnabled) return;
@@ -431,10 +480,8 @@
         });
         var cells = Object.keys(grid).map(function (k) { return grid[k]; });
         cells.forEach(function (c) {
-          fetch("https://api.open-meteo.com/v1/forecast?latitude=" + c.lat + "&longitude=" + c.lng + "&current=temperature_2m&temperature_unit=fahrenheit&forecast_days=1")
-            .then(function (r) { return r.json(); })
-            .then(function (d) {
-              var t = d && d.current && d.current.temperature_2m;
+          fetchCellTemp(c)
+            .then(function (t) {
               if (t == null || !tempLayer) return;
               L.marker([c.lat, c.lng], {
                 interactive: false, pane: "sitemapWeather",
@@ -451,24 +498,69 @@
         radarFrames = []; radarTimes = [];
         clearTimeout(radarAnimTimer); radarAnimTimer = null;
       }
+      // specs: [{ time, url }] (a Leaflet tile-URL template per frame).
+      // Swap-in order matches the old code: build+add the new layers, THEN
+      // clearRadar() removes the previous cycle's (radarFrames still holds
+      // the old array until reassigned below).
+      function applyRadarFrames(specs, source) {
+        var frames = [], times = [], tileErrors = 0;
+        specs.forEach(function (f) {
+          var layer = L.tileLayer(f.url, { opacity: 0, maxNativeZoom: 7, maxZoom: 18, pane: "sitemapWeather" });
+          if (source === "proxy") {
+            layer.on("tileerror", function () {
+              // Mid-cycle proxy failure (the index answered but tiles are
+              // erroring): flip this cycle to the CDN immediately instead of
+              // animating holes. Exact-match so the reload fires once, and
+              // only while THIS cycle's layers are still current — Leaflet
+              // can fire tileerror on aborted loads when a new cycle swaps
+              // the old layers out.
+              tileErrors++;
+              if (tileErrors === 5 && radarFrames === frames) {
+                skipProxyNextLoad = true;
+                clearTimeout(radarTimer);
+                loadRadar();
+              }
+            });
+          }
+          layer.addTo(map);
+          frames.push(layer);
+          times.push(f.time);
+        });
+        clearRadar();
+        radarFrames = frames; radarTimes = times;
+        wxSource = source;
+        paintBtns();
+        applyRadarMode();
+        clearTimeout(radarTimer);
+        radarTimer = setTimeout(loadRadar, radarRefreshDelay());
+      }
       function loadRadar() {
         if (!radarEnabled) return;
-        fetch("https://api.rainviewer.com/public/weather-maps.json")
-          .then(function (r) { return r.json(); })
-          .then(function (d) {
-            var past = (d.radar && d.radar.past) || [];
-            var frames = [], times = [];
-            past.forEach(function (f) {
-              frames.push(L.tileLayer(d.host + f.path + "/256/{z}/{x}/{y}/6/1_1.png",
-                { opacity: 0, maxNativeZoom: 7, maxZoom: 18, pane: "sitemapWeather" }).addTo(map));
-              times.push(f.time);
-            });
-            clearRadar();
-            radarFrames = frames; radarTimes = times;
-            applyRadarMode();
-            clearTimeout(radarTimer);
-            radarTimer = setTimeout(loadRadar, wxRefreshMs());
-          }).catch(function () {});
+        var viaProxy = !skipProxyNextLoad;
+        skipProxyNextLoad = false;
+        var attempt = viaProxy
+          ? fetch(WX_API_BASE + "/weather/frames")
+              .then(function (r) {
+                if (!r.ok) throw new Error("proxy " + r.status);
+                return r.json();
+              })
+              .then(function (d) {
+                applyRadarFrames((d.frames || []).map(function (f) {
+                  return { time: f.time, url: WX_API_BASE + "/weather/radar/" + f.id + "/{z}/{x}/{y}" };
+                }), "proxy");
+              })
+          : Promise.reject(new Error("proxy tiles erroring"));
+        attempt
+          .catch(function () {
+            return fetch("https://api.rainviewer.com/public/weather-maps.json")
+              .then(function (r) { return r.json(); })
+              .then(function (d) {
+                applyRadarFrames(((d.radar && d.radar.past) || []).map(function (f) {
+                  return { time: f.time, url: d.host + f.path + "/256/{z}/{x}/{y}/6/1_1.png" };
+                }), "cdn");
+              });
+          })
+          .catch(function () {});
       }
       function applyRadarMode() {
         clearTimeout(radarAnimTimer); radarAnimTimer = null;
@@ -503,6 +595,7 @@
           '<span><i style="background:' + COLOR.up + '"></i>Up</span>' +
           '<span><i style="background:' + COLOR.degraded + '"></i>Warn</span>' +
           '<span><i style="background:' + COLOR.down + '"></i>Down</span>' +
+          '<span><i style="background:' + COLOR.maint + '"></i>Maint</span>' +
           '<span><i style="background:' + COLOR.unknown + '"></i>Unknown</span>' +
         '</div>' +
         '<div class="sitemap-wx">' +
@@ -520,11 +613,21 @@
       var btnRadar = controls.querySelector('[data-wx="radar"]');
       var btnAnim = controls.querySelector('[data-wx="animate"]');
       var btnFull = controls.querySelector('[data-wx="full"]');
+      // Hover tooltip on the RADAR button naming the transport in use —
+      // "proxy" = the Polaris server's /weather endpoints, "cdn" = direct
+      // RainViewer fallback (proxy unavailable; re-tried automatically).
+      function radarSourceTitle() {
+        if (!radarEnabled) return "Radar off";
+        if (wxSource === "proxy") return "Radar source: Polaris server (proxied)";
+        if (wxSource === "cdn") return "Radar source: RainViewer CDN (direct) — Polaris proxy unavailable, retrying automatically";
+        return "Radar source: loading…";
+      }
       function paintBtns() {
         // Show the icon for the theme you'd switch TO (sun = go light), mirroring the app toggle.
         btnTheme.textContent = mapTheme === "dark" ? "☀" : "🌙";
         btnTemp.classList.toggle("active", tempEnabled);
         btnRadar.classList.toggle("active", radarEnabled);
+        btnRadar.title = radarSourceTitle();
         btnAnim.classList.toggle("active", radarAnimate);
         clockEl.style.display = radarEnabled ? "block" : "none";
       }
@@ -543,7 +646,9 @@
         el.classList.toggle("sitemap-fullscreen", on);
         btnFull.innerHTML = on ? "✖" : "⛶";
         btnFull.classList.toggle("active", on);
-        setTimeout(function () { try { map.invalidateSize(); } catch (_) {} }, 60);
+        // Re-home after the layout change (and invalidateSize) so the fleet
+        // refits to the new viewport instead of keeping the old framing.
+        setTimeout(function () { try { map.invalidateSize(); } catch (_) {} goHome(); }, 60);
       }
       btnFull.addEventListener("click", function () { setFullscreen(!el.classList.contains("sitemap-fullscreen")); });
       function onKeydown(e) { if (e.key === "Escape" && el.classList.contains("sitemap-fullscreen")) setFullscreen(false); }
@@ -554,7 +659,11 @@
         else { if (tempLayer) { map.removeLayer(tempLayer); tempLayer = null; } clearTimeout(tempTimer); }
       });
       btnRadar.addEventListener("click", function () {
-        radarEnabled = !radarEnabled; setWxPref("wx-radar", radarEnabled); paintBtns();
+        radarEnabled = !radarEnabled; setWxPref("wx-radar", radarEnabled);
+        // Toggling off forgets the transport; toggling back on re-tries the
+        // proxy first (manual fall-forward).
+        wxSource = null; skipProxyNextLoad = false;
+        paintBtns();
         if (radarEnabled) loadRadar();
         else { clearRadar(); clearTimeout(radarTimer); clockEl.textContent = ""; }
       });
@@ -575,8 +684,7 @@
       ro.observe(el);
 
       var siteTimer = setInterval(function () {
-        var regions = config && config.regionScope === "mine" ? PolarisWidgets.myRegionNames() : null;
-        api.map.sites(regions).then(function (sites) { buildMarkers(sites); }).catch(function () {});
+        api.map.sites(PolarisWidgets.regionNamesForConfig(config)).then(function (sites) { buildMarkers(sites); }).catch(function () {});
       }, 60000);
 
       ctx.onUnmount(function () {

@@ -102,8 +102,7 @@
     requiredPermission: { key: "deviceMap", level: "read" },
 
     fetchData: function (config) {
-      var regions = config && config.regionScope === "mine" ? PolarisWidgets.myRegionNames() : null;
-      return api.map.sites(regions).catch(function () { return []; });
+      return api.map.sites(PolarisWidgets.regionNamesForConfig(config)).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -251,7 +250,9 @@
         el.classList.toggle("sitemap-fullscreen", on);
         btnFull.innerHTML = on ? "✖" : "⛶";
         btnFull.classList.toggle("active", on);
-        setTimeout(function () { try { map.invalidateSize(); } catch (_) {} }, 60);
+        // Re-home after the layout change (and invalidateSize) so the fleet
+        // refits to the new viewport instead of keeping the old framing.
+        setTimeout(function () { try { map.invalidateSize(); } catch (_) {} goHome(); }, 60);
       }
       btnFull.addEventListener("click", function () { setFullscreen(!el.classList.contains("sitemap-fullscreen")); });
       function onKeydown(e) { if (e.key === "Escape" && el.classList.contains("sitemap-fullscreen")) setFullscreen(false); }
@@ -267,8 +268,7 @@
       ro.observe(el);
 
       var siteTimer = setInterval(function () {
-        var regions = config && config.regionScope === "mine" ? PolarisWidgets.myRegionNames() : null;
-        api.map.sites(regions).then(function (sites) { buildMarkers(sites); }).catch(function () {});
+        api.map.sites(PolarisWidgets.regionNamesForConfig(config)).then(function (sites) { buildMarkers(sites); }).catch(function () {});
       }, 60000);
 
       ctx.onUnmount(function () {

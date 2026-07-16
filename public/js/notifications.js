@@ -16,6 +16,7 @@ var _rulesSF = null;
 var _rulesLayout = null;
 var _ruleSchema = null;
 var _ruleTagList = null;  // cached distinct asset tags for the scope picker
+var _ruleAssetTypes = null; // cached asset-type registry (finite set) for the scope picker
 var _ruleChannels = null; // cached configured delivery channels (rule-builder picker)
 var _ruleRecipientUsers = null; // cached users for the recipient picker
 
@@ -559,6 +560,12 @@ async function openRuleBuilder(existing) {
     try { var _td = await api.assets.tags(); _ruleTagList = ((_td && _td.tags) || []).filter(function (t) { return !_looksLikeDeviceId(t); }); }
     catch (_e) { _ruleTagList = []; }
   }
+  if (_ruleAssetTypes === null) {
+    // Finite registry (built-ins + operator-added) — drives the scope picker's
+    // selectable asset-type chips instead of a free-text field.
+    try { var _at = await api.assetTypes.list(); _ruleAssetTypes = Array.isArray(_at) ? _at : ((_at && _at.assetTypes) || []); }
+    catch (_e) { _ruleAssetTypes = []; }
+  }
   // Always refresh channels (operator may have just added one in the Delivery tab).
   try { var _cd = await api.notificationChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
   catch (_e) { _ruleChannels = _ruleChannels || []; }
@@ -615,10 +622,8 @@ async function openRuleBuilder(existing) {
       '<div id="rule-email-fields" style="display:' + (comp ? "block" : "none") + ';margin-top:8px">' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">Email targets only — other channel types ignore this. To recipients come from each email target above; with customization on, each email target sends ONE message carrying its full To list plus the Cc/Bcc below. Unset fields keep the default subject/body. Insert variables via the palette above the message template.</p>' +
         '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject</label><input type="text" id="rule-email-subject" class="tpl-field" value="' + escapeHtml((comp && comp.subjectTemplate) || "") + '" placeholder="[{severity.upper}] {asset} — {metric} = {value}"></div>' +
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc — user accounts</label>' + userMultiSelect(comp && comp.cc && comp.cc.recipientUserIds, "ec-cc-users") + '</div>' +
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc — custom addresses (comma-separated)</label><input type="text" id="rule-email-cc-addr" value="' + escapeHtml(((comp && comp.cc && comp.cc.addresses) || []).join(", ")) + '" placeholder="manager@example.com"></div>' +
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc — user accounts</label>' + userMultiSelect(comp && comp.bcc && comp.bcc.recipientUserIds, "ec-bcc-users") + '</div>' +
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc — custom addresses (comma-separated)</label><input type="text" id="rule-email-bcc-addr" value="' + escapeHtml(((comp && comp.bcc && comp.bcc.addresses) || []).join(", ")) + '" placeholder="audit@example.com"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc (comma-separated — start typing for known addresses)</label><input type="text" id="rule-email-cc-addr" list="notif-email-suggest" autocomplete="off" value="' + escapeHtml(((comp && comp.cc && comp.cc.addresses) || []).join(", ")) + '" placeholder="manager@example.com"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc (comma-separated — start typing for known addresses)</label><input type="text" id="rule-email-bcc-addr" list="notif-email-suggest" autocomplete="off" value="' + escapeHtml(((comp && comp.bcc && comp.bcc.addresses) || []).join(", ")) + '" placeholder="audit@example.com"></div>' +
         '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body (plain text)</label><textarea id="rule-email-body" class="tpl-field" rows="5" style="width:100%" placeholder="{message} — details: {asset.ip} {asset.location}. View: {link}">' + escapeHtml((comp && comp.bodyTextTemplate) || "") + '</textarea></div>' +
         '<label style="font-size:0.8rem;display:block"><input type="checkbox" id="rule-email-html-enable"' + (comp && comp.bodyHtmlTemplate ? " checked" : "") + '> Add HTML body (interpolated values are HTML-escaped; Microsoft 365 recipients get HTML only when both bodies are set)</label>' +
         '<textarea id="rule-email-html" class="tpl-field" rows="5" style="width:100%;display:' + (comp && comp.bodyHtmlTemplate ? "block" : "none") + ';margin-top:4px">' + escapeHtml((comp && comp.bodyHtmlTemplate) || "") + '</textarea>' +
@@ -634,6 +639,8 @@ async function openRuleBuilder(existing) {
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:6px">Each tier emails its recipients once its delay elapses (checked every minute), optionally repeating until the notification is handled or max repeats is reached. Tiers use email channels only. Subject/body overrides fall back to the customized email above, then to the default with an [ESCALATION n] subject prefix.</p>' +
       '</div>' +
     '</div>' +
+    // Shared autocomplete source of known email addresses for the Cc/Bcc inputs.
+    '<datalist id="notif-email-suggest">' + emailSuggestOptions() + '</datalist>' +
     '<div id="rule-preview" style="margin-top:0.5rem"></div>';
 
   var footer =
@@ -731,15 +738,42 @@ async function openRuleBuilder(existing) {
       var chips = (_ruleTagList || []).map(function (tg) {
         return '<button type="button" class="btn btn-sm btn-secondary sc-tag-chip" data-tag="' + escapeHtml(tg) + '" style="margin:2px 4px 2px 0">' + escapeHtml(tg) + '</button>';
       }).join("");
+      // Asset types are a finite registry — render selectable toggle chips
+      // (active = selected) backed by a hidden #sc-types comma input so
+      // collectScope() reads them unchanged.
+      var selTypes = {};
+      (scope.assetTypes || []).forEach(function (t) { selTypes[t] = true; });
+      var typeChips = (_ruleAssetTypes || []).map(function (at) {
+        var on = !!selTypes[at.name];
+        return '<button type="button" class="btn btn-sm ' + (on ? "btn-primary" : "btn-secondary") + ' sc-type-chip" data-type="' + escapeHtml(at.name) + '" aria-pressed="' + on + '" style="margin:2px 4px 2px 0">' + escapeHtml(at.label || at.name) + '</button>';
+      }).join("");
       scopeBox.innerHTML =
         '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
         '<label style="font-weight:600">Scope — which assets</label>' +
         '<label style="display:block;margin:4px 0"><input type="checkbox" id="sc-all"' + (scope.allAssets ? " checked" : "") + '> All assets</label>' +
-        '<input type="text" id="sc-types" placeholder="asset types (comma-separated)" value="' + escapeHtml((scope.assetTypes || []).join(", ")) + '" style="margin-bottom:4px;width:100%">' +
+        '<input type="hidden" id="sc-types" value="' + escapeHtml((scope.assetTypes || []).join(", ")) + '">' +
+        (typeChips
+          ? '<div style="margin:2px 0 8px"><span style="display:block;font-size:0.78rem;color:var(--color-text-tertiary);margin-bottom:2px">Asset types</span>' + typeChips + '</div>'
+          : '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 8px">No asset types in the registry.</p>') +
         '<input type="text" id="sc-tags" placeholder="tags (comma-separated, e.g. region:Atlanta)" value="' + escapeHtml((scope.tags || []).join(", ")) + '" style="margin-bottom:4px;width:100%">' +
         (chips ? '<div style="margin-bottom:4px">' + chips + '</div>' : "") +
         '<input type="text" id="sc-ids" placeholder="specific asset IDs (comma-separated)" value="' + escapeHtml((scope.assetIds || []).join(", ")) + '" style="width:100%">' +
         '</div>';
+      // Asset-type chips toggle their value in the hidden #sc-types input.
+      scopeBox.querySelectorAll(".sc-type-chip").forEach(function (chip) {
+        chip.addEventListener("click", function () {
+          var input = document.getElementById("sc-types");
+          var list = input.value.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+          var name = chip.getAttribute("data-type");
+          var i = list.indexOf(name);
+          var on;
+          if (i >= 0) { list.splice(i, 1); on = false; } else { list.push(name); on = true; }
+          input.value = list.join(", ");
+          chip.setAttribute("aria-pressed", on);
+          chip.classList.toggle("btn-primary", on);
+          chip.classList.toggle("btn-secondary", !on);
+        });
+      });
       // Tag chips append/remove from the comma-separated tags input.
       scopeBox.querySelectorAll(".sc-tag-chip").forEach(function (chip) {
         chip.addEventListener("click", function () {
@@ -828,6 +862,17 @@ async function openRuleBuilder(existing) {
     var el = document.getElementById("sc-tags");
     var raw = el ? el.value : ((scope.tags || []).join(", "));
     return raw.split(",").map(function (x) { return x.trim(); }).filter(function (x) { return /^region:/i.test(x); });
+  }
+  // Distinct known email addresses (from configured users) → <option>s for the
+  // Cc/Bcc autocomplete datalist. Suggestions only — the operator can still
+  // type any address; nothing is pre-selected.
+  function emailSuggestOptions() {
+    var seen = {};
+    return (_ruleRecipientUsers || [])
+      .map(function (u) { return u.email; })
+      .filter(function (e) { if (!e || seen[e]) return false; seen[e] = 1; return true; })
+      .map(function (e) { return '<option value="' + escapeHtml(e) + '">'; })
+      .join("");
   }
   function userMultiSelect(selectedIds, cls) {
     cls = cls || "tg-recipient-users";
@@ -964,6 +1009,14 @@ async function openRuleBuilder(existing) {
     return (o.recipientUserIds || o.addresses) ? o : null;
   }
 
+  // Cc/Bcc are addresses-only (autocomplete of known emails, no autopopulated
+  // user list). Parse the comma-separated input into { addresses } or null.
+  function addrRecipObj(addrEl) {
+    if (!addrEl) return null;
+    var addrs = (addrEl.value || "").split(",").map(function (a) { return a.trim(); }).filter(Boolean);
+    return addrs.length ? { addresses: addrs } : null;
+  }
+
   function collectEmailComposition() {
     if (!emailEnable.checked) return null;
     var c = {};
@@ -972,8 +1025,8 @@ async function openRuleBuilder(existing) {
     if (document.getElementById("rule-email-html-enable").checked) {
       var h = document.getElementById("rule-email-html").value; if (h.trim()) c.bodyHtmlTemplate = h;
     }
-    var cc = recipObj(document.querySelector("#rule-email-fields .ec-cc-users"), document.getElementById("rule-email-cc-addr")); if (cc) c.cc = cc;
-    var bcc = recipObj(document.querySelector("#rule-email-fields .ec-bcc-users"), document.getElementById("rule-email-bcc-addr")); if (bcc) c.bcc = bcc;
+    var cc = addrRecipObj(document.getElementById("rule-email-cc-addr")); if (cc) c.cc = cc;
+    var bcc = addrRecipObj(document.getElementById("rule-email-bcc-addr")); if (bcc) c.bcc = bcc;
     return c; // {} is valid — explicit opt-in still switches email targets to one-message-per-target
   }
 
@@ -1007,10 +1060,8 @@ async function openRuleBuilder(existing) {
       '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">To — custom addresses (comma-separated)</label><input type="text" class="esc-to-addr" value="' + escapeHtml(((t.to && t.to.addresses) || []).join(", ")) + '" placeholder="supervisor@example.com"></div>' +
       '<details' + (t.cc || t.bcc || t.subjectTemplate || t.bodyTextTemplate || t.repeatEveryMin ? " open" : "") + '><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Cc / Bcc, subject/body overrides, repeat…</summary>' +
         '<div style="margin-top:6px">' +
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc — user accounts</label>' + userMultiSelect(t.cc && t.cc.recipientUserIds, "esc-cc-users") + '</div>' +
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc — custom addresses</label><input type="text" class="esc-cc-addr" value="' + escapeHtml(((t.cc && t.cc.addresses) || []).join(", ")) + '"></div>' +
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc — user accounts</label>' + userMultiSelect(t.bcc && t.bcc.recipientUserIds, "esc-bcc-users") + '</div>' +
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc — custom addresses</label><input type="text" class="esc-bcc-addr" value="' + escapeHtml(((t.bcc && t.bcc.addresses) || []).join(", ")) + '"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc (comma-separated — start typing for known addresses)</label><input type="text" class="esc-cc-addr" list="notif-email-suggest" autocomplete="off" value="' + escapeHtml(((t.cc && t.cc.addresses) || []).join(", ")) + '"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc (comma-separated — start typing for known addresses)</label><input type="text" class="esc-bcc-addr" list="notif-email-suggest" autocomplete="off" value="' + escapeHtml(((t.bcc && t.bcc.addresses) || []).join(", ")) + '"></div>' +
         '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject override (optional)</label><input type="text" class="esc-subject tpl-field" value="' + escapeHtml(t.subjectTemplate || "") + '" placeholder="[ESCALATION {escalation.tier}] {asset} unhandled for {escalation.elapsed}"></div>' +
         '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body override (plain text, optional)</label><textarea class="esc-body tpl-field" rows="3" style="width:100%">' + escapeHtml(t.bodyTextTemplate || "") + '</textarea></div>' +
         '<div class="form-group" style="margin-bottom:0"><label style="font-size:0.8rem">Repeat every</label> <input type="number" class="esc-repeat" min="5" value="' + (t.repeatEveryMin != null ? t.repeatEveryMin : "") + '" style="width:80px" placeholder="off"> min, <label style="font-size:0.8rem;display:inline">max</label> <input type="number" class="esc-max" min="1" max="20" value="' + (t.maxRepeats != null ? t.maxRepeats : "") + '" style="width:70px" placeholder="5"> repeats</div>' +
@@ -1043,8 +1094,8 @@ async function openRuleBuilder(existing) {
         channelId: row.querySelector(".esc-channel").value,
         to: recipObj(row.querySelector(".esc-to-users"), row.querySelector(".esc-to-addr")) || {},
       };
-      var cc = recipObj(row.querySelector(".esc-cc-users"), row.querySelector(".esc-cc-addr")); if (cc) t.cc = cc;
-      var bcc = recipObj(row.querySelector(".esc-bcc-users"), row.querySelector(".esc-bcc-addr")); if (bcc) t.bcc = bcc;
+      var cc = addrRecipObj(row.querySelector(".esc-cc-addr")); if (cc) t.cc = cc;
+      var bcc = addrRecipObj(row.querySelector(".esc-bcc-addr")); if (bcc) t.bcc = bcc;
       var subj = row.querySelector(".esc-subject").value.trim(); if (subj) t.subjectTemplate = subj;
       var bodyTxt = row.querySelector(".esc-body").value; if (bodyTxt.trim()) t.bodyTextTemplate = bodyTxt;
       var rep = row.querySelector(".esc-repeat").value;

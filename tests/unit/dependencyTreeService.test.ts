@@ -451,6 +451,77 @@ describe("evaluateSuppression", () => {
     const out = evaluateSuppression(states, parents);
     expect(out.get("sw")).toBe(false);
   });
+
+  // Maintenance window — a parent with status="maintenance" behaves exactly
+  // like an active Dependency Test overlay: confirmed-down for suppression,
+  // no transparent walk to grandparents.
+  it("maintenance parent treats children as dependency-down", () => {
+    const states: SuppressionAssetState[] = [
+      { id: "sw",  layer: 2, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "maintenance" },
+      { id: "acc", layer: 3, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "active" },
+    ];
+    const parents = new Map([["acc", ["sw"]]]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("acc")).toBe(true);
+    expect(out.get("sw")).toBe(false); // the maintained box itself is not suppressed
+  });
+
+  it("maintenance parent does NOT walk transparently to a healthy grandparent", () => {
+    const states: SuppressionAssetState[] = [
+      { id: "fg",  layer: 1, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "active" },
+      { id: "sw",  layer: 2, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "maintenance" },
+      { id: "acc", layer: 3, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "active" },
+    ];
+    const parents = new Map([["sw", ["fg"]], ["acc", ["sw"]]]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("acc")).toBe(true);
+  });
+
+  it("multi-parent: one maintained + one healthy parent keeps the child up (all-down rule)", () => {
+    const states: SuppressionAssetState[] = [
+      { id: "fg1", layer: 1, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "maintenance" },
+      { id: "fg2", layer: 1, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "active" },
+      { id: "sw",  layer: 2, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "active" },
+    ];
+    const parents = new Map([["sw", ["fg1", "fg2"]]]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("sw")).toBe(false);
+  });
+
+  // Per-schedule opt-out (suppressChildren=false → maintenanceSuppressChildren
+  // false on the state): the maintenance status is ignored by suppression and
+  // the parent evaluates by its frozen monitorStatus.
+  it("maintenance parent with suppressChildren=false leaves an up-parent's children unsuppressed", () => {
+    const states: SuppressionAssetState[] = [
+      { id: "sw",  layer: 2, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "maintenance", maintenanceSuppressChildren: false },
+      { id: "acc", layer: 3, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "active" },
+    ];
+    const parents = new Map([["acc", ["sw"]]]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("acc")).toBe(false);
+  });
+
+  it("maintenance parent with suppressChildren=false still suppresses via its frozen down monitorStatus", () => {
+    // Parent was already down when the window opened — the opt-out only
+    // removes the maintenance-implies-down shortcut, not real down state.
+    const states: SuppressionAssetState[] = [
+      { id: "sw",  layer: 2, monitorStatus: "down", monitored: true, currentlySuppressed: false, status: "maintenance", maintenanceSuppressChildren: false },
+      { id: "acc", layer: 3, monitorStatus: "up",   monitored: true, currentlySuppressed: false, status: "active" },
+    ];
+    const parents = new Map([["acc", ["sw"]]]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("acc")).toBe(true);
+  });
+
+  it("maintenanceSuppressChildren=true (explicit) matches the default maintenance-down behavior", () => {
+    const states: SuppressionAssetState[] = [
+      { id: "sw",  layer: 2, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "maintenance", maintenanceSuppressChildren: true },
+      { id: "acc", layer: 3, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "active" },
+    ];
+    const parents = new Map([["acc", ["sw"]]]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("acc")).toBe(true);
+  });
 });
 
 // ─── vCenter cluster multi-parent (vMotion-safe) ────────────────────────────

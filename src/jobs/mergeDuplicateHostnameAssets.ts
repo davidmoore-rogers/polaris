@@ -220,10 +220,15 @@ async function mergeDuplicateHostnameAssets(): Promise<void> {
       // Find every hostname appearing on >1 Asset row. Capped at the
       // realistic upper bound — even at thousands-of-assets fleets the
       // duplicate-hostname set is small (the prod sample showed 99).
+      // Operator-pinned hostnames ("hostnameOverride") are excluded on both
+      // sides: a pin that happens to collide with another asset's hostname is
+      // operator intent (two genuinely different devices), not a discovery
+      // ghost — merging on it would absorb a real device.
       const dupHosts = await prisma.$queryRaw<{ host: string }[]>`
         SELECT lower(hostname) AS host
         FROM assets
         WHERE hostname IS NOT NULL
+          AND "hostnameOverride" IS NULL
         GROUP BY lower(hostname)
         HAVING count(*) > 1
         LIMIT 2000
@@ -237,6 +242,9 @@ async function mergeDuplicateHostnameAssets(): Promise<void> {
           // variant and re-bucket in JS by lower(hostname). Hostname is
           // indexed; even at fleet scale this is a few hundred rows.
           OR: hosts.map((h) => ({ hostname: { equals: h, mode: "insensitive" as const } })),
+          // Mirror the SQL exclusion — a pinned asset must be neither ghost
+          // nor canonical.
+          hostnameOverride: null,
         },
         select: {
           id: true,
