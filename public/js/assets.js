@@ -2339,6 +2339,17 @@ function assetFormHTML(defaults) {
             : (d.discoveredByIntegrationId ? '<p class="hint">Discovered — saving a change pins it as a manual override.</p>' : '')) +
         '</div>' +
         '<div class="form-group"><label>DNS Name</label><div class="form-value">' + escapeHtml(d.dnsName || "-") + '</div></div>' +
+        // IP Address is editable on edit as an operator override, like
+        // Hostname — but discovery gets a vote: a later discovery write
+        // reporting the SAME address releases the pin automatically; a
+        // DIFFERENT address keeps the pin and raises a conflict to resolve
+        // on the Events → Conflicts tab. data-override-field tells
+        // getAssetFormData to always send the value (including "" to clear).
+        '<div class="form-group"><label>IP Address</label><input type="text" id="f-ipAddress" data-override-field="1" value="' + escapeHtml(d.ipAddress || "") + '" placeholder="e.g. 10.0.1.50">' +
+          (d.ipOverride
+            ? '<p class="hint">Manually overridden — clear the field to resume the discovered IP. If discovery reports this same address the override releases itself; a different discovered address raises a conflict.</p>'
+            : (d.discoveredByIntegrationId ? '<p class="hint">Discovered — saving a change pins it as a manual override (a matching discovery releases it; a differing one raises a conflict).</p>' : '')) +
+        '</div>' +
         '<div class="form-group" style="grid-column:1 / -1"><label>Serial Number</label><input type="text" id="f-serialNumber" value="' + escapeHtml(d.serialNumber || "") + '" placeholder="e.g. SN-DELL-001"></div>' +
       '</div>'
     : '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
@@ -2448,13 +2459,16 @@ function getAssetFormData() {
     data.latitude = lat;
     data.longitude = lng;
   }
-  // These fields are only editable on create, not edit — except hostname,
-  // which is editable on edit as an operator override. Hostname always sends
-  // (including "") so a blanked field clears the override server-side; on
-  // create the server treats "" as not-provided.
+  // These fields are only editable on create, not edit — except hostname and
+  // IP address, which are editable on edit as operator overrides. Hostname
+  // always sends (including "") so a blanked field clears the override
+  // server-side; on create the server treats "" as not-provided. The IP
+  // input carries data-override-field only in edit mode (create keeps the
+  // omit-when-empty behavior, since the create schema rejects "").
   if (document.getElementById("f-hostname"))     data.hostname     = val("f-hostname");
   if (document.getElementById("f-dnsName"))      data.dnsName      = val("f-dnsName") || undefined;
-  if (document.getElementById("f-ipAddress"))    data.ipAddress    = val("f-ipAddress") || undefined;
+  var ipEl = document.getElementById("f-ipAddress");
+  if (ipEl) data.ipAddress = ipEl.hasAttribute("data-override-field") ? val("f-ipAddress") : (val("f-ipAddress") || undefined);
   if (document.getElementById("f-macAddress"))   data.macAddress   = val("f-macAddress") || undefined;
   if (document.getElementById("f-serialNumber")) data.serialNumber = val("f-serialNumber") || undefined;
 
@@ -11843,8 +11857,14 @@ function ipViewRow(asset) {
   var src = asset.ipSource
     ? '<span style="font-size:0.75rem;color:var(--color-text-tertiary);margin-left:8px">' + escapeHtml(asset.ipSource) + '</span>'
     : '';
+  // Operator IP pin marker (Asset.ipOverride) — mirrors the hostname
+  // override marker. The pin releases itself when discovery reports the
+  // same address; a differing discovery raises a conflict.
+  var pin = asset.ipOverride
+    ? '<span style="font-size:0.75rem;color:var(--color-warning,#ffc107);margin-left:8px" title="Manually overridden — discovery reporting this address releases the pin; a different address raises a conflict">overridden</span>'
+    : '';
   return '<div class="detail-row"><span class="detail-label">IP Address</span>' +
-    '<span class="detail-value mono">' + ipCellHTML(asset) + src + '</span></div>';
+    '<span class="detail-value mono">' + ipCellHTML(asset) + src + pin + '</span></div>';
 }
 
 // ─── Management access (allowaccess) — Open HTTPS / Open SSH + AP warning ──────

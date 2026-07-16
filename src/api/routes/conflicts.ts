@@ -18,6 +18,11 @@
  *     netbios match the longer canonical hostname replaces the truncated
  *     one); reject creates a separate asset (admin confirmed they're
  *     different devices).
+ *       - "ip-override"            — a discovery write proposed an IP that
+ *         differs from the asset's operator IP pin (Asset.ipOverride; raised
+ *         by ipOverrideService). Accept adopts the discovered IP and releases
+ *         the pin; reject keeps the pin (the same discovered IP won't
+ *         re-raise). No proposedDeviceId / AssetSource identity involved.
  *
  * Role-based access:
  *   admin         — all conflicts
@@ -331,6 +336,14 @@ async function acceptAssetConflict(
     throw new AppError(500, "Asset conflict is missing its asset link");
   }
   const proposed = (conflict.proposedAssetFields || {}) as Record<string, any>;
+  // IP-override conflicts (operator pin vs discovery, raised by
+  // ipOverrideService) are a single-field disagreement with no source
+  // identity involved — they take their own narrow path. Merge-with-
+  // field-winners degenerates to a plain accept.
+  if (proposed.collisionReason === "ip-override") {
+    await acceptIpOverrideConflict(conflict, actor);
+    return;
+  }
   if (!conflict.proposedDeviceId) {
     throw new AppError(500, "Asset conflict is missing proposedDeviceId");
   }
@@ -504,7 +517,60 @@ async function acceptAssetConflict(
   });
 }
 
+// ─── Handlers — IP-override conflicts ────────────────────────────────────────
+// Raised by src/services/ipOverrideService.ts when a discovery write proposes
+// an IP that differs from the operator pin (Asset.ipOverride).
+
+// Accept = take discovery's side: write the discovered IP as the live address
+// and release the pin. Both fields are staged in one write so the db.ts
+// override guard treats it as an authoritative operator write.
+async function acceptIpOverrideConflict(conflict: any, actor?: string) {
+  const proposed = (conflict.proposedAssetFields || {}) as Record<string, any>;
+  const discoveredIp = typeof proposed.ipAddress === "string" && proposed.ipAddress ? proposed.ipAddress : null;
+  if (!discoveredIp) {
+    throw new AppError(500, "IP-override conflict is missing its proposed IP");
+  }
+  await prisma.asset.update({
+    where: { id: conflict.assetId },
+    data: {
+      ipAddress: discoveredIp,
+      ipOverride: null,
+      ipSource: typeof proposed.ipSource === "string" && proposed.ipSource ? proposed.ipSource : "discovery",
+    },
+  });
+  const label = conflict.asset?.hostname || discoveredIp;
+  logEvent({
+    action: "conflict.accepted",
+    resourceType: "asset",
+    resourceId: conflict.assetId,
+    resourceName: label,
+    actor,
+    message: `IP override conflict accepted on "${label}" — adopted discovered address ${discoveredIp}, released the override (was ${proposed.overrideIp ?? "unknown"})`,
+  });
+}
+
+// Reject = keep the pin. No asset write — the guard already re-asserted the
+// override on every discovery cycle. The rejected row doubles as the dedup
+// marker: ipOverrideService won't re-raise for this same discovered IP.
+async function rejectIpOverrideConflict(conflict: any, actor?: string) {
+  const proposed = (conflict.proposedAssetFields || {}) as Record<string, any>;
+  const label = conflict.asset?.hostname || proposed.overrideIp || conflict.assetId;
+  logEvent({
+    action: "conflict.rejected",
+    resourceType: "asset",
+    resourceId: conflict.assetId,
+    resourceName: label,
+    actor,
+    message: `IP override conflict rejected on "${label}" — kept pinned address ${proposed.overrideIp ?? "unknown"}; discovered ${proposed.ipAddress ?? "unknown"} dismissed (the same address won't re-raise)`,
+  });
+}
+
 async function rejectAssetConflict(conflict: any, actor?: string) {
+  const proposedForKind = (conflict.proposedAssetFields || {}) as Record<string, any>;
+  if (proposedForKind.collisionReason === "ip-override") {
+    await rejectIpOverrideConflict(conflict, actor);
+    return;
+  }
   if (!conflict.proposedDeviceId) {
     throw new AppError(500, "Asset conflict is missing proposedDeviceId");
   }

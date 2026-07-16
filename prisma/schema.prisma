@@ -501,6 +501,20 @@ model Asset {
   id               String      @id @default(uuid())
   ipAddress        String? // IPv4 or IPv6
   ipSource         String? // Where ipAddress was last set from: "manual", "fortimanager", "fortigate", etc.
+  // Operator IP override (pin) — hostnameOverride-style, with one twist:
+  // discovery gets a vote. When set, this value IS the effective ipAddress
+  // (the assets PUT handler writes both fields, and the Prisma extension in
+  // src/db.ts intercepts any later write staging `ipAddress` without touching
+  // `ipOverride`). When a discovery write stages an IP EQUAL to the override,
+  // the override is released (self-disabling — discovery agrees, the pin is
+  // no longer needed); when it stages a DIFFERENT IP, the write is re-asserted
+  // back to the override and a pending Conflict (entityType="asset",
+  // proposedAssetFields.collisionReason="ip-override") is raised — accept
+  // takes the discovered IP and releases the pin, reject keeps the override
+  // (the same discovered IP won't re-raise). Cleared by blanking the IP
+  // Address field in the edit form — ipAddress then reverts to the
+  // discovery-projected value. See src/services/ipOverrideService.ts.
+  ipOverride       String?
   macAddress       String? // Most recently seen MAC, e.g. "AA:BB:CC:DD:EE:FF"
   hostname         String?
   // Operator hostname override (pin) — coordSource-style. When set, this value
