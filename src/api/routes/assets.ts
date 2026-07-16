@@ -28,6 +28,7 @@ import { manualCoordPatchError } from "../../utils/geo.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
 import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } from "../../services/assetMergeService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
+import { resolvePendingIpOverrideConflicts } from "../../services/ipOverrideService.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
 import {
   probeAsset, recordProbeResult,
@@ -187,6 +188,10 @@ const CreateAssetSchema = z.object({
 const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
+  // Unlike create (min(1)), update accepts "" — blanking the IP Address field
+  // releases the operator IP pin (Asset.ipOverride) and reverts to the
+  // discovery-projected address, mirroring the hostname-override clear path.
+  ipAddress:             z.string().optional(),
   monitored:             z.boolean().optional(),
   monitorCredentialId:          z.string().uuid().nullable().optional(),
   responseTimeCredentialId:     z.string().uuid().nullable().optional(),
@@ -2413,6 +2418,25 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     // Notes: empty string clears to null (notes are operator-only — an
     // emptied box is an intentional clear, not "not provided").
     if (typeof input.notes === "string") data.notes = input.notes.trim() || null;
+    // Discovery projection (lazy, computed at most once) — needed when a
+    // pin-clear reverts hostname or ipAddress to the projected value.
+    let _projection: ReturnType<typeof projectAssetFromSources> | null = null;
+    const loadProjection = async () => {
+      if (!_projection) {
+        const overrideSources = await prisma.assetSource.findMany({
+          where: { assetId: id },
+          select: { sourceKind: true, inferred: true, observed: true },
+        });
+        _projection = projectAssetFromSources(
+          overrideSources.map((s) => ({
+            sourceKind: s.sourceKind,
+            inferred: s.inferred,
+            observed: s.observed as Record<string, unknown> | null,
+          })),
+        );
+      }
+      return _projection;
+    };
     // Hostname: an edit-time write is an operator override (coordSource-style
     // pin — the db.ts extension re-asserts it over discovery projection
     // writes). Only a real change pins, since the edit form echoes the
@@ -2423,18 +2447,7 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
       const trimmed = input.hostname.trim();
       if (!trimmed) {
         data.hostnameOverride = null;
-        const overrideSources = await prisma.assetSource.findMany({
-          where: { assetId: id },
-          select: { sourceKind: true, inferred: true, observed: true },
-        });
-        const { projected } = projectAssetFromSources(
-          overrideSources.map((s) => ({
-            sourceKind: s.sourceKind,
-            inferred: s.inferred,
-            observed: s.observed as Record<string, unknown> | null,
-          })),
-        );
-        data.hostname = projected.hostname;
+        data.hostname = (await loadProjection()).projected.hostname;
       } else if (trimmed !== existing.hostname) {
         data.hostname = trimmed;
         data.hostnameOverride = trimmed;
@@ -2442,11 +2455,36 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
         delete data.hostname;
       }
     }
+    // IP Address: same operator-override pattern as Hostname, with
+    // discovery-gets-a-vote semantics on later writes (see Asset.ipOverride
+    // in schema.prisma: discovery reporting the pinned IP releases the pin;
+    // a different IP re-asserts it and raises an ip-override Conflict).
+    // Only a real change pins; clearing (empty string) releases the pin and
+    // reverts to the discovery-projected address. Any set/clear here also
+    // closes the asset's pending ip-override conflict — the operator just
+    // made the call the conflict was asking about.
+    let ipOverrideTouched = false;
+    if (input.ipAddress !== undefined) {
+      const trimmed = input.ipAddress.trim();
+      if (!trimmed) {
+        data.ipOverride = null;
+        const { projected, provenance } = await loadProjection();
+        data.ipAddress = projected.ipAddress;
+        data.ipSource = projected.ipAddress ? (provenance.ipAddress ?? "discovery") : null;
+        ipOverrideTouched = !!existing.ipOverride;
+      } else if (trimmed !== existing.ipAddress) {
+        data.ipAddress = trimmed;
+        data.ipOverride = trimmed;
+        data.ipSource = "manual";
+        ipOverrideTouched = true;
+      } else {
+        delete data.ipAddress;
+      }
+    }
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     else if (input.acquiredAt === undefined) delete data.acquiredAt;
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     else if (input.warrantyExpiry === undefined) delete data.warrantyExpiry;
-    if (input.ipAddress) data.ipSource = "manual";
     // Manual coordinates: only a real change stamps coordSource — the edit
     // form echoes the current values back on every save, and silently pinning
     // discovery-stamped coords as "manual" would freeze discovery updates for
@@ -2487,7 +2525,13 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     if (input.monitored !== undefined || input.assetType !== undefined) {
       await recomputeMonitorOverrideForAssets(prisma, [id]);
     }
-    const trackFields = ["hostname", "hostnameOverride", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
+    // Operator set/cleared the IP pin: any pending ip-override conflict is
+    // now moot (best-effort — a leftover pending row would only linger until
+    // the next discovery cycle refreshes or re-raises it).
+    if (ipOverrideTouched) {
+      resolvePendingIpOverrideConflicts(id, requestActor(req) ?? "manual").catch(() => {});
+    }
+    const trackFields = ["hostname", "hostnameOverride", "ipAddress", "ipOverride", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
     const before: Record<string, unknown> = {};
     const after: Record<string, unknown> = {};
     for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }

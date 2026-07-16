@@ -23,8 +23,13 @@
  *      for new/edited assets between backfill runs at startup.
  *   4. Asset update/upsert writes that stage `hostname` without touching
  *      `hostnameOverride` are checked against the row's operator hostname
- *      override and rewritten to it when set (enforceHostnameOverride) —
- *      discovery projection writes can never clobber an operator pin.
+ *      override and rewritten to it when set — discovery projection writes
+ *      can never clobber an operator pin. Writes staging `ipAddress` without
+ *      touching `ipOverride` get the same guard with discovery-gets-a-vote
+ *      semantics (enforceOperatorOverrides): a staged IP equal to the
+ *      override releases the pin in the same write; a different staged IP is
+ *      rewritten back to the override and an ip-override Conflict is raised
+ *      (fire-and-forget, via ipOverrideService) for the operator to resolve.
  * The base client (_base) is reused for the history + source writes to
  * avoid a circular import.
  */
@@ -34,7 +39,7 @@ import { randomUUID } from "node:crypto";
 import { PrismaClient } from "./generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { normalizeManufacturer } from "./utils/manufacturerNormalize.js";
-import { applyHostnameOverride } from "./utils/assetInvariants.js";
+import { applyHostnameOverride, applyIpOverride, type IpOverrideOutcome } from "./utils/assetInvariants.js";
 import { deriveAssetSources, type AssetSnapshot } from "./utils/assetSourceDerivation.js";
 
 // Lazy-resolved to break the import cycle (dnsResolvedReservationService imports
@@ -259,35 +264,92 @@ function clampMonitoredForStatus(data: any): void {
 }
 
 /**
- * Enforce the operator hostname override (Asset.hostnameOverride) on a
- * pending update/upsert. Centralized here (like clampMonitoredForStatus) so
- * every discovery projection write path — integrations, agents, FMG service,
- * merge/split endpoints — respects the pin without each writer knowing about
- * it. The row read only fires when the write stages `hostname` WITHOUT
- * touching `hostnameOverride` (the operator set/clear path is authoritative),
- * so the monitor hot paths (probe results, lastSeen bumps) never pay it;
- * hostname-carrying writes are discovery-cadence, where the extra indexed
+ * Result of the pre-write override enforcement, handed back so the hook can
+ * fire the IP-override follow-ups (conflict raise / release audit) only
+ * AFTER the guarded write actually lands.
+ */
+interface OperatorOverrideOutcome {
+  ip: IpOverrideOutcome;
+  /** The ipSource the writer originally staged, captured before the
+   *  re-assertion rewrote it to "manual" — conflict provenance. */
+  stagedIpSource: string | null;
+}
+
+/**
+ * Enforce the operator overrides (Asset.hostnameOverride / Asset.ipOverride)
+ * on a pending update/upsert. Centralized here (like clampMonitoredForStatus)
+ * so every discovery projection write path — integrations, agents, FMG
+ * service, merge/split endpoints — respects the pins without each writer
+ * knowing about them. The row read only fires when the write stages
+ * `hostname` WITHOUT touching `hostnameOverride` and/or `ipAddress` WITHOUT
+ * touching `ipOverride` (the operator set/clear paths are authoritative), so
+ * the monitor hot paths (probe results, lastSeen bumps) never pay it;
+ * hostname/IP-carrying writes are discovery-cadence, where the extra indexed
  * point read is in the same budget as the drift-detection reads that already
- * follow them. updateMany is deliberately not guarded — no current writer
- * stages hostname through it (verified 2026-07); add the guard if one appears.
+ * follow them — and both pins share the single read. updateMany is
+ * deliberately not guarded — no current writer stages hostname or ipAddress
+ * through it (re-verified 2026-07); add the guard if one appears.
+ *
+ * The hostname pin is absolute (always re-asserted). The IP pin gives
+ * discovery a vote via applyIpOverride: matching IP → the pin is released in
+ * this same write; different IP → re-asserted, and the returned outcome
+ * tells the hook to raise an ip-override Conflict once the write lands.
  *
  * Best-effort: a failed read skips the rewrite rather than failing the write.
- * Self-healing — projection re-stages hostname every discovery cycle, so the
- * next guarded write re-asserts the override.
+ * Self-healing — projection re-stages the fields every discovery cycle, so
+ * the next guarded write re-applies the pins.
  */
-async function enforceHostnameOverride(base: PrismaClient, where: unknown, data: unknown): Promise<void> {
+async function enforceOperatorOverrides(
+  base: PrismaClient,
+  where: unknown,
+  data: unknown,
+): Promise<OperatorOverrideOutcome | null> {
   const d = data as Record<string, unknown> | undefined;
-  if (!d || typeof d !== "object") return;
-  if (!("hostname" in d) || "hostnameOverride" in d) return;
+  if (!d || typeof d !== "object") return null;
+  const guardHostname = "hostname" in d && !("hostnameOverride" in d);
+  const guardIp = "ipAddress" in d && !("ipOverride" in d);
+  if (!guardHostname && !guardIp) return null;
   try {
     const row = await base.asset.findFirst({
       where: where as any,
-      select: { hostnameOverride: true },
+      select: { hostnameOverride: true, ipOverride: true },
     });
-    applyHostnameOverride(d, row?.hostnameOverride);
+    if (guardHostname) applyHostnameOverride(d, row?.hostnameOverride);
+    if (guardIp) {
+      const srcRaw = d.ipSource;
+      const stagedIpSource =
+        typeof srcRaw === "string"
+          ? srcRaw
+          : (srcRaw && typeof srcRaw === "object" && typeof (srcRaw as any).set === "string" ? (srcRaw as any).set : null);
+      const ip = applyIpOverride(d, row?.ipOverride);
+      if (ip.action !== "none") return { ip, stagedIpSource };
+    }
   } catch {
     // Best-effort — see doc comment.
   }
+  return null;
+}
+
+// Fire-and-forget follow-ups for the IP-override guard, lazily importing the
+// service to break the import cycle (ipOverrideService imports `prisma` from
+// this file) — same pattern as the dns_resolved reconcile above. Failures are
+// logged and swallowed inside the service.
+function fireIpOverrideFollowUp(outcome: OperatorOverrideOutcome, assetId: string | undefined): void {
+  if (!assetId) return;
+  void (async () => {
+    try {
+      const svc = await import("./services/ipOverrideService.js");
+      if (outcome.ip.action === "released") {
+        await svc.handleIpOverrideReleased(assetId, outcome.ip.ip);
+      } else if (outcome.ip.action === "reasserted" && outcome.ip.discoveredIp) {
+        // A staged clear (discoveredIp null) is not a disagreement — the pin
+        // was re-asserted silently, no conflict.
+        await svc.raiseIpOverrideConflict(assetId, outcome.ip.discoveredIp, outcome.stagedIpSource);
+      }
+    } catch {
+      /* swallowed — follow-up is best-effort */
+    }
+  })();
 }
 
 function _buildClient(base: PrismaClient) {
@@ -315,8 +377,9 @@ function _buildClient(base: PrismaClient) {
         async update({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.data);
           clampMonitoredForStatus(args?.data);
-          await enforceHostnameOverride(base, args?.where, args?.data);
+          const overrideOutcome = await enforceOperatorOverrides(base, args?.where, args?.data);
           const result = await query(args);
+          if (overrideOutcome) fireIpOverrideFollowUp(overrideOutcome, (result as any)?.id);
           const d = args.data as Record<string, unknown> | undefined;
           const ip = typeof d?.ipAddress === "string" ? d.ipAddress : undefined;
           if (ip) {
@@ -355,8 +418,9 @@ function _buildClient(base: PrismaClient) {
           clampMonitoredForStatus(args?.update);
           // Create branch needs no guard — a brand-new row can't carry an
           // override; the read is a no-op miss when the row doesn't exist.
-          await enforceHostnameOverride(base, args?.where, args?.update);
+          const overrideOutcome = await enforceOperatorOverrides(base, args?.where, args?.update);
           const result = await query(args);
+          if (overrideOutcome) fireIpOverrideFollowUp(overrideOutcome, (result as any)?.id);
           const updateTouches = touchesAssetSources(args?.update);
           // Always fires after a create branch (we can't tell from the
           // result alone which branch ran, so we re-derive when the inputs
