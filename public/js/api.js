@@ -323,6 +323,8 @@ const api = {
   assets: {
     list:      (params) => request("GET", "/assets" + toQuery(params)),
     get:       (id)     => request("GET", `/assets/${id}`),
+    // Sidebar alert: last agent build shipped unsigned Windows binaries (assets:write).
+    agentSigningAlert: () => request("GET", "/assets/agent-signing-alert"),
     create:    (body)   => request("POST", "/assets", body),
     update:    (id, b)  => request("PUT", `/assets/${id}`, b),
     delete:    (id)     => request("DELETE", `/assets/${id}`),
@@ -650,6 +652,10 @@ const api = {
     agentCertPinsSummary:     () => request("GET",    "/server-settings/agents/cert-pins/summary"),
     agentCertPinBulkAdd:      (pin) => request("POST", "/server-settings/agents/cert-pins/bulk-add", { pin }),
     agentCertPinBulkRemove:   (pin) => request("POST", "/server-settings/agents/cert-pins/bulk-remove", { pin }),
+    // Agent code signing (Azure Trusted Signing) — masked secret config + dry-run test.
+    agentSigningGet:          ()    => request("GET",  "/server-settings/agents/signing"),
+    agentSigningSet:          (cfg) => request("PUT",  "/server-settings/agents/signing", cfg),
+    agentSigningTest:         ()    => trackedRequest("Testing code signing", "POST", "/server-settings/agents/signing/test"),
     getNtp:      ()       => request("GET", "/server-settings/ntp"),
     updateNtp:   (body)   => request("PUT", "/server-settings/ntp", body),
     testNtp:     (body)   => trackedRequest("Testing NTP sync", "POST", "/server-settings/ntp/test", body),

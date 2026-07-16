@@ -734,6 +734,22 @@ router.get("/tags", requirePermission("assets", "read"), async (_req, res, next)
   }
 });
 
+// GET /api/v1/assets/agent-signing-alert — the durable "last agent build
+// shipped UNSIGNED Windows binaries" stamp (Setting `agent.signing.lastFailure`,
+// written by agentBuildService's fail-open signing step; cleared by the next
+// fully-signed build or by disabling signing). Drives the dismissable sidebar
+// alert in app.js. Gated assets:write — the agent-DEPLOY permission (same gate
+// as /:id/agent/install below) — deliberately NOT under /server-settings,
+// whose router-level serverSettingsSystem gate only admin passes.
+router.get("/agent-signing-alert", requirePermission("assets", "write"), async (_req, res, next) => {
+  try {
+    const { getSigningAlert } = await import("../../services/agentSigningService.js");
+    res.json(await getSigningAlert());
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PUT /api/v1/assets/ip-history-settings — update retention settings (assets admin)
 router.put("/ip-history-settings", requirePermission("assets", "write"), async (req, res, next) => {
   try {

@@ -123,6 +123,41 @@ if ((Test-Command "go") -and ((go version) -match "go1\.(2[2-9]|[3-9][0-9])")) {
     }
 }
 
+# ─── 1c. Install Java 17 (agent code signing — optional at runtime) ──────────
+# Used by the agent code-signing feature (Integrations → Polaris Agents →
+# Code signing): when Azure Trusted Signing is configured, the in-app agent
+# build signs the two Windows binaries via jsign (a Java CLI). Opt-in —
+# missing Java only disables signing (the UI names what's missing), so
+# failures here warn instead of aborting the install. The Microsoft OpenJDK
+# MSI stamps itself into the Machine PATH, which the NSSM service inherits.
+Refresh-Path
+if (Test-Command "java") {
+    Write-Info "Java already installed"
+} else {
+    Write-Info "Installing Microsoft OpenJDK 17 (for agent code signing)..."
+    try {
+        if ($hasWinget) {
+            winget install --id Microsoft.OpenJDK.17 --accept-source-agreements --accept-package-agreements --silent
+        } else {
+            $jdkUrl = "https://aka.ms/download-jdk/microsoft-jdk-17-windows-x64.msi"
+            $jdkMsi = "$env:TEMP\microsoft-jdk-17-windows-x64.msi"
+            Write-Info "Downloading Microsoft OpenJDK installer..."
+            Invoke-WebRequest -Uri $jdkUrl -OutFile $jdkMsi -UseBasicParsing
+            Write-Info "Running OpenJDK installer..."
+            Start-Process msiexec.exe -ArgumentList "/i `"$jdkMsi`" /qn /norestart" -Wait -NoNewWindow
+            Remove-Item $jdkMsi -Force -ErrorAction SilentlyContinue
+        }
+        Refresh-Path
+    } catch {
+        Write-Warn "Java install failed ($_) — agent code signing stays unavailable until Java is installed manually"
+    }
+    if (Test-Command "java") {
+        Write-Info "Java installed"
+    } else {
+        Write-Warn "'java' not found in PATH — agent code signing stays unavailable until Java is installed manually"
+    }
+}
+
 # ─── 2. Install PostgreSQL 15 ────────────────────────────────────────────────
 $pgBinDirs = @(
     "C:\Program Files\PostgreSQL\15\bin",
@@ -250,6 +285,32 @@ $goCacheDir   = Join-Path $AppDir ".cache\go-build"
 New-Item -ItemType Directory -Force -Path $agentDataDir | Out-Null
 New-Item -ItemType Directory -Force -Path $goCacheDir   | Out-Null
 Write-Info "Created agent build dirs: $agentDataDir, $goCacheDir"
+
+# ─── 4c. jsign jar (agent code signing — optional at runtime) ────────────────
+# SHA-256-pinned download for the Azure Trusted Signing feature. Failure only
+# warns — signing is opt-in and the UI names exactly what's missing.
+$jsignVersion = "7.4"
+$jsignSha256  = "2ABF2ADE9EA322ACC2D60C24794EADC465FF9380938FCA4C932D09E0B25F1C28"
+$jsignJar = Join-Path $AppDir "tools\jsign.jar"
+if (Test-Path $jsignJar) {
+    Write-Info "jsign already present at $jsignJar"
+} else {
+    try {
+        New-Item -ItemType Directory -Force -Path (Join-Path $AppDir "tools") | Out-Null
+        Write-Info "Downloading jsign $jsignVersion (signs Windows agent binaries)..."
+        $jsignTmp = "$jsignJar.tmp"
+        Invoke-WebRequest -Uri "https://github.com/ebourg/jsign/releases/download/$jsignVersion/jsign-$jsignVersion.jar" -OutFile $jsignTmp -UseBasicParsing
+        if ((Get-FileHash $jsignTmp -Algorithm SHA256).Hash -eq $jsignSha256) {
+            Move-Item $jsignTmp $jsignJar -Force
+            Write-Info "jsign $jsignVersion installed to $jsignJar"
+        } else {
+            Remove-Item $jsignTmp -Force -ErrorAction SilentlyContinue
+            Write-Warn "jsign checksum mismatch — agent code signing stays unavailable until installed manually"
+        }
+    } catch {
+        Write-Warn "jsign download failed ($_) — agent code signing stays unavailable until installed manually"
+    }
+}
 
 # ─── 5. Configure environment ────────────────────────────────────────────────
 $envFile = Join-Path $AppDir ".env"

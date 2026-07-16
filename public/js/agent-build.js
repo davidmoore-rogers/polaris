@@ -251,6 +251,14 @@
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 0.5rem 0">Loading pin set...</p>' +
       '</div>';
 
+    // Code-signing slot. Populated async by renderAgentCodeSigning() —
+    // same separate-fetch pattern as the cert-pin pane above.
+    var codeSigningSlot =
+      '<div id="agent-code-signing" style="margin-top:0.75rem;padding-top:0.5rem;border-top:1px solid var(--color-border);font-size:0.85rem">' +
+        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Code signing (Azure Trusted Signing)</div>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 0.5rem 0">Loading signing config...</p>' +
+      '</div>';
+
     var installedSummarySlot = '<div id="agent-installed-summary"></div>';
 
     body.innerHTML =
@@ -271,7 +279,8 @@
       cleanupLine +
       serverUrlRow +
       autoUpgradeRow +
-      certPinRotationSlot;
+      certPinRotationSlot +
+      codeSigningSlot;
 
     var btn = document.getElementById("btn-agent-build");
     if (btn) btn.addEventListener("click", onAgentBuildClick);
@@ -322,6 +331,9 @@
     // Cert pin rotation pane. Loaded async; failure leaves the slot showing
     // a one-line error so operators know to refresh.
     renderAgentCertPinRotation();
+
+    // Code-signing pane — same async-slot pattern.
+    renderAgentCodeSigning();
   }
 
   // Populate the #agent-installed-summary slot with the latest counts
@@ -640,6 +652,117 @@
     });
   }
 
+  // Renders the Code signing pane (Azure Trusted Signing) in the slot
+  // reserved by renderAgentBuildInventory. Windows binaries only; runs as a
+  // post-build step (FAIL-OPEN — a failure warns + ships unsigned, never
+  // blocks the build). The client secret follows the mask convention: the
+  // server echoes bullets when one is stored; leaving the field untouched
+  // (or blank) on Save preserves it.
+  function renderAgentCodeSigning() {
+    var slot = document.getElementById("agent-code-signing");
+    if (!slot) return;
+    api.serverSettings.agentSigningGet().then(function (r) {
+      var cfg   = r.config || {};
+      var avail = r.availability || {};
+
+      var statusLine;
+      if (!cfg.enabled) {
+        statusLine = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.3rem 0 0.5rem">Disabled — Windows agent binaries ship unsigned.</p>';
+      } else if (avail.ok) {
+        statusLine =
+          '<p style="font-size:0.78rem;color:var(--color-success);margin:0.3rem 0 0.5rem">' +
+            '✓ Ready — ' + escapeHtml(avail.javaVersion || "java") + ', jsign at <code>' + escapeHtml(avail.jarPath || "?") + '</code>. ' +
+            'Windows binaries are signed on every build.' +
+          '</p>';
+      } else {
+        statusLine =
+          '<p style="font-size:0.78rem;color:var(--color-warning);margin:0.3rem 0 0.5rem">' +
+            '⚠ ' + escapeHtml(avail.error || "Signing is not ready") +
+            ' — builds will complete but ship UNSIGNED Windows binaries until this is fixed.' +
+          '</p>';
+      }
+
+      function inputRow(id, label, value, placeholder, type) {
+        return '<div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.35rem">' +
+          '<label for="' + id + '" style="width:150px;flex-shrink:0;font-size:0.78rem;color:var(--color-text-secondary)">' + label + '</label>' +
+          '<input type="' + (type || "text") + '" id="' + id + '" value="' + escapeHtml(value || "") + '" ' +
+            'placeholder="' + escapeHtml(placeholder || "") + '" autocomplete="off" ' +
+            'style="flex:1;padding:4px 8px;font-family:var(--font-mono, monospace);font-size:0.8rem">' +
+        '</div>';
+      }
+
+      slot.innerHTML =
+        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Code signing (Azure Trusted Signing)</div>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 0.3rem 0">' +
+          'Signs the two Windows agent binaries after every build so Microsoft Defender / SmartScreen trusts them. ' +
+          'Requires Java 17+ and the jsign jar on this Polaris server, plus an Azure Trusted Signing account ' +
+          '(see <code>docs/INSTALL.md</code> → "Optional: Code signing").' +
+        '</p>' +
+        statusLine +
+        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font-size:0.85rem;margin-top:0.3rem">' +
+          '<input type="checkbox" id="agent-signing-enabled" style="width:15px;height:15px;flex-shrink:0"' + (cfg.enabled ? " checked" : "") + '>' +
+          '<span>Sign Windows agent binaries on build</span>' +
+        '</label>' +
+        inputRow("agent-signing-endpoint",  "Endpoint",            cfg.endpoint,    "https://eus.codesigning.azure.net") +
+        inputRow("agent-signing-account",   "Account name",        cfg.accountName, "my-signing-account") +
+        inputRow("agent-signing-profile",   "Certificate profile", cfg.profileName, "polaris-agent") +
+        inputRow("agent-signing-tenant",    "Tenant ID",           cfg.tenantId,    "00000000-0000-0000-0000-000000000000") +
+        inputRow("agent-signing-client",    "Client ID",           cfg.clientId,    "app registration client ID") +
+        inputRow("agent-signing-secret",    "Client secret",       cfg.clientSecret, cfg.clientSecretSet ? "unchanged" : "client secret", "password") +
+        inputRow("agent-signing-jar",       "jsign jar path",      cfg.jsignJarPath, avail.jarPath || "auto-detect (tools/jsign.jar)") +
+        '<div style="display:flex;gap:0.5rem;margin-top:0.6rem">' +
+          '<button class="btn btn-secondary" id="btn-agent-signing-save" style="padding:4px 14px;font-size:0.8rem">Save</button>' +
+          '<button class="btn btn-secondary" id="btn-agent-signing-test" style="padding:4px 14px;font-size:0.8rem" ' +
+            'title="Checks Java + jsign and requests a real Entra ID token with the saved credentials">Test</button>' +
+        '</div>';
+
+      var saveBtn = document.getElementById("btn-agent-signing-save");
+      if (saveBtn) {
+        saveBtn.addEventListener("click", function () {
+          var body = {
+            enabled:      !!document.getElementById("agent-signing-enabled").checked,
+            endpoint:     (document.getElementById("agent-signing-endpoint").value || "").trim(),
+            accountName:  (document.getElementById("agent-signing-account").value || "").trim(),
+            profileName:  (document.getElementById("agent-signing-profile").value || "").trim(),
+            tenantId:     (document.getElementById("agent-signing-tenant").value || "").trim(),
+            clientId:     (document.getElementById("agent-signing-client").value || "").trim(),
+            // Mask echo / blank both mean "keep the stored secret" server-side.
+            clientSecret: document.getElementById("agent-signing-secret").value || "",
+            jsignJarPath: (document.getElementById("agent-signing-jar").value || "").trim(),
+          };
+          saveBtn.disabled = true;
+          api.serverSettings.agentSigningSet(body).then(function () {
+            showToast("Code-signing settings saved", "success");
+            renderAgentCodeSigning();
+          }).catch(function (err) {
+            showToast("Save failed: " + err.message, "error");
+            saveBtn.disabled = false;
+          });
+        });
+      }
+
+      var testBtn = document.getElementById("btn-agent-signing-test");
+      if (testBtn) {
+        testBtn.addEventListener("click", function () {
+          testBtn.disabled = true;
+          api.serverSettings.agentSigningTest().then(function (t) {
+            showToast(t.message, t.ok ? "success" : "error");
+          }).catch(function (err) {
+            showToast("Test failed: " + err.message, "error");
+          }).finally(function () {
+            testBtn.disabled = false;
+          });
+        });
+      }
+    }).catch(function (err) {
+      slot.innerHTML =
+        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Code signing (Azure Trusted Signing)</div>' +
+        '<p style="font-size:0.78rem;color:var(--color-warning);margin:0.3rem 0">' +
+          'Failed to load: ' + escapeHtml(err.message) +
+        '</p>';
+    });
+  }
+
   function onAgentPruneClick() {
     api.serverSettings.agentPrune().then(function (r) {
       var n = (r.removed || []).length;
@@ -780,6 +903,8 @@
       label = '<strong style="color:var(--color-warning)">Build cancelled</strong>';
     } else if (state.phase === "queued") {
       label = '<strong>Queued: v' + escapeHtml(state.version) + '</strong> · waiting · ' + escapeHtml(elapsedTxt) + cancelBtn;
+    } else if (state.phase === "signing") {
+      label = '<strong>Signing Windows binaries v' + escapeHtml(state.version) + '</strong> · ' + escapeHtml(elapsedTxt) + ' elapsed' + cancelBtn;
     } else {
       label = '<strong>Building agent binaries v' + escapeHtml(state.version) + '</strong> · ' + escapeHtml(elapsedTxt) + ' elapsed' + cancelBtn;
     }
