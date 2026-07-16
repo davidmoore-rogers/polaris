@@ -11,8 +11,12 @@
 //   - Initial viewport zooms to the FortiGate (or to a focus node when the
 //     URL carries ?q=<term>) instead of cy.fit() on the whole graph. A
 //     20-switch site is otherwise unreadable on a 375px screen.
-//   - No drag-to-reposition / localStorage persistence. Mobile users
-//     don't manually arrange node layouts.
+//   - No drag-to-reposition / layout persistence. Mobile users don't
+//     manually arrange node layouts. The shared server layouts the desktop
+//     modal saves (the /topology payload's `savedLayouts`) are deliberately
+//     NOT applied here either: they're pixel coords in the desktop's
+//     left-to-right orientation, and this surface renders transposed
+//     (lane → x, depth → y), so applying them would draw the site sideways.
 //   - No screenshot, no fullscreen toggle (the surface IS fullscreen).
 //   - Node tap opens a bottom sheet instead of a right-rail info panel,
 //     with a "View asset" action that pivots to the asset detail page.

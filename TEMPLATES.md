@@ -569,7 +569,7 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - Widget modules: `public/js/widgets/*.js` — each self-registers via `PolarisWidgets.register({...})` (registry in `public/js/widgets/index.js`).
 - Picker: `public/js/widget-library.js` — `WidgetLibrary.open(onAdd)` / `close()` / `isOpen()`.
 - Favorites: `public/js/favorites.js` — `getFavorites`/`isFavorite`/`toggleFavorite` (localStorage entity `"widgetlib"`); MUST be `<script>`-included before `widget-library.js`.
-- Persistence: `UserDashboard` Prisma model + `src/services/userDashboardService.ts` + `src/api/routes/userDashboard.ts` (GET/PUT `/me/dashboard`); client at `api.me.dashboard.{get,put}`.
+- Persistence: `UserDashboard` Prisma model + `src/services/userDashboardService.ts` + `src/api/routes/userDashboard.ts` (GET/PUT `/me/dashboard`); client at `api.me.dashboard.{get,put}`. The SHARED (per-resource, not per-user) variant of this pattern is `TopologyLayout` + `src/services/topologyLayoutService.ts` (Device Map topology drag layouts, one row per (site, view); writes RBAC-gated `deviceMap=write`, reads embedded in the topology GET) — copy that when a layout should be one map every operator sees rather than a personal preference.
 - Wallboard variant: `public/dash.html` is the unauthenticated read-only mirror (Dash wallboard, served by `src/dash/dashServer.ts`) — same markup/widget list, `dash-mode.js` flags + `dash-boot.js` instead of `app.js`, layout in localStorage (`polaris-dash-layout`) via the `POLARIS_DASH_LOCAL` branch in `dashboard.js`.
 
 **Key conventions:**

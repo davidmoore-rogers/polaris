@@ -795,7 +795,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ## cross-cutting/location-codes
 
-**What it is:** Physical-location codes (`a:` area / `b:` building / `f:` floor / `r:` room / `jb:` junction box, e.g. `a:Mine b:Shop f:2 r:North Closet jb:112-305`) embedded in FortiSwitch/FortiAP admin descriptions and/or Asset notes/description, parsed server-side by `src/utils/locationCodes.ts` and shipped per topology node as `location: {area, building, floor, room, junctionBox} | null`. Drives three Device Map features: grouping hulls (nested rounded rectangles color-coded per level — area rose > building sky-blue > floor violet dashed > room green > jb amber dashed, fitted inside-out with a sibling-separation sweep so no two shapes overlap; synthetic bottom-layer Cytoscape nodes so `cy.png()` screenshots include them), area/building/floor sibling row clustering in the column solver, and a two-row drill-down switcher of building views (every `b:` building, area-scoped keys `b|<a>|<b>`; the active building's floor views `f|<a>|<b>|<f>` appear in a second row) with cross-view portal stubs. Discovery also mirrors the device description into `Asset.notes` while notes aren't operator-authored (CLAUDE.md business rule 15).
+**What it is:** Physical-location codes (`a:` area / `b:` building / `f:` floor / `r:` room / `jb:` junction box, e.g. `a:Mine b:Shop f:2 r:North Closet jb:112-305`) embedded in FortiSwitch/FortiAP admin descriptions and/or Asset notes/description, parsed server-side by `src/utils/locationCodes.ts` and shipped per topology node as `location: {area, building, floor, room, junctionBox} | null`. Drives three Device Map features: grouping hulls (nested rounded rectangles color-coded per level — area rose > building sky-blue > floor violet dashed > room green > jb amber dashed, fitted inside-out with a sibling-separation sweep so no two shapes overlap; synthetic bottom-layer Cytoscape nodes so `cy.png()` screenshots include them), full-tier (area→building→floor→room→jb) sibling row clustering in the column solver (anchors, fallback-exile roots, AND each parent's leaf block — so room/jb hulls come out as tight contiguous bands), and a two-row drill-down switcher of building views (every `b:` building, area-scoped keys `b|<a>|<b>`; the active building's floor views `f|<a>|<b>|<f>` appear in a second row) with cross-view portal stubs. Notes are operator-only — discovery never writes them on an existing asset (CLAUDE.md business rule 15).
 
 **Writers** (files that mutate or emit this state):
 - `src/services/fortimanagerService.ts` — FMG capture: switch `description` from the already-fetched `/sys/proxy/json` managed-switch CMDB rows (`descriptionBySerial`, zero extra RPCs); AP `comment` added to the Step 3d.4 WTP CMDB roster fields and joined onto `localAps` (zero extra RPCs). `DiscoveredFortiSwitch.description` / `DiscoveredFortiAP.description`.
@@ -806,8 +806,8 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **Readers** (files that consume it):
 - `src/api/routes/map.ts` — topology endpoint selects `notes`/`description` on the FG + sibling queries, reads `fortinetTopology.deviceDescription` (`TopologyMeta`), and emits `location` (via `resolveEffectiveLocation`, per-key precedence notes → `Asset.description` → deviceDescription) + raw `deviceDescription` per node. FortiGate: notes/description only.
-- `public/js/topology-render.js` — `locationData()` stamps `locB/locF/locR/locJb` grouping keys (+ `loc*Name` display casing) onto node data; the solver's `regroupAnchorsByLocation` clusters non-spine sibling anchors (spine selection untouched — cross-subtree adjacency deliberately NOT guaranteed); `computeLocationGroups`/`renderLocationGroups`/`refreshLocationGroups` draw the hulls (`LOC_GROUP_KINDS` padding/shape tiers, `z-compound-depth: bottom`); `computeFloorViews`/`partitionElementsForFloor`/`compareFloors` (underground-aware: `-2 < B1 < 1 < Mezzanine`) build the floor views + portals.
-- `public/js/map.js` — Locations chip (`polaris.topology.showLocations`, default ON, rendered only when codes exist), floor-view switcher chips (top-left; `topoState.activeView`, never persisted), portal tap → `_setTopologyView`, per-view position keys (`polaris.topology.positions:<siteId>[:<viewKey>]`), hull suppression (`suppressKinds: ["building","floor"]`) in floor views, `[isLocGroup]`/`[isPortal]` exclusions in `saveNodePositions` + `_openAssetForNode`.
+- `public/js/topology-render.js` — `locationData()` stamps `locA/locB/locF/locR/locJb` grouping keys (+ `loc*Name` display casing) onto node data; the solver clusters through the FULL tier chain via `stableBucketByTiers` (`LOC_TIERS = [locA, locB, locF, locR, locJb]`, synthetic `"\tnone"` bucket for tier-skipping codes): `regroupAnchorsByLocation` on non-spine sibling anchors AND fallback-exile roots (spine selection untouched — cross-subtree adjacency deliberately NOT guaranteed), plus pass 5b ordering each parent's leaf block so same-room/jb leaves take contiguous lanes; `computeLocationGroups`/`renderLocationGroups`/`refreshLocationGroups` draw the hulls (`LOC_GROUP_KINDS` padding/shape tiers, `z-compound-depth: bottom`); `computeFloorViews`/`partitionElementsForFloor`/`compareFloors` (underground-aware: `-2 < B1 < 1 < Mezzanine`) build the floor views + portals; `routeInterGroupEdges` fans out BOTH corridor axes in 9px steps (incl. the straight-into-target-row corridor, so parallel horizontal runs never combine into one line).
+- `public/js/map.js` — Locations chip (`polaris.topology.showLocations`, default ON, rendered only when codes exist), Snap chip (`polaris.topology.snapToGrid`, default OFF), floor-view switcher chips (top-left; `topoState.activeView`, never persisted), portal tap → `_setTopologyView`, per-view position persistence (server `TopologyLayout` first via the payload's `savedLayouts[view]`, localStorage `polaris.topology.positions:<siteId>[:<viewKey>]` fallback), hull suppression (`suppressKinds: ["building","floor"]`) in floor views, `[isLocGroup]`/`[isPortal]` exclusions in `saveNodePositions` + `_openAssetForNode`.
 - `public/js/mobile/topology-tab.js` — flat hulls only (always-on, rendered on layoutstop; no switcher in v1).
 
 **Invariants:**
@@ -1512,6 +1512,33 @@ Listed alphabetically.
 - If the tag prefix or category constants change, also update CLAUDE.md "Map Regions" section + the assets edit modal's tag picker label conventions.
 - Membership logic depends on `Asset.fortinetTopology.controllerFortigate` matching firewall hostnames; if discovery ever stops setting that field, the cascade silently breaks. Add a coverage test if discovery topology shape evolves.
 - Polygon antimeridian crossings are documented out-of-scope; if Polaris ever supports global polygons, audit `pointInPolygon` for that case.
+
+---
+
+## services/topologyLayoutService.ts
+
+**What it owns:** Shared Device Map topology layouts — the `TopologyLayout` table (one row per `(siteId, view)`, siteId = the FortiGate Asset the graph is rooted on, `positions` = `{nodeId: {x,y}}` pixel model coords). The server-side half of topology drag persistence; the browser's localStorage layout remains a per-browser fallback.
+
+**Public API:** TopologyNodePosition, TopologyPositions, TopologyLayoutDto, MAX_LAYOUT_NODES, MAX_VIEW_KEY_LEN, MAX_NODE_ID_LEN, MAX_COORD, isValidViewKey, sanitizePositions, getLayoutsForSite, saveLayout, deleteLayout.
+
+**Cross-service deps:** `prisma.topologyLayout`, `prisma.asset` (firewall existence check on save).
+
+**Used by:**
+- `src/api/routes/map.ts` — `GET /map/sites/:id/topology` embeds `getLayoutsForSite` as `savedLayouts`; `PUT|DELETE /map/sites/:id/topology/layout` (both `deviceMap=write`) call `saveLayout` / `deleteLayout` and write `map.topology.layout_saved` / `map.topology.layout_reset` Events.
+- `public/js/map.js` — `loadNodePositions` prefers `savedLayouts[view]` over localStorage; `saveNodePositions` → `_queueServerLayoutSave` (debounced ~1s, writer-gated via `permAtLeast("deviceMap","write")`, dirty-flagged so open/close/refresh alone never PUTs); `resetTopologyLayout` deletes the active view's row; `_snapAllPositions` (Snap chip enable) re-snaps and re-queues other views' blobs.
+
+**Invariants:**
+- Full-replace per (site, view); last-write-wins between concurrent editors (`updatedBy`/`updatedAt` stored for a future conditional write).
+- `view` is `"flat"` or a `computeFloorViews` key (`b|<area>|<bldg>` / `f|<area>|<bldg>|<floor>`) — the grammar is shared with `public/js/topology-render.js:computeFloorViews`; changing the slug derivation there orphans saved layout rows (harmless: they cascade with the site, but operators lose that view's hand layout).
+- Saves 404 unless the site Asset exists AND `assetType === "firewall"`; rows cascade-delete with the Asset (plain table — the no-FK rule only covers Timescale hypertables).
+- Stale nodeIds inside a blob are never pruned server-side — ignored at render, dropped on the client's next full-replace save (mirrors the old localStorage semantics).
+- Reads are NOT permission-gated beyond auth (they ride the open topology GET) — readonly viewers see the shared layout; only writes need `deviceMap=write`.
+- Mobile (`public/js/mobile/topology-tab.js`) deliberately ignores `savedLayouts` — desktop coords are LR-oriented, mobile renders transposed.
+
+**When changing this:**
+- New view-key shapes (beyond b|/f|) need `isValidViewKey`, the route Zod, AND map.js `_activeViewKey` updated together.
+- If node ids in the topology payload ever stop being Asset UUIDs (or synthetics become persistable), revisit `MAX_NODE_ID_LEN` and the stale-entry story.
+- Keep the localStorage key scheme (`polaris.topology.positions:<siteId>[:<view>]`, bare key = flat) in sync — it's the seed/fallback the server store was modeled on.
 
 ---
 

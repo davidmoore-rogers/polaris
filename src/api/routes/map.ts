@@ -1,10 +1,15 @@
 /**
  * src/api/routes/map.ts — Device Map endpoints
  *
- * Three read-only endpoints, all behind requireAuth (registered in router.ts):
+ * Read endpoints, all behind requireAuth (registered in router.ts):
  *   GET /map/sites              — every firewall asset with lat/lng coords
  *   GET /map/search?q=<query>   — autocomplete over firewall hostnames
  *   GET /map/sites/:id/topology — FortiGate + its FortiSwitches + FortiAPs + edges
+ *                                 (+ savedLayouts: shared per-view node positions)
+ *
+ * Write endpoints (gated deviceMap=write):
+ *   PUT    /map/sites/:id/topology/layout — full-replace one (site, view) layout
+ *   DELETE /map/sites/:id/topology/layout?view=<key> — reset one view's layout
  *
  * Coordinates and topology metadata are populated by the FortiManager / FortiGate
  * discovery pipelines (see fortimanagerService.ts step 3d.5/3d.6 and
@@ -13,13 +18,42 @@
  */
 
 import { Router } from "express";
+import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { loadIconResolutionCache, resolveIconUrl } from "../../services/deviceIconService.js";
 import { inferInterfaceTopology } from "../../services/interfaceTopologyService.js";
 import { resolveEffectiveLocation, hasLocationCodes, type LocationCodes } from "../../utils/locationCodes.js";
+import {
+  getLayoutsForSite,
+  saveLayout,
+  deleteLayout,
+  sanitizePositions,
+  isValidViewKey,
+  MAX_LAYOUT_NODES,
+  MAX_VIEW_KEY_LEN,
+} from "../../services/topologyLayoutService.js";
+import { logEvent } from "./events.js";
+import { requirePermission } from "../middleware/permissions.js";
 
 const router = Router();
+
+// Shared topology-layout write bodies. View keys are "flat" or the
+// computeFloorViews building/floor keys ("b|…" / "f|…"); positions is the
+// { nodeId: {x,y} } blob map.js saves — re-validated in depth by
+// sanitizePositions (finite coords, node cap) at the service seam.
+const ViewKeySchema = z
+  .string()
+  .max(MAX_VIEW_KEY_LEN)
+  .refine(isValidViewKey, 'view must be "flat" or a "b|…" / "f|…" floor-view key');
+
+const SaveLayoutSchema = z.object({
+  view: ViewKeySchema,
+  positions: z.record(z.string(), z.object({ x: z.number(), y: z.number() })).refine(
+    (p) => Object.keys(p).length <= MAX_LAYOUT_NODES,
+    `positions exceeds the ${MAX_LAYOUT_NODES}-node cap`,
+  ),
+});
 
 type TopologyMeta = {
   role?: "fortigate" | "fortiswitch" | "fortiap";
@@ -1443,6 +1477,11 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       // (LLDP-detected). Rendered like a mesh edge AP→switch; the switch routes
       // behind the AP and its FortiLink controller edge is demoted client-side.
       bridgeEdges,
+      // Server-persisted (shared) node layouts, keyed by view ("flat" +
+      // floor-view keys): { [view]: { view, positions, updatedBy, updatedAt } }.
+      // Written via PUT /sites/:id/topology/layout (deviceMap=write); the
+      // modal prefers these over its per-browser localStorage layout.
+      savedLayouts: await getLayoutsForSite(fg.id),
     });
   } catch (err) {
     next(err);
@@ -1534,6 +1573,57 @@ router.get("/sites/:id/topology/search", async (req, res, next) => {
       };
     });
     res.json({ q, results });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── PUT /map/sites/:id/topology/layout ─────────────────────────────────────────
+// Full-replace save of one (site, view) shared topology layout. Debounced by
+// the client per drag session, so volume is low; every save is audited. Gated
+// deviceMap=write — reads stay open (the layout rides the topology GET above)
+// so readonly viewers see the shared map without being able to move it.
+router.put("/sites/:id/topology/layout", requirePermission("deviceMap", "write"), async (req, res, next) => {
+  try {
+    const siteId = req.params.id as string;
+    const input = SaveLayoutSchema.parse(req.body);
+    const positions = sanitizePositions(input.positions);
+    const actor = req.session?.username ?? null;
+    const saved = await saveLayout(siteId, input.view, positions, actor);
+    logEvent({
+      action: "map.topology.layout_saved",
+      resourceType: "asset",
+      resourceId: siteId,
+      actor: req.session?.username,
+      message: `Topology layout saved (view "${input.view}", ${Object.keys(positions).length} node${Object.keys(positions).length === 1 ? "" : "s"})`,
+      details: { view: input.view, nodeCount: Object.keys(positions).length },
+    });
+    res.json(saved);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── DELETE /map/sites/:id/topology/layout?view=<key> ───────────────────────────
+// Remove one (site, view) shared layout — the server half of "Reset layout".
+// Idempotent 204 so the client's reset flow is unconditional.
+router.delete("/sites/:id/topology/layout", requirePermission("deviceMap", "write"), async (req, res, next) => {
+  try {
+    const siteId = req.params.id as string;
+    const view = String(req.query.view ?? "");
+    if (!isValidViewKey(view)) throw new AppError(400, "Invalid or missing view key");
+    const removed = await deleteLayout(siteId, view);
+    if (removed) {
+      logEvent({
+        action: "map.topology.layout_reset",
+        resourceType: "asset",
+        resourceId: siteId,
+        actor: req.session?.username,
+        message: `Topology layout reset (view "${view}")`,
+        details: { view },
+      });
+    }
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

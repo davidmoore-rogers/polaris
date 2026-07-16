@@ -875,6 +875,7 @@ model Asset {
   dependencyParents   AssetDependencyParent[]  @relation("AssetDependencyChild")
   dependencyChildren  AssetDependencyParent[]  @relation("AssetDependencyParent")
   managedAgent        ManagedAgent?
+  topologyLayouts     TopologyLayout[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -2157,6 +2158,34 @@ model UserDashboard {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("user_dashboards")
+}
+
+// Shared (server-persisted) Device Map topology layout — the hand-tuned node
+// positions for one site's topology graph, one row per (site, view). Written
+// by operator drags in the topology modal (debounced full-replace PUT, gated
+// deviceMap=write); read by everyone via the savedLayouts embed on
+// GET /map/sites/:id/topology. `siteId` is the FortiGate Asset's id (the
+// topology root). `view` is "flat" or a floor-view key from computeFloorViews
+// ("b|<area>|<building>" / "f|<area>|<building>|<floor>") — renaming a:/b:/f:
+// location codes changes view keys and orphans that view's row (harmless;
+// cascades away with the site). `positions` is { [nodeId]: {x,y} } in pixel
+// model coords — the exact shape the browser previously kept in localStorage
+// (which remains a per-browser fallback/cache for non-writers). Stale nodeIds
+// inside the blob are ignored at render and dropped on the next save.
+// Last-write-wins between concurrent editors; updatedBy/updatedAt make a
+// future conditional-write possible. Single writer: topologyLayoutService.
+model TopologyLayout {
+  id        String   @id @default(uuid())
+  siteId    String   @map("site_id")
+  site      Asset    @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  view      String   @default("flat")
+  positions Json
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([siteId, view])
+  @@map("topology_layouts")
 }
 
 // Role: identity + permission matrix consulted by the per-route
