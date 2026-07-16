@@ -740,10 +740,11 @@ function setupColumnLayout(tableEl, options) {
     var anyWidth = false;
     colIds.forEach(function (id, i) {
       if (i === lastIdx) {
-        // Auto-fill: pins the table's right edge to the border. When the other
-        // (fixed-width) columns sum wider than the container the table grows
-        // past 100% and the wrapper's overflow-x:auto shows a scrollbar.
-        cols[i].style.width = "";
+        // Auto-fill column: its width is owned by pinAutoFillColumn
+        // (scheduled below), which computes it arithmetically. Never clear it
+        // here — a transient un-sizing shrinks the table for one layout pass,
+        // and when the table overflows horizontally that clamps the wrapper's
+        // scrollLeft, yanking the view back left on every resize-drag frame.
       } else {
         var w = widths[id];
         if (typeof w === "number" && w > 0) {
@@ -763,51 +764,58 @@ function setupColumnLayout(tableEl, options) {
     scheduleAutoFillPin();
   }
 
-  // table-layout:fixed sizes an auto-width column from its cell in the first
-  // <tbody> row. When that row is a colspan cell (e.g. the interfaces table's
-  // "Interfaces (30)" section header) the auto-fill (rightmost) column has no
-  // per-column width basis, so fixed layout strands the leftover space as a
-  // trailing gap instead of growing the column to the border. Detect that case
-  // after layout settles and pin the column to an explicit computed width so
-  // its right edge meets the table border. No-op for the common case (no
-  // colspan first row) — there the column auto-fills correctly and we leave it
-  // width:auto so it stays responsive without recomputation.
-  //
-  // The opposite failure is a CRUSHED auto-fill column: when the other visible
-  // columns' widths already sum past the container, fixed layout leaves no
-  // leftover and the auto column collapses to ~0px. Its right edge still meets
-  // the table border, so edge-distance alone reads as "auto-fill worked" — but
-  // the column is invisible, its header content (sort icon, filter controls)
-  // paints past the table border into overflow the wrapper can't scroll to,
-  // and the column-chooser gear (which lives in the rightmost visible th)
-  // appears parked on the previous column. Rescue it by pinning the column's
-  // saved/measured width so the table grows and the wrapper scrollbar reaches it.
+  // Sizes the auto-fill (rightmost visible resizable) column to an explicit
+  // pinned width = container width − Σ other visible columns, so its right
+  // edge meets the table border. Computed arithmetically — NEVER by clearing
+  // the width and measuring the auto-fill result: a transient clear shrinks
+  // the table for one layout pass, and when the table overflows horizontally
+  // that clamps the wrapper's scrollLeft and yanks the view back left (the
+  // drag-while-scrolled bug). Always pinning also covers both fixed-layout
+  // quirks in one place:
+  //  - colspan first <tbody> row (interfaces table's section header): an
+  //    auto-width column has no per-column width basis, so fixed layout
+  //    strands the leftover as a trailing gap instead of growing the column.
+  //  - CRUSHED column: when the other visible columns already sum past the
+  //    container, fixed layout gives an auto column ~0px — invisible, with
+  //    its header content painting past the table border into overflow the
+  //    wrapper's scrollbar can't reach. Rescue with the column's
+  //    saved/measured width so the table grows and the scrollbar covers it.
+  // Writes only when the value actually changes so the ResizeObserver below
+  // doesn't re-fire on every pass.
   var MIN_LAST_COL_W = 40;
   var pinScheduled = false;
   function pinAutoFillColumn() {
     var lastIdx = lastVisibleResizableIdx();
     if (lastIdx < 0) return;
-    var lastCol = cols[lastIdx];
-    lastCol.style.width = "";                       // measure the auto-fill result
     var tableRect = tableEl.getBoundingClientRect();
     if (!tableRect.width) return;                   // off-screen; nothing to measure
-    var lastTh = ths[lastIdx];
-    if (!lastTh) return;
-    var thRect = lastTh.getBoundingClientRect();
-    if (tableRect.right - thRect.right <= 1 && thRect.width >= MIN_LAST_COL_W) return; // auto-fill worked
+    // What table width:100% resolves against: the parent's content box.
+    var availW = tableRect.width;
+    var parent = tableEl.parentElement;
+    if (parent) {
+      var pcs = getComputedStyle(parent);
+      availW = parent.clientWidth - (parseFloat(pcs.paddingLeft) || 0) - (parseFloat(pcs.paddingRight) || 0);
+    }
     var used = 0;
     cols.forEach(function (c, i) {
       if (i === lastIdx || hidden[colIds[i]]) return;
-      used += c.getBoundingClientRect().width;
+      // Sum SPECIFIED widths, not rendered ones: when the specified columns
+      // sum narrower than the table's 100% width, fixed layout distributes
+      // the leftover across every column, so rendered widths would make this
+      // computation circular (target == whatever the last column currently
+      // renders at). Rendered width is only the fallback for columns with no
+      // explicit width yet.
+      used += parseFloat(c.style.width) || c.getBoundingClientRect().width;
     });
-    var target = Math.floor(tableRect.width - used);
+    var target = Math.floor(availW - used);
     if (target < MIN_LAST_COL_W) {
-      // Crushed: no leftover to fill. Restore the column's saved/measured
-      // width (40px floor) instead of leaving it collapsed.
+      // Crushed: no leftover to fill. Use the column's saved/measured width
+      // (40px floor) instead of letting it collapse.
       var savedW = widths[colIds[lastIdx]];
       target = Math.max(MIN_LAST_COL_W, (typeof savedW === "number" && savedW > 0) ? savedW : 0);
     }
-    lastCol.style.width = target + "px";
+    var next = target + "px";
+    if (cols[lastIdx].style.width !== next) cols[lastIdx].style.width = next;
   }
   function scheduleAutoFillPin() {
     if (typeof requestAnimationFrame !== "function") { pinAutoFillColumn(); return; }
@@ -914,15 +922,20 @@ function setupColumnLayout(tableEl, options) {
   })();
 
   // Re-pin the auto-fill column when the table becomes measurable (revealed
-  // from an inactive tab) or the container resizes. Self-disconnects once the
-  // table is detached (every re-render builds a fresh table + observer), so
-  // observers don't accumulate across the interface table's refresh ticks.
+  // from an inactive tab) or the container resizes. The parent is observed
+  // too: with the auto-fill column pinned to an explicit width, a container
+  // SHRINK doesn't change the table's own size (fixed layout keeps the column
+  // sum), so only the parent resize reveals that the last column should give
+  // space back. Self-disconnects once the table is detached (every re-render
+  // builds a fresh table + observer), so observers don't accumulate across
+  // the interface table's refresh ticks.
   if (typeof ResizeObserver === "function") {
     var autoFillRo = new ResizeObserver(function () {
       if (!tableEl.isConnected) { autoFillRo.disconnect(); return; }
       scheduleAutoFillPin();
     });
     autoFillRo.observe(tableEl);
+    if (tableEl.parentElement) autoFillRo.observe(tableEl.parentElement);
   }
 
   // Floating gear pinned to the top-right CORNER of the table's scroll
