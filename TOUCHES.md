@@ -287,6 +287,15 @@ and the Dockerfile's `golang-go` source (currently bookworm-backports)
 in lockstep, or operators will get cryptic "missing go.sum entry"
 errors when the build runs.
 
+**Bumping VERSION also requires regenerating the Windows VERSIONINFO
+resources** — `make -C agent winres` rewrites the committed
+`agent/cmd/polaris-agent/rsrc_windows_{amd64,arm64}.syso` (source:
+`winres.json` in the same directory) with the new file/product version.
+The .syso files are committed so the server-side `go build` links them
+with zero extra tooling; a stale .syso means Explorer → Properties →
+Details shows the OLD version on a NEW binary. Non-Windows builds ignore
+them entirely.
+
 The rebuild + redistribute paths after bumping VERSION:
 1. **From the UI:** Server Settings → Maintenance → Polaris Agent →
    Build. Polaris regenerates all 6 binaries using the installed Go
@@ -355,10 +364,38 @@ build auto-prune + boot-time auto-build are layered on top.
   readers of `agent/VERSION` (not writers, but documenting here for
   proximity). 5s mtime-checked cache; format-validated; fallback
   `"0.0.0-no-version-file"`.
+- `src/services/agentSigningService.ts` — Azure Trusted Signing of the
+  two Windows binaries as a post-build step (opt-in via the
+  `agent.codeSigning` Setting; Integrations → Polaris Agents → Code
+  signing). Owns the masked-secret config (clientSecret follows the
+  notificationChannelService MASK/merge discipline), the Entra ID
+  client-credentials token fetch, the `java -jar jsign.jar
+  --storetype TRUSTEDSIGNING` invocation (token via env
+  `POLARIS_SIGNING_TOKEN`, never argv), the `signingAvailability()`
+  probe (java on PATH + jar at `tools/jsign.jar` /
+  `/opt/polaris/tools/jsign.jar` / `STATE_DIR/tools/jsign.jar`), and
+  the durable `agent.signing.lastFailure` Setting behind the sidebar
+  alert. `agentBuildService.signWindowsBinaries()` calls it between the
+  platform loop and the manifest write; phase `"signing"`, steps
+  `sign / windows-<arch>`. **FAIL-OPEN:** a signing failure emits
+  `agent.build.sign_failed` (warning) + stamps the failure Setting but
+  the build completes and ships unsigned — never blocks agent rollout.
+  A fully-signed build (or disabling signing) clears the stamp. Routes:
+  `GET/PUT /server-settings/agents/signing` (PUT =
+  `serverSettingsSystem:fullwrite`) + `POST .../signing/test`
+  (token-fetch dry run); the alert feed is
+  `GET /assets/agent-signing-alert` gated `assets:write` (the
+  agent-deploy permission — deliberately NOT under /server-settings,
+  whose router-level gate only admin passes), polled every 30s by
+  `pollSigningAlert()` in `public/js/app.js` with per-user-per-failure
+  localStorage dismissal (`polaris.signing-alert.dismissed.<username>`).
 - `deploy/setup-{rhel,ubuntu,windows}{,-nodb}.{sh,ps1}` — install Go
-  alongside Node + mkdir `$APP_DIR/data/agents` + `$APP_DIR/.cache/go-build`.
+  alongside Node + mkdir `$APP_DIR/data/agents` + `$APP_DIR/.cache/go-build`;
+  also install Java 17 headless + the SHA-256-pinned jsign jar to
+  `$APP_DIR/tools/jsign.jar` (warn-don't-abort — signing is opt-in).
 - `Dockerfile` — pulls `golang-go` from bookworm-backports; pre-creates
-  `/app/state/.cache/go-build`.
+  `/app/state/.cache/go-build`; installs `default-jre-headless` + the
+  pinned jsign jar at `/opt/polaris/tools/jsign.jar`.
 
 **Readers** (consume state):
 - `public/js/server-settings.js:initAgentBuildCard` — Maintenance-tab
@@ -386,6 +423,13 @@ build auto-prune + boot-time auto-build are layered on top.
   six platforms succeed. Cancelled mid-flight builds leave a partial
   set under `data/agents/<version>/` but the existing manifest still
   points at the previous version's filenames.
+- Signing (when enabled) runs AFTER the platform loop and BEFORE the
+  manifest write — jsign mutates the .exe in place, and nothing
+  downstream hashes the binary bytes (integrity = the agent's TLS cert
+  pin), so in-place signing is safe. If a per-binary hash is ever added
+  to the manifest, compute it after signing. Signing failures are
+  fail-open by explicit operator decision: build completes, warning
+  Event + failure-stamp Setting + sidebar alert instead of a block.
 - Prune helper NEVER touches the current version, NEVER touches versions
   in use by a live ManagedAgent (`installStatus !== "revoked"`), and
   ALWAYS keeps the most recent N (default 3, env `POLARIS_AGENT_KEEP_VERSIONS`).
@@ -408,6 +452,11 @@ build auto-prune + boot-time auto-build are layered on top.
 - Adding a new upgrade-class action (e.g. config-only refresh): add it to
   `_isTransientAgentState` so the asset-details panel's auto-poll picks
   it up.
+- Bumping the pinned jsign version: update the version + SHA-256 in ALL
+  of `Dockerfile`, all six `deploy/setup-*.{sh,ps1}`, and the manual
+  install one-liners in `docs/INSTALL.md` ("Optional: Code signing").
+  The default jar probe paths in `agentSigningService.JSIGN_JAR_CANDIDATES`
+  are version-less (`tools/jsign.jar`), so only the download sites move.
 
 ---
 
@@ -425,6 +474,7 @@ build auto-prune + boot-time auto-build are layered on top.
 - New first-run setup step — wizard route + UI in `src/setup/`; the `.setup-complete` marker write at finalize still needs to fire (CLAUDE.md "First-run setup lock").
 - New encrypted-backup format change — the magic header is `POLARIS\0` (CLAUDE.md naming note); the restore path must accept the current version's dump and reject older formats with a clear error.
 - New Go-version requirement in the agent — bump in lockstep across `agent/go.mod`, every `deploy/setup-*.{sh,ps1}` Go pin, and the Dockerfile `golang-go` source. Already documented in `cross-cutting/polaris-agent` "When bumping agent/go.mod's go 1.x directive."
+- Java 17 headless + the jsign jar (agent code signing, optional at runtime) — provisioned by `Dockerfile` and all six `deploy/setup-*.{sh,ps1}` (SHA-256-pinned download to `<app dir>/tools/jsign.jar`, warn-don't-abort). Version bumps follow the checklist in `cross-cutting/polaris-agent-build` "Bumping the pinned jsign version."
 - New non-`.ts` asset read at runtime from a dist-relative path (via `import.meta.url`) — `tsc` does NOT copy data files into `dist/`, so add an entry to `ASSETS` in `scripts/copy-build-assets.mjs` (the second half of `npm run build`). Today that's `src/services/stdMibs/*.txt`, consumed by `stdMibLibrary.ts`. The Docker runtime image ships only `dist/` (no `src/`), so copying into `dist/` is the only correct strategy — a runtime fallback to `src/` would break in a container. All build sites (Dockerfile, every `deploy/setup-*`, both `deploy/update-*`, and `restartService`/the build step in `src/services/updateService.ts`) invoke `npm run build`, never bare `npx tsc`, so the copy runs everywhere a build happens.
 
 **Readers** (artifacts the running app reads from disk that operators provision):

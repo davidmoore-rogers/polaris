@@ -62,4 +62,15 @@ clean:
 dev:
 	$(BUILDENV) go build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o polaris-agent $(PKG)
 
-.PHONY: all linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64 clean dev
+# Regenerate the Windows VERSIONINFO resources (rsrc_windows_{amd64,arm64}.syso
+# in cmd/polaris-agent/, linked automatically by any GOOS=windows go build —
+# including the server-side agentBuildService path, which needs no extra
+# tooling because the .syso files are COMMITTED). The embedded metadata
+# (ProductName/CompanyName/FileVersion — Explorer → Properties → Details)
+# makes the PE look legitimate to Defender heuristics and carries the agent
+# version. MUST be re-run whenever VERSION bumps — the version is baked into
+# the .syso at generation time (see TOUCHES.md → cross-cutting/polaris-agent).
+winres:
+	cd cmd/polaris-agent && go run github.com/tc-hib/go-winres@v0.3.3 make --in winres.json --arch amd64,arm64 --file-version $(VERSION) --product-version $(VERSION)
+
+.PHONY: all linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64 clean dev winres

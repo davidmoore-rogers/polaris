@@ -144,6 +144,38 @@ fi
 mkdir -p "$APP_DIR/data/agents" "$APP_DIR/.cache/go-build"
 chown -R "$APP_USER:$APP_GROUP" "$APP_DIR/data/agents" "$APP_DIR/.cache"
 
+# ─── 4c. Java 17 + jsign (agent code signing — optional at runtime) ─────────
+# Used by the agent code-signing feature (Integrations → Polaris Agents →
+# Code signing): when Azure Trusted Signing is configured, the in-app agent
+# build signs the two Windows binaries via jsign (a Java CLI). The feature is
+# opt-in — missing Java/jsign only disables signing and the UI names exactly
+# what's missing — so failures here warn instead of aborting the install.
+JSIGN_VERSION="7.4"
+JSIGN_SHA256="2abf2ade9ea322acc2d60c24794eadc465ff9380938fca4c932d09e0b25f1c28"
+if command -v java &>/dev/null; then
+  info "Java already installed"
+else
+  info "Installing Java 17 (headless, for agent code signing)..."
+  dnf install -y java-17-openjdk-headless || \
+    info "WARNING: Java install failed — agent code signing stays unavailable until Java is installed manually"
+fi
+if [ -f "$APP_DIR/tools/jsign.jar" ]; then
+  info "jsign already present at $APP_DIR/tools/jsign.jar"
+else
+  info "Downloading jsign ${JSIGN_VERSION} (signs Windows agent binaries)..."
+  mkdir -p "$APP_DIR/tools"
+  if curl -fsSL -o "$APP_DIR/tools/jsign.jar.tmp" \
+       "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar" \
+     && echo "${JSIGN_SHA256}  $APP_DIR/tools/jsign.jar.tmp" | sha256sum -c --status -; then
+    mv "$APP_DIR/tools/jsign.jar.tmp" "$APP_DIR/tools/jsign.jar"
+    info "jsign ${JSIGN_VERSION} installed to $APP_DIR/tools/jsign.jar"
+  else
+    rm -f "$APP_DIR/tools/jsign.jar.tmp"
+    info "WARNING: jsign download failed or checksum mismatch — agent code signing stays unavailable until installed manually"
+  fi
+  chown -R "$APP_USER:$APP_GROUP" "$APP_DIR/tools" 2>/dev/null || true
+fi
+
 # ─── 5. Test database connectivity ──────────────────────────────────────────
 info "Testing database connectivity..."
 if command -v psql &>/dev/null; then

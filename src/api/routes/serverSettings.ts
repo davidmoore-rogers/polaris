@@ -2140,6 +2140,100 @@ router.put("/agents/server-url", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─── Agent code signing (Azure Trusted Signing) ────────────────────────────
+// Operator config for signing the two Windows agent binaries as a post-build
+// step in agentBuildService (jsign + Azure Trusted Signing; FAIL-OPEN — a
+// signing failure warns + stamps the sidebar-alert Setting but never blocks
+// the build). Secret discipline mirrors notificationChannelService: the
+// client secret is masked on read and preserved on write when the client
+// echoes the mask back.
+
+router.get("/agents/signing", async (_req, res, next) => {
+  try {
+    const { getSigningConfigMasked, signingAvailability } =
+      await import("../../services/agentSigningService.js");
+    const config = await getSigningConfigMasked();
+    res.json({ config, availability: await signingAvailability() });
+  } catch (err) { next(err); }
+});
+
+const SigningConfigSchema = z.object({
+  enabled:      z.boolean().optional(),
+  endpoint:     z.string().trim().max(300).optional(),
+  accountName:  z.string().trim().max(200).optional(),
+  profileName:  z.string().trim().max(200).optional(),
+  tenantId:     z.string().trim().max(100).optional(),
+  clientId:     z.string().trim().max(100).optional(),
+  clientSecret: z.string().max(500).optional(),
+  jsignJarPath: z.string().trim().max(500).optional(),
+});
+
+router.put("/agents/signing", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
+  try {
+    const { getSigningConfigRaw, updateSigningConfig, signingAvailability, MASK } =
+      await import("../../services/agentSigningService.js");
+    const { logEvent } = await import("./events.js");
+    const actor = req.session?.username || "unknown";
+
+    const parsed = SigningConfigSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "invalid body" });
+    }
+    const input = parsed.data;
+    if (input.endpoint && !/^https:\/\//i.test(input.endpoint)) {
+      return res.status(400).json({ error: "endpoint must start with https://" });
+    }
+
+    const before = await getSigningConfigRaw();
+    const config = await updateSigningConfig(input);
+    const clientSecretChanged =
+      typeof input.clientSecret === "string" &&
+      input.clientSecret.trim() !== "" &&
+      input.clientSecret !== MASK;
+
+    await logEvent({
+      action:       "agent.signing.config_updated",
+      level:        "info",
+      actor,
+      resourceType: "polaris-agent",
+      message:      `Agent code-signing config updated (${config.enabled ? "enabled" : "disabled"})`,
+      details: {
+        enabled:            config.enabled,
+        wasEnabled:         before.enabled,
+        endpoint:           config.endpoint,
+        accountName:        config.accountName,
+        profileName:        config.profileName,
+        tenantId:           config.tenantId,
+        clientId:           config.clientId,
+        clientSecretChanged,
+      },
+    });
+    res.json({ config, availability: await signingAvailability() });
+  } catch (err) { next(err); }
+});
+
+// Dry-run validation: availability probe + a REAL Entra ID token fetch
+// (proves the tenant/client/secret triple without invoking jsign — there's
+// nothing to sign outside a build). Gated fullwrite because it exercises the
+// stored secret against Entra ID.
+router.post("/agents/signing/test", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
+  try {
+    const { testSigningSetup } = await import("../../services/agentSigningService.js");
+    const { logEvent } = await import("./events.js");
+    const actor = req.session?.username || "unknown";
+    const result = await testSigningSetup();
+    await logEvent({
+      action:       "agent.signing.test",
+      level:        result.ok ? "info" : "warning",
+      actor,
+      resourceType: "polaris-agent",
+      message:      `Agent code-signing test ${result.ok ? "succeeded" : "failed"}: ${result.message}`,
+      details:      { ok: result.ok },
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // ─── Agent cert-pin rotation (Phase 2 dual-pin) ────────────────────────────
 // Operators stage a new pin BEFORE rotating the server cert so the entire
 // agent fleet trusts both old + new pins during the rotation window. After
