@@ -722,7 +722,6 @@ function setupColumnLayout(tableEl, options) {
       rules.push(sel + ' > colgroup > col:nth-child(' + n + ') { display: none; }');
     });
     styleEl.textContent = rules.join("\n");
-    if (typeof positionGear === "function") positionGear();
   }
 
   // Index of the rightmost visible, resizable (non-utility) column. This
@@ -926,24 +925,59 @@ function setupColumnLayout(tableEl, options) {
     autoFillRo.observe(tableEl);
   }
 
-  // Inline gear icon at the right edge of the header row. Appears on
-  // <thead> hover (CSS) and stays visible while the chooser is open.
-  // Auto-relocates to the rightmost visible <th> when columns hide.
+  // Floating gear pinned to the top-right CORNER of the table's scroll
+  // wrapper. It used to live inside the rightmost visible <th>, which meant a
+  // horizontally-overflowing table forced the operator to scroll right to
+  // find it. It now sits in a zero-height position:relative anchor <div>
+  // inserted immediately BEFORE the scroll wrapper — outside the overflow
+  // container, so scrolling (horizontal, or the sticky wrapper's internal
+  // vertical) never moves it. On .table-wrapper-sticky pages the header row
+  // is sticky at the wrapper top, so the gear stays visually attached to the
+  // header. Revealed on wrapper hover via JS (it's no longer a thead
+  // descendant, so the old CSS :hover reveal can't reach it); a short hide
+  // delay lets the pointer cross from the wrapper onto the gear (which is
+  // painted on top of the wrapper, so entering it fires the wrapper's
+  // mouseleave first).
   var gearWrap = null;
-  function positionGear() {
-    if (!gearWrap) return;
-    for (var i = ths.length - 1; i >= 0; i--) {
-      if (!hidden[colIds[i]]) {
-        if (ths[i] !== gearWrap.parentNode) {
-          // Same sticky-preserving guard as the resize handles above.
-          if (getComputedStyle(ths[i]).position === "static") ths[i].style.position = "relative";
-          ths[i].appendChild(gearWrap);
-        }
-        return;
-      }
+  // The anchor host: the direct-parent scroll container when there is one
+  // (every list page + asset-detail table wraps its <table> in a
+  // .table-wrapper with overflow auto), else the table itself.
+  var gearHost = (function () {
+    var p = tableEl.parentElement;
+    if (p && p !== document.body && /(auto|scroll)/.test(getComputedStyle(p).overflowX)) return p;
+    return tableEl;
+  })();
+  // Idempotency across re-setups (applyTableLayout re-runs after every
+  // render): an anchor stamped with this table's id and still holding a gear
+  // means the same table DOM was set up before — keep the existing gear and
+  // its listeners. A stale anchor from a replaced table render is emptied and
+  // reclaimed.
+  var gearAnchor = (function () {
+    var prev = gearHost.previousElementSibling;
+    return (prev && prev.classList && prev.classList.contains("sf-col-gear-anchor")) ? prev : null;
+  })();
+  if (ths.length > 0 && gearAnchor && gearAnchor.getAttribute("data-sf-for") === tableId &&
+      gearAnchor.querySelector(".sf-col-gear-wrap")) {
+    gearWrap = gearAnchor.querySelector(".sf-col-gear-wrap");
+  } else if (ths.length > 0) {
+    if (!gearAnchor) {
+      gearAnchor = document.createElement("div");
+      gearAnchor.className = "sf-col-gear-anchor";
+      gearHost.parentNode.insertBefore(gearAnchor, gearHost);
+    } else {
+      gearAnchor.textContent = "";
     }
-  }
-  if (ths.length > 0 && !headerRow.querySelector(".sf-col-gear-wrap")) {
+    gearAnchor.setAttribute("data-sf-for", tableId);
+    // Fallback-host + sticky-header combo (ip-panel style: sticky ths inside
+    // an ancestor scroller, no dedicated wrapper): make the anchor sticky at
+    // the header's own offset so the gear rides with the pinned header
+    // instead of scrolling away with the table top. Inert when nothing
+    // scrolls; never applied when the host is a wrapper (there the scrolling
+    // happens INSIDE the wrapper, below the anchor).
+    if (gearHost === tableEl && getComputedStyle(ths[0]).position === "sticky") {
+      gearAnchor.style.position = "sticky";
+      gearAnchor.style.top = getComputedStyle(ths[0]).top;
+    }
     gearWrap = document.createElement("span");
     gearWrap.className = "sf-col-gear-wrap";
     var gearBtn = document.createElement("button");
@@ -969,14 +1003,17 @@ function setupColumnLayout(tableEl, options) {
         if (!gearWrap._observed && chooserPop) {
           gearWrap._observed = true;
           new MutationObserver(function () {
-            if (chooserPop.hasAttribute("hidden")) gearWrap.classList.remove("open");
+            if (chooserPop.hasAttribute("hidden")) {
+              gearWrap.classList.remove("open");
+              gearWrap.classList.remove("sf-gear-visible");
+            }
           }).observe(chooserPop, { attributes: true, attributeFilter: ["hidden"] });
         }
       }
     });
-    // Optional per-table screenshot button, sits to the LEFT of the gear and
-    // rides along when the gear auto-relocates. Wired only when the caller
-    // passes options.onScreenshot (asset-detail tables); other tables get the
+    // Optional per-table screenshot button, sits to the LEFT of the gear
+    // inside the floating wrap. Wired only when the caller passes
+    // options.onScreenshot (asset-detail tables); other tables get the
     // gear alone, unchanged.
     if (typeof options.onScreenshot === "function") {
       var shotBtn = document.createElement("button");
@@ -998,7 +1035,29 @@ function setupColumnLayout(tableEl, options) {
       gearWrap.appendChild(shotBtn);
     }
     gearWrap.appendChild(gearBtn);
-    positionGear();
+    gearAnchor.appendChild(gearWrap);
+
+    // Hover reveal + scrollbar-aware placement. The right inset accounts for
+    // the wrapper's vertical scrollbar (offsetWidth − clientWidth = scrollbar
+    // + borders) so the gear never floats on top of it; recomputed on every
+    // reveal since the scrollbar comes and goes with content height.
+    var gearHideTimer = null;
+    function showGear() {
+      if (gearHideTimer) { clearTimeout(gearHideTimer); gearHideTimer = null; }
+      gearWrap.style.right = (gearHost.offsetWidth - gearHost.clientWidth + 6) + "px";
+      gearWrap.classList.add("sf-gear-visible");
+    }
+    function scheduleHideGear() {
+      if (gearHideTimer) clearTimeout(gearHideTimer);
+      gearHideTimer = setTimeout(function () {
+        gearHideTimer = null;
+        if (!gearWrap.classList.contains("open")) gearWrap.classList.remove("sf-gear-visible");
+      }, 120);
+    }
+    [gearHost, gearWrap].forEach(function (el) {
+      el.addEventListener("mouseenter", showGear);
+      el.addEventListener("mouseleave", scheduleHideGear);
+    });
   }
 
   var chooserPop = null;
