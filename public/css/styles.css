@@ -481,6 +481,25 @@ code {
   background: rgba(198,40,40,0.12);
 }
 
+/* ─── Agent code-signing failure (sidebar; dismissable; assets:write roles) ── */
+.signing-failure-alert {
+  border-color: rgba(255,179,0,0.45);
+  background: rgba(255,179,0,0.08);
+  margin-bottom: 0.5rem;
+}
+.signing-failure-header {
+  color: var(--color-warning);
+}
+.signing-failure-icon {
+  font-size: 0.85rem;
+  flex-shrink: 0;
+  color: var(--color-warning);
+}
+[data-theme="light"] .signing-failure-alert {
+  border-color: rgba(230,145,0,0.40);
+  background: rgba(230,145,0,0.07);
+}
+
 /* ─── In-app update progress (admin-only sidebar panel while an update applies) ── */
 .update-status {
   margin-bottom: 0.5rem;

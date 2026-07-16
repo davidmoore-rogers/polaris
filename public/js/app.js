@@ -195,6 +195,7 @@ function renderNav() {
     <div style="margin-top:auto">
       <div id="role-review-status" class="query-status role-review-status" style="display:none"></div>
       <div id="integration-failed-status" class="query-status integration-failed-status" style="display:none"></div>
+      <div id="signing-failure-alert" class="query-status signing-failure-alert" style="display:none"></div>
       <div id="update-status" class="query-status update-status" style="display:none"></div>
       <div id="query-status" class="query-status" style="display:none"></div>
       <div id="capacity-critical-alert" class="capacity-critical-alert" style="display:none"></div>
@@ -286,6 +287,32 @@ function renderNav() {
   setInterval(pollFailedIntegrations, 30000);
   window._pollFailedIntegrations = pollFailedIntegrations;
   window._getFailedIntegrations = function () { return _failedIntegrations; };
+
+  // ─── Agent code-signing failure alert ─────────────────────────────────
+  // Dismissable sidebar alert: the last agent build shipped UNSIGNED
+  // Windows binaries (code signing enabled but failed — the build is
+  // fail-open by design). Visible only to roles that can deploy agents
+  // (assets:write — same gate as the per-asset agent install routes).
+  // Dismissal is per-user + per-failure: the localStorage key stores the
+  // failure's `at` stamp, so a NEW failure re-shows the alert. Cleared
+  // server-side by the next fully-signed build or by disabling signing.
+  var _signingFailure = null;
+  async function pollSigningAlert() {
+    if (!canManageAssets()) return;
+    try {
+      var result = await api.assets.agentSigningAlert();
+      _signingFailure = (result && result.failure) || null;
+    } catch (_) {
+      _signingFailure = null;
+    }
+    renderSigningFailureAlert();
+  }
+  if (canManageAssets()) {
+    pollSigningAlert();
+    setInterval(pollSigningAlert, 30000);
+  }
+  window._pollSigningAlert = pollSigningAlert;
+  window._getSigningFailure = function () { return _signingFailure; };
 
   // ─── In-app update progress ───────────────────────────────────────────
   // Sidebar panel that mirrors the discovery indicator while an in-app
@@ -1325,6 +1352,68 @@ function renderIntegrationFailedStatus() {
   // Whole panel clicks through to the integrations page. Skip clicks that
   // originated on a button (defensive — there are none today, but parity with
   // the role-review panel pattern).
+  container.style.cursor = "pointer";
+  container.onclick = function (e) {
+    if (e.target && e.target.tagName === "BUTTON") return;
+    window.location.href = "/integrations.html";
+  };
+}
+
+// ─── Agent code-signing failure alert ───────────────────────────────────────
+// Renders the dismissable sidebar alert when the last agent build shipped
+// unsigned Windows binaries (fail-open signing). Reads the closure-scoped
+// _signingFailure populated by pollSigningAlert. Dismissal is per-user +
+// per-failure via localStorage: the key stores the failure's `at` stamp, so
+// dismissing hides THIS failure across reloads while a new failure (different
+// stamp) re-surfaces the panel. Clicking through opens the Polaris Agents card.
+
+function _signingAlertDismissKey() {
+  return "polaris.signing-alert.dismissed." + (currentUsername || "anon");
+}
+
+function renderSigningFailureAlert() {
+  var container = document.getElementById("signing-failure-alert");
+  if (!container) return;
+  var failure = (window._getSigningFailure && window._getSigningFailure()) || null;
+
+  var dismissedAt = null;
+  try { dismissedAt = localStorage.getItem(_signingAlertDismissKey()); } catch (_) {}
+
+  if (!failure || dismissedAt === failure.at) {
+    container.style.display = "none";
+    container.innerHTML = "";
+    container.onclick = null;
+    return;
+  }
+
+  var when = new Date(failure.at);
+  var sub = "v" + (failure.version || "?");
+  if (!isNaN(when.getTime())) sub += " · " + when.toLocaleString();
+  container.style.display = "block";
+  container.innerHTML =
+    '<div class="query-status-header signing-failure-header">' +
+      '<span class="signing-failure-icon" aria-hidden="true">&#9888;</span>' +
+      '<span class="query-status-label">Agent code signing failed</span>' +
+      '<button class="query-abort-btn signing-failure-dismiss" title="Dismiss (re-appears on a new failure)">&#x2715;</button>' +
+    '</div>' +
+    '<ul class="query-status-list">' +
+      '<li><div style="min-width:0;flex:1">' +
+        '<span class="query-status-name">Windows agent binaries shipped UNSIGNED</span>' +
+        '<span class="query-status-progress" title="' + escapeHtml(failure.error || "") + '">' + escapeHtml(sub) + '</span>' +
+      '</div></li>' +
+    '</ul>';
+
+  var dismissBtn = container.querySelector(".signing-failure-dismiss");
+  if (dismissBtn) {
+    dismissBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      try { localStorage.setItem(_signingAlertDismissKey(), failure.at); } catch (_) {}
+      renderSigningFailureAlert();
+    });
+  }
+
+  // Click-through to the Polaris Agents card (Integrations → Polaris Agents),
+  // where the Code signing pane names the specific problem.
   container.style.cursor = "pointer";
   container.onclick = function (e) {
     if (e.target && e.target.tagName === "BUTTON") return;
