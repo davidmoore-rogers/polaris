@@ -852,6 +852,8 @@ const api = {
     sites:    (regionNames) => request("GET", "/map/sites" + (regionNames && regionNames.length ? "?regionTags=" + encodeURIComponent(regionNames.slice().sort().join(",")) : "")),
     topology: (id)      => request("GET", `/map/sites/${id}/topology`),
     topologySearch: (id, q) => request("GET", `/map/sites/${id}/topology/search?q=${encodeURIComponent(q)}`),
+    saveTopologyLayout:   (id, view, positions) => request("PUT",    `/map/sites/${id}/topology/layout`, { view, positions }),
+    deleteTopologyLayout: (id, view)            => request("DELETE", `/map/sites/${id}/topology/layout?view=${encodeURIComponent(view)}`),
   },
   mapRegions: {
     list:   ()                     => request("GET",    "/map/regions"),

@@ -1199,9 +1199,14 @@
         if (!best || score < best.score) best = { cy: cy0, score: score };
       });
       var cyPick = best.cy;
-      // Fan out edges sharing a corridor.
+      // Fan out edges sharing a corridor — BOTH axes. The horizontal stagger
+      // deliberately includes the "straight into the target row" corridor:
+      // without it, every edge whose corridor is a target row it shares with
+      // other edges collapses onto one combined horizontal line (the first
+      // edge in a 10px bucket keeps the exact coordinate; later ones step
+      // down 9px and take a short vertical jog into their target).
       var cxS = stagger("v", cx);
-      var cyS = Math.abs(cyPick - T.y) < 0.5 ? cyPick : stagger("h", cyPick);
+      var cyS = stagger("h", cyPick);
       // Polyline: drop degenerate bends (e.g. corridor == target row).
       var pts = [];
       pts.push({ x: cxS, y: S.y });
@@ -1507,21 +1512,24 @@
   //          leaf block one column right. Rows pack tight near the spine and
   //          drift further down only where subtrees congest, so vertical
   //          spread grows with chain depth instead of every subtree claiming
-  //          a globally disjoint row band. Non-spine siblings sharing a b:
-  //          building code (then an f: floor code within a building) are
-  //          regrouped so they scan consecutively and land in adjacent lanes
-  //          — stable, first-appearance bucket order, keyless anchors at the
-  //          tail, and a no-op on untagged sites. NOT guaranteed:
-  //          cross-subtree adjacency (same building under different
-  //          parents/columns), the spine child's building (flat-chain wins),
-  //          and room/jb adjacency beyond what building+floor grouping
-  //          induces. Fallback exiles scan from row 0 in their own negative
-  //          columns.
+  //          a globally disjoint row band. Non-spine siblings sharing a
+  //          location code are regrouped through the FULL tier chain — a:
+  //          area, then b: building, then f: floor, then r: room, then jb:
+  //          junction box — so each tier's co-members scan consecutively and
+  //          land in adjacent lanes. Stable, first-appearance bucket order,
+  //          keyless anchors at the tail, and a no-op on untagged sites. NOT
+  //          guaranteed: cross-subtree adjacency (same location under
+  //          different parents/columns) and the spine child's location
+  //          (flat-chain wins). Fallback exiles scan from row 0 in their own
+  //          negative columns.
   //      (b) Leaf pass: each leaf stacks downward from its parent's row using a
   //          PER-COLUMN cursor, pushed down only to dodge an occupied lane or a
   //          drawn edge passing through the column. Per-column (not global)
   //          cursors line up each switch's AP stack just below it instead of
-  //          staircasing the stacks across the canvas. Orphans stack below all.
+  //          staircasing the stacks across the canvas. Within a parent's
+  //          block, leaves are ordered through the same location-tier chain
+  //          so same-room/jb leaves take contiguous lanes instead of raw
+  //          payload order. Orphans stack below all.
   //
   // Returns { [nodeId]: { depth, lane } }, or null when there is no FortiGate
   // root (caller should fall back to its previous layout).
@@ -1533,10 +1541,16 @@
     var adj = {}; // undirected adjacency: id -> [neighborId, ...]
     var rootId = null;
     // Location-code grouping keys (stamped by buildTopologyElements from the
-    // payload's a:/b:/f: codes) — drive the sibling-row clustering in pass 5a.
+    // payload's a:/b:/f:/r:/jb: codes) — drive the sibling-row clustering in
+    // pass 5a and the leaf-block ordering in pass 5b. All five tiers are read
+    // so room / junction-box co-members land on adjacent lanes and their
+    // hulls come out as tight bands instead of bounding boxes spanning
+    // whatever rows their members happened to get.
     var locAById = {};
     var locBById = {};
     var locFById = {};
+    var locRById = {};
+    var locJbById = {};
 
     elements.forEach(function (el) {
       var d = el && el.data;
@@ -1548,6 +1562,8 @@
       if (d.locA) locAById[d.id] = d.locA;
       if (d.locB) locBById[d.id] = d.locB;
       if (d.locF) locFById[d.id] = d.locF;
+      if (d.locR) locRById[d.id] = d.locR;
+      if (d.locJb) locJbById[d.id] = d.locJb;
       if (d.role === "fortigate" && !rootId) rootId = d.id;
     });
     if (!rootId) return null; // no firewall — let the caller keep dagre
@@ -1780,68 +1796,51 @@
       return kids;
     }
 
-    // Regroup sibling anchors so those sharing a b: building code (then an f:
-    // floor code within a building) claim ADJACENT fresh rows — the location
-    // hulls come out as clean contiguous bands instead of interleaved ones.
-    // Stable: buckets keep the order in which their first member appeared in
-    // the height-sorted input, members keep their relative order, and keyless
-    // anchors sink to the tail in their original relative order (an all-
-    // keyless site reproduces today's layout exactly). The spine child is
-    // excluded by the caller — flat-chain placement wins over grouping.
-    // Cross-subtree adjacency is deliberately NOT attempted: same-building
-    // anchors under different parents (or different columns) stay wherever
-    // their own parent's band puts them.
-    function stableBucketBy(items, keyById) {
+    // The full location-tier chain, outermost first — one array so pass 5a
+    // (anchor regrouping) and pass 5b (leaf-block ordering) can't drift apart.
+    var LOC_TIERS = [locAById, locBById, locFById, locRById, locJbById];
+    // Recursive stable bucketing over a tier chain: bucket by the first
+    // tier's key (buckets keep the order in which their first member
+    // appeared; members keep relative order), then recurse into each bucket
+    // with the remaining tiers. A member with no key at THIS tier but a key
+    // at a deeper one joins a synthetic "\tnone" bucket (placed like a real
+    // bucket at first appearance) so e.g. floorless-but-room-coded siblings
+    // still cluster by room — the tab prefix can't collide with a real key
+    // because locKey() collapses whitespace. Members keyless at this tier
+    // AND every deeper tier sink to the tail in their original relative
+    // order, so an all-keyless input comes back bit-for-bit unchanged.
+    function stableBucketByTiers(items, keyMaps) {
+      if (!keyMaps || keyMaps.length === 0 || items.length < 2) return items;
+      var keyMap = keyMaps[0];
+      var rest = keyMaps.slice(1);
+      function hasDeeperKey(it) {
+        for (var i = 0; i < rest.length; i++) { if (rest[i][it]) return true; }
+        return false;
+      }
       var order = [];
       var buckets = {};
       var tail = [];
       items.forEach(function (it) {
-        var key = keyById[it];
+        var key = keyMap[it] || (hasDeeperKey(it) ? "\tnone" : null);
         if (!key) { tail.push(it); return; }
         if (!buckets[key]) { buckets[key] = []; order.push(key); }
         buckets[key].push(it);
       });
       var out = [];
-      order.forEach(function (k) { out.push.apply(out, buckets[k]); });
+      order.forEach(function (k) { out.push.apply(out, stableBucketByTiers(buckets[k], rest)); });
       return out.concat(tail);
     }
+    // Regroup sibling anchors so those sharing a location code claim
+    // ADJACENT fresh rows, through every tier — area, then building, then
+    // floor, then room, then junction box — so each tier's hull comes out as
+    // a clean contiguous band instead of an interleaved one. The spine child
+    // is excluded by the caller — flat-chain placement wins over grouping.
+    // Cross-subtree adjacency is deliberately NOT attempted: same-location
+    // anchors under different parents (or different columns) stay wherever
+    // their own parent's band puts them.
     function regroupAnchorsByLocation(kids) {
       if (kids.length < 2) return kids;
-      var hasAnyCode = kids.some(function (k) { return !!locAById[k] || !!locBById[k]; });
-      if (!hasAnyCode) return kids;
-      // Bucket by area, then building within an area, then floor within a
-      // building — outermost level first so each tier's members pack into
-      // adjacent bands.
-      var order = [];
-      var buckets = {};
-      var tail = [];
-      kids.forEach(function (k) {
-        // Arealess-but-building-coded anchors share one synthetic area bucket
-        // so their buildings still cluster. The tab prefix can't collide with
-        // a real key — locKey() collapses whitespace.
-        var key = locAById[k] || (locBById[k] ? "\tnoarea" : null);
-        if (!key) { tail.push(k); return; }
-        if (!buckets[key]) { buckets[key] = []; order.push(key); }
-        buckets[key].push(k);
-      });
-      var out = [];
-      order.forEach(function (aKey) {
-        // Within an area bucket: sub-bucket by building, then by floor.
-        var bOrder = [];
-        var bBuckets = {};
-        var bTail = [];
-        buckets[aKey].forEach(function (k) {
-          var bKey = locBById[k];
-          if (!bKey) { bTail.push(k); return; }
-          if (!bBuckets[bKey]) { bBuckets[bKey] = []; bOrder.push(bKey); }
-          bBuckets[bKey].push(k);
-        });
-        bOrder.forEach(function (bKey) {
-          out.push.apply(out, stableBucketBy(bBuckets[bKey], locFById));
-        });
-        out.push.apply(out, bTail);
-      });
-      return out.concat(tail);
+      return stableBucketByTiers(kids, LOC_TIERS);
     }
 
     // Nearest-free-slot packing. The previous pass gave every fresh-row
@@ -1937,11 +1936,18 @@
     // Fallback exiles (negative columns): same placement scanning from row 0
     // so the exile cluster top-aligns with the root. Row numbers repeat but x
     // is negative (column -1 is always empty), so nothing overlaps spatially.
+    // The exile ROOTS are location-regrouped like any sibling set — they're
+    // effectively siblings of one virtual fallback parent, and without the
+    // regroup same-room exiles would interleave in element order.
+    var exileRoots = [];
     nodeIds.forEach(function (id) {
       if (isAnchor(id) && inFallbackRegion[id] &&
           !(pred[id] != null && isAnchor(pred[id]) && inFallbackRegion[pred[id]])) {
-        placeAnchorSubtree(id, true, 0);
+        exileRoots.push(id);
       }
+    });
+    regroupAnchorsByLocation(exileRoots).forEach(function (id) {
+      placeAnchorSubtree(id, true, 0);
     });
 
     // --- 5b. Leaf pass: stack each parent's leaves as a contiguous block ----
@@ -2014,6 +2020,15 @@
         // except leaf-chain oddities — stragglers get the next wave).
         var col = depth[pending[0]];
         var block = pending.filter(function (l) { return depth[l] === col; });
+        // Order the block's leaves through the location-tier chain so
+        // same-room / same-jb leaves sit on CONTIGUOUS lanes inside the
+        // window instead of interleaving in raw payload order — a room hull
+        // over a switch's leaf stack collapses to a tight band rather than
+        // spanning the whole block (and dragging the overlap sweep with it).
+        // The window's start/length are unaffected; only which leaf gets
+        // which lane inside it. Keyless leaves keep their relative order at
+        // the tail, so untagged sites reproduce today's layout exactly.
+        block = stableBucketByTiers(block, LOC_TIERS);
         // The whole block claims one CONTIGUOUS window, starting at the
         // parent's own row and slid down past taken lanes / crossing edges.
         // Sliding the window (rather than dodging per leaf) matters under
@@ -2070,8 +2085,13 @@
   //   3. Compact each group's interior: rank-compress the DISTINCT global
   //      depth/lane values its members use, so the group is exactly as wide
   //      and tall as its own subtree — internal shape, ordering, and the
-  //      area→building→floor row clustering are preserved, the dead space
-  //      between them is not.
+  //      full-tier (area→building→floor→room→jb) row clustering from the
+  //      flat solver are preserved, the dead space between them is not.
+  //      Because the flat solver now clusters through room/jb (anchors AND
+  //      each parent's leaf block), the inner-tier hulls inside a box are
+  //      contiguous bands wherever their members share a parent or sibling
+  //      set — the "two members at opposite corners" bounding-box blowup
+  //      only remains possible across different subtrees.
   //   4. Lay out the QUOTIENT graph of group boxes: boxes are ordered into
   //      quotient columns by each group's minimum global depth (so inter-
   //      group flow still reads left-to-right), stacked within a column by

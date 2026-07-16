@@ -48,6 +48,12 @@
   // default ON. The chip only renders when the site actually carries codes,
   // so untagged fleets see zero UI change.
   var SHOW_LOCATIONS_STORAGE_KEY = "polaris.topology.showLocations";
+  // Snap-to-grid: per-user singleton toggle, default OFF. When on, node /
+  // hull drags snap to the layout grid (TOPO_COL_SPACING × TOPO_ROW_SPACING)
+  // on release, and enabling the chip re-snaps every current position. The
+  // pref itself is a per-browser editing aid; the snapped POSITIONS persist
+  // through the normal layout-save pipeline (server for writers).
+  var SNAP_STORAGE_KEY = "polaris.topology.snapToGrid";
   // Toggleable roles, in chip display order. Only roles that buildTopologyElements
   // actually renders as nodes belong here (wireless clients / LLDP ghosts are
   // never drawn, and wired endpoints only appear as synthetic search-overlay
@@ -846,8 +852,12 @@
     var btn = document.getElementById("topology-refresh");
     if (btn) btn.disabled = true;
     try {
-      // Snapshot positions for any nodes that survive the refresh.
+      // Snapshot positions for any nodes that survive the refresh, and land
+      // any pending server save BEFORE re-fetching — the fresh payload's
+      // savedLayouts embed must reflect it or the re-render would restore
+      // the server's stale (pre-drag) layout over the operator's moves.
       if (cyInstance) saveNodePositions(topoState.siteId);
+      await _flushServerLayoutSaves();
       var data = await api.map.topology(topoState.siteId);
       topoState.data = data;
       renderTopologyGraph(data);
@@ -862,16 +872,38 @@
     }
   }
 
-  // Drop the operator's saved node positions for this site and re-run the
-  // column layout against the cached topology data. Used when manual drags
-  // have produced a layout the operator wants to abandon (e.g. inherited
-  // positions from before a column-spacing change).
+  // Drop the saved node positions for this site and re-run the column
+  // layout against the cached topology data. Used when manual drags have
+  // produced a layout the operator wants to abandon (e.g. inherited
+  // positions from before a column-spacing change). Removes BOTH stores:
+  // the per-browser localStorage layout and (for deviceMap writers) the
+  // shared server layout. A non-writer can only clear their local copy —
+  // the shared layout re-asserts on their next open.
   function resetTopologyLayout() {
     if (!topoState.siteId || !topoState.data) return;
     // Scoped to the ACTIVE view — resetting a floor view's drags leaves the
     // Flat layout (and every other floor's) untouched.
+    var view = _activeViewKey();
     try { localStorage.removeItem(_positionsStorageKey(topoState.siteId)); }
     catch (e) { /* quota / private mode — proceed with re-render anyway */ }
+    delete _layoutDirty[topoState.siteId + "|" + view];
+    var hadServerLayout = !!(topoState.data.savedLayouts && topoState.data.savedLayouts[view]);
+    if (hadServerLayout && !_canWriteServerLayout()) {
+      // The shared layout would simply re-assert on re-render — tell the
+      // operator why nothing moved instead of pretending to reset.
+      if (typeof showToast === "function") {
+        showToast("Shared layout kept — resetting it requires Device Map write access");
+      }
+      return;
+    }
+    if (hadServerLayout) {
+      delete topoState.data.savedLayouts[view];
+      api.map.deleteTopologyLayout(topoState.siteId, view).catch(function (err) {
+        if (typeof showToast === "function") {
+          showToast("Server layout not reset — " + (err && err.message ? err.message : String(err)), "error");
+        }
+      });
+    }
     renderTopologyGraph(topoState.data);
     if (typeof showToast === "function") showToast("Layout reset");
   }
@@ -1073,7 +1105,9 @@
     [
       ["Drag empty space", "Pan the view (scroll wheel zooms)"],
       ["Shift + drag", "Box-select multiple devices"],
-      ["Ctrl + drag a device", "Move the selected devices together"],
+      ["Drag a selected device", "Move the selected devices together"],
+      ["Ctrl + drag", "Pan from anywhere (even over devices)"],
+      ["Snap chip", "Snap drags to the layout grid"],
       ["Double-click a device", "Open its asset details"],
       ["Right-click a device", "Edit its description / grouping codes"],
     ].forEach(function (c) { parts.push(row("", c[0], c[1])); });
@@ -1128,15 +1162,81 @@
   }
 
   // ── Position persistence ───────────────────────────────────────────────────
-  // localStorage-backed per-site node positions. Keyed by site id (the Flat
-  // view keeps the legacy bare key for back-compat; floor views append
-  // ":<viewKey>" so each view owns its manual layout); value is a map of
-  // nodeId → {x, y}. Persisted browser-side only — operator-owned mental
-  // layout, not shared across users. Stale entries (nodes that no longer
-  // appear in the topology) are silently dropped on next save.
+  // Per-site, per-view node positions ({ nodeId: {x, y} } pixel model coords).
+  // Two stores, server-first:
+  //   1. SERVER (shared): the TopologyLayout rows embedded in the /topology
+  //      payload as `savedLayouts[view]` — the hand-tuned map every operator
+  //      sees. Written via debounced PUT, gated deviceMap=write client-side
+  //      (permAtLeast) so readonly viewers never emit 403 noise.
+  //   2. localStorage (per-browser fallback/cache): the pre-server store,
+  //      still written on every save — it's what a NON-writer's drags land
+  //      in, and it seeds the server the first time a writer saves a site
+  //      that predates server layouts.
+  // Load order: server → localStorage → solver default. localStorage keying:
+  // the Flat view keeps the legacy bare key for back-compat; floor views
+  // append ":<viewKey>". The server always uses the explicit "flat" key.
+  // Stale entries (nodes that left the topology) are silently dropped on the
+  // next save in both stores. Server writes only happen after a real drag
+  // (the dirty flag below) — open/close/refresh alone never PUTs, so the
+  // solver's automatic layout keeps improving for untouched sites.
+  function _activeViewKey() {
+    return topoState.activeView && topoState.activeView !== "flat" ? topoState.activeView : "flat";
+  }
   function _positionsStorageKey(siteId) {
-    var suffix = topoState.activeView && topoState.activeView !== "flat" ? ":" + topoState.activeView : "";
-    return POSITION_STORAGE_PREFIX + siteId + suffix;
+    var view = _activeViewKey();
+    return POSITION_STORAGE_PREFIX + siteId + (view !== "flat" ? ":" + view : "");
+  }
+  function _canWriteServerLayout() {
+    return typeof permAtLeast === "function" && permAtLeast("deviceMap", "write");
+  }
+  // Views whose positions changed via an actual operator gesture (drag /
+  // hull drag / snap-all) since their last queued server save. Keyed by
+  // "<siteId>|<view>" so a pending flag can't leak across sites.
+  var _layoutDirty = {};
+  function _markLayoutDirty() {
+    if (!topoState.siteId) return;
+    _layoutDirty[topoState.siteId + "|" + _activeViewKey()] = true;
+  }
+  // Debounced server save, one timer per (site, view). The in-memory
+  // savedLayouts cache is updated immediately so re-renders inside this
+  // session (view switches, Locations toggle) see the latest positions even
+  // before the PUT lands.
+  var _serverSaveTimers = {};
+  function _queueServerLayoutSave(siteId, view, positions) {
+    if (!_canWriteServerLayout()) return;
+    var dirtyKey = siteId + "|" + view;
+    if (!_layoutDirty[dirtyKey]) return;
+    delete _layoutDirty[dirtyKey];
+    if (topoState.data && topoState.siteId === siteId) {
+      if (!topoState.data.savedLayouts) topoState.data.savedLayouts = {};
+      topoState.data.savedLayouts[view] = { view: view, positions: positions };
+    }
+    if (_serverSaveTimers[dirtyKey]) clearTimeout(_serverSaveTimers[dirtyKey].timer);
+    var entry = {
+      run: function () {
+        delete _serverSaveTimers[dirtyKey];
+        return api.map.saveTopologyLayout(siteId, view, positions).catch(function (err) {
+          if (typeof showToast === "function") {
+            showToast("Layout not saved to server — kept locally (" + (err && err.message ? err.message : String(err)) + ")", "error");
+          }
+        });
+      },
+    };
+    entry.timer = setTimeout(entry.run, 1000);
+    _serverSaveTimers[dirtyKey] = entry;
+  }
+  // Fire any pending debounced PUTs immediately (close / view switch /
+  // refresh would otherwise race or drop the trailing save). Returns a
+  // promise so refreshTopology can await the write before re-fetching the
+  // payload (whose savedLayouts embed must include it).
+  function _flushServerLayoutSaves() {
+    var pending = [];
+    Object.keys(_serverSaveTimers).forEach(function (key) {
+      var entry = _serverSaveTimers[key];
+      clearTimeout(entry.timer);
+      pending.push(entry.run());
+    });
+    return Promise.all(pending);
   }
   function saveNodePositions(siteId) {
     if (!cyInstance || !siteId) return;
@@ -1152,9 +1252,17 @@
     });
     try { localStorage.setItem(_positionsStorageKey(siteId), JSON.stringify(out)); }
     catch (e) { /* quota / private mode — silently skip */ }
+    _queueServerLayoutSave(siteId, _activeViewKey(), out);
   }
   function loadNodePositions(siteId) {
     if (!siteId) return null;
+    // Server layout wins — it's the shared map. localStorage remains the
+    // per-browser fallback (non-writer drags, pre-server installs).
+    var layouts = topoState.data && topoState.data.savedLayouts;
+    var server = layouts && layouts[_activeViewKey()];
+    if (server && server.positions && typeof server.positions === "object") {
+      return server.positions;
+    }
     try {
       var raw = localStorage.getItem(_positionsStorageKey(siteId));
       if (!raw) return null;
@@ -1474,8 +1582,10 @@
       });
     }
     // Persist current node positions before tear-down so reopening the
-    // same site restores the operator's manual layout.
+    // same site restores the operator's manual layout. Flush the debounced
+    // server PUT immediately (fire-and-forget — the modal is closing).
     if (topoState.siteId && cyInstance) saveNodePositions(topoState.siteId);
+    _flushServerLayoutSaves();
     closeTopologySearchResults();
     topoState.siteId = null;
     topoState.hostname = null;
@@ -1664,7 +1774,7 @@
     // restores the operator's manual layout. Debounced via the timer
     // below so a long drag doesn't write per-tick.
     var saveTimer = null;
-    cyInstance.on("dragfree", "node", function () {
+    cyInstance.on("dragfree", "node", function (evt) {
       if (!topoState.siteId) return;
       // Suppress auto-save while the connection-path overlay is active —
       // the path nodes are sitting in a temporary tight-chain layout (not
@@ -1672,6 +1782,22 @@
       // overlay's coordinate space. Letting it persist would clobber the
       // operator's saved layout.
       if (topoState.pathOverlay) return;
+      // Snap-to-grid: on release, land the dragged node — and every other
+      // selected node, since a multi-select drag moves them together — on
+      // the nearest grid cell. Hull re-fit follows via the `position`
+      // listener below. Hull nodes are excluded here: their members were
+      // already snapped by the hull `free` handler, and re-centering the
+      // hull itself is refreshLocationGroups' job.
+      if (_readSnapToGrid()) {
+        var toSnap = cyInstance.collection(evt.target).union(cyInstance.nodes(":selected"));
+        cyInstance.batch(function () {
+          toSnap.forEach(function (n) {
+            if (n.data("isLocGroup") || n.data("isPortal")) return;
+            n.position(_snapPos(n.position()));
+          });
+        });
+      }
+      _markLayoutDirty();
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(function () {
         saveNodePositions(topoState.siteId);
@@ -1827,9 +1953,20 @@
         });
       });
     });
-    cyInstance.on("free", "node[isLocGroup]", function () {
+    cyInstance.on("free", "node[isLocGroup]", function (evt) {
       if (!hullDrag) return;
       hullDrag = null;
+      // Snap-to-grid: land every member the hull drag just moved on the
+      // nearest grid cell before the hulls re-fit around them.
+      if (_readSnapToGrid() && !topoState.pathOverlay) {
+        var memberIds = evt.target.data("memberIds") || [];
+        cyInstance.batch(function () {
+          memberIds.forEach(function (id) {
+            var m = cyInstance.getElementById(id);
+            if (m.length > 0) m.position(_snapPos(m.position()));
+          });
+        });
+      }
       window.PolarisTopologyRender.refreshLocationGroups(cyInstance);
       window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
     });
@@ -1998,6 +2135,79 @@
     catch (e) { /* quota / private mode — toggle still applies this session */ }
   }
 
+  // ── Snap-to-grid toggle ──────────────────────────────────────────────────
+  function _readSnapToGrid() {
+    try { return localStorage.getItem(SNAP_STORAGE_KEY) === "on"; }
+    catch (e) { return false; }
+  }
+  function _writeSnapToGrid(on) {
+    try { localStorage.setItem(SNAP_STORAGE_KEY, on ? "on" : "off"); }
+    catch (e) { /* quota / private mode — toggle still applies this session */ }
+  }
+  // Nearest grid cell for a pixel model position. The grid IS the column
+  // solver's lattice (TOPO_COL_SPACING × TOPO_ROW_SPACING), so snapped nodes
+  // line up exactly with auto-laid-out ones.
+  function _snapPos(p) {
+    return {
+      x: Math.round(p.x / TOPO_COL_SPACING) * TOPO_COL_SPACING,
+      y: Math.round(p.y / TOPO_ROW_SPACING) * TOPO_ROW_SPACING,
+    };
+  }
+  // One-time re-snap when the toggle turns on: every live node in the
+  // current view lands on its nearest grid cell, hulls re-fit, and the
+  // result persists through the normal save pipeline. Other views' SAVED
+  // blobs (server-side, writers only) are snapped arithmetically without
+  // rendering them — stale node ids inside those blobs snap too, which is
+  // harmless (they're ignored at render and dropped on the next real save).
+  function _snapAllPositions() {
+    if (!cyInstance || !topoState.siteId) return;
+    if (topoState.pathOverlay) return; // overlay positions are temporary — don't snap or save them
+    var moved = false;
+    cyInstance.batch(function () {
+      cyInstance.nodes().forEach(function (n) {
+        if (n.data("isLocGroup") || n.data("isPortal")) return;
+        var p = n.position();
+        var s = _snapPos(p);
+        if (s.x !== p.x || s.y !== p.y) {
+          n.position(s);
+          moved = true;
+        }
+      });
+    });
+    if (moved) {
+      if (topoState.hasLocationCodes && _readShowLocations()) {
+        window.PolarisTopologyRender.refreshLocationGroups(cyInstance);
+        window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
+      }
+      _markLayoutDirty();
+      saveNodePositions(topoState.siteId);
+    }
+    // Snap the OTHER views' server blobs (the active view was just handled
+    // live above). Local-only view layouts stay as-is until visited.
+    if (_canWriteServerLayout() && topoState.data && topoState.data.savedLayouts) {
+      var activeView = _activeViewKey();
+      Object.keys(topoState.data.savedLayouts).forEach(function (view) {
+        if (view === activeView) return;
+        var entry = topoState.data.savedLayouts[view];
+        var positions = entry && entry.positions;
+        if (!positions || typeof positions !== "object") return;
+        var changed = false;
+        var out = {};
+        Object.keys(positions).forEach(function (id) {
+          var p = positions[id];
+          if (!p || typeof p.x !== "number" || typeof p.y !== "number") return;
+          var s = _snapPos(p);
+          out[id] = s;
+          if (s.x !== p.x || s.y !== p.y) changed = true;
+        });
+        if (changed) {
+          _layoutDirty[topoState.siteId + "|" + view] = true;
+          _queueServerLayoutSave(topoState.siteId, view, out);
+        }
+      });
+    }
+  }
+
   // ── Device-type visibility toggles ─────────────────────────────────────────
   function _readHiddenRoles() {
     try {
@@ -2088,6 +2298,25 @@
       });
       wrap.appendChild(locChip);
     }
+    // Snap-to-grid chip — always offered (grid = the column solver's
+    // 130×95 lattice, present on every layout). Enabling it re-snaps every
+    // current position; while on, drags land on the grid on release.
+    var snapOn = _readSnapToGrid();
+    var snapChip = document.createElement("button");
+    snapChip.type = "button";
+    snapChip.className = "topology-type-chip" + (snapOn ? "" : " is-off");
+    snapChip.setAttribute("aria-pressed", snapOn ? "true" : "false");
+    snapChip.title = (snapOn ? "Disable" : "Enable") + " snap to grid (saved per user)";
+    snapChip.textContent = "Snap";
+    snapChip.addEventListener("click", function () {
+      var next = !_readSnapToGrid();
+      _writeSnapToGrid(next);
+      if (next) _snapAllPositions();
+      snapChip.className = "topology-type-chip" + (next ? "" : " is-off");
+      snapChip.setAttribute("aria-pressed", next ? "true" : "false");
+      snapChip.title = (next ? "Disable" : "Enable") + " snap to grid (saved per user)";
+    });
+    wrap.appendChild(snapChip);
     wrap.hidden = wrap.children.length === 0;
   }
 
