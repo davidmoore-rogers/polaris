@@ -173,6 +173,7 @@ polaris/
 │   │   ├── descriptionSyncService.ts # Description sync (FMG + standalone FortiGate `syncDescriptions` toggle, default off; Polaris-primary). Pure decide core (`decideDescriptionSync(polaris, device)`: non-empty Polaris → push whenever the device differs [device-side edits overwritten]; empty Polaris → adopt; a device clear never wipes a Polaris value; all audited) + per-target push/verify functions (FortiGate `system/interface` description, `system/global` alias, FortiSwitch managed-switch + per-port description, FortiAP wtp `location` (AP Manager's field — wtp `comment` is absent from FMG's copy, installs strip it) — all via reservationPushService's Transport so both useProxy modes + standalone work) + `syncDescriptionsOnSave` (save-time fast path from the interface-comment PUT / asset PUT) + `runDescriptionSyncForIntegration` (Phase 13.7 discovery reconcile: batched CMDB reads per FortiGate, push/adopt, write-on-change; doubles as the retry path for transient save-time failures AND the pass that seeds empty Polaris fields from the device). Last-synced values: `Asset.descriptionSync.value` / `AssetInterfaceOverride.syncedValue`. Best-effort, never throws; transport/read errors leave sync state untouched (quarantine-verify rule). FortiOS field shapes flagged verify-on-real-device in the header.
 │   │   ├── discoveryDurationService.ts # Rolling discovery-duration samples + "slow-run" threshold (Setting-backed)
 │   │   ├── discoveryRunState.ts     # DB-backed live discovery-run state (DiscoveryRun table) — replaces the in-memory activeDiscovery Map; written by the discovery worker, read by the web process (progress, isDiscoveryRunning, slow-run check, cancel)
+│   │   ├── discoveryCancelWatchdog.ts # Force-exit backstop for discovery cancel: armed when the run's abort signal fires, disarmed when runDiscovery unwinds. A wedge on a non-HTTP await (e.g. lock-blocked DB query) ignores the abort AND keeps heartbeating, so neither cancel nor the reaper clears it — after a 2-min grace the watchdog logs the stuck devices, finalizes the row `aborted`, writes an integration.discover.force_exit Event (both DB writes capped at 5s — the DB may be the wedge), and exits 1 so systemd/NSSM restarts the process
 │   │   ├── azureAuthService.ts      # Azure AD/Entra SAML SSO, user provisioning
 │   │   ├── ldapClient.ts            # Shared ldapts connection helpers (withBoundLdapClient bind/unbind lifecycle, newLdapClient TLS, decodeObjectGuid, formatLdapError) + escapeLdapFilterValue (RFC 4515 filter-injection escape). Used by BOTH activeDirectoryService (computer discovery) and ldapAuthService (user login).
 │   │   ├── ldapAuthService.ts       # LDAP user authentication. Settings (Setting key "ldap"; bindPassword masked/preserve-on-unchanged) + authenticateLdapUser (service-bind → escaped search → re-bind AS user to verify; rejects empty passwords before binding to defeat the unauthenticated-bind trap; reads group attribute (memberOf) + optional reverse member search; objectGUID→hex via decodeObjectGuid) + findOrProvisionLdapUser (→ ssoProvisioning) + testLdapConnection. Drives the LDAP branch in POST /auth/login.
@@ -1929,6 +1930,25 @@ cancel by setting `cancelRequested` (the worker polls it → aborts its local
 AbortController). When pg-boss is off (cursor mode), `triggerDiscovery` runs
 `runDiscovery` in-process — the single code path across topologies. See
 `src/services/discoveryRunState.ts` and `DiscoveryRun` in the domain model.
+
+**Cancel has two tiers.** The abort signal is observed natively by every HTTP
+transport under discovery (fgRequest 15s cap, FMG rpc 10s cap + bounded
+retries, geocoder 8s) and cooperatively by `syncDhcpSubnets`, which throws
+`DiscoveryAbortError` at each `phaseMark` boundary (`utils/errors.ts` —
+`name="AbortError"` so the terminal handler counts the run as aborted, not
+errored; the `__end__` mark is exempt so a fully-committed sync isn't
+discarded). For wedges the signal cannot reach — a Prisma query blocked on a
+Postgres lock has no statement timeout, ignores the signal, and keeps the 60s
+heartbeat ticking so the reaper never fires either (prod incident 2026-07-20:
+one FortiGate held a run "running" 5+ hours through a cancel) —
+`discoveryCancelWatchdog` is armed on abort and disarmed in runDiscovery's
+finally: if the run hasn't unwound 2 minutes after abort, it logs the stuck
+devices, finalizes the row `aborted`, writes `integration.discover.force_exit`,
+and exits 1 so systemd/NSSM restarts the process (same exit-and-restart pattern
+as the operator /restart endpoint). Under `all`/cursor-mode-fallback the exit
+takes the whole process — matching /restart semantics. If pg-boss redelivers
+the interrupted job, runDiscovery sees `cancelRequested` still set at startup
+and aborts cleanly.
 
 **Singletons** (monitor producer ticks, discovery scheduler, reconcilers,
 rollups, prune, one-shot migrations) are pinned to `web`/`all` so they run in
