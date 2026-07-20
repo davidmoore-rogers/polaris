@@ -13811,6 +13811,11 @@ function _depTreeNodeRow(node, opts) {
   var safeName = escapeHtml(name);
   var typeLabel = _DEP_TREE_TYPE_LABEL[node.assetType] || node.assetType || "asset";
   var pip = _depTreeStatusPip(node);
+  // Caller-supplied annotation tag (e.g. the HA-peer row's "HA standby") —
+  // reuses the override-tag styling.
+  var extraTag = opts.tag
+    ? ' <span class="dep-tree-source-tag"' + (opts.tagTitle ? ' title="' + escapeHtml(opts.tagTitle) + '"' : '') + '>' + escapeHtml(opts.tag) + '</span>'
+    : "";
   // Every node carries its computed dependencyLayer in the payload; surface it
   // so the operator can read each row's level, not just the current asset's.
   var levelBit = (node.dependencyLayer != null)
@@ -13832,6 +13837,7 @@ function _depTreeNodeRow(node, opts) {
     // Self node already prints "— level N" inline, so skip the tag there.
     (opts.self ? '' : levelBit) +
     sourceTag +
+    extraTag +
     '</div>';
 }
 
@@ -13844,7 +13850,11 @@ function renderDependencyTreeBlock(payload, selfId) {
   var parents  = Array.isArray(payload.effectiveParents) ? payload.effectiveParents : [];
   var children = Array.isArray(payload.children)         ? payload.children         : [];
   var self     = payload.asset || {};
-  if (parents.length === 0 && children.length === 0) {
+  // HA cluster peer (firewalls only). Display-only sibling: the DAG has no
+  // edge between HA members (both are layer-1 roots), so this is the only
+  // way the tree shows the cluster's second box.
+  var haPeer   = payload.haPeer || null;
+  if (parents.length === 0 && children.length === 0 && !haPeer) {
     // Only show "standalone" messaging for Fortinet infra types; endpoint
     // assets (workstations, printers, etc.) shouldn't see the block at all
     // since they're never in the dependency tree.
@@ -13882,6 +13892,22 @@ function renderDependencyTreeBlock(payload, selfId) {
     dependencyTestUntil: self.dependencyTestUntil,
   }, { self: true });
 
+  // HA peer row — rendered directly under the self row at the same level
+  // (no connector: it's a redundant sibling, not a parent or child). The
+  // pip reflects the peer's own state (a standby is typically unmonitored;
+  // its roster-driven health lives on its General tab).
+  var haPeerHTML = "";
+  if (haPeer) {
+    var peerTag = haPeer.haRole === "secondary" ? "HA standby"
+                : haPeer.haRole === "primary"   ? "HA primary (active)"
+                : "HA peer";
+    haPeerHTML = _depTreeNodeRow({
+      id: haPeer.id, hostname: haPeer.hostname, assetType: haPeer.assetType,
+      dependencyLayer: haPeer.dependencyLayer, monitorStatus: haPeer.monitorStatus,
+      monitored: haPeer.monitored,
+    }, { tag: peerTag, tagTitle: "HA cluster peer of " + (self.hostname || "this firewall") + " — redundant sibling, not a dependency" });
+  }
+
   var childrenHTML = "";
   if (children.length > 0) {
     childrenHTML += '<div class="dep-tree-connector">│</div>';
@@ -13916,6 +13942,7 @@ function renderDependencyTreeBlock(payload, selfId) {
     '<div class="dep-tree-body">' +
       parentsHTML +
       selfHTML +
+      haPeerHTML +
       childrenHTML +
     '</div>' +
     '</div>';

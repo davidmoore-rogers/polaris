@@ -462,6 +462,21 @@ export interface SuppressionAssetState {
    * Omitted/true = launch behavior (maintenance parent counts as down).
    */
   maintenanceSuppressChildren?: boolean;
+  /**
+   * HA standby FortiGate (fortinetTopology.haRole === "secondary"). An
+   * UNMONITORED standby parent is IGNORED by suppression — removed from the
+   * child's effective parent set — rather than treated as a transparent
+   * always-ok parent. Standbys are unmonitored by design (the cluster IP
+   * routes to the active member), so the generic transparent rule's
+   * "no monitored ancestor = ok" would permanently veto all-down
+   * suppression for every switch LLDP-cabled to both HA members: primary
+   * confirmed down, standby unknowable → child never suppresses. Ignoring
+   * the standby makes the primary's probe state decide, which matches
+   * physical reality (Polaris has no independent signal for the standby at
+   * probe cadence). A MONITORED standby (operator opt-in) evaluates
+   * normally by its own probe state.
+   */
+  isHaStandby?: boolean;
 }
 export function evaluateSuppression(
   states: SuppressionAssetState[],
@@ -484,8 +499,16 @@ export function evaluateSuppression(
   const result = new Map<string, boolean>();
   for (const s of sorted) result.set(s.id, false);
 
+  // Unmonitored HA-standby parents are invisible to suppression — filtered
+  // out of every parent set (top-level and the transparent-walk recursion)
+  // so they neither veto nor force suppression. See isHaStandby doc above.
+  const isIgnoredStandby = (id: string): boolean => {
+    const ps = stateById.get(id);
+    return ps?.isHaStandby === true && !ps.monitored;
+  };
+
   for (const s of sorted) {
-    const parents = parentsByChild.get(s.id) ?? [];
+    const parents = (parentsByChild.get(s.id) ?? []).filter(p => !isIgnoredStandby(p));
     if (parents.length === 0) {
       result.set(s.id, false);
       continue;
@@ -519,8 +542,11 @@ export function evaluateSuppression(
       }
       if (!ps.monitored) {
         // Transparent — recurse to grandparents. No grandparents = "ok"
-        // (we have no monitored ancestor that says otherwise).
-        const grand = parentsByChild.get(parentId) ?? [];
+        // (we have no monitored ancestor that says otherwise). Ignored
+        // standbys are filtered here too so a mid-chain unmonitored switch
+        // whose only other parent is the standby doesn't inherit the
+        // always-ok veto the top-level filter removed.
+        const grand = (parentsByChild.get(parentId) ?? []).filter(g => !isIgnoredStandby(g));
         if (grand.length === 0) return true;
         return grand.some(g => isParentOk(g));
       }
@@ -826,6 +852,19 @@ export async function reconcileDependencySuppression(): Promise<{
 
   const parentsByChild = await loadEffectiveParents();
 
+  // HA standby firewalls — unmonitored standbys are ignored as parents (see
+  // SuppressionAssetState.isHaStandby). Narrow JSON-path query instead of
+  // adding fortinetTopology to the fleet-wide select above: this runs every
+  // 60s and firewalls are a tiny slice of a 2000-asset fleet.
+  const standbyRows = await prisma.asset.findMany({
+    where: {
+      assetType: "firewall",
+      fortinetTopology: { path: ["haRole"], equals: "secondary" },
+    },
+    select: { id: true },
+  });
+  const standbyIds = new Set(standbyRows.map(r => r.id));
+
   // Per-asset "mark dependents down" resolution for in-maintenance assets:
   // OR across the asset's OPEN windows' schedules (any suppressing window
   // suppresses). A window whose schedule was deleted (scheduleId SetNull,
@@ -853,6 +892,7 @@ export async function reconcileDependencySuppression(): Promise<{
     maintenanceSuppressChildren: maintenanceSuppress.get(a.id) ?? true,
     currentlySuppressed: a.dependencySuppressed,
     dependencyTestUntil: a.dependencyTestUntil,
+    isHaStandby:         standbyIds.has(a.id),
   }));
 
   const desired = evaluateSuppression(states, parentsByChild);

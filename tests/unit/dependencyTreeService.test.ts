@@ -398,6 +398,76 @@ describe("evaluateSuppression", () => {
     expect(out.get("acc")).toBe(false);
   });
 
+  // HA standby FortiGate parents — an unmonitored standby is IGNORED
+  // (removed from the parent set), NOT transparent-ok. A switch LLDP-cabled
+  // to both HA members must suppress on the primary's confirmed-down alone;
+  // the generic no-monitored-ancestor rule would otherwise permanently veto
+  // all-down suppression for the whole site.
+  it("unmonitored HA-standby co-parent does not veto suppression when the primary is down", () => {
+    const states: SuppressionAssetState[] = [
+      st("fg_primary", 1, "down"),
+      { ...st("fg_standby", 1, null, /*monitored=*/false), isHaStandby: true },
+      st("sw", 2, "up"),
+    ];
+    const parents = new Map([["sw", ["fg_primary", "fg_standby"]]]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("sw")).toBe(true);
+  });
+
+  it("unmonitored HA-standby co-parent stays invisible when the primary is up", () => {
+    const states: SuppressionAssetState[] = [
+      st("fg_primary", 1, "up"),
+      { ...st("fg_standby", 1, null, /*monitored=*/false), isHaStandby: true },
+      st("sw", 2, "up"),
+    ];
+    const parents = new Map([["sw", ["fg_primary", "fg_standby"]]]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("sw")).toBe(false);
+  });
+
+  it("standby-only parent set → never suppressed (safe post-failover transient)", () => {
+    const states: SuppressionAssetState[] = [
+      { ...st("fg_standby", 1, null, /*monitored=*/false), isHaStandby: true },
+      st("sw", 2, "up"),
+    ];
+    const parents = new Map([["sw", ["fg_standby"]]]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("sw")).toBe(false);
+  });
+
+  it("MONITORED standby (operator opt-in) evaluates by its own probe state", () => {
+    // Down monitored standby + down primary → all-down → suppressed;
+    // up monitored standby + down primary → not suppressed.
+    const parents = new Map([["sw", ["fg_primary", "fg_standby"]]]);
+    const downStates: SuppressionAssetState[] = [
+      st("fg_primary", 1, "down"),
+      { ...st("fg_standby", 1, "down", /*monitored=*/true), isHaStandby: true },
+      st("sw", 2, "up"),
+    ];
+    expect(evaluateSuppression(downStates, parents).get("sw")).toBe(true);
+    const upStates: SuppressionAssetState[] = [
+      st("fg_primary", 1, "down"),
+      { ...st("fg_standby", 1, "up", /*monitored=*/true), isHaStandby: true },
+      st("sw", 2, "up"),
+    ];
+    expect(evaluateSuppression(upStates, parents).get("sw")).toBe(false);
+  });
+
+  it("standby filtered inside the transparent walk — unmonitored mid-switch whose parents are a down FG and a standby still suppresses the grandchild", () => {
+    const states: SuppressionAssetState[] = [
+      st("fg_primary", 1, "down"),
+      { ...st("fg_standby", 1, null, /*monitored=*/false), isHaStandby: true },
+      st("sw_mid", 2, null, /*monitored=*/false),
+      st("acc", 3, "up"),
+    ];
+    const parents = new Map([
+      ["sw_mid", ["fg_primary", "fg_standby"]],
+      ["acc",    ["sw_mid"]],
+    ]);
+    const out = evaluateSuppression(states, parents);
+    expect(out.get("acc")).toBe(true);
+  });
+
   // Admin-only "Dependency Test" overlay — parent with a future
   // dependencyTestUntil is treated as confirmed-down for suppression even
   // when its real probe is up. Past timestamps are inactive (auto-expired).
