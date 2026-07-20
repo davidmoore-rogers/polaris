@@ -3660,9 +3660,45 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
         dependencySuppressedAt: true,
         dependencyTestUntil: true,
         dependencyTestStartedBy: true,
+        fortinetTopology: true,
       },
     });
     if (!asset) throw new AppError(404, "Asset not found");
+
+    // HA peer (firewalls only) — the other member of this asset's HA
+    // cluster, resolved via the fortinetTopology.haPeerSerial stamp. The
+    // dependency DAG deliberately has NO edge between HA members (both are
+    // layer-1 roots; member↔member LLDP edges are same-layer and pruned),
+    // so without this the tree panel can never show the cluster's second
+    // box. Display-only — it is NOT a parent or child.
+    let haPeer: {
+      id: string; hostname: string | null; assetType: string;
+      dependencyLayer: number | null; monitorStatus: string | null;
+      monitored: boolean; haRole: string | null;
+    } | null = null;
+    const selfTopo = (asset.fortinetTopology as Record<string, unknown> | null) ?? null;
+    const peerSerial = typeof selfTopo?.haPeerSerial === "string" ? selfTopo.haPeerSerial : null;
+    if (asset.assetType === "firewall" && peerSerial) {
+      const peer = await prisma.asset.findFirst({
+        where: { serialNumber: { equals: peerSerial, mode: "insensitive" } },
+        select: {
+          id: true, hostname: true, assetType: true, dependencyLayer: true,
+          monitorStatus: true, monitored: true, fortinetTopology: true,
+        },
+      });
+      if (peer) {
+        const peerTopo = (peer.fortinetTopology as Record<string, unknown> | null) ?? null;
+        haPeer = {
+          id: peer.id,
+          hostname: peer.hostname,
+          assetType: peer.assetType,
+          dependencyLayer: peer.dependencyLayer,
+          monitorStatus: peer.monitorStatus,
+          monitored: peer.monitored,
+          haRole: typeof peerTopo?.haRole === "string" ? peerTopo.haRole : null,
+        };
+      }
+    }
 
     const rows = await prisma.assetDependencyParent.findMany({
       where: { assetId: id },
@@ -3864,6 +3900,7 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
       overrideParents,
       hasOverride,
       children: childrenWithGrandchildren,
+      haPeer,
     });
   } catch (err) {
     next(err);
