@@ -8027,9 +8027,23 @@ function assetMonitoringViewHTML(a) {
   var overridePill = _assetOverrideBadge(a);
   var overrideReset = _assetOverrideResetBtn(a);
   if (!a.monitored) {
+    // HA standby firewall: explain WHY it isn't monitored instead of the
+    // generic enable-it hint — discovery sweeps standby members to
+    // monitored=false every cycle (probes of the cluster IP only ever
+    // measure the active member), so "go enable it" would be misleading.
+    var haInfo = assetHaInfo(a);
+    var unmonMsg;
+    if (haInfo && haInfo.role === "secondary") {
+      unmonMsg = 'HA standby firewalls are not monitored — the cluster IP routes to the active member, so a probe would only ever measure the primary. ' +
+        'Health is tracked via the cluster’s HA roster on each discovery cycle' +
+        (haInfo.memberStatus === "up" ? ' (currently reported up)' : haInfo.memberStatus === "down" ? ' (currently reported DOWN)' : '') +
+        '. Polaris re-evaluates monitoring automatically when HA roles change on failover.';
+    } else {
+      unmonMsg = 'Monitoring is disabled for this asset. Enable it from the Edit modal’s Monitoring tab.';
+    }
     return '<div style="padding:1rem 0">' +
       pill + overridePill + ' &nbsp; ' +
-      '<span style="color:var(--color-text-secondary)">Monitoring is disabled for this asset. Enable it from the Edit modal’s Monitoring tab.</span>' +
+      '<span style="color:var(--color-text-secondary)">' + unmonMsg + '</span>' +
       overrideReset +
     '</div>';
   }
