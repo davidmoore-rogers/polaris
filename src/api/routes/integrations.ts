@@ -4150,6 +4150,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         memberHostname: string;
         isPrimary: boolean;
         peerSerial: string | null;
+        // Per-member health from the HA roster (FMG ha_slave[].status /
+        // presence in FortiOS ha-peer). null = roster carried no signal.
+        memberStatus: "up" | "down" | null;
       };
       const members: MemberCtx[] = haMembers
         ? haMembers.map((m) => {
@@ -4159,6 +4162,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               memberHostname: m.name || (m.isPrimary ? fgHostname : ""),
               isPrimary: m.isPrimary,
               peerSerial: others[0]?.serial || null,
+              memberStatus: m.status ?? null,
             };
           })
         : [{
@@ -4166,6 +4170,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             memberHostname: fgHostname,
             isPrimary: true,
             peerSerial: null,
+            memberStatus: null,
           }];
 
       for (const member of members) {
@@ -4184,6 +4189,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               haMode: clusterMode,
               haRole: member.isPrimary ? "primary" : "secondary",
               ...(member.peerSerial ? { haPeerSerial: member.peerSerial } : {}),
+              // Roster-reported member health (see MemberCtx.memberStatus).
+              // Drives the standby's "Standby" / "Standby Down" pill — the
+              // only live health signal for a box the cluster IP never
+              // routes to. Omitted (not nulled) when the roster carried no
+              // signal so the UI can distinguish "healthy" from "unknown".
+              ...(member.memberStatus ? { haMemberStatus: member.memberStatus } : {}),
+              // Display-only cluster IP for the standby member. Deliberately
+              // NOT Asset.ipAddress (which stays null on the standby): every
+              // IP-keyed dedup/probe/reservation path assumes one asset per
+              // IP, and any probe of this IP reaches the ACTIVE member.
+              ...(!member.isPrimary && device.mgmtIp ? { haClusterIp: device.mgmtIp } : {}),
             }
           : { role: "fortigate" as const, deviceName: device.name || fgHostname };
         const memberHaCtx = haMembers && member.peerSerial
@@ -4407,6 +4423,31 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         logDiscoveryAssetUpdated(fwBefore, updateData, existingAsset.id, memberDevice.hostname || device.name, {
           integrationName, integrationId, sourceKind: "fortigate-firewall", actor,
         });
+        // HA standby health transition. The roster status stamped into
+        // memberTopology above is the standby's only live health signal
+        // (probes route to the active member), so an up/unknown→down flip
+        // gets a warning Event — the hook for event-trigger notification
+        // rules — and the recovery an info Event. Primary members are
+        // excluded (probes + upstream conn status cover them), as are
+        // offline-in-FMG clusters (cached-CMDB roster is stale, not
+        // evidence — same posture as the lastSeen/resurrection guards).
+        if (!member.isPrimary && !memberDevice.offline && member.memberStatus) {
+          const prevMemberStatus = (existingAsset.fortinetTopology as Record<string, unknown> | null)?.haMemberStatus;
+          const memberLabel = `${memberDevice.hostname || member.serial} (${member.serial})`;
+          if (member.memberStatus === "down" && prevMemberStatus !== "down") {
+            logEvent({
+              action: "asset.ha.standby_down", resourceType: "asset", resourceId: existingAsset.id,
+              resourceName: memberDevice.hostname || device.name, actor, level: "warning",
+              message: `[${integrationName}] HA standby ${memberLabel} reported DOWN in cluster ${device.name || fgHostname}'s HA roster`,
+            });
+          } else if (member.memberStatus === "up" && prevMemberStatus === "down") {
+            logEvent({
+              action: "asset.ha.standby_restored", resourceType: "asset", resourceId: existingAsset.id,
+              resourceName: memberDevice.hostname || device.name, actor, level: "info",
+              message: `[${integrationName}] HA standby ${memberLabel} is back UP in cluster ${device.name || fgHostname}'s HA roster`,
+            });
+          }
+        }
         if (fwMacListForReconcile) {
           await reconcileMacAddresses(existingAsset.id, fwMacListForReconcile);
         }
@@ -4554,6 +4595,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       logDiscoveryAssetCreated(newAsset.id, memberDevice.hostname || device.name, {
         integrationName, integrationId, sourceKind: "fortigate-firewall", actor,
       });
+      // First sighting of a standby that's ALREADY failed in the roster —
+      // no prior topology stamp to diff against, so emit the warning
+      // unconditionally (the update branch's transition guard takes over
+      // from the next cycle).
+      if (isStandbyCreate && !memberDevice.offline && member.memberStatus === "down") {
+        logEvent({
+          action: "asset.ha.standby_down", resourceType: "asset", resourceId: newAsset.id,
+          resourceName: memberDevice.hostname || device.name, actor, level: "warning",
+          message: `[${integrationName}] HA standby ${memberDevice.hostname || member.serial} (${member.serial}) reported DOWN in cluster ${device.name || fgHostname}'s HA roster`,
+        });
+      }
       // Seed the `firewall:<hostname>` Tag registry row so the asset-edit
       // tag picker carries the entry from day one — only meaningful for
       // the primary (endpoints are sighted through the active member).

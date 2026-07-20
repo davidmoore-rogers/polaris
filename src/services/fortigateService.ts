@@ -1012,12 +1012,18 @@ export async function discoverDhcpSubnets(
             name: typeof p.hostname === "string" && p.hostname.length > 0 ? p.hostname : undefined,
             priority: Number.isFinite(p.priority) ? Number(p.priority) : undefined,
             isPrimary: false as const,
+            // ha-peer only lists members currently participating in the
+            // cluster — being listed IS the health signal (a dead standby
+            // drops out of the roster and falls to the Phase 2a stale-
+            // firewall sweep). FMG's ha_slave[].status carries the richer
+            // present-but-failed state; FortiOS REST has no equivalent here.
+            status: "up" as const,
           }))
           .filter((p) => p.serial && p.serial !== callerSerial);
         if (callerSerial && peerMembers.length > 0 && devices[0]) {
           devices[0].haMode = "a-p";
           devices[0].haMembers = [
-            { serial: callerSerial, name: deviceHostname || undefined, isPrimary: true },
+            { serial: callerSerial, name: deviceHostname || undefined, isPrimary: true, status: "up" },
             ...peerMembers,
           ];
           log("discover.ha", "info", `${deviceHostname}: HA cluster — ${devices[0].haMembers.length} member(s), primary=${callerSerial}`, deviceHostname);

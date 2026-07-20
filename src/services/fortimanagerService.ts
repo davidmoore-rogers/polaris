@@ -980,6 +980,14 @@ export interface DiscoveredDevice {
     name?: string;       // member hostname (FortiOS sys_name / FMG ha_slave[].name)
     priority?: number;
     isPrimary: boolean;
+    // Per-member health from FMG's ha_slave[].status (1=up, 0=down —
+    // verify-on-real-FMG; unknown encodings stay undefined). This is the only
+    // live health signal for a STANDBY member: probes against the cluster IP
+    // always reach the active member, so the sync pipeline stamps this onto
+    // the standby Asset's fortinetTopology and alerts on up→down flips.
+    // Standalone-FortiGate discovery stamps "up" for members listed by
+    // /monitor/system/ha-peer (a dead member drops out of that roster).
+    status?: "up" | "down";
   }>;
   // True when this device was OFFLINE in FMG (conn_status !== 1) and its config
   // was read from FMG's cached CMDB rather than a live query. Config-only: the
@@ -1343,7 +1351,14 @@ export function extractHaFromFmgDevice(
       const isPrimary = primarySerial.length > 0 && sn === primarySerial;
       const name = typeof s?.name === "string" && s.name.length > 0 ? s.name : undefined;
       const prio = Number.isFinite(s?.prio) ? Number(s.prio) : undefined;
-      return { serial: sn, name, priority: prio, isPrimary };
+      // ha_slave[].status: 1 = member up, 0 = member down (verify-on-real-FMG;
+      // string-encoded numbers normalized, anything else → undefined so a
+      // firmware that omits/renames the field degrades to "no health signal"
+      // rather than a false alarm).
+      const rawStatus = typeof s?.status === "string" ? Number(s.status) : s?.status;
+      const status: "up" | "down" | undefined =
+        rawStatus === 1 ? "up" : rawStatus === 0 ? "down" : undefined;
+      return { serial: sn, name, priority: prio, isPrimary, ...(status ? { status } : {}) };
     })
     .filter((m): m is NonNullable<typeof m> => m !== null);
   // Second pass: when no member matched device.sn (primarySerial empty or

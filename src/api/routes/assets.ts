@@ -516,6 +516,10 @@ const ASSET_LIST_SELECT = {
   // Maintenance pill: the parked pre-window status shows in the tooltip and
   // is what the "End maintenance now" popover restores.
   maintenanceReturnStatus: true,
+  // HA standby pill + cluster-IP display: selected only to feed the compact
+  // `ha` projection (shapeHaInfo) — enrichAssetList strips the raw blob so
+  // list rows never ship the full fortinetTopology JSON.
+  fortinetTopology: true,
 } as const;
 
 const ASSET_LIST_DEFAULT_LIMIT = 50;
@@ -633,15 +637,35 @@ function buildAssetOrderBy(
   return { [ASSET_SORT_COLUMNS[sortBy]]: dir };
 }
 
+// Compact HA projection for list rows. Non-null only for HA cluster members
+// (fortinetTopology carrying haMode + haRole — stamped by the FMG/FortiGate
+// firewall fan-out). `memberStatus` is the roster-reported member health
+// ("up"/"down", absent when the roster carried no signal); `clusterIp` is the
+// display-only cluster IP stamped on standby members (Asset.ipAddress stays
+// null on the standby by design — see the fan-out comments in integrations.ts).
+function shapeHaInfo(topo: unknown): { mode: string; role: string; memberStatus?: string; clusterIp?: string } | null {
+  const t = topo as Record<string, unknown> | null;
+  if (!t || typeof t !== "object") return null;
+  const { haMode: mode, haRole: role, haMemberStatus: memberStatus, haClusterIp: clusterIp } = t;
+  if (typeof mode !== "string" || mode === "standalone" || typeof role !== "string") return null;
+  return {
+    mode,
+    role,
+    ...(typeof memberStatus === "string" ? { memberStatus } : {}),
+    ...(typeof clusterIp === "string" ? { clusterIp } : {}),
+  };
+}
+
 function enrichAssetList(
-  assets: Array<{ ipAddress: string | null; associatedIpRows: unknown; macAddressRows: unknown } & Record<string, unknown>>,
+  assets: Array<{ ipAddress: string | null; associatedIpRows: unknown; macAddressRows: unknown; fortinetTopology?: unknown } & Record<string, unknown>>,
   ipCtx: Map<string, IpContext>,
 ) {
-  return assets.map(({ associatedIpRows, macAddressRows, ...a }) => ({
+  return assets.map(({ associatedIpRows, macAddressRows, fortinetTopology, ...a }) => ({
     ...a,
     associatedIps: shapeAssociatedIps(associatedIpRows as never),
     macAddresses: shapeMacRows(macAddressRows as never),
     ipContext: a.ipAddress ? (ipCtx.get(a.ipAddress) || null) : null,
+    ha: shapeHaInfo(fortinetTopology),
   }));
 }
 
