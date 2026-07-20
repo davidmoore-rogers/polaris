@@ -527,6 +527,7 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 
 **When adding a new sync phase:**
 - Insert `phaseMark("X")` right under the `// Phase X — ...` comment. The previous phase's elapsed time is logged at the next phaseMark call; the final phase is closed by `phaseMark("__end__")` at the bottom of `syncDhcpSubnets`.
+- `phaseMark` is also the sync's cooperative cancel point: it throws `DiscoveryAbortError` when the run's abort signal has fired (every mark except `__end__`, which would discard a fully-committed sync). Keep individual phases reasonably bounded — a cancel only lands between marks; a wedge inside one phase is covered by the `discoveryCancelWatchdog` force-exit, not by the throw.
 
 ---
 

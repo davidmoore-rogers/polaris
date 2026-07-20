@@ -2929,6 +2929,14 @@ export async function discoverDhcpSubnets(
             dhcpLeasesInventoriedDevices:          chunk.didDhcpLeasesQuery          ? [chunk.device.name] : [],
           });
         } catch (err: any) {
+          if (err?.name === "AbortError") {
+            // Operator cancel landed mid-sync (syncDhcpSubnets' phase-boundary
+            // check threw) — not a device failure. `discover.device.abort` is
+            // terminal for the activeDevices UI but deliberately increments no
+            // skip counter; the run-level abort accounting covers it.
+            log("discover.device.abort", "info", `${chunk.device.name}: Per-device sync stopped by cancel — ${err.message || "aborted"}`, chunk.device.name);
+            return;
+          }
           log("discover.device", "error", `${chunk.device.name}: Per-device sync failed — ${err.message || "Unknown error"}`, chunk.device.name);
           return; // terminal event already emitted — skip the complete log
         }

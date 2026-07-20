@@ -5,7 +5,8 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
-import { AppError } from "../../utils/errors.js";
+import { AppError, throwIfAborted } from "../../utils/errors.js";
+import { armDiscoveryCancelWatchdog } from "../../services/discoveryCancelWatchdog.js";
 import { requirePermission } from "../middleware/permissions.js";
 import * as fortimanager from "../../services/fortimanagerService.js";
 import { getFmgWorker } from "../../services/fmgWorker.js";
@@ -2240,6 +2241,20 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
     void touchWorkerHeartbeat(integrationId);
   }, 60_000);
 
+  // Force-exit backstop: if the abort fires but the run doesn't unwind within
+  // the grace window (wedged on an await the signal can't reach — e.g. a DB
+  // query blocked on a lock), the watchdog finalizes the row, logs which
+  // devices were stuck, and exits so the service manager restarts the process.
+  // Disarmed in the finally below — a run that aborts cleanly never trips it.
+  const disarmCancelWatchdog = armDiscoveryCancelWatchdog({
+    integrationId,
+    integrationName,
+    actor,
+    signal: ac.signal,
+    getActiveDevices: () =>
+      [...acc.activeDevices.entries()].map(([name, startedAtMs]) => ({ name, startedAtMs })),
+  });
+
   // Throttled progress flush so a chatty FMG run doesn't hammer the DB.
   let lastFlush = 0;
   const flush = (force = false) => {
@@ -2279,6 +2294,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
       const isTerminal =
         step === "discover.device.complete" ||
         step === "discover.device.skip" ||
+        step === "discover.device.abort" ||
         (step === "discover.device" && level === "error");
       if (isTerminal) {
         const start = acc.activeDevices.get(device);
@@ -2304,7 +2320,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
     // Per-device callback: sync each FortiGate's data as it arrives (phases 1, 3–9).
     // Phase 2 (stale deprecation) runs separately at the end once all devices are known.
     const onDeviceComplete = async (deviceResult: DiscoveryResult) => {
-      const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, deviceResult, actor, "skip-deprecation");
+      const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, deviceResult, actor, "skip-deprecation", ac.signal);
       syncTotals.created.push(...r.created);
       syncTotals.updated.push(...r.updated);
       syncTotals.skipped.push(...r.skipped);
@@ -2343,7 +2359,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
       const wsHost = (config as any).host as string;
       discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
       // Windows Server is a single host — no per-device iteration, sync the full result normally
-      const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
+      const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "full", ac.signal);
       syncTotals.created.push(...r.created);
       syncTotals.updated.push(...r.updated);
       syncTotals.skipped.push(...r.skipped);
@@ -2359,7 +2375,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
         onProgress,
       );
       if (!ac.signal.aborted) {
-        const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
+        const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "full", ac.signal);
         syncTotals.created.push(...r.created);
         syncTotals.updated.push(...r.updated);
         syncTotals.skipped.push(...r.skipped);
@@ -2435,7 +2451,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
           && (discoveryResult.switchInventoriedDevices?.length ?? 0) === 0
           && (discoveryResult.apInventoriedDevices?.length ?? 0) === 0;
         if (!scopedFinalizeIsNoop) {
-          const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, finalizeMode);
+          const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, finalizeMode, ac.signal);
           syncTotals.deprecated.push(...r.deprecated);
           syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
           syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
@@ -2524,6 +2540,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
       await finishRun(integrationId, "aborted");
     }
   } finally {
+    disarmCancelWatchdog();
     clearInterval(cancelTimer);
     clearInterval(heartbeatTimer);
   }
@@ -3343,7 +3360,7 @@ export function sweepPhaseEnabled(mode: SyncMode, phase: "2" | "2a" | "2b" | "2c
   return true;
 }
 
-async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full") {
+async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full", signal?: AbortSignal) {
   const syncLog = (level: "info" | "error", message: string) => {
     logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
   };
@@ -3391,6 +3408,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
     lastPhaseName = name;
     lastPhaseAt = now;
+    // Cooperative cancel: the HTTP transports observe the run's abort signal
+    // natively, but the DB work between these marks doesn't — a cancel that
+    // lands mid-sync used to run every remaining phase to completion (or hang
+    // with it, prod incident 2026-07-20). Throwing here stops the sync at the
+    // next phase boundary; DiscoveryAbortError carries name="AbortError" so
+    // runDiscovery's terminal handler counts the run as aborted, not errored.
+    // The __end__ mark is exempt — all work is already done at that point,
+    // and throwing would discard a fully-committed sync's result.
+    if (name !== "__end__") throwIfAborted(signal, `sync phase "${name}"`);
   };
   const integrationLabel =
     integrationType === "windowsserver" ? "Windows Server" :

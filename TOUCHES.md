@@ -2443,6 +2443,29 @@ Listed alphabetically.
 
 ---
 
+## services/discoveryCancelWatchdog.ts
+
+**What it owns:** The force-exit backstop for discovery cancellation. Armed when a run's abort signal fires, disarmed when `runDiscovery` reaches its finally. If the run hasn't unwound within the grace window (2 min), it logs the in-flight devices with ages, writes an `integration.discover.force_exit` Event, finalizes the `DiscoveryRun` row as `aborted`, and exits the process with code 1 (systemd `Restart=on-failure` / NSSM restart it).
+
+**Public API:** `armDiscoveryCancelWatchdog` (returns the disarm fn), `formatStuckDevices`, `CANCEL_FORCE_EXIT_GRACE_MS`, `FORCE_EXIT_CLEANUP_TIMEOUT_MS`, `ActiveDeviceSnapshot`, `CancelWatchdogOptions`.
+
+**Cross-service deps:** `discoveryRunState.finishRun`, `eventLogService.logEvent`, `logger` — all injectable via options for tests.
+
+**Used by:** `src/api/routes/integrations.ts` — `runDiscovery` arms it right after the heartbeat timer and disarms in the finally. One call site.
+
+**Invariants:**
+- Fires ONLY when armed (abort signal fired) and not disarmed — a run that cancels cleanly, completes, or errors never trips it.
+- Exists for wedges the abort signal cannot reach (non-HTTP awaits, e.g. a lock-blocked Prisma query). Those keep the 60s heartbeat ticking, so the discoveryRunReaper never clears them either — this watchdog is the only automatic recovery.
+- The pre-exit bookkeeping writes (Event, finishRun) are each raced against `FORCE_EXIT_CLEANUP_TIMEOUT_MS` — the DB may be the wedge; the exit must never be blocked by the hang it exists to break.
+- Finalizing the row as `aborted` before exit clears the UI immediately (no reaper wait) and leaves `cancelRequested=true`, so a pg-boss redelivery of the interrupted job self-aborts at runDiscovery startup.
+
+**When changing this:**
+- Keep the grace ≥ the cancel poll interval (3s) with generous margin — a well-behaved abort must always beat the watchdog.
+- The exit takes the whole process: fine for the discovery role, whole-app under `POLARIS_ROLE=all` / cursor-mode web fallback (same semantics as the operator /restart endpoint). Don't make the grace shorter without considering that case.
+- The disarm call in runDiscovery's finally is load-bearing — if you restructure runDiscovery, a missing disarm means every cancelled run force-exits the process 2 minutes later.
+
+---
+
 ## services/discoveryDurationService.ts
 
 **What it owns:** Rolling discovery-duration tracking per integration (and per-FortiGate within FMG runs), baseline computation for slow-run detection, and threshold formula.
@@ -2478,7 +2501,7 @@ Listed alphabetically.
 
 **Cross-service deps:** `prisma`, `logger`.
 
-**Used by:** `src/api/routes/integrations.ts` (discovery control + `/discoveries` list + backup-restore guard), `src/api/routes/assets.ts` (`POST /:id/rediscover` pre-check via `isRunActive`), `src/jobs/discoveryRunReaper.ts` (stale-run reaping).
+**Used by:** `src/api/routes/integrations.ts` (discovery control + `/discoveries` list + backup-restore guard), `src/api/routes/assets.ts` (`POST /:id/rediscover` pre-check via `isRunActive`), `src/jobs/discoveryRunReaper.ts` (stale-run reaping), `src/services/discoveryCancelWatchdog.ts` (`finishRun("aborted")` before force-exit).
 
 **Invariants:**
 - Hot progress is coalesced in the accumulator (mutates synchronously, flushes throttled + on terminal transitions); `flushRunProgress` / `touchWorkerHeartbeat` are best-effort and never kill a run on a transient DB hiccup.
@@ -2488,6 +2511,7 @@ Listed alphabetically.
 
 **When changing this:**
 - The worker heartbeat timer detects stalled phases — keep it shorter than the reaper's stale window.
+- The heartbeat runs on a timer independent of progress, so a wedged-but-alive run heartbeats forever and the reaper never clears it — that gap is covered by `discoveryCancelWatchdog` (force-exit after a cancelled run overstays its grace), not by the reaper. Don't "fix" a stuck run by loosening the reaper.
 
 ---
 
