@@ -5182,8 +5182,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // (or in addition to) the wired uplink.
         meshUplink: ap.meshUplink ?? null,
         parentApSerial: ap.parentApSerial ?? null,
-        // Raw admin description from the wtp CMDB `comment` (a:/b:/f:/r:/jb:
-        // location codes for the Device Map). Notes are operator-only.
+        // Raw admin description from the wtp CMDB `location` (comment
+        // fallback) — a:/b:/f:/r:/jb: location codes for the Device Map.
+        // Notes are operator-only.
         ...buildDeviceDescriptionStamp(ap.description),
       };
       // Presence gate: the managed-AP table includes configured-but-offline

@@ -213,7 +213,8 @@ FMG Integration Discovery
 │        Polaris (seed once; audited)
 │        Polaris has a value: write it to the device — FortiGate
 │        system/interface description / system/global alias, FortiSwitch
-│        managed-switch + port description, FortiAP wtp comment — and
+│        managed-switch + port description, FortiAP wtp location (AP
+│        Manager's field, 35-char cap) — and
 │        OVERWRITE any device-side edit (audited with the replaced value)
 │        proxy mode: writes via /sys/proxy/json; direct mode: per-FG REST
 │        verify on read-back; best-effort (Polaris row saves regardless),
