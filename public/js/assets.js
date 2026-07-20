@@ -2169,6 +2169,20 @@ function assetStatusBadge(asset) {
 // `data-monitor-toggle="<asset-id>"` and `data-monitored="true|false"` so
 // the delegated handler in `_handleMonitorPillClick` can flip it without
 // re-querying.
+// Normalized HA-cluster info for a Fortinet firewall asset. The assets LIST
+// endpoint ships the compact `ha` projection ({mode, role, memberStatus,
+// clusterIp}); the detail endpoint ships the full fortinetTopology blob —
+// accept either so the pill/IP helpers work from both data sources.
+function assetHaInfo(asset) {
+  if (!asset) return null;
+  if (asset.ha && typeof asset.ha === "object" && asset.ha.role) return asset.ha;
+  var topo = asset.fortinetTopology;
+  if (topo && typeof topo === "object" && topo.haMode && topo.haMode !== "standalone" && topo.haRole) {
+    return { mode: topo.haMode, role: topo.haRole, memberStatus: topo.haMemberStatus, clusterIp: topo.haClusterIp };
+  }
+  return null;
+}
+
 function assetMonitorBadge(asset) {
   var canToggle = typeof canManageAssets === "function" && canManageAssets() && asset && asset.id;
   var toggleAttrs = canToggle
@@ -2176,6 +2190,28 @@ function assetMonitorBadge(asset) {
       (asset.hostname ? ' data-hostname="' + escapeHtml(asset.hostname) + '"' : "") + ' role="button" tabindex="0"'
     : "";
   if (!asset || asset.monitored === false || asset.monitored == null) {
+    // HA standby FortiGate: not probe-monitored by design (the cluster IP
+    // routes only to the active member — a probe would measure the primary),
+    // so "Unmonitored" undersells it. Health rides the HA roster read on
+    // every discovery cycle: present/synced → "Standby", roster reports the
+    // member failed → "Standby Down". Operator opt-in monitoring (per the
+    // fan-out design) keeps the normal five-state pill below.
+    var haInfo = assetHaInfo(asset);
+    if (haInfo && haInfo.role === "secondary") {
+      if (haInfo.memberStatus === "down") {
+        var sdBits = ["HA standby member reported DOWN in the cluster's HA roster"];
+        if (canToggle) sdBits.push("Click to enable monitoring");
+        return '<span class="badge badge-monitor-down' + (canToggle ? " badge-clickable" : "") + '" title="' +
+          escapeHtml(sdBits.join("\n")) + '"' + toggleAttrs + '>Standby Down</span>';
+      }
+      var sbBits = ["HA standby member — the cluster IP routes to the active member"];
+      sbBits.push(haInfo.memberStatus === "up"
+        ? "HA roster reports this member up (checked each discovery cycle)"
+        : "Health tracked via the HA roster on each discovery cycle");
+      if (canToggle) sbBits.push("Click to enable monitoring");
+      return '<span class="badge badge-monitor-standby' + (canToggle ? " badge-clickable" : "") + '" title="' +
+        escapeHtml(sbBits.join("\n")) + '"' + toggleAttrs + '>Standby</span>';
+    }
     var unmonTitle = canToggle ? ' title="Click to enable monitoring"' : "";
     return '<span class="badge badge-unmonitored' + (canToggle ? " badge-clickable" : "") + '"' + unmonTitle + toggleAttrs + '>Unmonitored</span>';
   }
@@ -2240,7 +2276,20 @@ function assetMonitorBadge(asset) {
 function ipCellHTML(asset) {
   var primary = asset.ipAddress;
   var ips = Array.isArray(asset.associatedIps) ? asset.associatedIps : [];
-  if (!primary && ips.length === 0) return '-';
+  if (!primary && ips.length === 0) {
+    // HA standby FortiGate: Asset.ipAddress is deliberately null (the cluster
+    // IP routes only to the active member), but the shared cluster IP is
+    // stamped as display metadata — show it dimmed with a "(cluster)" marker
+    // so the row isn't a bare dash. Copy still copies the raw IP.
+    var haInfo = assetHaInfo(asset);
+    if (haInfo && haInfo.role === "secondary" && haInfo.clusterIp) {
+      return '<span class="copy-cell" style="color:var(--color-text-secondary)" ' +
+        'title="Cluster IP — routes to the active (primary) HA member. Click to copy" data-copy="' +
+        escapeHtml(haInfo.clusterIp) + '">' + escapeHtml(haInfo.clusterIp) +
+        ' <span style="font-size:0.75em">(cluster)</span></span>';
+    }
+    return '-';
+  }
   if (ips.length === 0) {
     return '<span class="copy-cell" title="Click to copy" data-copy="' + escapeHtml(primary) + '">' + escapeHtml(primary) + '</span>';
   }
@@ -12207,9 +12256,34 @@ function haTopologyHTML(asset) {
     peerHTML = '<a href="#" onclick="event.preventDefault(); window.openAssetBySerial && window.openAssetBySerial(\'' +
       serialEsc + '\'); return false" class="mono" title="Open peer asset">' + serialEsc + '</a>';
   }
+  // Roster-reported member health (fortinetTopology.haMemberStatus, stamped
+  // each discovery cycle from FMG ha_slave[].status / FortiOS ha-peer
+  // presence). Rendered only when discovery captured a signal — the standby's
+  // only live health source, since probes route to the active member.
+  var healthHTML = '';
+  var memberStatus = topo.haMemberStatus;
+  if (memberStatus === "up" || memberStatus === "down") {
+    var healthColor = memberStatus === "up" ? "var(--color-success,#10b981)" : "var(--color-danger,#ef4444)";
+    var healthLabel = memberStatus === "up" ? "In cluster (up)" : "Reported down";
+    var healthBadge = '<span style="display:inline-block;padding:1px 8px;border-radius:4px;font-size:0.8rem;background:' +
+      healthColor + ';color:#000;font-weight:600" title="From the cluster\'s HA roster, read each discovery cycle">' +
+      healthLabel + '</span>';
+    healthHTML = '<div class="detail-row"><span class="detail-label">HA Member Health</span><span class="detail-value">' + healthBadge + '</span></div>';
+  }
+  // Display-only cluster IP on the standby (Asset.ipAddress stays null there
+  // by design — the IP routes to the active member).
+  var clusterIpHTML = '';
+  if (role === "secondary" && topo.haClusterIp && typeof topo.haClusterIp === "string") {
+    clusterIpHTML = '<div class="detail-row"><span class="detail-label">Cluster IP</span><span class="detail-value mono">' +
+      '<span class="copy-cell" title="Routes to the active (primary) member. Click to copy" data-copy="' +
+      escapeHtml(topo.haClusterIp) + '">' + escapeHtml(topo.haClusterIp) + '</span>' +
+      ' <span style="color:var(--color-text-secondary);font-size:0.8em">(routes to active member)</span></span></div>';
+  }
   return '<div class="detail-row"><span class="detail-label">HA Mode</span><span class="detail-value">' +
     escapeHtml(modeLabel) + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">HA Role</span><span class="detail-value">' + roleBadge + '</span></div>' +
+    healthHTML +
+    clusterIpHTML +
     '<div class="detail-row"><span class="detail-label">HA Peer</span><span class="detail-value mono">' + peerHTML + '</span></div>';
 }
 

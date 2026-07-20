@@ -1511,7 +1511,19 @@
   }
 
   function renderMonitorPill(asset) {
-    if (!asset.monitored) return '<span class="status-pill unk">Unmonitored</span>';
+    if (!asset.monitored) {
+      // HA standby FortiGate — unmonitored by design (the cluster IP routes
+      // to the active member); health rides the HA roster each discovery
+      // cycle. Mirrors the desktop assetMonitorBadge standby branch.
+      var topo = asset.fortinetTopology;
+      if (topo && typeof topo === "object" && topo.haRole === "secondary") {
+        if (topo.haMemberStatus === "down") {
+          return '<span class="status-pill down"><span class="dot down"></span>Standby Down</span>';
+        }
+        return '<span class="status-pill unk"><span class="dot unk"></span>HA Standby</span>';
+      }
+      return '<span class="status-pill unk">Unmonitored</span>';
+    }
     if (asset.dependencySuppressed) {
       var layerBit = (asset.dependencyLayer != null) ? " (Layer " + asset.dependencyLayer + ")" : "";
       return '<span class="status-pill dep-down"><span class="dot dep-down"></span>Dep. Down' + layerBit + '</span>';

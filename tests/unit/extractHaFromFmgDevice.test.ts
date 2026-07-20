@@ -115,6 +115,45 @@ describe("extractHaFromFmgDevice", () => {
     expect(r.haMembers[0].serial).toBe("FGT-A-SERIAL");
   });
 
+  it("per-member status — numeric 1/0 map to up/down", () => {
+    const r = extractHaFromFmgDevice({
+      sn: "FGT-A-SERIAL",
+      ha_mode: "a-p",
+      ha_slave: [
+        { idx: 0, name: "FGT-A", sn: "FGT-A-SERIAL", status: 1 },
+        { idx: 1, name: "FGT-B", sn: "FGT-B-SERIAL", status: 0 },
+      ],
+    });
+    expect(r.haMembers.find((m) => m.serial === "FGT-A-SERIAL")?.status).toBe("up");
+    expect(r.haMembers.find((m) => m.serial === "FGT-B-SERIAL")?.status).toBe("down");
+  });
+
+  it("per-member status — string-encoded numbers normalized", () => {
+    const r = extractHaFromFmgDevice({
+      sn: "FGT-A-SERIAL",
+      ha_mode: "a-p",
+      ha_slave: [
+        { idx: 0, sn: "FGT-A-SERIAL", status: "1" },
+        { idx: 1, sn: "FGT-B-SERIAL", status: "0" },
+      ],
+    });
+    expect(r.haMembers.find((m) => m.serial === "FGT-A-SERIAL")?.status).toBe("up");
+    expect(r.haMembers.find((m) => m.serial === "FGT-B-SERIAL")?.status).toBe("down");
+  });
+
+  it("per-member status — missing or unrecognized stays undefined (no false alarm)", () => {
+    const r = extractHaFromFmgDevice({
+      sn: "FGT-A-SERIAL",
+      ha_mode: "a-p",
+      ha_slave: [
+        { idx: 0, sn: "FGT-A-SERIAL" },
+        { idx: 1, sn: "FGT-B-SERIAL", status: "weird" },
+      ],
+    });
+    expect(r.haMembers.find((m) => m.serial === "FGT-A-SERIAL")?.status).toBeUndefined();
+    expect(r.haMembers.find((m) => m.serial === "FGT-B-SERIAL")?.status).toBeUndefined();
+  });
+
   it("unrecognized string ha_mode falls back to standalone", () => {
     const r = extractHaFromFmgDevice({
       sn: "FGT-A-SERIAL",
