@@ -39,10 +39,11 @@
  *
  * VERIFY ON A REAL FortiOS 7.x DEVICE before trusting in production (same
  * caveat posture as the SD-WAN collectors): the `system/global.alias` field
- * name + its short length cap, child-table PUT patch semantics on
- * `ports/<port>`, and the wtp `location` length cap. When the wtp read shows
+ * name + its short length cap, and child-table PUT patch semantics on
+ * `ports/<port>`. When the wtp read shows
  * no `location` attribute, the FortiAP surface is skipped (logged once per
- * reconcile). CONFIRMED on FortiOS 7.6.7: the managed-switch
+ * reconcile). CONFIRMED: the wtp `location` cap is 35 chars (checked against
+ * central-management AP Manager). CONFIRMED on FortiOS 7.6.7: the managed-switch
  * mkey (`switch-id`) is NOT reliably the serial — FortiLink setups rename it
  * (e.g. to the hostname) and a serial-keyed PUT 404s ("Invalid url"), so
  * serial-keyed callers resolve the row via `matchManagedSwitchRow` (switch-id
@@ -110,7 +111,7 @@ export const DESCRIPTION_CAPS: Record<DescTargetKind, number> = {
   "fortigate-global": 35, // system/global `alias` is a short field
   "managed-switch": 63,   // 63-char cap confirmed on FortiOS 7.6.7
   "switch-port": 63,
-  "wtp": 35,              // wtp `location` is a short field (unverified cap)
+  "wtp": 35,              // wtp `location` cap confirmed: 35 chars
 };
 
 export function capDescriptionForTarget(value: string, target: DescTargetKind): string {

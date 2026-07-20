@@ -231,14 +231,17 @@ async function fetchFortiswitchCmdbMeta(
 
 /**
  * Read the wireless-controller wtp CMDB and return a map of AP serial
- * (UPPERCASE) → operator-set admin description (the wtp `comment` field —
- * the managed_ap monitor endpoint doesn't carry it). Same role as the
- * managed-switch description above: a:/b:/f:/r:/jb: location codes for the
- * Device Map. Best-effort: a 404 (older FortiOS / wireless-controller
- * disabled) or any other failure yields an empty map and never fails
- * discovery. Mirrors the FMG path's wtp CMDB roster read (Step 3d.4).
+ * (UPPERCASE) → operator-set admin description. The description surface is
+ * the wtp `location` field (AP Manager's field, 35-char cap — the same
+ * field description sync pushes to), with `comment` as fallback for rows
+ * that only carry the legacy field; the managed_ap monitor endpoint carries
+ * neither. Same role as the managed-switch description above:
+ * a:/b:/f:/r:/jb: location codes for the Device Map. Best-effort: a 404
+ * (older FortiOS / wireless-controller disabled) or any other failure
+ * yields an empty map and never fails discovery. Mirrors the FMG path's
+ * wtp CMDB roster read (Step 3d.4).
  */
-async function fetchFortiapComments(
+async function fetchFortiapDescriptions(
   config: FortiGateConfig,
   queryBase: Record<string, string>,
   signal: AbortSignal | undefined,
@@ -253,8 +256,10 @@ async function fetchFortiapComments(
     for (const row of rows) {
       const serial = String(row?.["wtp-id"] || "").trim();
       if (!serial) continue;
+      const location = typeof row?.location === "string" ? row.location.trim() : "";
       const comment = typeof row?.comment === "string" ? row.comment.trim() : "";
-      if (comment) out.set(serial.toUpperCase(), comment);
+      const description = location || comment;
+      if (description) out.set(serial.toUpperCase(), description);
     }
   } catch { /* best-effort — leave AP descriptions null */ }
   return out;
@@ -758,9 +763,9 @@ export async function discoverDhcpSubnets(
     didApQuery = true;
     let apCount = 0;
     if (Array.isArray(apResults)) {
-      // AP admin descriptions live in the wtp CMDB (`comment`), not the
-      // monitor endpoint — one extra best-effort read per run.
-      const commentBySerial = await fetchFortiapComments(config, queryBase, signal);
+      // AP admin descriptions live in the wtp CMDB (`location`, `comment`
+      // fallback), not the monitor endpoint — one extra best-effort read per run.
+      const descriptionBySerial = await fetchFortiapDescriptions(config, queryBase, signal);
       for (const ap of apResults) {
         // Shared parser — same shape across FMG proxy and standalone
         // FortiGate REST paths. See utils/fortiapMonitorRow.ts.
@@ -768,7 +773,7 @@ export async function discoverDhcpSubnets(
         fortiAps.push({
           device: deviceName,
           ...parsed,
-          description: commentBySerial.get((parsed.serial || "").toUpperCase()) ?? null,
+          description: descriptionBySerial.get((parsed.serial || "").toUpperCase()) ?? null,
         });
         apCount++;
       }

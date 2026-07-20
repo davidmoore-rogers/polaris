@@ -1144,10 +1144,11 @@ export interface DiscoveredFortiAP {
   memTotalMb?: number;
   sensorTemperatures?: Array<{ name: string; celsius: number }>;
   // Operator-set admin description from the wireless-controller wtp CMDB row
-  // (`comment` field — the monitor endpoint doesn't carry it). Same role as
-  // DiscoveredFortiSwitch.description: physical-location codes for Device Map
-  // grouping, stamped onto fortinetTopology.deviceDescription + synced into
-  // Asset.notes. null = roster read unavailable or no comment set.
+  // (`location` field — AP Manager's field, the description-sync surface —
+  // with `comment` as fallback; the monitor endpoint carries neither). Same
+  // role as DiscoveredFortiSwitch.description: physical-location codes for
+  // Device Map grouping, stamped onto fortinetTopology.deviceDescription.
+  // null = roster read unavailable or no location/comment set.
   description?: string | null;
 }
 
@@ -2513,8 +2514,13 @@ export async function discoverDhcpSubnets(
     // Mirror of Step 3c.5 — native FMG CMDB read, decommission protection
     // for configured-but-currently-offline APs. Best-effort. Also the only
     // place the AP admin description lives: the monitor endpoint in Step 3d
-    // doesn't carry it, so the wtp `comment` is joined onto localAps here
-    // (location codes for the Device Map — see utils/locationCodes.ts).
+    // doesn't carry it, so it's joined onto localAps here (location codes
+    // for the Device Map — see utils/locationCodes.ts). The description
+    // surface is the wtp `location` field (AP Manager's field, 35-char cap —
+    // FMG's device-DB copy carries `location` but no `comment` at all when
+    // APs are centrally managed, so a comment-only read comes back empty);
+    // `comment` is still requested as a fallback for per-device-managed
+    // ADOMs whose copy retains it.
     try {
       const apCmdbRes = await rpc(
         baseUrl,
@@ -2523,7 +2529,7 @@ export async function discoverDhcpSubnets(
           method: "get",
           params: [{
             url: `/pm/config/device/${deviceName}/vdom/root/wireless-controller/wtp`,
-            fields: ["wtp-id", "name", "comment"],
+            fields: ["wtp-id", "name", "location", "comment"],
             loadsub: 0,
           }],
         },
@@ -2531,19 +2537,21 @@ export async function discoverDhcpSubnets(
       );
       const apCmdbList = apCmdbRes.result?.[0]?.data;
       if (Array.isArray(apCmdbList)) {
-        const commentBySerial = new Map<string, string>();
+        const descriptionBySerial = new Map<string, string>();
         for (const ap of apCmdbList) {
           // FortiAPs are keyed by serial as `wtp-id` in CMDB (matches what
           // the live monitor query reports as `wtp_id` / `serial`).
           const serial = typeof ap["wtp-id"] === "string" ? ap["wtp-id"].trim() : "";
           if (!serial) continue;
           localCmdbApSerials.push({ device: deviceName, serial });
+          const location = typeof ap.location === "string" ? ap.location.trim() : "";
           const comment = typeof ap.comment === "string" ? ap.comment.trim() : "";
-          if (comment) commentBySerial.set(serial.toUpperCase(), comment);
+          const description = location || comment;
+          if (description) descriptionBySerial.set(serial.toUpperCase(), description);
         }
         for (const ap of localAps) {
           if (ap.device !== deviceName) continue;
-          ap.description = commentBySerial.get((ap.serial || "").toUpperCase()) ?? null;
+          ap.description = descriptionBySerial.get((ap.serial || "").toUpperCase()) ?? null;
         }
       }
     } catch (err: any) {
