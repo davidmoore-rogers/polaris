@@ -1538,7 +1538,15 @@
   }
 
   function monitorPillSubtext(asset) {
-    if (!asset.monitored) return "";
+    if (!asset.monitored) {
+      // HA standby — say why there's no monitoring (desktop System tab has
+      // the long-form explanation; keep the mobile subtext one line).
+      var topo = asset.fortinetTopology;
+      if (topo && typeof topo === "object" && topo.haRole === "secondary") {
+        return "standby firewalls are not monitored — health via the HA roster";
+      }
+      return "";
+    }
     var bits = [];
     if (asset.dependencySuppressed) {
       bits.push("upstream parent down");

@@ -209,6 +209,15 @@ export function snapshotAddAsMonitoredByAssetType(
  * map to a per-class block, are excluded by the WHERE clause and keep
  * their default (false). Same JSON-path logic as the cutover migration —
  * keep these two in sync.
+ *
+ * HA-standby exception (firewall class only): a standby member's effective
+ * integration default is ALWAYS "not monitored" — it isn't probe-reachable
+ * (its IP is nulled; the cluster IP routes to the active member) — so
+ * divergence is measured against `false`, not the class flag. This is what
+ * makes an operator's deliberate monitored=true on a standby compute
+ * override=true (protecting it from the discovery flip-off sweep in
+ * buildFortigateMonitorStamp) even while `fortigateMonitor.addAsMonitored`
+ * is on for the rest of the fleet.
  */
 export async function recomputeMonitorOverrideForAssets(
   prismaClient: { $executeRaw: (template: TemplateStringsArray, ...args: unknown[]) => Promise<number> },
@@ -221,7 +230,9 @@ export async function recomputeMonitorOverrideForAssets(
     SET "monitorOverride" = (
       a."monitored" IS DISTINCT FROM COALESCE(
         CASE a."assetType"
-          WHEN 'firewall'     THEN (i."config" #>> '{fortigateMonitor,addAsMonitored}')::boolean
+          WHEN 'firewall'     THEN (CASE WHEN a."fortinetTopology" ->> 'haRole' = 'secondary'
+                                         THEN false
+                                         ELSE (i."config" #>> '{fortigateMonitor,addAsMonitored}')::boolean END)
           WHEN 'switch'       THEN (i."config" #>> '{fortiswitchMonitor,addAsMonitored}')::boolean
           WHEN 'access_point' THEN (i."config" #>> '{fortiapMonitor,addAsMonitored}')::boolean
           WHEN 'workstation'  THEN (i."config" #>> '{workstationMonitor,addAsMonitored}')::boolean
@@ -249,6 +260,12 @@ export async function recomputeMonitorOverrideForAssets(
  * and a flag flip never re-derives or clears them (operators re-align a
  * pinned asset per-asset via the Reset-to-integration-default action).
  *
+ * HA-standby exception mirrors recomputeMonitorOverrideForAssets: a standby
+ * firewall's effective default is `false` regardless of the class flag —
+ * pre-fix, flipping `fortigateMonitor.addAsMonitored` ON re-enabled
+ * monitoring on every override-false standby, which is exactly the
+ * guaranteed-failure polling waste the standby design exists to avoid.
+ *
  * Returns the count of rows whose `monitored` value actually changed (used
  * by the route handler to emit an Event with the touched-asset count).
  */
@@ -260,7 +277,9 @@ export async function sweepMonitoredForIntegration(
     UPDATE "assets" a
     SET "monitored" = COALESCE(
       CASE a."assetType"
-        WHEN 'firewall'     THEN (i."config" #>> '{fortigateMonitor,addAsMonitored}')::boolean
+        WHEN 'firewall'     THEN (CASE WHEN a."fortinetTopology" ->> 'haRole' = 'secondary'
+                                       THEN false
+                                       ELSE (i."config" #>> '{fortigateMonitor,addAsMonitored}')::boolean END)
         WHEN 'switch'       THEN (i."config" #>> '{fortiswitchMonitor,addAsMonitored}')::boolean
         WHEN 'access_point' THEN (i."config" #>> '{fortiapMonitor,addAsMonitored}')::boolean
         WHEN 'workstation'  THEN (i."config" #>> '{workstationMonitor,addAsMonitored}')::boolean
@@ -277,7 +296,9 @@ export async function sweepMonitoredForIntegration(
       AND a."assetType" IN ('firewall', 'switch', 'access_point', 'workstation', 'server', 'virtual_machine', 'hypervisor')
       AND a."monitored" IS DISTINCT FROM COALESCE(
         CASE a."assetType"
-          WHEN 'firewall'     THEN (i."config" #>> '{fortigateMonitor,addAsMonitored}')::boolean
+          WHEN 'firewall'     THEN (CASE WHEN a."fortinetTopology" ->> 'haRole' = 'secondary'
+                                         THEN false
+                                         ELSE (i."config" #>> '{fortigateMonitor,addAsMonitored}')::boolean END)
           WHEN 'switch'       THEN (i."config" #>> '{fortiswitchMonitor,addAsMonitored}')::boolean
           WHEN 'access_point' THEN (i."config" #>> '{fortiapMonitor,addAsMonitored}')::boolean
           WHEN 'workstation'  THEN (i."config" #>> '{workstationMonitor,addAsMonitored}')::boolean
@@ -301,8 +322,10 @@ export async function sweepMonitoredForIntegration(
  *  - `existing.monitorOverride === true` → operator wins; no-op
  *  - otherwise enforce `monitored = addAsMonitored`
  *
- * Caller is responsible for excluding ineligible assets (e.g. HA standby
- * FortiGate members, which buildFortigateMonitorStamp filters separately).
+ * Caller is responsible for handling ineligible assets (e.g. HA standby
+ * FortiGate members, whose effective default is always "not monitored" —
+ * buildFortigateMonitorStamp in integrations.ts sweeps those to
+ * monitored=false separately instead of calling this).
  */
 export function buildMonitoredSweep(
   addAsMonitored: boolean | null,

@@ -1841,12 +1841,20 @@ router.post("/:id/auto-monitor-assets/preflight", async (req, res, next) => {
           discoveredByIntegrationId: req.params.id,
           assetType: k,
         },
-        select: { monitored: true, monitorOverride: true },
+        // fortinetTopology: HA-standby detection for the firewall class only
+        // (tiny per-firewall blob; the other classes ignore it).
+        select: { monitored: true, monitorOverride: true, fortinetTopology: k === "firewall" },
       });
       let overridden = 0;
       let wouldEnable = 0;
       let wouldDisable = 0;
+      let standbyExempt = 0;
       for (const r of rows) {
+        // HA standby firewalls are exempt from the class flag (their
+        // effective default is always "not monitored" — see
+        // sweepMonitoredForIntegration), so the sweep would never touch
+        // them; counting one as would-enable would overstate the impact.
+        if (k === "firewall" && ((r as { fortinetTopology?: unknown }).fortinetTopology as Record<string, unknown> | null)?.haRole === "secondary") { standbyExempt++; continue; }
         if (r.monitorOverride) { overridden++; continue; }
         if (proposedVal && !r.monitored) wouldEnable++;
         else if (!proposedVal && r.monitored) wouldDisable++;
@@ -1854,7 +1862,7 @@ router.post("/:id/auto-monitor-assets/preflight", async (req, res, next) => {
       out[k] = {
         currentAddAsMonitored: current[k],
         proposedAddAsMonitored: proposedVal,
-        total: rows.length,
+        total: rows.length - standbyExempt,
         overridden,
         wouldEnable,
         wouldDisable,
@@ -4748,17 +4756,26 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   /**
    * FortiGate-class equivalent (no enabled/credential branch — the FortiGate
    * integration always uses its own API token, no per-class credential to
-   * stamp). HA standby members are excluded — they aren't directly REST-
-   * reachable through the cluster IP, so the sweep would just churn
-   * monitored=true → failed probes; operators opt in standby members
-   * per-asset (which creates an override that protects the choice).
+   * stamp). HA standby members are actively swept to monitored=false: they
+   * aren't probe-reachable (their Asset IP is nulled; the cluster IP routes
+   * to the active member), so polling one is guaranteed-failure waste — and
+   * without the sweep, a failover leaves the ex-primary monitored=true
+   * forever, burning probe slots and raising false down noise. The flip-off
+   * respects monitorOverride so an operator who deliberately pinned
+   * monitoring on a standby (e.g. probing a dedicated HA mgmt interface via
+   * dnsName) keeps their choice; the role flips on failover are what make
+   * this a per-cycle sweep rather than a create-time default.
    */
   function buildFortigateMonitorStamp(
     existing: { monitored?: boolean | null; monitorOverride?: boolean | null },
     isStandby: boolean,
   ): Record<string, unknown> {
-    if (isStandby) return {};
     if (existing.monitorOverride === true) return {};
+    if (isStandby) {
+      // consecutiveFailures reset mirrors the db.ts decommission/disable
+      // clamp — don't let pre-failover probe-failure streaks linger.
+      return existing.monitored === true ? { monitored: false, consecutiveFailures: 0 } : {};
+    }
     const desired = fortigateAddAsMonitored;
     if (desired && existing.monitored !== true) return { monitored: true };
     if (!desired && existing.monitored === true) return { monitored: false };

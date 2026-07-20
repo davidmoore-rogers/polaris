@@ -3029,9 +3029,11 @@ Listed alphabetically.
 - Operator write paths capture intent as `monitored XOR addAsMonitored` at action time; re-aligning monitored to the flag clears it on the same write.
 - Only five asset types participate (`firewall` / `switch` / `access_point` / `workstation` / `server`); each maps to a type-specific config block (`fortigateMonitor` / `fortiswitchMonitor` / `fortiapMonitor` / `workstationMonitor` / `serverMonitor`).
 - `sweepMonitoredForIntegration` leaves `override=true` assets alone (operator pins win) and otherwise sets `monitored` per the class flag; it does NOT recompute overrides — a flag flip respects pins.
+- **HA-standby exception (firewall class):** an asset whose `fortinetTopology->>'haRole' = 'secondary'` has an effective default of `false` regardless of `fortigateMonitor.addAsMonitored` — encoded as a nested CASE in BOTH raw-SQL statements (`recomputeMonitorOverrideForAssets` + `sweepMonitoredForIntegration`, SET and WHERE clauses), in the reset endpoint (`assets.ts` forces `flag=false` for standbys), and in the auto-monitor preflight (standbys exempt from counts). This is what makes an operator's deliberate monitored=true on a standby compute override=true and survive the discovery flip-off sweep in `buildFortigateMonitorStamp` (integrations.ts), which sweeps override-false standbys to `monitored=false, consecutiveFailures=0` every cycle (covers failover role flips — the ex-primary must not keep burning probe slots on an IP-less row).
 
 **When changing this:**
 - The raw-SQL JSON-path block keys must stay in sync with `classBlockKeyForAssetType` and the cutover migration.
+- The HA-standby `haRole='secondary'` CASE must stay in sync across all four sites (two SQL statements × SET/WHERE, the reset endpoint, the preflight) AND with `buildFortigateMonitorStamp`'s standby branch.
 - Do NOT re-introduce a job/handler that recomputes `monitorOverride` across all assets — that is the bug the explicit-intent model fixed.
 
 ---

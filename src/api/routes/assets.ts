@@ -2726,6 +2726,7 @@ router.post("/:id/monitor-override/reset", requirePermission("assets", "write"),
         monitored: true,
         monitorOverride: true,
         discoveredByIntegrationId: true,
+        fortinetTopology: true,
       },
     });
     if (!existing) throw new AppError(404, "Asset not found");
@@ -2736,13 +2737,23 @@ router.post("/:id/monitor-override/reset", requirePermission("assets", "write"),
       where: { id: existing.discoveredByIntegrationId },
       select: { type: true, config: true },
     });
-    const flag = getAddAsMonitoredFromConfig(
+    let flag = getAddAsMonitoredFromConfig(
       integration?.type ?? null,
       (integration?.config as Record<string, unknown> | null) ?? null,
       existing.assetType,
     );
     if (flag === null) {
       throw new AppError(400, "Asset type is not subject to integration Auto-Monitor — nothing to reset");
+    }
+    // HA standby firewall: the effective integration default is always "not
+    // monitored" (the cluster IP routes to the active member), regardless of
+    // the firewall class flag — mirrors recomputeMonitorOverrideForAssets /
+    // sweepMonitoredForIntegration and the discovery flip-off sweep.
+    if (
+      existing.assetType === "firewall" &&
+      ((existing.fortinetTopology as Record<string, unknown> | null)?.haRole === "secondary")
+    ) {
+      flag = false;
     }
     // Realign to the flag and drop the pin. The DB-layer clamp still forces
     // monitored=false for decommissioned/disabled assets; that's fine — the
