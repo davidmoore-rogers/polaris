@@ -32,11 +32,12 @@ import {
   type RuleScope,
   type PreviewRuleInput,
   type EmailComposition,
-  type EscalationConfig,
+  type EscalationV2Config,
   type ResetConfig,
   type AutomationAction,
   CHANGE_TYPE_ACTIONS,
   normalizeRuleToV2,
+  normalizeEscalationToV2,
 } from "./notificationTypes.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
 import { executeActions, type ActionExecContext } from "./automationActionService.js";
@@ -67,8 +68,8 @@ interface DbRule {
   cooldownSec: number | null;
   messageTemplate: string | null;
   emailComposition: EmailComposition | null;
-  /** Stored (legacy) escalation shape — the sweep still consumes it directly. */
-  escalation: EscalationConfig | null;
+  /** Escalation as v2 tiers-of-actions (legacy tiers converted by the normalizer). */
+  escalation: EscalationV2Config | null;
 }
 
 /** Best-effort action fan-out — never breaks rule evaluation. (executeActions
@@ -462,19 +463,22 @@ function ruleWantsContext(rule: DbRule): boolean {
 
 function ruleWantsAssetDetail(rule: DbRule): boolean {
   const comp = rule.emailComposition;
-  const tierTemplates = (rule.escalation?.tiers ?? []).flatMap((t) => [t.subjectTemplate, t.bodyTextTemplate, t.bodyHtmlTemplate]);
   // Action-level templates can reference {asset.*} too: per-action email
-  // composition, api_call bodies, script args.
-  const actionTemplates = rule.actions.flatMap((a) =>
+  // composition, api_call bodies, script args — for the top-level actions AND
+  // every escalation tier's actions (v2 tiers carry actions).
+  const templatesOf = (a: AutomationAction) =>
     a.type === "notify"
       ? [a.emailComposition?.subjectTemplate, a.emailComposition?.bodyTextTemplate, a.emailComposition?.bodyHtmlTemplate]
       : a.type === "api_call"
         ? [a.bodyTemplate]
-        : [a.argsTemplate],
-  );
+        : [a.argsTemplate];
+  const actionTemplates = [
+    ...rule.actions,
+    ...(rule.escalation?.tiers ?? []).flatMap((t) => t.actions),
+  ].flatMap(templatesOf);
   return (
     ruleWantsContext(rule) ||
-    templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...tierTemplates, ...actionTemplates])
+    templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...actionTemplates])
   );
 }
 
@@ -859,7 +863,7 @@ export async function evaluateAllNotificationRules(): Promise<void> {
       cooldownSec: r.cooldownSec,
       messageTemplate: r.messageTemplate,
       emailComposition: (r.emailComposition ?? null) as EmailComposition | null,
-      escalation: (r.escalation ?? null) as EscalationConfig | null,
+      escalation: v2.escalation,
     };
   });
 
@@ -969,7 +973,7 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
       trigger, scope: input.scope,
       reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
-      emailComposition: input.emailComposition, escalation: input.escalation ?? null,
+      emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
     };
     const sample = readings.find((r) => readingMeets(trigger, r.value)) ?? readings[0];
     // Direct fetch (not the per-tick cache — preview runs in the web process).

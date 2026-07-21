@@ -203,7 +203,15 @@ export function dedupeEmailRecipients(to: string[], cc: string[], bcc: string[])
  * Disabled or missing channels are skipped. Best-effort: returns the number of
  * rows created.
  */
-export async function expandDeliveries(notificationId: string, targets: DeliveryTarget[] | undefined, scopeRegionTags?: string[], composedEmail?: ComposedEmail): Promise<number> {
+export async function expandDeliveries(
+  notificationId: string,
+  targets: DeliveryTarget[] | undefined,
+  scopeRegionTags?: string[],
+  composedEmail?: ComposedEmail,
+  /** Escalation provenance (tier/attempt) — stamped into every row's meta so
+   *  the View tab's "Escalated" marker and audits can attribute the send. */
+  escalation?: { tier: number; attempt: number },
+): Promise<number> {
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -222,7 +230,10 @@ export async function expandDeliveries(notificationId: string, targets: Delivery
     const key = `${channelId}|${transport}|${target}`;
     if (seen.has(key)) return;
     seen.add(key);
-    rows.push({ notificationId, channelId, transport, target, meta: meta ?? undefined });
+    const withEsc = escalation
+      ? ({ ...(meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {}), escalation } as Prisma.InputJsonValue)
+      : meta;
+    rows.push({ notificationId, channelId, transport, target, meta: withEsc ?? undefined });
   };
 
   // Recipient users for a target = union of: specific user ids + (if opted in)

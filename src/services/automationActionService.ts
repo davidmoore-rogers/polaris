@@ -65,22 +65,27 @@ export interface ActionExecContext {
 /**
  * Fan a fired alert's actions out to their execution paths. Never throws for
  * a single action's failure — failures are recorded as warning Events and the
- * remaining actions still run.
+ * remaining actions still run. Returns per-action counts: `executed` = actions
+ * that produced at least one delivery row / script run (the escalation sweep
+ * uses this to decide whether a tier counts as sent).
  */
 export async function executeActions(
   notificationId: string,
   actions: AutomationAction[],
   ctx: Record<string, string>,
   exec: ActionExecContext,
-): Promise<void> {
+): Promise<{ executed: number; failed: number }> {
+  let executed = 0;
+  let failed = 0;
   for (const [index, action] of actions.entries()) {
     try {
       if (action.type === "notify") {
-        const comp = action.emailComposition ?? exec.ruleEmailComposition ?? null;
-        const composed: ComposedEmail | undefined = comp ? buildComposedEmail(comp, ctx) : undefined;
-        await expandDeliveries(notificationId, actionsToTargets([action]), exec.scopeRegionTags, composed);
+        const composed = composeForNotify(action.emailComposition ?? null, exec, ctx);
+        const rows = await expandDeliveries(notificationId, actionsToTargets([action]), exec.scopeRegionTags, composed, exec.escalation);
+        if (rows > 0) executed++;
       } else if (action.type === "api_call") {
         await enqueueApiCall(notificationId, action, ctx, exec);
+        executed++;
       } else {
         // script — enqueue an AutomationScriptRun; the runAutomationScripts
         // job (server) or the agent command queue (agent) executes it. Args
@@ -101,8 +106,10 @@ export async function executeActions(
           assetId: exec.assetId ?? null,
           requestedBy: exec.actor ?? "system:automation",
         });
+        executed++;
       }
     } catch (err) {
+      failed++;
       await logEvent({
         action: "automation.action_error",
         resourceType: "notification",
@@ -122,6 +129,44 @@ export async function executeActions(
       }).catch(() => {});
     }
   }
+  return { executed, failed };
+}
+
+/**
+ * Compose the outbound email for a notify action. Normal fires: the ACTION's
+ * composition wins wholesale, falling back to the rule-level one, and no
+ * composition at all means the legacy per-address fan-out (undefined).
+ * ESCALATION fires reproduce the legacy tier semantics exactly:
+ *   - PER-FIELD merge — tier subject ?? rule subject, tier body ?? rule body
+ *     (a tier that only overrode the subject still renders the rule's body),
+ *   - cc/bcc come from the tier action only (never the rule composition),
+ *   - ALWAYS composed (one To+Cc+Bcc email per action, even with no
+ *     composition anywhere → default subject/body),
+ *   - the default "[ESCALATION n]" subject prefix when neither level set a
+ *     subject template.
+ */
+function composeForNotify(
+  actionComp: EmailComposition | null,
+  exec: ActionExecContext,
+  ctx: Record<string, string>,
+): ComposedEmail | undefined {
+  if (!exec.escalation) {
+    const comp = actionComp ?? exec.ruleEmailComposition ?? null;
+    return comp ? buildComposedEmail(comp, ctx) : undefined;
+  }
+  const rule = exec.ruleEmailComposition;
+  const merged: EmailComposition = {
+    subjectTemplate: actionComp?.subjectTemplate ?? rule?.subjectTemplate ?? null,
+    bodyTextTemplate: actionComp?.bodyTextTemplate ?? rule?.bodyTextTemplate ?? null,
+    bodyHtmlTemplate: actionComp?.bodyHtmlTemplate ?? rule?.bodyHtmlTemplate ?? null,
+    cc: actionComp?.cc ?? null,
+    bcc: actionComp?.bcc ?? null,
+  };
+  const composed = buildComposedEmail(merged, ctx);
+  if (!merged.subjectTemplate || !merged.subjectTemplate.trim()) {
+    composed.subject = `[ESCALATION ${exec.escalation.tier}] ${composed.subject}`;
+  }
+  return composed;
 }
 
 /**

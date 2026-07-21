@@ -1510,23 +1510,23 @@ Listed alphabetically.
 
 ## services/notificationEscalationService.ts
 
-**What it owns:** The escalation sweep — sending each rule's escalation-tier emails while a notification stays unhandled, and the per-notification `escalationState` bookkeeping.
+**What it owns:** The escalation sweep — running each rule's escalation TIERS OF ACTIONS (v2: notify / api_call / script, via `automationActionService.executeActions` with `exec.escalation` set) while a notification stays unhandled, and the per-notification `escalationState` bookkeeping. Legacy email tiers normalize to single-notify-action tiers (`normalizeEscalationToV2`) and produce byte-identical emails (parity-tested in notificationEscalationV2.test.ts).
 
-**Public API:** `runEscalationSweep(now?)` (job entry), `tierIsDue(tier, triggeredAt, tierState, now)` (pure, unit-tested).
+**Public API:** `runEscalationSweep(now?)` (job entry), `tierIsDue(tier, triggeredAt, tierState, now)` (pure, structural tier type — legacy and v2 tiers both fit; unit-tested).
 
-**Cross-service deps:** `prisma` (rules + notifications + channels + delivery rows), `notificationEngine.buildComposedEmail`, `notificationRecipientService.{resolveEmailRecipients, dedupeEmailRecipients}`, `src/utils/notificationTemplate.ts` (buildTemplateContext/formatElapsed/notificationsPageUrl), `eventLogService.logEvent`.
+**Cross-service deps:** `prisma` (rules + notifications + assets), `automationActionService.executeActions` (the entire send path — this service no longer builds delivery rows itself), `notificationTypes.normalizeRuleToV2`, `notificationRecipientService.scopeRegionTagsOf`, `notificationEngine.isSuppressedForNotifications`, `src/utils/notificationTemplate.ts` (buildTemplateContext/formatElapsed/notificationsPageUrl), `eventLogService.logEvent`.
 
 **Used by:** `src/jobs/escalateNotifications.ts` (60s tick).
 
 **Invariants:**
 - "Unhandled" per the rule's `stopOn`: `acknowledge` stops on ack OR clear; `clear` ignores ack. Cleared always stops (the query excludes cleared rows).
-- Renders from the fire-time `Notification.templateCtx` snapshot (+ live `{escalation.tier}`/`{escalation.elapsed}`); pre-feature notifications fall back to a minimal context from the row. Tier overrides → rule emailComposition → default subject with an `[ESCALATION n]` prefix.
-- Escalation is email-only; tiers whose channel is deleted/disabled/non-email are skipped (logged), never thrown.
-- Repeats: only when `repeatEveryMin` is set, gated by `maxRepeats` (default 5) — a send-once tier never re-fires.
-- Batched writes (`createMany` + one `$transaction` of state updates); tier recipients resolve once per (rule, tier) per sweep. Scales with the active-unhandled notification count, not fleet size.
-- Delivery rows carry the same composed-meta shape the drain already dispatches — no escalation-specific send path.
+- Renders from the fire-time `Notification.templateCtx` snapshot (+ live `{escalation.tier}`/`{escalation.elapsed}`); pre-feature notifications fall back to a minimal context from the row.
+- **Escalation notify composition is a PER-FIELD merge** (tier subject ?? rule subject, tier body ?? rule body — implemented in automationActionService.composeForNotify), always composed, `[ESCALATION n]` prefix only when neither level set a subject. cc/bcc come from the tier action only. Don't "simplify" to whole-object precedence — that breaks subject-only tier overrides.
+- A tier counts as SENT (state bump) only when `executeActions` reports ≥1 executed action — dead channels / empty recipients retry next sweep.
+- Repeats: only when `repeatEveryMin` is set, gated by `maxRepeats` (default 5) — a run-once tier never re-fires.
+- Scales with the active-unhandled notification count, not fleet size; per-tier recipient resolution rides the recipient service's 30s user-index TTL (the old per-sweep cache was dropped with the executeActions cutover — escalation volume is small).
 
-**When changing this:** state keys in `escalationState.tiers` are tier INDEXES — reordering a rule's tiers re-keys them (an already-sent tier position can re-fire); keep that acceptable or key by content hash. Keep the tier-channel validation in `notificationRuleService.assertEscalationChannels` aligned with the skip logic here.
+**When changing this:** state keys in `escalationState.tiers` are tier INDEXES — reordering a rule's tiers re-keys them (an already-sent tier position can re-fire); keep that acceptable or key by content hash. Tier-action reference validation lives in `notificationRuleService.assertActionRefs` (unified with top-level actions).
 
 ---
 

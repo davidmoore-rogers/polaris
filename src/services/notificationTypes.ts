@@ -439,8 +439,10 @@ const ruleInputBaseSchema = z.object({
   messageTemplate: z.string().max(2000).optional().nullable(),
   channels: z.array(z.string().max(50)).default(["in_app"]),
   emailComposition: emailCompositionSchema.optional().nullable(),
-  // Still the legacy escalation shape — flips to v2 in the escalation phase.
-  escalation: escalationSchema.optional().nullable(),
+  // Accepts BOTH shapes: legacy email tiers (pre-wizard UI) and v2 tiers of
+  // actions. Stored as given; every reader normalizes via
+  // normalizeEscalationToV2 (part of normalizeRuleToV2).
+  escalation: z.union([escalationSchema, escalationV2Schema]).optional().nullable(),
 });
 
 type RuleInputRaw = z.infer<typeof ruleInputBaseSchema>;
@@ -459,7 +461,9 @@ export interface RuleInput {
   messageTemplate: string | null;
   channels: string[];
   emailComposition: EmailComposition | null;
-  escalation: EscalationConfig | null;
+  /** As posted (legacy email tiers OR v2 tiers-of-actions) — stored verbatim;
+   *  readers normalize through normalizeEscalationToV2. */
+  escalation: EscalationConfig | EscalationV2Config | null;
 }
 
 /** Preview input = RuleInput with trigger optional (scope-only preview mode). */

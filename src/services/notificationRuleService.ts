@@ -18,6 +18,7 @@ import {
   CHANGE_TYPE_ACTIONS,
   legacyMirrorOfV2,
   normalizeRuleToV2,
+  normalizeEscalationToV2,
 } from "./notificationTypes.js";
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
 
@@ -126,40 +127,46 @@ export async function isChangeActionSubscribed(action: string): Promise<boolean>
 
 // ─── Rule CRUD ──────────────────────────────────────────────────────────────
 
-// Escalation is email-only until the escalation-v2 phase: every tier must
-// reference an smtp/oauth_m365 channel. Validated at save so the sweep never
-// has to guess intent.
-const EMAIL_CHANNEL_TYPES = new Set(["smtp", "oauth_m365"]);
-
 /**
- * Validate every reference a v2 rule's actions carry:
- *   - notify.channelId must exist (any channel type is legal in v2),
+ * Validate every reference a v2 rule's actions carry — TOP-LEVEL actions and
+ * escalation-tier actions alike (tiers normalize through
+ * normalizeEscalationToV2, so legacy email tiers validate as their converted
+ * notify actions; the email-only tier restriction is gone — escalation v2
+ * tiers take any action type):
+ *   - notify.channelId must exist (any channel type),
  *   - api_call.url host must pass the outbound SSRF guard (friendly 400 at
  *     save beats a silent fire-time failure),
  *   - script.scriptId must resolve to an ENABLED registry script whose
- *     runTarget is compatible with the action's runOn,
- *   - legacy escalation tiers keep the email-channel check.
+ *     runTarget is compatible with the action's runOn.
  * (The automationScripts=fullwrite gate on rules carrying script actions is
  * enforced at the route layer — permissions are not a service concern.)
  */
 async function assertActionRefs(input: RuleInput): Promise<void> {
-  const notifyChannelIds = new Set<string>();
-  const scriptRefs: { index: number; scriptId: string; runOn: string }[] = [];
-  for (const [i, action] of input.actions.entries()) {
+  const tierActions = (normalizeEscalationToV2(input.escalation)?.tiers ?? []).flatMap((t, ti) =>
+    t.actions.map((a) => ({ action: a, label: `Escalation tier ${ti + 1}` })),
+  );
+  const all = [
+    ...input.actions.map((a, i) => ({ action: a, label: `Action ${i + 1}` })),
+    ...tierActions,
+  ];
+
+  const notifyRefs: { label: string; channelId: string }[] = [];
+  const scriptRefs: { label: string; scriptId: string; runOn: string }[] = [];
+  for (const { action, label } of all) {
     if (action.type === "notify") {
-      notifyChannelIds.add(action.channelId);
+      notifyRefs.push({ label, channelId: action.channelId });
     } else if (action.type === "api_call") {
       let host = "";
       try {
         host = new URL(action.url).hostname;
       } catch {
-        throw new AppError(400, `Action ${i + 1}: api_call URL is not a valid URL`);
+        throw new AppError(400, `${label}: api_call URL is not a valid URL`);
       }
       if (isBlockedOutboundHost(host)) {
-        throw new AppError(400, `Action ${i + 1}: api_call host "${host}" is blocked (loopback/link-local/metadata addresses are not allowed)`);
+        throw new AppError(400, `${label}: api_call host "${host}" is blocked (loopback/link-local/metadata addresses are not allowed)`);
       }
-    } else if (action.type === "script") {
-      scriptRefs.push({ index: i, scriptId: action.scriptId, runOn: action.runOn });
+    } else {
+      scriptRefs.push({ label, scriptId: action.scriptId, runOn: action.runOn });
     }
   }
 
@@ -171,34 +178,24 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
     const scriptById = new Map(scripts.map((s) => [s.id, s]));
     for (const ref of scriptRefs) {
       const script = scriptById.get(ref.scriptId);
-      if (!script) throw new AppError(400, `Action ${ref.index + 1}: references a script that no longer exists in the registry`);
-      if (!script.enabled) throw new AppError(400, `Action ${ref.index + 1}: script "${script.name}" is disabled`);
+      if (!script) throw new AppError(400, `${ref.label}: references a script that no longer exists in the registry`);
+      if (!script.enabled) throw new AppError(400, `${ref.label}: script "${script.name}" is disabled`);
       if (script.runTarget !== "either" && script.runTarget !== ref.runOn) {
-        throw new AppError(400, `Action ${ref.index + 1}: script "${script.name}" only runs on ${script.runTarget}, but the action requests ${ref.runOn}`);
+        throw new AppError(400, `${ref.label}: script "${script.name}" only runs on ${script.runTarget}, but the action requests ${ref.runOn}`);
       }
     }
   }
 
-  const escalation = input.escalation;
-  const escalationIds = escalation ? escalation.tiers.map((t) => t.channelId) : [];
-  const allIds = Array.from(new Set([...notifyChannelIds, ...escalationIds]));
-  if (allIds.length === 0) return;
+  const channelIds = Array.from(new Set(notifyRefs.map((r) => r.channelId)));
+  if (channelIds.length === 0) return;
   const channels = await prisma.notificationChannel.findMany({
-    where: { id: { in: allIds } },
-    select: { id: true, name: true, type: true },
+    where: { id: { in: channelIds } },
+    select: { id: true },
   });
-  const byId = new Map(channels.map((c) => [c.id, c]));
-
-  for (const id of notifyChannelIds) {
-    if (!byId.has(id)) throw new AppError(400, "A notify action references a delivery channel that no longer exists");
-  }
-  if (escalation) {
-    for (const [i, tier] of escalation.tiers.entries()) {
-      const ch = byId.get(tier.channelId);
-      if (!ch) throw new AppError(400, `Escalation tier ${i + 1} references a delivery channel that no longer exists`);
-      if (!EMAIL_CHANNEL_TYPES.has(ch.type)) {
-        throw new AppError(400, `Escalation tier ${i + 1} channel "${ch.name}" is ${ch.type} — escalation emails require an email channel (SMTP or Microsoft 365)`);
-      }
+  const known = new Set(channels.map((c) => c.id));
+  for (const ref of notifyRefs) {
+    if (!known.has(ref.channelId)) {
+      throw new AppError(400, `${ref.label}: references a delivery channel that no longer exists`);
     }
   }
 }
