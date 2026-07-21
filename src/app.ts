@@ -713,6 +713,7 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/evaluateNotificationRules.js",
       "./jobs/escalateNotifications.js",
       "./jobs/deliverNotifications.js",
+      "./jobs/runAutomationScripts.js",
       "./jobs/resolvePolarisPushedConflicts.js",
       "./jobs/resolveStaleReservationConflicts.js",
       "./jobs/cleanupStaleDnsResolvedReleased.js",

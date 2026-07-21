@@ -12,9 +12,10 @@
  */
 
 import { Router } from "express";
-import { requirePermission } from "../middleware/permissions.js";
+import type { Request } from "express";
+import { requirePermission, hasPermission } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
-import { ruleInputSchema, previewInputSchema, buildSchemaCatalog } from "../../services/notificationTypes.js";
+import { ruleInputSchema, previewInputSchema, buildSchemaCatalog, normalizeEscalationToV2, type RuleInput } from "../../services/notificationTypes.js";
 import { listRules, createRule, updateRule, deleteRule } from "../../services/notificationRuleService.js";
 import { previewRule } from "../../services/notificationEngine.js";
 import { listRecipientUsers } from "../../services/notificationRecipientService.js";
@@ -52,9 +53,25 @@ notificationRulesRouter.post("/preview", requirePermission("automationManagement
   } catch (err) { next(err); }
 });
 
+/**
+ * Script actions are RCE-equivalent, so saving a rule that carries any
+ * (top-level or in an escalation tier) requires automationScripts=fullwrite
+ * ON TOP of automationManagement=fullwrite. Editing a rule without script
+ * actions never needs the key — including edits that REMOVE script actions.
+ */
+function assertScriptActionPermission(req: Request, input: RuleInput): void {
+  const hasScript =
+    input.actions.some((a) => a.type === "script") ||
+    (normalizeEscalationToV2(input.escalation)?.tiers ?? []).some((t) => t.actions.some((a) => a.type === "script"));
+  if (hasScript && !hasPermission(req, "automationScripts", "fullwrite")) {
+    throw new AppError(403, "Attaching script actions requires Full Read-Write on Automation Scripts (automationScripts)");
+  }
+}
+
 notificationRulesRouter.post("/", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     const input = ruleInputSchema.parse(req.body);
+    assertScriptActionPermission(req, input);
     const rule = await createRule(input, req.session?.username);
     res.status(201).json({ rule });
   } catch (err) { next(err); }
@@ -63,6 +80,7 @@ notificationRulesRouter.post("/", requirePermission("automationManagement", "ful
 notificationRulesRouter.put("/:id", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     const input = ruleInputSchema.parse(req.body);
+    assertScriptActionPermission(req, input);
     const rule = await updateRule(req.params.id as string, input, req.session?.username);
     res.json({ rule });
   } catch (err) {

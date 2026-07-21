@@ -2966,6 +2966,65 @@ model AgentCommand {
   @@map("agent_commands")
 }
 
+// Operator-authored script registry for Automation script actions. CRUD (and
+// attaching script actions to automations) is gated by the `automationScripts`
+// RBAC key — holding it is RCE-EQUIVALENT: server scripts run as the polaris
+// service user on the Polaris host, agent scripts as root/LocalSystem on the
+// triggering asset. Creation and every body change stamp a warning Event with
+// the old/new sha256. A human must review scripts before production use.
+model AutomationScript {
+  id          String  @id @default(uuid())
+  name        String  @unique
+  description String? @db.Text
+  interpreter String  // "bash" | "sh" | "powershell" | "cmd" | "python3"
+  body        String  @db.Text // ≤ 64 KB, validated at the API layer
+  runTarget   String  @default("server") // "server" | "agent" | "either"
+  timeoutSec  Int     @default(60) // default; a script action may override (≤600)
+  sha256      String  // hex digest of body, recomputed on every save (agents verify)
+  enabled     Boolean @default(true)
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  runs AutomationScriptRun[]
+
+  @@map("automation_scripts")
+}
+
+// One execution of a registry script (server- or agent-side) — the shared
+// results table for both runners. Server runs are claimed + executed by the
+// runAutomationScripts job (web/all role); agent runs ride the AgentCommand
+// queue (action="run_script") and complete via /agents/command-result.
+// notificationId deliberately has NO FK (alerts get cleared/pruned on their
+// own lifecycle). Rows older than ~90 days pruned by the runner's sweep.
+model AutomationScriptRun {
+  id             String            @id @default(uuid())
+  scriptId       String?
+  script         AutomationScript? @relation(fields: [scriptId], references: [id], onDelete: SetNull)
+  scriptName     String // snapshot — survives script deletion
+  sha256         String // snapshot of the body that actually ran
+  notificationId String? // the triggering alert, when fired by an automation
+  ruleId         String?
+  assetId        String? // agent runs: the triggering asset
+  runOn          String // "server" | "agent"
+  agentCommandId String? // agent runs: the AgentCommand carrying the payload
+  args           String? @db.Text // rendered argsTemplate snapshot
+  timeoutSec     Int
+  status         String  @default("pending") // pending | running | succeeded | failed | timeout
+  exitCode       Int?
+  stdout         String? @db.Text // capped at 64 KB
+  stderr         String? @db.Text // capped at 64 KB
+  requestedBy    String? // "system:automation" | operator username (test runs)
+  requestedAt    DateTime  @default(now())
+  startedAt      DateTime?
+  completedAt    DateTime?
+
+  @@index([status, runOn])
+  @@index([scriptId])
+  @@index([notificationId])
+  @@map("automation_script_runs")
+}
+
 // Geocode result cache. Populated by `geocoderService.geocode()` when
 // discovery falls back from a malformed CMDB coord to the FortiGate's SNMP
 // sysLocation string. Negative results (no geocoder hit) are stored too so

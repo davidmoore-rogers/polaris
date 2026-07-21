@@ -15,6 +15,7 @@ import logFlagRulesRouter from "./routes/logFlagRules.js";
 import eventsRouter from "./routes/events.js";
 import notificationsRouter from "./routes/notifications.js";
 import notificationRulesRouter from "./routes/notificationRules.js";
+import automationScriptsRouter from "./routes/automationScripts.js";
 import maintenanceSchedulesRouter from "./routes/maintenanceSchedules.js";
 import notificationChannelsRouter from "./routes/notificationChannels.js";
 import pushSubscriptionsRouter from "./routes/pushSubscriptions.js";
@@ -114,8 +115,10 @@ const deprecatedAlias = (successor: string) =>
     res.setHeader("Link", `<${successor}>; rel="successor-version"`);
     next();
   }) as import("express").RequestHandler;
-// Rules CRUD/schema/preview. /automations/scripts (script registry) mounts
-// before /automations in a later phase; keep that ordering when it lands.
+// Script registry — MUST mount before /automations so "scripts" is never
+// captured as a rule id. Gated automationScripts (RCE-equivalent key).
+router.use("/automations/scripts", automationScriptsRouter);
+// Rules CRUD/schema/preview.
 router.use("/automations", notificationRulesRouter);
 router.use("/notification-rules", deprecatedAlias("/api/v1/automations"), notificationRulesRouter);
 // Maintenance schedules (Assets page → Maintenance modal); per-route gates

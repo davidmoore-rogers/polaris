@@ -20,9 +20,12 @@
  *              SECURITY: headers were typed by the operator and are stored
  *              unmasked — save-time docs/catalog warn against secrets; the
  *              URL was SSRF-checked at save and is re-checked at send.
- *   script   → refused until the AutomationScript registry phase (recorded as
- *              a failed action, warning Event) — assertActionRefs also blocks
- *              script actions at save, so reaching this arm means a stale rule.
+ *   script   → an AutomationScriptRun row via requestScriptRun — NEVER
+ *              executed inline here: the runAutomationScripts job claims and
+ *              executes server runs; agent runs ride the AgentCommand queue
+ *              (agent phase). Args render at fire time and travel as a single
+ *              argv entry. Disabled/missing scripts (and, until the agent
+ *              phase, runOn="agent") throw → failed-action warning Event.
  *
  * Execution is best-effort PER ACTION: one bad action never blocks the
  * others; each failure writes an `automation.action_error` warning Event.
@@ -36,6 +39,7 @@ import {
   buildComposedEmail,
   type ComposedEmail,
 } from "./notificationRecipientService.js";
+import { requestScriptRun } from "./automationScriptService.js";
 import {
   actionsToTargets,
   type AutomationAction,
@@ -78,9 +82,25 @@ export async function executeActions(
       } else if (action.type === "api_call") {
         await enqueueApiCall(notificationId, action, ctx, exec);
       } else {
-        // script — registry phase pending; save-time validation blocks these,
-        // so a stored one is stale. Fail loudly rather than silently dropping.
-        throw new Error("script actions are not executable yet (automation script registry pending)");
+        // script — enqueue an AutomationScriptRun; the runAutomationScripts
+        // job (server) or the agent command queue (agent) executes it. Args
+        // render NOW from the fire-time context (single argv, never shell-
+        // interpolated by the runner). requestScriptRun throws on disabled/
+        // missing scripts and (until the agent phase) on runOn="agent" —
+        // recorded as a failed action Event by the catch below.
+        const args = action.argsTemplate && action.argsTemplate.trim()
+          ? renderNotificationTemplate(action.argsTemplate, ctx)
+          : null;
+        await requestScriptRun({
+          scriptId: action.scriptId,
+          runOn: action.runOn,
+          args,
+          timeoutSec: action.timeoutSec ?? null,
+          notificationId,
+          ruleId: exec.ruleId ?? null,
+          assetId: exec.assetId ?? null,
+          requestedBy: exec.actor ?? "system:automation",
+        });
       }
     } catch (err) {
       await logEvent({

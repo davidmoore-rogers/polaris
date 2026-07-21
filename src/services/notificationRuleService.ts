@@ -136,11 +136,15 @@ const EMAIL_CHANNEL_TYPES = new Set(["smtp", "oauth_m365"]);
  *   - notify.channelId must exist (any channel type is legal in v2),
  *   - api_call.url host must pass the outbound SSRF guard (friendly 400 at
  *     save beats a silent fire-time failure),
- *   - script actions are refused until the script-registry phase lands,
+ *   - script.scriptId must resolve to an ENABLED registry script whose
+ *     runTarget is compatible with the action's runOn,
  *   - legacy escalation tiers keep the email-channel check.
+ * (The automationScripts=fullwrite gate on rules carrying script actions is
+ * enforced at the route layer — permissions are not a service concern.)
  */
 async function assertActionRefs(input: RuleInput): Promise<void> {
   const notifyChannelIds = new Set<string>();
+  const scriptRefs: { index: number; scriptId: string; runOn: string }[] = [];
   for (const [i, action] of input.actions.entries()) {
     if (action.type === "notify") {
       notifyChannelIds.add(action.channelId);
@@ -155,9 +159,23 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
         throw new AppError(400, `Action ${i + 1}: api_call host "${host}" is blocked (loopback/link-local/metadata addresses are not allowed)`);
       }
     } else if (action.type === "script") {
-      // Placeholder until the AutomationScript registry phase: accepting a
-      // scriptId that can't resolve would store a permanently-failing action.
-      throw new AppError(400, `Action ${i + 1}: script actions are not available yet (the automation script registry has not been enabled)`);
+      scriptRefs.push({ index: i, scriptId: action.scriptId, runOn: action.runOn });
+    }
+  }
+
+  if (scriptRefs.length > 0) {
+    const scripts = await prisma.automationScript.findMany({
+      where: { id: { in: Array.from(new Set(scriptRefs.map((s) => s.scriptId))) } },
+      select: { id: true, name: true, enabled: true, runTarget: true },
+    });
+    const scriptById = new Map(scripts.map((s) => [s.id, s]));
+    for (const ref of scriptRefs) {
+      const script = scriptById.get(ref.scriptId);
+      if (!script) throw new AppError(400, `Action ${ref.index + 1}: references a script that no longer exists in the registry`);
+      if (!script.enabled) throw new AppError(400, `Action ${ref.index + 1}: script "${script.name}" is disabled`);
+      if (script.runTarget !== "either" && script.runTarget !== ref.runOn) {
+        throw new AppError(400, `Action ${ref.index + 1}: script "${script.name}" only runs on ${script.runTarget}, but the action requests ${ref.runOn}`);
+      }
     }
   }
 

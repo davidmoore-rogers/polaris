@@ -1261,6 +1261,46 @@ See `TEMPLATES.md` → "Permission-gated route + dynamic-role function key" for 
 
 Listed alphabetically.
 
+## services/automationScriptService.ts
+
+**What it owns:** The AutomationScript registry (operator-authored scripts referenced by Automation `script` actions) + the AutomationScriptRun lifecycle entry points. **RCE-equivalent surface:** every route sits behind the `automationScripts` key; server scripts run as the polaris service user, agent scripts as root/LocalSystem on the triggering asset.
+
+**Public API:** `listScripts`/`getScript`/`createScript`/`updateScript`/`deleteScript`, `requestScriptRun` (validates exists + enabled + runTarget-compatible; creates the pending run; refuses runOn="agent" until the agent phase), `listRuns`, `pruneOldRuns` (90d), `sha256Hex`, `SCRIPT_RUN_TARGET_VALUES`/`MAX_SCRIPT_BODY_BYTES`/`MAX_SCRIPT_TIMEOUT_SEC`.
+
+**Cross-service deps:** `prisma` (AutomationScript/AutomationScriptRun/NotificationRule), `eventLogService.logEvent`, `notificationTypes` (SCRIPT_INTERPRETERS + normalizeRuleToV2 for the delete-referenced scan).
+
+**Used by:** `src/api/routes/automationScripts.ts` (CRUD + test-run), `automationActionService` (script arm → requestScriptRun), `automationScriptRunner` (pruneOldRuns).
+
+**Invariants:**
+- sha256 recomputed on EVERY save — it's what agents verify before executing; never accept a client-supplied hash.
+- Creation is a warning Event; a body change is a warning Event carrying old+new sha256 — script tampering must be visible in the audit trail/syslog.
+- Delete refuses (friendly 409) while any automation's actions or escalation tiers reference the script (scan goes through `normalizeRuleToV2`, so legacy-shaped rows count too).
+- Run rows snapshot scriptName + sha256 so history survives script deletion; `notificationId` carries NO FK (alert lifecycle is independent).
+
+**When changing this:** New interpreter → `SCRIPT_INTERPRETERS` in notificationTypes + `interpreterArgv`/extension in automationScriptRunner + the Go agent's scriptexec mirror. Never widen who can call these paths without revisiting the RBAC posture in permissions.ts.
+
+---
+
+## services/automationScriptRunner.ts
+
+**What it owns:** Server-side execution of pending AutomationScriptRun rows (runOn="server"), driven by the `runAutomationScripts` job (5s tick, web/all role). Claim pending→running (bounded, restart-safe), execFile with timeout + output caps, record results + `automation.script.run` Events, stuck-running sweep, idle-tick retention prune.
+
+**Public API:** `runPendingServerScripts()` (the job tick), `executeServerScript(run)` (exported for tests).
+
+**Cross-service deps:** `prisma`, `eventLogService.logEvent`, `automationScriptService.pruneOldRuns`, `src/utils/paths.ts` (STATE_DIR → data/automation-scripts-tmp).
+
+**Used by:** `src/jobs/runAutomationScripts.ts`.
+
+**Invariants:**
+- Script execution NEVER happens inline in the engine or the delivery drain — always through this queue (a wedged script must not stall alert evaluation or deliveries).
+- The rendered args string travels as a SINGLE argv entry to execFile — never concatenated into a shell string. Alert context rides env vars (POLARIS_ALERT_ID/POLARIS_RULE/POLARIS_ASSET).
+- Body goes to a 0600 temp file under the state dir and is ALWAYS unlinked (finally); stdout/stderr capped at 64 KB (a maxBuffer kill classifies as failure, not timeout); SIGKILL on timeout.
+- Claim via updateMany with a status re-check so concurrent processes can't double-run; the stuck sweep only flips rows past timeout+60s grace.
+
+**When changing this:** Anything touching the execution model (interpreters, env, caps, temp-file handling) is security-sensitive — human review required before production; keep the Go agent's scriptexec semantics in lockstep (same caps, same hash-verify posture).
+
+---
+
 ## services/automationActionService.ts
 
 **What it owns:** The single fan-out point between a fired alert (Notification row) and its automation's `actions[]`. `executeActions(notificationId, actions, ctx, exec)` dispatches per action type: notify → the existing recipient/delivery pipeline (`expandDeliveries`) with the ACTION's `emailComposition` falling back to the rule-level one; api_call → one `NotificationDelivery` row (`transport: "api_call"`, `channelId: NULL` by design, request spec + fire-time-rendered body in meta); script → refused until the script-registry phase.

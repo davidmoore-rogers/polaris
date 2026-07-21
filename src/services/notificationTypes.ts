@@ -320,6 +320,11 @@ export const resetSchema = z
 
 export const API_CALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 export const SCRIPT_RUN_TARGETS = ["server", "agent"] as const;
+// Interpreter vocabulary for the AutomationScript registry (owned here — the
+// vocabulary file — so the catalog, the script service, and the routes never
+// drift; the Go agent mirrors this list in scriptexec).
+export const SCRIPT_INTERPRETERS = ["bash", "sh", "powershell", "cmd", "python3"] as const;
+export type ScriptInterpreter = (typeof SCRIPT_INTERPRETERS)[number];
 
 export const notifyActionSchema = z
   .object({
@@ -837,8 +842,8 @@ export function buildSchemaCatalog() {
     scriptMeta: {
       runOnOptions: SCRIPT_RUN_TARGETS,
       maxTimeoutSec: 600,
-      // Interpreter list ships with the script-registry phase.
-      languages: [] as string[],
+      languages: SCRIPT_INTERPRETERS,
+      help: "Scripts execute as the Polaris service account on the server, or as root/LocalSystem on the triggering asset's agent. A human must review every script before enabling it in production.",
     },
     escalationMeta: { maxTiers: 5, minRepeatEveryMin: 5, maxActionsPerTier: 10 },
     // Sentence-builder vocabulary (server-owned wording; the wizard renders
