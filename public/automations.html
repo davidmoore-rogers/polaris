@@ -19,6 +19,7 @@
         <div class="page-header-actions">
           <button class="btn btn-primary" id="btn-new-rule" style="display:none">+ New automation</button>
           <button class="btn btn-primary" id="btn-add-channel" style="display:none">+ Add channel</button>
+          <button class="btn btn-primary" id="btn-add-script" style="display:none">+ Add script</button>
           <button class="btn btn-secondary" id="btn-enable-push" style="display:none" title="Receive alerts as desktop/mobile push">Enable push</button>
           <button class="btn btn-secondary" id="btn-refresh">Refresh</button>
         </div>
@@ -28,6 +29,7 @@
         <button type="button" class="page-tab active" data-tab="view">Alerts</button>
         <button type="button" class="page-tab" data-tab="manage" id="auto-tab-manage-btn" style="display:none">Automations</button>
         <button type="button" class="page-tab" data-tab="delivery" id="auto-tab-delivery-btn" style="display:none">Delivery</button>
+        <button type="button" class="page-tab" data-tab="scripts" id="auto-tab-scripts-btn" style="display:none">Scripts</button>
       </div>
 
       <!-- ─── View tab ─────────────────────────────────────────────────── -->
@@ -113,6 +115,17 @@
           Configure where notifications are delivered. Add SMTP / Microsoft 365 email, Pushbullet, Slack, Microsoft Teams, or Web Push channels, then reference them from an automation's <strong>Notify</strong> action. In-app alerts (the Alerts tab) are always on.
         </p>
         <div id="channels-list"><p class="empty-state">Loading...</p></div>
+      </div>
+
+      <!-- ─── Scripts tab ───────────────────────────────────────────────────
+           AutomationScript registry (script actions reference these). Gated by
+           the automationScripts RBAC key — scripts are RCE-equivalent, so the
+           tab is hidden without it. -->
+      <div class="page-tab-panel" id="auto-tab-scripts">
+        <p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">
+          Scripts that automations can run — on the Polaris server (as the service account) or on the triggering asset's agent (as root / LocalSystem). <strong>A human must review every script before enabling it in production.</strong> Creation and body changes are audited with checksums.
+        </p>
+        <div id="scripts-list"><p class="empty-state">Loading...</p></div>
       </div>
     </main>
   </div>

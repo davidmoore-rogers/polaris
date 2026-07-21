@@ -41,17 +41,23 @@ function _looksLikeDeviceId(tag) {
   var canClear = false;
   var canManage = false;
   var canEditRules = false;
+  var canReadScripts = false;
+  var canEditScripts = false;
 
   function applyPermGatedUI() {
     canAck = permAtLeast("alerts", "write");
     canClear = permAtLeast("alerts", "fullwrite");
     canManage = permAtLeast("automationManagement", "read");
     canEditRules = permAtLeast("automationManagement", "fullwrite");
+    canReadScripts = permAtLeast("automationScripts", "read");
+    canEditScripts = permAtLeast("automationScripts", "fullwrite");
 
     var mb = document.getElementById("auto-tab-manage-btn");
     if (mb) mb.style.display = canManage ? "" : "none";
     var db = document.getElementById("auto-tab-delivery-btn");
     if (db) db.style.display = canManage ? "" : "none";
+    var sb = document.getElementById("auto-tab-scripts-btn");
+    if (sb) sb.style.display = canReadScripts ? "" : "none";
     var activeKey = (document.querySelector("#auto-tabs .page-tab.active") || {}).getAttribute
       ? document.querySelector("#auto-tabs .page-tab.active").getAttribute("data-tab") : "view";
     var nr = document.getElementById("btn-new-rule");
@@ -63,6 +69,11 @@ function _looksLikeDeviceId(tag) {
     if (ac) {
       ac.style.display = canEditRules && activeKey === "delivery" ? "" : "none";
       if (canEditRules && !ac._wired) { ac._wired = true; ac.addEventListener("click", function () { openChannelModal(null); }); }
+    }
+    var asBtn = document.getElementById("btn-add-script");
+    if (asBtn) {
+      asBtn.style.display = canEditScripts && activeKey === "scripts" ? "" : "none";
+      if (canEditScripts && !asBtn._wired) { asBtn._wired = true; asBtn.addEventListener("click", function () { openScriptModal(null); }); }
     }
     var ackBtn = document.getElementById("notif-bulk-ack");
     if (ackBtn) {
@@ -127,8 +138,11 @@ function _looksLikeDeviceId(tag) {
       if (nrBtn && canEditRules) nrBtn.style.display = key === "manage" ? "" : "none";
       var acBtn = document.getElementById("btn-add-channel");
       if (acBtn && canEditRules) acBtn.style.display = key === "delivery" ? "" : "none";
+      var asBtn2 = document.getElementById("btn-add-script");
+      if (asBtn2 && canEditScripts) asBtn2.style.display = key === "scripts" ? "" : "none";
       if (key === "manage" && !_rulesSF) initRulesTab();
       if (key === "delivery") loadChannelsTab();
+      if (key === "scripts") loadScriptsTab();
     });
   });
 
@@ -794,6 +808,170 @@ function openChannelModal(existing) {
       closeModal();
       showToast(isEdit ? "Channel saved" : "Channel created", "success");
       loadChannelsTab();
+    } catch (err) { this.disabled = false; showToast(err.message || "Save failed", "error"); }
+  });
+}
+
+// ═══════════════════════════════ Scripts tab ═══════════════════════════════
+// AutomationScript registry — the scripts `script` actions reference. Gated
+// automationScripts (read = view; fullwrite = CUD + test-run). RCE-equivalent
+// surface: every card + modal carries the human-review reminder, and the
+// server audits creation/body changes with sha256 checksums.
+
+var _awScriptList = null;
+
+async function loadScriptsTab() {
+  var container = document.getElementById("scripts-list");
+  if (!container) return;
+  if (!_ruleSchema) { try { _ruleSchema = await api.automations.schema(); } catch (_e) {} }
+  container.innerHTML = '<p class="empty-state">Loading…</p>';
+  try {
+    var resp = await api.automationScripts.list();
+    _awScriptList = (resp && resp.scripts) || [];
+    _awScripts = _awScriptList; // keep the wizard's picker cache in sync
+    renderScriptsList(_awScriptList);
+  } catch (err) {
+    container.innerHTML = '<p class="empty-state">Error: ' + escapeHtml(err.message || "load failed") + '</p>';
+  }
+}
+
+function renderScriptsList(scripts) {
+  var container = document.getElementById("scripts-list");
+  if (!container) return;
+  var canEdit = permAtLeast("automationScripts", "fullwrite");
+  if (!scripts.length) {
+    container.innerHTML = '<p class="empty-state">No scripts yet' + (canEdit ? ' — click "+ Add script" to create one.' : "") + '</p>';
+    return;
+  }
+  container.innerHTML = scripts.map(function (sc) {
+    var runTargetLabel = sc.runTarget === "either" ? "server or agent" : sc.runTarget;
+    var actions = canEdit
+      ? '<button class="btn btn-sm btn-secondary script-test" data-id="' + sc.id + '">Test run</button> ' +
+        '<button class="btn btn-sm btn-secondary script-edit" data-id="' + sc.id + '">Edit</button> ' +
+        '<button class="btn btn-sm btn-danger script-del" data-id="' + sc.id + '">Delete</button>'
+      : "";
+    return '<div class="card" style="margin-bottom:0.75rem;padding:0.9rem">' +
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+        '<strong>' + escapeHtml(sc.name) + '</strong>' +
+        '<span class="badge">' + escapeHtml(sc.interpreter) + '</span>' +
+        '<span class="badge">runs on ' + escapeHtml(runTargetLabel) + '</span>' +
+        (sc.enabled ? "" : '<span class="badge" style="opacity:0.7">disabled</span>') +
+        '<span style="margin-left:auto">' + actions + '</span>' +
+      '</div>' +
+      (sc.description ? '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin:6px 0 0">' + escapeHtml(sc.description) + '</p>' : "") +
+      '<p style="font-size:0.75rem;color:var(--color-text-tertiary);margin:6px 0 0;font-family:var(--font-mono)">timeout ' + sc.timeoutSec + 's · sha256 ' + escapeHtml((sc.sha256 || "").slice(0, 12)) + '…</p>' +
+      '<div class="script-test-out" data-id="' + sc.id + '"></div>' +
+    '</div>';
+  }).join("");
+
+  container.querySelectorAll(".script-edit").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var sc = _awScriptList.find(function (x) { return x.id === b.dataset.id; });
+      if (sc) openScriptModal(sc);
+    });
+  });
+  container.querySelectorAll(".script-del").forEach(function (b) {
+    b.addEventListener("click", async function () {
+      var sc = _awScriptList.find(function (x) { return x.id === b.dataset.id; });
+      if (!sc) return;
+      if (!(await showConfirm('Delete script "' + sc.name + '"? Automations referencing it must drop their script actions first (the server refuses otherwise).'))) return;
+      try { await api.automationScripts.delete(sc.id); showToast("Script deleted", "success"); loadScriptsTab(); }
+      catch (err) { showToast(err.message || "Delete failed", "error"); }
+    });
+  });
+  container.querySelectorAll(".script-test").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var sc = _awScriptList.find(function (x) { return x.id === b.dataset.id; });
+      if (sc) runScriptTest(sc, b);
+    });
+  });
+}
+
+// Server-side test run: enqueue (202 + runId), then poll the run until it
+// completes (the 5s runner job executes it) and render exit code + output.
+async function runScriptTest(sc, btn) {
+  var out = document.querySelector('.script-test-out[data-id="' + sc.id + '"]');
+  if (sc.runTarget === "agent") { showToast("Agent-only scripts can't be test-run from here — trigger them through an automation on a real asset.", "info"); return; }
+  if (!(await showConfirm('Run "' + sc.name + '" on the Polaris server NOW (as the service account)?'))) return;
+  btn.disabled = true;
+  if (out) out.innerHTML = '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin:6px 0 0">Queued…</p>';
+  try {
+    var res = await api.automationScripts.testRun(sc.id, {});
+    var runId = res.runId;
+    var tries = 0;
+    var poll = async function () {
+      tries++;
+      var rr;
+      try { rr = await api.automationScripts.run(runId); }
+      catch (_e) { rr = null; }
+      var run = rr && rr.run;
+      if (run && (run.status === "succeeded" || run.status === "failed" || run.status === "timeout")) {
+        var color = run.status === "succeeded" ? "var(--color-success)" : "var(--color-danger)";
+        if (out) out.innerHTML =
+          '<div style="border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;margin-top:6px">' +
+            '<p style="font-size:0.8rem;margin:0"><strong style="color:' + color + '">' + escapeHtml(run.status) + '</strong> (exit ' + (run.exitCode != null ? run.exitCode : "n/a") + ')</p>' +
+            (run.stdout ? '<pre style="white-space:pre-wrap;font-size:0.75rem;max-height:160px;overflow:auto;margin:4px 0 0">' + escapeHtml(run.stdout) + '</pre>' : "") +
+            (run.stderr ? '<pre style="white-space:pre-wrap;font-size:0.75rem;max-height:120px;overflow:auto;margin:4px 0 0;color:var(--color-danger)">' + escapeHtml(run.stderr) + '</pre>' : "") +
+          '</div>';
+        btn.disabled = false;
+        return;
+      }
+      if (tries > 60) { if (out) out.innerHTML = '<p style="font-size:0.8rem;color:var(--color-danger);margin:6px 0 0">Timed out waiting for the run to complete.</p>'; btn.disabled = false; return; }
+      setTimeout(poll, 2000);
+    };
+    setTimeout(poll, 2000);
+  } catch (err) {
+    if (out) out.innerHTML = "";
+    btn.disabled = false;
+    showToast(err.message || "Test run failed", "error");
+  }
+}
+
+function openScriptModal(existing) {
+  var s = _ruleSchema || {};
+  var meta = s.scriptMeta || { languages: ["bash", "sh", "powershell", "cmd", "python3"], runOnOptions: ["server", "agent"], maxTimeoutSec: 600 };
+  var sc = existing || {};
+  function optList(list, sel) {
+    return (list || []).map(function (v) { return '<option value="' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(v) + '</option>'; }).join("");
+  }
+  var body =
+    '<div class="form-group"><label>Name</label><input type="text" id="script-name" value="' + escapeHtml(sc.name || "") + '" placeholder="e.g. restart-print-spooler"></div>' +
+    '<div class="form-group"><label>Description (optional)</label><input type="text" id="script-desc" value="' + escapeHtml(sc.description || "") + '"></div>' +
+    '<div class="form-group"><label>Interpreter</label><select id="script-interp">' + optList(meta.languages, sc.interpreter || "bash") + '</select></div>' +
+    '<div class="form-group"><label>Runs on</label><select id="script-target">' +
+      '<option value="server"' + ((sc.runTarget || "server") === "server" ? " selected" : "") + '>the Polaris server</option>' +
+      '<option value="agent"' + (sc.runTarget === "agent" ? " selected" : "") + '>the triggering asset’s agent</option>' +
+      '<option value="either"' + (sc.runTarget === "either" ? " selected" : "") + '>either</option>' +
+    '</select></div>' +
+    '<div class="form-group"><label>Script body</label><textarea id="script-body" rows="12" style="width:100%;font-family:var(--font-mono);font-size:0.82rem" spellcheck="false">' + escapeHtml(sc.body || "") + '</textarea>' +
+      '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">Arguments arrive as one positional parameter ($1 / %1); alert context rides POLARIS_ALERT_ID / POLARIS_RULE / POLARIS_ASSET environment variables.</p></div>' +
+    '<div class="form-group"><label>Default timeout (seconds, 1–' + (meta.maxTimeoutSec || 600) + ')</label><input type="number" id="script-timeout" min="1" max="' + (meta.maxTimeoutSec || 600) + '" value="' + (sc.timeoutSec || 60) + '"></div>' +
+    '<div class="form-group"><label><input type="checkbox" id="script-enabled"' + (sc.enabled === false ? "" : " checked") + '> Enabled</label></div>' +
+    '<p style="font-size:0.8rem;color:var(--color-warning,#d97706);margin:0">' + escapeHtml(meta.help || "Scripts execute with full privileges — a human must review every script before enabling it in production.") + '</p>';
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="script-save">' + (existing ? "Save changes" : "Create script") + '</button>';
+  openModal(existing ? "Edit script" : "New script", body, footer, { wide: true });
+
+  document.getElementById("script-save").addEventListener("click", async function () {
+    var payload = {
+      name: document.getElementById("script-name").value.trim(),
+      description: document.getElementById("script-desc").value.trim() || null,
+      interpreter: document.getElementById("script-interp").value,
+      runTarget: document.getElementById("script-target").value,
+      body: document.getElementById("script-body").value,
+      timeoutSec: Number(document.getElementById("script-timeout").value) || 60,
+      enabled: document.getElementById("script-enabled").checked,
+    };
+    if (!payload.name) { showToast("Name is required.", "error"); return; }
+    if (!payload.body.trim()) { showToast("Script body is required.", "error"); return; }
+    this.disabled = true;
+    try {
+      if (existing) await api.automationScripts.update(existing.id, payload);
+      else await api.automationScripts.create(payload);
+      closeModal();
+      showToast(existing ? "Script saved" : "Script created", "success");
+      loadScriptsTab();
     } catch (err) { this.disabled = false; showToast(err.message || "Save failed", "error"); }
   });
 }
