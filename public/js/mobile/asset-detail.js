@@ -619,6 +619,9 @@
     row("Last seen port", asset.lastSeenSwitch
       ? '<span class="mono">' + escapeHtml(asset.lastSeenSwitch) + '</span>'
       : null);
+    row("Last seen AP", asset.lastSeenAp
+      ? '<span class="mono">' + escapeHtml(asset.lastSeenAp) + '</span>'
+      : null);
     row("Acquired", formatDate(asset.acquiredAt));
 
     if (rows.length === 0) {
