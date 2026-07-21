@@ -25,7 +25,7 @@ const subscribeSchema = z.object({
   keys: z.object({ p256dh: z.string().min(1).max(500), auth: z.string().min(1).max(500) }),
 });
 
-router.get("/key", requirePermission("notifications", "read"), async (_req, res, next) => {
+router.get("/key", requirePermission("alerts", "read"), async (_req, res, next) => {
   try {
     const ch = await getWebPushChannel();
     const cfg = (ch?.config && typeof ch.config === "object" ? ch.config : {}) as Record<string, unknown>;
@@ -37,7 +37,7 @@ router.get("/key", requirePermission("notifications", "read"), async (_req, res,
   }
 });
 
-router.post("/", requirePermission("notifications", "read"), async (req, res, next) => {
+router.post("/", requirePermission("alerts", "read"), async (req, res, next) => {
   try {
     const userId = req.session?.userId;
     if (!userId) throw new AppError(401, "Not authenticated");
@@ -57,7 +57,7 @@ router.post("/", requirePermission("notifications", "read"), async (req, res, ne
   }
 });
 
-router.delete("/", requirePermission("notifications", "read"), async (req, res, next) => {
+router.delete("/", requirePermission("alerts", "read"), async (req, res, next) => {
   try {
     const userId = req.session?.userId;
     if (!userId) throw new AppError(401, "Not authenticated");

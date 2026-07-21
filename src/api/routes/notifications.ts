@@ -4,7 +4,7 @@
  * Mounted at /api/v1/notifications. Gates:
  *   GET  /            notifications:read   (view; region-scoped to the caller)
  *   POST /acknowledge notifications:write  (user and up; readonly cannot)
- *   POST /clear       notifications:fullwrite (admin + assetsadmin)
+ *   POST /clear       alerts:fullwrite (admin + assetsadmin)
  *
  * Rule CRUD lives in notificationRules.ts. Business logic in
  * notificationService; region scope via regionScopeService.
@@ -27,7 +27,7 @@ const csvList = (v: unknown): string[] | undefined => {
   return v.split(",").map((s) => s.trim()).filter(Boolean);
 };
 
-notificationsRouter.get("/", requirePermission("notifications", "read"), async (req, res, next) => {
+notificationsRouter.get("/", requirePermission("alerts", "read"), async (req, res, next) => {
   try {
     const viewerRegionTags = req.session?.userId
       ? await getEffectiveRegionTags(req.session.userId)
@@ -58,7 +58,7 @@ const AckSchema = z.object({
   note: z.string().max(2000).optional(),
 });
 
-notificationsRouter.post("/acknowledge", requirePermission("notifications", "write"), async (req, res, next) => {
+notificationsRouter.post("/acknowledge", requirePermission("alerts", "write"), async (req, res, next) => {
   try {
     const { ids, note } = AckSchema.parse(req.body);
     const count = await acknowledgeNotifications(ids, req.session?.username ?? "unknown", note);
@@ -70,7 +70,7 @@ const ClearSchema = z.object({
   ids: z.array(z.string().min(1)).min(1).max(2000),
 });
 
-notificationsRouter.post("/clear", requirePermission("notifications", "fullwrite"), async (req, res, next) => {
+notificationsRouter.post("/clear", requirePermission("alerts", "fullwrite"), async (req, res, next) => {
   try {
     const { ids } = ClearSchema.parse(req.body);
     const count = await clearNotifications(ids, req.session?.username ?? "unknown");

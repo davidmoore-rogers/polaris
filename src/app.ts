@@ -451,7 +451,7 @@ app.use((req, res, next) => {
 });
 
 // Protect dashboard pages — redirect unauthenticated users to login
-const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/notifications.html", "/server-settings.html", "/map.html"];
+const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/notifications.html", "/automations.html", "/server-settings.html", "/map.html"];
 
 // Page-level gating — each protected page requires at least `read` on the
 // matching function key. Maps to the same matrix the API guards use, so
@@ -462,7 +462,10 @@ const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subn
 const pageRequiredPermission: Record<string, { key: string; level: "read" | "write" }> = {
   "/users.html":           { key: "users",                level: "read" },
   "/integrations.html":    { key: "integrations",         level: "read" },
-  "/notifications.html":   { key: "notifications",        level: "read" },
+  // /notifications.html stays gated forever — already-delivered web-push
+  // payloads deep-link to it (Automations rename, 2026-07).
+  "/notifications.html":   { key: "alerts",               level: "read" },
+  "/automations.html":     { key: "alerts",               level: "read" },
   "/server-settings.html": { key: "serverSettingsSystem", level: "read" },
 };
 const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
@@ -505,10 +508,12 @@ app.use(async (req, res, next) => {
     // to `ensureRoleSnapshot` which loads the user's role from
     // DB and stamps the session in place. One DB hit per surviving old
     // session; the snapshot path is hot after that.
-    const { ensureRoleSnapshot } = await import("./api/middleware/permissions.js");
+    const { ensureRoleSnapshot, permissionOf } = await import("./api/middleware/permissions.js");
     const snap = await ensureRoleSnapshot(req).catch(() => null);
     const perms = (snap?.permissions ?? req.session.roleSnapshot?.permissions ?? {}) as Record<string, "none" | "read" | "write" | "fullwrite">;
-    const actual = perms[required.key] ?? "none";
+    // permissionOf resolves pre-rename snapshot keys (notifications → alerts)
+    // so live sessions survive the Automations RBAC rename without re-login.
+    const actual = permissionOf(perms, required.key);
     if (PERM_RANK[actual] < PERM_RANK[required.level]) {
       return res.redirect("/");
     }

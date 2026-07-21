@@ -555,6 +555,8 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - Wire the route layer guards using `requirePermission(newKey, level)`.
 - Add a CLAUDE.md "Function-key catalogue" entry. The frontend matrix UI picks the new row up automatically via `GET /roles/functions`.
 
+**When renaming a function key:** model on the Automations cutover (`notifications`→`alerts` / `notificationManagement`→`automationManagement`, migration `20260721000000_automations_rbac_rename`). Three coordinated pieces, all required: (1) a migration that rewrites every stored `Role.permissions` JSON (old key removed, value carried onto the new key); (2) the old→new pair in `LEGACY_KEY_ALIASES` in `permissions.ts` so `permissionOf` resolves pre-deploy session snapshots without forcing re-login (the cold `roleVersionMap` trusts snapshots at boot); (3) `normalizePermissions`'s legacy fold so matrices posted by stale clients / imported role JSON keep their access. Update every `requirePermission`/`hasPermission` call site to the new name — the alias layer is for stored data, not for code.
+
 **When adding a new region-scoped column:**
 - Mirror the existing `Role.regionTags` / `User.regionTags` shape: `String[] @default([])` + comment `Empty = unrestricted`.
 - Validation lives in the service layer (`normalizeRegionTags` in `roleService.ts` is the template): trim, drop empties, dedupe case-insensitively, cap length + count.

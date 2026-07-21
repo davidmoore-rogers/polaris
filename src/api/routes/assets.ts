@@ -1031,9 +1031,10 @@ router.get("/:id/ip-history", requirePermission("assets", "read"), async (req, r
   }
 });
 
-// GET /api/v1/assets/:id/notifications — active notifications for this asset +
-// the enabled rules whose scope matches it (asset-details Notifications tab).
-router.get("/:id/notifications", requirePermission("assets", "read"), async (req, res, next) => {
+// GET /api/v1/assets/:id/alerts — active alerts for this asset + the enabled
+// automations whose scope matches it (asset-details Alerts tab). The
+// pre-rename /:id/notifications path stays as a deprecated alias.
+router.get(["/:id/alerts", "/:id/notifications"], requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string }, select: { id: true } });
     if (!asset) throw new AppError(404, "Asset not found");

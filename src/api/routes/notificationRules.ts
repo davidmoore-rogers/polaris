@@ -2,10 +2,10 @@
  * src/api/routes/notificationRules.ts — notification RULE CRUD (Manage tab).
  *
  * Mounted at /api/v1/notification-rules.
- *   GET  /         notificationManagement:read       (list)
- *   GET  /schema   notificationManagement:read       (builder vocabulary)
- *   POST /preview  notificationManagement:fullwrite  (dry-run a draft)
- *   POST / PUT/:id / DELETE/:id   notificationManagement:fullwrite  (CRUD)
+ *   GET  /         automationManagement:read       (list)
+ *   GET  /schema   automationManagement:read       (builder vocabulary)
+ *   POST /preview  automationManagement:fullwrite  (dry-run a draft)
+ *   POST / PUT/:id / DELETE/:id   automationManagement:fullwrite  (CRUD)
  *
  * Validation via ruleInputSchema (notificationTypes); business logic in
  * notificationRuleService; preview/dry-run in notificationEngine.
@@ -21,36 +21,36 @@ import { listRecipientUsers } from "../../services/notificationRecipientService.
 
 export const notificationRulesRouter = Router();
 
-notificationRulesRouter.get("/", requirePermission("notificationManagement", "read"), async (_req, res, next) => {
+notificationRulesRouter.get("/", requirePermission("automationManagement", "read"), async (_req, res, next) => {
   try {
     res.json({ rules: await listRules() });
   } catch (err) { next(err); }
 });
 
 // Static path BEFORE any "/:id" so it isn't captured as an id.
-notificationRulesRouter.get("/schema", requirePermission("notificationManagement", "read"), async (_req, res, next) => {
+notificationRulesRouter.get("/schema", requirePermission("automationManagement", "read"), async (_req, res, next) => {
   try {
     res.json(buildSchemaCatalog());
   } catch (err) { next(err); }
 });
 
 // Users for the rule-builder recipient picker (individual-account targets).
-// Gated by notificationManagement (a rule editor needs it) rather than
+// Gated by automationManagement (a rule editor needs it) rather than
 // users:read, since those are distinct permissions.
-notificationRulesRouter.get("/recipient-users", requirePermission("notificationManagement", "read"), async (_req, res, next) => {
+notificationRulesRouter.get("/recipient-users", requirePermission("automationManagement", "read"), async (_req, res, next) => {
   try {
     res.json({ users: await listRecipientUsers() });
   } catch (err) { next(err); }
 });
 
-notificationRulesRouter.post("/preview", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+notificationRulesRouter.post("/preview", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     const input = ruleInputSchema.parse(req.body);
     res.json(await previewRule(input));
   } catch (err) { next(err); }
 });
 
-notificationRulesRouter.post("/", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+notificationRulesRouter.post("/", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     const input = ruleInputSchema.parse(req.body);
     const rule = await createRule(input, req.session?.username);
@@ -58,7 +58,7 @@ notificationRulesRouter.post("/", requirePermission("notificationManagement", "f
   } catch (err) { next(err); }
 });
 
-notificationRulesRouter.put("/:id", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+notificationRulesRouter.put("/:id", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     const input = ruleInputSchema.parse(req.body);
     const rule = await updateRule(req.params.id as string, input, req.session?.username);
@@ -69,7 +69,7 @@ notificationRulesRouter.put("/:id", requirePermission("notificationManagement", 
   }
 });
 
-notificationRulesRouter.delete("/:id", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+notificationRulesRouter.delete("/:id", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     await deleteRule(req.params.id as string, req.session?.username);
     res.status(204).end();
