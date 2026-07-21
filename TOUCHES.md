@@ -1346,9 +1346,9 @@ Listed alphabetically.
 
 ## services/notificationEngine.ts
 
-**What it owns:** The rule evaluator. Threshold/state path (per-metric sample resolvers + the NotificationRuleState machine with forDuration/cooldown/clearBehavior), the event-tail path (cursor over Event rows matching event/change rules), all fire-time template rendering (in-app message + composed email via `src/utils/notificationTemplate.ts`), and `previewRule` (dry-run).
+**What it owns:** The rule evaluator. Threshold/state path (per-metric sample resolvers + the NotificationRuleState machine with forDuration/cooldown + v2 `reset` semantics: auto with hysteresis `clearThreshold` + clear-sustain `sustainSec` via `NotificationRuleState.recoveredSince`, timed via `afterSec` sweep, manual re-arm), the event-tail path (cursor over Event rows matching event/change rules), all fire-time template rendering (in-app message + composed email via `src/utils/notificationTemplate.ts`), and `previewRule` (dry-run; scope-only mode + hysteresis `wouldClear`/`inDeadBand` per match).
 
-**Public API:** `evaluateAllNotificationRules` (job entry), `previewRule`, `buildComposedEmail(comp, ctx)` (also used by the escalation sweep), `assetDetail`/`clearAssetDetailCache` (per-tick asset-detail cache), and the unit-tested pure helpers `compareNum`/`compareValue`/`globToRegExp`/`readingMeets`.
+**Public API:** `evaluateAllNotificationRules` (job entry), `previewRule`, `buildComposedEmail(comp, ctx)` (also used by the escalation sweep), `assetDetail`/`clearAssetDetailCache` (per-tick asset-detail cache), and the unit-tested pure helpers `compareNum`/`compareValue`/`globToRegExp`/`readingMeets`/`recoveredMeets`.
 
 **Cross-service deps:** `prisma` (assets + every sample table + notifications + state + Event + Setting), `eventLogService.logEvent`, `notificationService.REGION_TAG_PREFIX`, `notificationTypes`, `notificationRecipientService` (expandDeliveries + ComposedEmail), `src/utils/notificationTemplate.ts`.
 
@@ -1356,7 +1356,8 @@ Listed alphabetically.
 
 **Invariants:**
 - Fire only on the clear→firing transition; state writes happen only on transition (hot path scales with *changes*, not fleet size).
-- Recovery is acted on only from an explicit not-meeting reading (missing data leaves a firing state alone); `timed` clears purely on its timer.
+- Recovery is acted on only from an explicit not-meeting reading (missing data leaves a firing state alone — including a half-elapsed `recoveredSince` sustain timer, which freezes under maintenance/dependency suppression); `timed` clears purely on its timer.
+- Hysteresis dead band (auto + clearThreshold, value between clear and fire thresholds): the firing state holds, and any running sustain timer cancels. `recoveredSince` writes are transition-only (met↔recovered edges), never per-tick; it is a firing-state-only field, distinct from the pending-side `conditionMetSince` (nulled on fire). Every state-clearing write (recover / timed sweep / manual re-arm / re-fire) must null `recoveredSince`.
 - Notification `regionTags` are snapshotted from the asset's `region:` tags at fire time; `templateCtx` is snapshotted only when the rule has emailComposition/escalation (escalation renders from it later, surviving asset deletion).
 - `SCOPE_SELECT` stays tight (hot 60s×2000-asset path); the wider `ASSET_DETAIL_SELECT` fetch runs only on FIRE and only when composition/escalation/{asset.*} tokens need it, through the per-tick cache.
 - All interpolation goes through `renderNotificationTemplate` (single-brace {token}, single pass, unknown tokens literal) — never hand-rolled replaceAll chains.

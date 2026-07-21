@@ -399,6 +399,22 @@ export function readingMeets(trigger: Trigger, value: number | string | boolean 
   return false;
 }
 
+/**
+ * Has a FIRING condition recovered, honoring hysteresis? Without a
+ * clearThreshold (or for non-numeric readings) recovery is simply !meets —
+ * the legacy behavior. With one, recovery requires the value to cross the
+ * CLEAR threshold: fire at `cpu >= 90` with clearThreshold 80 recovers only
+ * below 80; between 80 and 90 is the dead band (neither meets nor recovered —
+ * the alert stays firing so a value hovering at the line can't flap).
+ * A null/absent reading counts as recovered (matches legacy: !meets).
+ */
+export function recoveredMeets(trigger: Trigger, reset: ResetConfig, value: number | string | boolean | null): boolean {
+  const meets = readingMeets(trigger, value);
+  if (reset.mode !== "auto" || reset.clearThreshold == null) return !meets;
+  if ((trigger.type !== "asset_metric" && trigger.type !== "host_metric") || typeof value !== "number") return !meets;
+  return !compareNum(value, trigger.operator, reset.clearThreshold);
+}
+
 // ─── Message + email templating ─────────────────────────────────────────────
 // All interpolation goes through renderNotificationTemplate (single-brace
 // {token} vocabulary from src/utils/notificationTemplate.ts) so the in-app
@@ -530,13 +546,36 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
           await fire(rule, reading, lastValue, now);
         }
         // else keep pending
-      } // firing → already active; suppress
+      } else if (st.state === "firing" && st.recoveredSince) {
+        // Re-met mid-recovery: cancel the clear-sustain timer (transition-only
+        // write — a steadily-firing condition costs nothing per tick).
+        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+      } // firing without a pending recovery → already active; suppress
     } else {
       // condition not met for this reading
       if (st && st.state === "pending") {
         await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null } });
       } else if (st && st.state === "firing") {
-        await recover(rule, st);
+        if (rule.reset.mode !== "auto") {
+          // manual re-arms the state; timed waits for its sweep — same as ever.
+          await recover(rule, st);
+        } else if (!recoveredMeets(trigger, rule.reset, reading.value)) {
+          // Hysteresis dead band (below fire, above clear): stay firing.
+          if (st.recoveredSince) {
+            await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+          }
+        } else {
+          const sustainSec = rule.reset.sustainSec ?? 0;
+          if (sustainSec <= 0) {
+            await recover(rule, st);
+          } else if (!st.recoveredSince) {
+            // Recovery observed — start the clear-sustain timer.
+            await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: now } });
+          } else if (now.getTime() - st.recoveredSince.getTime() >= sustainSec * 1000) {
+            await recover(rule, st);
+          }
+          // else: recovered but not sustained long enough yet — keep firing.
+        }
       }
     }
   }
@@ -561,7 +600,7 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
     for (const st of states) {
       if (st.state === "firing" && st.firedAt && now.getTime() - st.firedAt.getTime() >= afterSec * 1000) {
         await clearActiveNotification(st, "system:timed");
-        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, notificationId: null } });
+        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null } });
       }
     }
   }
@@ -609,7 +648,7 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
   await prisma.notificationRuleState.upsert({
     where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
     create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id },
-    update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null },
+    update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null, recoveredSince: null },
   });
   const composed = rule.emailComposition ? buildComposedEmail(rule.emailComposition, ctx) : undefined;
   await expandDeliveriesSafe(notif.id, rule.targets, scopeRegionTagsOf(rule.scope), composed);
@@ -628,7 +667,7 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
 async function recover(rule: DbRule, st: { id: string; notificationId: string | null }): Promise<void> {
   if (rule.reset.mode === "auto") {
     await clearActiveNotification(st, "system:auto-resolve");
-    await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, notificationId: null } });
+    await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null } });
     await logEvent({
       action: "notification.auto_cleared",
       resourceType: "notification",
@@ -642,7 +681,7 @@ async function recover(rule: DbRule, st: { id: string; notificationId: string | 
     // manual / timed: re-arm the state but leave the notification for a human
     // (timed is swept by the timer pass; manual stays until cleared).
     if (rule.reset.mode === "manual") {
-      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, notificationId: null } });
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null } });
     }
   }
 }
@@ -855,6 +894,11 @@ export interface PreviewMatch {
   dimension: string;
   value: number | string | boolean | null;
   meets: boolean;
+  /** Hysteresis view (only when the draft has reset.mode=auto + clearThreshold):
+   *  would a firing alert on this reading clear? A reading that neither meets
+   *  nor clears sits in the dead band. */
+  wouldClear?: boolean;
+  inDeadBand?: boolean;
 }
 
 export interface PreviewResult {
@@ -901,13 +945,23 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
     return { supported: false, note: "Event and change rules fire on new audit events; there's nothing to preview against current data.", totalEvaluated: 0, matches: [] };
   }
 
-  const matches: PreviewMatch[] = readings.map((r) => ({
-    assetId: r.assetId || null,
-    hostname: r.hostname,
-    dimension: r.dimLabel,
-    value: r.value,
-    meets: readingMeets(trigger, r.value),
-  }));
+  const showHysteresis = input.reset.mode === "auto" && input.reset.clearThreshold != null;
+  const matches: PreviewMatch[] = readings.map((r) => {
+    const meets = readingMeets(trigger, r.value);
+    if (!showHysteresis) {
+      return { assetId: r.assetId || null, hostname: r.hostname, dimension: r.dimLabel, value: r.value, meets };
+    }
+    const wouldClear = recoveredMeets(trigger, input.reset, r.value);
+    return {
+      assetId: r.assetId || null,
+      hostname: r.hostname,
+      dimension: r.dimLabel,
+      value: r.value,
+      meets,
+      wouldClear,
+      inDeadBand: !meets && !wouldClear,
+    };
+  });
   matches.sort((a, b) => Number(b.meets) - Number(a.meets));
 
   // Rendered sample of the composed email against the best reading (first
