@@ -64,7 +64,7 @@
     if (!isSupported()) throw new Error("This browser doesn't support push notifications.");
     var key = await api.push.key();
     if (!key || !key.enabled || !key.publicKey) {
-      throw new Error("Push isn't enabled on the server. Ask an admin to configure Web Push in Server Settings → Notifications.");
+      throw new Error("Push isn't enabled on the server. Ask an admin to configure Web Push on Automations → Delivery.");
     }
     var perm = await Notification.requestPermission();
     if (perm !== "granted") throw new Error("Notification permission was not granted.");

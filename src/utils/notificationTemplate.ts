@@ -171,11 +171,13 @@ export function templateNeedsAsset(templates: Array<string | null | undefined>):
   return templates.some((t) => typeof t === "string" && /\{asset\.[\w.]*\}/.test(t));
 }
 
-/** Notifications-page URL for the {link} token + the "View:" footer (null when POLARIS_PUBLIC_URL is unset). */
+/** Automations-page (Alerts tab) URL for the {link} token + the "View:" footer
+ *  (null when POLARIS_PUBLIC_URL is unset). Renamed page; the server keeps a
+ *  permanent /notifications.html redirect for links already delivered. */
 export function notificationsPageUrl(): string | null {
   const base = process.env.POLARIS_PUBLIC_URL;
   if (!base) return null;
-  return `${base.replace(/\/$/, "")}/notifications.html`;
+  return `${base.replace(/\/$/, "")}/automations.html`;
 }
 
 /** "92m" → "1h 32m"-style elapsed formatting for {escalation.elapsed}. */

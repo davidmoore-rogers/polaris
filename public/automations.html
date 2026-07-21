@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Polaris — Notifications</title>
+  <title>Polaris — Automations</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="icon" type="image/png" href="/logo.png">
@@ -15,30 +15,30 @@
     <aside class="sidebar" id="sidebar"></aside>
     <main class="main">
       <div class="page-header">
-        <h2>Notifications</h2>
+        <h2>Automations</h2>
         <div class="page-header-actions">
-          <button class="btn btn-primary" id="btn-new-rule" style="display:none">+ New rule</button>
+          <button class="btn btn-primary" id="btn-new-rule" style="display:none">+ New automation</button>
           <button class="btn btn-primary" id="btn-add-channel" style="display:none">+ Add channel</button>
-          <button class="btn btn-secondary" id="btn-enable-push" style="display:none" title="Receive notifications as desktop/mobile push">Enable push</button>
+          <button class="btn btn-secondary" id="btn-enable-push" style="display:none" title="Receive alerts as desktop/mobile push">Enable push</button>
           <button class="btn btn-secondary" id="btn-refresh">Refresh</button>
         </div>
       </div>
 
-      <div class="page-tabs" id="notif-tabs">
-        <button type="button" class="page-tab active" data-tab="view">View</button>
-        <button type="button" class="page-tab" data-tab="manage" id="notif-tab-manage-btn" style="display:none">Rules</button>
-        <button type="button" class="page-tab" data-tab="delivery" id="notif-tab-delivery-btn" style="display:none">Delivery</button>
+      <div class="page-tabs" id="auto-tabs">
+        <button type="button" class="page-tab active" data-tab="view">Alerts</button>
+        <button type="button" class="page-tab" data-tab="manage" id="auto-tab-manage-btn" style="display:none">Automations</button>
+        <button type="button" class="page-tab" data-tab="delivery" id="auto-tab-delivery-btn" style="display:none">Delivery</button>
       </div>
 
       <!-- ─── View tab ─────────────────────────────────────────────────── -->
-      <div class="page-tab-panel active" id="notif-tab-view">
+      <div class="page-tab-panel active" id="auto-tab-view">
         <!-- Always-visible action bar, ABOVE the page-size control and frozen
              (sticky) so it stays in view while scrolling a long list. Buttons
              are disabled until rows are selected; Acknowledge/Clear shown per
              the caller's permissions. The accent border appears only once
              something is selected (bulk-bar-idle = neutral). -->
         <div id="notif-bulk-bar" class="bulk-bar bulk-bar-idle">
-          <span class="bulk-bar-count">No notifications selected</span>
+          <span class="bulk-bar-count">No alerts selected</span>
           <button class="btn btn-sm btn-primary" id="notif-bulk-ack" style="display:none" disabled>Acknowledge</button>
           <button class="btn btn-sm btn-danger" id="notif-bulk-clear" style="display:none" disabled>Clear</button>
           <button class="btn btn-sm btn-secondary" id="notif-bulk-deselect" disabled>Deselect all</button>
@@ -84,7 +84,7 @@
       </div>
 
       <!-- ─── Manage tab ───────────────────────────────────────────────── -->
-      <div class="page-tab-panel" id="notif-tab-manage">
+      <div class="page-tab-panel" id="auto-tab-manage">
         <div class="table-wrapper">
           <table>
             <thead>
@@ -108,9 +108,9 @@
       <!-- ─── Delivery tab ─────────────────────────────────────────────────
            Operator-managed list of outbound delivery channels (email/chat/push),
            set up like the Integrations page. Rules reference these by id. -->
-      <div class="page-tab-panel" id="notif-tab-delivery">
+      <div class="page-tab-panel" id="auto-tab-delivery">
         <p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">
-          Configure where notifications are delivered. Add SMTP / Microsoft 365 email, Pushbullet, Slack, Microsoft Teams, or Web Push channels, then reference them from a rule's <strong>Notify</strong> section. In-app notifications (the View tab) are always on.
+          Configure where notifications are delivered. Add SMTP / Microsoft 365 email, Pushbullet, Slack, Microsoft Teams, or Web Push channels, then reference them from an automation's <strong>Notify</strong> action. In-app alerts (the Alerts tab) are always on.
         </p>
         <div id="channels-list"><p class="empty-state">Loading...</p></div>
       </div>
@@ -131,6 +131,6 @@
   <script src="/js/integrations.js"></script>
   <script src="/js/assets.js"></script>
   <script src="/js/push.js"></script>
-  <script src="/js/notifications.js"></script>
+  <script src="/js/automations.js"></script>
 </body>
 </html>

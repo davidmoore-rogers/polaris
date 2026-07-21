@@ -202,7 +202,7 @@ var _eventsSF = null;
 
   // setupColumnLayout AFTER TableSF: TableSF._setup rebuilds each header th
   // via innerHTML, which would wipe the resize handles setupColumnLayout
-  // appends (canonical order — see notifications.js).
+  // appends (canonical order — see automations.js).
   var eventsTable = document.querySelector("#events-tbody").closest("table");
   _eventsLayout = setupColumnLayout(eventsTable, {
     onChange: _saveEventsPrefs,

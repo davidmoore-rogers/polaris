@@ -543,6 +543,16 @@ function legacyIpamRedirect() {
 app.get("/blocks.html", legacyIpamRedirect());
 app.get("/subnets.html", legacyIpamRedirect());
 
+// Automations rename (2026-07): the page moved from /notifications.html to
+// /automations.html. This redirect is PERMANENT surface — already-delivered
+// web-push payloads deep-link to the old URL forever. A 302 (not 301) so a
+// future re-shuffle isn't cached by browsers; no fragment concerns here (push
+// deep links use query-less plain URLs). The page-gate middleware above ran
+// first, so only authorized users reach this hop.
+app.get("/notifications.html", (_req, res) => {
+  res.redirect("/automations.html");
+});
+
 // Serve uploaded logos from the state directory. On legacy installs (no
 // POLARIS_STATE_DIR set) this resolves to <project>/public/uploads — the
 // same files the express.static(public) mount below also serves, so the

@@ -1,5 +1,5 @@
 /**
- * public/js/notifications.js — Notifications page (View + Rules + Delivery tabs).
+ * public/js/automations.js — Automations page (Alerts + Automations + Delivery tabs).
  *
  * View tab: server-side TableSF list of triggered notifications with multiselect
  * acknowledge/clear (acknowledge gated notifications:write, clear gated
@@ -43,17 +43,17 @@ function _looksLikeDeviceId(tag) {
   var canEditRules = false;
 
   function applyPermGatedUI() {
-    canAck = permAtLeast("notifications", "write");
-    canClear = permAtLeast("notifications", "fullwrite");
-    canManage = permAtLeast("notificationManagement", "read");
-    canEditRules = permAtLeast("notificationManagement", "fullwrite");
+    canAck = permAtLeast("alerts", "write");
+    canClear = permAtLeast("alerts", "fullwrite");
+    canManage = permAtLeast("automationManagement", "read");
+    canEditRules = permAtLeast("automationManagement", "fullwrite");
 
-    var mb = document.getElementById("notif-tab-manage-btn");
+    var mb = document.getElementById("auto-tab-manage-btn");
     if (mb) mb.style.display = canManage ? "" : "none";
-    var db = document.getElementById("notif-tab-delivery-btn");
+    var db = document.getElementById("auto-tab-delivery-btn");
     if (db) db.style.display = canManage ? "" : "none";
-    var activeKey = (document.querySelector("#notif-tabs .page-tab.active") || {}).getAttribute
-      ? document.querySelector("#notif-tabs .page-tab.active").getAttribute("data-tab") : "view";
+    var activeKey = (document.querySelector("#auto-tabs .page-tab.active") || {}).getAttribute
+      ? document.querySelector("#auto-tabs .page-tab.active").getAttribute("data-tab") : "view";
     var nr = document.getElementById("btn-new-rule");
     if (nr) {
       nr.style.display = canEditRules && activeKey === "manage" ? "" : "none";
@@ -114,13 +114,13 @@ function _looksLikeDeviceId(tag) {
   }
 
   // ─── Tabs ──────────────────────────────────────────────────────────────
-  document.querySelectorAll("#notif-tabs .page-tab").forEach(function (btn) {
+  document.querySelectorAll("#auto-tabs .page-tab").forEach(function (btn) {
     btn.addEventListener("click", function () {
       var key = btn.getAttribute("data-tab");
-      document.querySelectorAll("#notif-tabs .page-tab").forEach(function (b) { b.classList.remove("active"); });
-      document.querySelectorAll('[id^="notif-tab-"]').forEach(function (p) { if (p.classList.contains("page-tab-panel")) p.classList.remove("active"); });
+      document.querySelectorAll("#auto-tabs .page-tab").forEach(function (b) { b.classList.remove("active"); });
+      document.querySelectorAll('[id^="auto-tab-"]').forEach(function (p) { if (p.classList.contains("page-tab-panel")) p.classList.remove("active"); });
       btn.classList.add("active");
-      var panel = document.getElementById("notif-tab-" + key);
+      var panel = document.getElementById("auto-tab-" + key);
       if (panel) panel.classList.add("active");
       // Header buttons are tab-specific: New rule on Manage, Add channel on Delivery.
       var nrBtn = document.getElementById("btn-new-rule");
@@ -133,7 +133,7 @@ function _looksLikeDeviceId(tag) {
   });
 
   document.getElementById("btn-refresh").addEventListener("click", function () {
-    var active = document.querySelector("#notif-tabs .page-tab.active");
+    var active = document.querySelector("#auto-tabs .page-tab.active");
     if (active && active.getAttribute("data-tab") === "manage") loadRules();
     else loadNotifications();
   });
@@ -148,7 +148,7 @@ function _looksLikeDeviceId(tag) {
   function savePrefs() {
     if (!currentUsername) return;
     try {
-      localStorage.setItem("polaris-prefs-notifications-" + currentUsername, JSON.stringify({
+      localStorage.setItem("polaris-prefs-alerts-" + currentUsername, JSON.stringify({
         pageSize: pageSize,
         layout: _notifLayout ? _notifLayout.getPrefs() : null,
         filters: _notifSF ? _notifSF._filters : null,
@@ -159,7 +159,12 @@ function _looksLikeDeviceId(tag) {
   function restorePrefs() {
     if (!currentUsername) return;
     var raw;
-    try { raw = localStorage.getItem("polaris-prefs-notifications-" + currentUsername); } catch (_) { return; }
+    // One-time read-migrate from the pre-rename key (Automations cutover) —
+    // the old key is left in place, harmless.
+    try {
+      raw = localStorage.getItem("polaris-prefs-alerts-" + currentUsername)
+        || localStorage.getItem("polaris-prefs-notifications-" + currentUsername);
+    } catch (_) { return; }
     if (!raw) return;
     try {
       var p = JSON.parse(raw);
@@ -198,13 +203,13 @@ function _looksLikeDeviceId(tag) {
   }
 
   function loadNotifications() {
-    api.notifications.list(buildQuery()).then(function (data) {
+    api.alerts.list(buildQuery()).then(function (data) {
       rows = data.notifications || [];
       total = data.total || 0;
       renderTable();
       renderPagination();
     }).catch(function () {
-      document.getElementById("notif-tbody").innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load notifications</td></tr>';
+      document.getElementById("notif-tbody").innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load alerts</td></tr>';
     });
   }
   window._reloadNotifications = loadNotifications;
@@ -212,7 +217,7 @@ function _looksLikeDeviceId(tag) {
   function renderTable() {
     var tbody = document.getElementById("notif-tbody");
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No notifications</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No alerts</td></tr>';
       updateBulkBar();
       updateSelectAll();
       return;
@@ -334,10 +339,10 @@ function _looksLikeDeviceId(tag) {
   async function doBulkClear() {
     var ids = Array.from(selected);
     if (!ids.length) return;
-    var ok = await showConfirm("Clear " + ids.length + " notification" + (ids.length === 1 ? "" : "s") + "? Cleared notifications are removed from the list.");
+    var ok = await showConfirm("Clear " + ids.length + " alert" + (ids.length === 1 ? "" : "s") + "? Cleared alerts are removed from the list.");
     if (!ok) return;
     try {
-      await api.notifications.clear(ids);
+      await api.alerts.clear(ids);
       showToast("Cleared " + ids.length, "success");
       selected.clear();
       loadNotifications();
@@ -356,7 +361,7 @@ function _looksLikeDeviceId(tag) {
       this.disabled = true;
       try {
         var note = (document.getElementById("ack-note").value || "").trim();
-        await api.notifications.acknowledge(ids, note || undefined);
+        await api.alerts.acknowledge(ids, note || undefined);
         closeModal();
         showToast("Acknowledged " + ids.length, "success");
         selected.clear();
@@ -430,11 +435,11 @@ function _looksLikeDeviceId(tag) {
   var _rules = [];
   function loadRules() {
     if (!canManage) return;
-    api.notificationRules.list().then(function (data) {
+    api.automations.list().then(function (data) {
       _rules = data.rules || [];
       renderRules();
     }).catch(function () {
-      document.getElementById("rules-tbody").innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load rules</td></tr>';
+      document.getElementById("rules-tbody").innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load automations</td></tr>';
     });
   }
   window._reloadRules = loadRules;
@@ -482,7 +487,7 @@ function _looksLikeDeviceId(tag) {
     });
     if (_rulesSF) data = _rulesSF.apply(data);
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No notification rules yet' + (canEditRules ? ' — click "+ New rule" to create one.' : "") + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No automations yet' + (canEditRules ? ' — click "+ New automation" to create one.' : "") + '</td></tr>';
       return;
     }
     tbody.innerHTML = data.map(function (r) {
@@ -515,9 +520,9 @@ function _looksLikeDeviceId(tag) {
         var desired = cb.checked;
         cb.disabled = true;
         try {
-          await api.notificationRules.update(r.id, _ruleToInput(r, { enabled: desired }));
+          await api.automations.update(r.id, _ruleToInput(r, { enabled: desired }));
           r.enabled = desired;
-          showToast("Rule " + (desired ? "enabled" : "disabled"), "success");
+          showToast("Automation " + (desired ? "enabled" : "disabled"), "success");
           loadRules();
         } catch (err) {
           cb.checked = !desired;
@@ -533,9 +538,9 @@ function _looksLikeDeviceId(tag) {
       b.addEventListener("click", async function () {
         var r = _rules.find(function (x) { return x.id === b.dataset.id; });
         if (!r) return;
-        var ok = await showConfirm('Delete rule "' + r.name + '"? Its firing state is dropped; existing notifications are kept.');
+        var ok = await showConfirm('Delete automation "' + r.name + '"? Its firing state is dropped; existing alerts are kept.');
         if (!ok) return;
-        try { await api.notificationRules.delete(r.id); showToast("Rule deleted", "success"); loadRules(); }
+        try { await api.automations.delete(r.id); showToast("Automation deleted", "success"); loadRules(); }
         catch (err) { showToast(err.message || "Delete failed", "error"); }
       });
     });
@@ -550,8 +555,8 @@ function _looksLikeDeviceId(tag) {
 
 async function openRuleBuilder(existing) {
   if (!_ruleSchema) {
-    try { _ruleSchema = await api.notificationRules.schema(); }
-    catch (err) { showToast("Failed to load rule schema", "error"); return; }
+    try { _ruleSchema = await api.automations.schema(); }
+    catch (err) { showToast("Failed to load the automation schema", "error"); return; }
   }
   if (_ruleTagList === null) {
     // Filter out machine-identifier tags (Entra/Intune GUIDs, long hex object
@@ -567,10 +572,10 @@ async function openRuleBuilder(existing) {
     catch (_e) { _ruleAssetTypes = []; }
   }
   // Always refresh channels (operator may have just added one in the Delivery tab).
-  try { var _cd = await api.notificationChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
+  try { var _cd = await api.deliveryChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
   catch (_e) { _ruleChannels = _ruleChannels || []; }
   if (_ruleRecipientUsers === null) {
-    try { var _ru = await api.notificationRules.recipientUsers(); _ruleRecipientUsers = (_ru && _ru.users) || []; }
+    try { var _ru = await api.automations.recipientUsers(); _ruleRecipientUsers = (_ru && _ru.users) || []; }
     catch (_e) { _ruleRecipientUsers = []; }
   }
   var s = _ruleSchema;
@@ -648,7 +653,7 @@ async function openRuleBuilder(existing) {
     '<button class="btn btn-secondary" id="rule-test">Test</button>' +
     '<button class="btn btn-primary" id="rule-save">' + (existing ? "Save changes" : "Create rule") + '</button>';
 
-  openModal(existing ? "Edit notification rule" : "New notification rule", body, footer, { wide: true });
+  openModal(existing ? "Edit automation" : "New automation", body, footer, { wide: true });
 
   var typeSel = document.getElementById("rule-trigger-type");
   var clearSel = document.getElementById("rule-clear");
@@ -1133,7 +1138,7 @@ async function openRuleBuilder(existing) {
     var box = document.getElementById("rule-preview");
     box.innerHTML = '<p style="color:var(--color-text-tertiary)">Testing…</p>';
     try {
-      var res = await api.notificationRules.preview(collectRule());
+      var res = await api.automations.preview(collectRule());
       if (!res.supported) { box.innerHTML = '<p style="color:var(--color-text-tertiary)">' + escapeHtml(res.note || "Not previewable.") + '</p>'; return; }
       var meeting = (res.matches || []).filter(function (m) { return m.meets; });
       var rowsHtml = (res.matches || []).slice(0, 20).map(function (m) {
@@ -1210,10 +1215,10 @@ async function openRuleBuilder(existing) {
     }
     this.disabled = true;
     try {
-      if (existing) await api.notificationRules.update(existing.id, rule);
-      else await api.notificationRules.create(rule);
+      if (existing) await api.automations.update(existing.id, rule);
+      else await api.automations.create(rule);
       closeModal();
-      showToast(existing ? "Rule saved" : "Rule created", "success");
+      showToast(existing ? "Automation saved" : "Automation created", "success");
       if (window._reloadRules) window._reloadRules();
     } catch (err) { this.disabled = false; showToast(err.message || "Save failed", "error"); }
   });
@@ -1226,10 +1231,10 @@ async function openRuleBuilder(existing) {
 async function loadChannelsTab() {
   var container = document.getElementById("channels-list");
   if (!container) return;
-  if (!_ruleSchema) { try { _ruleSchema = await api.notificationRules.schema(); } catch (_e) { /* labels degrade to raw type */ } }
+  if (!_ruleSchema) { try { _ruleSchema = await api.automations.schema(); } catch (_e) { /* labels degrade to raw type */ } }
   container.innerHTML = '<p class="empty-state">Loading…</p>';
   try {
-    var resp = await api.notificationChannels.list();
+    var resp = await api.deliveryChannels.list();
     _ruleChannels = (resp && resp.channels) || [];
     renderChannelsList(_ruleChannels);
   } catch (err) {
@@ -1271,7 +1276,7 @@ function channelDetailRows(c) {
 function renderChannelsList(channels) {
   var container = document.getElementById("channels-list");
   if (!container) return;
-  var canEdit = permAtLeast("notificationManagement", "fullwrite");
+  var canEdit = permAtLeast("automationManagement", "fullwrite");
   if (!channels.length) {
     container.innerHTML = '<div class="empty-state-card"><p>No delivery channels configured.</p>' +
       (canEdit ? '<p style="color:var(--color-text-tertiary);font-size:0.85rem;margin-top:0.5rem">Click “+ Add channel” to add an SMTP / Microsoft 365 email, Pushbullet, Slack, Microsoft Teams, or Web Push destination.</p>' : '') + '</div>';
@@ -1308,8 +1313,8 @@ function renderChannelsList(channels) {
 
 async function deleteChannel(c) {
   if (!c) return;
-  if (!window.confirm('Delete delivery channel "' + c.name + '"? Rules referencing it will stop delivering through it.')) return;
-  try { await api.notificationChannels.delete(c.id); showToast("Channel deleted", "success"); loadChannelsTab(); }
+  if (!(await showConfirm('Delete delivery channel "' + c.name + '"? Automations referencing it will stop delivering through it.'))) return;
+  try { await api.deliveryChannels.delete(c.id); showToast("Channel deleted", "success"); loadChannelsTab(); }
   catch (err) { showToast(err.message || "Delete failed", "error"); }
 }
 
@@ -1325,7 +1330,7 @@ async function testChannel(c, btn) {
     return;
   }
   if (btn) btn.disabled = true;
-  try { var r = await api.notificationChannels.test(c.id, body); showToast(r.message || "Test sent", "success"); }
+  try { var r = await api.deliveryChannels.test(c.id, body); showToast(r.message || "Test sent", "success"); }
   catch (err) { showToast(err.message || "Test failed", "error"); }
   if (btn) btn.disabled = false;
 }
@@ -1414,7 +1419,7 @@ function openChannelModal(existing) {
       gb.addEventListener("click", async function () {
         gb.disabled = true;
         try {
-          var r = await api.notificationChannels.generateVapid(cur.id);
+          var r = await api.deliveryChannels.generateVapid(cur.id);
           var pubEl = document.getElementById("ch-webpush-public");
           if (pubEl) pubEl.value = r.publicKey || "";
           showToast("New VAPID keypair generated", "success");
@@ -1448,12 +1453,12 @@ function openChannelModal(existing) {
     this.disabled = true;
     try {
       if (isEdit) {
-        await api.notificationChannels.update(cur.id, payload);
+        await api.deliveryChannels.update(cur.id, payload);
       } else {
-        var created = await api.notificationChannels.create(payload);
+        var created = await api.deliveryChannels.create(payload);
         // A brand-new Web Push channel needs a keypair to send — mint one now.
         if (type === "web_push" && created && created.id) {
-          try { await api.notificationChannels.generateVapid(created.id); } catch (_e) { /* operator can regenerate later */ }
+          try { await api.deliveryChannels.generateVapid(created.id); } catch (_e) { /* operator can regenerate later */ }
         }
       }
       closeModal();

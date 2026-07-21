@@ -2,7 +2,9 @@
  *
  * Receives pushes signed with the server VAPID key (deliverNotifications
  * web_push channel) and shows a system notification. Clicking it focuses an
- * existing Polaris tab (or opens one) at the notifications page / deep link.
+ * existing Polaris tab (or opens one) at the Automations page / deep link.
+ * (/notifications.html deep links from already-delivered pushes stay valid —
+ * the server keeps that page gated + reachable forever.)
  *
  * Registered by public/js/push.js on both the desktop app and the mobile SPA.
  * Intentionally minimal — no offline caching; Polaris is an online-only tool.
@@ -27,7 +29,7 @@ self.addEventListener("push", function (event) {
   var options = {
     body: data.body || "",
     tag: data.notificationId || undefined,
-    data: { url: data.url || "/notifications.html" },
+    data: { url: data.url || "/automations.html" },
     badge: "/favicon.ico",
     icon: "/favicon.ico",
     requireInteraction: data.severity === "error",
@@ -37,7 +39,7 @@ self.addEventListener("push", function (event) {
 
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
-  var url = (event.notification.data && event.notification.data.url) || "/notifications.html";
+  var url = (event.notification.data && event.notification.data.url) || "/automations.html";
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (clientList) {
       for (var i = 0; i < clientList.length; i++) {
