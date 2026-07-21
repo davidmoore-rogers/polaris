@@ -84,6 +84,7 @@ export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "integrations", label: "Integrations", description: "FortiManager / FortiGate / Windows Server / Entra ID / Active Directory integration CRUD + discovery." },
   { key: "discoveryConflicts", label: "Discovery Conflicts", description: "Accept / reject / merge reservation + asset conflicts raised by discovery." },
   { key: "deviceMap", label: "Device Map", description: "Geographic map of FortiGates + topology graphs." },
+  { key: "applicationMap", label: "Application Map", description: "Application-connectivity topology built from mapped-process connections. Read = view the map; Read-Write = save/reset the shared layout." },
   { key: "mapRegions", label: "Map Regions", description: "Draw / edit / delete polygons that auto-tag enclosed FortiGates." },
   { key: "deviceIcons", label: "Device Icons", description: "Operator-uploaded icons overlaid on the topology graph." },
   { key: "events", label: "Events / Audit Log", description: "Audit log + syslog/SFTP archival settings + event retention." },

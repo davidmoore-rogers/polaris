@@ -451,7 +451,7 @@ app.use((req, res, next) => {
 });
 
 // Protect dashboard pages — redirect unauthenticated users to login
-const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/notifications.html", "/server-settings.html", "/map.html"];
+const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/notifications.html", "/server-settings.html", "/map.html", "/appmap.html"];
 
 // Page-level gating — each protected page requires at least `read` on the
 // matching function key. Maps to the same matrix the API guards use, so
@@ -464,6 +464,7 @@ const pageRequiredPermission: Record<string, { key: string; level: "read" | "wri
   "/integrations.html":    { key: "integrations",         level: "read" },
   "/notifications.html":   { key: "notifications",        level: "read" },
   "/server-settings.html": { key: "serverSettingsSystem", level: "read" },
+  "/appmap.html":          { key: "applicationMap",       level: "read" },
 };
 const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
 app.use(async (req, res, next) => {

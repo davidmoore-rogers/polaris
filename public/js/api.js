@@ -413,6 +413,7 @@ const api = {
       if (opts.limit) qs.push("limit=" + encodeURIComponent(opts.limit));
       return request("GET", `/assets/${id}/process-logs?` + qs.join("&"));
     },
+    processConnections:   (id, name) => request("GET", `/assets/${id}/process-connections` + (name ? "?name=" + encodeURIComponent(name) : "")),
     setProcessConfig:     (id, name, body) => request("PUT", `/assets/${id}/processes/${encodeURIComponent(name)}/config`, body),
     controlProcess:       (id, name, action) => request("POST", `/assets/${id}/processes/${encodeURIComponent(name)}/control`, { action: action }),
     processCommand:       (id, commandId) => request("GET", `/assets/${id}/process-command/${commandId}`),
@@ -854,6 +855,11 @@ const api = {
     topologySearch: (id, q) => request("GET", `/map/sites/${id}/topology/search?q=${encodeURIComponent(q)}`),
     saveTopologyLayout:   (id, view, positions) => request("PUT",    `/map/sites/${id}/topology/layout`, { view, positions }),
     deleteTopologyLayout: (id, view)            => request("DELETE", `/map/sites/${id}/topology/layout?view=${encodeURIComponent(view)}`),
+  },
+  applicationMap: {
+    get:          ()                => request("GET",    "/application-map"),
+    saveLayout:   (view, positions) => request("PUT",    "/application-map/layout", { view: view, positions: positions }),
+    deleteLayout: (view)            => request("DELETE", "/application-map/layout?view=" + encodeURIComponent(view || "global")),
   },
   mapRegions: {
     list:   ()                     => request("GET",    "/map/regions"),

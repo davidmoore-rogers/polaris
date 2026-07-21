@@ -93,6 +93,9 @@ const (
 	defaultProcessTelemetryIntervalSec = 60
 	// Per-pinned-program log-tail cadence — 60 s.
 	defaultProcessLogIntervalSec       = 60
+	// Per-mapped-program connection-discovery cadence (Application Map) — 60 s,
+	// riding the same per-minute rhythm as the pinned telemetry pass.
+	defaultProcessConnectionsIntervalSec = 60
 	// Process-control command poll cadence — 20 s (operator clicks Stop/Start/
 	// Restart and expects it to act within seconds, not a minute).
 	defaultCommandPollIntervalSec      = 20
@@ -115,10 +118,14 @@ type eventLogRuntimeCfg struct {
 
 // processesRuntimeCfg holds the resolved processes-stream state from /config.
 // The inventory + telemetry + log loops gate on `enabled`; `pinned` lists the
-// operator-pinned programs (with log config) the telemetry/log loops collect.
+// operator-pinned programs (with log config) the telemetry/log loops collect;
+// `mapped` lists the programs toggled for Application Map connection discovery
+// (independent of `pinned` — mapped-only programs must not wake the
+// telemetry/log loops, and vice versa).
 type processesRuntimeCfg struct {
 	enabled bool
 	pinned  []transport.PinnedProcess
+	mapped  []string
 }
 
 var (
@@ -167,9 +174,9 @@ func applyServerStreams(resp *transport.ConfigResponse) {
 		eventLogCfg.Store(eventLogRuntimeCfg{})
 	}
 	if s, ok := resp.Streams["processes"]; ok {
-		processesCfg.Store(processesRuntimeCfg{enabled: s.Enabled, pinned: resp.PinnedProcesses})
+		processesCfg.Store(processesRuntimeCfg{enabled: s.Enabled, pinned: resp.PinnedProcesses, mapped: resp.MappedProcesses})
 	} else {
-		processesCfg.Store(processesRuntimeCfg{pinned: resp.PinnedProcesses})
+		processesCfg.Store(processesRuntimeCfg{pinned: resp.PinnedProcesses, mapped: resp.MappedProcesses})
 	}
 }
 
@@ -260,6 +267,7 @@ func runAgent(ctx context.Context, confPath string) {
 	go processInventoryLoop(ctx, cfg, client)
 	go processTelemetryLoop(ctx, cfg, client)
 	go processLogLoop(ctx, cfg, client)
+	go processConnectionsLoop(ctx, cfg, client)
 	go commandLoop(ctx, cfg, client)
 	go wsLoop(ctx, cfg, client)
 
@@ -768,6 +776,57 @@ func pushProcessLogOne(client *transport.Client, stateDir string) {
 	}
 	if verbose {
 		log.Printf("processLog sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
+	}
+}
+
+// processConnectionsLoop collects listening ports + outbound/inbound peers for
+// the operator-MAPPED programs once a minute (Application Map). Gated on the
+// processes stream resolving to agent AND at least one mapped program.
+func processConnectionsLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
+	interval := time.Duration(defaultProcessConnectionsIntervalSec) * time.Second
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	pushProcessConnectionsOne(client)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pushProcessConnectionsOne(client)
+		}
+	}
+}
+
+func pushProcessConnectionsOne(client *transport.Client) {
+	pc := loadProcessesCfg()
+	if !pc.enabled || len(pc.mapped) == 0 {
+		return
+	}
+	type res struct{ s []*transport.ProcessConnectionSample }
+	ch := make(chan res, 1)
+	go func() { ch <- res{collectors.ProcessConnectionsOnce(pc.mapped)} }()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(collectionTimeout):
+		log.Printf("push processConnections samples: collector timed out after %.0fs", collectionTimeout.Seconds())
+		return
+	}
+	// Zero rows → no push: absence never deletes server-side (rows age out),
+	// so an empty scrape has nothing to say.
+	if len(r.s) == 0 {
+		return
+	}
+	resp, err := client.PushSamples(&transport.SamplesBody{
+		Stream:  "processConnections",
+		Samples: r.s,
+	})
+	if err != nil {
+		log.Printf("push processConnections samples: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("processConnections sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
 	}
 }
 

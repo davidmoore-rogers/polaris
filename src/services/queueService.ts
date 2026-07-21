@@ -48,6 +48,7 @@ import {
   runFastFilteredFor,
   runLldpFor,
   runStorageFor,
+  runProcessesFor,
   type MonitorCadence,
 } from "./monitoringService.js";
 
@@ -156,6 +157,9 @@ export const QUEUE_NAMES: Record<MonitorCadence, string> = {
   // (singleton key `<assetId>:<cadence>` collapses duplicate publishes).
   lldp:         "polaris-monitor-lldp",
   storage:      "polaris-monitor-storage",
+  // Agentless (ssh/winrm) processes cadence: inventory + the 60s pinned/mapped
+  // sub-pass (cpu/mem telemetry + Application Map connections).
+  processes:    "polaris-monitor-processes",
 };
 
 interface MonitorJobPayload {
@@ -224,6 +228,7 @@ let slotPools: {
   systemInfo:   WorkerSlotPool;
   lldp:         WorkerSlotPool;
   storage:      WorkerSlotPool;
+  processes:    WorkerSlotPool;
   floating:     WorkerSlotPool;
 } | null = null;
 
@@ -294,7 +299,7 @@ let floatingLoopRunning = false;
 // generally cheaper than the per-vendor disk scalar pair; storage outranks
 // telemetry because storage feeds capacity alerts directly. Both still sit
 // below probe/fastFiltered so probes (the cheapest cadence) never starve.
-const FLOAT_PRIORITY: MonitorCadence[] = ["probe", "fastFiltered", "lldp", "storage", "telemetry", "systemInfo"];
+const FLOAT_PRIORITY: MonitorCadence[] = ["probe", "fastFiltered", "lldp", "storage", "processes", "telemetry", "systemInfo"];
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -383,7 +388,7 @@ async function refreshPgbossMetrics(): Promise<void> {
       setPgbossJobAge(name, "created", 0);
       setPgbossJobAge(name, "active", 0);
     }
-    const heavyQueues = new Set([QUEUE_NAMES.telemetry, QUEUE_NAMES.systemInfo, QUEUE_NAMES.lldp, QUEUE_NAMES.storage]);
+    const heavyQueues = new Set([QUEUE_NAMES.telemetry, QUEUE_NAMES.systemInfo, QUEUE_NAMES.lldp, QUEUE_NAMES.storage, QUEUE_NAMES.processes]);
     for (const row of rows) {
       setPgbossQueueJobs(row.name, row.state, Number(row.count));
       // Only created/active have a meaningful "oldest job age." Failed jobs
@@ -578,6 +583,8 @@ async function ensureQueues(boss: PgBossType): Promise<void> {
     // (SNMP-MIB or FortiOS REST) and might tail at the same pace.
     lldp:         600,
     storage:      600,
+    // SSH/WinRM sessions with generous per-command timeouts + two sub-passes.
+    processes:    600,
   };
   // createQueue is idempotent on name but does NOT re-apply config to an
   // existing queue — the stored `expire_seconds` / `retry_limit` / etc on
@@ -688,6 +695,9 @@ export async function startPgbossWorkers(): Promise<void> {
   // bump POLARIS_MONITOR_LLDP_WORKERS / POLARIS_MONITOR_STORAGE_WORKERS via env.
   const lldpWorkers     = resolveEnvInt("POLARIS_MONITOR_LLDP_WORKERS",    12);
   const storageWorkers  = resolveEnvInt("POLARIS_MONITOR_STORAGE_WORKERS", 12);
+  // Agentless processes cadence (ssh/winrm). Sized like lldp/storage — only
+  // ssh/winrm-polled assets with pins/mapped names produce work.
+  const processesWorkers = resolveEnvInt("POLARIS_MONITOR_PROCESSES_WORKERS", 12);
   const floatingWorkers = resolveEnvInt("POLARIS_MONITOR_FLOATING_WORKERS", 32);
   setMonitorWorkers({
     probe:        probeWorkers,
@@ -696,11 +706,12 @@ export async function startPgbossWorkers(): Promise<void> {
     systemInfo:   heavyWorkers,
     lldp:         lldpWorkers,
     storage:      storageWorkers,
+    processes:    processesWorkers,
     floating:     floatingWorkers,
   });
   logger.info(
     {
-      probeWorkers, fastWorkers, heavyWorkers, lldpWorkers, storageWorkers, floatingWorkers, cores: cpus().length,
+      probeWorkers, fastWorkers, heavyWorkers, lldpWorkers, storageWorkers, processesWorkers, floatingWorkers, cores: cpus().length,
     },
     "pg-boss workers configured",
   );
@@ -716,6 +727,7 @@ export async function startPgbossWorkers(): Promise<void> {
     systemInfo:   createWorkerSlotPool("sysinfo",   heavyWorkers),
     lldp:         createWorkerSlotPool("lldp",      lldpWorkers),
     storage:      createWorkerSlotPool("storage",   storageWorkers),
+    processes:    createWorkerSlotPool("processes", processesWorkers),
     floating:     createWorkerSlotPool("floating",  floatingWorkers),
   };
 
@@ -764,6 +776,14 @@ export async function startPgbossWorkers(): Promise<void> {
   }, async (jobs: PgBossJob<MonitorJobPayload>[]) => {
     await runDedicatedWorker("storage", jobs[0], (assetId, labels) =>
       runStorageFor(assetId, labels),
+    );
+  });
+
+  await boss.work<MonitorJobPayload>(QUEUE_NAMES.processes, {
+    localConcurrency: processesWorkers, batchSize: 1, pollingIntervalSeconds: 5,
+  }, async (jobs: PgBossJob<MonitorJobPayload>[]) => {
+    await runDedicatedWorker("processes", jobs[0], (assetId, labels) =>
+      runProcessesFor(assetId, labels),
     );
   });
 
@@ -868,6 +888,7 @@ async function dispatchFloatingJob(
       case "systemInfo":   await runSystemInfoFor(assetId, labels);   break;
       case "lldp":         await runLldpFor(assetId, labels);         break;
       case "storage":      await runStorageFor(assetId, labels);      break;
+      case "processes":    await runProcessesFor(assetId, labels);    break;
     }
     await boss.complete(queueName, job.id);
   } catch (err) {

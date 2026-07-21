@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polaris — Application Map</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="/logo.png">
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/appmap.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <main class="main">
+      <div class="page-header">
+        <h2>Application Map</h2>
+      </div>
+
+      <div class="appmap-toolbar">
+        <label class="appmap-toolbar-field">
+          <span>Seen within</span>
+          <select id="appmap-age" class="input">
+            <option value="600">Live (10 min)</option>
+            <option value="3600">1 hour</option>
+            <option value="86400" selected>24 hours</option>
+            <option value="604800">7 days</option>
+            <option value="0">All retained</option>
+          </select>
+        </label>
+        <label class="appmap-check"><input type="checkbox" id="appmap-proto-tcp" checked> TCP</label>
+        <label class="appmap-check"><input type="checkbox" id="appmap-proto-udp" checked> UDP</label>
+        <label class="appmap-check"><input type="checkbox" id="appmap-hide-external"> Hide external</label>
+        <div class="appmap-search-wrap">
+          <input type="search" id="appmap-search" class="input" placeholder="Find host / process / IP…"
+                 aria-label="Find a node" autocomplete="off" spellcheck="false" list="appmap-search-list">
+          <datalist id="appmap-search-list"></datalist>
+        </div>
+        <div class="appmap-toolbar-actions">
+          <span id="appmap-status" class="appmap-status"></span>
+          <button type="button" class="btn-icon" id="appmap-legend-btn" aria-label="Toggle legend" title="Toggle legend" style="line-height:0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="6" cy="6" r="2"/><line x1="11" y1="6" x2="21" y2="6"/>
+              <circle cx="6" cy="12" r="2"/><line x1="11" y1="12" x2="21" y2="12"/>
+              <circle cx="6" cy="18" r="2"/><line x1="11" y1="18" x2="21" y2="18"/>
+            </svg>
+          </button>
+          <button type="button" class="btn-icon" id="appmap-reset-layout" aria-label="Reset layout" title="Reset layout (discard manual node positions)" hidden style="line-height:0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="1 4 1 10 7 10"/>
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+            </svg>
+          </button>
+          <button type="button" class="btn-icon" id="appmap-refresh" aria-label="Refresh" title="Refresh now (auto-refreshes every 60s)" style="line-height:0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10"/>
+              <polyline points="1 20 1 14 7 14"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="appmap-layout">
+        <div id="appmap-graph" class="appmap-graph">
+          <div id="appmap-legend" class="appmap-legend" hidden>
+            <header class="appmap-legend-header">
+              <span>Legend</span>
+              <button type="button" class="btn-icon" id="appmap-legend-close" aria-label="Close legend" title="Close">&times;</button>
+            </header>
+            <div class="appmap-legend-body">
+              <div class="appmap-legend-row"><span class="appmap-legend-swatch appmap-legend-asset"></span> Asset (box groups its mapped processes)</div>
+              <div class="appmap-legend-row"><span class="appmap-legend-swatch appmap-legend-proc"></span> Mapped process</div>
+              <div class="appmap-legend-row"><span class="appmap-legend-swatch appmap-legend-unknown"></span> External / unknown IP</div>
+              <div class="appmap-legend-row"><span class="appmap-legend-line appmap-legend-line-process"></span> Process &rarr; process (both ends mapped)</div>
+              <div class="appmap-legend-row"><span class="appmap-legend-line appmap-legend-line-asset"></span> Process &rarr; asset (destination known, process not mapped)</div>
+              <div class="appmap-legend-row"><span class="appmap-legend-line appmap-legend-line-external"></span> External connection</div>
+              <div class="appmap-legend-row"><span class="appmap-legend-line appmap-legend-line-stale"></span> Stale (not seen in the last 15 min)</div>
+            </div>
+          </div>
+          <div id="appmap-empty" class="appmap-empty" hidden>
+            <h3 id="appmap-empty-title">No mapped processes yet</h3>
+            <p id="appmap-empty-text">
+              Open an asset's <strong>Processes</strong> tab and check <strong>Map</strong> on the
+              processes whose connectivity you want drawn here. Listening ports and connections
+              appear within a couple of minutes of mapping a process.
+            </p>
+            <a class="btn btn-secondary" href="/assets.html">Go to Assets</a>
+          </div>
+        </div>
+        <aside id="appmap-info" class="appmap-info" hidden></aside>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/vendor/cytoscape.min.js"></script>
+  <script src="/js/vendor/dagre.min.js"></script>
+  <script src="/js/vendor/cytoscape-dagre.js"></script>
+  <script src="/js/vendor/jspdf.umd.min.js"></script>
+  <script src="/js/vendor/jspdf.plugin.autotable.min.js"></script>
+  <script src="/js/vendor/html-to-image.min.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/app.js"></script>
+  <!-- assets.js + its UI deps power the canonical asset details slide-in
+       (openViewModal) that the Application Map reuses for node click-through —
+       same stack as map.html; each file's DOMContentLoaded handler self-guards
+       on its own page DOM. -->
+  <script src="/js/table-sf.js"></script>
+  <script src="/js/favorites.js"></script>
+  <script src="/js/integrations.js"></script>
+  <script src="/js/assets.js"></script>
+  <script src="/js/appmap.js"></script>
+</body>
+</html>

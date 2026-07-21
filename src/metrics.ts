@@ -310,7 +310,7 @@ const jobTotal = new Counter({
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-export type Cadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage";
+export type Cadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes";
 export type WorkOutcome = "success" | "failure" | "crash";
 export type ProbeOutcome = "success" | "failure";
 
@@ -368,6 +368,7 @@ export function setQueueDepth(depths: Partial<Record<Cadence, number>>): void {
   if (depths.systemInfo   !== undefined) monitorQueueDepth.set({ cadence: "systemInfo" }, depths.systemInfo);
   if (depths.lldp         !== undefined) monitorQueueDepth.set({ cadence: "lldp" }, depths.lldp);
   if (depths.storage      !== undefined) monitorQueueDepth.set({ cadence: "storage" }, depths.storage);
+  if (depths.processes    !== undefined) monitorQueueDepth.set({ cadence: "processes" }, depths.processes);
 }
 
 export function setPgbossQueueJobs(queue: string, state: string, count: number): void {
@@ -393,6 +394,7 @@ export function setMonitorWorkers(
   if (counts.systemInfo   !== undefined) monitorWorkers.set({ queue: "systemInfo" },   counts.systemInfo);
   if (counts.lldp         !== undefined) monitorWorkers.set({ queue: "lldp" },         counts.lldp);
   if (counts.storage      !== undefined) monitorWorkers.set({ queue: "storage" },      counts.storage);
+  if (counts.processes    !== undefined) monitorWorkers.set({ queue: "processes" },    counts.processes);
   if (counts.floating     !== undefined) monitorWorkers.set({ queue: "floating" },     counts.floating);
 }
 

@@ -14033,7 +14033,7 @@ var _assetEventsLoaded = false;     // lazy-load guard (first tab click)
 function _assetProcessesTabHTML(assetId) {
   return '<div class="section-block">' +
     '<div class="filter-bar" style="justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.5rem">' +
-      '<p class="hint" style="margin:0;max-width:640px">Check <strong>Monitor</strong> to collect CPU/RAM history and logs for a program (sampled once a minute). Check <strong>Alert</strong> to flag it for future alerting/notifications.</p>' +
+      '<p class="hint" style="margin:0;max-width:640px">Check <strong>Monitor</strong> to collect CPU/RAM history and logs for a program (sampled once a minute). Check <strong>Alert</strong> to flag it for future alerting/notifications. Check <strong>Map</strong> to discover the program\'s listening ports and connections for the <a href="/appmap.html">Application Map</a>.</p>' +
       '<button class="btn btn-secondary btn-sm" id="asset-view-proc-refresh">Refresh</button>' +
     '</div>' +
     '<div class="table-wrapper">' +
@@ -14041,6 +14041,7 @@ function _assetProcessesTabHTML(assetId) {
         '<thead><tr>' +
           '<th style="width:64px"  data-col-id="monitor" data-col-required="true">Monitor</th>' +
           '<th style="width:54px"  data-col-id="alert"   data-col-required="true">Alert</th>' +
+          '<th style="width:50px"  data-col-id="map"     data-col-required="true">Map</th>' +
           '<th                      data-col-id="name"    data-col-required="true" data-sf-key="name"          data-sf-type="string">Name</th>' +
           '<th style="width:80px"  data-col-id="instances" data-sf-key="instanceCount" data-sf-type="number">Instances</th>' +
           '<th style="width:80px"  data-col-id="cpu"       data-sf-key="cpuPct"        data-sf-type="number">CPU %</th>' +
@@ -14049,7 +14050,7 @@ function _assetProcessesTabHTML(assetId) {
           '<th                      data-col-id="service"   data-sf-key="serviceUnit"   data-sf-type="string">Service/Unit</th>' +
         '</tr></thead>' +
         '<tbody id="asset-view-proc-tbody">' +
-          '<tr><td colspan="8" class="empty-state">Loading…</td></tr>' +
+          '<tr><td colspan="9" class="empty-state">Loading…</td></tr>' +
         '</tbody>' +
       '</table>' +
     '</div>' +
@@ -14067,6 +14068,7 @@ function _wireAssetProcessesTab(asset) {
   var configs = {};
   var monitored = new Set();
   var alerted = new Set();
+  var mapped = new Set();
 
   function fmtPct(v) { return v == null ? "—" : Number(v).toFixed(1); }
 
@@ -14074,17 +14076,21 @@ function _wireAssetProcessesTab(asset) {
     var tbody = document.getElementById("asset-view-proc-tbody");
     if (!tbody) return;
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No processes reported yet. Processes appear once an agent (or an SNMP/SSH/WinRM poll) reports this host\'s process list.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No processes reported yet. Processes appear once an agent (or an SNMP/SSH/WinRM poll) reports this host\'s process list.</td></tr>';
       return;
     }
+    var canWrite = typeof canManageAssets === "function" && canManageAssets();
+    var disabled = canWrite ? "" : " disabled";
     tbody.innerHTML = data.map(function (p) {
       var nm = escapeHtml(p.name);
       var monChecked = monitored.has(p.name) ? " checked" : "";
       var altChecked = alerted.has(p.name) ? " checked" : "";
+      var mapChecked = mapped.has(p.name) ? " checked" : "";
       var ram = (p.memRssBytes != null) ? _fmtBytes(Number(p.memRssBytes)) : "—";
       return '<tr>' +
-        '<td style="text-align:center"><input type="checkbox" class="asset-proc-monitor-toggle" data-proc-name="' + nm + '"' + monChecked + '></td>' +
-        '<td style="text-align:center"><input type="checkbox" class="asset-proc-alert-toggle" data-proc-name="' + nm + '"' + altChecked + '></td>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-proc-monitor-toggle" data-proc-name="' + nm + '"' + monChecked + disabled + '></td>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-proc-alert-toggle" data-proc-name="' + nm + '"' + altChecked + disabled + '></td>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-proc-map-toggle" data-proc-name="' + nm + '" title="Discover listening ports + connections for the Application Map"' + mapChecked + disabled + '></td>' +
         '<td title="' + escapeHtml(p.exePath || "") + '"><a href="#" class="asset-proc-name-link" data-proc-name="' + nm + '">' + nm + '</a></td>' +
         '<td>' + (p.instanceCount != null ? p.instanceCount : "—") + '</td>' +
         '<td>' + fmtPct(p.cpuPct) + '</td>' +
@@ -14099,19 +14105,20 @@ function _wireAssetProcessesTab(asset) {
 
   // Persist a pin-set change. `which` selects which array/field to write.
   async function togglePin(which, name, on) {
-    var set = which === "monitor" ? monitored : alerted;
-    var field = which === "monitor" ? "monitoredProcesses" : "alertWatchedProcesses";
+    var set = which === "monitor" ? monitored : which === "map" ? mapped : alerted;
+    var field = which === "monitor" ? "monitoredProcesses" : which === "map" ? "mappedProcesses" : "alertWatchedProcesses";
     var next = new Set(set);
     if (on) next.add(name); else next.delete(name);
     try {
       var body = {};
       body[field] = Array.from(next);
       await api.assets.update(assetId, body);
-      if (which === "monitor") monitored = next; else alerted = next;
-      showToast(on
-        ? (which === "monitor" ? ("Monitoring " + name + " (CPU/RAM + logs)") : ("Flagged " + name + " for alerting"))
-        : (which === "monitor" ? ("Stopped monitoring " + name) : ("Unflagged " + name)),
-        "success");
+      if (which === "monitor") monitored = next; else if (which === "map") mapped = next; else alerted = next;
+      var msg;
+      if (which === "monitor") msg = on ? ("Monitoring " + name + " (CPU/RAM + logs)") : ("Stopped monitoring " + name);
+      else if (which === "map") msg = on ? ("Mapping " + name + " on the Application Map (ports + connections)") : ("Unmapped " + name);
+      else msg = on ? ("Flagged " + name + " for alerting") : ("Unflagged " + name);
+      showToast(msg, "success");
     } catch (err) {
       showToast(err && err.message ? err.message : "Failed to update", "error");
       apply(); // revert the checkbox to the persisted state
@@ -14126,6 +14133,7 @@ function _wireAssetProcessesTab(asset) {
       configs = (resp && resp.configs) || {};
       monitored = new Set((resp && resp.monitoredProcesses) || []);
       alerted = new Set((resp && resp.alertWatchedProcesses) || []);
+      mapped = new Set((resp && resp.mappedProcesses) || []);
       // Order matters: construct TableSF FIRST — it rewrites each data-sf-key
       // header's innerHTML (sort caret + filter UI), which wipes any resize
       // handle added earlier. applyTableLayout runs AFTER so its
@@ -14146,7 +14154,7 @@ function _wireAssetProcessesTab(asset) {
       }
       apply();
     } catch (err) {
-      if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
+      if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
     }
   }
 
@@ -14159,6 +14167,7 @@ function _wireAssetProcessesTab(asset) {
       if (!name) return;
       if (cb.classList.contains("asset-proc-monitor-toggle")) togglePin("monitor", name, cb.checked);
       else if (cb.classList.contains("asset-proc-alert-toggle")) togglePin("alert", name, cb.checked);
+      else if (cb.classList.contains("asset-proc-map-toggle")) togglePin("map", name, cb.checked);
     });
     // Name click → per-process detail slide-in (charts + logs + log config).
     tbody.addEventListener("click", function (e) {
@@ -14289,6 +14298,13 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
       '<div id="proc-mem-chart" class="proc-chart-box"></div>' +
       '<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
         '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem;gap:8px;flex-wrap:wrap">' +
+          '<h4 style="margin:0">Ports &amp; Connections</h4>' +
+          '<a class="btn btn-sm btn-secondary" href="/appmap.html#focus=' + encodeURIComponent("asset:" + asset.id) + '">View on Application Map</a>' +
+        '</div>' +
+        '<div id="proc-conn-view" style="font-size:0.8rem;color:var(--color-text-secondary)">Loading…</div>' +
+      '</div>' +
+      '<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
+        '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem;gap:8px;flex-wrap:wrap">' +
           '<h4 style="margin:0">Logs</h4>' +
           '<div style="display:flex;align-items:center;gap:10px">' +
             '<label style="font-size:0.78rem;display:flex;align-items:center;gap:4px"><input type="checkbox" id="proc-logs-flagged-only">Flagged only</label>' +
@@ -14321,6 +14337,7 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
 
   await _loadProcessHistoryFor(asset.id, name, _getChartRangePref("assetProcess", "1h"));
   _loadProcessLogsFor(asset.id, name);
+  _loadProcessConnectionsFor(asset.id, name);
 
   document.querySelectorAll(".proc-range-btn").forEach(function (b) {
     b.addEventListener("click", function () {
@@ -14429,6 +14446,75 @@ function _pollProcessCommand(assetId, commandId, statusEl, tries) {
       statusEl.textContent = " — still pending (agent may be offline)";
     }
   }).catch(function () { /* transient — leave the last status */ });
+}
+
+// Ports & Connections section of the process detail panel (Application Map
+// data, per-asset view). Three compact tables: listening ports, outbound
+// connections, inbound peers — remote endpoints hydrated with the matched
+// asset's hostname (link opens that asset's slide-in).
+async function _loadProcessConnectionsFor(assetId, name) {
+  var el = document.getElementById("proc-conn-view");
+  if (!el) return;
+  function remoteCell(r) {
+    var addr = escapeHtml(r.remoteIp) + (r.remotePort ? ":" + r.remotePort : "");
+    if (r.remoteAssetId) {
+      var label = escapeHtml(r.remoteHostname || r.remoteIp);
+      return '<a href="#" class="proc-conn-asset-link" data-asset-id="' + escapeHtml(r.remoteAssetId) + '">' + label + '</a> <span style="color:var(--color-text-tertiary)">(' + addr + ')</span>';
+    }
+    return addr;
+  }
+  function ago(iso) {
+    var s = Math.max(0, Date.now() - Date.parse(iso));
+    if (s < 90 * 1000) return "just now";
+    if (s < 3600 * 1000) return Math.round(s / 60000) + "m ago";
+    if (s < 86400 * 1000) return Math.round(s / 3600000) + "h ago";
+    return Math.round(s / 86400000) + "d ago";
+  }
+  function table(headers, rowsHtml) {
+    return '<table style="width:100%;border-collapse:collapse;font-size:0.78rem;margin:0.25rem 0 0.75rem">' +
+      '<tr>' + headers.map(function (h) { return '<th style="text-align:left;padding:2px 8px 2px 0;border-bottom:1px solid var(--color-border);font-weight:500">' + h + '</th>'; }).join("") + '</tr>' +
+      rowsHtml + '</table>';
+  }
+  try {
+    var d = await api.assets.processConnections(assetId, name);
+    var html = "";
+    if (d.listening.length) {
+      html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Listening (' + d.listening.length + ')</h5>';
+      html += table(["Port", "Bind", "Last seen"], d.listening.map(function (r) {
+        return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.port) + '</td>' +
+          '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.bindAddr || "—") + '</td>' +
+          '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+      }).join(""));
+    }
+    if (d.outbound.length) {
+      html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Outbound (' + d.outbound.length + ')</h5>';
+      html += table(["Destination", "Proto", "Last seen"], d.outbound.map(function (r) {
+        return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
+          '<td style="padding:2px 8px 2px 0">' + escapeHtml(r.proto) + '</td>' +
+          '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+      }).join(""));
+    }
+    if (d.inbound.length) {
+      html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Inbound peers (' + d.inbound.length + ')</h5>';
+      html += table(["Peer", "To port", "Last seen"], d.inbound.map(function (r) {
+        return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
+          '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.localPort) + '</td>' +
+          '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+      }).join(""));
+    }
+    if (!html) {
+      html = 'No connection data yet. Check <strong>Map</strong> for this process in the Processes tab to start collecting listening ports and connections (data appears within a minute or two).';
+    }
+    el.innerHTML = html;
+    el.querySelectorAll(".proc-conn-asset-link").forEach(function (a) {
+      a.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        openViewModal(a.getAttribute("data-asset-id"));
+      });
+    });
+  } catch (err) {
+    el.textContent = "Error: " + (err && err.message ? err.message : String(err));
+  }
 }
 
 async function _loadProcessLogsFor(assetId, name) {

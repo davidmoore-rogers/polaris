@@ -208,6 +208,20 @@ type ProcessTelemetrySample struct {
 	InstanceCount int      `json:"instanceCount,omitempty"`
 }
 
+// ProcessConnectionSample matches the server's ProcessConnectionSampleSchema —
+// one socket fact for a MAPPED program (Application Map). Kind selects which
+// fields are meaningful (listen: local*, outbound: remote*, inbound: remoteIp +
+// localPort); the rest are omitted and the server fills sentinels.
+type ProcessConnectionSample struct {
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`  // listen | outbound | inbound
+	Proto      string `json:"proto"` // tcp | udp
+	LocalAddr  string `json:"localAddr,omitempty"`
+	LocalPort  int    `json:"localPort,omitempty"`
+	RemoteIp   string `json:"remoteIp,omitempty"`
+	RemotePort int    `json:"remotePort,omitempty"`
+}
+
 // ProcessLogSample matches the server's ProcessLogSampleSchema — one row per
 // tailed log line for a pinned program.
 type ProcessLogSample struct {
@@ -367,6 +381,11 @@ type ConfigResponse struct {
 	Monitored bool                  `json:"monitored"`
 	// Feature C — programs pinned for per-minute telemetry + log tailing.
 	PinnedProcesses []PinnedProcess `json:"pinnedProcesses,omitempty"`
+	// Application Map — programs toggled for connection discovery (listening
+	// ports + outbound/inbound peers). Independent of PinnedProcesses: a
+	// mapped-only program must not wake the telemetry/log loops. Absent on
+	// older servers → the connections loop idles.
+	MappedProcesses []string `json:"mappedProcesses,omitempty"`
 	// Phase 2 dual-pin: the current set of acceptable leaf-cert SHA-256
 	// fingerprints (canonical pin + any operator-staged additional pins).
 	// Empty slice means "field not present" — older Phase 1 servers don't

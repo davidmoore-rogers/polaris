@@ -788,6 +788,15 @@ model Asset {
   // to decide when the next job is due.
   lastLldpAt            DateTime?
   lastStorageAt         DateTime?
+  // Agentless (ssh/winrm) processes-stream cadence anchors, same model as
+  // lastLldpAt/lastStorageAt: lastProcessesAt gates the full inventory pass
+  // (processesIntervalSec, default 600s); lastProcessPinsAt gates the 60s
+  // pinned/mapped sub-pass (cpu/mem telemetry for monitoredProcesses +
+  // connection rows for mappedProcesses). Agent-mode assets never use these —
+  // the agent runs its own loops. Stamped even on failure so a bad credential
+  // can't retrigger every heavy tick (AD-lockout / fail2ban exposure).
+  lastProcessesAt       DateTime?
+  lastProcessPinsAt     DateTime?
   // Bumped after every successful collectCustomWidgets pass.
   lastCustomWidgetAt    DateTime?
 
@@ -819,6 +828,14 @@ model Asset {
   // "Alert" checkbox). Storage-only for now — the alerting consumer lands with
   // the notifications feature; pinning here just persists operator intent.
   alertWatchedProcesses String[] @default([])
+
+  // Process names toggled for Application Map connection discovery (the
+  // Processes-tab "Map" checkbox). Independent of monitoredProcesses — a
+  // mapped-only process gets listening-port / connection collection but no
+  // cpu/mem telemetry or log tailing, and vice versa. Drives the agent's
+  // processConnections stream + the agentless 60s pinned/mapped sub-pass;
+  // rows land in AssetProcessConnection (accumulate + age).
+  mappedProcesses String[] @default([])
 
   // Quarantine. When non-null the asset is currently quarantined on one or
   // more FortiGates (per quarantineTargets). statusBeforeQuarantine stores
@@ -910,6 +927,7 @@ model Asset {
   managedAgent        ManagedAgent?
   maintenanceWindows  AssetMaintenanceWindow[]
   topologyLayouts     TopologyLayout[]
+  processConnections  AssetProcessConnection[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -1474,6 +1492,52 @@ model AssetProcess {
   @@unique([assetId, name])
   @@index([assetId])
   @@map("asset_processes")
+}
+
+// ACCUMULATE + AGE connection map for MAPPED processes (Asset.mappedProcesses).
+// One row per observed socket fact for a mapped program; rows are UPSERTED on
+// the business key (lastSeen bumped — behind a 5-minute churn gate — firstSeen
+// kept) by persistProcessConnections and pruned by pruneProcessConnections when
+// lastSeen exceeds POLARIS_PROCESS_CONN_RETENTION_DAYS (default 30). NEVER
+// delete-replaced — short-lived/periodic connections (DB pools, cron jobs) must
+// stay visible on the Application Map instead of flickering per scrape.
+// Plain table, NOT a hypertable, so a real FK to Asset is fine (the no-FK rule
+// is hypertables-only; AssetMaintenanceWindow precedent).
+// Per kind:
+//   listen:   localAddr = bind addr, localPort = port         (remote* = ""/0)
+//   outbound: remoteIp  = dst IP,    remotePort = dst port    (local* = ""/0;
+//             the ephemeral source port is intentionally never stored — that's
+//             what makes outbound rows naturally dedup)
+//   inbound:  remoteIp  = peer IP,   localPort = listening port (localAddr = "",
+//             remotePort = 0 — the peer's ephemeral port is dropped too)
+// Business-key columns are NOT NULL with sentinel defaults (""/0) so the unique
+// index is total — Postgres treats NULLs as distinct in unique indexes, which
+// would break the ON CONFLICT upsert.
+model AssetProcessConnection {
+  id          String   @id @default(uuid())
+  assetId     String
+  asset       Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  // AssetProcess.name key — same program-name space as the pin arrays.
+  processName String
+  kind        String   // "listen" | "outbound" | "inbound"
+  proto       String   // "tcp" | "udp"
+  localAddr   String   @default("")
+  localPort   Int      @default(0)
+  remoteIp    String   @default("")
+  remotePort  Int      @default(0)
+  firstSeen   DateTime @default(now())
+  lastSeen    DateTime @default(now())
+
+  // Explicit map name: the auto-generated 8-column name would exceed
+  // Postgres's 63-char identifier limit and get truncated unpredictably.
+  @@unique([assetId, processName, kind, proto, localAddr, localPort, remoteIp, remotePort], map: "asset_process_connections_bizkey")
+  @@index([assetId, processName])
+  // Global Application Map build joins remoteIp against other assets' IPs.
+  @@index([remoteIp])
+  // Deliberately NO index on lastSeen: it's the only column updates touch, so
+  // leaving it unindexed keeps every bump a HOT update; the daily prune's
+  // seq-scan over a ≤~180k-row table is trivial.
+  @@map("asset_process_connections")
 }
 
 // LLDP neighbor table — current-state per (asset, local interface). Replaced
@@ -2220,6 +2284,28 @@ model TopologyLayout {
 
   @@unique([siteId, view])
   @@map("topology_layouts")
+}
+
+// SHARED Application Map node positions — the appmap.html counterpart of
+// TopologyLayout, minus the per-site FK (the Application Map is one global
+// graph, not rooted on a firewall Asset). One row per view key ("global" today;
+// the column future-proofs sub-views). `positions` = { [nodeId]: {x,y} } where
+// nodeIds are the deterministic applicationMapService ids (asset:<id>,
+// proc:<assetId>:<b64url(name)>, ip:<ip>, ipgroup:<cidr>) so saved layouts
+// survive refresh. Written full-replace by operator drags (PUT
+// /application-map/layout, gated applicationMap=write, last-write-wins);
+// embedded as `savedLayout` on GET /application-map for every viewer —
+// localStorage stays the per-browser fallback for readers. Single writer:
+// applicationMapService.
+model ApplicationMapLayout {
+  id        String   @id @default(uuid())
+  view      String   @unique @default("global")
+  positions Json
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("application_map_layouts")
 }
 
 // Role: identity + permission matrix consulted by the per-route

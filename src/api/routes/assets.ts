@@ -54,6 +54,7 @@ import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
 import { requestProcessControl, getCommandStatus } from "../../services/agentCommandService.js";
+import { getAssetProcessConnections } from "../../services/applicationMapService.js";
 import {
   readIpsecHistory,
   readPerfSlaHistory,
@@ -250,6 +251,9 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   monitoredProcesses:    z.array(z.string().min(1)).max(64).optional(),
   // Process names flagged for future alerting (Processes-tab "Alert" checkbox).
   alertWatchedProcesses: z.array(z.string().min(1)).max(64).optional(),
+  // Process names toggled for Application Map connection discovery
+  // (Processes-tab "Map" checkbox). Same 64 cap; independent of the Monitor pin.
+  mappedProcesses:       z.array(z.string().min(1)).max(64).optional(),
 });
 
 // Per-pinned-process log config (PUT /assets/:id/processes/:name/config).
@@ -1762,7 +1766,7 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
     const id = req.params.id as string;
     const asset = await prisma.asset.findUnique({
       where: { id },
-      select: { monitoredProcesses: true, alertWatchedProcesses: true },
+      select: { monitoredProcesses: true, alertWatchedProcesses: true, mappedProcesses: true },
     });
     if (!asset) throw new AppError(404, "Asset not found");
     const [rows, configs] = await Promise.all([
@@ -1793,7 +1797,22 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
       configs: configsByName,
       monitoredProcesses:    (asset.monitoredProcesses    ?? []) as string[],
       alertWatchedProcesses: (asset.alertWatchedProcesses ?? []) as string[],
+      mappedProcesses:       (asset.mappedProcesses       ?? []) as string[],
     });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/process-connections?name= — Ports & Connections for the
+// process detail slide-in (Application Map data, per-asset view). Optional
+// `name` filters to one process. Remote IPs are hydrated with the matched
+// asset id + hostname via the bulk resolver (primary + associated IPs).
+router.get("/:id/process-connections", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const exists = await prisma.asset.findUnique({ where: { id }, select: { id: true } });
+    if (!exists) throw new AppError(404, "Asset not found");
+    const name = typeof req.query.name === "string" && req.query.name ? req.query.name : undefined;
+    res.json(await getAssetProcessConnections(id, name));
   } catch (err) { next(err); }
 });
 
@@ -2669,6 +2688,18 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     // A single SQL UPDATE handles the JSON-path lookup in one round-trip.
     if (input.monitored !== undefined || input.assetType !== undefined) {
       await recomputeMonitorOverrideForAssets(prisma, [id]);
+    }
+    // Unmapping a process removes its accumulated connection rows immediately —
+    // the Application Map must not keep drawing edges for up to the retention
+    // window after the operator opted the process out.
+    if (input.mappedProcesses !== undefined) {
+      const kept = new Set(input.mappedProcesses);
+      const removed = (existing.mappedProcesses ?? []).filter((n) => !kept.has(n));
+      if (removed.length > 0) {
+        await prisma.assetProcessConnection.deleteMany({
+          where: { assetId: id, processName: { in: removed } },
+        });
+      }
     }
     // Operator set/cleared the IP pin: any pending ip-override conflict is
     // now moot (best-effort — a leftover pending row would only linger until
