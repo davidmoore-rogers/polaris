@@ -36,11 +36,31 @@ import { randomBytes } from "node:crypto";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { hashPassword, verifyPassword } from "../utils/password.js";
+import { recomputeMonitorOverrideForAssets } from "./monitorOverrideService.js";
+import { logEvent } from "../api/routes/events.js";
 
 const TOKEN_PREFIX = "polaris_";
 const TOKEN_PREFIX_LEN = TOKEN_PREFIX.length + 8; // "polaris_xxxxxxxx" — indexed lookup key
 const TOKEN_RANDOM_BYTES = 24; // → 32 base64url chars
 const ENROLLMENT_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Pure eligibility check: should a successful agent enrollment flip the
+ * asset to monitored? Installing the agent is an explicit operator act of
+ * "I want telemetry from this host", so monitoring turns on automatically —
+ * EXCEPT on decommissioned/disabled assets (business rule 10: those are
+ * never monitored, and re-enabling is operator-driven only; the db.ts clamp
+ * only fires on writes that stage `status`, so we must not stage
+ * `monitored: true` on them here). Already-monitored assets are a no-op so
+ * a Reinstall doesn't re-log the event.
+ */
+export function shouldEnableMonitoringOnEnroll(asset: {
+  monitored: boolean;
+  status: string;
+}): boolean {
+  if (asset.monitored) return false;
+  return asset.status !== "decommissioned" && asset.status !== "disabled";
+}
 
 function generateRawToken(): string {
   const tail = randomBytes(TOKEN_RANDOM_BYTES)
@@ -127,6 +147,19 @@ export async function consumeEnrollmentToken(
     const bearerHash = await hashPassword(bearer);
     const bearerPrefix = bearer.slice(0, TOKEN_PREFIX_LEN);
 
+    // Installing the agent is operator intent to monitor the host — flip
+    // `monitored` on in the same transaction (skipped for decommissioned/
+    // disabled assets and no-op when already on). The override recompute
+    // after the transaction keeps `monitorOverride` consistent with the
+    // discovering integration's per-class addAsMonitored default, so the
+    // discovery sweep can't flip agent-monitored assets back off when the
+    // class default is "don't monitor".
+    const assetRow = await prisma.asset.findUnique({
+      where: { id: row.assetId },
+      select: { monitored: true, status: true },
+    });
+    const enableMonitoring = assetRow != null && shouldEnableMonitoringOnEnroll(assetRow);
+
     // Single transaction: clear enrollment fields + write bearer + flip
     // ManagedAgent to active + stamp the asset's four *Polling fields to
     // "agent" so the periodic puller no-ops cleanly. The polling stamp
@@ -163,9 +196,30 @@ export async function consumeEnrollmentToken(
           // Process inventory is collected by default whenever an agent is
           // present (operator decision) — eventLog stays opt-in/OFF (PII).
           processesPolling:    "agent",
+          ...(enableMonitoring ? { monitored: true } : {}),
         },
       }),
     ]);
+
+    if (enableMonitoring) {
+      // Keep monitorOverride consistent (monitored XOR class default) — same
+      // post-write recompute as PUT /assets/:id and the bulk-monitor route.
+      // Best-effort: a failure here leaves override=false, which the next
+      // operator monitor action recomputes; never fail the enrollment for it.
+      try {
+        await recomputeMonitorOverrideForAssets(prisma, [row.assetId]);
+      } catch {
+        // non-fatal — see comment above
+      }
+      logEvent({
+        action:       "monitor.enabled_by_agent",
+        resourceType: "asset",
+        resourceId:   row.assetId,
+        level:        "info",
+        message:      "Monitoring enabled automatically — Polaris Agent enrolled on this asset",
+        details:      { managedAgentId: row.id },
+      });
+    }
 
     return {
       managedAgent: {
