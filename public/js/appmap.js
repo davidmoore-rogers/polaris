@@ -382,6 +382,10 @@
       container: document.getElementById("appmap-graph"),
       elements: buildElements(g),
       wheelSensitivity: 0.2,
+      // maxZoom bounds the preset layout's fit too — without it a 3-node
+      // graph fit-zooms to fill the whole canvas with giant nodes.
+      minZoom: 0.1,
+      maxZoom: 1.5,
       style: appmapStylesheet(pageTheme()),
       layout: { name: "preset", positions: function (n) { return positions[n.id()] || undefined; }, fit: true, padding: 40 },
     });
@@ -400,12 +404,17 @@
     applyFocusHash();
   }
 
+  var _emptyDefaultHtml = null; // the onboarding <p>'s original markup
+
   function showEmpty(title, text) {
     var emptyEl = document.getElementById("appmap-empty");
+    var textEl = document.getElementById("appmap-empty-text");
+    if (_emptyDefaultHtml === null) _emptyDefaultHtml = textEl.innerHTML;
     document.getElementById("appmap-empty-title").textContent = title;
-    if (text !== null && text !== undefined) {
-      document.getElementById("appmap-empty-text").textContent = text;
-    }
+    // null text = restore the onboarding copy (it carries markup, so a
+    // one-way textContent overwrite would lose it for the session).
+    if (text === null || text === undefined) textEl.innerHTML = _emptyDefaultHtml;
+    else textEl.textContent = text;
     emptyEl.hidden = false;
   }
 
