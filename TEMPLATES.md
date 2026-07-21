@@ -27,6 +27,7 @@ Per-pattern sections:
 - [Shared frontend utils](#shared-frontend-utils)
 - [Time-series chart (SVG)](#time-series-chart-svg)
 - [Modal](#modal)
+- [Wizard (stepper modal)](#wizard-stepper-modal)
 - [Full-screen blocking overlay](#full-screen-blocking-overlay)
 - [Slide-over panel](#slide-over-panel)
 - [Sortable + filterable data table](#sortable--filterable-data-table)
@@ -129,6 +130,24 @@ Per-pattern sections:
 - For destructive actions, wrap with `await showConfirm(...)` first.
 - For wide forms (multi-column / tabbed), pass `{ wide: true }`; `{ large: true }` when the body carries a real data table; reserve `{ xl: true }` for genuinely dense UIs (allocation preview, etc.).
 - Re-bind any DOM listeners after each open — the body HTML is replaced wholesale.
+
+---
+
+## Wizard (stepper modal)
+
+**What it is:** A multi-step builder inside a modal — numbered stepper header, one `.step-panel` per step, per-step validation on Next, free navigation back to visited steps. Use when a creation flow has genuinely ordered parts (identity → scope → conditions → outcome); use plain `.page-tabs` when sections are peers with no ordering.
+
+**Canonical implementation:** the Automations 5-step builder — `openAutomationWizard(existing)` in `public/js/automations-wizard.js` (page module: `public/js/automations.js`). Shared CSS: `.stepper` / `.stepper-step{.active,.done,.clickable}` / `.stepper-num` / `.stepper-line` / `.step-panel{.visible}` + the sticky `.modal-body > .stepper` rule in `public/css/styles.css` (promoted from setup.html's inline copy — the pre-auth setup wizard keeps its own, deliberately self-contained). Companions: `.aw-sentence` (live plain-English summary callout) and `.review-grid` (final summary card).
+
+**Key conventions:**
+- Shell is a normal `openModal(..., { large: true })` — the stepper is a direct child of `.modal-body` so it pins sticky like `.page-tabs` does.
+- One module-scope draft object holds ALL steps' state; every navigation runs `collect` on the step being left (no hard validation when moving backward), `validate` only on Next. Each step is a `HTML/Wire/Collect/Validate` function quad.
+- The footer renders Cancel/Back/Next/Save once; a sync function toggles visibility per step (Save always visible in edit mode — all steps unlocked, `visited = max`).
+- Stepper steps ≤ the highest visited step get `.clickable` and jump directly; `updateStepper` stamps `.active`/`.done` on steps and `.done` on the connecting `.stepper-line`s (adapted from `setup.js` `goToStep`/`updateStepper`).
+- Save runs validate-all and jumps to the first failing step with a toast rather than silently blocking.
+- Live previews inside steps follow the maintenance-builder debounce pattern (`_maintRefreshPreview` in `assets-maintenance.js`): 400–600 ms debounce, cancel the timer on step exit.
+
+**When adding a new instance:** reuse the shared classes — don't fork the stepper CSS; keep panels lazy (render HTML strings up front, wire listeners once, re-render only the dynamic regions); stash the draft on modal close and offer a "restore draft?" on reopen if losing input would hurt.
 
 ---
 
