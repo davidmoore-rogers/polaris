@@ -1263,18 +1263,22 @@ Listed alphabetically.
 
 ## services/notificationTypes.ts
 
-**What it owns:** The notifications vocabulary — the discriminated `trigger` Zod union (asset_metric | asset_state | host_metric | event | change), the asset `scope` schema, `ruleInputSchema` (incl. `emailCompositionSchema` + `escalationSchema`), the metric/field/comparator/aggregation/change-type catalogs, and `buildSchemaCatalog()`.
+**What it owns:** The Automations vocabulary — the discriminated `trigger` Zod union (asset_metric | asset_state | host_metric | event | change), the asset `scope` schema, the **rule-shape-v2 layer** (`resetSchema` with hysteresis `clearThreshold` + clear-sustain `sustainSec`; the `actionSchema` union notify | api_call | script; escalation v2 tiers-of-actions), `ruleInputSchema` (accepts v2 AND legacy bodies via transform + superRefine cross-validation) / `previewInputSchema` (partial drafts), the pure legacy↔v2 converters (`normalizeRuleToV2`, `normalizeReset`, `targetsToNotifyActions`/`actionsToTargets`, `legacyMirrorOfV2`, `normalizeEscalationToV2`), the metric/field/comparator/aggregation/change-type catalogs, and `buildSchemaCatalog()`.
 
-**Public API:** `triggerSchema`, `scopeSchema`, `ruleInputSchema`, `emailCompositionSchema`, `escalationSchema`/`escalationTierSchema`, `buildSchemaCatalog`, `Trigger`/`RuleScope`/`RuleInput`/`EmailRecipients`/`EmailComposition`/`EscalationTier`/`EscalationConfig` types, `CHANGE_TYPE_ACTIONS`, `ASSET_SCOPED_TRIGGER_TYPES`, the `*_METRICS`/`*_FIELDS`/`CHANGE_TYPES` constants.
+**Public API:** `triggerSchema`, `scopeSchema`, `ruleInputSchema`, `previewInputSchema`, `resetSchema`, `actionSchema` (+ `notifyActionSchema`/`apiCallActionSchema`/`scriptActionSchema`), `escalationV2Schema`/`escalationTierV2Schema`, `emailCompositionSchema`, legacy `escalationSchema`/`escalationTierSchema`, the converters above, `buildSchemaCatalog`, `Trigger`/`RuleScope`/`RuleInput`/`PreviewRuleInput`/`ResetConfig`/`AutomationAction`/`EscalationV2Config`/… types, `CHANGE_TYPE_ACTIONS`, `ASSET_SCOPED_TRIGGER_TYPES`, the `*_METRICS`/`*_FIELDS`/`CHANGE_TYPES`/`RESET_MODES`/`API_CALL_METHODS`/`SCRIPT_RUN_TARGETS` constants.
 
-**Used by:** `notificationRules.ts` (validation + schema endpoint), `notificationEngine.ts`, `notificationRuleService.ts`, `notificationEscalationService.ts`, `notificationRecipientService.ts`, the builder UI (via `/notification-rules/schema`).
+**Used by:** `notificationRules.ts` (validation + schema endpoint), `notificationEngine.ts`, `notificationRuleService.ts`, `notificationEscalationService.ts`, `notificationRecipientService.ts`, `jobs/migrateAutomationRuleShape.ts`, the builder UI (via `/automations/schema`).
 
 **Invariants:**
 - Single source of truth — engine, routes, and frontend must read the vocabulary here, never hardcode it.
 - `CHANGE_TYPE_ACTIONS` maps each change type to the exact audit Event action the persist* detectors emit AND the event-tail matches; both ends must agree.
 - `buildSchemaCatalog().templateVariables` mirrors `TEMPLATE_VARIABLES` from `src/utils/notificationTemplate.ts` — the builder's insert-variable palette renders from it, never a hardcoded list.
+- **Every reader of stored rules goes through `normalizeRuleToV2`** — never read `clearBehavior`/`targets` directly; they're the derived mirror, not the source of truth. Every writer persists v2 AND the mirror (`legacyMirrorOfV2`).
+- `ruleInputSchema` output is canonical v2 (`RuleInput`): v2 fields win over conflicting legacy fields; a legacy-only body converts losslessly.
+- api_call `url` is STATIC (no {token}s — SSRF-checkable at save); only `bodyTemplate`/`argsTemplate` interpolate. api_call headers are stored unmasked — the no-secrets warning lives in `apiCallMeta.help` + docs.
+- Escalation INPUT stays the legacy email-tier shape until the escalation-v2 phase; `normalizeEscalationToV2` already converts both shapes for readers that want the v2 view.
 
-**When changing this:** Adding a metric/field → also wire its resolver in `notificationEngine` (else it parses but never reads data). Adding a change type → also emit the matching Event from the relevant persist* function. Adding a template token → add it to `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (and, if asset-sourced, the engine's `ASSET_DETAIL_SELECT`).
+**When changing this:** Adding a metric/field → also wire its resolver in `notificationEngine` (else it parses but never reads data). Adding a change type → also emit the matching Event from the relevant persist* function. Adding a template token → add it to `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (and, if asset-sourced, the engine's `ASSET_DETAIL_SELECT`). Adding an action type → extend `actionSchema` + `assertActionRefs` (notificationRuleService) + the execution fan-out + `actionTypes` in the catalog.
 
 ---
 

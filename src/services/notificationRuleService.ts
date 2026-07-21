@@ -13,7 +13,13 @@ import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import type { RuleScope, Trigger, RuleInput } from "./notificationTypes.js";
-import { ASSET_SCOPED_TRIGGER_TYPES, CHANGE_TYPE_ACTIONS } from "./notificationTypes.js";
+import {
+  ASSET_SCOPED_TRIGGER_TYPES,
+  CHANGE_TYPE_ACTIONS,
+  legacyMirrorOfV2,
+  normalizeRuleToV2,
+} from "./notificationTypes.js";
+import { isBlockedOutboundHost } from "../utils/netGuard.js";
 
 /** Minimal asset shape needed to evaluate scope membership. */
 export interface ScopeAsset {
@@ -120,39 +126,88 @@ export async function isChangeActionSubscribed(action: string): Promise<boolean>
 
 // ─── Rule CRUD ──────────────────────────────────────────────────────────────
 
-// Escalation is email-only: every tier must reference an smtp/oauth_m365
-// channel. Validated at save so the sweep never has to guess intent.
+// Escalation is email-only until the escalation-v2 phase: every tier must
+// reference an smtp/oauth_m365 channel. Validated at save so the sweep never
+// has to guess intent.
 const EMAIL_CHANNEL_TYPES = new Set(["smtp", "oauth_m365"]);
 
-async function assertEscalationChannels(escalation: RuleInput["escalation"]): Promise<void> {
-  if (!escalation || escalation.tiers.length === 0) return;
-  const ids = Array.from(new Set(escalation.tiers.map((t) => t.channelId)));
+/**
+ * Validate every reference a v2 rule's actions carry:
+ *   - notify.channelId must exist (any channel type is legal in v2),
+ *   - api_call.url host must pass the outbound SSRF guard (friendly 400 at
+ *     save beats a silent fire-time failure),
+ *   - script actions are refused until the script-registry phase lands,
+ *   - legacy escalation tiers keep the email-channel check.
+ */
+async function assertActionRefs(input: RuleInput): Promise<void> {
+  const notifyChannelIds = new Set<string>();
+  for (const [i, action] of input.actions.entries()) {
+    if (action.type === "notify") {
+      notifyChannelIds.add(action.channelId);
+    } else if (action.type === "api_call") {
+      let host = "";
+      try {
+        host = new URL(action.url).hostname;
+      } catch {
+        throw new AppError(400, `Action ${i + 1}: api_call URL is not a valid URL`);
+      }
+      if (isBlockedOutboundHost(host)) {
+        throw new AppError(400, `Action ${i + 1}: api_call host "${host}" is blocked (loopback/link-local/metadata addresses are not allowed)`);
+      }
+    } else if (action.type === "script") {
+      // Placeholder until the AutomationScript registry phase: accepting a
+      // scriptId that can't resolve would store a permanently-failing action.
+      throw new AppError(400, `Action ${i + 1}: script actions are not available yet (the automation script registry has not been enabled)`);
+    }
+  }
+
+  const escalation = input.escalation;
+  const escalationIds = escalation ? escalation.tiers.map((t) => t.channelId) : [];
+  const allIds = Array.from(new Set([...notifyChannelIds, ...escalationIds]));
+  if (allIds.length === 0) return;
   const channels = await prisma.notificationChannel.findMany({
-    where: { id: { in: ids } },
+    where: { id: { in: allIds } },
     select: { id: true, name: true, type: true },
   });
   const byId = new Map(channels.map((c) => [c.id, c]));
-  for (const [i, tier] of escalation.tiers.entries()) {
-    const ch = byId.get(tier.channelId);
-    if (!ch) throw new AppError(400, `Escalation tier ${i + 1} references a delivery channel that no longer exists`);
-    if (!EMAIL_CHANNEL_TYPES.has(ch.type)) {
-      throw new AppError(400, `Escalation tier ${i + 1} channel "${ch.name}" is ${ch.type} — escalation emails require an email channel (SMTP or Microsoft 365)`);
+
+  for (const id of notifyChannelIds) {
+    if (!byId.has(id)) throw new AppError(400, "A notify action references a delivery channel that no longer exists");
+  }
+  if (escalation) {
+    for (const [i, tier] of escalation.tiers.entries()) {
+      const ch = byId.get(tier.channelId);
+      if (!ch) throw new AppError(400, `Escalation tier ${i + 1} references a delivery channel that no longer exists`);
+      if (!EMAIL_CHANNEL_TYPES.has(ch.type)) {
+        throw new AppError(400, `Escalation tier ${i + 1} channel "${ch.name}" is ${ch.type} — escalation emails require an email channel (SMTP or Microsoft 365)`);
+      }
     }
   }
 }
 
+/** Attach the v2 view to a stored row: rows written before the v2 cutover
+ *  (or restored from pre-upgrade backups) carry NULL reset/actions — fill
+ *  them from the normalizer so API consumers always see the v2 shape. */
+function withV2<T extends { reset: unknown; actions: unknown }>(row: T): T {
+  if (row.reset && Array.isArray(row.actions)) return row;
+  const v2 = normalizeRuleToV2(row as Parameters<typeof normalizeRuleToV2>[0]);
+  return { ...row, reset: v2.reset, actions: v2.actions };
+}
+
 export async function listRules() {
-  return prisma.notificationRule.findMany({ orderBy: { createdAt: "desc" } });
+  const rows = await prisma.notificationRule.findMany({ orderBy: { createdAt: "desc" } });
+  return rows.map(withV2);
 }
 
 export async function getRule(id: string) {
   const rule = await prisma.notificationRule.findUnique({ where: { id } });
   if (!rule) throw new AppError(404, "Notification rule not found");
-  return rule;
+  return withV2(rule);
 }
 
 export async function createRule(input: RuleInput, actor?: string) {
-  await assertEscalationChannels(input.escalation);
+  await assertActionRefs(input);
+  const mirror = legacyMirrorOfV2(input.reset, input.actions);
   const rule = await prisma.notificationRule.create({
     data: {
       name: input.name,
@@ -161,12 +216,16 @@ export async function createRule(input: RuleInput, actor?: string) {
       severity: input.severity,
       trigger: input.trigger as any,
       scope: input.scope as any,
-      clearBehavior: input.clearBehavior,
-      clearAfterSec: input.clearAfterSec ?? null,
+      reset: input.reset as any,
+      actions: input.actions as any,
+      // Lossless legacy mirror — keeps the pre-wizard UI + pre-upgrade
+      // backups coherent. Derived, never authoritative (readers prefer v2).
+      clearBehavior: mirror.clearBehavior,
+      clearAfterSec: mirror.clearAfterSec,
+      targets: mirror.targets as any,
       cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       channels: input.channels,
-      targets: input.targets as any,
       emailComposition: (input.emailComposition ?? undefined) as any,
       escalation: (input.escalation ?? undefined) as any,
       createdBy: actor ?? null,
@@ -187,7 +246,8 @@ export async function createRule(input: RuleInput, actor?: string) {
 
 export async function updateRule(id: string, input: RuleInput, actor?: string) {
   await getRule(id); // 404 if missing
-  await assertEscalationChannels(input.escalation);
+  await assertActionRefs(input);
+  const mirror = legacyMirrorOfV2(input.reset, input.actions);
   // Nullable-Json semantics: undefined (field absent) leaves the stored value
   // unchanged; explicit null clears it (Prisma.DbNull).
   const jsonOrClear = (v: unknown) => (v === undefined ? undefined : v === null ? Prisma.DbNull : (v as any));
@@ -200,12 +260,14 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
       severity: input.severity,
       trigger: input.trigger as any,
       scope: input.scope as any,
-      clearBehavior: input.clearBehavior,
-      clearAfterSec: input.clearAfterSec ?? null,
+      reset: input.reset as any,
+      actions: input.actions as any,
+      clearBehavior: mirror.clearBehavior,
+      clearAfterSec: mirror.clearAfterSec,
+      targets: mirror.targets as any,
       cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       channels: input.channels,
-      targets: input.targets as any,
       emailComposition: jsonOrClear(input.emailComposition),
       escalation: jsonOrClear(input.escalation),
     },

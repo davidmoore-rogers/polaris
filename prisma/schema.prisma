@@ -3035,6 +3035,18 @@ model NotificationRule {
   // bodyHtmlTemplate?, repeatEveryMin?, maxRepeats? }] }. Email-only (tier
   // channels must be smtp/oauth_m365). Swept by the escalateNotifications job.
   escalation      Json?
+  // ── Automation rule-shape v2 (2026-07) ─────────────────────────────────
+  // reset: { mode: "manual"|"auto"|"timed", clearThreshold?, sustainSec?,
+  // afterSec? } — supersedes clearBehavior/clearAfterSec (auto gains
+  // hysteresis + clear-sustain). actions: v2 unified outcome list —
+  // [{ type: "notify"|"api_call"|"script", ... }] — supersedes `targets`.
+  // NULL on pre-v2 rows: every reader goes through normalizeRuleToV2()
+  // (notificationTypes.ts), and the migrateAutomationRuleShape one-shot
+  // persists the converted shape. The legacy columns above are retained as a
+  // lossless mirror (rewritten on every save from the v2 shape where
+  // representable) so a pre-wizard UI and pre-upgrade backups stay coherent.
+  reset           Json?
+  actions         Json?
   createdBy       String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -3179,6 +3191,11 @@ model NotificationRuleState {
   dimensionKey      String    @default("")
   state             String    @default("clear") // clear | pending | firing
   conditionMetSince DateTime? // for forDurationSec
+  // Recovery-sustain timer (reset.sustainSec, firing state only): stamped when
+  // the condition first reads as recovered, nulled when it re-meets or enters
+  // the hysteresis dead band. NOT conditionMetSince reused — that one belongs
+  // to the pending-side debounce and is nulled on fire.
+  recoveredSince    DateTime?
   firedAt           DateTime?
   lastValue         Float?
   notificationId    String? // active notification, for auto-resolve

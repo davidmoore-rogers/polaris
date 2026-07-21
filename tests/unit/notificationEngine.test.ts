@@ -119,7 +119,8 @@ describe("ruleInputSchema", () => {
       trigger: { type: "host_metric", metric: "memUsedPct", operator: ">", threshold: 85 },
     });
     expect(parsed.severity).toBe("warning");
-    expect(parsed.clearBehavior).toBe("manual");
+    expect(parsed.reset).toEqual({ mode: "manual" }); // v2 canonical output
+    expect(parsed.actions).toEqual([]);
     expect(parsed.channels).toEqual(["in_app"]);
     // trigger defaults
     expect((parsed.trigger as any).aggregation).toBe("latest");

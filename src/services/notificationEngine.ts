@@ -30,11 +30,15 @@ import { REGION_TAG_PREFIX } from "./notificationService.js";
 import {
   type Trigger,
   type RuleScope,
-  type RuleInput,
+  type PreviewRuleInput,
   type DeliveryTarget,
   type EmailComposition,
   type EscalationConfig,
+  type ResetConfig,
+  type AutomationAction,
   CHANGE_TYPE_ACTIONS,
+  actionsToTargets,
+  normalizeRuleToV2,
 } from "./notificationTypes.js";
 import { expandDeliveries, scopeRegionTagsOf, type ComposedEmail } from "./notificationRecipientService.js";
 import {
@@ -49,7 +53,7 @@ import {
 const LAST_EVENT_SETTING_KEY = "notificationEngine.lastEventCursor";
 const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000; // window to find the "latest" sample
 
-// ─── A rule as loaded from the DB ───────────────────────────────────────────
+// ─── A rule as loaded from the DB (normalized to shape v2) ──────────────────
 interface DbRule {
   id: string;
   name: string;
@@ -57,12 +61,17 @@ interface DbRule {
   severity: string;
   trigger: Trigger;
   scope: RuleScope;
-  clearBehavior: string;
-  clearAfterSec: number | null;
+  /** v2 reset semantics (legacy clearBehavior/clearAfterSec normalized in). */
+  reset: ResetConfig;
+  /** v2 unified action list (legacy targets normalized in). */
+  actions: AutomationAction[];
   cooldownSec: number | null;
   messageTemplate: string | null;
+  /** Legacy delivery view of `actions` (notify subset) — feeds expandDeliveries
+   *  until the action-execution phase replaces the fan-out. */
   targets: DeliveryTarget[];
   emailComposition: EmailComposition | null;
+  /** Stored (legacy) escalation shape — the sweep still consumes it directly. */
   escalation: EscalationConfig | null;
 }
 
@@ -547,9 +556,10 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
 
   // Timed auto-clear: firing states past their timer, even without an explicit
   // recovery reading (e.g. the asset stopped reporting).
-  if (rule.clearBehavior === "timed" && rule.clearAfterSec) {
+  if (rule.reset.mode === "timed" && rule.reset.afterSec) {
+    const afterSec = rule.reset.afterSec;
     for (const st of states) {
-      if (st.state === "firing" && st.firedAt && now.getTime() - st.firedAt.getTime() >= rule.clearAfterSec * 1000) {
+      if (st.state === "firing" && st.firedAt && now.getTime() - st.firedAt.getTime() >= afterSec * 1000) {
         await clearActiveNotification(st, "system:timed");
         await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, notificationId: null } });
       }
@@ -616,7 +626,7 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
 }
 
 async function recover(rule: DbRule, st: { id: string; notificationId: string | null }): Promise<void> {
-  if (rule.clearBehavior === "auto") {
+  if (rule.reset.mode === "auto") {
     await clearActiveNotification(st, "system:auto-resolve");
     await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, notificationId: null } });
     await logEvent({
@@ -631,7 +641,7 @@ async function recover(rule: DbRule, st: { id: string; notificationId: string | 
   } else {
     // manual / timed: re-arm the state but leave the notification for a human
     // (timed is swept by the timer pass; manual stays until cleared).
-    if (rule.clearBehavior === "manual") {
+    if (rule.reset.mode === "manual") {
       await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, notificationId: null } });
     }
   }
@@ -800,16 +810,23 @@ export async function assetDetail(assetId: string): Promise<AssetDetailRow | nul
 
 export async function evaluateAllNotificationRules(): Promise<void> {
   const dbRules = await prisma.notificationRule.findMany({ where: { enabled: true } });
-  const rules: DbRule[] = dbRules.map((r) => ({
-    id: r.id, name: r.name, description: r.description, severity: r.severity,
-    trigger: r.trigger as unknown as Trigger,
-    scope: (r.scope ?? {}) as RuleScope,
-    clearBehavior: r.clearBehavior, clearAfterSec: r.clearAfterSec, cooldownSec: r.cooldownSec,
-    messageTemplate: r.messageTemplate,
-    targets: Array.isArray(r.targets) ? (r.targets as unknown as DeliveryTarget[]) : [],
-    emailComposition: (r.emailComposition ?? null) as EmailComposition | null,
-    escalation: (r.escalation ?? null) as EscalationConfig | null,
-  }));
+  const rules: DbRule[] = dbRules.map((r) => {
+    // Shape-v2 normalization: legacy rows (clearBehavior/targets) and v2 rows
+    // (reset/actions) evaluate identically through the v2 view.
+    const v2 = normalizeRuleToV2(r);
+    return {
+      id: r.id, name: r.name, description: r.description, severity: r.severity,
+      trigger: r.trigger as unknown as Trigger,
+      scope: (r.scope ?? {}) as RuleScope,
+      reset: v2.reset,
+      actions: v2.actions,
+      cooldownSec: r.cooldownSec,
+      messageTemplate: r.messageTemplate,
+      targets: actionsToTargets(v2.actions),
+      emailComposition: (r.emailComposition ?? null) as EmailComposition | null,
+      escalation: (r.escalation ?? null) as EscalationConfig | null,
+    };
+  });
 
   clearAssetDetailCache();
 
@@ -849,10 +866,27 @@ export interface PreviewResult {
   emailPreview?: { subject: string; text: string; html?: string };
 }
 
-/** Dry-run a draft rule against current data with NO writes. */
-export async function previewRule(input: RuleInput): Promise<PreviewResult> {
+/** Dry-run a draft rule against current data with NO writes. A draft without
+ *  a trigger is a SCOPE-ONLY preview: list the devices the scope matches
+ *  (the wizard's asset-filtering step). */
+export async function previewRule(input: PreviewRuleInput): Promise<PreviewResult> {
   const trigger = input.trigger;
   let readings: Reading[] = [];
+
+  if (!trigger) {
+    const assets = await loadScopeAssets(input.scope);
+    return {
+      supported: true,
+      totalEvaluated: assets.length,
+      matches: assets.slice(0, 200).map((a) => ({
+        assetId: a.id,
+        hostname: a.hostname,
+        dimension: "",
+        value: null,
+        meets: true,
+      })),
+    };
+  }
 
   if (trigger.type === "host_metric") {
     const r = await resolveHostMetricReading(trigger);
@@ -882,8 +916,8 @@ export async function previewRule(input: RuleInput): Promise<PreviewResult> {
   if (input.emailComposition && readings.length > 0) {
     const draft: DbRule = {
       id: "", name: input.name, description: input.description ?? null, severity: input.severity,
-      trigger: input.trigger, scope: input.scope,
-      clearBehavior: input.clearBehavior, clearAfterSec: input.clearAfterSec ?? null, cooldownSec: input.cooldownSec ?? null,
+      trigger, scope: input.scope,
+      reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null, targets: [],
       emailComposition: input.emailComposition, escalation: input.escalation ?? null,
     };

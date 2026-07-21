@@ -14,7 +14,7 @@
 import { Router } from "express";
 import { requirePermission } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
-import { ruleInputSchema, buildSchemaCatalog } from "../../services/notificationTypes.js";
+import { ruleInputSchema, previewInputSchema, buildSchemaCatalog } from "../../services/notificationTypes.js";
 import { listRules, createRule, updateRule, deleteRule } from "../../services/notificationRuleService.js";
 import { previewRule } from "../../services/notificationEngine.js";
 import { listRecipientUsers } from "../../services/notificationRecipientService.js";
@@ -43,9 +43,11 @@ notificationRulesRouter.get("/recipient-users", requirePermission("automationMan
   } catch (err) { next(err); }
 });
 
+// Preview accepts partial drafts: `{scope}`-only (wizard Step 2 device list)
+// and `{trigger, scope}` (Step 3 current-values check) — name is defaulted.
 notificationRulesRouter.post("/preview", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
-    const input = ruleInputSchema.parse(req.body);
+    const input = previewInputSchema.parse(req.body);
     res.json(await previewRule(input));
   } catch (err) { next(err); }
 });
