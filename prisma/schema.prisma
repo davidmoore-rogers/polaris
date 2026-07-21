@@ -2951,8 +2951,12 @@ model AgentCommand {
   id             String   @id @default(uuid())
   assetId        String
   managedAgentId String
-  action         String   // "stop" | "start" | "restart"
-  target         String   // the resolved service/unit name to act on
+  action         String   // "stop" | "start" | "restart" | "run_script"
+  target         String   // the resolved service/unit name to act on (script name for run_script)
+  // run_script payload: { runId, interpreter, body, sha256, args, timeoutSec }.
+  // Body ships inline (≤64KB, bounded by the registry) with a sha256 the
+  // agent VERIFIES before executing. NULL for process-control commands.
+  payload        Json?
   status         String   @default("pending") // pending | sent | succeeded | failed
   requestedBy    String?  // operator username
   requestedAt    DateTime @default(now())

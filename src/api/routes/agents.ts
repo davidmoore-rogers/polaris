@@ -757,6 +757,11 @@ const CommandResultSchema = z.object({
   success:     z.boolean(),
   error:       z.string().max(2048).nullable().optional(),
   resultState: z.string().max(128).nullable().optional(),
+  // run_script results (0.13.0+): exit code + captured output (≤64 KB each,
+  // the agent caps before sending; re-capped server-side on persist).
+  exitCode:    z.number().int().nullable().optional(),
+  stdout:      z.string().max(64 * 1024).nullable().optional(),
+  stderr:      z.string().max(64 * 1024).nullable().optional(),
 });
 agentsRouter.post("/command-result", async (req, res, next) => {
   try {
@@ -767,6 +772,7 @@ agentsRouter.post("/command-result", async (req, res, next) => {
       body.success,
       body.error ?? null,
       body.resultState ?? null,
+      { exitCode: body.exitCode ?? null, stdout: body.stdout ?? null, stderr: body.stderr ?? null },
     );
     res.json({ ok: true });
   } catch (err) { next(err); }

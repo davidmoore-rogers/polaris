@@ -280,11 +280,14 @@ func (c *Client) PushSystemInfo(body *SystemInfoBody) error {
 
 // ─── Process-control commands (Phase 4) ───────────────────────────────
 
-// Command is one pending process-control request from the server.
+// Command is one pending command from the server: process control
+// ("stop"/"start"/"restart" against Target) or an automation script run
+// ("run_script", whose spec rides Payload — see internal/scriptexec).
 type Command struct {
-	ID     string `json:"id"`
-	Action string `json:"action"` // "stop" | "start" | "restart"
-	Target string `json:"target"` // service/unit name to act on
+	ID      string          `json:"id"`
+	Action  string          `json:"action"` // "stop" | "start" | "restart" | "run_script"
+	Target  string          `json:"target"` // service/unit name (script name for run_script)
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 // FetchCommands polls for pending process-control commands. The server marks
@@ -304,6 +307,13 @@ func (c *Client) FetchCommands() ([]Command, error) {
 
 // ReportCommandResult posts the outcome of executing one command.
 func (c *Client) ReportCommandResult(commandID string, success bool, errMsg, resultState string) error {
+	return c.ReportCommandResultFull(commandID, success, errMsg, resultState, nil, "", "")
+}
+
+// ReportCommandResultFull is ReportCommandResult plus the run_script result
+// fields (exit code + captured output, ≤64 KB each — scriptexec caps them).
+// exitCode nil = unknown (refused / killed before exit).
+func (c *Client) ReportCommandResultFull(commandID string, success bool, errMsg, resultState string, exitCode *int, stdout, stderr string) error {
 	if c.bearer == "" {
 		return errors.New("ReportCommandResult called without a bearer token — enroll first")
 	}
@@ -313,6 +323,15 @@ func (c *Client) ReportCommandResult(commandID string, success bool, errMsg, res
 	}
 	if resultState != "" {
 		body["resultState"] = resultState
+	}
+	if exitCode != nil {
+		body["exitCode"] = *exitCode
+	}
+	if stdout != "" {
+		body["stdout"] = stdout
+	}
+	if stderr != "" {
+		body["stderr"] = stderr
 	}
 	var out struct{ OK bool `json:"ok"` }
 	if err := c.do("POST", "/api/v1/agents/command-result", body, &out, true); err != nil {

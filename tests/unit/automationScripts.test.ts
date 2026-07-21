@@ -14,6 +14,8 @@ const db = {
   scripts: [] as any[],
   runs: [] as any[],
   rules: [] as any[],
+  agents: [] as any[],
+  agentCommands: [] as any[],
 };
 let seq = 0;
 
@@ -61,6 +63,19 @@ vi.mock("../../src/db.js", () => ({
       deleteMany: vi.fn(async () => ({ count: 0 })),
     },
     notificationRule: { findMany: vi.fn(async () => db.rules) },
+    managedAgent: {
+      findUnique: vi.fn(async ({ where }: any) => {
+        const a = db.agents.find((x) => x.assetId === where.assetId);
+        return a ? { ...a } : null;
+      }),
+    },
+    agentCommand: {
+      create: vi.fn(async ({ data }: any) => {
+        const c = { id: `cmd${++seq}`, status: "pending", requestedAt: new Date(), ...data };
+        db.agentCommands.push(c);
+        return c;
+      }),
+    },
   },
 }));
 
@@ -73,6 +88,8 @@ import {
   deleteScript,
   requestScriptRun,
   sha256Hex,
+  versionAtLeast,
+  MIN_AGENT_SCRIPT_VERSION,
   type ScriptInput,
 } from "../../src/services/automationScriptService.js";
 import { executeServerScript } from "../../src/services/automationScriptRunner.js";
@@ -94,6 +111,8 @@ beforeEach(() => {
   db.scripts.length = 0;
   db.runs.length = 0;
   db.rules.length = 0;
+  db.agents.length = 0;
+  db.agentCommands.length = 0;
   logEventMock.mockClear();
 });
 
@@ -150,15 +169,59 @@ describe("requestScriptRun validation", () => {
     expect(run.status).toBe("pending");
   });
 
-  it("refuses disabled scripts, incompatible targets, and (for now) agent runs", async () => {
+  it("refuses disabled scripts and incompatible targets", async () => {
     const s = await createScript(scriptInput({ enabled: false }));
     await expect(requestScriptRun({ scriptId: s.id, runOn: "server", args: null, requestedBy: "x" })).rejects.toThrow(/disabled/);
 
     const serverOnly = await createScript(scriptInput());
     await expect(requestScriptRun({ scriptId: serverOnly.id, runOn: "agent", args: null, requestedBy: "x" })).rejects.toThrow(/only runs on server/);
+  });
 
-    const either = await createScript(scriptInput({ runTarget: "either" }));
-    await expect(requestScriptRun({ scriptId: either.id, runOn: "agent", args: null, requestedBy: "x" })).rejects.toThrow(/not available yet/);
+  it("agent runs preflight: asset required, agent installed + active + version-gated", async () => {
+    const s = await createScript(scriptInput({ runTarget: "either" }));
+    const base = { scriptId: s.id, runOn: "agent" as const, args: null, requestedBy: "x" };
+
+    await expect(requestScriptRun(base)).rejects.toThrow(/no asset/);
+    await expect(requestScriptRun({ ...base, assetId: "a1" })).rejects.toThrow(/no Polaris Agent/);
+
+    db.agents.push({ id: "ag1", assetId: "a1", installStatus: "error", agentVersion: "0.13.0" });
+    await expect(requestScriptRun({ ...base, assetId: "a1" })).rejects.toThrow(/isn't active/);
+
+    db.agents[0].installStatus = "active";
+    db.agents[0].agentVersion = "0.12.0";
+    await expect(requestScriptRun({ ...base, assetId: "a1" })).rejects.toThrow(/needs 0\.13\.0/);
+
+    // No run rows leaked from the refused attempts (preflight before create).
+    expect(db.runs).toHaveLength(0);
+  });
+
+  it("agent run creates the run + a run_script AgentCommand with the verified payload, linked both ways", async () => {
+    const s = await createScript(scriptInput({ runTarget: "either", timeoutSec: 45 }));
+    db.agents.push({ id: "ag1", assetId: "a1", installStatus: "active", agentVersion: MIN_AGENT_SCRIPT_VERSION });
+
+    const { runId } = await requestScriptRun({ scriptId: s.id, runOn: "agent", args: "hello", requestedBy: "system:automation", assetId: "a1", ruleId: "r1", notificationId: "n1" });
+
+    const run = db.runs.find((r) => r.id === runId)!;
+    const cmd = db.agentCommands[0]!;
+    expect(cmd.action).toBe("run_script");
+    expect(cmd.managedAgentId).toBe("ag1");
+    expect(cmd.target).toBe(s.name);
+    expect(cmd.payload).toEqual({ runId, interpreter: s.interpreter, body: s.body, sha256: s.sha256, args: "hello", timeoutSec: 45 });
+    expect(run.agentCommandId).toBe(cmd.id);
+    expect(run.runOn).toBe("agent");
+  });
+});
+
+describe("versionAtLeast", () => {
+  it("compares dotted-numeric versions", () => {
+    expect(versionAtLeast("0.13.0", "0.13.0")).toBe(true);
+    expect(versionAtLeast("0.13.1", "0.13.0")).toBe(true);
+    expect(versionAtLeast("0.14.0", "0.13.0")).toBe(true);
+    expect(versionAtLeast("1.0.0", "0.13.0")).toBe(true);
+    expect(versionAtLeast("0.12.9", "0.13.0")).toBe(false);
+    expect(versionAtLeast("v0.13.0", "0.13.0")).toBe(true);
+    expect(versionAtLeast(null, "0.13.0")).toBe(false);
+    expect(versionAtLeast("garbage", "0.13.0")).toBe(false);
   });
 });
 

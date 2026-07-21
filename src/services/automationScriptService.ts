@@ -31,6 +31,24 @@ import {
 
 export const SCRIPT_RUN_TARGET_VALUES = ["server", "agent", "either"] as const;
 
+/** First agent version whose command loop understands action="run_script". */
+export const MIN_AGENT_SCRIPT_VERSION = "0.13.0";
+
+/** Dotted-numeric version compare: is `version` >= `min`? Non-numeric
+ *  segments compare as 0; null/empty is never enough. Pure — unit-tested. */
+export function versionAtLeast(version: string | null | undefined, min: string): boolean {
+  if (!version) return false;
+  const parse = (v: string) => v.trim().replace(/^v/i, "").split(".").map((p) => parseInt(p, 10) || 0);
+  const a = parse(version);
+  const b = parse(min);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
 export const MAX_SCRIPT_BODY_BYTES = 64 * 1024;
 export const MAX_SCRIPT_TIMEOUT_SEC = 600;
 const RUN_RETENTION_DAYS = 90;
@@ -188,7 +206,9 @@ export interface ScriptRunRequest {
 /**
  * Create a pending AutomationScriptRun. Server runs are picked up by the
  * runAutomationScripts job's claim pass; agent runs additionally enqueue an
- * AgentCommand (next phase — until then, runOn="agent" is refused).
+ * AgentCommand (action="run_script") for the TRIGGERING asset's agent —
+ * requiring an active agent on version ≥ MIN_AGENT_SCRIPT_VERSION (older
+ * agents don't know the action; the version gate keeps it off their queue).
  * Validates: script exists + enabled + runTarget compatibility.
  */
 export async function requestScriptRun(req: ScriptRunRequest): Promise<{ runId: string }> {
@@ -197,11 +217,24 @@ export async function requestScriptRun(req: ScriptRunRequest): Promise<{ runId: 
   if (script.runTarget !== "either" && script.runTarget !== req.runOn) {
     throw new AppError(400, `Script "${script.name}" only runs on ${script.runTarget}; action requested ${req.runOn}`);
   }
+
+  // Agent path preflight — fail BEFORE creating the run row so a misfire is
+  // one failed-action Event, not an orphaned forever-pending run.
+  let agent: { id: string } | null = null;
   if (req.runOn === "agent") {
-    // Agent execution ships in the next phase (AgentCommand payload + Go
-    // scriptexec). Refuse loudly so the action records a failed run Event.
-    throw new AppError(409, "Agent-side script execution is not available yet");
+    if (!req.assetId) throw new AppError(409, `Script "${script.name}" targets the agent, but this alert has no asset`);
+    const row = await prisma.managedAgent.findUnique({
+      where: { assetId: req.assetId },
+      select: { id: true, installStatus: true, agentVersion: true },
+    });
+    if (!row) throw new AppError(409, "The triggering asset has no Polaris Agent — agent scripts require an installed agent");
+    if (row.installStatus !== "active") throw new AppError(409, "The Polaris Agent on the triggering asset isn't active");
+    if (!versionAtLeast(row.agentVersion, MIN_AGENT_SCRIPT_VERSION)) {
+      throw new AppError(409, `The agent on the triggering asset is ${row.agentVersion ?? "unknown"} — script execution needs ${MIN_AGENT_SCRIPT_VERSION}+ (upgrade the Polaris Agent)`);
+    }
+    agent = { id: row.id };
   }
+
   const timeoutSec = Math.min(req.timeoutSec ?? script.timeoutSec, MAX_SCRIPT_TIMEOUT_SEC);
   const run = await prisma.automationScriptRun.create({
     data: {
@@ -217,6 +250,28 @@ export async function requestScriptRun(req: ScriptRunRequest): Promise<{ runId: 
       requestedBy: req.requestedBy,
     },
   });
+
+  if (req.runOn === "agent" && agent) {
+    const cmd = await prisma.agentCommand.create({
+      data: {
+        assetId: req.assetId!,
+        managedAgentId: agent.id,
+        action: "run_script",
+        target: script.name,
+        payload: {
+          runId: run.id,
+          interpreter: script.interpreter,
+          body: script.body,
+          sha256: script.sha256,
+          args: req.args ?? "",
+          timeoutSec,
+        },
+        requestedBy: req.requestedBy,
+      },
+    });
+    await prisma.automationScriptRun.update({ where: { id: run.id }, data: { agentCommandId: cmd.id } });
+  }
+
   return { runId: run.id };
 }
 
