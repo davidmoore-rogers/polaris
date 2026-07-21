@@ -1032,9 +1032,8 @@ button, .list-item, .chip { touch-action: manipulation; }
 .asset-card .meta .mono { color: var(--md-on-surface); }
 .asset-card .meta span { white-space: nowrap; }
 
-/* Asset-type avatar palettes — same key colors mobile-mockup-material.html
-   used so the same iconography reads identically. Keep the type → class
-   mapping in sync with TYPE_META in /js/mobile/assets-tab.js. */
+/* Asset-type avatar palettes. Keep the type → class mapping in sync with
+   TYPE_META in /js/mobile/assets-tab.js. */
 .ico-fw   { background: rgba(255,180,80,.18); color: #ffc78a; }
 .ico-sw   { background: rgba(216,188,224,.20); color: var(--md-tertiary); }
 .ico-srv  { background: rgba(163,201,255,.20); color: var(--md-primary); }
