@@ -225,7 +225,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `public/js/assets.js:_confirmUninstallAgent` — wraps `showConfirm` Promise; on resolve(true) calls `api.assets.deleteAgent(id, {force})`.
 - `src/api/routes/agents.ts:POST /enroll` — consumes the enrollment token, mints a long-lived bearer, transitions installStatus → "active"; emits `agent.enrolled`. Cert-pin mismatch sets installStatus="failed" and emits `agent.install_failed`.
 - `src/services/agentTokenService.ts:verifyBearer` — runs on EVERY bearer-gated call; best-effort bumps `lastSeenAt`/`lastSeenIp`, AND self-heals a stuck `installStatus="enrolling"` → `"active"`. This covers the re-install/re-push case where `startInstall` reset status to "enrolling" but the agent reused the bearer already in agent.conf and short-circuited `/enroll` (so nothing else would ever flip it active). Scoped to "enrolling" only — never touches upgrading/uninstalling/failed states.
-- `src/api/routes/agents.ts:POST /samples` — bumps lastSeenAt (via verifyBearer) + lastTelemetryAt / lastSystemInfoAt per stream; calls recordProbeResult({fromAgent:true}) for the responseTime stream so the five-state machine runs on agent-pushed RTTs. The responseTime sample also carries `uptimeSec` (Go agent's `host.Uptime()`); it's passed into the ProbeResult so the agent host's uptime lands on `Asset.lastUptimeSec` (+ reboot detection) via the same probe path SNMP/FortiOS use. The `eventLog` stream branch is NOT a sample table — it calls `osEventLogService.ingestOsEventLog` to curate entries into the audit Event table (`os_event.*`, resourceType=asset), gated by the `Setting("agentEventLog").enabled` master switch (drops a stale agent's push when off). See cross-cutting/osEventLog. **Process streams (Feature C):** `processInventory` → `persistAssetProcesses` (current-state full-replace); `processTelemetry` → `enqueueProcessSamples` (per-pinned-program CPU/RAM, cadence="fast"); `processLog` → `enqueueProcessLogSamples`. `GET /config` ships `streams.processes.enabled` (= processesPolling resolves to agent) + a `pinnedProcesses` array (`Asset.monitoredProcesses` joined to `AssetProcessConfig` → `{name, logSource, logPathGlob}`) so the agent telemetry/log loops know which programs to sample + where their logs are.
+- `src/api/routes/agents.ts:POST /samples` — bumps lastSeenAt (via verifyBearer) + lastTelemetryAt / lastSystemInfoAt per stream; calls recordProbeResult({fromAgent:true}) for the responseTime stream so the five-state machine runs on agent-pushed RTTs. The responseTime sample also carries `uptimeSec` (Go agent's `host.Uptime()`); it's passed into the ProbeResult so the agent host's uptime lands on `Asset.lastUptimeSec` (+ reboot detection) via the same probe path SNMP/FortiOS use. The `eventLog` stream branch is NOT a sample table — it calls `osEventLogService.ingestOsEventLog` to curate entries into the audit Event table (`os_event.*`, resourceType=asset), gated by the `Setting("agentEventLog").enabled` master switch (drops a stale agent's push when off). See cross-cutting/osEventLog. **Process streams (Feature C):** `processInventory` → `persistAssetProcesses` (current-state full-replace); `processTelemetry` → `enqueueProcessSamples` (per-pinned-program CPU/RAM, cadence="fast"); `processLog` → `enqueueProcessLogSamples`; `processConnections` → `persistProcessConnections` (Application Map accumulate+age rows, pushed names intersected with the CURRENT `Asset.mappedProcesses` as a stale-config guard). `GET /config` ships `streams.processes.enabled` (= processesPolling resolves to agent) + a `pinnedProcesses` array (`Asset.monitoredProcesses` joined to `AssetProcessConfig` → `{name, logSource, logPathGlob}`) so the agent telemetry/log loops know which programs to sample + where their logs are, + a plain `mappedProcesses: string[]` array for the connections loop (independent of pinnedProcesses — a mapped-only program must not wake the telemetry/log loops). The heartbeat `computeConfigEtag` folds BOTH pin sets by content (`join("\u0001")`), not count, so a same-count pin swap still refreshes running agents.
 - `src/api/routes/agents.ts:POST /system-info` — upserts the `polaris-agent` AssetSource row (externalId = managedAgent.id, observed = full host identity blob), then re-projects hostname / serialNumber / manufacturer / model / os / osVersion against all sources for the asset. Also writes MAC inline: normalize `primaryMac` → colon-upper, merge into `AssetMacAddress` via `reconcileMacAddresses` preserving entries from other sources, set `Asset.macAddress` to the freshest entry by `lastSeen`. MAC isn't owned by `projectAssetFromSources` — every discovery path writes it inline; the agent path matches that convention. Opportunistically bumps `ManagedAgent.agentVersion` when the body carries it.
 - `src/api/routes/agents.ts:POST /heartbeat` — refresh agentVersion + bump lastSeenAt.
 - `src/services/agentTokenService.ts` — `mintEnrollmentToken` (10-min TTL), `consumeEnrollmentToken` (atomic swap → bearer + stamps asset's 5 per-stream `*Polling` columns to `"agent"` in the same transaction so the active agent owns every stream), `revokeBearer` (sets bearerRevokedAt).
@@ -1617,6 +1617,59 @@ Listed alphabetically.
 - New view-key shapes (beyond b|/f|) need `isValidViewKey`, the route Zod, AND map.js `_activeViewKey` updated together.
 - If node ids in the topology payload ever stop being Asset UUIDs (or synthetics become persistable), revisit `MAX_NODE_ID_LEN` and the stale-entry story.
 - Keep the localStorage key scheme (`polaris.topology.positions:<siteId>[:<view>]`, bare key = flat) in sync — it's the seed/fallback the server store was modeled on.
+
+---
+
+## services/applicationMapService.ts
+
+**What it owns:** The Application Map — the connectivity graph built from `AssetProcessConnection` rows (accumulate+age socket facts for mapped processes), the per-asset Ports & Connections DTO, and the shared `ApplicationMapLayout` drag layout (the appmap counterpart of TopologyLayout, one global `view="global"` row, no per-site FK).
+
+**Public API:** buildApplicationMapGraph, buildGraphFromRows (PURE — the unit-tested core), resolveIpsToAssets, getAssetProcessConnections, getAppMapLayout, saveAppMapLayout, deleteAppMapLayout, assetNodeId, processNodeId, isNoiseIp, subnetKeyOf, plus the AppMap* type family.
+
+**Cross-service deps:** `prisma.asset` / `prisma.assetAssociatedIp` / `prisma.assetProcessConnection` / `prisma.applicationMapLayout`; `deviceIconService.loadIconResolutionCache/resolveIconUrl` (asset-node icons); `topologyLayoutService.sanitizePositions` (layout validation).
+
+**Used by:**
+- `src/api/routes/applicationMap.ts` — `GET /application-map` (applicationMap=read) + `PUT|DELETE /application-map/layout` (applicationMap=write, audited `application_map.layout.saved/reset`).
+- `src/api/routes/assets.ts` — `GET /assets/:id/process-connections` (assets=read) → `getAssetProcessConnections`.
+- `public/js/appmap.js` — the page; `public/js/assets.js` — the process detail panel's Ports & Connections section.
+
+**Invariants:**
+- Node ids are DETERMINISTIC (`asset:<id>`, `proc:<assetId>:<b64url(name)>`, `ip:<ip>`, `ipgroup:<cidr>`) — ApplicationMapLayout blobs and the client's localStorage fallback key on them; changing the id scheme orphans every saved layout.
+- `resolveIpsToAssets` consults Asset.ipAddress then AssetAssociatedIp ONLY — AssetIpHistory is deliberately excluded (a rotated-off IP would attribute live traffic to the wrong former holder).
+- Edge dedup: outbound observations win over inbound observations of the same logical connection (`src|dstNode|proto|port` key); one rendered edge per (source, target) with a ≤16-port breakdown.
+- Graph reads are bounded to `lastSeen ≥ now − 7d` — the UI's widest age filter; widening one without the other silently lies.
+- `buildGraphFromRows` stays pure (no prisma) — that's what makes the resolution/dedup/grouping rules testable.
+
+**When changing this:**
+- New node kinds / id shapes → update appmap.js (labels, stylesheet, layout passes) + the saved-layout story in the same change.
+- If collection ever adds more `kind` values to AssetProcessConnection, the graph core's listen-index + direction assumptions need revisiting.
+- Unknown-IP caps (group >5/subnet, 100 nodes) are load-bearing for busy fleets — don't remove without a pagination story.
+
+---
+
+## services/agentlessProcessService.ts
+
+**What it owns:** Agentless (SSH/WinRM) collection for the `processes` stream — full inventory, pinned-process CPU/RAM telemetry, and mapped-process connection discovery. The transport commands, the pure parsers, and the server-side mirror of the agent's connection direction heuristic (`buildConnectionRows`).
+
+**Public API:** collectProcessesSsh, collectProcessesWinrm, AgentlessProcessResult/AgentlessProcessOpts, parseLinuxPs, parseLinuxSs, buildLinuxSsCommand, parseWindowsProcessJson, parseWindowsConnectionsJson, buildWindowsConnectionsScript, aggregatePsRows, telemetryFromPsRows, buildConnectionRows, isShellSafeProcessName, LINUX_PS_COMMAND, WINDOWS_PS_PROCESS_SCRIPT.
+
+**Cross-service deps:** `utils/remoteExec.ts` (withSshClient/sshExec/winrmRunPowershell); `import type` ONLY from monitoringService (AssetProcessInput/ProcessConnectionInput — erased at runtime, so the monitoringService→agentlessProcessService import can't cycle).
+
+**Used by:**
+- `src/services/monitoringService.ts` — `runProcessesFor` (the "processes" monitor cadence) is the only caller; it resolves the credential chain (per-stream → asset default → class override → AD bind) and persists the results (persistAssetProcesses / enqueueProcessSamples / persistProcessConnections).
+
+**Invariants:**
+- Collection is scoped to the requested names ON-HOST (ss grep patterns / PS `$m -contains` filter) — never full-host collect-then-filter over the wire; that's the feature's whole point.
+- Mapped/pinned names are sanitized (`isShellSafeProcessName`) before embedding in ANY remote command line; names that fail the charset are silently skipped, never interpolated.
+- Linux `comm` is kernel-truncated to 15 chars — same as gopsutil `Name()` — so pin names stay consistent across agent/ssh transports. Windows names use Get-Process ProcessName (no ".exe").
+- `ss` grep exit code 1 = valid empty scrape, not an error. `ss -p` socket→process attribution effectively requires root/sudo — rows without an owner token drop on-host.
+- WinRM scripts must stay compact (≲2.5KB source): WinRS routes through cmd.exe (8191-char ceiling) and -EncodedCommand inflates ~2.7×.
+- Linux `pcpu` is lifetime-average CPU (not the agent's 300ms instantaneous window) — documented fidelity tradeoff; don't "fix" it with a two-sample sleep over SSH without weighing the session cost.
+
+**When changing this:**
+- Keep `buildConnectionRows` semantics in lockstep with the agent's `buildConnectionSamples` (agent/internal/collectors/processconnections.go) — both implement the same listen/inbound/outbound heuristic + ephemeral-port drop.
+- New parsed fields need fixtures in tests/unit/agentlessProcessService.test.ts (the parsers are the contract).
+- Verify command shapes on real hosts before relying on them: `etimes` (BusyBox ps lacks it), Win32_PerfFormattedData availability, Get-NetTCPConnection on the oldest supported Server.
 
 ---
 

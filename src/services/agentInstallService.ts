@@ -31,7 +31,6 @@
  * Windows path.
  */
 
-import { Client as SshClient } from "ssh2";
 import { readFile } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import { prisma } from "../db.js";
@@ -42,6 +41,7 @@ import { getCredential } from "./credentialService.js";
 import { mintEnrollmentToken } from "./agentTokenService.js";
 import { logEvent } from "../api/routes/events.js";
 import { winrmRunOne, type WinRmConnection } from "../utils/winrm.js";
+import { withSshClient, sshExec, sftpPut } from "../utils/remoteExec.js";
 import { getPublicUrlPort } from "../utils/publicUrl.js";
 import { getServerCertHostnames } from "./certInfo.js";
 
@@ -686,85 +686,8 @@ async function sshUninstall(p: SshUninstallParams): Promise<void> {
   });
 }
 
-function withSshClient<T>(
-  host: string,
-  config: Record<string, unknown>,
-  fn: (client: SshClient) => Promise<T>,
-): Promise<T> {
-  const username = String(config.username || "");
-  const password = typeof config.password === "string" ? config.password : "";
-  const privateKey = typeof config.privateKey === "string" ? config.privateKey : "";
-  const port = Number.isFinite(Number(config.port)) ? Number(config.port) : 22;
-  if (!username || (!password && !privateKey)) {
-    return Promise.reject(new Error("SSH credential is missing username or password/privateKey"));
-  }
-
-  return new Promise<T>((resolve, reject) => {
-    const client = new SshClient();
-    let settled = false;
-    const finish = (err: Error | null, val?: T) => {
-      if (settled) return;
-      settled = true;
-      try { client.end(); } catch { /* already closed */ }
-      if (err) reject(err); else resolve(val as T);
-    };
-
-    client.on("ready", async () => {
-      try {
-        const v = await fn(client);
-        finish(null, v);
-      } catch (err: any) {
-        finish(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-    client.on("error", (err) => finish(err));
-
-    const opts: any = { host, port, username, readyTimeout: 30_000 };
-    if (privateKey) opts.privateKey = privateKey;
-    else opts.password = password;
-    try {
-      client.connect(opts);
-    } catch (err: any) {
-      finish(err instanceof Error ? err : new Error(String(err)));
-    }
-  });
-}
-
-function sftpPut(client: SshClient, remotePath: string, body: Buffer, mode: number): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    client.sftp((err, sftp) => {
-      if (err) return reject(err);
-      const stream = sftp.createWriteStream(remotePath, { mode });
-      stream.on("error", reject);
-      stream.on("close", () => resolve());
-      stream.end(body);
-    });
-  });
-}
-
-interface ExecResult { exitCode: number | null; stdout: string; stderr: string }
-
-function sshExec(client: SshClient, cmd: string, timeoutMs: number): Promise<ExecResult> {
-  return new Promise<ExecResult>((resolve, reject) => {
-    client.exec(cmd, (err, stream) => {
-      if (err) return reject(err);
-      let stdout = "";
-      let stderr = "";
-      let exitCode: number | null = null;
-      const timer = setTimeout(() => {
-        try { stream.signal("KILL"); } catch { /* ignore */ }
-        reject(new Error(`Remote command timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      stream.on("close", (code: number) => {
-        clearTimeout(timer);
-        exitCode = code ?? null;
-        resolve({ exitCode, stdout, stderr });
-      });
-      stream.on("data",   (d: Buffer) => { stdout += d.toString("utf8"); });
-      stream.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
-    });
-  });
-}
+// withSshClient / sshExec / sftpPut / ExecResult moved to
+// src/utils/remoteExec.ts (shared with agentlessProcessService) — imported above.
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "…" : s;

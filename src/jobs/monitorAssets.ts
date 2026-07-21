@@ -127,6 +127,11 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       // Phase 2 carve-out: LLDP + Storage each have their own cadence + queue.
       lastLldpAt:    true, lldpIntervalSec:    true,
       lastStorageAt: true, storageIntervalSec: true,
+      // Agentless processes cadence (ssh/winrm): inventory anchor + the 60s
+      // pinned/mapped sub-pass anchor + the pin arrays that arm the sub-pass.
+      lastProcessesAt: true, lastProcessPinsAt: true, processesIntervalSec: true,
+      processesPolling: true,
+      monitoredProcesses: true, mappedProcesses: true,
       probeTimeoutMs: true,
       responseTimePolling: true,
       cpuMemoryPolling:    true,
@@ -258,6 +263,24 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       const storageTransport = eff.storagePolling || "unknown";
       await publishMonitorJob("storage", a.id, { transport: storageTransport, assetType, verboseDebug });
     }
+    // Agentless processes cadence — ssh/winrm only (agent-mode assets
+    // self-collect; SNMP hrSWRunTable stays declared-but-unimplemented). Due
+    // when the inventory interval elapsed OR pins/mapped names arm the 60s
+    // sub-pass; runProcessesFor re-derives which sub-passes to run and stamps
+    // the anchors even on failure so a bad credential can't re-queue every
+    // tick. isUp gate: authenticated transports shouldn't hammer unconfirmed
+    // hosts. Keep in sync with the matching block in runMonitorPass.
+    if (isUp && enabled.has("processes") &&
+        (eff.processesPolling === "ssh" || eff.processesPolling === "winrm")) {
+      const procPins =
+        ((a.monitoredProcesses?.length ?? 0) + (a.mappedProcesses?.length ?? 0)) > 0;
+      const processesDue =
+        isDue(a.lastProcessesAt, eff.processesIntervalSeconds) ||
+        (procPins && isDue(a.lastProcessPinsAt, 60));
+      if (processesDue) {
+        await publishMonitorJob("processes", a.id, { transport: eff.processesPolling, assetType, verboseDebug });
+      }
+    }
   }
 
   const total = candidates.length;
@@ -298,17 +321,18 @@ async function heavyTick(): Promise<void> {
       if (getBootTimeMode() === "pgboss") {
         // Phase 2 carve-out: LLDP + Storage publish on the heavy tick alongside
         // telemetry + systemInfo. Cursor mode keeps the legacy
-        // ["telemetry", "systemInfo"] set — the cursor pass doesn't drive the
-        // LLDP/Storage queues (those are pg-boss-only); the existing
+        // ["telemetry", "systemInfo"] set for those two — the cursor pass
+        // doesn't drive the LLDP/Storage queues (pg-boss-only); the existing
         // systemInfo walk picks up LLDP + Storage as session-coalesced side
-        // effects on cursor installs.
-        await publishDueWork(["telemetry", "systemInfo", "lldp", "storage"]);
+        // effects on cursor installs. The agentless "processes" cadence has NO
+        // side effect to ride, so it dispatches explicitly in BOTH modes.
+        await publishDueWork(["telemetry", "systemInfo", "lldp", "storage", "processes"]);
       } else {
         const stats = await runMonitorPass({
-          cadences: ["telemetry", "systemInfo"],
+          cadences: ["telemetry", "systemInfo", "processes"],
           concurrency: HEAVY_CONCURRENCY,
         });
-        if (stats.telemetry.collected > 0 || stats.systemInfo.collected > 0) {
+        if (stats.telemetry.collected > 0 || stats.systemInfo.collected > 0 || stats.processes.collected > 0) {
           logger.debug({ stats }, "Heavy monitor pass complete");
         }
       }

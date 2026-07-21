@@ -39,6 +39,7 @@ import {
   resolveMonitorSettings,
   invalidateMonitorSettingsCache,
   persistAssetProcesses,
+  persistProcessConnections,
 } from "../../services/monitoringService.js";
 import {
   enqueueMonitorSample,
@@ -251,6 +252,19 @@ const ProcessTelemetrySampleSchema = z.object({
   instanceCount: z.number().int().nullable().optional(),
 });
 
+// Per-MAPPED-program socket facts (Application Map). Accumulate+age rows —
+// see persistProcessConnections. Sentinels ("" / 0) fill the fields a kind
+// doesn't use, matching the asset_process_connections business key.
+const ProcessConnectionSampleSchema = z.object({
+  name:       z.string().min(1).max(255),
+  kind:       z.enum(["listen", "outbound", "inbound"]),
+  proto:      z.enum(["tcp", "udp"]),
+  localAddr:  z.string().max(64).optional(),
+  localPort:  z.number().int().min(0).max(65535).optional(),
+  remoteIp:   z.string().max(64).optional(),
+  remotePort: z.number().int().min(0).max(65535).optional(),
+});
+
 // Per-pinned-program log lines (Feature C).
 const ProcessLogSampleSchema = z.object({
   timestamp: z.string().datetime().optional(),
@@ -271,6 +285,10 @@ const SamplesBodySchema = z.discriminatedUnion("stream", [
   z.object({ stream: z.literal("processInventory"), samples: z.array(ProcessSampleSchema).max(10000) }),
   z.object({ stream: z.literal("processTelemetry"), samples: z.array(ProcessTelemetrySampleSchema).min(1).max(500) }),
   z.object({ stream: z.literal("processLog"),       samples: z.array(ProcessLogSampleSchema).min(1).max(2000) }),
+  // Application Map: listen/outbound/inbound rows for mapped processes. Caps
+  // are enforced on-agent (200/500/200 per process+kind); 5000 bounds a
+  // worst-case many-processes push.
+  z.object({ stream: z.literal("processConnections"), samples: z.array(ProcessConnectionSampleSchema).max(5000) }),
 ]);
 
 agentsRouter.post("/samples", async (req, res, next) => {
@@ -500,6 +518,27 @@ agentsRouter.post("/samples", async (req, res, next) => {
       }));
       enqueueProcessLogSamples(rows);
       accepted = rows.length;
+    } else if (body.stream === "processConnections") {
+      // Application Map socket facts. Intersect pushed names with the CURRENT
+      // mapped set — a guard against agents running on a stale config (the
+      // agent filters on-host; this is the server-side backstop, same posture
+      // as the storage arm's pinned lookup).
+      const mapped = new Set(
+        (await prisma.asset.findUnique({ where: { id: assetId }, select: { mappedProcesses: true } }))?.mappedProcesses ?? [],
+      );
+      const rows = body.samples
+        .filter((s) => mapped.has(s.name))
+        .map((s) => ({
+          processName: s.name,
+          kind:        s.kind,
+          proto:       s.proto,
+          localAddr:   s.localAddr ?? null,
+          localPort:   s.localPort ?? null,
+          remoteIp:    s.remoteIp ?? null,
+          remotePort:  s.remotePort ?? null,
+        }));
+      await persistProcessConnections(assetId, rows);
+      accepted = rows.length;
     } else {
       // storage
       const pinnedStorage = new Set(
@@ -706,6 +745,14 @@ agentsRouter.get("/config", async (req, res, next) => {
       monitored: asset.monitored,
       certFingerprints,
       pinnedProcesses,
+      // Mapped-process names for the Application Map connections loop. Plain
+      // string array (no per-entry log config — a mapped-only process must NOT
+      // trigger the telemetry/log loops). Independent of pinnedProcesses; the
+      // agent's processConnections loop keys off this set alone. Part of the
+      // ETag (payload hash) so a Map toggle refreshes running agents.
+      mappedProcesses: eff.processesPolling === "agent"
+        ? ((asset.mappedProcesses ?? []) as string[])
+        : [],
     };
     const etag = computeEtag(payload);
 
@@ -968,12 +1015,15 @@ async function computeConfigEtag(assetId: string): Promise<string> {
     // running agent only re-fetches /config when this heartbeat etag changes,
     // and the /config self-heal that flips processes to agent only runs on that
     // re-fetch. Omitting them deadlocked process collection on already-running
-    // agents (they'd only pick it up on restart). pinned-process count is folded
-    // in so adding/removing a Monitor pin also wakes the telemetry/log loops.
+    // agents (they'd only pick it up on restart). Pin sets are folded in BY
+    // CONTENT (not count) so swapping one pinned name for another at constant
+    // count still wakes the loops — a count-only fold left that case stale
+    // until the next full /config poll.
     sto:   [eff.storagePolling,      eff.storageIntervalSeconds,    eff.storageTimeoutMs],
     proc:  [eff.processesPolling,    eff.processesIntervalSeconds],
     evt:   [eff.eventLogPolling,     eff.eventLogIntervalSeconds],
-    pins:  (asset.monitoredProcesses ?? []).length,
+    pins:   (asset.monitoredProcesses ?? []).join("\u0001"),
+    mapped: (asset.mappedProcesses   ?? []).join("\u0001"),
     mon:   asset.monitored,
   };
   return computeEtag(compact);

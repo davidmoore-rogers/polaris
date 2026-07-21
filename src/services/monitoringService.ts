@@ -35,6 +35,9 @@ import { Client as SshClient } from "ssh2";
 
 import { prisma } from "../db.js";
 import { retryOnDeadlock } from "../utils/dbRetry.js";
+// NOTE: agentlessProcessService imports back from this module with
+// `import type` only, so this pair can't cycle at runtime.
+import { collectProcessesSsh, collectProcessesWinrm, type AgentlessProcessResult } from "./agentlessProcessService.js";
 import { AppError } from "../utils/errors.js";
 import { reconcileInterfaceMacs, expandMacRange } from "../utils/macAddresses.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
@@ -97,6 +100,7 @@ import {
   enqueueStorageSamples,
   enqueueIpsecTunnelSamples,
   enqueuePerfSlaSamples,
+  enqueueProcessSamples,
 } from "./sampleWriteBuffer.js";
 import {
   classifyHardwareSensor,
@@ -7451,6 +7455,135 @@ export async function persistAssetProcesses(
   }
 }
 
+// ─── Application Map: process connection persistence ─────────────────────────
+
+export type ProcessConnectionKind = "listen" | "outbound" | "inbound";
+
+export interface ProcessConnectionInput {
+  /** AssetProcess.name key — same program-name space as the pin arrays. */
+  processName: string;
+  kind:  ProcessConnectionKind;
+  proto: "tcp" | "udp";
+  localAddr?:  string | null;
+  localPort?:  number | null;
+  remoteIp?:   string | null;
+  remotePort?: number | null;
+}
+
+// Per-(processName, kind) row caps. Also enforced on-agent and in the agentless
+// parsers before transmit — this copy is the defensive last line against
+// old/hand-rolled agents pushing unbounded sets.
+const PROCESS_CONN_CAPS: Record<ProcessConnectionKind, number> = {
+  listen:   200,
+  outbound: 500,
+  inbound:  200,
+};
+// 11 params/row; 2000 rows/statement stays well under the 65535 param ceiling.
+const PROCESS_CONN_CHUNK = 2000;
+// lastSeen churn gate: a row seen every 60s only takes a real tuple update once
+// per window — ~5× less dead-tuple churn, and with lastSeen unindexed those
+// updates stay HOT. Reads can see lastSeen up to this much stale, irrelevant
+// against the 30-day retention window.
+const PROCESS_CONN_BUMP_MINUTES = 5;
+
+function processConnSentinels(r: ProcessConnectionInput): {
+  localAddr: string; localPort: number; remoteIp: string; remotePort: number;
+} {
+  return {
+    localAddr:  r.localAddr ?? "",
+    localPort:  Number.isInteger(r.localPort)  && (r.localPort  as number) >= 0 ? (r.localPort  as number) : 0,
+    remoteIp:   r.remoteIp ?? "",
+    remotePort: Number.isInteger(r.remotePort) && (r.remotePort as number) >= 0 ? (r.remotePort as number) : 0,
+  };
+}
+
+/**
+ * ACCUMULATE + AGE upsert of connection facts for one asset's MAPPED processes.
+ * NOT delete-replace: each row is keyed on the business tuple; a re-observed
+ * row bumps lastSeen (behind the churn gate) and keeps firstSeen, an absent row
+ * is left alone to age out via pruneProcessConnections. An empty `rows` push is
+ * therefore a no-op by design — short-lived connections must not flicker off
+ * the Application Map between scrapes.
+ *
+ * Caller contract: `rows` should already be filtered to the asset's
+ * mappedProcesses (the agent ingest arm and the agentless collectors both do);
+ * this function only normalizes, dedups, and caps.
+ */
+export async function persistProcessConnections(
+  assetId: string,
+  rows: ProcessConnectionInput[],
+): Promise<void> {
+  if (rows.length === 0) return;
+
+  interface NormalizedConnRow {
+    processName: string; kind: ProcessConnectionKind; proto: "tcp" | "udp";
+    localAddr: string; localPort: number; remoteIp: string; remotePort: number;
+  }
+  // Normalize + validate + dedup by business key. Two identical tuples inside
+  // one INSERT ... ON CONFLICT raise "cannot affect row a second time", so the
+  // JS-side dedup is mandatory, not an optimization.
+  const byKey = new Map<string, NormalizedConnRow>();
+  for (const r of rows) {
+    const kind  = String(r.kind).toLowerCase()  as ProcessConnectionKind;
+    const proto = String(r.proto).toLowerCase() as "tcp" | "udp";
+    if (kind !== "listen" && kind !== "outbound" && kind !== "inbound") continue;
+    if (proto !== "tcp" && proto !== "udp") continue;
+    const name = (r.processName ?? "").trim();
+    if (!name) continue;
+    const s = processConnSentinels(r);
+    if (s.localPort > 65535 || s.remotePort > 65535) continue;
+    const key = JSON.stringify([name, kind, proto, s.localAddr, s.localPort, s.remoteIp, s.remotePort]);
+    if (!byKey.has(key)) byKey.set(key, { processName: name, kind, proto, ...s });
+  }
+
+  // Per-(processName, kind) caps, deterministic order so truncation is stable
+  // across scrapes (a capped set shouldn't churn membership between pushes).
+  const grouped = new Map<string, { kind: ProcessConnectionKind; list: NormalizedConnRow[] }>();
+  for (const row of byKey.values()) {
+    // kind is a fixed token, so "kind:name" can't collide across groups.
+    const gk = `${row.kind}:${row.processName}`;
+    let g = grouped.get(gk);
+    if (!g) { g = { kind: row.kind, list: [] }; grouped.set(gk, g); }
+    g.list.push(row);
+  }
+  const capped: NormalizedConnRow[] = [];
+  for (const g of grouped.values()) {
+    g.list.sort((a, b) =>
+      a.proto.localeCompare(b.proto) ||
+      a.remoteIp.localeCompare(b.remoteIp) ||
+      (a.remotePort - b.remotePort) ||
+      a.localAddr.localeCompare(b.localAddr) ||
+      (a.localPort - b.localPort));
+    capped.push(...g.list.slice(0, PROCESS_CONN_CAPS[g.kind]));
+  }
+  if (capped.length === 0) return;
+
+  const nowIso = new Date().toISOString();
+  for (let i = 0; i < capped.length; i += PROCESS_CONN_CHUNK) {
+    const chunk = capped.slice(i, i + PROCESS_CONN_CHUNK);
+    const params: unknown[] = [];
+    const tuples: string[] = [];
+    let p = 1;
+    for (const r of chunk) {
+      tuples.push(`($${p++}::uuid, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}::int, $${p++}, $${p++}::int, $${p++}::timestamp, $${p++}::timestamp)`);
+      params.push(
+        randomUUID(), assetId, r.processName, r.kind, r.proto,
+        r.localAddr, r.localPort, r.remoteIp, r.remotePort,
+        nowIso, nowIso,
+      );
+    }
+    const sql =
+      `INSERT INTO "asset_process_connections" (` +
+      `"id", "assetId", "processName", "kind", "proto", ` +
+      `"localAddr", "localPort", "remoteIp", "remotePort", "firstSeen", "lastSeen"` +
+      `) VALUES ${tuples.join(", ")} ` +
+      `ON CONFLICT ("assetId", "processName", "kind", "proto", "localAddr", "localPort", "remoteIp", "remotePort") ` +
+      `DO UPDATE SET "lastSeen" = EXCLUDED."lastSeen" ` +
+      `WHERE "asset_process_connections"."lastSeen" < EXCLUDED."lastSeen" - interval '${PROCESS_CONN_BUMP_MINUTES} minutes'`;
+    await retryOnDeadlock(() => prisma.$executeRawUnsafe(sql, ...params));
+  }
+}
+
 /**
  * Replace the asset's LLDP neighbor rows with the latest scrape. Idempotent:
  * existing rows that match (assetId, localIfName, chassisId, portId) are
@@ -8500,9 +8633,11 @@ interface RunStats {
   telemetry:    { collected: number; failed: number };
   systemInfo:   { collected: number; failed: number };
   fastFiltered: { collected: number; failed: number };
+  /** Agentless (ssh/winrm) processes cadence — cursor mode only. */
+  processes:    { collected: number; failed: number };
 }
 
-export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage";
+export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes";
 
 /**
  * Per-cadence outcome tally returned by the runFooFor() functions. Used by
@@ -9028,6 +9163,155 @@ export async function runStorageFor(assetId: string, labels: WorkItemLabels): Pr
   }
 }
 
+// Fixed cadence of the agentless pinned/mapped sub-pass (pinned cpu/mem
+// telemetry + mapped connection discovery) — mirrors the agent's 60s
+// processTelemetry / processConnections loops.
+const PROCESS_PINS_INTERVAL_SEC = 60;
+
+/**
+ * Agentless `processes` cadence: full inventory at processesIntervalSeconds +
+ * a 60s pinned/mapped sub-pass (cpu/mem telemetry rows for monitoredProcesses,
+ * connection rows for mappedProcesses), over SSH or WinRM in one transport
+ * session. Agent-mode assets never reach the collectors — the agent runs its
+ * own loops; SNMP stays declared-but-unimplemented for this stream.
+ *
+ * Unlike runStorageFor, the cadence anchors (lastProcessesAt /
+ * lastProcessPinsAt) are stamped EVEN ON FAILURE: SSH/WinRM are authenticated
+ * transports, and a host with a bad credential must not be re-attempted every
+ * heavy tick (AD-lockout / fail2ban exposure). Failures are metrics + debug
+ * log only — no Event spam.
+ */
+export async function runProcessesFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("processes", labels);
+  try {
+    const asset = await prisma.asset.findUnique({
+      where: { id: assetId },
+      include: { monitorCredential: true, processesCredential: true, discoveredByIntegration: true },
+    });
+    if (!asset || !asset.monitored) {
+      recordWorkOutcome("processes", "success", labels);
+      return "success";
+    }
+    const effective = await resolveMonitorSettings({
+      ...asset,
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    });
+    const method = effective.processesPolling;
+    if (method !== "ssh" && method !== "winrm") {
+      // agent-mode assets self-collect; other methods don't deliver processes.
+      recordWorkOutcome("processes", "success", labels);
+      return "success";
+    }
+
+    const now = new Date();
+    const isDue = (last: Date | null, sec: number): boolean =>
+      sec > 0 && (!last || now.getTime() - last.getTime() >= sec * 1000);
+    const pinNames = (asset.monitoredProcesses ?? []) as string[];
+    const mapNames = (asset.mappedProcesses ?? []) as string[];
+    const inventoryDue = isDue(asset.lastProcessesAt, effective.processesIntervalSeconds);
+    const pinsDue = pinNames.length + mapNames.length > 0 && isDue(asset.lastProcessPinsAt, PROCESS_PINS_INTERVAL_SEC);
+    if (!inventoryDue && !pinsDue) {
+      recordWorkOutcome("processes", "success", labels);
+      return "success";
+    }
+    // Stamp whichever sub-passes we're about to attempt — success or failure —
+    // so the publisher doesn't re-queue a failing host every tick.
+    const stampAnchors = async (): Promise<void> => {
+      const data: Record<string, Date> = {};
+      if (inventoryDue) data.lastProcessesAt = now;
+      if (pinsDue) data.lastProcessPinsAt = now;
+      await prisma.asset.update({ where: { id: assetId }, data }).catch(() => {});
+    };
+
+    const fail = async (reason: string): Promise<CadenceOutcome> => {
+      await stampAnchors();
+      logger.debug({ assetId, method, reason }, "Agentless processes collection failed");
+      recordWorkOutcome("processes", "failure", labels);
+      return "failure";
+    };
+
+    const targetIp = asset.ipAddress;
+    if (!targetIp) return await fail("asset has no IP address");
+
+    // Credential chain — mirrors the probe dispatch: per-stream credential →
+    // asset default → class-override credential → AD bind fallback.
+    const integration = asset.discoveredByIntegration ?? null;
+    const isAdSrc = assetSourceKindFromIntegrationType(integration?.type ?? null) === "activedirectory";
+    const effCred = asset.processesCredential ?? asset.monitorCredential;
+    let credConfig: Record<string, unknown> | null =
+      effCred?.type === method ? (effCred.config as Record<string, unknown>) : null;
+    if (!credConfig) {
+      const classCred = await loadClassOverrideStreamCredential(effective.processesCredentialId, method);
+      if (classCred) credConfig = classCred.config as Record<string, unknown>;
+    }
+    if (!credConfig && isAdSrc && integration) {
+      const cfg = (integration.config as Record<string, unknown>) || {};
+      const username = String(cfg.bindDn || "");
+      const password = String(cfg.bindPassword || "");
+      if (username && password) {
+        credConfig = method === "winrm"
+          ? { username, password, useHttps: true, port: 5986 }
+          : { username, password, port: 22 };
+      }
+    }
+    if (!credConfig) return await fail(`no ${method} credential selected`);
+
+    const opts = {
+      inventory: inventoryDue,
+      monitored: pinsDue ? pinNames : [],
+      mapped:    pinsDue ? mapNames : [],
+      timeoutMs: effective.processesTimeoutMs,
+    };
+    let result: AgentlessProcessResult;
+    try {
+      if (method === "ssh") {
+        result = await collectProcessesSsh(targetIp, credConfig, opts);
+      } else {
+        result = await collectProcessesWinrm({
+          host:      targetIp,
+          username:  String(credConfig.username || ""),
+          password:  String(credConfig.password || ""),
+          useHttps:  credConfig.useHttps !== false,
+          port:      typeof credConfig.port === "number" ? credConfig.port : undefined,
+          verifyTls: credConfig.verifyTls === true,
+          // PS cold-start + the WinRS Receive poll loop realistically need
+          // more headroom than the 10s stream default.
+          timeoutMs: Math.max(effective.processesTimeoutMs, 30_000),
+        }, opts);
+      }
+    } catch (err: any) {
+      return await fail(err?.message || "collection error");
+    }
+
+    if (result.inventory) {
+      await persistAssetProcesses(assetId, result.inventory);
+    }
+    if (result.telemetry && result.telemetry.length > 0) {
+      enqueueProcessSamples(result.telemetry.map((t) => ({
+        assetId,
+        timestamp:     now,
+        cadence:       "fast" as const,
+        name:          t.name,
+        cpuPct:        t.cpuPct,
+        memRssBytes:   t.memRssBytes,
+        instanceCount: t.instanceCount,
+      })));
+    }
+    if (result.connections && result.connections.length > 0) {
+      await persistProcessConnections(assetId, result.connections);
+    }
+    await stampAnchors();
+    recordWorkOutcome("processes", "success", labels);
+    return "success";
+  } catch (err) {
+    logger.error({ err, assetId }, "Agentless processes scrape crashed");
+    recordWorkOutcome("processes", "crash", labels);
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
 /**
  * Storage-only SNMP walk. Same shape as the storage portion of
  * collectSystemInfoSnmp — hrStorageTable first, vendor disk scalar pair as
@@ -9171,6 +9455,12 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       monitoredInterfaces: true,
       monitoredStorage: true,
       monitoredIpsecTunnels: true,
+      // Agentless processes cadence (ssh/winrm): due-calc inputs. The runner
+      // (runProcessesFor) re-loads the asset itself; these keep the cursor
+      // pass's due-set aligned with the pg-boss publisher's.
+      processesPolling: true,
+      lastProcessesAt: true, lastProcessPinsAt: true,
+      monitoredProcesses: true, mappedProcesses: true,
       dependencySuppressed: true,
     },
   });
@@ -9223,6 +9513,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       // cursor-mode dispatcher needs them.
       lldp:         a.lldpPolling    || ifT,
       storage:      a.storagePolling || ifT,
+      processes:    a.processesPolling || "not_delivered",
     });
     assetTypeById.set(a.id, a.assetType ?? "unknown");
   }
@@ -9233,12 +9524,13 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     return now.getTime() - last.getTime() >= intervalSec * 1000;
   }
 
-  type WorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered";
+  type WorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes";
   type Work = { id: string; kind: WorkKind };
   const probes: Work[]       = [];
   const fastFiltereds: Work[] = [];
   const telemetries: Work[]  = [];
   const systemInfos: Work[]  = [];
+  const processesWork: Work[] = [];
   for (const a of candidates) {
     // Resolve effective settings through the four-tier hierarchy. Internally
     // memoized — first asset in a (integration|manual, assetType) bucket
@@ -9357,6 +9649,22 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     if (probe && hasFastPin && canSystemInfo && !systemInfo && isUp && enabled.has("fastFiltered")) {
       fastFiltereds.push({ id: a.id, kind: "fastFiltered" });
     }
+    // Agentless processes cadence (ssh/winrm only — unlike lldp/storage there
+    // is no systemInfo side effect to ride, so cursor mode dispatches it
+    // explicitly). Due when the inventory interval elapsed OR the 60s
+    // pinned/mapped sub-pass is owed; runProcessesFor re-derives which
+    // sub-passes to run. isUp gate: authenticated transports shouldn't hammer
+    // hosts that aren't confirmed up. Keep this block in sync with
+    // publishDueWork in monitorAssets.ts.
+    if (enabled.has("processes") && isUp &&
+        (eff.processesPolling === "ssh" || eff.processesPolling === "winrm")) {
+      const procPins =
+        ((a.monitoredProcesses?.length ?? 0) + (a.mappedProcesses?.length ?? 0)) > 0;
+      const processesDue =
+        isDue(a.lastProcessesAt, eff.processesIntervalSeconds) ||
+        (procPins && isDue(a.lastProcessPinsAt, PROCESS_PINS_INTERVAL_SEC));
+      if (processesDue) processesWork.push({ id: a.id, kind: "processes" });
+    }
   }
   // Order matters: probes first so a saturated worker pool drains the cheap
   // cadence ahead of the heavy walks. Fast-filtered scrapes ride the same
@@ -9364,13 +9672,14 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   // pass, so they queue right behind probes. Telemetry and systemInfo bring
   // up the rear — those are what actually time out on dead hosts, and they
   // shouldn't get to block per-minute polling for the rest of the fleet.
-  const work: Work[] = [...probes, ...fastFiltereds, ...telemetries, ...systemInfos];
+  const work: Work[] = [...probes, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork];
 
   setQueueDepth({
     probe: probes.length,
     fastFiltered: fastFiltereds.length,
     telemetry: telemetries.length,
     systemInfo: systemInfos.length,
+    processes: processesWork.length,
   });
 
   const stats: RunStats = {
@@ -9378,6 +9687,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     telemetry:  { collected: 0, failed: 0 },
     systemInfo: { collected: 0, failed: 0 },
     fastFiltered: { collected: 0, failed: 0 },
+    processes:  { collected: 0, failed: 0 },
   };
   if (work.length === 0) {
     endPassTimer();
@@ -9419,6 +9729,12 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
             const outcome = await runFastFilteredFor(w.id, labelFor("fastFiltered"));
             if (outcome === "success") stats.fastFiltered.collected++;
             else stats.fastFiltered.failed++;
+            break;
+          }
+          case "processes": {
+            const outcome = await runProcessesFor(w.id, labelFor("processes"));
+            if (outcome === "success") stats.processes.collected++;
+            else stats.processes.failed++;
             break;
           }
         }
@@ -9576,7 +9892,7 @@ export async function pruneSystemInfoSamples(): Promise<number> {
   const r = await getSampleRetention();
   const [
     iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily,
-    psDetail, psHourly, psDaily, lldp, customWidget, processLog,
+    psDetail, psHourly, psDaily, lldp, customWidget, processLog, processConn,
   ] = await Promise.all([
     // interfaces — detail is selection-aware (selected=configured, unselected=24h)
     pruneSelectionAwareDetail((w) => prisma.assetInterfaceSample.deleteMany({ where: w as any }), r.interfaces.detail, "asset_interface_samples"),
@@ -9608,15 +9924,33 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     // Process logs are a standalone detail-only hypertable (no rollups) — prune
     // on the process entity's detail window via the same compression-safe path.
     pruneTierByDays((w) => prisma.assetProcessLogSample.deleteMany({ where: w as any }), r.process.detail, "timestamp", "asset_process_log_samples"),
+    // Application Map connection rows (plain accumulate+age table) — fixed
+    // 30-day window (POLARIS_PROCESS_CONN_RETENTION_DAYS), not a retention entity.
+    pruneProcessConnections(),
   ]);
   return iDetail + iHourly + iDaily + sDetail + sHourly + sDaily + ipDetail + ipHourly + ipDaily
-    + psDetail + psHourly + psDaily + lldp + customWidget + processLog;
+    + psDetail + psHourly + psDaily + lldp + customWidget + processLog + processConn;
 }
 
 async function pruneLldpNeighbors(days: number): Promise<number> {
   if (days === FOREVER) return 0;
   const cutoff = days <= 0 ? new Date() : new Date(Date.now() - days * DAY_MS);
   const { count } = await prisma.assetLldpNeighbor.deleteMany({ where: { lastSeen: { lt: cutoff } } });
+  return count;
+}
+
+// Application Map connection rows age out on their own fixed window rather
+// than a sampleRetention entity — the table is current-state-with-age, not a
+// tiered time-series, and one number doesn't warrant a retention-UI row.
+// POLARIS_PROCESS_CONN_RETENTION_DAYS overrides the 30-day default.
+function processConnRetentionDays(): number {
+  const v = Number(process.env.POLARIS_PROCESS_CONN_RETENTION_DAYS);
+  return Number.isFinite(v) && v > 0 ? v : 30;
+}
+
+async function pruneProcessConnections(): Promise<number> {
+  const cutoff = new Date(Date.now() - processConnRetentionDays() * DAY_MS);
+  const { count } = await prisma.assetProcessConnection.deleteMany({ where: { lastSeen: { lt: cutoff } } });
   return count;
 }
 
