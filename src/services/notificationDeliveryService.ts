@@ -3,12 +3,16 @@
  *
  * Drains pending NotificationDelivery rows and dispatches each through its
  * configured NotificationChannel (email SMTP/M365 / webhook slack-teams /
- * pushbullet / web_push). Driven by the deliverNotifications job (~15s).
+ * pushbullet / web_push) — or, for transport "api_call", straight from the
+ * row's meta (channelId is NULL by design there; the request spec was
+ * rendered at fire time by automationActionService). Driven by the
+ * deliverNotifications job (~15s).
  *   - pull a bounded batch of pending rows (attempts < MAX_ATTEMPTS),
  *   - resolve each row's channel + config (secrets live on the channel),
  *   - dispatch with bounded concurrency,
  *   - mark sent / failed (failed rows retry until MAX_ATTEMPTS),
- *   - a NULL channel (deleted/disabled) → permanent fail,
+ *   - a NULL channel (deleted/disabled) → permanent fail, EXCEPT api_call
+ *     rows whose NULL channel is legitimate (normal retry path),
  *   - prune dead push subscriptions (HTTP 410/404),
  *   - write ONE summary audit Event per non-empty drain.
  */
@@ -22,6 +26,7 @@ import { sendSmtpEmail, sendM365Email, type EmailMessage } from "./notificationC
 import { sendWebhook } from "./notificationChannels/webhookChannel.js";
 import { sendPushbullet } from "./notificationChannels/pushbulletChannel.js";
 import { sendWebPush, type WebPushError } from "./notificationChannels/webPushChannel.js";
+import { sendApiCall } from "./notificationChannels/apiCallChannel.js";
 
 const MAX_ATTEMPTS = 3;
 const BATCH_SIZE = 200;
@@ -87,6 +92,24 @@ function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, url: str
 }
 
 async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promise<{ ok: true } | { ok: false; error: string; gone?: boolean }> {
+  // api_call rows carry NO channel by design (channelId NULL — the whole
+  // request spec lives in meta, rendered at fire time). Dispatch before the
+  // channel checks so the null channel isn't treated as deleted.
+  if (d.transport === "api_call") {
+    const m = (d.meta && typeof d.meta === "object" ? d.meta : {}) as Record<string, unknown>;
+    try {
+      await sendApiCall({
+        method: typeof m.method === "string" ? m.method : "POST",
+        url: typeof m.url === "string" && m.url ? m.url : d.target,
+        headers: m.headers && typeof m.headers === "object" ? (m.headers as Record<string, string>) : undefined,
+        body: typeof m.body === "string" ? m.body : undefined,
+        timeoutSec: typeof m.timeoutSec === "number" ? m.timeoutSec : undefined,
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error)?.message ?? String(err) };
+    }
+  }
   if (!channel) return { ok: false, error: "delivery channel was deleted" };
   if (!channel.enabled) return { ok: false, error: "delivery channel is disabled" };
   const url = notificationsPageUrl();
@@ -188,8 +211,10 @@ export async function drainPendingDeliveries(): Promise<{ processed: number; sen
   }
   for (const f of failed) {
     const row = rows.find((r) => r.id === f.id)!;
-    // A missing channel is permanent — fail immediately rather than burn retries.
-    const permanent = !row.channelId || !channels.get(row.channelId);
+    // A missing channel is permanent — fail immediately rather than burn
+    // retries. api_call rows legitimately carry NO channel (spec in meta), so
+    // their failures always take the normal retry path.
+    const permanent = row.transport !== "api_call" && (!row.channelId || !channels.get(row.channelId));
     const nextAttempts = row.attempts + 1;
     ops.push(
       prisma.notificationDelivery.update({

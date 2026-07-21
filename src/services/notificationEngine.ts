@@ -31,16 +31,15 @@ import {
   type Trigger,
   type RuleScope,
   type PreviewRuleInput,
-  type DeliveryTarget,
   type EmailComposition,
   type EscalationConfig,
   type ResetConfig,
   type AutomationAction,
   CHANGE_TYPE_ACTIONS,
-  actionsToTargets,
   normalizeRuleToV2,
 } from "./notificationTypes.js";
-import { expandDeliveries, scopeRegionTagsOf, type ComposedEmail } from "./notificationRecipientService.js";
+import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
+import { executeActions, type ActionExecContext } from "./automationActionService.js";
 import {
   buildTemplateContext,
   renderNotificationTemplate,
@@ -67,19 +66,17 @@ interface DbRule {
   actions: AutomationAction[];
   cooldownSec: number | null;
   messageTemplate: string | null;
-  /** Legacy delivery view of `actions` (notify subset) — feeds expandDeliveries
-   *  until the action-execution phase replaces the fan-out. */
-  targets: DeliveryTarget[];
   emailComposition: EmailComposition | null;
   /** Stored (legacy) escalation shape — the sweep still consumes it directly. */
   escalation: EscalationConfig | null;
 }
 
-/** Best-effort outbound-delivery expansion — never breaks rule evaluation. */
-async function expandDeliveriesSafe(notificationId: string, targets: DeliveryTarget[], scopeRegionTags?: string[], composedEmail?: ComposedEmail): Promise<void> {
-  if (!targets || targets.length === 0) return;
+/** Best-effort action fan-out — never breaks rule evaluation. (executeActions
+ *  is already best-effort per action; this guards the fan-out itself.) */
+async function executeActionsSafe(notificationId: string, actions: AutomationAction[], ctx: Record<string, string>, exec: ActionExecContext): Promise<void> {
+  if (!actions || actions.length === 0) return;
   try {
-    await expandDeliveries(notificationId, targets, scopeRegionTags, composedEmail);
+    await executeActions(notificationId, actions, ctx, exec);
   } catch (err) {
     await logEvent({
       action: "notification.delivery_expand_error",
@@ -87,7 +84,7 @@ async function expandDeliveriesSafe(notificationId: string, targets: DeliveryTar
       resourceId: notificationId,
       actor: "system:notification-engine",
       level: "warning",
-      message: "Failed to expand notification delivery targets",
+      message: "Failed to execute automation actions",
       details: { err: (err as Error)?.message },
     }).catch(() => {});
   }
@@ -466,33 +463,25 @@ function ruleWantsContext(rule: DbRule): boolean {
 function ruleWantsAssetDetail(rule: DbRule): boolean {
   const comp = rule.emailComposition;
   const tierTemplates = (rule.escalation?.tiers ?? []).flatMap((t) => [t.subjectTemplate, t.bodyTextTemplate, t.bodyHtmlTemplate]);
+  // Action-level templates can reference {asset.*} too: per-action email
+  // composition, api_call bodies, script args.
+  const actionTemplates = rule.actions.flatMap((a) =>
+    a.type === "notify"
+      ? [a.emailComposition?.subjectTemplate, a.emailComposition?.bodyTextTemplate, a.emailComposition?.bodyHtmlTemplate]
+      : a.type === "api_call"
+        ? [a.bodyTemplate]
+        : [a.argsTemplate],
+  );
   return (
     ruleWantsContext(rule) ||
-    templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...tierTemplates])
+    templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...tierTemplates, ...actionTemplates])
   );
 }
 
-/**
- * Render the composed outbound email for a rule from a built context. Unset
- * pieces fall back to the pre-feature defaults (subject `[SEV] asset`, text =
- * message + View link). HTML body only when the operator provided one —
- * interpolated values are HTML-escaped there. cc/bcc pass through unresolved
- * (the recipient service resolves them at expansion time).
- * Exported for the escalation sweep + preview.
- */
-export function buildComposedEmail(comp: EmailComposition, ctx: Record<string, string>): ComposedEmail {
-  const link = ctx["link"] || "";
-  const subject = comp.subjectTemplate && comp.subjectTemplate.trim()
-    ? renderNotificationTemplate(comp.subjectTemplate, ctx)
-    : `[${ctx["severity.upper"] || "NOTIFICATION"}] ${ctx["asset"] || "Polaris notification"}`;
-  const text = comp.bodyTextTemplate && comp.bodyTextTemplate.trim()
-    ? renderNotificationTemplate(comp.bodyTextTemplate, ctx)
-    : (ctx["message"] || "") + (link ? `\n\nView: ${link}` : "");
-  const html = comp.bodyHtmlTemplate && comp.bodyHtmlTemplate.trim()
-    ? renderNotificationTemplate(comp.bodyHtmlTemplate, ctx, { html: true })
-    : undefined;
-  return { subject, text, html, cc: comp.cc ?? undefined, bcc: comp.bcc ?? undefined };
-}
+// buildComposedEmail moved to notificationRecipientService (the action layer
+// composes per-action emails and importing it from here would be circular);
+// re-exported so the escalation sweep + tests keep their import path.
+export { buildComposedEmail };
 
 // ─── Threshold / state evaluation ───────────────────────────────────────────
 
@@ -650,8 +639,14 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
     create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id },
     update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null, recoveredSince: null },
   });
-  const composed = rule.emailComposition ? buildComposedEmail(rule.emailComposition, ctx) : undefined;
-  await expandDeliveriesSafe(notif.id, rule.targets, scopeRegionTagsOf(rule.scope), composed);
+  await executeActionsSafe(notif.id, rule.actions, ctx, {
+    scopeRegionTags: scopeRegionTagsOf(rule.scope),
+    assetId: reading.assetId || null,
+    ruleId: rule.id,
+    ruleName: rule.name,
+    ruleEmailComposition: rule.emailComposition,
+    actor: "system:notification-engine",
+  });
   await logEvent({
     action: "notification.triggered",
     resourceType: "notification",
@@ -737,10 +732,10 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   });
 
   const toCreate: Prisma.NotificationCreateManyInput[] = [];
-  // Notifications from rules with delivery targets get a client-generated id so
-  // we can expand their deliveries after the batch insert (createMany returns
-  // no ids). Rows without targets keep the DB default.
-  const deliverAfter: { id: string; targets: DeliveryTarget[]; scopeRegionTags: string[]; composedEmail?: ComposedEmail }[] = [];
+  // Notifications from rules with actions get a client-generated id so we can
+  // execute their actions after the batch insert (createMany returns no ids).
+  // The fire-time template context rides along — api_call bodies render from it.
+  const deliverAfter: { id: string; rule: DbRule; assetId: string | null; ctx: Record<string, string> }[] = [];
   for (const ev of events) {
     for (const c of compiled) {
       if (!c.re.test(ev.action)) continue;
@@ -777,15 +772,10 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         ? renderNotificationTemplate(tmpl, ctx)
         : `${c.rule.name}: ${ev.message}`;
       ctx["message"] = message;
-      const hasTargets = Array.isArray(c.rule.targets) && c.rule.targets.length > 0;
-      const id = hasTargets ? randomUUID() : undefined;
-      if (hasTargets && id) {
-        deliverAfter.push({
-          id,
-          targets: c.rule.targets,
-          scopeRegionTags: scopeRegionTagsOf(c.rule.scope),
-          composedEmail: c.rule.emailComposition ? buildComposedEmail(c.rule.emailComposition, ctx) : undefined,
-        });
+      const hasActions = c.rule.actions.length > 0;
+      const id = hasActions ? randomUUID() : undefined;
+      if (hasActions && id) {
+        deliverAfter.push({ id, rule: c.rule, assetId, ctx });
       }
       toCreate.push({
         ...(id ? { id } : {}),
@@ -804,7 +794,14 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
     await prisma.notification.createMany({ data: toCreate });
   }
   for (const d of deliverAfter) {
-    await expandDeliveriesSafe(d.id, d.targets, d.scopeRegionTags, d.composedEmail);
+    await executeActionsSafe(d.id, d.rule.actions, d.ctx, {
+      scopeRegionTags: scopeRegionTagsOf(d.rule.scope),
+      assetId: d.assetId,
+      ruleId: d.rule.id,
+      ruleName: d.rule.name,
+      ruleEmailComposition: d.rule.emailComposition,
+      actor: "system:notification-engine",
+    });
   }
 
   const newest = events[events.length - 1].timestamp.toISOString();
@@ -861,7 +858,6 @@ export async function evaluateAllNotificationRules(): Promise<void> {
       actions: v2.actions,
       cooldownSec: r.cooldownSec,
       messageTemplate: r.messageTemplate,
-      targets: actionsToTargets(v2.actions),
       emailComposition: (r.emailComposition ?? null) as EmailComposition | null,
       escalation: (r.escalation ?? null) as EscalationConfig | null,
     };
@@ -972,7 +968,7 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
       id: "", name: input.name, description: input.description ?? null, severity: input.severity,
       trigger, scope: input.scope,
       reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
-      messageTemplate: input.messageTemplate ?? null, targets: [],
+      messageTemplate: input.messageTemplate ?? null,
       emailComposition: input.emailComposition, escalation: input.escalation ?? null,
     };
     const sample = readings.find((r) => readingMeets(trigger, r.value)) ?? readings[0];

@@ -1261,6 +1261,25 @@ See `TEMPLATES.md` → "Permission-gated route + dynamic-role function key" for 
 
 Listed alphabetically.
 
+## services/automationActionService.ts
+
+**What it owns:** The single fan-out point between a fired alert (Notification row) and its automation's `actions[]`. `executeActions(notificationId, actions, ctx, exec)` dispatches per action type: notify → the existing recipient/delivery pipeline (`expandDeliveries`) with the ACTION's `emailComposition` falling back to the rule-level one; api_call → one `NotificationDelivery` row (`transport: "api_call"`, `channelId: NULL` by design, request spec + fire-time-rendered body in meta); script → refused until the script-registry phase.
+
+**Public API:** `executeActions`, `ActionExecContext` ({scopeRegionTags?, assetId?, ruleId?, ruleName?, ruleEmailComposition?, escalation? {tier, attempt}, actor?}).
+
+**Cross-service deps:** `prisma` (NotificationDelivery), `eventLogService.logEvent`, `notificationRecipientService` (expandDeliveries + buildComposedEmail), `notificationTypes` (actionsToTargets + action types), `src/utils/notificationTemplate.ts` (api_call body rendering).
+
+**Used by:** `notificationEngine` (fire + event-tail, via its `executeActionsSafe` wrapper); the escalation sweep joins in the escalation-v2 phase.
+
+**Invariants:**
+- Best-effort PER ACTION: one failing action never blocks the others; every failure writes an `automation.action_error` warning Event with actionIndex/actionType/ruleId details.
+- api_call bodies render at FIRE time from the live context — the drain never needs the rule. The api_call row's NULL channelId is legitimate (the drain's permanent-fail rule is transport-conditional); headers are operator-typed and stored unmasked (no-secrets warning lives in the catalog/docs).
+- notify composition precedence: action-level `emailComposition` ?? `exec.ruleEmailComposition` ?? none (legacy per-address fan-out) — byte-identical to the pre-actions path for converted rules.
+
+**When changing this:** New action type → new arm here + `actionSchema` + `assertActionRefs` (notificationRuleService) + a dispatch/execution path (drain arm or dedicated runner) + `actionTypes` catalog entry. Never execute long-running work inline here — enqueue (delivery row / script run) and let the owning job drain it.
+
+---
+
 ## services/notificationTypes.ts
 
 **What it owns:** The Automations vocabulary — the discriminated `trigger` Zod union (asset_metric | asset_state | host_metric | event | change), the asset `scope` schema, the **rule-shape-v2 layer** (`resetSchema` with hysteresis `clearThreshold` + clear-sustain `sustainSec`; the `actionSchema` union notify | api_call | script; escalation v2 tiers-of-actions), `ruleInputSchema` (accepts v2 AND legacy bodies via transform + superRefine cross-validation) / `previewInputSchema` (partial drafts), the pure legacy↔v2 converters (`normalizeRuleToV2`, `normalizeReset`, `targetsToNotifyActions`/`actionsToTargets`, `legacyMirrorOfV2`, `normalizeEscalationToV2`), the metric/field/comparator/aggregation/change-type catalogs, and `buildSchemaCatalog()`.

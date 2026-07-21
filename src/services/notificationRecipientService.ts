@@ -25,7 +25,15 @@ import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { resolveTagScopesForUser } from "./regionScopeService.js";
 import { stripRegionPrefix } from "./notificationService.js";
-import { type DeliveryTarget, type ChannelType, type EmailRecipients, CHANNEL_TYPES, CHANNEL_TRANSPORT } from "./notificationTypes.js";
+import { renderNotificationTemplate } from "../utils/notificationTemplate.js";
+import {
+  type DeliveryTarget,
+  type ChannelType,
+  type EmailRecipients,
+  type EmailComposition,
+  CHANNEL_TYPES,
+  CHANNEL_TRANSPORT,
+} from "./notificationTypes.js";
 
 /**
  * A pre-rendered outbound email (subject/text/html built by the engine at fire
@@ -40,6 +48,29 @@ export interface ComposedEmail {
   html?: string;
   cc?: EmailRecipients | null;
   bcc?: EmailRecipients | null;
+}
+
+/**
+ * Render the composed outbound email for a composition config from a built
+ * context. Unset pieces fall back to the pre-feature defaults (subject
+ * `[SEV] asset`, text = message + View link). HTML body only when the
+ * operator provided one — interpolated values are HTML-escaped there. cc/bcc
+ * pass through unresolved (resolved at expansion time). Lives here (not the
+ * engine) so the action-execution layer can compose without a circular
+ * import; the engine re-exports it for its historical consumers.
+ */
+export function buildComposedEmail(comp: EmailComposition, ctx: Record<string, string>): ComposedEmail {
+  const link = ctx["link"] || "";
+  const subject = comp.subjectTemplate && comp.subjectTemplate.trim()
+    ? renderNotificationTemplate(comp.subjectTemplate, ctx)
+    : `[${ctx["severity.upper"] || "NOTIFICATION"}] ${ctx["asset"] || "Polaris notification"}`;
+  const text = comp.bodyTextTemplate && comp.bodyTextTemplate.trim()
+    ? renderNotificationTemplate(comp.bodyTextTemplate, ctx)
+    : (ctx["message"] || "") + (link ? `\n\nView: ${link}` : "");
+  const html = comp.bodyHtmlTemplate && comp.bodyHtmlTemplate.trim()
+    ? renderNotificationTemplate(comp.bodyHtmlTemplate, ctx, { html: true })
+    : undefined;
+  return { subject, text, html, cc: comp.cc ?? undefined, bcc: comp.bcc ?? undefined };
 }
 
 export interface RecipientUser {
