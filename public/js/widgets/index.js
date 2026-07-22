@@ -407,6 +407,22 @@
     virtual_machine: "#29b6f6", hypervisor: "#5c6bc0",
   };
 
+  // Severity pill for rows whose asset carries an active automation alert
+  // (feeds attach alertSeverity/alertRank and sort severity-first). Palette
+  // mapping mirrors activeAlerts.js: notice/informational → blue watch,
+  // warning → amber, serious/critical → red.
+  var ALERT_SEV_PILL = {
+    notice: "widget-pill-watch", informational: "widget-pill-watch", info: "widget-pill-watch",
+    warning: "widget-pill-amber",
+    serious: "widget-pill-red", critical: "widget-pill-red", error: "widget-pill-red",
+  };
+  window.PolarisWidgets.alertSeverityPill = function (sev) {
+    if (!sev) return "";
+    var cls = ALERT_SEV_PILL[sev] || "widget-pill-watch";
+    var label = String(sev).slice(0, 4);
+    return '<span class="widget-pill ' + cls + '" title="Highest active alert: ' + escapeHtml(sev) + '" style="margin-right:4px;flex:0 0 auto">' + escapeHtml(label) + '</span>';
+  };
+
   // "5m 03s" / "2h 17m" / "3d 4h" — same shape the legacy dashboard used.
   window.PolarisWidgets.durationSince = function (iso) {
     if (!iso) return "—";

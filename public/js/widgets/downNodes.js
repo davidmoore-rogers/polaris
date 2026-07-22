@@ -1,9 +1,10 @@
 /**
  * widgets/downNodes.js — monitored assets currently down, grouped by site or
- * division (SolarWinds "Down Nodes" panel), youngest outage first (the feed
- * orders monitorStatusChangedAt desc — server-side, so the newest outages
- * survive the cap). Reuses the monitorAlerts row markup (statusDot +
- * dash-alert classes). Data from noc-summary downNodes[].
+ * division (SolarWinds "Down Nodes" panel). Severity-first: nodes carrying an
+ * active automation alert lead (feed sorts alertRank desc), then youngest
+ * outage first (monitorStatusChangedAt desc — server-side, so the newest
+ * outages survive the cap). Reuses the monitorAlerts row markup (statusDot +
+ * dash-alert classes + alert-severity pill). Data from noc-summary downNodes[].
  */
 
 (function () {
@@ -31,7 +32,7 @@
       '<div class="dash-alert-row" style="width:100%">' +
         statusDot(n.monitorStatus) +
         '<div class="dash-alert-body">' +
-          '<div class="dash-alert-title">' + escapeHtml(name) + '</div>' +
+          '<div class="dash-alert-title">' + (PolarisWidgets.alertSeverityPill ? PolarisWidgets.alertSeverityPill(n.alertSeverity) : "") + escapeHtml(name) + '</div>' +
           '<div class="dash-alert-sub">' + sub.join(" · ") + '</div>' +
         '</div>' +
         '<div class="dash-alert-time" data-changed-at="' + (n.monitorStatusChangedAt || "") + '">' + PolarisWidgets.durationSince(n.monitorStatusChangedAt) + '</div>' +

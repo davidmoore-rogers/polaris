@@ -100,6 +100,60 @@ function idWhere(assetIds: string[] | null): Record<string, unknown> {
   return assetIds ? { id: { in: assetIds } } : {};
 }
 
+// ─── Active-alert severity join ──────────────────────────────────────────────
+// Widgets sort SEVERITY-FIRST: a row whose asset carries an active (uncleared)
+// automation alert floats above unalerted rows, ordered by the alert's
+// severity; within the same severity each feed keeps its own order (value /
+// outage recency / overdue-ness — the sorts below are stable). Rank map covers
+// the current 5-level vocabulary plus the legacy info/error values on
+// pre-redesign notifications.
+export const ALERT_SEVERITY_RANK: Record<string, number> = {
+  notice: 1, informational: 2, info: 2, warning: 3, serious: 4, error: 5, critical: 5,
+};
+
+/** Highest active-alert severity per asset (one bounded findMany over the
+ *  uncleared notifications; covered by @@index([assetId]) + [cleared, ...]). */
+export async function activeAlertSeverityByAsset(assetIds: string[] | null): Promise<Map<string, { severity: string; rank: number }>> {
+  const rows = await prisma.notification.findMany({
+    where: { cleared: false, assetId: assetIds ? { in: assetIds } : { not: null } },
+    select: { assetId: true, severity: true },
+  });
+  const out = new Map<string, { severity: string; rank: number }>();
+  for (const r of rows) {
+    if (!r.assetId) continue;
+    const rank = ALERT_SEVERITY_RANK[r.severity] ?? 0;
+    const cur = out.get(r.assetId);
+    if (!cur || rank > cur.rank) out.set(r.assetId, { severity: r.severity, rank });
+  }
+  return out;
+}
+
+/** Decorate feed rows with the owning asset's highest active-alert severity.
+ *  One severity fetch bounded to the rows' own asset ids (feeds are capped,
+ *  so this stays small at 2000 assets). */
+async function attachAlertSeverity<T extends object>(
+  rows: T[],
+  idOf: (r: T) => string | null | undefined,
+): Promise<Array<T & { alertSeverity?: string; alertRank: number }>> {
+  const ids = Array.from(new Set(rows.map(idOf).filter((x): x is string => !!x)));
+  if (ids.length === 0) return rows.map((r) => ({ ...r, alertRank: 0 }));
+  const sev = await activeAlertSeverityByAsset(ids);
+  return rows.map((r) => {
+    const id = idOf(r);
+    const s = id ? sev.get(id) : undefined;
+    return { ...r, ...(s ? { alertSeverity: s.severity } : {}), alertRank: s?.rank ?? 0 };
+  });
+}
+
+/** Stable severity-first sort — equal ranks keep the feed's own order. */
+function severityFirst<T extends { alertRank: number }>(rows: T[]): T[] {
+  return rows.slice().sort((a, b) => b.alertRank - a.alertRank);
+}
+
+async function topNWithSeverity(rows: TopNRow[]): Promise<TopNRow[]> {
+  return severityFirst(await attachAlertSeverity(rows, (r) => r.id));
+}
+
 export interface StatusSummary {
   statusCounts: { total: number; up: number; down: number; warning: number; unknown: number; recovering: number; maintenance: number };
   uptimePercent: number | null;
@@ -163,6 +217,8 @@ export interface DownNode {
   division: string | null;
   monitorStatus: string | null;
   monitorStatusChangedAt: Date | null;
+  alertSeverity?: string;
+  alertRank?: number;
 }
 
 function siteOf(a: { location: string | null; learnedLocation: string | null; snmpLocation: string | null }): string {
@@ -207,7 +263,9 @@ export async function getDownNodes(limit: number | null = 100, assetIds: string[
     monitorStatus: a.monitorStatus,
     monitorStatusChangedAt: a.monitorStatusChangedAt,
   }));
-  return { nodes, total };
+  // Severity-first: alerted nodes float to the top; within a severity (and for
+  // unalerted nodes) the youngest-outage order above holds (stable sort).
+  return { nodes: severityFirst(await attachAlertSeverity(nodes, (n) => n.id)), total };
 }
 
 export interface DownInterface {
@@ -219,6 +277,8 @@ export interface DownInterface {
   ifLabel: string | null;
   gate: string;
   lastUpAt: Date | null;
+  alertSeverity?: string;
+  alertRank?: number;
 }
 
 /**
@@ -305,7 +365,7 @@ export async function getDownInterfaces(limit: number | null = 100, sinceMinutes
       lastUpAt: r.lastUpAt,
     });
   }
-  return out;
+  return severityFirst(await attachAlertSeverity(out, (r) => r.assetId));
 }
 
 export interface DownIpsecTunnel {
@@ -318,6 +378,8 @@ export interface DownIpsecTunnel {
   remoteGateway: string | null;
   gate: string;
   lastUpAt: Date | null;
+  alertSeverity?: string;
+  alertRank?: number;
 }
 
 /**
@@ -386,10 +448,10 @@ export async function getDownIpsecTunnels(limit: number | null = 100, sinceMinut
       lastUpAt: r.lastUpAt,
     });
   }
-  return out;
+  return severityFirst(await attachAlertSeverity(out, (r) => r.assetId));
 }
 
-export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string; site?: string }
+export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string; site?: string; alertSeverity?: string; alertRank?: number }
 
 // Hydrate a list of assetIds (preserving the incoming order) with display
 // names in ONE findMany — never a per-row lookup. `site` uses the same
@@ -454,7 +516,7 @@ export async function getHighestCpu(limit: number | null = 100, sinceMinutes = 6
      ORDER BY value DESC LIMIT $2`,
     ...params,
   );
-  return hydrateNames(rows.map((r) => ({ assetId: r.assetId, value: Math.round(r.value * 10) / 10 })));
+  return topNWithSeverity(await hydrateNames(rows.map((r) => ({ assetId: r.assetId, value: Math.round(r.value * 10) / 10 }))));
 }
 
 /**
@@ -483,7 +545,7 @@ export async function getHighestMemory(limit: number | null = 100, sinceMinutes 
      ORDER BY value DESC LIMIT $2`,
     ...params,
   );
-  return hydrateNames(rows.map((r) => ({ assetId: r.assetId, value: Math.round(r.value * 10) / 10 })));
+  return topNWithSeverity(await hydrateNames(rows.map((r) => ({ assetId: r.assetId, value: Math.round(r.value * 10) / 10 }))));
 }
 
 /**
@@ -517,7 +579,7 @@ export async function getSlowestResponse(limit: number | null = 100, assetIds: s
     ...params,
   );
   const ordered = rows.map((r) => ({ assetId: r.assetId, value: Math.round(Number(r.avg_ms) * 10) / 10 }));
-  return hydrateNames(ordered);
+  return topNWithSeverity(await hydrateNames(ordered));
 }
 
 /**
@@ -553,13 +615,14 @@ export async function getHighestDiskUsage(limit: number | null = 100, assetIds: 
     select: { id: true, hostname: true, ipAddress: true, location: true, learnedLocation: true, snmpLocation: true },
   });
   const byId = new Map(assets.map((a) => [a.id, a]));
-  return rows
+  const out = rows
     .map((r): TopNRow | null => {
       const a = byId.get(r.assetId);
       if (!a) return null;
       return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.pct * 10) / 10, detail: r.mountPath, site: siteOf(a) };
     })
     .filter((r): r is TopNRow => r !== null);
+  return topNWithSeverity(out);
 }
 
 /**
@@ -596,13 +659,14 @@ export async function getHighestTemperature(limit: number | null = 100, assetIds
     select: { id: true, hostname: true, ipAddress: true, location: true, learnedLocation: true, snmpLocation: true },
   });
   const byId = new Map(assets.map((a) => [a.id, a]));
-  return rows
+  const out = rows
     .map((r): TopNRow | null => {
       const a = byId.get(r.assetId);
       if (!a) return null;
       return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.value * 10) / 10, detail: r.sensorName, site: siteOf(a) };
     })
     .filter((r): r is TopNRow => r !== null);
+  return topNWithSeverity(out);
 }
 
 /**
@@ -635,10 +699,10 @@ export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 1
     assetId: r.assetId,
     value: Math.round((Number(r.failed) / Number(r.total)) * 1000) / 10,
   }));
-  return hydrateNames(ordered);
+  return topNWithSeverity(await hydrateNames(ordered));
 }
 
-export interface StalePoll { id: string; hostname: string | null; ipAddress: string | null; lastPolledAt: Date | null; expectedIntervalSec: number }
+export interface StalePoll { id: string; hostname: string | null; ipAddress: string | null; lastPolledAt: Date | null; expectedIntervalSec: number; alertSeverity?: string; alertRank?: number }
 
 /**
  * Feed 6 — stale polls (overdue for their next response-time probe). Two-stage:
@@ -699,10 +763,10 @@ export async function getStalePolls(grace = 3, limit: number | null = 50, assetI
       if (limit != null && out.length >= limit) break;
     }
   }
-  return out;
+  return severityFirst(await attachAlertSeverity(out, (r) => r.id));
 }
 
-export interface RebootRow { id: string; hostname: string | null; ipAddress: string | null; rebootedAt: Date }
+export interface RebootRow { id: string; hostname: string | null; ipAddress: string | null; rebootedAt: Date; alertSeverity?: string; alertRank?: number }
 
 /**
  * Feed 7 — recent reboots. Reads device.reboot Events emitted by the probe
@@ -721,7 +785,7 @@ export async function getRecentReboots(sinceHours = 72, limit: number | null = 2
     orderBy: { timestamp: "desc" },
     take: limit ?? undefined,
   });
-  return events.map((e) => {
+  const out: RebootRow[] = events.map((e) => {
     const details = (e.details ?? {}) as Record<string, unknown>;
     return {
       id: e.resourceId ?? "",
@@ -730,14 +794,16 @@ export async function getRecentReboots(sinceHours = 72, limit: number | null = 2
       rebootedAt: e.timestamp,
     };
   });
+  return severityFirst(await attachAlertSeverity(out, (r) => r.id || null));
 }
 
 export interface AlertRow { id: string; hostname: string | null; message: string; severity: string; raisedAt: Date }
 
 /**
- * Feed 8 — active alerts. Recent warning/error Events (levelRank >= 1), newest
- * first. Backed by the [levelRank, timestamp] index; the 7-day Event retention
- * floors the scan automatically.
+ * Feed 8 — active alerts. Recent warning/error Events (levelRank >= 1),
+ * SEVERITY-FIRST (levelRank desc — errors above warnings), newest first within
+ * a level. Backed by the [levelRank, timestamp] index; the 7-day Event
+ * retention floors the scan automatically.
  */
 export async function getRecentAlerts(limit: number | null = 30, assetIds: string[] | null = null): Promise<AlertRow[]> {
   const events = await prisma.event.findMany({
@@ -747,7 +813,7 @@ export async function getRecentAlerts(limit: number | null = 30, assetIds: strin
       // assetId). Non-asset events (integration/system) drop out under a filter.
       ...(assetIds ? { resourceId: { in: assetIds } } : {}),
     },
-    orderBy: { timestamp: "desc" },
+    orderBy: [{ levelRank: "desc" }, { timestamp: "desc" }],
     take: limit ?? undefined,
   });
   return events.map((e) => ({
@@ -768,6 +834,8 @@ export interface SiteWithIssues {
   lat: number | null;
   lng: number | null;
   nodes: Array<{ id: string; hostname: string | null; monitorStatus: string | null }>;
+  alertSeverity?: string;
+  alertRank?: number;
 }
 
 /**
@@ -815,7 +883,7 @@ export async function getSitesWithIssues(maxSites: number | null = 25, assetIds:
     nodesBySite.get(s)!.push({ id: n.id, hostname: n.hostname, monitorStatus: n.monitorStatus });
   }
 
-  return siteRows.map((r) => ({
+  const sites: SiteWithIssues[] = siteRows.map((r) => ({
     site: r.site,
     division: divisionBySite.get(r.site) ?? null,
     downCount: Number(r.down),
@@ -825,6 +893,19 @@ export async function getSitesWithIssues(maxSites: number | null = 25, assetIds:
     lng: r.lng,
     nodes: nodesBySite.get(r.site) ?? [],
   }));
+  // Per-site severity = the highest active alert across the site's affected
+  // nodes; sites with alerted nodes lead, then the down/warning ordering holds.
+  const sev = await activeAlertSeverityByAsset(nodeRows.map((n) => n.id));
+  for (const s of sites) {
+    let best: { severity: string; rank: number } | null = null;
+    for (const n of s.nodes) {
+      const x = sev.get(n.id);
+      if (x && (!best || x.rank > best.rank)) best = x;
+    }
+    if (best) { s.alertSeverity = best.severity; s.alertRank = best.rank; }
+    else s.alertRank = 0;
+  }
+  return sites.slice().sort((a, b) => (b.alertRank ?? 0) - (a.alertRank ?? 0));
 }
 
 export interface FilterOptions {

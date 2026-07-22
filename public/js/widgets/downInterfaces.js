@@ -25,6 +25,7 @@
         assetId: n.assetId, hostname: n.hostname, ipAddress: n.ipAddress, assetType: n.assetType,
         name: n.ifName, label: n.ifLabel, parentInterface: null, remoteGateway: null,
         gate: n.gate, lastUpAt: n.lastUpAt,
+        alertSeverity: n.alertSeverity, alertRank: n.alertRank || 0,
       };
     });
     var tunnels = !wantTunnels ? [] : ((d && d.downIpsecTunnels) || []).map(function (t) {
@@ -33,13 +34,18 @@
         assetId: t.assetId, hostname: t.hostname, ipAddress: t.ipAddress, assetType: t.assetType,
         name: t.tunnelName, label: null, parentInterface: t.parentInterface, remoteGateway: t.remoteGateway,
         gate: t.gate, lastUpAt: t.lastUpAt,
+        alertSeverity: t.alertSeverity, alertRank: t.alertRank || 0,
       };
     });
-    // Youngest outage first (newest lastUpAt at the top): the gate groups
-    // render in this order, and the row-limit clip keeps the freshest
-    // outages when over the cap. Nulls (no observed up sample in the
-    // window — down the longest / unknown) sink to the bottom.
+    // Severity-first (rows on assets carrying an active automation alert lead,
+    // by alert severity), then youngest outage first (newest lastUpAt at the
+    // top): the gate groups render in this order, and the row-limit clip keeps
+    // the highest-severity/freshest outages when over the cap. Nulls (no
+    // observed up sample in the window — down the longest / unknown) sink to
+    // the bottom within their severity band.
     return ifaces.concat(tunnels).sort(function (a, b) {
+      var d = (b.alertRank || 0) - (a.alertRank || 0);
+      if (d !== 0) return d;
       if (!a.lastUpAt && !b.lastUpAt) return 0;
       if (!a.lastUpAt) return 1;
       if (!b.lastUpAt) return -1;
@@ -61,7 +67,8 @@
   function rowHTML(n) {
     var typeLabel = TYPE_LABELS[n.assetType] || n.assetType || "asset";
     var host = n.hostname || n.ipAddress || "(unnamed)";
-    var title = escapeHtml(n.name || (n.kind === "tunnel" ? "(tunnel)" : "(interface)"));
+    var title = (PolarisWidgets.alertSeverityPill ? PolarisWidgets.alertSeverityPill(n.alertSeverity) : "") +
+      escapeHtml(n.name || (n.kind === "tunnel" ? "(tunnel)" : "(interface)"));
     if (n.label) title += ' <span class="dash-alert-ip">' + escapeHtml(n.label) + '</span>';
     var sub;
     if (n.kind === "tunnel") {

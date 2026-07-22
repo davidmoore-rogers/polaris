@@ -46,19 +46,23 @@
   function renderRows(el, rows, opts) {
     opts = opts || {};
     var cfg = opts.config || {};
-    var sorted = (rows || []).slice().sort(function (a, b) { return (b.value || 0) - (a.value || 0); });
+    // SEVERITY-FIRST: rows whose asset carries an active automation alert sort
+    // above unalerted rows (by the alert's severity rank, attached server-side
+    // as alertRank), then by value desc within a rank.
+    var sorted = (rows || []).slice().sort(function (a, b) {
+      var d = (b.alertRank || 0) - (a.alertRank || 0);
+      return d !== 0 ? d : (b.value || 0) - (a.value || 0);
+    });
     var shown;
     if (opts.fillTo) {
-      // sorted is desc, so the red rows (≥ the top color threshold) are the
-      // contiguous head — count them, then take max(rowLimit, redCount) from
-      // the top: the operator's limit of rows, extended when there are more
-      // red rows than the limit holds.
+      // Red guarantee: every row at/above the top color threshold shows even
+      // past the row limit (an alert must never be clipped away). With
+      // severity-first ordering red rows aren't a contiguous head anymore, so
+      // filter by position OR redness instead of extending the slice.
       var redOver = (opts.thresholds && opts.thresholds.length) ? opts.thresholds[0].over : Infinity;
-      var redCount = 0;
-      while (redCount < sorted.length && (sorted[redCount].value || 0) >= redOver) redCount++;
       var limitN = parseInt(cfg.rowLimit, 10);
       if (isNaN(limitN) || limitN <= 0) limitN = opts.fillTo;
-      shown = sorted.slice(0, Math.max(limitN, redCount));
+      shown = sorted.filter(function (r, i) { return i < limitN || (r.value || 0) >= redOver; });
     } else if (cfg.threshold != null) {
       shown = PolarisWidgets.clip(sorted.filter(function (r) { return (r.value || 0) >= cfg.threshold; }), cfg.rowLimit);
     } else {
@@ -89,9 +93,10 @@
       var label = formatValue(v, opts.unit);
       var tag = r.id ? "a" : "div";
       var nav = r.id ? ' href="/assets.html#view=asset:' + encodeURIComponent(r.id) + '"' : "";
+      var sevPill = PolarisWidgets.alertSeverityPill ? PolarisWidgets.alertSeverityPill(r.alertSeverity) : "";
       return "<" + tag + ' class="recent-item' + (r.id ? " recent-item-link" : "") + '"' + nav +
         ' style="display:grid;grid-template-columns:1fr 90px 48px;align-items:center;gap:8px;text-decoration:none">' +
-        '<span class="recent-item-title" title="' + tip + '" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + name + detail + '</span>' +
+        '<span class="recent-item-title" title="' + tip + '" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + sevPill + name + detail + '</span>' +
         '<div class="util-bar-track"><div class="util-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
         '<span style="font-size:0.82rem;text-align:right;color:var(--color-text-secondary)">' + label + '</span>' +
       "</" + tag + ">";
