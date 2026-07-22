@@ -5539,7 +5539,9 @@ function _renderInterfacesTable(container, si, asset) {
   container.innerHTML = staleBanner +
     '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>full-history retention</strong>. Unselected interfaces are kept for 24&nbsp;h only.</p>' +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this interface for fast-cadence polling + full-history retention (unselected interfaces are kept 24h)" style="width:32px" data-col-id="poll" data-col-required="true"></th>' +
+      '<th title="Pin this interface for fast-cadence polling + full-history retention (unselected interfaces are kept 24h)" style="width:32px" data-col-id="poll" data-col-required="true">' +
+        '<input type="checkbox" id="iface-poll-all" title="Select / de-select all interfaces and tunnels for fast-cadence polling (includes hidden inactive rows)"' + (canEdit ? '' : ' disabled') + '>' +
+      '</th>' +
       '<th data-col-id="ifname" data-col-required="true">Interface</th>' +
       '<th data-col-id="status">Status</th>' +
       '<th data-col-id="speed">Speed</th>' +
@@ -5561,6 +5563,57 @@ function _renderInterfacesTable(container, si, asset) {
     var ifaceTypeKey = _assetTableTypeKey("asset-interfaces", asset);
     applyTableLayout(container.querySelector("table"), ifaceTypeKey, {
       onScreenshot: function (t) { _screenshotTableEl(t, "Interfaces", { hiddenNoun: "interface" }); },
+    });
+  }
+
+  // Header select-all checkbox — mirrors the aggregate state of every Poll 1m
+  // checkbox in the table (interfaces AND nested IPsec tunnels, hidden
+  // inactive/collapsed rows included): checked = all pinned, indeterminate =
+  // some. Toggling writes the complete pin set in ONE PUT (both fields
+  // together when tunnel rows exist); unchecking clears both pin lists.
+  var ifaceAllCb = container.querySelector("#iface-poll-all");
+  function syncIfaceAllCb() {
+    if (!ifaceAllCb) return;
+    var boxes = container.querySelectorAll(".asset-iface-toggle, .asset-ipsec-toggle");
+    var on = 0;
+    boxes.forEach(function (b) { if (b.checked) on++; });
+    ifaceAllCb.checked = boxes.length > 0 && on === boxes.length;
+    ifaceAllCb.indeterminate = on > 0 && on < boxes.length;
+  }
+  syncIfaceAllCb();
+  if (canEdit && asset && ifaceAllCb) {
+    ifaceAllCb.addEventListener("change", async function () {
+      var on = ifaceAllCb.checked;
+      var ifaceBoxes  = container.querySelectorAll(".asset-iface-toggle");
+      var tunnelBoxes = container.querySelectorAll(".asset-ipsec-toggle");
+      var nextIf = new Set();
+      var nextTn = new Set();
+      if (on) {
+        ifaceBoxes.forEach(function (b) { nextIf.add(b.getAttribute("data-ifname")); });
+        tunnelBoxes.forEach(function (b) { nextTn.add(b.getAttribute("data-name")); });
+      }
+      var patch = { monitoredInterfaces: Array.from(nextIf) };
+      if (tunnelBoxes.length > 0) patch.monitoredIpsecTunnels = Array.from(nextTn);
+      ifaceAllCb.disabled = true;
+      try {
+        await api.assets.update(asset.id, patch);
+        monitored = nextIf;
+        if (si)    si.monitoredInterfaces    = Array.from(nextIf);
+        if (asset) asset.monitoredInterfaces = Array.from(nextIf);
+        if (tunnelBoxes.length > 0) {
+          monitoredTunnels = nextTn;
+          if (si)    si.monitoredIpsecTunnels    = Array.from(nextTn);
+          if (asset) asset.monitoredIpsecTunnels = Array.from(nextTn);
+        }
+        ifaceBoxes.forEach(function (b) { b.checked = on; });
+        tunnelBoxes.forEach(function (b) { b.checked = on; });
+        showToast(on ? "Fast-polling every interface" : "Stopped fast-polling all interfaces");
+      } catch (err) {
+        showToast(err.message || "Failed to update", "error");
+      } finally {
+        ifaceAllCb.disabled = false;
+        syncIfaceAllCb();
+      }
     });
   }
 
@@ -5649,6 +5702,7 @@ function _renderInterfacesTable(container, si, asset) {
           showToast(err.message || "Failed to update", "error");
         } finally {
           cb.disabled = false;
+          syncStorageAllCb();
         }
       });
     });
@@ -5686,6 +5740,7 @@ function _renderInterfacesTable(container, si, asset) {
           showToast(err.message || "Failed to update", "error");
         } finally {
           cb.disabled = false;
+          syncIfaceAllCb();
         }
       });
     });
@@ -5771,7 +5826,9 @@ function _renderStorageTable(container, si, asset) {
   container.innerHTML =
     '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects volumes for fast-cadence polling and <strong>full-history retention</strong>. Unselected volumes are kept for 24&nbsp;h only.</p>' +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this mountpoint for fast-cadence polling + full-history retention (unselected volumes are kept 24h)" style="width:32px" data-col-id="poll" data-col-required="true"></th>' +
+      '<th title="Pin this mountpoint for fast-cadence polling + full-history retention (unselected volumes are kept 24h)" style="width:32px" data-col-id="poll" data-col-required="true">' +
+        '<input type="checkbox" id="storage-poll-all" title="Select / de-select all volumes for fast-cadence polling"' + (canEdit ? '' : ' disabled') + '>' +
+      '</th>' +
       '<th data-col-id="mount" data-col-required="true">Mount</th>' +
       '<th data-col-id="used">Used</th>' +
       '<th data-col-id="total">Total</th>' +
@@ -5780,6 +5837,42 @@ function _renderStorageTable(container, si, asset) {
   if (typeof applyTableLayout === "function") {
     applyTableLayout(container.querySelector("table"), _assetTableTypeKey("asset-storage", asset), {
       onScreenshot: function (t) { _screenshotTableEl(t, "Storage"); },
+    });
+  }
+
+  // Header select-all checkbox — same pattern as the interfaces table:
+  // mirrors the aggregate Poll 1m state (indeterminate = some pinned) and
+  // writes the whole monitoredStorage set in one PUT.
+  var storageAllCb = container.querySelector("#storage-poll-all");
+  function syncStorageAllCb() {
+    if (!storageAllCb) return;
+    var boxes = container.querySelectorAll(".asset-storage-toggle");
+    var on = 0;
+    boxes.forEach(function (b) { if (b.checked) on++; });
+    storageAllCb.checked = boxes.length > 0 && on === boxes.length;
+    storageAllCb.indeterminate = on > 0 && on < boxes.length;
+  }
+  syncStorageAllCb();
+  if (canEdit && asset && storageAllCb) {
+    storageAllCb.addEventListener("change", async function () {
+      var on = storageAllCb.checked;
+      var boxes = container.querySelectorAll(".asset-storage-toggle");
+      var next = new Set();
+      if (on) boxes.forEach(function (b) { next.add(b.getAttribute("data-mount")); });
+      storageAllCb.disabled = true;
+      try {
+        await api.assets.update(asset.id, { monitoredStorage: Array.from(next) });
+        monitored = next;
+        if (si) si.monitoredStorage = Array.from(next);
+        if (asset) asset.monitoredStorage = Array.from(next);
+        boxes.forEach(function (b) { b.checked = on; });
+        showToast(on ? "Fast-polling every volume" : "Stopped fast-polling all volumes");
+      } catch (err) {
+        showToast(err.message || "Failed to update", "error");
+      } finally {
+        storageAllCb.disabled = false;
+        syncStorageAllCb();
+      }
     });
   }
 
@@ -5801,6 +5894,7 @@ function _renderStorageTable(container, si, asset) {
           showToast(err.message || "Failed to update", "error");
         } finally {
           cb.disabled = false;
+          syncIfaceAllCb();
         }
       });
     });
@@ -14031,17 +14125,29 @@ var _assetEventsLoaded = false;     // lazy-load guard (first tab click)
 // Alert (flag for future alerting). Client-side TableSF for sort/filter since
 // the row set is small + fetched in one call. Lazy-loaded on first tab click.
 function _assetProcessesTabHTML(assetId) {
+  // Header select-all checkboxes for the three pin columns. They act on the
+  // CURRENTLY FILTERED row set (TableSF), not the full inventory — filtering
+  // then select-all is the bulk-pin gesture. Stacked under the label so the
+  // narrow columns don't wrap.
+  var canWrite = typeof canManageAssets === "function" && canManageAssets();
+  var disAll = canWrite ? "" : " disabled";
+  function pinTh(width, colId, label, allId, title) {
+    return '<th style="width:' + width + 'px;text-align:center" data-col-id="' + colId + '" data-col-required="true">' +
+      '<span style="display:inline-flex;flex-direction:column;align-items:center;gap:3px">' + label +
+        '<input type="checkbox" id="' + allId + '" title="' + title + '"' + disAll + '>' +
+      '</span></th>';
+  }
   return '<div class="section-block">' +
     '<div class="filter-bar" style="justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.5rem">' +
       '<p class="hint" style="margin:0;max-width:640px">Check <strong>Monitor</strong> to collect CPU/RAM history and logs for a program (sampled once a minute). Check <strong>Alert</strong> to flag it for future alerting/notifications. Check <strong>Map</strong> to discover the program\'s listening ports and connections for the <a href="/appmap.html">Application Map</a>.</p>' +
       '<button class="btn btn-secondary btn-sm" id="asset-view-proc-refresh">Refresh</button>' +
     '</div>' +
-    '<div class="table-wrapper">' +
+    '<div class="table-wrapper table-wrapper-panel-sticky" id="asset-view-proc-wrapper">' +
       '<table id="asset-view-proc-table">' +
         '<thead><tr>' +
-          '<th style="width:64px"  data-col-id="monitor" data-col-required="true">Monitor</th>' +
-          '<th style="width:54px"  data-col-id="alert"   data-col-required="true">Alert</th>' +
-          '<th style="width:50px"  data-col-id="map"     data-col-required="true">Map</th>' +
+          pinTh(64, "monitor", "Monitor", "asset-proc-monitor-all", "Monitor / un-monitor all listed programs (respects the active filter)") +
+          pinTh(54, "alert",   "Alert",   "asset-proc-alert-all",   "Flag / unflag all listed programs for alerting (respects the active filter)") +
+          pinTh(50, "map",     "Map",     "asset-proc-map-all",     "Map / unmap all listed programs on the Application Map (respects the active filter)") +
           '<th                      data-col-id="name"    data-col-required="true" data-sf-key="name"          data-sf-type="string">Name</th>' +
           '<th style="width:80px"  data-col-id="instances" data-sf-key="instanceCount" data-sf-type="number">Instances</th>' +
           '<th style="width:80px"  data-col-id="cpu"       data-sf-key="cpuPct"        data-sf-type="number">CPU %</th>' +
@@ -14057,6 +14163,25 @@ function _assetProcessesTabHTML(assetId) {
   '</div>';
 }
 
+// Bound the Processes-tab table wrapper to the slide-over body's visible
+// bottom so vertical scrolling happens INSIDE the wrapper — the sticky thead
+// (.table-wrapper-panel-sticky, styles.css) pins to its top edge and the tab
+// strip / hint bar / slide-over footer stay put, mirroring the assets-page
+// sizeStickyTableWrappers() pattern. maxHeight (not height) so short process
+// lists keep a short table. No-op while the tab is hidden (display:none rects
+// are garbage); re-run on every Processes tab click + after each load + on
+// window resize.
+function _sizeAssetProcTableWrapper() {
+  var w = document.getElementById("asset-view-proc-wrapper");
+  var body = document.getElementById("asset-panel-body");
+  if (!w || !body || !w.offsetParent) return;
+  // 18px reserve = .asset-panel-content bottom padding (1rem) + slack so the
+  // slide-over body itself never grows a scrollbar.
+  var h = body.getBoundingClientRect().bottom - w.getBoundingClientRect().top - 18;
+  w.style.maxHeight = Math.max(260, Math.round(h)) + "px";
+}
+window.addEventListener("resize", _sizeAssetProcTableWrapper);
+
 function _wireAssetProcessesTab(asset) {
   var assetId = asset && asset.id ? asset.id : asset; // tolerate id-or-object
   var btn = document.querySelector('#asset-view-tabs [data-tab="processes"]');
@@ -14069,10 +14194,28 @@ function _wireAssetProcessesTab(asset) {
   var monitored = new Set();
   var alerted = new Set();
   var mapped = new Set();
+  var lastRendered = []; // currently displayed (filtered/sorted) rows — the select-all scope
 
   function fmtPct(v) { return v == null ? "—" : Number(v).toFixed(1); }
 
+  // Mirror each pin set's aggregate state onto its header select-all checkbox
+  // (scoped to the displayed rows): checked = all pinned, indeterminate = some.
+  function syncProcAllCbs() {
+    [{ id: "asset-proc-monitor-all", set: monitored },
+     { id: "asset-proc-alert-all",   set: alerted },
+     { id: "asset-proc-map-all",     set: mapped }].forEach(function (h) {
+      var cb = document.getElementById(h.id);
+      if (!cb) return;
+      var on = 0;
+      lastRendered.forEach(function (p) { if (h.set.has(p.name)) on++; });
+      cb.checked = lastRendered.length > 0 && on === lastRendered.length;
+      cb.indeterminate = on > 0 && on < lastRendered.length;
+    });
+  }
+
   function renderRows(data) {
+    lastRendered = data;
+    syncProcAllCbs();
     var tbody = document.getElementById("asset-view-proc-tbody");
     if (!tbody) return;
     if (!data.length) {
@@ -14125,6 +14268,35 @@ function _wireAssetProcessesTab(asset) {
     }
   }
 
+  // Header select-all — pin/unpin every DISPLAYED (filtered) program in one
+  // PUT. Union-into / subtract-from the persisted set so programs hidden by
+  // an active filter keep their pins.
+  async function toggleAllPins(which, on, cb) {
+    if (!lastRendered.length) { syncProcAllCbs(); return; }
+    var set = which === "monitor" ? monitored : which === "map" ? mapped : alerted;
+    var field = which === "monitor" ? "monitoredProcesses" : which === "map" ? "mappedProcesses" : "alertWatchedProcesses";
+    var next = new Set(set);
+    lastRendered.forEach(function (p) { if (on) next.add(p.name); else next.delete(p.name); });
+    cb.disabled = true;
+    try {
+      var body = {};
+      body[field] = Array.from(next);
+      await api.assets.update(assetId, body);
+      if (which === "monitor") monitored = next; else if (which === "map") mapped = next; else alerted = next;
+      var noun = lastRendered.length + " program" + (lastRendered.length === 1 ? "" : "s");
+      var msg;
+      if (which === "monitor") msg = on ? ("Monitoring " + noun + " (CPU/RAM + logs)") : ("Stopped monitoring " + noun);
+      else if (which === "map") msg = on ? ("Mapping " + noun + " on the Application Map") : ("Unmapped " + noun);
+      else msg = on ? ("Flagged " + noun + " for alerting") : ("Unflagged " + noun);
+      showToast(msg, "success");
+    } catch (err) {
+      showToast(err && err.message ? err.message : "Failed to update", "error");
+    } finally {
+      cb.disabled = false;
+      apply(); // re-render rows to the persisted state + resync header checkboxes
+    }
+  }
+
   async function load() {
     var tbody = document.getElementById("asset-view-proc-tbody");
     try {
@@ -14153,6 +14325,7 @@ function _wireAssetProcessesTab(asset) {
         }
       }
       apply();
+      _sizeAssetProcTableWrapper();
     } catch (err) {
       if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
     }
@@ -14183,7 +14356,17 @@ function _wireAssetProcessesTab(asset) {
   var refreshBtn = document.getElementById("asset-view-proc-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", load);
 
+  [["asset-proc-monitor-all", "monitor"], ["asset-proc-alert-all", "alert"], ["asset-proc-map-all", "map"]].forEach(function (pair) {
+    var cb = document.getElementById(pair[0]);
+    if (cb) cb.addEventListener("change", function () { toggleAllPins(pair[1], cb.checked, cb); });
+  });
+
   btn.addEventListener("click", function () {
+    // Re-measure on every activation (not just first load): _wireModalTabs'
+    // own click listener has already made the panel visible by the time this
+    // fires, and the hint bar's wrapped height / panel width may have changed
+    // since the last visit.
+    _sizeAssetProcTableWrapper();
     if (loaded) return;
     loaded = true;
     load();
