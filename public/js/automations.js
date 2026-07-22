@@ -1,17 +1,14 @@
 /**
  * public/js/automations.js — Automations page (Alerts + Automations + Delivery tabs).
  *
- * Alerts tab: server-side TableSF list of triggered alerts with multiselect
- * acknowledge/clear (acknowledge gated alerts:write, clear gated
- * alerts:fullwrite) + an optional-note acknowledge modal. Automations tab
- * (data-tab="manage", gated automationManagement): automation list; create/edit
- * opens the 5-step wizard in automations-wizard.js. Delivery tab: the
- * NotificationChannel registry. Mirrors the server-side table pattern in events.js.
+ * Automations tab (default, gated automationManagement): automation list;
+ * create/edit opens the 5-step wizard in automations-wizard.js. Delivery tab:
+ * the NotificationChannel registry. Scripts tab: the AutomationScript
+ * registry. The triggered-alert LIST no longer lives here — alerts surface on
+ * the dashboard's Active Alerts widget + the asset-details Alerts tab (a
+ * dedicated alerts widget rework is planned).
  */
 
-var _notifPageSize = 15;
-var _notifSF = null;
-var _notifLayout = null;
 var _rulesSF = null;
 var _rulesLayout = null;
 var _ruleSchema = null;
@@ -37,16 +34,12 @@ function _looksLikeDeviceId(tag) {
   // Permissions resolve asynchronously via /auth/me (userReady). Computing
   // them at script-load time reads an empty matrix and wrongly hides the
   // Manage tab / action buttons — so they're (re)applied after userReady.
-  var canAck = false;
-  var canClear = false;
   var canManage = false;
   var canEditRules = false;
   var canReadScripts = false;
   var canEditScripts = false;
 
   function applyPermGatedUI() {
-    canAck = permAtLeast("alerts", "write");
-    canClear = permAtLeast("alerts", "fullwrite");
     canManage = permAtLeast("automationManagement", "read");
     canEditRules = permAtLeast("automationManagement", "fullwrite");
     canReadScripts = permAtLeast("automationScripts", "read");
@@ -59,7 +52,7 @@ function _looksLikeDeviceId(tag) {
     var sb = document.getElementById("auto-tab-scripts-btn");
     if (sb) sb.style.display = canReadScripts ? "" : "none";
     var activeKey = (document.querySelector("#auto-tabs .page-tab.active") || {}).getAttribute
-      ? document.querySelector("#auto-tabs .page-tab.active").getAttribute("data-tab") : "view";
+      ? document.querySelector("#auto-tabs .page-tab.active").getAttribute("data-tab") : "manage";
     var nr = document.getElementById("btn-new-rule");
     if (nr) {
       nr.style.display = canEditRules && activeKey === "manage" ? "" : "none";
@@ -74,16 +67,6 @@ function _looksLikeDeviceId(tag) {
     if (asBtn) {
       asBtn.style.display = canEditScripts && activeKey === "scripts" ? "" : "none";
       if (canEditScripts && !asBtn._wired) { asBtn._wired = true; asBtn.addEventListener("click", function () { openScriptModal(null); }); }
-    }
-    var ackBtn = document.getElementById("notif-bulk-ack");
-    if (ackBtn) {
-      ackBtn.style.display = canAck ? "" : "none";
-      if (canAck && !ackBtn._wired) { ackBtn._wired = true; ackBtn.addEventListener("click", function () { openAckModal(Array.from(selected)); }); }
-    }
-    var clrBtn = document.getElementById("notif-bulk-clear");
-    if (clrBtn && canClear) {
-      clrBtn.style.display = "";
-      if (!clrBtn._wired) { clrBtn._wired = true; clrBtn.addEventListener("click", doBulkClear); }
     }
   }
 
@@ -148,291 +131,22 @@ function _looksLikeDeviceId(tag) {
 
   document.getElementById("btn-refresh").addEventListener("click", function () {
     var active = document.querySelector("#auto-tabs .page-tab.active");
-    if (active && active.getAttribute("data-tab") === "manage") loadRules();
-    else loadNotifications();
+    var key = active ? active.getAttribute("data-tab") : "manage";
+    if (key === "delivery") loadChannelsTab();
+    else if (key === "scripts") loadScriptsTab();
+    else loadRules();
   });
 
-  // ═══════════════════════════════ View tab ═══════════════════════════════
-  var pageSize = _notifPageSize;
-  var offset = 0;
-  var total = 0;
-  var rows = [];
-  var selected = new Set();
-
-  function savePrefs() {
-    if (!currentUsername) return;
-    try {
-      localStorage.setItem("polaris-prefs-alerts-" + currentUsername, JSON.stringify({
-        pageSize: pageSize,
-        layout: _notifLayout ? _notifLayout.getPrefs() : null,
-        filters: _notifSF ? _notifSF._filters : null,
-        sort: _notifSF ? { key: _notifSF._sortKey, dir: _notifSF._sortDir } : null,
-      }));
-    } catch (_) {}
-  }
-  function restorePrefs() {
-    if (!currentUsername) return;
-    var raw;
-    // One-time read-migrate from the pre-rename key (Automations cutover) —
-    // the old key is left in place, harmless.
-    try {
-      raw = localStorage.getItem("polaris-prefs-alerts-" + currentUsername)
-        || localStorage.getItem("polaris-prefs-notifications-" + currentUsername);
-    } catch (_) { return; }
-    if (!raw) return;
-    try {
-      var p = JSON.parse(raw);
-      if (p.pageSize) { pageSize = p.pageSize; _notifPageSize = p.pageSize; var ps = document.getElementById("filter-pagesize"); if (ps) ps.value = String(p.pageSize); }
-      if (_notifLayout && p.layout) _notifLayout.setPrefs(p.layout);
-      if (_notifSF) {
-        if (p.filters && typeof p.filters === "object") _notifSF._filters = p.filters;
-        if (p.sort && typeof p.sort === "object") {
-          if (p.sort.key) _notifSF._sortKey = p.sort.key;
-          if (p.sort.dir === "asc" || p.sort.dir === "desc") _notifSF._sortDir = p.sort.dir;
-        }
-        _notifSF.restoreFilterUI();
-        _notifSF._updateIcons();
-      }
-    } catch (_) {}
-  }
-
-  // NOTE: setupColumnLayout must run AFTER `new TableSF` below — TableSF
-  // rewrites each th's innerHTML (sort/filter UI), which would wipe the resize
-  // handles setupColumnLayout appends. Canonical order is TableSF first (see
-  // assets.js). The call lives just after the TableSF construction.
-
-  function buildQuery() {
-    var f = _notifSF ? _notifSF._filters || {} : {};
-    var params = { limit: pageSize, offset: offset };
-    if (Array.isArray(f.severity) && f.severity.length) params.severity = f.severity.join(",");
-    if (typeof f.message === "string" && f.message.trim()) params.search = f.message.trim();
-    else if (f.message && typeof f.message === "object" && f.message.q) params.search = String(f.message.q).trim();
-    if (typeof f.assetHostname === "string" && f.assetHostname.trim()) params.search = f.assetHostname.trim();
-    if (Array.isArray(f.regions) && f.regions.length) params.region = f.regions.join(",");
-    if (_notifSF && _notifSF._sortKey && _notifSF._sortKey !== "regions") {
-      params.sortBy = _notifSF._sortKey;
-      params.sortDir = _notifSF._sortDir === "asc" ? "asc" : "desc";
-    }
-    return params;
-  }
-
-  function loadNotifications() {
-    api.alerts.list(buildQuery()).then(function (data) {
-      rows = data.notifications || [];
-      total = data.total || 0;
-      renderTable();
-      renderPagination();
-    }).catch(function () {
-      document.getElementById("notif-tbody").innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load alerts</td></tr>';
-    });
-  }
-  window._reloadNotifications = loadNotifications;
-
-  function renderTable() {
-    var tbody = document.getElementById("notif-tbody");
-    if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No alerts</td></tr>';
-      updateBulkBar();
-      updateSelectAll();
-      return;
-    }
-    tbody.innerHTML = rows.map(function (n) {
-      var ts = new Date(n.triggeredAt);
-      var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " " +
-        ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      var sev = (n.severity || "info");
-      var checked = selected.has(n.id) ? " checked" : "";
-      var regions = (n.regionTags || []).map(escapeHtml).join(", ");
-      // Asset name links to the canonical asset-details slide-in when the
-      // notification is tied to an asset; plain text otherwise.
-      var assetCell = n.assetId
-        ? '<a href="#" class="asset-name-link" data-asset-id="' + escapeHtml(n.assetId) + '">' + escapeHtml(n.assetHostname || n.assetId) + '</a>'
-        : escapeHtml(n.assetHostname || "-");
-      var ackCell = "";
-      if (n.acknowledged) {
-        var ackTs = n.acknowledgedAt ? new Date(n.acknowledgedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
-        var label = escapeHtml(n.acknowledgedBy || "?") + (ackTs ? " · " + escapeHtml(ackTs) : "");
-        if (n.acknowledgeNote && n.acknowledgeNote.trim()) {
-          ackCell = '<a href="#" class="ack-view" data-id="' + n.id + '" title="Read note">' + label + ' &#128221;</a>';
-        } else {
-          ackCell = '<span style="color:var(--color-text-tertiary)">' + label + '</span>';
-        }
-      }
-      // Escalation marker — from the escalateNotifications sweep's per-tier state.
-      var escLine = "";
-      if (n.escalationState && n.escalationState.tiers) {
-        var escKeys = Object.keys(n.escalationState.tiers);
-        if (escKeys.length) {
-          var escSent = 0;
-          escKeys.forEach(function (k) { escSent += (n.escalationState.tiers[k].count || 0); });
-          var escTier = Math.max.apply(null, escKeys.map(Number)) + 1;
-          escLine = '<div style="font-size:0.75rem;color:var(--color-danger);margin-top:2px" title="Escalation emails sent while unhandled">Escalated — tier ' + escTier + ', ' + escSent + ' email' + (escSent === 1 ? "" : "s") + ' sent</div>';
-        }
-      }
-      return '<tr>' +
-        '<td class="cb-col"><input type="checkbox" class="row-cb" data-id="' + n.id + '"' + checked + '></td>' +
-        '<td style="font-family:var(--font-mono);font-size:0.82rem;white-space:nowrap">' + escapeHtml(timeStr) + '</td>' +
-        '<td><span class="badge badge-level-' + sev + '">' + sev.toUpperCase() + '</span></td>' +
-        '<td>' + assetCell + '</td>' +
-        '<td>' + (regions || '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
-        '<td>' + escapeHtml(n.message || "") + escLine + '</td>' +
-        '<td>' + ackCell + '</td>' +
-        '</tr>';
-    }).join("");
-
-    tbody.querySelectorAll(".row-cb").forEach(function (cb) {
-      cb.addEventListener("change", function () {
-        if (this.checked) selected.add(this.dataset.id); else selected.delete(this.dataset.id);
-        updateBulkBar(); updateSelectAll();
-      });
-    });
-    tbody.querySelectorAll(".ack-view").forEach(function (a) {
-      a.addEventListener("click", function (e) {
-        e.preventDefault();
-        var n = rows.find(function (r) { return r.id === a.dataset.id; });
-        if (n) openAckReadModal(n);
-      });
-    });
-    tbody.querySelectorAll(".asset-name-link").forEach(function (a) {
-      a.addEventListener("click", function (e) {
-        e.preventDefault();
-        if (typeof openViewModal === "function") openViewModal(a.getAttribute("data-asset-id"));
-      });
-    });
-    updateBulkBar(); updateSelectAll();
-  }
-
-  function updateSelectAll() {
-    var all = document.querySelectorAll("#notif-tbody .row-cb");
-    var checkedN = Array.prototype.filter.call(all, function (c) { return c.checked; }).length;
-    var sa = document.getElementById("notif-select-all");
-    if (sa) { sa.checked = all.length > 0 && checkedN === all.length; sa.indeterminate = checkedN > 0 && checkedN < all.length; }
-  }
-  // The action bar is always visible; its buttons are disabled until rows are
-  // selected (perm-gated visibility is handled in applyPermGatedUI).
-  function updateBulkBar() {
-    var n = selected.size;
-    var bar = document.getElementById("notif-bulk-bar");
-    var countEl = bar && bar.querySelector(".bulk-bar-count");
-    if (countEl) countEl.textContent = n === 0 ? "No notifications selected" : (n + " selected");
-    // Accent border only once something is selected.
-    if (bar) bar.classList.toggle("bulk-bar-idle", n === 0);
-    ["notif-bulk-ack", "notif-bulk-clear", "notif-bulk-deselect"].forEach(function (id) {
-      var b = document.getElementById(id);
-      if (b) b.disabled = n === 0;
-    });
-  }
-
-  document.getElementById("notif-select-all").addEventListener("change", function () {
-    var on = this.checked;
-    document.querySelectorAll("#notif-tbody .row-cb").forEach(function (cb) {
-      cb.checked = on;
-      if (on) selected.add(cb.dataset.id); else selected.delete(cb.dataset.id);
-    });
-    updateBulkBar();
-  });
-  function deselectAll() {
-    selected.clear();
-    document.querySelectorAll("#notif-tbody .row-cb").forEach(function (cb) { cb.checked = false; });
-    updateBulkBar(); updateSelectAll();
-  }
-  document.getElementById("notif-bulk-deselect").addEventListener("click", deselectAll);
-
-  // Escape clears the current selection — but only when nothing else owns
-  // Escape (an open modal / asset slide-in closes first) and there's actually
-  // a selection to clear, so Escape still falls through normally otherwise.
-  document.addEventListener("keydown", function (e) {
-    if (e.key !== "Escape") return;
-    if (selected.size === 0) return;
-    if (document.querySelector(".modal-overlay.open") || document.querySelector(".slideover-overlay.open")) return;
-    deselectAll();
-  });
-
-  // Acknowledge / Clear button visibility + wiring is applied in
-  // applyPermGatedUI() (after userReady) since permissions load async.
-  async function doBulkClear() {
-    var ids = Array.from(selected);
-    if (!ids.length) return;
-    var ok = await showConfirm("Clear " + ids.length + " alert" + (ids.length === 1 ? "" : "s") + "? Cleared alerts are removed from the list.");
-    if (!ok) return;
-    try {
-      await api.alerts.clear(ids);
-      showToast("Cleared " + ids.length, "success");
-      selected.clear();
-      loadNotifications();
-    } catch (err) { showToast(err.message || "Clear failed", "error"); }
-  }
-
-  function openAckModal(ids) {
-    if (!ids.length) return;
-    var body = '<div class="form-group"><label>Note (optional)</label>' +
-      '<textarea id="ack-note" rows="3" style="width:100%" placeholder="Optional note about ' + ids.length + ' notification' + (ids.length === 1 ? "" : "s") + '..."></textarea></div>' +
-      '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin:0">Acknowledging ' + ids.length + ' notification' + (ids.length === 1 ? "" : "s") + '. The note (if any) applies to all selected.</p>';
-    var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary" id="ack-confirm">Acknowledge</button>';
-    openModal("Acknowledge notifications", body, footer);
-    document.getElementById("ack-confirm").addEventListener("click", async function () {
-      this.disabled = true;
-      try {
-        var note = (document.getElementById("ack-note").value || "").trim();
-        await api.alerts.acknowledge(ids, note || undefined);
-        closeModal();
-        showToast("Acknowledged " + ids.length, "success");
-        selected.clear();
-        loadNotifications();
-      } catch (err) { this.disabled = false; showToast(err.message || "Acknowledge failed", "error"); }
-    });
-  }
-
-  function openAckReadModal(n) {
-    var ackTs = n.acknowledgedAt ? new Date(n.acknowledgedAt).toLocaleString() : "";
-    var body = '<div class="form-group"><label>Notification</label>' +
-      '<p style="margin:0;padding:0.5rem;background:var(--color-bg-secondary);border-radius:4px">' + escapeHtml(n.message || "") + '</p></div>' +
-      '<div class="form-group"><label>Acknowledged by</label><p style="margin:0">' + escapeHtml(n.acknowledgedBy || "?") + (ackTs ? " · " + escapeHtml(ackTs) : "") + '</p></div>' +
-      '<div class="form-group"><label>Note</label><p style="margin:0;white-space:pre-wrap">' + escapeHtml(n.acknowledgeNote || "(none)") + '</p></div>';
-    openModal("Acknowledgement", body, '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
-  }
-
-  function renderPagination() {
-    var containers = [];
-    var mainEl = document.getElementById("pagination");
-    var topEl = document.getElementById("pagination-top");
-    if (mainEl) containers.push(mainEl);
-    if (topEl) containers.push(topEl);
-    var totalPages = Math.max(1, Math.ceil(total / pageSize));
-    var currentPage = Math.floor(offset / pageSize) + 1;
-    var html =
-      '<button class="btn btn-secondary btn-sm page-prev" ' + (currentPage <= 1 ? "disabled" : "") + '>&laquo; Prev</button>' +
-      '<span style="font-size:0.82rem;color:var(--color-text-tertiary)">Page ' + currentPage + ' / ' + totalPages + '</span>' +
-      '<button class="btn btn-secondary btn-sm page-next" ' + (currentPage >= totalPages ? "disabled" : "") + '>Next &raquo;</button>' +
-      '<span style="font-size:0.82rem;color:var(--color-text-tertiary);margin-left:8px">' + total + ' notifications</span>';
-    containers.forEach(function (c) {
-      c.innerHTML = html;
-      c.querySelector(".page-prev").addEventListener("click", function () { if (offset >= pageSize) { offset -= pageSize; loadNotifications(); } });
-      c.querySelector(".page-next").addEventListener("click", function () { if (offset + pageSize < total) { offset += pageSize; loadNotifications(); } });
-    });
-  }
-
-  _notifSF = new TableSF("notif-tbody", function () { offset = 0; loadNotifications(); savePrefs(); });
-  // setupColumnLayout AFTER TableSF so its resize handles aren't wiped by
-  // TableSF's per-th innerHTML rewrite (see note above).
-  var notifTable = document.querySelector("#notif-tbody").closest("table");
-  _notifLayout = setupColumnLayout(notifTable, { onChange: savePrefs });
-
-  document.getElementById("filter-pagesize").addEventListener("change", function () {
-    pageSize = parseInt(this.value, 10) || 15; _notifPageSize = pageSize; offset = 0; loadNotifications(); savePrefs();
-  });
-
-  var prefsReady = (typeof userReady !== "undefined" && userReady && userReady.then)
-    ? userReady.then(restorePrefs) : (restorePrefs(), Promise.resolve());
-  prefsReady.then(loadNotifications);
-
-  // Apply permission-gated UI (Manage tab, New rule, Acknowledge/Clear) once
-  // /auth/me has populated the permission matrix.
-  if (typeof userReady !== "undefined" && userReady && userReady.then) {
-    userReady.then(applyPermGatedUI);
-  } else {
+  // Apply permission-gated UI (tab visibility, header buttons) once /auth/me
+  // has populated the permission matrix, then boot the default (Automations) tab.
+  function bootPage() {
     applyPermGatedUI();
+    if (canManage && !_rulesSF) initRulesTab();
+  }
+  if (typeof userReady !== "undefined" && userReady && userReady.then) {
+    userReady.then(bootPage);
+  } else {
+    bootPage();
   }
   setupPushButton();
 

@@ -132,7 +132,7 @@ const NAV_ITEMS = [
   { href: "/ipam.html",       label: "IPAM",         icon: "layers" },
   { href: "/assets.html",         label: "Assets",       icon: "monitor" },
   { href: "/events.html",         label: "Events",       icon: "activity" },
-  { href: "/automations.html", label: "Automations", icon: "zap", perm: ["alerts", "read"] },
+  { href: "/automations.html", label: "Automations", icon: "zap", perm: ["automationManagement", "read"] },
   { href: "/integrations.html",  label: "Integrations", icon: "plug", networkAdmin: true },
   { href: "/users.html",        label: "Users",        icon: "users", adminOnly: true },
 ];

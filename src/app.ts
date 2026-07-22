@@ -463,9 +463,12 @@ const pageRequiredPermission: Record<string, { key: string; level: "read" | "wri
   "/users.html":           { key: "users",                level: "read" },
   "/integrations.html":    { key: "integrations",         level: "read" },
   // /notifications.html stays gated forever — already-delivered web-push
-  // payloads deep-link to it (Automations rename, 2026-07).
-  "/notifications.html":   { key: "alerts",               level: "read" },
-  "/automations.html":     { key: "alerts",               level: "read" },
+  // payloads deep-link to it (Automations rename, 2026-07). Both pages gate on
+  // automationManagement since the Alerts LIST left the page (an alert-only
+  // viewer following an old deep link bounces to "/", where the Active Alerts
+  // widget lives).
+  "/notifications.html":   { key: "automationManagement", level: "read" },
+  "/automations.html":     { key: "automationManagement", level: "read" },
   "/server-settings.html": { key: "serverSettingsSystem", level: "read" },
 };
 const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
