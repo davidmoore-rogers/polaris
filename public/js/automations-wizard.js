@@ -35,9 +35,15 @@ async function openAutomationWizard(existing) {
     catch (_e) { _ruleTagList = []; }
   }
   if (_ruleAssetTypes === null) {
-    try { var _at = await api.assetTypes.list(); _ruleAssetTypes = Array.isArray(_at) ? _at : ((_at && _at.assetTypes) || []); }
+    // GET /asset-types returns { types: [...] } (the old builder read the
+    // wrong key and always showed "No asset types in the registry").
+    try { var _at = await api.assetTypes.list(); _ruleAssetTypes = Array.isArray(_at) ? _at : ((_at && (_at.types || _at.assetTypes)) || []); }
     catch (_e) { _ruleAssetTypes = []; }
   }
+  // Scope-picker option lists (distinct manufacturers/models + IPAM subnets) —
+  // refreshed every open, they're one cheap query each.
+  var _awScopeOptions = { manufacturers: [], models: [], subnets: [] };
+  try { _awScopeOptions = await api.automations.scopeOptions(); } catch (_e) {}
   try { var _cd = await api.deliveryChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
   catch (_e) { _ruleChannels = _ruleChannels || []; }
   if (_ruleRecipientUsers === null) {
@@ -265,28 +271,56 @@ async function openAutomationWizard(existing) {
   }
 
   // ── Step 2: Asset filtering ────────────────────────────────────────────
+  // Each dimension is its own dropdown picker populated from what actually
+  // exists (asset-type registry, distinct manufacturers/models from the
+  // inventory, IPAM subnets); picking adds a removable chip. Subnets also
+  // take a custom CIDR for ranges not defined in IPAM.
+  function scChip(field, val, label) {
+    return '<span class="sc-chip" data-field="' + field + '" data-val="' + escapeHtml(val) + '" style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--color-border);border-radius:12px;padding:1px 9px;margin:3px 5px 0 0;font-size:0.8rem">' +
+      escapeHtml(label || val) +
+      '<button type="button" class="sc-chip-x" aria-label="Remove" style="background:none;border:none;cursor:pointer;color:var(--color-text-tertiary);padding:0;font-size:0.95rem;line-height:1">&times;</button>' +
+    '</span>';
+  }
+  function scPickerRow(field, label, options, values, extraHtml) {
+    // options: [{value, label}]; values: currently-selected raw values.
+    var picked = new Set(values || []);
+    var opts = (options || []).filter(function (o) { return !picked.has(o.value); }).map(function (o) {
+      return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>';
+    }).join("");
+    var chips = (values || []).map(function (v) {
+      var o = (options || []).find(function (x) { return x.value === v; });
+      return scChip(field, v, o ? o.label : v);
+    }).join("");
+    return '<div class="form-group sc-picker" data-field="' + field + '" style="margin-bottom:0.6rem">' +
+      '<label style="font-size:0.82rem">' + escapeHtml(label) + '</label>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<select class="sc-pick" style="flex:1"><option value="">' + (options && options.length ? "(add…)" : "(none found)") + '</option>' + opts + '</select>' +
+        (extraHtml || "") +
+      '</div>' +
+      '<div class="sc-chips">' + chips + '</div>' +
+    '</div>';
+  }
   function step2Html() {
     var scope = draft.scope || {};
-    var chips = (_ruleTagList || []).map(function (tg) {
-      return '<button type="button" class="btn btn-sm btn-secondary sc-tag-chip" data-tag="' + escapeHtml(tg) + '" style="margin:2px 4px 2px 0">' + escapeHtml(tg) + '</button>';
-    }).join("");
-    var selTypes = {};
-    (scope.assetTypes || []).forEach(function (t) { selTypes[t] = true; });
-    var typeChips = (_ruleAssetTypes || []).map(function (at) {
-      var on = !!selTypes[at.name];
-      return '<button type="button" class="btn btn-sm ' + (on ? "btn-primary" : "btn-secondary") + ' sc-type-chip" data-type="' + escapeHtml(at.name) + '" aria-pressed="' + on + '" style="margin:2px 4px 2px 0">' + escapeHtml(at.label || at.name) + '</button>';
-    }).join("");
+    var typeOptions = (_ruleAssetTypes || []).map(function (at) { return { value: at.name, label: at.label || at.name }; });
+    var mfrOptions = (_awScopeOptions.manufacturers || []).map(function (m) { return { value: m, label: m }; });
+    var modelOptions = (_awScopeOptions.models || []).map(function (m) { return { value: m, label: m }; });
+    var subnetOptions = (_awScopeOptions.subnets || []).map(function (sn) { return { value: sn.cidr, label: sn.name + " — " + sn.cidr }; });
+    var tagOptions = (_ruleTagList || []).map(function (t) { return { value: t, label: t }; });
+    var subnetExtra = '<input type="text" id="sc-subnet-custom" placeholder="custom CIDR (10.20.0.0/16)" style="width:220px">' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="sc-subnet-add">Add</button>';
     return '<h3 style="margin:0 0 0.25rem">Which devices?</h3>' +
-      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Filter the assets this automation applies to. Polaris-host and audit-event triggers aren’t tied to assets and ignore this filter.</p>' +
-      '<label style="display:block;margin:4px 0"><input type="checkbox" id="sc-all"' + (scope.allAssets ? " checked" : "") + '> All assets</label>' +
+      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Filter the assets this automation applies to — pick from what exists, combine freely (a device must match every field you use). Polaris-host and audit-event triggers aren’t tied to assets and ignore this filter.</p>' +
+      '<label style="display:block;margin:4px 0 10px"><input type="checkbox" id="sc-all"' + (scope.allAssets ? " checked" : "") + '> All assets</label>' +
       '<div id="aw-scope-narrow" style="' + (scope.allAssets ? "opacity:0.5;pointer-events:none" : "") + '">' +
-        '<input type="hidden" id="sc-types" value="' + escapeHtml((scope.assetTypes || []).join(", ")) + '">' +
-        (typeChips
-          ? '<div style="margin:2px 0 8px"><span style="display:block;font-size:0.78rem;color:var(--color-text-tertiary);margin-bottom:2px">Asset types</span>' + typeChips + '</div>'
-          : '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 8px">No asset types in the registry.</p>') +
-        '<input type="text" id="sc-tags" placeholder="tags (comma-separated, e.g. region:Atlanta)" value="' + escapeHtml((scope.tags || []).join(", ")) + '" style="margin-bottom:4px;width:100%">' +
-        (chips ? '<div style="margin-bottom:4px">' + chips + '</div>' : "") +
-        '<input type="text" id="sc-ids" placeholder="specific asset IDs (comma-separated)" value="' + escapeHtml((scope.assetIds || []).join(", ")) + '" style="width:100%">' +
+        scPickerRow("assetTypes", "Device types", typeOptions, scope.assetTypes) +
+        scPickerRow("manufacturers", "Manufacturers", mfrOptions, scope.manufacturers) +
+        scPickerRow("models", "Models", modelOptions, scope.models) +
+        scPickerRow("subnetCidrs", "Subnets", subnetOptions, scope.subnetCidrs, subnetExtra) +
+        scPickerRow("tags", "Tags", tagOptions, scope.tags) +
+        '<div class="form-group" style="margin-bottom:0"><label style="font-size:0.82rem">Specific asset IDs (comma-separated, optional)</label>' +
+          '<input type="text" id="sc-ids" value="' + escapeHtml((scope.assetIds || []).join(", ")) + '" style="width:100%">' +
+        '</div>' +
       '</div>' +
       '<div id="aw-scope-preview" style="margin-top:0.75rem"></div>';
   }
@@ -299,46 +333,75 @@ async function openAutomationWizard(existing) {
       box.style.pointerEvents = all.checked ? "none" : "";
       scheduleScopePreview();
     });
-    panel.querySelectorAll(".sc-type-chip").forEach(function (chip) {
-      chip.addEventListener("click", function () {
-        var input = panel.querySelector("#sc-types");
-        var list = csvOf(input.value);
-        var name = chip.getAttribute("data-type");
-        var i = list.indexOf(name);
-        var on;
-        if (i >= 0) { list.splice(i, 1); on = false; } else { list.push(name); on = true; }
-        input.value = list.join(", ");
-        chip.setAttribute("aria-pressed", on);
-        chip.classList.toggle("btn-primary", on);
-        chip.classList.toggle("btn-secondary", !on);
+    // Picking from a dropdown adds a chip (and removes the option so it can't
+    // be double-picked); the chip's × puts the option back.
+    panel.querySelectorAll(".sc-picker .sc-pick").forEach(function (sel) {
+      sel.addEventListener("change", function () {
+        if (!sel.value) return;
+        var row = sel.closest(".sc-picker");
+        var opt = sel.options[sel.selectedIndex];
+        row.querySelector(".sc-chips").insertAdjacentHTML("beforeend", scChip(row.getAttribute("data-field"), sel.value, opt.textContent));
+        opt.remove();
+        sel.value = "";
         scheduleScopePreview();
       });
     });
-    panel.querySelectorAll(".sc-tag-chip").forEach(function (chip) {
-      chip.addEventListener("click", function () {
-        var input = panel.querySelector("#sc-tags");
-        var list = csvOf(input.value);
-        var tg = chip.getAttribute("data-tag");
-        var i = list.indexOf(tg);
-        if (i >= 0) list.splice(i, 1); else list.push(tg);
-        input.value = list.join(", ");
-        scheduleScopePreview();
-      });
+    panel.addEventListener("click", function (e) {
+      var x = e.target.closest && e.target.closest(".sc-chip-x");
+      if (!x) return;
+      var chip = x.closest(".sc-chip");
+      var row = chip.closest(".sc-picker");
+      // Restore the option into the row's dropdown (custom CIDRs weren't in it — skip).
+      var sel = row ? row.querySelector(".sc-pick") : null;
+      if (sel) {
+        var val = chip.getAttribute("data-val");
+        var known = false;
+        if (row.getAttribute("data-field") === "subnetCidrs") {
+          known = (_awScopeOptions.subnets || []).some(function (sn) { return sn.cidr === val; });
+        } else { known = true; }
+        if (known) {
+          var o = document.createElement("option");
+          o.value = val;
+          o.textContent = chip.textContent.replace(/×$/, "").trim();
+          sel.appendChild(o);
+        }
+      }
+      chip.remove();
+      scheduleScopePreview();
     });
+    var addBtn = panel.querySelector("#sc-subnet-add");
+    if (addBtn) {
+      var addCustom = function () {
+        var input = panel.querySelector("#sc-subnet-custom");
+        var v = (input.value || "").trim();
+        if (!v) return;
+        var row = panel.querySelector('.sc-picker[data-field="subnetCidrs"]');
+        row.querySelector(".sc-chips").insertAdjacentHTML("beforeend", scChip("subnetCidrs", v));
+        input.value = "";
+        scheduleScopePreview();
+      };
+      addBtn.addEventListener("click", addCustom);
+      panel.querySelector("#sc-subnet-custom").addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); addCustom(); }
+      });
+    }
     panel.addEventListener("input", function (e) {
-      if (e.target && /^sc-(tags|ids|mfrs|models|subnets)$/.test(e.target.id || "")) scheduleScopePreview();
+      if (e.target && e.target.id === "sc-ids") scheduleScopePreview();
     });
+  }
+  function scPicked(panel, field) {
+    return Array.from(panel.querySelectorAll('.sc-chip[data-field="' + field + '"]')).map(function (c) { return c.getAttribute("data-val"); });
   }
   function collectStep2() {
     var panel = document.getElementById("aw-step-2");
     if (!panel.querySelector("#sc-all")) return;
     if (panel.querySelector("#sc-all").checked) { draft.scope = { allAssets: true }; return; }
     var sc = {};
-    var types = csvOf(panel.querySelector("#sc-types").value); if (types.length) sc.assetTypes = types;
-    var tags = csvOf(panel.querySelector("#sc-tags").value); if (tags.length) sc.tags = tags;
-    var mfrs = csvOf(panel.querySelector("#sc-mfrs").value); if (mfrs.length) sc.manufacturers = mfrs;
-    var models = csvOf(panel.querySelector("#sc-models").value); if (models.length) sc.models = models;
-    var subnets = csvOf(panel.querySelector("#sc-subnets").value); if (subnets.length) sc.subnetCidrs = subnets;
+    var types = scPicked(panel, "assetTypes"); if (types.length) sc.assetTypes = types;
+    var mfrs = scPicked(panel, "manufacturers"); if (mfrs.length) sc.manufacturers = mfrs;
+    var models = scPicked(panel, "models"); if (models.length) sc.models = models;
+    var subnets = scPicked(panel, "subnetCidrs"); if (subnets.length) sc.subnetCidrs = subnets;
+    var tags = scPicked(panel, "tags"); if (tags.length) sc.tags = tags;
     var ids = csvOf(panel.querySelector("#sc-ids").value); if (ids.length) sc.assetIds = ids;
     draft.scope = sc;
   }

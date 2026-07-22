@@ -109,6 +109,42 @@ export async function findRulesMatchingAsset(assetId: string) {
   });
 }
 
+/**
+ * Option lists for the wizard's device-filtering pickers: distinct
+ * manufacturers/models present in the inventory + the defined (non-deprecated)
+ * IPAM subnets. Distinct queries only — cheap at 2000 assets.
+ */
+export async function listScopeOptions(): Promise<{
+  manufacturers: string[];
+  models: string[];
+  subnets: { id: string; name: string; cidr: string }[];
+}> {
+  const [mfrRows, modelRows, subnets] = await Promise.all([
+    prisma.asset.findMany({
+      select: { manufacturer: true },
+      distinct: ["manufacturer"],
+      where: { manufacturer: { not: null } },
+      orderBy: { manufacturer: "asc" },
+    }),
+    prisma.asset.findMany({
+      select: { model: true },
+      distinct: ["model"],
+      where: { model: { not: null } },
+      orderBy: { model: "asc" },
+    }),
+    prisma.subnet.findMany({
+      select: { id: true, name: true, cidr: true },
+      where: { status: { not: "deprecated" } },
+      orderBy: { cidr: "asc" },
+    }),
+  ]);
+  return {
+    manufacturers: mfrRows.map((r) => r.manufacturer).filter((m): m is string => !!m && m.trim() !== ""),
+    models: modelRows.map((r) => r.model).filter((m): m is string => !!m && m.trim() !== ""),
+    subnets,
+  };
+}
+
 // ─── Change-type subscription cache ─────────────────────────────────────────
 // The persist* functions only diff + emit change-Events when at least one
 // enabled `change` rule subscribes to that change type — zero overhead

@@ -619,6 +619,7 @@ const api = {
     list:    ()        => request("GET", "/automations"),
     schema:  ()        => request("GET", "/automations/schema"),
     recipientUsers: () => request("GET", "/automations/recipient-users"),
+    scopeOptions: ()   => request("GET", "/automations/scope-options"),
     preview: (body)    => request("POST", "/automations/preview", body),
     create:  (body)    => request("POST", "/automations", body),
     update:  (id, b)   => request("PUT", `/automations/${id}`, b),

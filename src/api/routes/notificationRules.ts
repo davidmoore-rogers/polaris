@@ -16,7 +16,7 @@ import type { Request } from "express";
 import { requirePermission, hasPermission } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
 import { ruleInputSchema, previewInputSchema, buildSchemaCatalog, normalizeEscalationToV2, type RuleInput } from "../../services/notificationTypes.js";
-import { listRules, createRule, updateRule, deleteRule } from "../../services/notificationRuleService.js";
+import { listRules, createRule, updateRule, deleteRule, listScopeOptions } from "../../services/notificationRuleService.js";
 import { previewRule } from "../../services/notificationEngine.js";
 import { listRecipientUsers } from "../../services/notificationRecipientService.js";
 
@@ -32,6 +32,15 @@ notificationRulesRouter.get("/", requirePermission("automationManagement", "read
 notificationRulesRouter.get("/schema", requirePermission("automationManagement", "read"), async (_req, res, next) => {
   try {
     res.json(buildSchemaCatalog());
+  } catch (err) { next(err); }
+});
+
+// Scope-picker option lists for the wizard's device-filtering step: distinct
+// manufacturers/models actually present in the inventory + the defined IPAM
+// subnets (name + cidr, non-deprecated). Types come from /asset-types.
+notificationRulesRouter.get("/scope-options", requirePermission("automationManagement", "read"), async (_req, res, next) => {
+  try {
+    res.json(await listScopeOptions());
   } catch (err) { next(err); }
 });
 
