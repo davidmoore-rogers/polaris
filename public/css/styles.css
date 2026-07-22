@@ -4418,3 +4418,18 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .aw-suggest-item { padding: 5px 9px; font-size: 0.82rem; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .aw-suggest-item:hover, .aw-suggest-item.active { background: var(--color-bg-secondary); }
 .aw-suggest-empty { padding: 5px 9px; font-size: 0.78rem; color: var(--color-text-tertiary); }
+
+/* Condition-builder drag handles + drop cues (wizard devices/trigger/reset trees) */
+.aw-grip {
+  cursor: grab;
+  color: var(--color-text-tertiary);
+  user-select: none;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 2px 2px 2px 0;
+  flex: 0 0 auto;
+}
+.aw-grip:active { cursor: grabbing; }
+.aw-drop-before { box-shadow: inset 0 3px 0 0 var(--color-accent); }
+.aw-drop-after { box-shadow: inset 0 -3px 0 0 var(--color-accent); }
+.aw-drop-into { box-shadow: inset 0 0 0 2px var(--color-accent); border-radius: 6px; }

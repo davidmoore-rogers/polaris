@@ -85,18 +85,34 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelectorAll("#aw-severity option.sev-critical").length).toBe(1);
   });
 
-  it("Next reaches step 2 and the condition builder is interactive", async () => {
+  it("Next reaches step 2; All assets is checked by default and hides the builder", async () => {
     (doc.querySelector("#aw-name") as unknown as { value: string }).value = "smoke";
     (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 20));
     expect(doc.querySelector("#aw-step-2.visible")).toBeTruthy();
+    const allCb = doc.querySelector("#aw-all-assets") as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
+    expect(allCb).toBeTruthy();
+    expect(allCb.checked).toBe(true);
+    expect((doc.querySelector("#aw-cond-wrap") as unknown as { style: { display: string } }).style.display).toBe("none");
+  });
+
+  it("unchecking All assets reveals the builder with a starter row; add-rule/add-group work", async () => {
+    const win = g.window as InstanceType<typeof Window>;
+    const allCb = doc.querySelector("#aw-all-assets") as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
+    allCb.checked = false;
+    allCb.dispatchEvent(new win.Event("change", { bubbles: true }));
+    expect((doc.querySelector("#aw-cond-wrap") as unknown as { style: { display: string } }).style.display).toBe("block");
     expect(doc.querySelector("#aw-cond-root .scg-group")).toBeTruthy();
-    expect(doc.querySelector("#aw-cond-root .scg-op")).toBeTruthy();
+    expect(doc.querySelectorAll("#aw-cond-root .scr-row").length).toBe(1); // seeded starter row
+    // Rows carry a draggable grip for the tree drag-and-drop.
+    expect(doc.querySelector("#aw-cond-root .scr-row .aw-grip[draggable='true']")).toBeTruthy();
 
     (doc.querySelector("#aw-cond-root .scg-add-rule") as unknown as { click: () => void }).click();
-    expect(doc.querySelector("#aw-cond-root .scr-row")).toBeTruthy();
+    expect(doc.querySelectorAll("#aw-cond-root .scr-row").length).toBe(2);
     (doc.querySelector("#aw-cond-root .scg-add-group") as unknown as { click: () => void }).click();
     expect(doc.querySelectorAll("#aw-cond-root .scg-group").length).toBe(2);
+    // Sub-groups get a grip too (root group does not).
+    expect(doc.querySelectorAll("#aw-cond-root .scg-group .aw-grip").length).toBeGreaterThan(0);
     expect(toastErrors).toEqual([]);
   });
 

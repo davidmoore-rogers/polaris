@@ -339,6 +339,7 @@ async function openAutomationWizard(existing) {
       return '<option value="' + f.field + '"' + (f.field === fm.field ? " selected" : "") + '>' + escapeHtml(f.label) + '</option>';
     }).join("");
     return '<div class="scr-row" style="display:flex;gap:6px;align-items:center;margin:4px 0">' +
+      '<span class="aw-grip" draggable="true" title="Drag to move">&#x2842;</span>' +
       '<select class="scr-field" style="width:31%">' + fieldOpts + '</select>' +
       '<select class="scr-op" style="width:26%">' + scOpOptions(fm.field, rule.operator || (fm.ops && fm.ops[0])) + '</select>' +
       '<span class="aw-combo">' +
@@ -357,6 +358,7 @@ async function openAutomationWizard(existing) {
     }).join("");
     return '<div class="scg-group" data-depth="' + depth + '" style="border:1px solid var(--color-border);border-left:3px solid ' + (depth === 0 ? "var(--color-accent)" : "var(--color-success)") + ';border-radius:6px;padding:0.55rem;margin:4px 0">' +
       '<div style="display:flex;gap:6px;align-items:center;margin-bottom:2px">' +
+        (depth > 0 ? '<span class="aw-grip" draggable="true" title="Drag to move group">&#x2842;</span>' : "") +
         '<select class="scg-op" style="flex:1;font-size:0.85rem">' + scGroupOpOptions(group.op || "and") + '</select>' +
         (depth > 0 ? '<button type="button" class="btn btn-sm btn-danger scg-remove" title="Remove group">&times;</button>' : "") +
       '</div>' +
@@ -387,16 +389,37 @@ async function openAutomationWizard(existing) {
   }
   function step2Html() {
     var scope = draft.scope || {};
+    var allAssets = !scope.condition && (scope.allAssets === true || Object.keys(scope).length === 0);
     var root = scope.condition
       ? JSON.parse(JSON.stringify(scope.condition))
-      : (scope.allAssets ? { op: "and", children: [] } : legacyScopeToCondition(scope));
+      : (allAssets ? { op: "and", children: [] } : legacyScopeToCondition(scope));
     return '<h3 style="margin:0 0 0.25rem">Which devices?</h3>' +
-      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 0.75rem">Build the filter from conditions and nested groups — with <strong>no conditions, every asset matches</strong>. Polaris-host and audit-event triggers aren’t tied to assets and ignore this filter.</p>' +
-      '<div id="aw-cond-root">' + scGroupHtml(root, 0) + '</div>' +
-      '<div id="aw-scope-preview" style="margin-top:0.75rem"></div>';
+      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 0.75rem">Polaris-host and audit-event triggers aren’t tied to assets and ignore this filter.</p>' +
+      '<div class="form-group" style="margin-bottom:0.5rem"><label style="font-weight:600"><input type="checkbox" id="aw-all-assets"' + (allAssets ? " checked" : "") + '> All assets</label>' +
+      '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 24px">Uncheck to filter which devices this automation applies to.</p></div>' +
+      '<div id="aw-cond-wrap" style="display:' + (allAssets ? "none" : "block") + '">' +
+        '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Build the filter from conditions and nested groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move a condition into another group or reorder groups.</p>' +
+        '<div id="aw-cond-root">' + scGroupHtml(root, 0) + '</div>' +
+        '<div id="aw-scope-preview" style="margin-top:0.75rem"></div>' +
+      '</div>';
   }
   function wireStep2() {
     var panel = document.getElementById("aw-step-2");
+    var allCb = panel.querySelector("#aw-all-assets");
+    if (allCb) {
+      allCb.addEventListener("change", function () {
+        var wrap = panel.querySelector("#aw-cond-wrap");
+        wrap.style.display = allCb.checked ? "none" : "block";
+        if (!allCb.checked) {
+          // Revealed with an empty root: seed a starter row so the operator
+          // lands on something editable.
+          var kids = panel.querySelector("#aw-cond-root > .scg-group > .scg-children");
+          if (kids && kids.children.length === 0) kids.insertAdjacentHTML("beforeend", scRuleRowHtml(null));
+          scheduleScopePreview();
+        }
+      });
+    }
+    wireCondDnD(panel, "#aw-cond-root", scheduleScopePreview);
     panel.addEventListener("change", function (e) {
       var t = e.target;
       if (!t || !t.classList) return;
@@ -435,6 +458,7 @@ async function openAutomationWizard(existing) {
       } else if (btn.classList.contains("scg-add-group")) {
         var g2 = btn.closest(".scg-group");
         var depth = Number(g2.getAttribute("data-depth")) + 1;
+        if (depth >= (scMeta.maxDepth || 5)) { showToast("Groups nest at most " + (scMeta.maxDepth || 5) + " levels", "info"); return; }
         g2.querySelector(":scope > .scg-children").insertAdjacentHTML(
           "beforeend",
           scGroupHtml({ op: "or", children: [{ field: "assetType", operator: "equals", value: "" }] }, depth),
@@ -519,6 +543,120 @@ async function openAutomationWizard(existing) {
       : '<div class="aw-suggest-empty">No matching values (free text is fine).</div>';
     suggest.classList.add("open");
   }
+  // ── Condition-tree drag & drop (shared by the devices / trigger / reset
+  // builders). Grip handles (.aw-grip) start the drag (dashboard tab-grip
+  // pattern: the dragged element is stashed module-side because dataTransfer
+  // is unreadable during dragover); rows/groups accept before/after drops by
+  // cursor midpoint, empty group bodies accept drop-into. DOM order IS the
+  // tree — collect just walks it, so a move needs no model bookkeeping.
+  var _awDragEl = null;
+  var _awDropCue = null;
+  function awClearDropCue() {
+    if (_awDropCue) { _awDropCue.classList.remove("aw-drop-before", "aw-drop-after", "aw-drop-into"); _awDropCue = null; }
+  }
+  function awGroupDepthOf(el, rootEl) {
+    var d = 0;
+    var p = el.parentElement;
+    while (p && p !== rootEl) {
+      if (p.classList && p.classList.contains("scg-group")) d++;
+      p = p.parentElement;
+    }
+    return d;
+  }
+  function awSubtreeHeight(el) {
+    // How many group levels the dragged element itself adds (row = 0).
+    if (!el.classList.contains("scg-group")) return 0;
+    var max = 1;
+    el.querySelectorAll(".scg-group").forEach(function (g) {
+      var d = 1;
+      var p = g.parentElement;
+      while (p && p !== el) {
+        if (p.classList.contains("scg-group")) d++;
+        p = p.parentElement;
+      }
+      if (d + 1 > max) max = d + 1;
+    });
+    return max;
+  }
+  function awFixDepths(rootEl) {
+    var boundary = rootEl.parentElement || rootEl;
+    rootEl.querySelectorAll(".scg-group").forEach(function (g) {
+      var depth = awGroupDepthOf(g, boundary);
+      g.setAttribute("data-depth", String(depth));
+      g.style.borderLeftColor = depth === 0 ? "var(--color-accent)" : "var(--color-success)";
+    });
+  }
+  function wireCondDnD(panel, rootSelector, onChange) {
+    panel.addEventListener("dragstart", function (e) {
+      var grip = e.target && e.target.classList && e.target.classList.contains("aw-grip") ? e.target : null;
+      if (!grip) return;
+      var el = grip.closest(".scr-row, .scg-group");
+      var root = panel.querySelector(rootSelector);
+      if (!el || !root || !root.contains(el)) return;
+      _awDragEl = el;
+      try { e.dataTransfer.setData("text/plain", ""); e.dataTransfer.effectAllowed = "move"; } catch (_e) {}
+    });
+    panel.addEventListener("dragover", function (e) {
+      if (!_awDragEl) return;
+      var root = panel.querySelector(rootSelector);
+      if (!root) return;
+      var over = e.target.closest && e.target.closest(".scr-row, .scg-children, .scg-group");
+      if (!over || !root.contains(over) || _awDragEl.contains(over)) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = "move"; } catch (_e) {}
+      awClearDropCue();
+      if (over.classList.contains("scg-children")) {
+        // Hovering a group's (possibly empty) body → drop into it.
+        over.classList.add("aw-drop-into");
+        _awDropCue = over;
+      } else {
+        var rect = over.getBoundingClientRect();
+        var before = e.clientY - rect.top < rect.height / 2;
+        over.classList.add(before ? "aw-drop-before" : "aw-drop-after");
+        _awDropCue = over;
+      }
+    });
+    panel.addEventListener("drop", function (e) {
+      if (!_awDragEl) return;
+      var root = panel.querySelector(rootSelector);
+      var cue = _awDropCue;
+      awClearDropCue();
+      if (!root || !cue || !root.contains(cue) || _awDragEl.contains(cue)) { _awDragEl = null; return; }
+      e.preventDefault();
+      var maxDepth = scMeta.maxDepth || 5;
+      var destChildren = null;
+      var beforeEl = null;
+      if (cue.classList.contains("scg-children")) {
+        destChildren = cue;
+      } else if (cue.classList.contains("scr-row")) {
+        destChildren = cue.parentElement;
+        beforeEl = e.clientY - cue.getBoundingClientRect().top < cue.getBoundingClientRect().height / 2 ? cue : cue.nextElementSibling;
+      } else { // scg-group
+        destChildren = cue.parentElement;
+        if (!destChildren.classList.contains("scg-children")) { _awDragEl = null; return; } // root group — can't sibling it
+        beforeEl = e.clientY - cue.getBoundingClientRect().top < cue.getBoundingClientRect().height / 2 ? cue : cue.nextElementSibling;
+      }
+      // Depth cap (matches the render rule: child groups live at depth ≤
+      // maxDepth-1): destination group depth + the dragged subtree's height.
+      var destGroup = destChildren.closest(".scg-group");
+      var h = awSubtreeHeight(_awDragEl); // rows = 0, plain group = 1, nested deeper
+      if (h > 0 && awGroupDepthOf(destGroup, panel) + h > maxDepth - 1) {
+        showToast("That move would nest groups more than " + maxDepth + " levels deep", "info");
+        _awDragEl = null;
+        return;
+      }
+      if (beforeEl) destChildren.insertBefore(_awDragEl, beforeEl);
+      else destChildren.appendChild(_awDragEl);
+      _awDragEl = null;
+      awFixDepths(root);
+      if (onChange) onChange();
+    });
+    panel.addEventListener("dragend", function () {
+      _awDragEl = null;
+      awClearDropCue();
+    });
+  }
+
   function scCollectGroup(groupEl) {
     var op = groupEl.querySelector(":scope > div > .scg-op").value;
     var children = [];
@@ -536,18 +674,23 @@ async function openAutomationWizard(existing) {
     return { op: op, children: children };
   }
   function collectStep2() {
+    var cb = document.getElementById("aw-all-assets");
+    if (cb && cb.checked) { draft.scope = { allAssets: true }; return; }
     var root = document.querySelector("#aw-cond-root > .scg-group");
     if (!root) return;
     var tree = scCollectGroup(root);
-    // Prune empty-valued rules and empty sub-groups (unfinished rows should
-    // not silently exclude everything); validation flags them on Next.
-    draft.scope = tree.children.length === 0 ? { allAssets: true } : { condition: tree };
+    // With "All assets" unchecked an empty tree is NOT all-assets — validation
+    // asks for a condition or a re-check so nothing matches silently.
+    draft.scope = { condition: tree };
   }
   function validateStep2() {
     var def = findType((draft.trigger || {}).type);
     if (def && !def.scoped) return null; // non-scoped triggers ignore the filter
     var sc = draft.scope || {};
     if (sc.allAssets || !sc.condition) return null;
+    if (!sc.condition.children.length) {
+      return 'Add at least one condition, or check "All assets".';
+    }
     var CIDR_ISH = /^([0-9]{1,3}\.){3}[0-9]{1,3}(\/[0-9]{1,2})?$|^[0-9a-f:]+(\/[0-9]{1,3})?$/i;
     var problem = null;
     var walk = function (g) {
