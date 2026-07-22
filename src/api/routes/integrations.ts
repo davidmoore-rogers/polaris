@@ -1232,7 +1232,10 @@ router.put("/:id", async (req, res, next) => {
         oldSnap.switch       !== newSnap.switch ||
         oldSnap.access_point !== newSnap.access_point ||
         oldSnap.workstation  !== newSnap.workstation ||
-        oldSnap.server       !== newSnap.server;
+        // Under a vcenter integration the server key reads vmMonitor, so VM
+        // flag flips sweep too; hypervisor covers the hostMonitor flag.
+        oldSnap.server       !== newSnap.server ||
+        oldSnap.hypervisor   !== newSnap.hypervisor;
       if (flipped) {
         const swept = await sweepMonitoredForIntegration(prisma, req.params.id);
         if (swept > 0) {
@@ -1546,8 +1549,9 @@ router.post("/:id/query", async (req, res, next) => {
 // `autoMonitorInterfaces` and validated by the existing PUT handler.
 
 // fortigate/fortiswitch/fortiap = FMG/FortiGate classes; workstation/server =
-// AD/Entra classes; virtual_machine = the vCenter VM class (interface auto-
-// monitor is class-agnostic in the service; ESXi hosts carry no auto-monitor).
+// AD/Entra classes; virtual_machine = the vCenter VM class (a klass name only —
+// the assets are typed "server"; interface auto-monitor is class-agnostic in
+// the service; ESXi hosts carry no auto-monitor).
 const ClassQuerySchema = z.enum(["fortigate", "fortiswitch", "fortiap", "workstation", "server", "virtual_machine"]);
 
 // Map an auto-monitor class to the Integration.config block that holds its
@@ -2570,7 +2574,7 @@ async function applyWorkstationServerAutoMonitor(
   for (const [klass, blockKey] of [
     ["workstation",     "workstationMonitor"],
     ["server",          "serverMonitor"],
-    ["virtual_machine", "vmMonitor"], // vCenter VM class (ESXi hosts carry no auto-monitor)
+    ["virtual_machine", "vmMonitor"], // vCenter VM class — klass name only, assets are typed "server" (ESXi hosts carry no auto-monitor)
   ] as const) {
     const block = cfg[blockKey];
     if (!block) continue;
@@ -2620,7 +2624,9 @@ async function runWorkstationServerAgentAutoDeploy(
     { klass: "server" as const,          assetType: "server",          deploy: cfg.serverMonitor?.agentDeploy },
     // vCenter VMs are guest OSes — agent deploy applies. ESXi hosts never
     // get the agent (no hostMonitor.agentDeploy exists in the schema).
-    { klass: "virtual_machine" as const, assetType: "virtual_machine", deploy: cfg.vmMonitor?.agentDeploy },
+    // The klass keeps its vm name; the assets are typed "server" (scoped to
+    // this integration by discoveredByIntegrationId in the deploy service).
+    { klass: "virtual_machine" as const, assetType: "server", deploy: cfg.vmMonitor?.agentDeploy },
   ].filter((c) => c.deploy?.enabled === true);
   if (classes.length === 0) return;
 
@@ -8030,7 +8036,11 @@ async function syncEntraDevices(
               collisionAssetId: untaggedSibling.asset.id,
               integrationId,
               proposedDeviceId: dev.deviceId,
-              proposedAssetFields: buildProposed("untagged-collision", untaggedSibling.via),
+              // bothAssetsExist: sibling flavour — the device already has its
+              // own asset, so conflict-reject records the decision without
+              // creating anything (see rejectAssetConflict's alreadyOwned
+              // guard) and the UI explains accept as a two-asset merge.
+              proposedAssetFields: { ...buildProposed("untagged-collision", untaggedSibling.via), bothAssetsExist: true },
               existingAsset: untaggedSibling.asset,
             });
             syncLog("warning", `Sibling hostname collision — Entra device "${dev.displayName}" (${dev.deviceId}) has a tagged asset but untagged asset ${untaggedSibling.asset.id} shares the same hostname${untaggedSibling.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
@@ -8953,13 +8963,11 @@ async function syncVcenterDevices(
   const skipped: string[] = [];
   const now = new Date();
 
-  // Per-class addAsMonitored snapshot for the auto-monitor sweep.
-  const vmAddAs   = getAddAsMonitoredFromConfig("vcenter", integrationConfig, "virtual_machine");
+  // Per-class addAsMonitored snapshot for the auto-monitor sweep. VMs are
+  // typed "server" (the virtual_machine built-in was retired 2026-07), which
+  // under a vcenter integration resolves to the vmMonitor block.
+  const vmAddAs   = getAddAsMonitoredFromConfig("vcenter", integrationConfig, "server");
   const hostAddAs = getAddAsMonitoredFromConfig("vcenter", integrationConfig, "hypervisor");
-  const resolveAddAs = (assetType: string | null | undefined): boolean | null =>
-    assetType === "virtual_machine" ? vmAddAs
-    : assetType === "hypervisor"    ? hostAddAs
-    : null;
 
   // Load the full asset table (MAC rows hydrated for the vNIC identity join)
   // plus the vcenter AssetSource index.
@@ -9154,7 +9162,10 @@ async function syncVcenterDevices(
       if (existing.assetType === "hypervisor") updateData.dependencyLayer = 1;
       if (existing.assetType === "other") updateData.assetType = "hypervisor";
       if (connected) bumpLastSeen(updateData, existing, now, "vcenter");
-      Object.assign(updateData, buildMonitoredSweep(resolveAddAs((updateData.assetType as string) ?? existing.assetType), existing));
+      Object.assign(updateData, buildMonitoredSweep(
+        ((updateData.assetType as string) ?? existing.assetType) === "hypervisor" ? hostAddAs : null,
+        existing,
+      ));
       const preserved = ((existing.tags as string[]) || []).filter((t) => !isVcenterManagedTag(t));
       const freshTags = ["vcenter", "auto-discovered"];
       updateData.tags = [...preserved, ...freshTags.filter((t) => !preserved.includes(t))];
@@ -9167,6 +9178,37 @@ async function syncVcenterDevices(
       updated.push(host.name || host.moref);
     } catch (err: any) {
       syncLog("error", `Failed to update asset for ESXi host ${host.name || host.moref}: ${err.message || "Unknown error"}`);
+    }
+    // Sibling hostname collision — same both-assets-exist detection as the
+    // VM pass below (an ESXi host may also live on as a manually-created or
+    // directory-discovered server asset). See the VM-pass comment.
+    {
+      const sibling = host.name ? lookupHostname(assetByHostnameNoVcenter, host.name) : null;
+      if (sibling && sibling.asset.id !== existing.id && !assetIdsWithVcenterSource.has(sibling.asset.id)) {
+        try {
+          await upsertAssetConflict({
+            collisionAssetId: sibling.asset.id,
+            integrationId,
+            proposedDeviceId: externalId,
+            proposedAssetFields: {
+              sourceType: "vcenter",
+              deviceId: externalId,
+              hostname: host.name,
+              os: "VMware ESXi",
+              assetType: "hypervisor",
+              clusterName: host.clusterName,
+              ipAddress: host.resolvedIp,
+              collisionReason: "untagged-collision",
+              matchedVia: sibling.via,
+              bothAssetsExist: true,
+            },
+            existingAsset: sibling.asset,
+          });
+          syncLog("warning", `Sibling hostname collision queued for review — ESXi host "${host.name}" has its own asset but asset ${sibling.asset.hostname || sibling.asset.id} shares the same hostname${sibling.via === "netbios" ? " (NetBIOS-truncated match)" : ""}. Accept in Conflicts to merge them.`);
+        } catch (err: any) {
+          syncLog("error", `Failed to queue sibling hostname-collision conflict for ESXi host "${host.name}": ${err.message || "Unknown error"}`);
+        }
+      }
     }
   }
 
@@ -9278,8 +9320,17 @@ async function syncVcenterDevices(
         // Type flip only from the "other" default — a directory-typed
         // workstation/server keeps its class (and thus its monitoring
         // class-block); the Virtualization section marks it as a VM anyway.
-        if (existing.assetType === "other") updateData.assetType = "virtual_machine";
-        if (((updateData.assetType as string) ?? existing.assetType) === "virtual_machine") updateData.dependencyLayer = 2;
+        if (existing.assetType === "other") updateData.assetType = "server";
+        // "vCenter-classed" = a server-typed asset this integration owns (or
+        // just took over via the other→server flip). Since VMs share the
+        // "server" type with directory-discovered machines, ownership — not
+        // the type — is what gates the vm-class layer stamp and monitored
+        // sweep, so vCenter never fights a directory integration over a
+        // MAC-matched server it merely enriches.
+        const vmClassed =
+          ((updateData.assetType as string) ?? existing.assetType) === "server" &&
+          (existing.discoveredByIntegrationId === integrationId || updateData.assetType === "server");
+        if (vmClassed) updateData.dependencyLayer = 2;
         let vmMergedMacs: MacJsonEntry[] | null = null;
         if (vmMacEntries.length > 0) {
           const { primary, merged } = mergeVmMacs(existing.macAddresses as any[]);
@@ -9287,7 +9338,7 @@ async function syncVcenterDevices(
           if (primary) updateData.macAddress = primary;
         }
         if (poweredOn) bumpLastSeen(updateData, existing, now, "vcenter");
-        Object.assign(updateData, buildMonitoredSweep(resolveAddAs((updateData.assetType as string) ?? existing.assetType), existing));
+        Object.assign(updateData, buildMonitoredSweep(vmClassed ? vmAddAs : null, existing));
         const preserved = ((existing.tags as string[]) || []).filter((t) => !isVcenterManagedTag(t));
         const freshTags = ["vcenter", "auto-discovered"];
         updateData.tags = [...preserved, ...freshTags.filter((t) => !preserved.includes(t))];
@@ -9303,6 +9354,47 @@ async function syncVcenterDevices(
         updated.push(displayName);
       } catch (err: any) {
         syncLog("error", `Failed to update asset for vCenter VM ${displayName}: ${err.message || "Unknown error"}`);
+      }
+      // Sibling hostname collision — this VM already has its own Polaris
+      // asset, but a second asset with no vCenter link shares the hostname
+      // (the directory discovered the guest separately and no vNIC MAC tied
+      // them together, or both predate the vCenter integration). Mirrors the
+      // Entra sibling check: raise a review conflict so the operator merges
+      // from the Conflicts queue — accept absorbs this VM's asset into the
+      // sibling — instead of hunting through Sources → Merge asset.
+      // upsertAssetConflict skips pairs the operator already resolved;
+      // `bothAssetsExist` tells resolution not to create anything on reject.
+      {
+        const siblingName = vm.guestHostname || vm.name;
+        const sibling = siblingName ? lookupHostname(assetByHostnameNoVcenter, siblingName) : null;
+        if (sibling && sibling.asset.id !== existing.id && !assetIdsWithVcenterSource.has(sibling.asset.id)) {
+          try {
+            await upsertAssetConflict({
+              collisionAssetId: sibling.asset.id,
+              integrationId,
+              proposedDeviceId: externalId,
+              proposedAssetFields: {
+                sourceType: "vcenter",
+                deviceId: externalId,
+                hostname: siblingName,
+                macAddress: vmMacEntries[0]?.mac ?? null,
+                os: vm.guestOsFullName,
+                assetType: "server",
+                ipAddress: vm.guestIp,
+                powerState: vm.powerState || null,
+                hostName: hostRow?.name ?? null,
+                clusterName: hostRow?.clusterName ?? null,
+                collisionReason: "untagged-collision",
+                matchedVia: sibling.via,
+                bothAssetsExist: true,
+              },
+              existingAsset: sibling.asset,
+            });
+            syncLog("warning", `Sibling hostname collision queued for review — vCenter VM "${displayName}" has its own asset but asset ${sibling.asset.hostname || sibling.asset.id} shares the same hostname${sibling.via === "netbios" ? " (NetBIOS-truncated match)" : ""}. Accept in Conflicts to merge them.`);
+          } catch (err: any) {
+            syncLog("error", `Failed to queue sibling hostname-collision conflict for VM "${displayName}": ${err.message || "Unknown error"}`);
+          }
+        }
       }
       continue;
     }
@@ -9323,7 +9415,7 @@ async function syncVcenterDevices(
               hostname: collisionName,
               macAddress: vmMacEntries[0]?.mac ?? null,
               os: vm.guestOsFullName,
-              assetType: "virtual_machine",
+              assetType: "server",
               ipAddress: vm.guestIp,
               powerState: vm.powerState || null,
               hostName: hostRow?.name ?? null,
@@ -9359,7 +9451,7 @@ async function syncVcenterDevices(
         osVersion: projected.osVersion,
         manufacturer: projected.manufacturer,
         model: projected.model,
-        assetType: "virtual_machine",
+        assetType: "server",
         status: "active",
         statusChangedAt: now,
         statusChangedBy: integrationName,

@@ -18,6 +18,12 @@
  *     netbios match the longer canonical hostname replaces the truncated
  *     one); reject creates a separate asset (admin confirmed they're
  *     different devices).
+ *     Sibling variant (`proposedAssetFields.bothAssetsExist`, raised by the
+ *     Entra + vCenter sibling checks): the proposed device ALREADY has its
+ *     own asset. Accept still merges — the ghost-absorb below moves the
+ *     duplicate's fields/MACs onto the collision target and deletes it —
+ *     but reject creates NOTHING (both assets stand; the resolved conflict
+ *     row suppresses a re-raise).
  *       - "ip-override"            — a discovery write proposed an IP that
  *         differs from the asset's operator IP pin (Asset.ipOverride; raised
  *         by ipOverrideService). Accept adopts the discovered IP and releases
@@ -580,6 +586,34 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
   const isVcenter = src === "vcenter-vm" || src === "vcenter-host";
   const sourceLabel = conflictSourceLabel(src);
 
+  // Sibling flavour — the proposed device ALREADY has its own asset (its
+  // (sourceKind, externalId) AssetSource row exists; raised by the discovery
+  // sibling checks with `bothAssetsExist`). Reject means "they really are two
+  // devices": record the decision and stop. Creating an asset here would mint
+  // a duplicate AND the upsert below would steal the source row off the
+  // device's real asset, orphaning it. The resolved conflict row itself is
+  // what suppresses a re-raise (upsertAssetConflict's resolved-pair check).
+  {
+    const rejectExternalId = isVcenter
+      ? String(conflict.proposedDeviceId)
+      : String(conflict.proposedDeviceId).toLowerCase();
+    const alreadyOwned = await prisma.assetSource.findUnique({
+      where: { sourceKind_externalId: { sourceKind: src, externalId: rejectExternalId } },
+      select: { assetId: true },
+    });
+    if (alreadyOwned) {
+      logEvent({
+        action: "conflict.rejected",
+        resourceType: "asset",
+        resourceId: alreadyOwned.assetId,
+        resourceName: proposed.hostname ?? undefined,
+        actor,
+        message: `Asset conflict rejected — kept ${sourceLabel} ${conflict.proposedDeviceId} and asset ${conflict.asset?.hostname || conflict.assetId} as separate assets (both already exist; nothing created)`,
+      });
+      return;
+    }
+  }
+
   // Phase 4b/4d: cross-integration identity tags (sid:* / ad-guid:*) and
   // the assetTag identity marker are no longer written here. The new
   // asset becomes findable on the next discovery run via the
@@ -604,7 +638,7 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
     macAddress: proposed.macAddress || null,
     manufacturer: proposed.manufacturer || null,
     model: proposed.model || null,
-    assetType: proposed.assetType || (isVcenter ? "virtual_machine" : isAd ? "other" : "workstation"),
+    assetType: proposed.assetType || (isVcenter ? "server" : isAd ? "other" : "workstation"),
     status: proposed.status || defaultStatus,
     statusChangedAt: new Date(),
     statusChangedBy: actor ?? "system",

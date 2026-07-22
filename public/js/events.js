@@ -1029,20 +1029,26 @@ function getAlertsFormData() {
         '</tr>';
     }).join("");
 
-    // Source-aware labels (Entra vs AD) — older Entra-only conflicts predate
-    // assetTagPrefix and default to Entra in the backend, so the same default
-    // applies here.
-    var isAd = proposed.assetTagPrefix === "ad:";
-    var sourceLabel = isAd ? "Active Directory" : "Entra ID";
-    var sourceShort = isAd ? "AD computer" : "Entra device";
-    var rightColLabel = isAd ? "Active Directory" : "Entra / Intune";
+    // Source-aware labels (Entra vs AD vs vCenter) — older Entra-only
+    // conflicts predate assetTagPrefix and default to Entra in the backend,
+    // so the same default applies here. vCenter conflicts carry
+    // sourceType="vcenter" with assetType discriminating VM vs ESXi host.
+    var isVcenter = proposed.sourceType === "vcenter";
+    var isAd = !isVcenter && proposed.assetTagPrefix === "ad:";
+    var sourceLabel = isVcenter ? "vCenter" : isAd ? "Active Directory" : "Entra ID";
+    var sourceShort = isVcenter
+      ? (proposed.assetType === "hypervisor" ? "vCenter ESXi host" : "vCenter VM")
+      : isAd ? "AD computer" : "Entra device";
+    var rightColLabel = isVcenter ? "vCenter" : isAd ? "Active Directory" : "Entra / Intune";
 
     // Collision reason + match mechanism shape the explainer copy.
     var reason = proposed.collisionReason || "untagged-collision";
     var via = proposed.matchedVia === "netbios" ? "netbios" : "exact";
 
     var explainer;
-    if (reason === "duplicate-registration") {
+    if (proposed.bothAssetsExist) {
+      explainer = "Duplicate assets — this " + escapeHtml(sourceShort) + " already has its own Polaris asset, and the asset shown here shares its hostname with no " + escapeHtml(sourceLabel) + " link. <strong>Apply merge</strong> combines them into one asset (the " + escapeHtml(sourceShort) + "'s duplicate is absorbed and removed); <strong>Reject</strong> keeps both assets as-is — nothing is created or deleted.";
+    } else if (reason === "duplicate-registration") {
       explainer = "Duplicate registration — another " + sourceShort + " with a different ID already exists under this hostname. <strong>Accept</strong> to merge into the existing record (replaces its assetTag with the new ID; the prior ID is preserved as a <code>prev-…</code> tag); <strong>Reject</strong> to keep them as separate assets.";
     } else if (reason === "mac-collision") {
       explainer = "MAC collision — the MAC reported by this " + sourceShort + " matches a MAC ever seen on an existing asset. <strong>Note:</strong> MAC randomization on modern Windows/iOS makes this a softer signal than hostname — confirm before accepting. <strong>Accept</strong> to merge into the existing record; <strong>Reject</strong> to keep them separate.";
@@ -1054,7 +1060,9 @@ function getAlertsFormData() {
     }
 
     var badges = [];
-    if (reason === "duplicate-registration") {
+    if (proposed.bothAssetsExist) {
+      badges.push('<span class="badge badge-warning">Duplicate assets</span>');
+    } else if (reason === "duplicate-registration") {
       badges.push('<span class="badge badge-warning">Duplicate registration</span>');
     } else if (reason === "mac-collision") {
       badges.push('<span class="badge" style="background:rgba(255,152,0,0.12);color:#ff9800;border:1px solid rgba(255,152,0,0.3)">MAC collision</span>');
@@ -1065,12 +1073,14 @@ function getAlertsFormData() {
     if (proposed.trustType) badges.push('<span class="badge" style="background:rgba(79,195,247,0.1);color:var(--color-accent);border:1px solid rgba(79,195,247,0.2)">' + escapeHtml(proposed.trustType) + '</span>');
     if (proposed.complianceState) badges.push('<span class="badge ' + (proposed.complianceState === "compliant" ? "badge-active" : "badge-warning") + '">' + escapeHtml(proposed.complianceState) + '</span>');
 
-    var rejectTitle = reason === "duplicate-registration"
-      ? "Create a separate asset for this " + sourceShort
+    var rejectTitle = proposed.bothAssetsExist
+      ? "Keep both assets separate (nothing is created or deleted)"
       : "Create a separate asset for this " + sourceShort;
-    var acceptTitle = reason === "duplicate-registration"
-      ? "Merge into the existing " + sourceShort
-      : "Adopt the existing asset as this " + sourceShort;
+    var acceptTitle = proposed.bothAssetsExist
+      ? "Merge the " + sourceShort + "'s duplicate asset into this one"
+      : reason === "duplicate-registration"
+        ? "Merge into the existing " + sourceShort
+        : "Adopt the existing asset as this " + sourceShort;
 
     var actions = isResolved
       ? resolvedActionsHtml(c)

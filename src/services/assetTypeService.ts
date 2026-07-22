@@ -190,8 +190,9 @@ export async function refreshCache(): Promise<void> {
 }
 
 /**
- * Idempotent seed for the built-in types (eight historical + the two vCenter
- * types added by migration 20260709000000). The registry migrations are the
+ * Idempotent seed for the built-in types (eight historical + the vCenter
+ * `hypervisor` type added by migration 20260709000000; its `virtual_machine`
+ * sibling was retired by 20260722000000). The registry migrations are the
  * authoritative seed path; this helper exists so a manual
  * `npx prisma migrate reset` or a Docker volume nuke doesn't leave the
  * registry empty while the cache is being warmed. Safe to call on every
@@ -206,8 +207,10 @@ const BUILT_IN_SEEDS: ReadonlyArray<{ name: string; label: string; description: 
   { name: "printer",      label: "Printer",      description: "Network printer / multi-function device." },
   { name: "access_point", label: "Access Point", description: "Wireless access point (FortiAPs and other vendors)." },
   { name: "other",        label: "Other",        description: "Default bucket for assets that do not fit the built-in categories." },
-  { name: "virtual_machine", label: "Virtual Machine", description: "vCenter-discovered virtual machine. Carries a VM→host dependency link and hypervisor-view telemetry." },
-  { name: "hypervisor",      label: "Hypervisor",      description: "Virtualization host (ESXi). Parents its VMs in the dependency tree; datastores render on its details view." },
+  // vCenter VMs are typed "server" (the virtual_machine built-in was retired
+  // by migration 20260722000000 — keep it out of this self-heal list or it
+  // comes back on the next boot); only the ESXi host type remains.
+  { name: "hypervisor",   label: "Hypervisor",   description: "Virtualization host (ESXi). Parents its VMs in the dependency tree; datastores render on its details view." },
 ];
 
 export async function seedBuiltInAssetTypes(): Promise<{ inserted: number }> {

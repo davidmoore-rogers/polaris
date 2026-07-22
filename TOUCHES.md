@@ -1508,6 +1508,8 @@ Listed alphabetically.
 - Changing quickStats fields → update `collectTelemetryVcenter` (monitoringService) + the cpuPct/memBytes mapping tests.
 - New datastore fields → `VcenterDatastore` model + migration + the `/assets/:id/virtualization` serializer + assets.js `_assetVirtualizationHTML`.
 - New per-class monitor knobs → `VcenterConfigSchema` (`vmMonitor`/`hostMonitor`) + `monitorOverrideService` block-key maps + `pickClassStreamsBlock` + the integrations.js `vms`/`hosts` subtabs and save readers.
+- VMs are typed `server` (the `virtual_machine` built-in was retired by migration 20260722000000). The auto-monitor/deploy **klass** name stays `virtual_machine` (queries pair it with `discoveredByIntegrationId`), but nothing writes that asset type anymore. `server` → block-key resolution is integration-type-dependent everywhere it happens (`monitorOverrideService.getAddAsMonitoredFromConfig` / `classBlockKeyForAssetType(assetType, integrationType)` / both raw-SQL sweeps, `monitoringService.pickClassStreamsBlock`): vcenter → `vmMonitor`, directory → `serverMonitor`. VM-class behaviors (dependencyLayer=2, vmMonitor sweep) gate on `discoveredByIntegrationId` ownership, not on the type.
+- Both the VM pass and the host pass raise a `bothAssetsExist` sibling Conflict when the device has its own asset AND a hostname-twin non-vCenter asset exists (so operators merge from the Conflicts queue). If you change the collision proposedAssetFields shape, keep `conflicts.ts` `conflictSourceFor` + `rejectAssetConflict`'s `alreadyOwned` short-circuit + the events.js `bothAssetsExist` card branch in lockstep.
 
 ---
 
@@ -1947,7 +1949,7 @@ Listed alphabetically.
 
 ## services/assetTypeService.ts
 
-**What it owns:** CRUD + in-memory cache for the `AssetTypeDef` registry (replaces the retired `AssetType` enum). Eight built-in types are protected; custom types support transactional rename and use-checked delete.
+**What it owns:** CRUD + in-memory cache for the `AssetTypeDef` registry (replaces the retired `AssetType` enum). Built-in types (the eight historical + vCenter's `hypervisor`) are protected; custom types support transactional rename and use-checked delete. The `virtual_machine` built-in was retired by migration 20260722000000 (vCenter VMs are typed `server`) — keep it out of `BUILT_IN_SEEDS` / `BUILT_IN_ASSET_TYPES` or the boot self-heal resurrects it.
 
 **Public API:** `AssetTypeRow`, `listAssetTypes`, `getAssetType`, `createAssetType`, `updateAssetType`, `deleteAssetType`, `refreshCache`, `seedBuiltInAssetTypes`
 

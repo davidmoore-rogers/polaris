@@ -80,6 +80,25 @@ describe("getAddAsMonitoredFromConfig — per-class flag read + type gating", ()
     ).toBe(true);
   });
 
+  it("maps server → vmMonitor on a vcenter integration (VMs are typed server)", () => {
+    expect(
+      getAddAsMonitoredFromConfig("vcenter", cfg("vmMonitor", true), "server"),
+    ).toBe(true);
+    // The directory block on a vcenter integration is ignored for servers.
+    expect(
+      getAddAsMonitoredFromConfig("vcenter", cfg("serverMonitor", true), "server"),
+    ).toBe(false);
+  });
+
+  it("maps hypervisor → hostMonitor on a vcenter integration only", () => {
+    expect(
+      getAddAsMonitoredFromConfig("vcenter", cfg("hostMonitor", true), "hypervisor"),
+    ).toBe(true);
+    expect(
+      getAddAsMonitoredFromConfig("activedirectory", cfg("hostMonitor", true), "hypervisor"),
+    ).toBeNull();
+  });
+
   it("returns false when the per-class block is missing", () => {
     expect(getAddAsMonitoredFromConfig("fortimanager", {}, "firewall")).toBe(false);
   });
@@ -207,12 +226,19 @@ describe("resolveMonitorOverride — config-aware convenience wrapper", () => {
 });
 
 describe("classBlockKeyForAssetType — assetType → config block key", () => {
-  it("maps each of the five participating classes", () => {
+  it("maps each of the participating classes", () => {
     expect(classBlockKeyForAssetType("firewall")).toBe("fortigateMonitor");
     expect(classBlockKeyForAssetType("switch")).toBe("fortiswitchMonitor");
     expect(classBlockKeyForAssetType("access_point")).toBe("fortiapMonitor");
     expect(classBlockKeyForAssetType("workstation")).toBe("workstationMonitor");
     expect(classBlockKeyForAssetType("server")).toBe("serverMonitor");
+    expect(classBlockKeyForAssetType("hypervisor")).toBe("hostMonitor");
+  });
+
+  it("server is integration-type-dependent: vcenter → vmMonitor, else serverMonitor", () => {
+    expect(classBlockKeyForAssetType("server", "vcenter")).toBe("vmMonitor");
+    expect(classBlockKeyForAssetType("server", "windowsserver")).toBe("serverMonitor");
+    expect(classBlockKeyForAssetType("server", null)).toBe("serverMonitor");
   });
 
   it("returns null for non-participating / nullish asset types", () => {
@@ -224,10 +250,10 @@ describe("classBlockKeyForAssetType — assetType → config block key", () => {
   });
 });
 
-describe("AUTO_MONITOR_ASSET_TYPES — the seven participating classes", () => {
-  it("contains exactly firewall/switch/access_point/workstation/server/virtual_machine/hypervisor", () => {
+describe("AUTO_MONITOR_ASSET_TYPES — the six participating classes", () => {
+  it("contains exactly firewall/switch/access_point/workstation/server/hypervisor", () => {
     expect([...AUTO_MONITOR_ASSET_TYPES].sort()).toEqual(
-      ["access_point", "firewall", "hypervisor", "server", "switch", "virtual_machine", "workstation"],
+      ["access_point", "firewall", "hypervisor", "server", "switch", "workstation"],
     );
   });
 
@@ -238,7 +264,6 @@ describe("AUTO_MONITOR_ASSET_TYPES — the seven participating classes", () => {
       "access_point",
       "workstation",
       "server",
-      "virtual_machine",
       "hypervisor",
     ];
     for (const c of classes) {
@@ -274,6 +299,17 @@ describe("snapshotAddAsMonitoredByAssetType — per-class flag snapshot", () => 
     expect(snap.firewall).toBeNull();
     expect(snap.switch).toBeNull();
     expect(snap.access_point).toBeNull();
+  });
+
+  it("resolves the vcenter classes: server → vmMonitor, hypervisor → hostMonitor", () => {
+    const snap = snapshotAddAsMonitoredByAssetType("vcenter", {
+      vmMonitor: { addAsMonitored: true },
+      hostMonitor: { addAsMonitored: false },
+    });
+    expect(snap.server).toBe(true);
+    expect(snap.hypervisor).toBe(false);
+    expect(snap.workstation).toBeNull();
+    expect(snap.firewall).toBeNull();
   });
 });
 

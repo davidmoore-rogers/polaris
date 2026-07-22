@@ -399,12 +399,12 @@
   window.PolarisWidgets.ASSET_TYPE_LABELS = {
     server: "Server", switch: "Switch", router: "Router", firewall: "Firewall",
     workstation: "Workstation", printer: "Printer", access_point: "AP", other: "Other",
-    virtual_machine: "Virtual Machine", hypervisor: "Hypervisor",
+    hypervisor: "Hypervisor",
   };
   window.PolarisWidgets.ASSET_TYPE_COLORS = {
     server: "#4fc3f7", switch: "#26c6da", router: "#7e57c2", firewall: "#ef5350",
     workstation: "#66bb6a", printer: "#ffa726", access_point: "#ab47bc", other: "#90a4ae",
-    virtual_machine: "#29b6f6", hypervisor: "#5c6bc0",
+    hypervisor: "#5c6bc0",
   };
 
   // "5m 03s" / "2h 17m" / "3d 4h" — same shape the legacy dashboard used.

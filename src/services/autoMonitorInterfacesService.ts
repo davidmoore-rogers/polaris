@@ -154,7 +154,11 @@ const CLASS_TO_ASSET_TYPE: Record<AutoMonitorClass, string> = {
   fortiap: "access_point",
   workstation: "workstation",
   server: "server",
-  virtual_machine: "virtual_machine",
+  // vCenter VM class — the klass keeps its vm name, but the assets are plain
+  // servers (the virtual_machine built-in type was retired 2026-07). Scope
+  // stays exact because every query pairs this with discoveredByIntegrationId,
+  // and only vCenter integrations use this klass.
+  virtual_machine: "server",
 };
 
 // ─── Pattern compilation (wildcard vs regex) ────────────────────────────────

@@ -1211,7 +1211,8 @@ function _classStreamsBlockFor(klass, opts) {
   if (klass === "workstations" || klass === "workstation") return streamsOf(opts.workstationMonitor);
   if (klass === "servers"      || klass === "server")      return streamsOf(opts.serverMonitor);
   // vCenter classes: plural UI keys, singular-ish backend blocks
-  // (vmMonitor / hostMonitor → Asset.assetType virtual_machine / hypervisor).
+  // (vmMonitor / hostMonitor). "virtual_machine" survives as a klass name
+  // only — the VM assets themselves are typed "server".
   if (klass === "vms"   || klass === "virtual_machine") return streamsOf(opts.vmMonitor);
   if (klass === "hosts" || klass === "hypervisor")      return streamsOf(opts.hostMonitor);
   return null;

@@ -61,7 +61,9 @@ export interface ResolverMount {
 const CLASS_TO_ASSET_TYPE: Record<StorageClass, string> = {
   workstation: "workstation",
   server: "server",
-  virtual_machine: "virtual_machine",
+  // vCenter VM class — klass name kept, assets are typed "server" (see the
+  // matching note in autoMonitorInterfacesService.CLASS_TO_ASSET_TYPE).
+  virtual_machine: "server",
 };
 
 // ─── Pure resolver ──────────────────────────────────────────────────────────

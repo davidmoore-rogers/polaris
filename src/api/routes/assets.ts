@@ -3472,7 +3472,7 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
     // canonical identity link via (sourceKind, externalId). The legacy
     // entra:/ad:/fgt: prefixes were back-compat markers that re-discovery
     // already stopped consulting in Phase 2.
-    let assetType: "firewall" | "switch" | "access_point" | "workstation" | "virtual_machine" | "hypervisor" | "other" = "other";
+    let assetType: "firewall" | "switch" | "access_point" | "workstation" | "server" | "hypervisor" | "other" = "other";
     const tagSet = new Set<string>(["split-from-asset", "auto-discovered"]);
     if (target.sourceKind === "entra") {
       assetType = "workstation";
@@ -3494,7 +3494,7 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
       assetType = "access_point";
       tagSet.add("fortiap");
     } else if (target.sourceKind === "vcenter-vm") {
-      assetType = "virtual_machine";
+      assetType = "server";
       tagSet.add("vcenter");
     } else if (target.sourceKind === "vcenter-host") {
       assetType = "hypervisor";
@@ -4328,6 +4328,39 @@ router.post("/bulk-quarantine/release", requirePermission("assetsQuarantine", "w
   } catch (err) {
     next(err);
   }
+});
+
+// POST /api/v1/assets/bulk-agent-install — kick off Polaris Agent installs on
+// every selected asset at once (assets-page bulk bar "Deploy Agent"). OS
+// platform + transport are resolved per asset the way discovery auto-deploy
+// does (inferAgentPlatform: Windows → WinRM credential with SSH fallback,
+// everything else → SSH); ineligible assets (existing agent, hypervisor,
+// Fortinet source, unreachable, no matching credential) come back as skipped
+// with a reason instead of failing the batch. Remote installs run in a
+// bounded background pool — the response returns immediately and the UI
+// watches per-asset installStatus.
+const BulkAgentInstallSchema = z.object({
+  ids:               z.array(z.string()).min(1).max(200),
+  sshCredentialId:   z.string().uuid().optional(),
+  winrmCredentialId: z.string().uuid().optional(),
+  arch:              z.enum(["amd64", "arm64"]).default("amd64"),
+}).refine((b) => b.sshCredentialId || b.winrmCredentialId, {
+  message: "Provide at least one credential (SSH and/or WinRM)",
+});
+router.post("/bulk-agent-install", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const input = BulkAgentInstallSchema.parse(req.body);
+    const actor = requestActor(req) || "unknown";
+    const { bulkInstallAgents } = await import("../../services/agentInstallService.js");
+    const result = await bulkInstallAgents({
+      assetIds:          input.ids,
+      sshCredentialId:   input.sshCredentialId ?? null,
+      winrmCredentialId: input.winrmCredentialId ?? null,
+      arch:              input.arch,
+      actor,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
 });
 
 // ─── Polaris Agent — operator-facing routes ──────────────────────────────────

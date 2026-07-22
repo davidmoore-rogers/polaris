@@ -833,8 +833,10 @@ function pickClassStreamsBlock(
     return streams && typeof streams === "object" ? streams : undefined;
   }
   if (integrationType === "vcenter") {
+    // vCenter VMs are typed "server" (the virtual_machine built-in was
+    // retired 2026-07); the class block kept its vmMonitor name.
     let block: Record<string, unknown> | undefined;
-    if (assetType === "virtual_machine")   block = cfg.vmMonitor   as Record<string, unknown> | undefined;
+    if (assetType === "server")            block = cfg.vmMonitor   as Record<string, unknown> | undefined;
     else if (assetType === "hypervisor")   block = cfg.hostMonitor as Record<string, unknown> | undefined;
     if (!block) return undefined;
     const streams = block.streams as Record<string, unknown> | undefined;
