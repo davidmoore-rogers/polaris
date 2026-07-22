@@ -4394,3 +4394,27 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .sev-select.sev-warning,       .sev-select option.sev-warning       { color: var(--color-warning); }
 .sev-select.sev-serious,       .sev-select option.sev-serious       { color: #ff8a00; }
 .sev-select.sev-critical,      .sev-select option.sev-critical      { color: var(--color-danger); }
+
+/* Condition-builder value combobox: focus/click opens the existing-values
+   list for the row's field; typing filters (contains). Replaces <datalist>,
+   which most browsers won't open on click. */
+.aw-combo { position: relative; flex: 1; display: flex; }
+.aw-combo > input { width: 100%; }
+.aw-suggest {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  max-height: 190px;
+  overflow-y: auto;
+  z-index: 1300; /* above the modal (1000/1075) */
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+  display: none;
+}
+.aw-suggest.open { display: block; }
+.aw-suggest-item { padding: 5px 9px; font-size: 0.82rem; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aw-suggest-item:hover, .aw-suggest-item.active { background: var(--color-bg-secondary); }
+.aw-suggest-empty { padding: 5px 9px; font-size: 0.78rem; color: var(--color-text-tertiary); }

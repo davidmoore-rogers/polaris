@@ -99,4 +99,32 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelectorAll("#aw-cond-root .scg-group").length).toBe(2);
     expect(toastErrors).toEqual([]);
   });
+
+  it("value combobox opens existing values on click and filters as you type", async () => {
+    const row = doc.querySelector("#aw-cond-root .scr-row")!;
+    const fieldSel = row.querySelector(".scr-field") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    const win = g.window as InstanceType<typeof Window>;
+    // Switch the row's field to Model, then click into the value input.
+    fieldSel.value = "model";
+    fieldSel.dispatchEvent(new win.Event("change", { bubbles: true }));
+    const input = row.querySelector(".scr-value") as unknown as { value: string; click: () => void; dispatchEvent: (e: unknown) => void };
+    input.click();
+    let items = row.querySelectorAll(".aw-suggest.open .aw-suggest-item");
+    expect(items.length).toBe(1); // the stubbed inventory has one model
+    expect(items[0]!.textContent).toBe("FGT-60F");
+    // Typing filters — a non-matching query shows the empty hint instead.
+    input.value = "zzz";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    expect(row.querySelectorAll(".aw-suggest.open .aw-suggest-item").length).toBe(0);
+    expect(row.querySelector(".aw-suggest.open .aw-suggest-empty")).toBeTruthy();
+    // A matching query brings the value back; clicking it fills the input.
+    input.value = "fgt";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    items = row.querySelectorAll(".aw-suggest.open .aw-suggest-item");
+    expect(items.length).toBe(1);
+    items[0]!.dispatchEvent(new win.MouseEvent("mousedown", { bubbles: true }));
+    expect(input.value).toBe("FGT-60F");
+    expect(row.querySelector(".aw-suggest.open")).toBeFalsy(); // closed after pick
+    expect(toastErrors).toEqual([]);
+  });
 });

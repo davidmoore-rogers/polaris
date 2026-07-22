@@ -332,27 +332,19 @@ async function openAutomationWizard(existing) {
       return '<option value="' + o + '"' + (o === sel ? " selected" : "") + '>' + escapeHtml((scMeta.groupOpLabels || {})[o] || o) + '</option>';
     }).join("");
   }
-  function scDatalistId(field) { return "aw-dl-" + field; }
-  function scDatalists() {
-    return (scMeta.fields || []).map(function (fm) {
-      var opts = scValueOptions(fm.field);
-      if (!opts.length) return "";
-      return '<datalist id="' + scDatalistId(fm.field) + '">' + opts.map(function (o) {
-        return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label !== o.value ? o.label : "") + '</option>';
-      }).join("") + '</datalist>';
-    }).join("");
-  }
   function scRuleRowHtml(rule) {
     rule = rule || { field: "assetType", operator: null, value: "" };
     var fm = scFieldMeta(rule.field);
     var fieldOpts = (scMeta.fields || []).map(function (f) {
       return '<option value="' + f.field + '"' + (f.field === fm.field ? " selected" : "") + '>' + escapeHtml(f.label) + '</option>';
     }).join("");
-    var hasOptions = scValueOptions(fm.field).length > 0;
     return '<div class="scr-row" style="display:flex;gap:6px;align-items:center;margin:4px 0">' +
       '<select class="scr-field" style="width:31%">' + fieldOpts + '</select>' +
       '<select class="scr-op" style="width:26%">' + scOpOptions(fm.field, rule.operator || (fm.ops && fm.ops[0])) + '</select>' +
-      '<input type="text" class="scr-value" style="flex:1"' + (hasOptions ? ' list="' + scDatalistId(fm.field) + '"' : "") + ' value="' + escapeHtml(rule.value || "") + '" placeholder="value">' +
+      '<span class="aw-combo">' +
+        '<input type="text" class="scr-value" autocomplete="off" value="' + escapeHtml(rule.value || "") + '" placeholder="value">' +
+        '<div class="aw-suggest"></div>' +
+      '</span>' +
       '<button type="button" class="btn btn-sm btn-danger scr-remove" title="Remove condition">&times;</button>' +
     '</div>';
   }
@@ -401,7 +393,6 @@ async function openAutomationWizard(existing) {
     return '<h3 style="margin:0 0 0.25rem">Which devices?</h3>' +
       '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 0.75rem">Build the filter from conditions and nested groups — with <strong>no conditions, every asset matches</strong>. Polaris-host and audit-event triggers aren’t tied to assets and ignore this filter.</p>' +
       '<div id="aw-cond-root">' + scGroupHtml(root, 0) + '</div>' +
-      scDatalists() +
       '<div id="aw-scope-preview" style="margin-top:0.75rem"></div>';
   }
   function wireStep2() {
@@ -410,22 +401,23 @@ async function openAutomationWizard(existing) {
       var t = e.target;
       if (!t || !t.classList) return;
       if (t.classList.contains("scr-field")) {
-        // Field changed: swap the operator list + value suggestions/placeholder.
+        // Field changed: swap the operator list; the value combobox reads the
+        // row's field at open time, so it just needs a reset.
         var row = t.closest(".scr-row");
-        var field = t.value;
-        row.querySelector(".scr-op").innerHTML = scOpOptions(field, null);
+        row.querySelector(".scr-op").innerHTML = scOpOptions(t.value, null);
         var input = row.querySelector(".scr-value");
-        var hasOptions = scValueOptions(field).length > 0;
-        if (hasOptions) input.setAttribute("list", scDatalistId(field));
-        else input.removeAttribute("list");
         input.value = "";
+        scCloseSuggest(row.querySelector(".aw-suggest"));
       }
       if (t.classList.contains("scr-field") || t.classList.contains("scr-op") || t.classList.contains("scg-op") || t.classList.contains("scr-value")) {
         scheduleScopePreview();
       }
     });
     panel.addEventListener("input", function (e) {
-      if (e.target && e.target.classList && e.target.classList.contains("scr-value")) scheduleScopePreview();
+      if (e.target && e.target.classList && e.target.classList.contains("scr-value")) {
+        scOpenSuggest(e.target); // refilter the suggestions as they type
+        scheduleScopePreview();
+      }
     });
     panel.addEventListener("click", function (e) {
       var btn = e.target.closest && e.target.closest("button");
@@ -450,6 +442,82 @@ async function openAutomationWizard(existing) {
         scheduleScopePreview();
       }
     });
+
+    // Value combobox: focus/click opens existing values for the row's field;
+    // typing filters (contains); ArrowUp/Down + Enter select; Esc closes.
+    panel.addEventListener("focusin", function (e) {
+      if (e.target && e.target.classList && e.target.classList.contains("scr-value")) scOpenSuggest(e.target);
+    });
+    panel.addEventListener("click", function (e) {
+      if (e.target && e.target.classList && e.target.classList.contains("scr-value")) scOpenSuggest(e.target);
+    });
+    panel.addEventListener("focusout", function (e) {
+      var input = e.target;
+      if (!input || !input.classList || !input.classList.contains("scr-value")) return;
+      // Delay so a mousedown on a suggestion (which fires before blur
+      // completes) still lands.
+      setTimeout(function () {
+        var suggest = input.parentElement && input.parentElement.querySelector(".aw-suggest");
+        if (suggest && !suggest.contains(document.activeElement)) scCloseSuggest(suggest);
+      }, 150);
+    });
+    panel.addEventListener("mousedown", function (e) {
+      var item = e.target.closest && e.target.closest(".aw-suggest-item");
+      if (!item) return;
+      e.preventDefault(); // keep focus on the input
+      var combo = item.closest(".aw-combo");
+      var input = combo.querySelector(".scr-value");
+      input.value = item.getAttribute("data-val");
+      scCloseSuggest(combo.querySelector(".aw-suggest"));
+      scheduleScopePreview();
+    });
+    panel.addEventListener("keydown", function (e) {
+      var input = e.target;
+      if (!input || !input.classList || !input.classList.contains("scr-value")) return;
+      var suggest = input.parentElement.querySelector(".aw-suggest");
+      var open = suggest && suggest.classList.contains("open");
+      if (e.key === "Escape") {
+        if (open) { scCloseSuggest(suggest); e.stopPropagation(); } // keep the modal open
+        return;
+      }
+      if (!open) return;
+      var items = Array.from(suggest.querySelectorAll(".aw-suggest-item"));
+      if (!items.length) return;
+      var idx = items.findIndex(function (i) { return i.classList.contains("active"); });
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        var next = e.key === "ArrowDown" ? Math.min(idx + 1, items.length - 1) : Math.max(idx - 1, 0);
+        items.forEach(function (i) { i.classList.remove("active"); });
+        items[next].classList.add("active");
+        if (items[next].scrollIntoView) items[next].scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter" && idx >= 0) {
+        e.preventDefault();
+        input.value = items[idx].getAttribute("data-val");
+        scCloseSuggest(suggest);
+        scheduleScopePreview();
+      }
+    });
+  }
+  function scCloseSuggest(suggest) {
+    if (suggest) { suggest.classList.remove("open"); suggest.innerHTML = ""; }
+  }
+  function scOpenSuggest(input) {
+    var row = input.closest(".scr-row");
+    var suggest = input.parentElement.querySelector(".aw-suggest");
+    if (!row || !suggest) return;
+    var field = row.querySelector(".scr-field").value;
+    var opts = scValueOptions(field);
+    if (!opts.length) { scCloseSuggest(suggest); return; }
+    var q = input.value.trim().toLowerCase();
+    var filtered = opts.filter(function (o) {
+      return !q || o.value.toLowerCase().indexOf(q) !== -1 || o.label.toLowerCase().indexOf(q) !== -1;
+    }).slice(0, 50);
+    suggest.innerHTML = filtered.length
+      ? filtered.map(function (o) {
+          return '<div class="aw-suggest-item" data-val="' + escapeHtml(o.value) + '" title="' + escapeHtml(o.label) + '">' + escapeHtml(o.label) + '</div>';
+        }).join("")
+      : '<div class="aw-suggest-empty">No matching values (free text is fine).</div>';
+    suggest.classList.add("open");
   }
   function scCollectGroup(groupEl) {
     var op = groupEl.querySelector(":scope > div > .scg-op").value;
