@@ -32,6 +32,7 @@
 
 import { prisma } from "../db.js";
 import { resolveMonitorSettings } from "./monitoringService.js";
+import { computeStorageForecast } from "./storageForecastService.js";
 import { createTtlCache } from "../utils/ttlCache.js";
 
 // Asset types treated as "infrastructure" for the uptime % gauge — mirrors the
@@ -451,7 +452,7 @@ export async function getDownIpsecTunnels(limit: number | null = 100, sinceMinut
   return severityFirst(await attachAlertSeverity(out, (r) => r.assetId));
 }
 
-export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string; site?: string; alertSeverity?: string; alertRank?: number }
+export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string; site?: string; usedPct?: number; alertSeverity?: string; alertRank?: number }
 
 // Hydrate a list of assetIds (preserving the incoming order) with display
 // names in ONE findMany — never a per-row lookup. `site` uses the same
@@ -702,6 +703,38 @@ export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 1
   return topNWithSeverity(await hydrateNames(ordered));
 }
 
+/**
+ * Feed 4d — storage forecast: days until each growing filesystem fills, from
+ * the shared 30-day trend (storageForecastService — regr_slope over detail +
+ * daily-rollup day buckets; growing mounts with ≥7 points only). Row value =
+ * projected days (LOWER is worse — the widget inverts its thresholds), detail
+ * = mount path, usedPct = latest fill level. Severity-first like every feed;
+ * within a severity band soonest-full leads.
+ */
+export async function getStorageForecast(limit: number | null = 100, assetIds: string[] | null = null): Promise<TopNRow[]> {
+  const fc = await computeStorageForecast(assetIds);
+  const capped = limit != null ? fc.slice(0, limit) : fc;
+  if (capped.length === 0) return [];
+  const ids = Array.from(new Set(capped.map((r) => r.assetId)));
+  const assets = await prisma.asset.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, hostname: true, ipAddress: true, location: true, learnedLocation: true, snmpLocation: true },
+  });
+  const byId = new Map(assets.map((a) => [a.id, a]));
+  const out = capped
+    .map((r): TopNRow | null => {
+      const a = byId.get(r.assetId);
+      if (!a) return null;
+      return {
+        id: a.id, hostname: a.hostname, ipAddress: a.ipAddress,
+        value: r.daysUntilFull, detail: r.mountPath, site: siteOf(a),
+        usedPct: r.usedPct ?? undefined,
+      };
+    })
+    .filter((r): r is TopNRow => r !== null);
+  return topNWithSeverity(out);
+}
+
 export interface StalePoll { id: string; hostname: string | null; ipAddress: string | null; lastPolledAt: Date | null; expectedIntervalSec: number; alertSeverity?: string; alertRank?: number }
 
 /**
@@ -949,7 +982,7 @@ export async function getFilterOptions(): Promise<FilterOptions> {
 export const NOC_FEED_NAMES = [
   "status", "downNodes", "downInterfaces", "downIpsecTunnels",
   "topCpu", "topMemory", "slowestResponse", "packetLoss", "diskUsage", "temperature",
-  "stalePolls", "sitesWithIssues", "recentReboots", "activeAlerts",
+  "storageForecast", "stalePolls", "sitesWithIssues", "recentReboots", "activeAlerts",
 ] as const;
 export type NocFeedName = (typeof NOC_FEED_NAMES)[number];
 
@@ -1008,6 +1041,7 @@ const NOC_FEEDS: Record<NocFeedName, {
   packetLoss:       { gate: "assets", empty: [], run: (L, ids) => getPacketLoss(L(100), 15, ids) },
   diskUsage:        { gate: "assets", empty: [], run: (L, ids) => getHighestDiskUsage(L(100), ids) },
   temperature:      { gate: "assets", empty: [], run: (L, ids) => getHighestTemperature(L(100), ids) },
+  storageForecast:  { gate: "assets", empty: [], run: (L, ids) => getStorageForecast(L(100), ids) },
   stalePolls:       { gate: "assets", empty: [], run: (L, ids) => getStalePolls(3, L(50), ids) },
   sitesWithIssues:  { gate: "assets", empty: [], run: (L, ids) => getSitesWithIssues(L(25), ids) },
   recentReboots:    { gate: "events", empty: [], run: (L, ids) => getRecentReboots(72, L(20), ids) },

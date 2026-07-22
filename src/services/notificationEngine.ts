@@ -48,6 +48,7 @@ import {
   evaluateScopeCondition,
 } from "./notificationTypes.js";
 import { ipInCidr } from "../utils/cidr.js";
+import { computeStorageForecast } from "./storageForecastService.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
 import { executeActions, type ActionExecContext } from "./automationActionService.js";
 import {
@@ -306,6 +307,19 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
         return used !== null && total ? (used / total) * 100 : null;
       };
       return reduceReadings(filtered, index, (r) => r.mountPath, (r) => r.mountPath, valueFn, agg);
+    }
+    case "storageDaysUntilFull": {
+      // Forecast metric: the shared 30-day trend (storageForecastService).
+      // aggregation/windowSec don't apply — the trend already smooths; a mount
+      // that isn't growing (or has <7 daily points) produces NO reading, so
+      // "days <= N" rules stay silent for healthy filesystems.
+      const fc = await computeStorageForecast(ids);
+      return fc
+        .filter((r) => index.has(r.assetId) && substringMatch(r.mountPath, df.mountPathPattern))
+        .map((r) => {
+          const a = index.get(r.assetId)!;
+          return { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: r.mountPath, dimLabel: r.mountPath, value: r.daysUntilFull };
+        });
     }
     case "sdwanLatencyMs": case "sdwanJitterMs": case "sdwanPacketLoss": {
       const col = trigger.metric === "sdwanLatencyMs" ? "latencyMs" : trigger.metric === "sdwanJitterMs" ? "jitterMs" : "packetLoss";

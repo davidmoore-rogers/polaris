@@ -472,8 +472,8 @@ describe("getNocSummaryPayload", () => {
     expect(Object.keys(r).sort()).toEqual([
       "activeAlertCount", "activeAlerts", "diskUsage", "downInterfaces", "downIpsecTunnels",
       "downNodes", "downNodesTotal", "packetLoss", "recentReboots", "sitesWithIssues",
-      "slowestResponse", "stalePolls", "statusCounts", "temperature", "topCpu", "topMemory",
-      "uptimePercent",
+      "slowestResponse", "stalePolls", "statusCounts", "storageForecast", "temperature",
+      "topCpu", "topMemory", "uptimePercent",
     ]);
   });
 
@@ -620,5 +620,25 @@ describe("alert-severity-aware ordering", () => {
     expect(eventFindMany).toHaveBeenCalledWith(expect.objectContaining({
       orderBy: [{ levelRank: "desc" }, { timestamp: "desc" }],
     }));
+  });
+});
+
+describe("getStorageForecast", () => {
+  it("hydrates forecast rows and sorts severity-first, then soonest-full", async () => {
+    rawUnsafe.mockResolvedValueOnce([
+      { assetId: "soon", mountPath: "/var", slope_per_day: 10e9, points: 12, last_used: 90e9, total_bytes: 100e9 },  // 1 day
+      { assetId: "later", mountPath: "C:", slope_per_day: 1e9, points: 30, last_used: 50e9, total_bytes: 100e9 },    // 50 days
+    ]);
+    findMany.mockResolvedValueOnce([
+      { id: "soon", hostname: "soon", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+      { id: "later", hostname: "later", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+    ]);
+    // The later-full asset carries an active critical alert — it still leads.
+    notifFindMany.mockResolvedValueOnce([{ assetId: "later", severity: "critical" }]);
+    const r = await noc.getStorageForecast();
+    expect(r.map((x) => [x.id, x.value])).toEqual([["later", 50], ["soon", 1]]);
+    expect(r[0].alertSeverity).toBe("critical");
+    expect(r[0].detail).toBe("C:");
+    expect(r[1].usedPct).toBe(90);
   });
 });

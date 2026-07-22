@@ -28,7 +28,7 @@ export const AGGREGATIONS = ["latest", "avg", "min", "max"] as const;
 // narrows multi-row streams (interfaces, sensors, mounts, SD-WAN members).
 export const ASSET_METRICS = [
   "cpuPct", "memPct", "memUsedBytes", "sessionCount", "responseTimeMs", "uptimeSec",
-  "hwSensorValue", "storageUsedPct", "storageUsedBytes",
+  "hwSensorValue", "storageUsedPct", "storageUsedBytes", "storageDaysUntilFull",
   "ifInErrorRate", "ifOutErrorRate", "ifInBps", "ifOutBps",
   "sdwanLatencyMs", "sdwanJitterMs", "sdwanPacketLoss", "ipsecThroughputBps",
   "customWidgetValue",
@@ -1107,6 +1107,10 @@ export const METRIC_META: Record<string, { label: string; unit: string }> = {
   hwSensorValue: { label: "Hardware sensor value", unit: "(sensor unit)" },
   storageUsedPct: { label: "Storage used", unit: "%" },
   storageUsedBytes: { label: "Storage used", unit: "bytes" },
+  // Forecast metric: projected days until each growing filesystem fills
+  // (30-day trend, ≥7 daily points; non-growing mounts produce no reading —
+  // see storageForecastService). Alert with "<=", e.g. ≤ 14 days.
+  storageDaysUntilFull: { label: "Days until storage full", unit: "days" },
   ifInErrorRate: { label: "Interface in-error rate", unit: "errors/s" },
   ifOutErrorRate: { label: "Interface out-error rate", unit: "errors/s" },
   ifInBps: { label: "Interface inbound", unit: "bps" },
@@ -1154,6 +1158,7 @@ export const METRIC_DIMENSIONS: Record<string, string[]> = {
   hwSensorValue: ["sensorClass"],
   storageUsedPct: ["mountPathPattern"],
   storageUsedBytes: ["mountPathPattern"],
+  storageDaysUntilFull: ["mountPathPattern"],
   ifInErrorRate: ["ifNamePattern"],
   ifOutErrorRate: ["ifNamePattern"],
   ifInBps: ["ifNamePattern"],
