@@ -200,6 +200,11 @@ function _looksLikeDeviceId(tag) {
   function scopeSummary(scope) {
     if (!scope || typeof scope !== "object") return "-";
     if (scope.allAssets) return "All assets";
+    if (scope.condition) {
+      var n = 0;
+      (function walk(g) { (g.children || []).forEach(function (c) { if (c.op !== undefined) walk(c); else n++; }); })(scope.condition);
+      return "custom filter (" + n + " condition" + (n === 1 ? "" : "s") + ")";
+    }
     var parts = [];
     if (scope.assetTypes && scope.assetTypes.length) parts.push("types: " + scope.assetTypes.join("/"));
     if (scope.tags && scope.tags.length) parts.push("tags: " + scope.tags.join("/"));

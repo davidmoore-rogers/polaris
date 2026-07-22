@@ -39,6 +39,7 @@ import {
   normalizeRuleToV2,
   normalizeEscalationToV2,
   scopeCidrOf,
+  evaluateScopeCondition,
 } from "./notificationTypes.js";
 import { ipInCidr } from "../utils/cidr.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
@@ -152,6 +153,9 @@ const SCOPE_SELECT = {
   id: true, hostname: true, assetType: true, tags: true, discoveredByIntegrationId: true,
   monitorStatus: true, status: true, consecutiveFailures: true, dependencySuppressed: true,
   quarantinedAt: true, ipAddress: true,
+  // condition-tree evaluation reads these (manufacturer/model/os); small
+  // string columns, still a tight select at 2000 assets.
+  manufacturer: true, model: true, os: true,
 } as const;
 
 /** Build a Prisma where from a scope, or null if the scope matches nothing.
@@ -172,6 +176,9 @@ function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
     and.push({ OR: scope.models.map((m) => ({ model: { contains: m, mode: "insensitive" as const } })) });
   }
   if (scope.subnetCidrs?.length) and.push({ ipAddress: { not: null } });
+  // A condition tree can't be expressed in SQL — it counts as a dimension
+  // (so a condition-only scope loads all assets) and filters in memory below.
+  if (scope.condition) and.push({});
   if (and.length === 0) return null; // no dimensions + not allAssets ⇒ nothing
   return { AND: and };
 }
@@ -179,12 +186,17 @@ function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
 async function loadScopeAssets(scope: RuleScope): Promise<ScopeAssetRow[]> {
   const where = scopeWhere(scope);
   if (!where) return [];
-  const rows = await prisma.asset.findMany({ where, select: SCOPE_SELECT });
-  if (!scope.subnetCidrs?.length) return rows;
-  const cidrs = scope.subnetCidrs.map(scopeCidrOf);
-  return rows.filter((a) => a.ipAddress && cidrs.some((c) => {
-    try { return ipInCidr(a.ipAddress!, c); } catch { return false; }
-  }));
+  let rows = await prisma.asset.findMany({ where, select: SCOPE_SELECT });
+  if (scope.subnetCidrs?.length) {
+    const cidrs = scope.subnetCidrs.map(scopeCidrOf);
+    rows = rows.filter((a) => a.ipAddress && cidrs.some((c) => {
+      try { return ipInCidr(a.ipAddress!, c); } catch { return false; }
+    }));
+  }
+  if (scope.condition) {
+    rows = rows.filter((a) => evaluateScopeCondition(scope.condition!, a));
+  }
+  return rows;
 }
 
 /**

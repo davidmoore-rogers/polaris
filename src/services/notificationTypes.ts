@@ -10,7 +10,7 @@
  */
 
 import { z } from "zod";
-import { isValidCidr, isValidIpAddress } from "../utils/cidr.js";
+import { isValidCidr, isValidIpAddress, ipInCidr } from "../utils/cidr.js";
 import { TEMPLATE_VARIABLES } from "../utils/notificationTemplate.js";
 
 // Notification severity (rule.severity → notification.severity). Ordered
@@ -134,6 +134,163 @@ export const triggerSchema = z.discriminatedUnion("type", [
   changeTrigger,
 ]);
 
+// ─── Scope condition tree (nested AND/OR device filtering) ──────────────────
+// `scope.condition` is a nested group of per-field rules — the wizard's
+// SolarWinds-style builder. Group combinators:
+//   and    = all children must be satisfied
+//   or     = at least one child must be satisfied
+//   none   = all children must NOT be satisfied      (¬or)
+//   notAll = at least one child must NOT be satisfied (¬and)
+// Rules are (field, operator, value) over asset identity columns; evaluation
+// is the pure `evaluateScopeCondition` below — used by the in-memory matcher
+// AND the engine's post-SQL filter, so the semantics can't drift.
+
+export const SCOPE_GROUP_OPS = ["and", "or", "none", "notAll"] as const;
+export type ScopeGroupOp = (typeof SCOPE_GROUP_OPS)[number];
+
+const STRING_OPS = ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"] as const;
+export const SCOPE_FIELD_OPS: Record<string, readonly string[]> = {
+  assetType: ["equals", "notEquals"],
+  manufacturer: STRING_OPS,
+  model: STRING_OPS,
+  hostname: STRING_OPS,
+  os: STRING_OPS,
+  tag: ["has", "notHas"],
+  subnet: ["inCidr", "notInCidr"],
+  status: ["equals", "notEquals"],
+  assetId: ["equals", "notEquals"],
+};
+export const SCOPE_FIELDS = Object.keys(SCOPE_FIELD_OPS);
+
+export interface ScopeConditionRule {
+  field: string;
+  operator: string;
+  value: string;
+}
+export interface ScopeConditionGroup {
+  op: ScopeGroupOp;
+  children: (ScopeConditionGroup | ScopeConditionRule)[];
+}
+
+const scopeConditionRuleSchema = z
+  .object({
+    field: z.enum(SCOPE_FIELDS as [string, ...string[]]),
+    operator: z.string().min(1).max(30),
+    value: z.string().min(1).max(200),
+  })
+  .strict()
+  .superRefine((r, ctx) => {
+    const ops = SCOPE_FIELD_OPS[r.field] ?? [];
+    if (!ops.includes(r.operator)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `operator "${r.operator}" is not valid for field "${r.field}"` });
+    }
+    if (r.field === "subnet" && !isValidCidr(r.value) && !isValidIpAddress(r.value)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `"${r.value}" must be a CIDR (e.g. 10.20.0.0/16) or an IP address` });
+    }
+  });
+
+export const scopeConditionSchema: z.ZodType<ScopeConditionGroup> = z.lazy(() =>
+  z
+    .object({
+      op: z.enum(SCOPE_GROUP_OPS),
+      children: z.array(z.union([scopeConditionRuleSchema, scopeConditionSchema])).max(50),
+    })
+    .strict(),
+) as z.ZodType<ScopeConditionGroup>;
+
+/** Depth/size guard for a condition tree (defense against pathological input). */
+export function scopeConditionStats(cond: ScopeConditionGroup): { depth: number; rules: number } {
+  let rules = 0;
+  const depthOf = (g: ScopeConditionGroup): number =>
+    1 + Math.max(0, ...g.children.map((c) => {
+      if ("op" in c) return depthOf(c as ScopeConditionGroup);
+      rules++;
+      return 0;
+    }));
+  const depth = depthOf(cond);
+  return { depth, rules };
+}
+
+/** The asset fields the condition evaluator reads (matcher + engine select). */
+export interface ScopeConditionAsset {
+  id: string;
+  assetType?: string | null;
+  manufacturer?: string | null;
+  model?: string | null;
+  hostname?: string | null;
+  os?: string | null;
+  tags?: string[];
+  ipAddress?: string | null;
+  status?: string | null;
+}
+
+function matchScopeRule(rule: ScopeConditionRule, asset: ScopeConditionAsset): boolean {
+  const v = rule.value.toLowerCase();
+  const str = (raw: string | null | undefined): string => (raw ?? "").toLowerCase();
+  switch (rule.field) {
+    case "assetType": {
+      const eq = str(asset.assetType) === v;
+      return rule.operator === "notEquals" ? !eq : eq;
+    }
+    case "status": {
+      const eq = str(asset.status) === v;
+      return rule.operator === "notEquals" ? !eq : eq;
+    }
+    case "assetId": {
+      const eq = (asset.id ?? "") === rule.value;
+      return rule.operator === "notEquals" ? !eq : eq;
+    }
+    case "tag": {
+      const has = (asset.tags ?? []).some((t) => t.toLowerCase() === v);
+      return rule.operator === "notHas" ? !has : has;
+    }
+    case "subnet": {
+      const ip = asset.ipAddress ?? "";
+      let inside = false;
+      if (ip) {
+        try { inside = ipInCidr(ip, scopeCidrOf(rule.value)); } catch { inside = false; }
+      }
+      return rule.operator === "notInCidr" ? !inside : inside;
+    }
+    default: { // manufacturer / model / hostname / os — string ops
+      const raw = str(
+        rule.field === "manufacturer" ? asset.manufacturer
+          : rule.field === "model" ? asset.model
+            : rule.field === "hostname" ? asset.hostname
+              : asset.os,
+      );
+      switch (rule.operator) {
+        case "equals": return raw === v;
+        case "notEquals": return raw !== v;
+        case "contains": return raw.includes(v);
+        case "notContains": return !raw.includes(v);
+        case "startsWith": return raw.startsWith(v);
+        case "endsWith": return raw.endsWith(v);
+        default: return false;
+      }
+    }
+  }
+}
+
+/**
+ * Evaluate a condition tree against an asset. Empty-group semantics follow
+ * boolean identities (and([])=true, or([])=false, none=¬or, notAll=¬and) —
+ * the wizard converts an empty ROOT group to allAssets, so stored trees
+ * always carry at least one rule.
+ */
+export function evaluateScopeCondition(cond: ScopeConditionGroup, asset: ScopeConditionAsset): boolean {
+  const results = cond.children.map((c) =>
+    "op" in c ? evaluateScopeCondition(c as ScopeConditionGroup, asset) : matchScopeRule(c as ScopeConditionRule, asset),
+  );
+  switch (cond.op) {
+    case "and": return results.every(Boolean);
+    case "or": return results.some(Boolean);
+    case "none": return !results.some(Boolean);
+    case "notAll": return !results.every(Boolean);
+    default: return false;
+  }
+}
+
 export const scopeSchema = z
   .object({
     allAssets: z.boolean().optional(),
@@ -156,13 +313,25 @@ export const scopeSchema = z
       )
       .max(100)
       .optional(),
+    // Nested AND/OR condition tree (the wizard's device-filter builder).
+    // Authoritative when present; the flat dimensions above remain for
+    // API-written and pre-builder rules (both AND together if combined).
+    condition: scopeConditionSchema.optional().nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((sc, ctx) => {
+    if (sc.condition) {
+      const { depth, rules } = scopeConditionStats(sc.condition);
+      if (depth > 5) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["condition"], message: "condition groups nest at most 5 deep" });
+      if (rules > 100) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["condition"], message: "at most 100 rules per condition tree" });
+    }
+  });
 
 /** Bare IP → host CIDR so scope subnet entries accept either form. */
 export function scopeCidrOf(entry: string): string {
   return isValidIpAddress(entry) ? entry + (entry.includes(":") ? "/128" : "/32") : entry;
 }
+
 
 // ─── Delivery channels + targets ─────────────────────────────────────────────
 // Channels are operator-configured delivery integrations (NotificationChannel
@@ -889,6 +1058,44 @@ export function buildSchemaCatalog() {
       tunnelName: "on tunnel {value}",
       widgetId: "for widget {value}",
       processNamePattern: "for processes matching {value}",
+    },
+    // ── Scope condition-tree vocabulary (the device-filter builder) ────────
+    scopeCondition: {
+      groupOps: SCOPE_GROUP_OPS,
+      groupOpLabels: {
+        and: "All child conditions must be satisfied (AND)",
+        or: "At least one child condition must be satisfied (OR)",
+        none: "All child conditions must NOT be satisfied",
+        notAll: "At least one child condition must NOT be satisfied",
+      },
+      operatorLabels: {
+        equals: "is equal to",
+        notEquals: "is not equal to",
+        contains: "contains",
+        notContains: "does not contain",
+        startsWith: "starts with",
+        endsWith: "ends with",
+        has: "is applied",
+        notHas: "is not applied",
+        inCidr: "is in subnet",
+        notInCidr: "is not in subnet",
+      },
+      // Per-field: label, valid operators, and which option list feeds the
+      // value suggestions ("assetTypes" | "manufacturers" | "models" | "tags"
+      // | "subnets" from /scope-options + the registry; null = free text).
+      fields: [
+        { field: "assetType", label: "Device type", ops: SCOPE_FIELD_OPS.assetType, optionsFrom: "assetTypes" },
+        { field: "manufacturer", label: "Manufacturer", ops: SCOPE_FIELD_OPS.manufacturer, optionsFrom: "manufacturers" },
+        { field: "model", label: "Model", ops: SCOPE_FIELD_OPS.model, optionsFrom: "models" },
+        { field: "hostname", label: "Hostname", ops: SCOPE_FIELD_OPS.hostname, optionsFrom: null },
+        { field: "os", label: "Operating system", ops: SCOPE_FIELD_OPS.os, optionsFrom: null },
+        { field: "tag", label: "Tag", ops: SCOPE_FIELD_OPS.tag, optionsFrom: "tags" },
+        { field: "subnet", label: "Subnet / IP", ops: SCOPE_FIELD_OPS.subnet, optionsFrom: "subnets" },
+        { field: "status", label: "Lifecycle status", ops: SCOPE_FIELD_OPS.status, optionsFrom: null, values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
+        { field: "assetId", label: "Asset ID", ops: SCOPE_FIELD_OPS.assetId, optionsFrom: null },
+      ],
+      maxDepth: 5,
+      maxRules: 100,
     },
   };
 }

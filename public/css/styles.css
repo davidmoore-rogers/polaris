@@ -4384,3 +4384,13 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .review-grid dt { color: var(--color-text-tertiary); font-weight: 500; }
 .review-grid dd { margin: 0; color: var(--color-text-primary); overflow-wrap: anywhere; }
+
+/* Severity-tinted <select> for the wizard (option colors match the
+   badge-level-* palette so severity reads identically everywhere).
+   Option styling works in desktop Chrome/Firefox; browsers that ignore it
+   still get the tinted select text via the sev-* class on the element. */
+.sev-select.sev-notice,        .sev-select option.sev-notice        { color: #94a3b8; }
+.sev-select.sev-informational, .sev-select option.sev-informational { color: var(--color-accent); }
+.sev-select.sev-warning,       .sev-select option.sev-warning       { color: var(--color-warning); }
+.sev-select.sev-serious,       .sev-select option.sev-serious       { color: #ff8a00; }
+.sev-select.sev-critical,      .sev-select option.sev-critical      { color: var(--color-danger); }

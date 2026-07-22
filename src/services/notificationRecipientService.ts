@@ -296,10 +296,27 @@ export async function expandDeliveries(
   return rows.length;
 }
 
-/** Extract the `region:`-prefixed tags from a rule's scope (for recipientScopeRegion). */
-export function scopeRegionTagsOf(scope: { tags?: string[] } | null | undefined): string[] {
+/** Extract the `region:`-prefixed tags from a rule's scope (for
+ *  recipientScopeRegion) — from the flat `tags` dimension AND from positive
+ *  tag rules inside a condition tree (field "tag", operator "has"). */
+export function scopeRegionTagsOf(
+  scope: { tags?: string[]; condition?: { op: string; children: unknown[] } | null } | null | undefined,
+): string[] {
+  const out = new Set<string>();
   const tags = scope && Array.isArray(scope.tags) ? scope.tags : [];
-  return tags.filter((t) => typeof t === "string" && t.toLowerCase().startsWith("region:"));
+  for (const t of tags) {
+    if (typeof t === "string" && t.toLowerCase().startsWith("region:")) out.add(t);
+  }
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    const g = node as { op?: string; children?: unknown[]; field?: string; operator?: string; value?: string };
+    if (Array.isArray(g.children)) { g.children.forEach(walk); return; }
+    if (g.field === "tag" && g.operator === "has" && typeof g.value === "string" && g.value.toLowerCase().startsWith("region:")) {
+      out.add(g.value);
+    }
+  };
+  if (scope?.condition) walk(scope.condition);
+  return Array.from(out);
 }
 
 function isChannelType(t: string): t is ChannelType {

@@ -12,6 +12,7 @@ vi.mock("../../src/db.js", () => ({ prisma: {} }));
 
 import {
   ruleInputSchema,
+  evaluateScopeCondition,
   previewInputSchema,
   normalizeRuleToV2,
   normalizeReset,
@@ -23,6 +24,7 @@ import {
   type DeliveryTarget,
   type EmailComposition,
 } from "../../src/services/notificationTypes.js";
+import { scopeMatchesAsset } from "../../src/services/notificationRuleService.js";
 
 const metricTrigger = { type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 90 };
 
@@ -295,6 +297,85 @@ describe("scopeSchema — manufacturer / model / subnet dimensions", () => {
     expect(() =>
       ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { subnetCidrs: ["not-a-cidr"] } }),
     ).toThrow(/CIDR/);
+  });
+});
+
+describe("scope condition tree", () => {
+  const asset = {
+    id: "a1", assetType: "switch", manufacturer: "Fortinet Inc.", model: "FortiSwitch 148F",
+    hostname: "sw-floor2-01", os: "FortiSwitchOS", tags: ["region:Atlanta", "prod"],
+    ipAddress: "10.20.30.40", status: "active",
+  };
+
+  it("evaluates AND / OR nesting like the reference builder", () => {
+    // (type == switch) AND (mfr contains forti) AND (vendor==net-snmp OR host contains floor2)
+    const cond = {
+      op: "and" as const,
+      children: [
+        { field: "assetType", operator: "equals", value: "switch" },
+        { field: "manufacturer", operator: "contains", value: "forti" },
+        {
+          op: "or" as const,
+          children: [
+            { field: "manufacturer", operator: "equals", value: "net-snmp" },
+            { field: "hostname", operator: "contains", value: "floor2" },
+          ],
+        },
+      ],
+    };
+    expect(evaluateScopeCondition(cond, asset)).toBe(true);
+    expect(evaluateScopeCondition(cond, { ...asset, hostname: "sw-floor3-01" })).toBe(false); // OR group fails
+    expect(evaluateScopeCondition(cond, { ...asset, assetType: "server" })).toBe(false); // AND leg fails
+  });
+
+  it("none / notAll combinators negate correctly", () => {
+    const inner = [
+      { field: "status", operator: "equals", value: "decommissioned" },
+      { field: "tag", operator: "has", value: "lab" },
+    ];
+    expect(evaluateScopeCondition({ op: "none", children: inner }, asset)).toBe(true); // neither matches
+    expect(evaluateScopeCondition({ op: "none", children: inner }, { ...asset, tags: ["lab"] })).toBe(false);
+    expect(evaluateScopeCondition({ op: "notAll", children: inner }, asset)).toBe(true); // at least one fails
+    expect(evaluateScopeCondition({ op: "notAll", children: inner }, { ...asset, status: "decommissioned", tags: ["lab"] })).toBe(false);
+  });
+
+  it("per-field operators: string ops, tag has/notHas, subnet in/notIn", () => {
+    const ev = (field: string, operator: string, value: string, a = asset) =>
+      evaluateScopeCondition({ op: "and", children: [{ field, operator, value }] }, a);
+    expect(ev("hostname", "startsWith", "sw-")).toBe(true);
+    expect(ev("hostname", "endsWith", "-01")).toBe(true);
+    expect(ev("model", "notContains", "/u")).toBe(true);
+    expect(ev("os", "equals", "fortiswitchos")).toBe(true); // case-insensitive
+    expect(ev("tag", "has", "PROD")).toBe(true);
+    expect(ev("tag", "notHas", "prod")).toBe(false);
+    expect(ev("subnet", "inCidr", "10.20.0.0/16")).toBe(true);
+    expect(ev("subnet", "notInCidr", "10.99.0.0/16")).toBe(true);
+    expect(ev("subnet", "inCidr", "10.20.30.40")).toBe(true); // bare IP = host route
+    expect(ev("assetId", "equals", "a1")).toBe(true);
+    expect(ev("status", "notEquals", "active")).toBe(false);
+  });
+
+  it("scopeMatchesAsset routes condition trees (and ANDs with flat dims)", () => {
+    const scope = { condition: { op: "or" as const, children: [{ field: "hostname", operator: "contains", value: "floor2" }] } };
+    expect(scopeMatchesAsset(scope, asset as never)).toBe(true);
+    expect(scopeMatchesAsset({ ...scope, assetTypes: ["server"] }, asset as never)).toBe(false); // flat dim ANDs in
+  });
+
+  it("ruleInputSchema accepts condition scopes and rejects bad operator/field/subnet combos", () => {
+    const good = ruleInputSchema.parse({
+      name: "cond", trigger: metricTrigger,
+      scope: { condition: { op: "and", children: [{ field: "manufacturer", operator: "contains", value: "forti" }] } },
+    });
+    expect(good.scope.condition!.op).toBe("and");
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { condition: { op: "and", children: [{ field: "tag", operator: "contains", value: "x" }] } } }),
+    ).toThrow(/not valid for field/);
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { condition: { op: "and", children: [{ field: "subnet", operator: "inCidr", value: "bogus" }] } } }),
+    ).toThrow(/CIDR/);
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { condition: { op: "nand", children: [] } } }),
+    ).toThrow();
   });
 });
 

@@ -3076,7 +3076,7 @@ model NotificationRule {
   enabled         Boolean @default(true)
   severity        String  @default("warning") // info | warning | error
   trigger         Json // discriminated union — see notificationRuleService
-  scope           Json   @default("{}") // { allAssets?, assetTypes?, tags?, assetIds?, integrationIds?, manufacturers?, models?, subnetCidrs? }
+  scope           Json   @default("{}") // { allAssets?, assetTypes?, tags?, assetIds?, integrationIds?, manufacturers?, models?, subnetCidrs?, condition? (nested AND/OR rule tree — see notificationTypes.scopeConditionSchema) }
   clearBehavior   String  @default("manual") // manual | auto | timed
   clearAfterSec   Int? // for clearBehavior=timed
   cooldownSec     Int? // suppress re-fire window (re-notify)

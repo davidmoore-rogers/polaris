@@ -19,6 +19,7 @@ import {
   legacyMirrorOfV2,
   normalizeRuleToV2,
   normalizeEscalationToV2,
+  evaluateScopeCondition,
 } from "./notificationTypes.js";
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
 import { ipInCidr } from "../utils/cidr.js";
@@ -33,6 +34,9 @@ export interface ScopeAsset {
   manufacturer?: string | null;
   model?: string | null;
   ipAddress?: string | null;
+  hostname?: string | null;
+  os?: string | null;
+  status?: string | null;
 }
 
 /**
@@ -82,6 +86,12 @@ export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean 
     });
     if (!inAny) return false;
   }
+  // Nested condition tree (the wizard's builder). ANDs with any flat
+  // dimensions above when both are present.
+  if (scope.condition) {
+    anyDimension = true;
+    if (!evaluateScopeCondition(scope.condition, asset)) return false;
+  }
   return anyDimension;
 }
 
@@ -93,7 +103,7 @@ export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean 
 export async function findRulesMatchingAsset(assetId: string) {
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: { id: true, assetType: true, tags: true, discoveredByIntegrationId: true, manufacturer: true, model: true, ipAddress: true },
+    select: { id: true, assetType: true, tags: true, discoveredByIntegrationId: true, manufacturer: true, model: true, ipAddress: true, hostname: true, os: true, status: true },
   });
   if (!asset) return [];
 

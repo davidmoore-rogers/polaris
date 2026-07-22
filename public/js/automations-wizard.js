@@ -90,6 +90,12 @@ async function openAutomationWizard(existing) {
   function opt(list, sel) {
     return (list || []).map(function (v) { return '<option value="' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(v) + '</option>'; }).join("");
   }
+  // Severity options carry the shared badge palette (styles.css .sev-select).
+  function sevOpt(sel) {
+    return (s.severities || []).map(function (v) {
+      return '<option value="' + escapeHtml(v) + '" class="sev-' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(v) + '</option>';
+    }).join("");
+  }
   function optLabeled(list, sel, labelFor) {
     return (list || []).map(function (v) {
       return '<option value="' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(labelFor ? labelFor(v) : v) + '</option>';
@@ -248,7 +254,7 @@ async function openAutomationWizard(existing) {
     '<button class="btn btn-primary" id="aw-next">Next &rarr;</button>' +
     '<button class="btn btn-primary" id="aw-save" style="display:none">' + (editing ? "Save changes" : "Create automation") + '</button>';
 
-  openModal(editing ? "Edit automation" : "New automation", body, footer, { large: true });
+  openModal(editing ? "Edit automation" : "New automation", body, footer, { wide: true });
 
   // ── Step 1: Name & description ─────────────────────────────────────────
   function step1Html() {
@@ -256,7 +262,7 @@ async function openAutomationWizard(existing) {
       '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Name it, describe what it watches for, and pick the severity its alerts carry.</p>' +
       '<div class="form-group"><label>Name</label><input type="text" id="aw-name" value="' + escapeHtml(draft.name || "") + '" placeholder="e.g. Switch temperature high"></div>' +
       '<div class="form-group"><label>Description (optional)</label><input type="text" id="aw-desc" value="' + escapeHtml(draft.description || "") + '"></div>' +
-      '<div class="form-group"><label>Severity</label><select id="aw-severity">' + opt(s.severities, draft.severity || "warning") + '</select></div>' +
+      '<div class="form-group"><label>Severity</label><select id="aw-severity" class="sev-select sev-' + escapeHtml(draft.severity || "warning") + '">' + sevOpt(draft.severity || "warning") + '</select></div>' +
       '<div class="form-group"><label><input type="checkbox" id="aw-enabled"' + (draft.enabled === false ? "" : " checked") + '> Enabled</label></div>';
   }
   function collectStep1() {
@@ -270,156 +276,223 @@ async function openAutomationWizard(existing) {
     return null;
   }
 
-  // ── Step 2: Asset filtering ────────────────────────────────────────────
-  // Each dimension is its own dropdown picker populated from what actually
-  // exists (asset-type registry, distinct manufacturers/models from the
-  // inventory, IPAM subnets); picking adds a removable chip. Subnets also
-  // take a custom CIDR for ranges not defined in IPAM.
-  function scChip(field, val, label) {
-    return '<span class="sc-chip" data-field="' + field + '" data-val="' + escapeHtml(val) + '" style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--color-border);border-radius:12px;padding:1px 9px;margin:3px 5px 0 0;font-size:0.8rem">' +
-      escapeHtml(label || val) +
-      '<button type="button" class="sc-chip-x" aria-label="Remove" style="background:none;border:none;cursor:pointer;color:var(--color-text-tertiary);padding:0;font-size:0.95rem;line-height:1">&times;</button>' +
-    '</span>';
+  // ── Step 2: Asset filtering (nested condition builder) ──────────────────
+  // SolarWinds-style tree: a root group with a combinator (AND / OR / NONE /
+  // NOT-ALL), child rules of [field][operator][value], and nested sub-groups.
+  // An empty root = all assets. Collect walks the DOM into scope.condition;
+  // the backend evaluates the same tree via evaluateScopeCondition.
+  var scMeta = s.scopeCondition || {
+    groupOps: ["and", "or", "none", "notAll"],
+    groupOpLabels: {
+      and: "All child conditions must be satisfied (AND)",
+      or: "At least one child condition must be satisfied (OR)",
+      none: "All child conditions must NOT be satisfied",
+      notAll: "At least one child condition must NOT be satisfied",
+    },
+    operatorLabels: { equals: "is equal to", notEquals: "is not equal to", contains: "contains", notContains: "does not contain", startsWith: "starts with", endsWith: "ends with", has: "is applied", notHas: "is not applied", inCidr: "is in subnet", notInCidr: "is not in subnet" },
+    fields: [
+      { field: "assetType", label: "Device type", ops: ["equals", "notEquals"], optionsFrom: "assetTypes" },
+      { field: "manufacturer", label: "Manufacturer", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: "manufacturers" },
+      { field: "model", label: "Model", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: "models" },
+      { field: "hostname", label: "Hostname", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: null },
+      { field: "os", label: "Operating system", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: null },
+      { field: "tag", label: "Tag", ops: ["has", "notHas"], optionsFrom: "tags" },
+      { field: "subnet", label: "Subnet / IP", ops: ["inCidr", "notInCidr"], optionsFrom: "subnets" },
+      { field: "status", label: "Lifecycle status", ops: ["equals", "notEquals"], optionsFrom: null, values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
+      { field: "assetId", label: "Asset ID", ops: ["equals", "notEquals"], optionsFrom: null },
+    ],
+    maxDepth: 5,
+  };
+  function scFieldMeta(field) {
+    return (scMeta.fields || []).find(function (f) { return f.field === field; }) || scMeta.fields[0];
   }
-  function scPickerRow(field, label, options, values, extraHtml) {
-    // options: [{value, label}]; values: currently-selected raw values.
-    var picked = new Set(values || []);
-    var opts = (options || []).filter(function (o) { return !picked.has(o.value); }).map(function (o) {
-      return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>';
+  function scValueOptions(field) {
+    var fm = scFieldMeta(field);
+    if (fm.values) return fm.values.map(function (v) { return { value: v, label: v }; });
+    switch (fm.optionsFrom) {
+      case "assetTypes": return (_ruleAssetTypes || []).map(function (t) { return { value: t.name, label: t.label || t.name }; });
+      case "manufacturers": return (_awScopeOptions.manufacturers || []).map(function (m) { return { value: m, label: m }; });
+      case "models": return (_awScopeOptions.models || []).map(function (m) { return { value: m, label: m }; });
+      case "tags": return (_ruleTagList || []).map(function (t) { return { value: t, label: t }; });
+      case "subnets": return (_awScopeOptions.subnets || []).map(function (sn) { return { value: sn.cidr, label: sn.name + " — " + sn.cidr }; });
+      default: return [];
+    }
+  }
+  function scOpOptions(field, sel) {
+    var fm = scFieldMeta(field);
+    return (fm.ops || []).map(function (o) {
+      return '<option value="' + o + '"' + (o === sel ? " selected" : "") + '>' + escapeHtml((scMeta.operatorLabels || {})[o] || o) + '</option>';
     }).join("");
-    var chips = (values || []).map(function (v) {
-      var o = (options || []).find(function (x) { return x.value === v; });
-      return scChip(field, v, o ? o.label : v);
+  }
+  function scGroupOpOptions(sel) {
+    return (scMeta.groupOps || []).map(function (o) {
+      return '<option value="' + o + '"' + (o === sel ? " selected" : "") + '>' + escapeHtml((scMeta.groupOpLabels || {})[o] || o) + '</option>';
     }).join("");
-    return '<div class="form-group sc-picker" data-field="' + field + '" style="margin-bottom:0.6rem">' +
-      '<label style="font-size:0.82rem">' + escapeHtml(label) + '</label>' +
-      '<div style="display:flex;gap:6px;align-items:center">' +
-        '<select class="sc-pick" style="flex:1"><option value="">' + (options && options.length ? "(add…)" : "(none found)") + '</option>' + opts + '</select>' +
-        (extraHtml || "") +
-      '</div>' +
-      '<div class="sc-chips">' + chips + '</div>' +
+  }
+  function scDatalistId(field) { return "aw-dl-" + field; }
+  function scDatalists() {
+    return (scMeta.fields || []).map(function (fm) {
+      var opts = scValueOptions(fm.field);
+      if (!opts.length) return "";
+      return '<datalist id="' + scDatalistId(fm.field) + '">' + opts.map(function (o) {
+        return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label !== o.value ? o.label : "") + '</option>';
+      }).join("") + '</datalist>';
+    }).join("");
+  }
+  function scRuleRowHtml(rule) {
+    rule = rule || { field: "assetType", operator: null, value: "" };
+    var fm = scFieldMeta(rule.field);
+    var fieldOpts = (scMeta.fields || []).map(function (f) {
+      return '<option value="' + f.field + '"' + (f.field === fm.field ? " selected" : "") + '>' + escapeHtml(f.label) + '</option>';
+    }).join("");
+    var hasOptions = scValueOptions(fm.field).length > 0;
+    return '<div class="scr-row" style="display:flex;gap:6px;align-items:center;margin:4px 0">' +
+      '<select class="scr-field" style="width:31%">' + fieldOpts + '</select>' +
+      '<select class="scr-op" style="width:26%">' + scOpOptions(fm.field, rule.operator || (fm.ops && fm.ops[0])) + '</select>' +
+      '<input type="text" class="scr-value" style="flex:1"' + (hasOptions ? ' list="' + scDatalistId(fm.field) + '"' : "") + ' value="' + escapeHtml(rule.value || "") + '" placeholder="value">' +
+      '<button type="button" class="btn btn-sm btn-danger scr-remove" title="Remove condition">&times;</button>' +
     '</div>';
+  }
+  function scGroupHtml(group, depth) {
+    group = group || { op: "and", children: [] };
+    var inner = (group.children || []).map(function (c) {
+      return c && c.op !== undefined && Array.isArray(c.children)
+        ? scGroupHtml(c, depth + 1)
+        : scRuleRowHtml(c);
+    }).join("");
+    return '<div class="scg-group" data-depth="' + depth + '" style="border:1px solid var(--color-border);border-left:3px solid ' + (depth === 0 ? "var(--color-accent)" : "var(--color-success)") + ';border-radius:6px;padding:0.55rem;margin:4px 0">' +
+      '<div style="display:flex;gap:6px;align-items:center;margin-bottom:2px">' +
+        '<select class="scg-op" style="flex:1;font-size:0.85rem">' + scGroupOpOptions(group.op || "and") + '</select>' +
+        (depth > 0 ? '<button type="button" class="btn btn-sm btn-danger scg-remove" title="Remove group">&times;</button>' : "") +
+      '</div>' +
+      '<div class="scg-children">' + inner + '</div>' +
+      '<div style="margin-top:4px">' +
+        '<button type="button" class="btn btn-sm btn-secondary scg-add-rule">+ Condition</button> ' +
+        (depth + 1 < (scMeta.maxDepth || 5) ? '<button type="button" class="btn btn-sm btn-secondary scg-add-group">+ Group</button>' : "") +
+      '</div>' +
+    '</div>';
+  }
+  /** Legacy flat scope → a condition tree for editing (each used dimension
+   *  becomes a rule, or an OR sub-group when the list has several entries). */
+  function legacyScopeToCondition(sc) {
+    var children = [];
+    var addDim = function (list, field, operator) {
+      if (!list || !list.length) return;
+      var rules = list.map(function (v) { return { field: field, operator: operator, value: v }; });
+      if (rules.length === 1) children.push(rules[0]);
+      else children.push({ op: "or", children: rules });
+    };
+    addDim(sc.assetTypes, "assetType", "equals");
+    addDim(sc.manufacturers, "manufacturer", "contains");
+    addDim(sc.models, "model", "contains");
+    addDim(sc.tags, "tag", "has");
+    addDim(sc.subnetCidrs, "subnet", "inCidr");
+    addDim(sc.assetIds, "assetId", "equals");
+    return { op: "and", children: children };
   }
   function step2Html() {
     var scope = draft.scope || {};
-    var typeOptions = (_ruleAssetTypes || []).map(function (at) { return { value: at.name, label: at.label || at.name }; });
-    var mfrOptions = (_awScopeOptions.manufacturers || []).map(function (m) { return { value: m, label: m }; });
-    var modelOptions = (_awScopeOptions.models || []).map(function (m) { return { value: m, label: m }; });
-    var subnetOptions = (_awScopeOptions.subnets || []).map(function (sn) { return { value: sn.cidr, label: sn.name + " — " + sn.cidr }; });
-    var tagOptions = (_ruleTagList || []).map(function (t) { return { value: t, label: t }; });
-    var subnetExtra = '<input type="text" id="sc-subnet-custom" placeholder="custom CIDR (10.20.0.0/16)" style="width:220px">' +
-      '<button type="button" class="btn btn-sm btn-secondary" id="sc-subnet-add">Add</button>';
+    var root = scope.condition
+      ? JSON.parse(JSON.stringify(scope.condition))
+      : (scope.allAssets ? { op: "and", children: [] } : legacyScopeToCondition(scope));
     return '<h3 style="margin:0 0 0.25rem">Which devices?</h3>' +
-      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Filter the assets this automation applies to — pick from what exists, combine freely (a device must match every field you use). Polaris-host and audit-event triggers aren’t tied to assets and ignore this filter.</p>' +
-      '<label style="display:block;margin:4px 0 10px"><input type="checkbox" id="sc-all"' + (scope.allAssets ? " checked" : "") + '> All assets</label>' +
-      '<div id="aw-scope-narrow" style="' + (scope.allAssets ? "opacity:0.5;pointer-events:none" : "") + '">' +
-        scPickerRow("assetTypes", "Device types", typeOptions, scope.assetTypes) +
-        scPickerRow("manufacturers", "Manufacturers", mfrOptions, scope.manufacturers) +
-        scPickerRow("models", "Models", modelOptions, scope.models) +
-        scPickerRow("subnetCidrs", "Subnets", subnetOptions, scope.subnetCidrs, subnetExtra) +
-        scPickerRow("tags", "Tags", tagOptions, scope.tags) +
-        '<div class="form-group" style="margin-bottom:0"><label style="font-size:0.82rem">Specific asset IDs (comma-separated, optional)</label>' +
-          '<input type="text" id="sc-ids" value="' + escapeHtml((scope.assetIds || []).join(", ")) + '" style="width:100%">' +
-        '</div>' +
-      '</div>' +
+      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 0.75rem">Build the filter from conditions and nested groups — with <strong>no conditions, every asset matches</strong>. Polaris-host and audit-event triggers aren’t tied to assets and ignore this filter.</p>' +
+      '<div id="aw-cond-root">' + scGroupHtml(root, 0) + '</div>' +
+      scDatalists() +
       '<div id="aw-scope-preview" style="margin-top:0.75rem"></div>';
   }
   function wireStep2() {
     var panel = document.getElementById("aw-step-2");
-    var all = panel.querySelector("#sc-all");
-    all.addEventListener("change", function () {
-      var box = panel.querySelector("#aw-scope-narrow");
-      box.style.opacity = all.checked ? "0.5" : "";
-      box.style.pointerEvents = all.checked ? "none" : "";
-      scheduleScopePreview();
-    });
-    // Picking from a dropdown adds a chip (and removes the option so it can't
-    // be double-picked); the chip's × puts the option back.
-    panel.querySelectorAll(".sc-picker .sc-pick").forEach(function (sel) {
-      sel.addEventListener("change", function () {
-        if (!sel.value) return;
-        var row = sel.closest(".sc-picker");
-        var opt = sel.options[sel.selectedIndex];
-        row.querySelector(".sc-chips").insertAdjacentHTML("beforeend", scChip(row.getAttribute("data-field"), sel.value, opt.textContent));
-        opt.remove();
-        sel.value = "";
+    panel.addEventListener("change", function (e) {
+      var t = e.target;
+      if (!t || !t.classList) return;
+      if (t.classList.contains("scr-field")) {
+        // Field changed: swap the operator list + value suggestions/placeholder.
+        var row = t.closest(".scr-row");
+        var field = t.value;
+        row.querySelector(".scr-op").innerHTML = scOpOptions(field, null);
+        var input = row.querySelector(".scr-value");
+        var hasOptions = scValueOptions(field).length > 0;
+        if (hasOptions) input.setAttribute("list", scDatalistId(field));
+        else input.removeAttribute("list");
+        input.value = "";
+      }
+      if (t.classList.contains("scr-field") || t.classList.contains("scr-op") || t.classList.contains("scg-op") || t.classList.contains("scr-value")) {
         scheduleScopePreview();
-      });
+      }
+    });
+    panel.addEventListener("input", function (e) {
+      if (e.target && e.target.classList && e.target.classList.contains("scr-value")) scheduleScopePreview();
     });
     panel.addEventListener("click", function (e) {
-      var x = e.target.closest && e.target.closest(".sc-chip-x");
-      if (!x) return;
-      var chip = x.closest(".sc-chip");
-      var row = chip.closest(".sc-picker");
-      // Restore the option into the row's dropdown (custom CIDRs weren't in it — skip).
-      var sel = row ? row.querySelector(".sc-pick") : null;
-      if (sel) {
-        var val = chip.getAttribute("data-val");
-        var known = false;
-        if (row.getAttribute("data-field") === "subnetCidrs") {
-          known = (_awScopeOptions.subnets || []).some(function (sn) { return sn.cidr === val; });
-        } else { known = true; }
-        if (known) {
-          var o = document.createElement("option");
-          o.value = val;
-          o.textContent = chip.textContent.replace(/×$/, "").trim();
-          sel.appendChild(o);
-        }
-      }
-      chip.remove();
-      scheduleScopePreview();
-    });
-    var addBtn = panel.querySelector("#sc-subnet-add");
-    if (addBtn) {
-      var addCustom = function () {
-        var input = panel.querySelector("#sc-subnet-custom");
-        var v = (input.value || "").trim();
-        if (!v) return;
-        var row = panel.querySelector('.sc-picker[data-field="subnetCidrs"]');
-        row.querySelector(".sc-chips").insertAdjacentHTML("beforeend", scChip("subnetCidrs", v));
-        input.value = "";
+      var btn = e.target.closest && e.target.closest("button");
+      if (!btn || !panel.contains(btn)) return;
+      if (btn.classList.contains("scr-remove")) {
+        btn.closest(".scr-row").remove();
         scheduleScopePreview();
-      };
-      addBtn.addEventListener("click", addCustom);
-      panel.querySelector("#sc-subnet-custom").addEventListener("keydown", function (e) {
-        if (e.key === "Enter") { e.preventDefault(); addCustom(); }
-      });
-    }
-    panel.addEventListener("input", function (e) {
-      if (e.target && e.target.id === "sc-ids") scheduleScopePreview();
+      } else if (btn.classList.contains("scg-remove")) {
+        btn.closest(".scg-group").remove();
+        scheduleScopePreview();
+      } else if (btn.classList.contains("scg-add-rule")) {
+        var g1 = btn.closest(".scg-group");
+        g1.querySelector(":scope > .scg-children").insertAdjacentHTML("beforeend", scRuleRowHtml(null));
+        scheduleScopePreview();
+      } else if (btn.classList.contains("scg-add-group")) {
+        var g2 = btn.closest(".scg-group");
+        var depth = Number(g2.getAttribute("data-depth")) + 1;
+        g2.querySelector(":scope > .scg-children").insertAdjacentHTML(
+          "beforeend",
+          scGroupHtml({ op: "or", children: [{ field: "assetType", operator: "equals", value: "" }] }, depth),
+        );
+        scheduleScopePreview();
+      }
     });
   }
-  function scPicked(panel, field) {
-    return Array.from(panel.querySelectorAll('.sc-chip[data-field="' + field + '"]')).map(function (c) { return c.getAttribute("data-val"); });
+  function scCollectGroup(groupEl) {
+    var op = groupEl.querySelector(":scope > div > .scg-op").value;
+    var children = [];
+    groupEl.querySelectorAll(":scope > .scg-children > *").forEach(function (el) {
+      if (el.classList.contains("scr-row")) {
+        children.push({
+          field: el.querySelector(".scr-field").value,
+          operator: el.querySelector(".scr-op").value,
+          value: el.querySelector(".scr-value").value.trim(),
+        });
+      } else if (el.classList.contains("scg-group")) {
+        children.push(scCollectGroup(el));
+      }
+    });
+    return { op: op, children: children };
   }
   function collectStep2() {
-    var panel = document.getElementById("aw-step-2");
-    if (!panel.querySelector("#sc-all")) return;
-    if (panel.querySelector("#sc-all").checked) { draft.scope = { allAssets: true }; return; }
-    var sc = {};
-    var types = scPicked(panel, "assetTypes"); if (types.length) sc.assetTypes = types;
-    var mfrs = scPicked(panel, "manufacturers"); if (mfrs.length) sc.manufacturers = mfrs;
-    var models = scPicked(panel, "models"); if (models.length) sc.models = models;
-    var subnets = scPicked(panel, "subnetCidrs"); if (subnets.length) sc.subnetCidrs = subnets;
-    var tags = scPicked(panel, "tags"); if (tags.length) sc.tags = tags;
-    var ids = csvOf(panel.querySelector("#sc-ids").value); if (ids.length) sc.assetIds = ids;
-    draft.scope = sc;
+    var root = document.querySelector("#aw-cond-root > .scg-group");
+    if (!root) return;
+    var tree = scCollectGroup(root);
+    // Prune empty-valued rules and empty sub-groups (unfinished rows should
+    // not silently exclude everything); validation flags them on Next.
+    draft.scope = tree.children.length === 0 ? { allAssets: true } : { condition: tree };
   }
   function validateStep2() {
     var def = findType((draft.trigger || {}).type);
     if (def && !def.scoped) return null; // non-scoped triggers ignore the filter
     var sc = draft.scope || {};
-    var any = sc.allAssets || (sc.assetTypes && sc.assetTypes.length) || (sc.tags && sc.tags.length) ||
-      (sc.assetIds && sc.assetIds.length) || (sc.manufacturers && sc.manufacturers.length) ||
-      (sc.models && sc.models.length) || (sc.subnetCidrs && sc.subnetCidrs.length);
-    if (!any) {
-      return "Pick devices: All assets, or at least one asset type / tag / manufacturer / model / subnet / asset ID.";
-    }
+    if (sc.allAssets || !sc.condition) return null;
     var CIDR_ISH = /^([0-9]{1,3}\.){3}[0-9]{1,3}(\/[0-9]{1,2})?$|^[0-9a-f:]+(\/[0-9]{1,3})?$/i;
-    for (var i = 0; i < (sc.subnetCidrs || []).length; i++) {
-      if (!CIDR_ISH.test(sc.subnetCidrs[i])) return 'Subnet "' + sc.subnetCidrs[i] + '" does not look like a CIDR or IP (e.g. 10.20.0.0/16).';
-    }
-    return null;
+    var problem = null;
+    var walk = function (g) {
+      if (problem) return;
+      if (!g.children.length) { problem = "A condition group is empty — add a condition or remove the group."; return; }
+      g.children.forEach(function (c) {
+        if (problem) return;
+        if (c.op !== undefined && Array.isArray(c.children)) { walk(c); return; }
+        if (!c.value) { problem = "Every condition needs a value (or remove the empty row)."; return; }
+        if (c.field === "subnet" && !CIDR_ISH.test(c.value)) {
+          problem = 'Subnet "' + c.value + '" does not look like a CIDR or IP (e.g. 10.20.0.0/16).';
+        }
+      });
+    };
+    walk(sc.condition);
+    return problem;
   }
   function scheduleScopePreview() {
     if (scopePreviewTimer) clearTimeout(scopePreviewTimer);
@@ -821,6 +894,13 @@ async function openAutomationWizard(existing) {
           h += '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">…or custom email addresses (comma-separated)</label><input type="text" class="na-addresses" value="' + escapeHtml((action.addresses || []).join(", ")) + '" placeholder="oncall@example.com"></div>';
         }
         var regions = (draft.scope && draft.scope.tags || []).filter(function (x) { return /^region:/i.test(x); });
+        // Condition-tree scopes carry tags inside rules — collect positive
+        // region: tag rules too (mirrors the server's scopeRegionTagsOf).
+        (function walk(node) {
+          if (!node || typeof node !== "object") return;
+          if (Array.isArray(node.children)) { node.children.forEach(walk); return; }
+          if (node.field === "tag" && node.operator === "has" && /^region:/i.test(node.value || "")) regions.push(node.value);
+        })(draft.scope && draft.scope.condition);
         var regionLabel = regions.length
           ? "…or users associated with the automation's region (" + regions.map(function (x) { return x.replace(/^region:/i, ""); }).join(", ") + ")"
           : "…or users associated with the automation's region (add a region: tag on the Devices step)";
@@ -1072,9 +1152,22 @@ async function openAutomationWizard(existing) {
     }
     return null;
   }
+  function condText(g) {
+    var parts = (g.children || []).map(function (c) {
+      if (c.op !== undefined && Array.isArray(c.children)) return "(" + condText(c) + ")";
+      var fm = scFieldMeta(c.field);
+      var opLbl = (scMeta.operatorLabels || {})[c.operator] || c.operator;
+      return fm.label + " " + opLbl + " " + c.value;
+    });
+    if (g.op === "or") return parts.join(" OR ");
+    if (g.op === "none") return "NOT(" + parts.join(" OR ") + ")";
+    if (g.op === "notAll") return "NOT(" + parts.join(" AND ") + ")";
+    return parts.join(" AND ");
+  }
   function scopeSummaryText(sc) {
     sc = sc || {};
     if (sc.allAssets) return "All assets";
+    if (sc.condition) return condText(sc.condition) || "(none)";
     var parts = [];
     if (sc.assetTypes && sc.assetTypes.length) parts.push("types: " + sc.assetTypes.join("/"));
     if (sc.tags && sc.tags.length) parts.push("tags: " + sc.tags.join("/"));
@@ -1221,6 +1314,12 @@ async function openAutomationWizard(existing) {
   });
 
   // ── First render ───────────────────────────────────────────────────────
+  var sevSel = document.getElementById("aw-severity");
+  if (sevSel) {
+    sevSel.addEventListener("change", function () {
+      sevSel.className = "sev-select sev-" + sevSel.value;
+    });
+  }
   wireStep2();
   wireStep3();
   updateStepper();
