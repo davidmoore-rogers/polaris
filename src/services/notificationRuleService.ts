@@ -331,9 +331,27 @@ export async function createRule(input: RuleInput, actor?: string) {
   return rule;
 }
 
+/** What makes two triggers "the same condition" for state-row continuity.
+ *  A changed identity (type/kind/metric/field/changeType) means the stored
+ *  NotificationRuleState rows describe a DIFFERENT condition — left in place
+ *  they linger firing forever (per-dimension rows under a now-composite rule,
+ *  a cpu row under a now-temperature rule). Threshold/operator/tree edits keep
+ *  the identity: the state keys stay meaningful and re-evaluate next tick. */
+function triggerIdentityOf(trigger: Trigger): string {
+  switch (trigger.type) {
+    case "asset_metric": case "host_metric": return `${trigger.type}:${trigger.metric}`;
+    case "asset_state": return `asset_state:${trigger.field}`;
+    case "composite": return `composite:${trigger.kind}`;
+    case "change": return `change:${trigger.changeType}`;
+    default: return trigger.type;
+  }
+}
+
 export async function updateRule(id: string, input: RuleInput, actor?: string) {
-  await getRule(id); // 404 if missing
+  const existing = await getRule(id); // 404 if missing
   await assertActionRefs(input);
+  const identityChanged =
+    triggerIdentityOf(existing.trigger as unknown as Trigger) !== triggerIdentityOf(input.trigger);
   const mirror = legacyMirrorOfV2(input.reset, input.actions);
   // Nullable-Json semantics: undefined (field absent) leaves the stored value
   // unchanged; explicit null clears it (Prisma.DbNull).
@@ -359,6 +377,25 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
       escalation: jsonOrClear(input.escalation),
     },
   });
+  // The trigger now describes a different condition — the old state rows (and
+  // their active alerts) are about something that no longer exists. Clear the
+  // alerts + drop the rows so nothing lingers firing under a stale key; the
+  // next tick re-evaluates from scratch (cooldown restarts — an edited
+  // trigger is a new condition).
+  if (identityChanged) {
+    const states = await prisma.notificationRuleState.findMany({
+      where: { ruleId: id },
+      select: { notificationId: true },
+    });
+    const notifIds = states.map((s) => s.notificationId).filter((n): n is string => !!n);
+    if (notifIds.length > 0) {
+      await prisma.notification.updateMany({
+        where: { id: { in: notifIds }, cleared: false },
+        data: { cleared: true, clearedBy: "system:rule-edited", clearedAt: new Date() },
+      });
+    }
+    await prisma.notificationRuleState.deleteMany({ where: { ruleId: id } });
+  }
   bumpChangeSubscriptions();
   await logEvent({
     action: "notification_rule.updated",
@@ -367,7 +404,7 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
     resourceName: rule.name,
     actor,
     message: `Notification rule "${rule.name}" updated`,
-    details: { triggerType: input.trigger.type, enabled: input.enabled },
+    details: { triggerType: input.trigger.type, enabled: input.enabled, ...(identityChanged ? { triggerIdentityChanged: true } : {}) },
   });
   return rule;
 }

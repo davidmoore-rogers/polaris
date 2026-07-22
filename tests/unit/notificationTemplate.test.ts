@@ -24,6 +24,7 @@ const FULL_PARTS: TemplateContextParts = {
   value: "97.5",
   threshold: "90",
   dimension: "port1",
+  conditions: "2 of 3 conditions met",
   message: "High CPU: fw-atl-01 — cpuPct = 97.5 (threshold 90)",
   severity: "critical",
   time: new Date("2026-07-04T12:00:00.000Z"),

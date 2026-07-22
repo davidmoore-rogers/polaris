@@ -35,7 +35,13 @@ import {
   type EscalationV2Config,
   type ResetConfig,
   type AutomationAction,
+  type CompositeTrigger,
+  type CompositeLeaf,
+  type TriggerConditionGroup,
   CHANGE_TYPE_ACTIONS,
+  METRIC_META,
+  FIELD_META,
+  isTriggerLeaf,
   normalizeRuleToV2,
   normalizeEscalationToV2,
   scopeCidrOf,
@@ -451,19 +457,19 @@ export function recoveredMeets(trigger: Trigger, reset: ResetConfig, value: numb
 // (when the rule has emailComposition/escalation) so escalation emails render
 // later with fire-time values.
 
+/** Fire-time detail for a composite trigger: what the message/tokens render. */
+interface CompositeFireInfo {
+  /** Met-conditions summary with witness dims, e.g. "CPU utilization ≥ 90 (95) and Storage used ≥ 80 (/var = 94)". */
+  summary: string;
+  /** "k of n conditions met". */
+  conditions: string;
+}
+
 /** The reading-derived template parts (sans assetDetail/message, added by callers). */
-function readingContextParts(rule: DbRule, reading: Reading, now: Date): TemplateContextParts {
+function readingContextParts(rule: DbRule, reading: Reading, now: Date, composite?: CompositeFireInfo): TemplateContextParts {
   const trigger = rule.trigger;
-  const metric = trigger.type === "asset_metric" || trigger.type === "host_metric" ? trigger.metric
-    : trigger.type === "asset_state" ? trigger.field : trigger.type;
-  const threshold = trigger.type === "asset_metric" || trigger.type === "host_metric" ? String(trigger.threshold)
-    : trigger.type === "asset_state" ? String(trigger.value) : "";
-  const valueStr = reading.value === null ? "n/a" : typeof reading.value === "number" ? round2(reading.value) : String(reading.value);
-  return {
+  const base = {
     asset: reading.hostname || reading.assetId || "host",
-    metric: String(metric),
-    value: valueStr,
-    threshold,
     dimension: reading.dimLabel || "",
     severity: rule.severity,
     time: now,
@@ -471,6 +477,17 @@ function readingContextParts(rule: DbRule, reading: Reading, now: Date): Templat
     ruleName: rule.name,
     ruleDescription: rule.description,
   };
+  if (trigger.type === "composite") {
+    // No single metric/value/threshold exists — {metric} carries the
+    // met-conditions summary, {conditions} the "k of n" count.
+    return { ...base, metric: composite?.summary ?? "conditions met", value: "", threshold: "", conditions: composite?.conditions ?? "" };
+  }
+  const metric = trigger.type === "asset_metric" || trigger.type === "host_metric" ? trigger.metric
+    : trigger.type === "asset_state" ? trigger.field : trigger.type;
+  const threshold = trigger.type === "asset_metric" || trigger.type === "host_metric" ? String(trigger.threshold)
+    : trigger.type === "asset_state" ? String(trigger.value) : "";
+  const valueStr = reading.value === null ? "n/a" : typeof reading.value === "number" ? round2(reading.value) : String(reading.value);
+  return { ...base, metric: String(metric), value: valueStr, threshold };
 }
 
 /** Render the in-app message from a built context (default string when no template). */
@@ -479,6 +496,11 @@ function renderMessage(rule: DbRule, reading: Reading, ctx: Record<string, strin
     return renderNotificationTemplate(rule.messageTemplate, ctx);
   }
   const dim = reading.dimLabel ? ` [${reading.dimLabel}]` : "";
+  if (rule.trigger.type === "composite") {
+    // {metric} holds the met-conditions summary — no "= (threshold )" artifacts.
+    const count = ctx["conditions"] ? ` (${ctx["conditions"]})` : "";
+    return `${rule.name}: ${ctx["asset"]} — ${ctx["metric"]}${count}`;
+  }
   return `${rule.name}: ${ctx["asset"]}${dim} — ${ctx["metric"]} = ${ctx["value"]} (threshold ${ctx["threshold"]})`;
 }
 
@@ -629,6 +651,292 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
   }
 }
 
+// ─── Composite trigger evaluation ───────────────────────────────────────────
+// Composite rules evaluate PER ASSET: every metric/state leaf resolves its
+// readings through the UNCHANGED single-trigger resolvers (one query per
+// DISTINCT leaf shape), a multi-dimension leaf counts as met when ANY of its
+// dimensions meets, and the AND/OR tree folds leaf truths into one outcome
+// per asset. The state machine runs at dimensionKey "" — one alert per
+// device. A deliberately separate path from evaluateThresholdRule (sharing
+// only the fire/recover/upsertState write layer) so the legacy per-dimension
+// path stays byte-identical.
+
+interface LeafRef {
+  /** Tree-path id ("0", "1.2") — stable across trigger and preview so the
+   *  wizard can highlight its builder rows. */
+  leafId: string;
+  leaf: CompositeLeaf;
+}
+
+function collectLeafRefs(node: { children: (TriggerConditionGroup | CompositeLeaf)[] }, prefix = ""): LeafRef[] {
+  const out: LeafRef[] = [];
+  node.children.forEach((c, i) => {
+    const id = prefix ? `${prefix}.${i}` : String(i);
+    if (isTriggerLeaf(c)) out.push({ leafId: id, leaf: c });
+    else out.push(...collectLeafRefs(c, id));
+  });
+  return out;
+}
+
+interface LeafTruth {
+  met: boolean;
+  /** The first meeting dimension — names the sensor/mount/interface in the alert. */
+  witness: { dimLabel: string; value: number | string | boolean | null } | null;
+  hasReading: boolean;
+}
+
+async function resolveOneLeafReadings(leaf: CompositeLeaf, assets: ScopeAssetRow[]): Promise<Reading[]> {
+  if (leaf.type === "asset_metric") return resolveAssetMetricReadings({ ...leaf, forDurationSec: 0 }, assets);
+  if (leaf.type === "asset_state") return resolveAssetStateReadings({ ...leaf, forDurationSec: 0 }, assets);
+  const r = await resolveHostMetricReading({ ...leaf, forDurationSec: 0 });
+  return r ? [r] : [];
+}
+
+/** Resolve every leaf's readings (identical leaves share one query) and fold
+ *  them to per-asset truths. Host leaves land on the pseudo-asset id "". */
+async function resolveLeafTruths(leaves: LeafRef[], assets: ScopeAssetRow[]): Promise<Map<string, Map<string, LeafTruth>>> {
+  const byResolverKey = new Map<string, Promise<Reading[]>>();
+  const out = new Map<string, Map<string, LeafTruth>>();
+  for (const { leafId, leaf } of leaves) {
+    const key = JSON.stringify(leaf);
+    let p = byResolverKey.get(key);
+    if (!p) {
+      p = resolveOneLeafReadings(leaf, assets);
+      byResolverKey.set(key, p);
+    }
+    out.set(leafId, leafTruthByAsset(leaf, await p));
+  }
+  return out;
+}
+
+/** ANY-dimension fold: a leaf is met for an asset when any of its readings meets. */
+function leafTruthByAsset(leaf: CompositeLeaf, readings: Reading[]): Map<string, LeafTruth> {
+  const out = new Map<string, LeafTruth>();
+  const leafTrigger = leaf as unknown as Trigger; // readingMeets reads type/operator/threshold|value only
+  for (const r of readings) {
+    const id = r.assetId || "";
+    let t = out.get(id);
+    if (!t) {
+      t = { met: false, witness: null, hasReading: true };
+      out.set(id, t);
+    }
+    if (!t.met && readingMeets(leafTrigger, r.value)) {
+      t.met = true;
+      t.witness = { dimLabel: r.dimLabel, value: r.value };
+    }
+  }
+  return out;
+}
+
+function evalTriggerTreeForAsset(
+  node: { op: "and" | "or"; children: (TriggerConditionGroup | CompositeLeaf)[] },
+  assetId: string,
+  truths: Map<string, Map<string, LeafTruth>>,
+  prefix = "",
+): boolean {
+  const results = node.children.map((c, i) => {
+    const id = prefix ? `${prefix}.${i}` : String(i);
+    if (isTriggerLeaf(c)) return truths.get(id)?.get(assetId)?.met === true; // no reading ⇒ false (never fire on absent evidence)
+    return evalTriggerTreeForAsset(c as TriggerConditionGroup, assetId, truths, id);
+  });
+  return node.op === "and" ? results.every(Boolean) : results.some(Boolean);
+}
+
+interface CompositeOutcome {
+  meets: boolean;
+  /** False when NO leaf produced a reading for this asset — the asset is
+   *  skipped entirely (state frozen), matching the per-reading path's
+   *  no-reading behavior. */
+  hasAnyReading: boolean;
+  metLeaves: Array<{ leafId: string; leaf: CompositeLeaf; witness: LeafTruth["witness"] }>;
+  totalLeaves: number;
+}
+
+function compositeOutcomeForAsset(
+  tree: { op: "and" | "or"; children: (TriggerConditionGroup | CompositeLeaf)[] },
+  assetId: string,
+  leaves: LeafRef[],
+  truths: Map<string, Map<string, LeafTruth>>,
+): CompositeOutcome {
+  const metLeaves: CompositeOutcome["metLeaves"] = [];
+  let hasAnyReading = false;
+  for (const { leafId, leaf } of leaves) {
+    const t = truths.get(leafId)?.get(assetId);
+    if (t?.hasReading) hasAnyReading = true;
+    if (t?.met) metLeaves.push({ leafId, leaf, witness: t.witness });
+  }
+  return { meets: evalTriggerTreeForAsset(tree, assetId, truths), hasAnyReading, metLeaves, totalLeaves: leaves.length };
+}
+
+/** Human label for a leaf condition ("CPU utilization >= 90"). */
+function leafConditionLabel(leaf: CompositeLeaf): string {
+  if (leaf.type === "asset_state") {
+    return `${FIELD_META[leaf.field]?.label ?? leaf.field} ${leaf.operator} ${leaf.value}`;
+  }
+  return `${METRIC_META[leaf.metric]?.label ?? leaf.metric} ${leaf.operator} ${leaf.threshold}`;
+}
+
+function compositeFireInfo(outcome: CompositeOutcome): CompositeFireInfo {
+  const parts = outcome.metLeaves.map(({ leaf, witness }) => {
+    const base = leafConditionLabel(leaf);
+    if (!witness) return base;
+    const v = typeof witness.value === "number" ? round2(witness.value) : String(witness.value ?? "");
+    return witness.dimLabel ? `${base} (${witness.dimLabel} = ${v})` : `${base} (${v})`;
+  });
+  return {
+    summary: parts.join(" and ") || "conditions met",
+    conditions: `${outcome.metLeaves.length} of ${outcome.totalLeaves} conditions met`,
+  };
+}
+
+const HOST_PSEUDO_ASSET: ScopeAssetRow = {
+  id: "", hostname: "Polaris host", assetType: null, tags: [], discoveredByIntegrationId: null,
+  monitorStatus: null, status: "active", consecutiveFailures: 0, dependencySuppressed: false,
+  quarantinedAt: null, ipAddress: null,
+};
+
+/** The auto/condition clear-sustain ladder — shared by both recovery signals
+ *  (auto: !triggerTree; condition: the reset tree). Mirrors the legacy
+ *  per-reading sustain block exactly. */
+async function applySustainedRecovery(
+  rule: DbRule,
+  st: { id: string; notificationId: string | null; recoveredSince: Date | null },
+  recovered: boolean,
+  now: Date,
+): Promise<void> {
+  if (!recovered) {
+    if (st.recoveredSince) {
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+    }
+    return;
+  }
+  const sustainSec = rule.reset.sustainSec ?? 0;
+  if (sustainSec <= 0) {
+    await recover(rule, st);
+  } else if (!st.recoveredSince) {
+    await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: now } });
+  } else if (now.getTime() - st.recoveredSince.getTime() >= sustainSec * 1000) {
+    await recover(rule, st);
+  }
+  // else: recovered but not sustained long enough yet — keep firing.
+}
+
+async function evaluateCompositeRule(rule: DbRule): Promise<void> {
+  const trigger = rule.trigger as CompositeTrigger;
+  const suppressedIds = new Set<string>();
+  let activeAssets: ScopeAssetRow[];
+  if (trigger.kind === "host") {
+    activeAssets = [HOST_PSEUDO_ASSET];
+  } else {
+    const assets = await loadScopeAssets(rule.scope);
+    activeAssets = [];
+    for (const a of assets) {
+      if (isSuppressedForNotifications(a)) suppressedIds.add(a.id);
+      else activeAssets.push(a);
+    }
+  }
+
+  const leaves = collectLeafRefs(trigger);
+  const truths = await resolveLeafTruths(leaves, activeAssets);
+
+  const states = await prisma.notificationRuleState.findMany({ where: { ruleId: rule.id } });
+  const now = new Date();
+
+  // Orphan sweep: composite state lives at dimensionKey "" only. Rows at any
+  // other key are stale BY CONSTRUCTION (a single→composite trigger edit that
+  // bypassed the service cleanup — raw API, restored backup): clear their
+  // notifications and delete the rows so they can't linger firing forever.
+  for (const st of states) {
+    if (st.dimensionKey !== "") {
+      await clearActiveNotification(st, "system:rule-edited");
+      await prisma.notificationRuleState.delete({ where: { id: st.id } });
+    }
+  }
+  const stateMap = new Map(states.filter((s) => s.dimensionKey === "").map((s) => [s.assetId ?? "", s]));
+
+  // Condition-mode reset: resolve the reset tree ONLY against assets that are
+  // actually firing — usually zero extra queries.
+  const resetTree = rule.reset.mode === "condition" ? (rule.reset.condition ?? null) : null;
+  let resetOutcomeFor: (assetId: string) => CompositeOutcome | null = () => null;
+  if (resetTree) {
+    const firingAssets = activeAssets.filter((a) => stateMap.get(a.id)?.state === "firing");
+    if (firingAssets.length > 0) {
+      const resetLeaves = collectLeafRefs(resetTree);
+      const resetTruths = await resolveLeafTruths(resetLeaves, firingAssets);
+      resetOutcomeFor = (assetId) => compositeOutcomeForAsset(resetTree, assetId, resetLeaves, resetTruths);
+    }
+  }
+
+  for (const a of activeAssets) {
+    const outcome = compositeOutcomeForAsset(trigger, a.id, leaves, truths);
+    if (!outcome.hasAnyReading) continue; // no evidence either way — state frozen (parity with the per-reading path)
+    const st = stateMap.get(a.id);
+    const reading: Reading = { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: "", dimLabel: "", value: null };
+
+    if (st?.state === "firing") {
+      if (rule.reset.mode === "condition") {
+        // While firing, the reset tree is the SOLE recovery authority — the
+        // trigger re-meeting does not independently cancel the sustain timer.
+        // No reset reading ⇒ not recovered (never clear on absent evidence).
+        const recovered = resetOutcomeFor(a.id)?.meets === true;
+        await applySustainedRecovery(rule, st, recovered, now);
+      } else if (outcome.meets) {
+        if (st.recoveredSince) {
+          // Re-met mid-recovery under auto: cancel the clear-sustain timer.
+          await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+        }
+      } else if (rule.reset.mode !== "auto") {
+        await recover(rule, st); // manual re-arms the state; timed waits for its sweep
+      } else {
+        // auto for composites = the tree is no longer true (no hysteresis
+        // dead band — clearThreshold is rejected at save for composites).
+        await applySustainedRecovery(rule, st, true, now);
+      }
+      continue;
+    }
+
+    if (outcome.meets) {
+      if (!st || st.state === "clear") {
+        if (trigger.forDurationSec > 0) {
+          await upsertState(rule.id, reading, "pending", { conditionMetSince: now, lastValue: null });
+        } else {
+          await fire(rule, reading, null, now, compositeFireInfo(outcome));
+        }
+      } else if (st.state === "pending") {
+        const since = st.conditionMetSince ?? now;
+        if (now.getTime() - since.getTime() >= trigger.forDurationSec * 1000) {
+          await fire(rule, reading, null, now, compositeFireInfo(outcome));
+        }
+        // else keep pending
+      }
+    } else if (st?.state === "pending") {
+      // Partial-missing under AND lands here too (missing leaf ⇒ false) — the
+      // debounce restarts; accepted semantics (readings smooth over 15 min).
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null } });
+    }
+  }
+
+  // Suppressed assets: reset pending rows (the debounce restarts after the
+  // window), leave firing rows frozen — same contract as the legacy path.
+  for (const st of states) {
+    if (st.dimensionKey === "" && st.state === "pending" && st.assetId && suppressedIds.has(st.assetId)) {
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null } });
+    }
+  }
+
+  // Timed auto-clear sweep (identical to the legacy path; orphan rows already
+  // deleted above are excluded by the dimensionKey guard).
+  if (rule.reset.mode === "timed" && rule.reset.afterSec) {
+    const afterSec = rule.reset.afterSec;
+    for (const st of states) {
+      if (st.dimensionKey === "" && st.state === "firing" && st.firedAt && now.getTime() - st.firedAt.getTime() >= afterSec * 1000) {
+        await clearActiveNotification(st, "system:timed");
+        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null } });
+      }
+    }
+  }
+}
+
 async function upsertState(
   ruleId: string,
   reading: Reading,
@@ -642,7 +950,7 @@ async function upsertState(
   });
 }
 
-async function fire(rule: DbRule, reading: Reading, lastValue: number | null, now: Date): Promise<void> {
+async function fire(rule: DbRule, reading: Reading, lastValue: number | null, now: Date, composite?: CompositeFireInfo): Promise<void> {
   // Respect cooldown: if this (rule,asset,dim) fired within cooldownSec, skip.
   const existing = await prisma.notificationRuleState.findUnique({
     where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
@@ -654,7 +962,7 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
   // is negligible even at 2000 assets — the hot evaluate path stays on the
   // tight SCOPE_SELECT.
   const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
-  const ctx = buildTemplateContext({ ...readingContextParts(rule, reading, now), assetDetail: detail });
+  const ctx = buildTemplateContext({ ...readingContextParts(rule, reading, now, composite), assetDetail: detail });
   const message = renderMessage(rule, reading, ctx);
   ctx["message"] = message;
   const notif = await prisma.notification.create({
@@ -694,7 +1002,9 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
 }
 
 async function recover(rule: DbRule, st: { id: string; notificationId: string | null }): Promise<void> {
-  if (rule.reset.mode === "auto") {
+  // "condition" recovers like "auto": the reset tree (or trigger negation)
+  // observed a real recovery, so clear the notification + stamp the event.
+  if (rule.reset.mode === "auto" || rule.reset.mode === "condition") {
     await clearActiveNotification(st, "system:auto-resolve");
     await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null } });
     await logEvent({
@@ -901,7 +1211,9 @@ export async function evaluateAllNotificationRules(): Promise<void> {
 
   for (const rule of rules) {
     try {
-      if (rule.trigger.type === "asset_metric" || rule.trigger.type === "asset_state" || rule.trigger.type === "host_metric") {
+      if (rule.trigger.type === "composite") {
+        await evaluateCompositeRule(rule);
+      } else if (rule.trigger.type === "asset_metric" || rule.trigger.type === "asset_state" || rule.trigger.type === "host_metric") {
         await evaluateThresholdRule(rule);
       }
     } catch (err) {

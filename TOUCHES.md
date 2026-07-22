@@ -1423,8 +1423,10 @@ Listed alphabetically.
 - `SCOPE_SELECT` stays tight (hot 60s×2000-asset path); the wider `ASSET_DETAIL_SELECT` fetch runs only on FIRE and only when composition/escalation/{asset.*} tokens need it, through the per-tick cache.
 - All interpolation goes through `renderNotificationTemplate` (single-brace {token}, single pass, unknown tokens literal) — never hand-rolled replaceAll chains.
 - Scale: batch findMany per sample table (no per-row awaits) — re-check at 2000 assets when adding a metric.
+- **Composite path is separate by design** (`evaluateCompositeRule` + collectLeafRefs/resolveLeafTruths/evalTriggerTreeForAsset/compositeOutcomeForAsset/applySustainedRecovery): per-ASSET state at dimensionKey "" (ANY-dimension leaves, one alert per device), leaves resolved through the UNCHANGED single-trigger resolvers with identical leaves deduped to one query. Never generalize the legacy per-reading loop to cover composites — the two share only fire/recover/upsertState. Missing leaf ⇒ false; asset with zero readings across all leaves ⇒ skipped (state frozen). Orphan sweep: any state row with dimensionKey ≠ "" under a composite rule is cleared + deleted (`system:rule-edited`). Condition-mode reset resolves its tree ONLY against firing assets and is the sole recovery authority while firing (`recover()` treats "condition" like "auto"); auto for composites = !tree, no hysteresis dead band.
+- `notificationRuleService.updateRule` clears alerts + deletes the rule's state rows whenever the trigger IDENTITY changes (`triggerIdentityOf`: type/kind/metric/field/changeType) — threshold/operator/tree edits keep state.
 
-**When changing this:** New metric → add a resolver branch AND the catalog entry in `notificationTypes`. New clear behavior → handle it in both `recover()` and the timed-sweep pass. New template token → `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (+ `ASSET_DETAIL_SELECT` here if asset-sourced).
+**When changing this:** New metric → add a resolver branch AND the catalog entry in `notificationTypes` (composite leaves get it for free via the shared resolvers). New clear behavior → handle it in `recover()`, the timed-sweep pass, AND the composite transition block. New template token → `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (+ `ASSET_DETAIL_SELECT` here if asset-sourced).
 
 ---
 
