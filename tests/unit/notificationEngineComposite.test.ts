@@ -139,9 +139,9 @@ vi.mock("../../src/services/automationActionService.js", () => ({
   executeActions: vi.fn(async () => ({ executed: 0, failed: 0 })),
 }));
 
-import { evaluateAllNotificationRules } from "../../src/services/notificationEngine.js";
+import { evaluateAllNotificationRules, previewRule } from "../../src/services/notificationEngine.js";
 import { updateRule } from "../../src/services/notificationRuleService.js";
-import { ruleInputSchema } from "../../src/services/notificationTypes.js";
+import { ruleInputSchema, previewInputSchema } from "../../src/services/notificationTypes.js";
 
 const T0 = new Date("2026-07-21T12:00:00Z");
 
@@ -434,6 +434,50 @@ describe("condition-mode reset", () => {
     vi.setSystemTime(new Date(T0.getTime() + 601_000));
     await tick({ a1: 95 }, { a1: 94 }); // cooldown elapsed — refires
     expect(db.notifications).toHaveLength(2);
+  });
+});
+
+describe("composite preview", () => {
+  it("returns one row per asset with a per-leaf breakdown", async () => {
+    const now = new Date();
+    db.telemetry = [
+      { assetId: "a1", timestamp: now, cpuPct: 95, memPct: null, memUsedBytes: null, sessionCount: null },
+      { assetId: "a2", timestamp: now, cpuPct: 45, memPct: null, memUsedBytes: null, sessionCount: null },
+    ];
+    db.storage = [{ assetId: "a1", timestamp: now, mountPath: "/var", usedBytes: 94, totalBytes: 100 }];
+    const input = previewInputSchema.parse({
+      trigger: { type: "composite", kind: "asset", op: "and", children: [cpuLeaf, storLeaf], forDurationSec: 0 },
+      scope: { allAssets: true },
+    });
+    const res = await previewRule(input as any);
+    expect(res.supported).toBe(true);
+    expect(res.totalEvaluated).toBe(2);
+
+    const m1 = res.matches.find((m) => m.assetId === "a1")!;
+    expect(m1.meets).toBe(true);
+    expect(m1.conditionsSummary).toBe("2 of 2 conditions met");
+    expect(m1.leaves).toHaveLength(2);
+    expect(m1.leaves![0]).toMatchObject({ leafId: "0", met: true, value: 95, noData: false });
+    expect(m1.leaves![1]).toMatchObject({ leafId: "1", met: true, dimension: "/var", noData: false });
+
+    const m2 = res.matches.find((m) => m.assetId === "a2")!;
+    expect(m2.meets).toBe(false);
+    expect(m2.leaves![0]).toMatchObject({ met: false, value: 45, noData: false }); // measured false
+    expect(m2.leaves![1]).toMatchObject({ met: false, value: null, noData: true }); // no storage data
+    // Met rows sort first.
+    expect(res.matches[0].assetId).toBe("a1");
+  });
+
+  it("skips assets with zero readings across all leaves", async () => {
+    db.telemetry = [];
+    db.storage = [];
+    const input = previewInputSchema.parse({
+      trigger: { type: "composite", kind: "asset", op: "and", children: [cpuLeaf, storLeaf], forDurationSec: 0 },
+      scope: { allAssets: true },
+    });
+    const res = await previewRule(input as any);
+    expect(res.totalEvaluated).toBe(0);
+    expect(res.matches).toHaveLength(0);
   });
 });
 

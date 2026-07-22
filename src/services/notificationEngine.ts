@@ -682,6 +682,8 @@ interface LeafTruth {
   met: boolean;
   /** The first meeting dimension — names the sensor/mount/interface in the alert. */
   witness: { dimLabel: string; value: number | string | boolean | null } | null;
+  /** A representative reading regardless of met (preview shows current values). */
+  sample: { dimLabel: string; value: number | string | boolean | null } | null;
   hasReading: boolean;
 }
 
@@ -717,9 +719,10 @@ function leafTruthByAsset(leaf: CompositeLeaf, readings: Reading[]): Map<string,
     const id = r.assetId || "";
     let t = out.get(id);
     if (!t) {
-      t = { met: false, witness: null, hasReading: true };
+      t = { met: false, witness: null, sample: null, hasReading: true };
       out.set(id, t);
     }
+    if (!t.sample) t.sample = { dimLabel: r.dimLabel, value: r.value };
     if (!t.met && readingMeets(leafTrigger, r.value)) {
       t.met = true;
       t.witness = { dimLabel: r.dimLabel, value: r.value };
@@ -1241,6 +1244,19 @@ export interface PreviewMatch {
    *  nor clears sits in the dead band. */
   wouldClear?: boolean;
   inDeadBand?: boolean;
+  /** Composite drafts only — per-condition breakdown, one row per asset.
+   *  leafId is the trigger-tree path ("0", "1.2") so the wizard can highlight
+   *  its builder rows; noData marks "false because absent", not measured. */
+  leaves?: Array<{
+    leafId: string;
+    label: string;
+    met: boolean;
+    value: number | string | boolean | null;
+    dimension: string;
+    noData: boolean;
+  }>;
+  /** Composite drafts only — "k of n conditions met". */
+  conditionsSummary?: string;
 }
 
 export interface PreviewResult {
@@ -1272,6 +1288,10 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
         meets: true,
       })),
     };
+  }
+
+  if (trigger.type === "composite") {
+    return previewCompositeRule(trigger, input);
   }
 
   if (trigger.type === "host_metric") {
@@ -1332,4 +1352,70 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
   }
 
   return { supported: true, totalEvaluated: readings.length, matches: matches.slice(0, 200), emailPreview };
+}
+
+/** Composite dry-run: one PreviewMatch per asset with a per-leaf breakdown
+ *  (met / measured-false / noData) in tree order. Suppression is NOT applied —
+ *  preview answers "would this fire on current data", not "is it silenced". */
+async function previewCompositeRule(trigger: CompositeTrigger, input: PreviewRuleInput): Promise<PreviewResult> {
+  const assets = trigger.kind === "host" ? [HOST_PSEUDO_ASSET] : await loadScopeAssets(input.scope);
+  const leaves = collectLeafRefs(trigger);
+  const truths = await resolveLeafTruths(leaves, assets);
+
+  const matches: PreviewMatch[] = [];
+  let evaluated = 0;
+  const outcomes = new Map<string, CompositeOutcome>();
+  for (const a of assets) {
+    const outcome = compositeOutcomeForAsset(trigger, a.id, leaves, truths);
+    if (!outcome.hasAnyReading) continue; // nothing measured — not evaluated
+    outcomes.set(a.id, outcome);
+    evaluated++;
+    matches.push({
+      assetId: a.id || null,
+      hostname: a.hostname,
+      dimension: "",
+      value: null,
+      meets: outcome.meets,
+      leaves: leaves.map(({ leafId, leaf }) => {
+        const t = truths.get(leafId)?.get(a.id);
+        const src = t?.witness ?? t?.sample ?? null;
+        return {
+          leafId,
+          label: leafConditionLabel(leaf),
+          met: t?.met === true,
+          value: src?.value ?? null,
+          dimension: src?.dimLabel ?? "",
+          noData: !t?.hasReading,
+        };
+      }),
+      conditionsSummary: `${outcome.metLeaves.length} of ${outcome.totalLeaves} conditions met`,
+    });
+  }
+  matches.sort((a, b) => Number(b.meets) - Number(a.meets));
+
+  let emailPreview: PreviewResult["emailPreview"];
+  if (input.emailComposition && matches.length > 0) {
+    const draft: DbRule = {
+      id: "", name: input.name, description: input.description ?? null, severity: input.severity,
+      trigger, scope: input.scope,
+      reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
+      messageTemplate: input.messageTemplate ?? null,
+      emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
+    };
+    const best = matches[0];
+    const outcome = outcomes.get(best.assetId ?? "")!;
+    const sample: Reading = { assetId: best.assetId ?? "", hostname: best.hostname, tags: [], dimKey: "", dimLabel: "", value: null };
+    const detail = best.assetId
+      ? await prisma.asset.findUnique({ where: { id: best.assetId }, select: ASSET_DETAIL_SELECT })
+      : null;
+    const ctx = buildTemplateContext({
+      ...readingContextParts(draft, sample, new Date(), compositeFireInfo(outcome)),
+      assetDetail: detail ? { ...detail, status: String(detail.status) } : null,
+    });
+    ctx["message"] = renderMessage(draft, sample, ctx);
+    const composed = buildComposedEmail(input.emailComposition, ctx);
+    emailPreview = { subject: composed.subject, text: composed.text, html: composed.html };
+  }
+
+  return { supported: true, totalEvaluated: evaluated, matches: matches.slice(0, 200), emailPreview };
 }
