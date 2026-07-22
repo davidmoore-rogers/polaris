@@ -2041,6 +2041,7 @@ function _wireSampleRetentionCard() {
       try {
         await api.serverSettings.setSampleRetention(payload);
         showToast("Sample retention saved", "success");
+        _showRetentionPruneInfoModal();
       } catch (err) {
         showToast("Save failed: " + (err && err.message ? err.message : String(err)), "error");
       } finally {
@@ -2048,6 +2049,31 @@ function _wireSampleRetentionCard() {
       }
     });
   }
+}
+
+// Post-save explainer: retention changes are applied by the retention prune
+// pass, which runs on a 24h cadence (RETENTION_PRUNE_INTERVAL_MS server-side)
+// — the save itself deletes nothing. Sets expectations for when the operator
+// will actually see database size move.
+function _showRetentionPruneInfoModal() {
+  var p = 'style="font-size:0.9rem;color:var(--color-text-secondary);margin:0 0 0.75rem"';
+  var body =
+    '<p ' + p + '>Retention changes are applied by the <strong>retention prune pass</strong>, ' +
+      'which runs once every 24 hours — not at save time. The next pass fires when 24 hours ' +
+      'have elapsed since the previous one, so the new limits take effect ' +
+      '<strong>within the next 24 hours</strong>.</p>' +
+    '<p ' + p + '>When it runs, sample history is stored in one-day chunks and every chunk ' +
+      'entirely older than the new cutoff is dropped whole — that is what returns disk space ' +
+      'to the operating system, compressed history included. Expect a step down in database ' +
+      'size at that point, then a one-day trim on each pass after.</p>' +
+    '<p ' + p + '>Two caveats: the chunk straddling a cutoff is kept until it fully ages past it ' +
+      '(up to one extra day of data per tier), and rows removed by row-level deletes free space ' +
+      'for reuse inside PostgreSQL rather than shrinking files on disk.</p>' +
+    '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0">You can confirm the ' +
+      'prune ran on the Maintenance tab — the Database card’s volume bars and steady-state ' +
+      'size reflect the new retention after the next pass.</p>';
+  var footer = '<button class="btn btn-primary" onclick="closeModal()">Got it</button>';
+  openModal("When will the database shrink?", body, footer);
 }
 
 async function loadDatabaseInfo() {
