@@ -78,7 +78,7 @@ describe("automation wizard DOM render", () => {
     await (g.openAutomationWizard as (r: unknown) => Promise<void>)(null);
     expect(toastErrors).toEqual([]);
     expect(doc.querySelector(".modal")).toBeTruthy();
-    expect(doc.querySelectorAll("#aw-stepper .stepper-step").length).toBe(5);
+    expect(doc.querySelectorAll("#aw-stepper .stepper-step").length).toBe(6);
     expect(doc.querySelector("#aw-step-1.visible")).toBeTruthy();
     // severity select carries the shared palette classes
     expect(doc.querySelector("#aw-severity.sev-select")).toBeTruthy();
@@ -141,6 +141,53 @@ describe("automation wizard DOM render", () => {
     items[0]!.dispatchEvent(new win.MouseEvent("mousedown", { bubbles: true }));
     expect(input.value).toBe("FGT-60F");
     expect(row.querySelector(".aw-suggest.open")).toBeFalsy(); // closed after pick
+    expect(toastErrors).toEqual([]);
+  });
+
+  it("step 3 renders the trigger condition tree with a starter leaf", async () => {
+    const win = g.window as InstanceType<typeof Window>;
+    // Re-check All assets so step 2 validates (the builder has unfinished rows).
+    const allCb = doc.querySelector("#aw-all-assets") as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
+    allCb.checked = true;
+    allCb.dispatchEvent(new win.Event("change", { bubbles: true }));
+    (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(toastErrors).toEqual([]);
+    expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
+    // Category select (device/host/event/change) + the tree with one leaf row.
+    const cat = doc.querySelector("#aw-trigger-type") as unknown as { value: string };
+    expect(cat.value).toBe("device");
+    expect(doc.querySelector("#aw-trig-root .scg-group")).toBeTruthy();
+    expect(doc.querySelectorAll("#aw-trig-root .scr-row").length).toBe(1);
+    expect(doc.querySelector("#aw-trig-root .tgl-what")).toBeTruthy();
+    expect(doc.querySelector("#aw-trig-root .tgl-threshold")).toBeTruthy();
+    expect(doc.querySelector("#aw-trig-root .scr-row .aw-grip[draggable='true']")).toBeTruthy();
+  });
+
+  it("step 4 shows the default-checked 'trigger no longer true' checkbox; step 6 lists affected devices", async () => {
+    // Fill the leaf threshold so step 3 validates.
+    (doc.querySelector("#aw-trig-root .tgl-threshold") as unknown as { value: string }).value = "90";
+    (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(toastErrors).toEqual([]);
+    expect(doc.querySelector("#aw-step-4.visible")).toBeTruthy();
+    const autoCb = doc.querySelector("#aw-reset-auto") as unknown as { checked: boolean };
+    expect(autoCb).toBeTruthy();
+    expect(autoCb.checked).toBe(true);
+    // Single-condition trigger → hysteresis extras available under the checkbox.
+    expect(doc.querySelector("#aw-hyst-enable")).toBeTruthy();
+
+    (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(doc.querySelector("#aw-step-5.visible")).toBeTruthy();
+    expect(doc.querySelector("#aw-summary")).toBeFalsy(); // summary moved to step 6
+
+    (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(doc.querySelector("#aw-step-6.visible")).toBeTruthy();
+    expect(doc.querySelector("#aw-summary")).toBeTruthy();
+    const affected = doc.querySelector("#aw-affected")!;
+    expect(affected.textContent).toContain("3"); // stubbed preview totalEvaluated
     expect(toastErrors).toEqual([]);
   });
 });

@@ -1,14 +1,23 @@
 /**
- * public/js/automations-wizard.js — the 5-step automation builder.
+ * public/js/automations-wizard.js — the 6-step automation builder.
  *
  * openAutomationWizard(existing) replaces the old single-form rule builder:
  *   Step 1  Name & description (+ severity + enabled)
- *   Step 2  Asset filtering (scope) — live matched-device preview
- *   Step 3  Trigger conditions — live plain-English sentence + current-value test
- *   Step 4  Reset conditions — auto (hysteresis + clear-sustain) / timed / manual
- *           + re-notify cooldown, live sentence
+ *   Step 2  Asset filtering — "All assets" checkbox (default) or a nested
+ *           AND/OR condition builder with drag-and-drop; live device preview
+ *   Step 3  Trigger conditions — device/host triggers use the same AND/OR
+ *           tree builder (1 condition saves as the legacy single trigger,
+ *           2+ as a per-asset composite); event/change keep flat fields;
+ *           live plain-English sentence + current-value test with per-leaf
+ *           breakdown
+ *   Step 4  Reset conditions — default-checked "trigger no longer true"
+ *           (auto, with hysteresis/sustain extras); unchecked reveals
+ *           timed / manual (+ a custom AND/OR reset-condition tree for
+ *           composite triggers → reset mode "condition")
  *   Step 5  Automations (actions: notify / api_call / script) + escalation
- *           tiers of actions + review summary
+ *           tiers of actions
+ *   Step 6  Summary — review grid + the list of devices the automation
+ *           affects (live scope preview)
  *
  * Mechanics: shared stepper CSS from styles.css (see TEMPLATES.md → "Wizard
  * (stepper modal)"); free navigation to visited steps (all steps unlocked in
@@ -81,8 +90,8 @@ async function openAutomationWizard(existing) {
   _awDraftStash = null;
 
   var step = 1;
-  var visited = editing ? 5 : 1;
-  var STEPS = ["Name", "Devices", "Trigger", "Reset", "Actions"];
+  var visited = editing ? 6 : 1;
+  var STEPS = ["Name", "Devices", "Trigger", "Reset", "Actions", "Summary"];
   var scopePreviewTimer = null;
   var trigPreviewTimer = null;
 
@@ -102,6 +111,13 @@ async function openAutomationWizard(existing) {
     }).join("");
   }
   function findType(t) { return s.triggerTypes.find(function (x) { return x.type === t; }); }
+  /** Device-scoped? Composite depends on kind (host composites ignore scope). */
+  function isTriggerScoped(tr) {
+    if (!tr || !tr.type) return true;
+    if (tr.type === "composite") return tr.kind !== "host";
+    var def = findType(tr.type);
+    return !!(def && def.scoped);
+  }
   function metricLabel(m) { var x = s.metricMeta && s.metricMeta[m]; return x ? x.label : m; }
   function metricUnit(m) { var x = s.metricMeta && s.metricMeta[m]; return (x && x.unit) || ""; }
   function fieldLabel(f) { var x = s.fieldMeta && s.fieldMeta[f]; return x ? x.label : f; }
@@ -176,9 +192,37 @@ async function openAutomationWizard(existing) {
     if (sec % 60 === 0) { var m = sec / 60; return m + (m === 1 ? " minute" : " minutes"); }
     return sec + " seconds";
   }
+  function tgLeafPhrase(leaf) {
+    if (!leaf || !leaf.type) return "…";
+    if (leaf.type === "asset_state") {
+      return fieldLabel(leaf.field) + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + String(leaf.value == null || leaf.value === "" ? "…" : leaf.value);
+    }
+    var unit = metricUnit(leaf.metric); unit = unit && unit !== "(sensor unit)" ? " " + unit : "";
+    var agg = leaf.aggregation && leaf.aggregation !== "latest" && leaf.windowSec
+      ? " (" + (AGG_PHRASE[leaf.aggregation] || leaf.aggregation) + " " + humanDuration(leaf.windowSec) + ")" : "";
+    var thr = leaf.threshold == null || isNaN(leaf.threshold) ? "…" : leaf.threshold;
+    var out = (leaf.type === "host_metric" ? "the Polaris host's " : "") + metricLabel(leaf.metric) + agg + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + thr + unit;
+    var df = leaf.dimensionFilter || {};
+    Object.keys(df).forEach(function (k) {
+      if (df[k]) out += " " + (DIM_PHRASE[k] || k + " = {value}").replace("{value}", df[k]);
+    });
+    return out;
+  }
+  function tgTreePhrase(node) {
+    var parts = (node.children || []).map(function (c) {
+      if (c && c.type === undefined && Array.isArray(c.children)) return "(" + tgTreePhrase(c) + ")";
+      return tgLeafPhrase(c);
+    });
+    return parts.join(node.op === "or" ? " OR " : " AND ");
+  }
   function triggerSentence(tr) {
     if (!tr || !tr.type) return "…";
     var out;
+    if (tr.type === "composite") {
+      out = "When <strong>" + escapeHtml(tgTreePhrase({ op: tr.op, children: tr.children || [] }) || "…") + "</strong>";
+      if (tr.forDurationSec > 0) out += ", sustained for <strong>" + humanDuration(tr.forDurationSec) + "</strong>";
+      return out + ".";
+    }
     if (tr.type === "asset_metric" || tr.type === "host_metric") {
       var subject = tr.type === "host_metric" ? "the Polaris host's " + metricLabel(tr.metric) : metricLabel(tr.metric);
       var agg = tr.aggregation && tr.aggregation !== "latest" && tr.windowSec
@@ -213,6 +257,10 @@ async function openAutomationWizard(existing) {
       out = "Stays active until <strong>someone clears it manually</strong>.";
     } else if (reset.mode === "timed") {
       out = "Resets automatically after <strong>" + (reset.afterSec ? humanDuration(reset.afterSec) : "…") + "</strong>.";
+    } else if (reset.mode === "condition") {
+      out = "Resets when <strong>" + escapeHtml(reset.condition ? tgTreePhrase(reset.condition) : "…") + "</strong>";
+      if (reset.sustainSec > 0) out += " and stays that way for <strong>" + humanDuration(reset.sustainSec) + "</strong>";
+      out += ".";
     } else {
       var numeric = tr && (tr.type === "asset_metric" || tr.type === "host_metric");
       if (numeric && reset.clearThreshold != null && !isNaN(reset.clearThreshold)) {
@@ -229,8 +277,20 @@ async function openAutomationWizard(existing) {
     return out;
   }
 
-  // Condition-builder vocabulary — must initialize BEFORE the body assembly
-  // below (step2Html renders from it during the openModal call).
+  // Builder vocabularies — must initialize BEFORE the body assembly below
+  // (step2Html/step3Html render from them during the openModal call).
+  var tgMeta = s.compositeMeta || {
+    groupOps: ["and", "or"],
+    groupOpLabels: { and: "All conditions must be met (AND)", or: "At least one condition must be met (OR)" },
+    maxDepth: 3, maxLeaves: 10,
+    anyDimensionNote: "With multiple conditions, an automation alerts once per device; a per-sensor/per-interface condition counts as met when any of them crosses.",
+  };
+  var TRIGGER_CATEGORIES = [
+    { value: "device", label: "Device conditions" },
+    { value: "host", label: "Polaris host conditions" },
+    { value: "event", label: (findType("event") || {}).label || "Audit event match" },
+    { value: "change", label: (findType("change") || {}).label || "Change detection" },
+  ];
   var scMeta = s.scopeCondition || {
     groupOps: ["and", "or", "none", "notAll"],
     groupOpLabels: {
@@ -257,9 +317,9 @@ async function openAutomationWizard(existing) {
   // ── Modal shell: stepper + panels + footer ─────────────────────────────
   function stepperHtml() {
     var parts = [];
-    for (var i = 1; i <= 5; i++) {
+    for (var i = 1; i <= STEPS.length; i++) {
       parts.push('<div class="stepper-step" data-step="' + i + '"><span class="stepper-num">' + i + '</span><span>' + STEPS[i - 1] + '</span></div>');
-      if (i < 5) parts.push('<div class="stepper-line" data-line="' + i + '"></div>');
+      if (i < STEPS.length) parts.push('<div class="stepper-line" data-line="' + i + '"></div>');
     }
     return '<div class="stepper" id="aw-stepper">' + parts.join("") + '</div>';
   }
@@ -270,7 +330,8 @@ async function openAutomationWizard(existing) {
     '<div class="step-panel" id="aw-step-2">' + step2Html() + '</div>' +
     '<div class="step-panel" id="aw-step-3">' + step3Html() + '</div>' +
     '<div class="step-panel" id="aw-step-4"></div>' + // rendered on entry (depends on trigger type)
-    '<div class="step-panel" id="aw-step-5"></div>' + // rendered on entry (summary reflects steps 1–4)
+    '<div class="step-panel" id="aw-step-5"></div>' + // rendered on entry (actions/escalation)
+    '<div class="step-panel" id="aw-step-6"></div>' + // rendered on entry (summary + affected devices)
     '<datalist id="notif-email-suggest">' + emailSuggestOptions() + '</datalist>';
 
   var footer =
@@ -586,7 +647,7 @@ async function openAutomationWizard(existing) {
       g.style.borderLeftColor = depth === 0 ? "var(--color-accent)" : "var(--color-success)";
     });
   }
-  function wireCondDnD(panel, rootSelector, onChange) {
+  function wireCondDnD(panel, rootSelector, onChange, maxDepthOverride) {
     panel.addEventListener("dragstart", function (e) {
       var grip = e.target && e.target.classList && e.target.classList.contains("aw-grip") ? e.target : null;
       if (!grip) return;
@@ -623,7 +684,7 @@ async function openAutomationWizard(existing) {
       awClearDropCue();
       if (!root || !cue || !root.contains(cue) || _awDragEl.contains(cue)) { _awDragEl = null; return; }
       e.preventDefault();
-      var maxDepth = scMeta.maxDepth || 5;
+      var maxDepth = maxDepthOverride || scMeta.maxDepth || 5;
       var destChildren = null;
       var beforeEl = null;
       if (cue.classList.contains("scg-children")) {
@@ -684,8 +745,7 @@ async function openAutomationWizard(existing) {
     draft.scope = { condition: tree };
   }
   function validateStep2() {
-    var def = findType((draft.trigger || {}).type);
-    if (def && !def.scoped) return null; // non-scoped triggers ignore the filter
+    if (!isTriggerScoped(draft.trigger)) return null; // non-scoped triggers ignore the filter
     var sc = draft.scope || {};
     if (sc.allAssets || !sc.condition) return null;
     if (!sc.condition.children.length) {
@@ -730,11 +790,228 @@ async function openAutomationWizard(existing) {
     }
   }
 
-  // ── Step 3: Trigger conditions ─────────────────────────────────────────
+  // ── Step 3: Trigger conditions (AND/OR condition tree) ─────────────────
+  // Device / Polaris-host triggers use the same nested group builder as the
+  // Devices step: leaf rows are metric/state conditions, groups combine with
+  // AND/OR (only — negation would fire on missing data), drag-and-drop moves
+  // conditions between groups. One condition saves as the legacy single
+  // trigger (per-sensor/-mount alerting + hysteresis); two or more save as a
+  // composite that alerts once per device. Audit-event and change triggers
+  // keep their flat fields.
+  function triggerCategoryOf(tr) {
+    if (!tr || !tr.type) return "device";
+    if (tr.type === "composite") return tr.kind === "host" ? "host" : "device";
+    if (tr.type === "host_metric") return "host";
+    if (tr.type === "event" || tr.type === "change") return tr.type;
+    return "device";
+  }
+  function tgDefaultLeaf(kind) {
+    return kind === "host"
+      ? { type: "host_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: null }
+      : { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: null };
+  }
+  function triggerToTree(tr, kind) {
+    if (tr && tr.type === "composite" && (tr.kind || "asset") === kind) {
+      return { op: tr.op || "and", children: JSON.parse(JSON.stringify(tr.children || [])) };
+    }
+    var leafKinds = kind === "host" ? ["host_metric"] : ["asset_metric", "asset_state"];
+    if (tr && leafKinds.indexOf(tr.type) !== -1) {
+      var leaf = JSON.parse(JSON.stringify(tr));
+      delete leaf.forDurationSec;
+      return { op: "and", children: [leaf] };
+    }
+    return { op: "and", children: [tgDefaultLeaf(kind)] };
+  }
+  /** Mirror of the server's collapseCompositeTrigger: 1 leaf ⇒ legacy single
+   *  trigger (so Step 4 offers hysteresis and the stored shape matches). */
+  function tgCollapse(tr) {
+    var op = tr.op, children = tr.children;
+    while (children.length === 1 && children[0] && children[0].type === undefined && Array.isArray(children[0].children)) {
+      op = children[0].op; children = children[0].children;
+    }
+    if (children.length === 1 && children[0] && children[0].type !== undefined) {
+      var leaf = JSON.parse(JSON.stringify(children[0]));
+      leaf.forDurationSec = tr.forDurationSec || 0;
+      return leaf;
+    }
+    return { type: "composite", kind: tr.kind, op: op, children: children, forDurationSec: tr.forDurationSec || 0 };
+  }
+  function tgLeaves(node) {
+    var out = [];
+    (node.children || []).forEach(function (c) {
+      if (c && c.type !== undefined) out.push(c);
+      else if (c) out = out.concat(tgLeaves(c));
+    });
+    return out;
+  }
+  function tgGroupOpOptions(sel) {
+    return (tgMeta.groupOps || ["and", "or"]).map(function (o) {
+      return '<option value="' + o + '"' + (o === sel ? " selected" : "") + '>' + escapeHtml((tgMeta.groupOpLabels || {})[o] || o) + '</option>';
+    }).join("");
+  }
+  function tgWhatOptions(kind, selWhat) {
+    if (kind === "host") {
+      var hm = (findType("host_metric") || {}).metrics || [];
+      return hm.map(function (m) {
+        var v = "m:" + m;
+        return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(metricLabel(m)) + '</option>';
+      }).join("");
+    }
+    var metrics = (findType("asset_metric") || {}).metrics || [];
+    var fields = (findType("asset_state") || {}).fields || [];
+    return '<optgroup label="Metrics">' + metrics.map(function (m) {
+      var v = "m:" + m;
+      return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(metricLabel(m)) + '</option>';
+    }).join("") + '</optgroup><optgroup label="Device state">' + fields.map(function (f) {
+      var v = "f:" + f;
+      return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(fieldLabel(f)) + '</option>';
+    }).join("") + '</optgroup>';
+  }
+  function tgStateValueControl(field, val) {
+    var meta = s.fieldMeta && s.fieldMeta[field];
+    var v = val != null ? String(val) : "";
+    if (meta && (meta.kind === "enum" || meta.kind === "bool") && meta.values) {
+      return '<select class="tgl-value" style="width:130px">' + opt(meta.values, v) + '</select>';
+    }
+    if (meta && meta.kind === "number") return '<input type="number" class="tgl-value" value="' + escapeHtml(v) + '" style="width:110px" placeholder="e.g. 3">';
+    return '<input type="text" class="tgl-value" value="' + escapeHtml(v) + '" style="width:130px" placeholder="e.g. up / down">';
+  }
+  function tgLeafRowHtml(leaf, kind) {
+    leaf = leaf || tgDefaultLeaf(kind);
+    var isState = leaf.type === "asset_state";
+    var what = isState ? "f:" + leaf.field : "m:" + leaf.metric;
+    var line1 =
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<span class="aw-grip" draggable="true" title="Drag to move">&#x2842;</span>' +
+        '<select class="tgl-what" style="flex:1;min-width:0">' + tgWhatOptions(kind, what) + '</select>' +
+        '<select class="tgl-op" style="width:64px">' + opt(s.comparators, leaf.operator || (isState ? "==" : ">=")) + '</select>' +
+        (isState
+          ? tgStateValueControl(leaf.field, leaf.value)
+          : '<input type="number" step="any" class="tgl-threshold" value="' + (leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : "") + '" placeholder="value" style="width:110px">') +
+        '<button type="button" class="btn btn-sm btn-danger scr-remove" title="Remove condition">&times;</button>' +
+      '</div>';
+    var line2 = "";
+    if (!isState) {
+      var unit = metricUnit(leaf.metric); if (unit === "(sensor unit)") unit = "sensor unit";
+      var dims = kind === "host" ? [] : ((s.metricDimensions && s.metricDimensions[leaf.metric]) || []);
+      var df = leaf.dimensionFilter || {};
+      var dimInputs = dims.map(function (d) {
+        return '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '" value="' + escapeHtml(df[d] || "") + '" style="flex:1;min-width:120px">';
+      }).join("");
+      line2 =
+        '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
+          (unit ? '<span class="tgl-unit">' + escapeHtml(unit) + '</span>' : "") +
+          '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + opt(s.aggregations, leaf.aggregation || "latest") + '</select>' +
+          '<span>over</span><input type="number" class="tgl-window" value="' + (leaf.windowSec || 0) + '" style="width:70px"><span>sec (0 = latest)</span>' +
+          dimInputs +
+        '</div>';
+    }
+    return '<div class="scr-row" style="margin:4px 0;padding:4px;border:1px solid var(--color-border);border-radius:6px">' + line1 + line2 + '</div>';
+  }
+  function tgGroupHtml(group, depth, kind) {
+    group = group || { op: "and", children: [] };
+    var inner = (group.children || []).map(function (c) {
+      return c && c.type === undefined && Array.isArray(c.children)
+        ? tgGroupHtml(c, depth + 1, kind)
+        : tgLeafRowHtml(c, kind);
+    }).join("");
+    return '<div class="scg-group" data-depth="' + depth + '" style="border:1px solid var(--color-border);border-left:3px solid ' + (depth === 0 ? "var(--color-accent)" : "var(--color-success)") + ';border-radius:6px;padding:0.55rem;margin:4px 0">' +
+      '<div style="display:flex;gap:6px;align-items:center;margin-bottom:2px">' +
+        (depth > 0 ? '<span class="aw-grip" draggable="true" title="Drag to move group">&#x2842;</span>' : "") +
+        '<select class="scg-op" style="flex:1;font-size:0.85rem">' + tgGroupOpOptions(group.op || "and") + '</select>' +
+        (depth > 0 ? '<button type="button" class="btn btn-sm btn-danger scg-remove" title="Remove group">&times;</button>' : "") +
+      '</div>' +
+      '<div class="scg-children">' + inner + '</div>' +
+      '<div style="margin-top:4px">' +
+        '<button type="button" class="btn btn-sm btn-secondary scg-add-rule">+ Condition</button> ' +
+        (depth + 1 < (tgMeta.maxDepth || 3) ? '<button type="button" class="btn btn-sm btn-secondary scg-add-group">+ Group</button>' : "") +
+      '</div>' +
+    '</div>';
+  }
+  function tgCollectLeaf(rowEl, kind) {
+    var what = rowEl.querySelector(".tgl-what").value;
+    var op = rowEl.querySelector(".tgl-op").value;
+    if (what.indexOf("f:") === 0) {
+      var vEl = rowEl.querySelector(".tgl-value");
+      return { type: "asset_state", field: what.slice(2), operator: op, value: vEl ? vEl.value : "" };
+    }
+    var leaf = {
+      type: kind === "host" ? "host_metric" : "asset_metric",
+      metric: what.slice(2),
+      aggregation: (rowEl.querySelector(".tgl-agg") || { value: "latest" }).value || "latest",
+      windowSec: Number((rowEl.querySelector(".tgl-window") || { value: 0 }).value) || 0,
+      operator: op,
+      threshold: Number(rowEl.querySelector(".tgl-threshold").value),
+    };
+    if (kind !== "host") {
+      var df = {};
+      rowEl.querySelectorAll(".tgl-dim").forEach(function (el) { var v = el.value.trim(); if (v) df[el.getAttribute("data-dim")] = v; });
+      if (Object.keys(df).length) leaf.dimensionFilter = df;
+    }
+    return leaf;
+  }
+  function tgCollectGroup(groupEl, kind) {
+    var op = groupEl.querySelector(":scope > div > .scg-op").value;
+    var children = [];
+    groupEl.querySelectorAll(":scope > .scg-children > *").forEach(function (el) {
+      if (el.classList.contains("scr-row")) children.push(tgCollectLeaf(el, kind));
+      else if (el.classList.contains("scg-group")) children.push(tgCollectGroup(el, kind));
+    });
+    return { op: op, children: children };
+  }
+  /** Delegated wiring for a trigger-style condition tree (Step 3 + the Step-4
+   *  reset builder). Added ONCE per panel (guard flag) — renders may replace
+   *  the inner HTML freely. kindFn is read at event time (device↔host swaps). */
+  function wireTgTree(panel, rootSelector, kindFn, onChange) {
+    if (panel._tgWired) return;
+    panel._tgWired = true;
+    panel.addEventListener("click", function (e) {
+      var btn = e.target.closest && e.target.closest("button");
+      if (!btn) return;
+      var root = panel.querySelector(rootSelector);
+      if (!root || !root.contains(btn)) return;
+      if (btn.classList.contains("scr-remove")) {
+        btn.closest(".scr-row").remove();
+        onChange();
+      } else if (btn.classList.contains("scg-remove")) {
+        btn.closest(".scg-group").remove();
+        onChange();
+      } else if (btn.classList.contains("scg-add-rule")) {
+        btn.closest(".scg-group").querySelector(":scope > .scg-children")
+          .insertAdjacentHTML("beforeend", tgLeafRowHtml(null, kindFn()));
+        onChange();
+      } else if (btn.classList.contains("scg-add-group")) {
+        var g = btn.closest(".scg-group");
+        var depth = Number(g.getAttribute("data-depth")) + 1;
+        if (depth >= (tgMeta.maxDepth || 3)) { showToast("Groups nest at most " + (tgMeta.maxDepth || 3) + " levels", "info"); return; }
+        g.querySelector(":scope > .scg-children")
+          .insertAdjacentHTML("beforeend", tgGroupHtml({ op: "or", children: [tgDefaultLeaf(kindFn())] }, depth, kindFn()));
+        onChange();
+      }
+    });
+    panel.addEventListener("change", function (e) {
+      var t = e.target;
+      if (!t || !t.classList) return;
+      var root = panel.querySelector(rootSelector);
+      if (!root || !root.contains(t)) return;
+      if (t.classList.contains("tgl-what")) {
+        // What changed: re-render the row with the new leaf's default fields.
+        var row = t.closest(".scr-row");
+        var what = t.value;
+        var leaf = what.indexOf("f:") === 0
+          ? { type: "asset_state", field: what.slice(2), operator: "==", value: "" }
+          : { type: kindFn() === "host" ? "host_metric" : "asset_metric", metric: what.slice(2), aggregation: "latest", windowSec: 0, operator: ">=", threshold: null };
+        row.outerHTML = tgLeafRowHtml(leaf, kindFn());
+      }
+      onChange();
+    });
+    wireCondDnD(panel, rootSelector, onChange, tgMeta.maxDepth || 3);
+  }
+
   function step3Html() {
-    var tr = draft.trigger || { type: "asset_metric" };
-    var typeOpts = s.triggerTypes.map(function (t) {
-      return '<option value="' + t.type + '"' + (t.type === tr.type ? " selected" : "") + '>' + escapeHtml(t.label) + '</option>';
+    var cat = triggerCategoryOf(draft.trigger);
+    var typeOpts = TRIGGER_CATEGORIES.map(function (t) {
+      return '<option value="' + t.value + '"' + (t.value === cat ? " selected" : "") + '>' + escapeHtml(t.label) + '</option>';
     }).join("");
     return '<h3 style="margin:0 0 0.25rem">When should it fire?</h3>' +
       '<div class="aw-sentence" id="aw-trigger-sentence">…</div>' +
@@ -749,78 +1026,43 @@ async function openAutomationWizard(existing) {
   }
   function renderTriggerFields() {
     var panel = document.getElementById("aw-step-3");
-    var t = panel.querySelector("#aw-trigger-type").value;
-    var def = findType(t);
+    var cat = panel.querySelector("#aw-trigger-type").value;
     var box = panel.querySelector("#aw-trigger-fields");
-    var cur = (draft.trigger && draft.trigger.type === t) ? draft.trigger : {};
+    var tr = draft.trigger || {};
     var html = "";
-    if (t === "asset_metric" || t === "host_metric") {
-      html += '<div class="form-group"><label>Metric</label><select id="tf-metric">' + optLabeled(def.metrics || [], cur.metric, metricLabel) + '</select></div>';
-      html += '<div class="form-group"><label>Aggregation</label><select id="tf-agg">' + opt(s.aggregations, cur.aggregation || "latest") + '</select> over <input type="number" id="tf-window" value="' + (cur.windowSec || 0) + '" style="width:90px"> sec (0 = latest)</div>';
-      html += '<div class="form-group"><label>Condition</label><select id="tf-op">' + opt(s.comparators, cur.operator || ">") + '</select> <input type="number" step="any" id="tf-threshold" value="' + (cur.threshold != null ? cur.threshold : "") + '" placeholder="threshold"> <span id="tf-unit" style="color:var(--color-text-tertiary);font-size:0.85rem"></span></div>';
-      html += '<div class="form-group"><label>Sustained for (minutes)</label><input type="number" id="tf-duration-min" min="0" value="' + Math.round((cur.forDurationSec || 0) / 60) + '" placeholder="0 = fire immediately"></div>';
-      if (t === "asset_metric") html += '<div id="tf-dims"></div>';
-    } else if (t === "asset_state") {
-      html += '<div class="form-group"><label>Field</label><select id="tf-field">' + optLabeled(def.fields || [], cur.field, fieldLabel) + '</select></div>';
-      html += '<div class="form-group"><label>Condition</label><select id="tf-op">' + opt(s.comparators, cur.operator || "==") + '</select> <span id="tf-value-wrap"></span></div>';
-      html += '<div class="form-group"><label>Sustained for (minutes)</label><input type="number" id="tf-duration-min" min="0" value="' + Math.round((cur.forDurationSec || 0) / 60) + '"></div>';
-    } else if (t === "event") {
-      html += '<div class="form-group"><label>Action pattern (glob)</label><input type="text" id="tf-action" value="' + escapeHtml(cur.actionPattern || "") + '" placeholder="e.g. monitor.status_changed or integration.test.*"></div>';
-      html += '<div class="form-group"><label>Resource type (optional)</label><input type="text" id="tf-restype" value="' + escapeHtml(cur.resourceType || "") + '" placeholder="e.g. asset / integration"></div>';
-      html += '<div class="form-group"><label>Minimum event level (optional)</label><select id="tf-minlevel"><option value="">(any)</option>' + opt(s.eventLevels || ["info", "warning", "error"], cur.minLevel || "") + '</select></div>';
-    } else if (t === "change") {
-      html += '<div class="form-group"><label>Change type</label><select id="tf-changetype">' + optLabeled(def.changeTypes || [], cur.changeType, changeLabel) + '</select></div>';
-    }
-    if (def && !def.scoped) {
-      html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">This trigger isn’t tied to assets — the device filter from the previous step is ignored.</p>';
+    if (cat === "device" || cat === "host") {
+      var kind = cat === "host" ? "host" : "asset";
+      var tree = triggerToTree(tr, kind);
+      html += '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Add conditions and combine them with AND/OR groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move them. ' + escapeHtml(tgMeta.anyDimensionNote || "") + '</p>' +
+        '<div id="aw-trig-root">' + tgGroupHtml(tree, 0, kind) + '</div>' +
+        '<div class="form-group" style="margin-top:0.5rem"><label>Sustained for (minutes)</label><input type="number" id="tf-duration-min" min="0" value="' + Math.round(((tr.forDurationSec || 0)) / 60) + '" placeholder="0 = fire immediately"></div>';
+      if (cat === "host") {
+        html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">Polaris-host conditions aren’t tied to assets — the device filter from the previous step is ignored.</p>';
+      }
+    } else if (cat === "event") {
+      var ev = tr.type === "event" ? tr : {};
+      html += '<div class="form-group"><label>Action pattern (glob)</label><input type="text" id="tf-action" value="' + escapeHtml(ev.actionPattern || "") + '" placeholder="e.g. monitor.status_changed or integration.test.*"></div>';
+      html += '<div class="form-group"><label>Resource type (optional)</label><input type="text" id="tf-restype" value="' + escapeHtml(ev.resourceType || "") + '" placeholder="e.g. asset / integration"></div>';
+      html += '<div class="form-group"><label>Minimum event level (optional)</label><select id="tf-minlevel"><option value="">(any)</option>' + opt(s.eventLevels || ["info", "warning", "error"], ev.minLevel || "") + '</select></div>';
+      html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">Audit-event triggers aren’t tied to assets — the device filter from the previous step is ignored.</p>';
+    } else if (cat === "change") {
+      var ch = tr.type === "change" ? tr : {};
+      var def = findType("change");
+      html += '<div class="form-group"><label>Change type</label><select id="tf-changetype">' + optLabeled((def && def.changeTypes) || [], ch.changeType, changeLabel) + '</select></div>';
     }
     box.innerHTML = html;
-
-    if (t === "asset_metric" || t === "host_metric") {
-      var renderMetricExtras = function () {
-        var m = panel.querySelector("#tf-metric").value;
-        var unitEl = panel.querySelector("#tf-unit"); if (unitEl) { var u = metricUnit(m); unitEl.textContent = u === "(sensor unit)" ? "(sensor unit)" : u; }
-        var dimsBox = panel.querySelector("#tf-dims");
-        if (dimsBox) {
-          var dims = (s.metricDimensions && s.metricDimensions[m]) || [];
-          var df = cur.dimensionFilter || {};
-          var rows = dims.map(function (d) {
-            return '<input type="text" data-dim="' + d + '" placeholder="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '" value="' + escapeHtml(df[d] || "") + '" style="margin-bottom:4px;display:block;width:100%">';
-          }).join("");
-          dimsBox.innerHTML = rows ? '<div class="form-group"><label>Dimension filter (optional)</label>' + rows + '</div>' : "";
-        }
-        refreshTriggerSentence();
-      };
-      panel.querySelector("#tf-metric").addEventListener("change", renderMetricExtras);
-      renderMetricExtras();
-    }
-    if (t === "asset_state") {
-      var renderStateValue = function () {
-        var f = panel.querySelector("#tf-field").value;
-        var meta = s.fieldMeta && s.fieldMeta[f];
-        var wrap = panel.querySelector("#tf-value-wrap"); if (!wrap) return;
-        var v = cur.value != null ? String(cur.value) : "";
-        if (meta && (meta.kind === "enum" || meta.kind === "bool") && meta.values) {
-          wrap.innerHTML = '<select id="tf-value">' + opt(meta.values, v) + '</select>';
-        } else if (meta && meta.kind === "number") {
-          wrap.innerHTML = '<input type="number" id="tf-value" value="' + escapeHtml(v) + '" placeholder="e.g. 3">';
-        } else {
-          wrap.innerHTML = '<input type="text" id="tf-value" value="' + escapeHtml(v) + '" placeholder="device value (e.g. up / down)">';
-        }
-        refreshTriggerSentence();
-      };
-      panel.querySelector("#tf-field").addEventListener("change", renderStateValue);
-      renderStateValue();
-    }
     refreshTriggerSentence();
   }
   function wireStep3() {
     var panel = document.getElementById("aw-step-3");
     panel.querySelector("#aw-trigger-type").addEventListener("change", function () {
-      collectStep3(); // keep whatever fits before the fields re-render
-      renderTriggerFields();
+      renderTriggerFields(); // category swap renders fresh from the draft
     });
-    // Delegated: any input change re-renders the sentence.
+    wireTgTree(panel, "#aw-trig-root", function () {
+      return panel.querySelector("#aw-trigger-type").value === "host" ? "host" : "asset";
+    }, refreshTriggerSentence);
+    // Delegated: any input/select change re-renders the sentence (the tree's
+    // own change handler also calls it — a second render is harmless).
     panel.addEventListener("input", function () { refreshTriggerSentence(); });
     panel.addEventListener("change", function () { refreshTriggerSentence(); });
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
@@ -831,36 +1073,58 @@ async function openAutomationWizard(existing) {
     var panel = document.getElementById("aw-step-3");
     var typeSel = panel.querySelector("#aw-trigger-type");
     if (!typeSel) return;
-    var t = typeSel.value;
-    var numOf = function (id) { var el = panel.querySelector("#" + id); if (!el || el.value === "") return undefined; var n = Number(el.value); return isNaN(n) ? undefined : n; };
-    var durationSec = (numOf("tf-duration-min") || 0) * 60;
-    if (t === "asset_metric" || t === "host_metric") {
-      var trg = { type: t, metric: panel.querySelector("#tf-metric").value, aggregation: panel.querySelector("#tf-agg").value, windowSec: numOf("tf-window") || 0, operator: panel.querySelector("#tf-op").value, threshold: Number(panel.querySelector("#tf-threshold").value), forDurationSec: durationSec };
-      if (t === "asset_metric") {
-        var df = {};
-        panel.querySelectorAll("#tf-dims [data-dim]").forEach(function (el) { var v = el.value.trim(); if (v) df[el.getAttribute("data-dim")] = v; });
-        if (Object.keys(df).length) trg.dimensionFilter = df;
+    var cat = typeSel.value;
+    if (cat === "device" || cat === "host") {
+      var kind = cat === "host" ? "host" : "asset";
+      var root = panel.querySelector("#aw-trig-root > .scg-group");
+      if (root) {
+        var tree = tgCollectGroup(root, kind);
+        var dEl = panel.querySelector("#tf-duration-min");
+        var mins = dEl && dEl.value !== "" ? Number(dEl.value) : 0;
+        draft.trigger = tgCollapse({
+          type: "composite", kind: kind, op: tree.op, children: tree.children,
+          forDurationSec: (isNaN(mins) ? 0 : mins) * 60,
+        });
       }
-      draft.trigger = trg;
-    } else if (t === "asset_state") {
-      draft.trigger = { type: t, field: panel.querySelector("#tf-field").value, operator: panel.querySelector("#tf-op").value, value: panel.querySelector("#tf-value") ? panel.querySelector("#tf-value").value : "", forDurationSec: durationSec };
-    } else if (t === "event") {
-      var ev = { type: t, actionPattern: panel.querySelector("#tf-action").value.trim() };
+    } else if (cat === "event") {
+      var ev = { type: "event", actionPattern: panel.querySelector("#tf-action").value.trim() };
       var rt = panel.querySelector("#tf-restype").value.trim(); if (rt) ev.resourceType = rt;
       var ml = panel.querySelector("#tf-minlevel").value; if (ml) ev.minLevel = ml;
       draft.trigger = ev;
-    } else if (t === "change") {
-      draft.trigger = { type: t, changeType: panel.querySelector("#tf-changetype").value };
+    } else if (cat === "change") {
+      draft.trigger = { type: "change", changeType: panel.querySelector("#tf-changetype").value };
     }
     draft.messageTemplate = (panel.querySelector("#aw-msg") ? panel.querySelector("#aw-msg").value.trim() : "") || null;
   }
+  function tgValidateLeaf(leaf, label) {
+    if (leaf.type === "asset_state") {
+      if (leaf.value == null || String(leaf.value).trim() === "") return label + ": choose or enter a value.";
+      return null;
+    }
+    if (leaf.threshold == null || isNaN(leaf.threshold)) return label + ": enter a numeric threshold.";
+    return null;
+  }
   function validateStep3() {
     var tr = draft.trigger || {};
-    if ((tr.type === "asset_metric" || tr.type === "host_metric") && (tr.threshold == null || isNaN(tr.threshold))) {
-      return "Enter a numeric threshold for the condition.";
-    }
-    if (tr.type === "asset_state" && (tr.value == null || String(tr.value).trim() === "")) {
-      return "Choose or enter a value for the condition.";
+    if (tr.type === "composite" || tr.type === "asset_metric" || tr.type === "asset_state" || tr.type === "host_metric") {
+      var leaves = tr.type === "composite" ? tgLeaves(tr) : [tr];
+      if (!leaves.length) return "Add at least one condition.";
+      if (leaves.length > (tgMeta.maxLeaves || 10)) return "At most " + (tgMeta.maxLeaves || 10) + " conditions per trigger.";
+      for (var i = 0; i < leaves.length; i++) {
+        var p = tgValidateLeaf(leaves[i], "Condition " + (i + 1));
+        if (p) return p;
+      }
+      // Empty sub-groups collapse to nothing meaningful — flag them.
+      if (tr.type === "composite") {
+        var emptyGroup = false;
+        (function walk(node) {
+          if (!node || node.type !== undefined || !Array.isArray(node.children)) return;
+          if (!node.children.length) { emptyGroup = true; return; }
+          node.children.forEach(walk);
+        })({ op: tr.op, children: tr.children });
+        if (emptyGroup) return "A condition group is empty — add a condition or remove the group.";
+      }
+      return null;
     }
     if (tr.type === "event" && !String(tr.actionPattern || "").trim()) {
       return "Enter an action pattern for the event trigger.";
@@ -882,18 +1146,49 @@ async function openAutomationWizard(existing) {
       var res = await api.automations.preview({ trigger: draft.trigger, scope: draft.scope, reset: draft.reset || undefined });
       if (!res.supported) { box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">' + escapeHtml(res.note || "Not previewable.") + '</p>'; return; }
       var meeting = (res.matches || []).filter(function (m) { return m.meets; });
+      var composite = (res.matches || []).some(function (m) { return Array.isArray(m.leaves); });
       var rowsHtml = (res.matches || []).slice(0, 20).map(function (m) {
-        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "host") + '</td><td>' + escapeHtml(m.dimension || "") + '</td><td>' + escapeHtml(m.value == null ? "n/a" : String(m.value)) + '</td><td>' + (m.meets ? '<span style="color:var(--color-danger)">would fire</span>' : m.inDeadBand ? '<span style="color:var(--color-warning,#d97706)">dead band</span>' : '<span style="color:var(--color-text-tertiary)">no</span>') + '</td></tr>';
+        var statusCell = m.meets ? '<span style="color:var(--color-danger)">would fire</span>' : m.inDeadBand ? '<span style="color:var(--color-warning,#d97706)">dead band</span>' : '<span style="color:var(--color-text-tertiary)">no</span>';
+        if (composite) {
+          // Per-condition breakdown: ✓ met (with witness dim), ✗ measured
+          // false, — no data.
+          var leafLines = (m.leaves || []).map(function (l) {
+            var mark = l.met ? '<span style="color:var(--color-danger)">&#10003;</span>' : l.noData ? '<span style="color:var(--color-text-tertiary)">&mdash;</span>' : '<span style="color:var(--color-text-tertiary)">&#10007;</span>';
+            var val = l.noData ? "no data" : (l.dimension ? l.dimension + " = " : "") + (l.value == null ? "n/a" : String(l.value));
+            return mark + ' ' + escapeHtml(l.label) + ' <span style="color:var(--color-text-tertiary)">(' + escapeHtml(val) + ')</span>';
+          }).join("<br>");
+          return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "host") + '</td><td style="font-size:0.78rem">' + leafLines + '</td><td>' + statusCell + '</td></tr>';
+        }
+        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "host") + '</td><td>' + escapeHtml(m.dimension || "") + '</td><td>' + escapeHtml(m.value == null ? "n/a" : String(m.value)) + '</td><td>' + statusCell + '</td></tr>';
       }).join("");
+      var headHtml = composite
+        ? '<tr><th>Asset</th><th>Conditions</th><th>Status</th></tr>'
+        : '<tr><th>Asset</th><th>Dimension</th><th>Value</th><th>Status</th></tr>';
       box.innerHTML = '<p style="font-size:0.85rem"><strong>' + meeting.length + '</strong> of ' + res.totalEvaluated + ' currently match.</p>' +
-        '<div class="table-wrapper" style="max-height:200px;overflow:auto"><table><thead><tr><th>Asset</th><th>Dimension</th><th>Value</th><th>Status</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>';
+        '<div class="table-wrapper" style="max-height:200px;overflow:auto"><table><thead>' + headHtml + '</thead><tbody>' + rowsHtml + '</tbody></table></div>';
     } catch (err) { box.innerHTML = '<p style="color:var(--color-danger)">' + escapeHtml(err.message || "Preview failed") + '</p>'; }
   }
 
   // ── Step 4: Reset conditions ───────────────────────────────────────────
+  // Default: a checked "Reset when the trigger is no longer true" checkbox
+  // (= auto mode, with hysteresis/sustain extras). Unchecking reveals the
+  // other modes — composite triggers additionally get "custom conditions"
+  // (the same AND/OR builder, stored as reset mode "condition").
+  // Event/change triggers keep the plain timed/manual radios.
   function defaultResetFor(triggerType) {
     var d = (s.resetDefaults && s.resetDefaults[triggerType]) || { mode: "auto" };
     return JSON.parse(JSON.stringify(d));
+  }
+  function resetRadioHtml(m, reset, extra) {
+    var meta = (s.resetModeMeta || {})[m] || { label: m };
+    return '<div style="margin-bottom:0.6rem">' +
+      '<label style="display:block;font-weight:600;font-size:0.9rem"><input type="radio" name="aw-reset-mode" value="' + m + '"' + (reset.mode === m ? " checked" : "") + '> ' + escapeHtml(meta.label || m) + '</label>' +
+      (meta.help ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 24px">' + escapeHtml(meta.help) + '</p>' : "") +
+      '<div class="aw-reset-extra" data-mode="' + m + '" style="display:' + (reset.mode === m ? "block" : "none") + '">' + (extra || "") + '</div>' +
+    '</div>';
+  }
+  function timedExtraHtml(reset) {
+    return '<div style="margin:6px 0 0 24px;font-size:0.85rem">Clear after <input type="number" id="aw-after-min" min="1" value="' + Math.round((reset.afterSec || 3600) / 60) + '" style="width:90px"> min</div>';
   }
   function renderStep4() {
     var panel = document.getElementById("aw-step-4");
@@ -901,40 +1196,85 @@ async function openAutomationWizard(existing) {
     var modes = (s.resetModesByTriggerType && s.resetModesByTriggerType[tr.type]) || ["auto", "timed", "manual"];
     if (!draft.reset || modes.indexOf(draft.reset.mode) === -1) draft.reset = defaultResetFor(tr.type);
     var reset = draft.reset;
+    var isEC = tr.type === "event" || tr.type === "change";
+    var isComposite = tr.type === "composite";
     var numeric = tr.type === "asset_metric" || tr.type === "host_metric";
-    var modeMeta = s.resetModeMeta || {};
-    var unit = numeric ? metricUnit(tr.metric) : "";
-    if (unit === "(sensor unit)") unit = "";
-    var invOp = INV_CMP[tr.operator] || "<";
+    var cooldownHtml = '<div class="form-group" style="margin-top:0.75rem"><label>Re-notify cooldown (minutes, optional)</label><input type="number" id="aw-cooldown-min" min="0" value="' + (draft.cooldownSec != null ? Math.round(draft.cooldownSec / 60) : "") + '" placeholder="blank = suppress repeats while active"></div>';
 
-    var radios = modes.map(function (m) {
-      var meta = modeMeta[m] || { label: m };
-      var extra = "";
-      if (m === "auto" && numeric) {
-        extra =
-          '<div style="margin:6px 0 0 24px">' +
-            '<label style="display:block;font-size:0.82rem"><input type="checkbox" id="aw-hyst-enable"' + (reset.clearThreshold != null ? " checked" : "") + '> Use a different clear threshold (hysteresis)</label>' +
-            '<div id="aw-hyst-fields" style="display:' + (reset.clearThreshold != null ? "block" : "none") + ';margin:4px 0 0 24px;font-size:0.85rem">value must be <strong>' + escapeHtml(CMP_PHRASE[invOp] || invOp) + '</strong> ' +
-              '<input type="number" step="any" id="aw-clear-threshold" value="' + (reset.clearThreshold != null ? reset.clearThreshold : "") + '" style="width:110px"> ' + escapeHtml(unit) +
-            '</div>' +
-            '<div style="margin:6px 0 0 24px;font-size:0.85rem">Must stay cleared for <input type="number" id="aw-sustain-min" min="0" value="' + Math.round((reset.sustainSec || 0) / 60) + '" style="width:80px"> min (0 = reset immediately)</div>' +
-          '</div>';
-      } else if (m === "auto") {
-        extra = '<div style="margin:6px 0 0 24px;font-size:0.85rem">Must stay cleared for <input type="number" id="aw-sustain-min" min="0" value="' + Math.round((reset.sustainSec || 0) / 60) + '" style="width:80px"> min (0 = reset immediately)</div>';
-      } else if (m === "timed") {
-        extra = '<div style="margin:6px 0 0 24px;font-size:0.85rem">Clear after <input type="number" id="aw-after-min" min="1" value="' + Math.round((reset.afterSec || 3600) / 60) + '" style="width:90px"> min</div>';
+    if (isEC) {
+      // Event/change: no continuous condition — plain timed/manual radios.
+      var radios = modes.map(function (m) {
+        return resetRadioHtml(m, reset, m === "timed" ? timedExtraHtml(reset) : "");
+      }).join("");
+      panel.innerHTML = '<h3 style="margin:0 0 0.25rem">How should its alerts reset?</h3>' +
+        '<div class="aw-sentence" id="aw-reset-sentence">…</div>' + radios + cooldownHtml;
+    } else {
+      var autoOn = reset.mode === "auto";
+      var customModes = (isComposite ? ["condition"] : []).concat(["timed", "manual"]);
+      var selCustom = customModes.indexOf(reset.mode) !== -1 ? reset.mode : customModes[customModes.length - 1];
+      var customReset = { mode: autoOn ? selCustom : reset.mode, afterSec: reset.afterSec, condition: reset.condition, sustainSec: reset.sustainSec };
+
+      var unit = numeric ? metricUnit(tr.metric) : "";
+      if (unit === "(sensor unit)") unit = "";
+      var invOp = INV_CMP[tr.operator] || "<";
+      var sustainHtml = '<div style="margin:6px 0 0;font-size:0.85rem">Must stay cleared for <input type="number" id="aw-sustain-min" min="0" value="' + Math.round((reset.sustainSec || 0) / 60) + '" style="width:80px"> min (0 = reset immediately)</div>';
+      var autoExtras = "";
+      if (numeric) {
+        autoExtras =
+          '<label style="display:block;font-size:0.82rem"><input type="checkbox" id="aw-hyst-enable"' + (reset.clearThreshold != null ? " checked" : "") + '> Use a different clear threshold (hysteresis)</label>' +
+          '<div id="aw-hyst-fields" style="display:' + (reset.clearThreshold != null ? "block" : "none") + ';margin:4px 0 0 24px;font-size:0.85rem">value must be <strong>' + escapeHtml(CMP_PHRASE[invOp] || invOp) + '</strong> ' +
+            '<input type="number" step="any" id="aw-clear-threshold" value="' + (reset.clearThreshold != null ? reset.clearThreshold : "") + '" style="width:110px"> ' + escapeHtml(unit) +
+          '</div>' + sustainHtml;
+      } else {
+        autoExtras = sustainHtml;
       }
-      return '<div style="margin-bottom:0.6rem">' +
-        '<label style="display:block;font-weight:600;font-size:0.9rem"><input type="radio" name="aw-reset-mode" value="' + m + '"' + (reset.mode === m ? " checked" : "") + '> ' + escapeHtml(meta.label || m) + '</label>' +
-        (meta.help ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 24px">' + escapeHtml(meta.help) + '</p>' : "") +
-        '<div class="aw-reset-extra" data-mode="' + m + '" style="display:' + (reset.mode === m ? "block" : "none") + '">' + extra + '</div>' +
-      '</div>';
-    }).join("");
 
-    panel.innerHTML = '<h3 style="margin:0 0 0.25rem">How should its alerts reset?</h3>' +
-      '<div class="aw-sentence" id="aw-reset-sentence">…</div>' +
-      radios +
-      '<div class="form-group" style="margin-top:0.75rem"><label>Re-notify cooldown (minutes, optional)</label><input type="number" id="aw-cooldown-min" min="0" value="' + (draft.cooldownSec != null ? Math.round(draft.cooldownSec / 60) : "") + '" placeholder="blank = suppress repeats while active"></div>';
+      var condExtra = "";
+      if (isComposite) {
+        var kind = tr.kind === "host" ? "host" : "asset";
+        var condTree = customReset.condition
+          ? JSON.parse(JSON.stringify(customReset.condition))
+          : { op: "and", children: [tgDefaultLeaf(kind)] };
+        condExtra =
+          '<div style="margin:6px 0 0 24px">' +
+            '<div id="aw-reset-root">' + tgGroupHtml(condTree, 0, kind) + '</div>' +
+            '<div style="font-size:0.85rem;margin-top:4px">Must stay true for <input type="number" id="aw-crs-sustain-min" min="0" value="' + Math.round((reset.mode === "condition" ? (reset.sustainSec || 0) : 0) / 60) + '" style="width:80px"> min (0 = reset immediately)</div>' +
+            '<p style="font-size:0.78rem;color:var(--color-warning,#d97706);margin:6px 0 0">If the trigger and reset conditions can both be true at once, the automation can clear and re-fire in a loop — set a re-notify cooldown below.</p>' +
+          '</div>';
+      }
+
+      var customRadios = customModes.map(function (m) {
+        var extra = m === "condition" ? condExtra : m === "timed" ? timedExtraHtml(customReset) : "";
+        return resetRadioHtml(m, customReset, extra);
+      }).join("");
+
+      panel.innerHTML = '<h3 style="margin:0 0 0.25rem">How should its alerts reset?</h3>' +
+        '<div class="aw-sentence" id="aw-reset-sentence">…</div>' +
+        '<div class="form-group" style="margin-bottom:0.5rem"><label style="font-weight:600"><input type="checkbox" id="aw-reset-auto"' + (autoOn ? " checked" : "") + '> Reset when the trigger is no longer true</label>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 24px">The alert clears automatically once the condition recovers. Uncheck for timed/manual resets' + (isComposite ? " or a custom reset condition" : "") + '.</p></div>' +
+        '<div id="aw-auto-extras" style="display:' + (autoOn ? "block" : "none") + ';margin:0 0 0.6rem 24px">' + autoExtras + '</div>' +
+        '<div id="aw-reset-custom" style="display:' + (autoOn ? "none" : "block") + '">' + customRadios + '</div>' +
+        cooldownHtml;
+
+      var autoCb = panel.querySelector("#aw-reset-auto");
+      autoCb.addEventListener("change", function () {
+        panel.querySelector("#aw-auto-extras").style.display = autoCb.checked ? "block" : "none";
+        panel.querySelector("#aw-reset-custom").style.display = autoCb.checked ? "none" : "block";
+        refreshResetSentence();
+      });
+      var hystEnable = panel.querySelector("#aw-hyst-enable");
+      if (hystEnable) {
+        hystEnable.addEventListener("change", function () {
+          panel.querySelector("#aw-hyst-fields").style.display = hystEnable.checked ? "block" : "none";
+          refreshResetSentence();
+        });
+      }
+      // The reset-condition builder shares the trigger tree machinery
+      // (delegated once per panel; kind follows the trigger).
+      wireTgTree(panel, "#aw-reset-root", function () {
+        return (draft.trigger && draft.trigger.kind) === "host" ? "host" : "asset";
+      }, refreshResetSentence);
+    }
 
     panel.querySelectorAll('input[name="aw-reset-mode"]').forEach(function (radio) {
       radio.addEventListener("change", function () {
@@ -942,33 +1282,42 @@ async function openAutomationWizard(existing) {
         refreshResetSentence();
       });
     });
-    var hystEnable = panel.querySelector("#aw-hyst-enable");
-    if (hystEnable) {
-      hystEnable.addEventListener("change", function () {
-        panel.querySelector("#aw-hyst-fields").style.display = hystEnable.checked ? "block" : "none";
-        refreshResetSentence();
-      });
+    if (!panel._rsWired) {
+      panel._rsWired = true;
+      panel.addEventListener("input", function () { refreshResetSentence(); });
     }
-    panel.addEventListener("input", function () { refreshResetSentence(); });
     refreshResetSentence();
   }
   function collectStep4() {
     var panel = document.getElementById("aw-step-4");
-    var sel = panel.querySelector('input[name="aw-reset-mode"]:checked');
-    if (!sel) return;
-    var mode = sel.value;
-    var reset = { mode: mode };
-    if (mode === "auto") {
+    var tr = draft.trigger || {};
+    var autoCb = panel.querySelector("#aw-reset-auto");
+    var reset;
+    if (autoCb && autoCb.checked) {
+      reset = { mode: "auto" };
       var hyst = panel.querySelector("#aw-hyst-enable");
       var ct = panel.querySelector("#aw-clear-threshold");
       if (hyst && hyst.checked && ct && ct.value !== "" && !isNaN(Number(ct.value))) reset.clearThreshold = Number(ct.value);
       var sm = panel.querySelector("#aw-sustain-min");
       var sus = sm && sm.value !== "" ? Number(sm.value) : 0;
       if (!isNaN(sus) && sus > 0) reset.sustainSec = sus * 60;
-    } else if (mode === "timed") {
-      var am = panel.querySelector("#aw-after-min");
-      var mins = am && am.value !== "" ? Number(am.value) : 60;
-      reset.afterSec = (isNaN(mins) || mins < 1 ? 60 : mins) * 60;
+    } else {
+      var sel = panel.querySelector('input[name="aw-reset-mode"]:checked');
+      if (!sel) return;
+      var mode = sel.value;
+      reset = { mode: mode };
+      if (mode === "timed") {
+        var am = panel.querySelector("#aw-after-min");
+        var mins = am && am.value !== "" ? Number(am.value) : 60;
+        reset.afterSec = (isNaN(mins) || mins < 1 ? 60 : mins) * 60;
+      } else if (mode === "condition") {
+        var kind = tr.kind === "host" ? "host" : "asset";
+        var root = panel.querySelector("#aw-reset-root > .scg-group");
+        if (root) reset.condition = tgCollectGroup(root, kind);
+        var cs = panel.querySelector("#aw-crs-sustain-min");
+        var csus = cs && cs.value !== "" ? Number(cs.value) : 0;
+        if (!isNaN(csus) && csus > 0) reset.sustainSec = csus * 60;
+      }
     }
     draft.reset = reset;
     var cd = panel.querySelector("#aw-cooldown-min");
@@ -984,6 +1333,16 @@ async function openAutomationWizard(existing) {
       if (tr.operator === "==" || tr.operator === "!=") return "Hysteresis can't be combined with the " + tr.operator + " operator.";
       if ((tr.operator === ">" || tr.operator === ">=") && r.clearThreshold > t) return "Clear threshold must be at or below the fire threshold (" + t + ").";
       if ((tr.operator === "<" || tr.operator === "<=") && r.clearThreshold < t) return "Clear threshold must be at or above the fire threshold (" + t + ").";
+    }
+    if (r.mode === "condition") {
+      if (tr.type !== "composite") return "A custom reset condition needs a multi-condition trigger — add a second trigger condition, or use the automatic reset.";
+      if (!r.condition || !(r.condition.children || []).length) return "Custom reset: add at least one condition.";
+      var leaves = tgLeaves(r.condition);
+      if (!leaves.length) return "Custom reset: add at least one condition.";
+      for (var i = 0; i < leaves.length; i++) {
+        var p = tgValidateLeaf(leaves[i], "Reset condition " + (i + 1));
+        if (p) return p;
+      }
     }
     return null;
   }
@@ -1024,10 +1383,6 @@ async function openAutomationWizard(existing) {
           '<button type="button" class="btn btn-sm btn-secondary" id="aw-esc-add" style="margin-top:6px">+ Add tier</button>' +
           '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:6px">Each tier runs its actions once its delay elapses (checked every minute), optionally repeating until the alert is handled or max repeats is reached.</p>' +
         '</div>' +
-      '</div>' +
-      '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
-        '<label style="font-weight:600;margin:0 0 6px;display:block">Summary</label>' +
-        '<div id="aw-summary"></div>' +
       '</div>';
 
     var host = panel.querySelector("#aw-actions");
@@ -1045,8 +1400,42 @@ async function openAutomationWizard(existing) {
       if (tiersHost.querySelectorAll(".aw-tier").length >= max) { showToast("Maximum " + max + " escalation tiers", "info"); return; }
       addTierRow(tiersHost, null);
     });
-    renderSummary();
     wireTokenPalette(panel);
+  }
+
+  // ── Step 6: Summary + affected devices ─────────────────────────────────
+  function renderStep6() {
+    var panel = document.getElementById("aw-step-6");
+    panel.innerHTML = '<h3 style="margin:0 0 0.25rem">Review &amp; save</h3>' +
+      '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
+        '<label style="font-weight:600;margin:0 0 6px;display:block">Summary</label>' +
+        '<div id="aw-summary"></div>' +
+      '</div>' +
+      '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
+        '<label style="font-weight:600;margin:0 0 6px;display:block">Devices this automation affects</label>' +
+        '<div id="aw-affected"><p style="color:var(--color-text-tertiary);font-size:0.85rem">Checking…</p></div>' +
+      '</div>';
+    renderSummary();
+    renderAffectedDevices();
+  }
+  async function renderAffectedDevices() {
+    var box = document.getElementById("aw-affected");
+    if (!box) return;
+    if (!isTriggerScoped(draft.trigger)) {
+      box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">This trigger isn’t tied to devices (Polaris host / audit events).</p>';
+      return;
+    }
+    try {
+      var res = await api.automations.preview({ scope: draft.scope });
+      var names = (res.matches || []).slice(0, 100).map(function (m) {
+        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + '</td></tr>';
+      }).join("");
+      box.innerHTML = '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> device(s) match the filter right now.</p>' +
+        (names ? '<div class="table-wrapper" style="max-height:220px;overflow:auto"><table><tbody>' + names + '</tbody></table></div>' +
+          (res.totalEvaluated > 100 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 100) + ' more.</p>' : "") : "");
+    } catch (err) {
+      box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">' + escapeHtml(err.message || "Preview unavailable") + '</p>';
+    }
   }
 
   // One action row — used for top-level actions AND escalation-tier actions.
@@ -1432,8 +1821,8 @@ async function openAutomationWizard(existing) {
   }
 
   // ── Navigation ─────────────────────────────────────────────────────────
-  var COLLECT = { 1: collectStep1, 2: collectStep2, 3: collectStep3, 4: collectStep4, 5: collectStep5 };
-  var VALIDATE = { 1: validateStep1, 2: validateStep2, 3: validateStep3, 4: validateStep4, 5: validateStep5 };
+  var COLLECT = { 1: collectStep1, 2: collectStep2, 3: collectStep3, 4: collectStep4, 5: collectStep5, 6: function () {} };
+  var VALIDATE = { 1: validateStep1, 2: validateStep2, 3: validateStep3, 4: validateStep4, 5: validateStep5, 6: function () { return null; } };
 
   function updateStepper() {
     document.querySelectorAll("#aw-stepper .stepper-step").forEach(function (el) {
@@ -1448,8 +1837,8 @@ async function openAutomationWizard(existing) {
   }
   function syncFooter() {
     document.getElementById("aw-back").style.display = step > 1 ? "" : "none";
-    document.getElementById("aw-next").style.display = step < 5 ? "" : "none";
-    document.getElementById("aw-save").style.display = (step === 5 || editing) ? "" : "none";
+    document.getElementById("aw-next").style.display = step < STEPS.length ? "" : "none";
+    document.getElementById("aw-save").style.display = (step === STEPS.length || editing) ? "" : "none";
   }
   function goToStep(n, opts) {
     opts = opts || {};
@@ -1464,9 +1853,10 @@ async function openAutomationWizard(existing) {
     document.getElementById("aw-step-" + step).classList.remove("visible");
     step = n;
     visited = Math.max(visited, n);
-    // Steps 4 + 5 re-render on entry (they depend on earlier steps' state).
+    // Steps 4–6 re-render on entry (they depend on earlier steps' state).
     if (n === 4) renderStep4();
     if (n === 5) renderStep5();
+    if (n === 6) renderStep6();
     document.getElementById("aw-step-" + n).classList.add("visible");
     updateStepper();
     syncFooter();
@@ -1493,7 +1883,7 @@ async function openAutomationWizard(existing) {
   document.getElementById("aw-save").addEventListener("click", async function () {
     COLLECT[step]();
     // Validate every step; jump to the first failing one.
-    for (var i = 1; i <= 5; i++) {
+    for (var i = 1; i <= STEPS.length; i++) {
       var problem = VALIDATE[i]();
       if (problem) {
         if (i !== step) goToStep(i, { skipCollect: true });
@@ -1507,7 +1897,7 @@ async function openAutomationWizard(existing) {
       enabled: draft.enabled,
       severity: draft.severity,
       trigger: draft.trigger,
-      scope: findType(draft.trigger.type) && findType(draft.trigger.type).scoped ? draft.scope : {},
+      scope: isTriggerScoped(draft.trigger) ? draft.scope : {},
       reset: draft.reset,
       actions: draft.actions,
       cooldownSec: draft.cooldownSec,
