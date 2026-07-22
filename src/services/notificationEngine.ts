@@ -38,7 +38,9 @@ import {
   CHANGE_TYPE_ACTIONS,
   normalizeRuleToV2,
   normalizeEscalationToV2,
+  scopeCidrOf,
 } from "./notificationTypes.js";
+import { ipInCidr } from "../utils/cidr.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
 import { executeActions, type ActionExecContext } from "./automationActionService.js";
 import {
@@ -102,6 +104,7 @@ interface ScopeAssetRow {
   consecutiveFailures: number;
   dependencySuppressed: boolean;
   quarantinedAt: Date | null;
+  ipAddress: string | null;
 }
 
 /** A single evaluated reading for a (asset, dimension). */
@@ -148,10 +151,12 @@ export function compareValue(value: number | string | boolean | null, op: string
 const SCOPE_SELECT = {
   id: true, hostname: true, assetType: true, tags: true, discoveredByIntegrationId: true,
   monitorStatus: true, status: true, consecutiveFailures: true, dependencySuppressed: true,
-  quarantinedAt: true,
+  quarantinedAt: true, ipAddress: true,
 } as const;
 
-/** Build a Prisma where from a scope, or null if the scope matches nothing. */
+/** Build a Prisma where from a scope, or null if the scope matches nothing.
+ *  subnetCidrs can't be expressed in SQL (CIDR math over a string column) —
+ *  it narrows to ipAddress-present here and match happens in loadScopeAssets. */
 function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
   if (scope.allAssets) return {};
   const and: Prisma.AssetWhereInput[] = [];
@@ -159,6 +164,14 @@ function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
   if (scope.tags?.length) and.push({ tags: { hasSome: scope.tags } });
   if (scope.assetIds?.length) and.push({ id: { in: scope.assetIds } });
   if (scope.integrationIds?.length) and.push({ discoveredByIntegrationId: { in: scope.integrationIds } });
+  // manufacturer / model: case-insensitive contains, OR within the list.
+  if (scope.manufacturers?.length) {
+    and.push({ OR: scope.manufacturers.map((m) => ({ manufacturer: { contains: m, mode: "insensitive" as const } })) });
+  }
+  if (scope.models?.length) {
+    and.push({ OR: scope.models.map((m) => ({ model: { contains: m, mode: "insensitive" as const } })) });
+  }
+  if (scope.subnetCidrs?.length) and.push({ ipAddress: { not: null } });
   if (and.length === 0) return null; // no dimensions + not allAssets ⇒ nothing
   return { AND: and };
 }
@@ -166,7 +179,12 @@ function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
 async function loadScopeAssets(scope: RuleScope): Promise<ScopeAssetRow[]> {
   const where = scopeWhere(scope);
   if (!where) return [];
-  return prisma.asset.findMany({ where, select: SCOPE_SELECT });
+  const rows = await prisma.asset.findMany({ where, select: SCOPE_SELECT });
+  if (!scope.subnetCidrs?.length) return rows;
+  const cidrs = scope.subnetCidrs.map(scopeCidrOf);
+  return rows.filter((a) => a.ipAddress && cidrs.some((c) => {
+    try { return ipInCidr(a.ipAddress!, c); } catch { return false; }
+  }));
 }
 
 /**

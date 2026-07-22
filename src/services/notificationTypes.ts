@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod";
+import { isValidCidr, isValidIpAddress } from "../utils/cidr.js";
 import { TEMPLATE_VARIABLES } from "../utils/notificationTemplate.js";
 
 // Notification severity (rule.severity → notification.severity). Ordered
@@ -140,8 +141,28 @@ export const scopeSchema = z
     tags: z.array(z.string().max(100)).max(200).optional(),
     assetIds: z.array(z.string().max(100)).max(2000).optional(),
     integrationIds: z.array(z.string().max(100)).max(200).optional(),
+    // Case-insensitive CONTAINS match per entry ("Cisco" matches
+    // "Cisco Systems, Inc."), OR within the list — same AND-across/OR-within
+    // semantics as the other dimensions.
+    manufacturers: z.array(z.string().min(1).max(100)).max(100).optional(),
+    models: z.array(z.string().min(1).max(100)).max(100).optional(),
+    // CIDRs (or bare IPs = /32, /128 for v6) the asset's primary IP must fall
+    // inside. Validated at save; matched in memory (ipInCidr) after the SQL pass.
+    subnetCidrs: z
+      .array(
+        z.string().min(1).max(100).refine((c) => isValidCidr(c) || isValidIpAddress(c), {
+          message: "must be a CIDR (e.g. 10.20.0.0/16) or an IP address",
+        }),
+      )
+      .max(100)
+      .optional(),
   })
   .strict();
+
+/** Bare IP → host CIDR so scope subnet entries accept either form. */
+export function scopeCidrOf(entry: string): string {
+  return isValidIpAddress(entry) ? entry + (entry.includes(":") ? "/128" : "/32") : entry;
+}
 
 // ─── Delivery channels + targets ─────────────────────────────────────────────
 // Channels are operator-configured delivery integrations (NotificationChannel

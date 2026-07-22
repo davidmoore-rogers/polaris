@@ -489,6 +489,9 @@ function _looksLikeDeviceId(tag) {
     var parts = [];
     if (scope.assetTypes && scope.assetTypes.length) parts.push("types: " + scope.assetTypes.join("/"));
     if (scope.tags && scope.tags.length) parts.push("tags: " + scope.tags.join("/"));
+    if (scope.manufacturers && scope.manufacturers.length) parts.push("mfr: " + scope.manufacturers.join("/"));
+    if (scope.models && scope.models.length) parts.push("model: " + scope.models.join("/"));
+    if (scope.subnetCidrs && scope.subnetCidrs.length) parts.push("subnets: " + scope.subnetCidrs.join("/"));
     if (scope.assetIds && scope.assetIds.length) parts.push(scope.assetIds.length + " asset(s)");
     if (scope.integrationIds && scope.integrationIds.length) parts.push(scope.integrationIds.length + " integration(s)");
     return parts.length ? parts.join("; ") : "n/a";

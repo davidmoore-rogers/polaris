@@ -326,7 +326,7 @@ async function openAutomationWizard(existing) {
       });
     });
     panel.addEventListener("input", function (e) {
-      if (e.target && (e.target.id === "sc-tags" || e.target.id === "sc-ids")) scheduleScopePreview();
+      if (e.target && /^sc-(tags|ids|mfrs|models|subnets)$/.test(e.target.id || "")) scheduleScopePreview();
     });
   }
   function collectStep2() {
@@ -336,6 +336,9 @@ async function openAutomationWizard(existing) {
     var sc = {};
     var types = csvOf(panel.querySelector("#sc-types").value); if (types.length) sc.assetTypes = types;
     var tags = csvOf(panel.querySelector("#sc-tags").value); if (tags.length) sc.tags = tags;
+    var mfrs = csvOf(panel.querySelector("#sc-mfrs").value); if (mfrs.length) sc.manufacturers = mfrs;
+    var models = csvOf(panel.querySelector("#sc-models").value); if (models.length) sc.models = models;
+    var subnets = csvOf(panel.querySelector("#sc-subnets").value); if (subnets.length) sc.subnetCidrs = subnets;
     var ids = csvOf(panel.querySelector("#sc-ids").value); if (ids.length) sc.assetIds = ids;
     draft.scope = sc;
   }
@@ -343,8 +346,15 @@ async function openAutomationWizard(existing) {
     var def = findType((draft.trigger || {}).type);
     if (def && !def.scoped) return null; // non-scoped triggers ignore the filter
     var sc = draft.scope || {};
-    if (!sc.allAssets && !(sc.assetTypes && sc.assetTypes.length) && !(sc.tags && sc.tags.length) && !(sc.assetIds && sc.assetIds.length)) {
-      return "Pick devices: All assets, or at least one asset type / tag / asset ID.";
+    var any = sc.allAssets || (sc.assetTypes && sc.assetTypes.length) || (sc.tags && sc.tags.length) ||
+      (sc.assetIds && sc.assetIds.length) || (sc.manufacturers && sc.manufacturers.length) ||
+      (sc.models && sc.models.length) || (sc.subnetCidrs && sc.subnetCidrs.length);
+    if (!any) {
+      return "Pick devices: All assets, or at least one asset type / tag / manufacturer / model / subnet / asset ID.";
+    }
+    var CIDR_ISH = /^([0-9]{1,3}\.){3}[0-9]{1,3}(\/[0-9]{1,2})?$|^[0-9a-f:]+(\/[0-9]{1,3})?$/i;
+    for (var i = 0; i < (sc.subnetCidrs || []).length; i++) {
+      if (!CIDR_ISH.test(sc.subnetCidrs[i])) return 'Subnet "' + sc.subnetCidrs[i] + '" does not look like a CIDR or IP (e.g. 10.20.0.0/16).';
     }
     return null;
   }
@@ -1005,6 +1015,9 @@ async function openAutomationWizard(existing) {
     var parts = [];
     if (sc.assetTypes && sc.assetTypes.length) parts.push("types: " + sc.assetTypes.join("/"));
     if (sc.tags && sc.tags.length) parts.push("tags: " + sc.tags.join("/"));
+    if (sc.manufacturers && sc.manufacturers.length) parts.push("mfr: " + sc.manufacturers.join("/"));
+    if (sc.models && sc.models.length) parts.push("model: " + sc.models.join("/"));
+    if (sc.subnetCidrs && sc.subnetCidrs.length) parts.push("subnets: " + sc.subnetCidrs.join("/"));
     if (sc.assetIds && sc.assetIds.length) parts.push(sc.assetIds.length + " asset(s)");
     return parts.length ? parts.join("; ") : "(none)";
   }

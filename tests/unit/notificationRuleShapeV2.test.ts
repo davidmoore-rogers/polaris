@@ -281,6 +281,23 @@ describe("ruleInputSchema (v2 input with legacy folding)", () => {
   });
 });
 
+describe("scopeSchema — manufacturer / model / subnet dimensions", () => {
+  it("accepts the new dimensions", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "scoped", trigger: metricTrigger,
+      scope: { manufacturers: ["Fortinet"], models: ["FGT-60F"], subnetCidrs: ["10.20.0.0/16", "192.168.1.5"] },
+    });
+    expect(parsed.scope.manufacturers).toEqual(["Fortinet"]);
+    expect(parsed.scope.subnetCidrs).toEqual(["10.20.0.0/16", "192.168.1.5"]);
+  });
+
+  it("rejects garbage subnet entries at save", () => {
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { subnetCidrs: ["not-a-cidr"] } }),
+    ).toThrow(/CIDR/);
+  });
+});
+
 describe("previewInputSchema (partial drafts)", () => {
   it("accepts a scope-only body with defaulted name and no trigger", () => {
     const parsed = previewInputSchema.parse({ scope: { assetTypes: ["server"] } });

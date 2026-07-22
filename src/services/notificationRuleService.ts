@@ -21,6 +21,8 @@ import {
   normalizeEscalationToV2,
 } from "./notificationTypes.js";
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
+import { ipInCidr } from "../utils/cidr.js";
+import { scopeCidrOf } from "./notificationTypes.js";
 
 /** Minimal asset shape needed to evaluate scope membership. */
 export interface ScopeAsset {
@@ -28,12 +30,17 @@ export interface ScopeAsset {
   assetType: string | null;
   tags: string[];
   discoveredByIntegrationId: string | null;
+  manufacturer?: string | null;
+  model?: string | null;
+  ipAddress?: string | null;
 }
 
 /**
  * Does `scope` select `asset`? AND across the provided dimensions, OR within
  * each list. `allAssets` short-circuits true. A scope with no dimensions and
  * allAssets unset matches NOTHING (the builder requires an explicit selection).
+ * KEEP IN LOCKSTEP with the engine's SQL `scopeWhere` + loadScopeAssets
+ * subnet post-filter (notificationEngine.ts) — this is the in-memory twin.
  */
 export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean {
   if (scope.allAssets) return true;
@@ -56,6 +63,25 @@ export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean 
     anyDimension = true;
     if (!scope.integrationIds.includes(asset.discoveredByIntegrationId ?? "")) return false;
   }
+  if (scope.manufacturers && scope.manufacturers.length > 0) {
+    anyDimension = true;
+    const mfr = (asset.manufacturer ?? "").toLowerCase();
+    if (!mfr || !scope.manufacturers.some((m) => mfr.includes(m.toLowerCase()))) return false;
+  }
+  if (scope.models && scope.models.length > 0) {
+    anyDimension = true;
+    const model = (asset.model ?? "").toLowerCase();
+    if (!model || !scope.models.some((m) => model.includes(m.toLowerCase()))) return false;
+  }
+  if (scope.subnetCidrs && scope.subnetCidrs.length > 0) {
+    anyDimension = true;
+    const ip = asset.ipAddress ?? "";
+    if (!ip) return false;
+    const inAny = scope.subnetCidrs.some((c) => {
+      try { return ipInCidr(ip, scopeCidrOf(c)); } catch { return false; }
+    });
+    if (!inAny) return false;
+  }
   return anyDimension;
 }
 
@@ -67,7 +93,7 @@ export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean 
 export async function findRulesMatchingAsset(assetId: string) {
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: { id: true, assetType: true, tags: true, discoveredByIntegrationId: true },
+    select: { id: true, assetType: true, tags: true, discoveredByIntegrationId: true, manufacturer: true, model: true, ipAddress: true },
   });
   if (!asset) return [];
 

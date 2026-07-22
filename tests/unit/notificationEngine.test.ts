@@ -80,7 +80,10 @@ describe("readingMeets", () => {
 });
 
 describe("scopeMatchesAsset", () => {
-  const asset: ScopeAsset = { id: "a1", assetType: "server", tags: ["region:Atlanta", "prod"], discoveredByIntegrationId: "i1" };
+  const asset: ScopeAsset = {
+    id: "a1", assetType: "server", tags: ["region:Atlanta", "prod"], discoveredByIntegrationId: "i1",
+    manufacturer: "Fortinet Inc.", model: "FortiGate FGT-60F", ipAddress: "10.20.30.40",
+  };
   it("allAssets matches anything", () => {
     expect(scopeMatchesAsset({ allAssets: true }, asset)).toBe(true);
   });
@@ -101,6 +104,27 @@ describe("scopeMatchesAsset", () => {
     expect(scopeMatchesAsset({ integrationIds: ["i1"] }, asset)).toBe(true);
     expect(scopeMatchesAsset({ assetIds: ["a1"] }, asset)).toBe(true);
     expect(scopeMatchesAsset({ assetIds: ["other"] }, asset)).toBe(false);
+  });
+  it("manufacturer / model match case-insensitively on contains", () => {
+    expect(scopeMatchesAsset({ manufacturers: ["fortinet"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ manufacturers: ["Cisco", "FORTINET"] }, asset)).toBe(true); // OR within
+    expect(scopeMatchesAsset({ manufacturers: ["Cisco"] }, asset)).toBe(false);
+    expect(scopeMatchesAsset({ models: ["fgt-60f"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ models: ["FGT-100"] }, asset)).toBe(false);
+    // absent asset fields never match
+    expect(scopeMatchesAsset({ manufacturers: ["fortinet"] }, { ...asset, manufacturer: null })).toBe(false);
+  });
+  it("subnetCidrs match the primary IP; bare IPs act as host routes", () => {
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.20.0.0/16"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.99.0.0/16", "10.20.30.0/24"] }, asset)).toBe(true); // OR within
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.99.0.0/16"] }, asset)).toBe(false);
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.20.30.40"] }, asset)).toBe(true); // bare IP = /32
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.20.30.41"] }, asset)).toBe(false);
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.20.0.0/16"] }, { ...asset, ipAddress: null })).toBe(false);
+  });
+  it("new dimensions AND with the existing ones", () => {
+    expect(scopeMatchesAsset({ assetTypes: ["server"], manufacturers: ["fortinet"], subnetCidrs: ["10.20.0.0/16"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ assetTypes: ["switch"], manufacturers: ["fortinet"] }, asset)).toBe(false);
   });
 });
 
