@@ -229,6 +229,31 @@ async function openAutomationWizard(existing) {
     return out;
   }
 
+  // Condition-builder vocabulary — must initialize BEFORE the body assembly
+  // below (step2Html renders from it during the openModal call).
+  var scMeta = s.scopeCondition || {
+    groupOps: ["and", "or", "none", "notAll"],
+    groupOpLabels: {
+      and: "All child conditions must be satisfied (AND)",
+      or: "At least one child condition must be satisfied (OR)",
+      none: "All child conditions must NOT be satisfied",
+      notAll: "At least one child condition must NOT be satisfied",
+    },
+    operatorLabels: { equals: "is equal to", notEquals: "is not equal to", contains: "contains", notContains: "does not contain", startsWith: "starts with", endsWith: "ends with", has: "is applied", notHas: "is not applied", inCidr: "is in subnet", notInCidr: "is not in subnet" },
+    fields: [
+      { field: "assetType", label: "Device type", ops: ["equals", "notEquals"], optionsFrom: "assetTypes" },
+      { field: "manufacturer", label: "Manufacturer", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: "manufacturers" },
+      { field: "model", label: "Model", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: "models" },
+      { field: "hostname", label: "Hostname", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: null },
+      { field: "os", label: "Operating system", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: null },
+      { field: "tag", label: "Tag", ops: ["has", "notHas"], optionsFrom: "tags" },
+      { field: "subnet", label: "Subnet / IP", ops: ["inCidr", "notInCidr"], optionsFrom: "subnets" },
+      { field: "status", label: "Lifecycle status", ops: ["equals", "notEquals"], optionsFrom: null, values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
+      { field: "assetId", label: "Asset ID", ops: ["equals", "notEquals"], optionsFrom: null },
+    ],
+    maxDepth: 5,
+  };
+
   // ── Modal shell: stepper + panels + footer ─────────────────────────────
   function stepperHtml() {
     var parts = [];
@@ -281,28 +306,6 @@ async function openAutomationWizard(existing) {
   // NOT-ALL), child rules of [field][operator][value], and nested sub-groups.
   // An empty root = all assets. Collect walks the DOM into scope.condition;
   // the backend evaluates the same tree via evaluateScopeCondition.
-  var scMeta = s.scopeCondition || {
-    groupOps: ["and", "or", "none", "notAll"],
-    groupOpLabels: {
-      and: "All child conditions must be satisfied (AND)",
-      or: "At least one child condition must be satisfied (OR)",
-      none: "All child conditions must NOT be satisfied",
-      notAll: "At least one child condition must NOT be satisfied",
-    },
-    operatorLabels: { equals: "is equal to", notEquals: "is not equal to", contains: "contains", notContains: "does not contain", startsWith: "starts with", endsWith: "ends with", has: "is applied", notHas: "is not applied", inCidr: "is in subnet", notInCidr: "is not in subnet" },
-    fields: [
-      { field: "assetType", label: "Device type", ops: ["equals", "notEquals"], optionsFrom: "assetTypes" },
-      { field: "manufacturer", label: "Manufacturer", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: "manufacturers" },
-      { field: "model", label: "Model", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: "models" },
-      { field: "hostname", label: "Hostname", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: null },
-      { field: "os", label: "Operating system", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: null },
-      { field: "tag", label: "Tag", ops: ["has", "notHas"], optionsFrom: "tags" },
-      { field: "subnet", label: "Subnet / IP", ops: ["inCidr", "notInCidr"], optionsFrom: "subnets" },
-      { field: "status", label: "Lifecycle status", ops: ["equals", "notEquals"], optionsFrom: null, values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
-      { field: "assetId", label: "Asset ID", ops: ["equals", "notEquals"], optionsFrom: null },
-    ],
-    maxDepth: 5,
-  };
   function scFieldMeta(field) {
     return (scMeta.fields || []).find(function (f) { return f.field === field; }) || scMeta.fields[0];
   }

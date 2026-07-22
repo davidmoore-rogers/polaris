@@ -56,7 +56,7 @@ function _looksLikeDeviceId(tag) {
     var nr = document.getElementById("btn-new-rule");
     if (nr) {
       nr.style.display = canEditRules && activeKey === "manage" ? "" : "none";
-      if (canEditRules && !nr._wired) { nr._wired = true; nr.addEventListener("click", function () { openAutomationWizard(null); }); }
+      if (canEditRules && !nr._wired) { nr._wired = true; nr.addEventListener("click", function () { openAutomationWizard(null).catch(function (err) { showToast(err && err.message || "Failed to open the automation wizard", "error"); }); }); }
     }
     var ac = document.getElementById("btn-add-channel");
     if (ac) {
@@ -271,7 +271,7 @@ function _looksLikeDeviceId(tag) {
       });
     });
     tbody.querySelectorAll(".rule-edit").forEach(function (b) {
-      b.addEventListener("click", function () { var r = _rules.find(function (x) { return x.id === b.dataset.id; }); if (r) openAutomationWizard(r); });
+      b.addEventListener("click", function () { var r = _rules.find(function (x) { return x.id === b.dataset.id; }); if (r) openAutomationWizard(r).catch(function (err) { showToast(err && err.message || "Failed to open the automation wizard", "error"); }); });
     });
     tbody.querySelectorAll(".rule-del").forEach(function (b) {
       b.addEventListener("click", async function () {
