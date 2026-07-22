@@ -14,7 +14,7 @@ import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import type { RuleScope, Trigger, RuleInput } from "./notificationTypes.js";
 import {
-  ASSET_SCOPED_TRIGGER_TYPES,
+  isAssetScopedTrigger,
   CHANGE_TYPE_ACTIONS,
   legacyMirrorOfV2,
   normalizeRuleToV2,
@@ -114,7 +114,7 @@ export async function findRulesMatchingAsset(assetId: string) {
 
   return rules.filter((r) => {
     const trigger = r.trigger as unknown as Trigger;
-    if (!ASSET_SCOPED_TRIGGER_TYPES.includes(trigger.type as any)) return false;
+    if (!isAssetScopedTrigger(trigger)) return false;
     return scopeMatchesAsset((r.scope ?? {}) as RuleScope, asset);
   });
 }

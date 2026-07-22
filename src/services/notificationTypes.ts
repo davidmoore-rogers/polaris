@@ -126,13 +126,158 @@ const changeTrigger = z.object({
   dimensionFilter: dimensionFilterSchema,
 });
 
+// ─── Composite trigger (nested AND/OR over metric/state leaves) ─────────────
+// The wizard's multi-condition trigger: a tree of the threshold-ish leaf
+// conditions above (event/change have no continuous reading to compose).
+// Evaluated PER ASSET — a multi-dimension leaf (sensors, mounts, interfaces)
+// counts as met when ANY of its dimensions meets, and the whole rule fires one
+// alert per asset (dimensionKey "") instead of per dimension. Only and/or are
+// allowed at group level: negation combinators would fire on missing data and
+// on every healthy asset; single-condition negation is already expressible via
+// the inverse comparator.
+//
+// Invariant (enforced by collapseCompositeTrigger in the input transforms):
+// a stored composite always has ≥2 leaves — a single-leaf composite collapses
+// to the legacy single trigger, keeping per-dimension alerting + hysteresis
+// for the common case regardless of which client authored the rule.
+
+export const TRIGGER_GROUP_OPS = ["and", "or"] as const;
+export type TriggerGroupOp = (typeof TRIGGER_GROUP_OPS)[number];
+
+// Leaves are the existing threshold conditions minus forDurationSec (the
+// sustain applies to the whole composite, not per leaf).
+const compositeAssetMetricLeaf = assetMetricTrigger.omit({ forDurationSec: true });
+const compositeAssetStateLeaf = assetStateTrigger.omit({ forDurationSec: true });
+const compositeHostMetricLeaf = hostMetricTrigger.omit({ forDurationSec: true });
+export const compositeLeafSchema = z.discriminatedUnion("type", [
+  compositeAssetMetricLeaf,
+  compositeAssetStateLeaf,
+  compositeHostMetricLeaf,
+]);
+export type CompositeLeaf = z.infer<typeof compositeLeafSchema>;
+
+export interface TriggerConditionGroup {
+  op: TriggerGroupOp;
+  children: (TriggerConditionGroup | CompositeLeaf)[];
+}
+
+/** A tree node is a leaf iff it carries the discriminator (groups are strict
+ *  {op, children} objects and never have `type`). */
+export function isTriggerLeaf(node: TriggerConditionGroup | CompositeLeaf): node is CompositeLeaf {
+  return "type" in node;
+}
+
+export const triggerConditionGroupSchema: z.ZodType<TriggerConditionGroup> = z.lazy(() =>
+  z
+    .object({
+      op: z.enum(TRIGGER_GROUP_OPS),
+      children: z.array(z.union([compositeLeafSchema, triggerConditionGroupSchema])).min(1).max(10),
+    })
+    .strict(),
+) as z.ZodType<TriggerConditionGroup>;
+
+// Plain ZodObject (no superRefine — discriminated-union members must be), so
+// the depth/leaf/kind caps live in validateCompositeTrigger, called from
+// validateRuleV2 on both the save and preview paths.
+const compositeTrigger = z.object({
+  type: z.literal("composite"),
+  // asset = asset_metric/asset_state leaves (scope-selected devices);
+  // host = host_metric leaves (the Polaris host). Never mixed.
+  kind: z.enum(["asset", "host"]),
+  op: z.enum(TRIGGER_GROUP_OPS),
+  children: z.array(z.union([compositeLeafSchema, triggerConditionGroupSchema])).min(1).max(10),
+  forDurationSec: z.number().int().min(0).max(86400).default(0),
+});
+
 export const triggerSchema = z.discriminatedUnion("type", [
   assetMetricTrigger,
   assetStateTrigger,
   hostMetricTrigger,
   eventTrigger,
   changeTrigger,
+  compositeTrigger,
 ]);
+export type CompositeTrigger = z.infer<typeof compositeTrigger>;
+
+/** Depth (root group = 1) + leaf count for a composite trigger tree. */
+export function triggerConditionStats(node: { op: TriggerGroupOp; children: (TriggerConditionGroup | CompositeLeaf)[] }): {
+  depth: number;
+  leaves: number;
+} {
+  let leaves = 0;
+  const depthOf = (g: { children: (TriggerConditionGroup | CompositeLeaf)[] }): number =>
+    1 + Math.max(0, ...g.children.map((c) => {
+      if (isTriggerLeaf(c)) { leaves++; return 0; }
+      return depthOf(c);
+    }));
+  const depth = depthOf(node);
+  return { depth, leaves };
+}
+
+/**
+ * Canonicalize a composite trigger: unwrap single-child group wrappers, and
+ * collapse a single-leaf tree to the legacy single trigger with forDurationSec
+ * hoisted onto it. Applied in the input transforms so the "≥2 leaves ⇒
+ * composite, 1 leaf ⇒ per-dimension legacy" invariant holds for every author
+ * (wizard or raw API).
+ */
+export function collapseCompositeTrigger(trigger: Trigger): Trigger {
+  if (trigger.type !== "composite") return trigger;
+  let op = trigger.op;
+  let children = trigger.children;
+  while (children.length === 1 && !isTriggerLeaf(children[0])) {
+    const g = children[0] as TriggerConditionGroup;
+    op = g.op;
+    children = g.children;
+  }
+  if (children.length === 1 && isTriggerLeaf(children[0])) {
+    return { ...(children[0] as CompositeLeaf), forDurationSec: trigger.forDurationSec } as Trigger;
+  }
+  return { ...trigger, op, children };
+}
+
+const COMPOSITE_MAX_DEPTH = 3;
+const COMPOSITE_MAX_LEAVES = 10;
+
+/** Structural caps + kind coherence for a composite trigger (save + preview). */
+export function validateCompositeTrigger(trigger: CompositeTrigger, ctx: z.RefinementCtx): void {
+  const stats = triggerConditionStats(trigger);
+  if (stats.depth > COMPOSITE_MAX_DEPTH) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["trigger"], message: `condition groups nest at most ${COMPOSITE_MAX_DEPTH} deep` });
+  }
+  if (stats.leaves > COMPOSITE_MAX_LEAVES) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["trigger"], message: `at most ${COMPOSITE_MAX_LEAVES} conditions per trigger` });
+  }
+  if (stats.leaves < 2) {
+    // collapseCompositeTrigger should have folded this to a single trigger; a
+    // composite reaching validation with <2 leaves means a raw caller bypassed
+    // the transform — reject rather than store a degenerate tree.
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["trigger"], message: "a composite trigger needs at least 2 conditions" });
+  }
+  const badLeaf = collectTriggerLeaves(trigger).find((l) =>
+    trigger.kind === "host" ? l.type !== "host_metric" : l.type === "host_metric",
+  );
+  if (badLeaf) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["trigger"],
+      message:
+        trigger.kind === "host"
+          ? "host composite triggers may only contain Polaris-host metric conditions"
+          : "device composite triggers may not contain Polaris-host metric conditions",
+    });
+  }
+}
+
+/** Flatten a composite tree's leaves in document order. */
+export function collectTriggerLeaves(node: { children: (TriggerConditionGroup | CompositeLeaf)[] }): CompositeLeaf[] {
+  const out: CompositeLeaf[] = [];
+  for (const c of node.children) {
+    if (isTriggerLeaf(c)) out.push(c);
+    else out.push(...collectTriggerLeaves(c));
+  }
+  return out;
+}
 
 // ─── Scope condition tree (nested AND/OR device filtering) ──────────────────
 // `scope.condition` is a nested group of per-field rules — the wizard's
@@ -490,7 +635,7 @@ export const escalationSchema = z
 // ruleInputSchema folds old POST bodies into v2, so pre-rename API clients and
 // the pre-wizard UI keep working against the alias paths.
 
-export const RESET_MODES = ["manual", "auto", "timed"] as const;
+export const RESET_MODES = ["manual", "auto", "timed", "condition"] as const;
 export type ResetMode = (typeof RESET_MODES)[number];
 
 export const resetSchema = z
@@ -500,11 +645,16 @@ export const resetSchema = z
     // meets `trigger.operator clearThreshold` (a fire at cpu >= 90 with
     // clearThreshold 80 clears at < 80). Omit = recover at the fire threshold.
     clearThreshold: z.number().optional().nullable(),
-    // auto only — clear-sustain: the condition must stay recovered this long
-    // before the alert auto-clears. 0/omit = clear on first recovered reading.
+    // auto + condition — clear-sustain: the recovery must hold this long
+    // before the alert auto-clears. 0/omit = clear on first recovered tick.
     sustainSec: z.number().int().min(0).max(86400).optional().nullable(),
     // timed only (the old clearAfterSec).
     afterSec: z.number().int().min(1).max(2592000).optional().nullable(),
+    // condition only — a custom AND/OR reset tree (same leaf vocabulary as the
+    // composite trigger). While the alert is firing, this tree is the sole
+    // recovery authority. v1-restricted to composite triggers of the same
+    // kind (validateRuleV2); per-dimension single triggers keep auto/hysteresis.
+    condition: triggerConditionGroupSchema.optional().nullable(),
   })
   .strict();
 
@@ -673,6 +823,9 @@ export function normalizeReset(
     if (reset.mode === "auto") {
       return { mode: "auto", clearThreshold: reset.clearThreshold ?? null, sustainSec: reset.sustainSec ?? null };
     }
+    if (reset.mode === "condition") {
+      return { mode: "condition", condition: reset.condition ?? null, sustainSec: reset.sustainSec ?? null };
+    }
     if (reset.mode === "timed") return { mode: "timed", afterSec: reset.afterSec ?? null };
     return { mode: "manual" };
   }
@@ -722,7 +875,9 @@ export function legacyMirrorOfV2(
   actions: AutomationAction[],
 ): { clearBehavior: (typeof CLEAR_BEHAVIORS)[number]; clearAfterSec: number | null; targets: DeliveryTarget[] } {
   return {
-    clearBehavior: reset.mode,
+    // "condition" has no legacy representation — "auto" is the closest
+    // semantic (clears without operator action) for pre-wizard readers.
+    clearBehavior: reset.mode === "condition" ? "auto" : reset.mode,
     clearAfterSec: reset.mode === "timed" ? (reset.afterSec ?? null) : null,
     targets: actionsToTargets(actions),
   };
@@ -748,8 +903,40 @@ function normalizeRuleInputCore(raw: Omit<RuleInputRaw, "trigger">): Omit<RuleIn
 /** Cross-field validation over the NORMALIZED v2 shape. */
 function validateRuleV2(v: { trigger?: Trigger; reset: ResetConfig }, ctx: z.RefinementCtx): void {
   const { trigger, reset } = v;
+  if (trigger?.type === "composite") validateCompositeTrigger(trigger, ctx);
   if (reset.mode === "timed" && reset.afterSec == null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "afterSec"], message: "timed reset requires afterSec" });
+  }
+  if (reset.mode === "condition") {
+    if (!reset.condition) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "condition"], message: "condition reset requires a condition tree" });
+    } else if (trigger && trigger.type !== "composite") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reset", "condition"],
+        message: "a custom reset condition requires a multi-condition (composite) trigger — single-condition automations use the automatic reset (optionally with a clear threshold)",
+      });
+    } else {
+      const stats = triggerConditionStats(reset.condition);
+      if (stats.depth > 3) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "condition"], message: "reset condition groups nest at most 3 deep" });
+      }
+      if (stats.leaves > 10) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "condition"], message: "at most 10 conditions per reset tree" });
+      }
+      if (trigger?.type === "composite") {
+        const badLeaf = collectTriggerLeaves(reset.condition).find((l) =>
+          trigger.kind === "host" ? l.type !== "host_metric" : l.type === "host_metric",
+        );
+        if (badLeaf) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["reset", "condition"],
+            message: "reset conditions must match the trigger's kind (device vs Polaris-host conditions)",
+          });
+        }
+      }
+    }
   }
   if (reset.mode === "auto" && reset.clearThreshold != null && trigger) {
     if (trigger.type !== "asset_metric" && trigger.type !== "host_metric") {
@@ -786,7 +973,7 @@ function validateRuleV2(v: { trigger?: Trigger; reset: ResetConfig }, ctx: z.Ref
 }
 
 export const ruleInputSchema = ruleInputBaseSchema
-  .transform((raw): RuleInput => ({ trigger: raw.trigger, ...normalizeRuleInputCore(raw) }))
+  .transform((raw): RuleInput => ({ trigger: collapseCompositeTrigger(raw.trigger), ...normalizeRuleInputCore(raw) }))
   .superRefine(validateRuleV2);
 
 // Preview accepts partial drafts: name defaulted, trigger optional (a
@@ -796,7 +983,10 @@ export const previewInputSchema = ruleInputBaseSchema
     name: z.string().min(1).max(200).default("Draft automation"),
     trigger: triggerSchema.optional(),
   })
-  .transform((raw): PreviewRuleInput => ({ trigger: raw.trigger, ...normalizeRuleInputCore(raw) }))
+  .transform((raw): PreviewRuleInput => ({
+    trigger: raw.trigger ? collapseCompositeTrigger(raw.trigger) : undefined,
+    ...normalizeRuleInputCore(raw),
+  }))
   .superRefine(validateRuleV2);
 
 // ─── Read-path normalizer (DB row → v2 view) ────────────────────────────────
@@ -894,8 +1084,15 @@ export function normalizeRuleToV2(row: {
   return { reset, actions, escalation: normalizeEscalationToV2(row.escalation) };
 }
 
-/** Trigger categories that select assets via `scope` (vs. event/host). */
+/** Trigger categories that select assets via `scope` (vs. event/host).
+ *  Composite triggers are scoped iff kind="asset" — use isAssetScopedTrigger. */
 export const ASSET_SCOPED_TRIGGER_TYPES = ["asset_metric", "asset_state", "change"] as const;
+
+/** Whether a trigger selects devices via `scope` (composite depends on kind). */
+export function isAssetScopedTrigger(trigger: Trigger): boolean {
+  if (trigger.type === "composite") return trigger.kind === "asset";
+  return (ASSET_SCOPED_TRIGGER_TYPES as readonly string[]).includes(trigger.type);
+}
 
 // ─── Display metadata (builder UI only; engine validates via the Zod schemas) ──
 // Human label + unit per metric, for both asset_metric and host_metric.
@@ -996,11 +1193,29 @@ export function buildSchemaCatalog() {
       { type: "host_metric", label: "Polaris host health", scoped: false, metrics: HOST_METRICS },
       { type: "event", label: "Audit event match", scoped: false },
       { type: "change", label: "Change detection", scoped: true, changeTypes: CHANGE_TYPES },
+      { type: "composite", label: "Multiple conditions (AND/OR)", scoped: true },
     ],
+    // Composite-trigger builder vocabulary (the wizard's trigger tree).
+    compositeMeta: {
+      kinds: ["asset", "host"],
+      groupOps: TRIGGER_GROUP_OPS,
+      groupOpLabels: {
+        and: "All conditions must be met (AND)",
+        or: "At least one condition must be met (OR)",
+      },
+      maxDepth: 3,
+      maxLeaves: 10,
+      // Multi-dimension leaves (sensors, mounts, interfaces …) count as met
+      // when ANY dimension crosses; composite automations alert once per
+      // device, not per dimension.
+      anyDimensionNote:
+        "With multiple conditions, an automation alerts once per device; a per-sensor/per-interface condition counts as met when any of them crosses.",
+    },
     // ── Rule-shape v2 vocabulary (reset + actions), wizard-facing ──────────
     resetModes: RESET_MODES,
     resetModeMeta: {
       auto: { label: "Automatically", help: "Clears when the condition recovers — optionally with a separate clear threshold (hysteresis) and a recovered-for duration." },
+      condition: { label: "When custom conditions are met", help: "Clears when a separate AND/OR condition tree becomes true (multi-condition triggers only). While the alert is active, the reset conditions are the only recovery authority — set a re-notify cooldown if the trigger and reset conditions can both be true at once." },
       timed: { label: "After a fixed time", help: "Clears after the configured duration, even without a recovery reading." },
       manual: { label: "Manually only", help: "Stays active until someone clears it." },
     },
@@ -1012,6 +1227,7 @@ export function buildSchemaCatalog() {
       host_metric: ["auto", "timed", "manual"],
       event: ["timed", "manual"],
       change: ["timed", "manual"],
+      composite: ["auto", "condition", "timed", "manual"],
     },
     resetDefaults: {
       asset_metric: { mode: "auto", sustainSec: 0 },
@@ -1019,6 +1235,7 @@ export function buildSchemaCatalog() {
       host_metric: { mode: "auto", sustainSec: 0 },
       event: { mode: "timed", afterSec: 3600 },
       change: { mode: "timed", afterSec: 3600 },
+      composite: { mode: "auto", sustainSec: 0 },
     },
     actionTypes: [
       { type: "notify", label: "Send a notification", requires: "channels", permission: null },

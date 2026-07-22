@@ -398,11 +398,165 @@ describe("buildSchemaCatalog v2 additions", () => {
   it("exposes schemaVersion 2 + the wizard vocabulary", () => {
     const cat = buildSchemaCatalog();
     expect(cat.schemaVersion).toBe(2);
-    expect(cat.resetModes).toEqual(["manual", "auto", "timed"]);
+    expect(cat.resetModes).toEqual(["manual", "auto", "timed", "condition"]);
     expect(cat.resetModesByTriggerType.event).toEqual(["timed", "manual"]);
+    expect(cat.resetModesByTriggerType.composite).toEqual(["auto", "condition", "timed", "manual"]);
     expect(cat.actionTypes.map((a: { type: string }) => a.type)).toEqual(["notify", "api_call", "script"]);
     expect(cat.inverseComparators[">="]).toBe("<");
     expect(cat.comparatorPhrases[">="]).toBe("is at or above");
     expect(cat.escalationMeta.maxTiers).toBe(5);
+    expect(cat.compositeMeta.groupOps).toEqual(["and", "or"]);
+    expect(cat.compositeMeta.maxDepth).toBe(3);
+    expect(cat.compositeMeta.maxLeaves).toBe(10);
+    expect(cat.triggerTypes.some((t: { type: string }) => t.type === "composite")).toBe(true);
+  });
+});
+
+// ─── Composite triggers + condition-mode reset ──────────────────────────────
+
+const cpuLeaf = { type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 90 };
+const tempLeaf = {
+  type: "asset_metric", metric: "hwSensorValue", operator: ">=", threshold: 60,
+  dimensionFilter: { sensorClass: "temperature" },
+};
+const statusLeaf = { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" };
+const hostLeaf = { type: "host_metric", metric: "cpuPct", operator: ">=", threshold: 95 };
+const compositeAnd = { type: "composite", kind: "asset", op: "and", children: [cpuLeaf, tempLeaf] };
+
+describe("composite trigger schema", () => {
+  it("accepts a 2-leaf AND tree and applies leaf defaults", () => {
+    const parsed = ruleInputSchema.parse({ name: "combo", trigger: compositeAnd });
+    expect(parsed.trigger.type).toBe("composite");
+    const t = parsed.trigger as any;
+    expect(t.forDurationSec).toBe(0);
+    expect(t.children[0].aggregation).toBe("latest"); // leaf default applied
+    expect(t.children[0].forDurationSec).toBeUndefined(); // leaves carry no per-leaf sustain
+  });
+
+  it("accepts nested groups and mixed metric/state leaves (kind=asset)", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "combo",
+      trigger: {
+        type: "composite", kind: "asset", op: "or",
+        children: [statusLeaf, { op: "and", children: [cpuLeaf, tempLeaf] }],
+      },
+    });
+    expect((parsed.trigger as any).children).toHaveLength(2);
+  });
+
+  it("collapses a single-leaf composite to the legacy single trigger, hoisting forDurationSec", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "solo",
+      trigger: { type: "composite", kind: "asset", op: "and", children: [cpuLeaf], forDurationSec: 300 },
+    });
+    expect(parsed.trigger).toMatchObject({ type: "asset_metric", metric: "cpuPct", threshold: 90, forDurationSec: 300 });
+  });
+
+  it("collapses through single-child group wrappers", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "wrapped",
+      trigger: {
+        type: "composite", kind: "asset", op: "and",
+        children: [{ op: "or", children: [{ op: "and", children: [statusLeaf] }] }],
+        forDurationSec: 60,
+      },
+    });
+    expect(parsed.trigger).toMatchObject({ type: "asset_state", field: "monitorStatus", forDurationSec: 60 });
+  });
+
+  it("rejects none/notAll group ops, over-deep nesting, and too many leaves", () => {
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "composite", kind: "asset", op: "none", children: [cpuLeaf, tempLeaf] },
+      }),
+    ).toThrow();
+    const depth4 = {
+      type: "composite", kind: "asset", op: "and",
+      children: [cpuLeaf, { op: "and", children: [tempLeaf, { op: "or", children: [statusLeaf, { op: "and", children: [cpuLeaf, tempLeaf] }] }] }],
+    };
+    expect(() => ruleInputSchema.parse({ name: "x", trigger: depth4 })).toThrow(/nest at most 3 deep/);
+    const manyLeaves = {
+      type: "composite", kind: "asset", op: "or",
+      children: Array.from({ length: 11 }, () => cpuLeaf),
+    };
+    expect(() => ruleInputSchema.parse({ name: "x", trigger: manyLeaves })).toThrow();
+  });
+
+  it("enforces kind coherence (host kind = host_metric leaves only, asset kind = no host leaves)", () => {
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "composite", kind: "host", op: "and", children: [hostLeaf, cpuLeaf] },
+      }),
+    ).toThrow();
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "composite", kind: "asset", op: "and", children: [cpuLeaf, hostLeaf] },
+      }),
+    ).toThrow(/may not contain Polaris-host/);
+    const hostOk = ruleInputSchema.parse({
+      name: "x",
+      trigger: { type: "composite", kind: "host", op: "and", children: [hostLeaf, { ...hostLeaf, threshold: 80, metric: "memUsedPct" }] },
+    });
+    expect(hostOk.trigger.type).toBe("composite");
+  });
+
+  it("rejects hysteresis clearThreshold on a composite trigger", () => {
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: compositeAnd, reset: { mode: "auto", clearThreshold: 80 } }),
+    ).toThrow(/numeric metric triggers/);
+  });
+});
+
+describe("condition-mode reset", () => {
+  const resetTree = { op: "and", children: [{ type: "asset_metric", metric: "cpuPct", operator: "<", threshold: 70 }] };
+
+  it("accepts a condition reset on a composite trigger and normalizes it", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "x", trigger: compositeAnd,
+      reset: { mode: "condition", condition: resetTree, sustainSec: 120, afterSec: 999, clearThreshold: 5 },
+    });
+    // mode-irrelevant fields stripped; leaf defaults (aggregation/windowSec) applied
+    expect(parsed.reset).toMatchObject({ mode: "condition", condition: resetTree, sustainSec: 120 });
+    expect((parsed.reset as any).afterSec).toBeUndefined();
+    expect((parsed.reset as any).clearThreshold).toBeUndefined();
+  });
+
+  it("normalizeReset keeps condition mode (does not fall through to manual)", () => {
+    expect(normalizeReset({ mode: "condition", condition: resetTree } as any)).toEqual({
+      mode: "condition", condition: resetTree, sustainSec: null,
+    });
+  });
+
+  it("survives the stored-row round trip through normalizeRuleToV2", () => {
+    const v2 = normalizeRuleToV2({
+      reset: { mode: "condition", condition: resetTree, sustainSec: 60 },
+      actions: [],
+    });
+    expect(v2.reset).toMatchObject({ mode: "condition", condition: resetTree, sustainSec: 60 });
+  });
+
+  it("legacyMirrorOfV2 projects condition mode to clearBehavior=auto", () => {
+    expect(legacyMirrorOfV2({ mode: "condition", condition: resetTree } as any, []).clearBehavior).toBe("auto");
+  });
+
+  it("rejects condition reset without a tree, and on non-composite triggers", () => {
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: compositeAnd, reset: { mode: "condition" } }),
+    ).toThrow(/requires a condition tree/);
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, reset: { mode: "condition", condition: resetTree } }),
+    ).toThrow(/composite/);
+  });
+
+  it("rejects a reset tree whose leaves mismatch the trigger kind", () => {
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x", trigger: compositeAnd,
+        reset: { mode: "condition", condition: { op: "and", children: [hostLeaf] } },
+      }),
+    ).toThrow(/match the trigger's kind/);
   });
 });

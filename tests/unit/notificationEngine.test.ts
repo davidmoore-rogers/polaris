@@ -163,11 +163,11 @@ describe("ruleInputSchema", () => {
 });
 
 describe("buildSchemaCatalog", () => {
-  it("exposes all five trigger types with the scoped flag", () => {
+  it("exposes all six trigger types with the scoped flag", () => {
     const cat = buildSchemaCatalog();
     const types = cat.triggerTypes.map((t) => t.type);
-    expect(types).toEqual(["asset_metric", "asset_state", "host_metric", "event", "change"]);
+    expect(types).toEqual(["asset_metric", "asset_state", "host_metric", "event", "change", "composite"]);
     const scoped = cat.triggerTypes.filter((t) => t.scoped).map((t) => t.type);
-    expect(scoped).toEqual(["asset_metric", "asset_state", "change"]);
+    expect(scoped).toEqual(["asset_metric", "asset_state", "change", "composite"]);
   });
 });
