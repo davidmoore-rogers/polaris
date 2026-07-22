@@ -49,6 +49,7 @@
         <span class="bulk-bar-count">No assets selected</span>
         <button class="btn btn-sm btn-secondary" id="assets-bulk-deselect-btn">Deselect All</button>
         <button class="btn btn-sm btn-secondary" id="assets-bulk-compare-btn" title="Compare telemetry of the selected assets" style="display:none">Compare</button>
+        <button class="btn btn-sm btn-secondary" id="assets-bulk-merge-btn" title="Merge the two selected assets into one — combines discovery sources (the inverse of Split)" style="display:none">Merge</button>
 
         <div class="btn-dropdown-wrap" data-manage-assets style="margin-left:auto">
           <button class="btn btn-sm btn-secondary" id="assets-bulk-type-btn">Type &#9662;</button>
@@ -69,6 +70,8 @@
         </div>
 
         <button class="btn btn-sm btn-secondary" id="assets-bulk-tags-btn" data-manage-assets>Edit Tags</button>
+
+        <button class="btn btn-sm btn-secondary" id="assets-bulk-agent-btn" data-manage-assets title="Install the Polaris Agent on all selected assets over SSH/WinRM — assets that already have an agent are skipped">Deploy Agent</button>
 
         <button class="btn btn-sm btn-danger" id="assets-bulk-quarantine-btn" data-manage-assets title="Quarantine selected assets — pushes MAC block to FortiGate(s) that have seen each asset" style="display:none">Quarantine selected</button>
         <button class="btn btn-sm btn-secondary" id="assets-bulk-unquarantine-btn" data-manage-assets title="Release quarantine on selected assets" style="display:none">Release Quarantine</button>

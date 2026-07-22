@@ -510,6 +510,7 @@ const api = {
       throw err;
     }),
     installAgent:         (id, body) => request("POST",   `/assets/${id}/agent/install`, body),
+    bulkInstallAgents:    (body)     => request("POST",   "/assets/bulk-agent-install", body),
     retryInstallAgent:    (id)       => request("POST",   `/assets/${id}/agent/retry`),
     upgradeAgent:         (id, body) => request("POST",   `/assets/${id}/agent/upgrade`, body || {}),
     deleteAgent:          (id, opts) => {

@@ -43,7 +43,13 @@ import { logEvent } from "../api/routes/events.js";
 import { winrmRunOne, type WinRmConnection } from "../utils/winrm.js";
 import { withSshClient, sshExec, sftpPut } from "../utils/remoteExec.js";
 import { getPublicUrlPort } from "../utils/publicUrl.js";
-import { getServerCertHostnames } from "./certInfo.js";
+import { getServerCertHostnames, getServerCertFingerprint } from "./certInfo.js";
+import { assetSourceKindFromIntegrationType, isPollingMethodCompatible } from "../utils/pollingCompatibility.js";
+import {
+  inferAgentPlatform,
+  pickTransportAndCredential,
+  checkAutoDeployPreconditions,
+} from "./agentAutoDeployService.js";
 
 // ─── Public entry points ──────────────────────────────────────────────
 
@@ -242,6 +248,165 @@ export async function upgradeAllOutdated(actor: string): Promise<UpgradeAllResul
     queued:   perAsset.filter((p) => p.ok).length,
     perAsset,
   };
+}
+
+// ─── Bulk install (assets-page bulk bar) ──────────────────────────────
+
+// Concurrent remote installs in the bulk pool. Each install holds an SSH/SFTP
+// or WinRM session and streams the agent binary, so this bounds outbound
+// connection + bandwidth pressure the same way upgradeAllOutdated's POOL_SIZE
+// bounds upgrades. Rows beyond the pool wait as installStatus="pending".
+const BULK_INSTALL_POOL = 5;
+
+export interface BulkInstallInput {
+  assetIds:           string[];
+  sshCredentialId?:   string | null;
+  winrmCredentialId?: string | null;
+  arch?:              "amd64" | "arm64";
+  actor:              string;
+}
+
+export interface BulkInstallResult {
+  requested: number;
+  kicked:    number;
+  skipped:   Array<{ assetId: string; hostname: string | null; reason: string }>;
+}
+
+/**
+ * Operator-initiated bulk agent install — the assets-page bulk bar's "Deploy
+ * Agent" action. Applies the same eligibility rules as the manual
+ * POST /assets/:id/agent/install route per asset (source-kind compatibility,
+ * no hypervisors, no existing ManagedAgent row, reachable host) but resolves
+ * OS platform + transport automatically the way discovery auto-deploy does:
+ * inferAgentPlatform(asset.os), Windows → WinRM credential (SSH fallback),
+ * linux/darwin → SSH credential. Ineligible assets are reported back as
+ * skipped with a reason — never an error for the whole batch.
+ *
+ * ManagedAgent rows are created synchronously (the UI immediately shows
+ * "pending" on every kicked asset); the remote installs then run in a
+ * background pool of BULK_INSTALL_POOL so a large selection can't fan out
+ * hundreds of simultaneous SSH/SFTP sessions. Per-row failures land as
+ * installStatus="failed" + installError via the normal state machine.
+ *
+ * Scale note: one findMany bounded by the route's ids cap + one create per
+ * eligible asset. A one-shot operator action, not a ticking job.
+ */
+export async function bulkInstallAgents(input: BulkInstallInput): Promise<BulkInstallResult> {
+  const arch = input.arch ?? "amd64";
+  const actor = input.actor;
+
+  // Run-level preconditions, checked ONCE so a misconfigured server fails the
+  // whole request with one clear error instead of N identical skips.
+  const pre = await checkAutoDeployPreconditions();
+  if (!pre.ok) throw new AppError(400, `Cannot deploy agents — ${pre.reason}`);
+  const fingerprint = getServerCertFingerprint();
+  if (!fingerprint) throw new AppError(400, "HTTPS is not running — agent install requires TLS for the cert pin");
+  const manifest = await loadManifest();
+  if (!manifest) throw new AppError(400, "No agent binaries available — build them first (Server Settings → Maintenance → Polaris Agent).");
+
+  // Credentials validated up front (type must match what they'll be used
+  // for); pickTransportAndCredential below decides which applies per asset.
+  const deployCfg = {
+    enabled: true,
+    sshCredentialId: input.sshCredentialId ?? null,
+    winrmCredentialId: input.winrmCredentialId ?? null,
+  };
+  if (!deployCfg.sshCredentialId && !deployCfg.winrmCredentialId) {
+    throw new AppError(400, "Provide at least one credential (SSH and/or WinRM)");
+  }
+  for (const [id, type] of [
+    [deployCfg.sshCredentialId, "ssh"],
+    [deployCfg.winrmCredentialId, "winrm"],
+  ] as const) {
+    if (!id) continue;
+    const cred = await getCredential(id).catch(() => null);
+    if (!cred) throw new AppError(400, `Credential ${id} not found`);
+    if (cred.type !== type) {
+      throw new AppError(400, `Credential "${cred.name}" is type "${cred.type}" — need a "${type}" credential`);
+    }
+  }
+
+  const assets = await prisma.asset.findMany({
+    where: { id: { in: input.assetIds } },
+    select: {
+      id: true, hostname: true, dnsName: true, ipAddress: true, os: true, assetType: true,
+      managedAgent: { select: { installStatus: true } },
+      discoveredByIntegration: { select: { type: true } },
+    },
+  });
+  const byId = new Map(assets.map((a) => [a.id, a]));
+
+  const skipped: BulkInstallResult["skipped"] = [];
+  const queue: Array<{ managedAgentId: string; credentialId: string }> = [];
+
+  for (const assetId of input.assetIds) {
+    const a = byId.get(assetId);
+    if (!a) { skipped.push({ assetId, hostname: null, reason: "asset not found" }); continue; }
+    const skip = (reason: string) => skipped.push({ assetId, hostname: a.hostname, reason });
+
+    if (a.managedAgent) { skip(`agent already installed (status=${a.managedAgent.installStatus})`); continue; }
+    const sourceKind = assetSourceKindFromIntegrationType(a.discoveredByIntegration?.type ?? null);
+    if (!isPollingMethodCompatible(sourceKind, "agent")) { skip(`Polaris Agent is not compatible with ${sourceKind} sources`); continue; }
+    if (a.assetType === "hypervisor") { skip("agent cannot be installed on a hypervisor (ESXi) host"); continue; }
+    const host = a.ipAddress || a.dnsName || a.hostname || "";
+    if (!host) { skip("no IP / DNS / hostname to reach the device"); continue; }
+
+    const osPlatform = inferAgentPlatform(a.os);
+    const target = pickTransportAndCredential(osPlatform, deployCfg);
+    if ("skip" in target) { skip(target.skip); continue; }
+    if (!manifest.binaries[`${osPlatform}-${arch}`]) { skip(`no agent binary built for ${osPlatform}-${arch}`); continue; }
+
+    try {
+      const row = await prisma.managedAgent.create({
+        data: {
+          assetId:               a.id,
+          osPlatform,
+          arch,
+          installedBy:           actor,
+          installStatus:         "pending",
+          serverCertFingerprint: fingerprint,
+          installCredentialId:   target.credentialId,
+          installTransport:      target.transport,
+        },
+      });
+      queue.push({ managedAgentId: row.id, credentialId: target.credentialId });
+      await logEvent({
+        action:       "agent.install_kickoff",
+        resourceType: "asset",
+        resourceId:   a.id,
+        resourceName: a.hostname || host,
+        actor,
+        level:        "info",
+        message:      `Polaris Agent install kicked off (bulk, ${osPlatform}/${arch}, ${target.transport})`,
+        details:      { managedAgentId: row.id, credentialId: target.credentialId, transport: target.transport, bulk: true },
+      }).catch(() => {});
+    } catch (err: any) {
+      // Unique-constraint race (another install landed between findMany and
+      // create) or any create failure — report as a skip, not a batch error.
+      skip(err?.message || "failed to create agent record");
+      logger.warn({ err, assetId: a.id }, "bulk agent install create failed");
+    }
+  }
+
+  // Background pool over the actual remote installs. Each runInstall owns its
+  // own error handling (failures land in installStatus="failed"); anything
+  // escaping is logged, never thrown into the pool.
+  if (queue.length > 0) {
+    setImmediate(() => {
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < queue.length) {
+          const q = queue[cursor++]!;
+          await runInstall({ managedAgentId: q.managedAgentId, credentialId: q.credentialId }).catch((err) => {
+            logger.error({ err, managedAgentId: q.managedAgentId }, "Bulk agent install crashed unexpectedly");
+          });
+        }
+      };
+      void Promise.all(Array.from({ length: Math.min(BULK_INSTALL_POOL, queue.length) }, () => worker()));
+    });
+  }
+
+  return { requested: input.assetIds.length, kicked: queue.length, skipped };
 }
 
 // ─── Install runner ───────────────────────────────────────────────────

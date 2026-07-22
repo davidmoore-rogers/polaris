@@ -303,6 +303,10 @@ document.addEventListener("DOMContentLoaded", async function () {
   document.getElementById("assets-bulk-tags-btn").addEventListener("click", openBulkTagsModal);
   var bCompare = document.getElementById("assets-bulk-compare-btn");
   if (bCompare) bCompare.addEventListener("click", openCompareModal);
+  var bMerge = document.getElementById("assets-bulk-merge-btn");
+  if (bMerge) bMerge.addEventListener("click", bulkMergeSelectedAssets);
+  var bAgent = document.getElementById("assets-bulk-agent-btn");
+  if (bAgent) bAgent.addEventListener("click", openBulkAgentDeployModal);
   _wireBulkBarDropdowns();
   var bQuarantine   = document.getElementById("assets-bulk-quarantine-btn");
   var bUnquarantine = document.getElementById("assets-bulk-unquarantine-btn");
@@ -1106,13 +1110,19 @@ function _assetsUpdateBulkBar() {
   // Disable every bulk action while nothing is selected.
   ["assets-bulk-deselect-btn", "assets-bulk-type-btn", "assets-bulk-state-btn",
    "assets-bulk-monitor-btn", "assets-bulk-tags-btn", "assets-bulk-delete-btn",
-   "assets-bulk-compare-btn", "assets-bulk-quarantine-btn", "assets-bulk-unquarantine-btn"
+   "assets-bulk-compare-btn", "assets-bulk-merge-btn", "assets-bulk-agent-btn",
+   "assets-bulk-quarantine-btn", "assets-bulk-unquarantine-btn"
   ].forEach(function (id) { var b = document.getElementById(id); if (b) b.disabled = count === 0; });
 
   // Compare needs at least two assets to overlay. Available to any role that
   // can view assets — comparing telemetry is read-only.
   var bCompare = document.getElementById("assets-bulk-compare-btn");
   if (bCompare) bCompare.style.display = count >= 2 ? "" : "none";
+
+  // Merge is pairwise — show only when exactly two assets are selected, and
+  // only to admins (same gate as the Sources-tab "Merge asset..." button).
+  var bMerge = document.getElementById("assets-bulk-merge-btn");
+  if (bMerge) bMerge.style.display = count === 2 && isAdmin() ? "" : "none";
 
   // Show quarantine/release buttons only for assets-admins. Determine which
   // buttons are relevant based on the statuses of the selected assets.
@@ -1428,6 +1438,7 @@ var _mergeOtherAsset = null;       // the selected merge target ("other"/B)
 var _mergeThisSources = [];
 var _mergeOtherSources = [];
 var _mergeSearchTimer = null;
+var _mergePreselected = false;     // true when opened from the bulk bar (both assets picked up front)
 
 function _mergeFieldVal(asset, f) {
   var v = asset ? asset[f.key] : null;
@@ -1438,21 +1449,28 @@ function _mergeFieldVal(asset, f) {
 
 function _mergeIsEmpty(v) { return v === null || v === undefined || (typeof v === "string" && v.trim() === ""); }
 
-async function openAssetMergeModal(assetId) {
+// `preselectOtherId` (optional) pre-selects the merge target and skips the
+// search step — the bulk-bar Merge button passes the second selected asset.
+// The "Choose a different asset" back link restores the search flow.
+async function openAssetMergeModal(assetId, preselectOtherId) {
   if (!isAdmin()) return;
   _mergeThisAsset = null; _mergeOtherAsset = null;
   _mergeThisSources = []; _mergeOtherSources = [];
+  _mergePreselected = !!preselectOtherId;
+
+  var intro = preselectOtherId
+    ? 'Merge the two selected assets into one. Review the differences, choose which asset ' +
+      'survives and which value wins for each field, then confirm.'
+    : 'Merge another asset into this one. Search for the duplicate, review the differences, ' +
+      'choose which asset survives and which value wins for each field, then confirm.';
 
   // xl modals zero out .modal-body padding (`.modal.modal-xl .modal-body` in
   // styles.css — other xl modals run full-bleed tables / sticky tab strips),
   // so wrap our content in our own padded container to keep text off the edges.
   var body =
     '<div style="padding:1.25rem">' +
-      '<p style="margin:0 0 0.75rem;color:var(--color-text-secondary);font-size:0.85rem">' +
-        'Merge another asset into this one. Search for the duplicate, review the differences, ' +
-        'choose which asset survives and which value wins for each field, then confirm.' +
-      '</p>' +
-      '<div class="form-group" style="margin-bottom:0.5rem">' +
+      '<p style="margin:0 0 0.75rem;color:var(--color-text-secondary);font-size:0.85rem">' + intro + '</p>' +
+      '<div class="form-group" id="merge-search-wrap" style="margin-bottom:0.5rem' + (preselectOtherId ? ';display:none' : '') + '">' +
         '<input type="text" id="merge-search" placeholder="Search hostname, IP, MAC, serial, asset tag, owner..." autocomplete="off" style="width:100%">' +
       '</div>' +
       '<div id="merge-search-results" style="max-height:280px;overflow:auto"></div>' +
@@ -1463,7 +1481,7 @@ async function openAssetMergeModal(assetId) {
     '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="merge-confirm-btn" style="display:none">Merge</button>';
 
-  openModal("Merge Asset", body, footer, { xl: true });
+  openModal("Merge Assets", body, footer, { xl: true });
 
   // Load the current ("this") asset + its sources up front so the comparison
   // renders the moment a target is chosen.
@@ -1487,8 +1505,10 @@ async function openAssetMergeModal(assetId) {
       var q = this.value.trim();
       _mergeSearchTimer = setTimeout(function () { _mergeRunSearch(assetId, q); }, 250);
     });
-    input.focus();
+    if (!preselectOtherId) input.focus();
   }
+
+  if (preselectOtherId) await selectMergeTarget(preselectOtherId);
 }
 
 async function _mergeRunSearch(thisId, q) {
@@ -1544,6 +1564,10 @@ function _mergeReopenSearch() {
   if (btn) btn.style.display = "none";
   var box = document.getElementById("merge-search-results");
   if (box) box.innerHTML = "";
+  // The bulk-bar pre-selected flow opens with the search row hidden — restore
+  // it so "Choose a different asset" always leads back to a usable search.
+  var wrap = document.getElementById("merge-search-wrap");
+  if (wrap) wrap.style.display = "";
   var input = document.getElementById("merge-search");
   if (input) { input.value = ""; input.focus(); }
 }
@@ -1571,10 +1595,10 @@ function _renderMergeComparison() {
     '<div class="section-block" style="margin-bottom:0.75rem;padding:0.6rem 0.75rem">' +
       '<div class="section-label" style="margin-bottom:0.4rem">Which asset survives?</div>' +
       '<label style="display:block;margin-bottom:0.25rem;cursor:pointer">' +
-        '<input type="radio" name="merge-survivor" value="this" checked> Keep <strong>' + _mergeAssetLabel(A) + '</strong> (this asset)' +
+        '<input type="radio" name="merge-survivor" value="this" checked> Keep <strong>' + _mergeAssetLabel(A) + '</strong> (' + (_mergePreselected ? 'A' : 'this asset') + ')' +
       '</label>' +
       '<label style="display:block;cursor:pointer">' +
-        '<input type="radio" name="merge-survivor" value="other"> Keep <strong>' + _mergeAssetLabel(B) + '</strong> (the other asset)' +
+        '<input type="radio" name="merge-survivor" value="other"> Keep <strong>' + _mergeAssetLabel(B) + '</strong> (' + (_mergePreselected ? 'B' : 'the other asset') + ')' +
       '</label>' +
       '<p class="hint" style="margin:0.4rem 0 0">The survivor keeps its monitoring history, dependency edges and quarantine state. ' +
         'The absorbed asset\'s sample/telemetry history and interface-comment overrides are <strong>permanently deleted</strong>. ' +
@@ -1810,6 +1834,11 @@ async function _confirmMerge() {
     });
     closeModal();
     showToast('Assets merged — moved ' + result.movedSources + ' source(s)');
+    // The absorbed asset no longer exists — drop it from the bulk selection
+    // (it may be selected when the merge came from the bulk bar).
+    _assetsSelected.delete(result.absorbedId);
+    delete _assetsSelectedMeta[result.absorbedId];
+    _assetsUpdateBulkBar();
     await loadAssets();
     // Re-open the survivor so the operator sees the combined record.
     window.location.hash = 'view=asset:' + result.survivorId;
@@ -1818,6 +1847,128 @@ async function _confirmMerge() {
     if (btn) btn.disabled = false;
     showToast(err.message || 'Merge failed', 'error');
   }
+}
+
+// Bulk-bar Merge — pairwise merge of the two selected assets. Reuses the
+// Sources-tab merge modal with the target pre-selected, so the search step is
+// skipped and the comparison renders immediately. The button only shows when
+// exactly two assets are selected (see _assetsUpdateBulkBar).
+function bulkMergeSelectedAssets() {
+  if (!isAdmin()) return;
+  var ids = Array.from(_assetsSelected);
+  if (ids.length !== 2) {
+    showToast("Select exactly two assets to merge", "error");
+    return;
+  }
+  openAssetMergeModal(ids[0], ids[1]);
+}
+
+// ─── Bulk agent deploy — install the Polaris Agent on every selected asset ──
+// One modal collects the SSH / WinRM credentials + arch; the server resolves
+// OS platform + transport per asset (Windows → WinRM with SSH fallback,
+// everything else → SSH) and reports ineligible assets back as skips
+// (existing agent, hypervisor, Fortinet source, unreachable, no matching
+// credential). Backend: POST /assets/bulk-agent-install (agentInstallService.
+// bulkInstallAgents) — installs run in a bounded server-side pool; progress
+// shows per-asset on each System tab exactly like a manual install.
+function openBulkAgentDeployModal() {
+  if (!canManageAssets()) return;
+  var ids = Array.from(_assetsSelected);
+  if (!ids.length) return;
+
+  _ensureCredentials().then(function () {
+    var sshOpts   = (_credentialCache.list || []).filter(function (c) { return c.type === "ssh"; });
+    var winrmOpts = (_credentialCache.list || []).filter(function (c) { return c.type === "winrm"; });
+    function credOptions(list, noneLabel) {
+      if (list.length === 0) return '<option value="">— No credentials of this type —</option>';
+      return '<option value="">' + noneLabel + '</option>' +
+        list.map(function (c) {
+          return '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>';
+        }).join("");
+    }
+
+    var body =
+      '<p style="color:var(--color-text-secondary)">Install the Polaris Agent on the <strong>' + ids.length +
+        '</strong> selected asset' + (ids.length === 1 ? '' : 's') + '. Each asset\'s OS is inferred from its ' +
+        'discovered OS field: Windows hosts use the WinRM credential (SSH as fallback), everything else uses the SSH credential. ' +
+        'Assets that already have an agent, hypervisors, Fortinet-discovered devices, and assets with no reachable address are skipped automatically.</p>' +
+      '<div class="form-group" style="margin-top:0.75rem">' +
+        '<label for="bulk-agent-cred-ssh">SSH credential (Linux / macOS, Windows fallback)</label>' +
+        '<select id="bulk-agent-cred-ssh">' + credOptions(sshOpts, "— None (skip SSH-only hosts) —") + '</select>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label for="bulk-agent-cred-winrm">WinRM credential (Windows)</label>' +
+        '<select id="bulk-agent-cred-winrm">' + credOptions(winrmOpts, "— None (Windows hosts use SSH fallback) —") + '</select>' +
+        '<p class="hint">Credentials need admin rights on the target hosts — the installer registers a system service.</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label for="bulk-agent-arch">CPU architecture</label>' +
+        '<select id="bulk-agent-arch">' +
+          '<option value="amd64" selected>amd64 (x86_64)</option>' +
+          '<option value="arm64">arm64</option>' +
+        '</select>' +
+        '<p class="hint">Applies to every asset in this batch. Pick arm64 only for actually-ARM hosts; a wrong guess fails safely at enrollment.</p>' +
+      '</div>';
+
+    var footer =
+      '<button class="btn btn-secondary" id="bulk-agent-cancel">Cancel</button>' +
+      '<button class="btn btn-primary" id="bulk-agent-go">Deploy Agent</button>';
+
+    openModal("Deploy Polaris Agent to " + ids.length + " Asset" + (ids.length === 1 ? "" : "s"), body, footer);
+
+    document.getElementById("bulk-agent-cancel").onclick = closeModal;
+    document.getElementById("bulk-agent-go").onclick = function () {
+      var ssh   = document.getElementById("bulk-agent-cred-ssh").value;
+      var winrm = document.getElementById("bulk-agent-cred-winrm").value;
+      var arch  = document.getElementById("bulk-agent-arch").value;
+      if (!ssh && !winrm) {
+        showToast("Pick at least one credential first", "error");
+        return; // keep modal open
+      }
+      var btn = document.getElementById("bulk-agent-go");
+      btn.disabled = true;
+      var payload = { ids: ids, arch: arch };
+      if (ssh)   payload.sshCredentialId = ssh;
+      if (winrm) payload.winrmCredentialId = winrm;
+      api.assets.bulkInstallAgents(payload).then(function (r) {
+        _renderBulkAgentDeployResult(r);
+        loadAssets();
+      }).catch(function (err) {
+        btn.disabled = false;
+        showToast("Deploy failed: " + err.message, "error");
+      });
+    };
+  });
+}
+
+// Replace the deploy modal's content with the outcome summary: how many
+// installs kicked off + a per-asset table of skips with the server's reason.
+function _renderBulkAgentDeployResult(r) {
+  var kickedLine = r.kicked > 0
+    ? '<p style="margin:0 0 0.75rem"><strong>' + r.kicked + '</strong> install' + (r.kicked === 1 ? '' : 's') +
+      ' started — progress shows on each asset\'s System tab as the pool works through them.</p>'
+    : '<p style="margin:0 0 0.75rem">No installs were started.</p>';
+  var skippedHTML = '';
+  if (r.skipped && r.skipped.length) {
+    skippedHTML =
+      '<div class="section-label" style="margin-bottom:0.4rem">Skipped (' + r.skipped.length + ')</div>' +
+      '<div style="max-height:300px;overflow:auto">' +
+        '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">' +
+          '<thead><tr>' +
+            '<th style="text-align:left;padding:0 0.6rem 0.35rem 0">Asset</th>' +
+            '<th style="text-align:left;padding:0 0 0.35rem">Reason</th>' +
+          '</tr></thead><tbody>' +
+          r.skipped.map(function (s) {
+            return '<tr>' +
+              '<td style="padding:0.25rem 0.6rem 0.25rem 0;vertical-align:top;white-space:nowrap">' + escapeHtml(s.hostname || s.assetId) + '</td>' +
+              '<td style="padding:0.25rem 0;vertical-align:top;word-break:break-word;color:var(--color-text-secondary)">' + escapeHtml(s.reason) + '</td>' +
+            '</tr>';
+          }).join("") +
+        '</tbody></table>' +
+      '</div>';
+  }
+  openModal("Agent Deploy Started", kickedLine + skippedHTML,
+    '<button class="btn btn-primary" onclick="closeModal()">Close</button>');
 }
 
 async function bulkQuarantineAssets() {
