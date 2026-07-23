@@ -4178,6 +4178,8 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .widget-pill-ok    { background: rgba(76,175,80,0.18);  color: #81c784; }
 .widget-pill-watch { background: rgba(79,195,247,0.18); color: #4fc3f7; }
 .widget-pill-amber { background: rgba(255,193,7,0.18);  color: #ffd54f; }
+.widget-pill-orange  { background: rgba(255,138,0,0.18);  color: #ff8a00; }
+.widget-pill-neutral { background: rgba(148,163,184,0.18); color: #94a3b8; }
 .widget-pill-red   { background: rgba(255,23,68,0.20);  color: #ef5350; }
 /* Severity pills keep their own text color even inside .recent-item-title,
    whose generic `span { color:#fff }` would otherwise whiten them (making the
@@ -4185,6 +4187,8 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .recent-item-title .widget-pill-ok    { color: #81c784; }
 .recent-item-title .widget-pill-watch { color: #4fc3f7; }
 .recent-item-title .widget-pill-amber { color: #ffd54f; }
+.recent-item-title .widget-pill-orange  { color: #ff8a00; }
+.recent-item-title .widget-pill-neutral { color: #94a3b8; }
 .recent-item-title .widget-pill-red   { color: #ef5350; }
 
 /* ─── Site Map widget markers ─────────────────────────────────────────────
