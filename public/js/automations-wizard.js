@@ -94,6 +94,9 @@ async function openAutomationWizard(existing) {
   var STEPS = ["Name", "Devices", "Trigger", "Reset", "Actions", "Summary"];
   var scopePreviewTimer = null;
   var trigPreviewTimer = null;
+  // Step-5 escalation: shows/hides the "stop escalating when" config as
+  // escalation rows come and go (set by renderStep5, called by addTierRow).
+  var _escSyncFn = null;
 
   // ── Small shared helpers (schema-driven options / labels) ──────────────
   function opt(list, sel) {
@@ -1376,29 +1379,34 @@ async function openAutomationWizard(existing) {
         '<button type="button" class="btn btn-sm btn-secondary" id="aw-add-action" style="margin-top:6px">+ Add action</button>' +
       '</div>' +
       '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
-        '<label style="font-weight:600;margin:0"><input type="checkbox" id="aw-esc-enable"' + (esc ? " checked" : "") + '> Escalate while unhandled</label>' +
-        '<div id="aw-esc-fields" style="display:' + (esc ? "block" : "none") + ';margin-top:8px">' +
-          '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Stop escalating when</label><select id="aw-esc-stopon"><option value="acknowledge"' + (esc && esc.stopOn === "acknowledge" ? " selected" : "") + '>Acknowledged (or cleared)</option><option value="clear"' + (esc && esc.stopOn === "clear" ? " selected" : "") + '>Cleared only — acknowledging does not stop it</option></select></div>' +
-          '<div id="aw-esc-tiers"></div>' +
-          '<button type="button" class="btn btn-sm btn-secondary" id="aw-esc-add" style="margin-top:6px">+ Add tier</button>' +
-          '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:6px">Each tier runs its actions once its delay elapses (checked every minute), optionally repeating until the alert is handled or max repeats is reached.</p>' +
-        '</div>' +
+        '<label style="font-weight:600;margin:0 0 4px;display:block">Escalation</label>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">If an alert stays unhandled, run more actions after a delay — e.g. notify a wider group 15 minutes in. Each escalation runs once its delay elapses (checked every minute), optionally repeating until the alert is handled.</p>' +
+        '<div id="aw-esc-config" style="display:none;margin-bottom:6px"><label style="font-size:0.8rem">Stop escalating when</label><select id="aw-esc-stopon"><option value="acknowledge"' + (esc && esc.stopOn === "acknowledge" ? " selected" : "") + '>Acknowledged (or cleared)</option><option value="clear"' + (esc && esc.stopOn === "clear" ? " selected" : "") + '>Cleared only — acknowledging does not stop it</option></select></div>' +
+        '<div id="aw-esc-tiers"></div>' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="aw-esc-add" style="margin-top:6px">+ Add escalation</button>' +
       '</div>';
 
     var host = panel.querySelector("#aw-actions");
     (draft.actions || []).forEach(function (a) { addActionRow(host, a); });
     panel.querySelector("#aw-add-action").addEventListener("click", function () { addActionRow(host, null); });
 
-    var escEnable = panel.querySelector("#aw-esc-enable");
-    escEnable.addEventListener("change", function () {
-      panel.querySelector("#aw-esc-fields").style.display = escEnable.checked ? "block" : "none";
-    });
     var tiersHost = panel.querySelector("#aw-esc-tiers");
+    // "Stop escalating when" is meaningful only once at least one escalation
+    // exists; addTierRow's remove handler calls this too (via _escSyncFn).
+    _escSyncFn = function () {
+      var any = tiersHost.querySelectorAll(".aw-tier").length > 0;
+      panel.querySelector("#aw-esc-config").style.display = any ? "block" : "none";
+    };
     ((esc && esc.tiers) || []).forEach(function (t) { addTierRow(tiersHost, t); });
+    _escSyncFn();
     panel.querySelector("#aw-esc-add").addEventListener("click", function () {
       var max = (s.escalationMeta && s.escalationMeta.maxTiers) || 5;
       if (tiersHost.querySelectorAll(".aw-tier").length >= max) { showToast("Maximum " + max + " escalation tiers", "info"); return; }
-      addTierRow(tiersHost, null);
+      var row = addTierRow(tiersHost, null);
+      // Seed a notify action so the channel + recipient fields are right
+      // there — an escalation without an action can't do anything anyway.
+      addActionRow(row.querySelector(".tier-actions"), null);
+      _escSyncFn();
     });
     wireTokenPalette(panel);
   }
@@ -1678,21 +1686,25 @@ async function openAutomationWizard(existing) {
     row.style.cssText = "border:1px solid var(--color-border);border-radius:6px;padding:0.6rem;margin-bottom:6px";
     row.innerHTML =
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">' +
-        '<label style="margin:0;font-size:0.8rem">After</label>' +
-        '<input type="number" class="tier-after" min="1" value="' + (tier.afterMin != null ? tier.afterMin : 15) + '" style="width:80px"> min,' +
-        '<label style="margin:0;font-size:0.8rem">repeat every</label>' +
+        '<label style="margin:0;font-size:0.8rem;font-weight:600">Escalate after</label>' +
+        '<input type="number" class="tier-after" min="1" value="' + (tier.afterMin != null ? tier.afterMin : 15) + '" style="width:80px" title="Minutes after the alert fires (while it stays unhandled)">' +
+        '<label style="margin:0;font-size:0.8rem">minutes unhandled, repeat every</label>' +
         '<input type="number" class="tier-repeat" min="5" value="' + (tier.repeatEveryMin != null ? tier.repeatEveryMin : "") + '" style="width:80px" placeholder="off"> min,' +
         '<label style="margin:0;font-size:0.8rem">max</label>' +
         '<input type="number" class="tier-max" min="1" max="20" value="' + (tier.maxRepeats != null ? tier.maxRepeats : "") + '" style="width:70px" placeholder="5">' +
-        '<button type="button" class="btn btn-sm btn-danger tier-remove" style="margin-left:auto">Remove tier</button>' +
+        '<button type="button" class="btn btn-sm btn-danger tier-remove" style="margin-left:auto">Remove escalation</button>' +
       '</div>' +
       '<div class="tier-actions"></div>' +
       '<button type="button" class="btn btn-sm btn-secondary tier-add-action">+ Add action</button>';
     host.appendChild(row);
-    row.querySelector(".tier-remove").addEventListener("click", function () { row.remove(); });
+    row.querySelector(".tier-remove").addEventListener("click", function () {
+      row.remove();
+      if (_escSyncFn) _escSyncFn();
+    });
     var actionsHost = row.querySelector(".tier-actions");
     (tier.actions || []).forEach(function (a) { addActionRow(actionsHost, a); });
     row.querySelector(".tier-add-action").addEventListener("click", function () { addActionRow(actionsHost, null); });
+    return row;
   }
 
   function collectStep5() {
@@ -1700,22 +1712,21 @@ async function openAutomationWizard(existing) {
     var host = panel.querySelector("#aw-actions");
     if (!host) return;
     draft.actions = collectActionsFrom(host);
-    if (panel.querySelector("#aw-esc-enable").checked) {
-      var tiers = [];
-      panel.querySelectorAll("#aw-esc-tiers .aw-tier").forEach(function (row) {
-        var t = { afterMin: Number(row.querySelector(".tier-after").value) || 0, actions: collectActionsFrom(row.querySelector(".tier-actions")) };
-        var rep = row.querySelector(".tier-repeat").value;
-        if (rep !== "") {
-          t.repeatEveryMin = Number(rep);
-          var mx = row.querySelector(".tier-max").value;
-          if (mx !== "") t.maxRepeats = Number(mx);
-        }
-        tiers.push(t);
-      });
-      draft.escalation = { stopOn: panel.querySelector("#aw-esc-stopon").value, tiers: tiers };
-    } else {
-      draft.escalation = null;
-    }
+    // Escalation exists iff at least one escalation row does — no toggle.
+    var tiers = [];
+    panel.querySelectorAll("#aw-esc-tiers .aw-tier").forEach(function (row) {
+      var t = { afterMin: Number(row.querySelector(".tier-after").value) || 0, actions: collectActionsFrom(row.querySelector(".tier-actions")) };
+      var rep = row.querySelector(".tier-repeat").value;
+      if (rep !== "") {
+        t.repeatEveryMin = Number(rep);
+        var mx = row.querySelector(".tier-max").value;
+        if (mx !== "") t.maxRepeats = Number(mx);
+      }
+      tiers.push(t);
+    });
+    draft.escalation = tiers.length
+      ? { stopOn: panel.querySelector("#aw-esc-stopon").value, tiers: tiers }
+      : null;
   }
   function validateAction(a, label) {
     if (a.type === "notify") {
@@ -1741,11 +1752,10 @@ async function openAutomationWizard(existing) {
     }
     if (draft.escalation) {
       var tiers = draft.escalation.tiers || [];
-      if (!tiers.length) return "Escalation: add at least one tier, or untick escalation.";
       for (var j = 0; j < tiers.length; j++) {
         var t = tiers[j]; var tn = j + 1;
-        if (!t.afterMin || isNaN(t.afterMin) || t.afterMin < 1) return "Escalation tier " + tn + ": enter the delay in minutes (1 or more).";
-        if (!t.actions.length) return "Escalation tier " + tn + ": add at least one action.";
+        if (!t.afterMin || isNaN(t.afterMin) || t.afterMin < 1) return "Escalation " + tn + ": enter the delay in minutes (1 or more).";
+        if (!t.actions.length) return "Escalation " + tn + ": add at least one action (or remove it).";
         for (var k = 0; k < t.actions.length; k++) {
           var p2 = validateAction(t.actions[k], "Escalation tier " + tn + ", action " + (k + 1));
           if (p2) return p2;

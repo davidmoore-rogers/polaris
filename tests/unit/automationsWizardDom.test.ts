@@ -182,6 +182,23 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector("#aw-step-5.visible")).toBeTruthy();
     expect(doc.querySelector("#aw-summary")).toBeFalsy(); // summary moved to step 6
 
+    // Escalation is button-based (no enable checkbox): adding an escalation
+    // reveals the delay field, seeds a notify action (channel + recipients),
+    // and shows the stop-condition select; removing it hides them again.
+    expect(doc.querySelector("#aw-esc-enable")).toBeFalsy();
+    const escAdd = doc.querySelector("#aw-esc-add")!;
+    expect(escAdd.textContent).toContain("Add escalation");
+    expect((doc.querySelector("#aw-esc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
+    (escAdd as unknown as { click: () => void }).click();
+    const tier = doc.querySelector("#aw-esc-tiers .aw-tier")!;
+    expect(tier.querySelector(".tier-after")).toBeTruthy(); // minutes-before field
+    expect(tier.querySelector(".tier-actions .aw-action")).toBeTruthy(); // seeded notify action
+    expect(tier.querySelector(".na-channel")).toBeTruthy(); // channel select → recipients render from it
+    expect((doc.querySelector("#aw-esc-config") as unknown as { style: { display: string } }).style.display).toBe("block");
+    (tier.querySelector(".tier-remove") as unknown as { click: () => void }).click();
+    expect(doc.querySelector("#aw-esc-tiers .aw-tier")).toBeFalsy();
+    expect((doc.querySelector("#aw-esc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
+
     (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(doc.querySelector("#aw-step-6.visible")).toBeTruthy();
