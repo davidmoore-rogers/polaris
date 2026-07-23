@@ -1875,7 +1875,7 @@ function openBulkAgentDeployModal() {
   var ids = Array.from(_assetsSelected);
   if (!ids.length) return;
 
-  _ensureCredentials().then(function () {
+  Promise.all([_ensureCredentials(), _ensureAgentInstallScripts()]).then(function () {
     var sshOpts   = (_credentialCache.list || []).filter(function (c) { return c.type === "ssh"; });
     var winrmOpts = (_credentialCache.list || []).filter(function (c) { return c.type === "winrm"; });
     function credOptions(list, noneLabel) {
@@ -1885,6 +1885,17 @@ function openBulkAgentDeployModal() {
           return '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>';
         }).join("");
     }
+
+    // Per-OS install-method picker — only shown for OSes that actually have
+    // more than one vetted variant (keeps the common single-variant case
+    // clutter-free). The submit handler reads whichever selects are present.
+    var osLabels = { linux: "Linux", darwin: "macOS", windows: "Windows" };
+    var scriptRows = ["linux", "darwin", "windows"].filter(_agentScriptHasChoicesFor).map(function (os) {
+      return '<div class="form-group">' +
+        '<label for="bulk-agent-script-' + os + '">Install method — ' + osLabels[os] + '</label>' +
+        '<select id="bulk-agent-script-' + os + '" data-os="' + os + '">' + _agentScriptOptionsFor(os) + '</select>' +
+        '</div>';
+    }).join("");
 
     var body =
       '<p style="color:var(--color-text-secondary)">Install the Polaris Agent on the <strong>' + ids.length +
@@ -1907,7 +1918,8 @@ function openBulkAgentDeployModal() {
           '<option value="arm64">arm64</option>' +
         '</select>' +
         '<p class="hint">Applies to every asset in this batch. Pick arm64 only for actually-ARM hosts; a wrong guess fails safely at enrollment.</p>' +
-      '</div>';
+      '</div>' +
+      scriptRows;
 
     var footer =
       '<button class="btn btn-secondary" id="bulk-agent-cancel">Cancel</button>' +
@@ -1929,6 +1941,12 @@ function openBulkAgentDeployModal() {
       var payload = { ids: ids, arch: arch };
       if (ssh)   payload.sshCredentialId = ssh;
       if (winrm) payload.winrmCredentialId = winrm;
+      // Collect any per-OS install-method choices that were rendered.
+      var scriptIds = {};
+      Array.prototype.forEach.call(document.querySelectorAll("[id^='bulk-agent-script-']"), function (sel) {
+        if (sel.value) scriptIds[sel.getAttribute("data-os")] = sel.value;
+      });
+      if (Object.keys(scriptIds).length) payload.scriptIds = scriptIds;
       api.assets.bulkInstallAgents(payload).then(function (r) {
         _renderBulkAgentDeployResult(r);
         loadAssets();
@@ -4711,9 +4729,10 @@ function _openInstallAgentModal(a) {
   else if (osText.indexOf("mac") >= 0 ||
            osText.indexOf("darwin") >= 0)         inferredOs = "darwin";
 
-  // Load credentials list so the picker isn't empty on open. Filter to
-  // ssh + winrm types — restapi/snmp credentials aren't relevant here.
-  _ensureCredentials().then(function () {
+  // Load credentials + the install-method catalog so both pickers are
+  // populated on open. Filter creds to ssh + winrm types — restapi/snmp
+  // credentials aren't relevant here.
+  Promise.all([_ensureCredentials(), _ensureAgentInstallScripts()]).then(function () {
     var sshOpts   = (_credentialCache.list || []).filter(function (c) { return c.type === "ssh"; });
     var winrmOpts = (_credentialCache.list || []).filter(function (c) { return c.type === "winrm"; });
     function credOptions(list) {
@@ -4744,6 +4763,11 @@ function _openInstallAgentModal(a) {
           '<option value="arm64">arm64</option>' +
         '</select>' +
         '<p class="hint">Pick arm64 only for actually-ARM hosts (Apple Silicon, Raspberry Pi, AWS Graviton, etc.). Most x86 servers and most older Windows hosts are amd64.</p>' +
+      '</div>' +
+      '<div class="form-group" id="agent-install-script-wrap">' +
+        '<label for="agent-install-script">Install method</label>' +
+        '<select id="agent-install-script">' + _agentScriptOptionsFor(inferredOs) + '</select>' +
+        '<p class="hint" id="agent-install-script-hint"></p>' +
       '</div>' +
       '<div class="form-group" id="agent-install-transport-wrap" style="display:none">' +
         '<label>Transport</label>' +
@@ -4787,12 +4811,30 @@ function _openInstallAgentModal(a) {
       var checked = document.querySelector('input[name="agent-install-transport"]:checked');
       return checked ? checked.value : "winrm";
     }
+    // Keep the install-method picker + its description in sync with the OS.
+    function refreshScriptRow() {
+      var os = document.getElementById("agent-install-os").value;
+      var sel  = document.getElementById("agent-install-script");
+      var wrap = document.getElementById("agent-install-script-wrap");
+      var hint = document.getElementById("agent-install-script-hint");
+      var opts = _agentScriptOptionsFor(os);
+      sel.innerHTML = opts;
+      // Nothing to pick (single vetted variant per OS today, or catalog
+      // failed to load) — hide the row and let the server apply the default.
+      wrap.style.display = (opts === "") ? "none" : "block";
+      var chosen = (_agentInstallScriptsCache.list || []).filter(function (s) { return s.id === sel.value; })[0];
+      hint.textContent = chosen ? chosen.description : "";
+    }
+    document.getElementById("agent-install-script").addEventListener("change", refreshScriptRow);
+
     function refreshCredRows() {
       var os = document.getElementById("agent-install-os").value;
       var transportWrap = document.getElementById("agent-install-transport-wrap");
       var sshWrap   = document.getElementById("agent-install-cred-ssh-wrap");
       var winrmWrap = document.getElementById("agent-install-cred-winrm-wrap");
       var hint      = document.getElementById("agent-install-transport-hint");
+
+      refreshScriptRow();
 
       if (os === "windows") {
         transportWrap.style.display = "block";
@@ -4817,10 +4859,11 @@ function _openInstallAgentModal(a) {
 
     document.getElementById("btn-agent-install-cancel").onclick = closeModal;
     document.getElementById("btn-agent-install-go").onclick = function () {
-      var osSel    = document.getElementById("agent-install-os");
-      var archSel  = document.getElementById("agent-install-arch");
-      var sshSel   = document.getElementById("agent-install-cred-ssh");
-      var winrmSel = document.getElementById("agent-install-cred-winrm");
+      var osSel     = document.getElementById("agent-install-os");
+      var archSel   = document.getElementById("agent-install-arch");
+      var scriptSel = document.getElementById("agent-install-script");
+      var sshSel    = document.getElementById("agent-install-cred-ssh");
+      var winrmSel  = document.getElementById("agent-install-cred-winrm");
       var os = osSel.value;
       var transport = (os === "windows") ? selectedTransport() : "ssh";
       var credentialId = (transport === "winrm") ? winrmSel.value : sshSel.value;
@@ -4828,12 +4871,16 @@ function _openInstallAgentModal(a) {
         showToast("Pick a credential first", "error");
         return; // keep modal open
       }
-      api.assets.installAgent(a.id, {
+      var body = {
         credentialId: credentialId,
         osPlatform:   os,
         arch:         archSel.value,
         transport:    transport,
-      }).then(function (r) {
+      };
+      // Only send scriptId when the picker is visible + has a value (empty
+      // catalog / hidden row → let the server apply the per-OS default).
+      if (scriptSel && scriptSel.value) body.scriptId = scriptSel.value;
+      api.assets.installAgent(a.id, body).then(function (r) {
         showToast("Install started — watch progress on the System tab", "success");
         closeModal();
         // Auto-open the asset details modal on the System tab so the
@@ -15759,6 +15806,40 @@ async function _ensureCredentials(force) {
     _credentialCache.list = [];
   }
   return _credentialCache.list;
+}
+
+// Curated install-method catalog (agentInstallScripts). Loaded once and cached
+// for the deploy modals' OS-locked "Install method" picker.
+var _agentInstallScriptsCache = { loaded: false, list: [] };
+
+async function _ensureAgentInstallScripts(force) {
+  if (_agentInstallScriptsCache.loaded && !force) return _agentInstallScriptsCache.list;
+  try {
+    var r = await api.assets.agentInstallScripts();
+    _agentInstallScriptsCache.list = (r && r.scripts) || [];
+    _agentInstallScriptsCache.loaded = true;
+  } catch (_) {
+    _agentInstallScriptsCache.list = [];
+  }
+  return _agentInstallScriptsCache.list;
+}
+
+// <option> HTML for the install-method variants available on a given OS.
+// The per-OS default is pre-selected. Returns "" when the catalog is empty
+// (network failure) — callers hide the picker and fall back to the default.
+function _agentScriptOptionsFor(os) {
+  var list = (_agentInstallScriptsCache.list || []).filter(function (s) { return s.osPlatform === os; });
+  if (list.length === 0) return "";
+  return list.map(function (s) {
+    return '<option value="' + escapeHtml(s.id) + '"' + (s.isDefault ? " selected" : "") + '>' + escapeHtml(s.label) + '</option>';
+  }).join("");
+}
+
+// True when an OS has more than one install-method variant (i.e. there's an
+// actual choice to present). Bulk deploy uses this to avoid rendering a
+// single-option select per OS in the common (one-variant) case.
+function _agentScriptHasChoicesFor(os) {
+  return (_agentInstallScriptsCache.list || []).filter(function (s) { return s.osPlatform === os; }).length > 1;
 }
 
 function _credentialOptionsFor(type, selectedId) {

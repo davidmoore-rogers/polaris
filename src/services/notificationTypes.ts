@@ -27,7 +27,7 @@ export const AGGREGATIONS = ["latest", "avg", "min", "max"] as const;
 // Numeric thresholds over the telemetry / sample tables. `dimensionFilter`
 // narrows multi-row streams (interfaces, sensors, mounts, SD-WAN members).
 export const ASSET_METRICS = [
-  "cpuPct", "memPct", "memUsedBytes", "sessionCount", "responseTimeMs", "uptimeSec",
+  "cpuPct", "memPct", "memUsedBytes", "sessionCount", "responseTimeMs", "uptimeSec", "probeLossPct",
   "hwSensorValue", "storageUsedPct", "storageUsedBytes", "storageDaysUntilFull",
   "ifInErrorRate", "ifOutErrorRate", "ifInBps", "ifOutBps",
   "sdwanLatencyMs", "sdwanJitterMs", "sdwanPacketLoss", "ipsecThroughputBps",
@@ -1104,6 +1104,13 @@ export const METRIC_META: Record<string, { label: string; unit: string }> = {
   sessionCount: { label: "Active sessions", unit: "" },
   responseTimeMs: { label: "Response time", unit: "ms" },
   uptimeSec: { label: "Uptime", unit: "sec" },
+  // Probe-failure ratio over the trigger window (failed probes / total probes),
+  // the same computation as the dashboard Packet Loss widget — works for ANY
+  // monitored asset (switch/AP/server), not just SD-WAN. Windowed ratio: the
+  // window is the measurement interval, so aggregation doesn't apply. Alert
+  // with ">", e.g. > 25%. Fully-down assets (no successful probe) produce no
+  // reading — they're the asset-down condition, not packet loss.
+  probeLossPct: { label: "Packet loss (probe)", unit: "%" },
   hwSensorValue: { label: "Hardware sensor value", unit: "(sensor unit)" },
   storageUsedPct: { label: "Storage used", unit: "%" },
   storageUsedBytes: { label: "Storage used", unit: "bytes" },
