@@ -60,15 +60,16 @@ type Config struct {
 	EnrollmentToken  string
 
 	// Optional knobs — leave empty for defaults.
-	ResponseTimeIntervalSec int
-	HeartbeatIntervalSec    int
-	TelemetryIntervalSec    int
-	InterfacesIntervalSec   int
-	StorageIntervalSec      int
-	EventLogIntervalSec     int
+	ResponseTimeIntervalSec     int
+	HeartbeatIntervalSec        int
+	TelemetryIntervalSec        int
+	InterfacesIntervalSec       int
+	StorageIntervalSec          int
+	EventLogIntervalSec         int
 	ProcessInventoryIntervalSec int
 	ProcessTelemetryIntervalSec int
 	ProcessLogIntervalSec       int
+	ServiceInventoryIntervalSec int
 	CommandPollIntervalSec      int
 
 	// Verbose turns on per-push lifecycle logging (connect / send / validate
@@ -164,6 +165,8 @@ func Load(path string) (*Config, error) {
 			fmt.Sscanf(val, "%d", &cfg.ProcessTelemetryIntervalSec)
 		case "process_log_interval_sec":
 			fmt.Sscanf(val, "%d", &cfg.ProcessLogIntervalSec)
+		case "service_inventory_interval_sec":
+			fmt.Sscanf(val, "%d", &cfg.ServiceInventoryIntervalSec)
 		case "command_poll_interval_sec":
 			fmt.Sscanf(val, "%d", &cfg.CommandPollIntervalSec)
 		case "verbose":
@@ -298,6 +301,9 @@ func (c *Config) Save() error {
 	}
 	if c.ProcessLogIntervalSec > 0 {
 		fmt.Fprintf(w, "process_log_interval_sec       = %d\n", c.ProcessLogIntervalSec)
+	}
+	if c.ServiceInventoryIntervalSec > 0 {
+		fmt.Fprintf(w, "service_inventory_interval_sec = %d\n", c.ServiceInventoryIntervalSec)
 	}
 	if c.CommandPollIntervalSec > 0 {
 		fmt.Fprintf(w, "command_poll_interval_sec      = %d\n", c.CommandPollIntervalSec)

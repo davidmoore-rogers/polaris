@@ -80,26 +80,29 @@ const (
 	// polled assets (60 s). System info (interfaces + storage) defaults
 	// to 600 s — the OS readings change slowly and the full enumeration
 	// has more overhead than a CPU snapshot.
-	defaultTelemetryIntervalSec    = 60
-	defaultInterfacesIntervalSec   = 600
-	defaultStorageIntervalSec      = 600
+	defaultTelemetryIntervalSec  = 60
+	defaultInterfacesIntervalSec = 600
+	defaultStorageIntervalSec    = 600
 	// OS event-log poll cadence. The stream is opt-in (default OFF server-side)
 	// so this only matters once an operator enables it; 60 s keeps fresh errors
 	// flowing without hammering wevtutil/journalctl.
-	defaultEventLogIntervalSec     = 60
+	defaultEventLogIntervalSec = 60
 	// Process-inventory snapshot cadence. Heavier enumeration (every PID) +
 	// current-state (no history), so a slower default than telemetry.
 	defaultProcessInventoryIntervalSec = 300
+	// Service-inventory snapshot cadence — current-state unit/service list,
+	// same rhythm as the process inventory.
+	defaultServiceInventoryIntervalSec = 300
 	// Per-pinned-program CPU/RAM cadence — 60 s like host telemetry.
 	defaultProcessTelemetryIntervalSec = 60
 	// Per-pinned-program log-tail cadence — 60 s.
-	defaultProcessLogIntervalSec       = 60
+	defaultProcessLogIntervalSec = 60
 	// Per-mapped-program connection-discovery cadence (Application Map) — 60 s,
 	// riding the same per-minute rhythm as the pinned telemetry pass.
 	defaultProcessConnectionsIntervalSec = 60
 	// Process-control command poll cadence — 20 s (operator clicks Stop/Start/
 	// Restart and expects it to act within seconds, not a minute).
-	defaultCommandPollIntervalSec      = 20
+	defaultCommandPollIntervalSec = 20
 )
 
 // ─── Server-pushed stream config (Phase 0 plumbing) ────────────────────────
@@ -129,9 +132,21 @@ type processesRuntimeCfg struct {
 	mapped  []string
 }
 
+// servicesRuntimeCfg holds the resolved services-stream state from /config. The
+// inventory loop gates on `enabled` (true whenever a live agent owns the host);
+// `monitored` lists units pinned for per-unit journalctl tailing (Phase 2) and
+// `mapped` lists units toggled for Application Map connection attribution
+// (Phase 3).
+type servicesRuntimeCfg struct {
+	enabled   bool
+	monitored []string
+	mapped    []string
+}
+
 var (
 	eventLogCfg      atomic.Value // eventLogRuntimeCfg
 	processesCfg     atomic.Value // processesRuntimeCfg
+	servicesCfg      atomic.Value // servicesRuntimeCfg
 	cachedConfigETag atomic.Value // string
 )
 
@@ -147,6 +162,13 @@ func loadProcessesCfg() processesRuntimeCfg {
 		return v.(processesRuntimeCfg)
 	}
 	return processesRuntimeCfg{} // disabled until the first /config apply
+}
+
+func loadServicesCfg() servicesRuntimeCfg {
+	if v := servicesCfg.Load(); v != nil {
+		return v.(servicesRuntimeCfg)
+	}
+	return servicesRuntimeCfg{} // disabled until the first /config apply
 }
 
 func loadConfigETag() string {
@@ -178,6 +200,11 @@ func applyServerStreams(resp *transport.ConfigResponse) {
 		processesCfg.Store(processesRuntimeCfg{enabled: s.Enabled, pinned: resp.PinnedProcesses, mapped: resp.MappedProcesses})
 	} else {
 		processesCfg.Store(processesRuntimeCfg{pinned: resp.PinnedProcesses, mapped: resp.MappedProcesses})
+	}
+	if s, ok := resp.Streams["services"]; ok {
+		servicesCfg.Store(servicesRuntimeCfg{enabled: s.Enabled, monitored: resp.MonitoredServices, mapped: resp.MappedServices})
+	} else {
+		servicesCfg.Store(servicesRuntimeCfg{monitored: resp.MonitoredServices, mapped: resp.MappedServices})
 	}
 }
 
@@ -266,6 +293,7 @@ func runAgent(ctx context.Context, confPath string) {
 	go systemInfoLoop(ctx, cfg, client)
 	go eventLogLoop(ctx, cfg, client)
 	go processInventoryLoop(ctx, cfg, client)
+	go serviceInventoryLoop(ctx, cfg, client)
 	go processTelemetryLoop(ctx, cfg, client)
 	go processLogLoop(ctx, cfg, client)
 	go processConnectionsLoop(ctx, cfg, client)
@@ -672,6 +700,57 @@ func pushProcessInventoryOne(client *transport.Client) {
 	}
 }
 
+// serviceInventoryLoop pushes the current-state systemd unit / Windows service
+// list on a fixed cadence (full-replace server-side). Gated on the services
+// stream being enabled (true whenever a live agent owns the host).
+func serviceInventoryLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
+	interval := time.Duration(cfg.ServiceInventoryIntervalSec) * time.Second
+	if interval == 0 {
+		interval = defaultServiceInventoryIntervalSec * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	pushServiceInventoryOne(client)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pushServiceInventoryOne(client)
+		}
+	}
+}
+
+func pushServiceInventoryOne(client *transport.Client) {
+	if !loadServicesCfg().enabled {
+		return // services stream not enabled — nothing to collect
+	}
+	type res struct{ s []*transport.ServiceSample }
+	ch := make(chan res, 1)
+	go func() { ch <- res{collectors.ServiceInventoryOnce()} }()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(collectionTimeout):
+		log.Printf("push serviceInventory samples: collector timed out after %.0fs", collectionTimeout.Seconds())
+		return
+	}
+	if r.s == nil {
+		return // no service manager / enumeration failed — skip (don't wipe inventory)
+	}
+	resp, err := client.PushSamples(&transport.SamplesBody{
+		Stream:  "serviceInventory",
+		Samples: r.s,
+	})
+	if err != nil {
+		log.Printf("push serviceInventory samples: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("serviceInventory sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
+	}
+}
+
 // processTelemetryLoop samples CPU/RAM for the operator-pinned programs once a
 // minute (Feature C). Gated on the processes stream resolving to agent AND at
 // least one pinned program; otherwise idle.
@@ -702,7 +781,9 @@ func pushProcessTelemetryOne(client *transport.Client) {
 	for _, p := range pc.pinned {
 		names = append(names, p.Name)
 	}
-	type res struct{ s []*transport.ProcessTelemetrySample }
+	type res struct {
+		s []*transport.ProcessTelemetrySample
+	}
 	ch := make(chan res, 1)
 	go func() { ch <- res{collectors.ProcessTelemetryOnce(names)} }()
 	var r res
@@ -803,7 +884,9 @@ func pushProcessConnectionsOne(client *transport.Client) {
 	if !pc.enabled || len(pc.mapped) == 0 {
 		return
 	}
-	type res struct{ s []*transport.ProcessConnectionSample }
+	type res struct {
+		s []*transport.ProcessConnectionSample
+	}
 	ch := make(chan res, 1)
 	go func() { ch <- res{collectors.ProcessConnectionsOnce(pc.mapped)} }()
 	var r res
