@@ -265,6 +265,8 @@ const ProcessConnectionSampleSchema = z.object({
   localPort:  z.number().int().min(0).max(65535).optional(),
   remoteIp:   z.string().max(64).optional(),
   remotePort: z.number().int().min(0).max(65535).optional(),
+  // Owning systemd unit / Windows service (Phase 3). Attribute-only.
+  unit:       z.string().max(255).optional(),
 });
 
 // Per-pinned-program log lines (Feature C).
@@ -556,11 +558,16 @@ agentsRouter.post("/samples", async (req, res, next) => {
       // mapped set — a guard against agents running on a stale config (the
       // agent filters on-host; this is the server-side backstop, same posture
       // as the storage arm's pinned lookup).
-      const mapped = new Set(
-        (await prisma.asset.findUnique({ where: { id: assetId }, select: { mappedProcesses: true } }))?.mappedProcesses ?? [],
-      );
+      const mapRow = await prisma.asset.findUnique({
+        where: { id: assetId },
+        select: { mappedProcesses: true, mappedServices: true },
+      });
+      const mappedNames = new Set(mapRow?.mappedProcesses ?? []);
+      const mappedUnits = new Set(mapRow?.mappedServices ?? []);
       const rows = body.samples
-        .filter((s) => mapped.has(s.name))
+        // Keep a row if its program is mapped by name OR its unit is mapped
+        // (Phase 3) — the two pin dimensions are independent.
+        .filter((s) => mappedNames.has(s.name) || (s.unit != null && mappedUnits.has(s.unit)))
         .map((s) => ({
           processName: s.name,
           kind:        s.kind,
@@ -569,6 +576,7 @@ agentsRouter.post("/samples", async (req, res, next) => {
           localPort:   s.localPort ?? null,
           remoteIp:    s.remoteIp ?? null,
           remotePort:  s.remotePort ?? null,
+          unit:        s.unit ?? null,
         }));
       await persistProcessConnections(assetId, rows);
       accepted = rows.length;

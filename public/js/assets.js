@@ -14871,6 +14871,15 @@ function openServiceDetailPanel(asset, svc) {
         metaRow("Main process", pidVal) +
         metaRow("Memory", memVal) +
       '</div>' +
+      // Ports & Connections (Phase 3) — populated when the unit is pinned for
+      // Map (mappedServices); the agent attributes its PIDs' sockets to the unit.
+      '<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
+        '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem;gap:8px;flex-wrap:wrap">' +
+          '<h4 style="margin:0">Ports &amp; Connections</h4>' +
+          '<a class="btn btn-sm btn-secondary" href="/appmap.html#focus=' + encodeURIComponent("asset:" + asset.id) + '">View on Application Map</a>' +
+        '</div>' +
+        '<div id="svc-conn-view" style="font-size:0.8rem;color:var(--color-text-secondary)">Loading…</div>' +
+      '</div>' +
       // Journalctl viewer (Phase 2) — Linux units only; populated when the unit
       // is pinned for Logs (monitoredServices) and the agent has tailed it.
       '<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
@@ -14897,6 +14906,7 @@ function openServiceDetailPanel(asset, svc) {
   if (refreshLogs) refreshLogs.addEventListener("click", function () { _loadServiceLogsFor(asset.id, svc.unit); });
   var flaggedOnly = document.getElementById("svc-logs-flagged-only");
   if (flaggedOnly) flaggedOnly.addEventListener("change", function () { _loadServiceLogsFor(asset.id, svc.unit); });
+  _loadServiceConnectionsFor(asset.id, svc.unit);
   _loadServiceLogsFor(asset.id, svc.unit);
 }
 
@@ -15215,6 +15225,29 @@ function _pollProcessCommand(assetId, commandId, statusEl, tries) {
 async function _loadProcessConnectionsFor(assetId, name) {
   var el = document.getElementById("proc-conn-view");
   if (!el) return;
+  try {
+    var d = await api.assets.processConnections(assetId, name);
+    _renderConnView(el, d, 'No connection data yet. Check <strong>Map</strong> for this process in the Processes tab to start collecting listening ports and connections (data appears within a minute or two).');
+  } catch (err) {
+    el.textContent = "Error: " + (err && err.message ? err.message : String(err));
+  }
+}
+
+// Ports & Connections for a mapped unit (Phase 3) — reuses the shared renderer.
+async function _loadServiceConnectionsFor(assetId, unit) {
+  var el = document.getElementById("svc-conn-view");
+  if (!el) return;
+  try {
+    var d = await api.assets.serviceConnections(assetId, unit);
+    _renderConnView(el, d, 'No connection data yet. Check <strong>Map</strong> for this unit in the Services tab to attribute its listening ports and connections (data appears within a minute or two).');
+  } catch (err) {
+    el.textContent = "Error: " + (err && err.message ? err.message : String(err));
+  }
+}
+
+// Shared listening/outbound/inbound table renderer for the process + service
+// connection panels (identical DTO shape from getAssetProcessConnections).
+function _renderConnView(el, d, emptyMsg) {
   function remoteCell(r) {
     var addr = escapeHtml(r.remoteIp) + (r.remotePort ? ":" + r.remotePort : "");
     if (r.remoteAssetId) {
@@ -15235,46 +15268,41 @@ async function _loadProcessConnectionsFor(assetId, name) {
       '<tr>' + headers.map(function (h) { return '<th style="text-align:left;padding:2px 8px 2px 0;border-bottom:1px solid var(--color-border);font-weight:500">' + h + '</th>'; }).join("") + '</tr>' +
       rowsHtml + '</table>';
   }
-  try {
-    var d = await api.assets.processConnections(assetId, name);
-    var html = "";
-    if (d.listening.length) {
-      html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Listening (' + d.listening.length + ')</h5>';
-      html += table(["Port", "Bind", "Last seen"], d.listening.map(function (r) {
-        return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.port) + '</td>' +
-          '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.bindAddr || "—") + '</td>' +
-          '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
-      }).join(""));
-    }
-    if (d.outbound.length) {
-      html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Outbound (' + d.outbound.length + ')</h5>';
-      html += table(["Destination", "Proto", "Last seen"], d.outbound.map(function (r) {
-        return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
-          '<td style="padding:2px 8px 2px 0">' + escapeHtml(r.proto) + '</td>' +
-          '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
-      }).join(""));
-    }
-    if (d.inbound.length) {
-      html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Inbound peers (' + d.inbound.length + ')</h5>';
-      html += table(["Peer", "To port", "Last seen"], d.inbound.map(function (r) {
-        return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
-          '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.localPort) + '</td>' +
-          '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
-      }).join(""));
-    }
-    if (!html) {
-      html = 'No connection data yet. Check <strong>Map</strong> for this process in the Processes tab to start collecting listening ports and connections (data appears within a minute or two).';
-    }
-    el.innerHTML = html;
-    el.querySelectorAll(".proc-conn-asset-link").forEach(function (a) {
-      a.addEventListener("click", function (ev) {
-        ev.preventDefault();
-        openViewModal(a.getAttribute("data-asset-id"));
-      });
-    });
-  } catch (err) {
-    el.textContent = "Error: " + (err && err.message ? err.message : String(err));
+  var html = "";
+  if (d.listening.length) {
+    html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Listening (' + d.listening.length + ')</h5>';
+    html += table(["Port", "Bind", "Last seen"], d.listening.map(function (r) {
+      return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.port) + '</td>' +
+        '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.bindAddr || "—") + '</td>' +
+        '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+    }).join(""));
   }
+  if (d.outbound.length) {
+    html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Outbound (' + d.outbound.length + ')</h5>';
+    html += table(["Destination", "Proto", "Last seen"], d.outbound.map(function (r) {
+      return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
+        '<td style="padding:2px 8px 2px 0">' + escapeHtml(r.proto) + '</td>' +
+        '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+    }).join(""));
+  }
+  if (d.inbound.length) {
+    html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Inbound peers (' + d.inbound.length + ')</h5>';
+    html += table(["Peer", "To port", "Last seen"], d.inbound.map(function (r) {
+      return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
+        '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.localPort) + '</td>' +
+        '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+    }).join(""));
+  }
+  if (!html) {
+    html = emptyMsg;
+  }
+  el.innerHTML = html;
+  el.querySelectorAll(".proc-conn-asset-link").forEach(function (a) {
+    a.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      openViewModal(a.getAttribute("data-asset-id"));
+    });
+  });
 }
 
 async function _loadProcessLogsFor(assetId, name) {

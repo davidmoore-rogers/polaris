@@ -1863,17 +1863,19 @@ router.get("/:id/services", requirePermission("assets", "read"), async (req, res
   } catch (err) { next(err); }
 });
 
-// GET /assets/:id/process-connections?name= — Ports & Connections for the
-// process detail slide-in (Application Map data, per-asset view). Optional
-// `name` filters to one process. Remote IPs are hydrated with the matched
-// asset id + hostname via the bulk resolver (primary + associated IPs).
+// GET /assets/:id/process-connections?name=&unit= — Ports & Connections for the
+// process detail slide-in AND the Services detail panel (Application Map data,
+// per-asset view). Optional `name` filters to one process; optional `unit`
+// (Phase 3) filters to one systemd unit / Windows service. Remote IPs are
+// hydrated with the matched asset id + hostname via the bulk resolver.
 router.get("/:id/process-connections", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const exists = await prisma.asset.findUnique({ where: { id }, select: { id: true } });
     if (!exists) throw new AppError(404, "Asset not found");
     const name = typeof req.query.name === "string" && req.query.name ? req.query.name : undefined;
-    res.json(await getAssetProcessConnections(id, name));
+    const unit = typeof req.query.unit === "string" && req.query.unit ? req.query.unit : undefined;
+    res.json(await getAssetProcessConnections(id, name, unit));
   } catch (err) { next(err); }
 });
 
@@ -2803,6 +2805,17 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
       if (removed.length > 0) {
         await prisma.assetProcessConnection.deleteMany({
           where: { assetId: id, processName: { in: removed } },
+        });
+      }
+    }
+    // Unmapping a UNIT likewise drops its accumulated connection rows now
+    // (Phase 3) — rows carry the owning unit, so delete by unit.
+    if (input.mappedServices !== undefined) {
+      const kept = new Set(input.mappedServices);
+      const removed = (existing.mappedServices ?? []).filter((u) => !kept.has(u));
+      if (removed.length > 0) {
+        await prisma.assetProcessConnection.deleteMany({
+          where: { assetId: id, unit: { in: removed } },
         });
       }
     }

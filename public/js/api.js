@@ -427,6 +427,7 @@ const api = {
       if (opts.flagged) qs.push("flagged=1");
       return request("GET", `/assets/${id}/service-logs?` + qs.join("&"));
     },
+    serviceConnections:   (id, unit) => request("GET", `/assets/${id}/process-connections?unit=` + encodeURIComponent(unit)),
     customWidgets:        (id)  => request("GET", `/assets/${id}/custom-widgets`),
     telemetryHistory:     (id, opts) => {
       if (typeof opts === "string") opts = { range: opts };
