@@ -50,6 +50,7 @@ import {
   enqueueProcessSamples,
   enqueueProcessLogSamples,
 } from "../../services/sampleWriteBuffer.js";
+import { persistAssetServices } from "../../services/serviceInventoryService.js";
 import { reconcileMacAddresses, reconcileInterfaceMacs } from "../../utils/macAddresses.js";
 import { logEvent } from "./events.js";
 import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
@@ -274,6 +275,22 @@ const ProcessLogSampleSchema = z.object({
   source:    z.string().max(512).nullable().optional(),
 });
 
+// Current-state service inventory — one row per systemd unit / Windows service.
+// Full-replaced per push (persistAssetServices). platform drives the state
+// vocabulary; controllable is derived server-side.
+const ServiceSampleSchema = z.object({
+  unit:         z.string().min(1).max(255),
+  platform:     z.enum(["systemd", "windows"]),
+  displayName:  z.string().max(512).nullable().optional(),
+  loadState:    z.string().max(64).nullable().optional(),
+  activeState:  z.string().max(64).nullable().optional(),
+  subState:     z.string().max(64).nullable().optional(),
+  enabledState: z.string().max(64).nullable().optional(),
+  mainPid:      z.number().int().min(0).nullable().optional(),
+  mainProcess:  z.string().max(255).nullable().optional(),
+  memBytes:     z.number().int().min(0).nullable().optional(),
+});
+
 const SamplesBodySchema = z.discriminatedUnion("stream", [
   z.object({ stream: z.literal("responseTime"), samples: z.array(ResponseTimeSampleSchema).min(1).max(500) }),
   z.object({ stream: z.literal("telemetry"),    samples: z.array(TelemetrySampleSchema).min(1).max(500) }),
@@ -289,6 +306,9 @@ const SamplesBodySchema = z.discriminatedUnion("stream", [
   // are enforced on-agent (200/500/200 per process+kind); 5000 bounds a
   // worst-case many-processes push.
   z.object({ stream: z.literal("processConnections"), samples: z.array(ProcessConnectionSampleSchema).max(5000) }),
+  // Current-state service/unit inventory. "All loaded units" is ~150-200 rows
+  // on a typical host; cap generously (delete-replace per push).
+  z.object({ stream: z.literal("serviceInventory"), samples: z.array(ServiceSampleSchema).max(5000) }),
 ]);
 
 agentsRouter.post("/samples", async (req, res, next) => {
@@ -539,6 +559,25 @@ agentsRouter.post("/samples", async (req, res, next) => {
         }));
       await persistProcessConnections(assetId, rows);
       accepted = rows.length;
+    } else if (body.stream === "serviceInventory") {
+      // Current-state inventory: full-replace the asset's service rows. The
+      // server derives `controllable` from platform + load state.
+      await persistAssetServices(
+        assetId,
+        body.samples.map((s) => ({
+          unit:         s.unit,
+          platform:     s.platform,
+          displayName:  s.displayName ?? null,
+          loadState:    s.loadState ?? null,
+          activeState:  s.activeState ?? null,
+          subState:     s.subState ?? null,
+          enabledState: s.enabledState ?? null,
+          mainPid:      s.mainPid ?? null,
+          mainProcess:  s.mainProcess ?? null,
+          memBytes:     s.memBytes != null ? BigInt(Math.round(s.memBytes)) : null,
+        })),
+      );
+      accepted = body.samples.length;
     } else {
       // storage
       const pinnedStorage = new Set(
@@ -741,6 +780,14 @@ agentsRouter.get("/config", async (req, res, next) => {
           intervalSec: eff.processesIntervalSeconds,
           timeoutMs:   eff.processesTimeoutMs,
         },
+        services: {
+          // Current-state systemd unit / Windows service inventory. Agent-only
+          // (agentless does not resolve units), so it's simply on whenever a
+          // live agent polls config — no per-stream polling column. Fixed
+          // cadence (the agent falls back to its own default when 0).
+          enabled:     true,
+          intervalSec: 300,
+        },
       },
       monitored: asset.monitored,
       certFingerprints,
@@ -753,6 +800,13 @@ agentsRouter.get("/config", async (req, res, next) => {
       mappedProcesses: eff.processesPolling === "agent"
         ? ((asset.mappedProcesses ?? []) as string[])
         : [],
+      // Service pins — units the operator flagged for per-unit journalctl
+      // tailing (monitoredServices; Phase 2) and Application Map connection
+      // attribution (mappedServices; Phase 3). Not tied to a polling column;
+      // shipped whenever set. Part of the ETag (payload hash) so a pin toggle
+      // refreshes running agents.
+      monitoredServices: (asset.monitoredServices ?? []) as string[],
+      mappedServices:    (asset.mappedServices ?? []) as string[],
     };
     const etag = computeEtag(payload);
 
@@ -1030,6 +1084,10 @@ async function computeConfigEtag(assetId: string): Promise<string> {
     evt:   [eff.eventLogPolling,     eff.eventLogIntervalSeconds],
     pins:   (asset.monitoredProcesses ?? []).join("\u0001"),
     mapped: (asset.mappedProcesses   ?? []).join("\u0001"),
+    // Service pins, folded by content so a swap at constant count still wakes
+    // the service log/connection loops (same reasoning as the process pins).
+    spins: (asset.monitoredServices ?? []).join(""),
+    smap:  (asset.mappedServices    ?? []).join(""),
     mon:   asset.monitored,
   };
   return computeEtag(compact);

@@ -53,7 +53,7 @@ import {
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
-import { requestProcessControl, getCommandStatus } from "../../services/agentCommandService.js";
+import { requestProcessControl, requestServiceControl, getCommandStatus } from "../../services/agentCommandService.js";
 import { getAssetProcessConnections } from "../../services/applicationMapService.js";
 import {
   readIpsecHistory,
@@ -254,6 +254,11 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Process names toggled for Application Map connection discovery
   // (Processes-tab "Map" checkbox). Same 64 cap; independent of the Monitor pin.
   mappedProcesses:       z.array(z.string().min(1)).max(64).optional(),
+  // Service/unit names pinned for per-unit journalctl tailing (Services-tab
+  // "Logs" checkbox) and Application Map connection attribution ("Map"
+  // checkbox). Services-tab siblings of monitored/mappedProcesses.
+  monitoredServices:     z.array(z.string().min(1)).max(64).optional(),
+  mappedServices:        z.array(z.string().min(1)).max(64).optional(),
 });
 
 // Per-pinned-process log config (PUT /assets/:id/processes/:name/config).
@@ -1822,6 +1827,42 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
   } catch (err) { next(err); }
 });
 
+// GET /assets/:id/services — current-state systemd unit / Windows service
+// inventory for the Services tab. Mirrors /:id/processes: the current AssetService
+// rows plus the two pin arrays (monitoredServices = journalctl tailing,
+// mappedServices = Application Map connection attribution).
+router.get("/:id/services", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: { monitoredServices: true, mappedServices: true },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    const rows = await prisma.assetService.findMany({
+      where: { assetId: id },
+      orderBy: [{ unit: "asc" }],
+    });
+    res.json({
+      services: rows.map((s) => ({
+        unit:         s.unit,
+        platform:     s.platform,
+        displayName:  s.displayName,
+        loadState:    s.loadState,
+        activeState:  s.activeState,
+        subState:     s.subState,
+        enabledState: s.enabledState,
+        mainPid:      s.mainPid,
+        mainProcess:  s.mainProcess,
+        memBytes:     s.memBytes != null ? s.memBytes.toString() : null,
+        controllable: s.controllable,
+      })),
+      monitoredServices: (asset.monitoredServices ?? []) as string[],
+      mappedServices:    (asset.mappedServices    ?? []) as string[],
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /assets/:id/process-connections?name= — Ports & Connections for the
 // process detail slide-in (Application Map data, per-asset view). Optional
 // `name` filters to one process. Remote IPs are hydrated with the matched
@@ -2479,6 +2520,23 @@ router.get("/:id/process-command/:commandId", requirePermission("assets", "read"
     const status = await getCommandStatus(req.params.id as string, String(req.params.commandId));
     if (!status) throw new AppError(404, "Command not found");
     res.json({ command: status });
+  } catch (err) { next(err); }
+});
+
+// POST /assets/:id/services/:unit/control — Start/Stop/Restart a systemd unit /
+// Windows service via the AgentCommand queue. Same posture as process control
+// (processControl RBAC, agent never self-acts, fully audited); the unit lands in
+// AgentCommand.target and the agent runs systemctl / net+sc. The unit name is a
+// wildcard param (dots / @ / : are legal in unit names) — the service lookup +
+// charset validation happen in requestServiceControl. Reuses the shared
+// process-command status poll (same AgentCommand row).
+router.post("/:id/services/:unit(*)/control", requirePermission("processControl", "write"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const unit = String(req.params.unit);
+    const { action } = ProcessControlSchema.parse(req.body);
+    const cmd = await requestServiceControl(id, unit, action, requestActor(req));
+    res.status(202).json({ command: cmd });
   } catch (err) { next(err); }
 });
 
