@@ -512,6 +512,7 @@ const api = {
     installAgent:         (id, body) => request("POST",   `/assets/${id}/agent/install`, body),
     bulkInstallAgents:    (body)     => request("POST",   "/assets/bulk-agent-install", body),
     retryInstallAgent:    (id)       => request("POST",   `/assets/${id}/agent/retry`),
+    reinstallAgent:       (id)       => request("POST",   `/assets/${id}/agent/reinstall`),
     upgradeAgent:         (id, body) => request("POST",   `/assets/${id}/agent/upgrade`, body || {}),
     deleteAgent:          (id, opts) => {
       var qs = (opts && opts.force) ? "?force=true" : "";
@@ -659,6 +660,7 @@ const api = {
     agentAutoUpgradeSettingGet: () => request("GET",    "/server-settings/agents/auto-upgrade-setting"),
     agentAutoUpgradeSettingSet: (b)=> request("PUT",    "/server-settings/agents/auto-upgrade-setting", { enabled: !!b }),
     agentInstalledSummary:      () => request("GET",    "/server-settings/agents/installed-summary"),
+    agentInstalledList:         () => request("GET",    "/server-settings/agents/installed"),
     agentUpgradeAll:            () => request("POST",   "/server-settings/agents/upgrade-all"),
     agentServerUrlGet:        () => request("GET",    "/server-settings/agents/server-url"),
     agentServerUrlSet:        (url) => request("PUT", "/server-settings/agents/server-url", { url }),

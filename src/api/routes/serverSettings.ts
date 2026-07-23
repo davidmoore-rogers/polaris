@@ -1954,6 +1954,67 @@ router.get("/agents/installed-summary", async (_req, res, next) => {
 });
 
 /**
+ * Full per-host list of installed agents for the Polaris Agents tab's
+ * "Installed agents" slide-in. Unlike /installed-summary (which returns
+ * aggregate counts), this returns one row per ManagedAgent joined with a
+ * thin slice of its Asset (hostname / IP) so the operator can see, and
+ * act on, each install individually — architecture, version, status, and
+ * the reinstall / upgrade / remove actions. `outOfDate` is computed
+ * against the manifest's currentVersion the same way /installed-summary
+ * partitions its histogram.
+ *
+ * Scale: one findMany (tight select) + one getInventory() manifest read —
+ * a one-shot operator action, not a ticking job, so this is fine at 2000
+ * agents.
+ */
+router.get("/agents/installed", async (_req, res, next) => {
+  try {
+    const { prisma } = await import("../../db.js");
+    const { getInventory } = await import("../../services/agentBuildService.js");
+    const inv = await getInventory();
+    const currentVersion = inv.manifest?.currentVersion ?? null;
+    const rows = await prisma.managedAgent.findMany({
+      select: {
+        id:                  true,
+        assetId:             true,
+        osPlatform:          true,
+        arch:                true,
+        agentVersion:        true,
+        installStatus:       true,
+        installError:        true,
+        installTransport:    true,
+        installedAt:         true,
+        installedBy:         true,
+        installCredentialId: true,
+        lastSeenAt:          true,
+        asset: { select: { hostname: true, dnsName: true, ipAddress: true, assetType: true } },
+      },
+      orderBy: { installedAt: "desc" },
+    });
+    const agents = rows.map((r) => ({
+      managedAgentId:       r.id,
+      assetId:              r.assetId,
+      hostname:             r.asset?.hostname || r.asset?.dnsName || null,
+      ipAddress:            r.asset?.ipAddress || null,
+      assetType:            r.asset?.assetType || null,
+      osPlatform:           r.osPlatform,
+      arch:                 r.arch,
+      agentVersion:         r.agentVersion,
+      installStatus:        r.installStatus,
+      installError:         r.installError,
+      installTransport:     r.installTransport,
+      installedAt:          r.installedAt,
+      installedBy:          r.installedBy,
+      hasInstallCredential: !!r.installCredentialId,
+      lastSeenAt:           r.lastSeenAt,
+      outOfDate:            !!(currentVersion && r.installStatus === "active" &&
+                               r.agentVersion && r.agentVersion !== currentVersion),
+    }));
+    res.json({ currentVersion, agents });
+  } catch (err) { next(err); }
+});
+
+/**
  * Bulk-upgrade every active ManagedAgent whose agentVersion lags the
  * current manifest. Logic lives in `upgradeAllOutdated` in
  * agentInstallService so the same path is reachable from the post-build

@@ -29,6 +29,7 @@
 
   var _agentBuildPollTimer = null;
   var _installedSummaryPollTimer = null;
+  var _agentListPollTimer = null;
 
   // Lightweight time formatters local to this module so it stays self-
   // contained — the server-settings.js page has richer formatters (with
@@ -261,6 +262,19 @@
 
     var installedSummarySlot = '<div id="agent-installed-summary"></div>';
 
+    // "Installed agents" entry point — opens the fleet slide-in listing every
+    // host with the agent installed (version + architecture + per-host
+    // reinstall / upgrade / remove). Always shown; the slide-in renders an
+    // empty state when no agents are installed yet.
+    var installedListRow =
+      '<div style="margin-top:0.75rem;padding-top:0.5rem;border-top:1px solid var(--color-border);' +
+          'display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap">' +
+        '<button class="btn btn-secondary" id="btn-agent-installed-list" style="padding:4px 14px;font-size:0.85rem">Installed agents</button>' +
+        '<span style="font-size:0.78rem;color:var(--color-text-tertiary);flex:1;min-width:220px">' +
+          'View every host with the agent installed — version, architecture, and per-host reinstall / upgrade / remove.' +
+        '</span>' +
+      '</div>';
+
     body.innerHTML =
       goNotice +
       drift +
@@ -276,6 +290,7 @@
       '<div>' + buildBtn + '</div>' +
       goVerLine +
       installedSummarySlot +
+      installedListRow +
       cleanupLine +
       serverUrlRow +
       autoUpgradeRow +
@@ -284,6 +299,8 @@
 
     var btn = document.getElementById("btn-agent-build");
     if (btn) btn.addEventListener("click", onAgentBuildClick);
+    var installedListBtn = document.getElementById("btn-agent-installed-list");
+    if (installedListBtn) installedListBtn.addEventListener("click", openInstalledAgentsPanel);
     var pruneBtn = document.getElementById("btn-agent-prune");
     if (pruneBtn) pruneBtn.addEventListener("click", onAgentPruneClick);
 
@@ -960,6 +977,233 @@
           });
         });
       });
+    });
+  }
+
+  // ─── Installed agents slide-in ────────────────────────────────────────────
+  //
+  // Fleet view of every host with the agent installed, opened from the
+  // "Installed agents" button on the Polaris Agents tab. One row per
+  // ManagedAgent (architecture, version, status, last-seen) with per-host
+  // Reinstall / Upgrade / Remove actions. Modeled on the asset-details
+  // slide-over (slideover-* classes + initSlideoverResize from app.js).
+  // The mutating actions call the per-asset /assets/:id/agent/* routes
+  // (assets:write); the list itself is a serverSettings read.
+
+  // In-progress statuses that warrant a live re-poll while the panel is open.
+  var _AGENT_BUSY_STATUSES = {
+    pending: 1, uploading: 1, enrolling: 1, upgrading: 1, uninstalling: 1,
+  };
+
+  function _agentStatusBadge(status) {
+    var color, label = status || "unknown";
+    switch (status) {
+      case "active":            color = "var(--color-success)"; break;
+      case "failed":
+      case "upgrade_failed":
+      case "uninstall_failed":  color = "var(--color-danger)"; break;
+      case "revoked":           color = "var(--color-warning)"; break;
+      case "pending":
+      case "uploading":
+      case "enrolling":
+      case "upgrading":
+      case "uninstalling":      color = "var(--color-accent)"; break;
+      default:                  color = "var(--color-text-tertiary)";
+    }
+    return '<span style="color:' + color + ';font-weight:600">' + escapeHtml(label) + '</span>';
+  }
+
+  function _ensureInstalledAgentsPanelDOM() {
+    var overlay = document.getElementById("agent-list-panel-overlay");
+    if (overlay) return overlay;
+    overlay = document.createElement("div");
+    overlay.className = "slideover-overlay";
+    overlay.id = "agent-list-panel-overlay";
+    overlay.innerHTML =
+      '<div class="slideover" id="agent-list-panel">' +
+        '<div class="slideover-resize-handle"></div>' +
+        '<div class="slideover-header">' +
+          '<div class="slideover-header-top">' +
+            '<h3>Installed Polaris Agents</h3>' +
+            '<button class="btn-icon" id="agent-list-panel-close" title="Close">×</button>' +
+          '</div>' +
+          '<div class="slideover-meta" id="agent-list-panel-meta"></div>' +
+        '</div>' +
+        '<div class="slideover-body" id="agent-list-panel-body" style="padding:1rem">' +
+          '<p class="empty-state">Loading...</p>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    // Backdrop click closes (click on the overlay itself, not the panel).
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) closeInstalledAgentsPanel();
+    });
+    var closeBtn = document.getElementById("agent-list-panel-close");
+    if (closeBtn) closeBtn.addEventListener("click", closeInstalledAgentsPanel);
+
+    if (typeof initSlideoverResize === "function") {
+      initSlideoverResize(document.getElementById("agent-list-panel"), "polaris.panel.width.agentlist");
+    }
+    return overlay;
+  }
+
+  function openInstalledAgentsPanel() {
+    var overlay = _ensureInstalledAgentsPanelDOM();
+    requestAnimationFrame(function () { overlay.classList.add("open"); });
+    refreshInstalledAgentsPanel();
+  }
+
+  function closeInstalledAgentsPanel() {
+    var overlay = document.getElementById("agent-list-panel-overlay");
+    if (overlay) overlay.classList.remove("open");
+    if (_agentListPollTimer) { clearTimeout(_agentListPollTimer); _agentListPollTimer = null; }
+  }
+
+  function _panelIsOpen() {
+    var overlay = document.getElementById("agent-list-panel-overlay");
+    return overlay && overlay.classList.contains("open");
+  }
+
+  function refreshInstalledAgentsPanel() {
+    api.serverSettings.agentInstalledList().then(function (data) {
+      if (!_panelIsOpen()) return;
+      _renderInstalledAgentsPanel(data);
+      // Live re-poll while any install/upgrade/uninstall is mid-flight, so
+      // the status column ticks through pending → active without a manual
+      // refresh. Stops once everything settles.
+      if (_agentListPollTimer) { clearTimeout(_agentListPollTimer); _agentListPollTimer = null; }
+      var busy = (data.agents || []).some(function (a) { return _AGENT_BUSY_STATUSES[a.installStatus]; });
+      if (busy) _agentListPollTimer = setTimeout(refreshInstalledAgentsPanel, 3000);
+    }).catch(function (err) {
+      var body = document.getElementById("agent-list-panel-body");
+      if (body) body.innerHTML = '<p class="empty-state" style="color:var(--color-danger)">Failed to load: ' + escapeHtml(err.message) + '</p>';
+    });
+  }
+
+  function _renderInstalledAgentsPanel(data) {
+    var meta = document.getElementById("agent-list-panel-meta");
+    var body = document.getElementById("agent-list-panel-body");
+    if (!body) return;
+    var agents  = data.agents || [];
+    var current = data.currentVersion;
+
+    if (meta) {
+      meta.innerHTML =
+        agents.length + ' installed agent' + (agents.length === 1 ? "" : "s") +
+        (current ? ' · current build <strong>v' + escapeHtml(current) + '</strong>' : ' · no build on disk');
+    }
+
+    if (agents.length === 0) {
+      body.innerHTML =
+        '<p class="empty-state">No agents installed yet. Deploy the agent from an asset\'s details modal ' +
+        '(Install Agent) or via the assets page bulk bar (Deploy Agent).</p>';
+      return;
+    }
+
+    var canManage = (typeof canManageAssets === "function") ? canManageAssets() : true;
+
+    var rows = agents.map(function (a) {
+      var host = a.hostname || a.ipAddress || a.assetId;
+      var hostSub = (a.hostname && a.ipAddress) ? a.ipAddress : "";
+      var verCell = a.agentVersion
+        ? '<code>v' + escapeHtml(a.agentVersion) + '</code>' +
+            (a.outOfDate
+              ? ' <span style="color:var(--color-warning);font-size:0.72rem;font-weight:600">out-of-date</span>'
+              : "")
+        : '<span style="color:var(--color-text-tertiary)">—</span>';
+      var lastSeen = a.lastSeenAt ? _timeAgo(a.lastSeenAt) : "—";
+
+      var actions = "";
+      if (canManage) {
+        var btns = [];
+        // Upgrade — only meaningful for an active, lagging agent.
+        if (a.outOfDate && a.installStatus === "active") {
+          btns.push('<button class="btn btn-secondary agent-act" data-act="upgrade" data-id="' + escapeHtml(a.assetId) +
+            '" style="padding:2px 8px;font-size:0.75rem">Upgrade</button>');
+        }
+        // Reinstall — needs the stored install credential.
+        var reAttr = a.hasInstallCredential ? "" : ' disabled title="No install credential on file — force-remove and install fresh"';
+        btns.push('<button class="btn btn-secondary agent-act" data-act="reinstall" data-id="' + escapeHtml(a.assetId) +
+          '"' + reAttr + ' style="padding:2px 8px;font-size:0.75rem">Reinstall</button>');
+        // Remove (graceful) + Force remove.
+        btns.push('<button class="btn btn-secondary agent-act" data-act="remove" data-id="' + escapeHtml(a.assetId) +
+          '" style="padding:2px 8px;font-size:0.75rem">Remove</button>');
+        btns.push('<button class="btn-icon agent-act" data-act="force-remove" data-id="' + escapeHtml(a.assetId) +
+          '" title="Force-remove: revoke the bearer and drop the local record without contacting the host (orphan binary stays on disk)" ' +
+          'style="padding:2px 8px;font-size:0.72rem;color:var(--color-danger)">Force ×</button>');
+        actions = '<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">' + btns.join("") + '</div>';
+      } else {
+        actions = '<span style="color:var(--color-text-tertiary);font-size:0.75rem">read-only</span>';
+      }
+
+      var errRow = a.installError
+        ? '<tr><td colspan="6" style="padding:0 8px 6px;font-family:monospace;font-size:0.72rem;color:var(--color-danger);' +
+            'white-space:pre-wrap;word-break:break-word">' + escapeHtml(a.installError) + '</td></tr>'
+        : "";
+
+      return '<tr style="border-bottom:1px solid var(--color-border-light, var(--color-border))">' +
+          '<td style="padding:6px 8px">' +
+            '<div>' + escapeHtml(host) + '</div>' +
+            (hostSub ? '<div style="font-size:0.72rem;color:var(--color-text-tertiary)">' + escapeHtml(hostSub) + '</div>' : "") +
+          '</td>' +
+          '<td style="padding:6px 8px"><code>' + escapeHtml(a.osPlatform) + '</code> / <code>' + escapeHtml(a.arch) + '</code></td>' +
+          '<td style="padding:6px 8px">' + verCell + '</td>' +
+          '<td style="padding:6px 8px">' + _agentStatusBadge(a.installStatus) + '</td>' +
+          '<td style="padding:6px 8px;font-size:0.78rem;color:var(--color-text-tertiary);white-space:nowrap">' + escapeHtml(lastSeen) + '</td>' +
+          '<td style="padding:6px 8px;text-align:right">' + actions + '</td>' +
+        '</tr>' + errRow;
+    }).join("");
+
+    body.innerHTML =
+      '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">' +
+        '<thead><tr style="border-bottom:1px solid var(--color-border)">' +
+          '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Host</th>' +
+          '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">OS / Arch</th>' +
+          '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Version</th>' +
+          '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Status</th>' +
+          '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Last seen</th>' +
+          '<th style="padding:4px 8px;text-align:right;font-weight:600;color:var(--color-text-secondary)">Actions</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table>';
+
+    body.querySelectorAll("button.agent-act").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        _onInstalledAgentAction(btn.getAttribute("data-act"), btn.getAttribute("data-id"), btn);
+      });
+    });
+  }
+
+  function _onInstalledAgentAction(act, assetId, btn) {
+    if (!assetId) return;
+    var run;
+
+    if (act === "upgrade") {
+      run = showConfirm("Upgrade this agent to the current build?\n\nThe host briefly bounces its agent service while the binary is replaced. Bearer + cert pin are preserved.")
+        .then(function (ok) { if (!ok) return null; return api.assets.upgradeAgent(assetId); });
+    } else if (act === "reinstall") {
+      run = showConfirm("Reinstall the agent on this host?\n\nRe-pushes the binary + agent.conf and re-runs the installer using the stored install credential. The old bearer is revoked and a fresh one issued on re-enroll.")
+        .then(function (ok) { if (!ok) return null; return api.assets.reinstallAgent(assetId); });
+    } else if (act === "remove") {
+      run = showConfirm("Remove the agent from this host?\n\nRevokes the bearer immediately, then remotely uninstalls the service + binary using the stored install credential.")
+        .then(function (ok) { if (!ok) return null; return api.assets.deleteAgent(assetId, { force: false }); });
+    } else if (act === "force-remove") {
+      run = showConfirm("Force-remove this agent?\n\nRevokes the bearer and drops the local record WITHOUT contacting the host. The agent binary stays on disk on the remote machine (its bearer is dead, so it can no longer talk to Polaris). Use this when the host is unreachable.")
+        .then(function (ok) { if (!ok) return null; return api.assets.deleteAgent(assetId, { force: true }); });
+    } else {
+      return;
+    }
+
+    if (btn) btn.disabled = true;
+    run.then(function (res) {
+      if (res === null) { if (btn) btn.disabled = false; return; } // cancelled
+      var verb = act === "upgrade" ? "Upgrade" : act === "reinstall" ? "Reinstall" : "Removal";
+      showToast(verb + " started", "success");
+      refreshInstalledAgentsPanel();
+    }).catch(function (err) {
+      showToast((err && err.message) ? err.message : "Action failed", "error");
+      if (btn) btn.disabled = false;
     });
   }
 

@@ -4586,6 +4586,67 @@ router.post("/:id/agent/retry", requirePermission("assets", "write"), async (req
   } catch (err) { next(err); }
 });
 
+// Reinstall = "start over" against the same host with the stored install
+// params, regardless of current installStatus (unlike /retry, which only
+// resets a "failed" row). Reuses the row's installCredentialId, osPlatform,
+// arch, and transport; revokes the old bearer up front (runInstall mints a
+// fresh enrollment token + bearer on re-enroll) and re-runs startInstall,
+// which re-pushes the binary + agent.conf and re-runs the installer. The
+// ManagedAgent row and the asset's per-stream *Polling config are kept — an
+// operator wanting a truly clean slate uses force-remove + a fresh install.
+router.post("/:id/agent/reinstall", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const assetId = req.params.id as string;
+    const actor = requestActor(req) || "unknown";
+
+    const row = await prisma.managedAgent.findUnique({ where: { assetId } });
+    if (!row) throw new AppError(404, "No agent installed for this asset");
+    if (!row.installCredentialId) {
+      throw new AppError(400,
+        "No install credential on file (credential was deleted). " +
+        "Force-remove the agent and start a fresh install.");
+    }
+
+    // Make sure the credential still exists before we reset the row —
+    // otherwise startInstall would flip us right back to "failed".
+    const cred = await getCredential(row.installCredentialId).catch(() => null);
+    if (!cred) {
+      throw new AppError(400,
+        "Original install credential no longer exists. " +
+        "Force-remove the agent and start a fresh install.");
+    }
+
+    // Kill the current bearer immediately — the re-enroll issues a fresh
+    // one. Anything the old agent process does before it re-enrolls is
+    // rejected, which is what we want during a reinstall.
+    const { revokeBearer } = await import("../../services/agentTokenService.js");
+    await revokeBearer(row.id);
+
+    await prisma.managedAgent.update({
+      where: { id: row.id },
+      data:  { installStatus: "pending", installError: null },
+    });
+
+    await logEvent({
+      action:       "agent.reinstall_kickoff",
+      resourceType: "asset",
+      resourceId:   assetId,
+      actor,
+      level:        "info",
+      message:      `Polaris Agent reinstall kicked off (${row.osPlatform}/${row.arch}, ${row.installTransport})`,
+      details:      { managedAgentId: row.id, credentialId: row.installCredentialId },
+    });
+
+    const { startInstall } = await import("../../services/agentInstallService.js");
+    await startInstall({ managedAgentId: row.id, credentialId: row.installCredentialId });
+
+    res.json({
+      managedAgentId: row.id,
+      installStatus:  "pending",
+    });
+  } catch (err) { next(err); }
+});
+
 const AgentUpgradeSchema = z.object({
   credentialId: z.string().uuid().optional(),
 });

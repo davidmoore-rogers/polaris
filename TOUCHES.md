@@ -340,9 +340,12 @@ build auto-prune + boot-time auto-build are layered on top.
   exposing the service: inventory, build start/poll/current/cancel,
   prune, installed-summary (returns active count + per-version histogram
   + live `upgrading` and `upgradeFailed` counts so the UI can poll for
-  in-flight upgrade-all status), upgrade-all (delegates to
-  `upgradeAllOutdated` in agentInstallService), auto-build-setting
-  GET+PUT, auto-upgrade-setting GET+PUT.
+  in-flight upgrade-all status), installed (full per-host list — one row
+  per ManagedAgent joined with a thin Asset slice for the "Installed
+  agents" slide-in on the Polaris Agents tab; drives per-host
+  reinstall/upgrade/remove via the `/assets/:id/agent/*` routes),
+  upgrade-all (delegates to `upgradeAllOutdated` in agentInstallService),
+  auto-build-setting GET+PUT, auto-upgrade-setting GET+PUT.
 - `src/jobs/autoBuildAgents.ts` — one-shot startup job, fires 60s after
   boot. Five gates in order: manifest exists, version drift, Go
   available, kill-switch off, then `startBuild({actor: "system:auto-
