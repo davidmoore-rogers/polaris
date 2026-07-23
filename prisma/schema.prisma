@@ -2980,6 +2980,14 @@ model ManagedAgent {
   // without asking the operator to re-pick it.
   installTransport String @default("ssh") // "ssh" | "winrm"
 
+  // Curated install-method variant chosen at deploy time (catalog id in
+  // src/services/agentInstallScripts.ts, e.g. "linux-systemd"). NULL = the
+  // per-OS default (pre-picker installs + auto-deploy). Persisted so
+  // retry/uninstall/upgrade replay the same method, and it's auditable.
+  // OS-locked at write time by resolveInstallScriptId (a windows-* variant
+  // can never land on a linux row).
+  installScriptId String?
+
   installStatus String  @default("pending") // see lifecycle comment above
   installError  String? // captured stderr / exception message on failure
 

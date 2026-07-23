@@ -50,6 +50,7 @@ import {
   pickTransportAndCredential,
   checkAutoDeployPreconditions,
 } from "./agentAutoDeployService.js";
+import { resolveInstallScriptId, type AgentOsPlatform } from "./agentInstallScripts.js";
 
 // ─── Public entry points ──────────────────────────────────────────────
 
@@ -263,6 +264,9 @@ export interface BulkInstallInput {
   sshCredentialId?:   string | null;
   winrmCredentialId?: string | null;
   arch?:              "amd64" | "arm64";
+  /** Operator-chosen install-method variant per OS (bulk spans mixed OSes, so
+   *  the choice is keyed by platform). Omitted / null → the per-OS default. */
+  scriptIds?:         Partial<Record<AgentOsPlatform, string | null>>;
   actor:              string;
 }
 
@@ -326,6 +330,16 @@ export async function bulkInstallAgents(input: BulkInstallInput): Promise<BulkIn
     }
   }
 
+  // Validate any operator-chosen install-script variants up front (batch-level
+  // error, like the credential checks above). Each slot's id is OS-locked to
+  // its own key, so a windows-* id in the linux slot fails here.
+  if (input.scriptIds) {
+    for (const os of ["linux", "darwin", "windows"] as AgentOsPlatform[]) {
+      const sid = input.scriptIds[os];
+      if (sid) resolveInstallScriptId(os, sid);
+    }
+  }
+
   const assets = await prisma.asset.findMany({
     where: { id: { in: input.assetIds } },
     select: {
@@ -367,6 +381,7 @@ export async function bulkInstallAgents(input: BulkInstallInput): Promise<BulkIn
           serverCertFingerprint: fingerprint,
           installCredentialId:   target.credentialId,
           installTransport:      target.transport,
+          installScriptId:       input.scriptIds?.[osPlatform] ?? null,
         },
       });
       queue.push({ managedAgentId: row.id, credentialId: target.credentialId });
@@ -477,6 +492,15 @@ async function runInstall(input: StartInstallInput): Promise<void> {
     agentId:                    row.id,
   });
 
+  // Validate the persisted install-script variant against the row's OS (the
+  // OS-lock, re-checked at execution time). A mismatch here is a bug — the
+  // deploy routes validate before persisting — so fail the install loudly.
+  try {
+    resolveInstallScriptId(row.osPlatform as AgentOsPlatform, row.installScriptId);
+  } catch (err: any) {
+    return failInstall(managedAgentId, row.assetId, err?.message ?? String(err));
+  }
+
   await transition(managedAgentId, "uploading");
 
   if (row.osPlatform === "linux" || row.osPlatform === "darwin") {
@@ -487,6 +511,7 @@ async function runInstall(input: StartInstallInput): Promise<void> {
         binaryBytes,
         agentConfBody,
         platform: row.osPlatform,
+        scriptId: row.installScriptId,
         testOverrides,
       });
     } catch (err: any) {
@@ -593,6 +618,7 @@ async function runUninstall(input: StartUninstallInput): Promise<void> {
         host,
         cred: cred.config as Record<string, unknown>,
         platform: row.osPlatform,
+        scriptId: row.installScriptId,
         testOverrides,
       });
     } catch (err: any) {
@@ -806,6 +832,7 @@ interface SshInstallParams {
   binaryBytes: Buffer;
   agentConfBody: string;
   platform: "linux" | "darwin";
+  scriptId?: string | null;
   testOverrides?: TestOverrides;
 }
 
@@ -816,7 +843,7 @@ async function sshInstall(p: SshInstallParams): Promise<void> {
   await withSshClient(p.host, p.cred, async (client) => {
     // 1. SFTP upload binary + installer script to /tmp.
     await sftpPut(client, "/tmp/polaris-agent.bin",         p.binaryBytes, 0o755);
-    await sftpPut(client, "/tmp/polaris-agent-install.sh",  installerScript(p.platform), 0o700);
+    await sftpPut(client, "/tmp/polaris-agent-install.sh",  installerScript(p.platform, p.scriptId), 0o700);
     await sftpPut(client, "/tmp/polaris-agent.conf",        Buffer.from(p.agentConfBody, "utf8"), 0o600);
 
     // 2. Run the installer. `sudo` is implicit — the credential is
@@ -835,6 +862,7 @@ interface SshUninstallParams {
   host: string;
   cred: Record<string, unknown>;
   platform: "linux" | "darwin";
+  scriptId?: string | null;
   testOverrides?: TestOverrides;
 }
 
@@ -843,7 +871,7 @@ async function sshUninstall(p: SshUninstallParams): Promise<void> {
   if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
 
   await withSshClient(p.host, p.cred, async (client) => {
-    await sftpPut(client, "/tmp/polaris-agent-uninstall.sh", uninstallerScript(p.platform), 0o700);
+    await sftpPut(client, "/tmp/polaris-agent-uninstall.sh", uninstallerScript(p.platform, p.scriptId), 0o700);
     const out = await sshExec(client, "sudo -n bash /tmp/polaris-agent-uninstall.sh", 60_000);
     if (out.exitCode !== 0) {
       throw new AppError(502, `Uninstaller exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
@@ -871,18 +899,30 @@ function truncate(s: string, n: number): string {
 // /tmp/polaris-agent.conf (binary + config) — the script just moves them
 // into place and registers the service.
 
-function installerScript(platform: "linux" | "darwin"): Buffer {
-  if (platform === "linux") {
-    return Buffer.from(LINUX_INSTALL_SCRIPT, "utf8");
+// Select the install script for the resolved catalog variant. resolveInstallScriptId
+// re-validates the OS-lock (defense in depth — the row's installScriptId was
+// already validated at deploy time). Add a `case` here for every new variant
+// added to AGENT_INSTALL_SCRIPTS.
+function installerScript(platform: "linux" | "darwin", scriptId?: string | null): Buffer {
+  const id = resolveInstallScriptId(platform, scriptId);
+  switch (id) {
+    case "linux-systemd":  return Buffer.from(LINUX_INSTALL_SCRIPT, "utf8");
+    case "darwin-launchd": return Buffer.from(DARWIN_INSTALL_SCRIPT, "utf8");
+    default:
+      throw new AppError(500, `No installer script wired for variant "${id}"`);
   }
-  return Buffer.from(DARWIN_INSTALL_SCRIPT, "utf8");
 }
 
-function uninstallerScript(platform: "linux" | "darwin"): Buffer {
-  if (platform === "linux") {
-    return Buffer.from(LINUX_UNINSTALL_SCRIPT, "utf8");
+function uninstallerScript(platform: "linux" | "darwin", scriptId?: string | null): Buffer {
+  // Uninstall must undo the SAME variant that installed the agent, so it keys
+  // off the persisted installScriptId too.
+  const id = resolveInstallScriptId(platform, scriptId);
+  switch (id) {
+    case "linux-systemd":  return Buffer.from(LINUX_UNINSTALL_SCRIPT, "utf8");
+    case "darwin-launchd": return Buffer.from(DARWIN_UNINSTALL_SCRIPT, "utf8");
+    default:
+      throw new AppError(500, `No uninstaller script wired for variant "${id}"`);
   }
-  return Buffer.from(DARWIN_UNINSTALL_SCRIPT, "utf8");
 }
 
 const LINUX_INSTALL_SCRIPT = `#!/usr/bin/env bash

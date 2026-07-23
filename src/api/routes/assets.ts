@@ -873,6 +873,16 @@ router.post("/bulk-monitor", requirePermission("assets", "write"), async (req, r
   } catch (err) { next(err); }
 });
 
+// GET /api/v1/assets/agent-install-scripts — curated install-method catalog
+// for the deploy modal's picker. MUST stay above GET /:id so the literal path
+// isn't captured as an asset id. Read-only metadata (no secrets); gated read.
+router.get("/agent-install-scripts", requirePermission("assets", "read"), async (_req, res, next) => {
+  try {
+    const { AGENT_INSTALL_SCRIPTS } = await import("../../services/agentInstallScripts.js");
+    res.json({ scripts: AGENT_INSTALL_SCRIPTS });
+  } catch (err) { next(err); }
+});
+
 // GET /api/v1/assets/:id — get single asset (all authenticated users)
 router.get("/:id", requirePermission("assets", "read"), async (req, res, next) => {
   try {
@@ -4345,6 +4355,14 @@ const BulkAgentInstallSchema = z.object({
   sshCredentialId:   z.string().uuid().optional(),
   winrmCredentialId: z.string().uuid().optional(),
   arch:              z.enum(["amd64", "arm64"]).default("amd64"),
+  // Per-OS install-method variant (bulk spans mixed OSes; the service applies
+  // each per an asset's inferred platform). Omitted keys use the per-OS
+  // default. OS-locked server-side by bulkInstallAgents.
+  scriptIds:         z.object({
+    linux:   z.string().max(100).optional(),
+    darwin:  z.string().max(100).optional(),
+    windows: z.string().max(100).optional(),
+  }).partial().optional(),
 }).refine((b) => b.sshCredentialId || b.winrmCredentialId, {
   message: "Provide at least one credential (SSH and/or WinRM)",
 });
@@ -4358,6 +4376,7 @@ router.post("/bulk-agent-install", requirePermission("assets", "write"), async (
       sshCredentialId:   input.sshCredentialId ?? null,
       winrmCredentialId: input.winrmCredentialId ?? null,
       arch:              input.arch,
+      scriptIds:         input.scriptIds,
       actor,
     });
     res.json(result);
@@ -4383,6 +4402,9 @@ const AgentInstallSchema = z.object({
   // behavior). Operators installing the agent on a Windows host that has
   // OpenSSH Server enabled can pick "ssh" to use an SSH credential instead.
   transport:    z.enum(["ssh", "winrm"]).optional(),
+  // Curated install-method variant id (see agentInstallScripts catalog).
+  // Optional — omitted uses the per-OS default. OS-locked server-side.
+  scriptId:     z.string().max(100).optional(),
 });
 
 router.get("/:id/agent", requirePermission("assets", "read"), async (req, res, next) => {
@@ -4436,6 +4458,12 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
       throw new AppError(400,
         `WinRM transport is only valid for Windows hosts — osPlatform=${body.osPlatform}`);
     }
+
+    // Validate the chosen install-method variant against the target OS (the
+    // OS-lock). Throws 400 on unknown id or OS mismatch; returns the concrete
+    // id to persist (the per-OS default when none was picked).
+    const { resolveInstallScriptId } = await import("../../services/agentInstallScripts.js");
+    resolveInstallScriptId(body.osPlatform, body.scriptId);
 
     // Credential type must match the transport (ssh-typed cred for SSH,
     // winrm-typed cred for WinRM). Both transports are available for
@@ -4506,6 +4534,7 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
         serverCertFingerprint: fingerprint,
         installCredentialId:   body.credentialId,
         installTransport:      transport,
+        installScriptId:       body.scriptId ?? null,
       },
     });
 
@@ -4516,7 +4545,7 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
       actor,
       level:        "info",
       message:      `Polaris Agent install kicked off (${body.osPlatform}/${body.arch}, ${transport})`,
-      details:      { managedAgentId: row.id, credentialId: body.credentialId, transport },
+      details:      { managedAgentId: row.id, credentialId: body.credentialId, transport, scriptId: body.scriptId ?? null },
     });
 
     // Fire the async install. The service mints its own enrollment token,

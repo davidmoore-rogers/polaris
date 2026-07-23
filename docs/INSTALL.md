@@ -1147,9 +1147,10 @@ From the Polaris UI:
 3. Save
 4. Reopen the asset details modal → **System** tab → **Install Agent…**
 5. Confirm the OS + arch picker (defaults from `Asset.os`)
-6. On **Windows** assets, pick the transport (WinRM or SSH); on Linux/macOS SSH is the only option
-7. Pick a stored credential of the matching type (SSH or WinRM)
-8. Click **Install**
+6. Pick the **Install method** — a curated, OS-locked service-install script (currently one vetted method per OS: systemd on Linux, launchd on macOS, a native Windows Service). The picker only lists methods valid for the selected OS; the choice is re-validated server-side.
+7. On **Windows** assets, pick the transport (WinRM or SSH); on Linux/macOS SSH is the only option
+8. Pick a stored credential of the matching type (SSH or WinRM)
+9. Click **Install**
 
 The install status pill flips `pending → uploading → enrolling → active` over ~30 seconds. The host's systemd / launchd / Windows Service is registered as `polaris-agent`. Uninstall + Force Remove buttons appear once the agent is active. The chosen transport is persisted on the agent row; retry, uninstall, and upgrade reuse it.
 
