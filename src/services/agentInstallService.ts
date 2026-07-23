@@ -487,10 +487,26 @@ async function runInstall(input: StartInstallInput): Promise<void> {
     return failInstall(managedAgentId, row.assetId, `Credential lookup failed: ${err.message ?? err}`);
   }
 
+  // Pin the CURRENT server cert, not whatever was stored at the original
+  // install. A reinstall reuses the row, and if the server cert has rotated
+  // since that host was first installed, the stored fingerprint is stale — the
+  // agent would bake a wrong pin into agent.conf, fail the pinned TLS
+  // handshake, never complete /enroll, and sit forever at "enrolling". Refresh
+  // to the live cert (falling back to the stored value only if the cert can't
+  // be read) and persist it so the row reflects what the agent will trust.
+  const liveFingerprint = getServerCertFingerprint();
+  const certFingerprint = liveFingerprint || row.serverCertFingerprint;
+  if (liveFingerprint && liveFingerprint !== row.serverCertFingerprint) {
+    await prisma.managedAgent.update({
+      where: { id: row.id },
+      data:  { serverCertFingerprint: liveFingerprint },
+    });
+  }
+
   // Build the rendered agent.conf body that's about to be uploaded.
   const agentConfBody = renderAgentConf({
     serverUrl:                  await inferOwnServerUrl(),
-    certFingerprint:            row.serverCertFingerprint,
+    certFingerprint,
     additionalCertFingerprints: row.additionalServerCertFingerprints,
     enrollmentToken,
     agentId:                    row.id,
