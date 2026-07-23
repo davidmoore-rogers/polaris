@@ -61,7 +61,7 @@ function _looksLikeDeviceId(tag) {
     var ac = document.getElementById("btn-add-channel");
     if (ac) {
       ac.style.display = canEditRules && activeKey === "delivery" ? "" : "none";
-      if (canEditRules && !ac._wired) { ac._wired = true; ac.addEventListener("click", function () { openChannelModal(null); }); }
+      if (canEditRules && !ac._wired) { ac._wired = true; ac.addEventListener("click", function () { showChannelTypePicker(); }); }
     }
     var asBtn = document.getElementById("btn-add-script");
     if (asBtn) {
@@ -401,15 +401,64 @@ async function testChannel(c, btn) {
   if (btn) btn.disabled = false;
 }
 
+// Short card subtitle per channel type for the add-channel type picker,
+// mirroring the Add Integration type-picker cards. Falls back to the schema
+// label when a type isn't listed here.
+var _CHANNEL_TYPE_DESC = {
+  smtp: "Email via an SMTP server",
+  oauth_m365: "Email via Microsoft 365 (OAuth)",
+  pushbullet: "Push notifications via Pushbullet",
+  slack: "Post to a Slack channel",
+  teams: "Post to a Microsoft Teams channel",
+  web_push: "Browser & mobile push notifications",
+};
+// Clean card title per type (schema labels carry parenthetical detail that
+// reads better as the subtitle).
+var _CHANNEL_TYPE_TITLE = {
+  smtp: "Email — SMTP",
+  oauth_m365: "Microsoft 365",
+  pushbullet: "Pushbullet",
+  slack: "Slack",
+  teams: "Microsoft Teams",
+  web_push: "Web Push",
+};
+
+// Add-channel entry point: pick a type from card-style buttons (same look as
+// the Add Integration picker), then open the channel form for that type.
+function showChannelTypePicker() {
+  var meta = _chanTypeMeta();
+  var types = Object.keys(meta);
+  if (types.length === 0) { showToast("Channel schema not loaded", "error"); return; }
+  var cards = types.map(function (t) {
+    var title = _CHANNEL_TYPE_TITLE[t] || (meta[t] && meta[t].label) || t;
+    var desc = _CHANNEL_TYPE_DESC[t] || (meta[t] && meta[t].label) || "";
+    return '<button class="btn btn-secondary ch-pick" data-type="' + escapeHtml(t) + '" style="padding:1.2rem;font-size:0.95rem;display:flex;flex-direction:column;align-items:center;gap:6px;white-space:normal;text-align:center">' +
+      '<strong>' + escapeHtml(title) + '</strong>' +
+      '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">' + escapeHtml(desc) + '</span>' +
+      '</button>';
+  }).join("");
+  var body =
+    '<p style="font-size:0.9rem;color:var(--color-text-secondary);margin-bottom:1rem">Select the type of delivery channel to add:</p>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' + cards + '</div>';
+  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>';
+  openModal("Add delivery channel", body, footer, { wide: true });
+  document.querySelectorAll(".ch-pick").forEach(function (b) {
+    b.addEventListener("click", function () { closeModal(); openChannelModal(null, b.dataset.type); });
+  });
+}
+
 // Add/edit a channel. `existing` = the masked channel row (edit) or null (add).
-function openChannelModal(existing) {
+// `presetType` = the type chosen in the picker (add flow); when set, the type
+// is fixed and shown read-only instead of a dropdown.
+function openChannelModal(existing, presetType) {
   var meta = _chanTypeMeta();
   var types = Object.keys(meta);
   if (types.length === 0) { showToast("Channel schema not loaded", "error"); return; }
   var isEdit = !!existing;
   var cur = existing || {};
   var curConfig = (cur.config && typeof cur.config === "object") ? cur.config : {};
-  var initialType = isEdit ? cur.type : types[0];
+  var fixedType = isEdit ? cur.type : (presetType && meta[presetType] ? presetType : null);
+  var initialType = fixedType || types[0];
 
   function fieldInput(f) {
     var id = "ch-field-" + f.key;
@@ -443,8 +492,8 @@ function openChannelModal(existing) {
     return html;
   }
 
-  var typeControl = isEdit
-    ? '<div class="form-group"><label>Type</label><input type="text" value="' + escapeHtml(channelTypeLabel(cur.type)) + '" readonly></div>'
+  var typeControl = fixedType
+    ? '<div class="form-group"><label>Type</label><input type="text" value="' + escapeHtml(channelTypeLabel(fixedType)) + '" readonly></div>'
     : '<div class="form-group"><label>Type</label><select id="ch-type">' + types.map(function (t) { return '<option value="' + t + '">' + escapeHtml(meta[t].label || t) + '</option>'; }).join("") + '</select></div>';
 
   var body =
