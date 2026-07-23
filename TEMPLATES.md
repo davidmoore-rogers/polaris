@@ -27,6 +27,7 @@ Per-pattern sections:
 - [Shared frontend utils](#shared-frontend-utils)
 - [Time-series chart (SVG)](#time-series-chart-svg)
 - [Modal](#modal)
+- [Wizard (stepper modal)](#wizard-stepper-modal)
 - [Full-screen blocking overlay](#full-screen-blocking-overlay)
 - [Slide-over panel](#slide-over-panel)
 - [Sortable + filterable data table](#sortable--filterable-data-table)
@@ -129,6 +130,24 @@ Per-pattern sections:
 - For destructive actions, wrap with `await showConfirm(...)` first.
 - For wide forms (multi-column / tabbed), pass `{ wide: true }`; `{ large: true }` when the body carries a real data table; reserve `{ xl: true }` for genuinely dense UIs (allocation preview, etc.).
 - Re-bind any DOM listeners after each open — the body HTML is replaced wholesale.
+
+---
+
+## Wizard (stepper modal)
+
+**What it is:** A multi-step builder inside a modal — numbered stepper header, one `.step-panel` per step, per-step validation on Next, free navigation back to visited steps. Use when a creation flow has genuinely ordered parts (identity → scope → conditions → outcome); use plain `.page-tabs` when sections are peers with no ordering.
+
+**Canonical implementation:** the Automations 5-step builder — `openAutomationWizard(existing)` in `public/js/automations-wizard.js` (page module: `public/js/automations.js`). Shared CSS: `.stepper` / `.stepper-step{.active,.done,.clickable}` / `.stepper-num` / `.stepper-line` / `.step-panel{.visible}` + the sticky `.modal-body > .stepper` rule in `public/css/styles.css` (promoted from setup.html's inline copy — the pre-auth setup wizard keeps its own, deliberately self-contained). Companions: `.aw-sentence` (live plain-English summary callout) and `.review-grid` (final summary card).
+
+**Key conventions:**
+- Shell is a normal `openModal(..., { large: true })` — the stepper is a direct child of `.modal-body` so it pins sticky like `.page-tabs` does.
+- One module-scope draft object holds ALL steps' state; every navigation runs `collect` on the step being left (no hard validation when moving backward), `validate` only on Next. Each step is a `HTML/Wire/Collect/Validate` function quad.
+- The footer renders Cancel/Back/Next/Save once; a sync function toggles visibility per step (Save always visible in edit mode — all steps unlocked, `visited = max`).
+- Stepper steps ≤ the highest visited step get `.clickable` and jump directly; `updateStepper` stamps `.active`/`.done` on steps and `.done` on the connecting `.stepper-line`s (adapted from `setup.js` `goToStep`/`updateStepper`).
+- Save runs validate-all and jumps to the first failing step with a toast rather than silently blocking.
+- Live previews inside steps follow the maintenance-builder debounce pattern (`_maintRefreshPreview` in `assets-maintenance.js`): 400–600 ms debounce, cancel the timer on step exit.
+
+**When adding a new instance:** reuse the shared classes — don't fork the stepper CSS; keep panels lazy (render HTML strings up front, wire listeners once, re-render only the dynamic regions); stash the draft on modal close and offer a "restore draft?" on reopen if losing input would hurt.
 
 ---
 
@@ -288,7 +307,7 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - **Pass `onSizeChange(size)`** (the 6th arg) to get the "Show N" selector — it renders into the right cell and calls back with the new size. The selector renders **only in the `-top` row** (not duplicated in the bottom pagination). Optional `opts.pageSizes` overrides `[15,25,50,100]`.
 - The page (not the helper) owns the size: `onSizeChange` sets the page's `_<scope>PageSize`, resets to page 1, re-fetches/re-renders, and saves prefs. Mirror the `onPageChange` callback shape.
 - **Do NOT add a standalone `<div class="filter-bar"><label>Show</label><select id="filter-pagesize">` above the table** — that's the old pattern, now removed. If prefs-restore still references `#filter-pagesize`, guard it (`var el = ...; if (el) ...`) since the static element no longer exists.
-- **Bespoke (non-`renderPageControls`) pagination** (offset-based: [public/js/events.js](public/js/events.js), [public/js/notifications.js](public/js/notifications.js)) gets the same look with an HTML grid wrapper instead: `<div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center"><span></span><div id="…-top"></div><div class="filter-bar" style="justify-self:end">…Show + buttons…</div></div>`. The middle cell is the JS-filled pagination container; the right cell holds the static selector. Only valid when that pagination renderer does **not** absolutely-position its own right-side buttons (those need the full-width container, which is why `renderPageControls` owns the grid itself).
+- **Bespoke (non-`renderPageControls`) pagination** (offset-based: [public/js/events.js](public/js/events.js), [public/js/automations.js](public/js/automations.js)) gets the same look with an HTML grid wrapper instead: `<div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center"><span></span><div id="…-top"></div><div class="filter-bar" style="justify-self:end">…Show + buttons…</div></div>`. The middle cell is the JS-filled pagination container; the right cell holds the static selector. Only valid when that pagination renderer does **not** absolutely-position its own right-side buttons (those need the full-width container, which is why `renderPageControls` owns the grid itself).
 
 ---
 
@@ -555,6 +574,8 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - Wire the route layer guards using `requirePermission(newKey, level)`.
 - Add a CLAUDE.md "Function-key catalogue" entry. The frontend matrix UI picks the new row up automatically via `GET /roles/functions`.
 
+**When renaming a function key:** model on the Automations cutover (`notifications`→`alerts` / `notificationManagement`→`automationManagement`, migration `20260721000000_automations_rbac_rename`). Three coordinated pieces, all required: (1) a migration that rewrites every stored `Role.permissions` JSON (old key removed, value carried onto the new key); (2) the old→new pair in `LEGACY_KEY_ALIASES` in `permissions.ts` so `permissionOf` resolves pre-deploy session snapshots without forcing re-login (the cold `roleVersionMap` trusts snapshots at boot); (3) `normalizePermissions`'s legacy fold so matrices posted by stale clients / imported role JSON keep their access. Update every `requirePermission`/`hasPermission` call site to the new name — the alias layer is for stored data, not for code.
+
 **When adding a new region-scoped column:**
 - Mirror the existing `Role.regionTags` / `User.regionTags` shape: `String[] @default([])` + comment `Empty = unrestricted`.
 - Validation lives in the service layer (`normalizeRegionTags` in `roleService.ts` is the template): trim, drop empties, dedupe case-insensitively, cap length + count.
@@ -642,7 +663,7 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - **Channel senders** (one file per transport, config passed in explicitly, each throws on failure): [src/services/notificationChannels/](src/services/notificationChannels/) — `emailChannel` (`sendSmtpEmail` nodemailer + `sendM365Email` Graph), `webhookChannel` (slack/teams/generic body + `netGuard.assertOutboundHostAllowed` SSRF guard), `pushbulletChannel`, `webPushChannel` (`web-push` VAPID; throws `gone=true` on 410/404).
 - **Recipient routing + queue rows**: [src/services/notificationRecipientService.ts](src/services/notificationRecipientService.ts) — `expandDeliveries(notificationId, targets, scopeRegionTags?, composedEmail?)` resolves each target's channel and snapshots recipients at fire time into `NotificationDelivery` rows (referencing the channel by id). Two email row shapes: legacy one-row-per-address, or (when the rule has `emailComposition`) one composed row per target whose `meta` snapshots the pre-rendered `{ composed, to[], cc[], bcc[], subject, text, html? }` — content rendered by the producer (engine / escalation sweep via the shared `src/utils/notificationTemplate.ts` renderer), recipients resolved here, secrets still only on the channel. The escalation sweep ([src/services/notificationEscalationService.ts](src/services/notificationEscalationService.ts)) inserts the same composed shape, so the drain needs no escalation-specific path.
 - **Drain job**: [src/services/notificationDeliveryService.ts](src/services/notificationDeliveryService.ts) `drainPendingDeliveries()` (reads each row's channel config at send time) + [src/jobs/deliverNotifications.ts](src/jobs/deliverNotifications.ts) (15s tick).
-- **Registry UI**: the Delivery tab list + add/edit/test modal in [public/js/notifications.js](public/js/notifications.js) (`loadChannelsTab` / `openChannelModal`) — driven by `CHANNEL_TYPE_META` field defs so a new type needs no bespoke UI.
+- **Registry UI**: the Delivery tab list + add/edit/test modal in [public/js/automations.js](public/js/automations.js) (`loadChannelsTab` / `openChannelModal`) — driven by `CHANNEL_TYPE_META` field defs so a new type needs no bespoke UI.
 - **Web push client**: service worker [public/sw.js](public/sw.js) + enrollment helper [public/js/push.js](public/js/push.js) (`window.polarisPush`) + [public/manifest.json](public/manifest.json).
 
 **Key conventions:**

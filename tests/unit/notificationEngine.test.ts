@@ -80,7 +80,10 @@ describe("readingMeets", () => {
 });
 
 describe("scopeMatchesAsset", () => {
-  const asset: ScopeAsset = { id: "a1", assetType: "server", tags: ["region:Atlanta", "prod"], discoveredByIntegrationId: "i1" };
+  const asset: ScopeAsset = {
+    id: "a1", assetType: "server", tags: ["region:Atlanta", "prod"], discoveredByIntegrationId: "i1",
+    manufacturer: "Fortinet Inc.", model: "FortiGate FGT-60F", ipAddress: "10.20.30.40",
+  };
   it("allAssets matches anything", () => {
     expect(scopeMatchesAsset({ allAssets: true }, asset)).toBe(true);
   });
@@ -102,6 +105,27 @@ describe("scopeMatchesAsset", () => {
     expect(scopeMatchesAsset({ assetIds: ["a1"] }, asset)).toBe(true);
     expect(scopeMatchesAsset({ assetIds: ["other"] }, asset)).toBe(false);
   });
+  it("manufacturer / model match case-insensitively on contains", () => {
+    expect(scopeMatchesAsset({ manufacturers: ["fortinet"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ manufacturers: ["Cisco", "FORTINET"] }, asset)).toBe(true); // OR within
+    expect(scopeMatchesAsset({ manufacturers: ["Cisco"] }, asset)).toBe(false);
+    expect(scopeMatchesAsset({ models: ["fgt-60f"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ models: ["FGT-100"] }, asset)).toBe(false);
+    // absent asset fields never match
+    expect(scopeMatchesAsset({ manufacturers: ["fortinet"] }, { ...asset, manufacturer: null })).toBe(false);
+  });
+  it("subnetCidrs match the primary IP; bare IPs act as host routes", () => {
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.20.0.0/16"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.99.0.0/16", "10.20.30.0/24"] }, asset)).toBe(true); // OR within
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.99.0.0/16"] }, asset)).toBe(false);
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.20.30.40"] }, asset)).toBe(true); // bare IP = /32
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.20.30.41"] }, asset)).toBe(false);
+    expect(scopeMatchesAsset({ subnetCidrs: ["10.20.0.0/16"] }, { ...asset, ipAddress: null })).toBe(false);
+  });
+  it("new dimensions AND with the existing ones", () => {
+    expect(scopeMatchesAsset({ assetTypes: ["server"], manufacturers: ["fortinet"], subnetCidrs: ["10.20.0.0/16"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ assetTypes: ["switch"], manufacturers: ["fortinet"] }, asset)).toBe(false);
+  });
 });
 
 describe("stripRegionPrefix", () => {
@@ -119,7 +143,8 @@ describe("ruleInputSchema", () => {
       trigger: { type: "host_metric", metric: "memUsedPct", operator: ">", threshold: 85 },
     });
     expect(parsed.severity).toBe("warning");
-    expect(parsed.clearBehavior).toBe("manual");
+    expect(parsed.reset).toEqual({ mode: "manual" }); // v2 canonical output
+    expect(parsed.actions).toEqual([]);
     expect(parsed.channels).toEqual(["in_app"]);
     // trigger defaults
     expect((parsed.trigger as any).aggregation).toBe("latest");
@@ -138,11 +163,11 @@ describe("ruleInputSchema", () => {
 });
 
 describe("buildSchemaCatalog", () => {
-  it("exposes all five trigger types with the scoped flag", () => {
+  it("exposes all six trigger types with the scoped flag", () => {
     const cat = buildSchemaCatalog();
     const types = cat.triggerTypes.map((t) => t.type);
-    expect(types).toEqual(["asset_metric", "asset_state", "host_metric", "event", "change"]);
+    expect(types).toEqual(["asset_metric", "asset_state", "host_metric", "event", "change", "composite"]);
     const scoped = cat.triggerTypes.filter((t) => t.scoped).map((t) => t.type);
-    expect(scoped).toEqual(["asset_metric", "asset_state", "change"]);
+    expect(scoped).toEqual(["asset_metric", "asset_state", "change", "composite"]);
   });
 });

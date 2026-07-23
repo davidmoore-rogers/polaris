@@ -34,6 +34,7 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{value}", label: "Value", description: "Observed value at fire time", group: "notification" },
   { token: "{threshold}", label: "Threshold", description: "Configured threshold / comparison value", group: "notification" },
   { token: "{dimension}", label: "Dimension", description: "Sub-asset dimension (interface / mount / sensor / tunnel)", group: "notification" },
+  { token: "{conditions}", label: "Conditions", description: "Multi-condition summary, e.g. \"2 of 3 conditions met\" (composite triggers; empty otherwise)", group: "notification" },
   { token: "{message}", label: "Message", description: "The rendered in-app notification message", group: "notification" },
   { token: "{severity}", label: "Severity", description: "Rule severity (e.g. warning)", group: "notification" },
   { token: "{severity.upper}", label: "SEVERITY", description: "Rule severity upper-cased (e.g. WARNING)", group: "notification" },
@@ -93,6 +94,8 @@ export interface TemplateContextParts {
   value?: string;
   threshold?: string;
   dimension?: string;
+  /** Composite triggers only — "k of n conditions met". */
+  conditions?: string;
   message?: string;
   severity?: string;
   time?: Date | string;
@@ -121,6 +124,7 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "value": str(parts.value),
     "threshold": str(parts.threshold),
     "dimension": str(parts.dimension),
+    "conditions": str(parts.conditions),
     "message": str(parts.message),
     "severity": severity,
     "severity.upper": severity.toUpperCase(),
@@ -171,11 +175,13 @@ export function templateNeedsAsset(templates: Array<string | null | undefined>):
   return templates.some((t) => typeof t === "string" && /\{asset\.[\w.]*\}/.test(t));
 }
 
-/** Notifications-page URL for the {link} token + the "View:" footer (null when POLARIS_PUBLIC_URL is unset). */
+/** Automations-page (Alerts tab) URL for the {link} token + the "View:" footer
+ *  (null when POLARIS_PUBLIC_URL is unset). Renamed page; the server keeps a
+ *  permanent /notifications.html redirect for links already delivered. */
 export function notificationsPageUrl(): string | null {
   const base = process.env.POLARIS_PUBLIC_URL;
   if (!base) return null;
-  return `${base.replace(/\/$/, "")}/notifications.html`;
+  return `${base.replace(/\/$/, "")}/automations.html`;
 }
 
 /** "92m" → "1h 32m"-style elapsed formatting for {escalation.elapsed}. */

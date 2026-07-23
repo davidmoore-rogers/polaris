@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polaris — Automations</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="/logo.png">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <main class="main">
+      <div class="page-header">
+        <h2>Automations</h2>
+        <div class="page-header-actions">
+          <button class="btn btn-primary" id="btn-new-rule" style="display:none">+ New automation</button>
+          <button class="btn btn-primary" id="btn-add-channel" style="display:none">+ Add channel</button>
+          <button class="btn btn-primary" id="btn-add-script" style="display:none">+ Add script</button>
+          <button class="btn btn-secondary" id="btn-enable-push" style="display:none" title="Receive alerts as desktop/mobile push">Enable push</button>
+          <button class="btn btn-secondary" id="btn-refresh">Refresh</button>
+        </div>
+      </div>
+
+      <div class="page-tabs" id="auto-tabs">
+        <button type="button" class="page-tab active" data-tab="manage" id="auto-tab-manage-btn" style="display:none">Automations</button>
+        <button type="button" class="page-tab" data-tab="delivery" id="auto-tab-delivery-btn" style="display:none">Delivery</button>
+        <button type="button" class="page-tab" data-tab="scripts" id="auto-tab-scripts-btn" style="display:none">Scripts</button>
+      </div>
+
+      <!-- ─── Manage tab ───────────────────────────────────────────────── -->
+      <div class="page-tab-panel active" id="auto-tab-manage">
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:200px" data-col-id="name"     data-sf-key="name"      data-sf-type="string">Name</th>
+                <th style="width:130px" data-col-id="trigger"  data-sf-key="triggerType" data-sf-type="string">Trigger</th>
+                <th style="width:100px" data-col-no-resize="true" data-col-id="severity" data-sf-key="severity"  data-sf-type="string" data-sf-options="notice|informational|warning|serious|critical">Severity</th>
+                <th style="width:90px"  data-col-no-resize="true" data-col-id="enabled"  data-sf-key="enabled"   data-sf-type="string">Enabled</th>
+                <th                       data-col-id="scope"    data-sf-key="scopeSummary" data-sf-type="string">Scope</th>
+                <th style="width:120px" data-col-id="createdBy" data-sf-key="createdBy" data-sf-type="string">Created by</th>
+                <th style="width:90px"  data-col-id="rule-actions" data-col-required="true"></th>
+              </tr>
+            </thead>
+            <tbody id="rules-tbody">
+              <tr><td colspan="7" class="empty-state">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ─── Delivery tab ─────────────────────────────────────────────────
+           Operator-managed list of outbound delivery channels (email/chat/push),
+           set up like the Integrations page. Rules reference these by id. -->
+      <div class="page-tab-panel" id="auto-tab-delivery">
+        <p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">
+          Configure where notifications are delivered. Add SMTP / Microsoft 365 email, Pushbullet, Slack, Microsoft Teams, or Web Push channels, then reference them from an automation's <strong>Notify</strong> action. In-app alerts (the Alerts tab) are always on.
+        </p>
+        <div id="channels-list"><p class="empty-state">Loading...</p></div>
+      </div>
+
+      <!-- ─── Scripts tab ───────────────────────────────────────────────────
+           AutomationScript registry (script actions reference these). Gated by
+           the automationScripts RBAC key — scripts are RCE-equivalent, so the
+           tab is hidden without it. -->
+      <div class="page-tab-panel" id="auto-tab-scripts">
+        <p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">
+          Scripts that automations can run — on the Polaris server (as the service account) or on the triggering asset's agent (as root / LocalSystem). <strong>A human must review every script before enabling it in production.</strong> Creation and body changes are audited with checksums.
+        </p>
+        <div id="scripts-list"><p class="empty-state">Loading...</p></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- jspdf / html-to-image + favorites/integrations/assets are loaded so the
+       canonical asset-details slide-in (openViewModal, page-agnostic) works when
+       an asset name is clicked — same pattern as map.html. assets.js / integrations.js
+       skip their page-init when their page DOM is absent. -->
+  <script src="/js/vendor/jspdf.umd.min.js"></script>
+  <script src="/js/vendor/jspdf.plugin.autotable.min.js"></script>
+  <script src="/js/vendor/html-to-image.min.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/app.js"></script>
+  <script src="/js/table-sf.js"></script>
+  <script src="/js/favorites.js"></script>
+  <script src="/js/integrations.js"></script>
+  <script src="/js/assets.js"></script>
+  <script src="/js/push.js"></script>
+  <script src="/js/automations.js"></script>
+  <script src="/js/automations-wizard.js"></script>
+</body>
+</html>

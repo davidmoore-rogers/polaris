@@ -3933,11 +3933,11 @@ async function openViewModal(id) {
     if (permAtLeast("events", "read")) {
       tabs.push({ key: "events", label: "Events", html: _assetEventsTabHTML(a.id) });
     }
-    // Notifications tab — active notifications for this asset + the rules whose
-    // scope matches it. Loaded eagerly after render (one cheap query). Gated on
-    // notifications-read to mirror the page's View-tab gate.
-    if (permAtLeast("notifications", "read")) {
-      tabs.push({ key: "notifications", label: "Notifications", html: _assetNotificationsTabHTML() });
+    // Alerts tab — active alerts for this asset + the automations whose scope
+    // matches it. Loaded eagerly after render (one cheap query). Gated on
+    // alerts-read to mirror the Automations page's Alerts-tab gate.
+    if (permAtLeast("alerts", "read")) {
+      tabs.push({ key: "notifications", label: "Alerts", html: _assetNotificationsTabHTML() });
     }
     // Custom MIB tab — shown only when the asset's manufacturer actually has
     // at least one ManufacturerCustomWidget defined under its
@@ -4014,7 +4014,7 @@ async function openViewModal(id) {
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
     if (!isInfraProc) _wireAssetProcessesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
-    if (permAtLeast("notifications", "read")) _loadAssetNotificationsTab(a.id);
+    if (permAtLeast("alerts", "read")) _loadAssetNotificationsTab(a.id);
     // Mount the dependency tree into its placeholder div on the General tab.
     var depMount = document.getElementById("asset-dep-tree-mount-" + a.id);
     if (depMount) {
@@ -14985,15 +14985,15 @@ function openLogFlagRulesModal(asset, processName, onChange) {
   refreshList();
 }
 
-// Asset-details Notifications tab: active notifications for this asset + the
-// rules whose scope matches it. Both loaded by _loadAssetNotificationsTab.
+// Asset-details Alerts tab: active alerts for this asset + the automations
+// whose scope matches it. Both loaded by _loadAssetNotificationsTab.
 function _assetNotificationsTabHTML() {
   return '<div class="section-block">' +
-    '<h4 style="margin:0 0 0.5rem">Active notifications</h4>' +
+    '<h4 style="margin:0 0 0.5rem">Active alerts</h4>' +
     '<div class="table-wrapper"><table><thead><tr>' +
       '<th style="width:160px">Time</th><th style="width:80px">Severity</th><th>Message</th><th style="width:160px">Acknowledged</th>' +
     '</tr></thead><tbody id="asset-notif-active-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>' +
-    '<h4 style="margin:1rem 0 0.5rem">Rules that can trigger for this asset</h4>' +
+    '<h4 style="margin:1rem 0 0.5rem">Automations that can trigger for this asset</h4>' +
     '<div class="table-wrapper"><table><thead><tr>' +
       '<th style="width:200px">Name</th><th style="width:130px">Trigger</th><th style="width:90px">Severity</th><th>Scope</th>' +
     '</tr></thead><tbody id="asset-notif-rules-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>' +
@@ -15001,7 +15001,7 @@ function _assetNotificationsTabHTML() {
 }
 
 function _loadAssetNotificationsTab(assetId) {
-  api.assets.notifications(assetId).then(function (data) {
+  api.assets.alerts(assetId).then(function (data) {
     var active = (data && data.active) || [];
     var rules = (data && data.matchingRules) || [];
     var aTbody = document.getElementById("asset-notif-active-tbody");
@@ -15012,7 +15012,7 @@ function _loadAssetNotificationsTab(assetId) {
         return '<tr><td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ts) + '</td>' +
           '<td><span class="badge badge-level-' + (n.severity || "info") + '">' + (n.severity || "info").toUpperCase() + '</span></td>' +
           '<td>' + escapeHtml(n.message || "") + '</td><td>' + ack + '</td></tr>';
-      }).join("") : '<tr><td colspan="4" class="empty-state">No active notifications</td></tr>';
+      }).join("") : '<tr><td colspan="4" class="empty-state">No active alerts</td></tr>';
     }
     var rTbody = document.getElementById("asset-notif-rules-tbody");
     if (rTbody) {
@@ -15023,7 +15023,7 @@ function _loadAssetNotificationsTab(assetId) {
         return '<tr><td>' + escapeHtml(r.name) + '</td><td><span class="badge">' + escapeHtml(tt) + '</span></td>' +
           '<td><span class="badge badge-level-' + (r.severity || "info") + '">' + (r.severity || "info").toUpperCase() + '</span></td>' +
           '<td style="font-size:0.85rem">' + escapeHtml(scope) + '</td></tr>';
-      }).join("") : '<tr><td colspan="4" class="empty-state">No rules currently match this asset</td></tr>';
+      }).join("") : '<tr><td colspan="4" class="empty-state">No automations currently match this asset</td></tr>';
     }
   }).catch(function () {
     var aTbody = document.getElementById("asset-notif-active-tbody");

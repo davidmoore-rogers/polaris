@@ -13,6 +13,7 @@ vi.mock("../../src/db.js", () => ({
   prisma: {
     asset: { groupBy: vi.fn(), count: vi.fn(), findMany: vi.fn() },
     event: { findMany: vi.fn() },
+    notification: { findMany: vi.fn() },
     $queryRawUnsafe: vi.fn(),
     $queryRaw: vi.fn(),
   },
@@ -33,9 +34,12 @@ const eventFindMany = prisma.event.findMany as unknown as ReturnType<typeof vi.f
 const rawUnsafe = prisma.$queryRawUnsafe as unknown as ReturnType<typeof vi.fn>;
 const rawQuery = prisma.$queryRaw as unknown as ReturnType<typeof vi.fn>;
 const resolve = resolveMonitorSettings as unknown as ReturnType<typeof vi.fn>;
+const notifFindMany = (prisma as unknown as { notification: { findMany: ReturnType<typeof vi.fn> } }).notification.findMany;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: no active alerts — feeds keep their base ordering.
+  notifFindMany.mockResolvedValue([]);
 });
 
 describe("getStatusSummary", () => {
@@ -468,8 +472,8 @@ describe("getNocSummaryPayload", () => {
     expect(Object.keys(r).sort()).toEqual([
       "activeAlertCount", "activeAlerts", "diskUsage", "downInterfaces", "downIpsecTunnels",
       "downNodes", "downNodesTotal", "packetLoss", "recentReboots", "sitesWithIssues",
-      "slowestResponse", "stalePolls", "statusCounts", "temperature", "topCpu", "topMemory",
-      "uptimePercent",
+      "slowestResponse", "stalePolls", "statusCounts", "storageForecast", "temperature",
+      "topCpu", "topMemory", "uptimePercent",
     ]);
   });
 
@@ -557,5 +561,84 @@ describe("resolveFilteredAssetIds", () => {
     const where = (findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
     expect(where.assetType).toEqual({ notIn: ["router", "firewall", "workstation", "printer", "access_point", "other"] });
     expect(where.tags).toEqual({ hasSome: ["region:East"] });
+  });
+});
+
+describe("alert-severity-aware ordering", () => {
+  it("activeAlertSeverityByAsset keeps the HIGHEST severity per asset and maps legacy values", async () => {
+    notifFindMany.mockResolvedValueOnce([
+      { assetId: "a", severity: "warning" },
+      { assetId: "a", severity: "critical" },
+      { assetId: "b", severity: "info" },     // legacy → rank 2
+      { assetId: "c", severity: "error" },    // legacy → rank 5
+      { assetId: null, severity: "critical" }, // host alert — no asset key
+    ]);
+    const m = await noc.activeAlertSeverityByAsset(["a", "b", "c"]);
+    expect(m.get("a")).toEqual({ severity: "critical", rank: 5 });
+    expect(m.get("b")).toEqual({ severity: "info", rank: 2 });
+    expect(m.get("c")).toEqual({ severity: "error", rank: 5 });
+    expect(m.has("")).toBe(false);
+  });
+
+  it("getDownNodes floats alerted nodes above newer unalerted outages (stable within rank)", async () => {
+    const older = new Date("2026-07-01T00:00:00Z");
+    const newer = new Date("2026-07-20T00:00:00Z");
+    findMany.mockResolvedValueOnce([
+      // Feed order = youngest outage first (the server orderBy).
+      { id: "fresh", hostname: "fresh", ipAddress: null, assetType: "switch", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: newer },
+      { id: "alerted", hostname: "alerted", ipAddress: null, assetType: "switch", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: older },
+    ]);
+    count.mockResolvedValueOnce(2);
+    notifFindMany.mockResolvedValueOnce([{ assetId: "alerted", severity: "serious" }]);
+    const r = await noc.getDownNodes();
+    expect(r.nodes.map((n) => n.id)).toEqual(["alerted", "fresh"]);
+    expect(r.nodes[0].alertSeverity).toBe("serious");
+    expect(r.nodes[0].alertRank).toBe(4);
+    expect(r.nodes[1].alertRank).toBe(0);
+  });
+
+  it("getHighestTemperature ranks a cooler-but-alerted sensor above a hotter unalerted one", async () => {
+    rawUnsafe.mockResolvedValueOnce([
+      { assetId: "hot", sensorName: "cpu", value: 88 },
+      { assetId: "warm", sensorName: "cpu", value: 61 },
+    ]);
+    findMany.mockResolvedValueOnce([
+      { id: "hot", hostname: "hot", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+      { id: "warm", hostname: "warm", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+    ]);
+    notifFindMany.mockResolvedValueOnce([{ assetId: "warm", severity: "critical" }]);
+    const r = await noc.getHighestTemperature();
+    expect(r.map((x) => x.id)).toEqual(["warm", "hot"]);
+    expect(r[0].alertSeverity).toBe("critical");
+    // Value ordering still holds within the unalerted band.
+    expect(r[1].value).toBe(88);
+  });
+
+  it("getRecentAlerts orders severity-first (levelRank desc) then newest", async () => {
+    eventFindMany.mockResolvedValueOnce([]);
+    await noc.getRecentAlerts();
+    expect(eventFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      orderBy: [{ levelRank: "desc" }, { timestamp: "desc" }],
+    }));
+  });
+});
+
+describe("getStorageForecast", () => {
+  it("hydrates forecast rows and sorts severity-first, then soonest-full", async () => {
+    rawUnsafe.mockResolvedValueOnce([
+      { assetId: "soon", mountPath: "/var", slope_per_day: 10e9, points: 12, last_used: 90e9, total_bytes: 100e9 },  // 1 day
+      { assetId: "later", mountPath: "C:", slope_per_day: 1e9, points: 30, last_used: 50e9, total_bytes: 100e9 },    // 50 days
+    ]);
+    findMany.mockResolvedValueOnce([
+      { id: "soon", hostname: "soon", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+      { id: "later", hostname: "later", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+    ]);
+    // The later-full asset carries an active critical alert — it still leads.
+    notifFindMany.mockResolvedValueOnce([{ assetId: "later", severity: "critical" }]);
+    const r = await noc.getStorageForecast();
+    expect(r.map((x) => [x.id, x.value])).toEqual([["later", 50], ["soon", 1]]);
+    expect(r[0].alertSeverity).toBe("critical");
+    expect(r[0].detail).toBe("C:");
+    expect(r[1].usedPct).toBe(90);
   });
 });

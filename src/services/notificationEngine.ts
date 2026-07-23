@@ -30,13 +30,27 @@ import { REGION_TAG_PREFIX } from "./notificationService.js";
 import {
   type Trigger,
   type RuleScope,
-  type RuleInput,
-  type DeliveryTarget,
+  type PreviewRuleInput,
   type EmailComposition,
-  type EscalationConfig,
+  type EscalationV2Config,
+  type ResetConfig,
+  type AutomationAction,
+  type CompositeTrigger,
+  type CompositeLeaf,
+  type TriggerConditionGroup,
   CHANGE_TYPE_ACTIONS,
+  METRIC_META,
+  FIELD_META,
+  isTriggerLeaf,
+  normalizeRuleToV2,
+  normalizeEscalationToV2,
+  scopeCidrOf,
+  evaluateScopeCondition,
 } from "./notificationTypes.js";
-import { expandDeliveries, scopeRegionTagsOf, type ComposedEmail } from "./notificationRecipientService.js";
+import { ipInCidr } from "../utils/cidr.js";
+import { computeStorageForecast } from "./storageForecastService.js";
+import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
+import { executeActions, type ActionExecContext } from "./automationActionService.js";
 import {
   buildTemplateContext,
   renderNotificationTemplate,
@@ -49,7 +63,7 @@ import {
 const LAST_EVENT_SETTING_KEY = "notificationEngine.lastEventCursor";
 const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000; // window to find the "latest" sample
 
-// ─── A rule as loaded from the DB ───────────────────────────────────────────
+// ─── A rule as loaded from the DB (normalized to shape v2) ──────────────────
 interface DbRule {
   id: string;
   name: string;
@@ -57,20 +71,23 @@ interface DbRule {
   severity: string;
   trigger: Trigger;
   scope: RuleScope;
-  clearBehavior: string;
-  clearAfterSec: number | null;
+  /** v2 reset semantics (legacy clearBehavior/clearAfterSec normalized in). */
+  reset: ResetConfig;
+  /** v2 unified action list (legacy targets normalized in). */
+  actions: AutomationAction[];
   cooldownSec: number | null;
   messageTemplate: string | null;
-  targets: DeliveryTarget[];
   emailComposition: EmailComposition | null;
-  escalation: EscalationConfig | null;
+  /** Escalation as v2 tiers-of-actions (legacy tiers converted by the normalizer). */
+  escalation: EscalationV2Config | null;
 }
 
-/** Best-effort outbound-delivery expansion — never breaks rule evaluation. */
-async function expandDeliveriesSafe(notificationId: string, targets: DeliveryTarget[], scopeRegionTags?: string[], composedEmail?: ComposedEmail): Promise<void> {
-  if (!targets || targets.length === 0) return;
+/** Best-effort action fan-out — never breaks rule evaluation. (executeActions
+ *  is already best-effort per action; this guards the fan-out itself.) */
+async function executeActionsSafe(notificationId: string, actions: AutomationAction[], ctx: Record<string, string>, exec: ActionExecContext): Promise<void> {
+  if (!actions || actions.length === 0) return;
   try {
-    await expandDeliveries(notificationId, targets, scopeRegionTags, composedEmail);
+    await executeActions(notificationId, actions, ctx, exec);
   } catch (err) {
     await logEvent({
       action: "notification.delivery_expand_error",
@@ -78,7 +95,7 @@ async function expandDeliveriesSafe(notificationId: string, targets: DeliveryTar
       resourceId: notificationId,
       actor: "system:notification-engine",
       level: "warning",
-      message: "Failed to expand notification delivery targets",
+      message: "Failed to execute automation actions",
       details: { err: (err as Error)?.message },
     }).catch(() => {});
   }
@@ -95,6 +112,7 @@ interface ScopeAssetRow {
   consecutiveFailures: number;
   dependencySuppressed: boolean;
   quarantinedAt: Date | null;
+  ipAddress: string | null;
 }
 
 /** A single evaluated reading for a (asset, dimension). */
@@ -141,10 +159,15 @@ export function compareValue(value: number | string | boolean | null, op: string
 const SCOPE_SELECT = {
   id: true, hostname: true, assetType: true, tags: true, discoveredByIntegrationId: true,
   monitorStatus: true, status: true, consecutiveFailures: true, dependencySuppressed: true,
-  quarantinedAt: true,
+  quarantinedAt: true, ipAddress: true,
+  // condition-tree evaluation reads these (manufacturer/model/os); small
+  // string columns, still a tight select at 2000 assets.
+  manufacturer: true, model: true, os: true,
 } as const;
 
-/** Build a Prisma where from a scope, or null if the scope matches nothing. */
+/** Build a Prisma where from a scope, or null if the scope matches nothing.
+ *  subnetCidrs can't be expressed in SQL (CIDR math over a string column) —
+ *  it narrows to ipAddress-present here and match happens in loadScopeAssets. */
 function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
   if (scope.allAssets) return {};
   const and: Prisma.AssetWhereInput[] = [];
@@ -152,6 +175,17 @@ function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
   if (scope.tags?.length) and.push({ tags: { hasSome: scope.tags } });
   if (scope.assetIds?.length) and.push({ id: { in: scope.assetIds } });
   if (scope.integrationIds?.length) and.push({ discoveredByIntegrationId: { in: scope.integrationIds } });
+  // manufacturer / model: case-insensitive contains, OR within the list.
+  if (scope.manufacturers?.length) {
+    and.push({ OR: scope.manufacturers.map((m) => ({ manufacturer: { contains: m, mode: "insensitive" as const } })) });
+  }
+  if (scope.models?.length) {
+    and.push({ OR: scope.models.map((m) => ({ model: { contains: m, mode: "insensitive" as const } })) });
+  }
+  if (scope.subnetCidrs?.length) and.push({ ipAddress: { not: null } });
+  // A condition tree can't be expressed in SQL — it counts as a dimension
+  // (so a condition-only scope loads all assets) and filters in memory below.
+  if (scope.condition) and.push({});
   if (and.length === 0) return null; // no dimensions + not allAssets ⇒ nothing
   return { AND: and };
 }
@@ -159,7 +193,17 @@ function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
 async function loadScopeAssets(scope: RuleScope): Promise<ScopeAssetRow[]> {
   const where = scopeWhere(scope);
   if (!where) return [];
-  return prisma.asset.findMany({ where, select: SCOPE_SELECT });
+  let rows = await prisma.asset.findMany({ where, select: SCOPE_SELECT });
+  if (scope.subnetCidrs?.length) {
+    const cidrs = scope.subnetCidrs.map(scopeCidrOf);
+    rows = rows.filter((a) => a.ipAddress && cidrs.some((c) => {
+      try { return ipInCidr(a.ipAddress!, c); } catch { return false; }
+    }));
+  }
+  if (scope.condition) {
+    rows = rows.filter((a) => evaluateScopeCondition(scope.condition!, a));
+  }
+  return rows;
 }
 
 /**
@@ -263,6 +307,19 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
         return used !== null && total ? (used / total) * 100 : null;
       };
       return reduceReadings(filtered, index, (r) => r.mountPath, (r) => r.mountPath, valueFn, agg);
+    }
+    case "storageDaysUntilFull": {
+      // Forecast metric: the shared 30-day trend (storageForecastService).
+      // aggregation/windowSec don't apply — the trend already smooths; a mount
+      // that isn't growing (or has <7 daily points) produces NO reading, so
+      // "days <= N" rules stay silent for healthy filesystems.
+      const fc = await computeStorageForecast(ids);
+      return fc
+        .filter((r) => index.has(r.assetId) && substringMatch(r.mountPath, df.mountPathPattern))
+        .map((r) => {
+          const a = index.get(r.assetId)!;
+          return { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: r.mountPath, dimLabel: r.mountPath, value: r.daysUntilFull };
+        });
     }
     case "sdwanLatencyMs": case "sdwanJitterMs": case "sdwanPacketLoss": {
       const col = trigger.metric === "sdwanLatencyMs" ? "latencyMs" : trigger.metric === "sdwanJitterMs" ? "jitterMs" : "packetLoss";
@@ -390,6 +447,22 @@ export function readingMeets(trigger: Trigger, value: number | string | boolean 
   return false;
 }
 
+/**
+ * Has a FIRING condition recovered, honoring hysteresis? Without a
+ * clearThreshold (or for non-numeric readings) recovery is simply !meets —
+ * the legacy behavior. With one, recovery requires the value to cross the
+ * CLEAR threshold: fire at `cpu >= 90` with clearThreshold 80 recovers only
+ * below 80; between 80 and 90 is the dead band (neither meets nor recovered —
+ * the alert stays firing so a value hovering at the line can't flap).
+ * A null/absent reading counts as recovered (matches legacy: !meets).
+ */
+export function recoveredMeets(trigger: Trigger, reset: ResetConfig, value: number | string | boolean | null): boolean {
+  const meets = readingMeets(trigger, value);
+  if (reset.mode !== "auto" || reset.clearThreshold == null) return !meets;
+  if ((trigger.type !== "asset_metric" && trigger.type !== "host_metric") || typeof value !== "number") return !meets;
+  return !compareNum(value, trigger.operator, reset.clearThreshold);
+}
+
 // ─── Message + email templating ─────────────────────────────────────────────
 // All interpolation goes through renderNotificationTemplate (single-brace
 // {token} vocabulary from src/utils/notificationTemplate.ts) so the in-app
@@ -398,19 +471,19 @@ export function readingMeets(trigger: Trigger, value: number | string | boolean 
 // (when the rule has emailComposition/escalation) so escalation emails render
 // later with fire-time values.
 
+/** Fire-time detail for a composite trigger: what the message/tokens render. */
+interface CompositeFireInfo {
+  /** Met-conditions summary with witness dims, e.g. "CPU utilization ≥ 90 (95) and Storage used ≥ 80 (/var = 94)". */
+  summary: string;
+  /** "k of n conditions met". */
+  conditions: string;
+}
+
 /** The reading-derived template parts (sans assetDetail/message, added by callers). */
-function readingContextParts(rule: DbRule, reading: Reading, now: Date): TemplateContextParts {
+function readingContextParts(rule: DbRule, reading: Reading, now: Date, composite?: CompositeFireInfo): TemplateContextParts {
   const trigger = rule.trigger;
-  const metric = trigger.type === "asset_metric" || trigger.type === "host_metric" ? trigger.metric
-    : trigger.type === "asset_state" ? trigger.field : trigger.type;
-  const threshold = trigger.type === "asset_metric" || trigger.type === "host_metric" ? String(trigger.threshold)
-    : trigger.type === "asset_state" ? String(trigger.value) : "";
-  const valueStr = reading.value === null ? "n/a" : typeof reading.value === "number" ? round2(reading.value) : String(reading.value);
-  return {
+  const base = {
     asset: reading.hostname || reading.assetId || "host",
-    metric: String(metric),
-    value: valueStr,
-    threshold,
     dimension: reading.dimLabel || "",
     severity: rule.severity,
     time: now,
@@ -418,6 +491,17 @@ function readingContextParts(rule: DbRule, reading: Reading, now: Date): Templat
     ruleName: rule.name,
     ruleDescription: rule.description,
   };
+  if (trigger.type === "composite") {
+    // No single metric/value/threshold exists — {metric} carries the
+    // met-conditions summary, {conditions} the "k of n" count.
+    return { ...base, metric: composite?.summary ?? "conditions met", value: "", threshold: "", conditions: composite?.conditions ?? "" };
+  }
+  const metric = trigger.type === "asset_metric" || trigger.type === "host_metric" ? trigger.metric
+    : trigger.type === "asset_state" ? trigger.field : trigger.type;
+  const threshold = trigger.type === "asset_metric" || trigger.type === "host_metric" ? String(trigger.threshold)
+    : trigger.type === "asset_state" ? String(trigger.value) : "";
+  const valueStr = reading.value === null ? "n/a" : typeof reading.value === "number" ? round2(reading.value) : String(reading.value);
+  return { ...base, metric: String(metric), value: valueStr, threshold };
 }
 
 /** Render the in-app message from a built context (default string when no template). */
@@ -426,6 +510,11 @@ function renderMessage(rule: DbRule, reading: Reading, ctx: Record<string, strin
     return renderNotificationTemplate(rule.messageTemplate, ctx);
   }
   const dim = reading.dimLabel ? ` [${reading.dimLabel}]` : "";
+  if (rule.trigger.type === "composite") {
+    // {metric} holds the met-conditions summary — no "= (threshold )" artifacts.
+    const count = ctx["conditions"] ? ` (${ctx["conditions"]})` : "";
+    return `${rule.name}: ${ctx["asset"]} — ${ctx["metric"]}${count}`;
+  }
   return `${rule.name}: ${ctx["asset"]}${dim} — ${ctx["metric"]} = ${ctx["value"]} (threshold ${ctx["threshold"]})`;
 }
 
@@ -440,34 +529,29 @@ function ruleWantsContext(rule: DbRule): boolean {
 
 function ruleWantsAssetDetail(rule: DbRule): boolean {
   const comp = rule.emailComposition;
-  const tierTemplates = (rule.escalation?.tiers ?? []).flatMap((t) => [t.subjectTemplate, t.bodyTextTemplate, t.bodyHtmlTemplate]);
+  // Action-level templates can reference {asset.*} too: per-action email
+  // composition, api_call bodies, script args — for the top-level actions AND
+  // every escalation tier's actions (v2 tiers carry actions).
+  const templatesOf = (a: AutomationAction) =>
+    a.type === "notify"
+      ? [a.emailComposition?.subjectTemplate, a.emailComposition?.bodyTextTemplate, a.emailComposition?.bodyHtmlTemplate]
+      : a.type === "api_call"
+        ? [a.bodyTemplate]
+        : [a.argsTemplate];
+  const actionTemplates = [
+    ...rule.actions,
+    ...(rule.escalation?.tiers ?? []).flatMap((t) => t.actions),
+  ].flatMap(templatesOf);
   return (
     ruleWantsContext(rule) ||
-    templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...tierTemplates])
+    templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...actionTemplates])
   );
 }
 
-/**
- * Render the composed outbound email for a rule from a built context. Unset
- * pieces fall back to the pre-feature defaults (subject `[SEV] asset`, text =
- * message + View link). HTML body only when the operator provided one —
- * interpolated values are HTML-escaped there. cc/bcc pass through unresolved
- * (the recipient service resolves them at expansion time).
- * Exported for the escalation sweep + preview.
- */
-export function buildComposedEmail(comp: EmailComposition, ctx: Record<string, string>): ComposedEmail {
-  const link = ctx["link"] || "";
-  const subject = comp.subjectTemplate && comp.subjectTemplate.trim()
-    ? renderNotificationTemplate(comp.subjectTemplate, ctx)
-    : `[${ctx["severity.upper"] || "NOTIFICATION"}] ${ctx["asset"] || "Polaris notification"}`;
-  const text = comp.bodyTextTemplate && comp.bodyTextTemplate.trim()
-    ? renderNotificationTemplate(comp.bodyTextTemplate, ctx)
-    : (ctx["message"] || "") + (link ? `\n\nView: ${link}` : "");
-  const html = comp.bodyHtmlTemplate && comp.bodyHtmlTemplate.trim()
-    ? renderNotificationTemplate(comp.bodyHtmlTemplate, ctx, { html: true })
-    : undefined;
-  return { subject, text, html, cc: comp.cc ?? undefined, bcc: comp.bcc ?? undefined };
-}
+// buildComposedEmail moved to notificationRecipientService (the action layer
+// composes per-action emails and importing it from here would be circular);
+// re-exported so the escalation sweep + tests keep their import path.
+export { buildComposedEmail };
 
 // ─── Threshold / state evaluation ───────────────────────────────────────────
 
@@ -521,13 +605,36 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
           await fire(rule, reading, lastValue, now);
         }
         // else keep pending
-      } // firing → already active; suppress
+      } else if (st.state === "firing" && st.recoveredSince) {
+        // Re-met mid-recovery: cancel the clear-sustain timer (transition-only
+        // write — a steadily-firing condition costs nothing per tick).
+        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+      } // firing without a pending recovery → already active; suppress
     } else {
       // condition not met for this reading
       if (st && st.state === "pending") {
         await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null } });
       } else if (st && st.state === "firing") {
-        await recover(rule, st);
+        if (rule.reset.mode !== "auto") {
+          // manual re-arms the state; timed waits for its sweep — same as ever.
+          await recover(rule, st);
+        } else if (!recoveredMeets(trigger, rule.reset, reading.value)) {
+          // Hysteresis dead band (below fire, above clear): stay firing.
+          if (st.recoveredSince) {
+            await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+          }
+        } else {
+          const sustainSec = rule.reset.sustainSec ?? 0;
+          if (sustainSec <= 0) {
+            await recover(rule, st);
+          } else if (!st.recoveredSince) {
+            // Recovery observed — start the clear-sustain timer.
+            await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: now } });
+          } else if (now.getTime() - st.recoveredSince.getTime() >= sustainSec * 1000) {
+            await recover(rule, st);
+          }
+          // else: recovered but not sustained long enough yet — keep firing.
+        }
       }
     }
   }
@@ -547,11 +654,301 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
 
   // Timed auto-clear: firing states past their timer, even without an explicit
   // recovery reading (e.g. the asset stopped reporting).
-  if (rule.clearBehavior === "timed" && rule.clearAfterSec) {
+  if (rule.reset.mode === "timed" && rule.reset.afterSec) {
+    const afterSec = rule.reset.afterSec;
     for (const st of states) {
-      if (st.state === "firing" && st.firedAt && now.getTime() - st.firedAt.getTime() >= rule.clearAfterSec * 1000) {
+      if (st.state === "firing" && st.firedAt && now.getTime() - st.firedAt.getTime() >= afterSec * 1000) {
         await clearActiveNotification(st, "system:timed");
-        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, notificationId: null } });
+        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null } });
+      }
+    }
+  }
+}
+
+// ─── Composite trigger evaluation ───────────────────────────────────────────
+// Composite rules evaluate PER ASSET: every metric/state leaf resolves its
+// readings through the UNCHANGED single-trigger resolvers (one query per
+// DISTINCT leaf shape), a multi-dimension leaf counts as met when ANY of its
+// dimensions meets, and the AND/OR tree folds leaf truths into one outcome
+// per asset. The state machine runs at dimensionKey "" — one alert per
+// device. A deliberately separate path from evaluateThresholdRule (sharing
+// only the fire/recover/upsertState write layer) so the legacy per-dimension
+// path stays byte-identical.
+
+interface LeafRef {
+  /** Tree-path id ("0", "1.2") — stable across trigger and preview so the
+   *  wizard can highlight its builder rows. */
+  leafId: string;
+  leaf: CompositeLeaf;
+}
+
+function collectLeafRefs(node: { children: (TriggerConditionGroup | CompositeLeaf)[] }, prefix = ""): LeafRef[] {
+  const out: LeafRef[] = [];
+  node.children.forEach((c, i) => {
+    const id = prefix ? `${prefix}.${i}` : String(i);
+    if (isTriggerLeaf(c)) out.push({ leafId: id, leaf: c });
+    else out.push(...collectLeafRefs(c, id));
+  });
+  return out;
+}
+
+interface LeafTruth {
+  met: boolean;
+  /** The first meeting dimension — names the sensor/mount/interface in the alert. */
+  witness: { dimLabel: string; value: number | string | boolean | null } | null;
+  /** A representative reading regardless of met (preview shows current values). */
+  sample: { dimLabel: string; value: number | string | boolean | null } | null;
+  hasReading: boolean;
+}
+
+async function resolveOneLeafReadings(leaf: CompositeLeaf, assets: ScopeAssetRow[]): Promise<Reading[]> {
+  if (leaf.type === "asset_metric") return resolveAssetMetricReadings({ ...leaf, forDurationSec: 0 }, assets);
+  if (leaf.type === "asset_state") return resolveAssetStateReadings({ ...leaf, forDurationSec: 0 }, assets);
+  const r = await resolveHostMetricReading({ ...leaf, forDurationSec: 0 });
+  return r ? [r] : [];
+}
+
+/** Resolve every leaf's readings (identical leaves share one query) and fold
+ *  them to per-asset truths. Host leaves land on the pseudo-asset id "". */
+async function resolveLeafTruths(leaves: LeafRef[], assets: ScopeAssetRow[]): Promise<Map<string, Map<string, LeafTruth>>> {
+  const byResolverKey = new Map<string, Promise<Reading[]>>();
+  const out = new Map<string, Map<string, LeafTruth>>();
+  for (const { leafId, leaf } of leaves) {
+    const key = JSON.stringify(leaf);
+    let p = byResolverKey.get(key);
+    if (!p) {
+      p = resolveOneLeafReadings(leaf, assets);
+      byResolverKey.set(key, p);
+    }
+    out.set(leafId, leafTruthByAsset(leaf, await p));
+  }
+  return out;
+}
+
+/** ANY-dimension fold: a leaf is met for an asset when any of its readings meets. */
+function leafTruthByAsset(leaf: CompositeLeaf, readings: Reading[]): Map<string, LeafTruth> {
+  const out = new Map<string, LeafTruth>();
+  const leafTrigger = leaf as unknown as Trigger; // readingMeets reads type/operator/threshold|value only
+  for (const r of readings) {
+    const id = r.assetId || "";
+    let t = out.get(id);
+    if (!t) {
+      t = { met: false, witness: null, sample: null, hasReading: true };
+      out.set(id, t);
+    }
+    if (!t.sample) t.sample = { dimLabel: r.dimLabel, value: r.value };
+    if (!t.met && readingMeets(leafTrigger, r.value)) {
+      t.met = true;
+      t.witness = { dimLabel: r.dimLabel, value: r.value };
+    }
+  }
+  return out;
+}
+
+function evalTriggerTreeForAsset(
+  node: { op: "and" | "or"; children: (TriggerConditionGroup | CompositeLeaf)[] },
+  assetId: string,
+  truths: Map<string, Map<string, LeafTruth>>,
+  prefix = "",
+): boolean {
+  const results = node.children.map((c, i) => {
+    const id = prefix ? `${prefix}.${i}` : String(i);
+    if (isTriggerLeaf(c)) return truths.get(id)?.get(assetId)?.met === true; // no reading ⇒ false (never fire on absent evidence)
+    return evalTriggerTreeForAsset(c as TriggerConditionGroup, assetId, truths, id);
+  });
+  return node.op === "and" ? results.every(Boolean) : results.some(Boolean);
+}
+
+interface CompositeOutcome {
+  meets: boolean;
+  /** False when NO leaf produced a reading for this asset — the asset is
+   *  skipped entirely (state frozen), matching the per-reading path's
+   *  no-reading behavior. */
+  hasAnyReading: boolean;
+  metLeaves: Array<{ leafId: string; leaf: CompositeLeaf; witness: LeafTruth["witness"] }>;
+  totalLeaves: number;
+}
+
+function compositeOutcomeForAsset(
+  tree: { op: "and" | "or"; children: (TriggerConditionGroup | CompositeLeaf)[] },
+  assetId: string,
+  leaves: LeafRef[],
+  truths: Map<string, Map<string, LeafTruth>>,
+): CompositeOutcome {
+  const metLeaves: CompositeOutcome["metLeaves"] = [];
+  let hasAnyReading = false;
+  for (const { leafId, leaf } of leaves) {
+    const t = truths.get(leafId)?.get(assetId);
+    if (t?.hasReading) hasAnyReading = true;
+    if (t?.met) metLeaves.push({ leafId, leaf, witness: t.witness });
+  }
+  return { meets: evalTriggerTreeForAsset(tree, assetId, truths), hasAnyReading, metLeaves, totalLeaves: leaves.length };
+}
+
+/** Human label for a leaf condition ("CPU utilization >= 90"). */
+function leafConditionLabel(leaf: CompositeLeaf): string {
+  if (leaf.type === "asset_state") {
+    return `${FIELD_META[leaf.field]?.label ?? leaf.field} ${leaf.operator} ${leaf.value}`;
+  }
+  return `${METRIC_META[leaf.metric]?.label ?? leaf.metric} ${leaf.operator} ${leaf.threshold}`;
+}
+
+function compositeFireInfo(outcome: CompositeOutcome): CompositeFireInfo {
+  const parts = outcome.metLeaves.map(({ leaf, witness }) => {
+    const base = leafConditionLabel(leaf);
+    if (!witness) return base;
+    const v = typeof witness.value === "number" ? round2(witness.value) : String(witness.value ?? "");
+    return witness.dimLabel ? `${base} (${witness.dimLabel} = ${v})` : `${base} (${v})`;
+  });
+  return {
+    summary: parts.join(" and ") || "conditions met",
+    conditions: `${outcome.metLeaves.length} of ${outcome.totalLeaves} conditions met`,
+  };
+}
+
+const HOST_PSEUDO_ASSET: ScopeAssetRow = {
+  id: "", hostname: "Polaris host", assetType: null, tags: [], discoveredByIntegrationId: null,
+  monitorStatus: null, status: "active", consecutiveFailures: 0, dependencySuppressed: false,
+  quarantinedAt: null, ipAddress: null,
+};
+
+/** The auto/condition clear-sustain ladder — shared by both recovery signals
+ *  (auto: !triggerTree; condition: the reset tree). Mirrors the legacy
+ *  per-reading sustain block exactly. */
+async function applySustainedRecovery(
+  rule: DbRule,
+  st: { id: string; notificationId: string | null; recoveredSince: Date | null },
+  recovered: boolean,
+  now: Date,
+): Promise<void> {
+  if (!recovered) {
+    if (st.recoveredSince) {
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+    }
+    return;
+  }
+  const sustainSec = rule.reset.sustainSec ?? 0;
+  if (sustainSec <= 0) {
+    await recover(rule, st);
+  } else if (!st.recoveredSince) {
+    await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: now } });
+  } else if (now.getTime() - st.recoveredSince.getTime() >= sustainSec * 1000) {
+    await recover(rule, st);
+  }
+  // else: recovered but not sustained long enough yet — keep firing.
+}
+
+async function evaluateCompositeRule(rule: DbRule): Promise<void> {
+  const trigger = rule.trigger as CompositeTrigger;
+  const suppressedIds = new Set<string>();
+  let activeAssets: ScopeAssetRow[];
+  if (trigger.kind === "host") {
+    activeAssets = [HOST_PSEUDO_ASSET];
+  } else {
+    const assets = await loadScopeAssets(rule.scope);
+    activeAssets = [];
+    for (const a of assets) {
+      if (isSuppressedForNotifications(a)) suppressedIds.add(a.id);
+      else activeAssets.push(a);
+    }
+  }
+
+  const leaves = collectLeafRefs(trigger);
+  const truths = await resolveLeafTruths(leaves, activeAssets);
+
+  const states = await prisma.notificationRuleState.findMany({ where: { ruleId: rule.id } });
+  const now = new Date();
+
+  // Orphan sweep: composite state lives at dimensionKey "" only. Rows at any
+  // other key are stale BY CONSTRUCTION (a single→composite trigger edit that
+  // bypassed the service cleanup — raw API, restored backup): clear their
+  // notifications and delete the rows so they can't linger firing forever.
+  for (const st of states) {
+    if (st.dimensionKey !== "") {
+      await clearActiveNotification(st, "system:rule-edited");
+      await prisma.notificationRuleState.delete({ where: { id: st.id } });
+    }
+  }
+  const stateMap = new Map(states.filter((s) => s.dimensionKey === "").map((s) => [s.assetId ?? "", s]));
+
+  // Condition-mode reset: resolve the reset tree ONLY against assets that are
+  // actually firing — usually zero extra queries.
+  const resetTree = rule.reset.mode === "condition" ? (rule.reset.condition ?? null) : null;
+  let resetOutcomeFor: (assetId: string) => CompositeOutcome | null = () => null;
+  if (resetTree) {
+    const firingAssets = activeAssets.filter((a) => stateMap.get(a.id)?.state === "firing");
+    if (firingAssets.length > 0) {
+      const resetLeaves = collectLeafRefs(resetTree);
+      const resetTruths = await resolveLeafTruths(resetLeaves, firingAssets);
+      resetOutcomeFor = (assetId) => compositeOutcomeForAsset(resetTree, assetId, resetLeaves, resetTruths);
+    }
+  }
+
+  for (const a of activeAssets) {
+    const outcome = compositeOutcomeForAsset(trigger, a.id, leaves, truths);
+    if (!outcome.hasAnyReading) continue; // no evidence either way — state frozen (parity with the per-reading path)
+    const st = stateMap.get(a.id);
+    const reading: Reading = { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: "", dimLabel: "", value: null };
+
+    if (st?.state === "firing") {
+      if (rule.reset.mode === "condition") {
+        // While firing, the reset tree is the SOLE recovery authority — the
+        // trigger re-meeting does not independently cancel the sustain timer.
+        // No reset reading ⇒ not recovered (never clear on absent evidence).
+        const recovered = resetOutcomeFor(a.id)?.meets === true;
+        await applySustainedRecovery(rule, st, recovered, now);
+      } else if (outcome.meets) {
+        if (st.recoveredSince) {
+          // Re-met mid-recovery under auto: cancel the clear-sustain timer.
+          await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+        }
+      } else if (rule.reset.mode !== "auto") {
+        await recover(rule, st); // manual re-arms the state; timed waits for its sweep
+      } else {
+        // auto for composites = the tree is no longer true (no hysteresis
+        // dead band — clearThreshold is rejected at save for composites).
+        await applySustainedRecovery(rule, st, true, now);
+      }
+      continue;
+    }
+
+    if (outcome.meets) {
+      if (!st || st.state === "clear") {
+        if (trigger.forDurationSec > 0) {
+          await upsertState(rule.id, reading, "pending", { conditionMetSince: now, lastValue: null });
+        } else {
+          await fire(rule, reading, null, now, compositeFireInfo(outcome));
+        }
+      } else if (st.state === "pending") {
+        const since = st.conditionMetSince ?? now;
+        if (now.getTime() - since.getTime() >= trigger.forDurationSec * 1000) {
+          await fire(rule, reading, null, now, compositeFireInfo(outcome));
+        }
+        // else keep pending
+      }
+    } else if (st?.state === "pending") {
+      // Partial-missing under AND lands here too (missing leaf ⇒ false) — the
+      // debounce restarts; accepted semantics (readings smooth over 15 min).
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null } });
+    }
+  }
+
+  // Suppressed assets: reset pending rows (the debounce restarts after the
+  // window), leave firing rows frozen — same contract as the legacy path.
+  for (const st of states) {
+    if (st.dimensionKey === "" && st.state === "pending" && st.assetId && suppressedIds.has(st.assetId)) {
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null } });
+    }
+  }
+
+  // Timed auto-clear sweep (identical to the legacy path; orphan rows already
+  // deleted above are excluded by the dimensionKey guard).
+  if (rule.reset.mode === "timed" && rule.reset.afterSec) {
+    const afterSec = rule.reset.afterSec;
+    for (const st of states) {
+      if (st.dimensionKey === "" && st.state === "firing" && st.firedAt && now.getTime() - st.firedAt.getTime() >= afterSec * 1000) {
+        await clearActiveNotification(st, "system:timed");
+        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null } });
       }
     }
   }
@@ -570,7 +967,7 @@ async function upsertState(
   });
 }
 
-async function fire(rule: DbRule, reading: Reading, lastValue: number | null, now: Date): Promise<void> {
+async function fire(rule: DbRule, reading: Reading, lastValue: number | null, now: Date, composite?: CompositeFireInfo): Promise<void> {
   // Respect cooldown: if this (rule,asset,dim) fired within cooldownSec, skip.
   const existing = await prisma.notificationRuleState.findUnique({
     where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
@@ -582,7 +979,7 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
   // is negligible even at 2000 assets — the hot evaluate path stays on the
   // tight SCOPE_SELECT.
   const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
-  const ctx = buildTemplateContext({ ...readingContextParts(rule, reading, now), assetDetail: detail });
+  const ctx = buildTemplateContext({ ...readingContextParts(rule, reading, now, composite), assetDetail: detail });
   const message = renderMessage(rule, reading, ctx);
   ctx["message"] = message;
   const notif = await prisma.notification.create({
@@ -599,10 +996,16 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
   await prisma.notificationRuleState.upsert({
     where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
     create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id },
-    update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null },
+    update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null, recoveredSince: null },
   });
-  const composed = rule.emailComposition ? buildComposedEmail(rule.emailComposition, ctx) : undefined;
-  await expandDeliveriesSafe(notif.id, rule.targets, scopeRegionTagsOf(rule.scope), composed);
+  await executeActionsSafe(notif.id, rule.actions, ctx, {
+    scopeRegionTags: scopeRegionTagsOf(rule.scope),
+    assetId: reading.assetId || null,
+    ruleId: rule.id,
+    ruleName: rule.name,
+    ruleEmailComposition: rule.emailComposition,
+    actor: "system:notification-engine",
+  });
   await logEvent({
     action: "notification.triggered",
     resourceType: "notification",
@@ -616,9 +1019,11 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
 }
 
 async function recover(rule: DbRule, st: { id: string; notificationId: string | null }): Promise<void> {
-  if (rule.clearBehavior === "auto") {
+  // "condition" recovers like "auto": the reset tree (or trigger negation)
+  // observed a real recovery, so clear the notification + stamp the event.
+  if (rule.reset.mode === "auto" || rule.reset.mode === "condition") {
     await clearActiveNotification(st, "system:auto-resolve");
-    await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, notificationId: null } });
+    await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null } });
     await logEvent({
       action: "notification.auto_cleared",
       resourceType: "notification",
@@ -631,8 +1036,8 @@ async function recover(rule: DbRule, st: { id: string; notificationId: string | 
   } else {
     // manual / timed: re-arm the state but leave the notification for a human
     // (timed is swept by the timer pass; manual stays until cleared).
-    if (rule.clearBehavior === "manual") {
-      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, notificationId: null } });
+    if (rule.reset.mode === "manual") {
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null } });
     }
   }
 }
@@ -688,10 +1093,10 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   });
 
   const toCreate: Prisma.NotificationCreateManyInput[] = [];
-  // Notifications from rules with delivery targets get a client-generated id so
-  // we can expand their deliveries after the batch insert (createMany returns
-  // no ids). Rows without targets keep the DB default.
-  const deliverAfter: { id: string; targets: DeliveryTarget[]; scopeRegionTags: string[]; composedEmail?: ComposedEmail }[] = [];
+  // Notifications from rules with actions get a client-generated id so we can
+  // execute their actions after the batch insert (createMany returns no ids).
+  // The fire-time template context rides along — api_call bodies render from it.
+  const deliverAfter: { id: string; rule: DbRule; assetId: string | null; ctx: Record<string, string> }[] = [];
   for (const ev of events) {
     for (const c of compiled) {
       if (!c.re.test(ev.action)) continue;
@@ -728,15 +1133,10 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         ? renderNotificationTemplate(tmpl, ctx)
         : `${c.rule.name}: ${ev.message}`;
       ctx["message"] = message;
-      const hasTargets = Array.isArray(c.rule.targets) && c.rule.targets.length > 0;
-      const id = hasTargets ? randomUUID() : undefined;
-      if (hasTargets && id) {
-        deliverAfter.push({
-          id,
-          targets: c.rule.targets,
-          scopeRegionTags: scopeRegionTagsOf(c.rule.scope),
-          composedEmail: c.rule.emailComposition ? buildComposedEmail(c.rule.emailComposition, ctx) : undefined,
-        });
+      const hasActions = c.rule.actions.length > 0;
+      const id = hasActions ? randomUUID() : undefined;
+      if (hasActions && id) {
+        deliverAfter.push({ id, rule: c.rule, assetId, ctx });
       }
       toCreate.push({
         ...(id ? { id } : {}),
@@ -755,7 +1155,14 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
     await prisma.notification.createMany({ data: toCreate });
   }
   for (const d of deliverAfter) {
-    await expandDeliveriesSafe(d.id, d.targets, d.scopeRegionTags, d.composedEmail);
+    await executeActionsSafe(d.id, d.rule.actions, d.ctx, {
+      scopeRegionTags: scopeRegionTagsOf(d.rule.scope),
+      assetId: d.assetId,
+      ruleId: d.rule.id,
+      ruleName: d.rule.name,
+      ruleEmailComposition: d.rule.emailComposition,
+      actor: "system:notification-engine",
+    });
   }
 
   const newest = events[events.length - 1].timestamp.toISOString();
@@ -800,22 +1207,30 @@ export async function assetDetail(assetId: string): Promise<AssetDetailRow | nul
 
 export async function evaluateAllNotificationRules(): Promise<void> {
   const dbRules = await prisma.notificationRule.findMany({ where: { enabled: true } });
-  const rules: DbRule[] = dbRules.map((r) => ({
-    id: r.id, name: r.name, description: r.description, severity: r.severity,
-    trigger: r.trigger as unknown as Trigger,
-    scope: (r.scope ?? {}) as RuleScope,
-    clearBehavior: r.clearBehavior, clearAfterSec: r.clearAfterSec, cooldownSec: r.cooldownSec,
-    messageTemplate: r.messageTemplate,
-    targets: Array.isArray(r.targets) ? (r.targets as unknown as DeliveryTarget[]) : [],
-    emailComposition: (r.emailComposition ?? null) as EmailComposition | null,
-    escalation: (r.escalation ?? null) as EscalationConfig | null,
-  }));
+  const rules: DbRule[] = dbRules.map((r) => {
+    // Shape-v2 normalization: legacy rows (clearBehavior/targets) and v2 rows
+    // (reset/actions) evaluate identically through the v2 view.
+    const v2 = normalizeRuleToV2(r);
+    return {
+      id: r.id, name: r.name, description: r.description, severity: r.severity,
+      trigger: r.trigger as unknown as Trigger,
+      scope: (r.scope ?? {}) as RuleScope,
+      reset: v2.reset,
+      actions: v2.actions,
+      cooldownSec: r.cooldownSec,
+      messageTemplate: r.messageTemplate,
+      emailComposition: (r.emailComposition ?? null) as EmailComposition | null,
+      escalation: v2.escalation,
+    };
+  });
 
   clearAssetDetailCache();
 
   for (const rule of rules) {
     try {
-      if (rule.trigger.type === "asset_metric" || rule.trigger.type === "asset_state" || rule.trigger.type === "host_metric") {
+      if (rule.trigger.type === "composite") {
+        await evaluateCompositeRule(rule);
+      } else if (rule.trigger.type === "asset_metric" || rule.trigger.type === "asset_state" || rule.trigger.type === "host_metric") {
         await evaluateThresholdRule(rule);
       }
     } catch (err) {
@@ -838,6 +1253,24 @@ export interface PreviewMatch {
   dimension: string;
   value: number | string | boolean | null;
   meets: boolean;
+  /** Hysteresis view (only when the draft has reset.mode=auto + clearThreshold):
+   *  would a firing alert on this reading clear? A reading that neither meets
+   *  nor clears sits in the dead band. */
+  wouldClear?: boolean;
+  inDeadBand?: boolean;
+  /** Composite drafts only — per-condition breakdown, one row per asset.
+   *  leafId is the trigger-tree path ("0", "1.2") so the wizard can highlight
+   *  its builder rows; noData marks "false because absent", not measured. */
+  leaves?: Array<{
+    leafId: string;
+    label: string;
+    met: boolean;
+    value: number | string | boolean | null;
+    dimension: string;
+    noData: boolean;
+  }>;
+  /** Composite drafts only — "k of n conditions met". */
+  conditionsSummary?: string;
 }
 
 export interface PreviewResult {
@@ -849,10 +1282,31 @@ export interface PreviewResult {
   emailPreview?: { subject: string; text: string; html?: string };
 }
 
-/** Dry-run a draft rule against current data with NO writes. */
-export async function previewRule(input: RuleInput): Promise<PreviewResult> {
+/** Dry-run a draft rule against current data with NO writes. A draft without
+ *  a trigger is a SCOPE-ONLY preview: list the devices the scope matches
+ *  (the wizard's asset-filtering step). */
+export async function previewRule(input: PreviewRuleInput): Promise<PreviewResult> {
   const trigger = input.trigger;
   let readings: Reading[] = [];
+
+  if (!trigger) {
+    const assets = await loadScopeAssets(input.scope);
+    return {
+      supported: true,
+      totalEvaluated: assets.length,
+      matches: assets.slice(0, 200).map((a) => ({
+        assetId: a.id,
+        hostname: a.hostname,
+        dimension: "",
+        value: null,
+        meets: true,
+      })),
+    };
+  }
+
+  if (trigger.type === "composite") {
+    return previewCompositeRule(trigger, input);
+  }
 
   if (trigger.type === "host_metric") {
     const r = await resolveHostMetricReading(trigger);
@@ -867,13 +1321,23 @@ export async function previewRule(input: RuleInput): Promise<PreviewResult> {
     return { supported: false, note: "Event and change rules fire on new audit events; there's nothing to preview against current data.", totalEvaluated: 0, matches: [] };
   }
 
-  const matches: PreviewMatch[] = readings.map((r) => ({
-    assetId: r.assetId || null,
-    hostname: r.hostname,
-    dimension: r.dimLabel,
-    value: r.value,
-    meets: readingMeets(trigger, r.value),
-  }));
+  const showHysteresis = input.reset.mode === "auto" && input.reset.clearThreshold != null;
+  const matches: PreviewMatch[] = readings.map((r) => {
+    const meets = readingMeets(trigger, r.value);
+    if (!showHysteresis) {
+      return { assetId: r.assetId || null, hostname: r.hostname, dimension: r.dimLabel, value: r.value, meets };
+    }
+    const wouldClear = recoveredMeets(trigger, input.reset, r.value);
+    return {
+      assetId: r.assetId || null,
+      hostname: r.hostname,
+      dimension: r.dimLabel,
+      value: r.value,
+      meets,
+      wouldClear,
+      inDeadBand: !meets && !wouldClear,
+    };
+  });
   matches.sort((a, b) => Number(b.meets) - Number(a.meets));
 
   // Rendered sample of the composed email against the best reading (first
@@ -882,10 +1346,10 @@ export async function previewRule(input: RuleInput): Promise<PreviewResult> {
   if (input.emailComposition && readings.length > 0) {
     const draft: DbRule = {
       id: "", name: input.name, description: input.description ?? null, severity: input.severity,
-      trigger: input.trigger, scope: input.scope,
-      clearBehavior: input.clearBehavior, clearAfterSec: input.clearAfterSec ?? null, cooldownSec: input.cooldownSec ?? null,
-      messageTemplate: input.messageTemplate ?? null, targets: [],
-      emailComposition: input.emailComposition, escalation: input.escalation ?? null,
+      trigger, scope: input.scope,
+      reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
+      messageTemplate: input.messageTemplate ?? null,
+      emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
     };
     const sample = readings.find((r) => readingMeets(trigger, r.value)) ?? readings[0];
     // Direct fetch (not the per-tick cache — preview runs in the web process).
@@ -902,4 +1366,70 @@ export async function previewRule(input: RuleInput): Promise<PreviewResult> {
   }
 
   return { supported: true, totalEvaluated: readings.length, matches: matches.slice(0, 200), emailPreview };
+}
+
+/** Composite dry-run: one PreviewMatch per asset with a per-leaf breakdown
+ *  (met / measured-false / noData) in tree order. Suppression is NOT applied —
+ *  preview answers "would this fire on current data", not "is it silenced". */
+async function previewCompositeRule(trigger: CompositeTrigger, input: PreviewRuleInput): Promise<PreviewResult> {
+  const assets = trigger.kind === "host" ? [HOST_PSEUDO_ASSET] : await loadScopeAssets(input.scope);
+  const leaves = collectLeafRefs(trigger);
+  const truths = await resolveLeafTruths(leaves, assets);
+
+  const matches: PreviewMatch[] = [];
+  let evaluated = 0;
+  const outcomes = new Map<string, CompositeOutcome>();
+  for (const a of assets) {
+    const outcome = compositeOutcomeForAsset(trigger, a.id, leaves, truths);
+    if (!outcome.hasAnyReading) continue; // nothing measured — not evaluated
+    outcomes.set(a.id, outcome);
+    evaluated++;
+    matches.push({
+      assetId: a.id || null,
+      hostname: a.hostname,
+      dimension: "",
+      value: null,
+      meets: outcome.meets,
+      leaves: leaves.map(({ leafId, leaf }) => {
+        const t = truths.get(leafId)?.get(a.id);
+        const src = t?.witness ?? t?.sample ?? null;
+        return {
+          leafId,
+          label: leafConditionLabel(leaf),
+          met: t?.met === true,
+          value: src?.value ?? null,
+          dimension: src?.dimLabel ?? "",
+          noData: !t?.hasReading,
+        };
+      }),
+      conditionsSummary: `${outcome.metLeaves.length} of ${outcome.totalLeaves} conditions met`,
+    });
+  }
+  matches.sort((a, b) => Number(b.meets) - Number(a.meets));
+
+  let emailPreview: PreviewResult["emailPreview"];
+  if (input.emailComposition && matches.length > 0) {
+    const draft: DbRule = {
+      id: "", name: input.name, description: input.description ?? null, severity: input.severity,
+      trigger, scope: input.scope,
+      reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
+      messageTemplate: input.messageTemplate ?? null,
+      emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
+    };
+    const best = matches[0];
+    const outcome = outcomes.get(best.assetId ?? "")!;
+    const sample: Reading = { assetId: best.assetId ?? "", hostname: best.hostname, tags: [], dimKey: "", dimLabel: "", value: null };
+    const detail = best.assetId
+      ? await prisma.asset.findUnique({ where: { id: best.assetId }, select: ASSET_DETAIL_SELECT })
+      : null;
+    const ctx = buildTemplateContext({
+      ...readingContextParts(draft, sample, new Date(), compositeFireInfo(outcome)),
+      assetDetail: detail ? { ...detail, status: String(detail.status) } : null,
+    });
+    ctx["message"] = renderMessage(draft, sample, ctx);
+    const composed = buildComposedEmail(input.emailComposition, ctx);
+    emailPreview = { subject: composed.subject, text: composed.text, html: composed.html };
+  }
+
+  return { supported: true, totalEvaluated: evaluated, matches: matches.slice(0, 200), emailPreview };
 }

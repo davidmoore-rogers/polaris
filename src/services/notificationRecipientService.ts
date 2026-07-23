@@ -25,7 +25,15 @@ import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { resolveTagScopesForUser } from "./regionScopeService.js";
 import { stripRegionPrefix } from "./notificationService.js";
-import { type DeliveryTarget, type ChannelType, type EmailRecipients, CHANNEL_TYPES, CHANNEL_TRANSPORT } from "./notificationTypes.js";
+import { renderNotificationTemplate } from "../utils/notificationTemplate.js";
+import {
+  type DeliveryTarget,
+  type ChannelType,
+  type EmailRecipients,
+  type EmailComposition,
+  CHANNEL_TYPES,
+  CHANNEL_TRANSPORT,
+} from "./notificationTypes.js";
 
 /**
  * A pre-rendered outbound email (subject/text/html built by the engine at fire
@@ -40,6 +48,29 @@ export interface ComposedEmail {
   html?: string;
   cc?: EmailRecipients | null;
   bcc?: EmailRecipients | null;
+}
+
+/**
+ * Render the composed outbound email for a composition config from a built
+ * context. Unset pieces fall back to the pre-feature defaults (subject
+ * `[SEV] asset`, text = message + View link). HTML body only when the
+ * operator provided one — interpolated values are HTML-escaped there. cc/bcc
+ * pass through unresolved (resolved at expansion time). Lives here (not the
+ * engine) so the action-execution layer can compose without a circular
+ * import; the engine re-exports it for its historical consumers.
+ */
+export function buildComposedEmail(comp: EmailComposition, ctx: Record<string, string>): ComposedEmail {
+  const link = ctx["link"] || "";
+  const subject = comp.subjectTemplate && comp.subjectTemplate.trim()
+    ? renderNotificationTemplate(comp.subjectTemplate, ctx)
+    : `[${ctx["severity.upper"] || "NOTIFICATION"}] ${ctx["asset"] || "Polaris notification"}`;
+  const text = comp.bodyTextTemplate && comp.bodyTextTemplate.trim()
+    ? renderNotificationTemplate(comp.bodyTextTemplate, ctx)
+    : (ctx["message"] || "") + (link ? `\n\nView: ${link}` : "");
+  const html = comp.bodyHtmlTemplate && comp.bodyHtmlTemplate.trim()
+    ? renderNotificationTemplate(comp.bodyHtmlTemplate, ctx, { html: true })
+    : undefined;
+  return { subject, text, html, cc: comp.cc ?? undefined, bcc: comp.bcc ?? undefined };
 }
 
 export interface RecipientUser {
@@ -172,7 +203,15 @@ export function dedupeEmailRecipients(to: string[], cc: string[], bcc: string[])
  * Disabled or missing channels are skipped. Best-effort: returns the number of
  * rows created.
  */
-export async function expandDeliveries(notificationId: string, targets: DeliveryTarget[] | undefined, scopeRegionTags?: string[], composedEmail?: ComposedEmail): Promise<number> {
+export async function expandDeliveries(
+  notificationId: string,
+  targets: DeliveryTarget[] | undefined,
+  scopeRegionTags?: string[],
+  composedEmail?: ComposedEmail,
+  /** Escalation provenance (tier/attempt) — stamped into every row's meta so
+   *  the View tab's "Escalated" marker and audits can attribute the send. */
+  escalation?: { tier: number; attempt: number },
+): Promise<number> {
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -191,7 +230,10 @@ export async function expandDeliveries(notificationId: string, targets: Delivery
     const key = `${channelId}|${transport}|${target}`;
     if (seen.has(key)) return;
     seen.add(key);
-    rows.push({ notificationId, channelId, transport, target, meta: meta ?? undefined });
+    const withEsc = escalation
+      ? ({ ...(meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {}), escalation } as Prisma.InputJsonValue)
+      : meta;
+    rows.push({ notificationId, channelId, transport, target, meta: withEsc ?? undefined });
   };
 
   // Recipient users for a target = union of: specific user ids + (if opted in)
@@ -254,10 +296,27 @@ export async function expandDeliveries(notificationId: string, targets: Delivery
   return rows.length;
 }
 
-/** Extract the `region:`-prefixed tags from a rule's scope (for recipientScopeRegion). */
-export function scopeRegionTagsOf(scope: { tags?: string[] } | null | undefined): string[] {
+/** Extract the `region:`-prefixed tags from a rule's scope (for
+ *  recipientScopeRegion) — from the flat `tags` dimension AND from positive
+ *  tag rules inside a condition tree (field "tag", operator "has"). */
+export function scopeRegionTagsOf(
+  scope: { tags?: string[]; condition?: { op: string; children: unknown[] } | null } | null | undefined,
+): string[] {
+  const out = new Set<string>();
   const tags = scope && Array.isArray(scope.tags) ? scope.tags : [];
-  return tags.filter((t) => typeof t === "string" && t.toLowerCase().startsWith("region:"));
+  for (const t of tags) {
+    if (typeof t === "string" && t.toLowerCase().startsWith("region:")) out.add(t);
+  }
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    const g = node as { op?: string; children?: unknown[]; field?: string; operator?: string; value?: string };
+    if (Array.isArray(g.children)) { g.children.forEach(walk); return; }
+    if (g.field === "tag" && g.operator === "has" && typeof g.value === "string" && g.value.toLowerCase().startsWith("region:")) {
+      out.add(g.value);
+    }
+  };
+  if (scope?.condition) walk(scope.condition);
+  return Array.from(out);
 }
 
 function isChannelType(t: string): t is ChannelType {

@@ -15,6 +15,7 @@ import logFlagRulesRouter from "./routes/logFlagRules.js";
 import eventsRouter from "./routes/events.js";
 import notificationsRouter from "./routes/notifications.js";
 import notificationRulesRouter from "./routes/notificationRules.js";
+import automationScriptsRouter from "./routes/automationScripts.js";
 import maintenanceSchedulesRouter from "./routes/maintenanceSchedules.js";
 import notificationChannelsRouter from "./routes/notificationChannels.js";
 import pushSubscriptionsRouter from "./routes/pushSubscriptions.js";
@@ -102,14 +103,35 @@ router.use("/asset-types", assetTypesRouter);
 router.use("/assets", assetsRouter);
 router.use("/log-flag-rules", logFlagRulesRouter);
 router.use("/events", eventsRouter);
-// Notifications: View-tab list + acknowledge/clear (per-route gates inside).
-// notification-rules mounted before so it isn't shadowed by /notifications.
-router.use("/notification-rules", notificationRulesRouter);
+// ─── Automations (canonical) + notification-era aliases ─────────────────
+// The Automations redesign renamed the user-facing API surface. Canonical
+// paths are /automations (rules), /alerts (triggered instances), and
+// /delivery-channels (outbound channels); the pre-rename paths stay mounted
+// on the SAME routers as deprecated aliases so existing API clients and
+// already-delivered web-push payloads keep working. Alias mounts carry
+// Deprecation/Link headers pointing at the successor path.
+const deprecatedAlias = (successor: string) =>
+  ((req, res, next) => {
+    res.setHeader("Deprecation", "true");
+    res.setHeader("Link", `<${successor}>; rel="successor-version"`);
+    next();
+  }) as import("express").RequestHandler;
+// Script registry — MUST mount before /automations so "scripts" is never
+// captured as a rule id. Gated automationScripts (RCE-equivalent key).
+router.use("/automations/scripts", automationScriptsRouter);
+// Rules CRUD/schema/preview.
+router.use("/automations", notificationRulesRouter);
+router.use("/notification-rules", deprecatedAlias("/api/v1/automations"), notificationRulesRouter);
 // Maintenance schedules (Assets page → Maintenance modal); per-route gates
 // on the maintenanceManagement function key.
 router.use("/maintenance-schedules", maintenanceSchedulesRouter);
-router.use("/notification-channels", notificationChannelsRouter);
-router.use("/notifications", notificationsRouter);
+// Outbound delivery channels (Automations → Delivery tab).
+router.use("/delivery-channels", notificationChannelsRouter);
+router.use("/notification-channels", deprecatedAlias("/api/v1/delivery-channels"), notificationChannelsRouter);
+// Triggered automation instances ("alerts": list + acknowledge/clear).
+// /notification-rules stays mounted before /notifications (shadowing).
+router.use("/alerts", notificationsRouter);
+router.use("/notifications", deprecatedAlias("/api/v1/alerts"), notificationsRouter);
 router.use("/push-subscriptions", pushSubscriptionsRouter);
 router.use("/search", searchRouter);
 // Region routes are mounted BEFORE /map so Express's first-match routing picks

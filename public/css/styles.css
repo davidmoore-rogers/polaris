@@ -4296,3 +4296,148 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   box-shadow: 0 2px 8px rgba(0,0,0,0.45);
 }
 
+
+/* ─── Wizard (stepper modal) — Automations 5-step builder ─────────────────────
+   Shared stepper classes promoted from setup.html's inline copy (the pre-auth
+   setup wizard keeps its own — it's intentionally self-contained and loads no
+   app CSS). Mechanics (goToStep/updateStepper adaptations) live in
+   automations-wizard.js; see TEMPLATES.md → "Wizard (stepper modal)". */
+.stepper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin-bottom: 1.25rem;
+}
+/* Pinned while a long step scrolls — same pattern as .modal-body > .page-tabs. */
+.modal-body > .stepper {
+  position: sticky;
+  top: 0;
+  background: var(--color-bg-primary);
+  z-index: 5;
+  margin-left: -1.25rem;
+  margin-right: -1.25rem;
+  padding: 1rem 1.25rem 0.75rem 1.25rem;
+}
+.modal-body:has(> .stepper:first-child) { padding-top: 0; }
+.stepper-step {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+}
+.stepper-step.active { color: var(--color-text-primary); }
+.stepper-step.done { color: var(--color-success); }
+/* Visited steps are navigable (unlike setup.html's strictly-linear stepper). */
+.stepper-step.clickable { cursor: pointer; }
+.stepper-step.clickable:hover .stepper-num { border-color: var(--color-accent); }
+.stepper-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: 1.5px solid var(--color-border);
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+.stepper-step.active .stepper-num {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: #fff;
+}
+.stepper-step.done .stepper-num {
+  border-color: var(--color-success);
+  background: var(--color-success);
+  color: #fff;
+}
+.stepper-line {
+  width: 32px;
+  height: 1.5px;
+  background: var(--color-border);
+  margin: 0 0.35rem;
+  flex-shrink: 0;
+}
+.stepper-line.done { background: var(--color-success); }
+.step-panel { display: none; }
+.step-panel.visible { display: block; }
+
+/* Live plain-English trigger/reset sentence (wizard Steps 3–4 + the Step-5
+   summary). One callout per step, re-rendered on any input via a delegated
+   listener — content is always escapeHtml'd interpolations. */
+.aw-sentence {
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-bg-secondary);
+  border-radius: 0 6px 6px 0;
+  padding: 0.6rem 0.9rem;
+  margin: 0 0 1rem;
+  font-size: 0.92rem;
+  font-style: italic;
+  color: var(--color-text-secondary);
+}
+.aw-sentence strong { color: var(--color-text-primary); font-style: normal; }
+
+/* Step-5 review summary card (label/value rows, setup.html's review-grid
+   promoted). */
+.review-grid {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 0.45rem 1rem;
+  font-size: 0.86rem;
+}
+.review-grid dt { color: var(--color-text-tertiary); font-weight: 500; }
+.review-grid dd { margin: 0; color: var(--color-text-primary); overflow-wrap: anywhere; }
+
+/* Severity-tinted <select> for the wizard (option colors match the
+   badge-level-* palette so severity reads identically everywhere).
+   Option styling works in desktop Chrome/Firefox; browsers that ignore it
+   still get the tinted select text via the sev-* class on the element. */
+.sev-select.sev-notice,        .sev-select option.sev-notice        { color: #94a3b8; }
+.sev-select.sev-informational, .sev-select option.sev-informational { color: var(--color-accent); }
+.sev-select.sev-warning,       .sev-select option.sev-warning       { color: var(--color-warning); }
+.sev-select.sev-serious,       .sev-select option.sev-serious       { color: #ff8a00; }
+.sev-select.sev-critical,      .sev-select option.sev-critical      { color: var(--color-danger); }
+
+/* Condition-builder value combobox: focus/click opens the existing-values
+   list for the row's field; typing filters (contains). Replaces <datalist>,
+   which most browsers won't open on click. */
+.aw-combo { position: relative; flex: 1; display: flex; }
+.aw-combo > input { width: 100%; }
+.aw-suggest {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  max-height: 190px;
+  overflow-y: auto;
+  z-index: 1300; /* above the modal (1000/1075) */
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+  display: none;
+}
+.aw-suggest.open { display: block; }
+.aw-suggest-item { padding: 5px 9px; font-size: 0.82rem; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aw-suggest-item:hover, .aw-suggest-item.active { background: var(--color-bg-secondary); }
+.aw-suggest-empty { padding: 5px 9px; font-size: 0.78rem; color: var(--color-text-tertiary); }
+
+/* Condition-builder drag handles + drop cues (wizard devices/trigger/reset trees) */
+.aw-grip {
+  cursor: grab;
+  color: var(--color-text-tertiary);
+  user-select: none;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 2px 2px 2px 0;
+  flex: 0 0 auto;
+}
+.aw-grip:active { cursor: grabbing; }
+.aw-drop-before { box-shadow: inset 0 3px 0 0 var(--color-accent); }
+.aw-drop-after { box-shadow: inset 0 -3px 0 0 var(--color-accent); }
+.aw-drop-into { box-shadow: inset 0 0 0 2px var(--color-accent); border-radius: 6px; }

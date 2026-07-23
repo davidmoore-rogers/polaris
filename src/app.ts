@@ -451,7 +451,7 @@ app.use((req, res, next) => {
 });
 
 // Protect dashboard pages — redirect unauthenticated users to login
-const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/notifications.html", "/server-settings.html", "/map.html", "/appmap.html"];
+const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/notifications.html", "/automations.html", "/server-settings.html", "/map.html", "/appmap.html"];
 
 // Page-level gating — each protected page requires at least `read` on the
 // matching function key. Maps to the same matrix the API guards use, so
@@ -462,7 +462,13 @@ const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subn
 const pageRequiredPermission: Record<string, { key: string; level: "read" | "write" }> = {
   "/users.html":           { key: "users",                level: "read" },
   "/integrations.html":    { key: "integrations",         level: "read" },
-  "/notifications.html":   { key: "notifications",        level: "read" },
+  // /notifications.html stays gated forever — already-delivered web-push
+  // payloads deep-link to it (Automations rename, 2026-07). Both pages gate on
+  // automationManagement since the Alerts LIST left the page (an alert-only
+  // viewer following an old deep link bounces to "/", where the Active Alerts
+  // widget lives).
+  "/notifications.html":   { key: "automationManagement", level: "read" },
+  "/automations.html":     { key: "automationManagement", level: "read" },
   "/server-settings.html": { key: "serverSettingsSystem", level: "read" },
   "/appmap.html":          { key: "applicationMap",       level: "read" },
 };
@@ -506,10 +512,12 @@ app.use(async (req, res, next) => {
     // to `ensureRoleSnapshot` which loads the user's role from
     // DB and stamps the session in place. One DB hit per surviving old
     // session; the snapshot path is hot after that.
-    const { ensureRoleSnapshot } = await import("./api/middleware/permissions.js");
+    const { ensureRoleSnapshot, permissionOf } = await import("./api/middleware/permissions.js");
     const snap = await ensureRoleSnapshot(req).catch(() => null);
     const perms = (snap?.permissions ?? req.session.roleSnapshot?.permissions ?? {}) as Record<string, "none" | "read" | "write" | "fullwrite">;
-    const actual = perms[required.key] ?? "none";
+    // permissionOf resolves pre-rename snapshot keys (notifications → alerts)
+    // so live sessions survive the Automations RBAC rename without re-login.
+    const actual = permissionOf(perms, required.key);
     if (PERM_RANK[actual] < PERM_RANK[required.level]) {
       return res.redirect("/");
     }
@@ -538,6 +546,16 @@ function legacyIpamRedirect() {
 }
 app.get("/blocks.html", legacyIpamRedirect());
 app.get("/subnets.html", legacyIpamRedirect());
+
+// Automations rename (2026-07): the page moved from /notifications.html to
+// /automations.html. This redirect is PERMANENT surface — already-delivered
+// web-push payloads deep-link to the old URL forever. A 302 (not 301) so a
+// future re-shuffle isn't cached by browsers; no fragment concerns here (push
+// deep links use query-less plain URLs). The page-gate middleware above ran
+// first, so only authorized users reach this hop.
+app.get("/notifications.html", (_req, res) => {
+  res.redirect("/automations.html");
+});
 
 // Serve uploaded logos from the state directory. On legacy installs (no
 // POLARIS_STATE_DIR set) this resolves to <project>/public/uploads — the
@@ -687,6 +705,7 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/rasterizeStoredSvgIcons.js",
       "./jobs/clampAssetAcquiredAt.js",
       "./jobs/bootstrapProxyConfig.js",
+      "./jobs/migrateAutomationRuleShape.js",
     ]) await importJob(p);
   }
 
@@ -708,6 +727,7 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/evaluateNotificationRules.js",
       "./jobs/escalateNotifications.js",
       "./jobs/deliverNotifications.js",
+      "./jobs/runAutomationScripts.js",
       "./jobs/resolvePolarisPushedConflicts.js",
       "./jobs/resolveStaleReservationConflicts.js",
       "./jobs/cleanupStaleDnsResolvedReleased.js",

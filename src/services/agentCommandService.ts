@@ -22,6 +22,9 @@ export interface AgentCommandView {
   id: string;
   action: string;
   target: string;
+  /** run_script commands: { runId, interpreter, body, sha256, args, timeoutSec }.
+   *  Absent for process-control commands (old agents ignore unknown fields). */
+  payload?: unknown;
 }
 
 /**
@@ -69,24 +72,40 @@ export async function fetchPendingCommands(managedAgentId: string): Promise<Agen
     where: { managedAgentId, status: "pending" },
     orderBy: { requestedAt: "asc" },
     take: 20,
-    select: { id: true, action: true, target: true },
+    select: { id: true, action: true, target: true, payload: true },
   });
   if (cmds.length > 0) {
     await prisma.agentCommand.updateMany({
       where: { id: { in: cmds.map((c) => c.id) } },
       data: { status: "sent", sentAt: new Date() },
     });
+    // run_script commands are "running" from the run's perspective the moment
+    // they ship to the agent (the stuck sweep doesn't apply — agent runs
+    // complete via /command-result).
+    const scriptCmdIds = cmds.filter((c) => c.action === "run_script").map((c) => c.id);
+    if (scriptCmdIds.length > 0) {
+      await prisma.automationScriptRun.updateMany({
+        where: { agentCommandId: { in: scriptCmdIds }, status: "pending" },
+        data: { status: "running", startedAt: new Date() },
+      });
+    }
   }
-  return cmds;
+  return cmds.map((c) => ({ id: c.id, action: c.action, target: c.target, ...(c.payload ? { payload: c.payload } : {}) }));
 }
 
-/** Agent result report. Bound to the agent's own commands; audited. */
+const OUTPUT_CAP_BYTES = 64 * 1024;
+const RUN_STATUSES = new Set(["succeeded", "failed", "timeout"]);
+
+/** Agent result report. Bound to the agent's own commands; audited.
+ *  run_script commands additionally complete their linked AutomationScriptRun
+ *  (resultState carries the run status; stdout/stderr/exitCode optional). */
 export async function recordCommandResult(
   managedAgentId: string,
   commandId: string,
   success: boolean,
   error: string | null,
   resultState: string | null,
+  output?: { exitCode?: number | null; stdout?: string | null; stderr?: string | null },
 ): Promise<void> {
   const cmd = await prisma.agentCommand.findUnique({ where: { id: commandId } });
   if (!cmd || cmd.managedAgentId !== managedAgentId) {
@@ -96,6 +115,37 @@ export async function recordCommandResult(
     where: { id: commandId },
     data: { status: success ? "succeeded" : "failed", completedAt: new Date(), error, resultState },
   });
+
+  if (cmd.action === "run_script") {
+    // resultState is the run status the agent observed; anything else maps
+    // from the success flag (defensive against older/foreign reporters).
+    const runStatus = resultState && RUN_STATUSES.has(resultState) ? resultState : success ? "succeeded" : "failed";
+    const run = await prisma.automationScriptRun.findFirst({ where: { agentCommandId: commandId } });
+    if (run) {
+      await prisma.automationScriptRun.update({
+        where: { id: run.id },
+        data: {
+          status: runStatus,
+          exitCode: output?.exitCode ?? null,
+          stdout: (output?.stdout ?? "").slice(0, OUTPUT_CAP_BYTES) || null,
+          stderr: ((output?.stderr ?? "") || (error ?? "")).slice(0, OUTPUT_CAP_BYTES) || null,
+          completedAt: new Date(),
+        },
+      });
+      await logEvent({
+        action: "automation.script.run",
+        resourceType: "automation-script",
+        resourceId: run.scriptId ?? undefined,
+        resourceName: run.scriptName,
+        actor: run.requestedBy ?? "system:automation",
+        level: runStatus === "succeeded" ? "info" : "warning",
+        message: `Automation script "${run.scriptName}" ${runStatus} on agent ${cmd.assetId} (exit ${output?.exitCode ?? "n/a"})`,
+        details: { runId: run.id, scriptId: run.scriptId, ruleId: run.ruleId, notificationId: run.notificationId, exitCode: output?.exitCode ?? null, runOn: "agent", status: runStatus, assetId: cmd.assetId },
+      });
+    }
+    return;
+  }
+
   await logEvent({
     action: `asset.process.${cmd.action}.result`,
     resourceType: "asset",

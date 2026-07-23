@@ -1,0 +1,562 @@
+/**
+ * tests/unit/notificationRuleShapeV2.test.ts — Automation rule-shape v2:
+ * legacy→v2 conversion fidelity (normalizeRuleToV2 / normalizeReset /
+ * targetsToNotifyActions / normalizeEscalationToV2), the legacy mirror
+ * (legacyMirrorOfV2), input folding (ruleInputSchema accepts old POST
+ * bodies), and the v2 cross-field validation (hysteresis threshold ordering).
+ */
+
+import { describe, it, expect, vi } from "vitest";
+
+vi.mock("../../src/db.js", () => ({ prisma: {} }));
+
+import {
+  ruleInputSchema,
+  evaluateScopeCondition,
+  previewInputSchema,
+  normalizeRuleToV2,
+  normalizeReset,
+  normalizeEscalationToV2,
+  targetsToNotifyActions,
+  actionsToTargets,
+  legacyMirrorOfV2,
+  buildSchemaCatalog,
+  type DeliveryTarget,
+  type EmailComposition,
+} from "../../src/services/notificationTypes.js";
+import { scopeMatchesAsset } from "../../src/services/notificationRuleService.js";
+
+const metricTrigger = { type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 90 };
+
+describe("normalizeReset", () => {
+  it("derives reset from legacy clearBehavior/clearAfterSec", () => {
+    expect(normalizeReset(null, "manual", null)).toEqual({ mode: "manual" });
+    expect(normalizeReset(null, "auto", null)).toEqual({ mode: "auto" });
+    expect(normalizeReset(null, "timed", 3600)).toEqual({ mode: "timed", afterSec: 3600 });
+    expect(normalizeReset(null, undefined, undefined)).toEqual({ mode: "manual" });
+  });
+
+  it("strips mode-irrelevant fields from a provided reset", () => {
+    expect(normalizeReset({ mode: "manual", afterSec: 60, clearThreshold: 5 } as any)).toEqual({ mode: "manual" });
+    expect(normalizeReset({ mode: "timed", afterSec: 120, clearThreshold: 5 } as any)).toEqual({ mode: "timed", afterSec: 120 });
+    expect(normalizeReset({ mode: "auto", clearThreshold: 80, sustainSec: 300, afterSec: 99 } as any)).toEqual({
+      mode: "auto", clearThreshold: 80, sustainSec: 300,
+    });
+  });
+});
+
+describe("targetsToNotifyActions / actionsToTargets round-trip", () => {
+  const targets: DeliveryTarget[] = [
+    { channelId: "ch-email", recipientUserIds: ["u1"], addresses: ["noc@example.com"], recipientScopeRegion: true },
+    { channelId: "ch-slack" },
+  ];
+  const comp: EmailComposition = { subjectTemplate: "[{severity.upper}] {asset}" };
+
+  it("copies the rule-level emailComposition onto every converted notify action", () => {
+    const actions = targetsToNotifyActions(targets, comp);
+    expect(actions).toHaveLength(2);
+    for (const a of actions) {
+      expect(a.type).toBe("notify");
+      expect((a as any).emailComposition).toEqual(comp);
+    }
+    expect((actions[0] as any).recipientUserIds).toEqual(["u1"]);
+    expect((actions[0] as any).recipientScopeRegion).toBe(true);
+    expect((actions[1] as any).recipientUserIds).toBeUndefined();
+  });
+
+  it("mirrors notify actions back to targets losslessly (sans per-action composition)", () => {
+    const actions = targetsToNotifyActions(targets, comp);
+    expect(actionsToTargets(actions)).toEqual(targets);
+  });
+
+  it("drops api_call/script actions from the legacy mirror", () => {
+    const mixed = [
+      ...targetsToNotifyActions([{ channelId: "c1" }], null),
+      { type: "api_call" as const, method: "POST" as const, url: "https://example.com/hook", timeoutSec: 15 },
+    ];
+    expect(actionsToTargets(mixed)).toEqual([{ channelId: "c1" }]);
+  });
+});
+
+describe("legacyMirrorOfV2", () => {
+  it("projects reset back onto clearBehavior/clearAfterSec", () => {
+    expect(legacyMirrorOfV2({ mode: "timed", afterSec: 900 }, [])).toEqual({
+      clearBehavior: "timed", clearAfterSec: 900, targets: [],
+    });
+    expect(legacyMirrorOfV2({ mode: "auto", clearThreshold: 55, sustainSec: 60 }, [])).toEqual({
+      clearBehavior: "auto", clearAfterSec: null, targets: [],
+    });
+  });
+});
+
+describe("normalizeRuleToV2 (stored rows)", () => {
+  it("converts a pre-v2 row (clearBehavior + targets + emailComposition)", () => {
+    const v2 = normalizeRuleToV2({
+      clearBehavior: "auto",
+      clearAfterSec: null,
+      targets: [{ channelId: "ch1", addresses: ["a@example.com"] }],
+      emailComposition: { subjectTemplate: "s" },
+      escalation: null,
+      reset: null,
+      actions: null,
+    });
+    expect(v2.reset).toEqual({ mode: "auto" });
+    expect(v2.actions).toEqual([
+      { type: "notify", channelId: "ch1", addresses: ["a@example.com"], emailComposition: { subjectTemplate: "s" } },
+    ]);
+    expect(v2.escalation).toBeNull();
+  });
+
+  it("prefers persisted v2 columns over the legacy mirror", () => {
+    const v2 = normalizeRuleToV2({
+      clearBehavior: "manual",
+      targets: [{ channelId: "stale" }],
+      reset: { mode: "auto", clearThreshold: 55, sustainSec: 120 },
+      actions: [{ type: "api_call", method: "POST", url: "https://example.com/x", timeoutSec: 15 }],
+    });
+    expect(v2.reset).toEqual({ mode: "auto", clearThreshold: 55, sustainSec: 120 });
+    expect(v2.actions).toEqual([{ type: "api_call", method: "POST", url: "https://example.com/x", timeoutSec: 15 }]);
+  });
+
+  it("drops malformed stored actions defensively instead of throwing", () => {
+    const v2 = normalizeRuleToV2({
+      reset: { mode: "manual" },
+      actions: [{ type: "notify", channelId: "ok" }, { type: "bogus" }, 42],
+    });
+    expect(v2.actions).toEqual([{ type: "notify", channelId: "ok" }]);
+  });
+});
+
+describe("normalizeEscalationToV2", () => {
+  it("converts legacy email tiers to notify-action tiers, preserving overrides", () => {
+    const v2 = normalizeEscalationToV2({
+      stopOn: "clear",
+      tiers: [
+        {
+          afterMin: 30,
+          channelId: "ch-email",
+          to: { recipientUserIds: ["u1"], addresses: ["mgr@example.com"] },
+          cc: { addresses: ["cc@example.com"] },
+          subjectTemplate: "ESC {asset}",
+          repeatEveryMin: 60,
+          maxRepeats: 3,
+        },
+        { afterMin: 120, channelId: "ch-email", to: { addresses: ["oncall@example.com"] } },
+      ],
+    });
+    expect(v2).not.toBeNull();
+    expect(v2!.stopOn).toBe("clear");
+    expect(v2!.tiers).toHaveLength(2);
+    const t1 = v2!.tiers[0]!;
+    expect(t1.afterMin).toBe(30);
+    expect(t1.repeatEveryMin).toBe(60);
+    expect(t1.maxRepeats).toBe(3);
+    expect(t1.actions).toEqual([
+      {
+        type: "notify",
+        channelId: "ch-email",
+        recipientUserIds: ["u1"],
+        addresses: ["mgr@example.com"],
+        emailComposition: {
+          subjectTemplate: "ESC {asset}",
+          bodyTextTemplate: null,
+          bodyHtmlTemplate: null,
+          cc: { addresses: ["cc@example.com"] },
+          bcc: null,
+        },
+      },
+    ]);
+    // Tier 2 set no overrides → emailComposition null (executor falls back to
+    // the rule-level composition, then the [ESCALATION n] default).
+    expect((v2!.tiers[1]!.actions[0] as any).emailComposition).toBeNull();
+  });
+
+  it("passes v2 escalation through and rejects malformed shapes to null", () => {
+    const v2 = {
+      stopOn: "acknowledge",
+      tiers: [{ afterMin: 10, actions: [{ type: "notify", channelId: "c" }] }],
+    };
+    expect(normalizeEscalationToV2(v2)).toEqual({
+      stopOn: "acknowledge",
+      tiers: [{ afterMin: 10, actions: [{ type: "notify", channelId: "c" }], repeatEveryMin: undefined, maxRepeats: undefined }],
+    });
+    expect(normalizeEscalationToV2(null)).toBeNull();
+    expect(normalizeEscalationToV2({ tiers: [] })).toBeNull();
+    expect(normalizeEscalationToV2({ tiers: [{ nonsense: true }] })).toBeNull();
+  });
+});
+
+describe("ruleInputSchema (v2 input with legacy folding)", () => {
+  it("folds a legacy POST body into the v2 canonical shape", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "legacy body",
+      trigger: metricTrigger,
+      scope: { allAssets: true },
+      clearBehavior: "timed",
+      clearAfterSec: 1800,
+      targets: [{ channelId: "ch1" }],
+      emailComposition: { subjectTemplate: "s" },
+    });
+    expect(parsed.reset).toEqual({ mode: "timed", afterSec: 1800 });
+    expect(parsed.actions).toEqual([{ type: "notify", channelId: "ch1", emailComposition: { subjectTemplate: "s" } }]);
+  });
+
+  it("v2 fields win over conflicting legacy fields", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "both",
+      trigger: metricTrigger,
+      scope: { allAssets: true },
+      clearBehavior: "manual",
+      reset: { mode: "auto", clearThreshold: 80, sustainSec: 60 },
+      targets: [{ channelId: "stale" }],
+      actions: [],
+    });
+    expect(parsed.reset).toEqual({ mode: "auto", clearThreshold: 80, sustainSec: 60 });
+    expect(parsed.actions).toEqual([]);
+  });
+
+  it("rejects timed reset without afterSec", () => {
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { allAssets: true }, reset: { mode: "timed" } }),
+    ).toThrow(/afterSec/);
+  });
+
+  it("rejects a clear threshold on the wrong side of the fire threshold", () => {
+    // op >= 90 ⇒ clearThreshold must be ≤ 90
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x", trigger: metricTrigger, scope: { allAssets: true },
+        reset: { mode: "auto", clearThreshold: 95 },
+      }),
+    ).toThrow(/at or below/);
+    // op <= 10 ⇒ clearThreshold must be ≥ 10
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "asset_metric", metric: "cpuPct", operator: "<=", threshold: 10 },
+        scope: { allAssets: true },
+        reset: { mode: "auto", clearThreshold: 5 },
+      }),
+    ).toThrow(/at or above/);
+    // equality operators can't carry hysteresis
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "asset_metric", metric: "cpuPct", operator: "==", threshold: 0 },
+        scope: { allAssets: true },
+        reset: { mode: "auto", clearThreshold: 1 },
+      }),
+    ).toThrow(/cannot be combined/);
+    // non-numeric trigger can't carry hysteresis
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
+        scope: { allAssets: true },
+        reset: { mode: "auto", clearThreshold: 1 },
+      }),
+    ).toThrow(/numeric metric triggers/);
+  });
+
+  it("accepts a valid hysteresis + sustain reset", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "temp",
+      trigger: { type: "asset_metric", metric: "hwSensorValue", operator: ">=", threshold: 60, dimensionFilter: { sensorClass: "temperature" } },
+      scope: { allAssets: true },
+      reset: { mode: "auto", clearThreshold: 55, sustainSec: 300 },
+    });
+    expect(parsed.reset).toEqual({ mode: "auto", clearThreshold: 55, sustainSec: 300 });
+  });
+
+  it("accepts api_call actions and rejects non-http(s) URLs", () => {
+    const ok = ruleInputSchema.parse({
+      name: "hook", trigger: metricTrigger, scope: { allAssets: true },
+      actions: [{ type: "api_call", url: "https://example.com/hook", headers: { "X-Env": "prod" } }],
+    });
+    expect(ok.actions[0]).toMatchObject({ type: "api_call", method: "POST", timeoutSec: 15 });
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "bad", trigger: metricTrigger, scope: { allAssets: true },
+        actions: [{ type: "api_call", url: "ftp://example.com/x" }],
+      }),
+    ).toThrow();
+  });
+});
+
+describe("scopeSchema — manufacturer / model / subnet dimensions", () => {
+  it("accepts the new dimensions", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "scoped", trigger: metricTrigger,
+      scope: { manufacturers: ["Fortinet"], models: ["FGT-60F"], subnetCidrs: ["10.20.0.0/16", "192.168.1.5"] },
+    });
+    expect(parsed.scope.manufacturers).toEqual(["Fortinet"]);
+    expect(parsed.scope.subnetCidrs).toEqual(["10.20.0.0/16", "192.168.1.5"]);
+  });
+
+  it("rejects garbage subnet entries at save", () => {
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { subnetCidrs: ["not-a-cidr"] } }),
+    ).toThrow(/CIDR/);
+  });
+});
+
+describe("scope condition tree", () => {
+  const asset = {
+    id: "a1", assetType: "switch", manufacturer: "Fortinet Inc.", model: "FortiSwitch 148F",
+    hostname: "sw-floor2-01", os: "FortiSwitchOS", tags: ["region:Atlanta", "prod"],
+    ipAddress: "10.20.30.40", status: "active",
+  };
+
+  it("evaluates AND / OR nesting like the reference builder", () => {
+    // (type == switch) AND (mfr contains forti) AND (vendor==net-snmp OR host contains floor2)
+    const cond = {
+      op: "and" as const,
+      children: [
+        { field: "assetType", operator: "equals", value: "switch" },
+        { field: "manufacturer", operator: "contains", value: "forti" },
+        {
+          op: "or" as const,
+          children: [
+            { field: "manufacturer", operator: "equals", value: "net-snmp" },
+            { field: "hostname", operator: "contains", value: "floor2" },
+          ],
+        },
+      ],
+    };
+    expect(evaluateScopeCondition(cond, asset)).toBe(true);
+    expect(evaluateScopeCondition(cond, { ...asset, hostname: "sw-floor3-01" })).toBe(false); // OR group fails
+    expect(evaluateScopeCondition(cond, { ...asset, assetType: "server" })).toBe(false); // AND leg fails
+  });
+
+  it("none / notAll combinators negate correctly", () => {
+    const inner = [
+      { field: "status", operator: "equals", value: "decommissioned" },
+      { field: "tag", operator: "has", value: "lab" },
+    ];
+    expect(evaluateScopeCondition({ op: "none", children: inner }, asset)).toBe(true); // neither matches
+    expect(evaluateScopeCondition({ op: "none", children: inner }, { ...asset, tags: ["lab"] })).toBe(false);
+    expect(evaluateScopeCondition({ op: "notAll", children: inner }, asset)).toBe(true); // at least one fails
+    expect(evaluateScopeCondition({ op: "notAll", children: inner }, { ...asset, status: "decommissioned", tags: ["lab"] })).toBe(false);
+  });
+
+  it("per-field operators: string ops, tag has/notHas, subnet in/notIn", () => {
+    const ev = (field: string, operator: string, value: string, a = asset) =>
+      evaluateScopeCondition({ op: "and", children: [{ field, operator, value }] }, a);
+    expect(ev("hostname", "startsWith", "sw-")).toBe(true);
+    expect(ev("hostname", "endsWith", "-01")).toBe(true);
+    expect(ev("model", "notContains", "/u")).toBe(true);
+    expect(ev("os", "equals", "fortiswitchos")).toBe(true); // case-insensitive
+    expect(ev("tag", "has", "PROD")).toBe(true);
+    expect(ev("tag", "notHas", "prod")).toBe(false);
+    expect(ev("subnet", "inCidr", "10.20.0.0/16")).toBe(true);
+    expect(ev("subnet", "notInCidr", "10.99.0.0/16")).toBe(true);
+    expect(ev("subnet", "inCidr", "10.20.30.40")).toBe(true); // bare IP = host route
+    expect(ev("assetId", "equals", "a1")).toBe(true);
+    expect(ev("status", "notEquals", "active")).toBe(false);
+  });
+
+  it("scopeMatchesAsset routes condition trees (and ANDs with flat dims)", () => {
+    const scope = { condition: { op: "or" as const, children: [{ field: "hostname", operator: "contains", value: "floor2" }] } };
+    expect(scopeMatchesAsset(scope, asset as never)).toBe(true);
+    expect(scopeMatchesAsset({ ...scope, assetTypes: ["server"] }, asset as never)).toBe(false); // flat dim ANDs in
+  });
+
+  it("ruleInputSchema accepts condition scopes and rejects bad operator/field/subnet combos", () => {
+    const good = ruleInputSchema.parse({
+      name: "cond", trigger: metricTrigger,
+      scope: { condition: { op: "and", children: [{ field: "manufacturer", operator: "contains", value: "forti" }] } },
+    });
+    expect(good.scope.condition!.op).toBe("and");
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { condition: { op: "and", children: [{ field: "tag", operator: "contains", value: "x" }] } } }),
+    ).toThrow(/not valid for field/);
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { condition: { op: "and", children: [{ field: "subnet", operator: "inCidr", value: "bogus" }] } } }),
+    ).toThrow(/CIDR/);
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, scope: { condition: { op: "nand", children: [] } } }),
+    ).toThrow();
+  });
+});
+
+describe("previewInputSchema (partial drafts)", () => {
+  it("accepts a scope-only body with defaulted name and no trigger", () => {
+    const parsed = previewInputSchema.parse({ scope: { assetTypes: ["server"] } });
+    expect(parsed.trigger).toBeUndefined();
+    expect(parsed.name).toBe("Draft automation");
+    expect(parsed.scope).toEqual({ assetTypes: ["server"] });
+  });
+
+  it("still validates hysteresis ordering when a trigger is present", () => {
+    expect(() =>
+      previewInputSchema.parse({ trigger: metricTrigger, reset: { mode: "auto", clearThreshold: 95 } }),
+    ).toThrow(/at or below/);
+  });
+});
+
+describe("buildSchemaCatalog v2 additions", () => {
+  it("exposes schemaVersion 2 + the wizard vocabulary", () => {
+    const cat = buildSchemaCatalog();
+    expect(cat.schemaVersion).toBe(2);
+    expect(cat.resetModes).toEqual(["manual", "auto", "timed", "condition"]);
+    expect(cat.resetModesByTriggerType.event).toEqual(["timed", "manual"]);
+    expect(cat.resetModesByTriggerType.composite).toEqual(["auto", "condition", "timed", "manual"]);
+    expect(cat.actionTypes.map((a: { type: string }) => a.type)).toEqual(["notify", "api_call", "script"]);
+    expect(cat.inverseComparators[">="]).toBe("<");
+    expect(cat.comparatorPhrases[">="]).toBe("is at or above");
+    expect(cat.escalationMeta.maxTiers).toBe(5);
+    expect(cat.compositeMeta.groupOps).toEqual(["and", "or"]);
+    expect(cat.compositeMeta.maxDepth).toBe(3);
+    expect(cat.compositeMeta.maxLeaves).toBe(10);
+    expect(cat.triggerTypes.some((t: { type: string }) => t.type === "composite")).toBe(true);
+  });
+});
+
+// ─── Composite triggers + condition-mode reset ──────────────────────────────
+
+const cpuLeaf = { type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 90 };
+const tempLeaf = {
+  type: "asset_metric", metric: "hwSensorValue", operator: ">=", threshold: 60,
+  dimensionFilter: { sensorClass: "temperature" },
+};
+const statusLeaf = { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" };
+const hostLeaf = { type: "host_metric", metric: "cpuPct", operator: ">=", threshold: 95 };
+const compositeAnd = { type: "composite", kind: "asset", op: "and", children: [cpuLeaf, tempLeaf] };
+
+describe("composite trigger schema", () => {
+  it("accepts a 2-leaf AND tree and applies leaf defaults", () => {
+    const parsed = ruleInputSchema.parse({ name: "combo", trigger: compositeAnd });
+    expect(parsed.trigger.type).toBe("composite");
+    const t = parsed.trigger as any;
+    expect(t.forDurationSec).toBe(0);
+    expect(t.children[0].aggregation).toBe("latest"); // leaf default applied
+    expect(t.children[0].forDurationSec).toBeUndefined(); // leaves carry no per-leaf sustain
+  });
+
+  it("accepts nested groups and mixed metric/state leaves (kind=asset)", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "combo",
+      trigger: {
+        type: "composite", kind: "asset", op: "or",
+        children: [statusLeaf, { op: "and", children: [cpuLeaf, tempLeaf] }],
+      },
+    });
+    expect((parsed.trigger as any).children).toHaveLength(2);
+  });
+
+  it("collapses a single-leaf composite to the legacy single trigger, hoisting forDurationSec", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "solo",
+      trigger: { type: "composite", kind: "asset", op: "and", children: [cpuLeaf], forDurationSec: 300 },
+    });
+    expect(parsed.trigger).toMatchObject({ type: "asset_metric", metric: "cpuPct", threshold: 90, forDurationSec: 300 });
+  });
+
+  it("collapses through single-child group wrappers", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "wrapped",
+      trigger: {
+        type: "composite", kind: "asset", op: "and",
+        children: [{ op: "or", children: [{ op: "and", children: [statusLeaf] }] }],
+        forDurationSec: 60,
+      },
+    });
+    expect(parsed.trigger).toMatchObject({ type: "asset_state", field: "monitorStatus", forDurationSec: 60 });
+  });
+
+  it("rejects none/notAll group ops, over-deep nesting, and too many leaves", () => {
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "composite", kind: "asset", op: "none", children: [cpuLeaf, tempLeaf] },
+      }),
+    ).toThrow();
+    const depth4 = {
+      type: "composite", kind: "asset", op: "and",
+      children: [cpuLeaf, { op: "and", children: [tempLeaf, { op: "or", children: [statusLeaf, { op: "and", children: [cpuLeaf, tempLeaf] }] }] }],
+    };
+    expect(() => ruleInputSchema.parse({ name: "x", trigger: depth4 })).toThrow(/nest at most 3 deep/);
+    const manyLeaves = {
+      type: "composite", kind: "asset", op: "or",
+      children: Array.from({ length: 11 }, () => cpuLeaf),
+    };
+    expect(() => ruleInputSchema.parse({ name: "x", trigger: manyLeaves })).toThrow();
+  });
+
+  it("enforces kind coherence (host kind = host_metric leaves only, asset kind = no host leaves)", () => {
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "composite", kind: "host", op: "and", children: [hostLeaf, cpuLeaf] },
+      }),
+    ).toThrow();
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "composite", kind: "asset", op: "and", children: [cpuLeaf, hostLeaf] },
+      }),
+    ).toThrow(/may not contain Polaris-host/);
+    const hostOk = ruleInputSchema.parse({
+      name: "x",
+      trigger: { type: "composite", kind: "host", op: "and", children: [hostLeaf, { ...hostLeaf, threshold: 80, metric: "memUsedPct" }] },
+    });
+    expect(hostOk.trigger.type).toBe("composite");
+  });
+
+  it("rejects hysteresis clearThreshold on a composite trigger", () => {
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: compositeAnd, reset: { mode: "auto", clearThreshold: 80 } }),
+    ).toThrow(/numeric metric triggers/);
+  });
+});
+
+describe("condition-mode reset", () => {
+  const resetTree = { op: "and", children: [{ type: "asset_metric", metric: "cpuPct", operator: "<", threshold: 70 }] };
+
+  it("accepts a condition reset on a composite trigger and normalizes it", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "x", trigger: compositeAnd,
+      reset: { mode: "condition", condition: resetTree, sustainSec: 120, afterSec: 999, clearThreshold: 5 },
+    });
+    // mode-irrelevant fields stripped; leaf defaults (aggregation/windowSec) applied
+    expect(parsed.reset).toMatchObject({ mode: "condition", condition: resetTree, sustainSec: 120 });
+    expect((parsed.reset as any).afterSec).toBeUndefined();
+    expect((parsed.reset as any).clearThreshold).toBeUndefined();
+  });
+
+  it("normalizeReset keeps condition mode (does not fall through to manual)", () => {
+    expect(normalizeReset({ mode: "condition", condition: resetTree } as any)).toEqual({
+      mode: "condition", condition: resetTree, sustainSec: null,
+    });
+  });
+
+  it("survives the stored-row round trip through normalizeRuleToV2", () => {
+    const v2 = normalizeRuleToV2({
+      reset: { mode: "condition", condition: resetTree, sustainSec: 60 },
+      actions: [],
+    });
+    expect(v2.reset).toMatchObject({ mode: "condition", condition: resetTree, sustainSec: 60 });
+  });
+
+  it("legacyMirrorOfV2 projects condition mode to clearBehavior=auto", () => {
+    expect(legacyMirrorOfV2({ mode: "condition", condition: resetTree } as any, []).clearBehavior).toBe("auto");
+  });
+
+  it("rejects condition reset without a tree, and on non-composite triggers", () => {
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: compositeAnd, reset: { mode: "condition" } }),
+    ).toThrow(/requires a condition tree/);
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, reset: { mode: "condition", condition: resetTree } }),
+    ).toThrow(/composite/);
+  });
+
+  it("rejects a reset tree whose leaves mismatch the trigger kind", () => {
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x", trigger: compositeAnd,
+        reset: { mode: "condition", condition: { op: "and", children: [hostLeaf] } },
+      }),
+    ).toThrow(/match the trigger's kind/);
+  });
+});

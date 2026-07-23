@@ -33,6 +33,7 @@ import (
 
 	"github.com/polaris/agent/internal/collectors"
 	"github.com/polaris/agent/internal/config"
+	"github.com/polaris/agent/internal/scriptexec"
 	"github.com/polaris/agent/internal/transport"
 )
 
@@ -861,17 +862,62 @@ func pollAndRunCommands(client *transport.Client) {
 		return
 	}
 	for _, c := range cmds {
-		state, execErr := collectors.RunServiceControl(c.Action, c.Target)
-		success := execErr == nil
-		errMsg := ""
-		if execErr != nil {
-			errMsg = execErr.Error()
+		switch c.Action {
+		case "run_script":
+			runScriptCommand(client, c)
+		case "stop", "start", "restart":
+			state, execErr := collectors.RunServiceControl(c.Action, c.Target)
+			success := execErr == nil
+			errMsg := ""
+			if execErr != nil {
+				errMsg = execErr.Error()
+			}
+			if rerr := client.ReportCommandResult(c.ID, success, errMsg, state); rerr != nil {
+				log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
+			}
+			log.Printf("process control: %s %s -> success=%v state=%q", c.Action, c.Target, success, state)
+		default:
+			// Defensive: a newer server queued something this agent doesn't
+			// understand — refuse explicitly instead of silently dropping
+			// (the server's version gate should prevent this, belt+braces).
+			if rerr := client.ReportCommandResult(c.ID, false, "agent does not support action \""+c.Action+"\" — upgrade the Polaris Agent", ""); rerr != nil {
+				log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
+			}
+			log.Printf("unknown command action %q refused (id=%s)", c.Action, c.ID)
 		}
-		if rerr := client.ReportCommandResult(c.ID, success, errMsg, state); rerr != nil {
+	}
+}
+
+// runScriptCommand executes one server-pushed automation script via the
+// scriptexec sandbox (sha256-verified, temp file, timeout, output caps) and
+// reports status + exit code + captured output. See internal/scriptexec for
+// the security posture.
+func runScriptCommand(client *transport.Client, c transport.Command) {
+	payload, err := scriptexec.ParsePayload(c.Payload)
+	if err != nil {
+		if rerr := client.ReportCommandResultFull(c.ID, false, err.Error(), "failed", nil, "", ""); rerr != nil {
 			log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
 		}
-		log.Printf("process control: %s %s -> success=%v state=%q", c.Action, c.Target, success, state)
+		log.Printf("run_script %s refused: %v", c.Target, err)
+		return
 	}
+	res := scriptexec.Run(payload)
+	success := res.Status == "succeeded"
+	var exitCode *int
+	if res.ExitCode >= 0 {
+		exitCode = &res.ExitCode
+	}
+	errMsg := ""
+	if !success {
+		errMsg = res.Stderr
+		if len(errMsg) > 1024 {
+			errMsg = errMsg[:1024]
+		}
+	}
+	if rerr := client.ReportCommandResultFull(c.ID, success, errMsg, res.Status, exitCode, res.Stdout, res.Stderr); rerr != nil {
+		log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
+	}
+	log.Printf("run_script: %s -> %s (exit=%d)", c.Target, res.Status, res.ExitCode)
 }
 
 // systemInfoLoop pushes host identity (hostname / OS / vendor / model

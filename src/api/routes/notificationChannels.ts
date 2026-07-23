@@ -3,7 +3,7 @@
  *
  * CRUD for the NotificationChannel registry (Notifications → Delivery tab) +
  * per-channel Test send + VAPID keypair generation for the web_push channel.
- * Gated `notificationManagement` (same as rule CRUD). Secrets are masked on
+ * Gated `automationManagement` (same as rule CRUD). Secrets are masked on
  * read and preserved on write by notificationChannelService.
  */
 
@@ -29,29 +29,29 @@ const channelInputSchema = z.object({
 });
 const channelUpdateSchema = channelInputSchema.partial({ type: true });
 
-router.get("/", requirePermission("notificationManagement", "read"), async (_req, res, next) => {
+router.get("/", requirePermission("automationManagement", "read"), async (_req, res, next) => {
   try { res.json({ channels: await listChannels() }); } catch (err) { next(err); }
 });
 
-router.get("/:id", requirePermission("notificationManagement", "read"), async (req, res, next) => {
+router.get("/:id", requirePermission("automationManagement", "read"), async (req, res, next) => {
   try { res.json(await getChannel(req.params.id as string)); } catch (err) { next(err); }
 });
 
-router.post("/", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+router.post("/", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     const input = channelInputSchema.parse(req.body);
     res.status(201).json(await createChannel(input, req.session?.username));
   } catch (err) { next(err); }
 });
 
-router.put("/:id", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+router.put("/:id", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     const input = channelUpdateSchema.parse(req.body);
     res.json(await updateChannel(req.params.id as string, input as any, req.session?.username));
   } catch (err) { next(err); }
 });
 
-router.delete("/:id", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+router.delete("/:id", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     await deleteChannel(req.params.id as string, req.session?.username);
     res.status(204).end();
@@ -59,14 +59,14 @@ router.delete("/:id", requirePermission("notificationManagement", "fullwrite"), 
 });
 
 // Generate + store a VAPID keypair on a web_push channel.
-router.post("/:id/generate-vapid", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+router.post("/:id/generate-vapid", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try { res.json(await generateWebPushKeys(req.params.id as string, req.session?.username)); } catch (err) { next(err); }
 });
 
 // Send a test through a channel. Email channels take a `to` address; chat /
 // pushbullet post to the channel's own destination. Uses the STORED config
 // (secrets intact) — save before testing.
-router.post("/:id/test", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+router.post("/:id/test", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
     const ch = await getChannelRaw(req.params.id as string);
     if (!ch) throw new AppError(404, "Notification channel not found");

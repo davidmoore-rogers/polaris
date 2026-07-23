@@ -173,6 +173,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `src/services/agentChannelService.ts` — in-memory `Map<managedAgentId, WebSocket>` session manager. `attach()` registers + schedules 30s heartbeat pings + bumps wsConnectedAt + emits `agent.connected`. `detach()` clears the timer, rejects any pending probe-now promises, closes the socket, bumps wsDisconnectedAt + emits `agent.disconnected`. `sendProbeNow(stream, timeoutMs)` is the server-→agent verb used by /probe-now in agent-mode; `refreshConfig()` sends a `refresh-config` frame so the agent re-fetches /config immediately. Idempotent: replacing an existing session for the same agentId closes the old socket.
 - `src/api/routes/agentsWs.ts` — `attachAgentWsUpgradeHandler(server)` wires `http.Server.on("upgrade", ...)` to validate the bearer carried in `Sec-WebSocket-Protocol: polaris-agent.v1.bearer.<token>`, then hands the socket to `agentChannelService.attach`. Mounted on the loopback HTTP listener in src/app.ts; agent WS upgrades come in via nginx's proxy_pass with `Upgrade`/`Connection` headers preserved by the reference config. Bearer never echoed back on the upgrade response — the client `ws` library accepts a no-protocol response by default.
 - `agent/cmd/polaris-agent/main.go` — host-side Go binary; loads agent.conf, runs /enroll on first boot (persists returned bearer back to agent.conf via Save), then ticks the response-time collect loop + heartbeat loop + outbound WS loop until SIGTERM. Generic across deployments; per-install identity (server URL, cert pin, bearer) lives entirely in agent.conf. Agent runtime lives in `runAgent(ctx, confPath)` so the Windows Service handler can call it under the SCM. The storage and interfaces push functions (`pushStorageOne`, `pushInterfacesOne`) run their OS-level collectors (`StorageOnce`, `InterfacesOnce`) in a sub-goroutine guarded by a 30 s `time.After` select — `statfs()`/ioctl syscalls can block indefinitely on a hung filesystem or unresponsive network interface, and without this guard the loop goroutine freezes and stops sending all subsequent samples while appearing connected (heartbeat runs independently). **Diagnostic verbose logging:** setting `verbose = true` in agent.conf (`Config.Verbose`, latched into the package-level `verbose` in `runAgent`) makes every sample push log its lifecycle — telemetry emits the full connect→send→validate(accepted/rejected)→disconnect narrative; responseTime/interfaces/storage emit a one-line `sent: … -> accepted=N rejected=N`. Off by default (success paths are silent). Server-side counterpart: `POLARIS_AGENT_SAMPLE_LOG=1` on the web role logs each inbound `/samples` push in `src/api/routes/agents.ts` (received count + first telemetry values + enqueued count) — pair the two to trace a round-trip and localize loss to agent-collect / transport / server-accept / buffer-write.
+- `agent/internal/scriptexec/` — sandboxed executor for server-pushed automation scripts (AgentCommand action=`run_script`, agent ≥0.13.0). Refuses payloads whose sha256 doesn't match the body, unknown interpreters, and platform-mismatched ones (bash/sh/python3 not on Windows; cmd only on Windows); body → 0700 temp dir (always removed), args as ONE argv entry (never shell-interpolated), `exec.CommandContext` timeout (≤600s), 64 KB stdout/stderr caps via a non-erroring limited writer. `main.go`'s `pollAndRunCommands` dispatches on action — run_script → scriptexec, stop/start/restart → service control, anything else → explicit refusal via command-result. Results go back through `ReportCommandResultFull` (exitCode/stdout/stderr). Keep semantics in LOCKSTEP with the server-side `automationScriptRunner.ts` (same caps, same argv posture, same interpreter list = `notificationTypes.SCRIPT_INTERPRETERS`).
 - `agent/cmd/polaris-agent/service_windows.go` (+ `service_other.go` stub) — Windows Service Control Manager integration via `golang.org/x/sys/windows/svc`. On Windows the entry point calls `svc.IsWindowsService()` first; if true, dispatches to `svc.Run(...)` which calls `Execute(args, r, status)` on the `polarisService` handler. The handler reports StartPending → Running, spawns `runAgent` in a goroutine, then translates SCM `Stop`/`Shutdown` requests into `context.Cancel`. Without this scaffolding, the SCM kills the process after ~30 s because plain Go binaries don't call `StartServiceCtrlDispatcher`. Non-Windows stub returns false so main() falls through to the SIGTERM-driven path.
 - `agent/internal/transport/ws.go` — outbound WebSocket client using `gorilla/websocket`. NewWSDialer wires TLS pinning (same `pinned.TLSConfig` used by HTTP) + carries the bearer in subprotocol. RunWithReconnect loops Dial + Run with exponential-backoff + full-jitter; never gives up.
 - `agent/internal/config/config.go` — Load/Save the INI-style agent.conf. Save() is atomic (write-tempfile + rename) and chmods 0600.
@@ -1210,7 +1211,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/api/middleware/permissions.ts` — `requirePermission` / `hasPermission` / `requireOwnership` / `ensureRoleSnapshot`. All route guards funnel through here, for sessions and role-bound bearer tokens alike.
 - Every route module under `src/api/routes/` — declares its per-route gate via `requirePermission(functionKey, level)`. Ownership-dimensioned routes (`subnets.ts`, `reservations.ts`) additionally branch on `req.permissionLevel === "fullwrite"`.
 - `src/api/routes/conflicts.ts` — `visibleEntityTypes(req)` and `canResolve(req, entityType)` consult `hasPermission(req, "discoveryConflicts", ...)` plus role NAME (`req.session.role`) for back-compat with the historical networkadmin↔reservation / assetsadmin↔asset split. Custom roles with `discoveryConflicts=write` see both entity types by default.
-- `src/app.ts` — Static-page redirect: `/users.html` / `/integrations.html` / `/server-settings.html` consult `req.session.roleSnapshot.permissions[key]` against the matching `pageRequiredPermission` entry; out-of-scope users bounce to `/`.
+- `src/app.ts` — Static-page redirect: `/users.html` / `/integrations.html` / `/notifications.html` / `/automations.html` / `/server-settings.html` resolve the caller's level via `permissionOf(perms, key)` (alias-aware) against the matching `pageRequiredPermission` entry; out-of-scope users bounce to `/`.
 - `public/js/app.js` — `permAtLeast(functionKey, level)` consumes `currentRolePermissions` populated from `auth.me.role.permissions`. The `isAdmin()` / `canManageNetworks()` / `canManageAssets()` / `isUserOrAbove()` / `canReviewConflicts()` / `canEditSubnet(subnet)` / `canEditReservation(reservation)` shims were rewritten to call `permAtLeast` and are the back-compat surface for the existing call sites across assets.js, subnets.js, reservations.js, integrations.js, events.js.
 - `public/js/users.js` — `loadRoles` consumes `GET /roles` + `GET /roles/functions`; `openRoleSlideover` renders the matrix + the badge color picker (random default for new roles, live preview); `openUserRegionsModal` writes `User.regionTags`. Role badges (users table + Manage Roles list) and `public/js/app.js`'s sidebar user-badge color via `roleBadgeStyleFromColor(role.color)`, falling back to the legacy `.badge-*` classes when `color` is null.
 - `public/js/mobile/app.js` — Mobile bootstrap reads `data.role.name` and `data.role.permissions` from /auth/me, storing them on `user.role` (string) + `user.permissions` (object) for the rest of the mobile bundle. Capability gates (reservations-tab.js `canCreate`/`canModify`, subnet-detail.js `canWrite`) consume `user.permissions` via a local `permAtLeast(user, key, level)` — mirroring desktop app.js — so custom/renamed roles that grant `reservations=write` pass. (Gating on the role NAME against a hardcoded seeded-role list was a bug: it falsely showed "read-only" to custom roles on mobile while the backend `requireOwnership("reservations")` accepted the write — fixed 2026-06.) more-tab.js still reads `user.role` for the role-name display badge only.
@@ -1225,6 +1226,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `lastAdminEquivalent` (userService): every mutation that would leave Polaris with zero users holding `users=fullwrite` AND `roles=fullwrite` returns 409.
 - Custom role names cannot collide with `admin` / `readonly` (case-insensitive reserved-name guard).
 - Permissions JSON is normalized on every write: unknown function keys dropped, missing keys defaulted to `"none"`. The route layer never trusts the raw body shape.
+- **Legacy key aliases (Automations rename, 2026-07):** `notifications`→`alerts` and `notificationManagement`→`automationManagement` were renamed (migration `20260721000000_automations_rbac_rename`, which also seeds `automationScripts` — fullwrite only for admin-equivalent matrices). Read path: `permissionOf(perms, key)` falls back through `LEGACY_KEY_ALIASES` so pre-deploy session snapshots (and Role rows restored from pre-upgrade backups) keep resolving without re-login — `requirePermission`, `hasPermission`, and the app.ts page gate all read through it; never revert them to direct `permissions[key]` lookups. Write path: `normalizePermissions` folds legacy keys onto modern names (modern wins on conflict) before the unknown-key drop.
 - Region/other tag normalization (shared `src/utils/tagNormalize.ts`): trim → drop empties → dedupe case-insensitively → cap length (64 chars) + count (64 entries).
 - Group-derived tags are computed at read time (`/auth/me` from `User.ssoGroups`) and NEVER written to `User.regionTags`/`User.otherTags` — operator-set per-user tags survive a re-login.
 
@@ -1260,20 +1262,84 @@ See `TEMPLATES.md` → "Permission-gated route + dynamic-role function key" for 
 
 Listed alphabetically.
 
+## services/automationScriptService.ts
+
+**What it owns:** The AutomationScript registry (operator-authored scripts referenced by Automation `script` actions) + the AutomationScriptRun lifecycle entry points. **RCE-equivalent surface:** every route sits behind the `automationScripts` key; server scripts run as the polaris service user, agent scripts as root/LocalSystem on the triggering asset.
+
+**Public API:** `listScripts`/`getScript`/`createScript`/`updateScript`/`deleteScript`, `requestScriptRun` (validates exists + enabled + runTarget-compatible; agent runs additionally preflight the TRIGGERING asset's ManagedAgent — installed + active + agentVersion ≥ MIN_AGENT_SCRIPT_VERSION (0.13.0) — BEFORE creating the run, then enqueue the run_script AgentCommand with the sha256-carrying payload and link agentCommandId), `listRuns`, `pruneOldRuns` (90d), `sha256Hex`, `versionAtLeast`/`MIN_AGENT_SCRIPT_VERSION`, `SCRIPT_RUN_TARGET_VALUES`/`MAX_SCRIPT_BODY_BYTES`/`MAX_SCRIPT_TIMEOUT_SEC`.
+
+**Cross-service deps:** `prisma` (AutomationScript/AutomationScriptRun/NotificationRule), `eventLogService.logEvent`, `notificationTypes` (SCRIPT_INTERPRETERS + normalizeRuleToV2 for the delete-referenced scan).
+
+**Used by:** `src/api/routes/automationScripts.ts` (CRUD + test-run), `automationActionService` (script arm → requestScriptRun), `automationScriptRunner` (pruneOldRuns).
+
+**Invariants:**
+- sha256 recomputed on EVERY save — it's what agents verify before executing; never accept a client-supplied hash.
+- Creation is a warning Event; a body change is a warning Event carrying old+new sha256 — script tampering must be visible in the audit trail/syslog.
+- Delete refuses (friendly 409) while any automation's actions or escalation tiers reference the script (scan goes through `normalizeRuleToV2`, so legacy-shaped rows count too).
+- Run rows snapshot scriptName + sha256 so history survives script deletion; `notificationId` carries NO FK (alert lifecycle is independent).
+
+**When changing this:** New interpreter → `SCRIPT_INTERPRETERS` in notificationTypes + `interpreterArgv`/extension in automationScriptRunner + the Go agent's scriptexec mirror. Never widen who can call these paths without revisiting the RBAC posture in permissions.ts.
+
+---
+
+## services/automationScriptRunner.ts
+
+**What it owns:** Server-side execution of pending AutomationScriptRun rows (runOn="server"), driven by the `runAutomationScripts` job (5s tick, web/all role). Claim pending→running (bounded, restart-safe), execFile with timeout + output caps, record results + `automation.script.run` Events, stuck-running sweep, idle-tick retention prune.
+
+**Public API:** `runPendingServerScripts()` (the job tick), `executeServerScript(run)` (exported for tests).
+
+**Cross-service deps:** `prisma`, `eventLogService.logEvent`, `automationScriptService.pruneOldRuns`, `src/utils/paths.ts` (STATE_DIR → data/automation-scripts-tmp).
+
+**Used by:** `src/jobs/runAutomationScripts.ts`.
+
+**Invariants:**
+- Script execution NEVER happens inline in the engine or the delivery drain — always through this queue (a wedged script must not stall alert evaluation or deliveries).
+- The rendered args string travels as a SINGLE argv entry to execFile — never concatenated into a shell string. Alert context rides env vars (POLARIS_ALERT_ID/POLARIS_RULE/POLARIS_ASSET).
+- Body goes to a 0600 temp file under the state dir and is ALWAYS unlinked (finally); stdout/stderr capped at 64 KB (a maxBuffer kill classifies as failure, not timeout); SIGKILL on timeout.
+- Claim via updateMany with a status re-check so concurrent processes can't double-run; the stuck sweep only flips rows past timeout+60s grace.
+
+**When changing this:** Anything touching the execution model (interpreters, env, caps, temp-file handling) is security-sensitive — human review required before production; keep the Go agent's scriptexec semantics in lockstep (same caps, same hash-verify posture).
+
+---
+
+## services/automationActionService.ts
+
+**What it owns:** The single fan-out point between a fired alert (Notification row) and its automation's `actions[]`. `executeActions(notificationId, actions, ctx, exec)` dispatches per action type: notify → the existing recipient/delivery pipeline (`expandDeliveries`) with the ACTION's `emailComposition` falling back to the rule-level one; api_call → one `NotificationDelivery` row (`transport: "api_call"`, `channelId: NULL` by design, request spec + fire-time-rendered body in meta); script → refused until the script-registry phase.
+
+**Public API:** `executeActions`, `ActionExecContext` ({scopeRegionTags?, assetId?, ruleId?, ruleName?, ruleEmailComposition?, escalation? {tier, attempt}, actor?}).
+
+**Cross-service deps:** `prisma` (NotificationDelivery), `eventLogService.logEvent`, `notificationRecipientService` (expandDeliveries + buildComposedEmail), `notificationTypes` (actionsToTargets + action types), `src/utils/notificationTemplate.ts` (api_call body rendering).
+
+**Used by:** `notificationEngine` (fire + event-tail, via its `executeActionsSafe` wrapper); the escalation sweep joins in the escalation-v2 phase.
+
+**Invariants:**
+- Best-effort PER ACTION: one failing action never blocks the others; every failure writes an `automation.action_error` warning Event with actionIndex/actionType/ruleId details.
+- api_call bodies render at FIRE time from the live context — the drain never needs the rule. The api_call row's NULL channelId is legitimate (the drain's permanent-fail rule is transport-conditional); headers are operator-typed and stored unmasked (no-secrets warning lives in the catalog/docs).
+- notify composition precedence: action-level `emailComposition` ?? `exec.ruleEmailComposition` ?? none (legacy per-address fan-out) — byte-identical to the pre-actions path for converted rules.
+
+**When changing this:** New action type → new arm here + `actionSchema` + `assertActionRefs` (notificationRuleService) + a dispatch/execution path (drain arm or dedicated runner) + `actionTypes` catalog entry. Never execute long-running work inline here — enqueue (delivery row / script run) and let the owning job drain it.
+
+---
+
 ## services/notificationTypes.ts
 
-**What it owns:** The notifications vocabulary — the discriminated `trigger` Zod union (asset_metric | asset_state | host_metric | event | change), the asset `scope` schema, `ruleInputSchema` (incl. `emailCompositionSchema` + `escalationSchema`), the metric/field/comparator/aggregation/change-type catalogs, and `buildSchemaCatalog()`.
+**What it owns:** The Automations vocabulary — the discriminated `trigger` Zod union (asset_metric | asset_state | host_metric | event | change | **composite** — a nested AND/OR tree of metric/state leaves, `kind` asset|host, ≤3 deep / 2–10 leaves, and/or only, caps in `validateCompositeTrigger`; a 1-leaf composite collapses to the legacy single trigger via `collapseCompositeTrigger` in the input transforms), the asset `scope` schema, the **rule-shape-v2 layer** (`resetSchema` with hysteresis `clearThreshold` + clear-sustain `sustainSec` + condition-mode reset trees; the `actionSchema` union notify | api_call | script; escalation v2 tiers-of-actions), `ruleInputSchema` (accepts v2 AND legacy bodies via transform + superRefine cross-validation) / `previewInputSchema` (partial drafts), the pure legacy↔v2 converters (`normalizeRuleToV2`, `normalizeReset`, `targetsToNotifyActions`/`actionsToTargets`, `legacyMirrorOfV2`, `normalizeEscalationToV2`), the metric/field/comparator/aggregation/change-type catalogs, and `buildSchemaCatalog()`.
 
-**Public API:** `triggerSchema`, `scopeSchema`, `ruleInputSchema`, `emailCompositionSchema`, `escalationSchema`/`escalationTierSchema`, `buildSchemaCatalog`, `Trigger`/`RuleScope`/`RuleInput`/`EmailRecipients`/`EmailComposition`/`EscalationTier`/`EscalationConfig` types, `CHANGE_TYPE_ACTIONS`, `ASSET_SCOPED_TRIGGER_TYPES`, the `*_METRICS`/`*_FIELDS`/`CHANGE_TYPES` constants.
+**Public API:** `triggerSchema`, `scopeSchema`, `ruleInputSchema`, `previewInputSchema`, `resetSchema`, `actionSchema` (+ `notifyActionSchema`/`apiCallActionSchema`/`scriptActionSchema`), `escalationV2Schema`/`escalationTierV2Schema`, `emailCompositionSchema`, legacy `escalationSchema`/`escalationTierSchema`, the converters above, `buildSchemaCatalog`, `Trigger`/`RuleScope`/`RuleInput`/`PreviewRuleInput`/`ResetConfig`/`AutomationAction`/`EscalationV2Config`/… types, `CHANGE_TYPE_ACTIONS`, `ASSET_SCOPED_TRIGGER_TYPES` + `isAssetScopedTrigger` (composite is scoped iff kind="asset"), the composite helpers (`triggerConditionGroupSchema`, `compositeLeafSchema`, `isTriggerLeaf`, `collectTriggerLeaves`, `triggerConditionStats`, `collapseCompositeTrigger`, `validateCompositeTrigger`, `TRIGGER_GROUP_OPS`), the `*_METRICS`/`*_FIELDS`/`CHANGE_TYPES`/`RESET_MODES`/`API_CALL_METHODS`/`SCRIPT_RUN_TARGETS` constants.
 
-**Used by:** `notificationRules.ts` (validation + schema endpoint), `notificationEngine.ts`, `notificationRuleService.ts`, `notificationEscalationService.ts`, `notificationRecipientService.ts`, the builder UI (via `/notification-rules/schema`).
+**Used by:** `notificationRules.ts` (validation + schema endpoint), `notificationEngine.ts`, `notificationRuleService.ts`, `notificationEscalationService.ts`, `notificationRecipientService.ts`, `jobs/migrateAutomationRuleShape.ts`, the builder UI (via `/automations/schema`).
 
 **Invariants:**
 - Single source of truth — engine, routes, and frontend must read the vocabulary here, never hardcode it.
 - `CHANGE_TYPE_ACTIONS` maps each change type to the exact audit Event action the persist* detectors emit AND the event-tail matches; both ends must agree.
 - `buildSchemaCatalog().templateVariables` mirrors `TEMPLATE_VARIABLES` from `src/utils/notificationTemplate.ts` — the builder's insert-variable palette renders from it, never a hardcoded list.
+- **Every reader of stored rules goes through `normalizeRuleToV2`** — never read `clearBehavior`/`targets` directly; they're the derived mirror, not the source of truth. Every writer persists v2 AND the mirror (`legacyMirrorOfV2`).
+- `ruleInputSchema` output is canonical v2 (`RuleInput`): v2 fields win over conflicting legacy fields; a legacy-only body converts losslessly.
+- api_call `url` is STATIC (no {token}s — SSRF-checkable at save); only `bodyTemplate`/`argsTemplate` interpolate. api_call headers are stored unmasked — the no-secrets warning lives in `apiCallMeta.help` + docs.
+- Escalation INPUT stays the legacy email-tier shape until the escalation-v2 phase; `normalizeEscalationToV2` already converts both shapes for readers that want the v2 view.
+- **Composite invariant:** 1 condition ⇒ legacy single trigger (per-dimension alerting + hysteresis-capable); ≥2 conditions ⇒ composite (per-asset alerting, ANY-dimension leaves, no clearThreshold). `collapseCompositeTrigger` in the input transforms enforces this for every author — never let a caller store a 1-leaf composite. Reset mode `condition` requires a composite trigger of the same kind (v1 restriction in `validateRuleV2`).
 
-**When changing this:** Adding a metric/field → also wire its resolver in `notificationEngine` (else it parses but never reads data). Adding a change type → also emit the matching Event from the relevant persist* function. Adding a template token → add it to `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (and, if asset-sourced, the engine's `ASSET_DETAIL_SELECT`).
+**When changing this:** Adding a metric/field → also wire its resolver in `notificationEngine` (else it parses but never reads data). Adding a change type → also emit the matching Event from the relevant persist* function. Adding a template token → add it to `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (and, if asset-sourced, the engine's `ASSET_DETAIL_SELECT`). Adding an action type → extend `actionSchema` + `assertActionRefs` (notificationRuleService) + the execution fan-out + `actionTypes` in the catalog. **Adding a scope dimension → THREE matchers must move in lockstep:** the engine's SQL `scopeWhere` (+ `loadScopeAssets` post-filter for non-SQL-expressible dims like subnetCidrs and `condition` trees, + SCOPE_SELECT if a new column is read — condition evaluation reads manufacturer/model/os/hostname/ipAddress/status), the in-memory `scopeMatchesAsset` twin in notificationRuleService (asset-details tab), and the wizard's Step-2 builder. The condition tree itself evaluates through ONE shared pure function (`evaluateScopeCondition` in notificationTypes) so the tree semantics can't drift; adding a condition FIELD means: SCOPE_FIELD_OPS + matchScopeRule + the catalog's scopeCondition.fields + (if a new asset column) both selects. `scopeRegionTagsOf` (recipient service) also mines positive region: tag rules from trees — keep it in mind when changing tag-rule semantics.
 
 ---
 
@@ -1341,9 +1407,9 @@ Listed alphabetically.
 
 ## services/notificationEngine.ts
 
-**What it owns:** The rule evaluator. Threshold/state path (per-metric sample resolvers + the NotificationRuleState machine with forDuration/cooldown/clearBehavior), the event-tail path (cursor over Event rows matching event/change rules), all fire-time template rendering (in-app message + composed email via `src/utils/notificationTemplate.ts`), and `previewRule` (dry-run).
+**What it owns:** The rule evaluator. Threshold/state path (per-metric sample resolvers + the NotificationRuleState machine with forDuration/cooldown + v2 `reset` semantics: auto with hysteresis `clearThreshold` + clear-sustain `sustainSec` via `NotificationRuleState.recoveredSince`, timed via `afterSec` sweep, manual re-arm), the event-tail path (cursor over Event rows matching event/change rules), all fire-time template rendering (in-app message + composed email via `src/utils/notificationTemplate.ts`), and `previewRule` (dry-run; scope-only mode + hysteresis `wouldClear`/`inDeadBand` per match).
 
-**Public API:** `evaluateAllNotificationRules` (job entry), `previewRule`, `buildComposedEmail(comp, ctx)` (also used by the escalation sweep), `assetDetail`/`clearAssetDetailCache` (per-tick asset-detail cache), and the unit-tested pure helpers `compareNum`/`compareValue`/`globToRegExp`/`readingMeets`.
+**Public API:** `evaluateAllNotificationRules` (job entry), `previewRule`, `buildComposedEmail(comp, ctx)` (also used by the escalation sweep), `assetDetail`/`clearAssetDetailCache` (per-tick asset-detail cache), and the unit-tested pure helpers `compareNum`/`compareValue`/`globToRegExp`/`readingMeets`/`recoveredMeets`.
 
 **Cross-service deps:** `prisma` (assets + every sample table + notifications + state + Event + Setting), `eventLogService.logEvent`, `notificationService.REGION_TAG_PREFIX`, `notificationTypes`, `notificationRecipientService` (expandDeliveries + ComposedEmail), `src/utils/notificationTemplate.ts`.
 
@@ -1351,13 +1417,16 @@ Listed alphabetically.
 
 **Invariants:**
 - Fire only on the clear→firing transition; state writes happen only on transition (hot path scales with *changes*, not fleet size).
-- Recovery is acted on only from an explicit not-meeting reading (missing data leaves a firing state alone); `timed` clears purely on its timer.
+- Recovery is acted on only from an explicit not-meeting reading (missing data leaves a firing state alone — including a half-elapsed `recoveredSince` sustain timer, which freezes under maintenance/dependency suppression); `timed` clears purely on its timer.
+- Hysteresis dead band (auto + clearThreshold, value between clear and fire thresholds): the firing state holds, and any running sustain timer cancels. `recoveredSince` writes are transition-only (met↔recovered edges), never per-tick; it is a firing-state-only field, distinct from the pending-side `conditionMetSince` (nulled on fire). Every state-clearing write (recover / timed sweep / manual re-arm / re-fire) must null `recoveredSince`.
 - Notification `regionTags` are snapshotted from the asset's `region:` tags at fire time; `templateCtx` is snapshotted only when the rule has emailComposition/escalation (escalation renders from it later, surviving asset deletion).
 - `SCOPE_SELECT` stays tight (hot 60s×2000-asset path); the wider `ASSET_DETAIL_SELECT` fetch runs only on FIRE and only when composition/escalation/{asset.*} tokens need it, through the per-tick cache.
 - All interpolation goes through `renderNotificationTemplate` (single-brace {token}, single pass, unknown tokens literal) — never hand-rolled replaceAll chains.
 - Scale: batch findMany per sample table (no per-row awaits) — re-check at 2000 assets when adding a metric.
+- **Composite path is separate by design** (`evaluateCompositeRule` + collectLeafRefs/resolveLeafTruths/evalTriggerTreeForAsset/compositeOutcomeForAsset/applySustainedRecovery): per-ASSET state at dimensionKey "" (ANY-dimension leaves, one alert per device), leaves resolved through the UNCHANGED single-trigger resolvers with identical leaves deduped to one query. Never generalize the legacy per-reading loop to cover composites — the two share only fire/recover/upsertState. Missing leaf ⇒ false; asset with zero readings across all leaves ⇒ skipped (state frozen). Orphan sweep: any state row with dimensionKey ≠ "" under a composite rule is cleared + deleted (`system:rule-edited`). Condition-mode reset resolves its tree ONLY against firing assets and is the sole recovery authority while firing (`recover()` treats "condition" like "auto"); auto for composites = !tree, no hysteresis dead band.
+- `notificationRuleService.updateRule` clears alerts + deletes the rule's state rows whenever the trigger IDENTITY changes (`triggerIdentityOf`: type/kind/metric/field/changeType) — threshold/operator/tree edits keep state.
 
-**When changing this:** New metric → add a resolver branch AND the catalog entry in `notificationTypes`. New clear behavior → handle it in both `recover()` and the timed-sweep pass. New template token → `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (+ `ASSET_DETAIL_SELECT` here if asset-sourced).
+**When changing this:** New metric → add a resolver branch AND the catalog entry in `notificationTypes` (composite leaves get it for free via the shared resolvers). New clear behavior → handle it in `recover()`, the timed-sweep pass, AND the composite transition block. New template token → `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (+ `ASSET_DETAIL_SELECT` here if asset-sourced).
 
 ---
 
@@ -1444,23 +1513,23 @@ Listed alphabetically.
 
 ## services/notificationEscalationService.ts
 
-**What it owns:** The escalation sweep — sending each rule's escalation-tier emails while a notification stays unhandled, and the per-notification `escalationState` bookkeeping.
+**What it owns:** The escalation sweep — running each rule's escalation TIERS OF ACTIONS (v2: notify / api_call / script, via `automationActionService.executeActions` with `exec.escalation` set) while a notification stays unhandled, and the per-notification `escalationState` bookkeeping. Legacy email tiers normalize to single-notify-action tiers (`normalizeEscalationToV2`) and produce byte-identical emails (parity-tested in notificationEscalationV2.test.ts).
 
-**Public API:** `runEscalationSweep(now?)` (job entry), `tierIsDue(tier, triggeredAt, tierState, now)` (pure, unit-tested).
+**Public API:** `runEscalationSweep(now?)` (job entry), `tierIsDue(tier, triggeredAt, tierState, now)` (pure, structural tier type — legacy and v2 tiers both fit; unit-tested).
 
-**Cross-service deps:** `prisma` (rules + notifications + channels + delivery rows), `notificationEngine.buildComposedEmail`, `notificationRecipientService.{resolveEmailRecipients, dedupeEmailRecipients}`, `src/utils/notificationTemplate.ts` (buildTemplateContext/formatElapsed/notificationsPageUrl), `eventLogService.logEvent`.
+**Cross-service deps:** `prisma` (rules + notifications + assets), `automationActionService.executeActions` (the entire send path — this service no longer builds delivery rows itself), `notificationTypes.normalizeRuleToV2`, `notificationRecipientService.scopeRegionTagsOf`, `notificationEngine.isSuppressedForNotifications`, `src/utils/notificationTemplate.ts` (buildTemplateContext/formatElapsed/notificationsPageUrl), `eventLogService.logEvent`.
 
 **Used by:** `src/jobs/escalateNotifications.ts` (60s tick).
 
 **Invariants:**
 - "Unhandled" per the rule's `stopOn`: `acknowledge` stops on ack OR clear; `clear` ignores ack. Cleared always stops (the query excludes cleared rows).
-- Renders from the fire-time `Notification.templateCtx` snapshot (+ live `{escalation.tier}`/`{escalation.elapsed}`); pre-feature notifications fall back to a minimal context from the row. Tier overrides → rule emailComposition → default subject with an `[ESCALATION n]` prefix.
-- Escalation is email-only; tiers whose channel is deleted/disabled/non-email are skipped (logged), never thrown.
-- Repeats: only when `repeatEveryMin` is set, gated by `maxRepeats` (default 5) — a send-once tier never re-fires.
-- Batched writes (`createMany` + one `$transaction` of state updates); tier recipients resolve once per (rule, tier) per sweep. Scales with the active-unhandled notification count, not fleet size.
-- Delivery rows carry the same composed-meta shape the drain already dispatches — no escalation-specific send path.
+- Renders from the fire-time `Notification.templateCtx` snapshot (+ live `{escalation.tier}`/`{escalation.elapsed}`); pre-feature notifications fall back to a minimal context from the row.
+- **Escalation notify composition is a PER-FIELD merge** (tier subject ?? rule subject, tier body ?? rule body — implemented in automationActionService.composeForNotify), always composed, `[ESCALATION n]` prefix only when neither level set a subject. cc/bcc come from the tier action only. Don't "simplify" to whole-object precedence — that breaks subject-only tier overrides.
+- A tier counts as SENT (state bump) only when `executeActions` reports ≥1 executed action — dead channels / empty recipients retry next sweep.
+- Repeats: only when `repeatEveryMin` is set, gated by `maxRepeats` (default 5) — a run-once tier never re-fires.
+- Scales with the active-unhandled notification count, not fleet size; per-tier recipient resolution rides the recipient service's 30s user-index TTL (the old per-sweep cache was dropped with the executeActions cutover — escalation volume is small).
 
-**When changing this:** state keys in `escalationState.tiers` are tier INDEXES — reordering a rule's tiers re-keys them (an already-sent tier position can re-fire); keep that acceptable or key by content hash. Keep the tier-channel validation in `notificationRuleService.assertEscalationChannels` aligned with the skip logic here.
+**When changing this:** state keys in `escalationState.tiers` are tier INDEXES — reordering a rule's tiers re-keys them (an already-sent tier position can re-fire); keep that acceptable or key by content hash. Tier-action reference validation lives in `notificationRuleService.assertActionRefs` (unified with top-level actions).
 
 ---
 
@@ -3997,6 +4066,25 @@ Listed alphabetically.
 
 ---
 
+## services/storageForecastService.ts
+
+**What it owns:** Per-filesystem "days until full" forecasting — the ONE shared computation behind the Storage Forecast dashboard widget (nocDashboardService `storageForecast` feed) and the `storageDaysUntilFull` automation metric (notificationEngine's asset-metric resolver).
+
+**Public API:** `computeStorageForecast(assetIds | null, lookbackDays?, minPoints?)` → `StorageForecastRow[]` (assetId, mountPath, daysUntilFull, usedPct, slopeBytesPerDay, points; soonest-full first), plus the tuning constants `FORECAST_LOOKBACK_DAYS` (30), `FORECAST_MIN_POINTS` (7), `FORECAST_MAX_DAYS` (365).
+
+**Cross-service deps:** `prisma` (raw regr_slope aggregate over `asset_storage_samples` + `asset_storage_samples_daily`), `utils/linearTrend.daysUntilFull`.
+
+**Used by:** `nocDashboardService.getStorageForecast` (widget feed), `notificationEngine.resolveAssetMetricReadings` (the `storageDaysUntilFull` case — dimKey = mountPath, so single-trigger rules alert per filesystem and composite leaves fold ANY-mount).
+
+**Invariants:**
+- Trend source is a UNION of day-bucketed DETAIL samples (7-day retention — covers every storage-scraped asset, incl. the slow 24h cadence) and the DAILY rollups (365-day retention but **cadence='fast' pinned assets only** — sampleRollupService's sqlStorageHourly cadence filter). Never rely on the rollups alone: unpinned assets would silently vanish from the forecast.
+- Growing mounts only (regr_slope > 0 in the HAVING) with ≥ minPoints distinct days — a flat/shrinking/new filesystem produces NO row, which is what keeps `storageDaysUntilFull <= N` automations silent for healthy mounts (absence of a reading is never a firing signal).
+- READ-ONLY over the hypertable + rollup table; one aggregate query, flat at 2000 assets.
+
+**When changing this:** The lookback/min-points defaults are user-visible semantics (widget copy + metric help in notificationTypes) — change them in lockstep. If storage rollups ever stop filtering on cadence, the UNION dedup keeps working but the detail arm becomes redundant past 7 days.
+
+---
+
 ## services/nocDashboardService.ts
 
 **What it owns:** Fleet-wide read-only aggregates for the SolarWinds-style NOC dashboard widgets, surfaced via `GET /dashboard/noc-summary`.
@@ -4015,6 +4103,7 @@ Listed alphabetically.
 - Permission-denied feeds return their `empty` value WITHOUT entering the TTL cache — a denied caller must never poison (or be served from) a granted caller's cache slot. Errors are never cached either (`createTtlCache` evicts rejections).
 - The no-`?feeds=` response shape is frozen (external kiosk consumers + `tests/integration/dashboardNocToken.test.ts`): `status` flattens to the three tile keys, `downNodes` unwraps `.nodes`.
 - `getSitesWithIssues` coalesces `location > learnedLocation > snmpLocation > "(unknown)"`; the same coalesce key buckets the node detail rows.
+- **Severity-first ordering (2026-07):** every asset-sourced feed decorates its rows with the owning asset's highest ACTIVE automation alert (`activeAlertSeverityByAsset` over uncleared Notification rows; `ALERT_SEVERITY_RANK` covers the 5-level vocabulary + legacy info/error) via `attachAlertSeverity`, then sorts `severityFirst` (STABLE — equal ranks keep the feed's own order: value desc / youngest outage / most overdue). One bounded notification findMany per feed run, scoped to the rows' own asset ids, inside the 10s feed cache. `getRecentAlerts` (Event-sourced) instead orders `levelRank desc, timestamp desc`; `getSitesWithIssues` takes the max rank across each site's affected nodes. Widgets render the rank via `PolarisWidgets.alertSeverityPill` and must NOT re-sort by value alone (`_topnBar.renderRows` sorts (alertRank, value); `downInterfaces.mergeRows` sorts (alertRank, lastUpAt); the fillTo red-guarantee filters by position-or-redness since red rows are no longer a contiguous head).
 
 **When changing this:**
 - Scale-check at 2000 assets — keep every feed to groupBy/count/one windowed aggregate/one bounded findMany.

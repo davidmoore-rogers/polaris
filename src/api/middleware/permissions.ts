@@ -88,8 +88,9 @@ export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "mapRegions", label: "Map Regions", description: "Draw / edit / delete polygons that auto-tag enclosed FortiGates." },
   { key: "deviceIcons", label: "Device Icons", description: "Operator-uploaded icons overlaid on the topology graph." },
   { key: "events", label: "Events / Audit Log", description: "Audit log + syslog/SFTP archival settings + event retention." },
-  { key: "notifications", label: "Notifications", description: "Triggered notifications (View tab). Read = view; Read-Write = acknowledge; Full Read-Write = clear." },
-  { key: "notificationManagement", label: "Notification Rules", description: "Create / edit / delete notification rules (Manage tab). Full Read-Write = rule CRUD." },
+  { key: "alerts", label: "Alerts", description: "Triggered automation instances (Alerts tab). Read = view; Read-Write = acknowledge; Full Read-Write = clear." },
+  { key: "automationManagement", label: "Automations", description: "Create / edit / delete automations + delivery channels. Full Read-Write = automation CRUD." },
+  { key: "automationScripts", label: "Automation Scripts", description: "Script registry CRUD + attaching script actions to automations. Full Read-Write is remote-code-execution as the service account on the Polaris host and on agent-managed assets — grant only to admins." },
   { key: "maintenanceManagement", label: "Maintenance Schedules", description: "Create / edit / delete maintenance windows that pause monitoring + notifications on matched assets, including the per-asset \"enter maintenance mode\" action." },
   { key: "staleReservations", label: "Stale Reservations", description: "Snooze / ignore / un-ignore stale DHCP reservation alerts + the threshold setting." },
   { key: "apiTokens", label: "API Tokens", description: "Long-lived bearer tokens for external callers (SIEM quarantine, etc.)." },
@@ -105,6 +106,47 @@ export function isValidFunctionKey(key: string): boolean {
   return FUNCTION_KEY_SET.has(key);
 }
 
+// ─── Legacy key aliases (Automations rename, 2026-07) ──────────────────
+//
+// The Automations redesign renamed two function keys. Stored Role matrices
+// are rewritten by migration 20260721000000_automations_rbac_rename, but
+// two caller populations still hold the OLD names after deploy:
+//   - persisted session snapshots stamped before the deploy (the cold
+//     roleVersionMap deliberately trusts the snapshot at boot, so without
+//     a reverse lookup every live session would 403 on alerts until
+//     re-login), and
+//   - external clients POSTing role matrices with the old key names.
+// LEGACY_KEY_ALIASES handles both: normalizePermissions folds legacy keys
+// on write, and permissionOf falls back through the reverse map on read.
+
+export const LEGACY_KEY_ALIASES: Record<string, string> = {
+  notifications: "alerts",
+  notificationManagement: "automationManagement",
+};
+
+const MODERN_TO_LEGACY: Record<string, string> = Object.fromEntries(
+  Object.entries(LEGACY_KEY_ALIASES).map(([legacy, modern]) => [modern, legacy]),
+);
+
+/**
+ * Resolve a function key's access level from a permissions matrix,
+ * falling back to the key's pre-rename alias when the modern key is
+ * absent (pre-deploy session snapshots). Never throws.
+ */
+export function permissionOf(
+  permissions: Record<string, AccessLevel | undefined>,
+  functionKey: string,
+): AccessLevel {
+  const direct = permissions[functionKey];
+  if (typeof direct === "string" && isValidAccessLevel(direct)) return direct;
+  const legacy = MODERN_TO_LEGACY[functionKey];
+  if (legacy) {
+    const v = permissions[legacy];
+    if (typeof v === "string" && isValidAccessLevel(v)) return v;
+  }
+  return "none";
+}
+
 export function isValidAccessLevel(level: string): level is AccessLevel {
   return level === "none" || level === "read" || level === "write" || level === "fullwrite";
 }
@@ -116,7 +158,18 @@ export function isValidAccessLevel(level: string): level is AccessLevel {
  */
 export function normalizePermissions(input: unknown): Record<string, AccessLevel> {
   const out: Record<string, AccessLevel> = {};
-  const raw = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const raw = { ...(input && typeof input === "object" ? (input as Record<string, unknown>) : {}) };
+  // Fold pre-rename keys onto their modern names when the modern key is
+  // absent, so matrices written by stale UI clients / imported role JSON
+  // survive the Automations rename. Modern key present always wins.
+  for (const [legacy, modern] of Object.entries(LEGACY_KEY_ALIASES)) {
+    const modernV = raw[modern];
+    const legacyV = raw[legacy];
+    const modernValid = typeof modernV === "string" && isValidAccessLevel(modernV);
+    if (!modernValid && typeof legacyV === "string" && isValidAccessLevel(legacyV)) {
+      raw[modern] = legacyV;
+    }
+  }
   for (const def of FUNCTION_KEYS) {
     const v = raw[def.key];
     out[def.key] = typeof v === "string" && isValidAccessLevel(v) ? v : "none";
@@ -374,7 +427,7 @@ export function requirePermission(functionKey: string, required: AccessLevel) {
       if (!snap) {
         return next(new AppError(403, "Forbidden — no role resolved for caller"));
       }
-      const actual = snap.permissions[functionKey] ?? "none";
+      const actual = permissionOf(snap.permissions, functionKey);
       if (!rankMeets(actual, required)) {
         return next(new AppError(403, `Forbidden — your role lacks ${required} access on ${functionKey}`));
       }
@@ -400,8 +453,7 @@ export function requirePermission(functionKey: string, required: AccessLevel) {
 export function hasPermission(req: Request, functionKey: string, required: AccessLevel): boolean {
   const snap = req.roleSnapshot ?? req.session?.roleSnapshot;
   if (!snap) return false;
-  const actual = snap.permissions[functionKey] ?? "none";
-  return rankMeets(actual, required);
+  return rankMeets(permissionOf(snap.permissions, functionKey), required);
 }
 
 /**

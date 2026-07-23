@@ -13,7 +13,17 @@ import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import type { RuleScope, Trigger, RuleInput } from "./notificationTypes.js";
-import { ASSET_SCOPED_TRIGGER_TYPES, CHANGE_TYPE_ACTIONS } from "./notificationTypes.js";
+import {
+  isAssetScopedTrigger,
+  CHANGE_TYPE_ACTIONS,
+  legacyMirrorOfV2,
+  normalizeRuleToV2,
+  normalizeEscalationToV2,
+  evaluateScopeCondition,
+} from "./notificationTypes.js";
+import { isBlockedOutboundHost } from "../utils/netGuard.js";
+import { ipInCidr } from "../utils/cidr.js";
+import { scopeCidrOf } from "./notificationTypes.js";
 
 /** Minimal asset shape needed to evaluate scope membership. */
 export interface ScopeAsset {
@@ -21,12 +31,20 @@ export interface ScopeAsset {
   assetType: string | null;
   tags: string[];
   discoveredByIntegrationId: string | null;
+  manufacturer?: string | null;
+  model?: string | null;
+  ipAddress?: string | null;
+  hostname?: string | null;
+  os?: string | null;
+  status?: string | null;
 }
 
 /**
  * Does `scope` select `asset`? AND across the provided dimensions, OR within
  * each list. `allAssets` short-circuits true. A scope with no dimensions and
  * allAssets unset matches NOTHING (the builder requires an explicit selection).
+ * KEEP IN LOCKSTEP with the engine's SQL `scopeWhere` + loadScopeAssets
+ * subnet post-filter (notificationEngine.ts) — this is the in-memory twin.
  */
 export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean {
   if (scope.allAssets) return true;
@@ -49,6 +67,31 @@ export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean 
     anyDimension = true;
     if (!scope.integrationIds.includes(asset.discoveredByIntegrationId ?? "")) return false;
   }
+  if (scope.manufacturers && scope.manufacturers.length > 0) {
+    anyDimension = true;
+    const mfr = (asset.manufacturer ?? "").toLowerCase();
+    if (!mfr || !scope.manufacturers.some((m) => mfr.includes(m.toLowerCase()))) return false;
+  }
+  if (scope.models && scope.models.length > 0) {
+    anyDimension = true;
+    const model = (asset.model ?? "").toLowerCase();
+    if (!model || !scope.models.some((m) => model.includes(m.toLowerCase()))) return false;
+  }
+  if (scope.subnetCidrs && scope.subnetCidrs.length > 0) {
+    anyDimension = true;
+    const ip = asset.ipAddress ?? "";
+    if (!ip) return false;
+    const inAny = scope.subnetCidrs.some((c) => {
+      try { return ipInCidr(ip, scopeCidrOf(c)); } catch { return false; }
+    });
+    if (!inAny) return false;
+  }
+  // Nested condition tree (the wizard's builder). ANDs with any flat
+  // dimensions above when both are present.
+  if (scope.condition) {
+    anyDimension = true;
+    if (!evaluateScopeCondition(scope.condition, asset)) return false;
+  }
   return anyDimension;
 }
 
@@ -60,7 +103,7 @@ export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean 
 export async function findRulesMatchingAsset(assetId: string) {
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: { id: true, assetType: true, tags: true, discoveredByIntegrationId: true },
+    select: { id: true, assetType: true, tags: true, discoveredByIntegrationId: true, manufacturer: true, model: true, ipAddress: true, hostname: true, os: true, status: true },
   });
   if (!asset) return [];
 
@@ -71,9 +114,45 @@ export async function findRulesMatchingAsset(assetId: string) {
 
   return rules.filter((r) => {
     const trigger = r.trigger as unknown as Trigger;
-    if (!ASSET_SCOPED_TRIGGER_TYPES.includes(trigger.type as any)) return false;
+    if (!isAssetScopedTrigger(trigger)) return false;
     return scopeMatchesAsset((r.scope ?? {}) as RuleScope, asset);
   });
+}
+
+/**
+ * Option lists for the wizard's device-filtering pickers: distinct
+ * manufacturers/models present in the inventory + the defined (non-deprecated)
+ * IPAM subnets. Distinct queries only — cheap at 2000 assets.
+ */
+export async function listScopeOptions(): Promise<{
+  manufacturers: string[];
+  models: string[];
+  subnets: { id: string; name: string; cidr: string }[];
+}> {
+  const [mfrRows, modelRows, subnets] = await Promise.all([
+    prisma.asset.findMany({
+      select: { manufacturer: true },
+      distinct: ["manufacturer"],
+      where: { manufacturer: { not: null } },
+      orderBy: { manufacturer: "asc" },
+    }),
+    prisma.asset.findMany({
+      select: { model: true },
+      distinct: ["model"],
+      where: { model: { not: null } },
+      orderBy: { model: "asc" },
+    }),
+    prisma.subnet.findMany({
+      select: { id: true, name: true, cidr: true },
+      where: { status: { not: "deprecated" } },
+      orderBy: { cidr: "asc" },
+    }),
+  ]);
+  return {
+    manufacturers: mfrRows.map((r) => r.manufacturer).filter((m): m is string => !!m && m.trim() !== ""),
+    models: modelRows.map((r) => r.model).filter((m): m is string => !!m && m.trim() !== ""),
+    subnets,
+  };
 }
 
 // ─── Change-type subscription cache ─────────────────────────────────────────
@@ -120,39 +199,102 @@ export async function isChangeActionSubscribed(action: string): Promise<boolean>
 
 // ─── Rule CRUD ──────────────────────────────────────────────────────────────
 
-// Escalation is email-only: every tier must reference an smtp/oauth_m365
-// channel. Validated at save so the sweep never has to guess intent.
-const EMAIL_CHANNEL_TYPES = new Set(["smtp", "oauth_m365"]);
+/**
+ * Validate every reference a v2 rule's actions carry — TOP-LEVEL actions and
+ * escalation-tier actions alike (tiers normalize through
+ * normalizeEscalationToV2, so legacy email tiers validate as their converted
+ * notify actions; the email-only tier restriction is gone — escalation v2
+ * tiers take any action type):
+ *   - notify.channelId must exist (any channel type),
+ *   - api_call.url host must pass the outbound SSRF guard (friendly 400 at
+ *     save beats a silent fire-time failure),
+ *   - script.scriptId must resolve to an ENABLED registry script whose
+ *     runTarget is compatible with the action's runOn.
+ * (The automationScripts=fullwrite gate on rules carrying script actions is
+ * enforced at the route layer — permissions are not a service concern.)
+ */
+async function assertActionRefs(input: RuleInput): Promise<void> {
+  const tierActions = (normalizeEscalationToV2(input.escalation)?.tiers ?? []).flatMap((t, ti) =>
+    t.actions.map((a) => ({ action: a, label: `Escalation tier ${ti + 1}` })),
+  );
+  const all = [
+    ...input.actions.map((a, i) => ({ action: a, label: `Action ${i + 1}` })),
+    ...tierActions,
+  ];
 
-async function assertEscalationChannels(escalation: RuleInput["escalation"]): Promise<void> {
-  if (!escalation || escalation.tiers.length === 0) return;
-  const ids = Array.from(new Set(escalation.tiers.map((t) => t.channelId)));
+  const notifyRefs: { label: string; channelId: string }[] = [];
+  const scriptRefs: { label: string; scriptId: string; runOn: string }[] = [];
+  for (const { action, label } of all) {
+    if (action.type === "notify") {
+      notifyRefs.push({ label, channelId: action.channelId });
+    } else if (action.type === "api_call") {
+      let host = "";
+      try {
+        host = new URL(action.url).hostname;
+      } catch {
+        throw new AppError(400, `${label}: api_call URL is not a valid URL`);
+      }
+      if (isBlockedOutboundHost(host)) {
+        throw new AppError(400, `${label}: api_call host "${host}" is blocked (loopback/link-local/metadata addresses are not allowed)`);
+      }
+    } else {
+      scriptRefs.push({ label, scriptId: action.scriptId, runOn: action.runOn });
+    }
+  }
+
+  if (scriptRefs.length > 0) {
+    const scripts = await prisma.automationScript.findMany({
+      where: { id: { in: Array.from(new Set(scriptRefs.map((s) => s.scriptId))) } },
+      select: { id: true, name: true, enabled: true, runTarget: true },
+    });
+    const scriptById = new Map(scripts.map((s) => [s.id, s]));
+    for (const ref of scriptRefs) {
+      const script = scriptById.get(ref.scriptId);
+      if (!script) throw new AppError(400, `${ref.label}: references a script that no longer exists in the registry`);
+      if (!script.enabled) throw new AppError(400, `${ref.label}: script "${script.name}" is disabled`);
+      if (script.runTarget !== "either" && script.runTarget !== ref.runOn) {
+        throw new AppError(400, `${ref.label}: script "${script.name}" only runs on ${script.runTarget}, but the action requests ${ref.runOn}`);
+      }
+    }
+  }
+
+  const channelIds = Array.from(new Set(notifyRefs.map((r) => r.channelId)));
+  if (channelIds.length === 0) return;
   const channels = await prisma.notificationChannel.findMany({
-    where: { id: { in: ids } },
-    select: { id: true, name: true, type: true },
+    where: { id: { in: channelIds } },
+    select: { id: true },
   });
-  const byId = new Map(channels.map((c) => [c.id, c]));
-  for (const [i, tier] of escalation.tiers.entries()) {
-    const ch = byId.get(tier.channelId);
-    if (!ch) throw new AppError(400, `Escalation tier ${i + 1} references a delivery channel that no longer exists`);
-    if (!EMAIL_CHANNEL_TYPES.has(ch.type)) {
-      throw new AppError(400, `Escalation tier ${i + 1} channel "${ch.name}" is ${ch.type} — escalation emails require an email channel (SMTP or Microsoft 365)`);
+  const known = new Set(channels.map((c) => c.id));
+  for (const ref of notifyRefs) {
+    if (!known.has(ref.channelId)) {
+      throw new AppError(400, `${ref.label}: references a delivery channel that no longer exists`);
     }
   }
 }
 
+/** Attach the v2 view to a stored row: rows written before the v2 cutover
+ *  (or restored from pre-upgrade backups) carry NULL reset/actions — fill
+ *  them from the normalizer so API consumers always see the v2 shape. */
+function withV2<T extends { reset: unknown; actions: unknown }>(row: T): T {
+  if (row.reset && Array.isArray(row.actions)) return row;
+  const v2 = normalizeRuleToV2(row as Parameters<typeof normalizeRuleToV2>[0]);
+  return { ...row, reset: v2.reset, actions: v2.actions };
+}
+
 export async function listRules() {
-  return prisma.notificationRule.findMany({ orderBy: { createdAt: "desc" } });
+  const rows = await prisma.notificationRule.findMany({ orderBy: { createdAt: "desc" } });
+  return rows.map(withV2);
 }
 
 export async function getRule(id: string) {
   const rule = await prisma.notificationRule.findUnique({ where: { id } });
   if (!rule) throw new AppError(404, "Notification rule not found");
-  return rule;
+  return withV2(rule);
 }
 
 export async function createRule(input: RuleInput, actor?: string) {
-  await assertEscalationChannels(input.escalation);
+  await assertActionRefs(input);
+  const mirror = legacyMirrorOfV2(input.reset, input.actions);
   const rule = await prisma.notificationRule.create({
     data: {
       name: input.name,
@@ -161,12 +303,16 @@ export async function createRule(input: RuleInput, actor?: string) {
       severity: input.severity,
       trigger: input.trigger as any,
       scope: input.scope as any,
-      clearBehavior: input.clearBehavior,
-      clearAfterSec: input.clearAfterSec ?? null,
+      reset: input.reset as any,
+      actions: input.actions as any,
+      // Lossless legacy mirror — keeps the pre-wizard UI + pre-upgrade
+      // backups coherent. Derived, never authoritative (readers prefer v2).
+      clearBehavior: mirror.clearBehavior,
+      clearAfterSec: mirror.clearAfterSec,
+      targets: mirror.targets as any,
       cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       channels: input.channels,
-      targets: input.targets as any,
       emailComposition: (input.emailComposition ?? undefined) as any,
       escalation: (input.escalation ?? undefined) as any,
       createdBy: actor ?? null,
@@ -185,9 +331,28 @@ export async function createRule(input: RuleInput, actor?: string) {
   return rule;
 }
 
+/** What makes two triggers "the same condition" for state-row continuity.
+ *  A changed identity (type/kind/metric/field/changeType) means the stored
+ *  NotificationRuleState rows describe a DIFFERENT condition — left in place
+ *  they linger firing forever (per-dimension rows under a now-composite rule,
+ *  a cpu row under a now-temperature rule). Threshold/operator/tree edits keep
+ *  the identity: the state keys stay meaningful and re-evaluate next tick. */
+function triggerIdentityOf(trigger: Trigger): string {
+  switch (trigger.type) {
+    case "asset_metric": case "host_metric": return `${trigger.type}:${trigger.metric}`;
+    case "asset_state": return `asset_state:${trigger.field}`;
+    case "composite": return `composite:${trigger.kind}`;
+    case "change": return `change:${trigger.changeType}`;
+    default: return trigger.type;
+  }
+}
+
 export async function updateRule(id: string, input: RuleInput, actor?: string) {
-  await getRule(id); // 404 if missing
-  await assertEscalationChannels(input.escalation);
+  const existing = await getRule(id); // 404 if missing
+  await assertActionRefs(input);
+  const identityChanged =
+    triggerIdentityOf(existing.trigger as unknown as Trigger) !== triggerIdentityOf(input.trigger);
+  const mirror = legacyMirrorOfV2(input.reset, input.actions);
   // Nullable-Json semantics: undefined (field absent) leaves the stored value
   // unchanged; explicit null clears it (Prisma.DbNull).
   const jsonOrClear = (v: unknown) => (v === undefined ? undefined : v === null ? Prisma.DbNull : (v as any));
@@ -200,16 +365,37 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
       severity: input.severity,
       trigger: input.trigger as any,
       scope: input.scope as any,
-      clearBehavior: input.clearBehavior,
-      clearAfterSec: input.clearAfterSec ?? null,
+      reset: input.reset as any,
+      actions: input.actions as any,
+      clearBehavior: mirror.clearBehavior,
+      clearAfterSec: mirror.clearAfterSec,
+      targets: mirror.targets as any,
       cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       channels: input.channels,
-      targets: input.targets as any,
       emailComposition: jsonOrClear(input.emailComposition),
       escalation: jsonOrClear(input.escalation),
     },
   });
+  // The trigger now describes a different condition — the old state rows (and
+  // their active alerts) are about something that no longer exists. Clear the
+  // alerts + drop the rows so nothing lingers firing under a stale key; the
+  // next tick re-evaluates from scratch (cooldown restarts — an edited
+  // trigger is a new condition).
+  if (identityChanged) {
+    const states = await prisma.notificationRuleState.findMany({
+      where: { ruleId: id },
+      select: { notificationId: true },
+    });
+    const notifIds = states.map((s) => s.notificationId).filter((n): n is string => !!n);
+    if (notifIds.length > 0) {
+      await prisma.notification.updateMany({
+        where: { id: { in: notifIds }, cleared: false },
+        data: { cleared: true, clearedBy: "system:rule-edited", clearedAt: new Date() },
+      });
+    }
+    await prisma.notificationRuleState.deleteMany({ where: { ruleId: id } });
+  }
   bumpChangeSubscriptions();
   await logEvent({
     action: "notification_rule.updated",
@@ -218,7 +404,7 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
     resourceName: rule.name,
     actor,
     message: `Notification rule "${rule.name}" updated`,
-    details: { triggerType: input.trigger.type, enabled: input.enabled },
+    details: { triggerType: input.trigger.type, enabled: input.enabled, ...(identityChanged ? { triggerIdentityChanged: true } : {}) },
   });
   return rule;
 }
