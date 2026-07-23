@@ -249,11 +249,16 @@
     var children = cluster.getAllChildMarkers();
     var sawMonitored = false;
     var sawDepDown = false;
+    var sawMaint = false;
     var worst = "up"; // up < degraded < down
     for (var i = 0; i < children.length; i++) {
       var s = children[i]._site;
       if (!s || !s.monitored) continue;
       sawMonitored = true;
+      // Maintenance isn't an outage (its health is frozen) — it never rolls a
+      // cluster up to red/amber. It surfaces only when nothing worse is
+      // present, mirroring the single-marker priority + the NOC feeds.
+      if (s.status === "maintenance") { sawMaint = true; continue; }
       // Suppressed sites contribute dep-down regardless of their own probe
       // health — matches the per-site marker and the assets-list pill.
       if (s.dependencySuppressed) { sawDepDown = true; continue; }
@@ -262,11 +267,13 @@
     }
     // Non-suppressed probe-down/degraded wins over dep-down — those are real
     // independent failures. A cluster where every monitored child is healthy
-    // or dep-down rolls up to dep-down.
+    // or dep-down rolls up to dep-down; maintenance surfaces last, above only
+    // an all-up cluster.
     var cls;
     if (!sawMonitored)               cls = "monitor-unmonitored";
     else if (worst !== "up")         cls = "monitor-" + worst;
     else if (sawDepDown)             cls = "monitor-dep-down";
+    else if (sawMaint)               cls = "monitor-maintenance";
     else                             cls = "monitor-up";
     var count = cluster.getChildCount();
     return L.divIcon({
@@ -337,6 +344,11 @@
   }
 
   function monitorClass(site) {
+    // Maintenance wins over everything: polling is paused so monitorHealth is
+    // frozen (not live), and the gate is intentionally offline. Paint it the
+    // maintenance purple rather than letting the stale health show red. Checked
+    // first, mirroring the Status Map widget's healthKey (siteMap.js).
+    if (site.status === "maintenance") return "monitor-maintenance";
     if (!site.monitored) return "monitor-unmonitored";
     // Dependency suppression takes precedence over the probe-derived health,
     // whether the site's own probe is failing (the usual case behind a down
@@ -352,6 +364,7 @@
   }
 
   function monitorTooltipLine(site) {
+    if (site.status === "maintenance") return "In maintenance — polling paused";
     if (!site.monitored) return "Unmonitored";
     var samples = site.monitorRecentSamples || 0;
     var failures = site.monitorRecentFailures || 0;
@@ -378,6 +391,12 @@
     var marker = L.marker([site.latitude, site.longitude], {
       icon: icon,
       title: site.hostname || "",
+      // Stack maintenance gates BENEATH everything else so a gate that's
+      // intentionally offline never sits on top of (and hides) a live gate
+      // where two markers overlap at nearly-identical coordinates. Leaflet's
+      // default is latitude-based ordering; a negative offset pushes
+      // maintenance markers to the bottom of the z-stack.
+      zIndexOffset: site.status === "maintenance" ? -1000 : 0,
     });
     // Stashed for clusterIcon() to roll up health across children.
     marker._site = site;

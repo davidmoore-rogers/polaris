@@ -4197,6 +4197,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .fg-marker.monitor-degraded    { background: #f9a825; color: #222; }
 .fg-marker.monitor-down        { background: #c62828; }
 .fg-marker.monitor-dep-down    { background: #607d8b; }
+.fg-marker.monitor-maintenance { background: #9575cd; }
 .fg-cluster {
   width: 40px; height: 40px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -4209,6 +4210,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .fg-cluster.monitor-degraded    { background: #f9a825; color: #222; }
 .fg-cluster.monitor-down        { background: #c62828; }
 .fg-cluster.monitor-dep-down    { background: #607d8b; }
+.fg-cluster.monitor-maintenance { background: #9575cd; }
 
 /* ── Site Map widget (SolarWinds-style status dots + weather) ───────────── */
 /* Darken the basemap only in dark theme so dots/radar pop; light theme renders normally. */

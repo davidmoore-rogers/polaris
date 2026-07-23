@@ -232,6 +232,7 @@ input, select, textarea { font-family: inherit; }
 .dot.down { background: var(--md-error); }
 .dot.unk  { background: var(--md-outline); }
 .dot.dep-down { background: #607d8b; }
+.dot.maint { background: #9575cd; }
 
 /* ─── Top app bar ─────────────────────────────────────────────────────── */
 .m3-topbar {
@@ -941,6 +942,7 @@ button, .list-item, .chip { touch-action: manipulation; }
 .fg-marker.monitor-up          { background: #2e7d32; }
 .fg-marker.monitor-degraded    { background: #f9a825; color: #222; }
 .fg-marker.monitor-down        { background: #c62828; }
+.fg-marker.monitor-maintenance { background: #9575cd; }
 .fg-cluster {
   width: 40px; height: 40px;
   border-radius: 50%;
@@ -958,6 +960,7 @@ button, .list-item, .chip { touch-action: manipulation; }
 .fg-cluster.monitor-up          { background: #2e7d32; }
 .fg-cluster.monitor-degraded    { background: #f9a825; color: #222; }
 .fg-cluster.monitor-down        { background: #c62828; }
+.fg-cluster.monitor-maintenance { background: #9575cd; }
 
 /* Monitor status pills (used in Map sheet + later phases) */
 .status-pill {
@@ -975,6 +978,7 @@ button, .list-item, .chip { touch-action: manipulation; }
 .status-pill.down      { background: var(--md-error-container); color: var(--md-on-error-container); }
 .status-pill.unk       { background: var(--md-surface-cont-highest); color: var(--md-on-surface-variant); }
 .status-pill.dep-down  { background: rgba(96,125,139,.18); color: #b0bec5; }
+.status-pill.maint     { background: rgba(149,117,205,.18); color: #b39ddb; }
 
 /* ─── Asset cards ─────────────────────────────────────────────────────── */
 .asset-list {
@@ -1263,6 +1267,7 @@ button, .list-item, .chip { touch-action: manipulation; }
   flex: 0 0 auto;
 }
 .topo-bar .icon-btn svg { width: 22px; height: 22px; fill: currentColor; }
+.topo-bar .icon-btn:disabled { opacity: .5; }
 .topo-search-wrap { position: relative; flex: 1; min-width: 0; }
 .topo-search {
   width: 100%;
