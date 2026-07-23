@@ -837,6 +837,15 @@ model Asset {
   // rows land in AssetProcessConnection (accumulate + age).
   mappedProcesses String[] @default([])
 
+  // Service (systemd unit / Windows service) pins — the Services-tab siblings of
+  // monitoredProcesses / mappedProcesses, keyed by UNIT name. monitoredServices
+  // drives per-unit journalctl/log tailing (the serviceLog agent stream);
+  // mappedServices drives per-unit connection attribution on the Application Map
+  // (stamped onto AssetProcessConnection.unit). Both shipped to the agent via
+  // GET /agents/config.
+  monitoredServices String[] @default([])
+  mappedServices    String[] @default([])
+
   // Quarantine. When non-null the asset is currently quarantined on one or
   // more FortiGates (per quarantineTargets). statusBeforeQuarantine stores
   // the prior AssetStatus so release can pop it back; null pops to active.
@@ -1492,6 +1501,47 @@ model AssetProcess {
   @@unique([assetId, name])
   @@index([assetId])
   @@map("asset_processes")
+}
+
+// CURRENT-STATE service inventory — one row per systemd unit (Linux) or Windows
+// service (SCM) per asset. Plain table, NOT a hypertable: replaced in full per
+// scrape by persistAssetServices (delete-replace, like AssetProcess /
+// AssetSdwanRule). Unlike AssetProcess (keyed by program name), this is keyed by
+// the UNIT name — so a service backed by a shared runtime (e.g. a Spring Boot
+// app running as "java") is visible as itself, and oneshot/exited units with no
+// live process still appear. No FK to Asset — matches the AssetProcess
+// convention. Agent-only (agentless SSH/WinRM does not resolve units).
+model AssetService {
+  id           String  @id @default(uuid())
+  assetId      String
+  // Aggregation key: the unit name ("truckscale-central.service") or Windows
+  // service short name ("W32Time"). Pinning in Asset.monitoredServices /
+  // mappedServices is by this name.
+  unit         String
+  // "systemd" | "windows" — selects the state vocabulary + control transport.
+  platform     String
+  // systemd Description / Windows DisplayName.
+  displayName  String?
+  // systemd load state (loaded/masked/not-found); "" for Windows.
+  loadState    String?
+  // systemd active state (active/inactive/failed) / Windows state (running/stopped).
+  activeState  String?
+  // systemd sub state (running/exited/dead/failed); "" for Windows.
+  subState     String?
+  // systemd enablement (enabled/disabled/static) / Windows start mode (auto/manual/disabled).
+  enabledState String?
+  // Main process PID + its program name (cross-links to the Processes tab).
+  mainPid      Int?
+  mainProcess  String?
+  // Current memory of the unit's cgroup (systemd MemoryCurrent); null when unset.
+  memBytes     BigInt?
+  // True when the unit is start/stop/restartable via the AgentCommand queue.
+  controllable Boolean @default(false)
+  updatedAt    DateTime @updatedAt
+
+  @@unique([assetId, unit])
+  @@index([assetId])
+  @@map("asset_services")
 }
 
 // ACCUMULATE + AGE connection map for MAPPED processes (Asset.mappedProcesses).
