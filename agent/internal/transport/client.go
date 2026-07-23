@@ -249,6 +249,16 @@ type ServiceSample struct {
 	MemBytes     *uint64 `json:"memBytes,omitempty"`
 }
 
+// ServiceLogSample matches the server's ServiceLogSampleSchema — one journalctl
+// line for a pinned unit (Phase 2). Same shape as ProcessLogSample with `unit`.
+type ServiceLogSample struct {
+	Timestamp string  `json:"timestamp,omitempty"`
+	Unit      string  `json:"unit"`
+	Level     *string `json:"level,omitempty"`
+	Message   string  `json:"message"`
+	Source    *string `json:"source,omitempty"`
+}
+
 type SamplesResponse struct {
 	Accepted int `json:"accepted"`
 	Rejected int `json:"rejected"`

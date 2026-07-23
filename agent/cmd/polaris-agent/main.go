@@ -294,6 +294,7 @@ func runAgent(ctx context.Context, confPath string) {
 	go eventLogLoop(ctx, cfg, client)
 	go processInventoryLoop(ctx, cfg, client)
 	go serviceInventoryLoop(ctx, cfg, client)
+	go serviceLogLoop(ctx, cfg, client)
 	go processTelemetryLoop(ctx, cfg, client)
 	go processLogLoop(ctx, cfg, client)
 	go processConnectionsLoop(ctx, cfg, client)
@@ -858,6 +859,59 @@ func pushProcessLogOne(client *transport.Client, stateDir string) {
 	}
 	if verbose {
 		log.Printf("processLog sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
+	}
+}
+
+// serviceLogLoop tails journalctl for the operator-pinned UNITS (Phase 2,
+// service dimension). Gated on the services stream being enabled AND >=1 pinned
+// unit (monitoredServices). Rides the process-log cadence (60s).
+func serviceLogLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
+	interval := time.Duration(cfg.ProcessLogIntervalSec) * time.Second
+	if interval == 0 {
+		interval = defaultProcessLogIntervalSec * time.Second
+	}
+	stateDir := filepath.Dir(cfg.Path())
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	pushServiceLogOne(client, stateDir)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pushServiceLogOne(client, stateDir)
+		}
+	}
+}
+
+func pushServiceLogOne(client *transport.Client, stateDir string) {
+	sc := loadServicesCfg()
+	if !sc.enabled || len(sc.monitored) == 0 {
+		return
+	}
+	type res struct{ s []*transport.ServiceLogSample }
+	ch := make(chan res, 1)
+	go func() { ch <- res{collectors.ServiceLogOnce(stateDir, sc.monitored, 0)} }()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(collectionTimeout):
+		log.Printf("push serviceLog samples: collector timed out after %.0fs", collectionTimeout.Seconds())
+		return
+	}
+	if len(r.s) == 0 {
+		return
+	}
+	resp, err := client.PushSamples(&transport.SamplesBody{
+		Stream:  "serviceLog",
+		Samples: r.s,
+	})
+	if err != nil {
+		log.Printf("push serviceLog samples: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("serviceLog sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
 	}
 }
 
