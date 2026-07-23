@@ -1122,10 +1122,13 @@
           btns.push('<button class="btn btn-secondary agent-act" data-act="upgrade" data-id="' + escapeHtml(a.assetId) +
             '" style="padding:2px 8px;font-size:0.75rem">Upgrade</button>');
         }
-        // Reinstall — needs the stored install credential.
+        // Reinstall — needs the stored install credential. Carries the OS +
+        // current root state so the Linux reinstall dialog can offer the
+        // "run as root" toggle (and pre-check it to the current value).
         var reAttr = a.hasInstallCredential ? "" : ' disabled title="No install credential on file — force-remove and install fresh"';
         btns.push('<button class="btn btn-secondary agent-act" data-act="reinstall" data-id="' + escapeHtml(a.assetId) +
-          '"' + reAttr + ' style="padding:2px 8px;font-size:0.75rem">Reinstall</button>');
+          '" data-os="' + escapeHtml(a.osPlatform || "") + '" data-root="' + (a.runAsRoot ? "1" : "0") + '"' +
+          reAttr + ' style="padding:2px 8px;font-size:0.75rem">Reinstall</button>');
         // Remove (graceful) + Force remove.
         btns.push('<button class="btn btn-secondary agent-act" data-act="remove" data-id="' + escapeHtml(a.assetId) +
           '" style="padding:2px 8px;font-size:0.75rem">Remove</button>');
@@ -1183,8 +1186,28 @@
       run = showConfirm("Upgrade this agent to the current build?\n\nThe host briefly bounces its agent service while the binary is replaced. Bearer + cert pin are preserved.")
         .then(function (ok) { if (!ok) return null; return api.assets.upgradeAgent(assetId); });
     } else if (act === "reinstall") {
-      run = showConfirm("Reinstall the agent on this host?\n\nRe-pushes the binary + agent.conf and re-runs the installer using the stored install credential. The old bearer is revoked and a fresh one issued on re-enroll.")
-        .then(function (ok) { if (!ok) return null; return api.assets.reinstallAgent(assetId); });
+      var os = btn ? btn.getAttribute("data-os") : "";
+      var curRoot = !!(btn && btn.getAttribute("data-root") === "1");
+      if (os === "linux") {
+        // Linux reinstall can also flip the privilege level — offer the root
+        // toggle (pre-checked to the current state) inside the confirm.
+        var formHtml =
+          '<p style="color:var(--color-text-secondary);margin-top:0">Re-pushes the binary + agent.conf and re-runs the installer using the stored install credential. The old bearer is revoked and a fresh one issued on re-enroll.</p>' +
+          '<div class="form-group">' +
+            '<label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal;cursor:pointer">' +
+              '<input type="checkbox" id="reinstall-run-as-root"' + (curRoot ? ' checked' : '') + '> Install with root privileges' +
+            '</label>' +
+            '<p class="hint" style="color:var(--color-warning)">Root lets the agent control services, run root automation scripts, and map connections — but gives it full control of the host. Uncheck to reinstall as the default unprivileged user.</p>' +
+          '</div>';
+        var wantRoot = curRoot;
+        var fp = showFormModal("Reinstall agent on this host", formHtml, "Reinstall");
+        var rcb = document.getElementById("reinstall-run-as-root");
+        if (rcb) rcb.addEventListener("change", function () { wantRoot = rcb.checked; });
+        run = fp.then(function (ok) { if (!ok) return null; return api.assets.reinstallAgent(assetId, { runAsRoot: wantRoot }); });
+      } else {
+        run = showConfirm("Reinstall the agent on this host?\n\nRe-pushes the binary + agent.conf and re-runs the installer using the stored install credential. The old bearer is revoked and a fresh one issued on re-enroll.")
+          .then(function (ok) { if (!ok) return null; return api.assets.reinstallAgent(assetId); });
+      }
     } else if (act === "remove") {
       run = showConfirm("Remove the agent from this host?\n\nRevokes the bearer immediately, then remotely uninstalls the service + binary using the stored install credential.")
         .then(function (ok) { if (!ok) return null; return api.assets.deleteAgent(assetId, { force: false }); });

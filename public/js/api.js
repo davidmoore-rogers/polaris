@@ -524,7 +524,7 @@ const api = {
     bulkInstallAgents:    (body)     => request("POST",   "/assets/bulk-agent-install", body),
     agentInstallScripts:  ()         => request("GET",    "/assets/agent-install-scripts"),
     retryInstallAgent:    (id)       => request("POST",   `/assets/${id}/agent/retry`),
-    reinstallAgent:       (id)       => request("POST",   `/assets/${id}/agent/reinstall`),
+    reinstallAgent:       (id, body) => request("POST",   `/assets/${id}/agent/reinstall`, body || {}),
     upgradeAgent:         (id, body) => request("POST",   `/assets/${id}/agent/upgrade`, body || {}),
     deleteAgent:          (id, opts) => {
       var qs = (opts && opts.force) ? "?force=true" : "";

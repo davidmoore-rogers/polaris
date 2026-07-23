@@ -4793,9 +4793,17 @@ router.post("/:id/agent/reinstall", requirePermission("assets", "write"), async 
     const { revokeBearer } = await import("../../services/agentTokenService.js");
     await revokeBearer(row.id);
 
+    // Optional privilege change on reinstall (Linux only): flip the agent
+    // between the unprivileged and root systemd unit. Ignored on Windows
+    // (LocalSystem). Undefined = keep the current row value.
+    const bodyRunAsRoot = typeof req.body?.runAsRoot === "boolean" ? req.body.runAsRoot : undefined;
+    const nextRunAsRoot = bodyRunAsRoot !== undefined && row.osPlatform === "linux"
+      ? bodyRunAsRoot
+      : row.runAsRoot;
+
     await prisma.managedAgent.update({
       where: { id: row.id },
-      data:  { installStatus: "pending", installError: null },
+      data:  { installStatus: "pending", installError: null, runAsRoot: nextRunAsRoot },
     });
 
     await logEvent({
@@ -4804,8 +4812,8 @@ router.post("/:id/agent/reinstall", requirePermission("assets", "write"), async 
       resourceId:   assetId,
       actor,
       level:        "info",
-      message:      `Polaris Agent reinstall kicked off (${row.osPlatform}/${row.arch}, ${row.installTransport})`,
-      details:      { managedAgentId: row.id, credentialId: row.installCredentialId },
+      message:      `Polaris Agent reinstall kicked off (${row.osPlatform}/${row.arch}, ${row.installTransport}${row.osPlatform === "linux" ? (nextRunAsRoot ? ", root" : ", unprivileged") : ""})`,
+      details:      { managedAgentId: row.id, credentialId: row.installCredentialId, runAsRoot: nextRunAsRoot },
     });
 
     const { startInstall } = await import("../../services/agentInstallService.js");
