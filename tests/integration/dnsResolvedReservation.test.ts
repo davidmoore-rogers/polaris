@@ -106,7 +106,15 @@ async function reconcileAndCountDnsRows(assetId: string): Promise<number> {
   // off, then re-read. Poll a few times so we don't race the void reconcile.
   for (let i = 0; i < 10; i++) {
     const n = (await dnsRows()).length;
-    if (n >= 1) return n;
+    if (n >= 1) {
+      // The row exists, but the fire-and-forget reconcile that the fixture
+      // asset create scheduled (db.ts Prisma extension) may still be in flight.
+      // Drain it before returning so a straggler can't re-create the row AFTER
+      // a caller (e.g. a release-path test) deletes it. Idempotent — the
+      // straggler collides on the (subnet, ip, active) unique constraint.
+      await settle();
+      return (await dnsRows()).length;
+    }
     await new Promise((r) => setTimeout(r, 30));
   }
   return (await dnsRows()).length;
