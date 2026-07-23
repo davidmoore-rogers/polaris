@@ -4179,6 +4179,13 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .widget-pill-watch { background: rgba(79,195,247,0.18); color: #4fc3f7; }
 .widget-pill-amber { background: rgba(255,193,7,0.18);  color: #ffd54f; }
 .widget-pill-red   { background: rgba(255,23,68,0.20);  color: #ef5350; }
+/* Severity pills keep their own text color even inside .recent-item-title,
+   whose generic `span { color:#fff }` would otherwise whiten them (making the
+   _topnBar / Active Alerts pills read differently from the dash-alert ones). */
+.recent-item-title .widget-pill-ok    { color: #81c784; }
+.recent-item-title .widget-pill-watch { color: #4fc3f7; }
+.recent-item-title .widget-pill-amber { color: #ffd54f; }
+.recent-item-title .widget-pill-red   { color: #ef5350; }
 
 /* ─── Site Map widget markers ─────────────────────────────────────────────
  * Lifted from map.css so the siteMap dashboard widget renders correctly on
