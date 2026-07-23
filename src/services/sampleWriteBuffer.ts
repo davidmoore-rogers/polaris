@@ -175,6 +175,17 @@ export interface ProcessLogRow {
   source: string | null;
 }
 
+// Pinned-UNIT journalctl log lines (Phase 2, service dimension). Standalone
+// detail-only table; same shape as ProcessLogRow with `unit` for `name`.
+export interface ServiceLogRow {
+  assetId: string;
+  timestamp: Date;
+  unit: string;
+  level: string | null;
+  message: string;
+  source: string | null;
+}
+
 // ─── Per-table buffer state ───────────────────────────────────────────────
 
 const buffers = {
@@ -187,6 +198,7 @@ const buffers = {
   perfSla:        [] as PerfSlaSampleRow[],
   process:        [] as ProcessSampleRow[],
   processLog:     [] as ProcessLogRow[],
+  serviceLog:     [] as ServiceLogRow[],
 };
 
 // Map each buffer key to its `polaris_sample_buffer_depth{table=...}` label
@@ -205,6 +217,7 @@ const TABLE_LABEL: Record<BufferKey, string> = {
   perfSla:     "asset_perf_sla_samples",
   process:     "asset_process_samples",
   processLog:  "asset_process_log_samples",
+  serviceLog:  "asset_service_log_samples",
 };
 
 // Flush early if any single table's depth exceeds this — keeps RSS bounded
@@ -285,6 +298,13 @@ export function enqueueProcessLogSamples(rows: ProcessLogRow[]): void {
   if (buffers.processLog.length >= SIZE_THRESHOLD) void flushTable("processLog");
 }
 
+export function enqueueServiceLogSamples(rows: ServiceLogRow[]): void {
+  if (rows.length === 0) return;
+  buffers.serviceLog.push(...rows);
+  setSampleBufferDepth(TABLE_LABEL.serviceLog, buffers.serviceLog.length);
+  if (buffers.serviceLog.length >= SIZE_THRESHOLD) void flushTable("serviceLog");
+}
+
 // ─── Flush ────────────────────────────────────────────────────────────────
 //
 // One flush per table per call so a slow table (e.g. interfaces, which can
@@ -294,7 +314,7 @@ export function enqueueProcessLogSamples(rows: ProcessLogRow[]): void {
 const flushing: Record<BufferKey, boolean> = {
   monitor: false, telemetry: false, hardware: false,
   iface: false, storage: false, ipsecTunnel: false,
-  perfSla: false, process: false, processLog: false,
+  perfSla: false, process: false, processLog: false, serviceLog: false,
 };
 
 async function flushTable(key: BufferKey): Promise<void> {
@@ -360,6 +380,9 @@ async function writeBatch(key: BufferKey, batch: unknown[]): Promise<void> {
       return;
     case "processLog":
       await prisma.assetProcessLogSample.createMany({ data: batch as ProcessLogRow[] });
+      return;
+    case "serviceLog":
+      await prisma.assetServiceLogSample.createMany({ data: batch as ServiceLogRow[] });
       return;
   }
 }

@@ -1808,6 +1808,28 @@ model AssetProcessLogSample {
   @@map("asset_process_log_samples")
 }
 
+// Per-pinned-UNIT journalctl log lines (Phase 2, service dimension). The
+// service-tab counterpart to AssetProcessLogSample: keyed by `unit` instead of
+// program `name`. Standalone detail-only hypertable — no rollups; pruned on the
+// system-info umbrella window (borrows the "process" retention entity's detail
+// window). NO FK to Asset. Only units in Asset.monitoredServices are tailed
+// (agent journalctl -u <unit>). Linux-only (journald); Windows service logs
+// ride the existing Event Log stream.
+model AssetServiceLogSample {
+  id        String   @default(uuid())
+  assetId   String
+  timestamp DateTime @default(now())
+  unit      String
+  level     String?
+  message   String   @db.Text
+  source    String?
+
+  @@id([id, timestamp])
+  @@index([assetId, timestamp])
+  @@index([assetId, unit, timestamp])
+  @@map("asset_service_log_samples")
+}
+
 // ─── Sample rollups (tiered retention: hourly + daily aggregates) ───────────
 //
 // Per-source aggregate tables populated by the sampleRollup job (custom

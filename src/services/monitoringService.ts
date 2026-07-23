@@ -9926,6 +9926,9 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     // Process logs are a standalone detail-only hypertable (no rollups) — prune
     // on the process entity's detail window via the same compression-safe path.
     pruneTierByDays((w) => prisma.assetProcessLogSample.deleteMany({ where: w as any }), r.process.detail, "timestamp", "asset_process_log_samples"),
+    // Service (journalctl) logs — same standalone-hypertable prune on the
+    // process entity's detail window as process logs.
+    pruneTierByDays((w) => prisma.assetServiceLogSample.deleteMany({ where: w as any }), r.process.detail, "timestamp", "asset_service_log_samples"),
     // Application Map connection rows (plain accumulate+age table) — fixed
     // 30-day window (POLARIS_PROCESS_CONN_RETENTION_DAYS), not a retention entity.
     pruneProcessConnections(),
