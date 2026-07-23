@@ -1575,6 +1575,12 @@ model AssetProcessConnection {
   localPort   Int      @default(0)
   remoteIp    String   @default("")
   remotePort  Int      @default(0)
+  // Owning systemd unit / Windows service (Phase 3), when the PID's cgroup
+  // resolved one — lets the Services detail panel + Application Map attribute a
+  // socket to a UNIT, not just a program name. NOT in the business key
+  // (deterministic per process; set on insert, never bumped on conflict).
+  // Empty when unknown or when the row came only via a mappedProcesses pin.
+  unit        String   @default("")
   firstSeen   DateTime @default(now())
   lastSeen    DateTime @default(now())
 

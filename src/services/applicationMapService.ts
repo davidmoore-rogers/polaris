@@ -526,9 +526,9 @@ export interface ProcessConnectionsDto {
 
 const DETAIL_SECTION_CAP = 500;
 
-export async function getAssetProcessConnections(assetId: string, processName?: string): Promise<ProcessConnectionsDto> {
+export async function getAssetProcessConnections(assetId: string, processName?: string, unit?: string): Promise<ProcessConnectionsDto> {
   const rows = await prisma.assetProcessConnection.findMany({
-    where: { assetId, ...(processName ? { processName } : {}) },
+    where: { assetId, ...(processName ? { processName } : {}), ...(unit ? { unit } : {}) },
     orderBy: { lastSeen: "desc" },
   });
   const remoteIps = [...new Set(rows.map((r) => r.remoteIp).filter((ip) => ip.length > 0))];
