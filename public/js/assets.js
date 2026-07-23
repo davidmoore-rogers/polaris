@@ -14871,12 +14871,63 @@ function openServiceDetailPanel(asset, svc) {
         metaRow("Main process", pidVal) +
         metaRow("Memory", memVal) +
       '</div>' +
+      // Journalctl viewer (Phase 2) — Linux units only; populated when the unit
+      // is pinned for Logs (monitoredServices) and the agent has tailed it.
+      '<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
+        '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem;gap:8px;flex-wrap:wrap">' +
+          '<h4 style="margin:0">Logs <span style="font-weight:400;font-size:0.75rem;color:var(--color-text-tertiary)">journalctl</span></h4>' +
+          '<div style="display:flex;align-items:center;gap:10px">' +
+            '<label style="font-size:0.78rem;display:flex;align-items:center;gap:4px"><input type="checkbox" id="svc-logs-flagged-only">Flagged only</label>' +
+            '<button class="btn btn-sm btn-secondary" id="btn-svc-logs-refresh">Refresh</button>' +
+          '</div>' +
+        '</div>' +
+        (svc.platform === "windows"
+          ? '<p class="hint" style="font-size:0.76rem">Windows service logs are collected via the Event Log stream, not here.</p>'
+          : '<p class="hint" style="font-size:0.76rem">Pin this unit\'s <strong>Logs</strong> box in the Services tab to start tailing its journal — lines appear within a minute or two.</p>') +
+        '<div id="svc-logs-view" style="max-height:300px;overflow:auto;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;font-family:var(--font-mono);font-size:0.78rem;white-space:pre-wrap;color:var(--color-text-secondary)">Loading…</div>' +
+      '</div>' +
     '</div>';
 
   if (canControl) {
     document.querySelectorAll(".svc-ctl-btn").forEach(function (b) {
       b.addEventListener("click", function () { _runServiceControl(asset.id, svc.unit, b.getAttribute("data-action")); });
     });
+  }
+  var refreshLogs = document.getElementById("btn-svc-logs-refresh");
+  if (refreshLogs) refreshLogs.addEventListener("click", function () { _loadServiceLogsFor(asset.id, svc.unit); });
+  var flaggedOnly = document.getElementById("svc-logs-flagged-only");
+  if (flaggedOnly) flaggedOnly.addEventListener("change", function () { _loadServiceLogsFor(asset.id, svc.unit); });
+  _loadServiceLogsFor(asset.id, svc.unit);
+}
+
+async function _loadServiceLogsFor(assetId, unit) {
+  var el = document.getElementById("svc-logs-view");
+  if (!el) return;
+  var flaggedToggle = document.getElementById("svc-logs-flagged-only");
+  var flaggedOnly = !!(flaggedToggle && flaggedToggle.checked);
+  try {
+    var data = await api.assets.serviceLogs(assetId, unit, { limit: 300, flagged: flaggedOnly ? 1 : undefined });
+    var logs = data.logs || [];
+    if (!logs.length) {
+      el.textContent = flaggedOnly
+        ? "No flagged log lines in this window."
+        : "No log lines collected yet. Pin this unit for Logs (Services tab) — journald tailing starts within a minute or two (Linux only).";
+      return;
+    }
+    // Server returns newest-first; show oldest-first in the viewer.
+    el.innerHTML = logs.slice().reverse().map(function (l) {
+      var ts = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "";
+      var lvl = l.level ? "[" + escapeHtml(l.level) + "] " : "";
+      var flags = Array.isArray(l.flags) ? l.flags : [];
+      var badges = flags.map(function (f) {
+        var col = f.color || "var(--color-warning)";
+        return '<span style="display:inline-block;margin-left:6px;padding:0 5px;border-radius:3px;font-size:0.7rem;background:' + col + ';color:#000">' + escapeHtml(f.label || f.name) + '</span>';
+      }).join("");
+      var hl = flags.length ? ';background:rgba(245,158,11,0.12);border-left:2px solid var(--color-warning);padding-left:4px' : "";
+      return '<div style="' + hl + '"><span style="color:var(--color-text-tertiary)">' + escapeHtml(ts) + '</span> ' + lvl + escapeHtml(l.message || "") + badges + '</div>';
+    }).join("");
+  } catch (err) {
+    el.textContent = "Error: " + (err.message || "failed to load logs");
   }
 }
 

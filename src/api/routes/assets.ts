@@ -2475,6 +2475,33 @@ router.get("/:id/process-logs", requirePermission("assets", "read"), async (req,
   } catch (err) { next(err); }
 });
 
+// GET /assets/:id/service-logs?unit=...&since=...&limit=...&flagged=1 — recent
+// journalctl lines for a pinned unit (standalone table, newest-first, capped).
+// Global/asset-scoped LogFlagRules apply (the unit is passed as the eval's
+// process key, so a process-scoped rule named after the unit also matches).
+router.get("/:id/service-logs", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const unit = req.query.unit ? String(req.query.unit) : null;
+    if (!unit) throw new AppError(400, "unit query parameter is required");
+    const limit = Math.min(2000, Math.max(1, parseInt(String(req.query.limit ?? "500"), 10) || 500));
+    const since = req.query.since ? new Date(String(req.query.since)) : null;
+    const onlyFlagged = String(req.query.flagged ?? "") === "1";
+    const rows = await prisma.assetServiceLogSample.findMany({
+      where: { assetId: id, unit, ...(since && !isNaN(since.getTime()) ? { timestamp: { gte: since } } : {}) },
+      orderBy: { timestamp: "desc" },
+      take: limit,
+    });
+    const logs = await evaluateLogFlags(
+      id,
+      unit,
+      rows.map((r) => ({ timestamp: r.timestamp, level: r.level, message: r.message, source: r.source })),
+      onlyFlagged,
+    );
+    res.json({ unit, logs });
+  } catch (err) { next(err); }
+});
+
 // PUT /assets/:id/processes/:name/config — operator log-path config for a
 // pinned program (log source + wildcard glob). Upserts AssetProcessConfig.
 router.put("/:id/processes/:name/config", requirePermission("assets", "write"), async (req, res, next) => {

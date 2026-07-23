@@ -49,6 +49,7 @@ import {
   enqueueStorageSamples,
   enqueueProcessSamples,
   enqueueProcessLogSamples,
+  enqueueServiceLogSamples,
 } from "../../services/sampleWriteBuffer.js";
 import { persistAssetServices } from "../../services/serviceInventoryService.js";
 import { reconcileMacAddresses, reconcileInterfaceMacs } from "../../utils/macAddresses.js";
@@ -291,6 +292,16 @@ const ServiceSampleSchema = z.object({
   memBytes:     z.number().int().min(0).nullable().optional(),
 });
 
+// Per-pinned-unit journalctl log lines (Phase 2, service dimension). Same shape
+// as ProcessLogSampleSchema with `unit` for `name`.
+const ServiceLogSampleSchema = z.object({
+  timestamp: z.string().datetime().optional(),
+  unit:      z.string().min(1).max(255),
+  level:     z.string().max(32).nullable().optional(),
+  message:   z.string().max(8192),
+  source:    z.string().max(512).nullable().optional(),
+});
+
 const SamplesBodySchema = z.discriminatedUnion("stream", [
   z.object({ stream: z.literal("responseTime"), samples: z.array(ResponseTimeSampleSchema).min(1).max(500) }),
   z.object({ stream: z.literal("telemetry"),    samples: z.array(TelemetrySampleSchema).min(1).max(500) }),
@@ -309,6 +320,8 @@ const SamplesBodySchema = z.discriminatedUnion("stream", [
   // Current-state service/unit inventory. "All loaded units" is ~150-200 rows
   // on a typical host; cap generously (delete-replace per push).
   z.object({ stream: z.literal("serviceInventory"), samples: z.array(ServiceSampleSchema).max(5000) }),
+  // Per-pinned-unit journalctl lines. Bounded like processLog.
+  z.object({ stream: z.literal("serviceLog"), samples: z.array(ServiceLogSampleSchema).min(1).max(2000) }),
 ]);
 
 agentsRouter.post("/samples", async (req, res, next) => {
@@ -578,6 +591,17 @@ agentsRouter.post("/samples", async (req, res, next) => {
         })),
       );
       accepted = body.samples.length;
+    } else if (body.stream === "serviceLog") {
+      const rows = body.samples.map((s) => ({
+        assetId,
+        timestamp: s.timestamp ? new Date(s.timestamp) : now,
+        unit:      s.unit,
+        level:     s.level ?? null,
+        message:   s.message,
+        source:    s.source ?? null,
+      }));
+      enqueueServiceLogSamples(rows);
+      accepted = rows.length;
     } else {
       // storage
       const pinnedStorage = new Set(
