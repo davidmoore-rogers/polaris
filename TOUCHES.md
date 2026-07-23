@@ -1685,7 +1685,7 @@ Listed alphabetically.
 - Delete-then-insert in ONE `$transaction` under `retryOnDeadlock`; empty rows = valid delete-only scrape. Keyed `@@unique([assetId, unit])`. Plain table, NO FK to Asset (matches AssetProcess/AssetSdwanRule).
 - `controllable` is DERIVED here, never trusted from the wire: systemd `loadState==="loaded"`, or any Windows service. Control routes re-check it.
 - Agent-only. Agentless SSH/WinRM does not resolve units (`agentlessProcessService` hardcodes serviceUnit null) — no agentless producer exists.
-- `mainProcess` is a display cross-link to the Processes tab, not a key.
+- `mainProcess` is a display cross-link to the process rows (Services tab, *Include processes* view), not a key.
 
 **When changing this:**
 - Adding a field: extend the Prisma model + migration, `ServiceSample` (Go transport) + collectors, `ServiceSampleSchema` + the ingest arm (agents.ts), the `AssetServiceInput` map, and the `GET /assets/:id/services` projection — in lockstep. Bump `agent/VERSION`.

@@ -1259,9 +1259,9 @@ code {
    boundary and scrolls away with the body — repaint it as a box-shadow that
    travels with the sticky cells. */
 .table-wrapper-sticky { overflow: auto; }
-/* Slide-over variant (asset-details Processes tab): same sticky thead +
+/* Slide-over variant (asset-details Services tab): same sticky thead +
    internal scroll, but the wrapper is height-bounded to the slide-over
-   body's visible bottom by _sizeAssetProcTableWrapper() in assets.js —
+   body's visible bottom by _sizeAssetSvcTableWrapper() in assets.js —
    NOT by the viewport-relative sizeStickyTableWrappers(), whose triggers
    (assets-list re-renders) fire while the panel tab is display:none and
    would stamp garbage heights. */

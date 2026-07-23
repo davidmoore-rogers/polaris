@@ -3949,16 +3949,14 @@ async function openViewModal(id) {
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) {
       tabs.push({ key: "sdwan", label: "SD-WAN", html: _assetSdwanTabHTML(a, sdwanRules, sdwanLinks, sdwanMembers) });
     }
-    // Processes tab — current-state process inventory + the Monitor/Alert pin
-    // checkboxes. Lazy-loaded on first click (see _wireAssetProcessesTab). Not
-    // shown on Fortinet infrastructure (firewall/switch/access_point) — those
-    // appliances don't report a host process table.
+    // Services tab — merged unit + process inventory. Shows systemd units /
+    // Windows services by default; an "Include processes" checkbox folds the
+    // current-state process inventory into the same table. Lazy-loaded on first
+    // click (see _wireAssetServicesTab). Not shown on Fortinet infrastructure
+    // (firewall/switch/access_point) — those appliances report neither a unit
+    // list nor a host process table.
     var isInfraProc = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
     if (!isInfraProc) {
-      tabs.push({ key: "processes", label: "Processes", html: _assetProcessesTabHTML(a.id) });
-      // Services tab — current-state systemd unit / Windows service inventory
-      // (the unit-centric sibling of Processes). Same infra gate; lazy-loaded on
-      // first click (see _wireAssetServicesTab).
       tabs.push({ key: "services", label: "Services", html: _assetServicesTabHTML(a.id) });
     }
     // Quarantine tab — assets-admin only, shown for any asset that has MACs or is quarantined.
@@ -4056,7 +4054,6 @@ async function openViewModal(id) {
     if (isAdmin()) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
-    if (!isInfraProc) _wireAssetProcessesTab(a);
     if (!isInfraProc) _wireAssetServicesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     if (permAtLeast("alerts", "read")) _loadAssetNotificationsTab(a.id);
@@ -14344,296 +14341,41 @@ var _assetEventsOffset = 0;
 var _assetEventsTotal = 0;
 var _assetEventsLoaded = false;     // lazy-load guard (first tab click)
 
-// ─── Processes tab ─────────────────────────────────────────────────────────
-// Current-state process inventory (one row per program, aggregated by name)
-// with two pin checkboxes: Monitor (per-minute CPU/RAM + logs — Feature C) and
-// Alert (flag for future alerting). Client-side TableSF for sort/filter since
-// the row set is small + fetched in one call. Lazy-loaded on first tab click.
-function _assetProcessesTabHTML(assetId) {
-  // Header select-all checkboxes for the three pin columns. They act on the
-  // CURRENTLY FILTERED row set (TableSF), not the full inventory — filtering
-  // then select-all is the bulk-pin gesture. Stacked under the label so the
-  // narrow columns don't wrap.
-  var canWrite = typeof canManageAssets === "function" && canManageAssets();
-  var disAll = canWrite ? "" : " disabled";
-  function pinTh(width, colId, label, allId, title) {
-    return '<th style="width:' + width + 'px;text-align:center" data-col-id="' + colId + '" data-col-required="true">' +
-      '<span style="display:inline-flex;flex-direction:column;align-items:center;gap:3px">' + label +
-        '<input type="checkbox" id="' + allId + '" title="' + title + '"' + disAll + '>' +
-      '</span></th>';
-  }
-  return '<div class="section-block">' +
-    '<div class="filter-bar" style="justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.5rem">' +
-      '<p class="hint" style="margin:0;max-width:640px">Check <strong>Monitor</strong> to collect CPU/RAM history and logs for a program (sampled once a minute). Check <strong>Alert</strong> to flag it for future alerting/notifications. Check <strong>Map</strong> to discover the program\'s listening ports and connections for the <a href="/appmap.html">Application Map</a>.</p>' +
-      '<button class="btn btn-secondary btn-sm" id="asset-view-proc-refresh">Refresh</button>' +
-    '</div>' +
-    '<div class="table-wrapper table-wrapper-panel-sticky" id="asset-view-proc-wrapper">' +
-      '<table id="asset-view-proc-table">' +
-        '<thead><tr>' +
-          pinTh(64, "monitor", "Monitor", "asset-proc-monitor-all", "Monitor / un-monitor all listed programs (respects the active filter)") +
-          pinTh(54, "alert",   "Alert",   "asset-proc-alert-all",   "Flag / unflag all listed programs for alerting (respects the active filter)") +
-          pinTh(50, "map",     "Map",     "asset-proc-map-all",     "Map / unmap all listed programs on the Application Map (respects the active filter)") +
-          '<th                      data-col-id="name"    data-col-required="true" data-sf-key="name"          data-sf-type="string">Name</th>' +
-          '<th style="width:80px"  data-col-id="instances" data-sf-key="instanceCount" data-sf-type="number">Instances</th>' +
-          '<th style="width:80px"  data-col-id="cpu"       data-sf-key="cpuPct"        data-sf-type="number">CPU %</th>' +
-          '<th style="width:110px" data-col-id="ram"       data-sf-key="memRssBytes"   data-sf-type="number">RAM</th>' +
-          '<th style="width:120px" data-col-id="user"      data-sf-key="username"      data-sf-type="string">User</th>' +
-          '<th                      data-col-id="service"   data-sf-key="serviceUnit"   data-sf-type="string">Service/Unit</th>' +
-        '</tr></thead>' +
-        '<tbody id="asset-view-proc-tbody">' +
-          '<tr><td colspan="9" class="empty-state">Loading…</td></tr>' +
-        '</tbody>' +
-      '</table>' +
-    '</div>' +
-  '</div>';
-}
-
-// Bound the Processes-tab table wrapper to the slide-over body's visible
-// bottom so vertical scrolling happens INSIDE the wrapper — the sticky thead
-// (.table-wrapper-panel-sticky, styles.css) pins to its top edge and the tab
-// strip / hint bar / slide-over footer stay put, mirroring the assets-page
-// sizeStickyTableWrappers() pattern. maxHeight (not height) so short process
-// lists keep a short table. No-op while the tab is hidden (display:none rects
-// are garbage); re-run on every Processes tab click + after each load + on
-// window resize.
-function _sizeAssetProcTableWrapper() {
-  var w = document.getElementById("asset-view-proc-wrapper");
-  var body = document.getElementById("asset-panel-body");
-  if (!w || !body || !w.offsetParent) return;
-  // 18px reserve = .asset-panel-content bottom padding (1rem) + slack so the
-  // slide-over body itself never grows a scrollbar.
-  var h = body.getBoundingClientRect().bottom - w.getBoundingClientRect().top - 18;
-  w.style.maxHeight = Math.max(260, Math.round(h)) + "px";
-}
-window.addEventListener("resize", _sizeAssetProcTableWrapper);
-
-function _wireAssetProcessesTab(asset) {
-  var assetId = asset && asset.id ? asset.id : asset; // tolerate id-or-object
-  var btn = document.querySelector('#asset-view-tabs [data-tab="processes"]');
-  if (!btn) return;
-  var loaded = false;
-  var layoutApplied = false;
-  var sf = null;
-  var rows = [];
-  var configs = {};
-  var monitored = new Set();
-  var alerted = new Set();
-  var mapped = new Set();
-  var lastRendered = []; // currently displayed (filtered/sorted) rows — the select-all scope
-
-  function fmtPct(v) { return v == null ? "—" : Number(v).toFixed(1); }
-
-  // Mirror each pin set's aggregate state onto its header select-all checkbox
-  // (scoped to the displayed rows): checked = all pinned, indeterminate = some.
-  function syncProcAllCbs() {
-    [{ id: "asset-proc-monitor-all", set: monitored },
-     { id: "asset-proc-alert-all",   set: alerted },
-     { id: "asset-proc-map-all",     set: mapped }].forEach(function (h) {
-      var cb = document.getElementById(h.id);
-      if (!cb) return;
-      var on = 0;
-      lastRendered.forEach(function (p) { if (h.set.has(p.name)) on++; });
-      cb.checked = lastRendered.length > 0 && on === lastRendered.length;
-      cb.indeterminate = on > 0 && on < lastRendered.length;
-    });
-  }
-
-  function renderRows(data) {
-    lastRendered = data;
-    syncProcAllCbs();
-    var tbody = document.getElementById("asset-view-proc-tbody");
-    if (!tbody) return;
-    if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No processes reported yet. Processes appear once an agent (or an SNMP/SSH/WinRM poll) reports this host\'s process list.</td></tr>';
-      return;
-    }
-    var canWrite = typeof canManageAssets === "function" && canManageAssets();
-    var disabled = canWrite ? "" : " disabled";
-    tbody.innerHTML = data.map(function (p) {
-      var nm = escapeHtml(p.name);
-      var monChecked = monitored.has(p.name) ? " checked" : "";
-      var altChecked = alerted.has(p.name) ? " checked" : "";
-      var mapChecked = mapped.has(p.name) ? " checked" : "";
-      var ram = (p.memRssBytes != null) ? _fmtBytes(Number(p.memRssBytes)) : "—";
-      return '<tr>' +
-        '<td style="text-align:center"><input type="checkbox" class="asset-proc-monitor-toggle" data-proc-name="' + nm + '"' + monChecked + disabled + '></td>' +
-        '<td style="text-align:center"><input type="checkbox" class="asset-proc-alert-toggle" data-proc-name="' + nm + '"' + altChecked + disabled + '></td>' +
-        '<td style="text-align:center"><input type="checkbox" class="asset-proc-map-toggle" data-proc-name="' + nm + '" title="Discover listening ports + connections for the Application Map"' + mapChecked + disabled + '></td>' +
-        '<td title="' + escapeHtml(p.exePath || "") + '"><a href="#" class="asset-proc-name-link" data-proc-name="' + nm + '">' + nm + '</a></td>' +
-        '<td>' + (p.instanceCount != null ? p.instanceCount : "—") + '</td>' +
-        '<td>' + fmtPct(p.cpuPct) + '</td>' +
-        '<td>' + ram + '</td>' +
-        '<td>' + escapeHtml(p.username || "—") + '</td>' +
-        '<td>' + (p.serviceUnit ? escapeHtml(p.serviceUnit) : '<span style="color:var(--color-text-tertiary)">—</span>') + '</td>' +
-      '</tr>';
-    }).join("");
-  }
-
-  function apply() { renderRows(sf ? sf.apply(rows) : rows); }
-
-  // Persist a pin-set change. `which` selects which array/field to write.
-  async function togglePin(which, name, on) {
-    var set = which === "monitor" ? monitored : which === "map" ? mapped : alerted;
-    var field = which === "monitor" ? "monitoredProcesses" : which === "map" ? "mappedProcesses" : "alertWatchedProcesses";
-    var next = new Set(set);
-    if (on) next.add(name); else next.delete(name);
-    try {
-      var body = {};
-      body[field] = Array.from(next);
-      await api.assets.update(assetId, body);
-      if (which === "monitor") monitored = next; else if (which === "map") mapped = next; else alerted = next;
-      var msg;
-      if (which === "monitor") msg = on ? ("Monitoring " + name + " (CPU/RAM + logs)") : ("Stopped monitoring " + name);
-      else if (which === "map") msg = on ? ("Mapping " + name + " on the Application Map (ports + connections)") : ("Unmapped " + name);
-      else msg = on ? ("Flagged " + name + " for alerting") : ("Unflagged " + name);
-      showToast(msg, "success");
-    } catch (err) {
-      showToast(err && err.message ? err.message : "Failed to update", "error");
-      apply(); // revert the checkbox to the persisted state
-    }
-  }
-
-  // Header select-all — pin/unpin every DISPLAYED (filtered) program in one
-  // PUT. Union-into / subtract-from the persisted set so programs hidden by
-  // an active filter keep their pins.
-  async function toggleAllPins(which, on, cb) {
-    if (!lastRendered.length) { syncProcAllCbs(); return; }
-    var set = which === "monitor" ? monitored : which === "map" ? mapped : alerted;
-    var field = which === "monitor" ? "monitoredProcesses" : which === "map" ? "mappedProcesses" : "alertWatchedProcesses";
-    var next = new Set(set);
-    lastRendered.forEach(function (p) { if (on) next.add(p.name); else next.delete(p.name); });
-    cb.disabled = true;
-    try {
-      var body = {};
-      body[field] = Array.from(next);
-      await api.assets.update(assetId, body);
-      if (which === "monitor") monitored = next; else if (which === "map") mapped = next; else alerted = next;
-      var noun = lastRendered.length + " program" + (lastRendered.length === 1 ? "" : "s");
-      var msg;
-      if (which === "monitor") msg = on ? ("Monitoring " + noun + " (CPU/RAM + logs)") : ("Stopped monitoring " + noun);
-      else if (which === "map") msg = on ? ("Mapping " + noun + " on the Application Map") : ("Unmapped " + noun);
-      else msg = on ? ("Flagged " + noun + " for alerting") : ("Unflagged " + noun);
-      showToast(msg, "success");
-    } catch (err) {
-      showToast(err && err.message ? err.message : "Failed to update", "error");
-    } finally {
-      cb.disabled = false;
-      apply(); // re-render rows to the persisted state + resync header checkboxes
-    }
-  }
-
-  async function load() {
-    var tbody = document.getElementById("asset-view-proc-tbody");
-    try {
-      var resp = await api.assets.processes(assetId);
-      rows = (resp && resp.processes) || [];
-      configs = (resp && resp.configs) || {};
-      monitored = new Set((resp && resp.monitoredProcesses) || []);
-      alerted = new Set((resp && resp.alertWatchedProcesses) || []);
-      mapped = new Set((resp && resp.mappedProcesses) || []);
-      // Order matters: construct TableSF FIRST — it rewrites each data-sf-key
-      // header's innerHTML (sort caret + filter UI), which wipes any resize
-      // handle added earlier. applyTableLayout runs AFTER so its
-      // .sf-resize-handle spans are appended last and survive on EVERY column
-      // (otherwise only the non-sortable Monitor/Alert columns stay resizable).
-      // Both run once; apply()/refresh only swaps the tbody.
-      if (!sf && typeof TableSF !== "undefined") {
-        sf = new TableSF("asset-view-proc-tbody", apply);
-      }
-      if (!layoutApplied && typeof applyTableLayout === "function") {
-        var procTable = document.getElementById("asset-view-proc-table");
-        if (procTable) {
-          applyTableLayout(procTable, "asset-processes", {
-            onScreenshot: function (t) { _screenshotTableEl(t, "Processes"); },
-          });
-          layoutApplied = true;
-        }
-      }
-      apply();
-      _sizeAssetProcTableWrapper();
-    } catch (err) {
-      if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
-    }
-  }
-
-  // Delegated checkbox handler (survives re-render).
-  var tbody = document.getElementById("asset-view-proc-tbody");
-  if (tbody) {
-    tbody.addEventListener("change", function (e) {
-      var cb = e.target;
-      var name = cb && cb.getAttribute ? cb.getAttribute("data-proc-name") : null;
-      if (!name) return;
-      if (cb.classList.contains("asset-proc-monitor-toggle")) togglePin("monitor", name, cb.checked);
-      else if (cb.classList.contains("asset-proc-alert-toggle")) togglePin("alert", name, cb.checked);
-      else if (cb.classList.contains("asset-proc-map-toggle")) togglePin("map", name, cb.checked);
-    });
-    // Name click → per-process detail slide-in (charts + logs + log config).
-    tbody.addEventListener("click", function (e) {
-      var link = e.target.closest ? e.target.closest(".asset-proc-name-link") : null;
-      if (!link) return;
-      e.preventDefault();
-      var name = link.getAttribute("data-proc-name");
-      if (!name) return;
-      var procRow = rows.filter(function (r) { return r.name === name; })[0] || null;
-      openProcessDetailPanel(asset, name, configs[name] || null, procRow, monitored.has(name));
-    });
-  }
-  var refreshBtn = document.getElementById("asset-view-proc-refresh");
-  if (refreshBtn) refreshBtn.addEventListener("click", load);
-
-  [["asset-proc-monitor-all", "monitor"], ["asset-proc-alert-all", "alert"], ["asset-proc-map-all", "map"]].forEach(function (pair) {
-    var cb = document.getElementById(pair[0]);
-    if (cb) cb.addEventListener("change", function () { toggleAllPins(pair[1], cb.checked, cb); });
-  });
-
-  btn.addEventListener("click", function () {
-    // Re-measure on every activation (not just first load): _wireModalTabs'
-    // own click listener has already made the panel visible by the time this
-    // fires, and the hint bar's wrapped height / panel width may have changed
-    // since the last visit.
-    _sizeAssetProcTableWrapper();
-    if (loaded) return;
-    loaded = true;
-    load();
-  });
-}
-
-// ─── Services tab ──────────────────────────────────────────────────────────
-// Current-state systemd unit / Windows service inventory (one row per unit) —
-// the unit-centric sibling of the Processes tab. A service backed by a shared
-// runtime (e.g. a Spring Boot app running as "java") shows up here as itself,
-// and oneshot/exited units with no live process still appear. Two pin columns:
-// Logs (monitoredServices — per-unit journalctl tailing) and Map (mappedServices
-// — Application Map connection attribution). Lazy-loaded on first tab click.
+// ─── Services tab (units + optional processes) ──────────────────────────────
+// Merged current-state inventory: systemd units / Windows services always, and
+// — when the operator ticks "Include processes" — the per-program process
+// inventory folded into the same table. A service backed by a shared runtime
+// (e.g. a Spring Boot app running as "java") shows up as its unit; the "java"
+// process row appears only with processes included. Three pin columns, each
+// applicable to one row kind (the other kind shows a muted dash):
+//   Monitor — processes (monitoredProcesses: per-minute CPU/RAM history + logs)
+//   Logs    — services  (monitoredServices: per-unit journalctl tailing)
+//   Map     — both       (mappedProcesses / mappedServices: Application Map)
+// (Process alerting moved to Automations, so there's no Alert column.)
+// Client-side TableSF for sort/filter; lazy-loaded on first tab click.
 function _assetServicesTabHTML() {
-  var canWrite = typeof canManageAssets === "function" && canManageAssets();
-  var disAll = canWrite ? "" : " disabled";
-  function pinTh(width, colId, label, allId, title) {
-    return '<th style="width:' + width + 'px;text-align:center" data-col-id="' + colId + '" data-col-required="true">' +
-      '<span style="display:inline-flex;flex-direction:column;align-items:center;gap:3px">' + label +
-        '<input type="checkbox" id="' + allId + '" title="' + title + '"' + disAll + '>' +
-      '</span></th>';
-  }
   return '<div class="section-block">' +
     '<div class="filter-bar" style="justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.5rem">' +
-      '<p class="hint" style="margin:0;max-width:640px">systemd units (Linux) and Windows services reported by the Polaris Agent. Check <strong>Logs</strong> to tail a unit\'s journal, <strong>Map</strong> to attribute its connections on the <a href="/appmap.html">Application Map</a>. Click a unit to control it (start/stop/restart).</p>' +
-      '<button class="btn btn-secondary btn-sm" id="asset-view-svc-refresh">Refresh</button>' +
+      '<p class="hint" style="margin:0;max-width:600px">systemd units (Linux) and Windows services reported by the Polaris Agent. Check <strong>Logs</strong> to tail a unit\'s journal, <strong>Monitor</strong> to collect a program\'s CPU/RAM history + logs, <strong>Map</strong> to attribute connections on the <a href="/appmap.html">Application Map</a>. Click a row to open it.</p>' +
+      '<div style="display:flex;align-items:center;gap:0.75rem;flex:none">' +
+        '<label style="display:flex;align-items:center;gap:5px;font-size:0.8rem;white-space:nowrap"><input type="checkbox" id="asset-view-svc-include-proc">Include processes</label>' +
+        '<button class="btn btn-secondary btn-sm" id="asset-view-svc-refresh">Refresh</button>' +
+      '</div>' +
     '</div>' +
     '<div class="table-wrapper table-wrapper-panel-sticky" id="asset-view-svc-wrapper">' +
       '<table id="asset-view-svc-table">' +
         '<thead><tr>' +
-          pinTh(50, "logs", "Logs", "asset-svc-logs-all", "Tail / stop tailing the journal for all listed units (respects the active filter)") +
-          pinTh(50, "map",  "Map",  "asset-svc-map-all",  "Map / unmap all listed units on the Application Map (respects the active filter)") +
-          '<th                      data-col-id="unit"     data-col-required="true" data-sf-key="unit"        data-sf-type="string">Unit</th>' +
-          '<th                      data-col-id="name"     data-sf-key="displayName"  data-sf-type="string">Name</th>' +
-          '<th style="width:110px" data-col-id="state"    data-sf-key="activeState"  data-sf-type="string">State</th>' +
-          '<th style="width:90px"  data-col-id="sub"      data-sf-key="subState"     data-sf-type="string">Sub</th>' +
-          '<th style="width:90px"  data-col-id="enabled"  data-sf-key="enabledState" data-sf-type="string">Enabled</th>' +
-          '<th style="width:90px"  data-col-id="pid"      data-sf-key="mainProcess"  data-sf-type="string">Main PID</th>' +
-          '<th style="width:100px" data-col-id="mem"      data-sf-key="memBytes"     data-sf-type="number">Memory</th>' +
+          '<th style="width:64px;text-align:center" data-col-id="monitor" data-col-required="true">Monitor</th>' +
+          '<th style="width:50px;text-align:center" data-col-id="logs"    data-col-required="true">Logs</th>' +
+          '<th style="width:50px;text-align:center" data-col-id="map"     data-col-required="true">Map</th>' +
+          '<th                      data-col-id="name"  data-col-required="true" data-sf-key="sortName"  data-sf-type="string">Name</th>' +
+          '<th style="width:90px"  data-col-id="type"  data-sf-key="typeLabel" data-sf-type="string">Type</th>' +
+          '<th style="width:120px" data-col-id="state" data-sf-key="stateSort" data-sf-type="string">State</th>' +
+          '<th style="width:80px"  data-col-id="cpu"   data-sf-key="cpuPct"    data-sf-type="number">CPU %</th>' +
+          '<th style="width:100px" data-col-id="mem"   data-sf-key="memSort"   data-sf-type="number">Memory</th>' +
         '</tr></thead>' +
         '<tbody id="asset-view-svc-tbody">' +
-          '<tr><td colspan="9" class="empty-state">Loading…</td></tr>' +
+          '<tr><td colspan="8" class="empty-state">Loading…</td></tr>' +
         '</tbody>' +
       '</table>' +
     '</div>' +
@@ -14666,61 +14408,106 @@ function _wireAssetServicesTab(asset) {
   var assetId = asset && asset.id ? asset.id : asset; // tolerate id-or-object
   var btn = document.querySelector('#asset-view-tabs [data-tab="services"]');
   if (!btn) return;
-  var loaded = false;
+  var loaded = false;        // services loaded (first tab activation)
+  var procLoaded = false;    // processes fetched at least once
+  var includeProc = false;   // "Include processes" checkbox state
   var layoutApplied = false;
   var sf = null;
-  var rows = [];
-  var monitored = new Set(); // monitoredServices (Logs)
-  var mapped = new Set();    // mappedServices (Map)
-  var lastRendered = [];
+  var svcRows = [];
+  var procRows = [];
+  var procConfigs = {};
+  var svcMonitored = new Set(); // monitoredServices (Logs)
+  var svcMapped = new Set();    // mappedServices (Map)
+  var procMonitored = new Set(); // monitoredProcesses (Monitor)
+  var procMapped = new Set();    // mappedProcesses (Map)
 
-  function syncSvcAllCbs() {
-    [{ id: "asset-svc-logs-all", set: monitored },
-     { id: "asset-svc-map-all",  set: mapped }].forEach(function (h) {
-      var cb = document.getElementById(h.id);
-      if (!cb) return;
-      var on = 0;
-      lastRendered.forEach(function (s) { if (h.set.has(s.unit)) on++; });
-      cb.checked = lastRendered.length > 0 && on === lastRendered.length;
-      cb.indeterminate = on > 0 && on < lastRendered.length;
+  function fmtPct(v) { return v == null ? "—" : Number(v).toFixed(1); }
+  var MUTED = '<span style="color:var(--color-text-tertiary)">—</span>';
+
+  // Unified row model — services first, then (when included) processes. Each
+  // carries `kind` + the raw row + the sortable columns TableSF reads by key.
+  function combinedRows() {
+    var out = svcRows.map(function (s) {
+      return {
+        kind: "service", raw: s,
+        sortName: s.unit || "",
+        typeLabel: "Service",
+        stateSort: s.activeState || "",
+        cpuPct: null,
+        memSort: (s.memBytes != null ? Number(s.memBytes) : null),
+      };
     });
+    if (includeProc) {
+      out = out.concat(procRows.map(function (p) {
+        return {
+          kind: "process", raw: p,
+          sortName: p.name || "",
+          typeLabel: "Process",
+          stateSort: "",
+          cpuPct: (p.cpuPct != null ? Number(p.cpuPct) : null),
+          memSort: (p.memRssBytes != null ? Number(p.memRssBytes) : null),
+        };
+      }));
+    }
+    return out;
   }
 
   function renderRows(data) {
-    lastRendered = data;
-    syncSvcAllCbs();
     var tbody = document.getElementById("asset-view-svc-tbody");
     if (!tbody) return;
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No services reported yet. Services appear once a Polaris Agent reports this host\'s unit list.</td></tr>';
+      var empty = includeProc
+        ? "No services or processes reported yet. They appear once a Polaris Agent (or an SNMP/SSH/WinRM poll) reports this host."
+        : "No services reported yet. Services appear once a Polaris Agent reports this host\'s unit list.";
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">' + empty + '</td></tr>';
       return;
     }
     var canWrite = typeof canManageAssets === "function" && canManageAssets();
     var disabled = canWrite ? "" : " disabled";
-    tbody.innerHTML = data.map(function (s) {
-      var u = escapeHtml(s.unit);
-      var logsChecked = monitored.has(s.unit) ? " checked" : "";
-      var mapChecked = mapped.has(s.unit) ? " checked" : "";
-      var mem = (s.memBytes != null) ? _fmtBytes(Number(s.memBytes)) : "—";
-      var pid = s.mainPid ? (escapeHtml(s.mainProcess || "") + " (" + s.mainPid + ")") : "—";
+    tbody.innerHTML = data.map(function (r) {
+      if (r.kind === "service") {
+        var s = r.raw;
+        var u = escapeHtml(s.unit);
+        var logsChecked = svcMonitored.has(s.unit) ? " checked" : "";
+        var mapChecked = svcMapped.has(s.unit) ? " checked" : "";
+        var mem = (s.memBytes != null) ? _fmtBytes(Number(s.memBytes)) : "—";
+        return '<tr>' +
+          '<td style="text-align:center">' + MUTED + '</td>' +
+          '<td style="text-align:center"><input type="checkbox" class="asset-svc-logs-toggle" data-svc-unit="' + u + '" title="Tail this unit\'s journal"' + logsChecked + disabled + '></td>' +
+          '<td style="text-align:center"><input type="checkbox" class="asset-svc-map-toggle" data-svc-unit="' + u + '" title="Attribute this unit\'s connections on the Application Map"' + mapChecked + disabled + '></td>' +
+          '<td title="' + escapeHtml(s.displayName || "") + '"><a href="#" class="asset-svc-unit-link" data-svc-unit="' + u + '">' + u + '</a></td>' +
+          '<td>Service</td>' +
+          '<td>' + _svcStatePill(s.activeState) + '</td>' +
+          '<td>—</td>' +
+          '<td>' + mem + '</td>' +
+        '</tr>';
+      }
+      var p = r.raw;
+      var nm = escapeHtml(p.name);
+      var monChecked = procMonitored.has(p.name) ? " checked" : "";
+      var pMapChecked = procMapped.has(p.name) ? " checked" : "";
+      var ram = (p.memRssBytes != null) ? _fmtBytes(Number(p.memRssBytes)) : "—";
       return '<tr>' +
-        '<td style="text-align:center"><input type="checkbox" class="asset-svc-logs-toggle" data-svc-unit="' + u + '"' + logsChecked + disabled + '></td>' +
-        '<td style="text-align:center"><input type="checkbox" class="asset-svc-map-toggle" data-svc-unit="' + u + '" title="Attribute this unit\'s connections on the Application Map"' + mapChecked + disabled + '></td>' +
-        '<td><a href="#" class="asset-svc-unit-link" data-svc-unit="' + u + '">' + u + '</a></td>' +
-        '<td title="' + escapeHtml(s.displayName || "") + '">' + escapeHtml(s.displayName || "—") + '</td>' +
-        '<td>' + _svcStatePill(s.activeState) + '</td>' +
-        '<td>' + escapeHtml(s.subState || "—") + '</td>' +
-        '<td>' + escapeHtml(s.enabledState || "—") + '</td>' +
-        '<td title="PID ' + (s.mainPid || "") + '">' + pid + '</td>' +
-        '<td>' + mem + '</td>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-proc-monitor-toggle" data-proc-name="' + nm + '" title="Collect CPU/RAM history + logs"' + monChecked + disabled + '></td>' +
+        '<td style="text-align:center">' + MUTED + '</td>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-proc-map-toggle" data-proc-name="' + nm + '" title="Discover listening ports + connections for the Application Map"' + pMapChecked + disabled + '></td>' +
+        '<td title="' + escapeHtml(p.exePath || "") + '"><a href="#" class="asset-proc-name-link" data-proc-name="' + nm + '">' + nm + '</a></td>' +
+        '<td><span style="color:var(--color-text-secondary)">Process</span></td>' +
+        '<td>—</td>' +
+        '<td>' + fmtPct(p.cpuPct) + '</td>' +
+        '<td>' + ram + '</td>' +
       '</tr>';
     }).join("");
   }
 
-  function apply() { renderRows(sf ? sf.apply(rows) : rows); }
+  function apply() {
+    var rows = combinedRows();
+    renderRows(sf ? sf.apply(rows) : rows);
+  }
 
-  async function togglePin(which, unit, on) {
-    var set = which === "logs" ? monitored : mapped;
+  // Persist a pin-set change for a service unit (Logs / Map).
+  async function toggleSvcPin(which, unit, on) {
+    var set = which === "logs" ? svcMonitored : svcMapped;
     var field = which === "logs" ? "monitoredServices" : "mappedServices";
     var next = new Set(set);
     if (on) next.add(unit); else next.delete(unit);
@@ -14728,100 +14515,153 @@ function _wireAssetServicesTab(asset) {
       var body = {};
       body[field] = Array.from(next);
       await api.assets.update(assetId, body);
-      if (which === "logs") monitored = next; else mapped = next;
+      if (which === "logs") svcMonitored = next; else svcMapped = next;
       var msg = which === "logs"
         ? (on ? ("Tailing journal for " + unit) : ("Stopped tailing " + unit))
         : (on ? ("Mapping " + unit + " on the Application Map") : ("Unmapped " + unit));
       showToast(msg, "success");
     } catch (err) {
       showToast(err && err.message ? err.message : "Failed to update", "error");
-      apply();
+      apply(); // revert the checkbox to the persisted state
     }
   }
 
-  async function toggleAllPins(which, on, cb) {
-    if (!lastRendered.length) { syncSvcAllCbs(); return; }
-    var set = which === "logs" ? monitored : mapped;
-    var field = which === "logs" ? "monitoredServices" : "mappedServices";
+  // Persist a pin-set change for a process program (Monitor / Map).
+  async function toggleProcPin(which, name, on) {
+    var set = which === "monitor" ? procMonitored : procMapped;
+    var field = which === "monitor" ? "monitoredProcesses" : "mappedProcesses";
     var next = new Set(set);
-    lastRendered.forEach(function (s) { if (on) next.add(s.unit); else next.delete(s.unit); });
-    cb.disabled = true;
+    if (on) next.add(name); else next.delete(name);
     try {
       var body = {};
       body[field] = Array.from(next);
       await api.assets.update(assetId, body);
-      if (which === "logs") monitored = next; else mapped = next;
-      var noun = lastRendered.length + " unit" + (lastRendered.length === 1 ? "" : "s");
-      var msg = which === "logs"
-        ? (on ? ("Tailing journal for " + noun) : ("Stopped tailing " + noun))
-        : (on ? ("Mapping " + noun + " on the Application Map") : ("Unmapped " + noun));
+      if (which === "monitor") procMonitored = next; else procMapped = next;
+      var msg = which === "monitor"
+        ? (on ? ("Monitoring " + name + " (CPU/RAM + logs)") : ("Stopped monitoring " + name))
+        : (on ? ("Mapping " + name + " on the Application Map (ports + connections)") : ("Unmapped " + name));
       showToast(msg, "success");
     } catch (err) {
       showToast(err && err.message ? err.message : "Failed to update", "error");
-    } finally {
-      cb.disabled = false;
       apply();
     }
   }
 
-  async function load() {
+  async function loadServices() {
+    var resp = await api.assets.services(assetId);
+    svcRows = (resp && resp.services) || [];
+    svcMonitored = new Set((resp && resp.monitoredServices) || []);
+    svcMapped = new Set((resp && resp.mappedServices) || []);
+  }
+
+  async function loadProcesses() {
+    var resp = await api.assets.processes(assetId);
+    procRows = (resp && resp.processes) || [];
+    procConfigs = (resp && resp.configs) || {};
+    procMonitored = new Set((resp && resp.monitoredProcesses) || []);
+    procMapped = new Set((resp && resp.mappedProcesses) || []);
+    procLoaded = true;
+  }
+
+  // Order matters: construct TableSF FIRST — it rewrites each data-sf-key
+  // header's innerHTML (sort caret + filter UI), which wipes any resize handle
+  // added earlier. applyTableLayout runs AFTER so its .sf-resize-handle spans
+  // are appended last and survive on every sortable column. Both run once.
+  function ensureTableWiring() {
+    if (!sf && typeof TableSF !== "undefined") {
+      sf = new TableSF("asset-view-svc-tbody", apply);
+    }
+    if (!layoutApplied && typeof applyTableLayout === "function") {
+      var svcTable = document.getElementById("asset-view-svc-table");
+      if (svcTable) {
+        applyTableLayout(svcTable, "asset-services-merged", {
+          onScreenshot: function (t) { _screenshotTableEl(t, "Services"); },
+        });
+        layoutApplied = true;
+      }
+    }
+  }
+
+  async function reload() {
     var tbody = document.getElementById("asset-view-svc-tbody");
     try {
-      var resp = await api.assets.services(assetId);
-      rows = (resp && resp.services) || [];
-      monitored = new Set((resp && resp.monitoredServices) || []);
-      mapped = new Set((resp && resp.mappedServices) || []);
-      if (!sf && typeof TableSF !== "undefined") {
-        sf = new TableSF("asset-view-svc-tbody", apply);
-      }
-      if (!layoutApplied && typeof applyTableLayout === "function") {
-        var svcTable = document.getElementById("asset-view-svc-table");
-        if (svcTable) {
-          applyTableLayout(svcTable, "asset-services", {
-            onScreenshot: function (t) { _screenshotTableEl(t, "Services"); },
-          });
-          layoutApplied = true;
-        }
-      }
+      await loadServices();
+      if (includeProc) { try { await loadProcesses(); } catch (e) { /* processes are optional; keep services */ } }
+      ensureTableWiring();
       apply();
       _sizeAssetSvcTableWrapper();
     } catch (err) {
-      if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
+      if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
     }
   }
 
+  // Delegated checkbox handler (survives re-render) — dispatches on the pin
+  // class + which row kind the checkbox belongs to.
   var tbody = document.getElementById("asset-view-svc-tbody");
   if (tbody) {
     tbody.addEventListener("change", function (e) {
       var cb = e.target;
-      var unit = cb && cb.getAttribute ? cb.getAttribute("data-svc-unit") : null;
-      if (!unit) return;
-      if (cb.classList.contains("asset-svc-logs-toggle")) togglePin("logs", unit, cb.checked);
-      else if (cb.classList.contains("asset-svc-map-toggle")) togglePin("map", unit, cb.checked);
+      if (!cb || !cb.getAttribute) return;
+      var unit = cb.getAttribute("data-svc-unit");
+      var name = cb.getAttribute("data-proc-name");
+      if (cb.classList.contains("asset-svc-logs-toggle")) toggleSvcPin("logs", unit, cb.checked);
+      else if (cb.classList.contains("asset-svc-map-toggle")) toggleSvcPin("map", unit, cb.checked);
+      else if (cb.classList.contains("asset-proc-monitor-toggle")) toggleProcPin("monitor", name, cb.checked);
+      else if (cb.classList.contains("asset-proc-map-toggle")) toggleProcPin("map", name, cb.checked);
     });
+    // Row name click → the matching detail slide-in (service control panel /
+    // per-process charts + logs).
     tbody.addEventListener("click", function (e) {
-      var link = e.target.closest ? e.target.closest(".asset-svc-unit-link") : null;
-      if (!link) return;
-      e.preventDefault();
-      var unit = link.getAttribute("data-svc-unit");
-      if (!unit) return;
-      var svcRow = rows.filter(function (r) { return r.unit === unit; })[0] || null;
-      openServiceDetailPanel(asset, svcRow);
+      var svcLink = e.target.closest ? e.target.closest(".asset-svc-unit-link") : null;
+      if (svcLink) {
+        e.preventDefault();
+        var unit = svcLink.getAttribute("data-svc-unit");
+        if (!unit) return;
+        var svcRow = svcRows.filter(function (r) { return r.unit === unit; })[0] || null;
+        openServiceDetailPanel(asset, svcRow);
+        return;
+      }
+      var procLink = e.target.closest ? e.target.closest(".asset-proc-name-link") : null;
+      if (procLink) {
+        e.preventDefault();
+        var name = procLink.getAttribute("data-proc-name");
+        if (!name) return;
+        var procRow = procRows.filter(function (r) { return r.name === name; })[0] || null;
+        openProcessDetailPanel(asset, name, procConfigs[name] || null, procRow, procMonitored.has(name));
+      }
     });
   }
   var refreshBtn = document.getElementById("asset-view-svc-refresh");
-  if (refreshBtn) refreshBtn.addEventListener("click", load);
+  if (refreshBtn) refreshBtn.addEventListener("click", function () { reload(); });
 
-  [["asset-svc-logs-all", "logs"], ["asset-svc-map-all", "map"]].forEach(function (pair) {
-    var cb = document.getElementById(pair[0]);
-    if (cb) cb.addEventListener("change", function () { toggleAllPins(pair[1], cb.checked, cb); });
-  });
+  // "Include processes" — fold the process inventory into the table. Lazy: the
+  // /processes fetch fires only the first time it's ticked, then re-renders.
+  var includeCb = document.getElementById("asset-view-svc-include-proc");
+  if (includeCb) {
+    includeCb.addEventListener("change", async function () {
+      includeProc = includeCb.checked;
+      if (includeProc && !procLoaded) {
+        includeCb.disabled = true;
+        try {
+          await loadProcesses();
+        } catch (err) {
+          showToast(err && err.message ? err.message : "Failed to load processes", "error");
+          includeProc = false;
+          includeCb.checked = false;
+        } finally {
+          includeCb.disabled = false;
+        }
+      }
+      apply();
+      _sizeAssetSvcTableWrapper();
+    });
+  }
 
   btn.addEventListener("click", function () {
     _sizeAssetSvcTableWrapper();
     if (loaded) return;
     loaded = true;
-    load();
+    reload();
   });
 }
 
