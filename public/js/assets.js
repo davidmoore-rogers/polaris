@@ -404,7 +404,6 @@ var ASSET_TYPE_LABELS = {
   printer: "Printer",
   access_point: "AP",
   other: "Other",
-  virtual_machine: "Virtual Machine",
   hypervisor: "Hypervisor",
 };
 
@@ -5853,7 +5852,7 @@ function _renderInterfacesTable(container, si, asset) {
           showToast(err.message || "Failed to update", "error");
         } finally {
           cb.disabled = false;
-          syncStorageAllCb();
+          syncIfaceAllCb();
         }
       });
     });
@@ -6045,7 +6044,7 @@ function _renderStorageTable(container, si, asset) {
           showToast(err.message || "Failed to update", "error");
         } finally {
           cb.disabled = false;
-          syncIfaceAllCb();
+          syncStorageAllCb();
         }
       });
     });
