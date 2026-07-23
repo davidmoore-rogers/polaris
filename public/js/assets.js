@@ -3956,6 +3956,10 @@ async function openViewModal(id) {
     var isInfraProc = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
     if (!isInfraProc) {
       tabs.push({ key: "processes", label: "Processes", html: _assetProcessesTabHTML(a.id) });
+      // Services tab — current-state systemd unit / Windows service inventory
+      // (the unit-centric sibling of Processes). Same infra gate; lazy-loaded on
+      // first click (see _wireAssetServicesTab).
+      tabs.push({ key: "services", label: "Services", html: _assetServicesTabHTML(a.id) });
     }
     // Quarantine tab — assets-admin only, shown for any asset that has MACs or is quarantined.
     // Infrastructure assets (firewall/switch/access_point) only get the tab if they're
@@ -4053,6 +4057,7 @@ async function openViewModal(id) {
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
     if (!isInfraProc) _wireAssetProcessesTab(a);
+    if (!isInfraProc) _wireAssetServicesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     if (permAtLeast("alerts", "read")) _loadAssetNotificationsTab(a.id);
     // Mount the dependency tree into its placeholder div on the General tab.
@@ -14591,6 +14596,307 @@ function _wireAssetProcessesTab(asset) {
     loaded = true;
     load();
   });
+}
+
+// ─── Services tab ──────────────────────────────────────────────────────────
+// Current-state systemd unit / Windows service inventory (one row per unit) —
+// the unit-centric sibling of the Processes tab. A service backed by a shared
+// runtime (e.g. a Spring Boot app running as "java") shows up here as itself,
+// and oneshot/exited units with no live process still appear. Two pin columns:
+// Logs (monitoredServices — per-unit journalctl tailing) and Map (mappedServices
+// — Application Map connection attribution). Lazy-loaded on first tab click.
+function _assetServicesTabHTML() {
+  var canWrite = typeof canManageAssets === "function" && canManageAssets();
+  var disAll = canWrite ? "" : " disabled";
+  function pinTh(width, colId, label, allId, title) {
+    return '<th style="width:' + width + 'px;text-align:center" data-col-id="' + colId + '" data-col-required="true">' +
+      '<span style="display:inline-flex;flex-direction:column;align-items:center;gap:3px">' + label +
+        '<input type="checkbox" id="' + allId + '" title="' + title + '"' + disAll + '>' +
+      '</span></th>';
+  }
+  return '<div class="section-block">' +
+    '<div class="filter-bar" style="justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.5rem">' +
+      '<p class="hint" style="margin:0;max-width:640px">systemd units (Linux) and Windows services reported by the Polaris Agent. Check <strong>Logs</strong> to tail a unit\'s journal, <strong>Map</strong> to attribute its connections on the <a href="/appmap.html">Application Map</a>. Click a unit to control it (start/stop/restart).</p>' +
+      '<button class="btn btn-secondary btn-sm" id="asset-view-svc-refresh">Refresh</button>' +
+    '</div>' +
+    '<div class="table-wrapper table-wrapper-panel-sticky" id="asset-view-svc-wrapper">' +
+      '<table id="asset-view-svc-table">' +
+        '<thead><tr>' +
+          pinTh(50, "logs", "Logs", "asset-svc-logs-all", "Tail / stop tailing the journal for all listed units (respects the active filter)") +
+          pinTh(50, "map",  "Map",  "asset-svc-map-all",  "Map / unmap all listed units on the Application Map (respects the active filter)") +
+          '<th                      data-col-id="unit"     data-col-required="true" data-sf-key="unit"        data-sf-type="string">Unit</th>' +
+          '<th                      data-col-id="name"     data-sf-key="displayName"  data-sf-type="string">Name</th>' +
+          '<th style="width:110px" data-col-id="state"    data-sf-key="activeState"  data-sf-type="string">State</th>' +
+          '<th style="width:90px"  data-col-id="sub"      data-sf-key="subState"     data-sf-type="string">Sub</th>' +
+          '<th style="width:90px"  data-col-id="enabled"  data-sf-key="enabledState" data-sf-type="string">Enabled</th>' +
+          '<th style="width:90px"  data-col-id="pid"      data-sf-key="mainProcess"  data-sf-type="string">Main PID</th>' +
+          '<th style="width:100px" data-col-id="mem"      data-sf-key="memBytes"     data-sf-type="number">Memory</th>' +
+        '</tr></thead>' +
+        '<tbody id="asset-view-svc-tbody">' +
+          '<tr><td colspan="9" class="empty-state">Loading…</td></tr>' +
+        '</tbody>' +
+      '</table>' +
+    '</div>' +
+  '</div>';
+}
+
+// Colored state pill — active/running green, failed red, activating/deactivating
+// amber, everything else (inactive/stopped/dead) muted grey.
+function _svcStatePill(activeState) {
+  var s = (activeState || "").toLowerCase();
+  var color = "var(--color-text-tertiary)";
+  if (s === "active" || s === "running") color = "var(--color-success)";
+  else if (s === "failed") color = "var(--color-danger)";
+  else if (s === "activating" || s === "deactivating" || s === "reloading") color = "var(--color-warning)";
+  var label = activeState ? escapeHtml(activeState) : "—";
+  return '<span style="display:inline-flex;align-items:center;gap:5px">' +
+    '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';flex:none"></span>' + label + '</span>';
+}
+
+function _sizeAssetSvcTableWrapper() {
+  var w = document.getElementById("asset-view-svc-wrapper");
+  var body = document.getElementById("asset-panel-body");
+  if (!w || !body || !w.offsetParent) return;
+  var h = body.getBoundingClientRect().bottom - w.getBoundingClientRect().top - 18;
+  w.style.maxHeight = Math.max(260, Math.round(h)) + "px";
+}
+window.addEventListener("resize", _sizeAssetSvcTableWrapper);
+
+function _wireAssetServicesTab(asset) {
+  var assetId = asset && asset.id ? asset.id : asset; // tolerate id-or-object
+  var btn = document.querySelector('#asset-view-tabs [data-tab="services"]');
+  if (!btn) return;
+  var loaded = false;
+  var layoutApplied = false;
+  var sf = null;
+  var rows = [];
+  var monitored = new Set(); // monitoredServices (Logs)
+  var mapped = new Set();    // mappedServices (Map)
+  var lastRendered = [];
+
+  function syncSvcAllCbs() {
+    [{ id: "asset-svc-logs-all", set: monitored },
+     { id: "asset-svc-map-all",  set: mapped }].forEach(function (h) {
+      var cb = document.getElementById(h.id);
+      if (!cb) return;
+      var on = 0;
+      lastRendered.forEach(function (s) { if (h.set.has(s.unit)) on++; });
+      cb.checked = lastRendered.length > 0 && on === lastRendered.length;
+      cb.indeterminate = on > 0 && on < lastRendered.length;
+    });
+  }
+
+  function renderRows(data) {
+    lastRendered = data;
+    syncSvcAllCbs();
+    var tbody = document.getElementById("asset-view-svc-tbody");
+    if (!tbody) return;
+    if (!data.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No services reported yet. Services appear once a Polaris Agent reports this host\'s unit list.</td></tr>';
+      return;
+    }
+    var canWrite = typeof canManageAssets === "function" && canManageAssets();
+    var disabled = canWrite ? "" : " disabled";
+    tbody.innerHTML = data.map(function (s) {
+      var u = escapeHtml(s.unit);
+      var logsChecked = monitored.has(s.unit) ? " checked" : "";
+      var mapChecked = mapped.has(s.unit) ? " checked" : "";
+      var mem = (s.memBytes != null) ? _fmtBytes(Number(s.memBytes)) : "—";
+      var pid = s.mainPid ? (escapeHtml(s.mainProcess || "") + " (" + s.mainPid + ")") : "—";
+      return '<tr>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-svc-logs-toggle" data-svc-unit="' + u + '"' + logsChecked + disabled + '></td>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-svc-map-toggle" data-svc-unit="' + u + '" title="Attribute this unit\'s connections on the Application Map"' + mapChecked + disabled + '></td>' +
+        '<td><a href="#" class="asset-svc-unit-link" data-svc-unit="' + u + '">' + u + '</a></td>' +
+        '<td title="' + escapeHtml(s.displayName || "") + '">' + escapeHtml(s.displayName || "—") + '</td>' +
+        '<td>' + _svcStatePill(s.activeState) + '</td>' +
+        '<td>' + escapeHtml(s.subState || "—") + '</td>' +
+        '<td>' + escapeHtml(s.enabledState || "—") + '</td>' +
+        '<td title="PID ' + (s.mainPid || "") + '">' + pid + '</td>' +
+        '<td>' + mem + '</td>' +
+      '</tr>';
+    }).join("");
+  }
+
+  function apply() { renderRows(sf ? sf.apply(rows) : rows); }
+
+  async function togglePin(which, unit, on) {
+    var set = which === "logs" ? monitored : mapped;
+    var field = which === "logs" ? "monitoredServices" : "mappedServices";
+    var next = new Set(set);
+    if (on) next.add(unit); else next.delete(unit);
+    try {
+      var body = {};
+      body[field] = Array.from(next);
+      await api.assets.update(assetId, body);
+      if (which === "logs") monitored = next; else mapped = next;
+      var msg = which === "logs"
+        ? (on ? ("Tailing journal for " + unit) : ("Stopped tailing " + unit))
+        : (on ? ("Mapping " + unit + " on the Application Map") : ("Unmapped " + unit));
+      showToast(msg, "success");
+    } catch (err) {
+      showToast(err && err.message ? err.message : "Failed to update", "error");
+      apply();
+    }
+  }
+
+  async function toggleAllPins(which, on, cb) {
+    if (!lastRendered.length) { syncSvcAllCbs(); return; }
+    var set = which === "logs" ? monitored : mapped;
+    var field = which === "logs" ? "monitoredServices" : "mappedServices";
+    var next = new Set(set);
+    lastRendered.forEach(function (s) { if (on) next.add(s.unit); else next.delete(s.unit); });
+    cb.disabled = true;
+    try {
+      var body = {};
+      body[field] = Array.from(next);
+      await api.assets.update(assetId, body);
+      if (which === "logs") monitored = next; else mapped = next;
+      var noun = lastRendered.length + " unit" + (lastRendered.length === 1 ? "" : "s");
+      var msg = which === "logs"
+        ? (on ? ("Tailing journal for " + noun) : ("Stopped tailing " + noun))
+        : (on ? ("Mapping " + noun + " on the Application Map") : ("Unmapped " + noun));
+      showToast(msg, "success");
+    } catch (err) {
+      showToast(err && err.message ? err.message : "Failed to update", "error");
+    } finally {
+      cb.disabled = false;
+      apply();
+    }
+  }
+
+  async function load() {
+    var tbody = document.getElementById("asset-view-svc-tbody");
+    try {
+      var resp = await api.assets.services(assetId);
+      rows = (resp && resp.services) || [];
+      monitored = new Set((resp && resp.monitoredServices) || []);
+      mapped = new Set((resp && resp.mappedServices) || []);
+      if (!sf && typeof TableSF !== "undefined") {
+        sf = new TableSF("asset-view-svc-tbody", apply);
+      }
+      if (!layoutApplied && typeof applyTableLayout === "function") {
+        var svcTable = document.getElementById("asset-view-svc-table");
+        if (svcTable) {
+          applyTableLayout(svcTable, "asset-services", {
+            onScreenshot: function (t) { _screenshotTableEl(t, "Services"); },
+          });
+          layoutApplied = true;
+        }
+      }
+      apply();
+      _sizeAssetSvcTableWrapper();
+    } catch (err) {
+      if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
+    }
+  }
+
+  var tbody = document.getElementById("asset-view-svc-tbody");
+  if (tbody) {
+    tbody.addEventListener("change", function (e) {
+      var cb = e.target;
+      var unit = cb && cb.getAttribute ? cb.getAttribute("data-svc-unit") : null;
+      if (!unit) return;
+      if (cb.classList.contains("asset-svc-logs-toggle")) togglePin("logs", unit, cb.checked);
+      else if (cb.classList.contains("asset-svc-map-toggle")) togglePin("map", unit, cb.checked);
+    });
+    tbody.addEventListener("click", function (e) {
+      var link = e.target.closest ? e.target.closest(".asset-svc-unit-link") : null;
+      if (!link) return;
+      e.preventDefault();
+      var unit = link.getAttribute("data-svc-unit");
+      if (!unit) return;
+      var svcRow = rows.filter(function (r) { return r.unit === unit; })[0] || null;
+      openServiceDetailPanel(asset, svcRow);
+    });
+  }
+  var refreshBtn = document.getElementById("asset-view-svc-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", load);
+
+  [["asset-svc-logs-all", "logs"], ["asset-svc-map-all", "map"]].forEach(function (pair) {
+    var cb = document.getElementById(pair[0]);
+    if (cb) cb.addEventListener("change", function () { toggleAllPins(pair[1], cb.checked, cb); });
+  });
+
+  btn.addEventListener("click", function () {
+    _sizeAssetSvcTableWrapper();
+    if (loaded) return;
+    loaded = true;
+    load();
+  });
+}
+
+// Per-service detail slide-in — reuses the process detail nested slide-over
+// shell. Phase 1: unit metadata + start/stop/restart control. (journalctl log
+// viewer + ports/connections land in later phases.)
+function openServiceDetailPanel(asset, svc) {
+  if (!asset || !svc) return;
+  _ensureProcPanelDOM();
+  var titleEl = document.getElementById("proc-panel-title");
+  var metaEl  = document.getElementById("proc-panel-meta");
+  var bodyEl  = document.getElementById("proc-panel-body");
+  var footerEl = document.getElementById("proc-panel-footer");
+  titleEl.textContent = "Service — " + svc.unit;
+  metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
+  footerEl.innerHTML = '<span style="flex:1"></span><button class="btn btn-sm btn-secondary" id="btn-proc-panel-close-btn">Close</button>';
+  requestAnimationFrame(function () { document.getElementById("proc-panel-overlay").classList.add("open"); });
+  document.getElementById("btn-proc-panel-close-btn").addEventListener("click", _closeProcPanel);
+
+  var canControl = !!(svc.controllable && permAtLeast("processControl", "write"));
+  var ctlButtons = canControl
+    ? '<button class="btn btn-sm btn-secondary svc-ctl-btn" data-action="restart">Restart</button>' +
+      '<button class="btn btn-sm btn-secondary svc-ctl-btn" data-action="stop">Stop</button>' +
+      '<button class="btn btn-sm btn-secondary svc-ctl-btn" data-action="start">Start</button>'
+    : '<span class="hint" style="font-size:0.75rem">' + (svc.controllable ? "Requires the Process Control permission." : "This unit isn’t controllable.") + '</span>';
+
+  function metaRow(label, value) {
+    return '<div style="display:flex;justify-content:space-between;gap:12px;padding:0.3rem 0;border-bottom:1px solid var(--color-border)">' +
+      '<span style="color:var(--color-text-secondary)">' + label + '</span>' +
+      '<span style="text-align:right">' + value + '</span></div>';
+  }
+  var pidVal = svc.mainPid ? (escapeHtml(svc.mainProcess || "") + " (PID " + svc.mainPid + ")") : "—";
+  var memVal = (svc.memBytes != null) ? _fmtBytes(Number(svc.memBytes)) : "—";
+
+  bodyEl.innerHTML =
+    '<div style="padding:1rem 1.25rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:0.75rem;padding-bottom:0.6rem;border-bottom:1px solid var(--color-border)">' +
+        '<div style="font-size:0.82rem;color:var(--color-text-secondary)">Control <span id="svc-ctl-status"></span></div>' +
+        '<div style="display:flex;gap:6px">' + ctlButtons + '</div>' +
+      '</div>' +
+      '<div style="font-size:0.85rem">' +
+        metaRow("Display name", escapeHtml(svc.displayName || "—")) +
+        metaRow("Platform", escapeHtml(svc.platform || "—")) +
+        metaRow("State", _svcStatePill(svc.activeState)) +
+        (svc.subState ? metaRow("Sub-state", escapeHtml(svc.subState)) : "") +
+        metaRow("Enabled", escapeHtml(svc.enabledState || "—")) +
+        metaRow("Main process", pidVal) +
+        metaRow("Memory", memVal) +
+      '</div>' +
+    '</div>';
+
+  if (canControl) {
+    document.querySelectorAll(".svc-ctl-btn").forEach(function (b) {
+      b.addEventListener("click", function () { _runServiceControl(asset.id, svc.unit, b.getAttribute("data-action")); });
+    });
+  }
+}
+
+// Issue a Stop/Start/Restart for a unit, then poll to completion (reuses the
+// shared process-command status poll — same AgentCommand row). Confirm first.
+async function _runServiceControl(assetId, unit, action) {
+  var verb = action.charAt(0).toUpperCase() + action.slice(1);
+  var ok = await showConfirm(verb + ' "' + unit + '" on this host? This runs against the live service.');
+  if (!ok) return;
+  var statusEl = document.getElementById("svc-ctl-status");
+  if (statusEl) statusEl.textContent = " — " + action + "ing…";
+  try {
+    var resp = await api.assets.controlService(assetId, unit, action);
+    var cmdId = resp && resp.command && resp.command.id;
+    showToast(verb + " requested for " + unit, "success");
+    if (cmdId) _pollProcessCommand(assetId, cmdId, statusEl, 0);
+  } catch (err) {
+    showToast(err.message || "Control request failed", "error");
+    if (statusEl) statusEl.textContent = "";
+  }
 }
 
 // ─── Per-process detail slide-in (nested slide-over) ─────────────────────────
