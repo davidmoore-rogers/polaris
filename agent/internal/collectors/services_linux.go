@@ -4,7 +4,7 @@ package collectors
 
 import (
 	"context"
-	"encoding/json"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
@@ -76,61 +76,38 @@ func serviceInventoryOnce() []*transport.ServiceSample {
 	return out
 }
 
-type sysdUnit struct {
-	Load        string `json:"load"`
-	Active      string `json:"active"`
-	Sub         string `json:"sub"`
-	Description string `json:"description"`
-}
-
-// listUnits runs `systemctl list-units --type=service --all -o json`. Returns
-// nil on failure (distinct from an empty map — a host with zero services).
+// listUnits runs `systemctl list-units --type=service --all --plain` and parses
+// the PLAIN columnar output (see parseListUnits for why not `-o json`). Returns
+// nil on failure OR on an empty parse — treating "no parseable rows" as a
+// failure rather than a zero-service host is deliberate: the server
+// full-replaces this asset's rows per push, so pushing an empty set on a parse
+// regression would WIPE a real inventory. Any systemd host has services, so nil
+// (skip, keep prior rows) is the safe choice, and it's logged so the anomaly is
+// never invisible.
 func listUnits() map[string]sysdUnit {
-	out, err := runSystemctl(20*time.Second, "list-units", "--type=service", "--all", "--no-legend", "--no-pager", "-o", "json")
+	out, err := runSystemctl(20*time.Second, "list-units", "--type=service", "--all", "--plain", "--no-legend", "--no-pager")
 	if err != nil {
+		log.Printf("serviceInventory: `systemctl list-units` failed: %v", err)
 		return nil
 	}
-	var rows []struct {
-		Unit        string `json:"unit"`
-		Load        string `json:"load"`
-		Active      string `json:"active"`
-		Sub         string `json:"sub"`
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
+	m := parseListUnits(string(out))
+	if len(m) == 0 {
+		log.Printf("serviceInventory: `systemctl list-units` returned no parseable service rows — skipping (inventory left unchanged)")
 		return nil
-	}
-	m := make(map[string]sysdUnit, len(rows))
-	for _, r := range rows {
-		if r.Unit == "" || !strings.HasSuffix(r.Unit, ".service") {
-			continue
-		}
-		m[r.Unit] = sysdUnit{Load: r.Load, Active: r.Active, Sub: r.Sub, Description: r.Description}
 	}
 	return m
 }
 
 // listUnitFiles maps unit → enablement (enabled/disabled/static/masked/...).
-// Best-effort: an empty map just means the enablement column stays blank.
+// Best-effort: an empty map just means the enablement column stays blank (it
+// never nils the whole collection). Plain columnar output, same as listUnits.
 func listUnitFiles() map[string]string {
-	out, err := runSystemctl(20*time.Second, "list-unit-files", "--type=service", "--no-legend", "--no-pager", "-o", "json")
+	out, err := runSystemctl(20*time.Second, "list-unit-files", "--type=service", "--plain", "--no-legend", "--no-pager")
 	if err != nil {
+		log.Printf("serviceInventory: `systemctl list-unit-files` failed (enablement will be blank): %v", err)
 		return map[string]string{}
 	}
-	var rows []struct {
-		UnitFile string `json:"unit_file"`
-		State    string `json:"state"`
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return map[string]string{}
-	}
-	m := make(map[string]string, len(rows))
-	for _, r := range rows {
-		if r.UnitFile != "" {
-			m[r.UnitFile] = r.State
-		}
-	}
-	return m
+	return parseListUnitFiles(string(out))
 }
 
 // showUnits batches `systemctl show <units> -p Id,MainPID,MemoryCurrent` into a

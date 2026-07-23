@@ -227,7 +227,13 @@ func refreshConfig(client *transport.Client) {
 
 func main() {
 	confPath := flag.String("conf", config.DefaultPath(), "path to agent.conf")
+	showVersion := flag.Bool("version", false, "print the agent version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	// On Windows, the binary may be launched by the Service Control Manager
 	// (sc.exe / Start-Service) rather than from a console. tryRunAsWindowsService
@@ -724,6 +730,9 @@ func serviceInventoryLoop(ctx context.Context, cfg *config.Config, client *trans
 
 func pushServiceInventoryOne(client *transport.Client) {
 	if !loadServicesCfg().enabled {
+		if verbose {
+			log.Printf("serviceInventory: stream disabled by server config — skipping")
+		}
 		return // services stream not enabled — nothing to collect
 	}
 	type res struct{ s []*transport.ServiceSample }
@@ -737,7 +746,13 @@ func pushServiceInventoryOne(client *transport.Client) {
 		return
 	}
 	if r.s == nil {
-		return // no service manager / enumeration failed — skip (don't wipe inventory)
+		// No service manager, or enumeration failed (the collector logs the
+		// specific reason). Skip rather than push an empty set — a full-replace
+		// with zero rows would wipe the asset's inventory server-side.
+		if verbose {
+			log.Printf("serviceInventory: collector returned no data — skipping (inventory left unchanged)")
+		}
+		return
 	}
 	resp, err := client.PushSamples(&transport.SamplesBody{
 		Stream:  "serviceInventory",

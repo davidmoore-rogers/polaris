@@ -30,6 +30,71 @@ type unitDetail struct {
 	hasMem   bool
 }
 
+// sysdUnit is the load/active/sub/description tuple parsed from a
+// `systemctl list-units` row. Untagged (like unitDetail) so its parser is
+// unit-testable on any OS.
+type sysdUnit struct {
+	Load        string
+	Active      string
+	Sub         string
+	Description string
+}
+
+// parseListUnits parses the PLAIN columnar output of
+// `systemctl list-units --type=service --all --plain --no-legend`, one unit
+// per line:
+//
+//	<unit> <load> <active> <sub> <description...>
+//
+// The first four columns are whitespace-free tokens; the description is the
+// remainder of the line (may contain spaces). We deliberately parse the table
+// form rather than `-o json`: systemctl only emits JSON for these list verbs
+// from an interactive session — under a systemd service (how the agent runs)
+// it silently falls back to this table format, so JSON parsing returns nothing.
+// A leading status glyph ("●", printed for failed/degraded units when --plain
+// is not honored) is tolerated. Only *.service rows are kept. Pure (no exec).
+func parseListUnits(out string) map[string]sysdUnit {
+	m := map[string]sysdUnit{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// Drop a leading bullet ("●") that older/TTY output prefixes onto
+		// failed-unit rows, so the column offsets line up regardless.
+		if fields[0] == "●" {
+			fields = fields[1:]
+		}
+		if len(fields) < 4 || !strings.HasSuffix(fields[0], ".service") {
+			continue
+		}
+		desc := ""
+		if len(fields) > 4 {
+			desc = strings.Join(fields[4:], " ")
+		}
+		m[fields[0]] = sysdUnit{Load: fields[1], Active: fields[2], Sub: fields[3], Description: desc}
+	}
+	return m
+}
+
+// parseListUnitFiles parses the PLAIN columnar output of
+// `systemctl list-unit-files --type=service --no-legend`, one unit per line:
+//
+//	<unit-file> <state> [<preset>]
+//
+// Same rationale as parseListUnits (table form, not JSON). Returns unit → state.
+func parseListUnitFiles(out string) map[string]string {
+	m := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.HasSuffix(fields[0], ".service") {
+			continue
+		}
+		m[fields[0]] = fields[1]
+	}
+	return m
+}
+
 // parseShowUnits parses `systemctl show` output — blank-line-separated blocks of
 // Key=Value lines, keyed by the Id property. Pure (unit-testable without exec).
 // MainPID 0 → no main pid; MemoryCurrent uint64-max / non-numeric → unaccounted.
