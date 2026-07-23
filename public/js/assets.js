@@ -14396,17 +14396,19 @@ var _assetEventsLoaded = false;     // lazy-load guard (first tab click)
 // — when the operator ticks "Include processes" — the per-program process
 // inventory folded into the same table. A service backed by a shared runtime
 // (e.g. a Spring Boot app running as "java") shows up as its unit; the "java"
-// process row appears only with processes included. Three pin columns, each
-// applicable to one row kind (the other kind shows a muted dash):
-//   Monitor — processes (monitoredProcesses: per-minute CPU/RAM history + logs)
-//   Logs    — services  (monitoredServices: per-unit journalctl tailing)
-//   Map     — both       (mappedProcesses / mappedServices: Application Map)
+// process row appears only with processes included. Two pin columns — Monitor
+// and Logs are combined into one, since a row is either a service or a process,
+// never both:
+//   Monitor — a service's journal tailing (monitoredServices) OR a process's
+//             CPU/RAM history + logs (monitoredProcesses); one checkbox per row,
+//             whichever applies to that row's kind
+//   Map     — both (mappedProcesses / mappedServices: Application Map)
 // (Process alerting moved to Automations, so there's no Alert column.)
 // Client-side TableSF for sort/filter; lazy-loaded on first tab click.
 function _assetServicesTabHTML() {
   return '<div class="section-block">' +
     '<div class="filter-bar" style="justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.5rem">' +
-      '<p class="hint" style="margin:0;max-width:600px">systemd units (Linux) and Windows services reported by the Polaris Agent. Check <strong>Logs</strong> to tail a unit\'s journal, <strong>Monitor</strong> to collect a program\'s CPU/RAM history + logs, <strong>Map</strong> to attribute connections on the <a href="/appmap.html">Application Map</a>. Click a row to open it.</p>' +
+      '<p class="hint" style="margin:0;max-width:600px">systemd units (Linux) and Windows services reported by the Polaris Agent. Check <strong>Monitor</strong> to tail a service\'s journal — or, for a process, to collect its CPU/RAM history + logs — and <strong>Map</strong> to attribute connections on the <a href="/appmap.html">Application Map</a>. Click a row to open it.</p>' +
       '<div style="display:flex;align-items:center;gap:0.75rem;flex:none">' +
         '<label style="display:flex;align-items:center;gap:5px;font-size:0.8rem;white-space:nowrap"><input type="checkbox" id="asset-view-svc-include-proc">Include processes</label>' +
         '<button class="btn btn-secondary btn-sm" id="asset-view-svc-refresh">Refresh</button>' +
@@ -14416,7 +14418,6 @@ function _assetServicesTabHTML() {
       '<table id="asset-view-svc-table">' +
         '<thead><tr>' +
           '<th class="svc-pin-col" style="width:58px" data-col-id="monitor" data-col-required="true">Monitor</th>' +
-          '<th class="svc-pin-col" style="width:40px" data-col-id="logs"    data-col-required="true">Logs</th>' +
           '<th class="svc-pin-col" style="width:40px" data-col-id="map"     data-col-required="true">Map</th>' +
           '<th                      data-col-id="name"  data-col-required="true" data-sf-key="sortName"  data-sf-type="string">Name</th>' +
           '<th style="width:90px"  data-col-id="type"  data-sf-key="typeLabel" data-sf-type="string">Type</th>' +
@@ -14425,7 +14426,7 @@ function _assetServicesTabHTML() {
           '<th style="width:100px" data-col-id="mem"   data-sf-key="memSort"   data-sf-type="number" data-sf-nofilter>Memory</th>' +
         '</tr></thead>' +
         '<tbody id="asset-view-svc-tbody">' +
-          '<tr><td colspan="8" class="empty-state">Loading…</td></tr>' +
+          '<tr><td colspan="7" class="empty-state">Loading…</td></tr>' +
         '</tbody>' +
       '</table>' +
     '</div>' +
@@ -14474,7 +14475,6 @@ function _wireAssetServicesTab(asset) {
                                  // (active agent + root on Linux / any Windows)
 
   function fmtPct(v) { return v == null ? "—" : Number(v).toFixed(1); }
-  var MUTED = '<span style="color:var(--color-text-tertiary)">—</span>';
 
   // Unified row model — services first, then (when included) processes. Each
   // carries `kind` + the raw row + the sortable columns TableSF reads by key.
@@ -14511,7 +14511,7 @@ function _wireAssetServicesTab(asset) {
       var empty = includeProc
         ? "No services or processes reported yet. They appear once a Polaris Agent (or an SNMP/SSH/WinRM poll) reports this host."
         : "No services reported yet. Services appear once a Polaris Agent reports this host\'s unit list.";
-      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">' + empty + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">' + empty + '</td></tr>';
       return;
     }
     var canWrite = typeof canManageAssets === "function" && canManageAssets();
@@ -14524,7 +14524,6 @@ function _wireAssetServicesTab(asset) {
         var mapChecked = svcMapped.has(s.unit) ? " checked" : "";
         var mem = (s.memBytes != null) ? _fmtBytes(Number(s.memBytes)) : "—";
         return '<tr>' +
-          '<td class="svc-pin-col">' + MUTED + '</td>' +
           '<td class="svc-pin-col"><input type="checkbox" class="asset-svc-logs-toggle" data-svc-unit="' + u + '" title="Tail this unit\'s journal"' + logsChecked + disabled + '></td>' +
           '<td class="svc-pin-col"><input type="checkbox" class="asset-svc-map-toggle" data-svc-unit="' + u + '" title="Attribute this unit\'s connections on the Application Map"' + mapChecked + disabled + '></td>' +
           '<td title="' + escapeHtml(s.displayName || "") + '"><a href="#" class="asset-svc-unit-link" data-svc-unit="' + u + '">' + u + '</a></td>' +
@@ -14541,7 +14540,6 @@ function _wireAssetServicesTab(asset) {
       var ram = (p.memRssBytes != null) ? _fmtBytes(Number(p.memRssBytes)) : "—";
       return '<tr>' +
         '<td class="svc-pin-col"><input type="checkbox" class="asset-proc-monitor-toggle" data-proc-name="' + nm + '" title="Collect CPU/RAM history + logs"' + monChecked + disabled + '></td>' +
-        '<td class="svc-pin-col">' + MUTED + '</td>' +
         '<td class="svc-pin-col"><input type="checkbox" class="asset-proc-map-toggle" data-proc-name="' + nm + '" title="Discover listening ports + connections for the Application Map"' + pMapChecked + disabled + '></td>' +
         '<td title="' + escapeHtml(p.exePath || "") + '"><a href="#" class="asset-proc-name-link" data-proc-name="' + nm + '">' + nm + '</a></td>' +
         '<td><span style="color:var(--color-text-secondary)">Process</span></td>' +
@@ -14645,7 +14643,7 @@ function _wireAssetServicesTab(asset) {
       apply();
       _sizeAssetSvcTableWrapper();
     } catch (err) {
-      if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
+      if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
     }
   }
 
