@@ -115,6 +115,7 @@
         + '      <input type="search" class="topo-search" id="topo-search-input" placeholder="Search this site…" autocomplete="off" spellcheck="false">'
         + '      <ul class="topo-search-results" id="topo-search-results" role="listbox" hidden></ul>'
         + '    </div>'
+        + '    <button class="icon-btn" id="topo-refresh" aria-label="Refresh topology"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>'
         + '  </div>'
         + '  <div class="topo-graph" id="topo-graph"></div>'
         + '  <div class="topo-status" id="topo-status">Loading topology…</div>'
@@ -122,6 +123,10 @@
 
       document.getElementById("topo-close").addEventListener("click", function () {
         closeTopology();
+      });
+
+      document.getElementById("topo-refresh").addEventListener("click", function () {
+        refreshTopology();
       });
 
       wireSearchInput(document.getElementById("topo-search-input"));
@@ -217,6 +222,28 @@
     else PolarisRouter.go("map");
   }
 
+  // Re-fetch the topology payload and rebuild the graph in place. Mirrors
+  // the desktop modal's refresh button (map.js refreshTopology): there are no
+  // manual node positions to snapshot here (autoungrabify + no savedLayouts),
+  // so it's a straight re-fetch → renderGraph. Guards against a double-tap by
+  // disabling the button for the duration.
+  function refreshTopology() {
+    if (!_siteId) return;
+    var btn = document.getElementById("topo-refresh");
+    if (btn) btn.disabled = true;
+    setStatus("Refreshing…");
+    api.map.topology(_siteId).then(function (data) {
+      _topoData = data;
+      _siteName = (data && data.fortigate && data.fortigate.hostname) || _siteName;
+      renderGraph(data);
+      setStatus("");
+    }).catch(function (err) {
+      setStatus("Failed to refresh topology: " + ((err && err.message) || err));
+    }).then(function () {
+      if (btn) btn.disabled = false;
+    });
+  }
+
   // ─── Graph render ─────────────────────────────────────────────────────
   function renderGraph(data) {
     var elements = window.PolarisTopologyRender.buildTopologyElements(data);
@@ -268,7 +295,13 @@
       autoungrabify: true, // nodes stay where the layout placed them; no manual drag
       // Match desktop's damped wheel zoom (mostly trackpads here).
       wheelSensitivity: 0.2,
-      layout: layoutConfig,
+      // NOTE: the layout is NOT passed here — it's run explicitly below via
+      // .layout().run() so the layoutstop listener is registered first. A
+      // `preset` layout (location-coded sites) runs SYNCHRONOUSLY, so if it
+      // rode the constructor it would emit layoutstop during construction —
+      // before the handler on the next lines attaches — silently dropping the
+      // grouping-hull render + initial focus. Same hazard the desktop modal
+      // documents in map.js (register listener before running the layout).
       // includeEndpointOverlay registers the .dimmed (display:none) and
       // synthetic-endpoint round-rectangle styles used by the connection-path
       // overlay when the operator deep-links here via global search on a
@@ -278,18 +311,18 @@
       style: window.PolarisTopologyRender.topologyStylesheet(theme, { includeEndpointOverlay: true }),
     });
 
-    // Location grouping hulls (building / floor / room / jb shapes from
-    // a:/b:/f:/r:/jb: codes) — always on for mobile (no toggle; flat view
-    // only in v1). Nodes are ungrabbable here so no drag-follow refresh is
-    // needed; the layout is final once it stops.
+    // Registered BEFORE .layout().run() below (see the constructor note).
+    //  - Location grouping hulls (building / floor / room / jb shapes from
+    //    a:/b:/f:/r:/jb: codes) — always on for mobile (no toggle; flat view
+    //    only in v1). Nodes are ungrabbable here so no drag-follow refresh is
+    //    needed; the layout is final once it stops.
+    //  - Initial focus: zoom to the FortiGate (or the searched node) instead
+    //    of fitting the whole graph. A site with 30 switches would otherwise
+    //    be unreadable at the default zoom-to-fit on a 375px screen.
     _cy.one("layoutstop", function () {
       window.PolarisTopologyRender.renderLocationGroups(_cy);
+      applyInitialFocus();
     });
-
-    // Initial focus: zoom to the FortiGate (or the searched node) instead
-    // of fitting the whole graph. A site with 30 switches would otherwise
-    // be unreadable at the default zoom-to-fit on a 375px screen.
-    _cy.one("layoutstop", function () { applyInitialFocus(); });
 
     // Tap a node → bottom sheet with details. Skip ghost LLDP nodes for
     // the no-action case (they render but have no Polaris asset linkage).
@@ -305,6 +338,11 @@
       }
       openNodeSheet(node, { kind: role || "unknown" });
     });
+
+    // Run the layout now that the layoutstop listener is attached. preset
+    // (location-coded / firewall-rooted sites) is synchronous; dagre (no
+    // firewall root) is async — either way the handler above catches it.
+    _cy.layout(layoutConfig).run();
   }
 
   function applyInitialFocus() {
@@ -709,6 +747,7 @@
   // mobile topology surface doesn't depend on map-tab's internals.
   function renderMonitorPill(asset) {
     if (!asset) return '<span class="status-pill unk">—</span>';
+    if (asset.status === "maintenance") return '<span class="status-pill maint"><span class="dot maint"></span>Maintenance</span>';
     if (!asset.monitored && asset.monitored !== undefined) return '<span class="status-pill unk">Unmonitored</span>';
     if (asset.monitored === undefined) return ""; // ghost LLDP / remote node
     var samples  = asset.monitorRecentSamples  || 0;

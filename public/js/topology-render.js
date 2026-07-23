@@ -24,6 +24,7 @@
     up:          "#2e7d32", // green
     degraded:    "#f9a825", // amber
     down:        "#c62828", // red
+    maintenance: "#9575cd", // purple — scheduler-held status="maintenance" (matches the assets-page pill + Status Map widget)
     unknown:     "#9e9e9e", // gray — unknown / dep-suppressed
     unmonitored: "#757575", // gray — unmonitored
   };
@@ -34,7 +35,12 @@
   // suppressed node renders gray ("Dep. Down") even when its own probe is
   // also failing — on the topology graph the down parent is the red node.
   function fortinetNodeColor(asset) {
-    if (!asset || !asset.monitored) return HEALTH_NODE_COLORS.unmonitored;
+    if (!asset) return HEALTH_NODE_COLORS.unmonitored;
+    // Maintenance wins over probe health and dependency suppression: the
+    // monitorStatus is frozen (polling is paused) so it isn't live state, and
+    // the node is intentionally offline. Paint it the maintenance purple.
+    if (asset.status === "maintenance") return HEALTH_NODE_COLORS.maintenance;
+    if (!asset.monitored) return HEALTH_NODE_COLORS.unmonitored;
     if (asset.dependencySuppressed) return HEALTH_NODE_COLORS.unknown; // Dep. Down (upstream parent offline)
     switch (asset.monitorHealth) {
       case "up":       return HEALTH_NODE_COLORS.up;
@@ -773,6 +779,7 @@
         { label: "Up",                color: HEALTH_NODE_COLORS.up },
         { label: "Degraded",          color: HEALTH_NODE_COLORS.degraded },
         { label: "Down",              color: HEALTH_NODE_COLORS.down },
+        { label: "Maintenance",       color: HEALTH_NODE_COLORS.maintenance },
         { label: "Dep. Down",         color: HEALTH_NODE_COLORS.unknown },
         { label: "Unmonitored",       color: HEALTH_NODE_COLORS.unmonitored },
       ],

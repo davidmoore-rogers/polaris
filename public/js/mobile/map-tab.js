@@ -226,15 +226,21 @@
     var L = window.L;
     var children = cluster.getAllChildMarkers();
     var sawMonitored = false;
+    var sawMaint = false;
     var worst = "up";
     for (var i = 0; i < children.length; i++) {
       var s = children[i]._site;
       if (!s || !s.monitored) continue;
       sawMonitored = true;
+      // Maintenance isn't an outage (frozen health) — surfaces only when
+      // nothing worse is present. Mirrors the desktop map cluster rollup.
+      if (s.status === "maintenance") { sawMaint = true; continue; }
       if (s.monitorHealth === "down") { worst = "down"; break; }
       if (s.monitorHealth === "degraded" && worst !== "down") worst = "degraded";
     }
-    var cls = sawMonitored ? "monitor-" + worst : "monitor-unmonitored";
+    var cls = !sawMonitored
+      ? "monitor-unmonitored"
+      : (worst !== "up" ? "monitor-" + worst : (sawMaint ? "monitor-maintenance" : "monitor-up"));
     var count = cluster.getChildCount();
     return L.divIcon({
       html: '<div class="fg-cluster ' + cls + '"><span>' + count + "</span></div>",
@@ -271,6 +277,7 @@
   }
 
   function monitorClass(site) {
+    if (site.status === "maintenance") return "monitor-maintenance";
     if (!site.monitored) return "monitor-unmonitored";
     switch (site.monitorHealth) {
       case "up":       return "monitor-up";
@@ -289,7 +296,12 @@
       iconSize: [34, 34],
       iconAnchor: [17, 17],
     });
-    var marker = L.marker([site.latitude, site.longitude], { icon: icon });
+    // Stack maintenance gates beneath live gates where markers overlap (see
+    // the desktop map makeMarker note).
+    var marker = L.marker([site.latitude, site.longitude], {
+      icon: icon,
+      zIndexOffset: site.status === "maintenance" ? -1000 : 0,
+    });
     marker._site = site;
     marker.on("click", function () { openSiteSheet(site); });
     return marker;
@@ -521,6 +533,7 @@
   }
 
   function renderMonitorPill(site) {
+    if (site.status === "maintenance") return '<span class="status-pill maint"><span class="dot maint"></span>Maintenance</span>';
     if (!site.monitored) return '<span class="status-pill unk">Unmonitored</span>';
     var samples = site.monitorRecentSamples || 0;
     var failures = site.monitorRecentFailures || 0;

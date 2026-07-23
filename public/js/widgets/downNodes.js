@@ -3,18 +3,12 @@
  * division (SolarWinds "Down Nodes" panel). Severity-first: nodes carrying an
  * active automation alert lead (feed sorts alertRank desc), then youngest
  * outage first (monitorStatusChangedAt desc — server-side, so the newest
- * outages survive the cap). Reuses the monitorAlerts row markup (statusDot +
- * dash-alert classes + alert-severity pill). Data from noc-summary downNodes[].
+ * outages survive the cap). Reuses the monitorAlerts row markup (dash-alert
+ * classes + alert-severity pill). Data from noc-summary downNodes[].
  */
 
 (function () {
   var TYPE_LABELS = PolarisWidgets.ASSET_TYPE_LABELS;
-
-  function statusDot(status) {
-    if (status === "down") return '<span class="dash-alert-dot dash-alert-down" title="Down"></span>';
-    if (status === "warning") return '<span class="dash-alert-dot dash-alert-warning" title="Warning"></span>';
-    return '<span class="dash-alert-dot" title="' + escapeHtml(status || "") + '"></span>';
-  }
 
   function groupKey(node, groupBy) {
     if (groupBy === "division") return node.division || "Ungrouped";
@@ -30,7 +24,6 @@
     var href = '/assets.html#view=asset:' + encodeURIComponent(n.id);
     return '<a class="dash-alert-item" href="' + href + '" data-asset-id="' + escapeHtml(n.id) + '" style="text-decoration:none">' +
       '<div class="dash-alert-row" style="width:100%">' +
-        statusDot(n.monitorStatus) +
         '<div class="dash-alert-body">' +
           '<div class="dash-alert-title">' + (PolarisWidgets.alertSeverityPill ? PolarisWidgets.alertSeverityPill(n.alertSeverity) : "") + escapeHtml(name) + '</div>' +
           '<div class="dash-alert-sub">' + sub.join(" · ") + '</div>' +

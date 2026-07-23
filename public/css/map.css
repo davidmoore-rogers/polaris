@@ -185,6 +185,7 @@
 .fg-marker.monitor-up          { background: #2e7d32; }
 .fg-marker.monitor-degraded    { background: #f9a825; color: #222; }
 .fg-marker.monitor-down        { background: #c62828; }
+.fg-marker.monitor-maintenance { background: #9575cd; }
 /* Dependency-suppressed: an upstream parent is confirmed-down. Slate-blue
  * — distinct from the bright red of a confirmed-down probe and the amber
  * of a degraded probe. The probe itself is still firing (at 2× cadence)
@@ -213,6 +214,7 @@
 .fg-cluster.monitor-degraded    { background: #f9a825; color: #222; }
 .fg-cluster.monitor-down        { background: #c62828; }
 .fg-cluster.monitor-dep-down    { background: #607d8b; }
+.fg-cluster.monitor-maintenance { background: #9575cd; }
 
 /* ─── Topology modal layout ─────────────────────────────────────────────────── */
 .topology-layout {

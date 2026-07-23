@@ -419,8 +419,7 @@
   window.PolarisWidgets.alertSeverityPill = function (sev) {
     if (!sev) return "";
     var cls = ALERT_SEV_PILL[sev] || "widget-pill-watch";
-    var label = String(sev).slice(0, 4);
-    return '<span class="widget-pill ' + cls + '" title="Highest active alert: ' + escapeHtml(sev) + '" style="margin-right:4px;flex:0 0 auto">' + escapeHtml(label) + '</span>';
+    return '<span class="widget-pill ' + cls + '" title="Highest active alert: ' + escapeHtml(sev) + '" style="margin-right:4px;flex:0 0 auto">' + escapeHtml(String(sev)) + '</span>';
   };
 
   // "5m 03s" / "2h 17m" / "3d 4h" — same shape the legacy dashboard used.
