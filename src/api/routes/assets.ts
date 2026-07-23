@@ -915,6 +915,7 @@ router.get("/:id", requirePermission("assets", "read"), async (req, res, next) =
     // FortiGate directly).
     let integrationMonitorCredential: { id: string; name: string; type: string } | null = null;
     let integrationUseProxy: boolean | null = null;
+    let integrationSyncDescriptions: boolean | null = null;
     if (asset.discoveredByIntegration) {
       const cfg = (asset.discoveredByIntegration.config as Record<string, unknown> | null) || {};
       const credId = typeof cfg.monitorCredentialId === "string" ? cfg.monitorCredentialId : null;
@@ -929,6 +930,14 @@ router.get("/:id", requirePermission("assets", "read"), async (req, res, next) =
       if (asset.discoveredByIntegration.type === "fortimanager") {
         integrationUseProxy = cfg.useProxy !== false;
       }
+      // Description Sync is a FortiManager + standalone FortiGate toggle. Expose
+      // a derived boolean (the raw config is stripped below — it holds API
+      // tokens) so the asset edit form can cap the FortiAP Description at the
+      // 35-char device `location` limit, but only when this AP's integration
+      // actually syncs descriptions to the device.
+      if (asset.discoveredByIntegration.type === "fortimanager" || asset.discoveredByIntegration.type === "fortigate") {
+        integrationSyncDescriptions = cfg.syncDescriptions === true;
+      }
     }
     const { config: _omit, ...integrationLite } = (asset.discoveredByIntegration as { config?: unknown } | null) || {};
     const { associatedIpRows, macAddressRows, ...assetRest } = asset;
@@ -937,7 +946,7 @@ router.get("/:id", requirePermission("assets", "read"), async (req, res, next) =
       associatedIps: shapeAssociatedIps(associatedIpRows),
       macAddresses:  shapeMacRows(macAddressRows),
       discoveredByIntegration: asset.discoveredByIntegration
-        ? { ...integrationLite, useProxy: integrationUseProxy }
+        ? { ...integrationLite, useProxy: integrationUseProxy, syncDescriptions: integrationSyncDescriptions }
         : null,
       integrationMonitorCredential,
     };

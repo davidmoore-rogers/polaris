@@ -2544,6 +2544,13 @@ function macCellHTML(asset) {
 
 function assetFormHTML(defaults) {
   var d = defaults || {};
+  // FortiAP descriptions push to the device `location` field, which FortiOS
+  // caps at 35 chars. When this AP's integration syncs descriptions, cap the
+  // Description input to match so the Polaris value can't silently outrun the
+  // device. Non-AP types, and APs whose integration doesn't sync, keep 255.
+  var apLocationCap = d.assetType === "access_point" &&
+    d.discoveredByIntegration && d.discoveredByIntegration.syncDescriptions === true;
+  var descMaxLen = apLocationCap ? 35 : 255;
   var identitySection = d._editing
     ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
         // Hostname is editable on edit as an operator override (coordinate-pin
@@ -2628,11 +2635,24 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Warranty Expires</label><input type="date" id="f-warrantyExpiry" value="' + dateInputVal(d.warrantyExpiry) + '"></div>' +
     '<div class="form-group"><label>Purchase Order</label><input type="text" id="f-purchaseOrder" value="' + escapeHtml(d.purchaseOrder || "") + '" placeholder="PO-12345"></div>' +
   '</div>' +
-  '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="255" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
+  '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="' + descMaxLen + '" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
     '<p class="hint">Device Map grouping codes: <code>a:</code>area &nbsp;<code>b:</code>building &nbsp;<code>f:</code>floor &nbsp;<code>r:</code>room &nbsp;<code>jb:</code>junction box — e.g. <code>a:Mine b:Shop f:2 r:North Closet jb:112-305</code>. Values may contain spaces; each runs until the next code. Codes here (falling back to the device-side description) group this device into building/floor/room shapes and floor views on the topology map.</p>' +
-    '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP location) — Polaris is primary: a value here always wins and pushes to the device. Leave empty to adopt the device\'s value.</p></div>' +
+    '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP location) — Polaris is primary: a value here always wins and pushes to the device. Leave empty to adopt the device\'s value.</p>' +
+    (apLocationCap ? '<p class="hint" style="color:var(--color-warning,#b45309)">Limited to 35 characters — this access point\'s integration syncs descriptions to the FortiAP <code>location</code> field, which FortiOS caps at 35 characters.</p>' : '') + '</div>' +
   '<div class="form-group"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes">' + escapeHtml(d.notes || "") + '</textarea></div>' +
   tagFieldHTML(d.tags || []);
+}
+
+// Read the Description field, trimmed to the input's own maxlength. maxlength
+// prevents over-typing but doesn't shorten a longer value assigned via the
+// value attribute (e.g. a pre-existing description on an AP that only just
+// became sync-capped at 35), so slice defensively.
+function descriptionFieldValue() {
+  var el = document.getElementById("f-description");
+  if (!el) return "";
+  var v = el.value;
+  var max = parseInt(el.getAttribute("maxlength") || "", 10);
+  return (max > 0 && v.length > max) ? v.slice(0, max) : v;
 }
 
 function getAssetFormData() {
@@ -2656,7 +2676,10 @@ function getAssetFormData() {
     notes:         val("f-notes"),
     // Always sent (including "") — an emptied Description clears to null
     // server-side so the device value can re-seed it (description sync).
-    description:   val("f-description"),
+    // Truncate to the input's own maxlength: for a synced FortiAP this is 35
+    // (the device `location` cap), and maxlength alone doesn't retro-trim a
+    // longer value that was set programmatically before the cap applied.
+    description:   descriptionFieldValue(),
     tags:          getTagFieldValue(),
   };
   // Coordinates travel as a pair: both blank → null (clear the manual pin /
