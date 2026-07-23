@@ -1667,6 +1667,32 @@ Listed alphabetically.
 
 ---
 
+## services/serviceInventoryService.ts
+
+**What it owns:** The `AssetService` current-state table (one row per `(asset, unit)` systemd unit / Windows service) — the unit-centric sibling of the process inventory. Full-replace per agent scrape.
+
+**Public API:** AssetServiceInput, isServiceControllable, persistAssetServices.
+
+**Cross-service deps:** `prisma.assetService`, `retryOnDeadlock` (utils/dbRetry).
+
+**Used by:**
+- `src/api/routes/agents.ts` — the `serviceInventory` sample-stream arm maps `ServiceSampleSchema` rows → `persistAssetServices`. Also ships `streams.services` + `monitoredServices`/`mappedServices` on `GET /agents/config` (folded into both the payload ETag and the heartbeat `computeConfigEtag`).
+- `src/api/routes/assets.ts` — `GET /assets/:id/services` reads the rows + pins; `POST /assets/:id/services/:unit/control` → `agentCommandService.requestServiceControl` (looks up the row, requires `controllable`). `monitoredServices`/`mappedServices` ride the general `PUT /assets/:id` pin path (UpdateAssetSchema).
+- `agent/internal/collectors/services*.go` — the sole producer (`ServiceInventoryOnce`; systemd `systemctl list-units/list-unit-files/show`, Windows `Win32_Service`). `parseShowUnits` is the untagged pure parser (unit-tested).
+- `public/js/assets.js` — the Services tab (`_wireAssetServicesTab`) + `openServiceDetailPanel`.
+
+**Invariants:**
+- Delete-then-insert in ONE `$transaction` under `retryOnDeadlock`; empty rows = valid delete-only scrape. Keyed `@@unique([assetId, unit])`. Plain table, NO FK to Asset (matches AssetProcess/AssetSdwanRule).
+- `controllable` is DERIVED here, never trusted from the wire: systemd `loadState==="loaded"`, or any Windows service. Control routes re-check it.
+- Agent-only. Agentless SSH/WinRM does not resolve units (`agentlessProcessService` hardcodes serviceUnit null) — no agentless producer exists.
+- `mainProcess` is a display cross-link to the Processes tab, not a key.
+
+**When changing this:**
+- Adding a field: extend the Prisma model + migration, `ServiceSample` (Go transport) + collectors, `ServiceSampleSchema` + the ingest arm (agents.ts), the `AssetServiceInput` map, and the `GET /assets/:id/services` projection — in lockstep. Bump `agent/VERSION`.
+- The `serviceLog` (Phase 2) + connection-unit-attribution (Phase 3) streams hang off the same pins (`monitoredServices`/`mappedServices`) shipped by the config endpoint.
+
+---
+
 ## services/topologyLayoutService.ts
 
 **What it owns:** Shared Device Map topology layouts — the `TopologyLayout` table (one row per `(siteId, view)`, siteId = the FortiGate Asset the graph is rooted on, `positions` = `{nodeId: {x,y}}` pixel model coords). The server-side half of topology drag persistence; the browser's localStorage layout remains a per-browser fallback.
