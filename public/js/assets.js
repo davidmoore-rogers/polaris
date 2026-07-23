@@ -4563,6 +4563,15 @@ function assetAgentSubpanelHTML(a, agent) {
     var wsRow = '<div>WebSocket: <strong style="color:' + (wsConnected ? 'var(--color-success)' : 'var(--color-text-secondary)') + '">' +
       (wsConnected ? 'Connected' : 'Disconnected') + '</strong></div>';
 
+    // Privilege level the agent runs at. Windows = LocalSystem, macOS = root
+    // (LaunchDaemon), Linux = root (runAsRoot install) or the default
+    // unprivileged DynamicUser. Root is highlighted since it's elevated.
+    var privLabel, privColor;
+    if (agent.osPlatform === "windows") { privLabel = "LocalSystem"; privColor = ""; }
+    else if (agent.osPlatform === "darwin") { privLabel = "Root"; privColor = "var(--color-warning)"; }
+    else { privLabel = agent.runAsRoot ? "Root" : "Unprivileged"; privColor = agent.runAsRoot ? "var(--color-warning)" : ""; }
+    var privRow = '<div>Privileges: <strong' + (privColor ? ' style="color:' + privColor + '"' : '') + '>' + privLabel + '</strong></div>';
+
     var errBlock = agent.installError
       ? '<div style="margin:0.5rem 0;padding:0.5rem 0.75rem;background:rgba(255,80,80,0.08);' +
         'border-left:3px solid var(--color-danger);border-radius:4px;font-family:monospace;font-size:0.8rem;' +
@@ -4613,7 +4622,7 @@ function assetAgentSubpanelHTML(a, agent) {
     body =
       errBlock +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem 1.25rem;margin:0.5rem 0">' +
-        versionRow + platformRow + lastSeenRow + wsRow +
+        versionRow + platformRow + lastSeenRow + wsRow + privRow +
       '</div>' +
       '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem">' + actions + '</div>';
   }
