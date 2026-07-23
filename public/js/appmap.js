@@ -375,6 +375,9 @@
       payload = p;
       render(preserved);
     }).catch(function (err) {
+      // Log the full error (with stack) so a render failure is diagnosable in
+      // the console, not just a one-line status message.
+      try { console.error("Application Map load/render failed:", err); } catch (e) { /* ignore */ }
       setStatus("Load failed: " + (err && err.message ? err.message : err));
     });
   }
@@ -393,7 +396,7 @@
     }
     if (g.edges.length === 0 && payload.edges.length > 0) {
       showEmpty("No connections in this window", "Widen the “Seen within” filter — connection data exists but nothing was seen recently enough.");
-    } else {
+    } else if (emptyEl) {
       emptyEl.hidden = true;
     }
 
@@ -430,13 +433,17 @@
   function showEmpty(title, text) {
     var emptyEl = document.getElementById("appmap-empty");
     var textEl = document.getElementById("appmap-empty-text");
-    if (_emptyDefaultHtml === null) _emptyDefaultHtml = textEl.innerHTML;
-    document.getElementById("appmap-empty-title").textContent = title;
-    // null text = restore the onboarding copy (it carries markup, so a
-    // one-way textContent overwrite would lose it for the session).
-    if (text === null || text === undefined) textEl.innerHTML = _emptyDefaultHtml;
-    else textEl.textContent = text;
-    emptyEl.hidden = false;
+    var titleEl = document.getElementById("appmap-empty-title");
+    // Never let a missing overlay element take down the whole render.
+    if (textEl) {
+      if (_emptyDefaultHtml === null) _emptyDefaultHtml = textEl.innerHTML;
+      // null text = restore the onboarding copy (it carries markup, so a
+      // one-way textContent overwrite would lose it for the session).
+      if (text === null || text === undefined) textEl.innerHTML = _emptyDefaultHtml;
+      else textEl.textContent = text;
+    }
+    if (titleEl) titleEl.textContent = title;
+    if (emptyEl) emptyEl.hidden = false;
   }
 
   function setStatus(text) {
@@ -457,8 +464,7 @@
       if (evt.target === cy) {
         selectedId = null;
         var info = document.getElementById("appmap-info");
-        info.hidden = true;
-        info.innerHTML = "";
+        if (info) { info.hidden = true; info.innerHTML = ""; }
       }
     });
     cy.on("dragfree", "node", function () {
