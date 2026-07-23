@@ -1740,6 +1740,8 @@ Listed alphabetically.
 - Edge dedup: outbound observations win over inbound observations of the same logical connection (`src|dstNode|proto|port` key); one rendered edge per (source, target) with a ≤16-port breakdown.
 - Graph reads are bounded to `lastSeen ≥ now − 7d` — the UI's widest age filter; widening one without the other silently lies.
 - `buildGraphFromRows` stays pure (no prisma) — that's what makes the resolution/dedup/grouping rules testable.
+- **No dangling references reach cytoscape.** `appmap.js:filterGraph` drops any process node whose parent asset isn't in the node set and any edge whose source/target has no node, and `computeLayout` skips collapsed edges to phantom nodes. A dangling ref makes cytoscape-dagre throw `Cannot set properties of null (setting 'hidden')` and fails the WHOLE render — which can happen when connection rows outlive the process/asset that owned them (e.g. a mapped process that stopped running). Keep both guards.
+- **Stale pins are recoverable.** A program pinned for Monitor/Map that no longer appears in the live inventory would otherwise have no Services-tab row (hence no checkbox) to un-pin it, and would linger on the map until its connection rows age out (`POLARIS_PROCESS_CONN_RETENTION_DAYS`, default 30). The Services tab's *Include processes* view surfaces such names as muted "not running" rows with their pin checkboxes so the operator can clear them (unmap → connection rows deleted immediately).
 
 **When changing this:**
 - New node kinds / id shapes → update appmap.js (labels, stylesheet, layout passes) + the saved-layout story in the same change.

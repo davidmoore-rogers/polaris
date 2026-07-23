@@ -14500,6 +14500,23 @@ function _wireAssetServicesTab(asset) {
           memSort: (p.memRssBytes != null ? Number(p.memRssBytes) : null),
         };
       }));
+      // Stale pins: a program pinned for Monitor and/or Map that no longer
+      // appears in the live inventory (it stopped running). Without a row the
+      // operator has no checkbox to un-pin it, so it lingers on the Application
+      // Map until its connection rows age out. Surface it as a "not running"
+      // row so the Monitor/Map boxes can be unchecked.
+      var live = {};
+      procRows.forEach(function (p) { live[p.name] = true; });
+      var staleNames = [];
+      procMonitored.forEach(function (nm) { if (!live[nm]) staleNames.push(nm); });
+      procMapped.forEach(function (nm) { if (!live[nm] && staleNames.indexOf(nm) < 0) staleNames.push(nm); });
+      staleNames.forEach(function (nm) {
+        out.push({
+          kind: "process",
+          raw: { name: nm, cpuPct: null, memRssBytes: null, exePath: "", _stale: true },
+          sortName: nm, typeLabel: "Process", stateSort: "", cpuPct: null, memSort: null,
+        });
+      });
     }
     return out;
   }
@@ -14538,6 +14555,21 @@ function _wireAssetServicesTab(asset) {
       var monChecked = procMonitored.has(p.name) ? " checked" : "";
       var pMapChecked = procMapped.has(p.name) ? " checked" : "";
       var ram = (p.memRssBytes != null) ? _fmtBytes(Number(p.memRssBytes)) : "—";
+      // Stale pin (program no longer in the live inventory): still shows its
+      // Monitor/Map boxes so the operator can un-pin it, but the name isn't a
+      // detail link (there's no live process to open) and the State reads
+      // "not running".
+      if (p._stale) {
+        return '<tr style="opacity:0.7">' +
+          '<td class="svc-pin-col"><input type="checkbox" class="asset-proc-monitor-toggle" data-proc-name="' + nm + '" title="Uncheck to stop monitoring this (no-longer-running) program"' + monChecked + disabled + '></td>' +
+          '<td class="svc-pin-col"><input type="checkbox" class="asset-proc-map-toggle" data-proc-name="' + nm + '" title="Uncheck to remove this (no-longer-running) program from the Application Map"' + pMapChecked + disabled + '></td>' +
+          '<td>' + nm + '</td>' +
+          '<td><span style="color:var(--color-text-secondary)">Process</span></td>' +
+          '<td><span style="color:var(--color-text-tertiary)">not running</span></td>' +
+          '<td>—</td>' +
+          '<td>—</td>' +
+        '</tr>';
+      }
       return '<tr>' +
         '<td class="svc-pin-col"><input type="checkbox" class="asset-proc-monitor-toggle" data-proc-name="' + nm + '" title="Collect CPU/RAM history + logs"' + monChecked + disabled + '></td>' +
         '<td class="svc-pin-col"><input type="checkbox" class="asset-proc-map-toggle" data-proc-name="' + nm + '" title="Discover listening ports + connections for the Application Map"' + pMapChecked + disabled + '></td>' +
@@ -14591,6 +14623,10 @@ function _wireAssetServicesTab(asset) {
         ? (on ? ("Monitoring " + name + " (CPU/RAM + logs)") : ("Stopped monitoring " + name))
         : (on ? ("Mapping " + name + " on the Application Map (ports + connections)") : ("Unmapped " + name));
       showToast(msg, "success");
+      // If this was a stale pin (program no longer in the live inventory) and
+      // it's now fully un-pinned, re-render so its "not running" row drops out.
+      var stillListed = procRows.some(function (p) { return p.name === name; });
+      if (!stillListed && !procMonitored.has(name) && !procMapped.has(name)) apply();
     } catch (err) {
       showToast(err && err.message ? err.message : "Failed to update", "error");
       apply();

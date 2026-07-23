@@ -99,7 +99,24 @@
       if (f.hideExternal) return false;
       return !!referenced[n.id];
     });
-    return { nodes: nodes, edges: edges };
+    // Guard against DANGLING references before they reach cytoscape/dagre: a
+    // process node whose parent asset isn't in the set, or an edge whose
+    // source/target has no node, makes the layout throw ("Cannot set properties
+    // of null (setting 'hidden')") and fails the whole render. This happens when
+    // connection rows (or mapped-process pins) outlive the process/asset that
+    // owned them — e.g. a mapped process that no longer exists in inventory.
+    // Drop the orphans; the rest of the graph still renders.
+    var nodeIds = {};
+    nodes.forEach(function (n) { nodeIds[n.id] = true; });
+    nodes = nodes.filter(function (n) {
+      return !(n.kind === "process" && n.parent && !nodeIds[n.parent]);
+    });
+    nodeIds = {};
+    nodes.forEach(function (n) { nodeIds[n.id] = true; });
+    var cleanEdges = edges.filter(function (r) {
+      return nodeIds[r.edge.source] && nodeIds[r.edge.target];
+    });
+    return { nodes: nodes, edges: cleanEdges };
   }
 
   function isUnknownId(id) {
@@ -281,6 +298,10 @@
       var s = parentOf[r.edge.source] || r.edge.source;
       var t = parentOf[r.edge.target] || r.edge.target;
       if (s === t) return;
+      // Both collapsed endpoints must be real nodes — an edge to a phantom node
+      // makes cytoscape-dagre throw. (filterGraph already drops dangling edges;
+      // this is defense in depth for the collapsed projection.)
+      if (!collapsedNodes[s] || !collapsedNodes[t]) return;
       collapsedEdges[s + "|" + t] = { source: s, target: t };
     });
     var els = [];
