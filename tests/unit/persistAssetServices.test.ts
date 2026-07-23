@@ -24,7 +24,7 @@ vi.mock("../../src/utils/dbRetry.js", () => ({
   retryOnDeadlock: (fn: () => Promise<unknown>) => fn(),
 }));
 
-import { persistAssetServices, isServiceControllable, type AssetServiceInput } from "../../src/services/serviceInventoryService.js";
+import { persistAssetServices, isServiceControllable, isPolarisAgentOwnUnit, type AssetServiceInput } from "../../src/services/serviceInventoryService.js";
 import { prisma } from "../../src/db.js";
 
 type Mock = ReturnType<typeof vi.fn>;
@@ -55,6 +55,22 @@ describe("isServiceControllable", () => {
   });
   it("windows → always controllable", () => {
     expect(isServiceControllable(svc({ platform: "windows", loadState: null }))).toBe(true);
+  });
+  it("the agent's own service is never controllable (both platforms)", () => {
+    expect(isServiceControllable(svc({ unit: "polaris-agent.service", loadState: "loaded" }))).toBe(false);
+    expect(isServiceControllable(svc({ unit: "polaris-agent", platform: "windows", loadState: null }))).toBe(false);
+  });
+});
+
+describe("isPolarisAgentOwnUnit", () => {
+  it("matches the Linux unit and Windows short name, case-insensitively", () => {
+    expect(isPolarisAgentOwnUnit("polaris-agent.service")).toBe(true);
+    expect(isPolarisAgentOwnUnit("polaris-agent")).toBe(true);
+    expect(isPolarisAgentOwnUnit("  POLARIS-AGENT.SERVICE ")).toBe(true);
+  });
+  it("does not match unrelated units", () => {
+    expect(isPolarisAgentOwnUnit("sshd.service")).toBe(false);
+    expect(isPolarisAgentOwnUnit("polaris-agent-helper.service")).toBe(false);
   });
 });
 

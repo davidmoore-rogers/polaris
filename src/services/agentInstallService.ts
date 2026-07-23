@@ -267,6 +267,8 @@ export interface BulkInstallInput {
   /** Operator-chosen install-method variant per OS (bulk spans mixed OSes, so
    *  the choice is keyed by platform). Omitted / null → the per-OS default. */
   scriptIds?:         Partial<Record<AgentOsPlatform, string | null>>;
+  /** Install as root (Linux hosts only; ignored for Windows/darwin). */
+  runAsRoot?:         boolean;
   actor:              string;
 }
 
@@ -382,6 +384,8 @@ export async function bulkInstallAgents(input: BulkInstallInput): Promise<BulkIn
           installCredentialId:   target.credentialId,
           installTransport:      target.transport,
           installScriptId:       input.scriptIds?.[osPlatform] ?? null,
+          // Root install is Linux-only; never store true for Windows/darwin.
+          runAsRoot:             osPlatform === "linux" ? (input.runAsRoot ?? false) : false,
         },
       });
       queue.push({ managedAgentId: row.id, credentialId: target.credentialId });
@@ -512,6 +516,7 @@ async function runInstall(input: StartInstallInput): Promise<void> {
         agentConfBody,
         platform: row.osPlatform,
         scriptId: row.installScriptId,
+        runAsRoot: row.runAsRoot,
         testOverrides,
       });
     } catch (err: any) {
@@ -833,6 +838,7 @@ interface SshInstallParams {
   agentConfBody: string;
   platform: "linux" | "darwin";
   scriptId?: string | null;
+  runAsRoot?: boolean; // linux only — emit the root systemd unit
   testOverrides?: TestOverrides;
 }
 
@@ -843,7 +849,7 @@ async function sshInstall(p: SshInstallParams): Promise<void> {
   await withSshClient(p.host, p.cred, async (client) => {
     // 1. SFTP upload binary + installer script to /tmp.
     await sftpPut(client, "/tmp/polaris-agent.bin",         p.binaryBytes, 0o755);
-    await sftpPut(client, "/tmp/polaris-agent-install.sh",  installerScript(p.platform, p.scriptId), 0o700);
+    await sftpPut(client, "/tmp/polaris-agent-install.sh",  installerScript(p.platform, p.scriptId, p.runAsRoot ?? false), 0o700);
     await sftpPut(client, "/tmp/polaris-agent.conf",        Buffer.from(p.agentConfBody, "utf8"), 0o600);
 
     // 2. Run the installer. `sudo` is implicit — the credential is
@@ -903,10 +909,11 @@ function truncate(s: string, n: number): string {
 // re-validates the OS-lock (defense in depth — the row's installScriptId was
 // already validated at deploy time). Add a `case` here for every new variant
 // added to AGENT_INSTALL_SCRIPTS.
-function installerScript(platform: "linux" | "darwin", scriptId?: string | null): Buffer {
+function installerScript(platform: "linux" | "darwin", scriptId?: string | null, runAsRoot = false): Buffer {
   const id = resolveInstallScriptId(platform, scriptId);
   switch (id) {
-    case "linux-systemd":  return Buffer.from(LINUX_INSTALL_SCRIPT, "utf8");
+    case "linux-systemd":  return Buffer.from(linuxInstallScript(runAsRoot), "utf8");
+    // darwin LaunchDaemons already run as root; runAsRoot is a Linux-only concept.
     case "darwin-launchd": return Buffer.from(DARWIN_INSTALL_SCRIPT, "utf8");
     default:
       throw new AppError(500, `No installer script wired for variant "${id}"`);
@@ -925,16 +932,60 @@ function uninstallerScript(platform: "linux" | "darwin", scriptId?: string | nul
   }
 }
 
-const LINUX_INSTALL_SCRIPT = `#!/usr/bin/env bash
-# Polaris Agent installer for Linux (systemd). Run by polaris-agent-install.sh
-# as root via sudo -n. Reads pre-staged binary + config from /tmp/.
-#
-# Config lives under /var/lib/polaris-agent/ rather than /etc/polaris-agent/
-# so the systemd DynamicUser can rewrite it after /enroll succeeds (the
-# unit uses ProtectSystem=strict which makes /etc/ read-only for the
-# process — but /var/lib/ is exposed writable via StateDirectory=). The
-# legacy /etc/polaris-agent path is cleaned up if it exists so operators
-# don't accumulate orphans on reinstall.
+// The systemd [Service] block. Default = the hardened unprivileged DynamicUser
+// unit. runAsRoot (operator opt-in, Linux only) = run as root with no sandbox,
+// which is required for service control (systemctl start/stop/restart against
+// OTHER units), root automation scripts, and Application Map connection
+// attribution (reading other users' /proc/<pid>/fd). The rest of the unit and
+// the install script are identical between the two.
+function linuxServiceBlock(runAsRoot: boolean): string {
+  if (runAsRoot) {
+    return `[Service]
+ExecStart=/usr/local/bin/polaris-agent -conf /var/lib/polaris-agent/agent.conf
+Restart=on-failure
+RestartSec=5
+# ROOT install — operator opt-in via the "Install with root privileges" toggle.
+# The agent runs privileged so it can control services (systemctl start/stop/
+# restart), execute root automation scripts, and attribute every process's
+# network connections on the Application Map (reading other users'
+# /proc/<pid>/fd). Broader blast radius than the default unprivileged unit;
+# chosen deliberately per host.
+User=root
+StateDirectory=polaris-agent
+StateDirectoryMode=0700`;
+  }
+  return `[Service]
+ExecStart=/usr/local/bin/polaris-agent -conf /var/lib/polaris-agent/agent.conf
+Restart=on-failure
+RestartSec=5
+# Dedicated unprivileged user for the agent. Falls back to root if the
+# user doesn't exist (operators with strict policies create it ahead of
+# time). Agent only reads its config + writes outbound network traffic;
+# no privileged operations needed at runtime.
+User=polaris-agent
+DynamicUser=yes
+# StateDirectory exposes /var/lib/polaris-agent as the unit's writable
+# state directory; systemd chowns it to the DynamicUser at start so the
+# agent can atomically rewrite agent.conf after /enroll lands (the
+# bearer must be persisted across restarts or the agent loops on the
+# already-consumed enrollment token).
+StateDirectory=polaris-agent
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true`;
+}
+
+// Polaris Agent installer for Linux (systemd), parameterized by runAsRoot.
+// Run by polaris-agent-install.sh as root via sudo -n; reads pre-staged binary
+// + config from /tmp/. Config lives under /var/lib/polaris-agent/ (systemd
+// StateDirectory) rather than /etc/polaris-agent/ so the agent can rewrite it
+// after /enroll succeeds — under the default unprivileged unit ProtectSystem=
+// strict makes /etc read-only, while StateDirectory stays writable. The legacy
+// /etc/polaris-agent path is cleaned up if present so reinstalls don't orphan.
+function linuxInstallScript(runAsRoot: boolean): string {
+  return `#!/usr/bin/env bash
 set -euo pipefail
 
 BIN_SRC=/tmp/polaris-agent.bin
@@ -961,27 +1012,7 @@ Description=Polaris Agent
 After=network-online.target
 Wants=network-online.target
 
-[Service]
-ExecStart=/usr/local/bin/polaris-agent -conf /var/lib/polaris-agent/agent.conf
-Restart=on-failure
-RestartSec=5
-# Dedicated unprivileged user for the agent. Falls back to root if the
-# user doesn't exist (operators with strict policies create it ahead of
-# time). Agent only reads its config + writes outbound network traffic;
-# no privileged operations needed at runtime.
-User=polaris-agent
-DynamicUser=yes
-# StateDirectory exposes /var/lib/polaris-agent as the unit's writable
-# state directory; systemd chowns it to the DynamicUser at start so the
-# agent can atomically rewrite agent.conf after /enroll lands (the
-# bearer must be persisted across restarts or the agent loops on the
-# already-consumed enrollment token).
-StateDirectory=polaris-agent
-StateDirectoryMode=0700
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true
+${linuxServiceBlock(runAsRoot)}
 
 [Install]
 WantedBy=multi-user.target
@@ -996,6 +1027,7 @@ rm -f "\${BIN_SRC}" "\${CONF_SRC}"
 
 echo "Polaris Agent installed and started"
 `;
+}
 
 const LINUX_UNINSTALL_SCRIPT = `#!/usr/bin/env bash
 # Polaris Agent uninstaller for Linux (systemd). Idempotent — missing

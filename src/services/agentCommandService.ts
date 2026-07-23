@@ -14,6 +14,7 @@
 
 import { prisma } from "../db.js";
 import { logEvent } from "./eventLogService.js";
+import { isPolarisAgentOwnUnit } from "./serviceInventoryService.js";
 import { AppError } from "../utils/errors.js";
 
 export type ControlAction = "stop" | "start" | "restart";
@@ -82,14 +83,23 @@ export async function requestServiceControl(
   actor: string | undefined,
 ): Promise<{ id: string; target: string }> {
   if (!CONTROL_UNIT_RE.test(unit)) throw new AppError(400, `Invalid unit name "${unit}"`);
+  if (isPolarisAgentOwnUnit(unit)) {
+    throw new AppError(409, `"${unit}" is the Polaris Agent's own service and can't be started/stopped/restarted from here`);
+  }
   const svc = await prisma.assetService.findUnique({ where: { assetId_unit: { assetId, unit } } });
   if (!svc) throw new AppError(404, `Service "${unit}" not found in this asset's inventory`);
   if (!svc.controllable) {
     throw new AppError(409, `"${unit}" is not controllable (masked / not-loaded) — start/stop/restart isn't available for it`);
   }
-  const agent = await prisma.managedAgent.findUnique({ where: { assetId }, select: { id: true, installStatus: true } });
+  const agent = await prisma.managedAgent.findUnique({ where: { assetId }, select: { id: true, installStatus: true, runAsRoot: true } });
   if (!agent) throw new AppError(409, "This asset has no Polaris Agent — service control requires an installed agent");
   if (agent.installStatus !== "active") throw new AppError(409, "The Polaris Agent on this asset isn't active");
+  // systemd control needs a root agent (a non-root/unprivileged agent gets
+  // "interactive authentication required" from systemctl). Windows agents run
+  // as LocalSystem, so control always works there.
+  if (svc.platform === "systemd" && !agent.runAsRoot) {
+    throw new AppError(409, `Service control on Linux requires the Polaris Agent to be installed with root privileges — reinstall the agent on this host with the "Install with root privileges" option to control "${unit}"`);
+  }
 
   const cmd = await prisma.agentCommand.create({
     data: { assetId, managedAgentId: agent.id, action, target: unit, requestedBy: actor ?? null },

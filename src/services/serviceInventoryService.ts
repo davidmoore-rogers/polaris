@@ -28,13 +28,29 @@ export interface AssetServiceInput {
 }
 
 /**
+ * The Polaris Agent's own service names — the Linux systemd unit and the Windows
+ * SCM short name. Start/stop/restart of these is refused end-to-end: stopping
+ * the agent would sever the control channel (and on Linux kill the collector
+ * that reports this very inventory), so an operator could never bring it back
+ * from the UI. The agent enforces the same rule locally as defense in depth.
+ */
+const AGENT_OWN_UNITS = new Set(["polaris-agent.service", "polaris-agent"]);
+
+/** True when `unit` names the Polaris Agent's own service (self-control guard). */
+export function isPolarisAgentOwnUnit(unit: string): boolean {
+  return AGENT_OWN_UNITS.has(unit.trim().toLowerCase());
+}
+
+/**
  * True when the unit/service can be start/stop/restarted via the AgentCommand
- * queue. systemd: any loaded, non-masked unit (`systemctl start/stop/restart`
- * targets the unit regardless of current active state — needed to *start* a
- * stopped service). Windows: every SCM service is controllable via `net`/`sc`.
- * A masked or not-found systemd unit cannot be acted on.
+ * queue. The agent's own service is never controllable (see AGENT_OWN_UNITS).
+ * systemd: any loaded, non-masked unit (`systemctl start/stop/restart` targets
+ * the unit regardless of current active state — needed to *start* a stopped
+ * service). Windows: every SCM service is controllable via `net`/`sc`. A masked
+ * or not-found systemd unit cannot be acted on.
  */
 export function isServiceControllable(s: AssetServiceInput): boolean {
+  if (isPolarisAgentOwnUnit(s.unit)) return false;
   if (s.platform === "windows") return true;
   const load = (s.loadState ?? "").toLowerCase();
   return load === "loaded";

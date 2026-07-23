@@ -56,7 +56,13 @@ TableSF.prototype._setup = function () {
       '</div>';
 
     var typeAttr = th.getAttribute("data-sf-type") || "string";
-    if (optsRaw != null) {
+    // data-sf-nofilter → sortable but NOT filterable: render the header + sort
+    // icon only, and skip the filter-control wiring below. Sorting stays wired
+    // (it hangs off .sf-header, independent of any filter control).
+    var noFilter = th.hasAttribute("data-sf-nofilter");
+    if (noFilter) {
+      th.innerHTML = headerHtml;
+    } else if (optsRaw != null) {
       // Empty data-sf-options="" marks the column as a dynamic multi-select;
       // setColumnOptions() will populate the checkbox list once data loads.
       var checks = optsRaw.trim()
@@ -103,7 +109,9 @@ TableSF.prototype._setup = function () {
       self._onChange();
     });
 
-    if (optsRaw != null) {
+    if (noFilter) {
+      // Sort-only column — no filter control to wire.
+    } else if (optsRaw != null) {
       var wrap = th.querySelector(".sf-filter-multi");
       var btn  = wrap.querySelector(".sf-multi-button");
       var pop  = wrap.querySelector(".sf-multi-popover");

@@ -1791,7 +1791,10 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
     const id = req.params.id as string;
     const asset = await prisma.asset.findUnique({
       where: { id },
-      select: { monitoredProcesses: true, alertWatchedProcesses: true, mappedProcesses: true },
+      select: {
+        monitoredProcesses: true, alertWatchedProcesses: true, mappedProcesses: true,
+        managedAgent: { select: { osPlatform: true, runAsRoot: true, installStatus: true } },
+      },
     });
     if (!asset) throw new AppError(404, "Asset not found");
     const [rows, configs] = await Promise.all([
@@ -1823,6 +1826,13 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
       monitoredProcesses:    (asset.monitoredProcesses    ?? []) as string[],
       alertWatchedProcesses: (asset.alertWatchedProcesses ?? []) as string[],
       mappedProcesses:       (asset.mappedProcesses       ?? []) as string[],
+      // Same control-availability signal as /services: process Start/Stop/
+      // Restart runs systemctl against the backing unit, so Linux needs a root
+      // agent. UI grays out the buttons when false.
+      serviceControlAvailable: (() => {
+        const ma = asset.managedAgent;
+        return !!ma && ma.installStatus === "active" && (ma.osPlatform === "windows" || ma.runAsRoot);
+      })(),
     });
   } catch (err) { next(err); }
 });
@@ -1836,13 +1846,23 @@ router.get("/:id/services", requirePermission("assets", "read"), async (req, res
     const id = req.params.id as string;
     const asset = await prisma.asset.findUnique({
       where: { id },
-      select: { monitoredServices: true, mappedServices: true },
+      select: {
+        monitoredServices: true, mappedServices: true,
+        managedAgent: { select: { osPlatform: true, runAsRoot: true, installStatus: true } },
+      },
     });
     if (!asset) throw new AppError(404, "Asset not found");
     const rows = await prisma.assetService.findMany({
       where: { assetId: id },
       orderBy: [{ unit: "asc" }],
     });
+    // Whether Start/Stop/Restart can actually run: needs an active agent, and on
+    // Linux that agent must be root (systemctl control fails for an unprivileged
+    // agent). Windows agents run as LocalSystem, so control always works there.
+    // The UI grays out the control buttons (rather than hiding them) when false.
+    const ma = asset.managedAgent;
+    const serviceControlAvailable = !!ma && ma.installStatus === "active" &&
+      (ma.osPlatform === "windows" || ma.runAsRoot);
     res.json({
       services: rows.map((s) => ({
         unit:         s.unit,
@@ -1859,6 +1879,7 @@ router.get("/:id/services", requirePermission("assets", "read"), async (req, res
       })),
       monitoredServices: (asset.monitoredServices ?? []) as string[],
       mappedServices:    (asset.mappedServices    ?? []) as string[],
+      serviceControlAvailable,
     });
   } catch (err) { next(err); }
 });
@@ -4473,6 +4494,9 @@ const BulkAgentInstallSchema = z.object({
     darwin:  z.string().max(100).optional(),
     windows: z.string().max(100).optional(),
   }).partial().optional(),
+  // Install Linux hosts as root (ignored for Windows/darwin). Applies to every
+  // Linux host in the selection.
+  runAsRoot:         z.boolean().optional(),
 }).refine((b) => b.sshCredentialId || b.winrmCredentialId, {
   message: "Provide at least one credential (SSH and/or WinRM)",
 });
@@ -4487,6 +4511,7 @@ router.post("/bulk-agent-install", requirePermission("assets", "write"), async (
       winrmCredentialId: input.winrmCredentialId ?? null,
       arch:              input.arch,
       scriptIds:         input.scriptIds,
+      runAsRoot:         input.runAsRoot,
       actor,
     });
     res.json(result);
@@ -4515,6 +4540,11 @@ const AgentInstallSchema = z.object({
   // Curated install-method variant id (see agentInstallScripts catalog).
   // Optional — omitted uses the per-OS default. OS-locked server-side.
   scriptId:     z.string().max(100).optional(),
+  // Operator opt-in (Linux only): install the agent as root instead of the
+  // default unprivileged DynamicUser unit. Required for service control, root
+  // automation scripts, and Application Map connection attribution. Ignored on
+  // Windows (LocalSystem) / darwin (LaunchDaemon runs as root).
+  runAsRoot:    z.boolean().optional(),
 });
 
 router.get("/:id/agent", requirePermission("assets", "read"), async (req, res, next) => {
@@ -4645,6 +4675,8 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
         installCredentialId:   body.credentialId,
         installTransport:      transport,
         installScriptId:       body.scriptId ?? null,
+        // Root install is a Linux-only concept; never store true for other OSes.
+        runAsRoot:             body.osPlatform === "linux" ? (body.runAsRoot ?? false) : false,
       },
     });
 

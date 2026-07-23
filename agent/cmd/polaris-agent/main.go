@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -63,6 +64,15 @@ func fmtIntPtr(p *int) string {
 		return "nil"
 	}
 	return fmt.Sprintf("%d", *p)
+}
+
+// isSelfControlTarget reports whether a service-control target names the Polaris
+// Agent's own service — the Linux systemd unit or the Windows SCM short name.
+// The agent refuses to start/stop/restart itself (mirrors the server's
+// controllable=false), so a stale or crafted command can't sever the channel.
+func isSelfControlTarget(target string) bool {
+	t := strings.ToLower(strings.TrimSpace(target))
+	return t == "polaris-agent" || t == "polaris-agent.service"
 }
 
 // version is stamped at build time via -ldflags='-X main.version=<x>'.
@@ -1022,6 +1032,17 @@ func pollAndRunCommands(client *transport.Client) {
 		case "run_script":
 			runScriptCommand(client, c)
 		case "stop", "start", "restart":
+			// Never act on our own service — stopping/restarting it would sever
+			// this command channel (and on Linux kill the inventory collector).
+			// The server marks it non-controllable, but refuse locally too in
+			// case a stale/pre-upgrade server queued it.
+			if isSelfControlTarget(c.Target) {
+				if rerr := client.ReportCommandResult(c.ID, false, "refused: the Polaris Agent will not control its own service", ""); rerr != nil {
+					log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
+				}
+				log.Printf("service control: refused self-target %q (id=%s)", c.Target, c.ID)
+				break
+			}
 			state, execErr := collectors.RunServiceControl(c.Action, c.Target)
 			success := execErr == nil
 			errMsg := ""
@@ -1031,7 +1052,7 @@ func pollAndRunCommands(client *transport.Client) {
 			if rerr := client.ReportCommandResult(c.ID, success, errMsg, state); rerr != nil {
 				log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
 			}
-			log.Printf("process control: %s %s -> success=%v state=%q", c.Action, c.Target, success, state)
+			log.Printf("service control: %s %s -> success=%v state=%q", c.Action, c.Target, success, state)
 		default:
 			// Defensive: a newer server queued something this agent doesn't
 			// understand — refuse explicitly instead of silently dropping

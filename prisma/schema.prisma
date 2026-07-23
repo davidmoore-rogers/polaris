@@ -3066,6 +3066,14 @@ model ManagedAgent {
   // can never land on a linux row).
   installScriptId String?
 
+  // Operator opt-in at install time (Linux only): install the agent as root
+  // instead of the default unprivileged DynamicUser unit. Root is required for
+  // service control (systemctl start/stop/restart), root automation scripts,
+  // and Application Map connection attribution (reading other users'
+  // /proc/<pid>/fd). Default false = the hardened unprivileged unit. On Windows
+  // the agent always runs as LocalSystem, so this flag is not consulted there.
+  runAsRoot Boolean @default(false)
+
   installStatus String  @default("pending") // see lifecycle comment above
   installError  String? // captured stderr / exception message on failure
 

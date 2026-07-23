@@ -229,6 +229,7 @@ Per-pattern sections:
   - `data-sf-key="<dotted.path>"` — supports nested keys (`block.name`, `_count.subnets`).
   - `data-sf-type="string|number|date|ip|array"` — defaults to `string`.
   - `data-sf-options="value1|value2=Label2|value3"` — when present, renders a multi-select checkbox popover instead of a free-text input.
+  - `data-sf-nofilter` (bare attribute) — sortable but NOT filterable: renders the header + sort caret only, no filter control. Sorting still works (it hangs off `.sf-header`, independent of the filter block). Use for numeric columns where a filter box adds noise but sort is useful (e.g. the asset Services tab's CPU % / Memory).
 - Construct once after rendering the static `<thead>`: `var sf = new TableSF("<tbody-id>", onChange);`.
 - Pipe raw rows through `sf.apply(rawData)` before rendering — sort + filters are applied there.
 - The `onChange` callback re-runs the row renderer; never mutate `rawData` in place.

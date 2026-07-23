@@ -1273,6 +1273,16 @@ code {
   z-index: 10;
   box-shadow: 0 1px 0 var(--color-border);
 }
+/* Narrow center-aligned pin/checkbox columns (asset Services tab: Monitor /
+   Logs / Map). Tight horizontal padding + no header wrap so the labels stay on
+   one line and the checkboxes sit close together instead of spread across wide
+   cells. */
+.svc-pin-col {
+  text-align: center;
+  white-space: nowrap;
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+}
 table {
   width: 100%;
   border-collapse: collapse;
