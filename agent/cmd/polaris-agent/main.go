@@ -935,14 +935,18 @@ func processConnectionsLoop(ctx context.Context, cfg *config.Config, client *tra
 
 func pushProcessConnectionsOne(client *transport.Client) {
 	pc := loadProcessesCfg()
-	if !pc.enabled || len(pc.mapped) == 0 {
+	sc := loadServicesCfg()
+	// Collect when the operator mapped at least one program (by name) OR one
+	// unit (mappedServices, Phase 3). Independent gates — a unit can be mapped
+	// without pinning its backing program and vice versa.
+	if len(pc.mapped) == 0 && len(sc.mapped) == 0 {
 		return
 	}
 	type res struct {
 		s []*transport.ProcessConnectionSample
 	}
 	ch := make(chan res, 1)
-	go func() { ch <- res{collectors.ProcessConnectionsOnce(pc.mapped)} }()
+	go func() { ch <- res{collectors.ProcessConnectionsOnce(pc.mapped, sc.mapped)} }()
 	var r res
 	select {
 	case r = <-ch:

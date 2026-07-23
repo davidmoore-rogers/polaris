@@ -220,6 +220,10 @@ type ProcessConnectionSample struct {
 	LocalPort  int    `json:"localPort,omitempty"`
 	RemoteIp   string `json:"remoteIp,omitempty"`
 	RemotePort int    `json:"remotePort,omitempty"`
+	// Owning systemd unit / Windows service (Phase 3), when the PID's cgroup
+	// resolved one — lets the server attribute the socket to a unit. "" when
+	// unknown or the row came only via a mappedProcesses (by-name) pin.
+	Unit string `json:"unit,omitempty"`
 }
 
 // ProcessLogSample matches the server's ProcessLogSampleSchema — one row per

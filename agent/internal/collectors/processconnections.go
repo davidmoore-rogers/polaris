@@ -2,9 +2,12 @@
 // programs (Application Map).
 //
 // Cross-platform via gopsutil/v3/net (no build tags). Collection is scoped to
-// the mapped program names ONLY — the whole point of the Map toggle is to avoid
+// the mapped programs (by name) AND mapped units (by systemd unit / Windows
+// service — Phase 3) ONLY — the whole point of the Map toggle is to avoid
 // full-host collect-everything-then-filter — and the direction heuristic, dedup,
-// and per-(program, kind) caps all run here, before transmit:
+// and per-(program, kind) caps all run here, before transmit. Each row carries
+// its owning unit (resolved from the PID's cgroup) so the server can attribute
+// the socket to a unit:
 //
 //   - TCP LISTEN rows (and UDP rows with no peer — UDP has no LISTEN state)
 //     become kind="listen" and feed a per-program set of listening ports.
@@ -46,6 +49,7 @@ const (
 // without a live socket table.
 type connRaw struct {
 	Name       string
+	Unit       string // owning systemd unit / Windows service ("" if none/unknown)
 	Proto      string // "tcp" | "udp"
 	Status     string // gopsutil TCP status ("LISTEN", "ESTABLISHED", ...); "" for UDP
 	LocalAddr  string
@@ -54,30 +58,50 @@ type connRaw struct {
 	RemotePort int
 }
 
-// ProcessConnectionsOnce collects connection facts for the mapped program
-// names. Returns nil when nothing is mapped or the socket table can't be read.
-func ProcessConnectionsOnce(mappedNames []string) []*transport.ProcessConnectionSample {
-	if len(mappedNames) == 0 {
+// ProcessConnectionsOnce collects connection facts for the operator-mapped
+// programs (by name) AND mapped units (by systemd unit / Windows service —
+// Phase 3). A PID is included when its program name is in mappedNames OR its
+// resolved unit is in mappedUnits; each row carries the resolved unit so the
+// server can attribute the socket to a unit. Returns nil when nothing is mapped
+// or the socket table can't be read.
+func ProcessConnectionsOnce(mappedNames, mappedUnits []string) []*transport.ProcessConnectionSample {
+	if len(mappedNames) == 0 && len(mappedUnits) == 0 {
 		return nil
 	}
-	want := make(map[string]bool, len(mappedNames))
+	wantName := make(map[string]bool, len(mappedNames))
 	for _, n := range mappedNames {
-		want[n] = true
+		wantName[n] = true
 	}
-	// pid → mapped program name, resolved once (Name() is the expensive call).
+	wantUnit := make(map[string]bool, len(mappedUnits))
+	for _, u := range mappedUnits {
+		wantUnit[u] = true
+	}
 	procs, err := process.Processes()
 	if err != nil {
 		return nil
 	}
-	nameByPid := make(map[int32]string)
+	// Resolve the unit for every PID once (cheap — one /proc/<pid>/cgroup read;
+	// no-op map off Linux/Windows) so we can select PIDs by unit + stamp it.
+	pids := make([]int32, 0, len(procs))
+	for _, p := range procs {
+		pids = append(pids, p.Pid)
+	}
+	unitByPid := resolveServiceUnits(pids)
+
+	// pid → {name, unit} for PIDs we care about (mapped by name or by unit).
+	type sel struct{ name, unit string }
+	byPid := make(map[int32]sel)
 	for _, p := range procs {
 		name, err := p.Name()
-		if err != nil || !want[name] {
+		if err != nil {
 			continue
 		}
-		nameByPid[p.Pid] = name
+		unit := unitByPid[p.Pid]
+		if wantName[name] || (unit != "" && wantUnit[unit]) {
+			byPid[p.Pid] = sel{name: name, unit: unit}
+		}
 	}
-	if len(nameByPid) == 0 {
+	if len(byPid) == 0 {
 		return nil
 	}
 
@@ -87,7 +111,7 @@ func ProcessConnectionsOnce(mappedNames []string) []*transport.ProcessConnection
 	}
 	raws := make([]connRaw, 0, 64)
 	for _, c := range conns {
-		name, ok := nameByPid[c.Pid]
+		s, ok := byPid[c.Pid]
 		if !ok {
 			continue
 		}
@@ -96,7 +120,8 @@ func ProcessConnectionsOnce(mappedNames []string) []*transport.ProcessConnection
 			continue
 		}
 		raws = append(raws, connRaw{
-			Name:       name,
+			Name:       s.name,
+			Unit:       s.unit,
 			Proto:      proto,
 			Status:     c.Status,
 			LocalAddr:  normalizeIP(c.Laddr.IP),
@@ -113,19 +138,24 @@ func ProcessConnectionsOnce(mappedNames []string) []*transport.ProcessConnection
 func buildConnectionSamples(raws []connRaw) []*transport.ProcessConnectionSample {
 	// Pass 1: listen rows + the per-(program, proto) listening-port sets the
 	// direction heuristic keys on.
-	type key struct{ name, kind, proto, laddr, raddr string; lport, rport int }
+	type key struct {
+		name, kind, proto, laddr, raddr string
+		lport, rport                    int
+	}
 	seen := make(map[key]bool)
 	listenPorts := make(map[string]map[int]bool) // "name/proto" → ports
 	var out []*transport.ProcessConnectionSample
 
-	add := func(name, kind, proto, laddr string, lport int, raddr string, rport int) {
+	// `unit` is an attribute, NOT part of the dedup key (deterministic per
+	// process); the first occurrence's unit wins on a duplicate tuple.
+	add := func(name, unit, kind, proto, laddr string, lport int, raddr string, rport int) {
 		k := key{name, kind, proto, laddr, raddr, lport, rport}
 		if seen[k] {
 			return
 		}
 		seen[k] = true
 		out = append(out, &transport.ProcessConnectionSample{
-			Name: name, Kind: kind, Proto: proto,
+			Name: name, Unit: unit, Kind: kind, Proto: proto,
 			LocalAddr: laddr, LocalPort: lport,
 			RemoteIp: raddr, RemotePort: rport,
 		})
@@ -139,7 +169,7 @@ func buildConnectionSamples(raws []connRaw) []*transport.ProcessConnectionSample
 				listenPorts[r.Name+"/"+r.Proto] = lp
 			}
 			lp[r.LocalPort] = true
-			add(r.Name, "listen", r.Proto, r.LocalAddr, r.LocalPort, "", 0)
+			add(r.Name, r.Unit, "listen", r.Proto, r.LocalAddr, r.LocalPort, "", 0)
 		}
 	}
 	// Pass 2: established rows → inbound/outbound by the listen-port sets.
@@ -152,10 +182,10 @@ func buildConnectionSamples(raws []connRaw) []*transport.ProcessConnectionSample
 		}
 		if listenPorts[r.Name+"/"+r.Proto][r.LocalPort] {
 			// Peer connected to our listening port; drop its ephemeral port.
-			add(r.Name, "inbound", r.Proto, "", r.LocalPort, r.RemoteAddr, 0)
+			add(r.Name, r.Unit, "inbound", r.Proto, "", r.LocalPort, r.RemoteAddr, 0)
 		} else {
 			// We dialed out; drop our ephemeral source port.
-			add(r.Name, "outbound", r.Proto, "", 0, r.RemoteAddr, r.RemotePort)
+			add(r.Name, r.Unit, "outbound", r.Proto, "", 0, r.RemoteAddr, r.RemotePort)
 		}
 	}
 
