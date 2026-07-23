@@ -2555,11 +2555,14 @@ router.get("/:id/process-command/:commandId", requirePermission("assets", "read"
 // POST /assets/:id/services/:unit/control — Start/Stop/Restart a systemd unit /
 // Windows service via the AgentCommand queue. Same posture as process control
 // (processControl RBAC, agent never self-acts, fully audited); the unit lands in
-// AgentCommand.target and the agent runs systemctl / net+sc. The unit name is a
-// wildcard param (dots / @ / : are legal in unit names) — the service lookup +
-// charset validation happen in requestServiceControl. Reuses the shared
-// process-command status poll (same AgentCommand row).
-router.post("/:id/services/:unit(*)/control", requirePermission("processControl", "write"), async (req, res, next) => {
+// AgentCommand.target and the agent runs systemctl / net+sc. A PLAIN :unit param
+// is correct and sufficient: unit names carry dots / @ / : but never "/", and a
+// plain param matches everything within one path segment. (Express 5 /
+// path-to-regexp v8 removed the `:param(regex)` syntax — `:unit(*)` here threw a
+// PathError at route registration and crash-looped polaris-web on boot,
+// prod incident 2026-07-23.) The service lookup + charset validation happen in
+// requestServiceControl. Reuses the shared process-command status poll.
+router.post("/:id/services/:unit/control", requirePermission("processControl", "write"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const unit = String(req.params.unit);
