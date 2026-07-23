@@ -1012,7 +1012,7 @@ function descriptionSyncFormHTML(syncDescriptions, useProxy) {
       '<h4 style="margin:0 0 0.25rem 0">Description Sync</h4>' +
       '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)"><strong style="color:var(--color-text-primary)">Polaris is primary.</strong> A value in Polaris always wins: it pushes to the device on save and re-asserts on every discovery cycle — device-side edits are overwritten (every change is audited). An empty Polaris field adopts the device\'s value instead.</p>' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
-        '<input type="checkbox" id="f-syncDescriptions" ' + checked + ' style="width:auto">' +
+        '<input type="checkbox" id="f-syncDescriptions" ' + checked + ' style="width:auto" onchange="onSyncDescriptionsToggle(this)">' +
         '<label for="f-syncDescriptions" style="margin:0">Sync descriptions between Polaris and devices (Polaris is primary)</label>' +
       '</div>' +
       '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
@@ -1047,6 +1047,24 @@ function _readSyncDescriptionsToggle() {
   var el = document.getElementById("f-syncDescriptions");
   if (!el) return undefined;
   return !!el.checked;
+}
+
+// Fires the moment the operator flips Description Sync ON: confirm the FortiAP
+// field-length caveat before letting the box stay checked. Declining reverts
+// the toggle. No-op on un-check. showConfirm (app.js) stacks its own overlay
+// above the open integration modal, so the edit form's DOM survives.
+function onSyncDescriptionsToggle(el) {
+  if (!el || !el.checked) return;
+  showConfirm(
+    "Enable Description Sync?\n\n" +
+    "FortiAP descriptions are written to the device's location field, which " +
+    "FortiOS limits to 35 characters. With sync on, Polaris caps the " +
+    "Description field to 35 characters for access points and truncates " +
+    "longer values when pushing to the device.\n\n" +
+    "FortiGate and FortiSwitch descriptions are not affected."
+  ).then(function (ok) {
+    if (!ok) el.checked = false;
+  });
 }
 
 // Per-integration monitoring transport block rendered at the top of the

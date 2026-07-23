@@ -35,9 +35,10 @@ function lastCall(): { sql: string; params: unknown[] } {
   return { sql: call[0] as string, params: call.slice(1) };
 }
 
-/** Rows-per-statement: params are 11 per tuple. */
+/** Rows-per-statement: params are 12 per tuple (id, assetId, processName, kind,
+ *  proto, localAddr, localPort, remoteIp, remotePort, unit, firstSeen, lastSeen). */
 function tupleCount(params: unknown[]): number {
-  return params.length / 11;
+  return params.length / 12;
 }
 
 beforeEach(() => {
@@ -60,7 +61,7 @@ describe("persistProcessConnections", () => {
       { processName: "sqlservr", kind: "LISTEN" as never, proto: "TCP" as never, localAddr: "0.0.0.0", localPort: 1433 },
     ]);
     const { params } = lastCall();
-    // tuple order: id, assetId, processName, kind, proto, localAddr, localPort, remoteIp, remotePort, firstSeen, lastSeen
+    // tuple order: id, assetId, processName, kind, proto, localAddr, localPort, remoteIp, remotePort, unit, firstSeen, lastSeen
     expect(params[1]).toBe(ASSET);
     expect(params[2]).toBe("sqlservr");
     expect(params[3]).toBe("listen");
@@ -69,6 +70,19 @@ describe("persistProcessConnections", () => {
     expect(params[6]).toBe(1433);
     expect(params[7]).toBe("");   // remoteIp sentinel
     expect(params[8]).toBe(0);    // remotePort sentinel
+    expect(params[9]).toBe("");   // unit sentinel (Phase 3) when not supplied
+  });
+
+  it("carries the owning unit (Phase 3) into the insert, defaulting to sentinel", async () => {
+    await persistProcessConnections(ASSET, [
+      { processName: "java", kind: "listen", proto: "tcp", localAddr: "0.0.0.0", localPort: 8080, unit: "truckscale-central.service" },
+    ]);
+    const { sql, params } = lastCall();
+    expect(sql).toContain('"unit"');
+    // unit is present in the column list but NOT refreshed on conflict.
+    expect(sql).toContain('DO UPDATE SET "lastSeen"');
+    expect(sql).not.toContain('SET "unit"');
+    expect(params[9]).toBe("truckscale-central.service");
   });
 
   it("drops invalid kind / proto / out-of-range ports / empty names", async () => {

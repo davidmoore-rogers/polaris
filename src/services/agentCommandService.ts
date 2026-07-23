@@ -63,6 +63,50 @@ export async function requestProcessControl(
   return { id: cmd.id, target: proc.serviceUnit };
 }
 
+// Unit-name charset accepted for control — mirrors the agent's validControlTarget
+// (systemd units: letters/digits/@:._- ; Windows service short names). Rejecting
+// here keeps a malformed unit out of the command queue before it reaches a shell-
+// free exec on-agent.
+const CONTROL_UNIT_RE = /^[A-Za-z0-9@:._-]{1,256}$/;
+
+/**
+ * Enqueue a control command for one service/unit (Services tab). Validates the
+ * unit exists in the asset's service inventory and is controllable, and that the
+ * asset has an active agent. Returns the created command. Mirrors
+ * requestProcessControl but keys on AssetService by (assetId, unit).
+ */
+export async function requestServiceControl(
+  assetId: string,
+  unit: string,
+  action: ControlAction,
+  actor: string | undefined,
+): Promise<{ id: string; target: string }> {
+  if (!CONTROL_UNIT_RE.test(unit)) throw new AppError(400, `Invalid unit name "${unit}"`);
+  const svc = await prisma.assetService.findUnique({ where: { assetId_unit: { assetId, unit } } });
+  if (!svc) throw new AppError(404, `Service "${unit}" not found in this asset's inventory`);
+  if (!svc.controllable) {
+    throw new AppError(409, `"${unit}" is not controllable (masked / not-loaded) — start/stop/restart isn't available for it`);
+  }
+  const agent = await prisma.managedAgent.findUnique({ where: { assetId }, select: { id: true, installStatus: true } });
+  if (!agent) throw new AppError(409, "This asset has no Polaris Agent — service control requires an installed agent");
+  if (agent.installStatus !== "active") throw new AppError(409, "The Polaris Agent on this asset isn't active");
+
+  const cmd = await prisma.agentCommand.create({
+    data: { assetId, managedAgentId: agent.id, action, target: unit, requestedBy: actor ?? null },
+  });
+  await logEvent({
+    action: `asset.service.${action}.requested`,
+    resourceType: "asset",
+    resourceId: assetId,
+    resourceName: unit,
+    actor,
+    level: "warning",
+    message: `Service ${action} requested for "${unit}"`,
+    details: { commandId: cmd.id, target: unit },
+  });
+  return { id: cmd.id, target: unit };
+}
+
 /**
  * Agent poll: return this agent's pending commands and atomically mark them
  * "sent" so a slow agent doesn't re-execute them on the next poll. Bounded.

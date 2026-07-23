@@ -112,16 +112,79 @@ export const ALERT_SEVERITY_RANK: Record<string, number> = {
   notice: 1, informational: 2, info: 2, warning: 3, serious: 4, error: 5, critical: 5,
 };
 
-/** Highest active-alert severity per asset (one bounded findMany over the
- *  uncleared notifications; covered by @@index([assetId]) + [cleared, ...]). */
-export async function activeAlertSeverityByAsset(assetIds: string[] | null): Promise<Map<string, { severity: string; rank: number }>> {
+// ─── Widget ↔ automation relevance ───────────────────────────────────────────
+// A row shows a severity pill ONLY when the asset carries an active alert whose
+// AUTOMATION is about the same thing the widget measures. A firewall answering
+// probes in 6ms should not wear a "serious" pill just because it has an
+// unrelated disk-full alert — the CPU/latency widgets classify CPU/latency, so
+// their pills reflect only CPU/latency automations. `any` keeps the legacy
+// "highest active alert of any kind" behavior (used by nothing metric-specific);
+// `none` suppresses the pill entirely (widgets with no matching automation, e.g.
+// stale polls). The pill's color/label is the firing automation's own severity.
+export type AlertRelevance =
+  | { kind: "metric"; metrics: readonly string[] } // asset_metric / host_metric leaves
+  | { kind: "state"; fields: readonly string[] }   // asset_state leaves
+  | { kind: "event"; actions: readonly string[] }  // event triggers (glob actionPattern)
+  | { kind: "any" }
+  | { kind: "none" };
+
+const metricRel = (...metrics: string[]): AlertRelevance => ({ kind: "metric", metrics });
+const stateRel = (...fields: string[]): AlertRelevance => ({ kind: "state", fields });
+const eventRel = (...actions: string[]): AlertRelevance => ({ kind: "event", actions });
+
+/** Anchored glob (`*` only) → RegExp, for matching an event trigger's
+ *  actionPattern against a concrete action the widget cares about. */
+function globToRegExp(pattern: string): RegExp {
+  const esc = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp("^" + esc + "$");
+}
+
+/** Does a rule trigger pertain to a widget's dimension? Walks the trigger,
+ *  recursing into composite groups/leaves — a composite counts if ANY leaf
+ *  matches. A rule-less notification (rule deleted → SetNull) matches nothing
+ *  but `any`. */
+function triggerMatchesRelevance(trigger: unknown, rel: AlertRelevance): boolean {
+  if (rel.kind === "any") return true;
+  if (rel.kind === "none") return false;
+  let matched = false;
+  const visit = (node: unknown): void => {
+    if (matched || !node || typeof node !== "object") return;
+    const n = node as Record<string, unknown>;
+    const t = n.type;
+    if ((t === "asset_metric" || t === "host_metric") && rel.kind === "metric") {
+      if (typeof n.metric === "string" && rel.metrics.includes(n.metric)) matched = true;
+    } else if (t === "asset_state" && rel.kind === "state") {
+      if (typeof n.field === "string" && rel.fields.includes(n.field)) matched = true;
+    } else if (t === "event" && rel.kind === "event") {
+      if (typeof n.actionPattern === "string") {
+        const re = globToRegExp(n.actionPattern);
+        if (rel.actions.some((a) => re.test(a))) matched = true;
+      }
+    }
+    // composite trigger + nested condition groups both carry a `children` array.
+    if (Array.isArray(n.children)) n.children.forEach(visit);
+  };
+  visit(trigger);
+  return matched;
+}
+
+/** Highest active-alert severity per asset, considering ONLY alerts whose
+ *  automation is relevant to the caller's widget (see AlertRelevance). One
+ *  bounded findMany over the uncleared notifications joined to their rule's
+ *  trigger; covered by @@index([assetId]) + [cleared, ...]. */
+export async function activeAlertSeverityByAsset(
+  assetIds: string[] | null,
+  relevance: AlertRelevance = { kind: "any" },
+): Promise<Map<string, { severity: string; rank: number }>> {
+  if (relevance.kind === "none") return new Map();
   const rows = await prisma.notification.findMany({
     where: { cleared: false, assetId: assetIds ? { in: assetIds } : { not: null } },
-    select: { assetId: true, severity: true },
+    select: { assetId: true, severity: true, rule: { select: { trigger: true } } },
   });
   const out = new Map<string, { severity: string; rank: number }>();
   for (const r of rows) {
     if (!r.assetId) continue;
+    if (!triggerMatchesRelevance(r.rule?.trigger, relevance)) continue;
     const rank = ALERT_SEVERITY_RANK[r.severity] ?? 0;
     const cur = out.get(r.assetId);
     if (!cur || rank > cur.rank) out.set(r.assetId, { severity: r.severity, rank });
@@ -129,16 +192,17 @@ export async function activeAlertSeverityByAsset(assetIds: string[] | null): Pro
   return out;
 }
 
-/** Decorate feed rows with the owning asset's highest active-alert severity.
- *  One severity fetch bounded to the rows' own asset ids (feeds are capped,
- *  so this stays small at 2000 assets). */
+/** Decorate feed rows with the owning asset's highest RELEVANT active-alert
+ *  severity. One severity fetch bounded to the rows' own asset ids (feeds are
+ *  capped, so this stays small at 2000 assets). */
 async function attachAlertSeverity<T extends object>(
   rows: T[],
   idOf: (r: T) => string | null | undefined,
+  relevance: AlertRelevance = { kind: "any" },
 ): Promise<Array<T & { alertSeverity?: string; alertRank: number }>> {
   const ids = Array.from(new Set(rows.map(idOf).filter((x): x is string => !!x)));
-  if (ids.length === 0) return rows.map((r) => ({ ...r, alertRank: 0 }));
-  const sev = await activeAlertSeverityByAsset(ids);
+  if (ids.length === 0 || relevance.kind === "none") return rows.map((r) => ({ ...r, alertRank: 0 }));
+  const sev = await activeAlertSeverityByAsset(ids, relevance);
   return rows.map((r) => {
     const id = idOf(r);
     const s = id ? sev.get(id) : undefined;
@@ -151,8 +215,8 @@ function severityFirst<T extends { alertRank: number }>(rows: T[]): T[] {
   return rows.slice().sort((a, b) => b.alertRank - a.alertRank);
 }
 
-async function topNWithSeverity(rows: TopNRow[]): Promise<TopNRow[]> {
-  return severityFirst(await attachAlertSeverity(rows, (r) => r.id));
+async function topNWithSeverity(rows: TopNRow[], relevance: AlertRelevance): Promise<TopNRow[]> {
+  return severityFirst(await attachAlertSeverity(rows, (r) => r.id, relevance));
 }
 
 export interface StatusSummary {
@@ -266,7 +330,7 @@ export async function getDownNodes(limit: number | null = 100, assetIds: string[
   }));
   // Severity-first: alerted nodes float to the top; within a severity (and for
   // unalerted nodes) the youngest-outage order above holds (stable sort).
-  return { nodes: severityFirst(await attachAlertSeverity(nodes, (n) => n.id)), total };
+  return { nodes: severityFirst(await attachAlertSeverity(nodes, (n) => n.id, stateRel("monitorStatus"))), total };
 }
 
 export interface DownInterface {
@@ -366,7 +430,7 @@ export async function getDownInterfaces(limit: number | null = 100, sinceMinutes
       lastUpAt: r.lastUpAt,
     });
   }
-  return severityFirst(await attachAlertSeverity(out, (r) => r.assetId));
+  return severityFirst(await attachAlertSeverity(out, (r) => r.assetId, stateRel("ifOperStatus")));
 }
 
 export interface DownIpsecTunnel {
@@ -449,7 +513,7 @@ export async function getDownIpsecTunnels(limit: number | null = 100, sinceMinut
       lastUpAt: r.lastUpAt,
     });
   }
-  return severityFirst(await attachAlertSeverity(out, (r) => r.assetId));
+  return severityFirst(await attachAlertSeverity(out, (r) => r.assetId, stateRel("ipsecStatus")));
 }
 
 export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string; site?: string; usedPct?: number; alertSeverity?: string; alertRank?: number }
@@ -517,7 +581,7 @@ export async function getHighestCpu(limit: number | null = 100, sinceMinutes = 6
      ORDER BY value DESC LIMIT $2`,
     ...params,
   );
-  return topNWithSeverity(await hydrateNames(rows.map((r) => ({ assetId: r.assetId, value: Math.round(r.value * 10) / 10 }))));
+  return topNWithSeverity(await hydrateNames(rows.map((r) => ({ assetId: r.assetId, value: Math.round(r.value * 10) / 10 }))), metricRel("cpuPct"));
 }
 
 /**
@@ -546,7 +610,7 @@ export async function getHighestMemory(limit: number | null = 100, sinceMinutes 
      ORDER BY value DESC LIMIT $2`,
     ...params,
   );
-  return topNWithSeverity(await hydrateNames(rows.map((r) => ({ assetId: r.assetId, value: Math.round(r.value * 10) / 10 }))));
+  return topNWithSeverity(await hydrateNames(rows.map((r) => ({ assetId: r.assetId, value: Math.round(r.value * 10) / 10 }))), metricRel("memPct", "memUsedBytes"));
 }
 
 /**
@@ -580,7 +644,7 @@ export async function getSlowestResponse(limit: number | null = 100, assetIds: s
     ...params,
   );
   const ordered = rows.map((r) => ({ assetId: r.assetId, value: Math.round(Number(r.avg_ms) * 10) / 10 }));
-  return topNWithSeverity(await hydrateNames(ordered));
+  return topNWithSeverity(await hydrateNames(ordered), metricRel("responseTimeMs"));
 }
 
 /**
@@ -623,7 +687,7 @@ export async function getHighestDiskUsage(limit: number | null = 100, assetIds: 
       return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.pct * 10) / 10, detail: r.mountPath, site: siteOf(a) };
     })
     .filter((r): r is TopNRow => r !== null);
-  return topNWithSeverity(out);
+  return topNWithSeverity(out, metricRel("storageUsedPct"));
 }
 
 /**
@@ -667,7 +731,7 @@ export async function getHighestTemperature(limit: number | null = 100, assetIds
       return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.value * 10) / 10, detail: r.sensorName, site: siteOf(a) };
     })
     .filter((r): r is TopNRow => r !== null);
-  return topNWithSeverity(out);
+  return topNWithSeverity(out, metricRel("hwSensorValue"));
 }
 
 /**
@@ -700,7 +764,7 @@ export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 1
     assetId: r.assetId,
     value: Math.round((Number(r.failed) / Number(r.total)) * 1000) / 10,
   }));
-  return topNWithSeverity(await hydrateNames(ordered));
+  return topNWithSeverity(await hydrateNames(ordered), metricRel("probeLossPct"));
 }
 
 /**
@@ -732,7 +796,7 @@ export async function getStorageForecast(limit: number | null = 100, assetIds: s
       };
     })
     .filter((r): r is TopNRow => r !== null);
-  return topNWithSeverity(out);
+  return topNWithSeverity(out, metricRel("storageDaysUntilFull"));
 }
 
 export interface StalePoll { id: string; hostname: string | null; ipAddress: string | null; lastPolledAt: Date | null; expectedIntervalSec: number; alertSeverity?: string; alertRank?: number }
@@ -796,7 +860,9 @@ export async function getStalePolls(grace = 3, limit: number | null = 50, assetI
       if (limit != null && out.length >= limit) break;
     }
   }
-  return severityFirst(await attachAlertSeverity(out, (r) => r.id));
+  // No automation dimension corresponds to "overdue for polling", so a stale-
+  // poll row never wears a severity pill (kind:"none" short-circuits the join).
+  return severityFirst(await attachAlertSeverity(out, (r) => r.id, { kind: "none" }));
 }
 
 export interface RebootRow { id: string; hostname: string | null; ipAddress: string | null; rebootedAt: Date; alertSeverity?: string; alertRank?: number }
@@ -827,7 +893,7 @@ export async function getRecentReboots(sinceHours = 72, limit: number | null = 2
       rebootedAt: e.timestamp,
     };
   });
-  return severityFirst(await attachAlertSeverity(out, (r) => r.id || null));
+  return severityFirst(await attachAlertSeverity(out, (r) => r.id || null, eventRel("device.reboot")));
 }
 
 export interface AlertRow { id: string; hostname: string | null; message: string; severity: string; raisedAt: Date }
@@ -928,7 +994,7 @@ export async function getSitesWithIssues(maxSites: number | null = 25, assetIds:
   }));
   // Per-site severity = the highest active alert across the site's affected
   // nodes; sites with alerted nodes lead, then the down/warning ordering holds.
-  const sev = await activeAlertSeverityByAsset(nodeRows.map((n) => n.id));
+  const sev = await activeAlertSeverityByAsset(nodeRows.map((n) => n.id), stateRel("monitorStatus"));
   for (const s of sites) {
     let best: { severity: string; rank: number } | null = null;
     for (const n of s.nodes) {

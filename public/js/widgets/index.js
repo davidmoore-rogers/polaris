@@ -409,12 +409,17 @@
 
   // Severity pill for rows whose asset carries an active automation alert
   // (feeds attach alertSeverity/alertRank and sort severity-first). Palette
-  // mapping mirrors activeAlerts.js: notice/informational → blue watch,
-  // warning → amber, serious/critical → red.
+  // mirrors the canonical badge-level-* scale used on the Automations page /
+  // wizard / Alerts tab so a severity reads identically everywhere: notice →
+  // grey, informational → blue, warning → yellow, serious → ORANGE,
+  // critical → RED. (Previously serious collapsed into the same red as
+  // critical, which disagreed with the Automations page.)
   var ALERT_SEV_PILL = {
-    notice: "widget-pill-watch", informational: "widget-pill-watch", info: "widget-pill-watch",
+    notice: "widget-pill-neutral",
+    informational: "widget-pill-watch", info: "widget-pill-watch",
     warning: "widget-pill-amber",
-    serious: "widget-pill-red", critical: "widget-pill-red", error: "widget-pill-red",
+    serious: "widget-pill-orange",
+    critical: "widget-pill-red", error: "widget-pill-red",
   };
   window.PolarisWidgets.alertSeverityPill = function (sev) {
     if (!sev) return "";

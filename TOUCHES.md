@@ -1667,6 +1667,32 @@ Listed alphabetically.
 
 ---
 
+## services/serviceInventoryService.ts
+
+**What it owns:** The `AssetService` current-state table (one row per `(asset, unit)` systemd unit / Windows service) — the unit-centric sibling of the process inventory. Full-replace per agent scrape.
+
+**Public API:** AssetServiceInput, isServiceControllable, persistAssetServices.
+
+**Cross-service deps:** `prisma.assetService`, `retryOnDeadlock` (utils/dbRetry).
+
+**Used by:**
+- `src/api/routes/agents.ts` — the `serviceInventory` sample-stream arm maps `ServiceSampleSchema` rows → `persistAssetServices`. Also ships `streams.services` + `monitoredServices`/`mappedServices` on `GET /agents/config` (folded into both the payload ETag and the heartbeat `computeConfigEtag`).
+- `src/api/routes/assets.ts` — `GET /assets/:id/services` reads the rows + pins; `POST /assets/:id/services/:unit/control` → `agentCommandService.requestServiceControl` (looks up the row, requires `controllable`). `monitoredServices`/`mappedServices` ride the general `PUT /assets/:id` pin path (UpdateAssetSchema).
+- `agent/internal/collectors/services*.go` — the sole producer (`ServiceInventoryOnce`; systemd `systemctl list-units/list-unit-files/show`, Windows `Win32_Service`). `parseShowUnits` is the untagged pure parser (unit-tested).
+- `public/js/assets.js` — the Services tab (`_wireAssetServicesTab`) + `openServiceDetailPanel`.
+
+**Invariants:**
+- Delete-then-insert in ONE `$transaction` under `retryOnDeadlock`; empty rows = valid delete-only scrape. Keyed `@@unique([assetId, unit])`. Plain table, NO FK to Asset (matches AssetProcess/AssetSdwanRule).
+- `controllable` is DERIVED here, never trusted from the wire: systemd `loadState==="loaded"`, or any Windows service. Control routes re-check it.
+- Agent-only. Agentless SSH/WinRM does not resolve units (`agentlessProcessService` hardcodes serviceUnit null) — no agentless producer exists.
+- `mainProcess` is a display cross-link to the Processes tab, not a key.
+
+**When changing this:**
+- Adding a field: extend the Prisma model + migration, `ServiceSample` (Go transport) + collectors, `ServiceSampleSchema` + the ingest arm (agents.ts), the `AssetServiceInput` map, and the `GET /assets/:id/services` projection — in lockstep. Bump `agent/VERSION`.
+- The `serviceLog` stream (per-unit journalctl → `AssetServiceLogSample`; agent `servicelog.go` + `readJournaldUnit`, ingested in agents.ts via `enqueueServiceLogSamples`, read at `GET /assets/:id/service-logs`) and connection-unit-attribution (Phase 3) hang off the same pins (`monitoredServices`/`mappedServices`) shipped by the config endpoint. Adding a service-log field touches the Prisma model + migration, `ServiceLogSample` (Go transport) + `servicelog.go`, `ServiceLogSampleSchema` + the ingest arm, `ServiceLogRow`/`enqueueServiceLogSamples` (sampleWriteBuffer), and the `pruneSystemInfoSamples` line.
+
+---
+
 ## services/topologyLayoutService.ts
 
 **What it owns:** Shared Device Map topology layouts — the `TopologyLayout` table (one row per `(siteId, view)`, siteId = the FortiGate Asset the graph is rooted on, `positions` = `{nodeId: {x,y}}` pixel model coords). The server-side half of topology drag persistence; the browser's localStorage layout remains a per-browser fallback.
@@ -2571,7 +2597,7 @@ Listed alphabetically.
 
 **Cross-service deps:** reservationPushService (imports `buildTransportForIntegration` / `callFortiOs` / `classifyPushError` / `Transport` — never inline a new transport builder), fortimanagerService (`proxyQuery` — the FMG-DB mirror's JSON-RPC seam; detection itself lives in fortimanagerService as `detectCentralManagement`), eventLogService (`logEvent`).
 
-**Used by:** src/api/routes/assets.ts (`PUT /:id/interfaces/:ifName/comment` → `syncDescriptionsOnSave(scope:"interface")`, response gains `sync: {attempted, status, error}`; asset PUT → `syncDescriptionsOnSave(scope:"device")` fire-and-forget when `description` changed); src/api/routes/integrations.ts:syncDhcpSubnets Phase 13.7 (`runDescriptionSyncForIntegration`, gated on the toggle — zero cost when off).
+**Used by:** src/api/routes/assets.ts (`PUT /:id/interfaces/:ifName/comment` → `syncDescriptionsOnSave(scope:"interface")`, response gains `sync: {attempted, status, error}`; asset PUT → `syncDescriptionsOnSave(scope:"device")` fire-and-forget when `description` changed; `GET /:id` exposes a derived `discoveredByIntegration.syncDescriptions` boolean — the raw config is stripped as it holds tokens); src/api/routes/integrations.ts:syncDhcpSubnets Phase 13.7 (`runDescriptionSyncForIntegration`, gated on the toggle — zero cost when off). **Frontend enforcement of the 35-char FortiAP `location` cap:** public/js/assets.js caps the Description input `maxlength` to 35 (+ warning hint, and a defensive truncate-to-maxlength on save) only when `assetType==="access_point"` AND `discoveredByIntegration.syncDescriptions===true`; public/js/integrations.js fires a `showConfirm` (`onSyncDescriptionsToggle`) the moment the operator enables Description Sync, spelling out the AP cap (reverts the toggle on decline).
 
 **Invariants:**
 - Polaris-primary: a non-empty Polaris value pushes whenever the device differs (device-side edits overwritten, audited); an empty Polaris field adopts the device value. A device-side clear never removes a Polaris value (push re-asserts). The save-time path always pushes.
@@ -4127,7 +4153,7 @@ Listed alphabetically.
 - Permission-denied feeds return their `empty` value WITHOUT entering the TTL cache — a denied caller must never poison (or be served from) a granted caller's cache slot. Errors are never cached either (`createTtlCache` evicts rejections).
 - The no-`?feeds=` response shape is frozen (external kiosk consumers + `tests/integration/dashboardNocToken.test.ts`): `status` flattens to the three tile keys, `downNodes` unwraps `.nodes`.
 - `getSitesWithIssues` coalesces `location > learnedLocation > snmpLocation > "(unknown)"`; the same coalesce key buckets the node detail rows.
-- **Severity-first ordering (2026-07):** every asset-sourced feed decorates its rows with the owning asset's highest ACTIVE automation alert (`activeAlertSeverityByAsset` over uncleared Notification rows; `ALERT_SEVERITY_RANK` covers the 5-level vocabulary + legacy info/error) via `attachAlertSeverity`, then sorts `severityFirst` (STABLE — equal ranks keep the feed's own order: value desc / youngest outage / most overdue). One bounded notification findMany per feed run, scoped to the rows' own asset ids, inside the 10s feed cache. `getRecentAlerts` (Event-sourced) instead orders `levelRank desc, timestamp desc`; `getSitesWithIssues` takes the max rank across each site's affected nodes. Widgets render the rank via `PolarisWidgets.alertSeverityPill` and must NOT re-sort by value alone (`_topnBar.renderRows` sorts (alertRank, value); `downInterfaces.mergeRows` sorts (alertRank, lastUpAt); the fillTo red-guarantee filters by position-or-redness since red rows are no longer a contiguous head).
+- **Severity-first ordering + per-widget relevance (2026-07):** every asset-sourced feed decorates its rows with the owning asset's highest ACTIVE automation alert (`activeAlertSeverityByAsset` over uncleared Notification rows joined to `rule.trigger`; `ALERT_SEVERITY_RANK` covers the 5-level vocabulary + legacy info/error) via `attachAlertSeverity`, then sorts `severityFirst` (STABLE — equal ranks keep the feed's own order: value desc / youngest outage / most overdue). **The pill is SCOPED to each widget's own dimension** — a row pills only when the firing automation's trigger is *about what the widget measures*, so a fast/low-CPU asset no longer wears a "serious" pill sourced from an unrelated disk/interface alert. Each feed passes an `AlertRelevance` (`metricRel`/`stateRel`/`eventRel`/`{kind:"none"}`): CPU→`cpuPct`, Memory→`memPct`|`memUsedBytes`, Slowest Response→`responseTimeMs`, Packet Loss→`probeLossPct`, Disk→`storageUsedPct`, Temperature→`hwSensorValue`, Storage Forecast→`storageDaysUntilFull`, Down Nodes/Sites→state `monitorStatus`, Down Interfaces→state `ifOperStatus`, Down IPsec→state `ipsecStatus`, Recent Reboots→event `device.reboot` (glob-matched), Stale Polls→`none` (no matching automation dimension, never pills). `triggerMatchesRelevance` walks composite trigger trees (matches if ANY leaf matches); a rule-deleted (null-trigger) notification matches nothing but `{kind:"any"}`. **When you add a new metric widget, give its feed the matching `AlertRelevance` or it silently shows no pill.** One bounded notification findMany per feed run, scoped to the rows' own asset ids, inside the 10s feed cache. `getRecentAlerts` (Event-sourced) instead orders `levelRank desc, timestamp desc`; `getSitesWithIssues` takes the max rank across each site's affected nodes. Widgets render the rank via `PolarisWidgets.alertSeverityPill`, whose class map mirrors the canonical `badge-level-*` scale (notice→grey `widget-pill-neutral`, informational→blue `-watch`, warning→yellow `-amber`, serious→orange `-orange`, critical→red `-red`) so a severity reads identically to the Automations page; widgets must NOT re-sort by value alone (`_topnBar.renderRows` sorts (alertRank, value); `downInterfaces.mergeRows` sorts (alertRank, lastUpAt); the fillTo red-guarantee filters by position-or-redness since red rows are no longer a contiguous head).
 
 **When changing this:**
 - Scale-check at 2000 assets — keep every feed to groupBy/count/one windowed aggregate/one bounded findMany.

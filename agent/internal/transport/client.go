@@ -127,12 +127,12 @@ type SamplesBody struct {
 // Temperatures is the per-sensor reading list when the OS exposes them
 // (Linux /sys/class/thermal, lm-sensors on macOS, WMI on Windows).
 type TelemetrySample struct {
-	Timestamp     string                  `json:"timestamp,omitempty"`
-	CPUPct        *float64                `json:"cpuPct,omitempty"`
-	MemPct        *float64                `json:"memPct,omitempty"`
-	MemUsedBytes  *uint64                 `json:"memUsedBytes,omitempty"`
-	MemTotalBytes *uint64                 `json:"memTotalBytes,omitempty"`
-	Temperatures  []TelemetryTemperature  `json:"temperatures,omitempty"`
+	Timestamp     string                 `json:"timestamp,omitempty"`
+	CPUPct        *float64               `json:"cpuPct,omitempty"`
+	MemPct        *float64               `json:"memPct,omitempty"`
+	MemUsedBytes  *uint64                `json:"memUsedBytes,omitempty"`
+	MemTotalBytes *uint64                `json:"memTotalBytes,omitempty"`
+	Temperatures  []TelemetryTemperature `json:"temperatures,omitempty"`
 }
 
 type TelemetryTemperature struct {
@@ -220,6 +220,10 @@ type ProcessConnectionSample struct {
 	LocalPort  int    `json:"localPort,omitempty"`
 	RemoteIp   string `json:"remoteIp,omitempty"`
 	RemotePort int    `json:"remotePort,omitempty"`
+	// Owning systemd unit / Windows service (Phase 3), when the PID's cgroup
+	// resolved one — lets the server attribute the socket to a unit. "" when
+	// unknown or the row came only via a mappedProcesses (by-name) pin.
+	Unit string `json:"unit,omitempty"`
 }
 
 // ProcessLogSample matches the server's ProcessLogSampleSchema — one row per
@@ -227,6 +231,33 @@ type ProcessConnectionSample struct {
 type ProcessLogSample struct {
 	Timestamp string  `json:"timestamp,omitempty"`
 	Name      string  `json:"name"`
+	Level     *string `json:"level,omitempty"`
+	Message   string  `json:"message"`
+	Source    *string `json:"source,omitempty"`
+}
+
+// ServiceSample matches the server's ServiceSampleSchema. One row per systemd
+// unit (Linux) or Windows service (SCM). Current-state inventory — the server
+// full-replaces the asset's rows per push (delete-replace). Platform selects
+// the state vocabulary; the server derives `controllable` from it.
+type ServiceSample struct {
+	Unit         string  `json:"unit"`
+	Platform     string  `json:"platform"` // "systemd" | "windows"
+	DisplayName  *string `json:"displayName,omitempty"`
+	LoadState    *string `json:"loadState,omitempty"`
+	ActiveState  *string `json:"activeState,omitempty"`
+	SubState     *string `json:"subState,omitempty"`
+	EnabledState *string `json:"enabledState,omitempty"`
+	MainPid      *int    `json:"mainPid,omitempty"`
+	MainProcess  *string `json:"mainProcess,omitempty"`
+	MemBytes     *uint64 `json:"memBytes,omitempty"`
+}
+
+// ServiceLogSample matches the server's ServiceLogSampleSchema — one journalctl
+// line for a pinned unit (Phase 2). Same shape as ProcessLogSample with `unit`.
+type ServiceLogSample struct {
+	Timestamp string  `json:"timestamp,omitempty"`
+	Unit      string  `json:"unit"`
 	Level     *string `json:"level,omitempty"`
 	Message   string  `json:"message"`
 	Source    *string `json:"source,omitempty"`
@@ -285,7 +316,9 @@ func (c *Client) PushSystemInfo(body *SystemInfoBody) error {
 	if c.bearer == "" {
 		return errors.New("PushSystemInfo called without a bearer token — enroll first")
 	}
-	var out struct{ OK bool `json:"ok"` }
+	var out struct {
+		OK bool `json:"ok"`
+	}
 	if err := c.do("POST", "/api/v1/agents/system-info", body, &out, true); err != nil {
 		return fmt.Errorf("system-info: %w", err)
 	}
@@ -347,7 +380,9 @@ func (c *Client) ReportCommandResultFull(commandID string, success bool, errMsg,
 	if stderr != "" {
 		body["stderr"] = stderr
 	}
-	var out struct{ OK bool `json:"ok"` }
+	var out struct {
+		OK bool `json:"ok"`
+	}
 	if err := c.do("POST", "/api/v1/agents/command-result", body, &out, true); err != nil {
 		return fmt.Errorf("command-result: %w", err)
 	}
@@ -395,9 +430,9 @@ type PinnedProcess struct {
 }
 
 type ConfigResponse struct {
-	ETag    string                  `json:"etag"`
-	Streams map[string]StreamConfig `json:"streams"`
-	Monitored bool                  `json:"monitored"`
+	ETag      string                  `json:"etag"`
+	Streams   map[string]StreamConfig `json:"streams"`
+	Monitored bool                    `json:"monitored"`
 	// Feature C — programs pinned for per-minute telemetry + log tailing.
 	PinnedProcesses []PinnedProcess `json:"pinnedProcesses,omitempty"`
 	// Application Map — programs toggled for connection discovery (listening
@@ -405,6 +440,12 @@ type ConfigResponse struct {
 	// mapped-only program must not wake the telemetry/log loops. Absent on
 	// older servers → the connections loop idles.
 	MappedProcesses []string `json:"mappedProcesses,omitempty"`
+	// Service dimension — units the operator pinned for per-unit journalctl
+	// tailing (MonitoredServices; the serviceLog loop) and for connection
+	// attribution on the Application Map (MappedServices). Absent on older
+	// servers → both service loops idle.
+	MonitoredServices []string `json:"monitoredServices,omitempty"`
+	MappedServices    []string `json:"mappedServices,omitempty"`
 	// Phase 2 dual-pin: the current set of acceptable leaf-cert SHA-256
 	// fingerprints (canonical pin + any operator-staged additional pins).
 	// Empty slice means "field not present" — older Phase 1 servers don't

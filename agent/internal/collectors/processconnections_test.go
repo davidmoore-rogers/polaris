@@ -26,6 +26,19 @@ func countKind(out []*transport.ProcessConnectionSample, name, kind string) int 
 	return n
 }
 
+func TestBuildConnectionSamplesCarriesUnit(t *testing.T) {
+	raws := []connRaw{
+		{Name: "java", Unit: "truckscale-central.service", Proto: "tcp", Status: "LISTEN", LocalAddr: "0.0.0.0", LocalPort: 8080},
+		{Name: "java", Unit: "truckscale-central.service", Proto: "tcp", Status: "ESTABLISHED", LocalAddr: "10.0.0.1", LocalPort: 40200, RemoteAddr: "10.0.0.5", RemotePort: 5432},
+	}
+	out := buildConnectionSamples(raws)
+	for _, s := range out {
+		if s.Unit != "truckscale-central.service" {
+			t.Errorf("expected unit stamped on every sample, got %q on %+v", s.Unit, s)
+		}
+	}
+}
+
 func TestBuildConnectionSamplesDirectionHeuristic(t *testing.T) {
 	raws := []connRaw{
 		// nginx listens on :443 …

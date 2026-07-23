@@ -589,7 +589,9 @@ describe("alert-severity-aware ordering", () => {
       { id: "alerted", hostname: "alerted", ipAddress: null, assetType: "switch", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: older },
     ]);
     count.mockResolvedValueOnce(2);
-    notifFindMany.mockResolvedValueOnce([{ assetId: "alerted", severity: "serious" }]);
+    notifFindMany.mockResolvedValueOnce([
+      { assetId: "alerted", severity: "serious", rule: { trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" } } },
+    ]);
     const r = await noc.getDownNodes();
     expect(r.nodes.map((n) => n.id)).toEqual(["alerted", "fresh"]);
     expect(r.nodes[0].alertSeverity).toBe("serious");
@@ -606,7 +608,9 @@ describe("alert-severity-aware ordering", () => {
       { id: "hot", hostname: "hot", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
       { id: "warm", hostname: "warm", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
     ]);
-    notifFindMany.mockResolvedValueOnce([{ assetId: "warm", severity: "critical" }]);
+    notifFindMany.mockResolvedValueOnce([
+      { assetId: "warm", severity: "critical", rule: { trigger: { type: "asset_metric", metric: "hwSensorValue", operator: ">", threshold: 80 } } },
+    ]);
     const r = await noc.getHighestTemperature();
     expect(r.map((x) => x.id)).toEqual(["warm", "hot"]);
     expect(r[0].alertSeverity).toBe("critical");
@@ -623,6 +627,84 @@ describe("alert-severity-aware ordering", () => {
   });
 });
 
+describe("per-widget alert relevance (pill only when a matching automation fires)", () => {
+  it("getHighestCpu does NOT pill an asset whose only active alert is a DISK automation", async () => {
+    // The exact reported bug: a 6.1% CPU firewall shown as 'serious' because it
+    // has an unrelated disk-full alert. The CPU widget must ignore it.
+    rawUnsafe.mockResolvedValueOnce([{ assetId: "fw", value: 6.1 }]);
+    findMany.mockResolvedValueOnce([
+      { id: "fw", hostname: "fw", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+    ]);
+    notifFindMany.mockResolvedValueOnce([
+      { assetId: "fw", severity: "serious", rule: { trigger: { type: "asset_metric", metric: "storageUsedPct", operator: ">", threshold: 90 } } },
+    ]);
+    const r = await noc.getHighestCpu();
+    expect(r[0].alertSeverity).toBeUndefined();
+    expect(r[0].alertRank).toBe(0);
+  });
+
+  it("getHighestCpu pills an asset whose active alert IS a cpuPct automation", async () => {
+    rawUnsafe.mockResolvedValueOnce([{ assetId: "fw", value: 95 }]);
+    findMany.mockResolvedValueOnce([
+      { id: "fw", hostname: "fw", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+    ]);
+    notifFindMany.mockResolvedValueOnce([
+      { assetId: "fw", severity: "critical", rule: { trigger: { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 } } },
+    ]);
+    const r = await noc.getHighestCpu();
+    expect(r[0].alertSeverity).toBe("critical");
+  });
+
+  it("a composite trigger pills the widget when ANY leaf matches its metric", async () => {
+    rawUnsafe.mockResolvedValueOnce([{ assetId: "fw", value: 92 }]);
+    findMany.mockResolvedValueOnce([
+      { id: "fw", hostname: "fw", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+    ]);
+    notifFindMany.mockResolvedValueOnce([
+      {
+        assetId: "fw",
+        severity: "serious",
+        rule: {
+          trigger: {
+            type: "composite",
+            kind: "asset",
+            op: "or",
+            children: [
+              { type: "asset_metric", metric: "memPct", operator: ">", threshold: 90 },
+              { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 },
+            ],
+          },
+        },
+      },
+    ]);
+    const r = await noc.getHighestCpu();
+    expect(r[0].alertSeverity).toBe("serious");
+  });
+
+  it("activeAlertSeverityByAsset filters out non-matching triggers under a metric relevance", async () => {
+    notifFindMany.mockResolvedValueOnce([
+      { assetId: "a", severity: "critical", rule: { trigger: { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 } } },
+      { assetId: "b", severity: "critical", rule: { trigger: { type: "asset_metric", metric: "storageUsedPct", operator: ">", threshold: 90 } } },
+      { assetId: "c", severity: "warning", rule: null }, // rule deleted → matches nothing specific
+    ]);
+    const m = await noc.activeAlertSeverityByAsset(["a", "b", "c"], { kind: "metric", metrics: ["cpuPct"] });
+    expect(m.get("a")).toEqual({ severity: "critical", rank: 5 });
+    expect(m.has("b")).toBe(false);
+    expect(m.has("c")).toBe(false);
+  });
+
+  it("getRecentReboots pills via the device.reboot event automation (glob actionPattern)", async () => {
+    eventFindMany.mockResolvedValueOnce([
+      { resourceId: "fw", resourceName: "fw", timestamp: new Date("2026-07-22T00:00:00Z"), details: {} },
+    ]);
+    notifFindMany.mockResolvedValueOnce([
+      { assetId: "fw", severity: "notice", rule: { trigger: { type: "event", actionPattern: "device.*" } } },
+    ]);
+    const r = await noc.getRecentReboots();
+    expect(r[0].alertSeverity).toBe("notice");
+  });
+});
+
 describe("getStorageForecast", () => {
   it("hydrates forecast rows and sorts severity-first, then soonest-full", async () => {
     rawUnsafe.mockResolvedValueOnce([
@@ -634,7 +716,9 @@ describe("getStorageForecast", () => {
       { id: "later", hostname: "later", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
     ]);
     // The later-full asset carries an active critical alert — it still leads.
-    notifFindMany.mockResolvedValueOnce([{ assetId: "later", severity: "critical" }]);
+    notifFindMany.mockResolvedValueOnce([
+      { assetId: "later", severity: "critical", rule: { trigger: { type: "asset_metric", metric: "storageDaysUntilFull", operator: "<", threshold: 7 } } },
+    ]);
     const r = await noc.getStorageForecast();
     expect(r.map((x) => [x.id, x.value])).toEqual([["later", 50], ["soon", 1]]);
     expect(r[0].alertSeverity).toBe("critical");

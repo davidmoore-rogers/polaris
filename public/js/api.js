@@ -417,6 +417,17 @@ const api = {
     setProcessConfig:     (id, name, body) => request("PUT", `/assets/${id}/processes/${encodeURIComponent(name)}/config`, body),
     controlProcess:       (id, name, action) => request("POST", `/assets/${id}/processes/${encodeURIComponent(name)}/control`, { action: action }),
     processCommand:       (id, commandId) => request("GET", `/assets/${id}/process-command/${commandId}`),
+    services:             (id)  => request("GET", `/assets/${id}/services`),
+    controlService:       (id, unit, action) => request("POST", `/assets/${id}/services/${encodeURIComponent(unit)}/control`, { action: action }),
+    serviceLogs:          (id, unit, opts) => {
+      opts = opts || {};
+      var qs = ["unit=" + encodeURIComponent(unit)];
+      if (opts.since) qs.push("since=" + encodeURIComponent(opts.since));
+      if (opts.limit) qs.push("limit=" + encodeURIComponent(opts.limit));
+      if (opts.flagged) qs.push("flagged=1");
+      return request("GET", `/assets/${id}/service-logs?` + qs.join("&"));
+    },
+    serviceConnections:   (id, unit) => request("GET", `/assets/${id}/process-connections?unit=` + encodeURIComponent(unit)),
     customWidgets:        (id)  => request("GET", `/assets/${id}/custom-widgets`),
     telemetryHistory:     (id, opts) => {
       if (typeof opts === "string") opts = { range: opts };

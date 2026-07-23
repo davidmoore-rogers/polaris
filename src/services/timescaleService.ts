@@ -70,6 +70,7 @@ export const ROLLUP_TABLES = [
 export const STANDALONE_SAMPLE_TABLES = [
   "asset_custom_widget_samples",
   "asset_process_log_samples",
+  "asset_service_log_samples",
 ] as const;
 
 /** Every table we manage as a hypertable — tiered source + rollup + standalone. */

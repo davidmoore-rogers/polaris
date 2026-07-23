@@ -2544,6 +2544,13 @@ function macCellHTML(asset) {
 
 function assetFormHTML(defaults) {
   var d = defaults || {};
+  // FortiAP descriptions push to the device `location` field, which FortiOS
+  // caps at 35 chars. When this AP's integration syncs descriptions, cap the
+  // Description input to match so the Polaris value can't silently outrun the
+  // device. Non-AP types, and APs whose integration doesn't sync, keep 255.
+  var apLocationCap = d.assetType === "access_point" &&
+    d.discoveredByIntegration && d.discoveredByIntegration.syncDescriptions === true;
+  var descMaxLen = apLocationCap ? 35 : 255;
   var identitySection = d._editing
     ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
         // Hostname is editable on edit as an operator override (coordinate-pin
@@ -2628,11 +2635,24 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Warranty Expires</label><input type="date" id="f-warrantyExpiry" value="' + dateInputVal(d.warrantyExpiry) + '"></div>' +
     '<div class="form-group"><label>Purchase Order</label><input type="text" id="f-purchaseOrder" value="' + escapeHtml(d.purchaseOrder || "") + '" placeholder="PO-12345"></div>' +
   '</div>' +
-  '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="255" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
+  '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="' + descMaxLen + '" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
     '<p class="hint">Device Map grouping codes: <code>a:</code>area &nbsp;<code>b:</code>building &nbsp;<code>f:</code>floor &nbsp;<code>r:</code>room &nbsp;<code>jb:</code>junction box — e.g. <code>a:Mine b:Shop f:2 r:North Closet jb:112-305</code>. Values may contain spaces; each runs until the next code. Codes here (falling back to the device-side description) group this device into building/floor/room shapes and floor views on the topology map.</p>' +
-    '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP location) — Polaris is primary: a value here always wins and pushes to the device. Leave empty to adopt the device\'s value.</p></div>' +
+    '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP location) — Polaris is primary: a value here always wins and pushes to the device. Leave empty to adopt the device\'s value.</p>' +
+    (apLocationCap ? '<p class="hint" style="color:var(--color-warning,#b45309)">Limited to 35 characters — this access point\'s integration syncs descriptions to the FortiAP <code>location</code> field, which FortiOS caps at 35 characters.</p>' : '') + '</div>' +
   '<div class="form-group"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes">' + escapeHtml(d.notes || "") + '</textarea></div>' +
   tagFieldHTML(d.tags || []);
+}
+
+// Read the Description field, trimmed to the input's own maxlength. maxlength
+// prevents over-typing but doesn't shorten a longer value assigned via the
+// value attribute (e.g. a pre-existing description on an AP that only just
+// became sync-capped at 35), so slice defensively.
+function descriptionFieldValue() {
+  var el = document.getElementById("f-description");
+  if (!el) return "";
+  var v = el.value;
+  var max = parseInt(el.getAttribute("maxlength") || "", 10);
+  return (max > 0 && v.length > max) ? v.slice(0, max) : v;
 }
 
 function getAssetFormData() {
@@ -2656,7 +2676,10 @@ function getAssetFormData() {
     notes:         val("f-notes"),
     // Always sent (including "") — an emptied Description clears to null
     // server-side so the device value can re-seed it (description sync).
-    description:   val("f-description"),
+    // Truncate to the input's own maxlength: for a synced FortiAP this is 35
+    // (the device `location` cap), and maxlength alone doesn't retro-trim a
+    // longer value that was set programmatically before the cap applied.
+    description:   descriptionFieldValue(),
     tags:          getTagFieldValue(),
   };
   // Coordinates travel as a pair: both blank → null (clear the manual pin /
@@ -3933,6 +3956,10 @@ async function openViewModal(id) {
     var isInfraProc = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
     if (!isInfraProc) {
       tabs.push({ key: "processes", label: "Processes", html: _assetProcessesTabHTML(a.id) });
+      // Services tab — current-state systemd unit / Windows service inventory
+      // (the unit-centric sibling of Processes). Same infra gate; lazy-loaded on
+      // first click (see _wireAssetServicesTab).
+      tabs.push({ key: "services", label: "Services", html: _assetServicesTabHTML(a.id) });
     }
     // Quarantine tab — assets-admin only, shown for any asset that has MACs or is quarantined.
     // Infrastructure assets (firewall/switch/access_point) only get the tab if they're
@@ -4030,6 +4057,7 @@ async function openViewModal(id) {
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
     if (!isInfraProc) _wireAssetProcessesTab(a);
+    if (!isInfraProc) _wireAssetServicesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     if (permAtLeast("alerts", "read")) _loadAssetNotificationsTab(a.id);
     // Mount the dependency tree into its placeholder div on the General tab.
@@ -14570,6 +14598,368 @@ function _wireAssetProcessesTab(asset) {
   });
 }
 
+// ─── Services tab ──────────────────────────────────────────────────────────
+// Current-state systemd unit / Windows service inventory (one row per unit) —
+// the unit-centric sibling of the Processes tab. A service backed by a shared
+// runtime (e.g. a Spring Boot app running as "java") shows up here as itself,
+// and oneshot/exited units with no live process still appear. Two pin columns:
+// Logs (monitoredServices — per-unit journalctl tailing) and Map (mappedServices
+// — Application Map connection attribution). Lazy-loaded on first tab click.
+function _assetServicesTabHTML() {
+  var canWrite = typeof canManageAssets === "function" && canManageAssets();
+  var disAll = canWrite ? "" : " disabled";
+  function pinTh(width, colId, label, allId, title) {
+    return '<th style="width:' + width + 'px;text-align:center" data-col-id="' + colId + '" data-col-required="true">' +
+      '<span style="display:inline-flex;flex-direction:column;align-items:center;gap:3px">' + label +
+        '<input type="checkbox" id="' + allId + '" title="' + title + '"' + disAll + '>' +
+      '</span></th>';
+  }
+  return '<div class="section-block">' +
+    '<div class="filter-bar" style="justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.5rem">' +
+      '<p class="hint" style="margin:0;max-width:640px">systemd units (Linux) and Windows services reported by the Polaris Agent. Check <strong>Logs</strong> to tail a unit\'s journal, <strong>Map</strong> to attribute its connections on the <a href="/appmap.html">Application Map</a>. Click a unit to control it (start/stop/restart).</p>' +
+      '<button class="btn btn-secondary btn-sm" id="asset-view-svc-refresh">Refresh</button>' +
+    '</div>' +
+    '<div class="table-wrapper table-wrapper-panel-sticky" id="asset-view-svc-wrapper">' +
+      '<table id="asset-view-svc-table">' +
+        '<thead><tr>' +
+          pinTh(50, "logs", "Logs", "asset-svc-logs-all", "Tail / stop tailing the journal for all listed units (respects the active filter)") +
+          pinTh(50, "map",  "Map",  "asset-svc-map-all",  "Map / unmap all listed units on the Application Map (respects the active filter)") +
+          '<th                      data-col-id="unit"     data-col-required="true" data-sf-key="unit"        data-sf-type="string">Unit</th>' +
+          '<th                      data-col-id="name"     data-sf-key="displayName"  data-sf-type="string">Name</th>' +
+          '<th style="width:110px" data-col-id="state"    data-sf-key="activeState"  data-sf-type="string">State</th>' +
+          '<th style="width:90px"  data-col-id="sub"      data-sf-key="subState"     data-sf-type="string">Sub</th>' +
+          '<th style="width:90px"  data-col-id="enabled"  data-sf-key="enabledState" data-sf-type="string">Enabled</th>' +
+          '<th style="width:90px"  data-col-id="pid"      data-sf-key="mainProcess"  data-sf-type="string">Main PID</th>' +
+          '<th style="width:100px" data-col-id="mem"      data-sf-key="memBytes"     data-sf-type="number">Memory</th>' +
+        '</tr></thead>' +
+        '<tbody id="asset-view-svc-tbody">' +
+          '<tr><td colspan="9" class="empty-state">Loading…</td></tr>' +
+        '</tbody>' +
+      '</table>' +
+    '</div>' +
+  '</div>';
+}
+
+// Colored state pill — active/running green, failed red, activating/deactivating
+// amber, everything else (inactive/stopped/dead) muted grey.
+function _svcStatePill(activeState) {
+  var s = (activeState || "").toLowerCase();
+  var color = "var(--color-text-tertiary)";
+  if (s === "active" || s === "running") color = "var(--color-success)";
+  else if (s === "failed") color = "var(--color-danger)";
+  else if (s === "activating" || s === "deactivating" || s === "reloading") color = "var(--color-warning)";
+  var label = activeState ? escapeHtml(activeState) : "—";
+  return '<span style="display:inline-flex;align-items:center;gap:5px">' +
+    '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';flex:none"></span>' + label + '</span>';
+}
+
+function _sizeAssetSvcTableWrapper() {
+  var w = document.getElementById("asset-view-svc-wrapper");
+  var body = document.getElementById("asset-panel-body");
+  if (!w || !body || !w.offsetParent) return;
+  var h = body.getBoundingClientRect().bottom - w.getBoundingClientRect().top - 18;
+  w.style.maxHeight = Math.max(260, Math.round(h)) + "px";
+}
+window.addEventListener("resize", _sizeAssetSvcTableWrapper);
+
+function _wireAssetServicesTab(asset) {
+  var assetId = asset && asset.id ? asset.id : asset; // tolerate id-or-object
+  var btn = document.querySelector('#asset-view-tabs [data-tab="services"]');
+  if (!btn) return;
+  var loaded = false;
+  var layoutApplied = false;
+  var sf = null;
+  var rows = [];
+  var monitored = new Set(); // monitoredServices (Logs)
+  var mapped = new Set();    // mappedServices (Map)
+  var lastRendered = [];
+
+  function syncSvcAllCbs() {
+    [{ id: "asset-svc-logs-all", set: monitored },
+     { id: "asset-svc-map-all",  set: mapped }].forEach(function (h) {
+      var cb = document.getElementById(h.id);
+      if (!cb) return;
+      var on = 0;
+      lastRendered.forEach(function (s) { if (h.set.has(s.unit)) on++; });
+      cb.checked = lastRendered.length > 0 && on === lastRendered.length;
+      cb.indeterminate = on > 0 && on < lastRendered.length;
+    });
+  }
+
+  function renderRows(data) {
+    lastRendered = data;
+    syncSvcAllCbs();
+    var tbody = document.getElementById("asset-view-svc-tbody");
+    if (!tbody) return;
+    if (!data.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No services reported yet. Services appear once a Polaris Agent reports this host\'s unit list.</td></tr>';
+      return;
+    }
+    var canWrite = typeof canManageAssets === "function" && canManageAssets();
+    var disabled = canWrite ? "" : " disabled";
+    tbody.innerHTML = data.map(function (s) {
+      var u = escapeHtml(s.unit);
+      var logsChecked = monitored.has(s.unit) ? " checked" : "";
+      var mapChecked = mapped.has(s.unit) ? " checked" : "";
+      var mem = (s.memBytes != null) ? _fmtBytes(Number(s.memBytes)) : "—";
+      var pid = s.mainPid ? (escapeHtml(s.mainProcess || "") + " (" + s.mainPid + ")") : "—";
+      return '<tr>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-svc-logs-toggle" data-svc-unit="' + u + '"' + logsChecked + disabled + '></td>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-svc-map-toggle" data-svc-unit="' + u + '" title="Attribute this unit\'s connections on the Application Map"' + mapChecked + disabled + '></td>' +
+        '<td><a href="#" class="asset-svc-unit-link" data-svc-unit="' + u + '">' + u + '</a></td>' +
+        '<td title="' + escapeHtml(s.displayName || "") + '">' + escapeHtml(s.displayName || "—") + '</td>' +
+        '<td>' + _svcStatePill(s.activeState) + '</td>' +
+        '<td>' + escapeHtml(s.subState || "—") + '</td>' +
+        '<td>' + escapeHtml(s.enabledState || "—") + '</td>' +
+        '<td title="PID ' + (s.mainPid || "") + '">' + pid + '</td>' +
+        '<td>' + mem + '</td>' +
+      '</tr>';
+    }).join("");
+  }
+
+  function apply() { renderRows(sf ? sf.apply(rows) : rows); }
+
+  async function togglePin(which, unit, on) {
+    var set = which === "logs" ? monitored : mapped;
+    var field = which === "logs" ? "monitoredServices" : "mappedServices";
+    var next = new Set(set);
+    if (on) next.add(unit); else next.delete(unit);
+    try {
+      var body = {};
+      body[field] = Array.from(next);
+      await api.assets.update(assetId, body);
+      if (which === "logs") monitored = next; else mapped = next;
+      var msg = which === "logs"
+        ? (on ? ("Tailing journal for " + unit) : ("Stopped tailing " + unit))
+        : (on ? ("Mapping " + unit + " on the Application Map") : ("Unmapped " + unit));
+      showToast(msg, "success");
+    } catch (err) {
+      showToast(err && err.message ? err.message : "Failed to update", "error");
+      apply();
+    }
+  }
+
+  async function toggleAllPins(which, on, cb) {
+    if (!lastRendered.length) { syncSvcAllCbs(); return; }
+    var set = which === "logs" ? monitored : mapped;
+    var field = which === "logs" ? "monitoredServices" : "mappedServices";
+    var next = new Set(set);
+    lastRendered.forEach(function (s) { if (on) next.add(s.unit); else next.delete(s.unit); });
+    cb.disabled = true;
+    try {
+      var body = {};
+      body[field] = Array.from(next);
+      await api.assets.update(assetId, body);
+      if (which === "logs") monitored = next; else mapped = next;
+      var noun = lastRendered.length + " unit" + (lastRendered.length === 1 ? "" : "s");
+      var msg = which === "logs"
+        ? (on ? ("Tailing journal for " + noun) : ("Stopped tailing " + noun))
+        : (on ? ("Mapping " + noun + " on the Application Map") : ("Unmapped " + noun));
+      showToast(msg, "success");
+    } catch (err) {
+      showToast(err && err.message ? err.message : "Failed to update", "error");
+    } finally {
+      cb.disabled = false;
+      apply();
+    }
+  }
+
+  async function load() {
+    var tbody = document.getElementById("asset-view-svc-tbody");
+    try {
+      var resp = await api.assets.services(assetId);
+      rows = (resp && resp.services) || [];
+      monitored = new Set((resp && resp.monitoredServices) || []);
+      mapped = new Set((resp && resp.mappedServices) || []);
+      if (!sf && typeof TableSF !== "undefined") {
+        sf = new TableSF("asset-view-svc-tbody", apply);
+      }
+      if (!layoutApplied && typeof applyTableLayout === "function") {
+        var svcTable = document.getElementById("asset-view-svc-table");
+        if (svcTable) {
+          applyTableLayout(svcTable, "asset-services", {
+            onScreenshot: function (t) { _screenshotTableEl(t, "Services"); },
+          });
+          layoutApplied = true;
+        }
+      }
+      apply();
+      _sizeAssetSvcTableWrapper();
+    } catch (err) {
+      if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
+    }
+  }
+
+  var tbody = document.getElementById("asset-view-svc-tbody");
+  if (tbody) {
+    tbody.addEventListener("change", function (e) {
+      var cb = e.target;
+      var unit = cb && cb.getAttribute ? cb.getAttribute("data-svc-unit") : null;
+      if (!unit) return;
+      if (cb.classList.contains("asset-svc-logs-toggle")) togglePin("logs", unit, cb.checked);
+      else if (cb.classList.contains("asset-svc-map-toggle")) togglePin("map", unit, cb.checked);
+    });
+    tbody.addEventListener("click", function (e) {
+      var link = e.target.closest ? e.target.closest(".asset-svc-unit-link") : null;
+      if (!link) return;
+      e.preventDefault();
+      var unit = link.getAttribute("data-svc-unit");
+      if (!unit) return;
+      var svcRow = rows.filter(function (r) { return r.unit === unit; })[0] || null;
+      openServiceDetailPanel(asset, svcRow);
+    });
+  }
+  var refreshBtn = document.getElementById("asset-view-svc-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", load);
+
+  [["asset-svc-logs-all", "logs"], ["asset-svc-map-all", "map"]].forEach(function (pair) {
+    var cb = document.getElementById(pair[0]);
+    if (cb) cb.addEventListener("change", function () { toggleAllPins(pair[1], cb.checked, cb); });
+  });
+
+  btn.addEventListener("click", function () {
+    _sizeAssetSvcTableWrapper();
+    if (loaded) return;
+    loaded = true;
+    load();
+  });
+}
+
+// Per-service detail slide-in — reuses the process detail nested slide-over
+// shell. Phase 1: unit metadata + start/stop/restart control. (journalctl log
+// viewer + ports/connections land in later phases.)
+function openServiceDetailPanel(asset, svc) {
+  if (!asset || !svc) return;
+  _ensureProcPanelDOM();
+  var titleEl = document.getElementById("proc-panel-title");
+  var metaEl  = document.getElementById("proc-panel-meta");
+  var bodyEl  = document.getElementById("proc-panel-body");
+  var footerEl = document.getElementById("proc-panel-footer");
+  titleEl.textContent = "Service — " + svc.unit;
+  metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
+  footerEl.innerHTML = '<span style="flex:1"></span><button class="btn btn-sm btn-secondary" id="btn-proc-panel-close-btn">Close</button>';
+  requestAnimationFrame(function () { document.getElementById("proc-panel-overlay").classList.add("open"); });
+  document.getElementById("btn-proc-panel-close-btn").addEventListener("click", _closeProcPanel);
+
+  var canControl = !!(svc.controllable && permAtLeast("processControl", "write"));
+  var ctlButtons = canControl
+    ? '<button class="btn btn-sm btn-secondary svc-ctl-btn" data-action="restart">Restart</button>' +
+      '<button class="btn btn-sm btn-secondary svc-ctl-btn" data-action="stop">Stop</button>' +
+      '<button class="btn btn-sm btn-secondary svc-ctl-btn" data-action="start">Start</button>'
+    : '<span class="hint" style="font-size:0.75rem">' + (svc.controllable ? "Requires the Process Control permission." : "This unit isn’t controllable.") + '</span>';
+
+  function metaRow(label, value) {
+    return '<div style="display:flex;justify-content:space-between;gap:12px;padding:0.3rem 0;border-bottom:1px solid var(--color-border)">' +
+      '<span style="color:var(--color-text-secondary)">' + label + '</span>' +
+      '<span style="text-align:right">' + value + '</span></div>';
+  }
+  var pidVal = svc.mainPid ? (escapeHtml(svc.mainProcess || "") + " (PID " + svc.mainPid + ")") : "—";
+  var memVal = (svc.memBytes != null) ? _fmtBytes(Number(svc.memBytes)) : "—";
+
+  bodyEl.innerHTML =
+    '<div style="padding:1rem 1.25rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:0.75rem;padding-bottom:0.6rem;border-bottom:1px solid var(--color-border)">' +
+        '<div style="font-size:0.82rem;color:var(--color-text-secondary)">Control <span id="svc-ctl-status"></span></div>' +
+        '<div style="display:flex;gap:6px">' + ctlButtons + '</div>' +
+      '</div>' +
+      '<div style="font-size:0.85rem">' +
+        metaRow("Display name", escapeHtml(svc.displayName || "—")) +
+        metaRow("Platform", escapeHtml(svc.platform || "—")) +
+        metaRow("State", _svcStatePill(svc.activeState)) +
+        (svc.subState ? metaRow("Sub-state", escapeHtml(svc.subState)) : "") +
+        metaRow("Enabled", escapeHtml(svc.enabledState || "—")) +
+        metaRow("Main process", pidVal) +
+        metaRow("Memory", memVal) +
+      '</div>' +
+      // Ports & Connections (Phase 3) — populated when the unit is pinned for
+      // Map (mappedServices); the agent attributes its PIDs' sockets to the unit.
+      '<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
+        '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem;gap:8px;flex-wrap:wrap">' +
+          '<h4 style="margin:0">Ports &amp; Connections</h4>' +
+          '<a class="btn btn-sm btn-secondary" href="/appmap.html#focus=' + encodeURIComponent("asset:" + asset.id) + '">View on Application Map</a>' +
+        '</div>' +
+        '<div id="svc-conn-view" style="font-size:0.8rem;color:var(--color-text-secondary)">Loading…</div>' +
+      '</div>' +
+      // Journalctl viewer (Phase 2) — Linux units only; populated when the unit
+      // is pinned for Logs (monitoredServices) and the agent has tailed it.
+      '<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
+        '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem;gap:8px;flex-wrap:wrap">' +
+          '<h4 style="margin:0">Logs <span style="font-weight:400;font-size:0.75rem;color:var(--color-text-tertiary)">journalctl</span></h4>' +
+          '<div style="display:flex;align-items:center;gap:10px">' +
+            '<label style="font-size:0.78rem;display:flex;align-items:center;gap:4px"><input type="checkbox" id="svc-logs-flagged-only">Flagged only</label>' +
+            '<button class="btn btn-sm btn-secondary" id="btn-svc-logs-refresh">Refresh</button>' +
+          '</div>' +
+        '</div>' +
+        (svc.platform === "windows"
+          ? '<p class="hint" style="font-size:0.76rem">Windows service logs are collected via the Event Log stream, not here.</p>'
+          : '<p class="hint" style="font-size:0.76rem">Pin this unit\'s <strong>Logs</strong> box in the Services tab to start tailing its journal — lines appear within a minute or two.</p>') +
+        '<div id="svc-logs-view" style="max-height:300px;overflow:auto;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;font-family:var(--font-mono);font-size:0.78rem;white-space:pre-wrap;color:var(--color-text-secondary)">Loading…</div>' +
+      '</div>' +
+    '</div>';
+
+  if (canControl) {
+    document.querySelectorAll(".svc-ctl-btn").forEach(function (b) {
+      b.addEventListener("click", function () { _runServiceControl(asset.id, svc.unit, b.getAttribute("data-action")); });
+    });
+  }
+  var refreshLogs = document.getElementById("btn-svc-logs-refresh");
+  if (refreshLogs) refreshLogs.addEventListener("click", function () { _loadServiceLogsFor(asset.id, svc.unit); });
+  var flaggedOnly = document.getElementById("svc-logs-flagged-only");
+  if (flaggedOnly) flaggedOnly.addEventListener("change", function () { _loadServiceLogsFor(asset.id, svc.unit); });
+  _loadServiceConnectionsFor(asset.id, svc.unit);
+  _loadServiceLogsFor(asset.id, svc.unit);
+}
+
+async function _loadServiceLogsFor(assetId, unit) {
+  var el = document.getElementById("svc-logs-view");
+  if (!el) return;
+  var flaggedToggle = document.getElementById("svc-logs-flagged-only");
+  var flaggedOnly = !!(flaggedToggle && flaggedToggle.checked);
+  try {
+    var data = await api.assets.serviceLogs(assetId, unit, { limit: 300, flagged: flaggedOnly ? 1 : undefined });
+    var logs = data.logs || [];
+    if (!logs.length) {
+      el.textContent = flaggedOnly
+        ? "No flagged log lines in this window."
+        : "No log lines collected yet. Pin this unit for Logs (Services tab) — journald tailing starts within a minute or two (Linux only).";
+      return;
+    }
+    // Server returns newest-first; show oldest-first in the viewer.
+    el.innerHTML = logs.slice().reverse().map(function (l) {
+      var ts = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "";
+      var lvl = l.level ? "[" + escapeHtml(l.level) + "] " : "";
+      var flags = Array.isArray(l.flags) ? l.flags : [];
+      var badges = flags.map(function (f) {
+        var col = f.color || "var(--color-warning)";
+        return '<span style="display:inline-block;margin-left:6px;padding:0 5px;border-radius:3px;font-size:0.7rem;background:' + col + ';color:#000">' + escapeHtml(f.label || f.name) + '</span>';
+      }).join("");
+      var hl = flags.length ? ';background:rgba(245,158,11,0.12);border-left:2px solid var(--color-warning);padding-left:4px' : "";
+      return '<div style="' + hl + '"><span style="color:var(--color-text-tertiary)">' + escapeHtml(ts) + '</span> ' + lvl + escapeHtml(l.message || "") + badges + '</div>';
+    }).join("");
+  } catch (err) {
+    el.textContent = "Error: " + (err.message || "failed to load logs");
+  }
+}
+
+// Issue a Stop/Start/Restart for a unit, then poll to completion (reuses the
+// shared process-command status poll — same AgentCommand row). Confirm first.
+async function _runServiceControl(assetId, unit, action) {
+  var verb = action.charAt(0).toUpperCase() + action.slice(1);
+  var ok = await showConfirm(verb + ' "' + unit + '" on this host? This runs against the live service.');
+  if (!ok) return;
+  var statusEl = document.getElementById("svc-ctl-status");
+  if (statusEl) statusEl.textContent = " — " + action + "ing…";
+  try {
+    var resp = await api.assets.controlService(assetId, unit, action);
+    var cmdId = resp && resp.command && resp.command.id;
+    showToast(verb + " requested for " + unit, "success");
+    if (cmdId) _pollProcessCommand(assetId, cmdId, statusEl, 0);
+  } catch (err) {
+    showToast(err.message || "Control request failed", "error");
+    if (statusEl) statusEl.textContent = "";
+  }
+}
+
 // ─── Per-process detail slide-in (nested slide-over) ─────────────────────────
 // CPU/RAM charts (reusing _renderSensorChart) + an editable log-path config +
 // a log viewer. Opened from the Processes-tab name link. Mirrors the interface
@@ -14835,6 +15225,29 @@ function _pollProcessCommand(assetId, commandId, statusEl, tries) {
 async function _loadProcessConnectionsFor(assetId, name) {
   var el = document.getElementById("proc-conn-view");
   if (!el) return;
+  try {
+    var d = await api.assets.processConnections(assetId, name);
+    _renderConnView(el, d, 'No connection data yet. Check <strong>Map</strong> for this process in the Processes tab to start collecting listening ports and connections (data appears within a minute or two).');
+  } catch (err) {
+    el.textContent = "Error: " + (err && err.message ? err.message : String(err));
+  }
+}
+
+// Ports & Connections for a mapped unit (Phase 3) — reuses the shared renderer.
+async function _loadServiceConnectionsFor(assetId, unit) {
+  var el = document.getElementById("svc-conn-view");
+  if (!el) return;
+  try {
+    var d = await api.assets.serviceConnections(assetId, unit);
+    _renderConnView(el, d, 'No connection data yet. Check <strong>Map</strong> for this unit in the Services tab to attribute its listening ports and connections (data appears within a minute or two).');
+  } catch (err) {
+    el.textContent = "Error: " + (err && err.message ? err.message : String(err));
+  }
+}
+
+// Shared listening/outbound/inbound table renderer for the process + service
+// connection panels (identical DTO shape from getAssetProcessConnections).
+function _renderConnView(el, d, emptyMsg) {
   function remoteCell(r) {
     var addr = escapeHtml(r.remoteIp) + (r.remotePort ? ":" + r.remotePort : "");
     if (r.remoteAssetId) {
@@ -14855,46 +15268,41 @@ async function _loadProcessConnectionsFor(assetId, name) {
       '<tr>' + headers.map(function (h) { return '<th style="text-align:left;padding:2px 8px 2px 0;border-bottom:1px solid var(--color-border);font-weight:500">' + h + '</th>'; }).join("") + '</tr>' +
       rowsHtml + '</table>';
   }
-  try {
-    var d = await api.assets.processConnections(assetId, name);
-    var html = "";
-    if (d.listening.length) {
-      html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Listening (' + d.listening.length + ')</h5>';
-      html += table(["Port", "Bind", "Last seen"], d.listening.map(function (r) {
-        return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.port) + '</td>' +
-          '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.bindAddr || "—") + '</td>' +
-          '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
-      }).join(""));
-    }
-    if (d.outbound.length) {
-      html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Outbound (' + d.outbound.length + ')</h5>';
-      html += table(["Destination", "Proto", "Last seen"], d.outbound.map(function (r) {
-        return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
-          '<td style="padding:2px 8px 2px 0">' + escapeHtml(r.proto) + '</td>' +
-          '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
-      }).join(""));
-    }
-    if (d.inbound.length) {
-      html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Inbound peers (' + d.inbound.length + ')</h5>';
-      html += table(["Peer", "To port", "Last seen"], d.inbound.map(function (r) {
-        return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
-          '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.localPort) + '</td>' +
-          '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
-      }).join(""));
-    }
-    if (!html) {
-      html = 'No connection data yet. Check <strong>Map</strong> for this process in the Processes tab to start collecting listening ports and connections (data appears within a minute or two).';
-    }
-    el.innerHTML = html;
-    el.querySelectorAll(".proc-conn-asset-link").forEach(function (a) {
-      a.addEventListener("click", function (ev) {
-        ev.preventDefault();
-        openViewModal(a.getAttribute("data-asset-id"));
-      });
-    });
-  } catch (err) {
-    el.textContent = "Error: " + (err && err.message ? err.message : String(err));
+  var html = "";
+  if (d.listening.length) {
+    html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Listening (' + d.listening.length + ')</h5>';
+    html += table(["Port", "Bind", "Last seen"], d.listening.map(function (r) {
+      return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.port) + '</td>' +
+        '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.bindAddr || "—") + '</td>' +
+        '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+    }).join(""));
   }
+  if (d.outbound.length) {
+    html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Outbound (' + d.outbound.length + ')</h5>';
+    html += table(["Destination", "Proto", "Last seen"], d.outbound.map(function (r) {
+      return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
+        '<td style="padding:2px 8px 2px 0">' + escapeHtml(r.proto) + '</td>' +
+        '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+    }).join(""));
+  }
+  if (d.inbound.length) {
+    html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Inbound peers (' + d.inbound.length + ')</h5>';
+    html += table(["Peer", "To port", "Last seen"], d.inbound.map(function (r) {
+      return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
+        '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.localPort) + '</td>' +
+        '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+    }).join(""));
+  }
+  if (!html) {
+    html = emptyMsg;
+  }
+  el.innerHTML = html;
+  el.querySelectorAll(".proc-conn-asset-link").forEach(function (a) {
+    a.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      openViewModal(a.getAttribute("data-asset-id"));
+    });
+  });
 }
 
 async function _loadProcessLogsFor(assetId, name) {

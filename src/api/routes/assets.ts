@@ -53,7 +53,7 @@ import {
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
-import { requestProcessControl, getCommandStatus } from "../../services/agentCommandService.js";
+import { requestProcessControl, requestServiceControl, getCommandStatus } from "../../services/agentCommandService.js";
 import { getAssetProcessConnections } from "../../services/applicationMapService.js";
 import {
   readIpsecHistory,
@@ -254,6 +254,11 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Process names toggled for Application Map connection discovery
   // (Processes-tab "Map" checkbox). Same 64 cap; independent of the Monitor pin.
   mappedProcesses:       z.array(z.string().min(1)).max(64).optional(),
+  // Service/unit names pinned for per-unit journalctl tailing (Services-tab
+  // "Logs" checkbox) and Application Map connection attribution ("Map"
+  // checkbox). Services-tab siblings of monitored/mappedProcesses.
+  monitoredServices:     z.array(z.string().min(1)).max(64).optional(),
+  mappedServices:        z.array(z.string().min(1)).max(64).optional(),
 });
 
 // Per-pinned-process log config (PUT /assets/:id/processes/:name/config).
@@ -915,6 +920,7 @@ router.get("/:id", requirePermission("assets", "read"), async (req, res, next) =
     // FortiGate directly).
     let integrationMonitorCredential: { id: string; name: string; type: string } | null = null;
     let integrationUseProxy: boolean | null = null;
+    let integrationSyncDescriptions: boolean | null = null;
     if (asset.discoveredByIntegration) {
       const cfg = (asset.discoveredByIntegration.config as Record<string, unknown> | null) || {};
       const credId = typeof cfg.monitorCredentialId === "string" ? cfg.monitorCredentialId : null;
@@ -929,6 +935,14 @@ router.get("/:id", requirePermission("assets", "read"), async (req, res, next) =
       if (asset.discoveredByIntegration.type === "fortimanager") {
         integrationUseProxy = cfg.useProxy !== false;
       }
+      // Description Sync is a FortiManager + standalone FortiGate toggle. Expose
+      // a derived boolean (the raw config is stripped below — it holds API
+      // tokens) so the asset edit form can cap the FortiAP Description at the
+      // 35-char device `location` limit, but only when this AP's integration
+      // actually syncs descriptions to the device.
+      if (asset.discoveredByIntegration.type === "fortimanager" || asset.discoveredByIntegration.type === "fortigate") {
+        integrationSyncDescriptions = cfg.syncDescriptions === true;
+      }
     }
     const { config: _omit, ...integrationLite } = (asset.discoveredByIntegration as { config?: unknown } | null) || {};
     const { associatedIpRows, macAddressRows, ...assetRest } = asset;
@@ -937,7 +951,7 @@ router.get("/:id", requirePermission("assets", "read"), async (req, res, next) =
       associatedIps: shapeAssociatedIps(associatedIpRows),
       macAddresses:  shapeMacRows(macAddressRows),
       discoveredByIntegration: asset.discoveredByIntegration
-        ? { ...integrationLite, useProxy: integrationUseProxy }
+        ? { ...integrationLite, useProxy: integrationUseProxy, syncDescriptions: integrationSyncDescriptions }
         : null,
       integrationMonitorCredential,
     };
@@ -1813,17 +1827,55 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
   } catch (err) { next(err); }
 });
 
-// GET /assets/:id/process-connections?name= — Ports & Connections for the
-// process detail slide-in (Application Map data, per-asset view). Optional
-// `name` filters to one process. Remote IPs are hydrated with the matched
-// asset id + hostname via the bulk resolver (primary + associated IPs).
+// GET /assets/:id/services — current-state systemd unit / Windows service
+// inventory for the Services tab. Mirrors /:id/processes: the current AssetService
+// rows plus the two pin arrays (monitoredServices = journalctl tailing,
+// mappedServices = Application Map connection attribution).
+router.get("/:id/services", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: { monitoredServices: true, mappedServices: true },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    const rows = await prisma.assetService.findMany({
+      where: { assetId: id },
+      orderBy: [{ unit: "asc" }],
+    });
+    res.json({
+      services: rows.map((s) => ({
+        unit:         s.unit,
+        platform:     s.platform,
+        displayName:  s.displayName,
+        loadState:    s.loadState,
+        activeState:  s.activeState,
+        subState:     s.subState,
+        enabledState: s.enabledState,
+        mainPid:      s.mainPid,
+        mainProcess:  s.mainProcess,
+        memBytes:     s.memBytes != null ? s.memBytes.toString() : null,
+        controllable: s.controllable,
+      })),
+      monitoredServices: (asset.monitoredServices ?? []) as string[],
+      mappedServices:    (asset.mappedServices    ?? []) as string[],
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/process-connections?name=&unit= — Ports & Connections for the
+// process detail slide-in AND the Services detail panel (Application Map data,
+// per-asset view). Optional `name` filters to one process; optional `unit`
+// (Phase 3) filters to one systemd unit / Windows service. Remote IPs are
+// hydrated with the matched asset id + hostname via the bulk resolver.
 router.get("/:id/process-connections", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const exists = await prisma.asset.findUnique({ where: { id }, select: { id: true } });
     if (!exists) throw new AppError(404, "Asset not found");
     const name = typeof req.query.name === "string" && req.query.name ? req.query.name : undefined;
-    res.json(await getAssetProcessConnections(id, name));
+    const unit = typeof req.query.unit === "string" && req.query.unit ? req.query.unit : undefined;
+    res.json(await getAssetProcessConnections(id, name, unit));
   } catch (err) { next(err); }
 });
 
@@ -2425,6 +2477,33 @@ router.get("/:id/process-logs", requirePermission("assets", "read"), async (req,
   } catch (err) { next(err); }
 });
 
+// GET /assets/:id/service-logs?unit=...&since=...&limit=...&flagged=1 — recent
+// journalctl lines for a pinned unit (standalone table, newest-first, capped).
+// Global/asset-scoped LogFlagRules apply (the unit is passed as the eval's
+// process key, so a process-scoped rule named after the unit also matches).
+router.get("/:id/service-logs", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const unit = req.query.unit ? String(req.query.unit) : null;
+    if (!unit) throw new AppError(400, "unit query parameter is required");
+    const limit = Math.min(2000, Math.max(1, parseInt(String(req.query.limit ?? "500"), 10) || 500));
+    const since = req.query.since ? new Date(String(req.query.since)) : null;
+    const onlyFlagged = String(req.query.flagged ?? "") === "1";
+    const rows = await prisma.assetServiceLogSample.findMany({
+      where: { assetId: id, unit, ...(since && !isNaN(since.getTime()) ? { timestamp: { gte: since } } : {}) },
+      orderBy: { timestamp: "desc" },
+      take: limit,
+    });
+    const logs = await evaluateLogFlags(
+      id,
+      unit,
+      rows.map((r) => ({ timestamp: r.timestamp, level: r.level, message: r.message, source: r.source })),
+      onlyFlagged,
+    );
+    res.json({ unit, logs });
+  } catch (err) { next(err); }
+});
+
 // PUT /assets/:id/processes/:name/config — operator log-path config for a
 // pinned program (log source + wildcard glob). Upserts AssetProcessConfig.
 router.put("/:id/processes/:name/config", requirePermission("assets", "write"), async (req, res, next) => {
@@ -2470,6 +2549,23 @@ router.get("/:id/process-command/:commandId", requirePermission("assets", "read"
     const status = await getCommandStatus(req.params.id as string, String(req.params.commandId));
     if (!status) throw new AppError(404, "Command not found");
     res.json({ command: status });
+  } catch (err) { next(err); }
+});
+
+// POST /assets/:id/services/:unit/control — Start/Stop/Restart a systemd unit /
+// Windows service via the AgentCommand queue. Same posture as process control
+// (processControl RBAC, agent never self-acts, fully audited); the unit lands in
+// AgentCommand.target and the agent runs systemctl / net+sc. The unit name is a
+// wildcard param (dots / @ / : are legal in unit names) — the service lookup +
+// charset validation happen in requestServiceControl. Reuses the shared
+// process-command status poll (same AgentCommand row).
+router.post("/:id/services/:unit(*)/control", requirePermission("processControl", "write"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const unit = String(req.params.unit);
+    const { action } = ProcessControlSchema.parse(req.body);
+    const cmd = await requestServiceControl(id, unit, action, requestActor(req));
+    res.status(202).json({ command: cmd });
   } catch (err) { next(err); }
 });
 
@@ -2709,6 +2805,17 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
       if (removed.length > 0) {
         await prisma.assetProcessConnection.deleteMany({
           where: { assetId: id, processName: { in: removed } },
+        });
+      }
+    }
+    // Unmapping a UNIT likewise drops its accumulated connection rows now
+    // (Phase 3) — rows carry the owning unit, so delete by unit.
+    if (input.mappedServices !== undefined) {
+      const kept = new Set(input.mappedServices);
+      const removed = (existing.mappedServices ?? []).filter((u) => !kept.has(u));
+      if (removed.length > 0) {
+        await prisma.assetProcessConnection.deleteMany({
+          where: { assetId: id, unit: { in: removed } },
         });
       }
     }

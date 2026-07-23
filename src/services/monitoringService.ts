@@ -7470,6 +7470,9 @@ export interface ProcessConnectionInput {
   localPort?:  number | null;
   remoteIp?:   string | null;
   remotePort?: number | null;
+  /** Owning systemd unit / Windows service (Phase 3). Attribute-only — NOT in
+   *  the business key; set on insert, never bumped on conflict. */
+  unit?: string | null;
 }
 
 // Per-(processName, kind) row caps. Also enforced on-agent and in the agentless
@@ -7480,7 +7483,7 @@ const PROCESS_CONN_CAPS: Record<ProcessConnectionKind, number> = {
   outbound: 500,
   inbound:  200,
 };
-// 11 params/row; 2000 rows/statement stays well under the 65535 param ceiling.
+// 12 params/row; 2000 rows/statement stays well under the 65535 param ceiling.
 const PROCESS_CONN_CHUNK = 2000;
 // lastSeen churn gate: a row seen every 60s only takes a real tuple update once
 // per window — ~5× less dead-tuple churn, and with lastSeen unindexed those
@@ -7520,6 +7523,7 @@ export async function persistProcessConnections(
   interface NormalizedConnRow {
     processName: string; kind: ProcessConnectionKind; proto: "tcp" | "udp";
     localAddr: string; localPort: number; remoteIp: string; remotePort: number;
+    unit: string;
   }
   // Normalize + validate + dedup by business key. Two identical tuples inside
   // one INSERT ... ON CONFLICT raise "cannot affect row a second time", so the
@@ -7535,7 +7539,9 @@ export async function persistProcessConnections(
     const s = processConnSentinels(r);
     if (s.localPort > 65535 || s.remotePort > 65535) continue;
     const key = JSON.stringify([name, kind, proto, s.localAddr, s.localPort, s.remoteIp, s.remotePort]);
-    if (!byKey.has(key)) byKey.set(key, { processName: name, kind, proto, ...s });
+    // unit is attribute-only (not in the key) — first occurrence wins, matching
+    // the agent's dedup + the insert-only ON CONFLICT below.
+    if (!byKey.has(key)) byKey.set(key, { processName: name, kind, proto, ...s, unit: (r.unit ?? "").trim() });
   }
 
   // Per-(processName, kind) caps, deterministic order so truncation is stable
@@ -7567,19 +7573,20 @@ export async function persistProcessConnections(
     const tuples: string[] = [];
     let p = 1;
     for (const r of chunk) {
-      tuples.push(`($${p++}::uuid, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}::int, $${p++}, $${p++}::int, $${p++}::timestamp, $${p++}::timestamp)`);
+      tuples.push(`($${p++}::uuid, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}::int, $${p++}, $${p++}::int, $${p++}, $${p++}::timestamp, $${p++}::timestamp)`);
       params.push(
         randomUUID(), assetId, r.processName, r.kind, r.proto,
-        r.localAddr, r.localPort, r.remoteIp, r.remotePort,
+        r.localAddr, r.localPort, r.remoteIp, r.remotePort, r.unit,
         nowIso, nowIso,
       );
     }
     const sql =
       `INSERT INTO "asset_process_connections" (` +
       `"id", "assetId", "processName", "kind", "proto", ` +
-      `"localAddr", "localPort", "remoteIp", "remotePort", "firstSeen", "lastSeen"` +
+      `"localAddr", "localPort", "remoteIp", "remotePort", "unit", "firstSeen", "lastSeen"` +
       `) VALUES ${tuples.join(", ")} ` +
       `ON CONFLICT ("assetId", "processName", "kind", "proto", "localAddr", "localPort", "remoteIp", "remotePort") ` +
+      // unit is intentionally NOT refreshed on conflict — set on first insert.
       `DO UPDATE SET "lastSeen" = EXCLUDED."lastSeen" ` +
       `WHERE "asset_process_connections"."lastSeen" < EXCLUDED."lastSeen" - interval '${PROCESS_CONN_BUMP_MINUTES} minutes'`;
     await retryOnDeadlock(() => prisma.$executeRawUnsafe(sql, ...params));
@@ -9926,6 +9933,9 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     // Process logs are a standalone detail-only hypertable (no rollups) — prune
     // on the process entity's detail window via the same compression-safe path.
     pruneTierByDays((w) => prisma.assetProcessLogSample.deleteMany({ where: w as any }), r.process.detail, "timestamp", "asset_process_log_samples"),
+    // Service (journalctl) logs — same standalone-hypertable prune on the
+    // process entity's detail window as process logs.
+    pruneTierByDays((w) => prisma.assetServiceLogSample.deleteMany({ where: w as any }), r.process.detail, "timestamp", "asset_service_log_samples"),
     // Application Map connection rows (plain accumulate+age table) — fixed
     // 30-day window (POLARIS_PROCESS_CONN_RETENTION_DAYS), not a retention entity.
     pruneProcessConnections(),
