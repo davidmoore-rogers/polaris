@@ -306,11 +306,16 @@
 
   // ─── Two-pass layout ───────────────────────────────────────────────
 
-  // Pass 1: dagre over the COLLAPSED asset-level graph (process endpoints
-  // fold into their parent asset). Pass 2: stack each asset's children
-  // vertically at the parent's dagre coordinate. Returns positions for child
-  // + plain nodes only (compound parents derive their box).
+  // Pass 1: dagre over the COLLAPSED asset-level graph (process/service
+  // endpoints fold into their parent asset). Each collapsed asset node is sized
+  // to the box its stacked children will actually occupy, so dagre reserves
+  // room and neighbouring boxes don't overlap. Pass 2: stack each asset's
+  // children vertically at the parent's dagre coordinate. Returns positions for
+  // child + plain nodes only (compound parents derive their box).
   function computeLayout(g) {
+    var nodeById = {};
+    g.nodes.forEach(function (n) { nodeById[n.id] = n; });
+
     var parentOf = {};
     g.nodes.forEach(function (n) {
       if (isChildNode(n.kind) && n.parent) parentOf[n.id] = n.parent;
@@ -319,6 +324,32 @@
     g.nodes.forEach(function (n) {
       if (!isChildNode(n.kind)) collapsedNodes[n.id] = true;
     });
+    // Children per parent — drives both the reserved box size (below) and the
+    // stacked child positions (pass 2).
+    var childrenByParent = {};
+    g.nodes.forEach(function (n) {
+      if (!isChildNode(n.kind) || !n.parent) return;
+      (childrenByParent[n.parent] = childrenByParent[n.parent] || []).push(n.id);
+    });
+
+    // Reserved bounding box for a collapsed node: children stack PROC_ROW_GAP
+    // apart (height) and the box is as wide as its widest child label
+    // (~7.3px/char in the 11px monospace child font) + padding. Childless
+    // collapsed nodes (unknown IPs, resolved-target assets) get a small box.
+    function boxSize(id) {
+      var kids = childrenByParent[id];
+      if (!kids || kids.length === 0) return { w: 70, h: 70 };
+      var maxChars = 6;
+      kids.forEach(function (kid) {
+        var lbl = nodeById[kid] ? nodeLabel(nodeById[kid]).split("\n")[0] : "";
+        if (lbl.length > maxChars) maxChars = lbl.length;
+      });
+      return {
+        w: Math.max(150, Math.round(maxChars * 7.3) + 48),
+        h: kids.length * PROC_ROW_GAP + 48,
+      };
+    }
+
     var collapsedEdges = {};
     g.edges.forEach(function (r) {
       var s = parentOf[r.edge.source] || r.edge.source;
@@ -332,14 +363,23 @@
     });
     var els = [];
     Object.keys(collapsedNodes).forEach(function (id) {
-      els.push({ group: "nodes", data: { id: id } });
+      var sz = boxSize(id);
+      els.push({ group: "nodes", data: { id: id, w: sz.w, h: sz.h } });
     });
     Object.keys(collapsedEdges).forEach(function (k) {
       var e = collapsedEdges[k];
       els.push({ group: "edges", data: { id: "ce:" + k, source: e.source, target: e.target } });
     });
-    var head = cytoscape({ headless: true, elements: els, styleEnabled: false });
-    head.layout({ name: "dagre", rankDir: "LR", nodeSep: 60, rankSep: 240 }).run();
+    // styleEnabled + a data-driven width/height mapper so dagre reads each
+    // node's real bounding box (cytoscape-dagre spaces nodes by width()/height()
+    // + nodeSep/rankSep — the gaps are box-edge to box-edge).
+    var head = cytoscape({
+      headless: true,
+      elements: els,
+      styleEnabled: true,
+      style: [{ selector: "node", style: { width: "data(w)", height: "data(h)" } }],
+    });
+    head.layout({ name: "dagre", rankDir: "LR", nodeSep: 45, rankSep: 130 }).run();
     var anchor = {};
     head.nodes().forEach(function (n) {
       anchor[n.id()] = { x: n.position("x"), y: n.position("y") };
@@ -352,11 +392,6 @@
       if (!isChildNode(n.kind) && anchor[n.id]) positions[n.id] = anchor[n.id];
     });
     // Children stack centered on the parent's coordinate.
-    var childrenByParent = {};
-    g.nodes.forEach(function (n) {
-      if (!isChildNode(n.kind) || !n.parent) return;
-      (childrenByParent[n.parent] = childrenByParent[n.parent] || []).push(n.id);
-    });
     Object.keys(childrenByParent).forEach(function (pid) {
       var kids = childrenByParent[pid].sort();
       var base = anchor[pid] || { x: 0, y: 0 };
