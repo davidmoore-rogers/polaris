@@ -53,6 +53,7 @@ import {
   evaluateScopeCondition,
   triggerSignature,
   scopeRank,
+  scopeRankLabel,
 } from "./notificationTypes.js";
 import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
 import { ipInCidr } from "../utils/cidr.js";
@@ -1586,6 +1587,9 @@ export interface PreviewResult {
   emailPreview?: { subject: string; text: string; html?: string };
   /** Precedence carve-out (present only for asset_metric/asset_state drafts). */
   carveOut?: CarveOutSummary;
+  /** Draft scope specificity (asset-scoped drafts) — drives the wizard's
+   *  "Specificity" indicator + explains carve-out ranking. */
+  specificity?: { rank: number; label: string };
 }
 
 /** A same-signature peer rule for carve-out computation. */
@@ -1765,6 +1769,9 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
     matches: matches.slice(0, 200),
     emailPreview,
     ...(carveOut.carvedOut || carveOut.carvesFrom ? { carveOut } : {}),
+    ...(trigger.type === "asset_metric" || trigger.type === "asset_state"
+      ? { specificity: { rank: scopeRank(input.scope), label: scopeRankLabel(scopeRank(input.scope)) } }
+      : {}),
   };
 }
 

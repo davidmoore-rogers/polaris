@@ -312,7 +312,8 @@ async function openAutomationWizard(existing) {
       { field: "tag", label: "Tag", ops: ["has", "notHas"], optionsFrom: "tags" },
       { field: "subnet", label: "Subnet / IP", ops: ["inCidr", "notInCidr"], optionsFrom: "subnets" },
       { field: "status", label: "Lifecycle status", ops: ["equals", "notEquals"], optionsFrom: null, values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
-      { field: "assetId", label: "Asset ID", ops: ["equals", "notEquals"], optionsFrom: null },
+      // Asset ID intentionally omitted — a raw id targets one device with no
+      // precedence meaning; use hostname. Saved rules using it still evaluate.
     ],
     maxDepth: 5,
   };
@@ -1434,16 +1435,51 @@ async function openAutomationWizard(existing) {
       return;
     }
     try {
-      var res = await api.automations.preview({ scope: draft.scope });
-      var names = (res.matches || []).slice(0, 100).map(function (m) {
-        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + '</td></tr>';
+      // Send the trigger + rule id so the preview can compute the precedence
+      // carve-out (which devices this automation shares with more/less-specific
+      // automations that watch the same thing) and exclude this rule itself.
+      var body = { scope: draft.scope, trigger: draft.trigger, reset: draft.reset || undefined };
+      if (editing && editing.id) body.id = editing.id;
+      var res = await api.automations.preview(body);
+      var matches = res.matches || [];
+      var names = matches.slice(0, 100).map(function (m) {
+        var carved = m.excludedBy
+          ? ' <span style="color:var(--color-warning, #b7791f);font-size:0.75rem">— covered by “' + escapeHtml(m.excludedBy.ruleName) + '”</span>'
+          : "";
+        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + carved + '</td></tr>';
       }).join("");
-      box.innerHTML = '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> device(s) match the filter right now.</p>' +
+      var spec = res.specificity
+        ? '<p style="font-size:0.8rem;margin:0 0 6px">Specificity: <strong>' + escapeHtml(res.specificity.label) + '</strong>' +
+          ' <span style="color:var(--color-text-tertiary)">— a more-specific automation watching the same thing takes precedence for the devices it covers.</span></p>'
+        : "";
+      box.innerHTML = spec +
+        '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> device(s) match the filter right now.</p>' +
+        carveOutWarningHtml(res.carveOut) +
         (names ? '<div class="table-wrapper" style="max-height:220px;overflow:auto"><table><tbody>' + names + '</tbody></table></div>' +
           (res.totalEvaluated > 100 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 100) + ' more.</p>' : "") : "");
     } catch (err) {
       box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">' + escapeHtml(err.message || "Preview unavailable") + '</p>';
     }
+  }
+  // Bidirectional precedence warning: what this draft takes from less-specific
+  // automations (carvesFrom) + what more-specific ones already cover (carvedOut).
+  function carveOutWarningHtml(carveOut) {
+    if (!carveOut) return "";
+    var parts = [];
+    if (carveOut.carvesFrom && carveOut.carvesFrom.length) {
+      var lines = carveOut.carvesFrom.map(function (c) {
+        var sample = (c.sampleHostnames || []).slice(0, 3).join(", ");
+        return '<li>“' + escapeHtml(c.ruleName) + '” — <strong>' + c.count + '</strong> device(s)' +
+          (sample ? ' <span style="color:var(--color-text-tertiary)">(' + escapeHtml(sample) + (c.count > 3 ? ", …" : "") + ')</span>' : "") + '</li>';
+      }).join("");
+      parts.push('<p style="margin:0 0 2px;font-size:0.82rem">Creating this will stop these less-specific automations from alerting on the devices it covers:</p><ul style="margin:0 0 6px 1.1rem;font-size:0.82rem">' + lines + '</ul>');
+    }
+    if (carveOut.carvedOut && carveOut.carvedOut.count) {
+      var by = (carveOut.carvedOut.byRule || []).map(function (b) { return '“' + escapeHtml(b.ruleName) + '” (' + b.count + ')'; }).join(", ");
+      parts.push('<p style="margin:0 0 6px;font-size:0.82rem"><strong>' + carveOut.carvedOut.count + '</strong> matched device(s) are already covered by a more-specific automation, so this one won’t alert on them: ' + by + '.</p>');
+    }
+    if (!parts.length) return "";
+    return '<div style="border:1px solid var(--color-warning, #d9a441);background:var(--color-warning-bg, rgba(217,164,65,0.08));border-radius:6px;padding:0.5rem 0.6rem;margin:0 0 8px">' + parts.join("") + '</div>';
   }
 
   // One action row — used for top-level actions AND escalation-tier actions.
