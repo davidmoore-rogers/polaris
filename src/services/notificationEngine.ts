@@ -46,7 +46,10 @@ import {
   normalizeEscalationToV2,
   scopeCidrOf,
   evaluateScopeCondition,
+  triggerSignature,
+  scopeRank,
 } from "./notificationTypes.js";
+import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
 import { ipInCidr } from "../utils/cidr.js";
 import { computeStorageForecast } from "./storageForecastService.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
@@ -113,6 +116,11 @@ interface ScopeAssetRow {
   dependencySuppressed: boolean;
   quarantinedAt: Date | null;
   ipAddress: string | null;
+  // Read by the condition-tree evaluator + the carve-out scope match
+  // (SCOPE_SELECT populates them; optional so the pseudo-host row can omit them).
+  manufacturer?: string | null;
+  model?: string | null;
+  os?: string | null;
 }
 
 /** A single evaluated reading for a (asset, dimension). */
@@ -587,22 +595,75 @@ function ruleWantsAssetDetail(rule: DbRule): boolean {
 // re-exported so the escalation sweep + tests keep their import path.
 export { buildComposedEmail };
 
+// ─── Specificity precedence / carve-out ─────────────────────────────────────
+// A more-specific automation "carves" the assets it covers out of a
+// less-specific one that watches the SAME trigger (triggerSignature): those
+// assets drop their readings, any active alert on the general rule clears
+// (superseded), and its pending debounce resets. Same-rank ties both fire.
+// Built once per engine tick over the enabled rule set; only asset_metric /
+// asset_state rules (non-null signature) participate.
+
+interface ShadowMember {
+  rule: DbRule;
+  rank: number;
+}
+interface ShadowIndex {
+  /** signature → participating rules (with precomputed scopeRank). */
+  bySig: Map<string, ShadowMember[]>;
+  /** signature → highest rank present (skip the per-asset check for max-rank rules). */
+  maxRankBySig: Map<string, number>;
+}
+
+export function buildShadowIndex(rules: DbRule[]): ShadowIndex {
+  const bySig = new Map<string, ShadowMember[]>();
+  const maxRankBySig = new Map<string, number>();
+  for (const rule of rules) {
+    const sig = triggerSignature(rule.trigger);
+    if (!sig) continue;
+    const rank = scopeRank(rule.scope);
+    const arr = bySig.get(sig);
+    if (arr) arr.push({ rule, rank });
+    else bySig.set(sig, [{ rule, rank }]);
+    maxRankBySig.set(sig, Math.max(maxRankBySig.get(sig) ?? 0, rank));
+  }
+  return { bySig, maxRankBySig };
+}
+
+/** Does a higher-rank same-signature rule also cover this asset? */
+export function isAssetShadowed(index: ShadowIndex, rule: DbRule, sig: string, rank: number, asset: ScopeAsset): boolean {
+  const group = index.bySig.get(sig);
+  if (!group) return false;
+  for (const other of group) {
+    if (other.rule.id === rule.id) continue;
+    if (other.rank > rank && scopeMatchesAsset(other.rule.scope, asset)) return true;
+  }
+  return false;
+}
+
 // ─── Threshold / state evaluation ───────────────────────────────────────────
 
-async function evaluateThresholdRule(rule: DbRule): Promise<void> {
+async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): Promise<void> {
   const trigger = rule.trigger;
   let readings: Reading[] = [];
   // Assets silenced this tick (maintenance window / dependency-suppressed).
   const suppressedIds = new Set<string>();
+  // Assets carved out this tick by a more-specific same-signature automation.
+  const shadowedIds = new Set<string>();
 
   if (trigger.type === "host_metric") {
     const r = await resolveHostMetricReading(trigger);
     readings = r ? [r] : [];
   } else if (trigger.type === "asset_metric" || trigger.type === "asset_state") {
     const assets = await loadScopeAssets(rule.scope);
+    // Precedence: only worth checking when this rule isn't already the most
+    // specific in its signature group (and the group has a higher-rank peer).
+    const sig = shadowIndex ? triggerSignature(rule.trigger) : null;
+    const rank = sig ? scopeRank(rule.scope) : 0;
+    const shadowable = !!(sig && shadowIndex && (shadowIndex.maxRankBySig.get(sig) ?? 0) > rank);
     const active: ScopeAssetRow[] = [];
     for (const a of assets) {
       if (isSuppressedForNotifications(a)) suppressedIds.add(a.id);
+      else if (shadowable && isAssetShadowed(shadowIndex!, rule, sig!, rank, a)) shadowedIds.add(a.id);
       else active.push(a);
     }
     readings = trigger.type === "asset_metric"
@@ -679,6 +740,35 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
   // exiting maintenance can't double-fire an already-active notification.
   for (const st of states) {
     if (st.state === "pending" && st.assetId && suppressedIds.has(st.assetId)) {
+      await prisma.notificationRuleState.update({
+        where: { id: st.id },
+        data: { state: "clear", conditionMetSince: null },
+      });
+    }
+  }
+
+  // Carved-out assets: a more-specific same-signature automation has taken them
+  // over. Unlike maintenance suppression (which freezes firing rows), the
+  // takeover is a real handoff — clear any active alert (superseded) and reset
+  // pending debounce so the general rule no longer alerts for these assets.
+  for (const st of states) {
+    if (!st.assetId || !shadowedIds.has(st.assetId)) continue;
+    if (st.state === "firing") {
+      await clearActiveNotification(st, "system:superseded");
+      await prisma.notificationRuleState.update({
+        where: { id: st.id },
+        data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null },
+      });
+      await logEvent({
+        action: "notification.superseded",
+        resourceType: "notification",
+        resourceId: st.notificationId ?? undefined,
+        resourceName: rule.name,
+        actor: "system:notification-engine",
+        message: `Cleared: ${rule.name} superseded by a more-specific automation`,
+        details: { ruleId: rule.id, assetId: st.assetId },
+      }).catch(() => {});
+    } else if (st.state === "pending") {
       await prisma.notificationRuleState.update({
         where: { id: st.id },
         data: { state: "clear", conditionMetSince: null },
@@ -1260,12 +1350,16 @@ export async function evaluateAllNotificationRules(): Promise<void> {
 
   clearAssetDetailCache();
 
+  // Precedence index: which asset_metric/asset_state rules can carve assets out
+  // of which (same trigger signature, higher scope specificity). Built once.
+  const shadowIndex = buildShadowIndex(rules);
+
   for (const rule of rules) {
     try {
       if (rule.trigger.type === "composite") {
         await evaluateCompositeRule(rule);
       } else if (rule.trigger.type === "asset_metric" || rule.trigger.type === "asset_state" || rule.trigger.type === "host_metric") {
-        await evaluateThresholdRule(rule);
+        await evaluateThresholdRule(rule, shadowIndex);
       }
     } catch (err) {
       await logEvent({ action: "notification.engine_error", actor: "system:notification-engine", level: "error", message: `Rule "${rule.name}" evaluation failed`, details: { ruleId: rule.id, err: (err as Error)?.message } }).catch(() => {});
