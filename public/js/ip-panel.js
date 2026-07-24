@@ -585,39 +585,43 @@ function _renderIpList(data) {
   });
 
   // Click-to-copy delegate for IP / hostname / MAC cells. Uses event delegation
-  // so newly-rendered pages don't need fresh wiring beyond this single listener
-  // (the body is re-rendered in full on every page change, so this re-binds
-  // alongside everything else above).
-  body.addEventListener("click", function (e) {
-    var target = e.target && e.target.closest ? e.target.closest(".copy-on-click") : null;
-    if (!target || !body.contains(target)) return;
-    var value = target.getAttribute("data-copy");
-    if (!value) return;
-    e.stopPropagation();
-    var notify = function (ok) {
-      if (typeof window.showToast === "function") {
-        window.showToast(ok ? ("Copied " + value) : "Copy failed", ok ? "success" : "error");
+  // so newly-rendered pages don't need fresh wiring beyond this single listener.
+  // The #ip-panel-body element persists across renders (only its innerHTML is
+  // replaced), so this MUST bind exactly once — otherwise every re-render (incl.
+  // discovery auto-refresh) stacks another listener and one click fires N toasts.
+  if (!body._copyDelegateBound) {
+    body._copyDelegateBound = true;
+    body.addEventListener("click", function (e) {
+      var target = e.target && e.target.closest ? e.target.closest(".copy-on-click") : null;
+      if (!target || !body.contains(target)) return;
+      var value = target.getAttribute("data-copy");
+      if (!value) return;
+      e.stopPropagation();
+      var notify = function (ok) {
+        if (typeof window.showToast === "function") {
+          window.showToast(ok ? ("Copied " + value) : "Copy failed", ok ? "success" : "error");
+        }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(value).then(function () { notify(true); }, function () { notify(false); });
+      } else {
+        // Fallback for non-secure contexts / older browsers
+        try {
+          var ta = document.createElement("textarea");
+          ta.value = value;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          var ok = document.execCommand && document.execCommand("copy");
+          document.body.removeChild(ta);
+          notify(!!ok);
+        } catch (_) {
+          notify(false);
+        }
       }
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(value).then(function () { notify(true); }, function () { notify(false); });
-    } else {
-      // Fallback for non-secure contexts / older browsers
-      try {
-        var ta = document.createElement("textarea");
-        ta.value = value;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        var ok = document.execCommand && document.execCommand("copy");
-        document.body.removeChild(ta);
-        notify(!!ok);
-      } catch (_) {
-        notify(false);
-      }
-    }
-  });
+    });
+  }
 
   // Scroll-to-row on focus IP. Cleared after one render so paginating away
   // doesn't snap back to the original IP.
