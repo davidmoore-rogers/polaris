@@ -23,6 +23,69 @@ export const CLEAR_BEHAVIORS = ["manual", "auto", "timed"] as const;
 export const COMPARATORS = [">", ">=", "<", "<=", "==", "!="] as const;
 export const AGGREGATIONS = ["latest", "avg", "min", "max"] as const;
 
+export type Severity = (typeof SEVERITIES)[number];
+export type Comparator = (typeof COMPARATORS)[number];
+
+/** Rank of a severity (higher = more severe); -1 for an unknown string. */
+export function severityRank(s: string): number {
+  return (SEVERITIES as readonly string[]).indexOf(s);
+}
+
+// ─── Severity bands (value-driven severity escalation) ──────────────────────
+// One automation can escalate severity by value: a base trigger threshold +
+// severity (tier 0) plus higher tiers ("bands"). severityForValue walks the
+// effective tiers [tier0, ...bands] and returns the MOST-severe tier a value
+// satisfies (or null when it satisfies none — below tier 0 = not firing). Bands
+// live at the rule level alongside actions/reset/escalation; each also carries
+// its own actions + escalation (see severityBandSchema).
+
+/** The value/severity part of a band tier that severityForValue reads. A full
+ *  band (severityBandSchema) additionally carries actions + escalation. */
+export interface SeverityTier {
+  threshold: number;
+  severity: Severity;
+}
+
+function numMeets(value: number, operator: Comparator, threshold: number): boolean {
+  switch (operator) {
+    case ">": return value > threshold;
+    case ">=": return value >= threshold;
+    case "<": return value < threshold;
+    case "<=": return value <= threshold;
+    case "==": return value === threshold;
+    case "!=": return value !== threshold;
+    default: return false;
+  }
+}
+
+/**
+ * The severity a numeric value lands in. Effective tiers are the base
+ * `{baseThreshold, baseSeverity}` plus `bands`; returns the most-severe tier the
+ * value satisfies under `operator`, or null when it satisfies none. A no-band
+ * trigger returns `baseSeverity` (when met) or null — identical to the pre-band
+ * fire/clear decision.
+ */
+export function severityForValue(
+  operator: Comparator,
+  baseThreshold: number,
+  baseSeverity: Severity,
+  bands: SeverityTier[] | null | undefined,
+  value: number | null | undefined,
+): Severity | null {
+  if (value == null || Number.isNaN(value)) return null;
+  const tiers: SeverityTier[] = [{ threshold: baseThreshold, severity: baseSeverity }, ...(bands ?? [])];
+  let best: Severity | null = null;
+  let bestRank = -1;
+  for (const tier of tiers) {
+    const r = severityRank(tier.severity);
+    if (r > bestRank && numMeets(value, operator, tier.threshold)) {
+      best = tier.severity;
+      bestRank = r;
+    }
+  }
+  return best;
+}
+
 // ─── Asset-metric trigger ───────────────────────────────────────────────────
 // Numeric thresholds over the telemetry / sample tables. `dimensionFilter`
 // narrows multi-row streams (interfaces, sensors, mounts, SD-WAN members).
@@ -758,6 +821,120 @@ export type AutomationAction = z.infer<typeof actionSchema>;
 export type EscalationTierV2 = z.infer<typeof escalationTierV2Schema>;
 export type EscalationV2Config = z.infer<typeof escalationV2Schema>;
 
+// ─── Specificity ranking (automation precedence / carve-out) ────────────────
+// A more-specific automation carves the assets it covers out of a less-specific
+// one that watches the SAME trigger (triggerSignature). Specificity = the
+// most-specific scope dimension an automation positively constrains, on this
+// ladder (least → most). Lifecycle status + asset id are deliberately absent —
+// status is a state qualifier, not an identity dimension, and asset id is no
+// longer offered in the builder.
+export const SCOPE_RANK = {
+  allAssets: 0,
+  assetType: 1,
+  os: 2,
+  manufacturer: 3,
+  model: 4,
+  tag: 5,
+  region: 6,
+  subnet: 7,
+  hostname: 8,
+} as const;
+
+/** Ladder for the wizard's "Specificity: …" indicator (least → most). */
+export const SCOPE_RANK_LADDER: { key: keyof typeof SCOPE_RANK; label: string }[] = [
+  { key: "allAssets", label: "All assets" },
+  { key: "assetType", label: "Device type" },
+  { key: "os", label: "Operating system" },
+  { key: "manufacturer", label: "Manufacturer" },
+  { key: "model", label: "Model" },
+  { key: "tag", label: "Tag" },
+  { key: "region", label: "Region" },
+  { key: "subnet", label: "Subnet" },
+  { key: "hostname", label: "Hostname" },
+];
+
+/** Human label for a numeric specificity rank (the ladder rung at or below it). */
+export function scopeRankLabel(rank: number): string {
+  let label = SCOPE_RANK_LADDER[0].label;
+  for (const rung of SCOPE_RANK_LADDER) {
+    if (SCOPE_RANK[rung.key] <= rank) label = rung.label;
+  }
+  return label;
+}
+
+// Condition-rule operators that POSITIVELY narrow to specific assets. Negative
+// operators (notEquals/notHas/…) and none/notAll groups broaden rather than
+// target, so they never raise specificity.
+const POSITIVE_SCOPE_OPS = new Set(["equals", "contains", "startsWith", "endsWith", "has", "inCidr"]);
+
+function isRegionTagValue(v: string): boolean {
+  return v.trim().toLowerCase().startsWith("region:");
+}
+
+function conditionRuleRank(rule: ScopeConditionRule): number {
+  if (!POSITIVE_SCOPE_OPS.has(rule.operator)) return 0;
+  switch (rule.field) {
+    case "assetType": return SCOPE_RANK.assetType;
+    case "os": return SCOPE_RANK.os;
+    case "manufacturer": return SCOPE_RANK.manufacturer;
+    case "model": return SCOPE_RANK.model;
+    case "tag": return isRegionTagValue(rule.value) ? SCOPE_RANK.region : SCOPE_RANK.tag;
+    case "subnet": return SCOPE_RANK.subnet;
+    case "hostname": return SCOPE_RANK.hostname;
+    default: return 0; // status, assetId — not on the ladder
+  }
+}
+
+function conditionTreeRank(group: ScopeConditionGroup): number {
+  // Only AND/OR subtrees positively target; none/notAll invert to "must NOT".
+  if (group.op !== "and" && group.op !== "or") return 0;
+  let rank = 0;
+  for (const child of group.children) {
+    rank = Math.max(
+      rank,
+      "op" in child ? conditionTreeRank(child as ScopeConditionGroup) : conditionRuleRank(child as ScopeConditionRule),
+    );
+  }
+  return rank;
+}
+
+/**
+ * Specificity rank of a scope = the most-specific dimension it positively
+ * constrains, across BOTH the flat dimensions and the condition tree. 0 =
+ * all-assets / unconstrained.
+ */
+export function scopeRank(scope: RuleScope): number {
+  let rank = 0;
+  if (scope.assetTypes?.length) rank = Math.max(rank, SCOPE_RANK.assetType);
+  if (scope.manufacturers?.length) rank = Math.max(rank, SCOPE_RANK.manufacturer);
+  if (scope.models?.length) rank = Math.max(rank, SCOPE_RANK.model);
+  if (scope.subnetCidrs?.length) rank = Math.max(rank, SCOPE_RANK.subnet);
+  for (const t of scope.tags ?? []) {
+    rank = Math.max(rank, isRegionTagValue(t) ? SCOPE_RANK.region : SCOPE_RANK.tag);
+  }
+  if (scope.condition) rank = Math.max(rank, conditionTreeRank(scope.condition));
+  return rank;
+}
+
+// ─── Trigger signature (carve-out "same trigger" key) ───────────────────────
+// Two automations carve-out only when they watch the SAME thing. The signature
+// is the metric/field + its dimension filter (strict: a sensor-class filter and
+// no filter are different things and never shadow each other — erring toward an
+// extra alert over a wrongly-silenced one). Returns null for triggers that
+// don't participate in carve-out (host has no asset scope; composite watches
+// many things; event/change are per-event, not per-asset thresholds).
+function stableDimFilter(df: Record<string, unknown> | undefined | null): string {
+  if (!df) return "";
+  const keys = Object.keys(df).filter((k) => df[k] !== undefined && df[k] !== null && df[k] !== "").sort();
+  return keys.map((k) => `${k}=${String(df[k])}`).join(",");
+}
+
+export function triggerSignature(trigger: Trigger): string | null {
+  if (trigger.type === "asset_metric") return `am:${trigger.metric}:${stableDimFilter(trigger.dimensionFilter)}`;
+  if (trigger.type === "asset_state") return `as:${trigger.field}:${stableDimFilter(trigger.dimensionFilter)}`;
+  return null;
+}
+
 // ─── Input schema (accepts v2 AND legacy bodies; canonical output is v2) ────
 
 const ruleInputBaseSchema = z.object({
@@ -1321,10 +1498,16 @@ export function buildSchemaCatalog() {
         { field: "tag", label: "Tag", ops: SCOPE_FIELD_OPS.tag, optionsFrom: "tags" },
         { field: "subnet", label: "Subnet / IP", ops: SCOPE_FIELD_OPS.subnet, optionsFrom: "subnets" },
         { field: "status", label: "Lifecycle status", ops: SCOPE_FIELD_OPS.status, optionsFrom: null, values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
-        { field: "assetId", label: "Asset ID", ops: SCOPE_FIELD_OPS.assetId, optionsFrom: null },
+        // NOTE: `assetId` remains a valid field for saved rules (SCOPE_FIELD_OPS
+        // + matchScopeRule still handle it) but is intentionally not offered as
+        // a new builder choice — a raw id targets one device with no precedence
+        // meaning; use hostname instead.
       ],
       maxDepth: 5,
       maxRules: 100,
+      // Precedence ladder (least → most specific). Drives the wizard's
+      // "Specificity" indicator; the carve-out engine ranks scopes by it.
+      specificity: SCOPE_RANK_LADDER,
     },
   };
 }
