@@ -415,10 +415,7 @@ const api = {
     },
     processConnections:   (id, name) => request("GET", `/assets/${id}/process-connections` + (name ? "?name=" + encodeURIComponent(name) : "")),
     setProcessConfig:     (id, name, body) => request("PUT", `/assets/${id}/processes/${encodeURIComponent(name)}/config`, body),
-    controlProcess:       (id, name, action) => request("POST", `/assets/${id}/processes/${encodeURIComponent(name)}/control`, { action: action }),
-    processCommand:       (id, commandId) => request("GET", `/assets/${id}/process-command/${commandId}`),
     services:             (id)  => request("GET", `/assets/${id}/services`),
-    controlService:       (id, unit, action) => request("POST", `/assets/${id}/services/${encodeURIComponent(unit)}/control`, { action: action }),
     serviceLogs:          (id, unit, opts) => {
       opts = opts || {};
       var qs = ["unit=" + encodeURIComponent(unit)];

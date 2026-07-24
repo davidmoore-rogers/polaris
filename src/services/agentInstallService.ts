@@ -37,6 +37,7 @@ import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { AGENT_BIN_DIR } from "../utils/paths.js";
+import { linuxServiceBlock, normalizePrivilegeTier, type AgentPrivilegeTier } from "../utils/agentUnit.js";
 import { getCredential } from "./credentialService.js";
 import { mintEnrollmentToken } from "./agentTokenService.js";
 import { logEvent } from "../api/routes/events.js";
@@ -267,8 +268,10 @@ export interface BulkInstallInput {
   /** Operator-chosen install-method variant per OS (bulk spans mixed OSes, so
    *  the choice is keyed by platform). Omitted / null → the per-OS default. */
   scriptIds?:         Partial<Record<AgentOsPlatform, string | null>>;
-  /** Install as root (Linux hosts only; ignored for Windows/darwin). */
-  runAsRoot?:         boolean;
+  /** Linux privilege tier (ignored for Windows/darwin). "ptrace" grants
+   *  CAP_SYS_PTRACE for Application Map connection attribution. Default
+   *  "unprivileged". */
+  privilegeTier?:     AgentPrivilegeTier;
   actor:              string;
 }
 
@@ -384,8 +387,8 @@ export async function bulkInstallAgents(input: BulkInstallInput): Promise<BulkIn
           installCredentialId:   target.credentialId,
           installTransport:      target.transport,
           installScriptId:       input.scriptIds?.[osPlatform] ?? null,
-          // Root install is Linux-only; never store true for Windows/darwin.
-          runAsRoot:             osPlatform === "linux" ? (input.runAsRoot ?? false) : false,
+          // Privilege tier is Linux-only; Windows/darwin stay "unprivileged".
+          privilegeTier:         osPlatform === "linux" ? normalizePrivilegeTier(input.privilegeTier) : "unprivileged",
         },
       });
       queue.push({ managedAgentId: row.id, credentialId: target.credentialId });
@@ -532,7 +535,7 @@ async function runInstall(input: StartInstallInput): Promise<void> {
         agentConfBody,
         platform: row.osPlatform,
         scriptId: row.installScriptId,
-        runAsRoot: row.runAsRoot,
+        tier: normalizePrivilegeTier(row.privilegeTier),
         testOverrides,
       });
     } catch (err: any) {
@@ -854,7 +857,7 @@ interface SshInstallParams {
   agentConfBody: string;
   platform: "linux" | "darwin";
   scriptId?: string | null;
-  runAsRoot?: boolean; // linux only — emit the root systemd unit
+  tier?: AgentPrivilegeTier; // linux only — "ptrace" adds CAP_SYS_PTRACE
   testOverrides?: TestOverrides;
 }
 
@@ -865,7 +868,7 @@ async function sshInstall(p: SshInstallParams): Promise<void> {
   await withSshClient(p.host, p.cred, async (client) => {
     // 1. SFTP upload binary + installer script to /tmp.
     await sftpPut(client, "/tmp/polaris-agent.bin",         p.binaryBytes, 0o755);
-    await sftpPut(client, "/tmp/polaris-agent-install.sh",  installerScript(p.platform, p.scriptId, p.runAsRoot ?? false), 0o700);
+    await sftpPut(client, "/tmp/polaris-agent-install.sh",  installerScript(p.platform, p.scriptId, p.tier ?? "unprivileged"), 0o700);
     await sftpPut(client, "/tmp/polaris-agent.conf",        Buffer.from(p.agentConfBody, "utf8"), 0o600);
 
     // 2. Run the installer. `sudo` is implicit — the credential is
@@ -925,11 +928,12 @@ function truncate(s: string, n: number): string {
 // re-validates the OS-lock (defense in depth — the row's installScriptId was
 // already validated at deploy time). Add a `case` here for every new variant
 // added to AGENT_INSTALL_SCRIPTS.
-function installerScript(platform: "linux" | "darwin", scriptId?: string | null, runAsRoot = false): Buffer {
+function installerScript(platform: "linux" | "darwin", scriptId?: string | null, tier: AgentPrivilegeTier = "unprivileged"): Buffer {
   const id = resolveInstallScriptId(platform, scriptId);
   switch (id) {
-    case "linux-systemd":  return Buffer.from(linuxInstallScript(runAsRoot), "utf8");
-    // darwin LaunchDaemons already run as root; runAsRoot is a Linux-only concept.
+    case "linux-systemd":  return Buffer.from(linuxInstallScript(tier), "utf8");
+    // darwin LaunchDaemons already run as root; the privilege tier is a
+    // Linux-only concept.
     case "darwin-launchd": return Buffer.from(DARWIN_INSTALL_SCRIPT, "utf8");
     default:
       throw new AppError(500, `No installer script wired for variant "${id}"`);
@@ -948,59 +952,19 @@ function uninstallerScript(platform: "linux" | "darwin", scriptId?: string | nul
   }
 }
 
-// The systemd [Service] block. Default = the hardened unprivileged DynamicUser
-// unit. runAsRoot (operator opt-in, Linux only) = run as root with no sandbox,
-// which is required for service control (systemctl start/stop/restart against
-// OTHER units), root automation scripts, and Application Map connection
-// attribution (reading other users' /proc/<pid>/fd). The rest of the unit and
-// the install script are identical between the two.
-function linuxServiceBlock(runAsRoot: boolean): string {
-  if (runAsRoot) {
-    return `[Service]
-ExecStart=/usr/local/bin/polaris-agent -conf /var/lib/polaris-agent/agent.conf
-Restart=on-failure
-RestartSec=5
-# ROOT install — operator opt-in via the "Install with root privileges" toggle.
-# The agent runs privileged so it can control services (systemctl start/stop/
-# restart), execute root automation scripts, and attribute every process's
-# network connections on the Application Map (reading other users'
-# /proc/<pid>/fd). Broader blast radius than the default unprivileged unit;
-# chosen deliberately per host.
-User=root
-StateDirectory=polaris-agent
-StateDirectoryMode=0700`;
-  }
-  return `[Service]
-ExecStart=/usr/local/bin/polaris-agent -conf /var/lib/polaris-agent/agent.conf
-Restart=on-failure
-RestartSec=5
-# Dedicated unprivileged user for the agent. Falls back to root if the
-# user doesn't exist (operators with strict policies create it ahead of
-# time). Agent only reads its config + writes outbound network traffic;
-# no privileged operations needed at runtime.
-User=polaris-agent
-DynamicUser=yes
-# StateDirectory exposes /var/lib/polaris-agent as the unit's writable
-# state directory; systemd chowns it to the DynamicUser at start so the
-# agent can atomically rewrite agent.conf after /enroll lands (the
-# bearer must be persisted across restarts or the agent loops on the
-# already-consumed enrollment token).
-StateDirectory=polaris-agent
-StateDirectoryMode=0700
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true`;
-}
+// Privilege-tier → systemd [Service] block mapping lives in utils/agentUnit.ts
+// (pure, unit-tested there). Re-exported for callers that import from here.
+export { normalizePrivilegeTier };
+export type { AgentPrivilegeTier };
 
-// Polaris Agent installer for Linux (systemd), parameterized by runAsRoot.
+// Polaris Agent installer for Linux (systemd), parameterized by privilege tier.
 // Run by polaris-agent-install.sh as root via sudo -n; reads pre-staged binary
 // + config from /tmp/. Config lives under /var/lib/polaris-agent/ (systemd
 // StateDirectory) rather than /etc/polaris-agent/ so the agent can rewrite it
-// after /enroll succeeds — under the default unprivileged unit ProtectSystem=
-// strict makes /etc read-only, while StateDirectory stays writable. The legacy
+// after /enroll succeeds — under the unprivileged unit ProtectSystem=strict
+// makes /etc read-only, while StateDirectory stays writable. The legacy
 // /etc/polaris-agent path is cleaned up if present so reinstalls don't orphan.
-function linuxInstallScript(runAsRoot: boolean): string {
+function linuxInstallScript(tier: AgentPrivilegeTier): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
 
@@ -1028,7 +992,7 @@ Description=Polaris Agent
 After=network-online.target
 Wants=network-online.target
 
-${linuxServiceBlock(runAsRoot)}
+${linuxServiceBlock(tier)}
 
 [Install]
 WantedBy=multi-user.target

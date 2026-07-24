@@ -181,7 +181,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `agent/internal/transport/client.go` — HTTP client that fires Enroll / PushSamples / Heartbeat / FetchConfig. Bearer stored on the Client struct; SetBearer() called once after enrollment.
 - `agent/internal/pinned/tls.go` — VerifyPeerCertificate that compares the leaf SHA-256 against the pin from agent.conf. tls.Config has InsecureSkipVerify=true so the standard chain check (which consults system roots) is skipped — pin verification is the only thing that fires.
 - **Cert pin source.** The pin embedded in `ManagedAgent.serverCertFingerprint` at install kickoff comes from `certInfo.getServerCertFingerprint()`, which reads the same cert file nginx serves (`POLARIS_PROXY_CERT_PATH`). Phase 2's dual-pin column (`additionalServerCertFingerprints[]`) lets operators stage a new pin via the Maintenance card before rolling nginx's cert. **`runInstall` re-reads the LIVE cert** at push time (not the stored `row.serverCertFingerprint`) and persists it onto the row — a reinstall against a host first enrolled before a cert rotation would otherwise bake the stale pin into agent.conf, the pinned TLS handshake would fail, and the agent would sit forever at "enrolling". Fresh installs already captured the current cert; this makes reinstall self-heal too.
-- **Privilege model / `ManagedAgent.runAsRoot`.** The Linux systemd unit is **unprivileged by default** (`User=polaris-agent`, `DynamicUser=yes`, `NoNewPrivileges=true`, `ProtectSystem=strict`) — enough for monitoring, but it CANNOT (a) `systemctl start/stop/restart` other units, (b) run `run_script` automations as root, or (c) attribute Application Map connections (gopsutil's socket→PID join reads other users' `/proc/<pid>/fd`, which needs root). Operators opt into a **root install** per host via the "Install with root privileges" checkbox on the per-asset install modal + the bulk Deploy Agent modal (confirmation-gated); the flag rides `POST /:id/agent/install` + `bulk-agent-install` → `ManagedAgent.runAsRoot` (Linux-only; forced false on Windows/darwin) → `agentInstallService.linuxInstallScript(runAsRoot)` emits `User=root` with no sandbox. An EXISTING Linux agent is flipped between privileged/unprivileged via the installed-agents list **Reinstall** action, which takes an optional `runAsRoot` body on `POST /:id/agent/reinstall` and updates the row before re-running the install (the list endpoint returns `runAsRoot` so the dialog pre-checks the current state). Windows agents always run as LocalSystem. The asset System-tab agent panel (`assetAgentSubpanelHTML`) surfaces a **Privileges** row (Root / Unprivileged on Linux, LocalSystem on Windows, Root on macOS) read from the `runAsRoot` field the `GET /:id/agent` endpoint already returns. `serviceInventoryService.isServiceControllable` and `agentCommandService.requestServiceControl` gate control on `runAsRoot` for systemd units; `GET /assets/:id/services` + `/processes` expose `serviceControlAvailable` so the detail panels gray out Start/Stop/Restart otherwise. **The agent's own service (`polaris-agent.service` / Windows `polaris-agent`) is never controllable** — enforced in `isServiceControllable`, in `requestServiceControl`, AND in the agent's own command handler (`isSelfControlTarget`), so it can't sever its channel. **Lockstep when changing the systemd unit:** `agentInstallService.linuxServiceBlock` / `linuxInstallScript` are the single source of the unit text — the fresh-install `deploy/` scripts do NOT install the agent (only Polaris itself), so there's no second copy to sync.
+- **Privilege model / `ManagedAgent.privilegeTier`.** The Linux systemd unit is **unprivileged by default** (`User=polaris-agent`, `DynamicUser=yes`, `NoNewPrivileges=true`, `ProtectSystem=strict`) — enough for monitoring, but it can't attribute Application Map connections (gopsutil's socket→PID join reads other users' `/proc/<pid>/fd`). The **`ptrace` tier** adds `AmbientCapabilities=CAP_SYS_PTRACE` (+ `CapabilityBoundingSet`) to that same hardened unit — enough for connection attribution WITHOUT full root (CAP_SYS_PTRACE also reads any process's memory, so it's operator-opt-in with a warning). **Full root was retired** with process/service control (Satellite-posture change); `privilegeTier` values are `unprivileged` | `ptrace` | (legacy) `root`. The tier → `[Service]` block mapping lives in **`src/utils/agentUnit.ts`** (`linuxServiceBlock` / `normalizePrivilegeTier`, pure + unit-tested; `linuxServiceBlock` only ever emits unprivileged/ptrace). Operators pick the tier via the "Grant CAP_SYS_PTRACE" checkbox on the per-asset install modal + the bulk Deploy Agent modal (confirmation-gated); it rides `POST /:id/agent/install` + `bulk-agent-install` (`privilegeTier` field, Linux-only, "unprivileged"|"ptrace") → `ManagedAgent.privilegeTier` → `agentInstallService.linuxInstallScript(tier)`. An EXISTING Linux agent changes tier via the installed-agents list **Reinstall** action (`privilegeTier` body on `POST /:id/agent/reinstall`); a legacy-`root` agent **downgrades** to unprivileged/ptrace on reinstall (the list endpoint returns `privilegeTier` so the dialog pre-checks the ptrace box for ptrace/root agents). Windows agents always run as LocalSystem, macOS LaunchDaemons as root. The asset System-tab agent panel (`assetAgentSubpanelHTML`) surfaces a **Privileges** row (Unprivileged / CAP_SYS_PTRACE / Root-legacy on Linux, LocalSystem on Windows, Root on macOS) read from the `privilegeTier` field `GET /:id/agent` returns. **Process/service start/stop/restart control was removed** — no `serviceControlAvailable`, no control routes, no agent servicecontrol collectors; the `processControl` RBAC key remains orphaned in the catalogue. **Lockstep when changing the systemd unit:** `utils/agentUnit.linuxServiceBlock` is the single source of the unit text — the fresh-install `deploy/` scripts do NOT install the agent (only Polaris itself), so there's no second copy to sync. Validate `DynamicUser=yes` + `AmbientCapabilities=CAP_SYS_PTRACE` on the target systemd version (RHEL 8 / systemd 239) — if the ambient cap is dropped under DynamicUser, fall back to a static `polaris-agent` system user.
 
 ### Cert pin rotation (Phase 2 dual-pin)
 
@@ -1679,7 +1679,7 @@ Listed alphabetically.
 
 **Used by:**
 - `src/api/routes/agents.ts` — the `serviceInventory` sample-stream arm maps `ServiceSampleSchema` rows → `persistAssetServices`. Also ships `streams.services` + `monitoredServices`/`mappedServices` on `GET /agents/config` (folded into both the payload ETag and the heartbeat `computeConfigEtag`).
-- `src/api/routes/assets.ts` — `GET /assets/:id/services` reads the rows + pins; `POST /assets/:id/services/:unit/control` → `agentCommandService.requestServiceControl` (looks up the row, requires `controllable`). `monitoredServices`/`mappedServices` ride the general `PUT /assets/:id` pin path (UpdateAssetSchema).
+- `src/api/routes/assets.ts` — `GET /assets/:id/services` reads the rows + pins (read-only; start/stop/restart control was removed in the Satellite-posture change). `monitoredServices`/`mappedServices` ride the general `PUT /assets/:id` pin path (UpdateAssetSchema).
 - `agent/internal/collectors/services*.go` — the sole producer (`ServiceInventoryOnce`; systemd `systemctl list-units/list-unit-files/show`, Windows `Win32_Service`). The Linux path parses the **plain columnar** output of `list-units`/`list-unit-files` (`--plain --no-legend`), NOT `-o json`: systemctl only emits JSON for those list verbs from an interactive session — under the agent's systemd service context it silently falls back to the table format, so JSON parsing yields nothing (this caused Linux services to never populate; fixed 2026-07). The untagged pure parsers `parseListUnits` / `parseListUnitFiles` / `parseShowUnits` live in `services.go` (unit-tested). On a command error OR an empty parse `listUnits` returns nil + logs, so a parse regression skips the push rather than wiping the delete-replaced inventory.
 - `public/js/assets.js` — the Services tab (`_wireAssetServicesTab`) + `openServiceDetailPanel`.
 
@@ -1906,23 +1906,25 @@ Listed alphabetically.
 
 ## services/agentChannelService.ts
 
-**What it owns:** In-memory `managedAgentId → WebSocket` registry for live agents: attach/detach lifecycle, heartbeat ping/pong, server-initiated probe-now requests, and config-refresh frames.
+**What it owns:** In-memory `managedAgentId → WebSocket` registry for live agents: attach/detach lifecycle, heartbeat ping/pong, server-initiated probe-now requests, config-refresh frames, command-dispatch wake frames, AND the cross-process command-wake LISTENer.
 
-**Public API:** `attach`, `detach`, `isAttached`, `sendProbeNow`, `refreshConfig`, `liveSessionCount`, `shutdownAllSessions`, `ProbeNowResult`
+**Public API:** `attach`, `detach`, `isAttached`, `sendProbeNow`, `refreshConfig`, `wakeCommands`, `startCommandWakeListener`, `liveSessionCount`, `shutdownAllSessions`, `ProbeNowResult`
 
-**Cross-service deps:** `prisma` (managed-agent updates), `logEvent`.
+**Cross-service deps:** `prisma` (managed-agent updates), `logEvent`, `pg` (dedicated LISTEN client), `dbConnections.getDirectDatabaseUrl`, `agentCommandWake.CMD_WAKE_CHANNEL`.
 
-**Used by:** `src/api/routes/agentsWs.ts` (attach on authenticated WS upgrade), `src/api/routes/serverSettings.ts` + `src/services/monitoringService.ts` (`sendProbeNow` / `refreshConfig`), app shutdown hook (`shutdownAllSessions`).
+**Used by:** `src/api/routes/agentsWs.ts` (attach on authenticated WS upgrade), `src/api/routes/serverSettings.ts` + `src/services/monitoringService.ts` (`sendProbeNow` / `refreshConfig`), `src/app.ts` (`startCommandWakeListener` after the WS handler attaches, web/all role), app shutdown hook (`shutdownAllSessions`).
 
 **Invariants:**
 - Attach replaces any existing session for the same agentId (idempotent).
 - Heartbeat ping interval + pong-timeout force-close and detach a silent agent.
 - Probe-now is request-id correlated with a timeout reject; detach clears pending probes and is a no-op when not attached.
-- Frame envelope is a JSON `{ type, id, payload }` — a wire protocol shared with the Go agent.
+- Frame envelope is a JSON `{ type, id, payload }` — a wire protocol shared with the Go agent. Frame types: `hello` / `refresh-config` / `probe-now-request` / `commands-pending`.
+- `wakeCommands` is a no-op when the agent isn't attached to THIS process — the NOTIFY reaches whichever process holds the session; the ≤20s command poll is the floor regardless.
+- The command-wake LISTENer uses the DIRECT database URL (session-pinned; PgBouncer transaction pooling breaks LISTEN) and reconnects with a fixed backoff on error.
 
 **When changing this:**
-- The frame format is the agent wire protocol — any change breaks deployed agents.
-- Pending-probe map must be cleaned up in teardown to avoid leaks.
+- The frame format is the agent wire protocol — any change breaks deployed agents. A new frame type must be added to the Go agent's `wsLoop` switch in lockstep (unknown types are ignored there, so new server→agent frames are backward-safe).
+- Pending-probe map must be cleaned up in teardown to avoid leaks; `shutdownAllSessions` also stops the wake LISTENer.
 
 ---
 
@@ -1932,7 +1934,7 @@ Listed alphabetically.
 
 **Public API:** `startInstall`, `startUninstall`, `startUpgrade`, `upgradeAllOutdated`, `renderAgentConf`, `inferOwnServerUrl`, `inferOwnServerUrlSync`, `AGENT_SERVER_URL_SETTING_KEY`, `StartInstallInput`, `StartUninstallInput`, `StartUpgradeInput`, `UpgradeAllResult`
 
-**Cross-service deps:** `credentialService.getCredential`, `agentTokenService.mintEnrollmentToken`, `agentBuildService.getInventory`, `certInfo.getServerCertHostnames`, `publicUrl` port helper, `logEvent`, `prisma`, WinRM helper.
+**Cross-service deps:** `credentialService.getCredential`, `agentTokenService.mintEnrollmentToken`, `agentBuildService.getInventory`, `certInfo.getServerCertHostnames`, `publicUrl` port helper, `utils/agentUnit` (`linuxServiceBlock`/`normalizePrivilegeTier`/`AgentPrivilegeTier` — the privilege-tier → systemd unit mapping; re-exported from here), `logEvent`, `prisma`, WinRM helper.
 
 **Used by:** `src/api/routes/assets.ts` (per-asset install / reinstall / upgrade / uninstall), `src/api/routes/serverSettings.ts` (upgrade-all), `src/services/agentAutoDeployService.ts` (`startInstall`), `src/services/agentBuildService.ts` (auto-upgrade hook).
 
@@ -1941,10 +1943,12 @@ Listed alphabetically.
 - Platform/arch drives binary selection (inferred from `Asset.os`, arch defaults amd64); SSH needs username + (password OR privateKey), WinRM needs username + password.
 - Uninstall hard-deletes the ManagedAgent row on success and clears polling columns so source defaults resume; upgrade replaces the binary only — `agent.conf` (bearer + pin) is untouched so the agent keeps its identity.
 - Server-URL resolution order: Setting override → `POLARIS_PUBLIC_URL` → cert hostnames → fallback → localhost.
+- **Linux privilege tier** (`ManagedAgent.privilegeTier`, Linux-only) selects the systemd `[Service]` block via `agentUnit.linuxServiceBlock`: `unprivileged` (default) or `ptrace` (+CAP_SYS_PTRACE for Application Map attribution). Full root is retired — never emitted for new installs/reinstalls; a legacy `root` row downgrades on reinstall. Reinstall conversion logic lives in the `POST /assets/:id/agent/reinstall` route (`assets.ts`), not here.
 
 **When changing this:**
 - `agent.conf` templating must stay in sync with the Go agent (pin set + enrollment-token format).
 - Concurrent upgrades are pool-bounded so a fleet upgrade doesn't overwhelm hosts; `testOverrides` allow fake SSH for unit tests.
+- The privilege-tier → unit mapping is pure in `utils/agentUnit.ts` (unit-tested) — edit systemd directives there, and remember `linuxServiceBlock` only ever emits unprivileged/ptrace (no root branch).
 
 ---
 
@@ -2802,25 +2806,41 @@ Listed alphabetically.
 
 ## services/agentCommandService.ts
 
-**What it owns:** The process-control command queue (Phase 4) — the `AgentCommand` table + its lifecycle. Turns operator Stop/Start/Restart requests into commands the agent fetches, executes, and reports on.
+**What it owns:** The agent command queue — the `AgentCommand` table + its lifecycle. Today the only queued action is `run_script` (agent-side automation script runs). Process/service start/stop/restart control was REMOVED (Satellite-posture change) — this module keeps only the shared fetch/report plumbing.
 
-**Public API:** `requestProcessControl(assetId, name, action, actor)` (enqueue + audit); `fetchPendingCommands(managedAgentId)` (agent poll; marks sent); `recordCommandResult(managedAgentId, commandId, success, error, resultState)` (agent report + audit); `getCommandStatus(assetId, commandId)` (UI poll); type `ControlAction`.
+**Public API:** `fetchPendingCommands(managedAgentId)` (agent poll; marks sent atomically + flips linked run_script `AutomationScriptRun`s pending→running); `recordCommandResult(managedAgentId, commandId, success, error, resultState, output?)` (agent report → completes the command + the linked run + audit); type `AgentCommandView`.
 
-**Cross-service deps:** `eventLogService.logEvent` (`asset.process.*`); `prisma.assetProcess` (controllable check), `prisma.managedAgent` (active-agent check), `prisma.agentCommand`.
+**Cross-service deps:** `eventLogService.logEvent` (`automation.script.run`, generic `agent.command.*.result` fallback); `prisma.agentCommand`, `prisma.automationScriptRun`.
 
-**Used by:** `src/api/routes/assets.ts` (`POST /assets/:id/processes/:name/control` gated `processControl:write`; `GET /assets/:id/process-command/:commandId`); `src/api/routes/agents.ts` (bearer `GET /agents/commands` + `POST /agents/command-result`).
+**Used by:** `src/api/routes/agents.ts` (bearer `GET /agents/commands` + `POST /agents/command-result`). Rows are ENQUEUED by `automationScriptService.requestScriptRun` (not this service).
 
 **Invariants:**
-- **Services/units only** — `requestProcessControl` 409s unless `AssetProcess.controllable` + `serviceUnit` are set. Raw process kill is intentionally NOT supported.
-- **Operator-initiated only** — commands are created exclusively by the gated control route; the agent endpoints never originate an action, only fetch/report.
-- The `processControl` RBAC key gates the request route; the agent never self-acts. Every transition is audited (`.requested` warning / `.result` info|warning).
-- `fetchPendingCommands` flips pending→sent atomically so a slow agent doesn't double-execute.
+- `fetchPendingCommands` flips pending→sent atomically so a slow agent (or a WS-wake + poll racing) doesn't double-execute the same command.
 - `recordCommandResult` verifies the command belongs to the reporting agent (managedAgentId match).
+- The agent refuses any non-`run_script` action; the server enqueues only `run_script`. A stale/foreign non-run_script row reaching `recordCommandResult` is audited generically, never as control.
 
 **When changing this:**
-- Adding a WS push (to wake the agent sooner than its poll): keep the poll path as the source of truth + fallback; the WS frame is just a nudge to call `/commands`.
-- New action beyond stop/start/restart: extend the route Zod enum + the agent executor + the UI buttons in lockstep.
-- `controllable`/`serviceUnit` are set by the agent's process-inventory collector — control is inert until the agent reports a resolved unit.
+- Near-real-time dispatch is via a `commands-pending` WS frame (`agentCommandWake.publishCommandWake` → `agentChannelService.wakeCommands`); the ≤20s `/commands` poll remains the source of truth + guaranteed floor. Don't make the WS frame authoritative.
+- A new action would need: the enqueue path, the agent executor arm (`pollAndRunCommands` in `agent/cmd/polaris-agent/main.go`), and the result branch here — in lockstep. Process/service control is intentionally NOT here anymore.
+
+---
+
+## services/agentCommandWake.ts
+
+**What it owns:** The cross-process "wake this agent" signal for near-real-time command dispatch. When a command is enqueued (from any process/role), this emits a Postgres NOTIFY so the process holding the agent's WS session pushes a `commands-pending` frame instead of the agent waiting out its ≤20s command poll.
+
+**Public API:** `publishCommandWake(managedAgentId)` (best-effort `SELECT pg_notify(CMD_WAKE_CHANNEL, id)` via prisma — never throws); `CMD_WAKE_CHANNEL` constant (`polaris_agent_cmd_wake`).
+
+**Cross-service deps:** `prisma.$executeRaw` (pg_notify); `logger`. Deliberately lightweight (no WS/pg-Client imports) so the enqueue side (`automationScriptService`, which runs in the monitor/all role) can import it without pulling the WS server.
+
+**Used by:** `src/services/automationScriptService.ts` (`requestScriptRun` fires it after creating the agent `run_script` command). The LISTEN side is `agentChannelService.startCommandWakeListener` (web/all role) → `wakeCommands`.
+
+**Invariants:**
+- **Best-effort only** — a failed/missed NOTIFY just means the agent picks the command up on its next `/commands` poll (the guaranteed floor). Never let a wake failure block or fail the enqueue.
+- NOTIFY works through PgBouncer; the paired LISTEN (agentChannelService) needs a session-pinned DIRECT connection — keep the two halves' transport assumptions aligned.
+- Channel name is lowercase (unquoted-identifier fold) — `publishCommandWake` and the `LISTEN` must use the same literal.
+
+**When changing this:** if another enqueue path (beyond script runs) starts creating `AgentCommand` rows, call `publishCommandWake` there too, or that path silently falls back to the poll latency.
 
 ---
 

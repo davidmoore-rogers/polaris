@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -64,15 +63,6 @@ func fmtIntPtr(p *int) string {
 		return "nil"
 	}
 	return fmt.Sprintf("%d", *p)
-}
-
-// isSelfControlTarget reports whether a service-control target names the Polaris
-// Agent's own service — the Linux systemd unit or the Windows SCM short name.
-// The agent refuses to start/stop/restart itself (mirrors the server's
-// controllable=false), so a stale or crafted command can't sever the channel.
-func isSelfControlTarget(target string) bool {
-	t := strings.ToLower(strings.TrimSpace(target))
-	return t == "polaris-agent" || t == "polaris-agent.service"
 }
 
 // version is stamped at build time via -ldflags='-X main.version=<x>'.
@@ -1031,36 +1021,15 @@ func pollAndRunCommands(client *transport.Client) {
 		switch c.Action {
 		case "run_script":
 			runScriptCommand(client, c)
-		case "stop", "start", "restart":
-			// Never act on our own service — stopping/restarting it would sever
-			// this command channel (and on Linux kill the inventory collector).
-			// The server marks it non-controllable, but refuse locally too in
-			// case a stale/pre-upgrade server queued it.
-			if isSelfControlTarget(c.Target) {
-				if rerr := client.ReportCommandResult(c.ID, false, "refused: the Polaris Agent will not control its own service", ""); rerr != nil {
-					log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
-				}
-				log.Printf("service control: refused self-target %q (id=%s)", c.Target, c.ID)
-				break
-			}
-			state, execErr := collectors.RunServiceControl(c.Action, c.Target)
-			success := execErr == nil
-			errMsg := ""
-			if execErr != nil {
-				errMsg = execErr.Error()
-			}
-			if rerr := client.ReportCommandResult(c.ID, success, errMsg, state); rerr != nil {
-				log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
-			}
-			log.Printf("service control: %s %s -> success=%v state=%q", c.Action, c.Target, success, state)
 		default:
-			// Defensive: a newer server queued something this agent doesn't
-			// understand — refuse explicitly instead of silently dropping
-			// (the server's version gate should prevent this, belt+braces).
-			if rerr := client.ReportCommandResult(c.ID, false, "agent does not support action \""+c.Action+"\" — upgrade the Polaris Agent", ""); rerr != nil {
+			// The agent only accepts run_script. Process/service start/stop/
+			// restart control was removed (Satellite-posture change), so a
+			// stop/start/restart action — or anything else a newer/stale server
+			// queued — is refused explicitly instead of silently dropped.
+			if rerr := client.ReportCommandResult(c.ID, false, "agent does not support action \""+c.Action+"\" (process/service control was removed)", ""); rerr != nil {
 				log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
 			}
-			log.Printf("unknown command action %q refused (id=%s)", c.Action, c.ID)
+			log.Printf("unsupported command action %q refused (id=%s)", c.Action, c.ID)
 		}
 	}
 }
@@ -1157,6 +1126,14 @@ func wsLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
 		switch f.Type {
 		case "hello":
 			// Server says it accepted the upgrade. Nothing to do.
+			return nil
+		case "commands-pending":
+			// Server enqueued a command (e.g. an automation script run) and is
+			// nudging us to fetch it now instead of waiting for the ~20s command
+			// poll. Run in a goroutine so we don't block the WS frame handler;
+			// the server's atomic claim (pending→sent) means a concurrent poll
+			// can't double-execute the same command.
+			go pollAndRunCommands(client)
 			return nil
 		case "refresh-config":
 			// Server is telling us something changed (operator edited
