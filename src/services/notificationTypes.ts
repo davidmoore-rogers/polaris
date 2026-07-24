@@ -806,6 +806,40 @@ export const escalationV2Schema = z
   })
   .strict();
 
+// ─── Severity bands (value-driven severity escalation) ──────────────────────
+// Higher tiers stacked on the base trigger (tier 0 = rule.severity +
+// trigger.threshold + rule.actions + rule.escalation). Each band carries its
+// OWN actions (run when the alert enters that band) and its own time-based
+// escalation (per-band, swept band-aware). Cross-field ordering (thresholds
+// monotonic in the operator direction, severities strictly increasing above
+// the base) is enforced in validateRuleV2 (discriminated-union members can't
+// carry a superRefine, and the base severity lives on the rule).
+export const severityBandSchema = z
+  .object({
+    threshold: z.number(),
+    severity: z.enum(SEVERITIES),
+    actions: z.array(actionSchema).max(20).default([]),
+    // Per-band time escalation (same shape as rule-level; accepts legacy or v2).
+    escalation: z.union([escalationSchema, escalationV2Schema]).optional().nullable(),
+  })
+  .strict();
+export type SeverityBand = z.infer<typeof severityBandSchema>;
+
+// Per-automation policy: which band transitions notify, and how a resolved
+// (below tier 0) alert notifies. onIncrease/onResolved default on; onDecrease
+// off (page when it worsens, not when it eases). resolvedMode picks whether the
+// all-clear reuses the last-fired band's actions or a dedicated list.
+export const bandNotifySchema = z
+  .object({
+    onIncrease: z.boolean().default(true),
+    onDecrease: z.boolean().default(false),
+    onResolved: z.boolean().default(true),
+    resolvedMode: z.enum(["reuse", "dedicated"]).default("reuse"),
+    resolvedActions: z.array(actionSchema).max(20).optional().nullable(),
+  })
+  .strict();
+export type BandNotify = z.infer<typeof bandNotifySchema>;
+
 export type Trigger = z.infer<typeof triggerSchema>;
 export type RuleScope = z.infer<typeof scopeSchema>;
 export type DeliveryTarget = z.infer<typeof deliveryTargetSchema>;
@@ -960,6 +994,10 @@ const ruleInputBaseSchema = z.object({
   // actions. Stored as given; every reader normalizes via
   // normalizeEscalationToV2 (part of normalizeRuleToV2).
   escalation: z.union([escalationSchema, escalationV2Schema]).optional().nullable(),
+  // Severity bands + notify policy (value-driven severity escalation). Bands
+  // are numeric-metric-trigger only (enforced in validateRuleV2).
+  severityBands: z.array(severityBandSchema).max(4).optional().nullable(),
+  bandNotify: bandNotifySchema.optional().nullable(),
 });
 
 type RuleInputRaw = z.infer<typeof ruleInputBaseSchema>;
@@ -981,6 +1019,10 @@ export interface RuleInput {
   /** As posted (legacy email tiers OR v2 tiers-of-actions) — stored verbatim;
    *  readers normalize through normalizeEscalationToV2. */
   escalation: EscalationConfig | EscalationV2Config | null;
+  /** Severity bands (numeric triggers only); null = single-severity. */
+  severityBands: SeverityBand[] | null;
+  /** Band-transition notify policy; null = defaults. */
+  bandNotify: BandNotify | null;
 }
 
 /** Preview input = RuleInput with trigger optional (scope-only preview mode). */
@@ -1074,13 +1116,54 @@ function normalizeRuleInputCore(raw: Omit<RuleInputRaw, "trigger">): Omit<RuleIn
     channels: raw.channels,
     emailComposition: raw.emailComposition ?? null,
     escalation: raw.escalation ?? null,
+    severityBands: raw.severityBands?.length ? raw.severityBands : null,
+    bandNotify: raw.bandNotify ?? null,
   };
 }
 
 /** Cross-field validation over the NORMALIZED v2 shape. */
-function validateRuleV2(v: { trigger?: Trigger; reset: ResetConfig }, ctx: z.RefinementCtx): void {
+/** Severity-band cross-field validation: numeric ordered trigger only, band
+ *  thresholds monotonic in the operator direction, severities strictly
+ *  increasing above the base. */
+function validateSeverityBands(
+  v: { trigger?: Trigger; severity?: Severity; severityBands?: SeverityBand[] | null },
+  ctx: z.RefinementCtx,
+): void {
+  const bands = v.severityBands;
+  if (!bands || bands.length === 0) return;
+  const t = v.trigger;
+  if (!t || (t.type !== "asset_metric" && t.type !== "host_metric")) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands"], message: "severity bands apply only to numeric metric triggers (asset metric / Polaris host)" });
+    return;
+  }
+  if (t.operator === "==" || t.operator === "!=") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands"], message: "severity bands need an ordered operator (>, >=, <, <=)" });
+    return;
+  }
+  const asc = t.operator === ">" || t.operator === ">=";
+  let prevThreshold = t.threshold;
+  let prevRank = severityRank(v.severity ?? "warning");
+  bands.forEach((b, i) => {
+    const rank = severityRank(b.severity);
+    if (rank <= prevRank) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands", i, "severity"], message: "each band must be more severe than the tier below it" });
+    }
+    const beyond = asc ? b.threshold > prevThreshold : b.threshold < prevThreshold;
+    if (!beyond) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands", i, "threshold"], message: `band threshold must be ${asc ? "above" : "below"} the previous tier (${prevThreshold})` });
+    }
+    prevThreshold = b.threshold;
+    prevRank = rank;
+  });
+}
+
+function validateRuleV2(
+  v: { trigger?: Trigger; reset: ResetConfig; severity?: Severity; severityBands?: SeverityBand[] | null; bandNotify?: BandNotify | null },
+  ctx: z.RefinementCtx,
+): void {
   const { trigger, reset } = v;
   if (trigger?.type === "composite") validateCompositeTrigger(trigger, ctx);
+  validateSeverityBands(v, ctx);
   if (reset.mode === "timed" && reset.afterSec == null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "afterSec"], message: "timed reset requires afterSec" });
   }
@@ -1174,6 +1257,10 @@ export interface RuleV2View {
   actions: AutomationAction[];
   /** Escalation as v2 tiers-of-actions (legacy tiers converted); null when unset. */
   escalation: EscalationV2Config | null;
+  /** Severity bands (numeric triggers); null = single-severity. */
+  severityBands: SeverityBand[] | null;
+  /** Band-transition notify policy; null = defaults. */
+  bandNotify: BandNotify | null;
 }
 
 /** Legacy escalation tier → v2 tier of one notify action. Tier-level template
@@ -1235,6 +1322,8 @@ export function normalizeRuleToV2(row: {
   escalation?: unknown;
   reset?: unknown;
   actions?: unknown;
+  severityBands?: unknown;
+  bandNotify?: unknown;
 }): RuleV2View {
   const storedReset = row.reset ? resetSchema.safeParse(row.reset) : null;
   const reset = storedReset?.success
@@ -1258,7 +1347,18 @@ export function normalizeRuleToV2(row: {
     actions = targetsToNotifyActions(targets, emailComposition);
   }
 
-  return { reset, actions, escalation: normalizeEscalationToV2(row.escalation) };
+  const bands = Array.isArray(row.severityBands)
+    ? row.severityBands
+        .map((b) => severityBandSchema.safeParse(b))
+        .filter((r): r is { success: true; data: SeverityBand } => r.success)
+        .map((r) => r.data)
+    : [];
+  const severityBands = bands.length ? bands : null;
+  const bandNotify = row.bandNotify && bandNotifySchema.safeParse(row.bandNotify).success
+    ? bandNotifySchema.parse(row.bandNotify)
+    : null;
+
+  return { reset, actions, escalation: normalizeEscalationToV2(row.escalation), severityBands, bandNotify };
 }
 
 /** Trigger categories that select assets via `scope` (vs. event/host).

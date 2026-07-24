@@ -24,7 +24,7 @@
 
 import { randomUUID } from "node:crypto";
 import { prisma } from "../db.js";
-import type { Prisma } from "../generated/prisma/client.js";
+import { Prisma } from "../generated/prisma/client.js";
 import { logEvent } from "./eventLogService.js";
 import { REGION_TAG_PREFIX } from "./notificationService.js";
 import {
@@ -38,6 +38,11 @@ import {
   type CompositeTrigger,
   type CompositeLeaf,
   type TriggerConditionGroup,
+  type SeverityBand,
+  type BandNotify,
+  type Severity,
+  severityForValue,
+  severityRank,
   CHANGE_TYPE_ACTIONS,
   METRIC_META,
   FIELD_META,
@@ -83,6 +88,10 @@ interface DbRule {
   emailComposition: EmailComposition | null;
   /** Escalation as v2 tiers-of-actions (legacy tiers converted by the normalizer). */
   escalation: EscalationV2Config | null;
+  /** Severity bands (numeric triggers only); null = single-severity. */
+  severityBands: SeverityBand[] | null;
+  /** Band-transition notify policy; null = defaults (increase + resolved/reuse). */
+  bandNotify: BandNotify | null;
 }
 
 /** Best-effort action fan-out — never breaks rule evaluation. (executeActions
@@ -678,13 +687,18 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
   const stateMap = new Map(states.map((s) => [`${s.assetId ?? ""}|${s.dimensionKey}`, s]));
   const now = new Date();
   const seen = new Set<string>();
+  const hasBands = ruleHasBands(rule);
 
   for (const reading of readings) {
     const key = `${reading.assetId || ""}|${reading.dimKey}`;
     seen.add(key);
-    const meets = readingMeets(trigger, reading.value);
-    const st = stateMap.get(key);
     const lastValue = typeof reading.value === "number" ? reading.value : null;
+    // Banded rules fire/clear by the resolved band severity (null = below tier
+    // 0); non-banded rules use the single-threshold decision unchanged.
+    const bandSev = hasBands ? bandSeverityFor(rule, lastValue) : null;
+    const meets = hasBands ? bandSev !== null : readingMeets(trigger, reading.value);
+    const fireOpts = hasBands && bandSev ? { severity: bandSev, actions: tierForSeverity(rule, bandSev).actions } : undefined;
+    const st = stateMap.get(key);
 
     if (meets) {
       if (!st || st.state === "clear") {
@@ -692,19 +706,24 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
           // start the sustained-duration timer
           await upsertState(rule.id, reading, "pending", { conditionMetSince: now, lastValue });
         } else {
-          await fire(rule, reading, lastValue, now);
+          await fire(rule, reading, lastValue, now, undefined, fireOpts);
         }
       } else if (st.state === "pending") {
         const since = st.conditionMetSince ?? now;
         if (now.getTime() - since.getTime() >= (trigger as any).forDurationSec * 1000) {
-          await fire(rule, reading, lastValue, now);
+          await fire(rule, reading, lastValue, now, undefined, fireOpts);
         }
         // else keep pending
-      } else if (st.state === "firing" && st.recoveredSince) {
-        // Re-met mid-recovery: cancel the clear-sustain timer (transition-only
-        // write — a steadily-firing condition costs nothing per tick).
-        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
-      } // firing without a pending recovery → already active; suppress
+      } else if (st.state === "firing") {
+        if (hasBands && bandSev && bandSev !== (st.firingSeverity ?? rule.severity)) {
+          // Crossed into a different band — escalate/de-escalate the live alert.
+          await applyBandTransition(rule, reading, st, bandSev, now);
+        } else if (st.recoveredSince) {
+          // Re-met mid-recovery: cancel the clear-sustain timer (transition-only
+          // write — a steadily-firing condition costs nothing per tick).
+          await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+        } // same band / firing without a pending recovery → already active; suppress
+      }
     } else {
       // condition not met for this reading
       if (st && st.state === "pending") {
@@ -721,11 +740,13 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
         } else {
           const sustainSec = rule.reset.sustainSec ?? 0;
           if (sustainSec <= 0) {
+            if (hasBands) await fireResolved(rule, reading, st, now);
             await recover(rule, st);
           } else if (!st.recoveredSince) {
             // Recovery observed — start the clear-sustain timer.
             await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: now } });
           } else if (now.getTime() - st.recoveredSince.getTime() >= sustainSec * 1000) {
+            if (hasBands) await fireResolved(rule, reading, st, now);
             await recover(rule, st);
           }
           // else: recovered but not sustained long enough yet — keep firing.
@@ -1091,38 +1112,61 @@ async function upsertState(
   });
 }
 
-async function fire(rule: DbRule, reading: Reading, lastValue: number | null, now: Date, composite?: CompositeFireInfo): Promise<void> {
-  // Respect cooldown: if this (rule,asset,dim) fired within cooldownSec, skip.
-  const existing = await prisma.notificationRuleState.findUnique({
-    where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
-  });
-  if (rule.cooldownSec && existing?.firedAt && now.getTime() - existing.firedAt.getTime() < rule.cooldownSec * 1000) {
-    return;
+// ─── Severity bands (value-driven severity escalation) ──────────────────────
+// Tier 0 = rule.severity + trigger.threshold + rule.actions/escalation; bands
+// stack higher tiers on top. The alert is ONE row per (rule,asset,dim); its
+// severity climbs with the value (re-notifying per bandNotify) and clears below
+// tier 0. See notificationTypes.severityForValue.
+
+interface EffectiveTier {
+  severity: string;
+  actions: AutomationAction[];
+  escalation: EscalationV2Config | null;
+}
+
+/** Whether this rule uses value-driven severity bands (numeric trigger only). */
+function ruleHasBands(rule: DbRule): boolean {
+  return !!(rule.severityBands && rule.severityBands.length) &&
+    (rule.trigger.type === "asset_metric" || rule.trigger.type === "host_metric");
+}
+
+/** The band severity for a numeric reading (null = below tier 0 / not firing). */
+function bandSeverityFor(rule: DbRule, value: number | null): string | null {
+  const t = rule.trigger;
+  if (t.type !== "asset_metric" && t.type !== "host_metric") return null;
+  return severityForValue(t.operator, t.threshold, rule.severity as Severity, rule.severityBands as SeverityBand[] | null, value);
+}
+
+/** The actions + escalation for a resolved severity (base tier for the base
+ *  severity, else the matching band; fallback to tier 0). */
+export function tierForSeverity(rule: DbRule, severity: string): EffectiveTier {
+  if (severity !== rule.severity) {
+    const band = (rule.severityBands ?? []).find((b) => b.severity === severity);
+    if (band) return { severity, actions: band.actions, escalation: normalizeEscalationToV2(band.escalation) };
   }
-  // Fires are transition-guarded (rare), so the per-fire asset-detail lookup
-  // is negligible even at 2000 assets — the hot evaluate path stays on the
-  // tight SCOPE_SELECT.
-  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
-  const ctx = buildTemplateContext({ ...readingContextParts(rule, reading, now, composite), assetDetail: detail });
-  const message = renderMessage(rule, reading, ctx);
-  ctx["message"] = message;
-  const notif = await prisma.notification.create({
-    data: {
-      ruleId: rule.id,
-      assetId: reading.assetId || null,
-      assetHostname: reading.hostname,
-      severity: rule.severity,
-      message,
-      regionTags: regionSnapshot(reading.tags),
-      ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}),
-    },
-  });
-  await prisma.notificationRuleState.upsert({
-    where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
-    create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id },
-    update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null, recoveredSince: null },
-  });
-  await executeActionsSafe(notif.id, rule.actions, ctx, {
+  return { severity: rule.severity, actions: rule.actions, escalation: rule.escalation };
+}
+
+/** Normalized band-notify policy with defaults. */
+export function bandNotifyOf(rule: DbRule): { onIncrease: boolean; onDecrease: boolean; onResolved: boolean; resolvedMode: "reuse" | "dedicated"; resolvedActions: AutomationAction[] } {
+  const b: BandNotify | null = rule.bandNotify;
+  return {
+    onIncrease: b?.onIncrease ?? true,
+    onDecrease: b?.onDecrease ?? false,
+    onResolved: b?.onResolved ?? true,
+    resolvedMode: b?.resolvedMode ?? "reuse",
+    resolvedActions: b?.resolvedActions ?? [],
+  };
+}
+
+function severityLevel(severity: string): "error" | "warning" | "info" {
+  return severity === "critical" || severity === "serious" ? "error" : severity === "warning" ? "warning" : "info";
+}
+
+/** Fan the alert's actions out to the delivery pipeline (shared by initial fire
+ *  + band escalation/de-escalation + resolved). */
+async function enqueueAlertActions(notifId: string, actions: AutomationAction[], ctx: Record<string, string>, rule: DbRule, reading: Reading): Promise<void> {
+  await executeActionsSafe(notifId, actions, ctx, {
     scopeRegionTags: scopeRegionTagsOf(rule.scope),
     assetId: reading.assetId || null,
     ruleId: rule.id,
@@ -1130,16 +1174,129 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
     ruleEmailComposition: rule.emailComposition,
     actor: "system:notification-engine",
   });
+}
+
+async function fire(
+  rule: DbRule,
+  reading: Reading,
+  lastValue: number | null,
+  now: Date,
+  composite?: CompositeFireInfo,
+  opts?: { severity?: string; actions?: AutomationAction[] },
+): Promise<void> {
+  // Respect cooldown: if this (rule,asset,dim) fired within cooldownSec, skip.
+  const existing = await prisma.notificationRuleState.findUnique({
+    where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
+  });
+  if (rule.cooldownSec && existing?.firedAt && now.getTime() - existing.firedAt.getTime() < rule.cooldownSec * 1000) {
+    return;
+  }
+  const severity = opts?.severity ?? rule.severity;
+  const actions = opts?.actions ?? rule.actions;
+  // Fires are transition-guarded (rare), so the per-fire asset-detail lookup
+  // is negligible even at 2000 assets — the hot evaluate path stays on the
+  // tight SCOPE_SELECT.
+  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
+  const parts = readingContextParts(rule, reading, now, composite);
+  parts.severity = severity; // band-resolved severity for the {severity} token
+  const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
+  const message = renderMessage(rule, reading, ctx);
+  ctx["message"] = message;
+  const notif = await prisma.notification.create({
+    data: {
+      ruleId: rule.id,
+      assetId: reading.assetId || null,
+      assetHostname: reading.hostname,
+      severity,
+      message,
+      regionTags: regionSnapshot(reading.tags),
+      ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}),
+    },
+  });
+  await prisma.notificationRuleState.upsert({
+    where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
+    create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id, firingSeverity: severity },
+    update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null, recoveredSince: null, firingSeverity: severity },
+  });
+  await enqueueAlertActions(notif.id, actions, ctx, rule, reading);
   await logEvent({
     action: "notification.triggered",
     resourceType: "notification",
     resourceId: notif.id,
     resourceName: rule.name,
     actor: "system:notification-engine",
-    level: (rule.severity === "critical" || rule.severity === "serious") ? "error" : rule.severity === "warning" ? "warning" : "info",
+    level: severityLevel(severity),
     message: notif.message,
-    details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey },
+    details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey, severity },
   });
+}
+
+/** A firing alert crossed into a different band. Update its severity + message,
+ *  re-notify per policy (increase always if onIncrease; decrease if onDecrease),
+ *  and reset the escalation timer so the new band's escalation starts fresh. */
+async function applyBandTransition(
+  rule: DbRule,
+  reading: Reading,
+  st: { id: string; notificationId: string | null; firingSeverity: string | null },
+  newSeverity: string,
+  now: Date,
+): Promise<void> {
+  const prevRank = severityRank(st.firingSeverity ?? rule.severity);
+  const increased = severityRank(newSeverity) > prevRank;
+  const policy = bandNotifyOf(rule);
+  const tier = tierForSeverity(rule, newSeverity);
+
+  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
+  const parts = readingContextParts(rule, reading, now);
+  parts.severity = newSeverity;
+  const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
+  const message = renderMessage(rule, reading, ctx);
+  ctx["message"] = message;
+
+  // Update the live alert in place (one alert per asset) + reset escalation.
+  if (st.notificationId) {
+    await prisma.notification.updateMany({
+      where: { id: st.notificationId, cleared: false },
+      data: { severity: newSeverity, message, escalationState: Prisma.DbNull, ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}) },
+    });
+  }
+  await prisma.notificationRuleState.update({
+    where: { id: st.id },
+    data: { firingSeverity: newSeverity, lastValue: typeof reading.value === "number" ? reading.value : null, recoveredSince: null },
+  });
+
+  if ((increased && policy.onIncrease) || (!increased && policy.onDecrease)) {
+    if (st.notificationId) await enqueueAlertActions(st.notificationId, tier.actions, ctx, rule, reading);
+    await logEvent({
+      action: increased ? "notification.escalated" : "notification.deescalated",
+      resourceType: "notification",
+      resourceId: st.notificationId ?? undefined,
+      resourceName: rule.name,
+      actor: "system:notification-engine",
+      level: severityLevel(newSeverity),
+      message,
+      details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey, severity: newSeverity, from: st.firingSeverity },
+    }).catch(() => {});
+  }
+}
+
+/** Resolved (below tier 0): optionally send an all-clear before recovering. */
+async function fireResolved(
+  rule: DbRule,
+  reading: Reading,
+  st: { id: string; notificationId: string | null; firingSeverity: string | null },
+  now: Date,
+): Promise<void> {
+  const policy = bandNotifyOf(rule);
+  if (!policy.onResolved || !st.notificationId) return;
+  const actions = policy.resolvedMode === "dedicated" ? policy.resolvedActions : tierForSeverity(rule, st.firingSeverity ?? rule.severity).actions;
+  if (!actions.length) return;
+  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
+  const parts = readingContextParts(rule, reading, now);
+  parts.severity = "resolved";
+  const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
+  ctx["message"] = `Resolved: ${rule.name} — ${ctx["asset"] ?? reading.hostname ?? ""} recovered`;
+  await enqueueAlertActions(st.notificationId, actions, ctx, rule, reading);
 }
 
 async function recover(rule: DbRule, st: { id: string; notificationId: string | null }): Promise<void> {
@@ -1345,6 +1502,8 @@ export async function evaluateAllNotificationRules(): Promise<void> {
       messageTemplate: r.messageTemplate,
       emailComposition: (r.emailComposition ?? null) as EmailComposition | null,
       escalation: v2.escalation,
+      severityBands: v2.severityBands,
+      bandNotify: v2.bandNotify,
     };
   });
 
@@ -1478,6 +1637,7 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
       reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
+      severityBands: input.severityBands, bandNotify: input.bandNotify,
     };
     const sample = readings.find((r) => readingMeets(trigger, r.value)) ?? readings[0];
     // Direct fetch (not the per-tick cache — preview runs in the web process).
@@ -1543,6 +1703,7 @@ async function previewCompositeRule(trigger: CompositeTrigger, input: PreviewRul
       reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
+      severityBands: input.severityBands, bandNotify: input.bandNotify,
     };
     const best = matches[0];
     const outcome = outcomes.get(best.assetId ?? "")!;

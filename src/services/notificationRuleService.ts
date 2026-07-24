@@ -217,9 +217,21 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
   const tierActions = (normalizeEscalationToV2(input.escalation)?.tiers ?? []).flatMap((t, ti) =>
     t.actions.map((a) => ({ action: a, label: `Escalation tier ${ti + 1}` })),
   );
+  // Severity-band actions + each band's own time-escalation tiers, plus the
+  // dedicated resolved actions — all subject to the same channel/script ref +
+  // SSRF checks as the base actions.
+  const bandActions = (input.severityBands ?? []).flatMap((b) => [
+    ...b.actions.map((a, i) => ({ action: a, label: `${b.severity} band action ${i + 1}` })),
+    ...(normalizeEscalationToV2(b.escalation)?.tiers ?? []).flatMap((t, ti) =>
+      t.actions.map((a) => ({ action: a, label: `${b.severity} band escalation tier ${ti + 1}` })),
+    ),
+  ]);
+  const resolvedActions = (input.bandNotify?.resolvedActions ?? []).map((a, i) => ({ action: a, label: `Resolved action ${i + 1}` }));
   const all = [
     ...input.actions.map((a, i) => ({ action: a, label: `Action ${i + 1}` })),
     ...tierActions,
+    ...bandActions,
+    ...resolvedActions,
   ];
 
   const notifyRefs: { label: string; channelId: string }[] = [];
@@ -315,6 +327,8 @@ export async function createRule(input: RuleInput, actor?: string) {
       channels: input.channels,
       emailComposition: (input.emailComposition ?? undefined) as any,
       escalation: (input.escalation ?? undefined) as any,
+      severityBands: (input.severityBands ?? undefined) as any,
+      bandNotify: (input.bandNotify ?? undefined) as any,
       createdBy: actor ?? null,
     },
   });
@@ -375,6 +389,8 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
       channels: input.channels,
       emailComposition: jsonOrClear(input.emailComposition),
       escalation: jsonOrClear(input.escalation),
+      severityBands: jsonOrClear(input.severityBands),
+      bandNotify: jsonOrClear(input.bandNotify),
     },
   });
   // The trigger now describes a different condition — the old state rows (and
