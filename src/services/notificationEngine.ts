@@ -24,7 +24,7 @@
 
 import { randomUUID } from "node:crypto";
 import { prisma } from "../db.js";
-import { Prisma } from "../generated/prisma/client.js";
+import type { Prisma } from "../generated/prisma/client.js";
 import { logEvent } from "./eventLogService.js";
 import { REGION_TAG_PREFIX } from "./notificationService.js";
 import {
@@ -1253,11 +1253,13 @@ async function applyBandTransition(
   const message = renderMessage(rule, reading, ctx);
   ctx["message"] = message;
 
-  // Update the live alert in place (one alert per asset) + reset escalation.
+  // Update the live alert in place (one alert per asset). Reset the escalation
+  // progress and stamp bandSince so the new band's escalation timers restart
+  // from band-entry (the sweep measures tier delays from bandSince ?? triggeredAt).
   if (st.notificationId) {
     await prisma.notification.updateMany({
       where: { id: st.notificationId, cleared: false },
-      data: { severity: newSeverity, message, escalationState: Prisma.DbNull, ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}) },
+      data: { severity: newSeverity, message, escalationState: { tiers: {}, bandSince: now.toISOString() } as any, ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}) },
     });
   }
   await prisma.notificationRuleState.update({

@@ -238,6 +238,42 @@ describe("v2 tiers of actions", () => {
   });
 });
 
+describe("per-band escalation (value-driven)", () => {
+  const critBandEsc = {
+    threshold: 65,
+    severity: "critical",
+    actions: [],
+    escalation: { stopOn: "acknowledge", tiers: [{ afterMin: 30, actions: [{ type: "api_call", method: "POST", url: "https://pager.example.com/crit", timeoutSec: 15 }] }] },
+  };
+
+  it("runs the CURRENT band's escalation chain (selected by the alert's severity)", async () => {
+    seedRule({ severity: "warning", escalation: null, severityBands: [critBandEsc] });
+    seedNotif({ severity: "critical" }); // in the critical band
+    const runs = await runEscalationSweep(NOW);
+    expect(runs).toBe(1);
+    expect(db.deliveries).toHaveLength(1);
+    expect(db.deliveries[0].transport).toBe("api_call");
+  });
+
+  it("does NOT escalate a base-severity alert when only a band carries escalation", async () => {
+    seedRule({ severity: "warning", escalation: null, severityBands: [critBandEsc] });
+    seedNotif({ severity: "warning" }); // still at tier 0, which has no escalation
+    expect(await runEscalationSweep(NOW)).toBe(0);
+    expect(db.deliveries).toHaveLength(0);
+  });
+
+  it("measures band-tier delays from bandSince (a freshly-entered band restarts the timer)", async () => {
+    seedRule({ severity: "warning", escalation: null, severityBands: [critBandEsc] });
+    // Fired 35m ago, but only entered the critical band 5m ago → tier(afterMin 30) not due yet.
+    seedNotif({ severity: "critical", escalationState: { tiers: {}, bandSince: new Date(NOW.getTime() - 5 * 60_000).toISOString() } });
+    expect(await runEscalationSweep(NOW)).toBe(0);
+
+    // Entered the band 31m ago → now due.
+    db.notifs[0].escalationState = { tiers: {}, bandSince: new Date(NOW.getTime() - 31 * 60_000).toISOString() };
+    expect(await runEscalationSweep(NOW)).toBe(1);
+  });
+});
+
 describe("tierIsDue (unchanged semantics)", () => {
   const tier = { afterMin: 30, repeatEveryMin: 60, maxRepeats: 2 };
   it("first send after afterMin, repeats per repeatEveryMin, capped at maxRepeats", () => {
