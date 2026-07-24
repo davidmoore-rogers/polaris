@@ -527,8 +527,16 @@ export function buildGraphFromRows(
 // ─── Orchestrator ─────────────────────────────────────────────────────
 
 export async function buildApplicationMapGraph(): Promise<AppMapGraph> {
+  // Only actively-monitored hosts appear as compound-parent nodes. `monitored`
+  // is false for stop-monitored assets and for decommissioned/disabled ones
+  // (business rule 10), so this drops a host off the map when the operator stops
+  // monitoring it (or removes its agent) WITHOUT clearing the map pins — the
+  // selection is preserved and the host reappears if monitoring is re-enabled.
+  // (Resolved-target assets that are merely edge endpoints are added separately
+  // via ipToAsset regardless of this filter — they show only while live traffic
+  // references them.)
   const assets: MappedAssetLite[] = await prisma.asset.findMany({
-    where: { OR: [{ mappedProcesses: { isEmpty: false } }, { mappedServices: { isEmpty: false } }] },
+    where: { monitored: true, OR: [{ mappedProcesses: { isEmpty: false } }, { mappedServices: { isEmpty: false } }] },
     select: { ...ASSET_LITE_SELECT, mappedProcesses: true, mappedServices: true },
   });
   const since = new Date(Date.now() - GRAPH_WINDOW_MS);

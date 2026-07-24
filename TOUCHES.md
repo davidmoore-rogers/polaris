@@ -1737,6 +1737,7 @@ Listed alphabetically.
 
 **Invariants:**
 - Node ids are DETERMINISTIC (`asset:<id>`, `proc:<assetId>:<b64url(name)>`, `svc:<assetId>:<b64url(unit)>`, `ip:<ip>`, `ipgroup:<cidr>`) — ApplicationMapLayout blobs and the client's localStorage fallback key on them; changing the id scheme orphans every saved layout.
+- **Only monitored hosts are compound parents.** `buildApplicationMapGraph` filters the asset query to `monitored: true` — a stop-monitored / decommissioned / disabled asset (all `monitored=false`) drops off the map WITHOUT clearing its map pins, and reappears if monitoring is re-enabled. Resolved-target assets (edge endpoints) are added separately via `resolveIpsToAssets` regardless, so they show only while live traffic references them.
 - `resolveIpsToAssets` consults Asset.ipAddress then AssetAssociatedIp ONLY — AssetIpHistory is deliberately excluded (a rotated-off IP would attribute live traffic to the wrong former holder).
 - Edge dedup: outbound observations win over inbound observations of the same logical connection (`src|dstNode|proto|port` key); one rendered edge per (source, target) with a ≤16-port breakdown.
 - Graph reads are bounded to `lastSeen ≥ now − 7d` — the UI's widest age filter; widening one without the other silently lies.
