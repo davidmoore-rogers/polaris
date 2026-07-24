@@ -80,9 +80,10 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector(".modal")).toBeTruthy();
     expect(doc.querySelectorAll("#aw-stepper .stepper-step").length).toBe(6);
     expect(doc.querySelector("#aw-step-1.visible")).toBeTruthy();
-    // severity select carries the shared palette classes
-    expect(doc.querySelector("#aw-severity.sev-select")).toBeTruthy();
-    expect(doc.querySelectorAll("#aw-severity option.sev-critical").length).toBe(1);
+    // Severity + Enabled were removed from the name step (severity moved to the
+    // trigger step; enabled is managed from the list toggle).
+    expect(doc.querySelector("#aw-severity")).toBeFalsy();
+    expect(doc.querySelector("#aw-enabled")).toBeFalsy();
   });
 
   it("Next reaches step 2; All assets is checked by default and hides the builder", async () => {
@@ -154,6 +155,9 @@ describe("automation wizard DOM render", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(toastErrors).toEqual([]);
     expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
+    // Severity now leads the trigger step (moved off the name step).
+    expect(doc.querySelector("#aw-trigger-severity.sev-select")).toBeTruthy();
+    expect(doc.querySelectorAll("#aw-trigger-severity option.sev-critical").length).toBe(1);
     // Category select (device/host/event/change) + the tree with one leaf row.
     const cat = doc.querySelector("#aw-trigger-type") as unknown as { value: string };
     expect(cat.value).toBe("device");

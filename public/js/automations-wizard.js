@@ -349,17 +349,13 @@ async function openAutomationWizard(existing) {
   // ── Step 1: Name & description ─────────────────────────────────────────
   function step1Html() {
     return '<h3 style="margin:0 0 0.25rem">What is this automation?</h3>' +
-      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Name it, describe what it watches for, and pick the severity its alerts carry.</p>' +
+      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Name it and describe what it watches for. (Severity is set with the trigger on the next steps.)</p>' +
       '<div class="form-group"><label>Name</label><input type="text" id="aw-name" value="' + escapeHtml(draft.name || "") + '" placeholder="e.g. Switch temperature high"></div>' +
-      '<div class="form-group"><label>Description (optional)</label><input type="text" id="aw-desc" value="' + escapeHtml(draft.description || "") + '"></div>' +
-      '<div class="form-group"><label>Severity</label><select id="aw-severity" class="sev-select sev-' + escapeHtml(draft.severity || "warning") + '">' + sevOpt(draft.severity || "warning") + '</select></div>' +
-      '<div class="form-group"><label><input type="checkbox" id="aw-enabled"' + (draft.enabled === false ? "" : " checked") + '> Enabled</label></div>';
+      '<div class="form-group"><label>Description (optional)</label><input type="text" id="aw-desc" value="' + escapeHtml(draft.description || "") + '"></div>';
   }
   function collectStep1() {
     draft.name = document.getElementById("aw-name").value.trim();
     draft.description = document.getElementById("aw-desc").value.trim() || null;
-    draft.severity = document.getElementById("aw-severity").value;
-    draft.enabled = document.getElementById("aw-enabled").checked;
   }
   function validateStep1() {
     if (!draft.name) return "Name is required.";
@@ -1019,6 +1015,7 @@ async function openAutomationWizard(existing) {
     }).join("");
     return '<h3 style="margin:0 0 0.25rem">When should it fire?</h3>' +
       '<div class="aw-sentence" id="aw-trigger-sentence">…</div>' +
+      '<div class="form-group"><label>Alert severity</label><select id="aw-trigger-severity" class="sev-select sev-' + escapeHtml(draft.severity || "warning") + '">' + sevOpt(draft.severity || "warning") + '</select></div>' +
       '<div class="form-group"><label>Trigger type</label><select id="aw-trigger-type">' + typeOpts + '</select></div>' +
       '<div id="aw-trigger-fields"></div>' +
       '<div id="aw-bands-host" style="display:none"></div>' +
@@ -1060,6 +1057,15 @@ async function openAutomationWizard(existing) {
   }
   function wireStep3() {
     var panel = document.getElementById("aw-step-3");
+    var sevSel = panel.querySelector("#aw-trigger-severity");
+    if (sevSel) {
+      sevSel.addEventListener("change", function () {
+        draft.severity = sevSel.value;
+        sevSel.className = "sev-select sev-" + sevSel.value;
+        var note = panel.querySelector("#aw-band-base-note");
+        if (note) note.innerHTML = bandBaseNoteHtml();
+      });
+    }
     panel.querySelector("#aw-trigger-type").addEventListener("change", function () {
       renderTriggerFields(); // category swap renders fresh from the draft
     });
@@ -1103,6 +1109,8 @@ async function openAutomationWizard(existing) {
       draft.trigger = { type: "change", changeType: panel.querySelector("#tf-changetype").value };
     }
     draft.messageTemplate = (panel.querySelector("#aw-msg") ? panel.querySelector("#aw-msg").value.trim() : "") || null;
+    var sevSel = panel.querySelector("#aw-trigger-severity");
+    if (sevSel) draft.severity = sevSel.value; // severity leads the trigger now
     collectBands(panel); // severity bands live with the trigger (step 3)
   }
   function tgValidateLeaf(leaf, label) {
@@ -1450,14 +1458,14 @@ async function openAutomationWizard(existing) {
   function bandBaseNoteHtml() {
     var tr = draft.trigger || {};
     var opPhrase = ((s.comparatorPhrases || {})[tr.operator]) || tr.operator || ">=";
-    return 'Base tier: severity <strong>' + escapeHtml(draft.severity) + '</strong> when the value ' + escapeHtml(opPhrase) + ' <strong>' + escapeHtml(String(tr.threshold != null ? tr.threshold : "?")) + '</strong> (its actions live on the Actions step). Add higher tiers to escalate severity as the value climbs.';
+    return 'This condition alerts at severity <strong>' + escapeHtml(draft.severity) + '</strong> when the value ' + escapeHtml(opPhrase) + ' <strong>' + escapeHtml(String(tr.threshold != null ? tr.threshold : "?")) + '</strong> (its actions live on the Actions step). Add another severity to escalate as the value climbs further.';
   }
   function bandsSectionHtml() {
     return '<div class="form-group" id="aw-bands-section" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
-      '<label style="font-weight:600;margin:0 0 4px;display:block">Severity bands (optional)</label>' +
+      '<label style="font-weight:600;margin:0 0 4px;display:block">Additional severities for this condition (optional)</label>' +
       '<p id="aw-band-base-note" style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">' + bandBaseNoteHtml() + '</p>' +
       '<div id="aw-bands"></div>' +
-      '<button type="button" class="btn btn-sm btn-secondary" id="aw-band-add" style="margin-top:4px">+ Add severity tier</button>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="aw-band-add" style="margin-top:4px">+ Add another severity</button>' +
       '<div id="aw-band-notify" style="display:none;margin-top:10px;border-top:1px solid var(--color-border);padding-top:8px">' +
         '<label style="font-weight:600;font-size:0.82rem;display:block;margin:0 0 4px">Notify on</label>' +
         '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-increase" checked> Severity increase (re-notify with the new band’s actions)</label>' +
@@ -2199,12 +2207,7 @@ async function openAutomationWizard(existing) {
   });
 
   // ── First render ───────────────────────────────────────────────────────
-  var sevSel = document.getElementById("aw-severity");
-  if (sevSel) {
-    sevSel.addEventListener("change", function () {
-      sevSel.className = "sev-select sev-" + sevSel.value;
-    });
-  }
+  // (Severity moved off step 1 onto the trigger step — wired in wireStep3.)
   wireStep2();
   wireStep3();
   updateStepper();
