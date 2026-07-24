@@ -798,14 +798,21 @@ function _handleMonitorPillClick(e) {
     return;
   }
 
-  if (currentlyMonitored) {
-    _showMonitorDisableConfirm(pill, function () { _flipAssetMonitor(assetId, false); }, {
-      assetId: assetId,
-      hostname: pill.getAttribute("data-hostname") || "",
-    });
-  } else {
-    _flipAssetMonitor(assetId, true);
+  // Enabling a currently-unmonitored asset opens the edit modal on the
+  // Monitoring tab (where the operator sets the polling method / credential)
+  // rather than flipping it blind — from both the table pill and the asset
+  // details System-tab pill.
+  if (!currentlyMonitored) {
+    openEditModal(assetId, { tab: "monitoring" });
+    return;
   }
+
+  // Disabling still confirms inline (fast, low-risk toggle) — no need to
+  // detour through the edit modal.
+  _showMonitorDisableConfirm(pill, function () { _flipAssetMonitor(assetId, false); }, {
+    assetId: assetId,
+    hostname: pill.getAttribute("data-hostname") || "",
+  });
 }
 
 // Shared pill popover shell: builds, positions (viewport coordinates so the
@@ -3081,30 +3088,6 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   // ignored at resolution time + see misleading dropdown state.
   var transportBlockShown = !(agentActive || agentInFlight);
 
-  // Maintenance section (edit mode only): shows current windows + covering
-  // schedules (lazily loaded in _wireMonitorEditTab) and, for
-  // maintenanceManagement holders, an ad-hoc "enter maintenance until…"
-  // action realized as a one-shot schedule on save.
-  var canMaint = typeof canManageMaintenance === "function" && canManageMaintenance();
-  var maintSectionHtml = (asset && asset.id)
-    ? '<div class="form-group" id="f-maint-wrap" style="margin-top:0.5rem;padding:0.75rem;border:1px solid var(--color-border);border-radius:6px;background:var(--color-surface-1)">' +
-        '<strong>Maintenance</strong>' +
-        '<div id="f-maint-info" class="hint" style="margin:0.35rem 0 0.5rem">Loading maintenance info…</div>' +
-        (canMaint
-          ? '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex-wrap:wrap">' +
-              '<input type="checkbox" id="f-maint-enter" style="width:auto">' +
-              '<span>Enter maintenance mode until</span>' +
-              '<input type="datetime-local" id="f-maint-until" disabled>' +
-            '</label>' +
-            '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px" title="Devices behind this asset go into dependency suppression (notifications paused) for the window. Uncheck when they stay reachable and should keep alerting.">' +
-              '<input type="checkbox" id="f-maint-suppress" checked disabled style="width:auto">' +
-              '<span>Mark dependent devices as down</span>' +
-            '</label>' +
-            '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time.</p>'
-          : "") +
-      '</div>'
-    : "";
-
   return (
     '<div class="form-group">' +
       '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
@@ -3113,7 +3096,6 @@ function assetMonitoringFormHTML(asset, managedAgent) {
       '</label>' +
       '<p class="hint">A successful probe means the credential authenticated. Probes write a sample row each cycle; failed probes count as packet loss.</p>' +
     '</div>' +
-    maintSectionHtml +
     agentBlockHtml +
     (transportBlockShown ? transportBlockHtml : '') +
     '<div class="form-group" id="f-asset-overrides-wrap"' + assetIdAttr + ' style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--color-border);display:none">' +
@@ -3123,9 +3105,35 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   );
 }
 
-// Maintenance section of the edit modal's Monitoring tab: current windows +
-// covering schedules (from /assets/:id/maintenance-info), and the ad-hoc
-// enter-until checkbox. Best-effort — a load failure just leaves the hint.
+// Maintenance tab of the edit modal (edit mode only — the actions realize as
+// a one-shot schedule against an existing asset). Shows current windows +
+// covering schedules (lazily loaded in _wireMaintenanceEditSection) and, for
+// maintenanceManagement holders, an ad-hoc "enter maintenance until…" action.
+function assetMaintenanceFormHTML(asset) {
+  if (!asset || !asset.id) return "";
+  var canMaint = typeof canManageMaintenance === "function" && canManageMaintenance();
+  return (
+    '<div class="form-group" id="f-maint-wrap">' +
+      '<div id="f-maint-info" class="hint" style="margin:0 0 0.5rem">Loading maintenance info…</div>' +
+      (canMaint
+        ? '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex-wrap:wrap">' +
+            '<input type="checkbox" id="f-maint-enter" style="width:auto">' +
+            '<span>Enter maintenance mode until</span>' +
+            '<input type="datetime-local" id="f-maint-until" disabled>' +
+          '</label>' +
+          '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px" title="Devices behind this asset go into dependency suppression (notifications paused) for the window. Uncheck when they stay reachable and should keep alerting.">' +
+            '<input type="checkbox" id="f-maint-suppress" checked disabled style="width:auto">' +
+            '<span>Mark dependent devices as down</span>' +
+          '</label>' +
+          '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time.</p>'
+        : '<p class="hint">You don’t have permission to change maintenance windows.</p>') +
+    '</div>'
+  );
+}
+
+// Maintenance tab of the edit modal: current windows + covering schedules
+// (from /assets/:id/maintenance-info), and the ad-hoc enter-until checkbox.
+// Best-effort — a load failure just leaves the hint.
 function _wireMaintenanceEditSection(asset) {
   var infoEl = document.getElementById("f-maint-info");
   if (!infoEl || !asset || !asset.id) return;
@@ -3513,7 +3521,8 @@ async function openCreateModal() {
   });
 }
 
-async function openEditModal(id) {
+async function openEditModal(id, opts) {
+  opts = opts || {};
   try {
     // Fetch in parallel: asset, tag cache, and the agent state. The
     // Monitoring tab branches on whether an agent is installed (active
@@ -3528,15 +3537,27 @@ async function openEditModal(id) {
     var asset = results[0];
     var managedAgent = results[2];
     asset._editing = true;
-    var body = _renderTabbedBody("asset-edit", [
+    var editTabs = [
       { key: "general",    label: "General",    html: assetFormHTML(asset) },
       { key: "monitoring", label: "Monitoring", html: assetMonitoringFormHTML(asset, managedAgent) },
-    ]);
+    ];
+    // Maintenance is edit-only (the ad-hoc window realizes as a one-shot
+    // schedule against an existing asset), so it never appears on create.
+    if (asset.id) {
+      editTabs.push({ key: "maintenance", label: "Maintenance", html: assetMaintenanceFormHTML(asset) });
+    }
+    var body = _renderTabbedBody("asset-edit", editTabs);
     var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
       '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
     var title = "Edit Asset" + (asset.hostname ? " — " + asset.hostname : "");
     openModal(title, body, footer, { wide: true });
     _wireModalTabs("asset-edit");
+    // Open on a caller-requested tab (e.g. the System-tab "Unmonitored" pill
+    // deep-links here to Monitoring). Falls back to the default first tab.
+    if (opts.tab) {
+      var tabBtn = document.querySelector('#asset-edit-tabs .page-tab[data-tab="' + opts.tab + '"]');
+      if (tabBtn) tabBtn.click();
+    }
     wireTagPicker();
     _wireMonitorEditTab(asset);
     _populateUploadedMibsInDropdowns();
