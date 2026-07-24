@@ -36,6 +36,7 @@ import {
   collectHardwareSensors, recordHardwareSensorResult,
   collectSystemInfo, recordSystemInfoResult,
   snmpWalkRaw,
+  resolveMonitorSettings,
   resolveMonitorSettingsWithProvenance,
 } from "../../services/monitoringService.js";
 import { getCredential } from "../../services/credentialService.js";
@@ -519,6 +520,20 @@ const ASSET_LIST_SELECT = {
   lastMonitorAt: true,
   lastResponseTimeMs: true,
   discoveredByIntegrationId: true,
+  // "Monitored Via" column: the resolved per-stream polling methods + agent
+  // state are reduced to a compact `monitoringMethods` array by
+  // computeMonitoringMethods() in enrichAssetList. The six *Polling scalars
+  // feed the monitor-settings resolver; the discovering integration's type
+  // supplies the source default; an active ManagedAgent short-circuits to
+  // ["agent"] (the agent owns all streams).
+  responseTimePolling: true,
+  cpuMemoryPolling: true,
+  temperaturePolling: true,
+  interfacesPolling: true,
+  lldpPolling: true,
+  storagePolling: true,
+  discoveredByIntegration: { select: { type: true } },
+  managedAgent: { select: { installStatus: true } },
   dependencyLayer: true,
   dependencySuppressed: true,
   dependencyTestUntil: true,
@@ -665,17 +680,85 @@ function shapeHaInfo(topo: unknown): { mode: string; role: string; memberStatus?
   };
 }
 
-function enrichAssetList(
+// Reduce an asset's monitoring transports to the compact array the
+// "Monitored Via" list column renders. Empty = not monitored / nothing to
+// show. An active Polaris Agent owns all streams, so it short-circuits to
+// ["agent"]. Otherwise the six per-stream polling methods are resolved through
+// the monitor-settings hierarchy (cached tiers — no per-row DB hit) and de-
+// duplicated. ICMP is reachability-only and pairs with every telemetry
+// transport, so it's treated as subordinate: a device with any non-ICMP
+// transport reports that transport (or "Multiple" when several differ), and
+// ICMP surfaces only when it's the sole method (ping-only monitoring).
+async function computeMonitoringMethods(a: {
+  monitored?: boolean;
+  assetType?: unknown;
+  discoveredByIntegrationId?: unknown;
+  discoveredByIntegration?: { type?: string | null } | null;
+  managedAgent?: { installStatus?: string | null } | null;
+  responseTimePolling?: unknown;
+  cpuMemoryPolling?: unknown;
+  temperaturePolling?: unknown;
+  interfacesPolling?: unknown;
+  lldpPolling?: unknown;
+  storagePolling?: unknown;
+}): Promise<string[]> {
+  if (!a.monitored) return [];
+  if (a.managedAgent?.installStatus === "active") return ["agent"];
+  const resolved = await resolveMonitorSettings({
+    assetType:                   typeof a.assetType === "string" ? a.assetType : "other",
+    discoveredByIntegrationId:   typeof a.discoveredByIntegrationId === "string" ? a.discoveredByIntegrationId : null,
+    discoveredByIntegrationType: a.discoveredByIntegration?.type ?? null,
+    monitorIntervalSec:     null,
+    cpuMemoryIntervalSec:   null,
+    temperatureIntervalSec: null,
+    systemInfoIntervalSec:  null,
+    probeTimeoutMs:         null,
+    responseTimePolling: typeof a.responseTimePolling === "string" ? a.responseTimePolling : null,
+    cpuMemoryPolling:    typeof a.cpuMemoryPolling    === "string" ? a.cpuMemoryPolling    : null,
+    temperaturePolling:  typeof a.temperaturePolling  === "string" ? a.temperaturePolling  : null,
+    interfacesPolling:   typeof a.interfacesPolling   === "string" ? a.interfacesPolling   : null,
+    lldpPolling:         typeof a.lldpPolling         === "string" ? a.lldpPolling         : null,
+    storagePolling:      typeof a.storagePolling      === "string" ? a.storagePolling      : null,
+  });
+  const all = [
+    resolved.responseTimePolling,
+    resolved.cpuMemoryPolling,
+    resolved.temperaturePolling,
+    resolved.interfacesPolling,
+    resolved.lldpPolling,
+    resolved.storagePolling,
+  ].filter((m): m is PollingMethod => m != null && m !== "disabled");
+  const nonIcmp = [...new Set<string>(all.filter((m) => m !== "icmp"))];
+  if (nonIcmp.length > 0) return nonIcmp;
+  return all.includes("icmp") ? ["icmp"] : [];
+}
+
+async function enrichAssetList(
   assets: Array<{ ipAddress: string | null; associatedIpRows: unknown; macAddressRows: unknown; fortinetTopology?: unknown } & Record<string, unknown>>,
   ipCtx: Map<string, IpContext>,
 ) {
-  return assets.map(({ associatedIpRows, macAddressRows, fortinetTopology, ...a }) => ({
+  return Promise.all(assets.map(async ({
+    associatedIpRows, macAddressRows, fortinetTopology,
+    // Strip the raw resolver inputs from the wire shape — only the reduced
+    // `monitoringMethods` array is surfaced to the list.
+    responseTimePolling, cpuMemoryPolling, temperaturePolling, interfacesPolling, lldpPolling, storagePolling,
+    discoveredByIntegration, managedAgent,
+    ...a
+  }) => ({
     ...a,
     associatedIps: shapeAssociatedIps(associatedIpRows as never),
     macAddresses: shapeMacRows(macAddressRows as never),
     ipContext: a.ipAddress ? (ipCtx.get(a.ipAddress) || null) : null,
     ha: shapeHaInfo(fortinetTopology),
-  }));
+    monitoringMethods: await computeMonitoringMethods({
+      monitored: a.monitored as boolean | undefined,
+      assetType: a.assetType,
+      discoveredByIntegrationId: a.discoveredByIntegrationId,
+      discoveredByIntegration: discoveredByIntegration as { type?: string | null } | null,
+      managedAgent: managedAgent as { installStatus?: string | null } | null,
+      responseTimePolling, cpuMemoryPolling, temperaturePolling, interfacesPolling, lldpPolling, storagePolling,
+    }),
+  })));
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -737,7 +820,7 @@ router.get("/", requirePermission("assets", "read"), async (req, res, next) => {
     }
 
     const ipCtx = await buildIpContexts(assets.map((a) => a.ipAddress as string | null).filter(Boolean) as string[]);
-    const enriched = enrichAssetList(assets as never, ipCtx);
+    const enriched = await enrichAssetList(assets as never, ipCtx);
     res.json({ assets: enriched, total, limit, offset });
   } catch (err) {
     next(err);

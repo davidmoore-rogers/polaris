@@ -572,7 +572,7 @@ async function fetchAssetsPage() {
     _assetsData = all.map(_mapAsset);
     renderAssetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="19" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="20" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -1021,8 +1021,8 @@ function renderAssetsPage() {
   if (_assetsData.length === 0) {
     var hasFilters = _assetsSF && _assetsSF._filters && Object.keys(_assetsSF._filters).length > 0;
     tbody.innerHTML = hasFilters
-      ? '<tr><td colspan="19" class="empty-state">No results match the current filters.</td></tr>'
-      : '<tr><td colspan="19" class="empty-state">No assets found. Add one to get started.</td></tr>';
+      ? '<tr><td colspan="20" class="empty-state">No results match the current filters.</td></tr>'
+      : '<tr><td colspan="20" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
     _assetsUpdateSelectAll();
     return;
@@ -1042,6 +1042,7 @@ function renderAssetsPage() {
       '<td>' + assetTypeBadge(a.assetType, a) + '</td>' +
       '<td>' + assetStatusBadge(a) + '</td>' +
       '<td>' + assetMonitorBadge(a) + '</td>' +
+      '<td>' + assetMonitoredViaCell(a) + '</td>' +
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
       '<td>' + escapeHtml(a.description || "-") + '</td>' +
       '<td>' + _copyableCell(a.assetTag) + '</td>' +
@@ -2374,6 +2375,34 @@ function assetHaInfo(asset) {
     return { mode: topo.haMode, role: topo.haRole, memberStatus: topo.haMemberStatus, clusterIp: topo.haClusterIp };
   }
   return null;
+}
+
+// Human labels for the raw polling-method keys the server sends in
+// `monitoringMethods`. Mirrors _POLLING_LABELS in integrations.js (not loaded
+// on this page) so the Assets table stays self-contained.
+var _MONITORED_VIA_LABELS = {
+  agent:    "Agent",
+  snmp:     "SNMP",
+  ssh:      "SSH",
+  winrm:    "WinRM",
+  rest_api: "REST API",
+  icmp:     "ICMP",
+  vcenter:  "vCenter",
+};
+
+// "Monitored Via" cell — renders how the asset is actually monitored from the
+// server-reduced `monitoringMethods` array (see computeMonitoringMethods in
+// the assets route). Empty → em dash (unmonitored / nothing resolved); one
+// method → its label; several → "Multiple" with the full list in the tooltip.
+function assetMonitoredViaCell(asset) {
+  var methods = (asset && asset.monitoringMethods) || [];
+  if (!methods.length) return '<span class="text-tertiary">—</span>';
+  if (methods.length === 1) {
+    var m = methods[0];
+    return '<span class="badge badge-neutral">' + escapeHtml(_MONITORED_VIA_LABELS[m] || m) + '</span>';
+  }
+  var labels = methods.map(function (k) { return _MONITORED_VIA_LABELS[k] || k; });
+  return '<span class="badge badge-neutral" title="' + escapeHtml(labels.join(", ")) + '">Multiple</span>';
 }
 
 function assetMonitorBadge(asset) {
