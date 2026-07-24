@@ -155,9 +155,14 @@ describe("automation wizard DOM render", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(toastErrors).toEqual([]);
     expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
-    // Severity now leads the trigger step (moved off the name step).
+    // Severity leads the trigger step (single mode default): standalone
+    // dropdown shown, multi-severity checkbox present + off, bands hidden.
     expect(doc.querySelector("#aw-trigger-severity.sev-select")).toBeTruthy();
     expect(doc.querySelectorAll("#aw-trigger-severity option.sev-critical").length).toBe(1);
+    const multiCb = doc.querySelector("#aw-multi-sev") as unknown as { checked: boolean; disabled: boolean; dispatchEvent: (e: unknown) => void };
+    expect(multiCb).toBeTruthy();
+    expect(multiCb.checked).toBe(false);
+    expect((doc.querySelector("#aw-bands-host") as unknown as { style: { display: string } }).style.display).toBe("none");
     // Category select (device/host/event/change) + the tree with one leaf row.
     const cat = doc.querySelector("#aw-trigger-type") as unknown as { value: string };
     expect(cat.value).toBe("device");
@@ -167,15 +172,19 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector("#aw-trig-root .tgl-threshold")).toBeTruthy();
     expect(doc.querySelector("#aw-trig-root .scr-row .aw-grip[draggable='true']")).toBeTruthy();
 
-    // Severity bands live WITH the trigger (step 3) — the default single
-    // numeric metric makes the editor available. Adding a tier reveals the
-    // notify policy.
+    // Enable multi-severity → single dropdown hides, the severity-levels panel
+    // (base severity + tiers) appears. Adding a tier reveals the notify policy.
+    multiCb.checked = true;
+    multiCb.dispatchEvent(new win.Event("change", { bubbles: true }));
+    expect((doc.querySelector("#aw-single-sev-wrap") as unknown as { style: { display: string } }).style.display).toBe("none");
     expect(doc.querySelector("#aw-bands-section")).toBeTruthy();
+    expect(doc.querySelector("#aw-band-base-sev")).toBeTruthy();
     expect((doc.querySelector("#aw-band-notify") as unknown as { style: { display: string } }).style.display).toBe("none");
     (doc.querySelector("#aw-band-add") as unknown as { click: () => void }).click();
     const band = doc.querySelector("#aw-bands .aw-band")!;
     expect(band).toBeTruthy();
     expect(band.querySelector(".band-copy")).toBeTruthy(); // copy-actions-from affordance
+    expect(band.querySelector(".band-op")).toBeTruthy();    // per-tier operator
     (band.querySelector(".band-threshold") as unknown as { value: string }).value = "95";
     (band.querySelector(".band-severity") as unknown as { value: string }).value = "critical";
     expect((doc.querySelector("#aw-band-notify") as unknown as { style: { display: string } }).style.display).toBe("block");

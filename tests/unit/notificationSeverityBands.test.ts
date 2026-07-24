@@ -45,10 +45,25 @@ describe("ruleInputSchema — severity bands", () => {
     }))).toThrow();
   });
 
-  it("rejects band thresholds not moving in the operator direction", () => {
+  it("accepts a per-tier operator override (tiers share sampling, vary the comparison)", () => {
+    const parsed = ruleInputSchema.parse(bandedRule({
+      severityBands: [{ threshold: 60, severity: "serious", operator: ">" }],
+    }));
+    expect((parsed.severityBands![0] as any).operator).toBe(">");
+  });
+
+  it("rejects a per-tier equality operator (needs an ordered comparison)", () => {
     expect(() => ruleInputSchema.parse(bandedRule({
-      severityBands: [{ threshold: 50, severity: "serious" }], // below base for >=
+      severityBands: [{ threshold: 60, severity: "serious", operator: "==" }],
     }))).toThrow();
+  });
+
+  it("no longer requires monotonic thresholds — the most-severe MET tier wins", () => {
+    // Threshold below the base is allowed now (per-tier operators make strict
+    // threshold ordering meaningless); only severity must strictly increase.
+    expect(() => ruleInputSchema.parse(bandedRule({
+      severityBands: [{ threshold: 50, severity: "serious" }],
+    }))).not.toThrow();
   });
 
   it("rejects bands on a non-numeric trigger", () => {

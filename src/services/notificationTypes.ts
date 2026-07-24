@@ -44,6 +44,8 @@ export function severityRank(s: string): number {
 export interface SeverityTier {
   threshold: number;
   severity: Severity;
+  /** Per-tier comparison operator (falls back to the base trigger's). */
+  operator?: Comparator;
 }
 
 function numMeets(value: number, operator: Comparator, threshold: number): boolean {
@@ -78,7 +80,9 @@ export function severityForValue(
   let bestRank = -1;
   for (const tier of tiers) {
     const r = severityRank(tier.severity);
-    if (r > bestRank && numMeets(value, operator, tier.threshold)) {
+    // Tiers share the base sampling (aggregation/window/dimensionFilter) but may
+    // carry their own comparison operator; fall back to the base operator.
+    if (r > bestRank && numMeets(value, tier.operator ?? operator, tier.threshold)) {
       best = tier.severity;
       bestRank = r;
     }
@@ -818,6 +822,10 @@ export const severityBandSchema = z
   .object({
     threshold: z.number(),
     severity: z.enum(SEVERITIES),
+    // Per-tier comparison operator (falls back to the trigger's). Tiers share
+    // the trigger's sampling — aggregation / window / dimensionFilter — so only
+    // the comparison + threshold + severity vary per tier.
+    operator: z.enum(COMPARATORS).optional(),
     actions: z.array(actionSchema).max(20).default([]),
     // Per-band time escalation (same shape as rule-level; accepts legacy or v2).
     escalation: z.union([escalationSchema, escalationV2Schema]).optional().nullable(),
@@ -1142,19 +1150,19 @@ function validateSeverityBands(
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands"], message: "severity bands need an ordered operator (>, >=, <, <=)" });
     return;
   }
-  const asc = t.operator === ">" || t.operator === ">=";
-  let prevThreshold = t.threshold;
+  // Severities must STRICTLY INCREASE tier-over-tier (the "only increase
+  // severity" rule). Tiers may carry their own ordered operator (they share the
+  // trigger's sampling); the value is compared to each tier and the most-severe
+  // MET tier wins, so per-tier thresholds need not be monotonic.
   let prevRank = severityRank(v.severity ?? "warning");
   bands.forEach((b, i) => {
     const rank = severityRank(b.severity);
     if (rank <= prevRank) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands", i, "severity"], message: "each band must be more severe than the tier below it" });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands", i, "severity"], message: "each added severity must be higher than the one before it" });
     }
-    const beyond = asc ? b.threshold > prevThreshold : b.threshold < prevThreshold;
-    if (!beyond) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands", i, "threshold"], message: `band threshold must be ${asc ? "above" : "below"} the previous tier (${prevThreshold})` });
+    if (b.operator && (b.operator === "==" || b.operator === "!=")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands", i, "operator"], message: "severity tiers need an ordered operator (>, >=, <, <=)" });
     }
-    prevThreshold = b.threshold;
     prevRank = rank;
   });
 }
