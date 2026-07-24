@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
+import { publishCommandWake } from "./agentCommandWake.js";
 import {
   normalizeRuleToV2,
   SCRIPT_INTERPRETERS,
@@ -270,6 +271,10 @@ export async function requestScriptRun(req: ScriptRunRequest): Promise<{ runId: 
       },
     });
     await prisma.automationScriptRun.update({ where: { id: run.id }, data: { agentCommandId: cmd.id } });
+    // Best-effort near-real-time nudge: signal the process holding this agent's
+    // WS session to push a "commands-pending" frame so the agent fetches now
+    // instead of waiting for its ~20s command poll (the guaranteed floor).
+    await publishCommandWake(agent.id);
   }
 
   return { runId: run.id };

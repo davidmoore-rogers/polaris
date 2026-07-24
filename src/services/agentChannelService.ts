@@ -40,9 +40,12 @@
  */
 
 import type { WebSocket } from "ws";
+import pg from "pg";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { logEvent } from "../api/routes/events.js";
+import { getDirectDatabaseUrl } from "../utils/dbConnections.js";
+import { CMD_WAKE_CHANNEL } from "./agentCommandWake.js";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const PROBE_NOW_DEFAULT_TIMEOUT_MS = 10_000;
@@ -230,6 +233,16 @@ export function refreshConfig(managedAgentId: string): void {
   safeSend(session.ws, { type: "refresh-config", id: "", payload: {} });
 }
 
+// Nudge an attached agent to fetch its pending commands immediately instead of
+// waiting for its ~20s command poll. No-op when the agent isn't attached (it
+// picks the command up on its next poll — the guaranteed floor). Fed by the
+// cross-process command-wake listener below.
+export function wakeCommands(managedAgentId: string): void {
+  const session = sessions.get(managedAgentId);
+  if (!session) return;
+  safeSend(session.ws, { type: "commands-pending", id: "", payload: {} });
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────
 
 function safeSend(ws: WebSocket, frame: unknown): void {
@@ -253,8 +266,69 @@ export function liveSessionCount(): number {
 
 // Shutdown hook: graceful close on SIGTERM/SIGINT. Wired from src/app.ts.
 export async function shutdownAllSessions(): Promise<void> {
+  stopCommandWakeListener();
   const ids = Array.from(sessions.keys());
   for (const id of ids) {
     detach(id, "server shutdown");
   }
+}
+
+// ─── Cross-process command-wake listener (web/all role) ───────────────
+//
+// A dedicated Postgres session LISTENing on CMD_WAKE_CHANNEL. When any process
+// enqueues a command and calls publishCommandWake (agentCommandWake.ts), the
+// NOTIFY lands here and we push a `commands-pending` WS frame to that agent if
+// it's attached to this process. Best-effort — the agent's command poll is the
+// guaranteed floor. LISTEN needs a session-pinned connection, so this uses the
+// DIRECT database URL (PgBouncer transaction pooling would break it).
+
+let wakeClient: pg.Client | null = null;
+let wakeReconnectTimer: NodeJS.Timeout | null = null;
+let wakeListenerStopped = false;
+
+export async function startCommandWakeListener(): Promise<void> {
+  wakeListenerStopped = false;
+  await connectWakeListener();
+}
+
+async function connectWakeListener(): Promise<void> {
+  if (wakeListenerStopped) return;
+  const url = getDirectDatabaseUrl();
+  if (!url) {
+    logger.warn("Agent command-wake listener: no database URL — near-real-time dispatch disabled (agents still poll)");
+    return;
+  }
+  const client = new pg.Client({ connectionString: url });
+  client.on("notification", (msg) => {
+    if (msg.payload) wakeCommands(msg.payload);
+  });
+  client.on("error", (err) => {
+    logger.warn({ err: err.message }, "Agent command-wake listener error — reconnecting");
+    scheduleWakeReconnect();
+  });
+  try {
+    await client.connect();
+    await client.query(`LISTEN ${CMD_WAKE_CHANNEL}`);
+    wakeClient = client;
+    logger.info("Agent command-wake listener attached");
+  } catch (err) {
+    logger.warn({ err }, "Agent command-wake listener connect failed — retrying");
+    try { await client.end(); } catch { /* ignore */ }
+    scheduleWakeReconnect();
+  }
+}
+
+function scheduleWakeReconnect(): void {
+  if (wakeListenerStopped || wakeReconnectTimer) return;
+  if (wakeClient) { try { void wakeClient.end(); } catch { /* ignore */ } wakeClient = null; }
+  wakeReconnectTimer = setTimeout(() => {
+    wakeReconnectTimer = null;
+    void connectWakeListener();
+  }, 5000);
+}
+
+function stopCommandWakeListener(): void {
+  wakeListenerStopped = true;
+  if (wakeReconnectTimer) { clearTimeout(wakeReconnectTimer); wakeReconnectTimer = null; }
+  if (wakeClient) { try { void wakeClient.end(); } catch { /* ignore */ } wakeClient = null; }
 }

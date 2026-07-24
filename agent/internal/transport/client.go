@@ -325,20 +325,21 @@ func (c *Client) PushSystemInfo(body *SystemInfoBody) error {
 	return nil
 }
 
-// ─── Process-control commands (Phase 4) ───────────────────────────────
+// ─── Agent commands ───────────────────────────────────────────────────
 
-// Command is one pending command from the server: process control
-// ("stop"/"start"/"restart" against Target) or an automation script run
-// ("run_script", whose spec rides Payload — see internal/scriptexec).
+// Command is one pending command from the server. The only supported action is
+// "run_script" (an automation script run, whose spec rides Payload — see
+// internal/scriptexec). Process/service start/stop/restart control was removed;
+// any other action is refused by the agent.
 type Command struct {
 	ID      string          `json:"id"`
-	Action  string          `json:"action"` // "stop" | "start" | "restart" | "run_script"
-	Target  string          `json:"target"` // service/unit name (script name for run_script)
+	Action  string          `json:"action"` // "run_script"
+	Target  string          `json:"target"` // script name
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// FetchCommands polls for pending process-control commands. The server marks
-// them "sent" so a slow agent doesn't re-run them.
+// FetchCommands polls for pending commands. The server marks them "sent" so a
+// slow agent doesn't re-run them.
 func (c *Client) FetchCommands() ([]Command, error) {
 	if c.bearer == "" {
 		return nil, errors.New("FetchCommands called without a bearer token — enroll first")

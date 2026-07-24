@@ -1123,11 +1123,14 @@
             '" style="padding:2px 8px;font-size:0.75rem">Upgrade</button>');
         }
         // Reinstall — needs the stored install credential. Carries the OS +
-        // current root state so the Linux reinstall dialog can offer the
-        // "run as root" toggle (and pre-check it to the current value).
+        // current privilege tier so the Linux reinstall dialog can offer the
+        // CAP_SYS_PTRACE toggle (pre-checked when the agent is on the ptrace
+        // tier). A legacy "root" agent pre-checks it too, since reinstalling
+        // downgrades it to unprivileged/ptrace.
         var reAttr = a.hasInstallCredential ? "" : ' disabled title="No install credential on file — force-remove and install fresh"';
+        var curPtrace = (a.privilegeTier === "ptrace" || a.privilegeTier === "root") ? "1" : "0";
         btns.push('<button class="btn btn-secondary agent-act" data-act="reinstall" data-id="' + escapeHtml(a.assetId) +
-          '" data-os="' + escapeHtml(a.osPlatform || "") + '" data-root="' + (a.runAsRoot ? "1" : "0") + '"' +
+          '" data-os="' + escapeHtml(a.osPlatform || "") + '" data-ptrace="' + curPtrace + '"' +
           reAttr + ' style="padding:2px 8px;font-size:0.75rem">Reinstall</button>');
         // Remove (graceful) + Force remove.
         btns.push('<button class="btn btn-secondary agent-act" data-act="remove" data-id="' + escapeHtml(a.assetId) +
@@ -1187,23 +1190,24 @@
         .then(function (ok) { if (!ok) return null; return api.assets.upgradeAgent(assetId); });
     } else if (act === "reinstall") {
       var os = btn ? btn.getAttribute("data-os") : "";
-      var curRoot = !!(btn && btn.getAttribute("data-root") === "1");
+      var curPtrace = !!(btn && btn.getAttribute("data-ptrace") === "1");
       if (os === "linux") {
-        // Linux reinstall can also flip the privilege level — offer the root
-        // toggle (pre-checked to the current state) inside the confirm.
+        // Linux reinstall can also change the privilege tier — offer the
+        // CAP_SYS_PTRACE toggle (pre-checked to the current state). A legacy
+        // root agent lands here pre-checked and downgrades to unprivileged/ptrace.
         var formHtml =
           '<p style="color:var(--color-text-secondary);margin-top:0">Re-pushes the binary + agent.conf and re-runs the installer using the stored install credential. The old bearer is revoked and a fresh one issued on re-enroll.</p>' +
           '<div class="form-group">' +
             '<label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal;cursor:pointer">' +
-              '<input type="checkbox" id="reinstall-run-as-root"' + (curRoot ? ' checked' : '') + '> Install with root privileges' +
+              '<input type="checkbox" id="reinstall-run-as-root"' + (curPtrace ? ' checked' : '') + '> Grant CAP_SYS_PTRACE (for Application Map connection mapping)' +
             '</label>' +
-            '<p class="hint" style="color:var(--color-warning)">Root lets the agent control services, run root automation scripts, and map connections — but gives it full control of the host. Uncheck to reinstall as the default unprivileged user.</p>' +
+            '<p class="hint" style="color:var(--color-warning)">Leave unchecked to reinstall fully unprivileged (recommended). Checking this grants CAP_SYS_PTRACE so the agent can attribute connections to processes — without full root. This capability also lets the agent read any process’s memory (a credential-theft risk).</p>' +
           '</div>';
-        var wantRoot = curRoot;
+        var wantPtrace = curPtrace;
         var fp = showFormModal("Reinstall agent on this host", formHtml, "Reinstall");
         var rcb = document.getElementById("reinstall-run-as-root");
-        if (rcb) rcb.addEventListener("change", function () { wantRoot = rcb.checked; });
-        run = fp.then(function (ok) { if (!ok) return null; return api.assets.reinstallAgent(assetId, { runAsRoot: wantRoot }); });
+        if (rcb) rcb.addEventListener("change", function () { wantPtrace = rcb.checked; });
+        run = fp.then(function (ok) { if (!ok) return null; return api.assets.reinstallAgent(assetId, { privilegeTier: wantPtrace ? "ptrace" : "unprivileged" }); });
       } else {
         run = showConfirm("Reinstall the agent on this host?\n\nRe-pushes the binary + agent.conf and re-runs the installer using the stored install credential. The old bearer is revoked and a fresh one issued on re-enroll.")
           .then(function (ok) { if (!ok) return null; return api.assets.reinstallAgent(assetId); });

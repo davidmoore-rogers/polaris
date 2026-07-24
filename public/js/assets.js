@@ -1928,13 +1928,13 @@ function openBulkAgentDeployModal() {
         '<p class="hint">Applies to every asset in this batch. Pick arm64 only for actually-ARM hosts; a wrong guess fails safely at enrollment.</p>' +
       '</div>' +
       scriptRows +
-      // Root install — applies to Linux hosts in the batch only (Windows agents
-      // run as LocalSystem; macOS LaunchDaemons run as root).
+      // Privilege tier — applies to Linux hosts in the batch only (Windows
+      // agents run as LocalSystem; macOS LaunchDaemons run as root).
       '<div class="form-group">' +
         '<label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal;cursor:pointer">' +
-          '<input type="checkbox" id="bulk-agent-run-as-root"> Install Linux hosts with root privileges' +
+          '<input type="checkbox" id="bulk-agent-run-as-root"> Grant CAP_SYS_PTRACE on Linux hosts (for Application Map connection mapping)' +
         '</label>' +
-        '<p class="hint" style="color:var(--color-warning)">Runs the agent as <strong>root</strong> on every Linux host in this batch instead of the default unprivileged user. Required for service control, root automation scripts, and Application Map connection mapping — but gives the agent full control of those hosts.</p>' +
+        '<p class="hint" style="color:var(--color-warning)">Leave unchecked to run the agent fully unprivileged (recommended). Checking this grants <strong>CAP_SYS_PTRACE</strong> on every Linux host in this batch so the agent can attribute network connections to processes — without full root. Note: this capability also lets the agent read any process’s memory (a credential-theft risk). Windows hosts are unaffected.</p>' +
       '</div>';
 
     var footer =
@@ -1949,15 +1949,15 @@ function openBulkAgentDeployModal() {
       var winrm = document.getElementById("bulk-agent-cred-winrm").value;
       var arch  = document.getElementById("bulk-agent-arch").value;
       var rootCb = document.getElementById("bulk-agent-run-as-root");
-      var runAsRoot = !!(rootCb && rootCb.checked);
+      var wantPtrace = !!(rootCb && rootCb.checked);
       if (!ssh && !winrm) {
         showToast("Pick at least one credential first", "error");
         return; // keep modal open
       }
-      if (runAsRoot) {
+      if (wantPtrace) {
         var ok = await showConfirm(
-          "Install the Polaris Agent as root on the Linux hosts in this batch?\n\n" +
-          "Those agents will run with full root privileges instead of the default unprivileged user — able to start/stop/restart any service, run automation scripts as root, and read every process's network connections. Windows hosts are unaffected (they always run as LocalSystem)."
+          "Grant the Polaris Agent CAP_SYS_PTRACE on the Linux hosts in this batch?\n\n" +
+          "This lets those agents attribute network connections to processes for the Application Map — without full root. Note that CAP_SYS_PTRACE also lets the agent read any process's memory (a credential-theft risk). Windows hosts are unaffected (they always run as LocalSystem)."
         );
         if (!ok) return; // keep modal open
       }
@@ -1966,7 +1966,7 @@ function openBulkAgentDeployModal() {
       var payload = { ids: ids, arch: arch };
       if (ssh)   payload.sshCredentialId = ssh;
       if (winrm) payload.winrmCredentialId = winrm;
-      if (runAsRoot) payload.runAsRoot = true;
+      if (wantPtrace) payload.privilegeTier = "ptrace";
       // Collect any per-OS install-method choices that were rendered.
       var scriptIds = {};
       Array.prototype.forEach.call(document.querySelectorAll("[id^='bulk-agent-script-']"), function (sel) {
@@ -4614,12 +4614,14 @@ function assetAgentSubpanelHTML(a, agent) {
       (wsConnected ? 'Connected' : 'Disconnected') + '</strong></div>';
 
     // Privilege level the agent runs at. Windows = LocalSystem, macOS = root
-    // (LaunchDaemon), Linux = root (runAsRoot install) or the default
-    // unprivileged DynamicUser. Root is highlighted since it's elevated.
+    // (LaunchDaemon), Linux = one of the privilege tiers. "ptrace" and the
+    // legacy "root" are highlighted since they're elevated.
     var privLabel, privColor;
     if (agent.osPlatform === "windows") { privLabel = "LocalSystem"; privColor = ""; }
     else if (agent.osPlatform === "darwin") { privLabel = "Root"; privColor = "var(--color-warning)"; }
-    else { privLabel = agent.runAsRoot ? "Root" : "Unprivileged"; privColor = agent.runAsRoot ? "var(--color-warning)" : ""; }
+    else if (agent.privilegeTier === "root") { privLabel = "Root (legacy — reinstall to update)"; privColor = "var(--color-warning)"; }
+    else if (agent.privilegeTier === "ptrace") { privLabel = "CAP_SYS_PTRACE (connection mapping)"; privColor = "var(--color-warning)"; }
+    else { privLabel = "Unprivileged"; privColor = ""; }
     var privRow = '<div>Privileges: <strong' + (privColor ? ' style="color:' + privColor + '"' : '') + '>' + privLabel + '</strong></div>';
 
     var errBlock = agent.installError
@@ -4871,13 +4873,13 @@ function _openInstallAgentModal(a) {
         '<select id="agent-install-script">' + _agentScriptOptionsFor(inferredOs) + '</select>' +
         '<p class="hint" id="agent-install-script-hint"></p>' +
       '</div>' +
-      // Root install — Linux only (Windows agents run as LocalSystem; macOS
+      // Privilege tier — Linux only (Windows agents run as LocalSystem; macOS
       // LaunchDaemons run as root). Shown/hidden by refreshCredRows.
       '<div class="form-group" id="agent-install-root-wrap">' +
         '<label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal;cursor:pointer">' +
-          '<input type="checkbox" id="agent-install-run-as-root"> Install with root privileges' +
+          '<input type="checkbox" id="agent-install-run-as-root"> Grant CAP_SYS_PTRACE (for Application Map connection mapping)' +
         '</label>' +
-        '<p class="hint" style="color:var(--color-warning)">Runs the agent as <strong>root</strong> instead of the default unprivileged user. Required for service control (start/stop/restart), root automation scripts, and Application Map connection mapping. This gives the agent full control of the host — enable only if you need those capabilities.</p>' +
+        '<p class="hint" style="color:var(--color-warning)">Leave unchecked to run the agent fully unprivileged (recommended). Checking this grants the agent the <strong>CAP_SYS_PTRACE</strong> capability so it can attribute network connections to processes for the Application Map — without full root. Note: this capability also lets the agent read any process’s memory (a credential-theft risk), so enable it only on hosts where you want the service/connection map.</p>' +
       '</div>' +
       '<div class="form-group" id="agent-install-transport-wrap" style="display:none">' +
         '<label>Transport</label>' +
@@ -4992,15 +4994,15 @@ function _openInstallAgentModal(a) {
         showToast("Pick a credential first", "error");
         return; // keep modal open
       }
-      var runAsRoot = os === "linux" && !!(rootCb && rootCb.checked);
-      // Root install is high blast-radius — make the operator confirm.
-      if (runAsRoot) {
+      var wantPtrace = os === "linux" && !!(rootCb && rootCb.checked);
+      // Granting CAP_SYS_PTRACE is a meaningful privilege — make the operator confirm.
+      if (wantPtrace) {
         var ok = await showConfirm(
-          "Install the Polaris Agent as root on this host?\n\n" +
-          "The agent will run with full root privileges instead of the default unprivileged user. " +
-          "This lets it start/stop/restart any service, run automation scripts as root, and read every " +
-          "process's network connections for the Application Map.\n\n" +
-          "Only do this on hosts where you need those capabilities."
+          "Grant the Polaris Agent CAP_SYS_PTRACE on this host?\n\n" +
+          "This lets the agent attribute network connections to processes for the " +
+          "Application Map — without full root. Note that CAP_SYS_PTRACE also lets the " +
+          "agent read any process's memory (a credential-theft risk).\n\n" +
+          "Only do this on hosts where you want the service/connection map."
         );
         if (!ok) return; // keep modal open
       }
@@ -5013,7 +5015,7 @@ function _openInstallAgentModal(a) {
       // Only send scriptId when the picker is visible + has a value (empty
       // catalog / hidden row → let the server apply the per-OS default).
       if (scriptSel && scriptSel.value) body.scriptId = scriptSel.value;
-      if (runAsRoot) body.runAsRoot = true;
+      if (wantPtrace) body.privilegeTier = "ptrace";
       api.assets.installAgent(a.id, body).then(function (r) {
         showToast("Install started — watch progress on the System tab", "success");
         closeModal();
@@ -14530,8 +14532,6 @@ function _wireAssetServicesTab(asset) {
   var svcMapped = new Set();    // mappedServices (Map)
   var procMonitored = new Set(); // monitoredProcesses (Monitor)
   var procMapped = new Set();    // mappedProcesses (Map)
-  var controlAvailable = false;  // agent can actually run Start/Stop/Restart
-                                 // (active agent + root on Linux / any Windows)
 
   function fmtPct(v) { return v == null ? "—" : Number(v).toFixed(1); }
 
@@ -14697,7 +14697,6 @@ function _wireAssetServicesTab(asset) {
     svcRows = (resp && resp.services) || [];
     svcMonitored = new Set((resp && resp.monitoredServices) || []);
     svcMapped = new Set((resp && resp.mappedServices) || []);
-    controlAvailable = !!(resp && resp.serviceControlAvailable);
   }
 
   async function loadProcesses() {
@@ -14706,7 +14705,6 @@ function _wireAssetServicesTab(asset) {
     procConfigs = (resp && resp.configs) || {};
     procMonitored = new Set((resp && resp.monitoredProcesses) || []);
     procMapped = new Set((resp && resp.mappedProcesses) || []);
-    if (resp && typeof resp.serviceControlAvailable === "boolean") controlAvailable = resp.serviceControlAvailable;
     procLoaded = true;
   }
 
@@ -14765,7 +14763,7 @@ function _wireAssetServicesTab(asset) {
         var unit = svcLink.getAttribute("data-svc-unit");
         if (!unit) return;
         var svcRow = svcRows.filter(function (r) { return r.unit === unit; })[0] || null;
-        openServiceDetailPanel(asset, svcRow, controlAvailable);
+        openServiceDetailPanel(asset, svcRow);
         return;
       }
       var procLink = e.target.closest ? e.target.closest(".asset-proc-name-link") : null;
@@ -14774,7 +14772,7 @@ function _wireAssetServicesTab(asset) {
         var name = procLink.getAttribute("data-proc-name");
         if (!name) return;
         var procRow = procRows.filter(function (r) { return r.name === name; })[0] || null;
-        openProcessDetailPanel(asset, name, procConfigs[name] || null, procRow, procMonitored.has(name), controlAvailable);
+        openProcessDetailPanel(asset, name, procConfigs[name] || null, procRow, procMonitored.has(name));
       }
     });
   }
@@ -14813,9 +14811,9 @@ function _wireAssetServicesTab(asset) {
 }
 
 // Per-service detail slide-in — reuses the process detail nested slide-over
-// shell. Phase 1: unit metadata + start/stop/restart control. (journalctl log
-// viewer + ports/connections land in later phases.)
-function openServiceDetailPanel(asset, svc, controlAvailable) {
+// shell. Unit metadata + journalctl log viewer + ports/connections. (Start/stop/
+// restart control was removed — Satellite-posture change.)
+function openServiceDetailPanel(asset, svc) {
   if (!asset || !svc) return;
   _ensureProcPanelDOM();
   var titleEl = document.getElementById("proc-panel-title");
@@ -14828,26 +14826,6 @@ function openServiceDetailPanel(asset, svc, controlAvailable) {
   requestAnimationFrame(function () { document.getElementById("proc-panel-overlay").classList.add("open"); });
   document.getElementById("btn-proc-panel-close-btn").addEventListener("click", _closeProcPanel);
 
-  // Control needs the permission AND an agent that can actually action it —
-  // on Linux that means a root install (controlAvailable=false otherwise). When
-  // blocked only by root, show the buttons DISABLED with an explanatory tooltip
-  // rather than hiding them, so the operator knows the capability exists.
-  var hasPerm = permAtLeast("processControl", "write");
-  var rootBlocked = !!(svc.controllable && hasPerm && controlAvailable === false);
-  var canControl = !!(svc.controllable && hasPerm && controlAvailable !== false);
-  var ctlButtons;
-  if (svc.controllable && hasPerm) {
-    var dis = canControl ? "" : " disabled";
-    var tip = rootBlocked ? ' title="Requires the Polaris Agent to be installed with root privileges on this host"' : "";
-    ctlButtons =
-      '<button class="btn btn-sm btn-secondary svc-ctl-btn" data-action="restart"' + dis + tip + '>Restart</button>' +
-      '<button class="btn btn-sm btn-secondary svc-ctl-btn" data-action="stop"' + dis + tip + '>Stop</button>' +
-      '<button class="btn btn-sm btn-secondary svc-ctl-btn" data-action="start"' + dis + tip + '>Start</button>' +
-      (rootBlocked ? '<span class="hint" style="font-size:0.72rem;color:var(--color-warning);margin-left:6px">Agent not installed as root</span>' : "");
-  } else {
-    ctlButtons = '<span class="hint" style="font-size:0.75rem">' + (svc.controllable ? "Requires the Process Control permission." : "This unit isn’t controllable.") + '</span>';
-  }
-
   function metaRow(label, value) {
     return '<div style="display:flex;justify-content:space-between;gap:12px;padding:0.3rem 0;border-bottom:1px solid var(--color-border)">' +
       '<span style="color:var(--color-text-secondary)">' + label + '</span>' +
@@ -14858,10 +14836,6 @@ function openServiceDetailPanel(asset, svc, controlAvailable) {
 
   bodyEl.innerHTML =
     '<div style="padding:1rem 1.25rem">' +
-      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:0.75rem;padding-bottom:0.6rem;border-bottom:1px solid var(--color-border)">' +
-        '<div style="font-size:0.82rem;color:var(--color-text-secondary)">Control <span id="svc-ctl-status"></span></div>' +
-        '<div style="display:flex;gap:6px">' + ctlButtons + '</div>' +
-      '</div>' +
       '<div style="font-size:0.85rem">' +
         metaRow("Display name", escapeHtml(svc.displayName || "—")) +
         metaRow("Platform", escapeHtml(svc.platform || "—")) +
@@ -14897,11 +14871,6 @@ function openServiceDetailPanel(asset, svc, controlAvailable) {
       '</div>' +
     '</div>';
 
-  if (canControl) {
-    document.querySelectorAll(".svc-ctl-btn").forEach(function (b) {
-      b.addEventListener("click", function () { _runServiceControl(asset.id, svc.unit, b.getAttribute("data-action")); });
-    });
-  }
   var refreshLogs = document.getElementById("btn-svc-logs-refresh");
   if (refreshLogs) refreshLogs.addEventListener("click", function () { _loadServiceLogsFor(asset.id, svc.unit); });
   var flaggedOnly = document.getElementById("svc-logs-flagged-only");
@@ -14941,25 +14910,6 @@ async function _loadServiceLogsFor(assetId, unit) {
   }
 }
 
-// Issue a Stop/Start/Restart for a unit, then poll to completion (reuses the
-// shared process-command status poll — same AgentCommand row). Confirm first.
-async function _runServiceControl(assetId, unit, action) {
-  var verb = action.charAt(0).toUpperCase() + action.slice(1);
-  var ok = await showConfirm(verb + ' "' + unit + '" on this host? This runs against the live service.');
-  if (!ok) return;
-  var statusEl = document.getElementById("svc-ctl-status");
-  if (statusEl) statusEl.textContent = " — " + action + "ing…";
-  try {
-    var resp = await api.assets.controlService(assetId, unit, action);
-    var cmdId = resp && resp.command && resp.command.id;
-    showToast(verb + " requested for " + unit, "success");
-    if (cmdId) _pollProcessCommand(assetId, cmdId, statusEl, 0);
-  } catch (err) {
-    showToast(err.message || "Control request failed", "error");
-    if (statusEl) statusEl.textContent = "";
-  }
-}
-
 // ─── Per-process detail slide-in (nested slide-over) ─────────────────────────
 // CPU/RAM charts (reusing _renderSensorChart) + an editable log-path config +
 // a log viewer. Opened from the Processes-tab name link. Mirrors the interface
@@ -14996,7 +14946,7 @@ function _closeProcPanel() {
   if (ov) ov.classList.remove("open");
 }
 
-async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned, controlAvailable) {
+async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
   if (!asset || !name) return;
   _ensureProcPanelDOM();
   var titleEl = document.getElementById("proc-panel-title");
@@ -15024,27 +14974,13 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned, contr
   var src = c.logSource || "auto";
   function srcOpt(v, label) { return '<option value="' + v + '"' + (src === v ? " selected" : "") + '>' + label + '</option>'; }
 
-  // Process control (Phase 4) — only when the process resolves to a service/
-  // unit AND the operator holds the processControl permission. Buttons confirm
-  // before acting; result polls the command status.
-  var procHasPerm = permAtLeast("processControl", "write");
-  var procControllable = !!(procRow && procRow.controllable && procRow.serviceUnit);
-  var procRootBlocked = !!(procControllable && procHasPerm && controlAvailable === false);
-  var canControl = !!(procControllable && procHasPerm && controlAvailable !== false);
+  // Show the backing service/unit (read-only) when the process resolves to one.
+  // (Start/stop/restart control was removed — Satellite-posture change.)
   var controlBlock = "";
   if (procRow && procRow.serviceUnit) {
-    var pDis = canControl ? "" : " disabled";
-    var pTip = procRootBlocked ? ' title="Requires the Polaris Agent to be installed with root privileges on this host"' : "";
-    var ctlButtons = (procControllable && procHasPerm)
-      ? '<button class="btn btn-sm btn-secondary proc-ctl-btn" data-action="restart"' + pDis + pTip + '>Restart</button>' +
-        '<button class="btn btn-sm btn-secondary proc-ctl-btn" data-action="stop"' + pDis + pTip + '>Stop</button>' +
-        '<button class="btn btn-sm btn-secondary proc-ctl-btn" data-action="start"' + pDis + pTip + '>Start</button>' +
-        (procRootBlocked ? '<span class="hint" style="font-size:0.72rem;color:var(--color-warning);margin-left:6px">Agent not installed as root</span>' : "")
-      : '<span class="hint" style="font-size:0.75rem">' + (procHasPerm ? "" : "Requires the Process Control permission.") + '</span>';
     controlBlock =
-      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:0.75rem;padding-bottom:0.6rem;border-bottom:1px solid var(--color-border)">' +
-        '<div style="font-size:0.82rem;color:var(--color-text-secondary)">Service / unit: <code>' + escapeHtml(procRow.serviceUnit) + '</code> <span id="proc-ctl-status"></span></div>' +
-        '<div style="display:flex;gap:6px">' + ctlButtons + '</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:0.75rem;padding-bottom:0.6rem;border-bottom:1px solid var(--color-border)">' +
+        '<div style="font-size:0.82rem;color:var(--color-text-secondary)">Service / unit: <code>' + escapeHtml(procRow.serviceUnit) + '</code></div>' +
       '</div>';
   }
 
@@ -15130,11 +15066,6 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned, contr
   if (flaggedOnly) flaggedOnly.addEventListener("change", function () { _loadProcessLogsFor(asset.id, name); });
   var manageRules = document.getElementById("btn-proc-flag-rules");
   if (manageRules) manageRules.addEventListener("click", function () { openLogFlagRulesModal(asset, name, function () { _loadProcessLogsFor(asset.id, name); }); });
-  if (canControl) {
-    document.querySelectorAll(".proc-ctl-btn").forEach(function (b) {
-      b.addEventListener("click", function () { _runProcessControl(asset.id, name, b.getAttribute("data-action")); });
-    });
-  }
   var saveCfg = document.getElementById("btn-proc-log-config-save");
   if (saveCfg) {
     saveCfg.addEventListener("click", async function () {
@@ -15181,47 +15112,6 @@ async function _loadProcessHistoryFor(assetId, name, range) {
     cpuEl.textContent = "Error: " + (err.message || "failed to load");
     memEl.textContent = "";
   }
-}
-
-// Phase 4: issue a Stop/Start/Restart for a service-backed process, then poll
-// the command to completion. Confirm first — this acts on the live host.
-async function _runProcessControl(assetId, name, action) {
-  var verb = action.charAt(0).toUpperCase() + action.slice(1);
-  var ok = await showConfirm(verb + ' "' + name + '" on this host? This runs against the live service.');
-  if (!ok) return;
-  var statusEl = document.getElementById("proc-ctl-status");
-  if (statusEl) statusEl.textContent = " — " + action + "ing…";
-  try {
-    var resp = await api.assets.controlProcess(assetId, name, action);
-    var cmdId = resp && resp.command && resp.command.id;
-    showToast(verb + " requested for " + name, "success");
-    if (cmdId) _pollProcessCommand(assetId, cmdId, statusEl, 0);
-  } catch (err) {
-    showToast(err.message || "Control request failed", "error");
-    if (statusEl) statusEl.textContent = "";
-  }
-}
-
-function _pollProcessCommand(assetId, commandId, statusEl, tries) {
-  api.assets.processCommand(assetId, commandId).then(function (r) {
-    var st = r && r.command;
-    if (!st) return;
-    if (st.status === "succeeded") {
-      if (statusEl) statusEl.textContent = " — done" + (st.resultState ? " (" + escapeHtml(st.resultState) + ")" : "");
-      showToast(st.action + " of " + st.target + " succeeded", "success");
-      return;
-    }
-    if (st.status === "failed") {
-      if (statusEl) statusEl.textContent = " — failed";
-      showToast(st.error || (st.action + " failed"), "error");
-      return;
-    }
-    if (tries < 15) {
-      setTimeout(function () { _pollProcessCommand(assetId, commandId, statusEl, tries + 1); }, 2000);
-    } else if (statusEl) {
-      statusEl.textContent = " — still pending (agent may be offline)";
-    }
-  }).catch(function () { /* transient — leave the last status */ });
 }
 
 // Ports & Connections section of the process detail panel (Application Map

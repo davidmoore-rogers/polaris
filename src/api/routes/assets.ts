@@ -54,7 +54,6 @@ import {
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
-import { requestProcessControl, requestServiceControl, getCommandStatus } from "../../services/agentCommandService.js";
 import { getAssetProcessConnections } from "../../services/applicationMapService.js";
 import {
   readIpsecHistory,
@@ -1876,7 +1875,6 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
       where: { id },
       select: {
         monitoredProcesses: true, alertWatchedProcesses: true, mappedProcesses: true,
-        managedAgent: { select: { osPlatform: true, runAsRoot: true, installStatus: true } },
       },
     });
     if (!asset) throw new AppError(404, "Asset not found");
@@ -1909,13 +1907,6 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
       monitoredProcesses:    (asset.monitoredProcesses    ?? []) as string[],
       alertWatchedProcesses: (asset.alertWatchedProcesses ?? []) as string[],
       mappedProcesses:       (asset.mappedProcesses       ?? []) as string[],
-      // Same control-availability signal as /services: process Start/Stop/
-      // Restart runs systemctl against the backing unit, so Linux needs a root
-      // agent. UI grays out the buttons when false.
-      serviceControlAvailable: (() => {
-        const ma = asset.managedAgent;
-        return !!ma && ma.installStatus === "active" && (ma.osPlatform === "windows" || ma.runAsRoot);
-      })(),
     });
   } catch (err) { next(err); }
 });
@@ -1931,7 +1922,6 @@ router.get("/:id/services", requirePermission("assets", "read"), async (req, res
       where: { id },
       select: {
         monitoredServices: true, mappedServices: true,
-        managedAgent: { select: { osPlatform: true, runAsRoot: true, installStatus: true } },
       },
     });
     if (!asset) throw new AppError(404, "Asset not found");
@@ -1939,13 +1929,6 @@ router.get("/:id/services", requirePermission("assets", "read"), async (req, res
       where: { assetId: id },
       orderBy: [{ unit: "asc" }],
     });
-    // Whether Start/Stop/Restart can actually run: needs an active agent, and on
-    // Linux that agent must be root (systemctl control fails for an unprivileged
-    // agent). Windows agents run as LocalSystem, so control always works there.
-    // The UI grays out the control buttons (rather than hiding them) when false.
-    const ma = asset.managedAgent;
-    const serviceControlAvailable = !!ma && ma.installStatus === "active" &&
-      (ma.osPlatform === "windows" || ma.runAsRoot);
     res.json({
       services: rows.map((s) => ({
         unit:         s.unit,
@@ -1962,7 +1945,6 @@ router.get("/:id/services", requirePermission("assets", "read"), async (req, res
       })),
       monitoredServices: (asset.monitoredServices ?? []) as string[],
       mappedServices:    (asset.mappedServices    ?? []) as string[],
-      serviceControlAvailable,
     });
   } catch (err) { next(err); }
 });
@@ -2632,49 +2614,11 @@ router.put("/:id/processes/:name/config", requirePermission("assets", "write"), 
   } catch (err) { next(err); }
 });
 
-// POST /assets/:id/processes/:name/control — Phase 4 process control. Enqueues
-// a Stop/Start/Restart command for a service-backed process. Gated on the
-// dedicated processControl RBAC key (operator-initiated, confirmed client-side,
-// fully audited; the agent never self-acts). Returns the command id to poll.
-const ProcessControlSchema = z.object({ action: z.enum(["stop", "start", "restart"]) });
-router.post("/:id/processes/:name/control", requirePermission("processControl", "write"), async (req, res, next) => {
-  try {
-    const id = req.params.id as string;
-    const name = String(req.params.name);
-    const { action } = ProcessControlSchema.parse(req.body);
-    const cmd = await requestProcessControl(id, name, action, requestActor(req));
-    res.status(202).json({ command: cmd });
-  } catch (err) { next(err); }
-});
-
-// GET /assets/:id/process-command/:commandId — poll a control command's status.
-router.get("/:id/process-command/:commandId", requirePermission("assets", "read"), async (req, res, next) => {
-  try {
-    const status = await getCommandStatus(req.params.id as string, String(req.params.commandId));
-    if (!status) throw new AppError(404, "Command not found");
-    res.json({ command: status });
-  } catch (err) { next(err); }
-});
-
-// POST /assets/:id/services/:unit/control — Start/Stop/Restart a systemd unit /
-// Windows service via the AgentCommand queue. Same posture as process control
-// (processControl RBAC, agent never self-acts, fully audited); the unit lands in
-// AgentCommand.target and the agent runs systemctl / net+sc. A PLAIN :unit param
-// is correct and sufficient: unit names carry dots / @ / : but never "/", and a
-// plain param matches everything within one path segment. (Express 5 /
-// path-to-regexp v8 removed the `:param(regex)` syntax — `:unit(*)` here threw a
-// PathError at route registration and crash-looped polaris-web on boot,
-// prod incident 2026-07-23.) The service lookup + charset validation happen in
-// requestServiceControl. Reuses the shared process-command status poll.
-router.post("/:id/services/:unit/control", requirePermission("processControl", "write"), async (req, res, next) => {
-  try {
-    const id = req.params.id as string;
-    const unit = String(req.params.unit);
-    const { action } = ProcessControlSchema.parse(req.body);
-    const cmd = await requestServiceControl(id, unit, action, requestActor(req));
-    res.status(202).json({ command: cmd });
-  } catch (err) { next(err); }
-});
+// NOTE: process/service start/stop/restart control was removed (Satellite-posture
+// change). The former POST /:id/processes/:name/control, POST /:id/services/:unit/
+// control, and GET /:id/process-command/:commandId routes no longer exist; the
+// agent no longer accepts control actions. Automation script runs stay (they ride
+// the AgentCommand queue with action="run_script").
 
 // POST /api/v1/assets — create (assets admin)
 router.post("/", requirePermission("assets", "write"), async (req, res, next) => {
@@ -4577,9 +4521,10 @@ const BulkAgentInstallSchema = z.object({
     darwin:  z.string().max(100).optional(),
     windows: z.string().max(100).optional(),
   }).partial().optional(),
-  // Install Linux hosts as root (ignored for Windows/darwin). Applies to every
-  // Linux host in the selection.
-  runAsRoot:         z.boolean().optional(),
+  // Linux privilege tier (ignored for Windows/darwin). "ptrace" grants
+  // CAP_SYS_PTRACE for Application Map connection attribution. Applies to every
+  // Linux host in the selection. Full root is no longer selectable.
+  privilegeTier:     z.enum(["unprivileged", "ptrace"]).optional(),
 }).refine((b) => b.sshCredentialId || b.winrmCredentialId, {
   message: "Provide at least one credential (SSH and/or WinRM)",
 });
@@ -4594,7 +4539,7 @@ router.post("/bulk-agent-install", requirePermission("assets", "write"), async (
       winrmCredentialId: input.winrmCredentialId ?? null,
       arch:              input.arch,
       scriptIds:         input.scriptIds,
-      runAsRoot:         input.runAsRoot,
+      privilegeTier:     input.privilegeTier,
       actor,
     });
     res.json(result);
@@ -4623,11 +4568,11 @@ const AgentInstallSchema = z.object({
   // Curated install-method variant id (see agentInstallScripts catalog).
   // Optional — omitted uses the per-OS default. OS-locked server-side.
   scriptId:     z.string().max(100).optional(),
-  // Operator opt-in (Linux only): install the agent as root instead of the
-  // default unprivileged DynamicUser unit. Required for service control, root
-  // automation scripts, and Application Map connection attribution. Ignored on
-  // Windows (LocalSystem) / darwin (LaunchDaemon runs as root).
-  runAsRoot:    z.boolean().optional(),
+  // Linux privilege tier: "unprivileged" (default, hardened DynamicUser unit) or
+  // "ptrace" (unprivileged + CAP_SYS_PTRACE, enabling Application Map connection
+  // attribution without full root). Ignored on Windows (LocalSystem) / darwin
+  // (LaunchDaemon runs as root). Full root is no longer selectable.
+  privilegeTier: z.enum(["unprivileged", "ptrace"]).optional(),
 });
 
 router.get("/:id/agent", requirePermission("assets", "read"), async (req, res, next) => {
@@ -4758,8 +4703,8 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
         installCredentialId:   body.credentialId,
         installTransport:      transport,
         installScriptId:       body.scriptId ?? null,
-        // Root install is a Linux-only concept; never store true for other OSes.
-        runAsRoot:             body.osPlatform === "linux" ? (body.runAsRoot ?? false) : false,
+        // Privilege tier is a Linux-only concept; other OSes stay "unprivileged".
+        privilegeTier:         body.osPlatform === "linux" ? (body.privilegeTier ?? "unprivileged") : "unprivileged",
       },
     });
 
@@ -4876,17 +4821,22 @@ router.post("/:id/agent/reinstall", requirePermission("assets", "write"), async 
     const { revokeBearer } = await import("../../services/agentTokenService.js");
     await revokeBearer(row.id);
 
-    // Optional privilege change on reinstall (Linux only): flip the agent
-    // between the unprivileged and root systemd unit. Ignored on Windows
-    // (LocalSystem). Undefined = keep the current row value.
-    const bodyRunAsRoot = typeof req.body?.runAsRoot === "boolean" ? req.body.runAsRoot : undefined;
-    const nextRunAsRoot = bodyRunAsRoot !== undefined && row.osPlatform === "linux"
-      ? bodyRunAsRoot
-      : row.runAsRoot;
+    // Optional privilege change on reinstall (Linux only). A reinstall can only
+    // produce the unprivileged or ptrace unit — full root is retired, so a legacy
+    // "root" agent DOWNGRADES to unprivileged unless the operator explicitly
+    // picks a tier. Ignored on Windows (LocalSystem).
+    const bodyTier: "unprivileged" | "ptrace" | undefined =
+      (req.body?.privilegeTier === "unprivileged" || req.body?.privilegeTier === "ptrace")
+        ? req.body.privilegeTier : undefined;
+    const nextTier: "unprivileged" | "ptrace" =
+      row.osPlatform !== "linux" ? "unprivileged"
+      : bodyTier !== undefined ? bodyTier
+      : row.privilegeTier === "ptrace" ? "ptrace"
+      : "unprivileged"; // legacy "root" (or already unprivileged) → unprivileged
 
     await prisma.managedAgent.update({
       where: { id: row.id },
-      data:  { installStatus: "pending", installError: null, runAsRoot: nextRunAsRoot },
+      data:  { installStatus: "pending", installError: null, privilegeTier: nextTier },
     });
 
     await logEvent({
@@ -4895,8 +4845,8 @@ router.post("/:id/agent/reinstall", requirePermission("assets", "write"), async 
       resourceId:   assetId,
       actor,
       level:        "info",
-      message:      `Polaris Agent reinstall kicked off (${row.osPlatform}/${row.arch}, ${row.installTransport}${row.osPlatform === "linux" ? (nextRunAsRoot ? ", root" : ", unprivileged") : ""})`,
-      details:      { managedAgentId: row.id, credentialId: row.installCredentialId, runAsRoot: nextRunAsRoot },
+      message:      `Polaris Agent reinstall kicked off (${row.osPlatform}/${row.arch}, ${row.installTransport}${row.osPlatform === "linux" ? ", " + nextTier : ""})`,
+      details:      { managedAgentId: row.id, credentialId: row.installCredentialId, privilegeTier: nextTier },
     });
 
     const { startInstall } = await import("../../services/agentInstallService.js");

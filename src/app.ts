@@ -665,6 +665,11 @@ export async function startApp(): Promise<void> {
   // same port and (in production) the same HTTPS cert their pin verifies.
   const { attachAgentWsUpgradeHandler } = await import("./api/routes/agentsWs.js");
   attachAgentWsUpgradeHandler(httpServer);
+  // Start the cross-process command-wake listener so an enqueued script run
+  // (from any process) can push a "commands-pending" frame to the agent's WS
+  // session held here. Best-effort — agents still poll as the guaranteed floor.
+  const { startCommandWakeListener } = await import("./services/agentChannelService.js");
+  await startCommandWakeListener();
 }
 
 /**
