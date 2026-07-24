@@ -59,6 +59,12 @@
     return typeof permAtLeast === "function" && permAtLeast("applicationMap", "write");
   }
 
+  // Process and service nodes are both compound children of an asset box and
+  // are handled uniformly by the layout / filter passes.
+  function isChildNode(kind) {
+    return kind === "process" || kind === "service";
+  }
+
   // ─── Filters ───────────────────────────────────────────────────────
 
   function currentFilters() {
@@ -90,9 +96,9 @@
     var referenced = {};
     edges.forEach(function (r) { referenced[r.edge.source] = true; referenced[r.edge.target] = true; });
     var nodes = payload.nodes.filter(function (n) {
-      if (n.kind === "asset" || n.kind === "process") {
-        // Resolved-target assets with no mapped processes only matter while
-        // an edge points at them.
+      if (n.kind === "asset" || isChildNode(n.kind)) {
+        // Resolved-target assets with no mapped processes/services only matter
+        // while an edge points at them.
         if (n.kind === "asset" && n.hasMappedProcesses === false) return !!referenced["" + n.id];
         return true;
       }
@@ -109,7 +115,7 @@
     var nodeIds = {};
     nodes.forEach(function (n) { nodeIds[n.id] = true; });
     nodes = nodes.filter(function (n) {
-      return !(n.kind === "process" && n.parent && !nodeIds[n.parent]);
+      return !(isChildNode(n.kind) && n.parent && !nodeIds[n.parent]);
     });
     nodeIds = {};
     nodes.forEach(function (n) { nodeIds[n.id] = true; });
@@ -128,6 +134,7 @@
   function nodeLabel(n) {
     if (n.kind === "asset") return n.hostname || n.ipAddress || n.assetId || "asset";
     if (n.kind === "process") return n.processName || "process";
+    if (n.kind === "service") return n.serviceUnit || "service";
     if (n.kind === "unknown-ip") return n.ip || "?";
     if (n.kind === "unknown-ip-group") return (n.cidr || "?") + "\n" + ((n.ips || []).length) + " hosts";
     if (n.kind === "unknown-overflow") return "+" + (n.overflowCount || 0) + " external";
@@ -151,7 +158,7 @@
         hasIcon: n.iconUrl ? 1 : 0,
       };
       if (n.iconUrl) data.iconUrl = n.iconUrl;
-      if (n.kind === "process" && n.parent) data.parent = n.parent;
+      if (isChildNode(n.kind) && n.parent) data.parent = n.parent;
       els.push({ group: "nodes", data: data });
     });
     g.edges.forEach(function (r) {
@@ -208,6 +215,25 @@
           "background-color": "#7e57c2",
           "border-width": 1.5,
           "border-color": isDark ? "#b39ddb" : "#5e35b1",
+          label: "data(label)",
+          color: "#ffffff",
+          "font-size": "11px",
+          "font-family": "Roboto Mono, monospace",
+          "text-valign": "center",
+          "text-halign": "center",
+        },
+      },
+      // Service child node — teal, to distinguish from process purple.
+      {
+        selector: 'node[kind="service"]',
+        style: {
+          shape: "round-rectangle",
+          width: "label",
+          height: 26,
+          padding: 6,
+          "background-color": "#00897b",
+          "border-width": 1.5,
+          "border-color": isDark ? "#4db6ac" : "#00695c",
           label: "data(label)",
           color: "#ffffff",
           "font-size": "11px",
@@ -287,11 +313,11 @@
   function computeLayout(g) {
     var parentOf = {};
     g.nodes.forEach(function (n) {
-      if (n.kind === "process" && n.parent) parentOf[n.id] = n.parent;
+      if (isChildNode(n.kind) && n.parent) parentOf[n.id] = n.parent;
     });
     var collapsedNodes = {};
     g.nodes.forEach(function (n) {
-      if (n.kind !== "process") collapsedNodes[n.id] = true;
+      if (!isChildNode(n.kind)) collapsedNodes[n.id] = true;
     });
     var collapsedEdges = {};
     g.edges.forEach(function (r) {
@@ -323,12 +349,12 @@
     var positions = {};
     // Plain nodes take the dagre coordinate directly.
     g.nodes.forEach(function (n) {
-      if (n.kind !== "process" && anchor[n.id]) positions[n.id] = anchor[n.id];
+      if (!isChildNode(n.kind) && anchor[n.id]) positions[n.id] = anchor[n.id];
     });
     // Children stack centered on the parent's coordinate.
     var childrenByParent = {};
     g.nodes.forEach(function (n) {
-      if (n.kind !== "process" || !n.parent) return;
+      if (!isChildNode(n.kind) || !n.parent) return;
       (childrenByParent[n.parent] = childrenByParent[n.parent] || []).push(n.id);
     });
     Object.keys(childrenByParent).forEach(function (pid) {
@@ -389,7 +415,7 @@
     var g = filterGraph(f);
 
     if (mappedAssets.length === 0) {
-      showEmpty("No mapped processes yet", null);
+      showEmpty("No mapped processes or services yet", null);
       if (cy) { cy.destroy(); cy = null; }
       setStatus("");
       return;
@@ -418,6 +444,7 @@
     setStatus(
       g.nodes.filter(function (n) { return n.kind === "asset"; }).length + " assets · " +
       payload.stats.processCount + " processes · " +
+      (payload.stats.serviceCount || 0) + " services · " +
       g.edges.length + " connections" +
       (payload.stats.truncated && payload.stats.truncated.unknownIps ? " · " + payload.stats.truncated.unknownIps + " external IPs collapsed" : "")
     );
@@ -517,11 +544,20 @@
         });
         html += "</table>";
       }
+      var svcs = payload.nodes.filter(function (p) { return p.kind === "service" && p.assetId === n.assetId; });
+      if (svcs.length) {
+        html += "<table><tr><th>Mapped service</th><th>Listening</th></tr>";
+        svcs.forEach(function (p) {
+          var lp = (p.listenPorts || []).map(function (x) { return x.proto + "/" + x.port; }).join(", ");
+          html += "<tr><td>" + esc(p.serviceUnit) + "</td><td>" + esc(lp || "—") + "</td></tr>";
+        });
+        html += "</table>";
+      }
       html += '<div class="appmap-info-actions"><button type="button" class="btn btn-secondary" data-open-asset="' + esc(n.assetId) + '">Open asset details</button></div>';
-    } else if (n.kind === "process") {
-      html += "<h3>" + esc(n.processName) + "</h3>";
+    } else if (isChildNode(n.kind)) {
+      html += "<h3>" + esc(n.processName || n.serviceUnit) + "</h3>";
       var owner = findNode("asset:" + n.assetId);
-      html += '<div class="appmap-info-sub">on ' + esc(owner && (owner.hostname || owner.ipAddress) || n.assetId) + "</div>";
+      html += '<div class="appmap-info-sub">' + (n.kind === "service" ? "service" : "process") + " on " + esc(owner && (owner.hostname || owner.ipAddress) || n.assetId) + "</div>";
       var lp2 = (n.listenPorts || []);
       if (lp2.length) {
         html += "<table><tr><th>Listening port</th></tr>";

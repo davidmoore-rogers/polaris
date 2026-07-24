@@ -1723,9 +1723,9 @@ Listed alphabetically.
 
 ## services/applicationMapService.ts
 
-**What it owns:** The Application Map — the connectivity graph built from `AssetProcessConnection` rows (accumulate+age socket facts for mapped processes), the per-asset Ports & Connections DTO, and the shared `ApplicationMapLayout` drag layout (the appmap counterpart of TopologyLayout, one global `view="global"` row, no per-site FK).
+**What it owns:** The Application Map — the connectivity graph built from `AssetProcessConnection` rows (accumulate+age socket facts for mapped processes AND mapped service units), the per-asset Ports & Connections DTO, and the shared `ApplicationMapLayout` drag layout (the appmap counterpart of TopologyLayout, one global `view="global"` row, no per-site FK). Two independent child dimensions per asset: `Asset.mappedProcesses` (by program name → `process` child node) and `Asset.mappedServices` (by owning `unit` → `service` child node). A connection row is attributed to a process child when its `processName` is mapped, to a service child when its `unit` is mapped, or to both. Process and service children both render even with zero connections (they come from the mapped list, not the rows).
 
-**Public API:** buildApplicationMapGraph, buildGraphFromRows (PURE — the unit-tested core), resolveIpsToAssets, getAssetProcessConnections, getAppMapLayout, saveAppMapLayout, deleteAppMapLayout, assetNodeId, processNodeId, isNoiseIp, subnetKeyOf, plus the AppMap* type family.
+**Public API:** buildApplicationMapGraph, buildGraphFromRows (PURE — the unit-tested core), resolveIpsToAssets, getAssetProcessConnections, getAppMapLayout, saveAppMapLayout, deleteAppMapLayout, assetNodeId, processNodeId, serviceNodeId, isNoiseIp, subnetKeyOf, plus the AppMap* type family.
 
 **Cross-service deps:** `prisma.asset` / `prisma.assetAssociatedIp` / `prisma.assetProcessConnection` / `prisma.applicationMapLayout`; `deviceIconService.loadIconResolutionCache/resolveIconUrl` (asset-node icons); `topologyLayoutService.sanitizePositions` (layout validation).
 
@@ -1735,12 +1735,12 @@ Listed alphabetically.
 - `public/js/appmap.js` — the page; `public/js/assets.js` — the process detail panel's Ports & Connections section.
 
 **Invariants:**
-- Node ids are DETERMINISTIC (`asset:<id>`, `proc:<assetId>:<b64url(name)>`, `ip:<ip>`, `ipgroup:<cidr>`) — ApplicationMapLayout blobs and the client's localStorage fallback key on them; changing the id scheme orphans every saved layout.
+- Node ids are DETERMINISTIC (`asset:<id>`, `proc:<assetId>:<b64url(name)>`, `svc:<assetId>:<b64url(unit)>`, `ip:<ip>`, `ipgroup:<cidr>`) — ApplicationMapLayout blobs and the client's localStorage fallback key on them; changing the id scheme orphans every saved layout.
 - `resolveIpsToAssets` consults Asset.ipAddress then AssetAssociatedIp ONLY — AssetIpHistory is deliberately excluded (a rotated-off IP would attribute live traffic to the wrong former holder).
 - Edge dedup: outbound observations win over inbound observations of the same logical connection (`src|dstNode|proto|port` key); one rendered edge per (source, target) with a ≤16-port breakdown.
 - Graph reads are bounded to `lastSeen ≥ now − 7d` — the UI's widest age filter; widening one without the other silently lies.
 - `buildGraphFromRows` stays pure (no prisma) — that's what makes the resolution/dedup/grouping rules testable.
-- **No dangling references reach cytoscape.** `appmap.js:filterGraph` drops any process node whose parent asset isn't in the node set and any edge whose source/target has no node, and `computeLayout` skips collapsed edges to phantom nodes. A dangling ref makes cytoscape-dagre throw `Cannot set properties of null (setting 'hidden')` and fails the WHOLE render — which can happen when connection rows outlive the process/asset that owned them (e.g. a mapped process that stopped running). Keep both guards.
+- **No dangling references reach cytoscape.** `appmap.js:filterGraph` drops any child node (process or service, via `isChildNode`) whose parent asset isn't in the node set and any edge whose source/target has no node, and `computeLayout` skips collapsed edges to phantom nodes. A dangling ref makes cytoscape-dagre throw `Cannot set properties of null (setting 'hidden')` and fails the WHOLE render — which can happen when connection rows outlive the process/asset that owned them (e.g. a mapped process that stopped running). Keep both guards.
 - **Stale pins are recoverable.** A program pinned for Monitor/Map that no longer appears in the live inventory would otherwise have no Services-tab row (hence no checkbox) to un-pin it, and would linger on the map until its connection rows age out (`POLARIS_PROCESS_CONN_RETENTION_DAYS`, default 30). The Services tab's *Include processes* view surfaces such names as muted "not running" rows with their pin checkboxes so the operator can clear them (unmap → connection rows deleted immediately).
 
 **When changing this:**

@@ -24,6 +24,7 @@ vi.mock("../../src/db.js", () => ({ prisma: {} }));
 import {
   buildGraphFromRows,
   processNodeId,
+  serviceNodeId,
   assetNodeId,
   isNoiseIp,
   subnetKeyOf,
@@ -38,14 +39,15 @@ const T1 = new Date("2026-07-21T00:00:00Z");
 function asset(id: string, ip: string, mapped: string[], over: Partial<MappedAssetLite> = {}): MappedAssetLite {
   return {
     id, hostname: `${id}-host`, ipAddress: ip, assetType: "server",
-    monitorStatus: "up", manufacturer: null, model: null, mappedProcesses: mapped,
+    monitorStatus: "up", manufacturer: null, model: null,
+    mappedProcesses: mapped, mappedServices: [],
     ...over,
   };
 }
 
 function row(assetId: string, processName: string, kind: string, proto: string, over: Partial<ProcessConnectionRow> = {}): ProcessConnectionRow {
   return {
-    assetId, processName, kind, proto,
+    assetId, processName, unit: null, kind, proto,
     localAddr: "", localPort: 0, remoteIp: "", remotePort: 0,
     firstSeen: T0, lastSeen: T1,
     ...over,
@@ -218,7 +220,61 @@ describe("buildGraphFromRows", () => {
       row("B", "postgres", "listen", "tcp", { localPort: 5432 }),
     ];
     const g = buildGraphFromRows([web, db], rows, ipMapOf(web, db));
-    expect(g.stats).toMatchObject({ assetCount: 2, processCount: 2, edgeCount: 1, unknownIpCount: 0 });
+    expect(g.stats).toMatchObject({ assetCount: 2, processCount: 2, serviceCount: 0, edgeCount: 1, unknownIpCount: 0 });
+  });
+});
+
+describe("buildGraphFromRows — mapped services (Asset.mappedServices / unit)", () => {
+  it("emits a service child node even when the service has zero connections", () => {
+    const box = asset("S", "10.0.1.1", [], { mappedServices: ["nginx.service"] });
+    const g = buildGraphFromRows([box], [], ipMapOf(box));
+    const svc = g.nodes.find((n) => n.id === serviceNodeId("S", "nginx.service"))!;
+    expect(svc.kind).toBe("service");
+    expect(svc.parent).toBe(assetNodeId("S"));
+    expect(svc.serviceUnit).toBe("nginx.service");
+    expect(g.stats.serviceCount).toBe(1);
+    // The owning asset renders (it's part of the operator's selection).
+    expect(g.nodes.find((n) => n.id === assetNodeId("S"))?.hasMappedProcesses).toBe(true);
+  });
+
+  it("attributes a connection to a service node by its owning unit", () => {
+    const app = asset("A", "10.0.1.2", [], { mappedServices: ["myapp.service"] });
+    const rows = [
+      // Backing process is `java`, NOT mapped as a process — only the unit is.
+      row("A", "java", "outbound", "tcp", { unit: "myapp.service", remoteIp: "8.8.8.8", remotePort: 443 }),
+    ];
+    const g = buildGraphFromRows([app], rows, ipMapOf(app));
+    const e = g.edges[0];
+    expect(e.kind).toBe("external");
+    expect(e.source).toBe(serviceNodeId("A", "myapp.service"));
+    expect(e.target).toBe("ip:8.8.8.8");
+  });
+
+  it("resolves process→service when the destination unit listens on the port", () => {
+    const web = asset("A", "10.0.1.3", ["curl"]);
+    const dbSvc = asset("B", "10.0.1.4", [], { mappedServices: ["postgresql.service"] });
+    const rows = [
+      row("A", "curl", "outbound", "tcp", { remoteIp: "10.0.1.4", remotePort: 5432 }),
+      row("B", "postgres", "listen", "tcp", { unit: "postgresql.service", localPort: 5432 }),
+    ];
+    const g = buildGraphFromRows([web, dbSvc], rows, ipMapOf(web, dbSvc));
+    const e = g.edges.find((x) => x.kind === "process")!;
+    expect(e.source).toBe(processNodeId("A", "curl"));
+    expect(e.target).toBe(serviceNodeId("B", "postgresql.service"));
+    const svc = g.nodes.find((n) => n.id === serviceNodeId("B", "postgresql.service"))!;
+    expect(svc.listenPorts).toEqual([{ proto: "tcp", port: 5432 }]);
+  });
+
+  it("attributes a row to BOTH a process and a service when both are mapped", () => {
+    const box = asset("A", "10.0.1.5", ["java"], { mappedServices: ["myapp.service"] });
+    const rows = [
+      row("A", "java", "outbound", "tcp", { unit: "myapp.service", remoteIp: "9.9.9.9", remotePort: 443 }),
+    ];
+    const g = buildGraphFromRows([box], rows, ipMapOf(box));
+    // One edge from the process node, one from the service node — same peer.
+    expect(g.edges).toHaveLength(2);
+    const sources = g.edges.map((e) => e.source).sort();
+    expect(sources).toEqual([processNodeId("A", "java"), serviceNodeId("A", "myapp.service")].sort());
   });
 });
 

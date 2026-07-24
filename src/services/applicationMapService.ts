@@ -3,10 +3,14 @@
  * per-asset connection reads, and the shared page layout.
  *
  * Data source: AssetProcessConnection (accumulate+age socket facts collected
- * per-minute for MAPPED processes — Asset.mappedProcesses). The graph:
+ * per-minute for MAPPED processes — Asset.mappedProcesses — AND for the units
+ * an operator maps from the Services tab — Asset.mappedServices, matched on the
+ * row's owning `unit`). The graph:
  *
- *   nodes — one compound-parent node per asset with mapped processes, one
- *     child node per mapped process, plus grey "unknown" nodes for external
+ *   nodes — one compound-parent node per asset with mapped processes/services,
+ *     one child node per mapped process AND per mapped service unit (both
+ *     render even with zero connections — they come from the mapped list, not
+ *     from connection rows), plus grey "unknown" nodes for external
  *     IPs (grouped per /24 (v6: /64) when >5 unknowns share the subnet,
  *     hard-capped at 100 after grouping + one overflow node).
  *   edges — outbound rows resolve remoteIp against known assets
@@ -44,11 +48,13 @@ export interface MappedAssetLite {
   manufacturer: string | null;
   model: string | null;
   mappedProcesses: string[];
+  mappedServices: string[];
 }
 
 export interface ProcessConnectionRow {
   assetId: string;
   processName: string;
+  unit: string | null; // owning systemd unit / Windows service, if resolved
   kind: string;   // listen | outbound | inbound
   proto: string;  // tcp | udp
   localAddr: string;
@@ -61,7 +67,7 @@ export interface ProcessConnectionRow {
 
 export interface AppMapNode {
   id: string;
-  kind: "asset" | "process" | "unknown-ip" | "unknown-ip-group" | "unknown-overflow";
+  kind: "asset" | "process" | "service" | "unknown-ip" | "unknown-ip-group" | "unknown-overflow";
   parent?: string;
   assetId?: string;
   hostname?: string | null;
@@ -69,10 +75,12 @@ export interface AppMapNode {
   assetType?: string | null;
   monitorStatus?: string | null;
   iconUrl?: string | null;
-  /** True on asset nodes that have mapped processes of their own (compound
-   * parents); false on assets that appear only as resolved edge targets. */
+  /** True on asset nodes that have mapped processes/services of their own
+   * (compound parents); false on assets that appear only as resolved edge
+   * targets. */
   hasMappedProcesses?: boolean;
   processName?: string;
+  serviceUnit?: string;
   listenPorts?: Array<{ proto: string; port: number }>;
   ip?: string;
   cidr?: string;
@@ -102,6 +110,7 @@ export interface AppMapEdge {
 export interface AppMapStats {
   assetCount: number;
   processCount: number;
+  serviceCount: number;
   unknownIpCount: number;
   edgeCount: number;
   truncated: { unknownIps: number };
@@ -138,6 +147,10 @@ export function assetNodeId(assetId: string): string {
 
 export function processNodeId(assetId: string, processName: string): string {
   return `proc:${assetId}:${Buffer.from(processName, "utf8").toString("base64url")}`;
+}
+
+export function serviceNodeId(assetId: string, unit: string): string {
+  return `svc:${assetId}:${Buffer.from(unit, "utf8").toString("base64url")}`;
 }
 
 // ─── Noise filter ─────────────────────────────────────────────────────
@@ -182,7 +195,7 @@ const ASSET_LITE_SELECT = {
   monitorStatus: true, manufacturer: true, model: true,
 } as const;
 
-export type ResolvedAssetLite = Omit<MappedAssetLite, "mappedProcesses">;
+export type ResolvedAssetLite = Omit<MappedAssetLite, "mappedProcesses" | "mappedServices">;
 
 /**
  * Resolve remote IPs to known assets: primary Asset.ipAddress first, then the
@@ -233,30 +246,48 @@ export function buildGraphFromRows(
   rows: ProcessConnectionRow[],
   ipToAsset: Map<string, ResolvedAssetLite>,
 ): { nodes: AppMapNode[]; edges: AppMapEdge[]; stats: AppMapStats } {
-  const mappedByAsset = new Map(assets.map((a) => [a.id, new Set(a.mappedProcesses)]));
+  const mappedProcByAsset = new Map(assets.map((a) => [a.id, new Set(a.mappedProcesses)]));
+  const mappedSvcByAsset = new Map(assets.map((a) => [a.id, new Set(a.mappedServices)]));
 
-  // Only rows for still-mapped processes participate (rows for a just-unmapped
-  // process are deleted at the PUT, but belt-and-suspenders here too).
-  const liveRows = rows.filter((r) => mappedByAsset.get(r.assetId)?.has(r.processName));
+  // The child nodes a given row is attributed to. A row can satisfy BOTH a
+  // mapped process (by program name) AND a mapped service (by owning unit) —
+  // e.g. a Spring app mapped as the `java` process and as `myapp.service`; it
+  // then shows on both children. Rows matching neither are dropped (rows for a
+  // just-unmapped process/service are deleted at the PUT, but belt-and-
+  // suspenders here too).
+  const ownerNodeIds = (r: ProcessConnectionRow): string[] => {
+    const out: string[] = [];
+    if (mappedProcByAsset.get(r.assetId)?.has(r.processName)) out.push(processNodeId(r.assetId, r.processName));
+    if (r.unit && mappedSvcByAsset.get(r.assetId)?.has(r.unit)) out.push(serviceNodeId(r.assetId, r.unit));
+    return out;
+  };
+  const liveRows = rows.filter((r) => ownerNodeIds(r).length > 0);
 
-  // Listen index: assetId → "proto/port" → processName. Also per-process
-  // listen-port lists for the node payload.
-  const listenIndex = new Map<string, Map<string, string>>();
-  const listenPortsByProc = new Map<string, Array<{ proto: string; port: number }>>();
+  // Listen index: assetId → "proto/port" → set of listening child-node ids
+  // (a port can be attributed to a process node AND a service node). Also
+  // per-child listen-port lists for the node payload.
+  const listenIndex = new Map<string, Map<string, Set<string>>>();
+  const listenPortsByNode = new Map<string, Array<{ proto: string; port: number }>>();
   for (const r of liveRows) {
     if (r.kind !== "listen") continue;
     let m = listenIndex.get(r.assetId);
     if (!m) { m = new Map(); listenIndex.set(r.assetId, m); }
-    if (!m.has(`${r.proto}/${r.localPort}`)) m.set(`${r.proto}/${r.localPort}`, r.processName);
-    const pk = processNodeId(r.assetId, r.processName);
-    let list = listenPortsByProc.get(pk);
-    if (!list) { list = []; listenPortsByProc.set(pk, list); }
-    if (!list.some((p) => p.proto === r.proto && p.port === r.localPort)) {
-      list.push({ proto: r.proto, port: r.localPort });
+    const key = `${r.proto}/${r.localPort}`;
+    let set = m.get(key);
+    if (!set) { set = new Set(); m.set(key, set); }
+    for (const nodeId of ownerNodeIds(r)) {
+      set.add(nodeId);
+      let list = listenPortsByNode.get(nodeId);
+      if (!list) { list = []; listenPortsByNode.set(nodeId, list); }
+      if (!list.some((p) => p.proto === r.proto && p.port === r.localPort)) {
+        list.push({ proto: r.proto, port: r.localPort });
+      }
     }
   }
+  const sortedPorts = (nodeId: string): Array<{ proto: string; port: number }> =>
+    (listenPortsByNode.get(nodeId) ?? []).sort((x, y) => x.proto.localeCompare(y.proto) || x.port - y.port);
 
-  // ─ Nodes: mapped assets (compound parents) + their process children ─
+  // ─ Nodes: mapped assets (compound parents) + process/service children ─
   const nodes: AppMapNode[] = [];
   const nodeIds = new Set<string>();
   const pushNode = (n: AppMapNode): void => {
@@ -265,6 +296,7 @@ export function buildGraphFromRows(
     nodes.push(n);
   };
   let processCount = 0;
+  let serviceCount = 0;
   for (const a of assets) {
     pushNode({
       id: assetNodeId(a.id), kind: "asset", assetId: a.id,
@@ -275,10 +307,17 @@ export function buildGraphFromRows(
       const pid = processNodeId(a.id, name);
       pushNode({
         id: pid, kind: "process", parent: assetNodeId(a.id), assetId: a.id,
-        processName: name,
-        listenPorts: (listenPortsByProc.get(pid) ?? []).sort((x, y) => x.proto.localeCompare(y.proto) || x.port - y.port),
+        processName: name, listenPorts: sortedPorts(pid),
       });
       processCount++;
+    }
+    for (const unit of a.mappedServices) {
+      const sid = serviceNodeId(a.id, unit);
+      pushNode({
+        id: sid, kind: "service", parent: assetNodeId(a.id), assetId: a.id,
+        serviceUnit: unit, listenPorts: sortedPorts(sid),
+      });
+      serviceCount++;
     }
   }
   // Resolved-target assets that have no mapped processes of their own get a
@@ -329,41 +368,53 @@ export function buildGraphFromRows(
     if (lastSeen.getTime() > acc.lastSeen) acc.lastSeen = lastSeen.getTime();
   };
 
-  // Pass 1: outbound rows.
+  // Pass 1: outbound rows. Each row has ≥1 source child node (process and/or
+  // service); a resolved destination can have >1 listening child node on the
+  // port (process + service both attributed) — draw an edge per (source,
+  // listener) pair.
   for (const r of liveRows) {
     if (r.kind !== "outbound" || !r.remoteIp || isNoiseIp(r.remoteIp)) continue;
-    const srcProc = processNodeId(r.assetId, r.processName);
+    const sources = ownerNodeIds(r);
     const target = ipToAsset.get(r.remoteIp);
     if (target) {
-      const listener = listenIndex.get(target.id)?.get(`${r.proto}/${r.remotePort}`);
-      if (target.id === r.assetId && listener === r.processName) continue; // same-process self-loop
-      const targetNode = listener
-        ? processNodeId(target.id, listener)
-        : ensureTargetAsset(target);
-      // Materialize the compound parent even for process-level targets (it
-      // always exists — listener implies a mapped asset — but be safe).
-      addEdge(srcProc, targetNode, listener ? "process" : "asset", r.proto, r.remotePort, r.firstSeen, r.lastSeen);
-      outboundKeys.add(`${r.assetId}|${targetNode}|${r.proto}|${r.remotePort}`);
+      const listeners = listenIndex.get(target.id)?.get(`${r.proto}/${r.remotePort}`);
+      for (const srcNode of sources) {
+        if (listeners && listeners.size > 0) {
+          for (const listenerNode of listeners) {
+            if (target.id === r.assetId && listenerNode === srcNode) continue; // same-node self-loop
+            addEdge(srcNode, listenerNode, "process", r.proto, r.remotePort, r.firstSeen, r.lastSeen);
+            outboundKeys.add(`${r.assetId}|${listenerNode}|${r.proto}|${r.remotePort}`);
+          }
+        } else {
+          const targetNode = ensureTargetAsset(target);
+          addEdge(srcNode, targetNode, "asset", r.proto, r.remotePort, r.firstSeen, r.lastSeen);
+          outboundKeys.add(`${r.assetId}|${targetNode}|${r.proto}|${r.remotePort}`);
+        }
+      }
     } else {
       unknownConnCount.set(r.remoteIp, (unknownConnCount.get(r.remoteIp) ?? 0) + 1);
-      addEdge(srcProc, `ip:${r.remoteIp}`, "external", r.proto, r.remotePort, r.firstSeen, r.lastSeen);
+      for (const srcNode of sources) {
+        addEdge(srcNode, `ip:${r.remoteIp}`, "external", r.proto, r.remotePort, r.firstSeen, r.lastSeen);
+      }
     }
   }
 
   // Pass 2: inbound rows — reverse-direction edges, deduped against outbound
   // observations of the same logical connection (outbound wins: it knows the
-  // source process; the inbound side only knows the peer IP).
+  // source child node; the inbound side only knows the peer IP).
   for (const r of liveRows) {
     if (r.kind !== "inbound" || !r.remoteIp || isNoiseIp(r.remoteIp)) continue;
-    const dstProc = processNodeId(r.assetId, r.processName);
+    const dsts = ownerNodeIds(r);
     const peer = ipToAsset.get(r.remoteIp);
-    if (peer) {
-      if (outboundKeys.has(`${peer.id}|${dstProc}|${r.proto}|${r.localPort}`)) continue;
-      if (peer.id === r.assetId) continue; // self-connection seen from the listen side
-      addEdge(ensureTargetAsset(peer), dstProc, "asset", r.proto, r.localPort, r.firstSeen, r.lastSeen);
-    } else {
-      unknownConnCount.set(r.remoteIp, (unknownConnCount.get(r.remoteIp) ?? 0) + 1);
-      addEdge(`ip:${r.remoteIp}`, dstProc, "external-inbound", r.proto, r.localPort, r.firstSeen, r.lastSeen);
+    if (!peer) unknownConnCount.set(r.remoteIp, (unknownConnCount.get(r.remoteIp) ?? 0) + 1);
+    for (const dstNode of dsts) {
+      if (peer) {
+        if (outboundKeys.has(`${peer.id}|${dstNode}|${r.proto}|${r.localPort}`)) continue;
+        if (peer.id === r.assetId) continue; // self-connection seen from the listen side
+        addEdge(ensureTargetAsset(peer), dstNode, "asset", r.proto, r.localPort, r.firstSeen, r.lastSeen);
+      } else {
+        addEdge(`ip:${r.remoteIp}`, dstNode, "external-inbound", r.proto, r.localPort, r.firstSeen, r.lastSeen);
+      }
     }
   }
 
@@ -465,6 +516,7 @@ export function buildGraphFromRows(
     stats: {
       assetCount: nodes.filter((n) => n.kind === "asset").length,
       processCount,
+      serviceCount,
       unknownIpCount: kept.length,
       edgeCount: edges.length,
       truncated: { unknownIps: dropped.length },
@@ -476,14 +528,14 @@ export function buildGraphFromRows(
 
 export async function buildApplicationMapGraph(): Promise<AppMapGraph> {
   const assets: MappedAssetLite[] = await prisma.asset.findMany({
-    where: { mappedProcesses: { isEmpty: false } },
-    select: { ...ASSET_LITE_SELECT, mappedProcesses: true },
+    where: { OR: [{ mappedProcesses: { isEmpty: false } }, { mappedServices: { isEmpty: false } }] },
+    select: { ...ASSET_LITE_SELECT, mappedProcesses: true, mappedServices: true },
   });
   const since = new Date(Date.now() - GRAPH_WINDOW_MS);
   const rows: ProcessConnectionRow[] = assets.length === 0 ? [] : await prisma.assetProcessConnection.findMany({
     where: { assetId: { in: assets.map((a) => a.id) }, lastSeen: { gte: since } },
     select: {
-      assetId: true, processName: true, kind: true, proto: true,
+      assetId: true, processName: true, unit: true, kind: true, proto: true,
       localAddr: true, localPort: true, remoteIp: true, remotePort: true,
       firstSeen: true, lastSeen: true,
     },
