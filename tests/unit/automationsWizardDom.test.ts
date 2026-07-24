@@ -172,20 +172,25 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector("#aw-trig-root .tgl-threshold")).toBeTruthy();
     expect(doc.querySelector("#aw-trig-root .scr-row .aw-grip[draggable='true']")).toBeTruthy();
 
-    // Enable multi-severity → single dropdown hides, the severity-levels panel
-    // (base severity + tiers) appears. Adding a tier reveals the notify policy.
+    // Enable multi-severity → single dropdown hides; the base severity select +
+    // a "+ Severity" button are injected INTO the condition group header/buttons.
     multiCb.checked = true;
     multiCb.dispatchEvent(new win.Event("change", { bubbles: true }));
     expect((doc.querySelector("#aw-single-sev-wrap") as unknown as { style: { display: string } }).style.display).toBe("none");
-    expect(doc.querySelector("#aw-bands-section")).toBeTruthy();
-    expect(doc.querySelector("#aw-band-base-sev")).toBeTruthy();
+    expect(doc.querySelector("#aw-trig-root .scg-group .scg-sev")).toBeTruthy();   // base severity in the group header
+    const addSev = doc.querySelector("#aw-trig-root .scg-group .scg-add-sev");
+    expect(addSev).toBeTruthy();                                                   // + Severity next to +Condition/+Group
     expect((doc.querySelector("#aw-band-notify") as unknown as { style: { display: string } }).style.display).toBe("none");
-    (doc.querySelector("#aw-band-add") as unknown as { click: () => void }).click();
+
+    // Clicking + Severity adds a tier GROUP block: severity header + a condition
+    // row (locked metric, editable operator/value) + its own + Severity.
+    (addSev as unknown as { click: () => void }).click();
     const band = doc.querySelector("#aw-bands .aw-band")!;
     expect(band).toBeTruthy();
-    expect(band.querySelector(".band-copy")).toBeTruthy(); // copy-actions-from affordance
-    expect(band.querySelector(".band-op")).toBeTruthy();    // per-tier operator
-    (band.querySelector(".band-threshold") as unknown as { value: string }).value = "95";
+    expect(band.querySelector(".band-severity")).toBeTruthy();
+    expect(band.querySelector(".band-add-sev")).toBeTruthy();                      // per-tier + Severity
+    expect((band.querySelector(".band-cond .tgl-what") as unknown as { disabled: boolean }).disabled).toBe(true); // metric locked
+    (band.querySelector(".band-cond .tgl-threshold") as unknown as { value: string }).value = "95"; // editable value
     (band.querySelector(".band-severity") as unknown as { value: string }).value = "critical";
     expect((doc.querySelector("#aw-band-notify") as unknown as { style: { display: string } }).style.display).toBe("block");
     expect((doc.querySelector("#aw-bn-increase") as unknown as { checked: boolean }).checked).toBe(true);
