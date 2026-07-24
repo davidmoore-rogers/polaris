@@ -170,7 +170,8 @@
 }
 
 .appmap-legend-asset   { background: rgba(79, 195, 247, 0.15); border: 1.5px solid #4fc3f7; }
-.appmap-legend-proc    { background: #7e57c2; border-radius: 50%; }
+.appmap-legend-proc    { background: #7e57c2; }
+.appmap-legend-service { background: #00897b; }
 .appmap-legend-unknown { background: #9e9e9e; border: 1.5px dashed #757575; }
 
 .appmap-legend-line {

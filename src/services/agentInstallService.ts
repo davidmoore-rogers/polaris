@@ -675,6 +675,11 @@ async function runUninstall(input: StartUninstallInput): Promise<void> {
   // polling to resume per the source default. Operators can re-pick a
   // specific method on the Monitoring tab if they want a different
   // post-uninstall config.
+  // Removing the agent also tears the host off the Application Map: clear the
+  // map pins (mappedProcesses/mappedServices) + null processesPolling +
+  // delete its connection facts. Nothing collects those once the agent is gone,
+  // and the pinned process/service child nodes would otherwise render on the
+  // map indefinitely (they come from the pins, not the connection rows).
   await prisma.$transaction([
     prisma.managedAgent.delete({ where: { id: managedAgentId } }),
     prisma.asset.update({
@@ -686,8 +691,12 @@ async function runUninstall(input: StartUninstallInput): Promise<void> {
         interfacesPolling:   null,
         lldpPolling:         null,
         storagePolling:      null,
+        processesPolling:    null,
+        mappedProcesses:     [],
+        mappedServices:      [],
       },
     }),
+    prisma.assetProcessConnection.deleteMany({ where: { assetId: row.assetId } }),
   ]);
   await logEvent({
     action:       "agent.uninstalled",

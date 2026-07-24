@@ -29,6 +29,7 @@
   var refreshTimer = null;
   var saveTimer = null;
   var selectedId = null;
+  var searchFocusId = null;   // when set, the map is narrowed to this node + its connections
 
   document.addEventListener("DOMContentLoaded", async function () {
     if (!document.getElementById("appmap-graph")) return; // not this page
@@ -74,6 +75,7 @@
       tcp: !!(document.getElementById("appmap-proto-tcp") || {}).checked,
       udp: !!(document.getElementById("appmap-proto-udp") || {}).checked,
       hideExternal: !!(document.getElementById("appmap-hide-external") || {}).checked,
+      focusId: searchFocusId,
     };
   }
 
@@ -93,9 +95,30 @@
       if (f.hideExternal && (isUnknownId(e.source) || isUnknownId(e.target))) continue;
       edges.push({ edge: e, ports: ports });
     }
+
+    // Search focus: narrow to one node + its connections. "core" = the focus
+    // node, plus (if the focus is an asset box) its own child nodes, since an
+    // asset's connections flow through its processes/services. Keep only edges
+    // touching core; the visible set is core + those edges' endpoints + the
+    // parent asset boxes of any visible child node (so compound boxes render).
+    var focusVisible = null;
+    if (f.focusId) {
+      var core = {};
+      core[f.focusId] = true;
+      payload.nodes.forEach(function (n) { if (n.parent === f.focusId) core[n.id] = true; });
+      edges = edges.filter(function (r) { return core[r.edge.source] || core[r.edge.target]; });
+      focusVisible = {};
+      Object.keys(core).forEach(function (id) { focusVisible[id] = true; });
+      edges.forEach(function (r) { focusVisible[r.edge.source] = true; focusVisible[r.edge.target] = true; });
+      payload.nodes.forEach(function (n) {
+        if (focusVisible[n.id] && isChildNode(n.kind) && n.parent) focusVisible[n.parent] = true;
+      });
+    }
+
     var referenced = {};
     edges.forEach(function (r) { referenced[r.edge.source] = true; referenced[r.edge.target] = true; });
     var nodes = payload.nodes.filter(function (n) {
+      if (focusVisible && !focusVisible[n.id]) return false; // search focus wins over the keep-all rules
       if (n.kind === "asset" || isChildNode(n.kind)) {
         // Resolved-target assets with no mapped processes/services only matter
         // while an edge points at them.
@@ -159,6 +182,11 @@
       };
       if (n.iconUrl) data.iconUrl = n.iconUrl;
       if (isChildNode(n.kind) && n.parent) data.parent = n.parent;
+      // Data-driven width for child (process/service) nodes: size the box to the
+      // label so long unit names (e.g. "truckscale-central.service") aren't
+      // clipped. cytoscape's width:"label" mis-measures when the monospace
+      // webfont isn't loaded yet; ~7.6px/char at 11px mono + padding is safe.
+      if (isChildNode(n.kind)) data.w = Math.max(46, Math.round(String(data.label).length * 7.6) + 20);
       els.push({ group: "nodes", data: data });
     });
     g.edges.forEach(function (r) {
@@ -209,7 +237,7 @@
         selector: 'node[kind="process"]',
         style: {
           shape: "round-rectangle",
-          width: "label",
+          width: "data(w)",
           height: 26,
           padding: 6,
           "background-color": "#7e57c2",
@@ -228,7 +256,7 @@
         selector: 'node[kind="service"]',
         style: {
           shape: "round-rectangle",
-          width: "label",
+          width: "data(w)",
           height: 26,
           padding: 6,
           "background-color": "#00897b",
@@ -475,14 +503,20 @@
       layout: { name: "preset", positions: function (n) { return positions[n.id()] || undefined; }, fit: true, padding: 40 },
     });
     wireGraphEvents();
-    populateSearchList(g);
-    setStatus(
-      g.nodes.filter(function (n) { return n.kind === "asset"; }).length + " assets · " +
-      payload.stats.processCount + " processes · " +
-      (payload.stats.serviceCount || 0) + " services · " +
-      g.edges.length + " connections" +
-      (payload.stats.truncated && payload.stats.truncated.unknownIps ? " · " + payload.stats.truncated.unknownIps + " external IPs collapsed" : "")
-    );
+    populateSearchList();
+    if (searchFocusId) {
+      var focusNodeObj = findNode(searchFocusId);
+      var focusLabel = focusNodeObj ? nodeLabel(focusNodeObj).split("\n")[0] : searchFocusId;
+      setStatus("Focused on “" + focusLabel + "” · " + g.edges.length + " connection(s) — clear the search box to show the full map");
+    } else {
+      setStatus(
+        g.nodes.filter(function (n) { return n.kind === "asset"; }).length + " assets · " +
+        payload.stats.processCount + " processes · " +
+        (payload.stats.serviceCount || 0) + " services · " +
+        g.edges.length + " connections" +
+        (payload.stats.truncated && payload.stats.truncated.unknownIps ? " · " + payload.stats.truncated.unknownIps + " external IPs collapsed" : "")
+      );
+    }
     if (selectedId) {
       var sel = cy.getElementById(selectedId);
       if (sel && sel.length) sel.select();
@@ -688,27 +722,29 @@
 
     var search = document.getElementById("appmap-search");
     if (search) {
-      search.addEventListener("change", function () { focusByLabel(search.value); });
+      search.addEventListener("change", function () { applySearch(search.value); });
       search.addEventListener("keydown", function (ev) {
-        if (ev.key === "Enter") focusByLabel(search.value);
+        if (ev.key === "Enter") applySearch(search.value);
       });
     }
   }
 
-  function populateSearchList(g) {
+  // Datalist suggestions always reflect the FULL graph (not the focus-narrowed
+  // view) so the operator can search for any node while a focus is active.
+  function populateSearchList() {
     var list = document.getElementById("appmap-search-list");
-    if (!list) return;
+    if (!list || !payload) return;
     list.innerHTML = "";
-    g.nodes.forEach(function (n) {
+    payload.nodes.forEach(function (n) {
       var opt = document.createElement("option");
       opt.value = nodeLabel(n).split("\n")[0];
       list.appendChild(opt);
     });
   }
 
-  function focusByLabel(q) {
-    if (!cy || !q) return;
-    q = q.trim().toLowerCase();
+  function findNodeByQuery(q) {
+    q = (q || "").trim().toLowerCase();
+    if (!q) return null;
     var hit = null;
     payload.nodes.some(function (n) {
       var label = nodeLabel(n).split("\n")[0].toLowerCase();
@@ -716,7 +752,22 @@
       if (label.indexOf(q) >= 0 || ip.indexOf(q) >= 0) { hit = n; return true; }
       return false;
     });
-    if (!hit) return;
+    return hit;
+  }
+
+  // Search narrows the map to the matched node + its connections (and clears
+  // to the full map on an empty box). An empty match leaves the current view.
+  function applySearch(q) {
+    if (!payload) return;
+    var trimmed = (q || "").trim();
+    if (!trimmed) {
+      if (searchFocusId !== null) { searchFocusId = null; render(capturePositions()); }
+      return;
+    }
+    var hit = findNodeByQuery(trimmed);
+    if (!hit) { setStatus("No node matches “" + trimmed + "”"); return; }
+    searchFocusId = hit.id;
+    render(capturePositions());
     focusNode(hit.id);
   }
 

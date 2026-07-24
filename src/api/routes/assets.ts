@@ -4910,7 +4910,10 @@ router.delete("/:id/agent", requirePermission("assets", "write"), async (req, re
       // (operator's choice when ?force=true); the bearer is dead so it
       // can't talk to Polaris. Also clear the *Polling fields back to
       // null so the periodic puller resumes per the source default —
-      // mirrors what runUninstall does on the non-force path.
+      // mirrors what runUninstall does on the non-force path. Removing the
+      // agent also tears the host off the Application Map: clear the map
+      // pins + delete its connection facts (nothing collects them anymore,
+      // and the pinned child nodes would otherwise render forever).
       await prisma.$transaction([
         prisma.managedAgent.delete({ where: { id: row.id } }),
         prisma.asset.update({
@@ -4922,8 +4925,12 @@ router.delete("/:id/agent", requirePermission("assets", "write"), async (req, re
             interfacesPolling:   null,
             lldpPolling:         null,
             storagePolling:      null,
+            processesPolling:    null,
+            mappedProcesses:     [],
+            mappedServices:      [],
           },
         }),
+        prisma.assetProcessConnection.deleteMany({ where: { assetId } }),
       ]);
       await logEvent({
         action:       "agent.force_removed",
