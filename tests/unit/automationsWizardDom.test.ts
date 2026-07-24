@@ -199,10 +199,25 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector("#aw-esc-tiers .aw-tier")).toBeFalsy();
     expect((doc.querySelector("#aw-esc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
 
+    // Severity bands: the single-leaf trigger collapsed to an asset_metric, so
+    // the band editor is present. Adding a tier reveals the notify policy.
+    expect(doc.querySelector("#aw-bands-section")).toBeTruthy();
+    expect((doc.querySelector("#aw-band-notify") as unknown as { style: { display: string } }).style.display).toBe("none");
+    (doc.querySelector("#aw-band-add") as unknown as { click: () => void }).click();
+    const band = doc.querySelector("#aw-bands .aw-band")!;
+    expect(band).toBeTruthy();
+    expect(band.querySelector(".band-copy")).toBeTruthy(); // copy-actions-from affordance
+    (band.querySelector(".band-threshold") as unknown as { value: string }).value = "95";
+    (band.querySelector(".band-severity") as unknown as { value: string }).value = "critical";
+    expect((doc.querySelector("#aw-band-notify") as unknown as { style: { display: string } }).style.display).toBe("block");
+    expect((doc.querySelector("#aw-bn-increase") as unknown as { checked: boolean }).checked).toBe(true);
+    expect((doc.querySelector("#aw-bn-decrease") as unknown as { checked: boolean }).checked).toBe(false);
+
     (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(doc.querySelector("#aw-step-6.visible")).toBeTruthy();
     expect(doc.querySelector("#aw-summary")).toBeTruthy();
+    expect(doc.querySelector("#aw-summary")!.textContent).toContain("critical"); // band in summary
     const affected = doc.querySelector("#aw-affected")!;
     expect(affected.textContent).toContain("3"); // stubbed preview totalEvaluated
     expect(toastErrors).toEqual([]);

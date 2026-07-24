@@ -1385,7 +1385,8 @@ async function openAutomationWizard(existing) {
         '<div id="aw-esc-config" style="display:none;margin-bottom:6px"><label style="font-size:0.8rem">Stop escalating when</label><select id="aw-esc-stopon"><option value="acknowledge"' + (esc && esc.stopOn === "acknowledge" ? " selected" : "") + '>Acknowledged (or cleared)</option><option value="clear"' + (esc && esc.stopOn === "clear" ? " selected" : "") + '>Cleared only — acknowledging does not stop it</option></select></div>' +
         '<div id="aw-esc-tiers"></div>' +
         '<button type="button" class="btn btn-sm btn-secondary" id="aw-esc-add" style="margin-top:6px">+ Add escalation</button>' +
-      '</div>';
+      '</div>' +
+      bandsSectionHtml();
 
     var host = panel.querySelector("#aw-actions");
     (draft.actions || []).forEach(function (a) { addActionRow(host, a); });
@@ -1409,7 +1410,142 @@ async function openAutomationWizard(existing) {
       addActionRow(row.querySelector(".tier-actions"), null);
       _escSyncFn();
     });
+    wireBandsSection(panel);
     wireTokenPalette(panel);
+  }
+
+  // ── Severity bands (numeric single-metric triggers) ────────────────────────
+  function bandsSectionHtml() {
+    if (!bandsApplicable(draft.trigger)) return "";
+    var tr = draft.trigger;
+    var opPhrase = ((s.comparatorPhrases || {})[tr.operator]) || tr.operator;
+    var base = 'Base tier: severity <strong>' + escapeHtml(draft.severity) + '</strong> when the value ' + escapeHtml(opPhrase) + ' <strong>' + escapeHtml(String(tr.threshold != null ? tr.threshold : "?")) + '</strong> (the actions above). Add higher tiers to escalate severity as the value climbs.';
+    return '<div class="form-group" id="aw-bands-section" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
+      '<label style="font-weight:600;margin:0 0 4px;display:block">Severity bands (optional)</label>' +
+      '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">' + base + '</p>' +
+      '<div id="aw-bands"></div>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="aw-band-add" style="margin-top:4px">+ Add severity tier</button>' +
+      '<div id="aw-band-notify" style="display:none;margin-top:10px;border-top:1px solid var(--color-border);padding-top:8px">' +
+        '<label style="font-weight:600;font-size:0.82rem;display:block;margin:0 0 4px">Notify on</label>' +
+        '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-increase" checked> Severity increase (re-notify with the new band’s actions)</label>' +
+        '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-decrease"> Severity decrease (run the lower band’s actions)</label>' +
+        '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-resolved" checked> Resolved (below the base tier)</label>' +
+        '<div id="aw-bn-resolved-wrap" style="margin:6px 0 0 1.2rem">' +
+          '<label style="font-size:0.8rem">Resolved actions</label> ' +
+          '<select id="aw-bn-resolved-mode" style="width:auto"><option value="reuse">Reuse the alert’s actions</option><option value="dedicated">Run dedicated actions</option></select>' +
+          '<div id="aw-bn-resolved-actions" style="margin-top:6px;display:none"></div>' +
+          '<button type="button" class="btn btn-sm btn-secondary" id="aw-bn-resolved-add" style="margin-top:4px;display:none">+ Add resolved action</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+  function bandSeverityOptions(sel) {
+    return (s.severities || []).map(function (sv) {
+      return '<option value="' + sv + '"' + (sv === sel ? " selected" : "") + '>' + escapeHtml(sv) + '</option>';
+    }).join("");
+  }
+  function wireBandsSection(panel) {
+    var section = panel.querySelector("#aw-bands-section");
+    if (!section) return; // not a numeric single-metric trigger
+    var bandsHost = panel.querySelector("#aw-bands");
+    (draft.severityBands || []).forEach(function (b) { addBandRow(bandsHost, b); });
+    var notifyBox = panel.querySelector("#aw-band-notify");
+    var syncNotify = function () { notifyBox.style.display = bandsHost.querySelectorAll(".aw-band").length ? "block" : "none"; };
+    panel.querySelector("#aw-band-add").addEventListener("click", function () {
+      if (bandsHost.querySelectorAll(".aw-band").length >= 4) { showToast("At most 4 severity bands", "info"); return; }
+      addBandRow(bandsHost, null);
+      syncNotify();
+    });
+    // Notify policy state.
+    var bn = draft.bandNotify || {};
+    panel.querySelector("#aw-bn-increase").checked = bn.onIncrease !== false;
+    panel.querySelector("#aw-bn-decrease").checked = bn.onDecrease === true;
+    panel.querySelector("#aw-bn-resolved").checked = bn.onResolved !== false;
+    var modeSel = panel.querySelector("#aw-bn-resolved-mode");
+    modeSel.value = bn.resolvedMode === "dedicated" ? "dedicated" : "reuse";
+    var resActionsHost = panel.querySelector("#aw-bn-resolved-actions");
+    var resAddBtn = panel.querySelector("#aw-bn-resolved-add");
+    var syncResolved = function () {
+      var on = panel.querySelector("#aw-bn-resolved").checked;
+      var dedicated = on && modeSel.value === "dedicated";
+      panel.querySelector("#aw-bn-resolved-wrap").style.display = on ? "block" : "none";
+      resActionsHost.style.display = dedicated ? "block" : "none";
+      resAddBtn.style.display = dedicated ? "inline-block" : "none";
+    };
+    (bn.resolvedActions || []).forEach(function (a) { addActionRow(resActionsHost, a); });
+    panel.querySelector("#aw-bn-resolved").addEventListener("change", syncResolved);
+    modeSel.addEventListener("change", syncResolved);
+    resAddBtn.addEventListener("click", function () { addActionRow(resActionsHost, null); });
+    syncNotify();
+    syncResolved();
+  }
+  function addBandRow(host, band) {
+    band = band || { threshold: "", severity: "", actions: [] };
+    var row = document.createElement("div");
+    row.className = "aw-band";
+    row.style.cssText = "border:1px solid var(--color-border);border-radius:6px;padding:0.6rem;margin-bottom:6px";
+    var op = (draft.trigger && draft.trigger.operator) || ">=";
+    row.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">' +
+        '<label style="margin:0;font-size:0.8rem;font-weight:600">When value ' + escapeHtml(op) + '</label>' +
+        '<input type="number" class="band-threshold" value="' + escapeHtml(band.threshold != null ? String(band.threshold) : "") + '" style="width:90px" step="any">' +
+        '<label style="margin:0;font-size:0.8rem">→ severity</label>' +
+        '<select class="band-severity" style="width:auto">' + bandSeverityOptions(band.severity) + '</select>' +
+        '<select class="band-copy" style="width:auto" title="Copy actions from another tier"><option value="">Copy actions from…</option></select>' +
+        '<button type="button" class="btn btn-sm btn-danger band-remove" style="margin-left:auto">Remove tier</button>' +
+      '</div>' +
+      '<details><summary style="font-size:0.8rem;cursor:pointer">Actions for this band</summary><div style="margin-top:6px"><div class="band-actions"></div>' +
+        '<button type="button" class="btn btn-sm btn-secondary band-add-action" style="margin-top:4px">+ Add action</button></div></details>' +
+      '<details><summary style="font-size:0.8rem;cursor:pointer">Escalation for this band</summary><div style="margin-top:6px"><div class="band-esc"></div>' +
+        '<button type="button" class="btn btn-sm btn-secondary band-add-esc" style="margin-top:4px">+ Add escalation</button></div></details>';
+    host.appendChild(row);
+    var actionsHost = row.querySelector(".band-actions");
+    (band.actions || []).forEach(function (a) { addActionRow(actionsHost, a); });
+    row.querySelector(".band-add-action").addEventListener("click", function () { addActionRow(actionsHost, null); });
+    var escHost = row.querySelector(".band-esc");
+    ((band.escalation && band.escalation.tiers) || []).forEach(function (t) { addTierRow(escHost, t); });
+    row.querySelector(".band-add-esc").addEventListener("click", function () {
+      var r = addTierRow(escHost, null);
+      addActionRow(r.querySelector(".tier-actions"), null);
+    });
+    row.querySelector(".band-remove").addEventListener("click", function () {
+      row.remove();
+      var panel = document.getElementById("aw-step-5");
+      var notifyBox = panel.querySelector("#aw-band-notify");
+      if (notifyBox) notifyBox.style.display = panel.querySelectorAll("#aw-bands .aw-band").length ? "block" : "none";
+    });
+    // Copy-actions-from affordance: clone another tier's collected actions.
+    var copySel = row.querySelector(".band-copy");
+    copySel.addEventListener("focus", function () { refreshBandCopyOptions(copySel, row); });
+    copySel.addEventListener("change", function () {
+      if (!copySel.value) return;
+      var src = resolveCopySource(copySel.value, row);
+      if (src) { collectActionsFrom(src).forEach(function (a) { addActionRow(actionsHost, a); }); }
+      copySel.value = "";
+    });
+    return row;
+  }
+  function refreshBandCopyOptions(sel, selfRow) {
+    var panel = document.getElementById("aw-step-5");
+    var opts = ['<option value="">Copy actions from…</option>', '<option value="base">Base tier actions</option>'];
+    var bands = Array.prototype.slice.call(panel.querySelectorAll("#aw-bands .aw-band"));
+    bands.forEach(function (b, i) {
+      if (b === selfRow) return;
+      var sv = b.querySelector(".band-severity").value || ("tier " + (i + 1));
+      opts.push('<option value="band:' + i + '">' + escapeHtml(sv) + ' band actions</option>');
+    });
+    sel.innerHTML = opts.join("");
+  }
+  function resolveCopySource(val, selfRow) {
+    var panel = document.getElementById("aw-step-5");
+    if (val === "base") return panel.querySelector("#aw-actions");
+    if (val.indexOf("band:") === 0) {
+      var idx = Number(val.slice(5));
+      var bands = panel.querySelectorAll("#aw-bands .aw-band");
+      var b = bands[idx];
+      return b && b !== selfRow ? b.querySelector(".band-actions") : null;
+    }
+    return null;
   }
 
   // ── Step 6: Summary + affected devices ─────────────────────────────────
@@ -1743,14 +1879,11 @@ async function openAutomationWizard(existing) {
     return row;
   }
 
-  function collectStep5() {
-    var panel = document.getElementById("aw-step-5");
-    var host = panel.querySelector("#aw-actions");
-    if (!host) return;
-    draft.actions = collectActionsFrom(host);
-    // Escalation exists iff at least one escalation row does — no toggle.
+  // Collect escalation-tier rows from a host (shared by the base escalation and
+  // each severity band's escalation).
+  function collectTierRows(host) {
     var tiers = [];
-    panel.querySelectorAll("#aw-esc-tiers .aw-tier").forEach(function (row) {
+    host.querySelectorAll(":scope > .aw-tier").forEach(function (row) {
       var t = { afterMin: Number(row.querySelector(".tier-after").value) || 0, actions: collectActionsFrom(row.querySelector(".tier-actions")) };
       var rep = row.querySelector(".tier-repeat").value;
       if (rep !== "") {
@@ -1760,10 +1893,51 @@ async function openAutomationWizard(existing) {
       }
       tiers.push(t);
     });
+    return tiers;
+  }
+  function collectStep5() {
+    var panel = document.getElementById("aw-step-5");
+    var host = panel.querySelector("#aw-actions");
+    if (!host) return;
+    draft.actions = collectActionsFrom(host);
+    // Escalation exists iff at least one escalation row does — no toggle.
+    var tiers = collectTierRows(panel.querySelector("#aw-esc-tiers"));
     draft.escalation = tiers.length
       ? { stopOn: panel.querySelector("#aw-esc-stopon").value, tiers: tiers }
       : null;
+    collectBands(panel);
   }
+  // Severity bands + notify policy (numeric single-metric triggers only).
+  function collectBands(panel) {
+    if (!bandsApplicable(draft.trigger)) { draft.severityBands = null; draft.bandNotify = null; return; }
+    var bandsHost = panel.querySelector("#aw-bands");
+    if (!bandsHost) return; // section not rendered
+    var bands = [];
+    bandsHost.querySelectorAll(":scope > .aw-band").forEach(function (row) {
+      var thr = row.querySelector(".band-threshold").value;
+      var band = {
+        threshold: thr !== "" && !isNaN(Number(thr)) ? Number(thr) : null,
+        severity: row.querySelector(".band-severity").value,
+        actions: collectActionsFrom(row.querySelector(".band-actions")),
+      };
+      var escTiers = collectTierRows(row.querySelector(".band-esc"));
+      if (escTiers.length) band.escalation = { stopOn: "acknowledge", tiers: escTiers };
+      bands.push(band);
+    });
+    draft.severityBands = bands.length ? bands : null;
+    if (!bands.length) { draft.bandNotify = null; return; }
+    var np = {
+      onIncrease: panel.querySelector("#aw-bn-increase").checked,
+      onDecrease: panel.querySelector("#aw-bn-decrease").checked,
+      onResolved: panel.querySelector("#aw-bn-resolved").checked,
+      resolvedMode: panel.querySelector("#aw-bn-resolved-mode").value,
+    };
+    if (np.onResolved && np.resolvedMode === "dedicated") {
+      np.resolvedActions = collectActionsFrom(panel.querySelector("#aw-bn-resolved-actions"));
+    }
+    draft.bandNotify = np;
+  }
+  function bandsApplicable(tr) { return !!tr && (tr.type === "asset_metric" || tr.type === "host_metric"); }
   function validateAction(a, label) {
     if (a.type === "notify") {
       if (!a.channelId) return label + ": pick a channel.";
@@ -1797,6 +1971,30 @@ async function openAutomationWizard(existing) {
           if (p2) return p2;
         }
         if (t.repeatEveryMin != null && (isNaN(t.repeatEveryMin) || t.repeatEveryMin < 5)) return "Escalation tier " + tn + ": repeat interval must be 5 minutes or more.";
+      }
+    }
+    // Severity bands: threshold present + actions valid (ordering is enforced
+    // server-side against the base severity + operator).
+    if (bandsApplicable(draft.trigger) && draft.severityBands) {
+      for (var b = 0; b < draft.severityBands.length; b++) {
+        var band = draft.severityBands[b]; var bn = "Severity band " + (b + 1);
+        if (band.threshold == null || isNaN(band.threshold)) return bn + ": enter a numeric threshold.";
+        if (!band.severity) return bn + ": pick a severity.";
+        for (var ba = 0; ba < (band.actions || []).length; ba++) {
+          var pb = validateAction(band.actions[ba], bn + ", action " + (ba + 1));
+          if (pb) return pb;
+        }
+        var betiers = (band.escalation && band.escalation.tiers) || [];
+        for (var be = 0; be < betiers.length; be++) {
+          if (!betiers[be].actions.length) return bn + ", escalation " + (be + 1) + ": add at least one action (or remove it).";
+        }
+      }
+      if (draft.bandNotify && draft.bandNotify.onResolved && draft.bandNotify.resolvedMode === "dedicated") {
+        var ra = draft.bandNotify.resolvedActions || [];
+        for (var r = 0; r < ra.length; r++) {
+          var pr = validateAction(ra[r], "Resolved action " + (r + 1));
+          if (pr) return pr;
+        }
       }
     }
     return null;
@@ -1833,12 +2031,21 @@ async function openAutomationWizard(existing) {
     var escLine = draft.escalation && draft.escalation.tiers && draft.escalation.tiers.length
       ? draft.escalation.tiers.length + " tier(s), stops on " + (draft.escalation.stopOn === "clear" ? "clear" : "acknowledge")
       : "off";
+    var bandsRow = "";
+    if (bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length) {
+      var op = (draft.trigger && draft.trigger.operator) || ">=";
+      var bandLine = draft.severityBands.map(function (b) { return escapeHtml(b.severity + " " + op + " " + b.threshold); }).join(", ");
+      var np = draft.bandNotify || {};
+      var notifyBits = [np.onIncrease !== false ? "increase" : null, np.onDecrease ? "decrease" : null, np.onResolved !== false ? "resolved" : null].filter(Boolean).join(" + ");
+      bandsRow = '<dt>Severity bands</dt><dd>' + bandLine + ' <span style="color:var(--color-text-tertiary)">— notify on ' + escapeHtml(notifyBits || "none") + '</span></dd>';
+    }
     box.innerHTML = '<dl class="review-grid">' +
       '<dt>Name</dt><dd>' + escapeHtml(draft.name || "…") + ' <span class="badge badge-level-' + (draft.severity || "warning") + '">' + escapeHtml((draft.severity || "warning").toUpperCase()) + '</span>' + (draft.enabled === false ? ' <span class="badge">disabled</span>' : "") + '</dd>' +
       '<dt>Devices</dt><dd>' + escapeHtml(scopeSummaryText(draft.scope)) + '</dd>' +
       '<dt>Trigger</dt><dd>' + triggerSentence(draft.trigger) + '</dd>' +
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
       '<dt>Actions</dt><dd>' + (actionLines.length ? actionLines.join("<br>") : '<span style="color:var(--color-text-tertiary)">in-app alert only</span>') + '</dd>' +
+      bandsRow +
       '<dt>Escalation</dt><dd>' + escapeHtml(escLine) + '</dd>' +
     '</dl>';
   }
@@ -1951,6 +2158,8 @@ async function openAutomationWizard(existing) {
       channels: ["in_app"],
       emailComposition: null, // per-action composition in v2; rule-level field retired by the wizard
       escalation: draft.escalation,
+      severityBands: bandsApplicable(draft.trigger) ? (draft.severityBands || null) : null,
+      bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
     };
     this.disabled = true;
     try {
@@ -2018,5 +2227,7 @@ function _awDraftFromRule(r) {
     messageTemplate: r.messageTemplate != null ? r.messageTemplate : null,
     actions: JSON.parse(JSON.stringify(Array.isArray(r.actions) ? r.actions : [])),
     escalation: esc ? JSON.parse(JSON.stringify(esc)) : null,
+    severityBands: Array.isArray(r.severityBands) && r.severityBands.length ? JSON.parse(JSON.stringify(r.severityBands)) : null,
+    bandNotify: r.bandNotify ? JSON.parse(JSON.stringify(r.bandNotify)) : null,
   };
 }
