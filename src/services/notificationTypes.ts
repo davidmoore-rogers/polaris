@@ -1025,10 +1025,12 @@ export interface RuleInput {
   bandNotify: BandNotify | null;
 }
 
-/** Preview input = RuleInput with trigger optional (scope-only preview mode). */
+/** Preview input = RuleInput with trigger optional (scope-only preview mode).
+ *  `id` (when editing) lets the carve-out preview exclude the rule itself. */
 export type PreviewRuleInput = Omit<RuleInput, "trigger" | "name"> & {
   name: string;
   trigger?: Trigger;
+  id?: string;
 };
 
 /** clearBehavior/clearAfterSec → v2 reset. Also sanitizes a provided reset:
@@ -1242,9 +1244,12 @@ export const previewInputSchema = ruleInputBaseSchema
   .extend({
     name: z.string().min(1).max(200).default("Draft automation"),
     trigger: triggerSchema.optional(),
+    // When editing, the rule's own id so the carve-out preview excludes itself.
+    id: z.string().max(100).optional(),
   })
   .transform((raw): PreviewRuleInput => ({
     trigger: raw.trigger ? collapseCompositeTrigger(raw.trigger) : undefined,
+    id: raw.id,
     ...normalizeRuleInputCore(raw),
   }))
   .superRefine(validateRuleV2);

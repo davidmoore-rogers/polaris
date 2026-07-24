@@ -8,8 +8,8 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { buildShadowIndex, isAssetShadowed } from "../../src/services/notificationEngine.js";
-import { triggerSignature, scopeRank } from "../../src/services/notificationTypes.js";
+import { buildShadowIndex, isAssetShadowed, carveOutAggregate, type CarveOutPeer } from "../../src/services/notificationEngine.js";
+import { triggerSignature, scopeRank, SCOPE_RANK } from "../../src/services/notificationTypes.js";
 import type { ScopeAsset } from "../../src/services/notificationRuleService.js";
 
 const tempTrigger = { type: "asset_metric", metric: "hwSensorValue", operator: ">=", threshold: 80, aggregation: "latest", windowSec: 0, forDurationSec: 0 };
@@ -85,5 +85,42 @@ describe("isAssetShadowed", () => {
     const inSubnet: ScopeAsset = { ...a101f, assetType: "firewall", ipAddress: "10.0.0.5" };
     expect(shadowed(idx2, byType, inSubnet)).toBe(true); // subnet (7) > assetType (1)
     expect(shadowed(idx2, bySubnet, inSubnet)).toBe(false);
+  });
+});
+
+describe("carveOutAggregate (preview, both directions)", () => {
+  const a101f: ScopeAsset = { id: "101f", hostname: "fortigate-101f", assetType: "firewall", tags: [], discoveredByIntegrationId: null };
+  const sw: ScopeAsset = { id: "sw1", hostname: "switch-1", assetType: "switch", tags: [], discoveredByIntegrationId: null };
+  const hostnamePeer: CarveOutPeer = { id: "spec", name: "Specific 101f", scope: { condition: { op: "and", children: [{ field: "hostname", operator: "equals", value: "fortigate-101f" }] } } as any, rank: SCOPE_RANK.hostname };
+  const allPeer: CarveOutPeer = { id: "gen", name: "General", scope: { allAssets: true }, rank: SCOPE_RANK.allAssets };
+
+  it("direction 1: a general draft is carved out by a higher-rank peer (per-asset + summary)", () => {
+    const { excludedBy, summary } = carveOutAggregate(SCOPE_RANK.allAssets, [a101f, sw], [hostnamePeer]);
+    expect(excludedBy.get("101f")).toEqual({ ruleId: "spec", ruleName: "Specific 101f" });
+    expect(excludedBy.has("sw1")).toBe(false);
+    expect(summary.carvedOut).toEqual({ count: 1, byRule: [{ ruleId: "spec", ruleName: "Specific 101f", count: 1 }] });
+    expect(summary.carvesFrom).toBeUndefined();
+  });
+
+  it("direction 2: a specific draft warns which lower-rank peers it carves from", () => {
+    const { excludedBy, summary } = carveOutAggregate(SCOPE_RANK.hostname, [a101f], [allPeer]);
+    expect(excludedBy.size).toBe(0);
+    expect(summary.carvedOut).toBeUndefined();
+    expect(summary.carvesFrom).toEqual([{ ruleId: "gen", ruleName: "General", count: 1, sampleHostnames: ["fortigate-101f"] }]);
+  });
+
+  it("same-rank peers carve neither direction (ties both fire)", () => {
+    const tie: CarveOutPeer = { ...allPeer, rank: SCOPE_RANK.allAssets };
+    const { excludedBy, summary } = carveOutAggregate(SCOPE_RANK.allAssets, [a101f, sw], [tie]);
+    expect(excludedBy.size).toBe(0);
+    expect(summary).toEqual({});
+  });
+
+  it("attributes an asset to its HIGHEST-rank coverer", () => {
+    const subnetPeer: CarveOutPeer = { id: "sub", name: "By subnet", scope: { subnetCidrs: ["10.0.0.0/24"] }, rank: SCOPE_RANK.subnet };
+    const inBoth: ScopeAsset = { ...a101f, ipAddress: "10.0.0.5" };
+    // hostname (8) beats subnet (7)
+    const { excludedBy } = carveOutAggregate(SCOPE_RANK.allAssets, [inBoth], [subnetPeer, hostnamePeer]);
+    expect(excludedBy.get("101f")).toEqual({ ruleId: "spec", ruleName: "Specific 101f" });
   });
 });

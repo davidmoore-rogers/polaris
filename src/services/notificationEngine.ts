@@ -1560,6 +1560,21 @@ export interface PreviewMatch {
   }>;
   /** Composite drafts only — "k of n conditions met". */
   conditionsSummary?: string;
+  /** Severity bands: the severity this value lands in (null = below tier 0). */
+  severity?: string | null;
+  /** Precedence: a more-specific same-trigger automation already covers this
+   *  asset, so the draft won't alert on it. */
+  excludedBy?: { ruleId: string; ruleName: string };
+}
+
+/** Precedence carve-out summary for a draft (both authoring directions). */
+export interface CarveOutSummary {
+  /** Direction 1 — assets carved OUT of this (more-general) draft by existing
+   *  higher-rank same-trigger automations. */
+  carvedOut?: { count: number; byRule: { ruleId: string; ruleName: string; count: number }[] };
+  /** Direction 2 — existing lower-rank same-trigger automations this (more-
+   *  specific) draft will remove assets FROM. */
+  carvesFrom?: { ruleId: string; ruleName: string; count: number; sampleHostnames: string[] }[];
 }
 
 export interface PreviewResult {
@@ -1569,6 +1584,84 @@ export interface PreviewResult {
   matches: PreviewMatch[];
   /** Rendered sample of the composed email (first match), when the draft has emailComposition. */
   emailPreview?: { subject: string; text: string; html?: string };
+  /** Precedence carve-out (present only for asset_metric/asset_state drafts). */
+  carveOut?: CarveOutSummary;
+}
+
+/** A same-signature peer rule for carve-out computation. */
+export interface CarveOutPeer {
+  id: string;
+  name: string;
+  scope: RuleScope;
+  rank: number;
+}
+
+/** Pure carve-out aggregation: given the draft's rank, the assets its scope
+ *  matches, and the same-signature peer rules, compute per-asset excludedBy
+ *  (direction 1) + the summary (dir 1 + dir 2). No DB access — unit-testable. */
+export function carveOutAggregate(
+  draftRank: number,
+  scopeAssets: ScopeAsset[],
+  peers: CarveOutPeer[],
+): { excludedBy: Map<string, { ruleId: string; ruleName: string }>; summary: CarveOutSummary } {
+  const excludedBy = new Map<string, { ruleId: string; ruleName: string }>();
+  const higher = peers.filter((o) => o.rank > draftRank);
+  const lower = peers.filter((o) => o.rank < draftRank);
+
+  // Direction 1: assets a higher-rank same-signature rule already covers — the
+  // draft won't alert on them. Attribute each to its highest-rank coverer.
+  const byRule = new Map<string, { ruleName: string; count: number }>();
+  for (const a of scopeAssets) {
+    let best: CarveOutPeer | null = null;
+    for (const o of higher) {
+      if (scopeMatchesAsset(o.scope, a) && (!best || o.rank > best.rank)) best = o;
+    }
+    if (best) {
+      excludedBy.set(a.id, { ruleId: best.id, ruleName: best.name });
+      const e = byRule.get(best.id) ?? { ruleName: best.name, count: 0 };
+      e.count++;
+      byRule.set(best.id, e);
+    }
+  }
+
+  // Direction 2: lower-rank rules this (more-specific) draft will carve assets
+  // from — the authoring warning "creating this removes N devices from X".
+  const carvesFrom: NonNullable<CarveOutSummary["carvesFrom"]> = [];
+  for (const o of lower) {
+    const hit = scopeAssets.filter((a) => scopeMatchesAsset(o.scope, a));
+    if (hit.length) {
+      carvesFrom.push({ ruleId: o.id, ruleName: o.name, count: hit.length, sampleHostnames: hit.slice(0, 5).map((a) => a.hostname ?? a.id) });
+    }
+  }
+
+  const summary: CarveOutSummary = {};
+  if (excludedBy.size) {
+    summary.carvedOut = { count: excludedBy.size, byRule: Array.from(byRule.entries()).map(([ruleId, v]) => ({ ruleId, ruleName: v.ruleName, count: v.count })) };
+  }
+  if (carvesFrom.length) summary.carvesFrom = carvesFrom;
+  return { excludedBy, summary };
+}
+
+/** Compute the precedence carve-out for a draft against the other enabled
+ *  same-signature rules (both authoring directions): fetch peers, delegate to
+ *  the pure carveOutAggregate. */
+async function computeCarveOut(
+  input: PreviewRuleInput,
+  scopeAssets: ScopeAssetRow[],
+): Promise<{ excludedBy: Map<string, { ruleId: string; ruleName: string }>; summary: CarveOutSummary }> {
+  const sig = input.trigger ? triggerSignature(input.trigger) : null;
+  if (!sig || scopeAssets.length === 0) return { excludedBy: new Map(), summary: {} };
+
+  const others = await prisma.notificationRule.findMany({
+    where: { enabled: true, ...(input.id ? { id: { not: input.id } } : {}) },
+    select: { id: true, name: true, trigger: true, scope: true },
+  });
+  const peers: CarveOutPeer[] = others
+    .filter((o) => triggerSignature(o.trigger as unknown as Trigger) === sig)
+    .map((o) => ({ id: o.id, name: o.name, scope: (o.scope ?? {}) as RuleScope, rank: scopeRank((o.scope ?? {}) as RuleScope) }));
+  if (peers.length === 0) return { excludedBy: new Map(), summary: {} };
+
+  return carveOutAggregate(scopeRank(input.scope), scopeAssets, peers);
 }
 
 /** Dry-run a draft rule against current data with NO writes. A draft without
@@ -1597,37 +1690,48 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
     return previewCompositeRule(trigger, input);
   }
 
+  let scopeAssets: ScopeAssetRow[] = [];
   if (trigger.type === "host_metric") {
     const r = await resolveHostMetricReading(trigger);
     readings = r ? [r] : [];
   } else if (trigger.type === "asset_metric") {
-    const assets = await loadScopeAssets(input.scope);
-    readings = await resolveAssetMetricReadings(trigger, assets);
+    scopeAssets = await loadScopeAssets(input.scope);
+    readings = await resolveAssetMetricReadings(trigger, scopeAssets);
   } else if (trigger.type === "asset_state") {
-    const assets = await loadScopeAssets(input.scope);
-    readings = await resolveAssetStateReadings(trigger, assets);
+    scopeAssets = await loadScopeAssets(input.scope);
+    readings = await resolveAssetStateReadings(trigger, scopeAssets);
   } else {
     return { supported: false, note: "Event and change rules fire on new audit events; there's nothing to preview against current data.", totalEvaluated: 0, matches: [] };
   }
 
+  // Severity bands: the tier a value lands in (numeric triggers only).
+  const banded = !!(input.severityBands && input.severityBands.length) && (trigger.type === "asset_metric" || trigger.type === "host_metric");
+  const bandSevOf = (v: number | string | boolean | null): string | null =>
+    banded && (trigger.type === "asset_metric" || trigger.type === "host_metric")
+      ? severityForValue(trigger.operator, trigger.threshold, input.severity as Severity, input.severityBands as SeverityBand[], typeof v === "number" ? v : null)
+      : null;
+
   const showHysteresis = input.reset.mode === "auto" && input.reset.clearThreshold != null;
   const matches: PreviewMatch[] = readings.map((r) => {
     const meets = readingMeets(trigger, r.value);
-    if (!showHysteresis) {
-      return { assetId: r.assetId || null, hostname: r.hostname, dimension: r.dimLabel, value: r.value, meets };
+    const base: PreviewMatch = { assetId: r.assetId || null, hostname: r.hostname, dimension: r.dimLabel, value: r.value, meets };
+    if (banded) base.severity = bandSevOf(r.value);
+    if (showHysteresis) {
+      const wouldClear = recoveredMeets(trigger, input.reset, r.value);
+      base.wouldClear = wouldClear;
+      base.inDeadBand = !meets && !wouldClear;
     }
-    const wouldClear = recoveredMeets(trigger, input.reset, r.value);
-    return {
-      assetId: r.assetId || null,
-      hostname: r.hostname,
-      dimension: r.dimLabel,
-      value: r.value,
-      meets,
-      wouldClear,
-      inDeadBand: !meets && !wouldClear,
-    };
+    return base;
   });
   matches.sort((a, b) => Number(b.meets) - Number(a.meets));
+
+  // Precedence carve-out (both authoring directions) for asset-scoped drafts.
+  const { excludedBy, summary: carveOut } = await computeCarveOut(input, scopeAssets);
+  if (excludedBy.size) {
+    for (const m of matches) {
+      if (m.assetId && excludedBy.has(m.assetId)) m.excludedBy = excludedBy.get(m.assetId);
+    }
+  }
 
   // Rendered sample of the composed email against the best reading (first
   // matching, else first evaluated) — templates only, no recipient resolution.
@@ -1655,7 +1759,13 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
     emailPreview = { subject: composed.subject, text: composed.text, html: composed.html };
   }
 
-  return { supported: true, totalEvaluated: readings.length, matches: matches.slice(0, 200), emailPreview };
+  return {
+    supported: true,
+    totalEvaluated: readings.length,
+    matches: matches.slice(0, 200),
+    emailPreview,
+    ...(carveOut.carvedOut || carveOut.carvesFrom ? { carveOut } : {}),
+  };
 }
 
 /** Composite dry-run: one PreviewMatch per asset with a per-leaf breakdown
