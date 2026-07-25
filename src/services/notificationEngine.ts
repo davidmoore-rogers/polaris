@@ -1138,12 +1138,21 @@ function bandSeverityFor(rule: DbRule, value: number | null): string | null {
   return severityForValue(t.operator, t.threshold, rule.severity as Severity, rule.severityBands as SeverityBand[] | null, value);
 }
 
-/** The actions + escalation for a resolved severity (base tier for the base
- *  severity, else the matching band; fallback to tier 0). */
+/** The actions + escalation for a resolved severity. A band uses its OWN
+ *  actions/escalation when it carries any, else falls back to the base tier's
+ *  (severity tiers usually carry none — the alert re-notifies with the base
+ *  Actions-step actions + base escalation at the tier's severity). */
 export function tierForSeverity(rule: DbRule, severity: string): EffectiveTier {
   if (severity !== rule.severity) {
     const band = (rule.severityBands ?? []).find((b) => b.severity === severity);
-    if (band) return { severity, actions: band.actions, escalation: normalizeEscalationToV2(band.escalation) };
+    if (band) {
+      const bandEsc = normalizeEscalationToV2(band.escalation);
+      return {
+        severity,
+        actions: band.actions && band.actions.length ? band.actions : rule.actions,
+        escalation: bandEsc ?? rule.escalation,
+      };
+    }
   }
   return { severity: rule.severity, actions: rule.actions, escalation: rule.escalation };
 }

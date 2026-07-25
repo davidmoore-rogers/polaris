@@ -1594,6 +1594,7 @@ async function openAutomationWizard(existing) {
         draft.severity = sel.value;
         sel.className = "scg-sev sev-select sev-" + sel.value;
         applySevAccent(panel);
+        syncBandAddButtons(panel);
       });
     }
     if (btnRow && !existingAdd) {
@@ -1606,17 +1607,12 @@ async function openAutomationWizard(existing) {
       btnRow.appendChild(b);
     }
     root.style.borderLeftColor = sevColor(draft.severity || "warning");
+    syncBandAddButtons(panel);
   }
   function syncBandNotify(panel) {
     var box = panel.querySelector("#aw-band-notify");
     var host = panel.querySelector("#aw-bands");
     if (box && host) box.style.display = host.querySelectorAll(".aw-band").length ? "block" : "none";
-  }
-  function bandLockedHint() {
-    var tr = draft.trigger || {};
-    var m = tr.metric ? metricLabel(tr.metric) : "same metric";
-    var agg = tr.aggregation && tr.aggregation !== "latest" ? (escapeHtml(tr.aggregation) + " over " + (tr.windowSec || 0) + "s") : "latest";
-    return escapeHtml(m) + " · " + agg;
   }
   // Default severity for a NEW tier: one rank above the most-severe existing
   // tier (or the base) — enforces the "only increase severity" rule.
@@ -1641,23 +1637,22 @@ async function openAutomationWizard(existing) {
       threshold: band.threshold != null && band.threshold !== "" ? band.threshold : null,
       dimensionFilter: tr.dimensionFilter,
     };
+    var panel = document.getElementById("aw-step-3");
     var row = document.createElement("div");
     row.className = "aw-band scg-group";
     row.style.cssText = "border:1px solid var(--color-border);border-left:3px solid " + sevColor(sev0) + ";border-radius:6px;padding:0.55rem;margin:4px 0";
+    // A tier is just: severity + the (locked-metric) condition + "+ Severity".
+    // It carries NO per-tier actions/escalation — the alert re-notifies with the
+    // base (Actions-step) actions + base escalation at the tier's severity.
     row.innerHTML =
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap">' +
         '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' +
         sevSelectHtml("band-severity", sev0) +
-        '<select class="band-copy" style="width:auto" title="Copy actions from another tier"><option value="">Copy actions from…</option></select>' +
         '<button type="button" class="btn btn-sm btn-danger band-remove" title="Remove severity" style="margin-left:auto">&times;</button>' +
       '</div>' +
       '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
       '<div class="band-cond scg-children">' + tgLeafRowHtml(tierLeaf, kind) + '</div>' +
-      '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>' +
-      '<details><summary style="font-size:0.8rem;cursor:pointer">Actions for this severity</summary><div style="margin-top:6px"><div class="band-actions"></div>' +
-        '<button type="button" class="btn btn-sm btn-secondary band-add-action" style="margin-top:4px">+ Add action</button></div></details>' +
-      '<details><summary style="font-size:0.8rem;cursor:pointer">Escalation for this severity</summary><div style="margin-top:6px"><div class="band-esc"></div>' +
-        '<button type="button" class="btn btn-sm btn-secondary band-add-esc" style="margin-top:4px">+ Add escalation</button></div></details>';
+      '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>';
     host.appendChild(row);
     // Lock the shared-sampling fields on the tier's condition row — metric,
     // aggregation, window, dimensions — so only operator + value are editable.
@@ -1665,7 +1660,7 @@ async function openAutomationWizard(existing) {
     cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-window, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
     var grip = cond.querySelector(".aw-grip"); if (grip) grip.style.display = "none";
     var rmCond = cond.querySelector(".scr-remove"); if (rmCond) rmCond.style.display = "none";
-    row.querySelector(".band-add-sev").addEventListener("click", function () { addBandRow(host, null); syncBandNotify(document.getElementById("aw-step-3")); });
+    row.querySelector(".band-add-sev").addEventListener("click", function () { addBandRow(host, null); syncBandNotify(panel); });
     // Per-tier accent + "only increase severity" guard: a tier can't be set at
     // or below the tier before it (or the base).
     var sevSel = row.querySelector(".band-severity");
@@ -1680,51 +1675,26 @@ async function openAutomationWizard(existing) {
       }
       sevSel.className = "band-severity sev-select sev-" + sevSel.value;
       row.style.borderLeftColor = sevColor(sevSel.value);
-    });
-    var actionsHost = row.querySelector(".band-actions");
-    (band.actions || []).forEach(function (a) { addActionRow(actionsHost, a); });
-    row.querySelector(".band-add-action").addEventListener("click", function () { addActionRow(actionsHost, null); });
-    var escHost = row.querySelector(".band-esc");
-    ((band.escalation && band.escalation.tiers) || []).forEach(function (t) { addTierRow(escHost, t); });
-    row.querySelector(".band-add-esc").addEventListener("click", function () {
-      var r = addTierRow(escHost, null);
-      addActionRow(r.querySelector(".tier-actions"), null);
+      syncBandAddButtons(panel);
     });
     row.querySelector(".band-remove").addEventListener("click", function () {
       row.remove();
-      syncBandNotify(document.getElementById("aw-step-3"));
+      syncBandNotify(panel);
+      syncBandAddButtons(panel);
     });
-    // Copy-actions-from affordance: clone another tier's collected actions.
-    var copySel = row.querySelector(".band-copy");
-    copySel.addEventListener("focus", function () { refreshBandCopyOptions(copySel, row); });
-    copySel.addEventListener("change", function () {
-      if (!copySel.value) return;
-      var src = resolveCopySource(copySel.value, row);
-      if (src) { collectActionsFrom(src).forEach(function (a) { addActionRow(actionsHost, a); }); }
-      copySel.value = "";
-    });
+    syncBandAddButtons(panel);
     return row;
   }
-  function refreshBandCopyOptions(sel, selfRow) {
-    var panel = document.getElementById("aw-step-3");
-    var opts = ['<option value="">Copy actions from…</option>'];
-    var bands = Array.prototype.slice.call(panel.querySelectorAll("#aw-bands .aw-band"));
-    bands.forEach(function (b, i) {
-      if (b === selfRow) return;
-      var sv = b.querySelector(".band-severity").value || ("tier " + (i + 1));
-      opts.push('<option value="band:' + i + '">' + escapeHtml(sv) + ' band actions</option>');
-    });
-    sel.innerHTML = opts.join("");
-  }
-  function resolveCopySource(val, selfRow) {
-    var panel = document.getElementById("aw-step-3");
-    if (val.indexOf("band:") === 0) {
-      var idx = Number(val.slice(5));
-      var bands = panel.querySelectorAll("#aw-bands .aw-band");
-      var b = bands[idx];
-      return b && b !== selfRow ? b.querySelector(".band-actions") : null;
-    }
-    return null;
+  // Show a "+ Severity" button only while a HIGHER severity is still available
+  // (and fewer than 4 tiers) — so the chain can reach critical but not beyond.
+  function syncBandAddButtons(panel) {
+    var host = panel.querySelector("#aw-bands");
+    var sevs = s.severities || [];
+    var maxRank = sevRankOf(draft.severity || "warning");
+    var count = 0;
+    if (host) host.querySelectorAll(".band-severity").forEach(function (sel) { maxRank = Math.max(maxRank, sevRankOf(sel.value)); count++; });
+    var canAdd = count < 4 && maxRank < sevs.length - 1;
+    panel.querySelectorAll(".scg-add-sev, .band-add-sev").forEach(function (b) { b.style.display = canAdd ? "" : "none"; });
   }
 
   // ── Step 6: Summary + affected devices ─────────────────────────────────
@@ -2099,15 +2069,15 @@ async function openAutomationWizard(existing) {
       // row; metric + aggregation + window are shared with the base condition.
       var condRow = row.querySelector(".band-cond .scr-row");
       var leaf = condRow ? tgCollectLeaf(condRow, kind) : {};
+      // Tiers carry no per-tier actions/escalation — the alert re-notifies with
+      // the base (Actions-step) actions + base escalation at the tier's severity.
       var band = {
         threshold: leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : null,
         severity: row.querySelector(".band-severity").value,
-        actions: collectActionsFrom(row.querySelector(".band-actions")),
+        actions: [],
       };
       // Persist a per-tier operator only when it differs from the base.
       if (leaf.operator && leaf.operator !== baseOp) band.operator = leaf.operator;
-      var escTiers = collectTierRows(row.querySelector(".band-esc"));
-      if (escTiers.length) band.escalation = { stopOn: "acknowledge", tiers: escTiers };
       bands.push(band);
     });
     draft.severityBands = bands.length ? bands : null;
