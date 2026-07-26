@@ -16,6 +16,11 @@
 //     assetsQuarantine read; degrades to a muted note otherwise)
 //   - IP history list
 //
+// Hero also carries a Quarantine / Release Quarantine button, gated on the
+// assetsQuarantine:write permission and the same eligibility as the desktop
+// quarantine tab (non-infra + has a MAC to push, or already quarantined →
+// Release). See quarantineButtonHtml / wireQuarantineButton.
+//
 // Hero also carries a "View SD-WAN" button for FortiGate firewalls that
 // reported SD-WAN data (perf-SLA links / rules / members exist). Tapping it
 // slides up a second bottom sheet (stacked on the asset sheet, like the
@@ -479,6 +484,11 @@
       + '  <div id="asset-sdwan-btn-wrap" style="margin-top:12px;display:none;">'
       + '    <button class="btn btn-tonal btn-block" id="asset-sdwan-btn"><svg viewBox="0 0 24 24"><use href="#i-router"/></svg>View SD-WAN</button>'
       + '  </div>'
+      // Quarantine action — rendered synchronously from the asset row (status +
+      // MACs + type are all present). Empty string when the caller lacks the
+      // assetsQuarantine:write permission or the asset isn't eligible; the wrap
+      // stays so refreshAfterQuarantine can re-render into it after an action.
+      + '  <div id="asset-quarantine-btn-wrap">' + quarantineButtonHtml(asset) + '</div>'
       + '</div>'
 
       // Response Time section — collapsed by default; subtitle shows
@@ -572,6 +582,9 @@
         loadTelemetry(asset.id, st);
       });
     });
+    // Quarantine / release action button (hero).
+    wireQuarantineButton(asset, st);
+
     // Back/refresh now live in the sheet header (wired once in ensureSheet).
   }
 
@@ -1498,6 +1511,84 @@
       btn.disabled = false;
       btn.innerHTML = '<svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg>';
     });
+  }
+
+  // ─── Quarantine ────────────────────────────────────────────────────────
+  // Mirrors the desktop quarantine tab's eligibility (assets.js
+  // `_assetQuarantineTabHTML` + the tab guard): gate on the assetsQuarantine
+  // write permission (the backend gate on POST/DELETE /assets/:id/quarantine),
+  // then offer Quarantine only for non-infra assets that carry a MAC, and
+  // Release for anything already quarantined. Infrastructure (firewall /
+  // switch / access_point) can't be newly quarantined but keeps Release so a
+  // misclassified push can still be undone.
+  var _PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 };
+  function canQuarantine() {
+    var user = (window.PolarisMobile && PolarisMobile.user && PolarisMobile.user()) || null;
+    var have = (user && user.permissions && user.permissions.assetsQuarantine) || "none";
+    return (_PERM_RANK[have] || 0) >= _PERM_RANK.write;
+  }
+
+  function quarantineButtonHtml(asset) {
+    if (!asset || !canQuarantine()) return "";
+    if (asset.status === "quarantined") {
+      return '<button class="btn btn-tonal btn-block" style="margin-top:12px;" id="asset-quarantine-btn" data-q="release"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Release Quarantine</button>';
+    }
+    var isInfra = asset.assetType === "firewall" || asset.assetType === "switch" || asset.assetType === "access_point";
+    var hasMac = !!(asset.macAddress || (asset.macAddresses && asset.macAddresses.length));
+    if (hasMac && !isInfra) {
+      return '<button class="btn btn-error btn-block" style="margin-top:12px;" id="asset-quarantine-btn" data-q="quarantine"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Quarantine</button>';
+    }
+    return "";
+  }
+
+  function wireQuarantineButton(asset, st) {
+    var btn = document.getElementById("asset-quarantine-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      if (btn.dataset.q === "release") {
+        if (!window.confirm("Release quarantine on this asset? Removes the MAC block from every FortiGate it was pushed to.")) return;
+        btn.disabled = true;
+        api.assets.unquarantine(asset.id).then(function (result) {
+          PolarisTabs.showSnackbar((result && result.message) || "Quarantine released");
+          refreshAfterQuarantine(asset.id, st);
+        }).catch(function (err) {
+          btn.disabled = false;
+          PolarisTabs.showSnackbar(err && err.message ? err.message : "Release failed", { error: true });
+        });
+      } else {
+        // window.prompt returns null on cancel (no push), "" when the operator
+        // submits without a reason (proceed — reason is optional).
+        var reason = window.prompt("Reason for quarantine (optional):");
+        if (reason === null) return;
+        btn.disabled = true;
+        api.assets.quarantine(asset.id, reason || undefined).then(function (result) {
+          PolarisTabs.showSnackbar((result && result.message) || "Asset quarantined");
+          refreshAfterQuarantine(asset.id, st);
+        }).catch(function (err) {
+          btn.disabled = false;
+          PolarisTabs.showSnackbar(err && err.message ? err.message : "Quarantine failed", { error: true });
+        });
+      }
+    });
+  }
+
+  // Re-fetch the asset after a quarantine/release so the hero pill, header dot
+  // and the action button itself reflect the new status (mirrors the pill
+  // refresh in onRefresh). Guarded by _openId so a stale response from a
+  // superseded asset can't overwrite the current sheet.
+  function refreshAfterQuarantine(id, st) {
+    api.assets.get(id).then(function (fresh) {
+      if (!fresh || _openId !== id) return;
+      _assetCache[id] = fresh;
+      var pillHost = document.getElementById("asset-hero-pill");
+      if (pillHost) pillHost.innerHTML = renderMonitorPill(fresh);
+      setHeader(fresh);
+      var wrap = document.getElementById("asset-quarantine-btn-wrap");
+      if (wrap) {
+        wrap.innerHTML = quarantineButtonHtml(fresh);
+        wireQuarantineButton(fresh, st);
+      }
+    }).catch(function () { /* pill/button stay as-is; the action already toasted */ });
   }
 
   // ─── helpers ───────────────────────────────────────────────────────────
