@@ -2065,7 +2065,7 @@ Listed alphabetically.
 
 **Public API:** `MERGEABLE_FIELDS`, `MergeableField`, `FieldWinner`, `MergeAssetsResult`, `mergeAssets`, `transferAssetSideTables`, `SideTableTransferCounts`
 
-**Cross-service deps:** `prisma`, `AppError`, `clampAcquiredToLastSeen`.
+**Cross-service deps:** `prisma`, `AppError`, `clampAcquiredToLastSeen`, `monitorOverrideService.recomputeMonitorOverrideForAssets` (after a monitored carry-over).
 
 **Used by:** `src/api/routes/assets.ts` — `POST /assets/:id/merge`; `assetGhostMergeService.ts` (imports `transferAssetSideTables`).
 
@@ -2073,10 +2073,14 @@ Listed alphabetically.
 - Canonical and ghost must be distinct IDs; all transfers run in a single `$transaction`.
 - Ghost `AssetSource` rows re-bind to canonical (global `(sourceKind, externalId)` uniqueness means no collision); `AssetMacAddress` / `AssetAssociatedIp` / `AssetIpHistory` / `AssetFortigateSighting` delete-on-conflict when duplicates exist.
 - `ManagedAgent` transfers only if the survivor has none; `lastSeen` keeps the more recent value; tags union; `acquiredAt` clamped to stay ≤ `lastSeen`.
+- **`monitored` is OR-ed, not "survivor wins"** — either side monitored ⇒ the survivor is monitored (`carriedMonitoring` in the result; same intent as `assetGhostMergeService.transferredMonitored`). ON-flip only: an unmonitored ghost never turns a monitored survivor off, and a survivor that was already monitored keeps its own config untouched. When the flip happens the ghost's monitoring CONFIG rides along — `MONITOR_CONFIG_FIELDS` (per-stream polling methods, credentials, MIB pins, interval/timeout overrides; ghost's non-null wins, survivor keeps its own where the ghost has none) and `MONITOR_PIN_FIELDS` (monitored/mapped interface / storage / tunnel / process / service arrays; UNIONed) — because enabling the flag alone would leave a monitored asset resolving streams off empty overrides. `monitorStatus` resets to null + failure/success counters to 0 (the ghost's samples are orphaned, so no history backs a carried status), then `recomputeMonitorOverrideForAssets` runs post-transaction.
+- Business rule 10 outranks the carry-over: the merged status (`fieldWinners`-resolved, not just the survivor's current) landing on `decommissioned`/`disabled` skips it entirely. Resolved in-service because the `db.ts` clamp only fires when a write stages `status`, which a status-preserving merge doesn't.
 - Ghost's TimescaleDB sample rows are orphaned (no FK) and age out via `drop_chunks` — never row-deleted here.
 
 **When changing this:**
 - Keep `MERGEABLE_FIELDS` in sync with the comparison UI in `public/js/assets.js`.
+- A new per-asset monitoring override column (polling method / credential / cadence / pin array) belongs in `MONITOR_CONFIG_FIELDS` or `MONITOR_PIN_FIELDS`, or a merge will enable monitoring without it. `ASSET_SELECT` derives from both lists, so adding it there is enough.
+- The merge modal's review step mirrors the carry-over client-side (`monitoringCarried` in `_buildMergePlan`, `public/js/assets.js`) — keep the rule 10 exclusion in sync so the preview can't promise a flip the server refuses.
 
 ---
 
@@ -3228,7 +3232,7 @@ Listed alphabetically.
 
 **Cross-service deps:** none (pure helpers + raw SQL via the caller's prisma).
 
-**Used by:** `src/api/routes/assets.ts` (status-pill toggle / `PUT /assets/:id` → `recomputeMonitorOverrideForAssets`; `POST /assets/:id/monitor-override/reset` → `getAddAsMonitoredFromConfig`), `src/api/routes/integrations.ts` (save flow `sweepMonitoredForIntegration` + preflight `snapshotAddAsMonitoredByAssetType`).
+**Used by:** `src/api/routes/assets.ts` (status-pill toggle / `PUT /assets/:id` → `recomputeMonitorOverrideForAssets`; `POST /assets/:id/monitor-override/reset` → `getAddAsMonitoredFromConfig`), `src/api/routes/integrations.ts` (save flow `sweepMonitoredForIntegration` + preflight `snapshotAddAsMonitoredByAssetType`), `assetGhostMergeService.ts` + `assetMergeService.ts` (`recomputeMonitorOverrideForAssets` after a merge carries `monitored=true` onto the survivor — the carry-over IS operator intent, so the bit must follow it).
 
 **Invariants:**
 - `monitorOverride` is written ONLY by operator write paths and the reset endpoint. NOTHING re-derives it from incidental state (no boot job, no integration-save recompute) — incidental divergence (decommission clamp, created-before-flag-enabled, HA standby) leaves it false so the next discovery sweep self-heals the asset. (This is the explicit-intent fix; the prior convergent model's every-boot/every-save re-derivation stranded such assets.)

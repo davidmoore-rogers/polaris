@@ -3752,6 +3752,12 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
 // overrides, dependency edges, and pending conflicts cascade-delete with it —
 // the survivor keeps its own (the UI warns about this and surfaces which side
 // is monitored so the operator picks the right survivor).
+//
+// `monitored` itself is OR-ed, not "survivor wins": if either side was
+// monitored the survivor comes out monitored, and when that flips the survivor
+// ON the absorbed row's polling methods / credentials / cadences / pins ride
+// along so the enabled monitoring can actually resolve a method. See
+// assetMergeService's header.
 const mergeBodySchema = z.object({
   otherAssetId: z.string().min(1),
   survivor: z.enum(["this", "other"]).default("this"),
@@ -3794,10 +3800,13 @@ router.post("/:id/merge", requirePermission("assets", "write"), async (req, res,
       resourceName: survivorBefore.hostname || undefined,
       actor: requestActor(req),
       level: "info",
-      message: `Merged asset ${absorbedBefore.hostname || result.absorbedId} into ${survivorBefore.hostname || result.survivorId} — moved ${result.movedSources} source(s)`,
+      message: `Merged asset ${absorbedBefore.hostname || result.absorbedId} into ${survivorBefore.hostname || result.survivorId} — moved ${result.movedSources} source(s)` +
+        (result.carriedMonitoring ? "; monitoring carried over from the absorbed asset" : ""),
       details: {
         survivorId: result.survivorId,
         absorbedId: result.absorbedId,
+        carriedMonitoring: result.carriedMonitoring,
+        monitorFieldsAdopted: result.monitorFieldsAdopted,
         movedSources: result.movedSources,
         movedMacs: result.movedMacs,
         movedIps: result.movedIps,

@@ -1621,7 +1621,9 @@ function _renderMergeComparison() {
       '</label>' +
       '<p class="hint" style="margin:0.4rem 0 0">The survivor keeps its monitoring history, dependency edges and quarantine state. ' +
         'The absorbed asset\'s sample/telemetry history and interface-comment overrides are <strong>permanently deleted</strong>. ' +
-        'Discovery sources, MAC / IP / sighting history from both assets are combined onto the survivor.</p>' +
+        'Discovery sources, MAC / IP / sighting history from both assets are combined onto the survivor. ' +
+        'If <strong>either</strong> asset is monitored the survivor comes out monitored — when that turns the survivor on, ' +
+        'the absorbed asset\'s polling methods, credentials and pinned interfaces / storage / processes come with it.</p>' +
     '</div>';
 
   // Context rows (no winner choice) — help the operator pick the survivor.
@@ -1716,7 +1718,7 @@ function _buildMergePlan(survivor, fieldWinners) {
     var fromVal = _mergeFieldVal(survivorAsset, f);
     var toVal = _mergeFieldVal(toAsset, f);
     if (fromVal !== toVal) {
-      overwrites.push({ label: f.label, from: fromVal, to: toVal });
+      overwrites.push({ key: f.key, label: f.label, from: fromVal, to: toVal });
     }
   });
 
@@ -1726,12 +1728,22 @@ function _buildMergePlan(survivor, fieldWinners) {
   survTags.forEach(function (t) { have[t] = true; });
   var tagsAdded = (absorbedAsset.tags || []).filter(function (t) { return !have[t]; });
 
+  // monitored is OR-ed server-side; only the OFF→ON direction is a change worth
+  // showing. Mirrors assetMergeService's carriedMonitoring, including the
+  // business-rule-10 exclusion (a decommissioned/disabled survivor stays off) —
+  // status here is the post-merge value the winners resolve to.
+  var mergedStatus = survivorAsset.status;
+  overwrites.forEach(function (o) { if (o.key === "status") mergedStatus = o.to; });
+  var monitoringCarried = !!absorbedAsset.monitored && !survivorAsset.monitored &&
+    mergedStatus !== "decommissioned" && mergedStatus !== "disabled";
+
   return {
     survivorAsset: survivorAsset,
     absorbedAsset: absorbedAsset,
     absorbedSources: absorbedSources || [],
     overwrites: overwrites,
-    tagsAdded: tagsAdded
+    tagsAdded: tagsAdded,
+    monitoringCarried: monitoringCarried
   };
 }
 
@@ -1775,6 +1787,14 @@ function _showMergeReviewModal(survivor, fieldWinners) {
     combinedBits.push('MAC, IP and firewall-sighting history');
     if (plan.tagsAdded.length) {
       combinedBits.push('tags: ' + plan.tagsAdded.map(escapeHtml).join(", "));
+    }
+    // The OR-ed monitored flag is the one change an operator can't infer from
+    // the field table (monitored isn't a mergeable field with winner radios),
+    // so call it out explicitly along with the config that rides with it.
+    if (plan.monitoringCarried) {
+      combinedBits.push('<strong>monitoring stays enabled</strong> — ' + absLabel +
+        ' was monitored, so ' + survLabel + ' is switched on, adopting its polling methods, ' +
+        'credentials, cadences and pinned interfaces / storage / processes (status resets to unknown until the first poll)');
     }
 
     var bodyHTML =

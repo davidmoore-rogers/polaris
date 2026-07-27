@@ -26,6 +26,17 @@
  *     AssetAssociatedIp, AssetIpHistory, AssetFortigateSighting (all
  *     delete-on-conflict against the survivor's existing rows), and the
  *     ManagedAgent enrollment IFF the survivor has none.
+ *   - `monitored` is OR-ed across the two rows: if either side was monitored,
+ *     the survivor comes out monitored. Same intent as the automatic
+ *     endpoint-ghost merge (`assetGhostMergeService.transferredMonitored`) —
+ *     monitoring is an explicit operator choice and a merge must not silently
+ *     drop it. When the carry-over actually flips the survivor ON, the ghost's
+ *     monitoring CONFIGURATION rides along too (per-stream polling methods,
+ *     credentials, MIBs, intervals/timeouts, and the pinned interface /
+ *     storage / process / service / tunnel arrays) — enabling the flag without
+ *     it would leave a monitored asset whose streams resolve off the survivor's
+ *     empty overrides. Business rule 10 still wins: a survivor whose merged
+ *     status lands on decommissioned/disabled stays unmonitored.
  *   - Cascade-DELETED with the ghost (FK kept): LLDP neighbors, wireless
  *     stations, interface comment overrides, dependency edges, and pending
  *     Conflicts. The survivor keeps its own. Called out in the confirm dialog.
@@ -46,6 +57,7 @@
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { clampAcquiredToLastSeen } from "../utils/assetInvariants.js";
+import { recomputeMonitorOverrideForAssets } from "./monitorOverrideService.js";
 
 // Scalar fields the comparison UI diffs and the operator can pick a winner
 // for. Kept in sync with the COMPARE_FIELDS list in public/js/assets.js so the
@@ -78,12 +90,94 @@ export const MERGEABLE_FIELDS = [
 export type MergeableField = (typeof MERGEABLE_FIELDS)[number];
 export type FieldWinner = "canonical" | "ghost";
 
+/**
+ * Monitoring configuration carried from the ghost onto the survivor when the
+ * merge flips the survivor's `monitored` ON (i.e. the ghost was the monitored
+ * side). Nullable scalars: the ghost's non-null value wins, the survivor's is
+ * kept wherever the ghost has none — the survivor was NOT being polled, so any
+ * override it holds is inert config that no successful poll ever validated,
+ * while the ghost's is the configuration that was actually working.
+ *
+ * NOT carried when both sides were already monitored: the survivor's own
+ * working configuration is authoritative and must not be rewritten by the
+ * absorbed row.
+ */
+const MONITOR_CONFIG_FIELDS = [
+  // Per-stream polling methods (null = inherit from the settings hierarchy).
+  "responseTimePolling",
+  "cpuMemoryPolling",
+  "temperaturePolling",
+  "interfacesPolling",
+  "lldpPolling",
+  "storagePolling",
+  "processesPolling",
+  "eventLogPolling",
+  "customWidgetPolling",
+  // Credentials the above methods authenticate with.
+  "monitorCredentialId",
+  "responseTimeCredentialId",
+  "cpuMemoryCredentialId",
+  "temperatureCredentialId",
+  "interfacesCredentialId",
+  "lldpCredentialId",
+  "customWidgetCredentialId",
+  "processesCredentialId",
+  "eventLogCredentialId",
+  // Per-stream MIB pins.
+  "responseTimeMibId",
+  "cpuMemoryMibId",
+  "temperatureMibId",
+  "interfacesMibId",
+  "lldpMibId",
+  "processesMibId",
+  // Cadence + timeout overrides.
+  "monitorIntervalSec",
+  "cpuMemoryIntervalSec",
+  "temperatureIntervalSec",
+  "systemInfoIntervalSec",
+  "lldpIntervalSec",
+  "storageIntervalSec",
+  "customWidgetIntervalSec",
+  "processesIntervalSec",
+  "eventLogIntervalSec",
+  "cpuMemoryTimeoutMs",
+  "temperatureTimeoutMs",
+  "systemInfoTimeoutMs",
+  "customWidgetTimeoutMs",
+  "processesTimeoutMs",
+  "eventLogTimeoutMs",
+] as const;
+
+/**
+ * Operator pin arrays carried the same way, but UNIONed rather than overwritten
+ * — a pin is additive intent ("also poll this interface"), and the survivor's
+ * own pins stay valid. Order-preserving with the survivor's first.
+ */
+const MONITOR_PIN_FIELDS = [
+  "monitoredInterfaces",
+  "monitoredStorage",
+  "monitoredIpsecTunnels",
+  "monitoredProcesses",
+  "monitoredServices",
+  "mappedProcesses",
+  "mappedServices",
+] as const;
+
+type MonitorCarryField =
+  | (typeof MONITOR_CONFIG_FIELDS)[number]
+  | (typeof MONITOR_PIN_FIELDS)[number];
+
+const MONITOR_CARRY_SELECT = Object.fromEntries(
+  [...MONITOR_CONFIG_FIELDS, ...MONITOR_PIN_FIELDS].map((f) => [f, true]),
+) as Record<MonitorCarryField, true>;
+
 type AssetForMerge = {
   id: string;
   hostname: string | null;
   lastSeen: Date | null;
   acquiredAt: Date | null;
   tags: string[];
+  monitored: boolean;
   managedAgent: { id: string } | null;
 } & Record<string, unknown>;
 
@@ -97,6 +191,10 @@ export interface MergeAssetsResult {
   movedSightings: number;
   movedManagedAgent: boolean;
   appliedFields: string[];
+  /** True when the ghost's monitored=true flipped the survivor ON. */
+  carriedMonitoring: boolean;
+  /** Monitoring config/pin fields adopted from the ghost alongside that flip. */
+  monitorFieldsAdopted: string[];
 }
 
 const ASSET_SELECT = {
@@ -125,7 +223,12 @@ const ASSET_SELECT = {
   lastSeen: true,
   lastSeenSource: true,
   tags: true,
+  monitored: true,
   managedAgent: { select: { id: true } },
+  // Monitoring config + pins, for the monitored-side carry-over below. Derived
+  // from the two lists above so they stay the single source of truth (the cast
+  // gives Prisma literal keys instead of fromEntries' string index signature).
+  ...MONITOR_CARRY_SELECT,
 } as const;
 
 function isEmpty(v: unknown): boolean {
@@ -246,6 +349,58 @@ export async function mergeAssets(opts: {
   // extension, but we resolve it here so the value is correct in-transaction).
   clampAcquiredToLastSeen(update, { acquiredAt: c.acquiredAt, lastSeen: c.lastSeen });
 
+  // monitored — OR across the two rows: monitoring is an explicit operator
+  // choice, so absorbing a monitored asset must not silently stop polling the
+  // device. Only the OFF→ON direction needs work (both-monitored and
+  // survivor-already-monitored are no-ops, and the ghost being unmonitored
+  // never turns the survivor off).
+  //
+  // Business rule 10 still wins: `decommissioned`/`disabled` assets are never
+  // monitored. The db.ts extension clamps that only when the write stages
+  // `status`, which a merge that keeps the survivor's status doesn't — so
+  // resolve the effective status here and skip the carry-over.
+  const effectiveStatus = (update.status ?? c.status) as string | null;
+  const statusBlocksMonitoring = effectiveStatus === "decommissioned" || effectiveStatus === "disabled";
+  const carriedMonitoring = g.monitored === true && c.monitored !== true && !statusBlocksMonitoring;
+  const monitorFieldsAdopted: string[] = [];
+  if (carriedMonitoring) {
+    update.monitored = true;
+    // Fresh state: the survivor has never been polled under this config and the
+    // ghost's samples are orphaned by the merge, so a leftover monitorStatus
+    // would assert history the survivor can't back. null renders as "unknown"
+    // and the first probe (≤ one monitor tick) replaces it.
+    update.monitorStatus = null;
+    update.consecutiveFailures = 0;
+    update.consecutiveSuccesses = 0;
+    // Config the enabled monitoring needs in order to resolve a method — see
+    // MONITOR_CONFIG_FIELDS. Ghost's non-null wins; survivor keeps its own
+    // wherever the ghost has none.
+    for (const field of MONITOR_CONFIG_FIELDS) {
+      const gVal = g[field];
+      if (gVal === null || gVal === undefined) continue;
+      if (gVal === c[field]) continue;
+      update[field] = gVal;
+      monitorFieldsAdopted.push(field);
+    }
+    // Pins are additive intent — union, survivor's order first.
+    for (const field of MONITOR_PIN_FIELDS) {
+      const cArr = Array.isArray(c[field]) ? (c[field] as string[]) : [];
+      const gArr = Array.isArray(g[field]) ? (g[field] as string[]) : [];
+      const merged = [...cArr];
+      const have = new Set(cArr);
+      for (const v of gArr) {
+        if (!have.has(v)) {
+          merged.push(v);
+          have.add(v);
+        }
+      }
+      if (merged.length > cArr.length) {
+        update[field] = merged;
+        monitorFieldsAdopted.push(field);
+      }
+    }
+  }
+
   let movedSources = 0;
   let movedMacs = 0;
   let movedIps = 0;
@@ -292,6 +447,17 @@ export async function mergeAssets(opts: {
     await tx.asset.delete({ where: { id: g.id } });
   });
 
+  // Keep monitorOverride faithful to the carried-over monitoring intent — the
+  // same post-write hook the operator asset-write paths and the endpoint-ghost
+  // merge use. Best-effort: a recompute failure must not undo the merge.
+  if (carriedMonitoring) {
+    try {
+      await recomputeMonitorOverrideForAssets(prisma, [c.id]);
+    } catch {
+      /* swallowed — see above */
+    }
+  }
+
   return {
     survivorId: c.id,
     absorbedId: g.id,
@@ -302,5 +468,7 @@ export async function mergeAssets(opts: {
     movedSightings,
     movedManagedAgent,
     appliedFields,
+    carriedMonitoring,
+    monitorFieldsAdopted,
   };
 }
