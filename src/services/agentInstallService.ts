@@ -990,7 +990,19 @@ systemctl stop  polaris-agent 2>/dev/null || true
 install -m 0755 -o root -g root "\${BIN_SRC}"  "\${BIN_DST}"
 mkdir -p "\${CONF_DIR}"
 chmod 0700 "\${CONF_DIR}"
-install -m 0600 -o root -g root "\${CONF_SRC}" "\${CONF_DST}"
+# The conf must be READABLE BY THE UNIT'S DynamicUser, not by root. systemd
+# chowns the StateDirectory itself to the dynamic user, but NOT files already
+# inside it — so on a REINSTALL (where \${CONF_DIR} is already a symlink into
+# /var/lib/private/ owned by the dynamic user) a root-owned agent.conf leaves
+# the agent dying with "load config: permission denied" on every restart, and
+# it parks in installStatus="enrolling" forever. Match the state directory's
+# current owner instead; on a first install that's still root and systemd's
+# directory migration chowns the whole tree at first start. After /enroll the
+# agent rewrites the file itself (tempfile + rename as its own user), so
+# ownership stays correct from then on.
+install -m 0600 "\${CONF_SRC}" "\${CONF_DST}"
+CONF_OWNER="$(stat -Lc '%u:%g' "\${CONF_DIR}" 2>/dev/null || echo 0:0)"
+chown "\${CONF_OWNER}" "\${CONF_DST}"
 
 # Legacy location from pre-StateDirectory installs. Harmless if absent.
 rm -rf /etc/polaris-agent 2>/dev/null || true
@@ -1029,6 +1041,10 @@ rm -f /etc/systemd/system/polaris-agent.service
 systemctl daemon-reload || true
 
 rm -rf /var/lib/polaris-agent
+# StateDirectory under DynamicUser lives at /var/lib/private/<name>, with
+# /var/lib/polaris-agent as a symlink to it — removing only the symlink
+# orphans the real state (agent.conf with its bearer, servicelog cursors).
+rm -rf /var/lib/private/polaris-agent
 rm -rf /etc/polaris-agent       # legacy pre-StateDirectory location
 rm -f  /usr/local/bin/polaris-agent
 
