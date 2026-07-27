@@ -13,8 +13,9 @@
 //
 // Filters (age / proto / hide-external) are client-side over the cached
 // payload; the graph auto-refreshes every 60s (paused while the tab is
-// hidden) preserving current node positions. Node click-through reuses the
-// canonical asset details slide-in (openViewModal from assets.js).
+// hidden) preserving current node positions. Tapping an asset box opens the
+// canonical asset details slide-in in place (openViewModal from assets.js) —
+// no navigation off the map.
 
 (function () {
   "use strict";
@@ -329,6 +330,20 @@
       { selector: "edge[stale = 1]", style: { opacity: 0.35 } },
       { selector: "node:selected", style: { "border-width": 3, "border-color": "#ffb300" } },
       { selector: "edge:selected", style: { width: 3 } },
+      // Hover highlight — a stale edge renders at 0.35 opacity, which makes its
+      // port label hard to read; under the pointer it goes fully opaque and
+      // rises above its neighbours. Cytoscape has no :hover selector, so
+      // wireGraphEvents toggles this class on mouseover/mouseout. Declared LAST
+      // so it wins over the stale-opacity and :selected rules above.
+      {
+        selector: "edge.appmap-hover",
+        style: {
+          opacity: 1,
+          width: 3,
+          "text-background-opacity": 1,
+          "z-index": 999,
+        },
+      },
     ];
   }
 
@@ -551,11 +566,27 @@
     cy.on("tap", "node", function (evt) {
       selectedId = evt.target.id();
       renderInfoNode(evt.target.id());
+      // Tapping an ASSET box additionally opens the canonical asset details
+      // slide-in over the map — same openViewModal the info rail's button
+      // calls, so the operator never leaves the page. The rail is rendered
+      // first, so closing the panel leaves the node's detail behind it.
+      // Child (process/service) and external nodes stay rail-only: their rail
+      // carries the per-node connection detail and still offers the button.
+      // Cytoscape suppresses `tap` after a drag, so repositioning a box never
+      // pops the panel.
+      var n = findNode(evt.target.id());
+      if (n && n.kind === "asset" && n.assetId && typeof openViewModal === "function") {
+        openViewModal(n.assetId);
+      }
     });
     cy.on("tap", "edge", function (evt) {
       selectedId = evt.target.id();
       renderInfoEdge(evt.target.id());
     });
+    // Full opacity for the edge under the pointer (see the .appmap-hover rule).
+    // Touch devices never fire these; tapping an edge still opens the rail.
+    cy.on("mouseover", "edge", function (evt) { evt.target.addClass("appmap-hover"); });
+    cy.on("mouseout", "edge", function (evt) { evt.target.removeClass("appmap-hover"); });
     cy.on("tap", function (evt) {
       if (evt.target === cy) {
         selectedId = null;
