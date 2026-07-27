@@ -300,7 +300,8 @@ document.addEventListener("DOMContentLoaded", async function () {
   // delete button works regardless of where the tooltip lives.
   document.addEventListener("click", _handleMacDeleteClick);
   document.getElementById("assets-bulk-delete-btn").addEventListener("click", bulkDeleteAssets);
-  document.getElementById("assets-bulk-tags-btn").addEventListener("click", openBulkTagsModal);
+  var bEdit = document.getElementById("assets-bulk-edit-btn");
+  if (bEdit) bEdit.addEventListener("click", bulkEditSelectedAsset);
   var bCompare = document.getElementById("assets-bulk-compare-btn");
   if (bCompare) bCompare.addEventListener("click", openCompareModal);
   var bMerge = document.getElementById("assets-bulk-merge-btn");
@@ -1116,7 +1117,7 @@ function _assetsUpdateBulkBar() {
   if (el) el.textContent = count === 0 ? "No assets selected" : (count + " selected");
   // Disable every bulk action while nothing is selected.
   ["assets-bulk-deselect-btn", "assets-bulk-type-btn", "assets-bulk-state-btn",
-   "assets-bulk-monitor-btn", "assets-bulk-tags-btn", "assets-bulk-delete-btn",
+   "assets-bulk-monitor-btn", "assets-bulk-delete-btn",
    "assets-bulk-compare-btn", "assets-bulk-merge-btn", "assets-bulk-agent-btn",
    "assets-bulk-quarantine-btn", "assets-bulk-unquarantine-btn"
   ].forEach(function (id) { var b = document.getElementById(id); if (b) b.disabled = count === 0; });
@@ -1125,6 +1126,17 @@ function _assetsUpdateBulkBar() {
   // can view assets — comparing telemetry is read-only.
   var bCompare = document.getElementById("assets-bulk-compare-btn");
   if (bCompare) bCompare.style.display = count >= 2 ? "" : "none";
+
+  // Edit opens the single-asset edit modal, so it stays visible but greys out
+  // unless exactly one asset is selected (data-manage-assets already hides it
+  // for roles that can't edit).
+  var bEdit = document.getElementById("assets-bulk-edit-btn");
+  if (bEdit) {
+    bEdit.disabled = count !== 1;
+    bEdit.title = count > 1
+      ? "Select a single asset to edit"
+      : "Edit the selected asset";
+  }
 
   // Merge is pairwise — show only when exactly two assets are selected, and
   // only to admins (same gate as the Sources-tab "Merge asset..." button).
@@ -2227,75 +2239,13 @@ async function bulkDeleteAssets() {
   loadAssets();
 }
 
-async function openBulkTagsModal() {
+// Bulk-bar Edit: the edit modal is single-asset, so this only acts when exactly
+// one row is selected (the button hides otherwise). Tags are edited there like
+// any other field — the old bulk tag-mode modal was retired in favor of it.
+function bulkEditSelectedAsset() {
   var ids = Array.from(_assetsSelected);
-  if (!ids.length) return;
-  await _ensureTagCache();
-
-  var body =
-    '<p style="color:var(--color-text-secondary);margin-bottom:1.25rem">Editing tags on <strong>' + ids.length + '</strong> asset' + (ids.length !== 1 ? 's' : '') + '.</p>' +
-    '<div class="form-group"><label>Tags</label>' +
-      '<div style="display:flex;gap:16px;margin-bottom:0.5rem">' +
-        '<label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:normal"><input type="radio" name="bulk-tag-mode" value="add" checked> Add tags</label>' +
-        '<label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:normal"><input type="radio" name="bulk-tag-mode" value="replace"> Replace tags</label>' +
-      '</div>' +
-      '<div id="bulk-tag-picker-wrap">' + tagFieldHTML([]) + '</div>' +
-    '</div>';
-
-  var footer =
-    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-    '<button class="btn btn-primary" id="bulk-edit-save-btn">Apply to ' + ids.length + ' Asset' + (ids.length !== 1 ? 's' : '') + '</button>';
-
-  openModal("Edit Tags", body, footer);
-  wireTagPicker();
-
-  document.getElementById("bulk-edit-save-btn").addEventListener("click", async function () {
-    var btn = this;
-    var tagModeEl = document.querySelector('input[name="bulk-tag-mode"]:checked');
-    var tagMode = tagModeEl ? tagModeEl.value : "add";
-    var selectedTags = getTagFieldValue() || [];
-
-    if (!selectedTags.length && tagMode === "add") {
-      showToast("Pick at least one tag to add", "error");
-      return;
-    }
-
-    btn.disabled = true;
-    btn.textContent = "Applying…";
-
-    var successCount = 0;
-    var errorCount = 0;
-
-    for (var i = 0; i < ids.length; i++) {
-      var id = ids[i];
-      var payload = {};
-      if (tagMode === "add") {
-        var existing = _assetsData.find(function (a) { return a.id === id; });
-        var existingTags = existing && existing.tags ? existing.tags : [];
-        payload.tags = Array.from(new Set(existingTags.concat(selectedTags)));
-      } else {
-        var existingForReplace = _assetsData.find(function (a) { return a.id === id; });
-        var preserved = (existingForReplace && existingForReplace.tags ? existingForReplace.tags : [])
-          .filter(isProtectedTag);
-        payload.tags = Array.from(new Set(selectedTags.concat(preserved)));
-      }
-      try {
-        await api.assets.update(id, payload);
-        successCount++;
-      } catch (_e) {
-        errorCount++;
-      }
-    }
-
-    closeModal();
-    if (errorCount === 0) {
-      showToast("Updated tags on " + successCount + " asset" + (successCount !== 1 ? "s" : ""));
-    } else {
-      showToast("Updated " + successCount + ", " + errorCount + " failed", errorCount === ids.length ? "error" : "");
-    }
-    _assetsSelected.clear();
-    loadAssets();
-  });
+  if (ids.length !== 1) return;
+  openEditModal(ids[0]);
 }
 
 function assetTypeBadge(type, asset) {
