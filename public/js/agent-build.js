@@ -1013,6 +1013,29 @@
     return '<span style="color:' + color + ';font-weight:600">' + escapeHtml(label) + '</span>';
   }
 
+  // Privilege cell for the installed-agents table. The tier is Linux-only —
+  // Windows agents always run as LocalSystem and macOS LaunchDaemons as root,
+  // so those render as fixed informational text. `ptrace` is called out in
+  // warning colour because CAP_SYS_PTRACE also permits reading any process's
+  // memory; legacy `root` rows (pre-Satellite-posture installs, never emitted
+  // for new installs) are flagged danger so operators reinstall them down.
+  function _agentPrivilegeCell(a) {
+    var tertiary = function (t) {
+      return '<span style="color:var(--color-text-tertiary);font-size:0.78rem">' + escapeHtml(t) + '</span>';
+    };
+    if (a.osPlatform === "windows") return tertiary("LocalSystem");
+    if (a.osPlatform === "darwin")  return tertiary("root (daemon)");
+    if (a.privilegeTier === "ptrace") {
+      return '<span style="color:var(--color-warning);font-weight:600;font-size:0.78rem" ' +
+        'title="Agent runs unprivileged plus AmbientCapabilities=CAP_SYS_PTRACE, so it can attribute Application Map connections to processes. This capability also lets it read any process’s memory.">CAP_SYS_PTRACE</span>';
+    }
+    if (a.privilegeTier === "root") {
+      return '<span style="color:var(--color-danger);font-weight:600;font-size:0.78rem" ' +
+        'title="Legacy full-root install from before the Satellite-posture change. Reinstall to downgrade it to unprivileged or CAP_SYS_PTRACE.">root (legacy)</span>';
+    }
+    return tertiary("unprivileged");
+  }
+
   function _ensureInstalledAgentsPanelDOM() {
     var overlay = document.getElementById("agent-list-panel-overlay");
     if (overlay) return overlay;
@@ -1089,9 +1112,18 @@
     var current = data.currentVersion;
 
     if (meta) {
+      // Elevated = anything above the hardened unprivileged unit. Surfaced as a
+      // header count so "how many hosts did we grant ptrace to?" is answerable
+      // without scanning the table.
+      var elevated = agents.filter(function (a) {
+        return a.osPlatform === "linux" && (a.privilegeTier === "ptrace" || a.privilegeTier === "root");
+      }).length;
       meta.innerHTML =
         agents.length + ' installed agent' + (agents.length === 1 ? "" : "s") +
-        (current ? ' · current build <strong>v' + escapeHtml(current) + '</strong>' : ' · no build on disk');
+        (current ? ' · current build <strong>v' + escapeHtml(current) + '</strong>' : ' · no build on disk') +
+        (elevated
+          ? ' · <span style="color:var(--color-warning);font-weight:600">' + elevated + ' with CAP_SYS_PTRACE</span>'
+          : "");
     }
 
     if (agents.length === 0) {
@@ -1144,7 +1176,7 @@
       }
 
       var errRow = a.installError
-        ? '<tr><td colspan="6" style="padding:0 8px 6px;font-family:monospace;font-size:0.72rem;color:var(--color-danger);' +
+        ? '<tr><td colspan="7" style="padding:0 8px 6px;font-family:monospace;font-size:0.72rem;color:var(--color-danger);' +
             'white-space:pre-wrap;word-break:break-word">' + escapeHtml(a.installError) + '</td></tr>'
         : "";
 
@@ -1154,6 +1186,7 @@
             (hostSub ? '<div style="font-size:0.72rem;color:var(--color-text-tertiary)">' + escapeHtml(hostSub) + '</div>' : "") +
           '</td>' +
           '<td style="padding:6px 8px"><code>' + escapeHtml(a.osPlatform) + '</code> / <code>' + escapeHtml(a.arch) + '</code></td>' +
+          '<td style="padding:6px 8px;white-space:nowrap">' + _agentPrivilegeCell(a) + '</td>' +
           '<td style="padding:6px 8px">' + verCell + '</td>' +
           '<td style="padding:6px 8px">' + _agentStatusBadge(a.installStatus) + '</td>' +
           '<td style="padding:6px 8px;font-size:0.78rem;color:var(--color-text-tertiary);white-space:nowrap">' + escapeHtml(lastSeen) + '</td>' +
@@ -1166,6 +1199,7 @@
         '<thead><tr style="border-bottom:1px solid var(--color-border)">' +
           '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Host</th>' +
           '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">OS / Arch</th>' +
+          '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Privilege</th>' +
           '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Version</th>' +
           '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Status</th>' +
           '<th style="padding:4px 8px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Last seen</th>' +
