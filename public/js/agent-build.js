@@ -1180,9 +1180,14 @@
             'white-space:pre-wrap;word-break:break-word">' + escapeHtml(a.installError) + '</td></tr>'
         : "";
 
+      // Host cell is click-through to the asset details slide-in (see the
+      // delegated handler below). Accent colour + role/tabindex mirror the
+      // credential-usage slide-in's asset rows in server-settings.js.
       return '<tr style="border-bottom:1px solid var(--color-border-light, var(--color-border))">' +
           '<td style="padding:6px 8px">' +
-            '<div>' + escapeHtml(host) + '</div>' +
+            '<div data-asset-id="' + escapeHtml(a.assetId) + '" role="button" tabindex="0" ' +
+              'title="Open asset details" ' +
+              'style="color:var(--color-accent);cursor:pointer">' + escapeHtml(host) + '</div>' +
             (hostSub ? '<div style="font-size:0.72rem;color:var(--color-text-tertiary)">' + escapeHtml(hostSub) + '</div>' : "") +
           '</td>' +
           '<td style="padding:6px 8px"><code>' + escapeHtml(a.osPlatform) + '</code> / <code>' + escapeHtml(a.arch) + '</code></td>' +
@@ -1212,6 +1217,39 @@
       btn.addEventListener("click", function () {
         _onInstalledAgentAction(btn.getAttribute("data-act"), btn.getAttribute("data-id"), btn);
       });
+    });
+    _wireInstalledAgentHostLinks(body);
+  }
+
+  // Host-cell click-through → asset details. Delegated on the panel body (which
+  // re-renders on every poll tick) and bound once via a flag, so the 3s busy
+  // re-render doesn't stack duplicate listeners.
+  //
+  // In-place when the canonical asset slide-over is on the page (assets.js
+  // defines openViewModal and appends to <body>, so it stacks over this panel);
+  // otherwise the #view=asset:<id> deep link app.js processSearchHash() opens on
+  // load — the same hand-off the Server Settings credential-usage slide-in uses,
+  // and the reason integrations.html doesn't have to pull in all of assets.js.
+  function _wireInstalledAgentHostLinks(body) {
+    if (!body || body._agentHostLinksBound) return;
+    body._agentHostLinksBound = true;
+    function open(target) {
+      var el = target && target.closest ? target.closest("[data-asset-id]") : null;
+      if (!el) return;
+      var assetId = el.getAttribute("data-asset-id");
+      if (!assetId) return;
+      if (typeof openViewModal === "function") {
+        openViewModal(assetId);
+      } else {
+        window.location.href = "/assets.html#view=asset:" + encodeURIComponent(assetId);
+      }
+    }
+    body.addEventListener("click", function (e) { open(e.target); });
+    body.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      if (!e.target || !e.target.hasAttribute || !e.target.hasAttribute("data-asset-id")) return;
+      e.preventDefault();   // Space would scroll the panel
+      open(e.target);
     });
   }
 

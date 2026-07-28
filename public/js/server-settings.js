@@ -5760,8 +5760,9 @@ function renderCredentialsTab() {
 // Lists the assets a credential reaches, grouped by the tier each one inherits
 // it from (asset / class / integration). Models the canonical asset-details
 // slide-over (assets.js): append a `.slideover-overlay` to <body>, toggle the
-// `.open` class, reuse initSlideoverResize. Clicking an asset hands off to the
-// global openViewModal() (assets.js is loaded on the same page).
+// `.open` class, reuse initSlideoverResize. Clicking an asset hands off via the
+// #view=asset:<id> deep link — assets.js is NOT loaded on this page (see the
+// wiring comment below).
 var _credUsageReturnFocus = null;
 
 function _ensureCredUsagePanelDOM() {
