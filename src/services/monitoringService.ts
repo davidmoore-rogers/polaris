@@ -90,7 +90,7 @@ import {
 } from "../metrics.js";
 import pg from "pg";
 import { dropChunks, getEffectiveCompressAfterDays } from "./timescaleService.js";
-import { getSampleRetention, FOREVER, unselectedSlowPruneWindow, tieredPruneWindow } from "./sampleRetentionService.js";
+import { getSampleRetention, getAppMapConnectionRetentionDays, FOREVER, unselectedSlowPruneWindow, tieredPruneWindow } from "./sampleRetentionService.js";
 import { getDirectDatabaseUrl } from "../utils/dbConnections.js";
 import {
   enqueueMonitorSample,
@@ -9951,8 +9951,8 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     // Service (journalctl) logs — same standalone-hypertable prune on the
     // process entity's detail window as process logs.
     pruneTierByDays((w) => prisma.assetServiceLogSample.deleteMany({ where: w as any }), r.process.detail, "timestamp", "asset_service_log_samples"),
-    // Application Map connection rows (plain accumulate+age table) — fixed
-    // 30-day window (POLARIS_PROCESS_CONN_RETENTION_DAYS), not a retention entity.
+    // Application Map connection rows (plain accumulate+age table) — the FLAT
+    // `appMapConnections` retention entity (single window, no tiers).
     pruneProcessConnections(),
   ]);
   return iDetail + iHourly + iDaily + sDetail + sHourly + sDaily + ipDetail + ipHourly + ipDaily
@@ -9966,17 +9966,16 @@ async function pruneLldpNeighbors(days: number): Promise<number> {
   return count;
 }
 
-// Application Map connection rows age out on their own fixed window rather
-// than a sampleRetention entity — the table is current-state-with-age, not a
-// tiered time-series, and one number doesn't warrant a retention-UI row.
-// POLARIS_PROCESS_CONN_RETENTION_DAYS overrides the 30-day default.
-function processConnRetentionDays(): number {
-  const v = Number(process.env.POLARIS_PROCESS_CONN_RETENTION_DAYS);
-  return Number.isFinite(v) && v > 0 ? v : 30;
-}
-
+// Application Map connection rows use the FLAT `appMapConnections` retention
+// entity — one window, no detail/hourly/daily tiers, because the table is
+// current-state-with-age rather than a tiered time-series. Encoding matches a
+// tier (FOREVER = never prune, <= 0 = drop everything), so this mirrors
+// pruneLldpNeighbors exactly. POLARIS_PROCESS_CONN_RETENTION_DAYS is now only the
+// default seed for that setting, not the authority.
 async function pruneProcessConnections(): Promise<number> {
-  const cutoff = new Date(Date.now() - processConnRetentionDays() * DAY_MS);
+  const days = await getAppMapConnectionRetentionDays();
+  if (days === FOREVER) return 0;
+  const cutoff = days <= 0 ? new Date() : new Date(Date.now() - days * DAY_MS);
   const { count } = await prisma.assetProcessConnection.deleteMany({ where: { lastSeen: { lt: cutoff } } });
   return count;
 }

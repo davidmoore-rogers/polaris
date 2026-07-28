@@ -28,10 +28,21 @@
  * unselected, not a configurable cell. assets / cpuMem / hardware have no
  * selection concept — their retention applies to every row.
  *
- * Encoding (per tier): positive = N days; 0 = tier OFF (pruned away — do not
- * keep this tier); FOREVER (-1) = keep forever. NOTE: this flips the legacy
- * meaning of 0 (which meant "keep forever"); the one-shot migration translates
- * legacy 0 → FOREVER. See migrateSampleRetentionToEntities.
+ * FLAT entities: a second, non-tiered dimension in the same Setting row for
+ * tables that are current-state-with-age rather than tiered time-series, so
+ * detail/hourly/daily would be meaningless. Today that's:
+ *
+ *   appMapConnections — asset_process_connections   (Application Map socket facts)
+ *
+ * They carry a single `{ days }` window using the same encoding as a tier, and
+ * they also bound what the reading surface can show — the Application Map's
+ * "Seen within" range is derived from this number so the widest option can't
+ * promise more history than is retained.
+ *
+ * Encoding (per tier, and per flat window): positive = N days; 0 = OFF (pruned
+ * away — do not keep this tier); FOREVER (-1) = keep forever. NOTE: this flips
+ * the legacy meaning of 0 (which meant "keep forever"); the one-shot migration
+ * translates legacy 0 → FOREVER. See migrateSampleRetentionToEntities.
  *
  * Defaults: 7 days detail / 30 days hourly / 365 days daily, uniform across
  * entities. Operators tune from the Retention card.
@@ -166,6 +177,16 @@ export const RETENTION_ENTITIES: RetentionEntity[] = [
   "process",
 ];
 
+/** Entities with a single window instead of detail/hourly/daily tiers — see the
+ *  "FLAT entities" note in the file header. */
+export type FlatRetentionEntity = "appMapConnections";
+
+export const FLAT_RETENTION_ENTITIES: FlatRetentionEntity[] = ["appMapConnections"];
+
+export interface FlatRetention {
+  days: number;
+}
+
 /** Entities whose configured retention applies to SELECTED rows only
  *  (unselected rows are fixed at UNSELECTED_DETAIL_HOURS, no rollup). */
 export const SELECTION_AWARE_ENTITIES: RetentionEntity[] = ["interfaces", "storage", "ipsec"];
@@ -176,12 +197,28 @@ export interface TierRetention {
   daily: number;
 }
 
-export type SampleRetention = Record<RetentionEntity, TierRetention>;
+/** Intersection, not a union member: `retention[tieredEntity][tier]` keeps
+ *  working unchanged while flat entities read `retention.appMapConnections.days`. */
+export type SampleRetention =
+  Record<RetentionEntity, TierRetention> & Record<FlatRetentionEntity, FlatRetention>;
 
 // SolarWinds-style defaults. Operators tune from the Retention card.
 const DEFAULT_DETAIL_DAYS = 7;
 const DEFAULT_HOURLY_DAYS = 30;
 const DEFAULT_DAILY_DAYS = 365;
+
+/** Default window for the Application Map's connection facts.
+ *
+ *  POLARIS_PROCESS_CONN_RETENTION_DAYS used to be the authority for this table.
+ *  It is now only the DEFAULT SEED: an install that set the env keeps its number
+ *  until an operator saves the Retention card, after which the Setting wins and
+ *  there is exactly one source of truth. */
+const DEFAULT_APPMAP_CONN_DAYS = 30;
+
+function defaultAppMapConnDays(): number {
+  const v = Number(process.env.POLARIS_PROCESS_CONN_RETENTION_DAYS);
+  return Number.isFinite(v) && v > 0 ? Math.trunc(v) : DEFAULT_APPMAP_CONN_DAYS;
+}
 
 function defaultTier(): TierRetention {
   return { detail: DEFAULT_DETAIL_DAYS, hourly: DEFAULT_HOURLY_DAYS, daily: DEFAULT_DAILY_DAYS };
@@ -197,6 +234,7 @@ export function defaultSampleRetention(): SampleRetention {
     ipsec:       defaultTier(),
     perfSla:     defaultTier(),
     process:     defaultTier(),
+    appMapConnections: { days: defaultAppMapConnDays() },
   };
 }
 
@@ -229,12 +267,21 @@ function parseTier(raw: unknown, fallback: TierRetention): TierRetention {
   };
 }
 
+function parseFlat(raw: unknown, fallback: FlatRetention): FlatRetention {
+  if (raw == null || typeof raw !== "object") return { ...fallback };
+  const r = raw as Record<string, unknown>;
+  return { days: toRetentionDays(r.days, fallback.days) };
+}
+
 function parseSampleRetention(raw: unknown): SampleRetention {
   const fallback = defaultSampleRetention();
   if (raw == null || typeof raw !== "object") return fallback;
   const r = raw as Record<string, unknown>;
   const out = {} as SampleRetention;
   for (const e of RETENTION_ENTITIES) out[e] = parseTier(r[e], fallback[e]);
+  // Stored rows that predate a flat entity simply lack the key and inherit the
+  // default here — that's why adding one needs no migration.
+  for (const e of FLAT_RETENTION_ENTITIES) out[e] = parseFlat(r[e], fallback[e]);
   return out;
 }
 
@@ -259,6 +306,12 @@ function mergeTier(current: TierRetention, input: unknown): TierRetention {
   };
 }
 
+function mergeFlat(current: FlatRetention, input: unknown): FlatRetention {
+  if (input == null || typeof input !== "object") return { ...current };
+  const i = input as Record<string, unknown>;
+  return { days: i.days == null ? current.days : toRetentionDays(i.days, current.days) };
+}
+
 function mergeRetention(
   current: SampleRetention,
   input: Partial<SampleRetention> | Record<string, unknown>,
@@ -266,6 +319,7 @@ function mergeRetention(
   const i = input as Record<string, unknown>;
   const out = {} as SampleRetention;
   for (const e of RETENTION_ENTITIES) out[e] = i[e] == null ? { ...current[e] } : mergeTier(current[e], i[e]);
+  for (const e of FLAT_RETENTION_ENTITIES) out[e] = i[e] == null ? { ...current[e] } : mergeFlat(current[e], i[e]);
   return out;
 }
 
@@ -297,4 +351,15 @@ export function getRetentionDays(
   tier: RetentionTier,
 ): number {
   return retention[entity][tier];
+}
+
+/**
+ * Configured window (days) for the Application Map's connection facts. Returns 0
+ * (prune everything) or FOREVER (-1) as stored. Two callers, both fine on the
+ * 5-second cache: the nightly prune, and the graph endpoint — which uses it to
+ * bound its read AND to tell the client how far back "Seen within" can reach, so
+ * the widest option can't promise history that was already pruned.
+ */
+export async function getAppMapConnectionRetentionDays(): Promise<number> {
+  return (await getSampleRetention()).appMapConnections.days;
 }

@@ -33,6 +33,8 @@ import {
   invalidateSampleRetentionCache,
   FOREVER,
   RETENTION_ENTITIES,
+  FLAT_RETENTION_ENTITIES,
+  type FlatRetentionEntity,
   SETTING_KEY as RETENTION_KEY,
   type SampleRetention,
   type TierRetention,
@@ -89,6 +91,11 @@ function legacyStreamToTier(raw: unknown, fallback: TierRetention): TierRetentio
           // Process telemetry postdates the legacy class shape — no legacy key
           // to migrate; take the default.
           process:     def.process,
+          // Flat (non-tiered) entities likewise postdate the legacy shape and
+          // have no stream to derive from. Spread the defaults rather than
+          // naming each one, so a future flat entity can't be forgotten here.
+          ...Object.fromEntries(FLAT_RETENTION_ENTITIES.map((e) => [e, def[e]])) as
+            Pick<SampleRetention, FlatRetentionEntity>,
         };
       } else {
         // No row / unrecognized → seed entity defaults.

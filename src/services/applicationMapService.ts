@@ -36,6 +36,7 @@ import { AppError } from "../utils/errors.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { loadIconResolutionCache, resolveIconUrl } from "./deviceIconService.js";
 import { sanitizePositions, type TopologyPositions } from "./topologyLayoutService.js";
+import { getAppMapConnectionRetentionDays, FOREVER } from "./sampleRetentionService.js";
 
 // ─── Shapes ───────────────────────────────────────────────────────────
 
@@ -129,11 +130,11 @@ export interface AppMapGraph {
   edges: AppMapEdge[];
   savedLayout: AppMapLayoutDto | null;
   stats: AppMapStats;
+  /** Configured `appMapConnections` retention window in days (FOREVER = -1).
+   *  The client builds its "Seen within" range from this, so the widest option
+   *  reflects what is actually retained instead of a hardcoded guess. */
+  retentionDays: number;
 }
-
-// Graph reads are bounded server-side: "All" in the UI means "all retained
-// within this window" — matches the age filter's widest setting.
-const GRAPH_WINDOW_MS = 7 * 24 * 3600 * 1000;
 // Unknown-IP hygiene.
 const UNKNOWN_GROUP_THRESHOLD = 5;   // >5 unknowns in one subnet → group node
 const UNKNOWN_NODE_CAP = 100;        // after grouping; overflow collapses
@@ -539,9 +540,18 @@ export async function buildApplicationMapGraph(): Promise<AppMapGraph> {
     where: { monitored: true, OR: [{ mappedProcesses: { isEmpty: false } }, { mappedServices: { isEmpty: false } }] },
     select: { ...ASSET_LITE_SELECT, mappedProcesses: true, mappedServices: true },
   });
-  const since = new Date(Date.now() - GRAPH_WINDOW_MS);
+  // Bound the read by the SAME window the prune uses, so the client's widest
+  // "Seen within" option can't promise history that was already deleted (and
+  // can't hide history that's still there). FOREVER = no lower bound.
+  const retentionDays = await getAppMapConnectionRetentionDays();
+  const since = retentionDays === FOREVER
+    ? null
+    : new Date(Date.now() - Math.max(0, retentionDays) * 24 * 3600 * 1000);
   const rows: ProcessConnectionRow[] = assets.length === 0 ? [] : await prisma.assetProcessConnection.findMany({
-    where: { assetId: { in: assets.map((a) => a.id) }, lastSeen: { gte: since } },
+    where: {
+      assetId: { in: assets.map((a) => a.id) },
+      ...(since ? { lastSeen: { gte: since } } : {}),
+    },
     select: {
       assetId: true, processName: true, unit: true, kind: true, proto: true,
       localAddr: true, localPort: true, remoteIp: true, remotePort: true,
@@ -573,6 +583,7 @@ export async function buildApplicationMapGraph(): Promise<AppMapGraph> {
     edges: graph.edges,
     savedLayout: await getAppMapLayout("global"),
     stats: graph.stats,
+    retentionDays,
   };
 }
 

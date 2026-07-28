@@ -1915,6 +1915,20 @@ var SAMPLE_RETENTION_ENTITIES = [
   { key: "storage",     label: "Storage",        hint: "Per-volume usage.",       selectionAware: true },
   { key: "ipsec",       label: "IPsec tunnels",  hint: "Per-tunnel state.",       selectionAware: true },
   { key: "perfSla",     label: "SD-WAN Perf SLA", hint: "Per health-check member latency / jitter / loss." },
+  { key: "process",     label: "Processes & services", hint: "Pinned-program CPU/RAM plus process + service log lines." },
+];
+// FLAT entities: one window instead of detail/hourly/daily, for tables that are
+// current-state-with-age rather than tiered time-series. Same −1/0/N encoding.
+var SAMPLE_RETENTION_FLAT_ENTITIES = [
+  {
+    key: "appMapConnections",
+    label: "Application Map connections",
+    hint: "Observed listening ports + peers for mapped processes/services. Rows accumulate " +
+          "(one per distinct socket) and age out on this window; capped at 200 listening / " +
+          "500 outbound / 200 inbound per program per host. Also sets how far back the " +
+          "Application Map's “Seen within” filter can reach.",
+    def: 30,
+  },
 ];
 var SAMPLE_RETENTION_TIERS   = [
   { key: "detail", label: "Detail"      },
@@ -1972,6 +1986,27 @@ function renderSampleRetentionCard(retention) {
     ? '<p class="hint" style="margin-top:0.5rem;font-size:0.76rem">* Applies to <strong>selected (monitored)</strong> interfaces / storage / IPsec tunnels only — unselected ones are kept 24&nbsp;h and not rolled up. Choose which to keep from each asset\'s interface / storage / IPsec slide-in.</p>'
     : "";
 
+  // Flat entities render as their own single-input rows: they have one window,
+  // so putting them in the tier table would leave two thirds of it meaningless.
+  var flatRows = SAMPLE_RETENTION_FLAT_ENTITIES.map(function (entity) {
+    var cur = r[entity.key] && typeof r[entity.key].days === "number" ? r[entity.key].days : entity.def;
+    return '<tr>' +
+      '<td style="padding:4px 10px 4px 0;font-size:0.85rem">' + escapeHtml(entity.label) +
+        '<div style="font-size:0.72rem;color:var(--color-text-tertiary);max-width:34rem">' + escapeHtml(entity.hint) + '</div>' +
+      '</td>' +
+      '<td style="padding:3px 6px;text-align:center;vertical-align:top">' +
+        '<input type="number" min="-1" max="3650" step="1" id="ret-flat-' + escapeHtml(entity.key) + '"' +
+        ' data-flat-entity="' + escapeHtml(entity.key) + '"' +
+        ' value="' + cur + '" style="width:4rem;text-align:center;padding:2px 4px;font-size:0.85rem">' +
+      '</td>' +
+      '<td style="padding:3px 0 3px 6px;font-size:0.78rem;color:var(--color-text-tertiary);vertical-align:top">days</td>' +
+    '</tr>';
+  }).join("");
+  var flatSection = flatRows
+    ? '<h5 style="margin:1.1rem 0 0.35rem;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--color-text-secondary)">Single-window data</h5>' +
+      '<table style="border-collapse:collapse"><tbody>' + flatRows + '</tbody></table>'
+    : "";
+
   return '<div class="settings-card" id="sample-retention-card">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
       '<h4 style="margin:0">Sample Retention</h4>' +
@@ -1992,6 +2027,7 @@ function renderSampleRetentionCard(retention) {
       '<tbody>' + rows + '</tbody>' +
     '</table>' +
     footnote +
+    flatSection +
     '<p class="hint" style="margin-top:0.5rem;font-size:0.78rem">Defaults: 7 days detail / 30 days hourly / 365 days daily. Takes effect on the next nightly prune (heavy-loop tick) and on the next chart request.</p>' +
   '</div>';
 }
@@ -2010,6 +2046,10 @@ function _wireSampleRetentionCard() {
           var el = document.getElementById("ret-" + entity.key + "-" + tier.key);
           if (el) el.value = String(SAMPLE_RETENTION_DEFAULTS[tier.key]);
         });
+      });
+      SAMPLE_RETENTION_FLAT_ENTITIES.forEach(function (entity) {
+        var el = document.getElementById("ret-flat-" + entity.key);
+        if (el) el.value = String(entity.def);
       });
     });
   }
@@ -2032,6 +2072,18 @@ function _wireSampleRetentionCard() {
           el.style.borderColor = "";
           payload[entity.key][tier.key] = n;
         });
+      });
+      SAMPLE_RETENTION_FLAT_ENTITIES.forEach(function (entity) {
+        var el = document.getElementById("ret-flat-" + entity.key);
+        if (!el) return;
+        var n = parseInt(el.value, 10);
+        if (!Number.isFinite(n) || n < -1 || n > 3650) {
+          hasError = true;
+          el.style.borderColor = "var(--color-status-error, #e57373)";
+          return;
+        }
+        el.style.borderColor = "";
+        payload[entity.key] = { days: n };
       });
       if (hasError) {
         showToast("Retention values must be −1 (forever), 0 (off), or 1–3650 days", "error");
