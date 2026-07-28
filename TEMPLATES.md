@@ -30,6 +30,7 @@ Per-pattern sections:
 - [Wizard (stepper modal)](#wizard-stepper-modal)
 - [Full-screen blocking overlay](#full-screen-blocking-overlay)
 - [Slide-over panel](#slide-over-panel)
+- [Token/pill filter box (multi-dimension, typeahead-committed)](#tokenpill-filter-box-multi-dimension-typeahead-committed)
 - [Sortable + filterable data table](#sortable--filterable-data-table)
 - [Per-instance multi-lane worker (constrained + unconstrained endpoints)](#per-instance-multi-lane-worker-constrained--unconstrained-endpoints)
 - [Cross-asset graph derivation + persisted DAG](#cross-asset-graph-derivation--persisted-dag)
@@ -216,6 +217,26 @@ Per-pattern sections:
 - `data-shot-sub="hiddenIfaces"` — Interfaces only; surfaces the "Include hidden interfaces" sub-checkbox.
 
 **Key conventions:** wrappers with no rendered content (empty async mounts) are skipped by `_collectShotSections`, so conditional sections need no special handling. Excluded sections are pruned from the html-to-image clone via its `filter` option — never hide live DOM for exclusion. The Events tab gets no annotations (its footer button is the Export dropdown, not Screenshot).
+
+---
+
+## Token/pill filter box (multi-dimension, typeahead-committed)
+
+**What it is:** One text input that accumulates *filter pills*. The operator types a fragment, a suggestion dropdown built from the data currently on screen offers matches labelled by dimension, Enter turns the pick into a pill, and pills combine **OR within a kind, AND across kinds**. Use it when a surface has many filterable dimensions and a row of checkboxes/selects per dimension would crowd the toolbar (or can't be enumerated up front — hostnames, process names, ports). Use `TableSF`'s per-column controls instead when the filters map cleanly onto table columns.
+
+**Canonical implementation:** the Application Map toolbar — `public/js/appmap.js` (`applyGraphFilter` / `buildFilterCatalog` / `rankSuggestions` / `renderPills` / `addPill` / `removePillAt` / `openSuggest` / `commitInput` / `wireFilterBox`), markup in `public/appmap.html`, CSS `.appmap-filter` / `-pills` / `-input` / `.appmap-suggest{.open}` / `-item{.active}` / `-kind` / `-empty` in `public/css/appmap.css`.
+
+**Key conventions:**
+- **Pill model is `{ kind, value }`** and nothing else — serializable, so the whole pill list persists in the page's `polaris-prefs-<scope>-<username>` blob for free.
+- **Don't use `<datalist>`.** Most browsers won't open it on click. Reuse the `.aw-suggest` recipe from `public/js/automations-wizard.js` (`scOpenSuggest` / `scCloseSuggest`): absolutely-positioned div, `.open` class, `mousedown` + `preventDefault()` on rows so blur-close doesn't race the tap, `blur` close behind a ~150 ms `setTimeout`, ArrowUp/Down moving an `.active` class with `scrollIntoView({block:"nearest"})`, Escape closing with `stopPropagation()` so a surrounding modal doesn't also close.
+- **Catalog is rebuilt from the FULL dataset on every render**, never from the filtered view — otherwise adding one pill hides the suggestions needed to add the next.
+- **Rank prefix matches above interior matches** so typing `tc` offers `tcp` first rather than some host whose name merely contains "tc". Cap the list (~50).
+- **Matching is substring, not equality.** Catalog-sourced values are full labels (so it behaves as equality for them) while a hand-typed fragment still works; a free-text `text` kind is the fallback when nothing matched.
+- **Keep the filter predicate PURE and separate from the DOM**, exposed on a `window.Polaris<Page>` namespace, and unit-test it through a `node:vm` sandbox (`tests/unit/appmapFilter.test.ts`, same approach as `topologyColumns.test.ts`). Pill semantics are exactly the kind of logic that silently drifts.
+- **Removal has three affordances**: the pill's `×`, Backspace on an empty input, and (implicitly) clearing all pills to restore the unfiltered view. Debounce only the *suggestion* filtering (~200 ms); committing a pill is a discrete action and should re-render immediately.
+- Reuse `.tag-chip` / `.tag-chip-delete` for the pill visuals rather than forking chip CSS; add a dimmed `-kind` prefix span so `host:web01` and `service:web01` are distinguishable at a glance.
+
+**When adding a new instance:** define the kind list up front (each kind needs a haystack function over your row/node shape); decide the cross-kind combinator explicitly and write it into the doc comment (AND-across/OR-within is the default operators expect from a filter bar); make sure an active filter genuinely *narrows* — a "keep these always" rule that survives an active scope means the filter appears not to work.
 
 ---
 
