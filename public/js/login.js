@@ -40,6 +40,62 @@
   logo.style.visibility = "";
 })();
 
+// Keep the card above the on-screen keyboard on mobile. iOS Safari leaves the
+// layout viewport at full height when the keyboard opens, so the flex-centered
+// card doesn't move and the password field / Sign in button end up behind the
+// keyboard. window.visualViewport reports the actually-visible rect on both iOS
+// Safari and Chrome Android: while it's meaningfully shorter than the layout
+// viewport we pin .login-wrapper to that rect and top-align it (see the
+// .kb-open rules in login.html), then scroll the active form's bottom — the
+// submit button — into view.
+(function () {
+  var vv = window.visualViewport;
+  var wrapper = document.querySelector(".login-wrapper");
+  if (!vv || !wrapper) return;
+
+  // Below this delta it's browser chrome (collapsing URL bar), not a keyboard.
+  var KEYBOARD_MIN_PX = 120;
+  var pending = 0;
+  var lastScrolled = null;
+
+  function apply() {
+    pending = 0;
+    var layoutH = Math.max(window.innerHeight, document.documentElement.clientHeight || 0);
+    var open = layoutH - vv.height > KEYBOARD_MIN_PX;
+
+    if (open) {
+      wrapper.style.setProperty("--vv-height", vv.height + "px");
+      wrapper.style.setProperty("--vv-offset-top", vv.offsetTop + "px");
+      wrapper.classList.add("kb-open");
+      var active = document.activeElement;
+      var target = active && active.form ? active.form : active;
+      // Only when the focused form changes (keyboard just opened, or the MFA
+      // step swapped forms) — re-running this on every resize/scroll event
+      // would fight the user's own scrolling.
+      if (target && target !== lastScrolled && target.scrollIntoView) {
+        target.scrollIntoView({ block: "end", behavior: "smooth" });
+        lastScrolled = target;
+      }
+    } else {
+      wrapper.classList.remove("kb-open");
+      wrapper.style.removeProperty("--vv-height");
+      wrapper.style.removeProperty("--vv-offset-top");
+      lastScrolled = null;
+    }
+  }
+
+  function schedule() {
+    if (!pending) pending = window.requestAnimationFrame(apply);
+  }
+
+  vv.addEventListener("resize", schedule);
+  vv.addEventListener("scroll", schedule);
+  window.addEventListener("orientationchange", schedule);
+  // The MFA step swaps the form in-place; re-measure so the code field and
+  // Verify button land above a keyboard that's already up.
+  document.addEventListener("focusin", schedule);
+})();
+
 // Check SSO config and show button if enabled
 (async function () {
   try {

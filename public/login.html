@@ -12,10 +12,31 @@
   <style>
     .login-wrapper {
       min-height: 100vh;
+      min-height: 100dvh;
       display: flex;
       align-items: center;
       justify-content: center;
+      padding: 1rem 0;
       background: var(--color-bg-secondary);
+    }
+    /* On-screen-keyboard mode (mobile). iOS Safari does not resize the layout
+       viewport when the keyboard opens, so 100vh/100dvh still measure the whole
+       screen and the flex-centered card stays put — with the password field and
+       Sign in button behind the keyboard. login.js watches window.visualViewport
+       and flips this class on while the keyboard is up: the wrapper is pinned to
+       the *visible* rect (--vv-height / --vv-offset-top) and top-aligns its card,
+       scrolling internally when the card is taller than what's left. */
+    .login-wrapper.kb-open {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      min-height: 0;
+      height: var(--vv-height, 100dvh);
+      transform: translateY(var(--vv-offset-top, 0px));
+      align-items: flex-start;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     .login-card {
       background: var(--color-bg-primary);
