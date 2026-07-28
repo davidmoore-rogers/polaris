@@ -21,21 +21,23 @@
       <div class="appmap-toolbar">
         <label class="appmap-toolbar-field">
           <span>Seen within</span>
-          <select id="appmap-age" class="input">
-            <option value="600">Live (10 min)</option>
-            <option value="3600">1 hour</option>
-            <option value="86400" selected>24 hours</option>
-            <option value="604800">7 days</option>
-            <option value="0">All retained</option>
-          </select>
+          <!-- Options are rebuilt from the server's configured retention window
+               (appmap.js buildAgeOptions) so the widest one can't promise more
+               history than is actually kept. -->
+          <select id="appmap-age" class="input"></select>
         </label>
-        <label class="appmap-check"><input type="checkbox" id="appmap-proto-tcp" checked> TCP</label>
-        <label class="appmap-check"><input type="checkbox" id="appmap-proto-udp" checked> UDP</label>
         <label class="appmap-check"><input type="checkbox" id="appmap-hide-external"> Hide external</label>
-        <div class="appmap-search-wrap">
-          <input type="search" id="appmap-search" class="input" placeholder="Find host / process / IP…"
-                 aria-label="Find a node" autocomplete="off" spellcheck="false" list="appmap-search-list">
-          <datalist id="appmap-search-list"></datalist>
+        <!-- Token/pill filter. Protocol, port, asset, process, service and
+             external-IP filters are all typed here; pills combine OR within a
+             kind and AND across kinds. -->
+        <div class="appmap-filter" id="appmap-filter">
+          <div class="appmap-filter-pills" id="appmap-filter-pills"></div>
+          <input type="text" id="appmap-filter-input" class="appmap-filter-input"
+                 placeholder="Filter: tcp, port, host, process, service…"
+                 aria-label="Add a filter" autocomplete="off" spellcheck="false"
+                 role="combobox" aria-expanded="false" aria-autocomplete="list"
+                 aria-controls="appmap-suggest">
+          <div class="appmap-suggest" id="appmap-suggest" role="listbox"></div>
         </div>
         <div class="appmap-toolbar-actions">
           <span id="appmap-status" class="appmap-status"></span>

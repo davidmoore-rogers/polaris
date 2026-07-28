@@ -11,26 +11,47 @@
 // over the computed layout: server `savedLayout` (shared, applicationMap=write)
 // > localStorage (per-browser fallback for readers) > computed.
 //
-// Filters (age / proto / hide-external) are client-side over the cached
-// payload; the graph auto-refreshes every 60s (paused while the tab is
-// hidden) preserving current node positions. Tapping an asset box opens the
-// canonical asset details slide-in in place (openViewModal from assets.js) —
-// no navigation off the map.
+// Filters are client-side over the cached payload; the graph auto-refreshes
+// every 60s (paused while the tab is hidden) preserving current node positions.
+// Tapping an asset box opens the canonical asset details slide-in in place
+// (openViewModal from assets.js) — no navigation off the map.
+//
+// Filtering is a TOKEN/PILL box: the operator types a fragment, picks from a
+// suggestion dropdown built out of the current payload, and Enter turns it into a
+// pill. Pills combine OR WITHIN A KIND and AND ACROSS KINDS — [tcp] [udp] [web01]
+// means "(tcp or udp) traffic touching web01". Kinds: proto, port, asset,
+// process, service, external, and a free-text fallback. The "Seen within" range
+// and "Hide external" stay separate controls (a range and a boolean aren't
+// tokens). Per-user toolbar state persists in localStorage under
+// polaris-prefs-appmap-<username>; node positions keep their own key.
 
 (function () {
   "use strict";
 
   var LS_KEY = "polaris.appmap.positions";
+  // Per-user toolbar prefs (age / hide-external / legend / pills). Separate from
+  // LS_KEY, which is per-browser and pairs with the SHARED server-side layout.
+  function prefsKey() {
+    var u = (typeof currentUsername !== "undefined" && currentUsername) ? currentUsername : "";
+    return u ? "polaris-prefs-appmap-" + u : "";
+  }
   var STALE_MS = 15 * 60 * 1000;
   var REFRESH_MS = 60 * 1000;
-  var PROC_ROW_GAP = 52;
+  // Vertical slot per child node inside an asset box. Sized for the tallest
+  // child (40px — a name plus its listen-ports line) with breathing room.
+  var PROC_ROW_GAP = 58;
 
   var cy = null;
   var payload = null;         // last server payload
   var refreshTimer = null;
   var saveTimer = null;
   var selectedId = null;
-  var searchFocusId = null;   // when set, the map is narrowed to this node + its connections
+  // Active filter pills: [{ kind, value }]. kind ∈ proto | port | asset |
+  // process | service | external | text. `value` is the match target — for
+  // node-scope kinds it's the lowercased label the catalog offered.
+  var filterPills = [];
+  var suggestItems = [];      // current dropdown contents
+  var suggestIndex = -1;      // highlighted row, -1 = none
 
   document.addEventListener("DOMContentLoaded", async function () {
     if (!document.getElementById("appmap-graph")) return; // not this page
@@ -67,68 +88,261 @@
     return kind === "process" || kind === "service";
   }
 
+  // ─── Per-user toolbar prefs ────────────────────────────────────────
+  //
+  // Convention: polaris-prefs-<scope>-<username>, one JSON blob, absent entry =
+  // defaults (never store defaults). Restore runs from wireToolbar(), which is
+  // called after fetchCurrentUser() so currentUsername is populated.
+
+  function savePrefs() {
+    var key = prefsKey();
+    if (!key) return;
+    try {
+      var ageEl = document.getElementById("appmap-age");
+      var legend = document.getElementById("appmap-legend");
+      var prev = readPrefs() || {};
+      // The select is empty until the first payload builds its options, so
+      // reading it before then would persist Number("") = 0 ("all retained") and
+      // clobber the operator's saved range. Keep the previous value until real
+      // options exist.
+      var age = (ageEl && ageEl.options.length) ? Number(ageEl.value)
+        : (typeof prev.age === "number" ? prev.age : null);
+      localStorage.setItem(key, JSON.stringify({
+        age: age,
+        hideExternal: !!(document.getElementById("appmap-hide-external") || {}).checked,
+        legend: !!(legend && !legend.hidden),
+        pills: filterPills,
+      }));
+    } catch (e) { /* quota / private mode — prefs are best-effort */ }
+  }
+
+  function readPrefs() {
+    var key = prefsKey();
+    if (!key) return null;
+    try {
+      var raw = JSON.parse(localStorage.getItem(key) || "null");
+      return (raw && typeof raw === "object") ? raw : null;
+    } catch (e) { return null; }
+  }
+
+  // Restore the pills + booleans immediately; `age` is deferred to
+  // applyAgeOptions() because the option list depends on the server's retention
+  // window, which isn't known until the first payload lands.
+  function restorePrefs() {
+    var p = readPrefs();
+    if (!p) return;
+    if (Array.isArray(p.pills)) {
+      // Validate the kind against the known list: an unrecognized kind (stale
+      // blob, hand-edited storage) would render as a pill that silently filters
+      // nothing, which reads as a broken filter box.
+      filterPills = p.pills.filter(function (x) {
+        return x && typeof x.value === "string" &&
+          (x.kind === "proto" || x.kind === "port" || SCOPE_KINDS.indexOf(x.kind) >= 0);
+      });
+      renderPills();
+    }
+    var he = document.getElementById("appmap-hide-external");
+    if (he && typeof p.hideExternal === "boolean") he.checked = p.hideExternal;
+    var legend = document.getElementById("appmap-legend");
+    if (legend && p.legend === true) legend.hidden = false;
+  }
+
+  // ─── "Seen within" options (bounded by the server's retention window) ──
+
+  var AGE_STEPS = [
+    { sec: 600,     label: "Live (10 min)" },
+    { sec: 3600,    label: "1 hour" },
+    { sec: 86400,   label: "24 hours" },
+    { sec: 604800,  label: "7 days" },
+    { sec: 2592000, label: "30 days" },
+  ];
+  var DEFAULT_AGE_SEC = 86400;
+
+  // Rebuild the select from `retentionDays` so the widest option states the real
+  // window instead of an unqualified "All retained" that used to mean 7 days
+  // regardless of what was kept. A saved age beyond the window is clamped rather
+  // than silently selecting an option that shows nothing.
+  function applyAgeOptions(retentionDays) {
+    var sel = document.getElementById("appmap-age");
+    if (!sel) return;
+    var forever = retentionDays === -1;
+    var windowSec = forever ? Infinity : Math.max(0, Number(retentionDays) || 0) * 86400;
+    var html = "";
+    AGE_STEPS.forEach(function (s) {
+      // Keep a step only if the retained window can actually satisfy it.
+      if (s.sec <= windowSec) html += '<option value="' + s.sec + '">' + esc(s.label) + "</option>";
+    });
+    var allLabel = forever ? "All retained (no limit)"
+      : "All retained (" + retentionDays + (retentionDays === 1 ? " day" : " days") + ")";
+    html += '<option value="0">' + esc(allLabel) + "</option>";
+    sel.innerHTML = html;
+
+    var want = null;
+    var p = readPrefs();
+    if (p && typeof p.age === "number") want = p.age;
+    if (want == null) want = DEFAULT_AGE_SEC;
+    // 0 ("all") is always present; otherwise fall back to the widest step that
+    // still fits, else "all".
+    var have = Array.prototype.map.call(sel.options, function (o) { return Number(o.value); });
+    if (have.indexOf(want) < 0) {
+      var fits = have.filter(function (v) { return v > 0 && v <= want; });
+      want = fits.length ? Math.max.apply(null, fits) : 0;
+    }
+    sel.value = String(want);
+  }
+
   // ─── Filters ───────────────────────────────────────────────────────
 
   function currentFilters() {
     var age = Number((document.getElementById("appmap-age") || {}).value || 86400);
     return {
       ageMs: age > 0 ? age * 1000 : 0,
-      tcp: !!(document.getElementById("appmap-proto-tcp") || {}).checked,
-      udp: !!(document.getElementById("appmap-proto-udp") || {}).checked,
       hideExternal: !!(document.getElementById("appmap-hide-external") || {}).checked,
-      focusId: searchFocusId,
+      pills: filterPills,
     };
   }
 
-  // Apply the client-side filters to the cached payload. Asset/process nodes
-  // always stay (they're the operator's selection); unknown nodes stay only
-  // while an edge still references them.
-  function filterGraph(f) {
-    var now = Date.now();
+  var SCOPE_KINDS = ["asset", "process", "service", "external", "text"];
+
+  // The searchable text of a node, per pill kind. `text` pills deliberately look
+  // at everything so a half-remembered fragment still lands somewhere.
+  function nodeHaystack(n, kind) {
+    var out = [];
+    function add(v) { if (v) out.push(String(v).toLowerCase()); }
+    if (kind === "asset" || kind === "text") {
+      if (n.kind === "asset") { add(n.hostname); add(n.ipAddress); add(n.assetId); }
+    }
+    if (kind === "process" || kind === "text") {
+      if (n.kind === "process") add(n.processName);
+    }
+    if (kind === "service" || kind === "text") {
+      if (n.kind === "service") add(n.serviceUnit);
+    }
+    if (kind === "external" || kind === "text") {
+      if (String(n.kind).indexOf("unknown-") === 0) {
+        add(n.ip); add(n.cidr);
+        (n.ips || []).forEach(add);
+      }
+    }
+    return out;
+  }
+
+  // Substring, not equality: catalog-sourced values are full labels (so it
+  // behaves as equality for them) while a hand-typed fragment still matches.
+  function nodeMatchesPill(n, pill) {
+    var v = String(pill.value || "").toLowerCase();
+    if (!v) return false;
+    return nodeHaystack(n, pill.kind).some(function (h) { return h.indexOf(v) >= 0; });
+  }
+
+  /**
+   * PURE filter core — exposed on window.PolarisAppMap for unit tests.
+   *
+   * Pills combine OR within a kind and AND across kinds:
+   *   - proto / port pills filter an edge's PORT LIST; when either kind is
+   *     present the edge must retain at least one port (a genuinely port-less
+   *     edge is exempt, as before).
+   *   - Each node-scope kind (asset / process / service / external / text) with
+   *     pills becomes a group: a Set of matching node ids, with asset pills
+   *     expanded to that asset's children because an asset's traffic flows
+   *     through its process/service boxes. An edge survives only if EVERY group
+   *     has a matching endpoint.
+   *   - A node is visible if a surviving edge references it, or if it satisfies
+   *     every group itself (counting its parent and its children as proxies) —
+   *     that second clause is what keeps a pinned-but-edgeless process/service
+   *     on screen when it's exactly what the operator filtered to.
+   */
+  function applyGraphFilter(allNodes, allEdges, f, now) {
+    var pills = f.pills || [];
+    var childrenOf = {};
+    allNodes.forEach(function (n) {
+      if (isChildNode(n.kind) && n.parent) (childrenOf[n.parent] = childrenOf[n.parent] || []).push(n.id);
+    });
+
+    var protoVals = {}, protoAny = false;
+    var portVals = {}, portAny = false;
+    pills.forEach(function (p) {
+      if (p.kind === "proto") { protoVals[String(p.value).toLowerCase()] = true; protoAny = true; }
+      if (p.kind === "port")  { portVals[String(p.value)] = true; portAny = true; }
+    });
+
+    // Node-scope groups, in a stable order so behaviour doesn't depend on the
+    // order the operator happened to add pills in.
+    var groups = [];
+    SCOPE_KINDS.forEach(function (kind) {
+      var mine = pills.filter(function (p) { return p.kind === kind; });
+      if (!mine.length) return;
+      var set = {};
+      allNodes.forEach(function (n) {
+        if (!mine.some(function (p) { return nodeMatchesPill(n, p); })) return;
+        set[n.id] = true;
+        if (n.kind === "asset") (childrenOf[n.id] || []).forEach(function (cid) { set[cid] = true; });
+      });
+      groups.push(set);
+    });
+
     var edges = [];
-    for (var i = 0; i < payload.edges.length; i++) {
-      var e = payload.edges[i];
+    for (var i = 0; i < allEdges.length; i++) {
+      var e = allEdges[i];
       if (f.ageMs > 0 && now - Date.parse(e.lastSeen) > f.ageMs) continue;
       var ports = e.ports.filter(function (p) {
-        return (p.proto === "tcp" && f.tcp) || (p.proto === "udp" && f.udp);
+        if (protoAny && !protoVals[String(p.proto).toLowerCase()]) return false;
+        if (portAny && !portVals[String(p.port)]) return false;
+        return true;
       });
-      if (ports.length === 0 && e.ports.length > 0) continue;
+      if ((protoAny || portAny) && ports.length === 0 && e.ports.length > 0) continue;
       if (f.hideExternal && (isUnknownId(e.source) || isUnknownId(e.target))) continue;
+      var scoped = groups.every(function (g) { return g[e.source] || g[e.target]; });
+      if (!scoped) continue;
       edges.push({ edge: e, ports: ports });
-    }
-
-    // Search focus: narrow to one node + its connections. "core" = the focus
-    // node, plus (if the focus is an asset box) its own child nodes, since an
-    // asset's connections flow through its processes/services. Keep only edges
-    // touching core; the visible set is core + those edges' endpoints + the
-    // parent asset boxes of any visible child node (so compound boxes render).
-    var focusVisible = null;
-    if (f.focusId) {
-      var core = {};
-      core[f.focusId] = true;
-      payload.nodes.forEach(function (n) { if (n.parent === f.focusId) core[n.id] = true; });
-      edges = edges.filter(function (r) { return core[r.edge.source] || core[r.edge.target]; });
-      focusVisible = {};
-      Object.keys(core).forEach(function (id) { focusVisible[id] = true; });
-      edges.forEach(function (r) { focusVisible[r.edge.source] = true; focusVisible[r.edge.target] = true; });
-      payload.nodes.forEach(function (n) {
-        if (focusVisible[n.id] && isChildNode(n.kind) && n.parent) focusVisible[n.parent] = true;
-      });
     }
 
     var referenced = {};
     edges.forEach(function (r) { referenced[r.edge.source] = true; referenced[r.edge.target] = true; });
-    var nodes = payload.nodes.filter(function (n) {
-      if (focusVisible && !focusVisible[n.id]) return false; // search focus wins over the keep-all rules
-      if (n.kind === "asset" || isChildNode(n.kind)) {
+
+    // Parent and children act as proxies so an asset box and its children agree
+    // about whether they satisfy a group (see the doc comment).
+    function satisfiesAllGroups(n) {
+      if (!groups.length) return false;
+      var related = [n.id];
+      if (n.parent) related.push(n.parent);
+      (childrenOf[n.id] || []).forEach(function (cid) { related.push(cid); });
+      return groups.every(function (g) {
+        return related.some(function (id) { return g[id]; });
+      });
+    }
+
+    var nodes = allNodes.filter(function (n) {
+      var isExternal = !(n.kind === "asset" || isChildNode(n.kind));
+      if (isExternal && f.hideExternal) return false;
+      if (groups.length) {
+        // Under an active scope nothing is kept unconditionally — otherwise every
+        // unrelated asset box would still render and the filter wouldn't narrow.
+        return !!referenced[n.id] || satisfiesAllGroups(n);
+      }
+      if (!isExternal) {
         // Resolved-target assets with no mapped processes/services only matter
         // while an edge points at them.
         if (n.kind === "asset" && n.hasMappedProcesses === false) return !!referenced["" + n.id];
         return true;
       }
-      if (f.hideExternal) return false;
       return !!referenced[n.id];
     });
+
+    // Compound boxes must render for any visible child.
+    var visible = {};
+    nodes.forEach(function (n) { visible[n.id] = true; });
+    var addedParents = [];
+    nodes.forEach(function (n) {
+      if (isChildNode(n.kind) && n.parent && !visible[n.parent]) {
+        visible[n.parent] = true;
+        addedParents.push(n.parent);
+      }
+    });
+    if (addedParents.length) {
+      allNodes.forEach(function (n) { if (addedParents.indexOf(n.id) >= 0) nodes.push(n); });
+    }
+
     // Guard against DANGLING references before they reach cytoscape/dagre: a
     // process node whose parent asset isn't in the set, or an edge whose
     // source/target has no node, makes the layout throw ("Cannot set properties
@@ -149,20 +363,45 @@
     return { nodes: nodes, edges: cleanEdges };
   }
 
+  function filterGraph(f) {
+    return applyGraphFilter(payload.nodes, payload.edges, f, Date.now());
+  }
+
   function isUnknownId(id) {
     return id.indexOf("ip:") === 0 || id.indexOf("ipgroup:") === 0;
   }
 
   // ─── Elements + stylesheet ─────────────────────────────────────────
 
+  // Listening ports as a compact second label line for child nodes. A process or
+  // service that listens but has no observed peers has NO edges, so without this
+  // its box shows only a name and looks like nothing was collected — the listen
+  // ports are the whole signal in that case.
+  function listenSuffix(n) {
+    var lp = n.listenPorts || [];
+    if (!lp.length) return "";
+    var parts = lp.slice(0, 3).map(function (p) { return p.proto + "/" + p.port; });
+    var extra = lp.length - 3;
+    return "\n" + parts.join(", ") + (extra > 0 ? " +" + extra : "");
+  }
+
   function nodeLabel(n) {
     if (n.kind === "asset") return n.hostname || n.ipAddress || n.assetId || "asset";
-    if (n.kind === "process") return n.processName || "process";
-    if (n.kind === "service") return n.serviceUnit || "service";
+    if (n.kind === "process") return (n.processName || "process") + listenSuffix(n);
+    if (n.kind === "service") return (n.serviceUnit || "service") + listenSuffix(n);
     if (n.kind === "unknown-ip") return n.ip || "?";
     if (n.kind === "unknown-ip-group") return (n.cidr || "?") + "\n" + ((n.ips || []).length) + " hosts";
     if (n.kind === "unknown-overflow") return "+" + (n.overflowCount || 0) + " external";
     return n.id;
+  }
+
+  // Longest line of a (possibly multi-line) label — child nodes carry a second
+  // listen-ports line that can be WIDER than the name, so sizing off the whole
+  // string or off line 1 alone both get it wrong.
+  function labelWidthChars(label) {
+    var max = 0;
+    String(label).split("\n").forEach(function (line) { if (line.length > max) max = line.length; });
+    return max;
   }
 
   function edgeLabel(ports, overflow) {
@@ -183,11 +422,15 @@
       };
       if (n.iconUrl) data.iconUrl = n.iconUrl;
       if (isChildNode(n.kind) && n.parent) data.parent = n.parent;
-      // Data-driven width for child (process/service) nodes: size the box to the
-      // label so long unit names (e.g. "truckscale-central.service") aren't
-      // clipped. cytoscape's width:"label" mis-measures when the monospace
+      // Data-driven width/height for child (process/service) nodes: size the box
+      // to the label so long unit names (e.g. "truckscale-central.service")
+      // aren't clipped. cytoscape's width:"label" mis-measures when the monospace
       // webfont isn't loaded yet; ~7.6px/char at 11px mono + padding is safe.
-      if (isChildNode(n.kind)) data.w = Math.max(46, Math.round(String(data.label).length * 7.6) + 20);
+      // Height grows for the second (listen-ports) line when there is one.
+      if (isChildNode(n.kind)) {
+        data.w = Math.max(46, Math.round(labelWidthChars(data.label) * 7.6) + 20);
+        data.h = String(data.label).indexOf("\n") >= 0 ? 40 : 26;
+      }
       els.push({ group: "nodes", data: data });
     });
     g.edges.forEach(function (r) {
@@ -239,7 +482,8 @@
         style: {
           shape: "round-rectangle",
           width: "data(w)",
-          height: 26,
+          height: "data(h)",
+          "text-wrap": "wrap",
           padding: 6,
           "background-color": "#7e57c2",
           "border-width": 1.5,
@@ -258,7 +502,8 @@
         style: {
           shape: "round-rectangle",
           width: "data(w)",
-          height: 26,
+          height: "data(h)",
+          "text-wrap": "wrap",
           padding: 6,
           "background-color": "#00897b",
           "border-width": 1.5,
@@ -384,8 +629,8 @@
       if (!kids || kids.length === 0) return { w: 70, h: 70 };
       var maxChars = 6;
       kids.forEach(function (kid) {
-        var lbl = nodeById[kid] ? nodeLabel(nodeById[kid]).split("\n")[0] : "";
-        if (lbl.length > maxChars) maxChars = lbl.length;
+        var chars = nodeById[kid] ? labelWidthChars(nodeLabel(nodeById[kid])) : 0;
+        if (chars > maxChars) maxChars = chars;
       });
       return {
         w: Math.max(150, Math.round(maxChars * 7.3) + 48),
@@ -477,6 +722,9 @@
     var preserved = preserve ? capturePositions() : null;
     api.applicationMap.get().then(function (p) {
       payload = p;
+      // The "Seen within" list is derived from the server's retention window, so
+      // it can only be built once a payload has landed.
+      applyAgeOptions(typeof p.retentionDays === "number" ? p.retentionDays : 7);
       render(preserved);
     }).catch(function (err) {
       // Log the full error (with stack) so a render failure is diagnosable in
@@ -499,7 +747,12 @@
       return;
     }
     if (g.edges.length === 0 && payload.edges.length > 0) {
-      showEmpty("No connections in this window", "Widen the “Seen within” filter — connection data exists but nothing was seen recently enough.");
+      showEmpty(
+        filterPills.length ? "No connections match these filters" : "No connections in this window",
+        filterPills.length
+          ? "Remove a filter pill — connection data exists but nothing matches all of them at once."
+          : "Widen the “Seen within” filter — connection data exists but nothing was seen recently enough.",
+      );
     } else if (emptyEl) {
       emptyEl.hidden = true;
     }
@@ -518,11 +771,12 @@
       layout: { name: "preset", positions: function (n) { return positions[n.id()] || undefined; }, fit: true, padding: 40 },
     });
     wireGraphEvents();
-    populateSearchList();
-    if (searchFocusId) {
-      var focusNodeObj = findNode(searchFocusId);
-      var focusLabel = focusNodeObj ? nodeLabel(focusNodeObj).split("\n")[0] : searchFocusId;
-      setStatus("Focused on “" + focusLabel + "” · " + g.edges.length + " connection(s) — clear the search box to show the full map");
+    if (filterPills.length) {
+      setStatus(
+        "Filtered by " + pillSummary() + " · " +
+        g.nodes.filter(function (n) { return n.kind === "asset"; }).length + " assets · " +
+        g.edges.length + " connection(s)"
+      );
     } else {
       setStatus(
         g.nodes.filter(function (n) { return n.kind === "asset"; }).length + " assets · " +
@@ -721,12 +975,15 @@
     info.hidden = false;
   }
 
-  // ─── Toolbar / search / hash focus ─────────────────────────────────
+  // ─── Toolbar / pill filter / hash focus ────────────────────────────
 
   function wireToolbar() {
-    ["appmap-age", "appmap-proto-tcp", "appmap-proto-udp", "appmap-hide-external"].forEach(function (id) {
+    ["appmap-age", "appmap-hide-external"].forEach(function (id) {
       var el = document.getElementById(id);
-      if (el) el.addEventListener("change", function () { if (payload) render(capturePositions()); });
+      if (el) el.addEventListener("change", function () {
+        savePrefs();
+        if (payload) render(capturePositions());
+      });
     });
     var refresh = document.getElementById("appmap-refresh");
     if (refresh) refresh.addEventListener("click", function () { loadGraph(true); });
@@ -734,9 +991,9 @@
     var legendBtn = document.getElementById("appmap-legend-btn");
     var legend = document.getElementById("appmap-legend");
     if (legendBtn && legend) {
-      legendBtn.addEventListener("click", function () { legend.hidden = !legend.hidden; });
+      legendBtn.addEventListener("click", function () { legend.hidden = !legend.hidden; savePrefs(); });
       var legendClose = document.getElementById("appmap-legend-close");
-      if (legendClose) legendClose.addEventListener("click", function () { legend.hidden = true; });
+      if (legendClose) legendClose.addEventListener("click", function () { legend.hidden = true; savePrefs(); });
     }
 
     var reset = document.getElementById("appmap-reset-layout");
@@ -751,55 +1008,227 @@
       });
     }
 
-    var search = document.getElementById("appmap-search");
-    if (search) {
-      search.addEventListener("change", function () { applySearch(search.value); });
-      search.addEventListener("keydown", function (ev) {
-        if (ev.key === "Enter") applySearch(search.value);
+    wireFilterBox();
+    // Pills / booleans restore now; the age select waits for the first payload
+    // (its options depend on the server's retention window).
+    restorePrefs();
+  }
+
+  // ─── Pill filter box ───────────────────────────────────────────────
+
+  var PILL_KIND_LABEL = {
+    proto: "proto", port: "port", asset: "host",
+    process: "process", service: "service", external: "external", text: "text",
+  };
+
+  function renderPills() {
+    var wrap = document.getElementById("appmap-filter-pills");
+    if (!wrap) return;
+    wrap.innerHTML = filterPills.map(function (p, i) {
+      return '<span class="tag-chip">' +
+        '<span class="appmap-pill-kind">' + esc(PILL_KIND_LABEL[p.kind] || p.kind) + ':</span>' +
+        esc(p.value) +
+        '<button type="button" class="tag-chip-delete" data-pill-index="' + i +
+        '" aria-label="Remove filter" title="Remove filter">×</button>' +
+      '</span>';
+    }).join("");
+    var input = document.getElementById("appmap-filter-input");
+    if (input) {
+      input.placeholder = filterPills.length ? "Add filter…" : "Filter: tcp, port, host, process, service…";
+    }
+  }
+
+  function addPill(kind, value) {
+    var v = String(value == null ? "" : value).trim();
+    if (!v) return;
+    var dup = filterPills.some(function (p) {
+      return p.kind === kind && p.value.toLowerCase() === v.toLowerCase();
+    });
+    if (!dup) filterPills.push({ kind: kind, value: v });
+    renderPills();
+    savePrefs();
+    if (payload) render(capturePositions());
+  }
+
+  function removePillAt(i) {
+    if (i < 0 || i >= filterPills.length) return;
+    filterPills.splice(i, 1);
+    renderPills();
+    savePrefs();
+    if (payload) render(capturePositions());
+  }
+
+  // Everything the current payload makes filterable. Rebuilt on every render so
+  // it always reflects the FULL graph, not the narrowed view — otherwise adding
+  // one pill would hide the suggestions needed to add the next.
+  function buildFilterCatalog(nodes, edges) {
+    var out = [];
+    var seen = {};
+    function push(kind, value) {
+      var v = String(value == null ? "" : value).trim();
+      if (!v) return;
+      var k = kind + "|" + v.toLowerCase();
+      if (seen[k]) return;
+      seen[k] = true;
+      out.push({ kind: kind, value: v });
+    }
+    var protos = {}, ports = {};
+    (edges || []).forEach(function (e) {
+      (e.ports || []).forEach(function (p) { protos[p.proto] = true; ports[p.port] = true; });
+    });
+    (nodes || []).forEach(function (n) {
+      (n.listenPorts || []).forEach(function (p) { protos[p.proto] = true; ports[p.port] = true; });
+      if (n.kind === "asset") { push("asset", n.hostname || n.ipAddress); }
+      else if (n.kind === "process") push("process", n.processName);
+      else if (n.kind === "service") push("service", n.serviceUnit);
+      else if (n.kind === "unknown-ip") push("external", n.ip);
+      else if (n.kind === "unknown-ip-group") push("external", n.cidr);
+    });
+    Object.keys(protos).sort().forEach(function (p) { push("proto", p); });
+    Object.keys(ports).map(Number).sort(function (a, b) { return a - b; })
+      .forEach(function (p) { push("port", String(p)); });
+    return out;
+  }
+
+  var SUGGEST_CAP = 50;
+
+  // Prefix matches rank above interior matches (typing "tc" should offer "tcp"
+  // first, not some host whose name merely contains "tc").
+  function rankSuggestions(catalog, q) {
+    var query = String(q || "").trim().toLowerCase();
+    if (!query) return catalog.slice(0, SUGGEST_CAP);
+    var pre = [], mid = [];
+    catalog.forEach(function (c) {
+      var v = c.value.toLowerCase();
+      var at = v.indexOf(query);
+      if (at === 0) pre.push(c);
+      else if (at > 0) mid.push(c);
+      else if ((PILL_KIND_LABEL[c.kind] || c.kind).indexOf(query) === 0) mid.push(c);
+    });
+    return pre.concat(mid).slice(0, SUGGEST_CAP);
+  }
+
+  function closeSuggest() {
+    var box = document.getElementById("appmap-suggest");
+    var input = document.getElementById("appmap-filter-input");
+    if (box) { box.classList.remove("open"); box.innerHTML = ""; }
+    if (input) input.setAttribute("aria-expanded", "false");
+    suggestItems = [];
+    suggestIndex = -1;
+  }
+
+  function openSuggest() {
+    var box = document.getElementById("appmap-suggest");
+    var input = document.getElementById("appmap-filter-input");
+    if (!box || !input) return;
+    var catalog = payload ? buildFilterCatalog(payload.nodes, payload.edges) : [];
+    suggestItems = rankSuggestions(catalog, input.value);
+    suggestIndex = suggestItems.length ? 0 : -1;
+    if (!suggestItems.length) {
+      box.innerHTML = '<div class="appmap-suggest-empty">' +
+        (input.value.trim()
+          ? 'No match — press Enter for a free-text filter'
+          : 'Nothing to filter yet') +
+        '</div>';
+    } else {
+      box.innerHTML = suggestItems.map(function (c, i) {
+        return '<div class="appmap-suggest-item' + (i === suggestIndex ? " active" : "") + '"' +
+          ' role="option" data-suggest-index="' + i + '">' +
+          '<span>' + esc(c.value) + '</span>' +
+          '<span class="appmap-suggest-kind">' + esc(PILL_KIND_LABEL[c.kind] || c.kind) + '</span>' +
+        '</div>';
+      }).join("");
+    }
+    box.classList.add("open");
+    input.setAttribute("aria-expanded", "true");
+  }
+
+  function moveSuggest(delta) {
+    var box = document.getElementById("appmap-suggest");
+    if (!box || !suggestItems.length) return;
+    suggestIndex = (suggestIndex + delta + suggestItems.length) % suggestItems.length;
+    var rows = box.querySelectorAll(".appmap-suggest-item");
+    for (var i = 0; i < rows.length; i++) {
+      if (i === suggestIndex) {
+        rows[i].classList.add("active");
+        rows[i].scrollIntoView({ block: "nearest" });
+      } else {
+        rows[i].classList.remove("active");
+      }
+    }
+  }
+
+  function commitInput() {
+    var input = document.getElementById("appmap-filter-input");
+    if (!input) return;
+    var pick = suggestIndex >= 0 ? suggestItems[suggestIndex] : null;
+    if (pick) addPill(pick.kind, pick.value);
+    else if (input.value.trim()) addPill("text", input.value);
+    input.value = "";
+    closeSuggest();
+  }
+
+  function wireFilterBox() {
+    var wrap = document.getElementById("appmap-filter");
+    var input = document.getElementById("appmap-filter-input");
+    var box = document.getElementById("appmap-suggest");
+    if (!wrap || !input || !box) return;
+
+    // Clicking the padding of the box should focus the text field — it reads as
+    // one input, so it should behave like one.
+    wrap.addEventListener("mousedown", function (ev) {
+      if (ev.target === wrap || ev.target.id === "appmap-filter-pills") {
+        ev.preventDefault();
+        input.focus();
+      }
+    });
+
+    var reopen = (typeof debounce === "function") ? debounce(openSuggest, 200) : openSuggest;
+    input.addEventListener("input", reopen);
+    input.addEventListener("focus", openSuggest);
+    input.addEventListener("click", openSuggest);
+    // Delay so a suggestion mousedown still lands before the box empties.
+    input.addEventListener("blur", function () { setTimeout(closeSuggest, 150); });
+
+    input.addEventListener("keydown", function (ev) {
+      if (ev.key === "ArrowDown") { ev.preventDefault(); if (!suggestItems.length) openSuggest(); else moveSuggest(1); }
+      else if (ev.key === "ArrowUp") { ev.preventDefault(); moveSuggest(-1); }
+      else if (ev.key === "Enter") { ev.preventDefault(); commitInput(); }
+      else if (ev.key === "Escape") {
+        // Stop propagation so a surrounding modal/panel doesn't also close.
+        ev.stopPropagation();
+        closeSuggest();
+      } else if (ev.key === "Backspace" && input.value === "" && filterPills.length) {
+        ev.preventDefault();
+        removePillAt(filterPills.length - 1);
+      }
+    });
+
+    // preventDefault keeps focus in the input so blur-close doesn't race the tap.
+    box.addEventListener("mousedown", function (ev) {
+      var row = ev.target.closest ? ev.target.closest(".appmap-suggest-item") : null;
+      if (!row) return;
+      ev.preventDefault();
+      suggestIndex = Number(row.getAttribute("data-suggest-index"));
+      commitInput();
+    });
+
+    var pills = document.getElementById("appmap-filter-pills");
+    if (pills) {
+      pills.addEventListener("click", function (ev) {
+        var btn = ev.target.closest ? ev.target.closest("[data-pill-index]") : null;
+        if (!btn) return;
+        removePillAt(Number(btn.getAttribute("data-pill-index")));
       });
     }
   }
 
-  // Datalist suggestions always reflect the FULL graph (not the focus-narrowed
-  // view) so the operator can search for any node while a focus is active.
-  function populateSearchList() {
-    var list = document.getElementById("appmap-search-list");
-    if (!list || !payload) return;
-    list.innerHTML = "";
-    payload.nodes.forEach(function (n) {
-      var opt = document.createElement("option");
-      opt.value = nodeLabel(n).split("\n")[0];
-      list.appendChild(opt);
-    });
-  }
-
-  function findNodeByQuery(q) {
-    q = (q || "").trim().toLowerCase();
-    if (!q) return null;
-    var hit = null;
-    payload.nodes.some(function (n) {
-      var label = nodeLabel(n).split("\n")[0].toLowerCase();
-      var ip = (n.ipAddress || n.ip || "").toLowerCase();
-      if (label.indexOf(q) >= 0 || ip.indexOf(q) >= 0) { hit = n; return true; }
-      return false;
-    });
-    return hit;
-  }
-
-  // Search narrows the map to the matched node + its connections (and clears
-  // to the full map on an empty box). An empty match leaves the current view.
-  function applySearch(q) {
-    if (!payload) return;
-    var trimmed = (q || "").trim();
-    if (!trimmed) {
-      if (searchFocusId !== null) { searchFocusId = null; render(capturePositions()); }
-      return;
-    }
-    var hit = findNodeByQuery(trimmed);
-    if (!hit) { setStatus("No node matches “" + trimmed + "”"); return; }
-    searchFocusId = hit.id;
-    render(capturePositions());
-    focusNode(hit.id);
+  // Human-readable summary of the active pills for the status line.
+  function pillSummary() {
+    if (!filterPills.length) return "";
+    return filterPills.map(function (p) {
+      return (PILL_KIND_LABEL[p.kind] || p.kind) + ":" + p.value;
+    }).join(" · ");
   }
 
   function focusNode(id) {
@@ -813,15 +1242,32 @@
   }
 
   // Deep link: /appmap.html#focus=asset:<id> (used by the process detail
-  // panel's "View on Application Map" link).
+  // panel's "View on Application Map" link). Narrowing is pills now, so a deep
+  // link ADDS an asset pill — the operator can then see why the view is narrowed
+  // and clear it the same way as any other filter.
   function applyFocusHash() {
     var m = /[#&]focus=([^&]+)/.exec(window.location.hash || "");
     if (!m || !cy) return;
     var id = decodeURIComponent(m[1]);
-    if (cy.getElementById(id).length) {
-      focusNode(id);
-      // One-shot: clear so later refreshes don't re-zoom.
-      window.location.hash = "";
+    if (!cy.getElementById(id).length) return;
+    // One-shot: clear first so the re-render this triggers can't loop.
+    window.location.hash = "";
+    var n = findNode(id);
+    if (n && n.kind === "asset") {
+      var label = n.hostname || n.ipAddress;
+      if (label && !filterPills.some(function (p) { return p.kind === "asset" && p.value === label; })) {
+        addPill("asset", label); // re-renders
+        return;
+      }
     }
+    focusNode(id);
   }
+
+  // Pure helpers exposed for unit tests (the page itself is an IIFE with no
+  // module surface) — same pattern as window.PolarisTopologyRender.
+  window.PolarisAppMap = {
+    applyGraphFilter: applyGraphFilter,
+    buildFilterCatalog: buildFilterCatalog,
+    rankSuggestions: rankSuggestions,
+  };
 })();

@@ -33,14 +33,99 @@
   user-select: none;
 }
 
-.appmap-search-wrap {
-  flex: 0 1 280px;
+/* Token/pill filter. The whole box looks like one input; the text field is
+   borderless and grows to fill whatever the pills leave. `position: relative`
+   anchors the suggestion dropdown. */
+.appmap-filter {
+  position: relative;
+  flex: 1 1 320px;
+  min-width: 220px;
+  max-width: 560px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 4px 8px;
+  min-height: 32px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
 }
 
-.appmap-search-wrap input {
-  width: 100%;
+.appmap-filter:focus-within {
+  border-color: var(--color-accent);
+}
+
+.appmap-filter-pills {
+  display: contents;
+}
+
+.appmap-filter-input {
+  flex: 1 1 90px;
+  min-width: 90px;
+  border: none;
+  background: none;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  padding: 2px 0;
+  outline: none;
+}
+
+/* A pill's kind prefix (proto:, port:, host:…) — dimmer than the value so the
+   value stays the thing you read. */
+.appmap-pill-kind {
+  opacity: 0.65;
+  font-size: 0.92em;
+}
+
+/* Suggestion dropdown. Mirrors the .aw-suggest combobox used by the automations
+   wizard rather than a <datalist>, which most browsers won't open on click. */
+.appmap-suggest {
+  display: none;
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 1300;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+
+.appmap-suggest.open {
+  display: block;
+}
+
+.appmap-suggest-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
   padding: 5px 10px;
   font-size: 13px;
+  cursor: pointer;
+}
+
+.appmap-suggest-item:hover,
+.appmap-suggest-item.active {
+  background: var(--color-surface-hover, rgba(79, 195, 247, 0.12));
+}
+
+.appmap-suggest-kind {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.appmap-suggest-empty {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
 }
 
 .appmap-toolbar-actions {
