@@ -883,6 +883,12 @@ const api = {
     get:          ()                => request("GET",    "/application-map"),
     saveLayout:   (view, positions) => request("PUT",    "/application-map/layout", { view: view, positions: positions }),
     deleteLayout: (view)            => request("DELETE", "/application-map/layout?view=" + encodeURIComponent(view || "global")),
+    // Discovery: fleet-wide process/service aggregate + the persistent auto-map
+    // selection (applied now AND to assets discovered later).
+    discovery:        ()          => request("GET",  "/application-map/discovery"),
+    previewDiscovery: (selection) => request("POST", "/application-map/discovery/preview", { selection: selection }),
+    saveDiscovery:    (selection) => request("PUT",  "/application-map/discovery", { selection: selection }),
+    unmapEverywhere:  (kind, name) => request("POST", "/application-map/discovery/unmap", { kind: kind, name: name }),
   },
   mapRegions: {
     list:   ()                     => request("GET",    "/map/regions"),

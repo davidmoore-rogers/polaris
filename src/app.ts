@@ -743,6 +743,7 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/retryQueuedReservationPushes.js",
       "./jobs/reconcileMapRegions.js",
       "./jobs/reconcileTagAssignments.js",
+      "./jobs/reconcileAppMapAutoMap.js",
       "./jobs/reconcileDnsResolvedReservations.js",
       "./jobs/runSampleRollup.js",
       "./jobs/reclaimBloatedChunks.js",

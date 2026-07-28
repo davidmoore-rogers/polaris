@@ -988,6 +988,17 @@
     var refresh = document.getElementById("appmap-refresh");
     if (refresh) refresh.addEventListener("click", function () { loadGraph(true); });
 
+    // Discovery modal (appmap-discovery.js). Reading the fleet aggregate is
+    // applicationMap:read, but the only thing to DO in there is save a selection
+    // that writes asset pin fields — so gate the entry point on both.
+    var discovery = document.getElementById("appmap-discovery-btn");
+    if (discovery && typeof permAtLeast === "function" && permAtLeast("applicationMap", "read")) {
+      discovery.hidden = false;
+      discovery.addEventListener("click", function () {
+        if (typeof window.openAppMapDiscovery === "function") window.openAppMapDiscovery();
+      });
+    }
+
     var legendBtn = document.getElementById("appmap-legend-btn");
     var legend = document.getElementById("appmap-legend");
     if (legendBtn && legend) {
@@ -1262,6 +1273,10 @@
     }
     focusNode(id);
   }
+
+  // Lets the Discovery modal pull a fresh graph after it changes pins, instead of
+  // leaving the operator looking at a stale map until the 60s refresh.
+  window.appMapReload = function () { if (payload) loadGraph(true); };
 
   // Pure helpers exposed for unit tests (the page itself is an IIFE with no
   // module surface) — same pattern as window.PolarisTopologyRender.

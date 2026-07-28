@@ -22,7 +22,7 @@
         <label class="appmap-toolbar-field">
           <span>Seen within</span>
           <!-- Options are rebuilt from the server's configured retention window
-               (appmap.js buildAgeOptions) so the widest one can't promise more
+               (appmap.js applyAgeOptions) so the widest one can't promise more
                history than is actually kept. -->
           <select id="appmap-age" class="input"></select>
         </label>
@@ -41,6 +41,7 @@
         </div>
         <div class="appmap-toolbar-actions">
           <span id="appmap-status" class="appmap-status"></span>
+          <button type="button" class="btn btn-secondary btn-sm" id="appmap-discovery-btn" hidden>Discovery</button>
           <button type="button" class="btn-icon" id="appmap-legend-btn" aria-label="Toggle legend" title="Toggle legend" style="line-height:0">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <circle cx="6" cy="6" r="2"/><line x1="11" y1="6" x2="21" y2="6"/>
@@ -83,11 +84,12 @@
             </div>
           </div>
           <div id="appmap-empty" class="appmap-empty" hidden>
-            <h3 id="appmap-empty-title">No mapped processes yet</h3>
+            <h3 id="appmap-empty-title">No mapped processes or services yet</h3>
             <p id="appmap-empty-text">
-              Open an asset's <strong>Processes</strong> tab and check <strong>Map</strong> on the
-              processes whose connectivity you want drawn here. Listening ports and connections
-              appear within a couple of minutes of mapping a process.
+              Use <strong>Discovery</strong> above to pick from everything reported across the fleet,
+              or open an asset's <strong>Services</strong> tab and check <strong>Map</strong> on the
+              units and programs whose connectivity you want drawn here. Listening ports and
+              connections appear within a couple of minutes of mapping something.
             </p>
             <a class="btn btn-secondary" href="/assets.html">Go to Assets</a>
           </div>
@@ -114,5 +116,6 @@
   <script src="/js/integrations.js"></script>
   <script src="/js/assets.js"></script>
   <script src="/js/appmap.js"></script>
+  <script src="/js/appmap-discovery.js"></script>
 </body>
 </html>
