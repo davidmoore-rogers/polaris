@@ -97,7 +97,10 @@
         '</select>' +
         '<label class="appmap-check"><input type="checkbox" id="apd-only-selected"> Selected only</label>' +
       '</div>' +
-      '<div id="apd-table-wrap" style="max-height:46vh;overflow-y:auto;border:1px solid var(--color-border);border-radius:var(--radius-md)">' +
+      // Frozen header: .table-wrapper-modal-sticky pins thead th to the top of
+      // this scroll box. Self-bounding via max-height — no JS sizer (see the
+      // rule's comment in styles.css).
+      '<div id="apd-table-wrap" class="table-wrapper table-wrapper-modal-sticky" style="max-height:46vh">' +
         '<table class="data-table" id="apd-table" style="margin:0">' +
           '<thead><tr>' +
             '<th style="width:2.5rem"></th>' +

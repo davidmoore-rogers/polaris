@@ -1266,8 +1266,15 @@ code {
    (assets-list re-renders) fire while the panel tab is display:none and
    would stamp garbage heights. */
 .table-wrapper-panel-sticky { overflow: auto; }
+/* Modal variant (Application Map → Discovery): same sticky thead + internal
+   scroll, but SELF-BOUNDING — the caller sets its own max-height, so there is
+   deliberately no JS sizer. Don't reach for .table-wrapper-sticky here:
+   sizeStickyTableWrappers() would stamp a viewport-derived inline max-height
+   over the modal's own bound on every resize / page-control render. */
+.table-wrapper-modal-sticky { overflow: auto; }
 .table-wrapper-sticky thead th,
-.table-wrapper-panel-sticky thead th {
+.table-wrapper-panel-sticky thead th,
+.table-wrapper-modal-sticky thead th {
   position: sticky;
   top: 0;
   z-index: 10;
