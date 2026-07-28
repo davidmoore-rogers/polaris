@@ -1578,7 +1578,10 @@ model AssetProcessConnection {
   // Owning systemd unit / Windows service (Phase 3), when the PID's cgroup
   // resolved one — lets the Services detail panel + Application Map attribute a
   // socket to a UNIT, not just a program name. NOT in the business key
-  // (deterministic per process; set on insert, never bumped on conflict).
+  // (deterministic per process). BACKFILL-ONLY on conflict: an empty stored
+  // value adopts the incoming unit, a non-empty one is never overwritten — so a
+  // tuple first inserted before its unit was mapped can still be attributed,
+  // without letting svchost co-hosting or an agentless push churn the column.
   // Empty when unknown or when the row came only via a mappedProcesses pin.
   unit        String   @default("")
   firstSeen   DateTime @default(now())

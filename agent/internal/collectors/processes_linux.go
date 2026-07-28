@@ -29,8 +29,15 @@ func resolveServiceUnits(pids []int32) map[int32]string {
 // Handles both cgroup v2 (single "0::/system.slice/nginx.service" line) and v1
 // (multiple "N:controller:/system.slice/nginx.service" lines). Returns the
 // LAST path segment ending in .service (preferred) or .scope. Pure.
+//
+// Taking the LAST .service rather than the first matters for delegated
+// hierarchies: a workload under
+// "/system.slice/containerd.service/kubepods/.../app.service" belongs to
+// app.service, and returning the outer containerd.service would attribute every
+// container on the host to one unit.
 func parseSystemdUnit(cgroup string) string {
-	best := ""
+	service := ""
+	scope := ""
 	for _, line := range strings.Split(cgroup, "\n") {
 		// The path is the part after the last ':'.
 		idx := strings.LastIndex(line, ":")
@@ -40,12 +47,15 @@ func parseSystemdUnit(cgroup string) string {
 		path := line[idx+1:]
 		for _, seg := range strings.Split(path, "/") {
 			if strings.HasSuffix(seg, ".service") {
-				return seg // a .service is the most specific/desirable match
+				service = seg // keep scanning — the deepest .service wins
 			}
 			if strings.HasSuffix(seg, ".scope") {
-				best = seg
+				scope = seg
 			}
 		}
 	}
-	return best
+	if service != "" {
+		return service // a .service is the most specific/desirable match
+	}
+	return scope
 }

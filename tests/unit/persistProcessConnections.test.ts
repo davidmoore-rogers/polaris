@@ -9,6 +9,7 @@
  *   - per-(processName, kind) caps (200 listen / 500 outbound / 200 inbound)
  *   - invalid kind / proto / port rows dropped
  *   - churn-gate SQL shape (ON CONFLICT ... DO UPDATE ... WHERE lastSeen <)
+ *   - unit backfill-on-conflict (empty adopts, non-empty is preserved)
  *   - empty / all-invalid input issues no DB call
  *
  * Prisma is mocked; assertions run against the raw SQL + params.
@@ -79,10 +80,22 @@ describe("persistProcessConnections", () => {
     ]);
     const { sql, params } = lastCall();
     expect(sql).toContain('"unit"');
-    // unit is present in the column list but NOT refreshed on conflict.
-    expect(sql).toContain('DO UPDATE SET "lastSeen"');
-    expect(sql).not.toContain('SET "unit"');
     expect(params[9]).toBe("truckscale-central.service");
+  });
+
+  it("backfills an empty unit on conflict but never overwrites a non-empty one", async () => {
+    await persistProcessConnections(ASSET, [
+      { processName: "java", kind: "listen", proto: "tcp", localAddr: "0.0.0.0", localPort: 8080, unit: "myapp.service" },
+    ]);
+    const { sql } = lastCall();
+    // A stored '' adopts EXCLUDED.unit; anything else keeps the stored value.
+    expect(sql).toContain(
+      `"unit" = CASE WHEN "asset_process_connections"."unit" = '' ` +
+      `THEN EXCLUDED."unit" ELSE "asset_process_connections"."unit" END`,
+    );
+    // The backfill arm must be OR-ed onto the churn gate, otherwise a row bumped
+    // inside the 5-minute window could never adopt its unit.
+    expect(sql).toContain(`OR ("asset_process_connections"."unit" = '' AND EXCLUDED."unit" <> '')`);
   });
 
   it("drops invalid kind / proto / out-of-range ports / empty names", async () => {
@@ -132,7 +145,9 @@ describe("persistProcessConnections", () => {
     const { sql } = lastCall();
     expect(sql).toContain('INSERT INTO "asset_process_connections"');
     expect(sql).toContain('ON CONFLICT ("assetId", "processName", "kind", "proto", "localAddr", "localPort", "remoteIp", "remotePort")');
-    expect(sql).toContain('DO UPDATE SET "lastSeen" = EXCLUDED."lastSeen"');
+    // GREATEST, not a bare assignment: the unit-backfill arm can fire on a row
+    // whose stored lastSeen is NEWER than this push, and must not move it back.
+    expect(sql).toContain('DO UPDATE SET "lastSeen" = GREATEST("asset_process_connections"."lastSeen", EXCLUDED."lastSeen")');
     expect(sql).toMatch(/WHERE "asset_process_connections"\."lastSeen" < EXCLUDED\."lastSeen" - interval '\d+ minutes'/);
     // firstSeen must NOT be overwritten on conflict.
     expect(sql).not.toContain('"firstSeen" = EXCLUDED');

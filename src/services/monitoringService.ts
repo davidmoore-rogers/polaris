@@ -7586,9 +7586,24 @@ export async function persistProcessConnections(
       `"localAddr", "localPort", "remoteIp", "remotePort", "unit", "firstSeen", "lastSeen"` +
       `) VALUES ${tuples.join(", ")} ` +
       `ON CONFLICT ("assetId", "processName", "kind", "proto", "localAddr", "localPort", "remoteIp", "remotePort") ` +
-      // unit is intentionally NOT refreshed on conflict — set on first insert.
-      `DO UPDATE SET "lastSeen" = EXCLUDED."lastSeen" ` +
-      `WHERE "asset_process_connections"."lastSeen" < EXCLUDED."lastSeen" - interval '${PROCESS_CONN_BUMP_MINUTES} minutes'`;
+      // unit is BACKFILL-ONLY: an empty stored unit adopts the incoming one, a
+      // non-empty one is never overwritten. Backfill matters because unit is not
+      // in the business key — a tuple first inserted before its unit was mapped
+      // (program mapped as a process first, row predating the unit column, or an
+      // agentless push that can't resolve units) would otherwise keep unit=''
+      // forever, and applicationMapService.ownerNodeIds needs a non-empty unit to
+      // attribute the row to its mapped service. Never overwriting keeps Windows
+      // svchost first-service flapping and the agentless-vs-agent insert race from
+      // churning the column.
+      `DO UPDATE SET ` +
+        `"lastSeen" = GREATEST("asset_process_connections"."lastSeen", EXCLUDED."lastSeen"), ` +
+        `"unit" = CASE WHEN "asset_process_connections"."unit" = '' ` +
+                     `THEN EXCLUDED."unit" ELSE "asset_process_connections"."unit" END ` +
+      // The OR arm is what lets a backfill land INSIDE the churn gate. It can only
+      // fire once per row (afterwards unit <> ''), so the dead-tuple budget the
+      // gate protects is unaffected.
+      `WHERE "asset_process_connections"."lastSeen" < EXCLUDED."lastSeen" - interval '${PROCESS_CONN_BUMP_MINUTES} minutes' ` +
+        `OR ("asset_process_connections"."unit" = '' AND EXCLUDED."unit" <> '')`;
     await retryOnDeadlock(() => prisma.$executeRawUnsafe(sql, ...params));
   }
 }

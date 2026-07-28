@@ -14500,6 +14500,10 @@ function _wireAssetServicesTab(asset) {
   var procConfigs = {};
   var svcMonitored = new Set(); // monitoredServices (Logs)
   var svcMapped = new Set();    // mappedServices (Map)
+  // Can a socket be attributed to a unit on this host? Agent-only — see the
+  // `unitAttribution` field on GET /assets/:id/services. Default true so a
+  // failed/older fetch doesn't gratuitously disable the checkbox.
+  var svcUnitAttribution = true;
   var procMonitored = new Set(); // monitoredProcesses (Monitor)
   var procMapped = new Set();    // mappedProcesses (Map)
 
@@ -14562,6 +14566,15 @@ function _wireAssetServicesTab(asset) {
     }
     var canWrite = typeof canManageAssets === "function" && canManageAssets();
     var disabled = canWrite ? "" : " disabled";
+    // Per-unit socket attribution needs the Polaris Agent — only it resolves a
+    // PID's owning unit. On an agentless (SSH/WinRM-polled) host, mapping a
+    // service would collect nothing, so disable the box and say why rather than
+    // letting the operator tick something inert. Already-set pins still render
+    // checked so they stay visible (and clearable once an agent lands).
+    var svcMapDisabled = disabled || (svcUnitAttribution ? "" : " disabled");
+    var svcMapTitle = svcUnitAttribution
+      ? "Attribute this unit's connections on the Application Map"
+      : "Requires the Polaris Agent — agentless SSH/WinRM collection can't attribute a socket to a unit";
     tbody.innerHTML = data.map(function (r) {
       if (r.kind === "service") {
         var s = r.raw;
@@ -14571,7 +14584,7 @@ function _wireAssetServicesTab(asset) {
         var mem = (s.memBytes != null) ? _fmtBytes(Number(s.memBytes)) : "—";
         return '<tr>' +
           '<td class="svc-pin-col"><input type="checkbox" class="asset-svc-logs-toggle" data-svc-unit="' + u + '" title="Tail this unit\'s journal"' + logsChecked + disabled + '></td>' +
-          '<td class="svc-pin-col"><input type="checkbox" class="asset-svc-map-toggle" data-svc-unit="' + u + '" title="Attribute this unit\'s connections on the Application Map"' + mapChecked + disabled + '></td>' +
+          '<td class="svc-pin-col"><input type="checkbox" class="asset-svc-map-toggle" data-svc-unit="' + u + '" title="' + escapeHtml(svcMapTitle) + '"' + mapChecked + svcMapDisabled + '></td>' +
           '<td title="' + escapeHtml(s.displayName || "") + '"><a href="#" class="asset-svc-unit-link" data-svc-unit="' + u + '">' + u + '</a></td>' +
           '<td>Service</td>' +
           '<td>' + _svcStatePill(s.activeState) + '</td>' +
@@ -14667,6 +14680,7 @@ function _wireAssetServicesTab(asset) {
     svcRows = (resp && resp.services) || [];
     svcMonitored = new Set((resp && resp.monitoredServices) || []);
     svcMapped = new Set((resp && resp.mappedServices) || []);
+    svcUnitAttribution = !(resp && resp.unitAttribution === false);
   }
 
   async function loadProcesses() {

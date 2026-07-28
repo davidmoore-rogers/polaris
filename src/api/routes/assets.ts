@@ -1922,6 +1922,9 @@ router.get("/:id/services", requirePermission("assets", "read"), async (req, res
       where: { id },
       select: {
         monitoredServices: true, mappedServices: true,
+        // Presence of a ManagedAgent row is what makes per-unit socket
+        // attribution possible — see `unitAttribution` below.
+        managedAgent: { select: { id: true } },
       },
     });
     if (!asset) throw new AppError(404, "Asset not found");
@@ -1945,6 +1948,13 @@ router.get("/:id/services", requirePermission("assets", "read"), async (req, res
       })),
       monitoredServices: (asset.monitoredServices ?? []) as string[],
       mappedServices:    (asset.mappedServices    ?? []) as string[],
+      // Can a socket be attributed to a UNIT on this host? Only the Polaris
+      // Agent resolves a PID's owning unit (cgroup on Linux, tasklist /svc on
+      // Windows); the agentless SSH/WinRM processes cadence collects mapped
+      // program names only and never stamps AssetProcessConnection.unit. Without
+      // an agent, ticking Map on a service would silently collect nothing, so the
+      // Services tab disables that checkbox and says why.
+      unitAttribution: asset.managedAgent != null,
     });
   } catch (err) { next(err); }
 });
