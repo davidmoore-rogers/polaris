@@ -3508,7 +3508,9 @@ model AssetMaintenanceWindow {
   scheduleName String // snapshot for chart-band labels after delete
   startedAt    DateTime  @default(now())
   endedAt      DateTime? // null = window currently open
-  endReason    String? // "schedule" | "operator" | "disabled" | "deleted" | "criteria"
+  // "schedule" | "operator" | "disabled" | "deleted" | "criteria" |
+  // "decommissioned" (deleted at its discovery source mid-window)
+  endReason    String?
 
   asset    Asset                @relation(fields: [assetId], references: [id], onDelete: Cascade)
   schedule MaintenanceSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)

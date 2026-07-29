@@ -61,6 +61,7 @@ import { recomputeDependencyTree } from "../../services/dependencyTreeService.js
 import { collectManagementAccess, type DeviceAccessGroup } from "../../services/fortinetManagementAccessService.js";
 import { runDescriptionSyncForIntegration } from "../../services/descriptionSyncService.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
+import { releaseAssetsForDecommission } from "../../services/maintenanceScheduleService.js";
 import { reconcileAllTags } from "../../services/tagAssignmentService.js";
 import {
   reconcileFirewallTagsForIntegration,
@@ -3913,10 +3914,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       where: {
         discoveredByIntegrationId: integrationId,
         assetType: "firewall",
-        // A maintenance-window asset is deliberately unreachable — never
-        // decommission it from here (decommissioned would also clamp
-        // monitored=false and break the scheduler's status restore).
-        status: { notIn: ["decommissioned", "maintenance"] },
+        // Maintenance-window assets ARE judged here: roster absence is config
+        // truth, not a reachability signal (an offline device stays in the
+        // roster), so a device deleted at the source outranks its open window.
+        // releaseAssetsForDecommission below force-closes those windows before
+        // the status flip — see maintenanceScheduleService.
+        status: { not: "decommissioned" },
       },
       select: { id: true, hostname: true, serialNumber: true },
     });
@@ -3941,6 +3944,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       });
     }
     if (staleFwIds.length > 0) {
+      // Any of these sitting in an open maintenance window: close the window +
+      // decommission atomically first, so the 30s maintenance reconcile can't
+      // self-heal-reflip the status back to "maintenance" (or, at window end,
+      // restore a deleted device to "active"). No-op when none are in a window.
+      await releaseAssetsForDecommission(staleFwIds, {
+        at: new Date(now),
+        actor,
+        statusChangedBy: integrationLabel,
+        reason: `no longer configured in "${integrationName}"`,
+      });
       await prisma.asset.updateMany({
         where: { id: { in: staleFwIds } },
         data: { status: "decommissioned", statusChangedAt: new Date(now), statusChangedBy: integrationLabel },
@@ -3983,8 +3996,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       where: {
         discoveredByIntegrationId: integrationId,
         assetType: { in: ["switch", "access_point"] },
-        // Same maintenance guard as the Phase-2a firewall sweep above.
-        status: { notIn: ["decommissioned", "maintenance"] },
+        // Maintenance-window assets are judged here too — same reasoning as
+        // Phase 2a: a powered-off-for-maintenance switch/AP is still in its
+        // controller's CMDB (cmdbProtected below), so only a real removal from
+        // the managed inventory reaches the decommission path.
+        status: { not: "decommissioned" },
       },
       select: { id: true, hostname: true, serialNumber: true, assetType: true, fortinetTopology: true, status: true },
     });
@@ -4019,6 +4035,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       });
     }
     if (staleIds.length > 0) {
+      // Force-exit maintenance for any of these in an open window (see 2a).
+      await releaseAssetsForDecommission(staleIds, {
+        at: new Date(now),
+        actor,
+        statusChangedBy: integrationLabel,
+        reason: "no longer reported by its controller",
+      });
       await prisma.asset.updateMany({
         where: { id: { in: staleIds } },
         data: { status: "decommissioned", statusChangedAt: new Date(now), statusChangedBy: integrationLabel },

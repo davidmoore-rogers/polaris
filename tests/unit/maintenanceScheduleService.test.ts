@@ -207,6 +207,7 @@ import {
   updateSchedule,
   deleteSchedule,
   operatorReleaseAsset,
+  releaseAssetsForDecommission,
   previewTargets,
 } from "../../src/services/maintenanceScheduleService.js";
 import { logEventsBatch } from "../../src/services/eventLogService.js";
@@ -609,6 +610,66 @@ describe("ad-hoc schedule lifecycle", () => {
     expect((row.schedule as any).startAt).toBe("2026-07-10T12:00"); // pinned NOW, server-local
     expect((row.schedule as any).startNow).toBeUndefined(); // marker stripped — stored shape is concrete
     expect(assetById("a1").status).toBe("maintenance");
+  });
+});
+
+describe("releaseAssetsForDecommission", () => {
+  it("force-closes the window and decommissions an asset deleted at its source", async () => {
+    h.db.assets.push(asset("a1"));
+    h.db.schedules.push(schedule("s1", ACTIVE_ONESHOT, { assetIds: ["a1"] }));
+    await reconcileMaintenance();
+    expect(assetById("a1").status).toBe("maintenance");
+
+    const released = await releaseAssetsForDecommission(["a1"], {
+      actor: "discovery",
+      statusChangedBy: "integration:FMG",
+      reason: 'no longer configured in "FMG"',
+    });
+
+    expect(released).toEqual(["a1"]);
+    expect(openWindows()).toHaveLength(0);
+    expect(h.db.windows[0]!.endReason).toBe("decommissioned");
+    expect(assetById("a1")).toMatchObject({
+      status: "decommissioned",
+      maintenanceReturnStatus: null,
+      statusChangedBy: "integration:FMG",
+    });
+    expect(vi.mocked(logEventsBatch)).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "maintenance.exited", resourceId: "a1" }),
+      ]),
+    );
+    // The ad-hoc-shaped schedule that held it is spent (its only asset is gone).
+    expect(h.db.schedules).toHaveLength(0);
+  });
+
+  it("does not restore the pre-window status when the window's occurrence ends", async () => {
+    h.db.assets.push(asset("a1"));
+    h.db.schedules.push(schedule("s1", DAILY, { assetIds: ["a1"] })); // recurring — survives
+    await reconcileMaintenance();
+
+    await releaseAssetsForDecommission(["a1"], { statusChangedBy: "integration:FMG" });
+    // The real status write clamps monitored=false (db.ts extension, mocked out
+    // here) — that clamp is what keeps the asset out of the target set.
+    assetById("a1").monitored = false;
+
+    vi.setSystemTime(new Date(2026, 6, 10, 15, 0)); // past today's 14:00 end
+    await reconcileMaintenance();
+    vi.setSystemTime(new Date(2026, 6, 11, 12, 0)); // next occurrence
+    await reconcileMaintenance();
+
+    expect(assetById("a1").status).toBe("decommissioned"); // never restored, never re-entered
+    expect(openWindows()).toHaveLength(0);
+  });
+
+  it("is a no-op for assets with no open window (the common sweep case)", async () => {
+    h.db.assets.push(asset("a1"));
+
+    const released = await releaseAssetsForDecommission(["a1", "a2"]);
+
+    expect(released).toEqual([]);
+    expect(assetById("a1").status).toBe("active"); // caller's own status write owns these
+    expect(h.db.windows).toHaveLength(0);
   });
 });
 

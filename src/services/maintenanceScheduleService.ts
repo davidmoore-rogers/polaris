@@ -30,6 +30,11 @@
  * discovery path not yet guarded) is self-healed: the reconcile re-flips to
  * "maintenance" and absorbs the clobbered value into `maintenanceReturnStatus`
  * so exit restores what the system writer wanted.
+ *
+ * Deletion-at-source is the one system signal that OUTRANKS the window:
+ * `releaseAssetsForDecommission()` (called by the discovery decommission
+ * sweeps) force-closes the windows and decommissions the asset outright —
+ * see its doc comment for why roster absence is not a reachability signal.
  */
 
 import { prisma } from "../db.js";
@@ -437,26 +442,141 @@ export async function operatorReleaseAsset(assetId: string, actor?: string): Pro
   // again (release suppresses its only occurrence), so delete it rather than
   // leaving a dead row in the Schedules list. Closed window rows keep their
   // scheduleName snapshot for the chart bands (scheduleId goes SetNull).
-  const schedIds = Array.from(new Set(open.map((w) => w.scheduleId).filter((id): id is string => !!id)));
-  if (schedIds.length > 0) {
-    const rows = await prisma.maintenanceSchedule.findMany({ where: { id: { in: schedIds } } });
-    const spent = rows.filter((s) => isAdhocShape(s, parseStoredShape(s)));
-    if (spent.length > 0) {
-      await prisma.maintenanceSchedule.deleteMany({ where: { id: { in: spent.map((s) => s.id) } } });
-      await logEventsBatch(
-        spent.map((s) => ({
-          action: "maintenance_schedule.deleted",
-          resourceType: "maintenance-schedule",
-          resourceId: s.id,
-          resourceName: s.name,
-          actor: actor ?? SYSTEM_ACTOR,
-          message: `Ad-hoc maintenance schedule "${s.name}" removed (maintenance ended by operator)`,
-          details: { reason: "adhoc-spent-operator" },
-        })),
-      );
-    }
-  }
+  await deleteSpentAdhocSchedules(
+    open.map((w) => w.scheduleId),
+    actor,
+    "maintenance ended by operator",
+    "adhoc-spent-operator",
+  );
   return true;
+}
+
+/**
+ * Delete the single-asset ad-hoc one-shots among `scheduleIds` — the pill /
+ * edit-modal "enter maintenance until…" artifacts, which are single-purpose
+ * and can never usefully fire again once their window has been ended early.
+ * Multi-asset / criteria-based / recurring schedules are never auto-deleted.
+ */
+async function deleteSpentAdhocSchedules(
+  scheduleIds: Array<string | null>,
+  actor: string | undefined,
+  note: string,
+  reasonCode: string,
+): Promise<void> {
+  const ids = Array.from(new Set(scheduleIds.filter((id): id is string => !!id)));
+  if (ids.length === 0) return;
+  const rows = await prisma.maintenanceSchedule.findMany({ where: { id: { in: ids } } });
+  const spent = rows.filter((s) => isAdhocShape(s, parseStoredShape(s)));
+  if (spent.length === 0) return;
+  await prisma.maintenanceSchedule.deleteMany({ where: { id: { in: spent.map((s) => s.id) } } });
+  await logEventsBatch(
+    spent.map((s) => ({
+      action: "maintenance_schedule.deleted",
+      resourceType: "maintenance-schedule",
+      resourceId: s.id,
+      resourceName: s.name,
+      actor: actor ?? SYSTEM_ACTOR,
+      message: `Ad-hoc maintenance schedule "${s.name}" removed (${note})`,
+      details: { reason: reasonCode },
+    })),
+  );
+}
+
+/**
+ * Force-exit maintenance for assets a discovery sweep has just found GONE at
+ * their source of truth (no longer in the FMG device roster / no longer in a
+ * FortiGate controller's managed FortiSwitch-FortiAP inventory), and
+ * decommission them.
+ *
+ * Deletion-at-source OUTRANKS the maintenance window. The window guard on the
+ * decommission sweeps exists because maintenance makes a device deliberately
+ * unreachable — but roster absence is CONFIG truth, not a reachability
+ * signal (an offline/unreachable device stays in the roster and is never
+ * flagged). Without this, a device deleted from FortiManager mid-window sat in
+ * "maintenance" for the rest of the window and was then restored to its
+ * parked status — usually "active" — so a deleted device came back as live
+ * inventory and only aged out months later via decommissionStaleAssets.
+ *
+ * Closes every open window (`endReason: "decommissioned"`), clears the parked
+ * return status, and writes `status: "decommissioned"` in ONE transaction, so
+ * the 30s reconcile can never observe a half-state it would "fix": open rows
+ * with a non-maintenance status get self-heal-reflipped, and closed rows on a
+ * still-`monitored` asset get re-entered. The status write also clamps
+ * `monitored=false` (business rule 10) via the Prisma extension in db.ts,
+ * which is what keeps the asset out of the target set on later ticks.
+ *
+ * Returns the ids that were actually in maintenance (callers apply their own
+ * status write to the rest of the sweep's batch).
+ */
+export async function releaseAssetsForDecommission(
+  assetIds: string[],
+  opts: { at?: Date; actor?: string; statusChangedBy?: string; reason?: string } = {},
+): Promise<string[]> {
+  if (assetIds.length === 0) return [];
+  const open = await prisma.assetMaintenanceWindow.findMany({
+    where: { assetId: { in: assetIds }, endedAt: null },
+    select: { id: true, assetId: true, scheduleId: true, scheduleName: true },
+  });
+  if (open.length === 0) return [];
+
+  const now = opts.at ?? new Date();
+  const releasedIds = Array.from(new Set(open.map((w) => w.assetId)));
+  await prisma.$transaction([
+    prisma.assetMaintenanceWindow.updateMany({
+      where: { id: { in: open.map((w) => w.id) } },
+      data: { endedAt: now, endReason: "decommissioned" },
+    }),
+    prisma.asset.updateMany({
+      where: { id: { in: releasedIds } },
+      data: {
+        status: "decommissioned" as any,
+        maintenanceReturnStatus: null,
+        statusChangedAt: now,
+        statusChangedBy: opts.statusChangedBy ?? SYSTEM_ACTOR,
+      },
+    }),
+  ]);
+
+  const rows = await prisma.asset.findMany({
+    where: { id: { in: releasedIds } },
+    select: { id: true, hostname: true },
+  });
+  const nameById = new Map(rows.map((r) => [r.id, r.hostname ?? r.id]));
+  const schedNamesByAsset = new Map<string, string[]>();
+  for (const w of open) {
+    const list = schedNamesByAsset.get(w.assetId) ?? [];
+    list.push(w.scheduleName);
+    schedNamesByAsset.set(w.assetId, list);
+  }
+  await logEventsBatch(
+    releasedIds.map((id) => ({
+      action: "maintenance.exited",
+      resourceType: "asset",
+      resourceId: id,
+      resourceName: nameById.get(id) ?? id,
+      actor: opts.actor ?? SYSTEM_ACTOR,
+      message: `Maintenance ended — asset decommissioned${opts.reason ? ` (${opts.reason})` : ""}`,
+      details: {
+        reason: "decommissioned",
+        detail: opts.reason ?? null,
+        schedules: schedNamesByAsset.get(id) ?? [],
+      },
+    })),
+  );
+  logger.info(
+    { count: releasedIds.length, reason: opts.reason },
+    "maintenance: force-exited asset(s) for decommission (deleted at source)",
+  );
+
+  // The ad-hoc one-shot that put a now-deleted device into maintenance is
+  // spent — the asset is unmonitored, so it can never be a target again.
+  await deleteSpentAdhocSchedules(
+    open.map((w) => w.scheduleId),
+    opts.actor,
+    "asset decommissioned",
+    "adhoc-spent-decommissioned",
+  );
+  return releasedIds;
 }
 
 // ─── Reconcile ───────────────────────────────────────────────────────────────
