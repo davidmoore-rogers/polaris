@@ -707,6 +707,20 @@ function setupColumnLayout(tableEl, options) {
   // width entry would absorb leftover space and balloon past its 20px floor.
   colIds.forEach(function (id) { if (noResize[id]) widths[id] = FIXED_COL_W; });
 
+  // Pin static-width columns to the width DECLARED on their <th>, not to a
+  // measured render. These columns carry no drag handle, so a first render that
+  // measured them crushed locks that width in permanently with no operator
+  // recourse — and auto layout crushes readily: `overflow-wrap: anywhere` on
+  // `thead th` makes a header's min-content one character, so an over-committed
+  // table can squeeze a declared 120px column down to ~40px. The declared width
+  // is the single source of truth (setPrefs ignores stale saved widths for them
+  // the same way it does for the utility columns).
+  ths.forEach(function (th, i) {
+    if (!fixedW[colIds[i]]) return;
+    var declaredW = parseFloat(th.style.width);
+    if (declaredW > 0) widths[colIds[i]] = declaredW;
+  });
+
   // Seed default-hidden columns. A <th data-col-default-hidden="true"> starts
   // hidden until the user enables it. Saved prefs override this via setPrefs:
   // a `shown` snapshot un-hides anything the user explicitly turned on, so the
@@ -1173,7 +1187,10 @@ function setupColumnLayout(tableEl, options) {
       if (!p) return;
       if (p.widths && typeof p.widths === "object") {
         Object.keys(p.widths).forEach(function (id) {
-          if (noResize[id]) return; // fixed columns stay pinned; ignore stale saved widths
+          // Utility + static-width columns stay at their pinned/declared width;
+          // ignore stale saved widths (they have no handle, so any saved value
+          // is a measurement artifact — see the fixedW seed above).
+          if (noResize[id] || fixedW[id]) return;
           var v = p.widths[id];
           if (typeof v === "number" && v > 0) widths[id] = v;
         });
