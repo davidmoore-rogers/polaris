@@ -35,7 +35,7 @@
   }
 
   function scopeSummary(r) {
-    if (!r.scope || !(r.scope.rules || []).length) return "All monitored assets";
+    if (!r.scope || !(r.scope.rules || []).length) return "All workstations & servers";
     var n = r.scope.rules.length;
     var first = r.scope.rules[0];
     var label = first.field === "subnet"
@@ -197,6 +197,10 @@
   async function reload() {
     var cfg = await api.applicationMap.discovery();
     rules = (cfg && cfg.rules) || [];
+    // Published by the server so the wizard's asset-type picker can't offer a type
+    // no rule could ever match — rather than keeping a second copy of the constant
+    // in sync on the client.
+    window.appMapProcessCapableTypes = (cfg && cfg.processCapableAssetTypes) || null;
     renderRows();
   }
 

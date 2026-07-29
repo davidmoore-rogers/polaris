@@ -32,6 +32,7 @@ import {
   previewScope,
   applyRules,
   unmapEverywhere,
+  PROCESS_CAPABLE_ASSET_TYPES,
 } from "../../services/appMapDiscoveryService.js";
 import { normalizeCriteria } from "../../services/tagAssignmentService.js";
 import { logEvent } from "./events.js";
@@ -104,10 +105,13 @@ const requireDiscoveryWrite = [
   requirePermission("assets", "write"),
 ];
 
-// GET /application-map/discovery — the stored rule set.
+// GET /application-map/discovery — the stored rule set, plus the asset types a
+// rule can meaningfully target. The client uses that list to constrain its
+// asset-type picker instead of keeping a second copy of the constant in sync.
 router.get("/discovery", requirePermission("applicationMap", "read"), async (_req, res, next) => {
   try {
-    res.json(await getConfig());
+    const cfg = await getConfig();
+    res.json({ ...cfg, processCapableAssetTypes: [...PROCESS_CAPABLE_ASSET_TYPES] });
   } catch (err) {
     next(err);
   }

@@ -58,6 +58,31 @@ export const SETTING_KEY = "appMapAutoMap";
 const AGGREGATE_LIMIT = 2000;
 /** Same per-array ceiling the assets PUT enforces on the pin fields. */
 const MAX_SELECTION_ENTRIES = 64;
+/**
+ * Asset types Polaris actually collects a process / service inventory from, and
+ * therefore the only ones a map rule can meaningfully target.
+ *
+ * Inventory comes from the Polaris Agent (or the agentless SSH/WinRM processes
+ * cadence), which only ever lands on general-purpose hosts — never on appliances.
+ * Without this filter "All monitored assets" counted every firewall, switch, AP
+ * and printer in the fleet, so the device count on the wizard's Devices step
+ * promised work that could never happen: those assets report nothing, so
+ * `resolveBlockPins` finds nothing to pin on them.
+ *
+ * Applied to every CANDIDATE query (inventory aggregate, scope preview, apply) so
+ * the count the operator sees is the count that can actually be pinned — including
+ * for an explicitly-scoped rule, which likewise can't pin a switch. Deliberately
+ * NOT applied to the fleet-wide already-pinned count (`pinnedCounts`), which must
+ * still surface a hand-applied pin wherever it lives so Unmap-everywhere means
+ * everywhere.
+ *
+ * `server` covers vCenter VMs too — they're typed `server` since the dedicated
+ * virtual_machine type was retired. ESXi hosts (`hypervisor`) are excluded: no
+ * agent runs on them. Widen this list when process collection reaches network
+ * hardware; it's the single place that decides.
+ */
+export const PROCESS_CAPABLE_ASSET_TYPES = ["workstation", "server"] as const;
+
 /** Enough for real fleet segmentation without turning the list into a page. */
 const MAX_RULES = 50;
 const MAX_NAME_LEN = 64;
@@ -281,8 +306,10 @@ async function pinnedCounts(column: "mappedProcesses" | "mappedServices"): Promi
 
 /**
  * Asset ids a scope selects, or null for "no scope" (caller skips the filter).
- * Always intersected with monitored=true, matching the Application Map's own
- * filter — pinning a host the map won't render is wasted work.
+ * Every caller additionally intersects with monitored=true (matching the
+ * Application Map's own filter — pinning a host the map won't render is wasted
+ * work) AND with PROCESS_CAPABLE_ASSET_TYPES, so neither an unscoped rule nor one
+ * scoped at an appliance can claim devices that report no inventory.
  */
 async function scopedAssetIds(scope: TagCriteria | null): Promise<Set<string> | null> {
   if (!scope) return null;
@@ -295,41 +322,53 @@ async function scopedAssetIds(scope: TagCriteria | null): Promise<Set<string> | 
  * picker lists what THOSE hosts actually run instead of the whole fleet's
  * inventory — that's the granularity the flat fleet-wide picker couldn't express.
  */
+// COUNT(*) rather than COUNT(DISTINCT assetId): asset_processes is unique on
+// (assetId, name) and asset_services on (assetId, unit), so a group can hold at
+// most one row per asset and the two are equivalent — but DISTINCT costs a sort
+// or hash per group over the whole table, which is most of what made this slow.
+// Deliberately NOT adding an index on name/unit to speed the GROUP BY: both
+// tables are delete-replaced per asset per scrape by persistAssetProcesses /
+// persistAssetServices, so an extra index would tax every one of those writes
+// fleet-wide to speed up one wizard step.
 export async function getInventoryAggregate(
   scope: TagCriteria | null,
 ): Promise<{ processes: AggregateRow[]; services: AggregateRow[] }> {
   const allowed = await scopedAssetIds(scope);
   if (allowed && allowed.size === 0) return { processes: [], services: [] };
   const ids = allowed ? [...allowed] : null;
+  // Prisma's tagged template needs a real array binding for = ANY.
+  const TYPES = [...PROCESS_CAPABLE_ASSET_TYPES];
 
   const [procRows, svcRows, procPinned, svcPinned] = await Promise.all([
     ids
       ? prisma.$queryRaw<CountRow[]>`
-          SELECT p."name" AS "name", COUNT(DISTINCT p."assetId")::int AS "count"
+          SELECT p."name" AS "name", COUNT(*)::int AS "count"
             FROM "asset_processes" p
             JOIN "assets" a ON a."id" = p."assetId"
-           WHERE a."monitored" = true AND p."assetId" = ANY(${ids}::text[])
+           WHERE a."monitored" = true AND a."assetType" = ANY(${TYPES}::text[])
+             AND p."assetId" = ANY(${ids}::text[])
            GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT ${AGGREGATE_LIMIT}`
       : prisma.$queryRaw<CountRow[]>`
-          SELECT p."name" AS "name", COUNT(DISTINCT p."assetId")::int AS "count"
+          SELECT p."name" AS "name", COUNT(*)::int AS "count"
             FROM "asset_processes" p
             JOIN "assets" a ON a."id" = p."assetId"
-           WHERE a."monitored" = true
+           WHERE a."monitored" = true AND a."assetType" = ANY(${TYPES}::text[])
            GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT ${AGGREGATE_LIMIT}`,
     ids
       ? prisma.$queryRaw<Array<CountRow & { platform: string | null; displayName: string | null }>>`
-          SELECT s."unit" AS "name", COUNT(DISTINCT s."assetId")::int AS "count",
+          SELECT s."unit" AS "name", COUNT(*)::int AS "count",
                  MIN(s."platform") AS "platform", MIN(s."displayName") AS "displayName"
             FROM "asset_services" s
             JOIN "assets" a ON a."id" = s."assetId"
-           WHERE a."monitored" = true AND s."assetId" = ANY(${ids}::text[])
+           WHERE a."monitored" = true AND a."assetType" = ANY(${TYPES}::text[])
+             AND s."assetId" = ANY(${ids}::text[])
            GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT ${AGGREGATE_LIMIT}`
       : prisma.$queryRaw<Array<CountRow & { platform: string | null; displayName: string | null }>>`
-          SELECT s."unit" AS "name", COUNT(DISTINCT s."assetId")::int AS "count",
+          SELECT s."unit" AS "name", COUNT(*)::int AS "count",
                  MIN(s."platform") AS "platform", MIN(s."displayName") AS "displayName"
             FROM "asset_services" s
             JOIN "assets" a ON a."id" = s."assetId"
-           WHERE a."monitored" = true
+           WHERE a."monitored" = true AND a."assetType" = ANY(${TYPES}::text[])
            GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT ${AGGREGATE_LIMIT}`,
     pinnedCounts("mappedProcesses"),
     pinnedCounts("mappedServices"),
@@ -355,11 +394,12 @@ interface CandidateAsset {
   mappedServices: string[];
 }
 
-/** Every monitored asset, once. Rule scopes are applied in memory against this
- *  so a 10-rule config doesn't re-query the asset table 10 times. */
+/** Every monitored, process-capable asset, once. Rule scopes are applied in
+ *  memory against this so a 10-rule config doesn't re-query the asset table 10
+ *  times. */
 async function loadMonitoredAssets(): Promise<CandidateAsset[]> {
   return prisma.asset.findMany({
-    where: { monitored: true },
+    where: { monitored: true, assetType: { in: [...PROCESS_CAPABLE_ASSET_TYPES] } },
     select: { id: true, hostname: true, mappedProcesses: true, mappedServices: true },
   });
 }
@@ -524,6 +564,10 @@ export async function previewScope(scope: TagCriteria | null): Promise<ScopePrev
   const rows = await prisma.asset.findMany({
     where: {
       monitored: true,
+      // Same process-capable filter the apply uses, so the count on the Devices
+      // step is the count that can actually be pinned rather than a fleet total
+      // padded with appliances that report no inventory.
+      assetType: { in: [...PROCESS_CAPABLE_ASSET_TYPES] },
       ...(allowed ? { id: { in: [...allowed] } } : {}),
     },
     select: { id: true, hostname: true, ipAddress: true, assetType: true },

@@ -98,7 +98,9 @@
     var inventory = null;          // { processes, services } for the current scope
     var inventoryScopeKey = null;  // JSON of the scope the inventory was fetched for
     var itemSearch = "";
-    var itemKind = "all";
+    // Services are the usual target — a unit is the thing operators map; the raw
+    // process inventory is the long-tail fallback. Default the filter to match.
+    var itemKind = "service";
     var itemSelectedOnly = false;
 
     var step = 1;
@@ -193,8 +195,11 @@
       return '' +
         '<div class="form-group">' +
           '<label class="appmap-check"><input type="checkbox" id="apr-all-assets"' +
-            (allAssets ? " checked" : "") + '> All monitored assets</label>' +
-          '<p class="hint">Uncheck to narrow the rule to specific devices. Conditions are ANDed.</p>' +
+            (allAssets ? " checked" : "") + '> All monitored workstations &amp; servers</label>' +
+          '<p class="hint">Polaris only collects a process/service inventory from workstations and ' +
+            'servers (via the Polaris Agent, or agentless SSH/WinRM), so rules only ever target those — ' +
+            'firewalls, switches, APs and printers report nothing to pin. ' +
+            'Uncheck to narrow further; conditions are ANDed.</p>' +
         '</div>' +
         '<div id="apr-scope-builder"' + (allAssets ? ' style="display:none"' : "") + '>' +
           '<div id="apr-rules">' + (rules.length ? rules.map(ruleRowHTML).join("") : ruleRowHTML(null)) + '</div>' +
@@ -254,7 +259,7 @@
     function validateStep2() {
       // Unchecked + empty is a mistake, not a synonym for all-assets: silently
       // widening to the whole fleet is exactly the over-pinning this replaced.
-      if (!allAssets && !draft.scope) return "Add a condition, or tick “All monitored assets”.";
+      if (!allAssets && !draft.scope) return "Add a condition, or tick “All monitored workstations & servers”.";
       return null;
     }
 
@@ -275,6 +280,9 @@
             return "<tr><td>" + escapeHtml(a.hostname || "—") + "</td><td>" +
               escapeHtml(a.ipAddress || "—") + "</td><td>" + escapeHtml(a.assetType || "—") + "</td></tr>";
           }).join("");
+          // Warm the item list now that we know the scope is settled — step 3
+          // otherwise starts its aggregate only once the operator gets there.
+          if (step === 2) loadInventoryIfNeeded();
           el.innerHTML = "<strong>" + res.total + "</strong> monitored asset(s)" +
             '<div class="table-wrapper" style="max-height:180px;overflow:auto;margin-top:6px">' +
               '<table class="data-table" style="margin:0"><tbody>' + rows + "</tbody></table>" +
@@ -364,9 +372,9 @@
           '<input type="search" id="apr-item-search" class="input" placeholder="Search programs / units…" ' +
                  'style="flex:1 1 200px;min-width:150px" autocomplete="off" spellcheck="false">' +
           '<select id="apr-item-kind" class="input" style="width:auto">' +
-            '<option value="all">All types</option>' +
-            '<option value="service">Services only</option>' +
+            '<option value="service" selected>Services only</option>' +
             '<option value="process">Processes only</option>' +
+            '<option value="all">All types</option>' +
           '</select>' +
           '<label class="appmap-check"><input type="checkbox" id="apr-item-selected"> Selected only</label>' +
         '</div>' +
@@ -379,12 +387,26 @@
             '</tr></thead>' +
             '<tbody id="apr-item-tbody"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody>' +
           '</table>' +
-        '</div>';
+        '</div>' +
+        '<div id="apr-item-count" class="hint" style="margin-top:0.5rem"></div>';
+    }
+
+    function updateItemCount() {
+      var el = document.getElementById("apr-item-count");
+      if (!el) return;
+      var svc = Object.keys(picked.service).length;
+      var proc = Object.keys(picked.process).length;
+      var parts = [svc + " service" + (svc === 1 ? "" : "s")];
+      // Only mention processes once any are picked, so the common services-only
+      // case stays a single clean number.
+      if (proc) parts.push(proc + " process" + (proc === 1 ? "" : "es"));
+      el.textContent = parts.join(" · ") + " selected";
     }
 
     function renderItemRows() {
       var tbody = document.getElementById("apr-item-tbody");
       if (!tbody) return;
+      updateItemCount();
       if (!inventory) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Loading…</td></tr>';
         return;
@@ -419,7 +441,11 @@
       inventory = null;
       renderItemRows();
       try {
-        inventory = await api.applicationMap.discoveryInventory(draft.scope);
+        var fetched = await api.applicationMap.discoveryInventory(draft.scope);
+        // The scope may have moved while this was in flight (prefetch + a fast
+        // edit); a stale response must not overwrite a newer one.
+        if (JSON.stringify(draft.scope || null) !== key) return;
+        inventory = fetched;
         inventoryScopeKey = key;
       } catch (err) {
         var tbody = document.getElementById("apr-item-tbody");
@@ -447,6 +473,7 @@
         var k = box.getAttribute("data-kind");
         var n = box.getAttribute("data-name");
         if (box.checked) picked[k][n] = true; else delete picked[k][n];
+        updateItemCount();
       });
     }
 
@@ -468,7 +495,7 @@
       var panel = document.getElementById("apr-step-4");
       if (!panel) return;
       var scopeText = allAssets
-        ? "All monitored assets"
+        ? "All monitored workstations & servers"
         : ((draft.scope && draft.scope.rules) || []).map(function (r) {
             var f = r.field;
             if (f === "subnet") return "IP in " + (r.cidrs || []).join(", ");
@@ -635,9 +662,15 @@
       }
       var dl = document.getElementById("apr-assettype-list");
       if (dl) {
-        dl.innerHTML = (_aprAssetTypes || []).map(function (t) {
-          return '<option value="' + escapeHtml(t.name || t) + '"></option>';
-        }).join("");
+        // Only types a rule can actually match (the server publishes the list on
+        // GET /discovery). Offering "firewall" here would let an operator build a
+        // rule that silently matches nothing.
+        var capable = window.appMapProcessCapableTypes || null;
+        dl.innerHTML = (_aprAssetTypes || [])
+          .map(function (t) { return t.name || t; })
+          .filter(function (n) { return !capable || capable.indexOf(n) >= 0; })
+          .map(function (n) { return '<option value="' + escapeHtml(n) + '"></option>'; })
+          .join("");
       }
       if (!_aprIntegrations) {
         try { _aprIntegrations = await api.integrations.list(); } catch (e) { _aprIntegrations = []; }

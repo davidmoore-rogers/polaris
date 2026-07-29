@@ -31,6 +31,7 @@ import {
   resolveBlockPins,
   emptyConfig,
   isRuleEmpty,
+  PROCESS_CAPABLE_ASSET_TYPES,
 } from "../../src/services/appMapDiscoveryService.js";
 
 const block = (over: Record<string, unknown> = {}) =>
@@ -168,6 +169,26 @@ describe("isRuleEmpty", () => {
   it("is false as soon as either side has a name or pattern", () => {
     expect(isRuleEmpty(normalizeRule(RULE({ processes: { names: ["nginx"] } })))).toBe(false);
     expect(isRuleEmpty(normalizeRule(RULE({ services: { patterns: ["*.service"] } })))).toBe(false);
+  });
+});
+
+describe("PROCESS_CAPABLE_ASSET_TYPES", () => {
+  // Inventory only ever comes from the agent / agentless SSH+WinRM, which land on
+  // general-purpose hosts. Counting appliances made the wizard's device count
+  // promise pins that could never happen. Widening this list is the single switch
+  // for "processes on network hardware" later.
+  it("is workstations and servers only", () => {
+    expect([...PROCESS_CAPABLE_ASSET_TYPES]).toEqual(["workstation", "server"]);
+  });
+
+  it("excludes appliance types that never report an inventory", () => {
+    for (const t of ["firewall", "switch", "access_point", "printer", "router", "hypervisor", "other"]) {
+      expect(PROCESS_CAPABLE_ASSET_TYPES as readonly string[]).not.toContain(t);
+    }
+  });
+
+  it("covers vCenter VMs, which are typed server", () => {
+    expect(PROCESS_CAPABLE_ASSET_TYPES as readonly string[]).toContain("server");
   });
 });
 
