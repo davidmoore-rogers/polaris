@@ -45,7 +45,13 @@ import { hasPermission } from "../middleware/permissions.js";
 import { logEvent } from "./events.js";
 import { clampAcquiredToLastSeen, bumpLastSeen } from "../../utils/assetInvariants.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
-import { MAC_ROW_SELECT, reconcileMacAddresses, shapeMacRows } from "../../utils/macAddresses.js";
+import { MAC_ROW_SELECT } from "../../utils/macAddresses.js";
+import {
+  absorbAssetRelations,
+  resolveMonitoringCarry,
+  type AbsorbedRelationCounts,
+} from "../../services/assetMergeService.js";
+import { recomputeMonitorOverrideForAssets } from "../../services/monitorOverrideService.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -439,6 +445,16 @@ async function acceptAssetConflict(
   // before we upsert at the bottom, find the ghost (if any), merge its
   // non-empty fields into the accept target, then delete it so the
   // accept target becomes the single canonical record.
+  //
+  // The ghost is a REAL multi-source asset, not a placeholder: it commonly
+  // carries discovery sources the accept target knows nothing about (the
+  // reported case: an AD-only target absorbing a ghost that held
+  // entra + intune + fortigate-endpoint + vcenter-vm). Letting the delete
+  // cascade those rows away silently destroyed provenance the operator was
+  // told the merge would "combine" — so the ghost's relations are RE-BOUND
+  // onto the target via the shared `absorbAssetRelations`, exactly like the
+  // operator-driven Sources-tab merge. Monitoring intent rides along the
+  // same way.
   const sourceKind = src;
   // AD/Entra ids are case-normalized to lowercase everywhere; vCenter
   // externalIds (instanceUuid or `${integrationId}:${moref}`) must match the
@@ -453,50 +469,95 @@ async function acceptAssetConflict(
   const ghost: any = (existingSourceForId && existingSourceForId.assetId !== existing.id)
     ? existingSourceForId.asset
     : null;
-  let mergedMacsForReconcile: ReturnType<typeof shapeMacRows> | null = null;
+  let absorbed: AbsorbedRelationCounts | null = null;
+  let monitorFieldsAdopted: string[] = [];
+  let carriedMonitoring = false;
   if (ghost) {
     // Absorb any fields from the ghost that the accept target is still missing.
-    if (!update.serialNumber && !existing.serialNumber && ghost.serialNumber) update.serialNumber = ghost.serialNumber;
-    if (!update.macAddress && !existing.macAddress && ghost.macAddress) update.macAddress = ghost.macAddress;
-    if (!update.manufacturer && !existing.manufacturer && ghost.manufacturer) update.manufacturer = ghost.manufacturer;
-    if (!update.model && !existing.model && ghost.model) update.model = ghost.model;
+    // Blank-fill only — the conflict's own field winners (resolved above from
+    // `proposed`) always outrank the ghost's row.
+    const blankFillFromGhost = (field: string) => {
+      if (!update[field] && !existing[field] && ghost[field]) update[field] = ghost[field];
+    };
+    blankFillFromGhost("serialNumber");
+    blankFillFromGhost("macAddress");
+    blankFillFromGhost("manufacturer");
+    blankFillFromGhost("model");
+    blankFillFromGhost("assignedTo");
+    blankFillFromGhost("notes");
+    // The ghost is usually the side discovery actually reached, so it's the one
+    // holding the live address / DNS name / location. An empty accept target
+    // must not come out of the merge with no IP at all. (`ipAddress` respects
+    // the operator pin the same way every other writer does — the db.ts guard
+    // re-asserts `ipOverride` over this write.)
+    blankFillFromGhost("ipAddress");
+    blankFillFromGhost("dnsName");
+    blankFillFromGhost("learnedLocation");
+    blankFillFromGhost("snmpLocation");
+    blankFillFromGhost("learnedAddress");
+    blankFillFromGhost("department");
+    blankFillFromGhost("location");
+    blankFillFromGhost("purchaseOrder");
+    blankFillFromGhost("acquiredAt");
+    blankFillFromGhost("warrantyExpiry");
     if (!update.os && ghost.os) update.os = ghost.os;
     if (!update.osVersion && ghost.osVersion) update.osVersion = ghost.osVersion;
-    if (!update.assignedTo && !existing.assignedTo && ghost.assignedTo) update.assignedTo = ghost.assignedTo;
-    if (!update.notes && !existing.notes && ghost.notes) update.notes = ghost.notes;
-    if (!update.lastSeen && !existing.lastSeen && ghost.lastSeen) {
-      update.lastSeen = ghost.lastSeen;
-      if (ghost.lastSeenSource) update.lastSeenSource = ghost.lastSeenSource;
+    if (!update.assetType && existing.assetType === "other" && ghost.assetType) {
+      update.assetType = ghost.assetType;
     }
-    // Merge ghost's MAC history into the accept target. Side-table reconcile
-    // happens AFTER the asset.update below — assembling the merged shape
-    // here so we can run a single reconcile call.
-    const ghostMacs = shapeMacRows(ghost.macAddressRows);
-    const existingMacs = shapeMacRows(existing.macAddressRows);
-    if (ghostMacs.length > 0) {
-      const merged = [...existingMacs];
-      for (const m of ghostMacs) {
-        const key = (m.mac || "").replace(/[^0-9a-fA-F]/g, "").toUpperCase();
-        if (key && !merged.some((x) => (x.mac || "").replace(/[^0-9a-fA-F]/g, "").toUpperCase() === key)) {
-          merged.push(m);
+    // lastSeen — keep the more recent, carrying the ghost's provenance label.
+    // Routed through bumpLastSeen so rule 12's no-regress + polling-authority
+    // deferral still apply to the absorbed evidence.
+    if (ghost.lastSeen) {
+      bumpLastSeen(update, existing, ghost.lastSeen, ghost.lastSeenSource || "conflict-accept");
+    }
+    // Tags — union the ghost's on top of the source tags resolved above, so the
+    // survivor keeps the ghost's source labels (entraid / vcenter / …).
+    const tagsSoFar = Array.isArray(update.tags) ? (update.tags as string[]) : [];
+    const ghostTags = Array.isArray(ghost.tags) ? (ghost.tags as string[]) : [];
+    if (ghostTags.length > 0) {
+      const have = new Set(tagsSoFar);
+      const withGhost = [...tagsSoFar];
+      for (const t of ghostTags) {
+        if (!have.has(t)) {
+          withGhost.push(t);
+          have.add(t);
         }
       }
-      if (merged.length > existingMacs.length) {
-        mergedMacsForReconcile = merged;
-      }
+      if (withGhost.length > tagsSoFar.length) update.tags = withGhost;
     }
-    // Delete the ghost. Cascade rule on AssetMacAddress.assetId removes the
-    // ghost's MAC rows automatically — no separate cleanup needed.
-    await prisma.asset.delete({ where: { id: ghost.id } });
+    // Monitoring is an explicit operator choice — absorbing a monitored ghost
+    // must not silently stop polling the device.
+    const carry = resolveMonitoringCarry(update, existing, ghost);
+    carriedMonitoring = carry.carried;
+    monitorFieldsAdopted = carry.adopted;
   }
 
   clampAcquiredToLastSeen(update, existing);
-  await prisma.asset.update({
-    where: { id: existing.id },
-    data: update,
-  });
-  if (mergedMacsForReconcile) {
-    await reconcileMacAddresses(existing.id, mergedMacsForReconcile);
+
+  if (ghost) {
+    // One transaction: re-bind the ghost's sources / side tables / agent
+    // enrollment onto the accept target, apply the merged fields, then delete
+    // the ghost. Everything re-bound first so the delete can't cascade it away.
+    await prisma.$transaction(async (tx) => {
+      absorbed = await absorbAssetRelations(tx, ghost.id, existing.id);
+      await tx.asset.update({ where: { id: existing.id }, data: update });
+      await tx.asset.delete({ where: { id: ghost.id } });
+    });
+    // Keep monitorOverride faithful to the carried-over monitoring intent —
+    // best-effort, a recompute failure must not undo the merge.
+    if (carriedMonitoring) {
+      try {
+        await recomputeMonitorOverrideForAssets(prisma, [existing.id]);
+      } catch {
+        /* swallowed — see above */
+      }
+    }
+  } else {
+    await prisma.asset.update({
+      where: { id: existing.id },
+      data: update,
+    });
   }
 
   // Stamp the AssetSource row that ties this asset to the conflict's
@@ -504,11 +565,37 @@ async function acceptAssetConflict(
   // marker — discovery's re-discovery uses AssetSource.externalId as the
   // primary key (see buildEntraSyncIndex / buildAdSyncIndex), so writing
   // the source row here is what makes the asset findable on the next
-  // sync. The observed blob is built from the conflict's snapshot;
-  // the next discovery run replaces it with a richer canonical version.
+  // sync. The observed blob is built from the conflict's snapshot; the next
+  // discovery run replaces it with a richer canonical version. In the ghost
+  // flavour the row already exists and was just re-bound above, so this lands
+  // on the upsert's UPDATE branch — which deliberately doesn't touch
+  // `observed`, leaving the ghost's full discovery blob intact instead of
+  // flattening it to the snapshot.
   await upsertConflictAssetSource(existing.id, conflict, proposed, src);
 
-  const ghostNote = ghost ? ` (absorbed and removed ghost asset ${ghost.id})` : "";
+  // Spell out what came across, so the audit trail shows the survivor really
+  // did inherit the duplicate's provenance rather than silently losing it.
+  let ghostNote = "";
+  if (ghost) {
+    const a = absorbed as AbsorbedRelationCounts | null;
+    const moved: string[] = [];
+    if (a) {
+      if (a.movedSources) moved.push(`${a.movedSources} source row(s)`);
+      if (a.movedMacs) moved.push(`${a.movedMacs} MAC(s)`);
+      if (a.movedIps) moved.push(`${a.movedIps} associated IP(s)`);
+      if (a.movedIpHistory) moved.push(`${a.movedIpHistory} IP history row(s)`);
+      if (a.movedSightings) moved.push(`${a.movedSightings} firewall sighting(s)`);
+      if (a.movedManagedAgent) moved.push("agent enrollment");
+    }
+    if (carriedMonitoring) {
+      moved.push(
+        monitorFieldsAdopted.length > 0
+          ? `monitoring (with ${monitorFieldsAdopted.length} config field(s))`
+          : "monitoring",
+      );
+    }
+    ghostNote = ` (absorbed and removed ghost asset ${ghost.id}${moved.length ? ` — carried over ${moved.join(", ")}` : ""})`;
+  }
   const winnerEntries = Object.entries(fieldWinners);
   const mergeNote = winnerEntries.length > 0
     ? ` (merged with selections: ${winnerEntries.map(([k, v]) => `${k}=${v}`).join(", ")})`

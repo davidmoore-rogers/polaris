@@ -27,7 +27,9 @@ vi.mock("../../src/db.js", () => {
     assetIpHistory: { findMany: vi.fn(async () => []), update: vi.fn(), delete: vi.fn() },
     assetFortigateSighting: { findMany: vi.fn(async () => []), update: vi.fn(), delete: vi.fn() },
     assetSource: { updateMany: vi.fn(async () => ({ count: 0 })) },
-    managedAgent: { update: vi.fn() },
+    // absorbAssetRelations resolves agent presence from the table itself
+    // (it's shared with the conflict path, which has no pre-loaded row).
+    managedAgent: { findMany: vi.fn(async () => []), update: vi.fn() },
   };
   return {
     prisma: {
@@ -39,7 +41,11 @@ vi.mock("../../src/db.js", () => {
   };
 });
 
-import { mergeAssets } from "../../src/services/assetMergeService.js";
+import {
+  mergeAssets,
+  absorbAssetRelations,
+  resolveMonitoringCarry,
+} from "../../src/services/assetMergeService.js";
 import { prisma } from "../../src/db.js";
 
 type Mock = ReturnType<typeof vi.fn>;
@@ -79,7 +85,6 @@ function assetRow(id: string, over: Record<string, unknown> = {}) {
     lastSeenSource: null,
     tags: [] as string[],
     monitored: false,
-    managedAgent: null,
     monitoredInterfaces: [] as string[],
     monitoredStorage: [] as string[],
     monitoredIpsecTunnels: [] as string[],
@@ -97,6 +102,11 @@ function seed(canonical: Record<string, unknown>, ghost: Record<string, unknown>
   );
 }
 
+/** Which asset ids the ManagedAgent table holds an enrollment for. */
+function seedAgents(...assetIds: string[]) {
+  tx.managedAgent.findMany.mockResolvedValue(assetIds.map((assetId) => ({ assetId })));
+}
+
 /** The data object the survivor was updated with (empty when no update fired). */
 function updateData(): Record<string, unknown> {
   const call = tx.asset.update.mock.calls[0];
@@ -110,6 +120,7 @@ beforeEach(() => {
   tx.assetIpHistory.findMany.mockResolvedValue([]);
   tx.assetFortigateSighting.findMany.mockResolvedValue([]);
   tx.assetSource.updateMany.mockResolvedValue({ count: 0 });
+  tx.managedAgent.findMany.mockResolvedValue([]);
   executeRaw.mockResolvedValue(0);
 });
 
@@ -256,7 +267,8 @@ describe("mergeAssets — transfers", () => {
   });
 
   it("re-binds the ghost's agent enrollment only when the survivor has none", async () => {
-    seed({ managedAgent: null }, { managedAgent: { id: "ma-1" } });
+    seed({}, {});
+    seedAgents(GHOST);
     const res = await mergeAssets({ canonicalId: CANON, ghostId: GHOST });
     expect(res.movedManagedAgent).toBe(true);
     expect(tx.managedAgent.update).toHaveBeenCalledWith({
@@ -265,9 +277,103 @@ describe("mergeAssets — transfers", () => {
     });
 
     vi.clearAllMocks();
-    seed({ managedAgent: { id: "ma-keep" } }, { managedAgent: { id: "ma-1" } });
+    seed({}, {});
+    seedAgents(GHOST, CANON);
     const res2 = await mergeAssets({ canonicalId: CANON, ghostId: GHOST });
     expect(res2.movedManagedAgent).toBe(false);
     expect(tx.managedAgent.update).not.toHaveBeenCalled();
+  });
+});
+
+// The absorb mechanics are shared with acceptAssetConflict's sibling-conflict
+// ghost path (api/routes/conflicts.ts), which used to let the ghost delete
+// cascade its AssetSource rows away — dropping discovery provenance (entra /
+// intune / fortigate-endpoint) the survivor never had. These assert the
+// contract that path now relies on.
+describe("absorbAssetRelations", () => {
+  it("re-points every source row and never deletes one", async () => {
+    tx.assetSource.updateMany.mockResolvedValue({ count: 4 });
+    const counts = await absorbAssetRelations(tx as any, GHOST, CANON);
+    expect(tx.assetSource.updateMany).toHaveBeenCalledWith({
+      where: { assetId: GHOST },
+      data: { assetId: CANON },
+    });
+    expect(counts.movedSources).toBe(4);
+    expect((tx.assetSource as Record<string, Mock>).deleteMany).toBeUndefined();
+  });
+
+  it("transfers the four side tables, keeping the survivor's row on a collision", async () => {
+    // Survivor already holds this MAC; the absorbed row collides and is dropped
+    // rather than re-pointed (the unique (assetId, mac) key forbids both).
+    tx.assetMacAddress.findMany
+      .mockResolvedValueOnce([{ mac: "AA:BB:CC:DD:EE:FF" }])
+      .mockResolvedValueOnce([
+        { id: "dup", mac: "AA:BB:CC:DD:EE:FF" },
+        { id: "new", mac: "11:22:33:44:55:66" },
+      ]);
+    const counts = await absorbAssetRelations(tx as any, GHOST, CANON);
+    expect(tx.assetMacAddress.delete).toHaveBeenCalledWith({ where: { id: "dup" } });
+    expect(tx.assetMacAddress.update).toHaveBeenCalledWith({
+      where: { id: "new" },
+      data: { assetId: CANON },
+    });
+    expect(counts.movedMacs).toBe(1);
+  });
+
+  it("leaves the survivor's own agent enrollment in place", async () => {
+    seedAgents(CANON);
+    const counts = await absorbAssetRelations(tx as any, GHOST, CANON);
+    expect(counts.movedManagedAgent).toBe(false);
+    expect(tx.managedAgent.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveMonitoringCarry", () => {
+  const row = (over: Record<string, unknown> = {}) => ({
+    status: "active",
+    monitored: false,
+    cpuMemoryPolling: null,
+    monitoredInterfaces: [] as string[],
+    ...over,
+  });
+
+  it("flips the survivor on and adopts the absorbed row's config", async () => {
+    const update: Record<string, unknown> = {};
+    const res = resolveMonitoringCarry(
+      update,
+      row(),
+      row({ monitored: true, cpuMemoryPolling: "snmp", monitoredInterfaces: ["port1"] }),
+    );
+    expect(res.carried).toBe(true);
+    expect(update.monitored).toBe(true);
+    expect(update.cpuMemoryPolling).toBe("snmp");
+    expect(update.monitoredInterfaces).toEqual(["port1"]);
+    // Monitor state resets — the survivor has no history under this config.
+    expect(update.monitorStatus).toBeNull();
+    expect(res.adopted).toContain("cpuMemoryPolling");
+  });
+
+  it("is a no-op when the survivor is already monitored", async () => {
+    const update: Record<string, unknown> = {};
+    const res = resolveMonitoringCarry(
+      update,
+      row({ monitored: true, cpuMemoryPolling: "agent" }),
+      row({ monitored: true, cpuMemoryPolling: "snmp" }),
+    );
+    expect(res.carried).toBe(false);
+    expect(update).toEqual({});
+  });
+
+  it("never turns monitoring off", async () => {
+    const update: Record<string, unknown> = {};
+    resolveMonitoringCarry(update, row({ monitored: true }), row({ monitored: false }));
+    expect(update.monitored).toBeUndefined();
+  });
+
+  it("respects business rule 10 — a staged decommission blocks the carry-over", async () => {
+    const update: Record<string, unknown> = { status: "decommissioned" };
+    const res = resolveMonitoringCarry(update, row(), row({ monitored: true }));
+    expect(res.carried).toBe(false);
+    expect(update.monitored).toBeUndefined();
   });
 });

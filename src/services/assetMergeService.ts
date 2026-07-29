@@ -8,14 +8,17 @@
  * survivor (canonical) and absorbs the other (ghost) into it.
  *
  * How this differs from the automatic merges:
- *   - `mergeDuplicateHostnameAssets` job / `acceptAssetConflict` cascade-DELETE
- *     the ghost's AssetSource rows (they assume the ghost's sources are
- *     redundant duplicates of the canonical's). Here the whole point is that
- *     the two assets carry DIFFERENT discovery sources, so we RE-BIND the
- *     ghost's AssetSource rows onto the canonical — the survivor ends up
+ *   - `mergeDuplicateHostnameAssets` job cascade-DELETEs the ghost's
+ *     AssetSource rows (it assumes the ghost's sources are redundant
+ *     duplicates of the canonical's). Here the whole point is that the two
+ *     assets carry DIFFERENT discovery sources, so we RE-BIND the ghost's
+ *     AssetSource rows onto the canonical — the survivor ends up
  *     multi-source. The global unique constraint on (sourceKind, externalId)
  *     guarantees no collision: two distinct assets can never already hold the
- *     same source identity.
+ *     same source identity. `absorbAssetRelations` below is that re-bind, and
+ *     is SHARED with the conflict-resolution ghost absorb in
+ *     `api/routes/conflicts.ts` (`acceptAssetConflict`) — merging a sibling
+ *     conflict must not drop the duplicate's unrelated sources either.
  *   - Those paths blank-fill only. Here the caller supplies per-field winners
  *     (operator chose, field by field, in the comparison UI).
  *
@@ -178,7 +181,6 @@ type AssetForMerge = {
   acquiredAt: Date | null;
   tags: string[];
   monitored: boolean;
-  managedAgent: { id: string } | null;
 } & Record<string, unknown>;
 
 export interface MergeAssetsResult {
@@ -224,7 +226,6 @@ const ASSET_SELECT = {
   lastSeenSource: true,
   tags: true,
   monitored: true,
-  managedAgent: { select: { id: true } },
   // Monitoring config + pins, for the monitored-side carry-over below. Derived
   // from the two lists above so they stay the single source of truth (the cast
   // gives Prisma literal keys instead of fromEntries' string index signature).
@@ -283,6 +284,123 @@ export async function transferAssetSideTables(
     movedIpHistory: await moveUnique(tx.assetIpHistory, "ip"),
     movedSightings: await moveUnique(tx.assetFortigateSighting, "fortigateDevice"),
   };
+}
+
+export interface AbsorbedRelationCounts extends SideTableTransferCounts {
+  movedSources: number;
+  movedManagedAgent: boolean;
+}
+
+/**
+ * Re-bind every transferable relation from `fromAssetId` onto `toAssetId`
+ * inside the caller's transaction, so deleting the absorbed asset afterwards
+ * doesn't cascade them away. Shared by the operator merge below and the
+ * sibling-conflict ghost absorb in `acceptAssetConflict`.
+ *
+ *   - AssetSource — ALL rows re-point. No collision is possible:
+ *     (sourceKind, externalId) is globally unique, so two distinct assets can
+ *     never already hold the same source identity. This is what leaves the
+ *     survivor multi-source instead of losing the absorbed asset's
+ *     discovery provenance.
+ *   - The four side tables — via `transferAssetSideTables` (delete-on-conflict,
+ *     survivor's row wins).
+ *   - ManagedAgent — 1:1 on assetId; re-bound only when the survivor has none,
+ *     so the agent enrollment + its cert pins survive. If both sides have one,
+ *     the absorbed asset's cascade-deletes (survivor keeps its own).
+ *
+ * Everything NOT listed here cascade-deletes with the absorbed row (LLDP
+ * neighbors, wireless stations, interface overrides, dependency edges, pending
+ * conflicts) and the sample hypertables' rows orphan + age out — see the file
+ * header.
+ */
+export async function absorbAssetRelations(
+  tx: any,
+  fromAssetId: string,
+  toAssetId: string,
+): Promise<AbsorbedRelationCounts> {
+  const srcRes = await tx.assetSource.updateMany({
+    where: { assetId: fromAssetId },
+    data: { assetId: toAssetId },
+  });
+  const side = await transferAssetSideTables(tx, fromAssetId, toAssetId);
+
+  const agents = await tx.managedAgent.findMany({
+    where: { assetId: { in: [fromAssetId, toAssetId] } },
+    select: { assetId: true },
+  });
+  let movedManagedAgent = false;
+  const fromHasAgent = agents.some((a: any) => a.assetId === fromAssetId);
+  const toHasAgent = agents.some((a: any) => a.assetId === toAssetId);
+  if (fromHasAgent && !toHasAgent) {
+    await tx.managedAgent.update({ where: { assetId: fromAssetId }, data: { assetId: toAssetId } });
+    movedManagedAgent = true;
+  }
+
+  return { movedSources: srcRes.count, ...side, movedManagedAgent };
+}
+
+/**
+ * Resolve the `monitored` OR-carry onto `update`: monitoring is an explicit
+ * operator choice, so absorbing a monitored asset must never silently stop
+ * polling the device. Only the OFF→ON direction does work (both-monitored and
+ * survivor-already-monitored are no-ops; an unmonitored ghost never turns the
+ * survivor off). When the flip happens, the ghost's monitoring CONFIGURATION
+ * rides along — see MONITOR_CONFIG_FIELDS / MONITOR_PIN_FIELDS.
+ *
+ * Business rule 10 still wins: `decommissioned`/`disabled` never monitors. The
+ * db.ts extension clamps that only when the write stages `status`, which a
+ * merge keeping the survivor's status doesn't — so the effective status is
+ * resolved here (staged value first) and the carry-over skipped.
+ *
+ * Shared with `acceptAssetConflict`; both callers pass rows carrying at least
+ * `monitored`, `status`, and the MONITOR_CARRY_SELECT fields.
+ */
+export function resolveMonitoringCarry(
+  update: Record<string, unknown>,
+  canonical: Record<string, any>,
+  ghost: Record<string, any>,
+): { carried: boolean; adopted: string[] } {
+  const effectiveStatus = (update.status ?? canonical.status) as string | null;
+  const statusBlocksMonitoring = effectiveStatus === "decommissioned" || effectiveStatus === "disabled";
+  const carried = ghost.monitored === true && canonical.monitored !== true && !statusBlocksMonitoring;
+  const adopted: string[] = [];
+  if (!carried) return { carried, adopted };
+
+  update.monitored = true;
+  // Fresh state: the survivor has never been polled under this config and the
+  // ghost's samples are orphaned by the merge, so a leftover monitorStatus
+  // would assert history the survivor can't back. null renders as "unknown"
+  // and the first probe (≤ one monitor tick) replaces it.
+  update.monitorStatus = null;
+  update.consecutiveFailures = 0;
+  update.consecutiveSuccesses = 0;
+  // Config the enabled monitoring needs in order to resolve a method. Ghost's
+  // non-null wins; survivor keeps its own wherever the ghost has none.
+  for (const field of MONITOR_CONFIG_FIELDS) {
+    const gVal = ghost[field];
+    if (gVal === null || gVal === undefined) continue;
+    if (gVal === canonical[field]) continue;
+    update[field] = gVal;
+    adopted.push(field);
+  }
+  // Pins are additive intent — union, survivor's order first.
+  for (const field of MONITOR_PIN_FIELDS) {
+    const cArr = Array.isArray(canonical[field]) ? (canonical[field] as string[]) : [];
+    const gArr = Array.isArray(ghost[field]) ? (ghost[field] as string[]) : [];
+    const merged = [...cArr];
+    const have = new Set(cArr);
+    for (const v of gArr) {
+      if (!have.has(v)) {
+        merged.push(v);
+        have.add(v);
+      }
+    }
+    if (merged.length > cArr.length) {
+      update[field] = merged;
+      adopted.push(field);
+    }
+  }
+  return { carried, adopted };
 }
 
 /**
@@ -349,57 +467,10 @@ export async function mergeAssets(opts: {
   // extension, but we resolve it here so the value is correct in-transaction).
   clampAcquiredToLastSeen(update, { acquiredAt: c.acquiredAt, lastSeen: c.lastSeen });
 
-  // monitored — OR across the two rows: monitoring is an explicit operator
-  // choice, so absorbing a monitored asset must not silently stop polling the
-  // device. Only the OFF→ON direction needs work (both-monitored and
-  // survivor-already-monitored are no-ops, and the ghost being unmonitored
-  // never turns the survivor off).
-  //
-  // Business rule 10 still wins: `decommissioned`/`disabled` assets are never
-  // monitored. The db.ts extension clamps that only when the write stages
-  // `status`, which a merge that keeps the survivor's status doesn't — so
-  // resolve the effective status here and skip the carry-over.
-  const effectiveStatus = (update.status ?? c.status) as string | null;
-  const statusBlocksMonitoring = effectiveStatus === "decommissioned" || effectiveStatus === "disabled";
-  const carriedMonitoring = g.monitored === true && c.monitored !== true && !statusBlocksMonitoring;
-  const monitorFieldsAdopted: string[] = [];
-  if (carriedMonitoring) {
-    update.monitored = true;
-    // Fresh state: the survivor has never been polled under this config and the
-    // ghost's samples are orphaned by the merge, so a leftover monitorStatus
-    // would assert history the survivor can't back. null renders as "unknown"
-    // and the first probe (≤ one monitor tick) replaces it.
-    update.monitorStatus = null;
-    update.consecutiveFailures = 0;
-    update.consecutiveSuccesses = 0;
-    // Config the enabled monitoring needs in order to resolve a method — see
-    // MONITOR_CONFIG_FIELDS. Ghost's non-null wins; survivor keeps its own
-    // wherever the ghost has none.
-    for (const field of MONITOR_CONFIG_FIELDS) {
-      const gVal = g[field];
-      if (gVal === null || gVal === undefined) continue;
-      if (gVal === c[field]) continue;
-      update[field] = gVal;
-      monitorFieldsAdopted.push(field);
-    }
-    // Pins are additive intent — union, survivor's order first.
-    for (const field of MONITOR_PIN_FIELDS) {
-      const cArr = Array.isArray(c[field]) ? (c[field] as string[]) : [];
-      const gArr = Array.isArray(g[field]) ? (g[field] as string[]) : [];
-      const merged = [...cArr];
-      const have = new Set(cArr);
-      for (const v of gArr) {
-        if (!have.has(v)) {
-          merged.push(v);
-          have.add(v);
-        }
-      }
-      if (merged.length > cArr.length) {
-        update[field] = merged;
-        monitorFieldsAdopted.push(field);
-      }
-    }
-  }
+  // monitored — OR across the two rows (+ the ghost's monitoring config when
+  // the flip actually turns the survivor ON). Shared with the conflict path.
+  const { carried: carriedMonitoring, adopted: monitorFieldsAdopted } =
+    resolveMonitoringCarry(update, c, g);
 
   let movedSources = 0;
   let movedMacs = 0;
@@ -409,32 +480,16 @@ export async function mergeAssets(opts: {
   let movedManagedAgent = false;
 
   await prisma.$transaction(async (tx) => {
-    // AssetSource — re-bind ALL ghost sources onto the canonical. No collision
-    // possible: (sourceKind, externalId) is globally unique, so two distinct
-    // assets can't already share a source identity. This is what makes the
-    // survivor multi-source (the whole reason to merge rather than delete).
-    const srcRes = await tx.assetSource.updateMany({
-      where: { assetId: g.id },
-      data: { assetId: c.id },
-    });
-    movedSources = srcRes.count;
-
-    // Side tables — unique per (assetId, key), delete-on-conflict. Shared
-    // with the endpoint-ghost merge.
-    const sideCounts = await transferAssetSideTables(tx, g.id, c.id);
-    movedMacs = sideCounts.movedMacs;
-    movedIps = sideCounts.movedIps;
-    movedIpHistory = sideCounts.movedIpHistory;
-    movedSightings = sideCounts.movedSightings;
-
-    // ManagedAgent — 1:1, unique assetId, cascade-deletes with the ghost. If
-    // the survivor has no agent but the ghost does, re-bind it so the
-    // enrollment (and its cert pins) survive the merge. If both have one, the
-    // ghost's cascade-deletes (operator keeps the survivor's).
-    if (g.managedAgent && !c.managedAgent) {
-      await tx.managedAgent.update({ where: { assetId: g.id }, data: { assetId: c.id } });
-      movedManagedAgent = true;
-    }
+    // Sources / side tables / managed agent — re-bound onto the canonical so
+    // the ghost delete below can't cascade them away. Shared with the
+    // conflict-resolution ghost absorb.
+    const absorbed = await absorbAssetRelations(tx, g.id, c.id);
+    movedSources = absorbed.movedSources;
+    movedMacs = absorbed.movedMacs;
+    movedIps = absorbed.movedIps;
+    movedIpHistory = absorbed.movedIpHistory;
+    movedSightings = absorbed.movedSightings;
+    movedManagedAgent = absorbed.movedManagedAgent;
 
     if (Object.keys(update).length > 0) {
       await tx.asset.update({ where: { id: c.id }, data: update });
