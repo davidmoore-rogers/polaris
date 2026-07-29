@@ -1,306 +1,228 @@
-// appmap-discovery.js — the Application Map's "Discovery" modal.
+// appmap-discovery.js — the Application Map's "Discovery" entry point: a list of
+// named MAP RULES, each of which pins process/service items onto the assets its
+// scope selects (now, and on assets discovered later via the
+// reconcileAppMapAutoMap job).
 //
-// Shows every process program and service unit the agents have reported across
-// the fleet, aggregated with a per-name device count, and lets the operator tick
-// the ones that belong on the map. Ticks are saved as a persistent SELECTION
-// (Setting "appMapAutoMap") rather than applied once: the server pins them on
-// every matching asset now, and the reconcileAppMapAutoMap job re-applies them to
-// assets discovered later. That's the whole point — pinning used to be one
-// Services-tab checkbox per host, which a newly-built host silently missed.
+// This file owns the LIST; the builder lives in appmap-rules-wizard.js. Same split
+// as automations.js / automations-wizard.js.
 //
-// Two asymmetries worth knowing while reading this:
-//   - Un-ticking a row stops FUTURE auto-pinning; it does not retroactively
-//     unpin, because those arrays are operator-owned and someone may have pinned
-//     a name by hand. "Unmap everywhere" is the separate, explicit strip.
-//   - Ticks are the `names` list. Patterns and the optional asset scope are also
-//     part of the stored selection but are not (yet) surfaced here; the modal
-//     round-trips whatever the server sent so it can't silently drop them.
+// Why rules instead of one fleet-wide picker: a single selection could only say
+// "every asset that reports this program", which over-pins — mapping
+// truckscale.service for the three truckscale hosts also hit every other host
+// running it. Each rule carries its own asset scope, so the same unit can be
+// mapped in one part of the fleet and left alone elsewhere.
 //
-// Loaded after appmap.js; both are IIFEs. Exposes openAppMapDiscovery() on window.
+// Asymmetry worth knowing while reading this: removing an item from a rule, or
+// disabling/deleting the rule, stops FUTURE auto-pinning — it does not
+// retroactively unpin, because Asset.mappedProcesses/mappedServices are
+// operator-owned and someone may have pinned a name by hand. "Unmap everywhere" is
+// the separate, confirmation-gated strip.
+//
+// openModal reuses ONE overlay, so the wizard REPLACES this list on the way in and
+// reopens it on cancel/save (see openAppMapRuleWizard).
+
+/* global openModal, closeModal, showToast, showConfirm, escapeHtml, permAtLeast, api,
+   openAppMapRuleWizard */
 
 (function () {
   "use strict";
 
-  var data = null;         // { processes, services, selection }
-  var picked = {           // name -> true, per kind. The editable state.
-    process: {},
-    service: {},
-  };
-  var previewTimer = null;
-  var searchQuery = "";
-  var kindFilter = "all";  // all | process | service
-  var onlySelected = false;
-
-  function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
+  var rules = [];
 
   function canWrite() {
     return typeof permAtLeast === "function" &&
       permAtLeast("applicationMap", "write") && permAtLeast("assets", "write");
   }
 
-  // ─── Row model ─────────────────────────────────────────────────────
-
-  function allRows() {
-    var out = [];
-    (data.processes || []).forEach(function (r) {
-      out.push({ kind: "process", name: r.name, deviceCount: r.deviceCount, mappedCount: r.mappedCount, sub: "" });
-    });
-    (data.services || []).forEach(function (r) {
-      out.push({
-        kind: "service", name: r.name, deviceCount: r.deviceCount, mappedCount: r.mappedCount,
-        sub: [r.displayName, r.platform].filter(Boolean).join(" · "),
-      });
-    });
-    return out;
+  function scopeSummary(r) {
+    if (!r.scope || !(r.scope.rules || []).length) return "All monitored assets";
+    var n = r.scope.rules.length;
+    var first = r.scope.rules[0];
+    var label = first.field === "subnet"
+      ? "IP in " + (first.cidrs || []).join(", ")
+      : first.field + " " + first.op + " " + (first.values || []).join(", ");
+    return n === 1 ? label : label + " +" + (n - 1) + " more";
   }
 
-  function visibleRows() {
-    var q = searchQuery.trim().toLowerCase();
-    return allRows().filter(function (r) {
-      if (kindFilter !== "all" && r.kind !== kindFilter) return false;
-      if (onlySelected && !picked[r.kind][r.name]) return false;
-      if (!q) return true;
-      return r.name.toLowerCase().indexOf(q) >= 0 || (r.sub || "").toLowerCase().indexOf(q) >= 0;
-    }).sort(function (a, b) {
-      // Most-deployed first — that's the useful end of a long tail of
-      // one-host-only programs.
-      if (b.deviceCount !== a.deviceCount) return b.deviceCount - a.deviceCount;
-      return a.name.localeCompare(b.name);
-    });
+  function itemSummary(r) {
+    var svc = (r.services && r.services.names) || [];
+    var proc = (r.processes && r.processes.names) || [];
+    var pat = ((r.services && r.services.patterns) || []).length +
+              ((r.processes && r.processes.patterns) || []).length;
+    var parts = [];
+    if (svc.length) parts.push(svc.length + " service" + (svc.length === 1 ? "" : "s"));
+    if (proc.length) parts.push(proc.length + " process" + (proc.length === 1 ? "" : "es"));
+    if (pat) parts.push(pat + " pattern" + (pat === 1 ? "" : "s"));
+    return parts.length ? parts.join(" · ") : "—";
   }
-
-  function pickedCount() {
-    return Object.keys(picked.process).length + Object.keys(picked.service).length;
-  }
-
-  // ─── Render ────────────────────────────────────────────────────────
 
   function bodyHTML() {
     return '' +
-      '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.75rem">' +
-        'Everything the Polaris Agents have reported across the fleet. Tick what belongs on the ' +
-        'Application Map — Polaris pins it on every matching device now, <strong>and on devices ' +
-        'discovered later</strong>. Un-ticking stops future auto-pinning; it doesn\'t unpin what\'s ' +
-        'already there (use <em>Unmap everywhere</em> for that).' +
+      '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.85rem">' +
+        'Map rules pin processes and services onto the devices you choose — on the devices that ' +
+        'match today, <strong>and on devices discovered later</strong>. Removing an item or ' +
+        "disabling a rule stops future auto-pinning; it doesn't unpin what's already there " +
+        '(use <em>Unmap everywhere</em> for that).' +
       '</p>' +
-      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:0.6rem">' +
-        '<input type="search" id="apd-search" class="input" placeholder="Search programs / units…" ' +
-               'style="flex:1 1 220px;min-width:160px" autocomplete="off" spellcheck="false">' +
-        '<select id="apd-kind" class="input" style="width:auto">' +
-          '<option value="all">All types</option>' +
-          '<option value="service">Services only</option>' +
-          '<option value="process">Processes only</option>' +
-        '</select>' +
-        '<label class="appmap-check"><input type="checkbox" id="apd-only-selected"> Selected only</label>' +
+      '<div style="display:flex;justify-content:flex-end;margin-bottom:0.6rem">' +
+        (canWrite() ? '<button type="button" class="btn btn-primary btn-sm" id="apd-add">+ Add rule</button>' : "") +
       '</div>' +
-      // Frozen header: .table-wrapper-modal-sticky pins thead th to the top of
-      // this scroll box. Self-bounding via max-height — no JS sizer (see the
-      // rule's comment in styles.css).
-      '<div id="apd-table-wrap" class="table-wrapper table-wrapper-modal-sticky" style="max-height:46vh">' +
-        '<table class="data-table" id="apd-table" style="margin:0">' +
+      '<div class="table-wrapper table-wrapper-modal-sticky" style="max-height:46vh">' +
+        '<table class="data-table" style="margin:0">' +
           '<thead><tr>' +
-            '<th style="width:2.5rem"></th>' +
-            '<th>Name</th>' +
-            '<th style="width:6rem">Type</th>' +
-            '<th style="width:6rem">Devices</th>' +
-            '<th style="width:7rem">Mapped</th>' +
-            '<th style="width:9rem"></th>' +
+            '<th style="width:4rem">On</th>' +
+            '<th>Rule</th>' +
+            '<th>Devices</th>' +
+            '<th>Items</th>' +
+            '<th style="width:8rem"></th>' +
           '</tr></thead>' +
-          '<tbody id="apd-tbody"></tbody>' +
+          '<tbody id="apd-tbody"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody>' +
         '</table>' +
-      '</div>' +
-      '<div id="apd-preview" class="hint" style="margin-top:0.6rem;font-size:0.8rem">' +
-        'Tick something to preview what would be pinned.' +
       '</div>';
   }
 
   function renderRows() {
     var tbody = document.getElementById("apd-tbody");
     if (!tbody) return;
-    var rows = visibleRows();
-    if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">' +
-        (allRows().length
-          ? "Nothing matches this search."
-          : "No processes or services reported yet. They appear once a Polaris Agent reports a host’s inventory.") +
-        '</td></tr>';
+    if (!rules.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">' +
+        (canWrite()
+          ? "No map rules yet. Add one to choose which devices get which processes and services mapped."
+          : "No map rules configured.") +
+        "</td></tr>";
       return;
     }
-    var disabled = canWrite() ? "" : " disabled";
-    tbody.innerHTML = rows.map(function (r) {
-      var checked = picked[r.kind][r.name] ? " checked" : "";
-      var nm = esc(r.name);
-      return '<tr>' +
-        '<td><input type="checkbox" class="apd-pick" data-kind="' + r.kind + '" data-name="' + nm + '"' + checked + disabled + '></td>' +
-        '<td>' + nm + (r.sub ? '<div style="font-size:0.72rem;color:var(--color-text-tertiary)">' + esc(r.sub) + '</div>' : "") + '</td>' +
-        '<td>' + (r.kind === "service" ? "Service" : "Process") + '</td>' +
-        '<td>' + r.deviceCount + '</td>' +
-        '<td>' + (r.mappedCount ? r.mappedCount + " host(s)" : "—") + '</td>' +
-        '<td>' + (r.mappedCount
-          ? '<button type="button" class="btn btn-secondary btn-sm apd-unmap" data-kind="' + r.kind +
-            '" data-name="' + nm + '"' + disabled + '>Unmap everywhere</button>'
-          : "") + '</td>' +
-      '</tr>';
+    var dis = canWrite() ? "" : " disabled";
+    tbody.innerHTML = rules.map(function (r) {
+      return "<tr>" +
+        '<td><label class="toggle-switch" title="' +
+          (r.enabled ? "Enabled — stops pinning new items when turned off" : "Disabled") + '">' +
+          '<input type="checkbox" class="apd-toggle" data-id="' + escapeHtml(r.id) + '"' +
+            (r.enabled ? " checked" : "") + dis + ">" +
+          '<span class="toggle-slider"></span></label></td>' +
+        '<td><a href="#" class="apd-edit-link" data-id="' + escapeHtml(r.id) + '">' + escapeHtml(r.name) + "</a></td>" +
+        "<td>" + escapeHtml(scopeSummary(r)) + "</td>" +
+        "<td>" + escapeHtml(itemSummary(r)) + "</td>" +
+        '<td style="white-space:nowrap">' +
+          '<button type="button" class="btn btn-secondary btn-sm apd-edit" data-id="' + escapeHtml(r.id) + '"' + dis + ">Edit</button> " +
+          '<button type="button" class="btn btn-secondary btn-sm apd-delete" data-id="' + escapeHtml(r.id) + '"' + dis + ">Delete</button>" +
+        "</td>" +
+      "</tr>";
     }).join("");
   }
 
-  // ─── Preview (debounced, mirrors the maintenance builder) ──────────
-
-  function selectionFromPicked() {
-    // Round-trip patterns + scope untouched: the modal doesn't surface them, so
-    // saving must not be how an operator loses them.
-    var stored = (data && data.selection) || {};
-    var sp = stored.processes || {};
-    var ss = stored.services || {};
-    return {
-      version: 1,
-      processes: { names: Object.keys(picked.process), patterns: sp.patterns || [], regex: !!sp.regex },
-      services:  { names: Object.keys(picked.service), patterns: ss.patterns || [], regex: !!ss.regex },
-      scope: stored.scope || null,
-    };
+  // Every write PUTs the whole rule set — the endpoint validates and applies the
+  // complete config (cross-rule name/id uniqueness can't be checked per-rule), and
+  // applying is what makes pins land immediately instead of waiting for the tick.
+  async function persist(nextRules, successMsg) {
+    var res = await api.applicationMap.saveDiscovery(nextRules);
+    rules = res.rules || [];
+    var a = res.applied || {};
+    showToast(
+      a.devices
+        ? successMsg + " — pinned " + ((a.processPins || 0) + (a.servicePins || 0)) + " item(s) on " + a.devices + " device(s)"
+        : successMsg,
+      "success",
+    );
+    // The map itself changed, so reflect it without making the operator refresh.
+    if (typeof window.appMapReload === "function") window.appMapReload();
+    return res;
   }
 
-  function refreshPreview() {
-    var el = document.getElementById("apd-preview");
-    if (!el) return;
-    var sel = selectionFromPicked();
-    var nothing = !sel.processes.names.length && !sel.services.names.length &&
-      !sel.processes.patterns.length && !sel.services.patterns.length;
-    if (nothing) {
-      el.textContent = "Tick something to preview what would be pinned.";
-      return;
-    }
-    el.textContent = "Checking…";
-    if (previewTimer) clearTimeout(previewTimer);
-    previewTimer = setTimeout(async function () {
-      try {
-        var res = await api.applicationMap.previewDiscovery(sel);
-        if (!res.deviceCount) {
-          el.innerHTML = "<em>Nothing new to pin — every matching device already has these.</em>";
-          return;
-        }
-        var names = (res.sampleDevices || []).map(function (d) { return d.hostname || d.assetId; });
-        el.innerHTML =
-          "Would add <strong>" + res.processPins + "</strong> process pin(s) and <strong>" +
-          res.servicePins + "</strong> service pin(s) across <strong>" + res.deviceCount +
-          "</strong> device(s)" +
-          (names.length ? ": " + esc(names.join(", ")) + (res.deviceCount > names.length ? ", …" : "") : "") + ".";
-      } catch (err) {
-        el.textContent = "Preview failed: " + (err && err.message ? err.message : String(err));
-      }
-    }, 450);
-  }
-
-  // ─── Wiring ────────────────────────────────────────────────────────
+  // Called by the wizard on save. Upsert by id so Edit replaces in place.
+  window.appMapRulesSaveOne = async function appMapRulesSaveOne(rule) {
+    var next = rules.slice();
+    var idx = rule.id ? next.findIndex(function (r) { return r.id === rule.id; }) : -1;
+    if (idx >= 0) next[idx] = rule; else next.push(rule);
+    await persist(next, idx >= 0 ? "Rule updated" : "Rule created");
+  };
 
   function wire() {
-    var search = document.getElementById("apd-search");
-    var reRender = (typeof debounce === "function") ? debounce(renderRows, 200) : renderRows;
-    if (search) {
-      search.addEventListener("input", function () { searchQuery = search.value; reRender(); });
-    }
-    var kind = document.getElementById("apd-kind");
-    if (kind) kind.addEventListener("change", function () { kindFilter = kind.value; renderRows(); });
-    var only = document.getElementById("apd-only-selected");
-    if (only) only.addEventListener("change", function () { onlySelected = only.checked; renderRows(); });
-
-    var tbody = document.getElementById("apd-tbody");
-    if (tbody) {
-      tbody.addEventListener("change", function (ev) {
-        var box = ev.target.closest ? ev.target.closest(".apd-pick") : null;
-        if (!box) return;
-        var k = box.getAttribute("data-kind");
-        var n = box.getAttribute("data-name");
-        if (box.checked) picked[k][n] = true; else delete picked[k][n];
-        refreshPreview();
-        syncFooter();
+    var add = document.getElementById("apd-add");
+    if (add) {
+      add.addEventListener("click", function () {
+        if (typeof openAppMapRuleWizard === "function") openAppMapRuleWizard(null);
       });
-      tbody.addEventListener("click", async function (ev) {
-        var btn = ev.target.closest ? ev.target.closest(".apd-unmap") : null;
-        if (!btn) return;
-        var k = btn.getAttribute("data-kind");
-        var n = btn.getAttribute("data-name");
+    }
+    var tbody = document.getElementById("apd-tbody");
+    if (!tbody) return;
+
+    tbody.addEventListener("click", async function (ev) {
+      var editEl = ev.target.closest ? ev.target.closest(".apd-edit, .apd-edit-link") : null;
+      if (editEl) {
+        ev.preventDefault();
+        var id = editEl.getAttribute("data-id");
+        var hit = rules.filter(function (r) { return r.id === id; })[0];
+        if (hit && typeof openAppMapRuleWizard === "function") openAppMapRuleWizard(hit);
+        return;
+      }
+      var del = ev.target.closest ? ev.target.closest(".apd-delete") : null;
+      if (del) {
+        var did = del.getAttribute("data-id");
+        var row = rules.filter(function (r) { return r.id === did; })[0];
+        if (!row) return;
         var ok = await showConfirm(
-          'Remove "' + n + '" from every device\'s Application Map pins and delete its collected ' +
-          'connection rows? This also takes it out of the saved selection so it won\'t be re-pinned.',
+          'Delete the map rule "' + row.name + '"? Devices it already pinned keep their pins — ' +
+          "deleting only stops future auto-pinning.",
         );
         if (!ok) return;
-        btn.disabled = true;
+        del.disabled = true;
         try {
-          var res = await api.applicationMap.unmapEverywhere(k, n);
-          showToast("Un-mapped " + n + " from " + res.devices + " device(s)", "success");
-          delete picked[k][n];
-          await reload();
+          await persist(rules.filter(function (r) { return r.id !== did; }), "Rule deleted");
+          renderRows();
         } catch (err) {
-          showToast("Un-map failed: " + (err && err.message ? err.message : String(err)), "error");
-          btn.disabled = false;
+          showToast("Delete failed: " + (err && err.message ? err.message : String(err)), "error");
+          del.disabled = false;
         }
-      });
-    }
-  }
+      }
+    });
 
-  function syncFooter() {
-    var save = document.getElementById("apd-save");
-    if (!save) return;
-    var n = pickedCount();
-    save.textContent = n ? "Save selection (" + n + ")" : "Save selection";
+    tbody.addEventListener("change", async function (ev) {
+      var cb = ev.target.closest ? ev.target.closest(".apd-toggle") : null;
+      if (!cb) return;
+      var id = cb.getAttribute("data-id");
+      var next = rules.map(function (r) {
+        return r.id === id ? Object.assign({}, r, { enabled: cb.checked }) : r;
+      });
+      try {
+        await persist(next, cb.checked ? "Rule enabled" : "Rule disabled");
+        renderRows();
+      } catch (err) {
+        showToast("Update failed: " + (err && err.message ? err.message : String(err)), "error");
+        cb.checked = !cb.checked; // revert the optimistic flip
+      }
+    });
   }
 
   async function reload() {
-    data = await api.applicationMap.discovery();
-    var sel = data.selection || {};
-    picked = { process: {}, service: {} };
-    ((sel.processes && sel.processes.names) || []).forEach(function (n) { picked.process[n] = true; });
-    ((sel.services  && sel.services.names)  || []).forEach(function (n) { picked.service[n] = true; });
+    var cfg = await api.applicationMap.discovery();
+    rules = (cfg && cfg.rules) || [];
     renderRows();
-    refreshPreview();
-    syncFooter();
   }
 
-  async function save() {
-    var btn = document.getElementById("apd-save");
-    if (btn) btn.disabled = true;
-    try {
-      var res = await api.applicationMap.saveDiscovery(selectionFromPicked());
-      var a = res.applied || {};
-      showToast(
-        a.devices
-          ? "Saved — pinned " + ((a.processPins || 0) + (a.servicePins || 0)) + " item(s) on " + a.devices + " device(s)"
-          : "Saved — nothing new to pin right now",
-        "success",
-      );
-      closeModal();
-      // The map itself changes as a result, so reflect it without a manual refresh.
-      if (typeof window.appMapReload === "function") window.appMapReload();
-    } catch (err) {
-      showToast("Save failed: " + (err && err.message ? err.message : String(err)), "error");
-      if (btn) btn.disabled = false;
-    }
-  }
-
-  window.openAppMapDiscovery = async function openAppMapDiscovery() {
-    var footer =
-      '<button type="button" class="btn btn-secondary" id="apd-cancel">Close</button>' +
-      (canWrite() ? '<button type="button" class="btn btn-primary" id="apd-save">Save selection</button>' : "");
-    openModal("Discover processes &amp; services", bodyHTML(), footer, { large: true });
-    var cancel = document.getElementById("apd-cancel");
-    if (cancel) cancel.addEventListener("click", closeModal);
-    var saveBtn = document.getElementById("apd-save");
-    if (saveBtn) saveBtn.addEventListener("click", save);
+  // Named separately from the button handler so the wizard can return here.
+  window.openAppMapRulesList = async function openAppMapRulesList() {
+    openModal(
+      // Titled to tie back to the toolbar button the operator clicked.
+      "Discovery — map rules",
+      bodyHTML(),
+      '<button type="button" class="btn btn-secondary" id="apd-close">Close</button>',
+      { large: true },
+    );
+    var close = document.getElementById("apd-close");
+    if (close) close.addEventListener("click", closeModal);
     wire();
-    var tbody = document.getElementById("apd-tbody");
-    if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Loading…</td></tr>';
     try {
       await reload();
     } catch (err) {
+      var tbody = document.getElementById("apd-tbody");
       if (tbody) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load: ' +
-          esc(err && err.message ? err.message : String(err)) + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load: ' +
+          escapeHtml(err && err.message ? err.message : String(err)) + "</td></tr>";
       }
     }
   };
+
+  // Kept as the toolbar button's entry point so appmap.js doesn't need to change.
+  window.openAppMapDiscovery = window.openAppMapRulesList;
 })();

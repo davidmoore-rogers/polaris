@@ -4,8 +4,8 @@
  * The Application Map page's API: the connectivity graph built from mapped-
  * process connection facts (AssetProcessConnection), the shared drag layout
  * (ApplicationMapLayout — the appmap counterpart of TopologyLayout), and the
- * Discovery surface (fleet-wide process/service aggregate + the persistent
- * auto-map selection).
+ * Discovery surface (named MAP RULES: an asset scope plus the process/service
+ * items to pin on the assets it selects, now and as they're discovered).
  *
  * Gates: `applicationMap=read` to view the graph, `applicationMap=write`
  * to save/reset the shared layout. The Discovery WRITES additionally require
@@ -23,15 +23,17 @@ import {
   deleteAppMapLayout,
 } from "../../services/applicationMapService.js";
 import {
-  getFleetProcessAggregate,
-  getFleetServiceAggregate,
-  getSelection,
-  saveSelection,
-  normalizeSelection,
-  previewAutoMap,
-  applyAutoMap,
+  getConfig,
+  saveConfig,
+  normalizeConfig,
+  normalizeRule,
+  getInventoryAggregate,
+  previewRule,
+  previewScope,
+  applyRules,
   unmapEverywhere,
 } from "../../services/appMapDiscoveryService.js";
+import { normalizeCriteria } from "../../services/tagAssignmentService.js";
 import { logEvent } from "./events.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { requestActor } from "../middleware/auth.js";
@@ -92,62 +94,81 @@ router.delete("/layout", requirePermission("applicationMap", "write"), async (re
   }
 });
 
-// ─── Discovery: fleet aggregate + persistent auto-map selection ─────────────
+// ─── Discovery: named map rules ─────────────────────────────────────────────
 //
-// Mounted BEFORE nothing in particular (no conflicting param routes here), but
-// note the write gates are chained: `applicationMap=write` says "you may curate
-// this map", `assets=write` says "you may change asset pin fields". Both are
-// required because the write does both.
+// The write gates are chained: `applicationMap=write` says "you may curate this
+// map", `assets=write` says "you may change asset pin fields". Both are required
+// because the write does both.
 const requireDiscoveryWrite = [
   requirePermission("applicationMap", "write"),
   requirePermission("assets", "write"),
 ];
 
-// GET /application-map/discovery — everything the modal needs in one round-trip.
+// GET /application-map/discovery — the stored rule set.
 router.get("/discovery", requirePermission("applicationMap", "read"), async (_req, res, next) => {
   try {
-    const [processes, services, selection] = await Promise.all([
-      getFleetProcessAggregate(),
-      getFleetServiceAggregate(),
-      getSelection(),
-    ]);
-    res.json({ processes, services, selection });
+    res.json(await getConfig());
   } catch (err) {
     next(err);
   }
 });
 
-// POST /application-map/discovery/preview — dry run; writes nothing. Read-gated
-// because it only reports what a selection WOULD pin.
+const ScopeBodySchema = z.object({ scope: z.unknown().optional() });
+
+// POST /application-map/discovery/scope-preview — which assets a scope selects.
+// Backs the wizard's asset-selection step so the operator can see they picked the
+// hosts they meant before choosing items.
+router.post("/discovery/scope-preview", requirePermission("applicationMap", "read"), async (req, res, next) => {
+  try {
+    const body = ScopeBodySchema.parse(req.body ?? {});
+    const scope = body.scope == null ? null : normalizeCriteria(body.scope);
+    res.json(await previewScope(scope));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /application-map/discovery/inventory — the programs / units reported by the
+// assets a scope selects. This is what makes the picker granular: it lists what
+// THOSE hosts run, not the whole fleet's inventory.
+router.post("/discovery/inventory", requirePermission("applicationMap", "read"), async (req, res, next) => {
+  try {
+    const body = ScopeBodySchema.parse(req.body ?? {});
+    const scope = body.scope == null ? null : normalizeCriteria(body.scope);
+    res.json(await getInventoryAggregate(scope));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /application-map/discovery/preview — dry run for ONE rule; writes nothing.
+// Read-gated because it only reports what the rule WOULD pin.
 router.post("/discovery/preview", requirePermission("applicationMap", "read"), async (req, res, next) => {
   try {
-    const selection = normalizeSelection((req.body ?? {}).selection);
-    res.json(await previewAutoMap(selection));
+    const rule = normalizeRule((req.body ?? {}).rule);
+    res.json(await previewRule(rule));
   } catch (err) {
     next(err);
   }
 });
 
-// PUT /application-map/discovery — persist the selection and apply it inline, so
+// PUT /application-map/discovery — persist the rule set and apply it inline, so
 // the operator sees pins land immediately instead of waiting for the reconcile
 // tick. The tick is what covers assets discovered later.
 router.put("/discovery", ...requireDiscoveryWrite, async (req, res, next) => {
   try {
-    const selection = normalizeSelection((req.body ?? {}).selection);
-    await saveSelection(selection);
+    const cfg = normalizeConfig(req.body ?? {});
+    await saveConfig(cfg);
     const actor = requestActor(req);
     logEvent({
       action: "application_map.automap.saved",
       resourceType: "application_map",
       resourceId: "discovery",
       actor,
-      message:
-        `Application Map auto-map selection saved ` +
-        `(${selection.processes.names.length} processes, ${selection.services.names.length} services` +
-        `${selection.scope ? ", scoped" : ""})`,
-      details: { selection } as any,
+      message: `Application Map map rules saved (${cfg.rules.length} rule(s), ${cfg.rules.filter((r) => r.enabled).length} enabled)`,
+      details: { rules: cfg.rules } as any,
     });
-    const applied = await applyAutoMap(selection);
+    const applied = await applyRules(cfg.rules);
     if (applied.devices > 0) {
       logEvent({
         action: "application_map.automap.applied",
@@ -155,12 +176,12 @@ router.put("/discovery", ...requireDiscoveryWrite, async (req, res, next) => {
         resourceId: "discovery",
         actor,
         message:
-          `Auto-map pinned ${applied.processPins} process(es) + ${applied.servicePins} service(s) ` +
+          `Map rules pinned ${applied.processPins} process(es) + ${applied.servicePins} service(s) ` +
           `across ${applied.devices} device(s)`,
         details: applied as any,
       });
     }
-    res.json({ selection, applied });
+    res.json({ ...cfg, applied });
   } catch (err) {
     next(err);
   }

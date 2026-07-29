@@ -1727,28 +1727,32 @@ Listed alphabetically.
 
 ## services/appMapDiscoveryService.ts
 
-**What it owns:** The Application Map's **Discovery** surface — the fleet-wide process/service aggregate behind the modal, and the PERSISTENT auto-map selection in `Setting("appMapAutoMap")` that pins the operator's picks onto matching assets now *and* onto assets discovered later. Structurally a sibling of `autoMonitorStorageService` (aggregate → preview → additive apply → re-apply later), with the periodic-reconciler entry point of `tagAssignmentService`.
+**What it owns:** The Application Map's **Discovery** surface — named MAP RULES in `Setting("appMapAutoMap")` (`{version:2, rules:[…]}`), the scope-driven process/service aggregate behind the wizard's item step, and the additive apply that pins them. Structurally a sibling of `autoMonitorStorageService` (aggregate → preview → additive apply → re-apply later), with the periodic-reconciler entry point of `tagAssignmentService`.
 
-**Public API:** normalizeSelection, getSelection, saveSelection, emptySelection, isSelectionEmpty, resolveBlockPins (PURE — the unit-tested core), getFleetProcessAggregate, getFleetServiceAggregate, previewAutoMap, applyAutoMap, unmapEverywhere, reconcileAutoMap, SETTING_KEY, plus the AutoMap* / AggregateRow types.
+**Public API:** normalizeRule, normalizeConfig, getConfig, saveConfig, emptyConfig, isRuleEmpty, resolveBlockPins (PURE — the unit-tested core), getInventoryAggregate, previewScope, previewRule, applyRules, unmapEverywhere, reconcileAutoMap, SETTING_KEY, plus the AppMapRule / AppMapAutoMapConfig / AutoMap* / AggregateRow types.
 
-**Cross-service deps:** `prisma.setting` / `prisma.asset` / `prisma.assetProcess` / `prisma.assetService` / `prisma.assetProcessConnection`; `autoMonitorInterfacesService.compilePattern` (wildcard-vs-regex compilation, shared not duplicated); `tagAssignmentService.normalizeCriteria` + `resolveMatchingAssetIds` (the optional asset scope reuses that vocabulary rather than inventing a second one).
+**Cross-service deps:** `prisma.setting` / `prisma.asset` / `prisma.assetProcess` / `prisma.assetService` / `prisma.assetProcessConnection`; `autoMonitorInterfacesService.compilePattern` (wildcard-vs-regex compilation, shared not duplicated); `tagAssignmentService.normalizeCriteria` + `resolveMatchingAssetIds` (each rule's scope reuses that vocabulary rather than inventing a second one).
 
 **Used by:**
-- `src/api/routes/applicationMap.ts` — `GET /application-map/discovery` (applicationMap=read), `POST /discovery/preview` (read), `PUT /discovery` + `POST /discovery/unmap` (applicationMap=write **AND** assets=write, chained).
+- `src/api/routes/applicationMap.ts` — `GET /discovery` + `POST /discovery/{scope-preview,inventory,preview}` (applicationMap=read), `PUT /discovery` + `POST /discovery/unmap` (applicationMap=write **AND** assets=write, chained).
 - `src/jobs/reconcileAppMapAutoMap.ts` — 30-min tick calling `reconcileAutoMap()`.
-- `public/js/appmap-discovery.js` — the modal.
+- `public/js/appmap-discovery.js` (rules list) + `public/js/appmap-rules-wizard.js` (the builder).
 
 **Invariants:**
-- **Apply is STRICTLY ADDITIVE and never strips.** `Asset.mappedProcesses` / `mappedServices` are operator-owned — someone may have pinned a name by hand on one host — so un-ticking a row in the modal stops FUTURE auto-pinning rather than retroactively unpinning. `unmapEverywhere` is the separate, explicitly-confirmed strip, and it also removes the name from the stored selection (otherwise the next reconcile puts it straight back).
-- **Aggregates must stay bounded.** Four GROUP BY round-trips regardless of fleet size: `asset_processes` / `asset_services` joined to `assets` on `monitored=true` with `COUNT(DISTINCT "assetId")` (LIMIT 2000), plus one `unnest(mappedProcesses|mappedServices)` GROUP BY for the pinned count. Never read per-asset rows to count them in memory — that's ~400k `AssetProcess` rows at 2000 hosts, on a modal open.
+- **MANY rules, not one selection.** A single fleet-wide selection could only express "every asset reporting this program", which over-pins. Each rule has its own scope; when several match one asset their pins UNION, which is why `computePending` can't just loop rules independently.
+- **Apply is STRICTLY ADDITIVE and never strips.** `Asset.mappedProcesses` / `mappedServices` are operator-owned — someone may have pinned a name by hand on one host — so removing an item from a rule, or disabling/deleting the rule, stops FUTURE auto-pinning rather than retroactively unpinning. `unmapEverywhere` is the separate strip, and it also removes the name from EVERY rule (otherwise the next reconcile puts it straight back).
+- **The pre-rules shape folds forward at read time.** `normalizeConfig` turns a legacy `{version:1, processes, services, scope}` blob into one "Imported selection" rule, so an install that configured the old flat modal doesn't silently lose its pins. No migration job — same trick as the flat retention default. An EMPTY legacy selection folds to zero rules, not an inert one.
+- **Aggregates must stay bounded and scope-narrowed.** `getInventoryAggregate(scope)` runs GROUP BYs over `asset_processes` / `asset_services` joined to `assets` on `monitored=true`, restricted to the scope's asset ids (LIMIT 2000), plus `unnest` GROUP BYs for the pinned count. Never read per-asset rows to count them in memory — that's ~400k `AssetProcess` rows at 2000 hosts, on a wizard step. The item picker CANNOT filter client-side: aggregate rows carry no asset ids.
+- **Apply resolves each scope once and loads inventory once.** `computePending` resolves every rule's scope, unions the touched asset ids, loads the inventory for that union in one pass, then evaluates all rules in memory — otherwise a 10-rule config would re-query the asset + inventory tables 10 times.
+- **Rule names and ids are unique.** Names are how operators refer to these in conversation and Events (409 on a case-insensitive collision); a duplicate id would make an edit fan out across rules.
 - **Names dedup case-INSENSITIVELY but keep the first spelling.** Pins are matched against inventory case-sensitively, so folding case would silently stop matching the real program name.
-- **Patterns compile at save time.** `normalizeSelection` runs `compilePattern` on every pattern so a bad regex is a 400 the operator sees, not a silent no-match on every reconcile tick forever.
-- **An unusable scope tree means NO scope, not match-nothing.** `normalizeCriteria` returns null when there are no usable rules; treating that as "match nothing" would quietly disable a working selection.
+- **Patterns compile at save time.** `normalizeRule` runs `compilePattern` on every pattern so a bad regex is a 400 the operator sees, not a silent no-match on every reconcile tick forever.
+- **An unusable scope tree means NO scope, not match-nothing.** `normalizeCriteria` returns null when there are no usable rules; treating that as "match nothing" would quietly disable a working rule. The WIZARD compensates: unchecked "All assets" with an empty builder is a validation error, never a silent widening.
 - **`monitored: true` is the candidate filter**, matching `buildApplicationMapGraph`'s own filter — pinning a host the map won't render is wasted work.
-- **The modal round-trips `patterns` + `scope` untouched.** It only surfaces `names`; saving must not be how an operator loses the parts it doesn't show.
 
 **When changing this:**
-- Adding a selection dimension → update `normalizeSelection` (validation + cap), `resolveBlockPins` (if it affects matching), the preview/apply pending computation, AND `public/js/appmap-discovery.js`'s round-trip so it can't be dropped on save.
+- Adding a rule field → update `normalizeRule` (validation + cap), the preview/apply pending computation, AND the wizard's collect/round-trip so it can't be dropped on save. The wizard only surfaces `names`; `patterns` and `scope` are round-tripped untouched.
+- The whole rule set is PUT on every write (the list modal resends everything, including for an enable-toggle) because cross-rule uniqueness can't be validated per-rule. Don't add a per-rule PATCH without moving that validation.
 - The reconcile cadence is deliberately 30 min and deliberately NOT hooked into `persistAssetProcesses`/`persistAssetServices` — those run per asset every few minutes. Don't "improve" the latency by hooking them without a fleet-scale plan.
 - If apply ever needs to strip, it needs a provenance table first (see `TagAutoAssignment` in tagAssignmentService) — otherwise it will delete hand-applied pins.
 
