@@ -3,7 +3,14 @@
  *
  * The privilege-tier → systemd [Service]-block mapping for the Linux agent:
  *   - unprivileged (default) — hardened DynamicUser, NO capabilities
- *   - ptrace                 — same hardened base + AmbientCapabilities=CAP_SYS_PTRACE
+ *   - ptrace                 — same hardened base + AmbientCapabilities=
+ *                              CAP_SYS_PTRACE CAP_DAC_READ_SEARCH. The PAIR is
+ *                              load-bearing: /proc/<pid>/fd of a foreign process
+ *                              is a 0500 dir whose open is a pure DAC check
+ *                              (only DAC_READ_SEARCH passes), while readlinking
+ *                              entries is the ptrace check. SYS_PTRACE alone
+ *                              collected zero connection rows fleet-wide
+ *                              (prod, 2026-07-29).
  *   - normalizePrivilegeTier — legacy "root" / unknown values collapse to unprivileged
  */
 
@@ -38,11 +45,15 @@ describe("linuxServiceBlock", () => {
     }
   });
 
-  it("only the ptrace tier grants CAP_SYS_PTRACE", () => {
+  it("only the ptrace tier grants capabilities — and grants the full pair", () => {
     expect(unpriv).not.toContain("CAP_SYS_PTRACE");
+    expect(unpriv).not.toContain("CAP_DAC_READ_SEARCH");
     expect(unpriv).not.toContain("AmbientCapabilities");
-    expect(ptrace).toContain("AmbientCapabilities=CAP_SYS_PTRACE");
-    expect(ptrace).toContain("CapabilityBoundingSet=CAP_SYS_PTRACE");
+    // The PAIR, in both Ambient and BoundingSet. CAP_SYS_PTRACE alone cannot
+    // open a foreign /proc/<pid>/fd (0500 dir, DAC check) — the regression
+    // that shipped as zero Application Map rows fleet-wide.
+    expect(ptrace).toContain("AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH");
+    expect(ptrace).toContain("CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH");
   });
 
   it("both are valid [Service] blocks pointing at the agent binary", () => {

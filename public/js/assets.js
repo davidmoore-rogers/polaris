@@ -1964,9 +1964,9 @@ function openBulkAgentDeployModal() {
       // agents run as LocalSystem; macOS LaunchDaemons run as root).
       '<div class="form-group">' +
         '<label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal;cursor:pointer">' +
-          '<input type="checkbox" id="bulk-agent-run-as-root"> Grant CAP_SYS_PTRACE on Linux hosts (for Application Map connection mapping)' +
+          '<input type="checkbox" id="bulk-agent-run-as-root"> Grant CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH on Linux hosts (for Application Map connection mapping)' +
         '</label>' +
-        '<p class="hint" style="color:var(--color-warning)">Leave unchecked to run the agent fully unprivileged (recommended). Checking this grants <strong>CAP_SYS_PTRACE</strong> on every Linux host in this batch so the agent can attribute network connections to processes — without full root. Note: this capability also lets the agent read any process’s memory (a credential-theft risk). Windows hosts are unaffected.</p>' +
+        '<p class="hint" style="color:var(--color-warning)">Leave unchecked to run the agent fully unprivileged (recommended). Checking this grants <strong>CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH</strong> on every Linux host in this batch — the pair the agent needs to attribute network connections to processes, without full root. Note: these capabilities also let the agent read any process’s memory and any file on the host (a credential-theft risk). Windows hosts are unaffected.</p>' +
       '</div>';
 
     var footer =
@@ -1988,8 +1988,8 @@ function openBulkAgentDeployModal() {
       }
       if (wantPtrace) {
         var ok = await showConfirm(
-          "Grant the Polaris Agent CAP_SYS_PTRACE on the Linux hosts in this batch?\n\n" +
-          "This lets those agents attribute network connections to processes for the Application Map — without full root. Note that CAP_SYS_PTRACE also lets the agent read any process's memory (a credential-theft risk). Windows hosts are unaffected (they always run as LocalSystem)."
+          "Grant the Polaris Agent CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH on the Linux hosts in this batch?\n\n" +
+          "This capability pair lets those agents attribute network connections to processes for the Application Map — without full root. Note that it also lets the agent read any process's memory and any file on the host (a credential-theft risk). Windows hosts are unaffected (they always run as LocalSystem)."
         );
         if (!ok) return; // keep modal open
       }
@@ -4590,7 +4590,7 @@ function assetAgentSubpanelHTML(a, agent) {
     if (agent.osPlatform === "windows") { privLabel = "LocalSystem"; privColor = ""; }
     else if (agent.osPlatform === "darwin") { privLabel = "Root"; privColor = "var(--color-warning)"; }
     else if (agent.privilegeTier === "root") { privLabel = "Root (legacy — reinstall to update)"; privColor = "var(--color-warning)"; }
-    else if (agent.privilegeTier === "ptrace") { privLabel = "CAP_SYS_PTRACE (connection mapping)"; privColor = "var(--color-warning)"; }
+    else if (agent.privilegeTier === "ptrace") { privLabel = "CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH (connection mapping)"; privColor = "var(--color-warning)"; }
     else { privLabel = "Unprivileged"; privColor = ""; }
     var privRow = '<div>Privileges: <strong' + (privColor ? ' style="color:' + privColor + '"' : '') + '>' + privLabel + '</strong></div>';
 
@@ -4847,9 +4847,9 @@ function _openInstallAgentModal(a) {
       // LaunchDaemons run as root). Shown/hidden by refreshCredRows.
       '<div class="form-group" id="agent-install-root-wrap">' +
         '<label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal;cursor:pointer">' +
-          '<input type="checkbox" id="agent-install-run-as-root"> Grant CAP_SYS_PTRACE (for Application Map connection mapping)' +
+          '<input type="checkbox" id="agent-install-run-as-root"> Grant CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH (for Application Map connection mapping)' +
         '</label>' +
-        '<p class="hint" style="color:var(--color-warning)">Leave unchecked to run the agent fully unprivileged (recommended). Checking this grants the agent the <strong>CAP_SYS_PTRACE</strong> capability so it can attribute network connections to processes for the Application Map — without full root. Note: this capability also lets the agent read any process’s memory (a credential-theft risk), so enable it only on hosts where you want the service/connection map.</p>' +
+        '<p class="hint" style="color:var(--color-warning)">Leave unchecked to run the agent fully unprivileged (recommended). Checking this grants the agent the <strong>CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH</strong> capability pair it needs to attribute network connections to processes for the Application Map — without full root. Note: these capabilities also let the agent read any process’s memory and any file on the host (a credential-theft risk), so enable them only on hosts where you want the service/connection map.</p>' +
       '</div>' +
       '<div class="form-group" id="agent-install-transport-wrap" style="display:none">' +
         '<label>Transport</label>' +
@@ -4965,13 +4965,14 @@ function _openInstallAgentModal(a) {
         return; // keep modal open
       }
       var wantPtrace = os === "linux" && !!(rootCb && rootCb.checked);
-      // Granting CAP_SYS_PTRACE is a meaningful privilege — make the operator confirm.
+      // Granting the ptrace-tier capability pair is a meaningful privilege —
+      // make the operator confirm.
       if (wantPtrace) {
         var ok = await showConfirm(
-          "Grant the Polaris Agent CAP_SYS_PTRACE on this host?\n\n" +
-          "This lets the agent attribute network connections to processes for the " +
-          "Application Map — without full root. Note that CAP_SYS_PTRACE also lets the " +
-          "agent read any process's memory (a credential-theft risk).\n\n" +
+          "Grant the Polaris Agent CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH on this host?\n\n" +
+          "This capability pair lets the agent attribute network connections to processes " +
+          "for the Application Map — without full root. Note that it also lets the " +
+          "agent read any process's memory and any file on the host (a credential-theft risk).\n\n" +
           "Only do this on hosts where you want the service/connection map."
         );
         if (!ok) return; // keep modal open

@@ -1016,9 +1016,10 @@
   // Privilege cell for the installed-agents table. The tier is Linux-only —
   // Windows agents always run as LocalSystem and macOS LaunchDaemons as root,
   // so those render as fixed informational text. `ptrace` is called out in
-  // warning colour because CAP_SYS_PTRACE also permits reading any process's
-  // memory; legacy `root` rows (pre-Satellite-posture installs, never emitted
-  // for new installs) are flagged danger so operators reinstall them down.
+  // warning colour because the tier's capability pair (CAP_SYS_PTRACE +
+  // CAP_DAC_READ_SEARCH) permits reading any process's memory and any file;
+  // legacy `root` rows (pre-Satellite-posture installs, never emitted for new
+  // installs) are flagged danger so operators reinstall them down.
   function _agentPrivilegeCell(a) {
     var tertiary = function (t) {
       return '<span style="color:var(--color-text-tertiary);font-size:0.78rem">' + escapeHtml(t) + '</span>';
@@ -1027,7 +1028,7 @@
     if (a.osPlatform === "darwin")  return tertiary("root (daemon)");
     if (a.privilegeTier === "ptrace") {
       return '<span style="color:var(--color-warning);font-weight:600;font-size:0.78rem" ' +
-        'title="Agent runs unprivileged plus AmbientCapabilities=CAP_SYS_PTRACE, so it can attribute Application Map connections to processes. This capability also lets it read any process’s memory.">CAP_SYS_PTRACE</span>';
+        'title="Agent runs unprivileged plus AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH, the pair required to attribute Application Map connections to processes. These capabilities also let it read any process’s memory and any file on the host. Agents installed before the CAP_DAC_READ_SEARCH fix carry only CAP_SYS_PTRACE and collect no connections — reinstall to update.">CAP_SYS_PTRACE</span>';
     }
     if (a.privilegeTier === "root") {
       return '<span style="color:var(--color-danger);font-weight:600;font-size:0.78rem" ' +
@@ -1271,9 +1272,9 @@
           '<p style="color:var(--color-text-secondary);margin-top:0">Re-pushes the binary + agent.conf and re-runs the installer using the stored install credential. The old bearer is revoked and a fresh one issued on re-enroll.</p>' +
           '<div class="form-group">' +
             '<label style="display:flex;align-items:center;gap:0.5rem;font-weight:normal;cursor:pointer">' +
-              '<input type="checkbox" id="reinstall-run-as-root"' + (curPtrace ? ' checked' : '') + '> Grant CAP_SYS_PTRACE (for Application Map connection mapping)' +
+              '<input type="checkbox" id="reinstall-run-as-root"' + (curPtrace ? ' checked' : '') + '> Grant CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH (for Application Map connection mapping)' +
             '</label>' +
-            '<p class="hint" style="color:var(--color-warning)">Leave unchecked to reinstall fully unprivileged (recommended). Checking this grants CAP_SYS_PTRACE so the agent can attribute connections to processes — without full root. This capability also lets the agent read any process’s memory (a credential-theft risk).</p>' +
+            '<p class="hint" style="color:var(--color-warning)">Leave unchecked to reinstall fully unprivileged (recommended). Checking this grants the capability pair the agent needs to attribute connections to processes — without full root. These capabilities also let the agent read any process’s memory and any file on the host (a credential-theft risk).</p>' +
           '</div>';
         var wantPtrace = curPtrace;
         var fp = showFormModal("Reinstall agent on this host", formHtml, "Reinstall");
