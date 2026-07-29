@@ -86,6 +86,10 @@ export interface AppMapNode {
   ip?: string;
   cidr?: string;
   ips?: string[];
+  /** unknown-ip only: a name for an IP that matched no Asset, from the IP registry
+   *  (see resolveIpsToNameHints). Label-only — there is no asset to open. */
+  ipHostname?: string | null;
+  ipNameSource?: "reservation" | null;
   connCount?: number;
   overflowCount?: number;
 }
@@ -236,6 +240,45 @@ export async function resolveIpsToAssets(ips: string[]): Promise<Map<string, Res
   return out;
 }
 
+/**
+ * IPAM fallback for IPs that matched no Asset: an ACTIVE Reservation's hostname.
+ *
+ * Polaris is the IP registry, so an unresolved internal endpoint is often already
+ * named there even though no Asset exists for it — a statically-assigned appliance,
+ * a DHCP reservation, a manually-recorded host. Showing "172.25.87.17" when the
+ * registry says what it is makes the map harder to read than it needs to be.
+ *
+ * Label-only: these do NOT become asset nodes (there's no asset to open), they just
+ * name the grey unknown-IP node. `status: "active"` because a released/expired row
+ * is history, not current truth, and `hostname` non-empty because a reservation with
+ * no name tells us nothing the IP doesn't.
+ *
+ * Deliberately narrower than the reservation table's full richness: `owner` is
+ * display metadata and `description` is free text, so neither is a reliable name.
+ */
+export interface IpNameHint {
+  hostname: string;
+  /** Which registry surface named it — shown in the info rail so the operator
+   *  knows this is IPAM data, not a discovered asset. */
+  source: "reservation";
+}
+
+export async function resolveIpsToNameHints(ips: string[]): Promise<Map<string, IpNameHint>> {
+  const out = new Map<string, IpNameHint>();
+  if (ips.length === 0) return out;
+  const rows = await prisma.reservation.findMany({
+    where: { ipAddress: { in: ips }, status: "active", hostname: { not: null } },
+    select: { ipAddress: true, hostname: true },
+  });
+  for (const r of rows) {
+    const ip = r.ipAddress;
+    const hostname = (r.hostname ?? "").trim();
+    if (!ip || !hostname || out.has(ip)) continue;
+    out.set(ip, { hostname, source: "reservation" });
+  }
+  return out;
+}
+
 // ─── Pure graph core ──────────────────────────────────────────────────
 
 const EDGE_KIND_RANK: Record<AppMapEdge["kind"], number> = {
@@ -246,6 +289,8 @@ export function buildGraphFromRows(
   assets: MappedAssetLite[],
   rows: ProcessConnectionRow[],
   ipToAsset: Map<string, ResolvedAssetLite>,
+  /** Optional IPAM name hints for IPs that matched no asset. Label-only. */
+  ipNameHints?: Map<string, IpNameHint>,
 ): { nodes: AppMapNode[]; edges: AppMapEdge[]; stats: AppMapStats } {
   const mappedProcByAsset = new Map(assets.map((a) => [a.id, new Set(a.mappedProcesses)]));
   const mappedSvcByAsset = new Map(assets.map((a) => [a.id, new Set(a.mappedServices)]));
@@ -446,7 +491,13 @@ export function buildGraphFromRows(
         const connCount = unknownConnCount.get(ip) ?? 0;
         unknownNodes.push({
           id: `ip:${ip}`, connCount,
-          node: { id: `ip:${ip}`, kind: "unknown-ip", ip, connCount },
+          node: {
+            id: `ip:${ip}`, kind: "unknown-ip", ip, connCount,
+            // Name it from the IP registry when no Asset matched, so an internal
+            // endpoint reads as what it is instead of a bare address.
+            ipHostname: ipNameHints?.get(ip)?.hostname ?? null,
+            ipNameSource: ipNameHints?.get(ip)?.source ?? null,
+          },
         });
       }
     }
@@ -560,7 +611,11 @@ export async function buildApplicationMapGraph(): Promise<AppMapGraph> {
   });
   const remoteIps = [...new Set(rows.map((r) => r.remoteIp).filter((ip) => ip && !isNoiseIp(ip)))];
   const ipToAsset = await resolveIpsToAssets(remoteIps);
-  const graph = buildGraphFromRows(assets, rows, ipToAsset);
+  // Only the leftovers need the IPAM lookup — an IP that already resolved to an
+  // asset has a real node and doesn't want a registry label.
+  const unresolvedIps = remoteIps.filter((ip) => !ipToAsset.has(ip));
+  const ipNameHints = await resolveIpsToNameHints(unresolvedIps);
+  const graph = buildGraphFromRows(assets, rows, ipToAsset, ipNameHints);
 
   // Device icons for asset nodes (same recipe as the topology endpoint).
   const iconCache = await loadIconResolutionCache();

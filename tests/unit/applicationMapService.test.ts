@@ -31,6 +31,7 @@ import {
   type MappedAssetLite,
   type ProcessConnectionRow,
   type ResolvedAssetLite,
+  type IpNameHint,
 } from "../../src/services/applicationMapService.js";
 
 const T0 = new Date("2026-07-20T00:00:00Z");
@@ -102,6 +103,35 @@ describe("buildGraphFromRows", () => {
     expect(g.edges[0].kind).toBe("external");
     expect(g.edges[0].target).toBe("ip:8.8.8.8");
     expect(g.nodes.find((n) => n.id === "ip:8.8.8.8")?.kind).toBe("unknown-ip");
+  });
+
+  // Polaris is the IP registry, so an unresolved internal endpoint is often
+  // already named there even with no Asset record. The hint is LABEL-ONLY: it must
+  // not turn the grey node into an asset node, because there's nothing to open.
+  it("labels an unknown-ip from an IPAM name hint without making it an asset", () => {
+    const rows = [row("A", "nginx", "outbound", "tcp", { remoteIp: "172.25.87.17", remotePort: 443 })];
+    const hints = new Map<string, IpNameHint>([
+      ["172.25.87.17", { hostname: "scale-plc-01", source: "reservation" }],
+    ]);
+    const g = buildGraphFromRows([web], rows, ipMapOf(web), hints);
+    const n = g.nodes.find((x) => x.id === "ip:172.25.87.17")!;
+    expect(n.kind).toBe("unknown-ip");
+    expect(n.ipHostname).toBe("scale-plc-01");
+    expect(n.ipNameSource).toBe("reservation");
+    expect(n.assetId).toBeUndefined();
+    expect(g.edges[0].kind).toBe("external");
+  });
+
+  it("leaves ipHostname null when the registry has no name for the IP", () => {
+    const rows = [row("A", "nginx", "outbound", "tcp", { remoteIp: "8.8.8.8", remotePort: 53 })];
+    const g = buildGraphFromRows([web], rows, ipMapOf(web), new Map());
+    expect(g.nodes.find((x) => x.id === "ip:8.8.8.8")!.ipHostname).toBeNull();
+  });
+
+  it("omitting the hints map entirely is safe (back-compat)", () => {
+    const rows = [row("A", "nginx", "outbound", "tcp", { remoteIp: "8.8.8.8", remotePort: 53 })];
+    const g = buildGraphFromRows([web], rows, ipMapOf(web));
+    expect(g.nodes.find((x) => x.id === "ip:8.8.8.8")!.ipHostname).toBeNull();
   });
 
   it("dedups a connection observed from both ends (outbound wins)", () => {

@@ -237,7 +237,7 @@
     }
     if (kind === "external" || kind === "text") {
       if (String(n.kind).indexOf("unknown-") === 0) {
-        add(n.ip); add(n.cidr);
+        add(n.ip); add(n.cidr); add(n.ipHostname);
         (n.ips || []).forEach(add);
       }
     }
@@ -406,7 +406,11 @@
     if (n.kind === "asset") return n.hostname || n.ipAddress || n.assetId || "asset";
     if (n.kind === "process") return (n.processName || "process") + listenSuffix(n);
     if (n.kind === "service") return (n.serviceUnit || "service") + listenSuffix(n);
-    if (n.kind === "unknown-ip") return n.ip || "?";
+    if (n.kind === "unknown-ip") {
+      // Registry-named IPs read as the name with the address beneath, so the
+      // operator still sees which address it was.
+      return n.ipHostname ? n.ipHostname + "\n" + (n.ip || "") : (n.ip || "?");
+    }
     if (n.kind === "unknown-ip-group") return (n.cidr || "?") + "\n" + ((n.ips || []).length) + " hosts";
     if (n.kind === "unknown-overflow") return "+" + (n.overflowCount || 0) + " external";
     return n.id;
@@ -951,6 +955,11 @@
     } else {
       html += "<h3>" + esc(nodeLabel(n).split("\n")[0]) + "</h3>";
       html += '<div class="appmap-info-sub">' + (n.kind === "unknown-ip-group" ? "External subnet (not matched to any asset)" : n.kind === "unknown-overflow" ? "Collapsed external endpoints" : "External IP (not matched to any asset)") + "</div>";
+      if (n.ipHostname) {
+        html += '<div class="appmap-info-sub">Named <strong>' + esc(n.ipHostname) +
+          "</strong> by an IP " + esc(n.ipNameSource || "registry") +
+          " — no asset record exists for this address.</div>";
+      }
       if (n.ips && n.ips.length) {
         html += "<table><tr><th>Member IPs</th></tr>";
         n.ips.slice(0, 50).forEach(function (ip) { html += "<tr><td>" + esc(ip) + "</td></tr>"; });
@@ -1110,7 +1119,7 @@
       if (n.kind === "asset") { push("asset", n.hostname || n.ipAddress); push("type", n.assetType); }
       else if (n.kind === "process") push("process", n.processName);
       else if (n.kind === "service") push("service", n.serviceUnit);
-      else if (n.kind === "unknown-ip") push("external", n.ip);
+      else if (n.kind === "unknown-ip") { push("external", n.ip); push("external", n.ipHostname); }
       else if (n.kind === "unknown-ip-group") push("external", n.cidr);
     });
     Object.keys(protos).sort().forEach(function (p) { push("proto", p); });
