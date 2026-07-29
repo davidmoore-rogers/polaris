@@ -20,10 +20,20 @@
 // suggestion dropdown built out of the current payload, and Enter turns it into a
 // pill. Pills combine OR WITHIN A KIND and AND ACROSS KINDS — [tcp] [udp] [web01]
 // means "(tcp or udp) traffic touching web01". Kinds: proto, port, asset,
-// process, service, external, and a free-text fallback. The "Seen within" range
-// and "Hide external" stay separate controls (a range and a boolean aren't
-// tokens). Per-user toolbar state persists in localStorage under
-// polaris-prefs-appmap-<username>; node positions keep their own key.
+// process, service, external, and a free-text fallback. Applied pills render in a
+// row BELOW the input, so a long filter set can't squeeze the typing area. The
+// "Seen within" range and "Hide external" stay separate controls (a range and a
+// boolean aren't tokens).
+//
+// Three localStorage keys, deliberately separate:
+//   polaris.appmap.positions              — node positions, per BROWSER (pairs with
+//                                           the shared server-side layout)
+//   polaris-prefs-appmap-<user>           — last toolbar state (age / hide-external
+//                                           / legend / pills)
+//   polaris-prefs-appmap-filters-<user>   — NAMED saved pill sets, recalled from the
+//                                           Saved menu. Pills only: silently moving
+//                                           the operator's time window on recall
+//                                           would be a surprise.
 
 (function () {
   "use strict";
@@ -1020,6 +1030,7 @@
     }
 
     wireFilterBox();
+    wireSavedFilters();
     // Pills / booleans restore now; the age select waits for the first payload
     // (its options depend on the server's retention window).
     restorePrefs();
@@ -1186,9 +1197,10 @@
     if (!wrap || !input || !box) return;
 
     // Clicking the padding of the box should focus the text field — it reads as
-    // one input, so it should behave like one.
+    // one input, so it should behave like one. (Pills live OUTSIDE this box now,
+    // in the row below, so they're deliberately not part of this target check.)
     wrap.addEventListener("mousedown", function (ev) {
-      if (ev.target === wrap || ev.target.id === "appmap-filter-pills") {
+      if (ev.target === wrap) {
         ev.preventDefault();
         input.focus();
       }
@@ -1232,6 +1244,144 @@
         removePillAt(Number(btn.getAttribute("data-pill-index")));
       });
     }
+  }
+
+  // ─── Saved filters ─────────────────────────────────────────────────
+  //
+  // A named pill set, per user, in its own localStorage key (the toolbar prefs
+  // blob is last-state; these are deliberate, named recalls — same split as the
+  // integrations page's saved queries). Stores ONLY the pills: "Seen within" and
+  // Hide external are separate controls, and silently moving the operator's time
+  // window on recall would be a surprise.
+
+  function savedFiltersKey() {
+    var u = (typeof currentUsername !== "undefined" && currentUsername) ? currentUsername : "";
+    return u ? "polaris-prefs-appmap-filters-" + u : "";
+  }
+
+  function readSavedFilters() {
+    var key = savedFiltersKey();
+    if (!key) return [];
+    try {
+      var raw = JSON.parse(localStorage.getItem(key) || "[]");
+      if (!Array.isArray(raw)) return [];
+      return raw.filter(function (f) { return f && typeof f.name === "string" && Array.isArray(f.pills); });
+    } catch (e) { return []; }
+  }
+
+  function writeSavedFilters(list) {
+    var key = savedFiltersKey();
+    if (!key) return;
+    try { localStorage.setItem(key, JSON.stringify(list)); } catch (e) { /* quota */ }
+  }
+
+  function renderSavedMenu() {
+    var menu = document.getElementById("appmap-saved-menu");
+    if (!menu) return;
+    var list = readSavedFilters();
+    var canSave = filterPills.length > 0;
+    var html =
+      '<div class="appmap-saved-new">' +
+        '<input type="text" id="appmap-saved-name" class="input" maxlength="48" ' +
+               'placeholder="' + (canSave ? "Name this filter…" : "Add a pill first") + '"' +
+               (canSave ? "" : " disabled") + '>' +
+        '<button type="button" class="btn btn-primary btn-sm" id="appmap-saved-add"' +
+          (canSave ? "" : " disabled") + ">Save</button>" +
+      "</div>";
+    html += list.length
+      ? list.map(function (f, i) {
+          return '<div class="appmap-saved-item" data-saved-index="' + i + '" role="menuitem" ' +
+            'title="Apply “' + esc(f.name) + '” (' + f.pills.length + ' pill(s))">' +
+            '<span class="appmap-saved-name">' + esc(f.name) + "</span>" +
+            '<button type="button" class="tag-chip-delete" data-saved-delete="' + i +
+              '" aria-label="Delete saved filter" title="Delete">&times;</button>' +
+          "</div>";
+        }).join("")
+      : '<div class="appmap-saved-empty">No saved filters yet.</div>';
+    menu.innerHTML = html;
+  }
+
+  function closeSavedMenu() {
+    var menu = document.getElementById("appmap-saved-menu");
+    var btn = document.getElementById("appmap-saved-btn");
+    if (menu) menu.classList.remove("open");
+    if (btn) btn.setAttribute("aria-expanded", "false");
+  }
+
+  function wireSavedFilters() {
+    var btn = document.getElementById("appmap-saved-btn");
+    var menu = document.getElementById("appmap-saved-menu");
+    if (!btn || !menu) return;
+
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      var open = menu.classList.contains("open");
+      if (open) { closeSavedMenu(); return; }
+      renderSavedMenu();
+      menu.classList.add("open");
+      btn.setAttribute("aria-expanded", "true");
+      var nameEl = document.getElementById("appmap-saved-name");
+      if (nameEl && !nameEl.disabled) nameEl.focus();
+    });
+
+    // Keep clicks inside the menu from reaching the document close handler.
+    menu.addEventListener("click", function (ev) { ev.stopPropagation(); });
+
+    function commitSave() {
+      var nameEl = document.getElementById("appmap-saved-name");
+      if (!nameEl) return;
+      var name = nameEl.value.trim();
+      if (!name || !filterPills.length) return;
+      var list = readSavedFilters();
+      var idx = -1;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].name.toLowerCase() === name.toLowerCase()) { idx = i; break; }
+      }
+      // Same name overwrites rather than accumulating near-duplicates.
+      var entry = { name: name, pills: filterPills.slice() };
+      if (idx >= 0) list[idx] = entry; else list.push(entry);
+      writeSavedFilters(list);
+      renderSavedMenu();
+      if (typeof showToast === "function") {
+        showToast(idx >= 0 ? "Updated saved filter “" + name + "”" : "Saved filter “" + name + "”", "success");
+      }
+    }
+
+    menu.addEventListener("keydown", function (ev) {
+      if (ev.target.id !== "appmap-saved-name") return;
+      if (ev.key === "Enter") { ev.preventDefault(); commitSave(); }
+      else if (ev.key === "Escape") { ev.stopPropagation(); closeSavedMenu(); }
+    });
+
+    menu.addEventListener("mousedown", function (ev) {
+      var del = ev.target.closest ? ev.target.closest("[data-saved-delete]") : null;
+      if (del) {
+        ev.preventDefault();
+        var di = Number(del.getAttribute("data-saved-delete"));
+        var list = readSavedFilters();
+        if (di >= 0 && di < list.length) {
+          list.splice(di, 1);
+          writeSavedFilters(list);
+          renderSavedMenu();
+        }
+        return;
+      }
+      if (ev.target.id === "appmap-saved-add") { ev.preventDefault(); commitSave(); return; }
+      var row = ev.target.closest ? ev.target.closest("[data-saved-index]") : null;
+      if (!row) return;
+      ev.preventDefault();
+      var hit = readSavedFilters()[Number(row.getAttribute("data-saved-index"))];
+      if (!hit) return;
+      // REPLACES the current pills rather than merging — a saved filter is a
+      // whole view, and merging would quietly AND it with whatever was there.
+      filterPills = hit.pills.slice();
+      renderPills();
+      savePrefs();
+      closeSavedMenu();
+      if (payload) render(capturePositions());
+    });
+
+    document.addEventListener("click", function () { closeSavedMenu(); });
   }
 
   // Human-readable summary of the active pills for the status line.

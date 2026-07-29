@@ -29,15 +29,25 @@
         <label class="appmap-check"><input type="checkbox" id="appmap-hide-external"> Hide external</label>
         <!-- Token/pill filter. Protocol, port, asset, process, service and
              external-IP filters are all typed here; pills combine OR within a
-             kind and AND across kinds. -->
-        <div class="appmap-filter" id="appmap-filter">
-          <div class="appmap-filter-pills" id="appmap-filter-pills"></div>
-          <input type="text" id="appmap-filter-input" class="appmap-filter-input"
-                 placeholder="Filter: tcp, port, host, process, service…"
-                 aria-label="Add a filter" autocomplete="off" spellcheck="false"
-                 role="combobox" aria-expanded="false" aria-autocomplete="list"
-                 aria-controls="appmap-suggest">
-          <div class="appmap-suggest" id="appmap-suggest" role="listbox"></div>
+             kind and AND across kinds. Applied pills render in a row BELOW the
+             input so a long filter set can't squeeze the typing area. -->
+        <div class="appmap-filter-wrap">
+          <div class="appmap-filter" id="appmap-filter">
+            <input type="text" id="appmap-filter-input" class="appmap-filter-input"
+                   placeholder="Filter: tcp, port, host, process, service…"
+                   aria-label="Add a filter" autocomplete="off" spellcheck="false"
+                   role="combobox" aria-expanded="false" aria-autocomplete="list"
+                   aria-controls="appmap-suggest">
+            <div class="appmap-suggest" id="appmap-suggest" role="listbox"></div>
+          </div>
+          <div class="appmap-filter-row">
+            <div class="appmap-saved" id="appmap-saved">
+              <button type="button" class="btn btn-secondary btn-sm" id="appmap-saved-btn"
+                      aria-haspopup="true" aria-expanded="false">Saved &#9662;</button>
+              <div class="appmap-saved-menu" id="appmap-saved-menu" role="menu"></div>
+            </div>
+            <div class="appmap-filter-pills" id="appmap-filter-pills"></div>
+          </div>
         </div>
         <div class="appmap-toolbar-actions">
           <span id="appmap-status" class="appmap-status"></span>
