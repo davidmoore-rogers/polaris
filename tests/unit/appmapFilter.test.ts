@@ -24,6 +24,7 @@ interface Node {
   assetId?: string;
   hostname?: string;
   ipAddress?: string;
+  assetType?: string;
   processName?: string;
   serviceUnit?: string;
   listenPorts?: Array<{ proto: string; port: number }>;
@@ -67,10 +68,10 @@ const iso = (minutesAgo: number) => new Date(NOW - minutesAgo * 60_000).toISOStr
 // service); db01 runs postgres. Plus one external IP.
 function fixture(): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [
-    { id: "asset:A", kind: "asset", assetId: "A", hostname: "web01", ipAddress: "10.0.0.1", hasMappedProcesses: true },
+    { id: "asset:A", kind: "asset", assetId: "A", hostname: "web01", ipAddress: "10.0.0.1", assetType: "server", hasMappedProcesses: true },
     { id: "proc:A:nginx", kind: "process", parent: "asset:A", assetId: "A", processName: "nginx", listenPorts: [{ proto: "tcp", port: 443 }] },
     { id: "svc:A:myapp", kind: "service", parent: "asset:A", assetId: "A", serviceUnit: "myapp.service", listenPorts: [{ proto: "tcp", port: 8080 }] },
-    { id: "asset:B", kind: "asset", assetId: "B", hostname: "db01", ipAddress: "10.0.0.2", hasMappedProcesses: true },
+    { id: "asset:B", kind: "asset", assetId: "B", hostname: "db01", ipAddress: "10.0.0.2", assetType: "workstation", hasMappedProcesses: true },
     { id: "proc:B:postgres", kind: "process", parent: "asset:B", assetId: "B", processName: "postgres", listenPorts: [{ proto: "tcp", port: 5432 }] },
     { id: "ip:203.0.113.9", kind: "unknown-ip", ip: "203.0.113.9" },
   ];
@@ -173,6 +174,41 @@ describe("applyGraphFilter — AND across kinds", () => {
   });
 });
 
+describe("applyGraphFilter — device type", () => {
+  it("a type pill keeps only traffic touching assets of that type", () => {
+    // web01 is a server: its edges are e1 (to db01) and e2 (to external).
+    expect(edgeIds(run(noFilter({ pills: [{ kind: "type", value: "server" }] })))).toEqual(["e1", "e2"]);
+  });
+
+  it("covers traffic flowing through a matching asset's children", () => {
+    // e2's endpoint is svc:A:myapp, not asset:A — the type group must expand to
+    // children or filtering by device type would find almost nothing.
+    const r = run(noFilter({ pills: [{ kind: "type", value: "workstation" }] }));
+    expect(edgeIds(r)).toEqual(["e1", "e3"]);
+    expect(nodeIds(r)).toContain("proc:B:postgres");
+  });
+
+  it("two type pills union", () => {
+    const r = run(noFilter({ pills: [{ kind: "type", value: "server" }, { kind: "type", value: "workstation" }] }));
+    expect(edgeIds(r)).toEqual(["e1", "e2", "e3"]);
+  });
+
+  it("ANDs across kinds like any other pill", () => {
+    const r = run(noFilter({ pills: [{ kind: "type", value: "server" }, { kind: "proto", value: "udp" }] }));
+    expect(edgeIds(r)).toEqual(["e2"]);
+  });
+
+  it("a type nothing matches yields an empty graph", () => {
+    expect(edgeIds(run(noFilter({ pills: [{ kind: "type", value: "firewall" }] })))).toEqual([]);
+  });
+
+  it("does NOT leak into free-text matching", () => {
+    // A bare "server" as free text would otherwise match most of the fleet and
+    // read as a broken filter.
+    expect(edgeIds(run(noFilter({ pills: [{ kind: "text", value: "server" }] })))).toEqual([]);
+  });
+});
+
 describe("applyGraphFilter — narrowing and visibility", () => {
   it("an active scope drops unrelated asset boxes (it narrows, not just centers)", () => {
     const r = run(noFilter({ pills: [{ kind: "service", value: "myapp.service" }] }));
@@ -233,6 +269,7 @@ describe("buildFilterCatalog / rankSuggestions", () => {
     const of = (k: string) => cat.filter((c) => c.kind === k).map((c) => c.value);
     expect(of("proto").sort()).toEqual(["tcp", "udp"]);
     expect(of("asset").sort()).toEqual(["db01", "web01"]);
+    expect(of("type").sort()).toEqual(["server", "workstation"]);
     expect(of("process").sort()).toEqual(["nginx", "postgres"]);
     expect(of("service")).toEqual(["myapp.service"]);
     expect(of("external")).toEqual(["203.0.113.9"]);

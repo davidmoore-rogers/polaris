@@ -27,14 +27,14 @@
           <select id="appmap-age" class="input"></select>
         </label>
         <label class="appmap-check"><input type="checkbox" id="appmap-hide-external"> Hide external</label>
-        <!-- Token/pill filter. Protocol, port, asset, process, service and
-             external-IP filters are all typed here; pills combine OR within a
-             kind and AND across kinds. Applied pills render in a row BELOW the
+        <!-- Token/pill filter. Protocol, port, host, device type, process,
+             service and external-IP filters are all typed here; pills combine
+             OR within a kind and AND across kinds. Applied pills render in a row BELOW the
              input so a long filter set can't squeeze the typing area. -->
         <div class="appmap-filter-wrap">
           <div class="appmap-filter" id="appmap-filter">
             <input type="text" id="appmap-filter-input" class="appmap-filter-input"
-                   placeholder="Filter: tcp, port, host, process, service…"
+                   placeholder="Filter: tcp, port, host, type, process, service…"
                    aria-label="Add a filter" autocomplete="off" spellcheck="false"
                    role="combobox" aria-expanded="false" aria-autocomplete="list"
                    aria-controls="appmap-suggest">

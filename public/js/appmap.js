@@ -19,8 +19,8 @@
 // Filtering is a TOKEN/PILL box: the operator types a fragment, picks from a
 // suggestion dropdown built out of the current payload, and Enter turns it into a
 // pill. Pills combine OR WITHIN A KIND and AND ACROSS KINDS — [tcp] [udp] [web01]
-// means "(tcp or udp) traffic touching web01". Kinds: proto, port, asset,
-// process, service, external, and a free-text fallback. Applied pills render in a
+// means "(tcp or udp) traffic touching web01". Kinds: proto, port, asset (host),
+// type (device type), process, service, external, and a free-text fallback. Applied pills render in a
 // row BELOW the input, so a long filter set can't squeeze the typing area. The
 // "Seen within" range and "Hide external" stay separate controls (a range and a
 // boolean aren't tokens).
@@ -56,9 +56,9 @@
   var refreshTimer = null;
   var saveTimer = null;
   var selectedId = null;
-  // Active filter pills: [{ kind, value }]. kind ∈ proto | port | asset |
+  // Active filter pills: [{ kind, value }]. kind ∈ proto | port | asset | type |
   // process | service | external | text. `value` is the match target — for
-  // node-scope kinds it's the lowercased label the catalog offered.
+  // node-scope kinds it's the label the catalog offered.
   var filterPills = [];
   var suggestItems = [];      // current dropdown contents
   var suggestIndex = -1;      // highlighted row, -1 = none
@@ -212,7 +212,7 @@
     };
   }
 
-  var SCOPE_KINDS = ["asset", "process", "service", "external", "text"];
+  var SCOPE_KINDS = ["asset", "type", "process", "service", "external", "text"];
 
   // The searchable text of a node, per pill kind. `text` pills deliberately look
   // at everything so a half-remembered fragment still lands somewhere.
@@ -221,6 +221,13 @@
     function add(v) { if (v) out.push(String(v).toLowerCase()); }
     if (kind === "asset" || kind === "text") {
       if (n.kind === "asset") { add(n.hostname); add(n.ipAddress); add(n.assetId); }
+    }
+    // Device type is asset-level, so a `type` pill matches asset nodes and the
+    // group-builder expands it to their children (an asset's traffic flows through
+    // its process/service boxes). Deliberately NOT folded into `text`: a bare
+    // "server" would then match most of the fleet and read as a broken filter.
+    if (kind === "type") {
+      if (n.kind === "asset") add(n.assetType);
     }
     if (kind === "process" || kind === "text") {
       if (n.kind === "process") add(n.processName);
@@ -1039,7 +1046,7 @@
   // ─── Pill filter box ───────────────────────────────────────────────
 
   var PILL_KIND_LABEL = {
-    proto: "proto", port: "port", asset: "host",
+    proto: "proto", port: "port", asset: "host", type: "type",
     process: "process", service: "service", external: "external", text: "text",
   };
 
@@ -1056,7 +1063,7 @@
     }).join("");
     var input = document.getElementById("appmap-filter-input");
     if (input) {
-      input.placeholder = filterPills.length ? "Add filter…" : "Filter: tcp, port, host, process, service…";
+      input.placeholder = filterPills.length ? "Add filter…" : "Filter: tcp, port, host, type, process, service…";
     }
   }
 
@@ -1100,7 +1107,7 @@
     });
     (nodes || []).forEach(function (n) {
       (n.listenPorts || []).forEach(function (p) { protos[p.proto] = true; ports[p.port] = true; });
-      if (n.kind === "asset") { push("asset", n.hostname || n.ipAddress); }
+      if (n.kind === "asset") { push("asset", n.hostname || n.ipAddress); push("type", n.assetType); }
       else if (n.kind === "process") push("process", n.processName);
       else if (n.kind === "service") push("service", n.serviceUnit);
       else if (n.kind === "unknown-ip") push("external", n.ip);
