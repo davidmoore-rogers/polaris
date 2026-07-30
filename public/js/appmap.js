@@ -13,8 +13,10 @@
 //
 // Filters are client-side over the cached payload; the graph auto-refreshes
 // every 60s (paused while the tab is hidden) preserving current node positions.
-// Tapping an asset box opens the canonical asset details slide-in in place
-// (openViewModal from assets.js) — no navigation off the map.
+// Tapping any node only fills the info rail. The canonical asset-details slide-in
+// (openViewModal from assets.js) opens ONLY from the rail's "Open asset details"
+// button — so selecting a box to read its services and ports never throws a panel
+// over the graph.
 //
 // Filtering is a TOKEN/PILL box: the operator types a fragment, picks from a
 // suggestion dropdown built out of the current payload, and Enter turns it into a
@@ -896,20 +898,13 @@
 
   function wireGraphEvents() {
     cy.on("tap", "node", function (evt) {
+      // EVERY node kind — asset boxes included — is rail-only on tap. Tapping an
+      // asset used to also pop the asset-details slide-in, which made ordinary
+      // map navigation (select a box to read its services and ports) throw a panel
+      // over the graph you were reading. Opening the slide-in is now an explicit
+      // act: the rail's "Open asset details" button, and nothing else.
       selectedId = evt.target.id();
       renderInfoNode(evt.target.id());
-      // Tapping an ASSET box additionally opens the canonical asset details
-      // slide-in over the map — same openViewModal the info rail's button
-      // calls, so the operator never leaves the page. The rail is rendered
-      // first, so closing the panel leaves the node's detail behind it.
-      // Child (process/service) and external nodes stay rail-only: their rail
-      // carries the per-node connection detail and still offers the button.
-      // Cytoscape suppresses `tap` after a drag, so repositioning a box never
-      // pops the panel.
-      var n = findNode(evt.target.id());
-      if (n && n.kind === "asset" && n.assetId && typeof openViewModal === "function") {
-        openViewModal(n.assetId);
-      }
     });
     cy.on("tap", "edge", function (evt) {
       selectedId = evt.target.id();
