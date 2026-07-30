@@ -1,12 +1,27 @@
 /* Application Map page — graph canvas, toolbar, info rail, legend.
    Colors ride the styles.css CSS variables so light/dark both work. */
 
+/* Three stacked rows: filter box + Saved, applied pills (collapses when
+   empty), then the view controls with status + actions right-aligned. */
 .appmap-toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.appmap-toolbar-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.appmap-toolbar-controls {
   display: flex;
   align-items: center;
   gap: 14px;
   flex-wrap: wrap;
-  margin-bottom: 12px;
 }
 
 .appmap-toolbar-field {
@@ -33,26 +48,18 @@
   user-select: none;
 }
 
-/* Token/pill filter. The wrapper owns the toolbar sizing and stacks the input
-   above the applied-pills row; the box itself stays a single-row input so a long
-   filter set can never squeeze the typing area. */
-.appmap-filter-wrap {
-  flex: 1 1 320px;
-  min-width: 220px;
-  max-width: 560px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-/* `position: relative` anchors the suggestion dropdown. */
+/* Token/pill filter. The box stays a single-row input (pills live in their own
+   row below) so a long filter set can never squeeze the typing area.
+   `position: relative` anchors the suggestion dropdown. */
 .appmap-filter {
   position: relative;
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 8px;
-  min-height: 32px;
+  padding: 4px 10px;
+  min-height: 34px;
+  flex: 1 1 auto;
+  max-width: 720px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -62,20 +69,16 @@
   border-color: var(--color-accent);
 }
 
-/* Saved-filter control + applied pills share the row under the input. */
-.appmap-filter-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
 .appmap-filter-pills {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
   align-items: center;
-  min-height: 24px;
+}
+
+/* No pills → the row disappears entirely instead of reserving blank height. */
+.appmap-filter-pills:empty {
+  display: none;
 }
 
 /* Saved filters: a small menu anchored under its button, styled like the

@@ -852,8 +852,11 @@
     });
     wireGraphEvents();
     if (filterPills.length) {
+      // The pills themselves show WHAT is filtered — repeating them here just
+      // duplicated a long row of text. "Filtered" + the surviving counts is
+      // enough to read the effect.
       setStatus(
-        "Filtered by " + pillSummary() + " · " +
+        "Filtered · " +
         g.nodes.filter(function (n) { return n.kind === "asset"; }).length + " assets · " +
         g.edges.length + " connection(s)"
       );
@@ -1122,10 +1125,8 @@
         '" aria-label="Remove filter" title="Remove filter">×</button>' +
       '</span>';
     }).join("");
-    var input = document.getElementById("appmap-filter-input");
-    if (input) {
-      input.placeholder = filterPills.length ? "Add filter…" : "Filter: tcp, port, host, type, process, service…";
-    }
+    // Placeholder stays the short "Add filter..." (the suggestion dropdown is
+    // what teaches the vocabulary); the full hint rides the tooltip.
   }
 
   function addPill(kind, value) {
@@ -1527,14 +1528,6 @@
     });
 
     document.addEventListener("click", function () { closeSavedMenu(); });
-  }
-
-  // Human-readable summary of the active pills for the status line.
-  function pillSummary() {
-    if (!filterPills.length) return "";
-    return filterPills.map(function (p) {
-      return (PILL_KIND_LABEL[p.kind] || p.kind) + ":" + p.value;
-    }).join(" · ");
   }
 
   function focusNode(id) {
