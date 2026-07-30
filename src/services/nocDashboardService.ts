@@ -1064,7 +1064,7 @@ export async function getSitesWithIssues(maxSites: number | null = 25, assetIds:
 export interface FilterOptions {
   assetTypes: string[];
   regions: string[];
-  fortigates: string[];
+  fortigates: Array<{ name: string; regions: string[] }>;
 }
 
 /**
@@ -1075,13 +1075,15 @@ export interface FilterOptions {
  *     — custom types are always shown and aren't meaningful filter entries.
  *   - regions: distinct `region:<name>` tag values across the live fleet, the
  *     same tags the `regionTags` filter matches. Sorted.
- *   - fortigates: distinct FortiGate device names for the "Selected
- *     FortiGates" picker — the `learnedLocation` values of live firewall
- *     assets (Fortinet discovery stamps a firewall's own FMG/device hostname
- *     there, the same name managed switches / APs / endpoints reference), so
- *     every offered option is guaranteed to match at least the gate itself.
+ *   - fortigates: `{name, regions}` entries for the "Selected FortiGates"
+ *     picker — name = the `learnedLocation` of a live firewall asset
+ *     (Fortinet discovery stamps a firewall's own FMG/device hostname there,
+ *     the same name managed switches / APs / endpoints reference), so every
+ *     offered option is guaranteed to match at least the gate itself;
+ *     regions = the gate's own `region:<name>` tags, letting the picker
+ *     narrow its list to the widget's selected regions client-side.
  *     Non-Fortinet operator-typed firewalls carry no learnedLocation and are
- *     naturally excluded. Sorted.
+ *     naturally excluded. Sorted by name.
  * Three cheap queries; safe for a read-only NOC kiosk token.
  */
 export async function getFilterOptions(): Promise<FilterOptions> {
@@ -1103,7 +1105,7 @@ export async function getFilterOptions(): Promise<FilterOptions> {
         learnedLocation: { not: null },
         status: { notIn: ["decommissioned", "disabled"] },
       },
-      select: { learnedLocation: true },
+      select: { learnedLocation: true, tags: true },
       distinct: ["learnedLocation"],
     }),
   ]);
@@ -1112,9 +1114,14 @@ export async function getFilterOptions(): Promise<FilterOptions> {
     assetTypes: BUILTIN_ASSET_TYPES.filter((t) => present.has(t)),
     regions: regionRows.map((r) => r.region).filter(Boolean),
     fortigates: fortigateRows
-      .map((r) => r.learnedLocation)
-      .filter((n): n is string => Boolean(n))
-      .sort((a, b) => a.localeCompare(b)),
+      .filter((r): r is typeof r & { learnedLocation: string } => Boolean(r.learnedLocation))
+      .map((r) => ({
+        name: r.learnedLocation,
+        regions: (r.tags || [])
+          .filter((t) => t.startsWith("region:"))
+          .map((t) => t.slice("region:".length)),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
   };
 }
 

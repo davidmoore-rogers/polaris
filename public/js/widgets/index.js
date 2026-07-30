@@ -337,7 +337,7 @@
         +   '<option value="all"' + (fgScope === "all" ? " selected" : "") + '>All FortiGates</option>'
         +   '<option value="custom"' + (fgScope === "custom" ? " selected" : "") + '>Selected FortiGates…</option>'
         + '</select>'
-        + '<div class="widget-config-typegrid" data-nocf="fortigateList" style="display:none"></div>';
+        + '<div class="widget-config-typegrid widget-config-fglist" data-nocf="fortigateList" style="display:none"></div>';
       var enabled = Array.isArray(config.assetTypes) ? config.assetTypes : BUILTIN.slice();
       html += '<label class="widget-config-label">Asset types</label>'
         + '<div class="widget-config-typegrid">'
@@ -350,24 +350,42 @@
     }
     el.insertAdjacentHTML("beforeend", html);
 
+    // Live copy of the filter keys this popover edits. updateConfig replaces
+    // the widget's config object, so the `config` snapshot we closed over
+    // goes stale after the first change — `live` is what the FortiGate list
+    // reads to filter by the CURRENT region selection (and what repaints
+    // read for checked state).
+    var live = {
+      regionScope: scope,
+      regions: Array.isArray(config.regions) ? config.regions.slice() : [],
+      fortigateScope: fgScope,
+      fortigates: Array.isArray(config.fortigates) ? config.fortigates.slice() : [],
+    };
+    function setCfg(key, value) {
+      if (Object.prototype.hasOwnProperty.call(live, key)) live[key] = value;
+      onChange(key, value);
+      // A region change re-filters which gates the FortiGate list offers.
+      if ((key === "regionScope" || key === "regions") && repaintFortigates) repaintFortigates(true);
+    }
+    var repaintFortigates = null;
+
     // Wire one scope <select> + its "Selected …" checkbox list. The list is
-    // shown/populated only while scope is "custom", painted once per popover
-    // open (option names don't change under it); checkbox handlers re-read
-    // the live DOM, so the stale `config` snapshot the popover closed over
-    // never matters. getOptions resolves to strings or {value, label} entries
-    // (label shown, value stored); onChange fires with listKey = the
-    // picked-value array.
-    function wireScopePicker(scopeAttr, listAttr, listKey, selectedNames, getOptions, emptyMsg) {
+    // shown/populated only while scope is "custom"; checkbox handlers re-read
+    // the live DOM. getOptions resolves to strings or {value, label} entries
+    // (label shown, value stored) and is re-invoked on forced repaints (the
+    // FortiGate list re-filters when the region pick changes). Returns the
+    // paint function; paint(true) rebuilds even when already painted.
+    function wireScopePicker(scopeAttr, listAttr, listKey, getOptions, emptyMsg) {
       var sel = el.querySelector('[data-nocf="' + scopeAttr + '"]');
       var listEl = el.querySelector('[data-nocf="' + listAttr + '"]');
-      if (!sel) return;
-      function paintList() {
+      if (!sel) return function () {};
+      function paintList(force) {
         if (!listEl) return;
         if (sel.value !== "custom") { listEl.style.display = "none"; return; }
         listEl.style.display = "";
-        if (listEl.childElementCount) return;
+        if (listEl.childElementCount && !force) return;
         getOptions().then(function (entries) {
-          if (!listEl.isConnected || sel.value !== "custom" || listEl.childElementCount) return;
+          if (!listEl.isConnected || sel.value !== "custom") return;
           if (!entries.length) {
             listEl.innerHTML = '<p style="grid-column:1/-1;font-size:0.8rem;color:var(--color-text-secondary);margin:2px 0">'
               + emptyMsg + '</p>';
@@ -376,9 +394,19 @@
           var opts = entries.map(function (e) {
             return typeof e === "string" ? { value: e, label: e } : e;
           });
+          // Drop selections the (re-filtered) list no longer offers so the
+          // saved config always mirrors what the operator can see. Skipped
+          // when the option fetch came back empty (a failed fetch must not
+          // wipe a saved pick).
+          var selected = Array.isArray(live[listKey]) ? live[listKey] : [];
+          var visible = selected.filter(function (v) {
+            return opts.some(function (o) { return o.value === v; });
+          });
+          if (visible.length !== selected.length) setCfg(listKey, visible);
+          selected = visible;
           listEl.innerHTML = opts.map(function (o, i) {
             return '<label class="widget-config-typeopt">'
-              + '<input type="checkbox" data-nocopt="' + i + '"' + (selectedNames.indexOf(o.value) !== -1 ? " checked" : "") + '> '
+              + '<input type="checkbox" data-nocopt="' + i + '"' + (selected.indexOf(o.value) !== -1 ? " checked" : "") + '> '
               + escapeHtml(o.label) + '</label>';
           }).join("");
           var boxes = listEl.querySelectorAll("[data-nocopt]");
@@ -388,35 +416,51 @@
               Array.prototype.forEach.call(boxes, function (b) {
                 if (b.checked) current.push(opts[parseInt(b.getAttribute("data-nocopt"), 10)].value);
               });
-              onChange(listKey, current);
+              setCfg(listKey, current);
             });
           });
         });
       }
       sel.addEventListener("change", function () {
-        onChange(scopeAttr, sel.value);
+        setCfg(scopeAttr, sel.value);
         paintList();
       });
       paintList();
+      return paintList;
     }
 
     wireScopePicker(
       "regionScope", "regionList", "regions",
-      Array.isArray(config.regions) ? config.regions : [],
       window.PolarisWidgets.getRegionOptions,
       'No regions found — draw regions on the Device Map first.',
     );
     if (includeAssetTypes) {
-      wireScopePicker(
+      repaintFortigates = wireScopePicker(
         "fortigateScope", "fortigateList", "fortigates",
-        Array.isArray(config.fortigates) ? config.fortigates : [],
         function () {
-          // Prepend the "(No FortiGate)" entry (server sentinel __none__) so
-          // switches/APs with no associated gate stay selectable — e.g. a
-          // standalone SNMP-monitored switch that isn't FortiGate-managed.
-          return window.PolarisWidgets.getFortigateOptions().then(function (names) {
-            if (!names.length) return names;
-            return [{ value: "__none__", label: "(No FortiGate)" }].concat(names);
+          return window.PolarisWidgets.getFortigateOptions().then(function (gates) {
+            if (!gates.length) return [];
+            // Narrow the offered gates to the widget's CURRENT region scope
+            // (a gate matches when it carries any selected region's tag); no
+            // region narrowing = every gate. "(No FortiGate)" (server
+            // sentinel __none__) is always offered so switches/APs with no
+            // associated gate stay selectable — including inside a region.
+            var regions = null;
+            if (live.regionScope === "custom") regions = live.regions;
+            else if (live.regionScope === "mine" && !onDash) regions = window.PolarisWidgets.myRegionNames();
+            var offered = gates;
+            if (regions && regions.length) {
+              offered = gates.filter(function (g) {
+                var rs = g.regions || [];
+                for (var i = 0; i < rs.length; i++) {
+                  if (regions.indexOf(rs[i]) !== -1) return true;
+                }
+                return false;
+              });
+            }
+            return [{ value: "__none__", label: "(No FortiGate)" }].concat(
+              offered.map(function (g) { return { value: g.name, label: g.name }; }),
+            );
           });
         },
         'No FortiGates found — run a FortiManager / FortiGate discovery first.',

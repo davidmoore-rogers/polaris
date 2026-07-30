@@ -4025,6 +4025,20 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .widget-config-popover .widget-config-typeopt input[type="checkbox"] {
   width: auto;
   margin: 0;
+  flex: 0 0 auto;
+}
+/* FortiGate picker list: device hostnames (SITENAME-61F-1 …) are much longer
+   than region names, so the two-column grid overflows its cells — go single
+   column, cap the height (fleets run to hundreds of gates), and let any
+   still-too-long name wrap instead of escaping the popover. */
+.widget-config-popover .widget-config-fglist {
+  grid-template-columns: 1fr;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.widget-config-popover .widget-config-fglist .widget-config-typeopt {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ── Add-Widgets picker ──────────────────────────────────────────────────

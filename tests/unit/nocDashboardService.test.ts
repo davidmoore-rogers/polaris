@@ -421,20 +421,25 @@ describe("getHighestTemperature", () => {
 });
 
 describe("getFilterOptions", () => {
-  it("returns built-in types present (canonical order, custom dropped), distinct region tags, and sorted FortiGate names", async () => {
+  it("returns built-in types present (canonical order, custom dropped), distinct region tags, and sorted FortiGate {name, regions} entries", async () => {
     findMany
       .mockResolvedValueOnce([
         { assetType: "firewall" }, { assetType: "server" }, { assetType: "acme-widget" },
       ])
-      // 2nd findMany: distinct firewall learnedLocation values (unsorted from the DB)
+      // 2nd findMany: distinct firewall learnedLocation values (unsorted from
+      // the DB) + each gate's tags (region: prefix stripped, others dropped)
       .mockResolvedValueOnce([
-        { learnedLocation: "JEFFERSON-FG" }, { learnedLocation: "ATLANTA-FG" },
+        { learnedLocation: "JEFFERSON-FG", tags: ["region:Central Kentucky", "site:quarry"] },
+        { learnedLocation: "ATLANTA-FG", tags: [] },
       ]);
     rawQuery.mockResolvedValueOnce([{ region: "East" }, { region: "West" }]);
     const r = await noc.getFilterOptions();
     expect(r.assetTypes).toEqual(["server", "firewall"]); // builtin order; custom 'acme-widget' dropped
     expect(r.regions).toEqual(["East", "West"]);
-    expect(r.fortigates).toEqual(["ATLANTA-FG", "JEFFERSON-FG"]); // sorted
+    expect(r.fortigates).toEqual([
+      { name: "ATLANTA-FG", regions: [] },
+      { name: "JEFFERSON-FG", regions: ["Central Kentucky"] },
+    ]); // sorted by name; regions = the gate's own region tags for picker narrowing
     // The FortiGate list is firewall learnedLocation values (the device name
     // switches/APs/endpoints reference), live assets only.
     expect(findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
