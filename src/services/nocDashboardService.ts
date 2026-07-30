@@ -63,21 +63,41 @@ const ALERT_WHERE = {
 // The eight built-in asset types the per-widget asset-type filter toggles.
 const BUILTIN_ASSET_TYPES = ["server", "switch", "router", "firewall", "workstation", "printer", "access_point", "other"];
 
+// Sentinel the widgets send in ?fortigates= for the "(No FortiGate)" picker
+// entry — matches assets with NO gate association (no sighting rows and a
+// learnedLocation that isn't any known gate's name), so standalone
+// switches/APs that were never FortiGate-managed remain selectable. Double
+// underscores keep it collision-proof against real device hostnames.
+export const FORTIGATE_NONE_SENTINEL = "__none__";
+
 /**
  * Resolve a per-widget filter into the set of matching asset ids, or null when
  * no filter is active (callers then skip the constraint entirely — the default
- * unfiltered path). Two dimensions:
+ * unfiltered path). Three dimensions:
  *   - assetTypes: the ENABLED built-in types. Hidden = built-ins NOT enabled;
  *     we exclude those (`assetType NOT IN hidden`) so unchecked types disappear
  *     while custom (non-built-in) types always remain visible.
  *   - regionNames: the user's region names ("My regions"). An asset matches if
  *     it carries the `region:<name>` tag for any of them. Empty = all regions.
+ *   - fortigateNames: FortiGate device names ("Selected FortiGates" — the
+ *     per-site narrowing below regions). An asset matches if it sits behind
+ *     any of them: `learnedLocation` equals the name (managed FortiSwitches /
+ *     FortiAPs carry their controller gate there, firewalls their own
+ *     hostname, endpoints the gate that leased them) OR any
+ *     AssetFortigateSighting row names it — the same two haystacks the
+ *     tag/maintenance "Behind FortiGate" criteria matches, but exact-only
+ *     (the picker offers concrete device names, not patterns). The
+ *     FORTIGATE_NONE_SENTINEL entry instead matches assets with NO gate
+ *     association: zero sighting rows AND a learnedLocation that isn't any
+ *     known gate's name (null, or a non-gate value like an AD OU path) — so
+ *     never-FortiGate-managed switches/APs stay selectable alongside gates.
  * Returns [] (not null) when a filter is active but nothing matches — feeds
  * then correctly show nothing.
  */
 export async function resolveFilteredAssetIds(opts: {
   assetTypes?: string[] | null;
   regionNames?: string[] | null;
+  fortigateNames?: string[] | null;
 }): Promise<string[] | null> {
   const where: Record<string, unknown> = {};
   let active = false;
@@ -88,6 +108,40 @@ export async function resolveFilteredAssetIds(opts: {
   const regionNames = (opts.regionNames || []).filter(Boolean);
   if (regionNames.length > 0) {
     where.tags = { hasSome: regionNames.map((n) => "region:" + n) };
+    active = true;
+  }
+  const fortigateNames = (opts.fortigateNames || []).filter(Boolean);
+  if (fortigateNames.length > 0) {
+    const named = fortigateNames.filter((n) => n !== FORTIGATE_NONE_SENTINEL);
+    // Top-level OR ANDs with the dimensions above: (types) AND (regions) AND
+    // (behind any selected gate / gate-less).
+    const or: Record<string, unknown>[] = named.flatMap((n) => [
+      { learnedLocation: { equals: n, mode: "insensitive" } },
+      { fortigateSightings: { some: { fortigateDevice: { equals: n, mode: "insensitive" } } } },
+    ]);
+    if (fortigateNames.includes(FORTIGATE_NONE_SENTINEL)) {
+      // "(No FortiGate)": no sighting rows AND learnedLocation isn't a known
+      // gate name. The gate list is every firewall's learnedLocation (any
+      // status — a decommissioned gate's name still marks an association),
+      // compared verbatim: both sides are stamped by the same discovery
+      // writers, so exact values agree. notIn excludes NULL rows in SQL,
+      // hence the explicit null arm.
+      const gateRows = await prisma.asset.findMany({
+        where: { assetType: "firewall", learnedLocation: { not: null } },
+        select: { learnedLocation: true },
+        distinct: ["learnedLocation"],
+      });
+      const gates = gateRows.map((r) => r.learnedLocation).filter((n): n is string => Boolean(n));
+      or.push({
+        AND: [
+          gates.length > 0
+            ? { OR: [{ learnedLocation: null }, { learnedLocation: { notIn: gates } }] }
+            : {},
+          { fortigateSightings: { none: {} } },
+        ],
+      });
+    }
+    where.OR = or;
     active = true;
   }
   if (!active) return null;
@@ -1010,6 +1064,7 @@ export async function getSitesWithIssues(maxSites: number | null = 25, assetIds:
 export interface FilterOptions {
   assetTypes: string[];
   regions: string[];
+  fortigates: string[];
 }
 
 /**
@@ -1020,10 +1075,17 @@ export interface FilterOptions {
  *     — custom types are always shown and aren't meaningful filter entries.
  *   - regions: distinct `region:<name>` tag values across the live fleet, the
  *     same tags the `regionTags` filter matches. Sorted.
- * Two cheap queries; safe for a read-only NOC kiosk token.
+ *   - fortigates: distinct FortiGate device names for the "Selected
+ *     FortiGates" picker — the `learnedLocation` values of live firewall
+ *     assets (Fortinet discovery stamps a firewall's own FMG/device hostname
+ *     there, the same name managed switches / APs / endpoints reference), so
+ *     every offered option is guaranteed to match at least the gate itself.
+ *     Non-Fortinet operator-typed firewalls carry no learnedLocation and are
+ *     naturally excluded. Sorted.
+ * Three cheap queries; safe for a read-only NOC kiosk token.
  */
 export async function getFilterOptions(): Promise<FilterOptions> {
-  const [typeRows, regionRows] = await Promise.all([
+  const [typeRows, regionRows, fortigateRows] = await Promise.all([
     prisma.asset.findMany({
       where: { status: { notIn: ["decommissioned", "disabled"] } },
       select: { assetType: true },
@@ -1035,11 +1097,24 @@ export async function getFilterOptions(): Promise<FilterOptions> {
       WHERE t LIKE 'region:%'
         AND "status" NOT IN ('decommissioned', 'disabled')
       ORDER BY region`,
+    prisma.asset.findMany({
+      where: {
+        assetType: "firewall",
+        learnedLocation: { not: null },
+        status: { notIn: ["decommissioned", "disabled"] },
+      },
+      select: { learnedLocation: true },
+      distinct: ["learnedLocation"],
+    }),
   ]);
   const present = new Set(typeRows.map((r) => r.assetType));
   return {
     assetTypes: BUILTIN_ASSET_TYPES.filter((t) => present.has(t)),
     regions: regionRows.map((r) => r.region).filter(Boolean),
+    fortigates: fortigateRows
+      .map((r) => r.learnedLocation)
+      .filter((n): n is string => Boolean(n))
+      .sort((a, b) => a.localeCompare(b)),
   };
 }
 
@@ -1125,10 +1200,15 @@ export function clearNocFeedCache(): void {
   nocFeedCache.invalidate();
 }
 
-function filterCacheKey(assetTypes: string[] | null, regionNames: string[] | null): string {
+function filterCacheKey(
+  assetTypes: string[] | null,
+  regionNames: string[] | null,
+  fortigateNames: string[] | null,
+): string {
   const t = (assetTypes ?? []).slice().sort().join(",");
   const r = (regionNames ?? []).slice().sort().join(",");
-  return t + "|" + r;
+  const f = (fortigateNames ?? []).slice().sort().join(",");
+  return t + "|" + r + "|" + f;
 }
 
 /**
@@ -1145,6 +1225,7 @@ export async function getNocSummaryPayload(opts: {
   canEvents: boolean;
   assetTypes: string[] | null;
   regionNames: string[] | null;
+  fortigateNames?: string[] | null;
   capLimit: number | null;
   sampleCount?: number | null;
 }): Promise<Record<string, unknown>> {
@@ -1152,7 +1233,8 @@ export async function getNocSummaryPayload(opts: {
     ? [...NOC_FEED_NAMES]
     : opts.feeds.filter((f): f is NocFeedName => Object.prototype.hasOwnProperty.call(NOC_FEEDS, f));
 
-  const fKey = filterCacheKey(opts.assetTypes, opts.regionNames);
+  const fortigateNames = opts.fortigateNames ?? null;
+  const fKey = filterCacheKey(opts.assetTypes, opts.regionNames, fortigateNames);
   const allowed = (gate: "assets" | "events") => (gate === "assets" ? opts.canAssets : opts.canEvents);
 
   // Resolve the per-widget filter to asset ids once (cached — the id set backs
@@ -1160,7 +1242,7 @@ export async function getNocSummaryPayload(opts: {
   let assetIds: string[] | null = null;
   if (requested.some((f) => allowed(NOC_FEEDS[f].gate))) {
     assetIds = (await nocFeedCache.getOrCompute("ids|" + fKey, () =>
-      resolveFilteredAssetIds({ assetTypes: opts.assetTypes, regionNames: opts.regionNames }),
+      resolveFilteredAssetIds({ assetTypes: opts.assetTypes, regionNames: opts.regionNames, fortigateNames }),
     )) as string[] | null;
   }
 

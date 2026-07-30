@@ -198,12 +198,16 @@ router.get("/noc-summary", async (req, res, next) => {
     const canEvents = hasPermission(req, "events", "read");
 
     // Per-widget filters (optional): ?assetTypes=server,switch,... (the ENABLED
-    // built-in types) and ?regionTags=East,West (the caller's "My regions"
-    // names). The service resolves them to an asset-id set (cached) — null when
-    // neither narrows, the default unfiltered path. The frontend memoizes per
-    // (feeds, assetTypes, regionTags) so each distinct request fetches once.
+    // built-in types), ?regionTags=East,West (the caller's "My regions"
+    // names), and ?fortigates=SITE-FG1,SITE-FG2 (the "Selected FortiGates"
+    // per-site narrowing — assets behind any named gate via learnedLocation /
+    // sighting rows). The service resolves them to an asset-id set (cached) —
+    // null when nothing narrows, the default unfiltered path. The frontend
+    // memoizes per (feeds, assetTypes, regionTags, fortigates) so each
+    // distinct request fetches once.
     const assetTypes = parseCsvParam(req.query.assetTypes);
     const regionNames = parseCsvParam(req.query.regionTags);
+    const fortigateNames = parseCsvParam(req.query.fortigates);
 
     // A widget wanting more than the default payload (the 1000-row option) sends
     // ?limit=N; that caps every REQUESTED feed at N, clamped to a 1000 ceiling.
@@ -225,6 +229,7 @@ router.get("/noc-summary", async (req, res, next) => {
       canEvents,
       assetTypes,
       regionNames,
+      fortigateNames,
       capLimit,
       sampleCount,
     }));
@@ -234,17 +239,17 @@ router.get("/noc-summary", async (req, res, next) => {
 });
 
 /**
- * GET /filter-options — available asset types + region tags for the NOC
- * dashboard's global filter dropdowns. Same assets-read gate as /noc-summary
- * (session role or token-bound role); callers without access get empty lists
- * (not 403).
+ * GET /filter-options — available asset types + region tags + FortiGate
+ * device names for the NOC dashboard's widget filter pickers. Same
+ * assets-read gate as /noc-summary (session role or token-bound role);
+ * callers without access get empty lists (not 403).
  */
 router.get("/filter-options", async (req, res, next) => {
   try {
     await ensureRoleSnapshot(req);
     const canAssets = hasPermission(req, "assets", "read");
     if (!canAssets) {
-      res.json({ assetTypes: [], regions: [] });
+      res.json({ assetTypes: [], regions: [], fortigates: [] });
       return;
     }
     res.json(await nocDashboardService.getFilterOptions());

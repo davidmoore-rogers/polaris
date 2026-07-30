@@ -72,8 +72,10 @@
   // assetTypes is sent only when it's a strict subset of the eight built-ins
   // (all-on = omit = unfiltered). regionScope "mine" expands to the caller's
   // effective region names (app.js global currentEffectiveRegions); "custom"
-  // uses the widget's own picked region list (config.regions). An empty list
-  // either way means "unrestricted", so no param is sent.
+  // uses the widget's own picked region list (config.regions). fortigateScope
+  // "custom" sends the picked FortiGate device names (config.fortigates) —
+  // the per-site narrowing below regions. An empty list any way means
+  // "unrestricted", so no param is sent.
   function nocQueryString(opts) {
     opts = opts || {};
     var parts = [];
@@ -86,6 +88,9 @@
     if (opts.regionScope === "custom") regions = Array.isArray(opts.regions) ? opts.regions : [];
     else if (opts.regionScope === "mine") regions = (typeof currentEffectiveRegions !== "undefined" && currentEffectiveRegions) || [];
     if (regions && regions.length) parts.push("regionTags=" + encodeURIComponent(regions.slice().sort().join(",")));
+    if (opts.fortigateScope === "custom" && Array.isArray(opts.fortigates) && opts.fortigates.length) {
+      parts.push("fortigates=" + encodeURIComponent(opts.fortigates.slice().sort().join(",")));
+    }
     // Ask the server for a larger cap only when a widget wants more than the
     // default payload holds (>100 → the 1000-row option). Numeric limits ≤100
     // are omitted so those widgets keep sharing the one default-capped payload
@@ -167,6 +172,8 @@
       assetTypes: config.assetTypes,
       regionScope: config.regionScope,
       regions: config.regions,
+      fortigateScope: config.fortigateScope,
+      fortigates: config.fortigates,
       // Only widgets wanting MORE than the default payload holds (the 1000-row
       // option) request a larger server cap; ≤100 shares the default payload.
       limit: n > 100 ? n : undefined,
@@ -255,18 +262,25 @@
     return null;
   };
 
-  // Created-region names for the "Selected regions" picker, memoized for the
-  // page lifetime (retried on failure). Sourced from /dashboard/filter-options
-  // — the distinct region:<name> tags reconcileMapRegions keeps stamped on
-  // live assets — which is mounted on the dash listener's API allowlist, so
-  // the picker also works on the unauthenticated /dash wallboard.
-  var _regionOptionsPromise = null;
+  // Picker options for the shared filter config, memoized for the page
+  // lifetime (retried on failure). Sourced from /dashboard/filter-options —
+  // one fetch feeds both the "Selected regions" list (the distinct
+  // region:<name> tags reconcileMapRegions keeps stamped on live assets) and
+  // the "Selected FortiGates" list (live firewall device names). The endpoint
+  // is mounted on the dash listener's API allowlist, so both pickers also
+  // work on the unauthenticated /dash wallboard.
+  var _filterOptionsPromise = null;
+  function getFilterOptions() {
+    if (_filterOptionsPromise) return _filterOptionsPromise;
+    _filterOptionsPromise = api.dashboard.filterOptions()
+      .catch(function () { _filterOptionsPromise = null; return {}; });
+    return _filterOptionsPromise;
+  }
   window.PolarisWidgets.getRegionOptions = function () {
-    if (_regionOptionsPromise) return _regionOptionsPromise;
-    _regionOptionsPromise = api.dashboard.filterOptions()
-      .then(function (d) { return (d && d.regions) || []; })
-      .catch(function () { _regionOptionsPromise = null; return []; });
-    return _regionOptionsPromise;
+    return getFilterOptions().then(function (d) { return (d && d.regions) || []; });
+  };
+  window.PolarisWidgets.getFortigateOptions = function () {
+    return getFilterOptions().then(function (d) { return (d && d.fortigates) || []; });
   };
 
   // Open an asset's details slide-in in place when the canonical slide-over
@@ -291,11 +305,15 @@
   // (none checked = unfiltered, mirroring the asset-type grid). On the
   // unauthenticated /dash wallboard "My regions" is hidden — there is no
   // viewer identity for it to resolve against (a saved "mine" renders and
-  // behaves as "all" there). The asset-type toggle grid is added only when
-  // includeAssetTypes is true (every NOC widget except the maps).
-  // onChange(key, value) is the widget's config setter — key is "regionScope"
-  // (string), "regions" (string[]), or "assetTypes" (string[]). Appends, so a
-  // widget can render its own controls first, then call this.
+  // behaves as "all" there). The asset-type toggle grid AND the FortiGates
+  // scope (All / Selected FortiGates — narrows to assets behind the picked
+  // gates, e.g. one site's switches/APs) are added only when includeAssetTypes
+  // is true (every NOC widget except the maps, which fetch /map/sites and
+  // don't ride the noc-summary filter).
+  // onChange(key, value) is the widget's config setter — key is "regionScope"/
+  // "fortigateScope" (string), "regions"/"fortigates" (string[]), or
+  // "assetTypes" (string[]). Appends, so a widget can render its own controls
+  // first, then call this.
   window.PolarisWidgets.renderNocFilterConfig = function (el, config, onChange, includeAssetTypes) {
     config = config || {};
     var labels = window.PolarisWidgets.ASSET_TYPE_LABELS;
@@ -304,6 +322,7 @@
     var scope = config.regionScope === "custom" ? "custom"
       : (config.regionScope === "mine" && !onDash) ? "mine"
       : "all";
+    var fgScope = config.fortigateScope === "custom" ? "custom" : "all";
     var html = ''
       + '<label class="widget-config-label">Regions</label>'
       + '<select class="widget-config-select" data-nocf="regionScope">'
@@ -313,6 +332,12 @@
       + '</select>'
       + '<div class="widget-config-typegrid" data-nocf="regionList" style="display:none"></div>';
     if (includeAssetTypes) {
+      html += '<label class="widget-config-label">FortiGates</label>'
+        + '<select class="widget-config-select" data-nocf="fortigateScope">'
+        +   '<option value="all"' + (fgScope === "all" ? " selected" : "") + '>All FortiGates</option>'
+        +   '<option value="custom"' + (fgScope === "custom" ? " selected" : "") + '>Selected FortiGates…</option>'
+        + '</select>'
+        + '<div class="widget-config-typegrid" data-nocf="fortigateList" style="display:none"></div>';
       var enabled = Array.isArray(config.assetTypes) ? config.assetTypes : BUILTIN.slice();
       html += '<label class="widget-config-label">Asset types</label>'
         + '<div class="widget-config-typegrid">'
@@ -325,50 +350,77 @@
     }
     el.insertAdjacentHTML("beforeend", html);
 
-    var sel = el.querySelector('[data-nocf="regionScope"]');
-    var regionListEl = el.querySelector('[data-nocf="regionList"]');
-
-    // Show/populate the region checkbox list only while scope is "custom".
-    // The list is painted once per popover open (region names don't change
-    // under it); checkbox handlers re-read the live DOM, so the stale
-    // `config` snapshot the popover closed over never matters.
-    function paintRegionList() {
-      if (!regionListEl) return;
-      if (sel.value !== "custom") { regionListEl.style.display = "none"; return; }
-      regionListEl.style.display = "";
-      if (regionListEl.childElementCount) return;
-      window.PolarisWidgets.getRegionOptions().then(function (names) {
-        if (!regionListEl.isConnected || sel.value !== "custom" || regionListEl.childElementCount) return;
-        if (!names.length) {
-          regionListEl.innerHTML = '<p style="grid-column:1/-1;font-size:0.8rem;color:var(--color-text-secondary);margin:2px 0">'
-            + 'No regions found — draw regions on the Device Map first.</p>';
-          return;
-        }
-        var selected = Array.isArray(config.regions) ? config.regions : [];
-        regionListEl.innerHTML = names.map(function (name, i) {
-          return '<label class="widget-config-typeopt">'
-            + '<input type="checkbox" data-nocregion="' + i + '"' + (selected.indexOf(name) !== -1 ? " checked" : "") + '> '
-            + escapeHtml(name) + '</label>';
-        }).join("");
-        var boxes = regionListEl.querySelectorAll("[data-nocregion]");
-        Array.prototype.forEach.call(boxes, function (cb) {
-          cb.addEventListener("change", function () {
-            var current = [];
-            Array.prototype.forEach.call(boxes, function (b) {
-              if (b.checked) current.push(names[parseInt(b.getAttribute("data-nocregion"), 10)]);
+    // Wire one scope <select> + its "Selected …" checkbox list. The list is
+    // shown/populated only while scope is "custom", painted once per popover
+    // open (option names don't change under it); checkbox handlers re-read
+    // the live DOM, so the stale `config` snapshot the popover closed over
+    // never matters. getOptions resolves to strings or {value, label} entries
+    // (label shown, value stored); onChange fires with listKey = the
+    // picked-value array.
+    function wireScopePicker(scopeAttr, listAttr, listKey, selectedNames, getOptions, emptyMsg) {
+      var sel = el.querySelector('[data-nocf="' + scopeAttr + '"]');
+      var listEl = el.querySelector('[data-nocf="' + listAttr + '"]');
+      if (!sel) return;
+      function paintList() {
+        if (!listEl) return;
+        if (sel.value !== "custom") { listEl.style.display = "none"; return; }
+        listEl.style.display = "";
+        if (listEl.childElementCount) return;
+        getOptions().then(function (entries) {
+          if (!listEl.isConnected || sel.value !== "custom" || listEl.childElementCount) return;
+          if (!entries.length) {
+            listEl.innerHTML = '<p style="grid-column:1/-1;font-size:0.8rem;color:var(--color-text-secondary);margin:2px 0">'
+              + emptyMsg + '</p>';
+            return;
+          }
+          var opts = entries.map(function (e) {
+            return typeof e === "string" ? { value: e, label: e } : e;
+          });
+          listEl.innerHTML = opts.map(function (o, i) {
+            return '<label class="widget-config-typeopt">'
+              + '<input type="checkbox" data-nocopt="' + i + '"' + (selectedNames.indexOf(o.value) !== -1 ? " checked" : "") + '> '
+              + escapeHtml(o.label) + '</label>';
+          }).join("");
+          var boxes = listEl.querySelectorAll("[data-nocopt]");
+          Array.prototype.forEach.call(boxes, function (cb) {
+            cb.addEventListener("change", function () {
+              var current = [];
+              Array.prototype.forEach.call(boxes, function (b) {
+                if (b.checked) current.push(opts[parseInt(b.getAttribute("data-nocopt"), 10)].value);
+              });
+              onChange(listKey, current);
             });
-            onChange("regions", current);
           });
         });
+      }
+      sel.addEventListener("change", function () {
+        onChange(scopeAttr, sel.value);
+        paintList();
       });
+      paintList();
     }
 
-    if (sel) {
-      sel.addEventListener("change", function () {
-        onChange("regionScope", sel.value);
-        paintRegionList();
-      });
-      paintRegionList();
+    wireScopePicker(
+      "regionScope", "regionList", "regions",
+      Array.isArray(config.regions) ? config.regions : [],
+      window.PolarisWidgets.getRegionOptions,
+      'No regions found — draw regions on the Device Map first.',
+    );
+    if (includeAssetTypes) {
+      wireScopePicker(
+        "fortigateScope", "fortigateList", "fortigates",
+        Array.isArray(config.fortigates) ? config.fortigates : [],
+        function () {
+          // Prepend the "(No FortiGate)" entry (server sentinel __none__) so
+          // switches/APs with no associated gate stay selectable — e.g. a
+          // standalone SNMP-monitored switch that isn't FortiGate-managed.
+          return window.PolarisWidgets.getFortigateOptions().then(function (names) {
+            if (!names.length) return names;
+            return [{ value: "__none__", label: "(No FortiGate)" }].concat(names);
+          });
+        },
+        'No FortiGates found — run a FortiManager / FortiGate discovery first.',
+      );
     }
 
     if (includeAssetTypes) {

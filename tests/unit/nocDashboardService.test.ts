@@ -421,14 +421,30 @@ describe("getHighestTemperature", () => {
 });
 
 describe("getFilterOptions", () => {
-  it("returns built-in types present (canonical order, custom dropped) and distinct region tags", async () => {
-    findMany.mockResolvedValueOnce([
-      { assetType: "firewall" }, { assetType: "server" }, { assetType: "acme-widget" },
-    ]);
+  it("returns built-in types present (canonical order, custom dropped), distinct region tags, and sorted FortiGate names", async () => {
+    findMany
+      .mockResolvedValueOnce([
+        { assetType: "firewall" }, { assetType: "server" }, { assetType: "acme-widget" },
+      ])
+      // 2nd findMany: distinct firewall learnedLocation values (unsorted from the DB)
+      .mockResolvedValueOnce([
+        { learnedLocation: "JEFFERSON-FG" }, { learnedLocation: "ATLANTA-FG" },
+      ]);
     rawQuery.mockResolvedValueOnce([{ region: "East" }, { region: "West" }]);
     const r = await noc.getFilterOptions();
     expect(r.assetTypes).toEqual(["server", "firewall"]); // builtin order; custom 'acme-widget' dropped
     expect(r.regions).toEqual(["East", "West"]);
+    expect(r.fortigates).toEqual(["ATLANTA-FG", "JEFFERSON-FG"]); // sorted
+    // The FortiGate list is firewall learnedLocation values (the device name
+    // switches/APs/endpoints reference), live assets only.
+    expect(findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: expect.objectContaining({
+        assetType: "firewall",
+        learnedLocation: { not: null },
+        status: { notIn: ["decommissioned", "disabled"] },
+      }),
+      distinct: ["learnedLocation"],
+    }));
   });
 });
 
@@ -510,6 +526,21 @@ describe("getNocSummaryPayload", () => {
     expect(rawUnsafe).toHaveBeenCalledTimes(2);
   });
 
+  it("keys the feed cache on the fortigates filter (per-site widgets don't share unfiltered payloads)", async () => {
+    rawUnsafe.mockResolvedValue([]);
+    findMany.mockResolvedValue([]);
+
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), fortigateNames: ["JEFFERSON-FG"] });
+    expect(rawUnsafe).toHaveBeenCalledTimes(1);
+    // Same gate = cache hit; different gate (or none) = fresh computation.
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), fortigateNames: ["JEFFERSON-FG"] });
+    expect(rawUnsafe).toHaveBeenCalledTimes(1);
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), fortigateNames: ["NASHVILLE-FG"] });
+    expect(rawUnsafe).toHaveBeenCalledTimes(2);
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll() });
+    expect(rawUnsafe).toHaveBeenCalledTimes(3);
+  });
+
   it("applies the caller's capLimit to the feed query", async () => {
     rawUnsafe.mockResolvedValue([]);
     await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), capLimit: 1000 });
@@ -561,6 +592,60 @@ describe("resolveFilteredAssetIds", () => {
     const where = (findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
     expect(where.assetType).toEqual({ notIn: ["router", "firewall", "workstation", "printer", "access_point", "other"] });
     expect(where.tags).toEqual({ hasSome: ["region:East"] });
+  });
+
+  it("filters by FortiGate names across both haystacks (learnedLocation OR sighting rows, exact-insensitive)", async () => {
+    findMany.mockResolvedValueOnce([{ id: "sw1" }]);
+    const r = await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null, fortigateNames: ["JEFFERSON-FG"] });
+    expect(r).toEqual(["sw1"]);
+    const where = (findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
+    expect(where.OR).toEqual([
+      { learnedLocation: { equals: "JEFFERSON-FG", mode: "insensitive" } },
+      { fortigateSightings: { some: { fortigateDevice: { equals: "JEFFERSON-FG", mode: "insensitive" } } } },
+    ]);
+  });
+
+  it("__none__ sentinel matches gate-less assets (no sightings, learnedLocation not a known gate name)", async () => {
+    findMany
+      // 1st findMany: the known-gate name lookup (firewall learnedLocations)
+      .mockResolvedValueOnce([{ learnedLocation: "JEFFERSON-FG" }])
+      // 2nd findMany: the id-set resolution
+      .mockResolvedValueOnce([{ id: "standalone-sw" }]);
+    const r = await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null, fortigateNames: ["__none__"] });
+    expect(r).toEqual(["standalone-sw"]);
+    const where = (findMany.mock.calls[1][0] as { where: Record<string, unknown> }).where;
+    expect(where.OR).toEqual([
+      {
+        AND: [
+          { OR: [{ learnedLocation: null }, { learnedLocation: { notIn: ["JEFFERSON-FG"] } }] },
+          { fortigateSightings: { none: {} } },
+        ],
+      },
+    ]);
+  });
+
+  it("__none__ combines with named gates in one OR (a site plus its strays)", async () => {
+    findMany
+      .mockResolvedValueOnce([]) // no known gates on record
+      .mockResolvedValueOnce([]);
+    await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null, fortigateNames: ["JEFFERSON-FG", "__none__"] });
+    const where = (findMany.mock.calls[1][0] as { where: Record<string, unknown> }).where;
+    const or = where.OR as unknown[];
+    expect(or.length).toBe(3); // 2 haystacks for the named gate + 1 gate-less arm
+    expect(or[2]).toEqual({ AND: [{}, { fortigateSightings: { none: {} } }] });
+  });
+
+  it("ANDs the FortiGate narrowing with asset types (one site's switches/APs)", async () => {
+    findMany.mockResolvedValueOnce([]);
+    await noc.resolveFilteredAssetIds({
+      assetTypes: ["switch", "access_point"],
+      regionNames: null,
+      fortigateNames: ["JEFFERSON-FG", "NASHVILLE-FG"],
+    });
+    const where = (findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
+    // Both dimensions present as sibling keys = implicit Prisma AND.
+    expect(where.assetType).toEqual({ notIn: ["server", "router", "firewall", "workstation", "printer", "other"] });
+    expect((where.OR as unknown[]).length).toBe(4); // 2 gates × 2 haystacks
   });
 });
 

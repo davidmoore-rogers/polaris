@@ -275,8 +275,9 @@ const api = {
     // active alerts, sites with issues). qs carries the per-widget filter +
     // feeds= subset (built by widgets/index.js getNocSummary).
     nocSummary: (qs) => request("GET", "/dashboard/noc-summary" + (qs ? "?" + qs : ""), undefined, timeoutSignal(DASHBOARD_FETCH_TIMEOUT_MS)),
-    // Available asset types + created region names for widget filter pickers.
-    // Mounted on the dash listener too (dashServer API allowlist).
+    // Available asset types + created region names + FortiGate device names
+    // for widget filter pickers. Mounted on the dash listener too (dashServer
+    // API allowlist).
     filterOptions: () => request("GET", "/dashboard/filter-options"),
   },
   me: {
