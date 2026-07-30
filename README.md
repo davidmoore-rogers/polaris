@@ -30,7 +30,7 @@ Asset monitoring runs on three independent collection cadences (sample retention
 
 Operators can pin specific interfaces, mountpoints, or IPsec tunnels for **sub-minute polling** without re-walking the full table; pinned (selected) entities also keep full tiered history while unselected ones are retained 24 h. Each FMG/FortiGate integration carries per-stream **REST ↔ SNMP toggles** (response time, telemetry, interfaces, LLDP) so branch-class FortiGates whose REST sensor endpoints 404 on FortiOS 7.4.x can be moved to SNMP one stream at a time. Per-asset overrides take precedence when set.
 
-The asset details panel renders charts for response time, CPU/memory, temperature per sensor, per-interface throughput + errors, mountpoint usage, and IPsec status timeline + bytes. Admin operators also get an **SNMP Walk** tab for ad-hoc OID exploration on any reachable host.
+The asset details panel renders charts for response time, CPU/memory, temperature per sensor, per-interface throughput + errors, mountpoint usage, and IPsec status timeline + bytes. Admin operators also get an **SNMP Walk** tab for ad-hoc OID exploration on assets with SNMP configured for at least one monitoring stream.
 
 **Polaris Agent (optional)** — a small Go binary you can install on Linux / macOS / Windows hosts (amd64 + arm64) via stored SSH or WinRM credentials. The agent pushes monitoring samples back to Polaris over HTTPS with a pinned-leaf TLS handshake; an outbound WebSocket also stays open for on-demand probe-now. Useful for hosts behind NAT, hosts without a working SNMP/WinRM probe surface, and generic Windows/Linux endpoints. Install + uninstall + force-remove are all driven from the asset details modal. See `docs/INSTALL.md` → "Optional: Polaris Agent."
 

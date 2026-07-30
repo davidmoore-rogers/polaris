@@ -4024,6 +4024,11 @@ async function openViewModal(id) {
       a.manufacturer
         ? api.assets.customWidgets(a.id).catch(function (err) { console.warn("Failed to load custom widgets", err); return null; })
         : Promise.resolve(null),
+      // Effective monitor settings — only needed to decide whether the SNMP
+      // Walk tab shows (admin-only), so non-admins skip the fetch entirely.
+      isAdmin()
+        ? api.assets.effectiveMonitorSettings(a.id).catch(function (err) { console.warn("Failed to load effective monitor settings", err); return null; })
+        : Promise.resolve(null),
     ]);
     var sources         = auxResults[0] || [];
     var dependencies    = auxResults[1];
@@ -4031,6 +4036,7 @@ async function openViewModal(id) {
     var sightings       = Array.isArray(auxResults[3]) ? auxResults[3] : (auxResults[3] && auxResults[3].sightings) || [];
     var ipHistory       = auxResults[4] || [];
     var customWidgetPayload = auxResults[5];
+    var effMonitorSettings  = auxResults[6];
     agentSubpanelHTML   = assetAgentSubpanelHTML(a, managedAgent);
     // Stations tab — visible on FortiAPs that have wireless clients
     // reported by the most recent SNMP fapStationTable scrape. The
@@ -4104,9 +4110,13 @@ async function openViewModal(id) {
     if (customWidgetPayload && customWidgetPayload.widgets && customWidgetPayload.widgets.length) {
       tabs.push({ key: "customMib", label: "Custom MIB", html: _customMibTabHTML(customWidgetPayload) });
     }
-    // SNMP Walk tab — admin-only, mirrors the backend gate. Loads credentials
-    // before render so the picker isn't empty on first paint.
-    if (isAdmin()) {
+    // SNMP Walk tab — admin-only, mirrors the backend gate. Additionally
+    // hidden when no monitoring stream resolves to SNMP for this asset
+    // (effective settings prefetched in the auxResults pass above, so the
+    // tab never flashes-then-vanishes — same idiom as Custom MIB). Loads
+    // credentials before render so the picker isn't empty on first paint.
+    var showSnmpWalkTab = isAdmin() && _assetUsesSnmpPolling(a, effMonitorSettings);
+    if (showSnmpWalkTab) {
       await _ensureCredentials();
       tabs.push({ key: "snmp", label: "SNMP Walk", html: assetSnmpWalkViewHTML(a) });
     }
@@ -4164,7 +4174,7 @@ async function openViewModal(id) {
       });
     }
     _syncAssetFooterButtons();
-    if (isAdmin()) _wireSnmpWalkTab(a);
+    if (showSnmpWalkTab) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
     if (!isInfraProc) _wireAssetServicesTab(a);
@@ -13634,9 +13644,29 @@ async function openImportPdfModal(file) {
 //
 // Operator-driven snmpwalk against the asset's IP. Admin-only on both the
 // frontend (the tab is omitted) and the backend (POST /assets/:id/snmp-walk
-// is gated on requireAdmin). Pick any stored SNMP credential — not just the
-// asset's monitor credential — so an admin can spot-check a host that isn't
-// yet monitored, or use a different community than the one the monitor uses.
+// is gated on requireAdmin). The tab only shows on assets where at least one
+// monitoring stream resolves to SNMP (see _assetUsesSnmpPolling) — walking a
+// host that speaks no SNMP just times out. Within the tab, pick any stored
+// SNMP credential — not just the asset's monitor credential — so an admin
+// can use a different community than the one the monitor uses.
+
+// True when at least one monitoring stream actually resolves to SNMP for
+// this asset. `eff` is the /effective-monitor-settings payload (walks all
+// four tiers, so class overrides and integration baselines count, not just
+// per-asset picks — and source defaults are already baked into `resolved`,
+// though none of them is ever "snmp"). Custom MIB widget probes ride
+// `Asset.customWidgetPolling` (falling back to the cpuMemory method, which
+// the resolved check already covers), so the per-asset field counts too.
+// Fail-open: when the effective-settings fetch failed the tab stays
+// reachable rather than silently vanishing on a transient error.
+function _assetUsesSnmpPolling(asset, eff) {
+  if (asset && asset.customWidgetPolling === "snmp") return true;
+  if (!eff || !eff.resolved) return true;
+  var r = eff.resolved;
+  return ["responseTimePolling", "cpuMemoryPolling", "temperaturePolling", "interfacesPolling",
+          "lldpPolling", "storagePolling", "processesPolling", "eventLogPolling"]
+    .some(function (k) { return r[k] === "snmp"; });
+}
 
 var _snmpWalkLastOid = "1.3.6.1.2.1.1";
 var _snmpWalkLastCredId = null;
