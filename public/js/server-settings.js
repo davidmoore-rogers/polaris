@@ -1977,7 +1977,7 @@ function renderSampleRetentionCard(retention) {
   });
 
   var headerCells = SAMPLE_RETENTION_TIERS.map(function (tier) {
-    return '<th style="padding:3px 6px;font-size:0.74rem;color:var(--color-text-secondary);font-weight:600;text-transform:uppercase;letter-spacing:0.04em">' +
+    return '<th style="padding:3px 6px;text-align:center;font-size:0.74rem;color:var(--color-text-secondary);font-weight:600;text-transform:uppercase;letter-spacing:0.04em">' +
       escapeHtml(tier.label) +
     '</th>';
   }).join("");
