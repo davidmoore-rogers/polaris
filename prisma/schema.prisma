@@ -3311,6 +3311,18 @@ model NotificationRule {
   // representable) so a pre-wizard UI and pre-upgrade backups stay coherent.
   reset           Json?
   actions         Json?
+  // ── Severity bands (value-driven escalation, 2026-07) ──────────────────────
+  // Optional higher tiers stacked on the base trigger threshold/severity (tier
+  // 0 = severity + trigger.threshold + actions/escalation above). Each band:
+  // { threshold, severity, actions: AutomationAction[], escalation? }. As the
+  // metric climbs the alert's severity escalates and re-notifies with that
+  // band's actions. NULL = single-severity (pre-band) behavior. Numeric
+  // (asset_metric/host_metric) triggers only. See notificationTypes.severityBandSchema.
+  severityBands   Json?
+  // Per-automation notify policy for band transitions: { onIncrease, onDecrease,
+  // onResolved, resolvedMode: "reuse"|"dedicated", resolvedActions? }. NULL =
+  // defaults (increase + resolved via reuse). See notificationTypes.bandNotifySchema.
+  bandNotify      Json?
   createdBy       String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -3463,6 +3475,10 @@ model NotificationRuleState {
   firedAt           DateTime?
   lastValue         Float?
   notificationId    String? // active notification, for auto-resolve
+  // The severity band the active alert is currently in (severity-bands feature).
+  // Set on fire + every band transition; drives increase(re-notify)/decrease/
+  // same detection. NULL for pre-band rules / single-severity alerts.
+  firingSeverity    String?
   updatedAt         DateTime  @updatedAt
 
   @@unique([ruleId, assetId, dimensionKey])

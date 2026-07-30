@@ -36,6 +36,7 @@ import { executeActions } from "./automationActionService.js";
 import { scopeRegionTagsOf } from "./notificationRecipientService.js";
 import {
   normalizeRuleToV2,
+  normalizeEscalationToV2,
   type EmailComposition,
   type EscalationV2Config,
   type RuleScope,
@@ -49,7 +50,30 @@ interface EscalationRule {
   description: string | null;
   scope: RuleScope;
   emailComposition: EmailComposition | null;
-  escalation: EscalationV2Config;
+  /** Base severity (tier 0). */
+  severity: string;
+  /** Tier-0 (rule-level) escalation, or null. */
+  ruleEscalation: EscalationV2Config | null;
+  /** Per-band escalations keyed by band severity (value-driven escalation). */
+  bands: { severity: string; escalation: EscalationV2Config | null }[];
+}
+
+/** The escalation config that applies to an alert at `severity`: the matching
+ *  band's escalation when the alert is in a band, else the rule-level (tier 0)
+ *  escalation. */
+function escalationForSeverity(rule: EscalationRule, severity: string): EscalationV2Config | null {
+  if (severity !== rule.severity) {
+    const band = rule.bands.find((b) => b.severity === severity);
+    if (band?.escalation && band.escalation.tiers.length) return band.escalation;
+  }
+  return rule.ruleEscalation;
+}
+
+/** Every escalation config a rule can present (tier 0 + each band). */
+function allEscalationsOf(rule: EscalationRule): EscalationV2Config[] {
+  return [rule.ruleEscalation, ...rule.bands.map((b) => b.escalation)].filter(
+    (e): e is EscalationV2Config => !!e && e.tiers.length > 0,
+  );
 }
 
 interface TierState {
@@ -58,11 +82,16 @@ interface TierState {
   count: number;
 }
 
-type EscalationState = { tiers: Record<string, TierState> };
+// bandSince (severity bands): when the alert entered its current band, so a
+// newly-entered band's escalation timers restart from band-entry rather than
+// the original fire. Absent for single-severity alerts (timers run off
+// triggeredAt). Stamped by the engine's applyBandTransition.
+type EscalationState = { tiers: Record<string, TierState>; bandSince?: string };
 
 function stateOf(raw: unknown): EscalationState {
-  const tiers = raw && typeof raw === "object" && (raw as any).tiers && typeof (raw as any).tiers === "object" ? (raw as any).tiers : {};
-  return { tiers: { ...tiers } };
+  const o = raw && typeof raw === "object" ? (raw as any) : {};
+  const tiers = o.tiers && typeof o.tiers === "object" ? o.tiers : {};
+  return { tiers: { ...tiers }, ...(typeof o.bandSince === "string" ? { bandSince: o.bandSince } : {}) };
 }
 
 /** Is this tier due to run now? (first run after afterMin; repeats per
@@ -90,29 +119,37 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
   const dbRules = await prisma.notificationRule.findMany({
     where: { enabled: true },
     select: {
-      id: true, name: true, description: true, scope: true, emailComposition: true,
+      id: true, name: true, description: true, scope: true, emailComposition: true, severity: true,
       escalation: true, targets: true, clearBehavior: true, clearAfterSec: true, reset: true, actions: true,
+      severityBands: true,
     },
   });
   const rules = new Map<string, EscalationRule>();
   for (const r of dbRules) {
-    const esc = normalizeRuleToV2(r).escalation;
-    if (esc && esc.tiers.length > 0) {
-      rules.set(r.id, {
-        id: r.id,
-        name: r.name,
-        description: r.description,
-        scope: (r.scope ?? {}) as RuleScope,
-        emailComposition: r.emailComposition as EmailComposition | null,
-        escalation: esc,
-      });
-    }
+    const v2 = normalizeRuleToV2(r);
+    const ruleEscalation = v2.escalation;
+    const bands = (v2.severityBands ?? []).map((b) => ({ severity: b.severity, escalation: normalizeEscalationToV2(b.escalation) }));
+    const rule: EscalationRule = {
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      scope: (r.scope ?? {}) as RuleScope,
+      emailComposition: r.emailComposition as EmailComposition | null,
+      severity: r.severity,
+      ruleEscalation,
+      bands,
+    };
+    // Include the rule if ANY tier exists (rule-level or on a band).
+    if (allEscalationsOf(rule).length > 0) rules.set(r.id, rule);
   }
   if (rules.size === 0) return 0;
 
   // Candidates: uncleared notifications of escalation rules past the earliest
-  // tier delay. Bounded by the active-unhandled set, not fleet size.
-  const minAfterMin = Math.min(...Array.from(rules.values()).flatMap((r) => r.escalation.tiers.map((t) => t.afterMin)));
+  // tier delay (across tier 0 + every band). Bounded by the active-unhandled
+  // set, not fleet size.
+  const minAfterMin = Math.min(
+    ...Array.from(rules.values()).flatMap((r) => allEscalationsOf(r).flatMap((e) => e.tiers.map((t) => t.afterMin))),
+  );
   const notifs = await prisma.notification.findMany({
     where: {
       cleared: false,
@@ -150,15 +187,22 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
   for (const n of notifs) {
     const rule = rules.get(n.ruleId!);
     if (!rule) continue;
-    if (rule.escalation.stopOn !== "clear" && n.acknowledged) continue; // "acknowledge" stops on ack
+    // Value-driven escalation: the alert's CURRENT band (its severity) selects
+    // which escalation chain applies. The engine resets escalationState on every
+    // band change, so a newly-entered band's tiers start their timers fresh.
+    const escalation = escalationForSeverity(rule, n.severity);
+    if (!escalation || escalation.tiers.length === 0) continue;
+    if (escalation.stopOn !== "clear" && n.acknowledged) continue; // "acknowledge" stops on ack
     if (n.assetId && suppressedAssetIds.has(n.assetId)) continue; // silenced — resumes post-window
 
     const state = stateOf(n.escalationState);
+    // Timers run from band-entry when banded (bandSince), else the fire time.
+    const startAt = state.bandSince ? new Date(state.bandSince) : n.triggeredAt;
     let dirty = false;
 
-    for (const [idx, tier] of rule.escalation.tiers.entries()) {
+    for (const [idx, tier] of escalation.tiers.entries()) {
       const tierKey = String(idx);
-      if (!tierIsDue(tier, n.triggeredAt, state.tiers[tierKey], now)) continue;
+      if (!tierIsDue(tier, startAt, state.tiers[tierKey], now)) continue;
 
       // Context: fire-time snapshot + live escalation tokens. Pre-feature
       // notifications (no templateCtx) get a minimal context from the row.

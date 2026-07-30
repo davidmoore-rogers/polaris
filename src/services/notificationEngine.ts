@@ -38,6 +38,11 @@ import {
   type CompositeTrigger,
   type CompositeLeaf,
   type TriggerConditionGroup,
+  type SeverityBand,
+  type BandNotify,
+  type Severity,
+  severityForValue,
+  severityRank,
   CHANGE_TYPE_ACTIONS,
   METRIC_META,
   FIELD_META,
@@ -46,7 +51,11 @@ import {
   normalizeEscalationToV2,
   scopeCidrOf,
   evaluateScopeCondition,
+  triggerSignature,
+  scopeRank,
+  scopeRankLabel,
 } from "./notificationTypes.js";
+import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
 import { ipInCidr } from "../utils/cidr.js";
 import { computeStorageForecast } from "./storageForecastService.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
@@ -80,6 +89,10 @@ interface DbRule {
   emailComposition: EmailComposition | null;
   /** Escalation as v2 tiers-of-actions (legacy tiers converted by the normalizer). */
   escalation: EscalationV2Config | null;
+  /** Severity bands (numeric triggers only); null = single-severity. */
+  severityBands: SeverityBand[] | null;
+  /** Band-transition notify policy; null = defaults (increase + resolved/reuse). */
+  bandNotify: BandNotify | null;
 }
 
 /** Best-effort action fan-out — never breaks rule evaluation. (executeActions
@@ -113,6 +126,11 @@ interface ScopeAssetRow {
   dependencySuppressed: boolean;
   quarantinedAt: Date | null;
   ipAddress: string | null;
+  // Read by the condition-tree evaluator + the carve-out scope match
+  // (SCOPE_SELECT populates them; optional so the pseudo-host row can omit them).
+  manufacturer?: string | null;
+  model?: string | null;
+  os?: string | null;
 }
 
 /** A single evaluated reading for a (asset, dimension). */
@@ -587,22 +605,75 @@ function ruleWantsAssetDetail(rule: DbRule): boolean {
 // re-exported so the escalation sweep + tests keep their import path.
 export { buildComposedEmail };
 
+// ─── Specificity precedence / carve-out ─────────────────────────────────────
+// A more-specific automation "carves" the assets it covers out of a
+// less-specific one that watches the SAME trigger (triggerSignature): those
+// assets drop their readings, any active alert on the general rule clears
+// (superseded), and its pending debounce resets. Same-rank ties both fire.
+// Built once per engine tick over the enabled rule set; only asset_metric /
+// asset_state rules (non-null signature) participate.
+
+interface ShadowMember {
+  rule: DbRule;
+  rank: number;
+}
+interface ShadowIndex {
+  /** signature → participating rules (with precomputed scopeRank). */
+  bySig: Map<string, ShadowMember[]>;
+  /** signature → highest rank present (skip the per-asset check for max-rank rules). */
+  maxRankBySig: Map<string, number>;
+}
+
+export function buildShadowIndex(rules: DbRule[]): ShadowIndex {
+  const bySig = new Map<string, ShadowMember[]>();
+  const maxRankBySig = new Map<string, number>();
+  for (const rule of rules) {
+    const sig = triggerSignature(rule.trigger);
+    if (!sig) continue;
+    const rank = scopeRank(rule.scope);
+    const arr = bySig.get(sig);
+    if (arr) arr.push({ rule, rank });
+    else bySig.set(sig, [{ rule, rank }]);
+    maxRankBySig.set(sig, Math.max(maxRankBySig.get(sig) ?? 0, rank));
+  }
+  return { bySig, maxRankBySig };
+}
+
+/** Does a higher-rank same-signature rule also cover this asset? */
+export function isAssetShadowed(index: ShadowIndex, rule: DbRule, sig: string, rank: number, asset: ScopeAsset): boolean {
+  const group = index.bySig.get(sig);
+  if (!group) return false;
+  for (const other of group) {
+    if (other.rule.id === rule.id) continue;
+    if (other.rank > rank && scopeMatchesAsset(other.rule.scope, asset)) return true;
+  }
+  return false;
+}
+
 // ─── Threshold / state evaluation ───────────────────────────────────────────
 
-async function evaluateThresholdRule(rule: DbRule): Promise<void> {
+async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): Promise<void> {
   const trigger = rule.trigger;
   let readings: Reading[] = [];
   // Assets silenced this tick (maintenance window / dependency-suppressed).
   const suppressedIds = new Set<string>();
+  // Assets carved out this tick by a more-specific same-signature automation.
+  const shadowedIds = new Set<string>();
 
   if (trigger.type === "host_metric") {
     const r = await resolveHostMetricReading(trigger);
     readings = r ? [r] : [];
   } else if (trigger.type === "asset_metric" || trigger.type === "asset_state") {
     const assets = await loadScopeAssets(rule.scope);
+    // Precedence: only worth checking when this rule isn't already the most
+    // specific in its signature group (and the group has a higher-rank peer).
+    const sig = shadowIndex ? triggerSignature(rule.trigger) : null;
+    const rank = sig ? scopeRank(rule.scope) : 0;
+    const shadowable = !!(sig && shadowIndex && (shadowIndex.maxRankBySig.get(sig) ?? 0) > rank);
     const active: ScopeAssetRow[] = [];
     for (const a of assets) {
       if (isSuppressedForNotifications(a)) suppressedIds.add(a.id);
+      else if (shadowable && isAssetShadowed(shadowIndex!, rule, sig!, rank, a)) shadowedIds.add(a.id);
       else active.push(a);
     }
     readings = trigger.type === "asset_metric"
@@ -617,13 +688,18 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
   const stateMap = new Map(states.map((s) => [`${s.assetId ?? ""}|${s.dimensionKey}`, s]));
   const now = new Date();
   const seen = new Set<string>();
+  const hasBands = ruleHasBands(rule);
 
   for (const reading of readings) {
     const key = `${reading.assetId || ""}|${reading.dimKey}`;
     seen.add(key);
-    const meets = readingMeets(trigger, reading.value);
-    const st = stateMap.get(key);
     const lastValue = typeof reading.value === "number" ? reading.value : null;
+    // Banded rules fire/clear by the resolved band severity (null = below tier
+    // 0); non-banded rules use the single-threshold decision unchanged.
+    const bandSev = hasBands ? bandSeverityFor(rule, lastValue) : null;
+    const meets = hasBands ? bandSev !== null : readingMeets(trigger, reading.value);
+    const fireOpts = hasBands && bandSev ? { severity: bandSev, actions: tierForSeverity(rule, bandSev).actions } : undefined;
+    const st = stateMap.get(key);
 
     if (meets) {
       if (!st || st.state === "clear") {
@@ -631,19 +707,24 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
           // start the sustained-duration timer
           await upsertState(rule.id, reading, "pending", { conditionMetSince: now, lastValue });
         } else {
-          await fire(rule, reading, lastValue, now);
+          await fire(rule, reading, lastValue, now, undefined, fireOpts);
         }
       } else if (st.state === "pending") {
         const since = st.conditionMetSince ?? now;
         if (now.getTime() - since.getTime() >= (trigger as any).forDurationSec * 1000) {
-          await fire(rule, reading, lastValue, now);
+          await fire(rule, reading, lastValue, now, undefined, fireOpts);
         }
         // else keep pending
-      } else if (st.state === "firing" && st.recoveredSince) {
-        // Re-met mid-recovery: cancel the clear-sustain timer (transition-only
-        // write — a steadily-firing condition costs nothing per tick).
-        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
-      } // firing without a pending recovery → already active; suppress
+      } else if (st.state === "firing") {
+        if (hasBands && bandSev && bandSev !== (st.firingSeverity ?? rule.severity)) {
+          // Crossed into a different band — escalate/de-escalate the live alert.
+          await applyBandTransition(rule, reading, st, bandSev, now);
+        } else if (st.recoveredSince) {
+          // Re-met mid-recovery: cancel the clear-sustain timer (transition-only
+          // write — a steadily-firing condition costs nothing per tick).
+          await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
+        } // same band / firing without a pending recovery → already active; suppress
+      }
     } else {
       // condition not met for this reading
       if (st && st.state === "pending") {
@@ -660,11 +741,13 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
         } else {
           const sustainSec = rule.reset.sustainSec ?? 0;
           if (sustainSec <= 0) {
+            if (hasBands) await fireResolved(rule, reading, st, now);
             await recover(rule, st);
           } else if (!st.recoveredSince) {
             // Recovery observed — start the clear-sustain timer.
             await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: now } });
           } else if (now.getTime() - st.recoveredSince.getTime() >= sustainSec * 1000) {
+            if (hasBands) await fireResolved(rule, reading, st, now);
             await recover(rule, st);
           }
           // else: recovered but not sustained long enough yet — keep firing.
@@ -679,6 +762,35 @@ async function evaluateThresholdRule(rule: DbRule): Promise<void> {
   // exiting maintenance can't double-fire an already-active notification.
   for (const st of states) {
     if (st.state === "pending" && st.assetId && suppressedIds.has(st.assetId)) {
+      await prisma.notificationRuleState.update({
+        where: { id: st.id },
+        data: { state: "clear", conditionMetSince: null },
+      });
+    }
+  }
+
+  // Carved-out assets: a more-specific same-signature automation has taken them
+  // over. Unlike maintenance suppression (which freezes firing rows), the
+  // takeover is a real handoff — clear any active alert (superseded) and reset
+  // pending debounce so the general rule no longer alerts for these assets.
+  for (const st of states) {
+    if (!st.assetId || !shadowedIds.has(st.assetId)) continue;
+    if (st.state === "firing") {
+      await clearActiveNotification(st, "system:superseded");
+      await prisma.notificationRuleState.update({
+        where: { id: st.id },
+        data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null },
+      });
+      await logEvent({
+        action: "notification.superseded",
+        resourceType: "notification",
+        resourceId: st.notificationId ?? undefined,
+        resourceName: rule.name,
+        actor: "system:notification-engine",
+        message: `Cleared: ${rule.name} superseded by a more-specific automation`,
+        details: { ruleId: rule.id, assetId: st.assetId },
+      }).catch(() => {});
+    } else if (st.state === "pending") {
       await prisma.notificationRuleState.update({
         where: { id: st.id },
         data: { state: "clear", conditionMetSince: null },
@@ -1001,38 +1113,70 @@ async function upsertState(
   });
 }
 
-async function fire(rule: DbRule, reading: Reading, lastValue: number | null, now: Date, composite?: CompositeFireInfo): Promise<void> {
-  // Respect cooldown: if this (rule,asset,dim) fired within cooldownSec, skip.
-  const existing = await prisma.notificationRuleState.findUnique({
-    where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
-  });
-  if (rule.cooldownSec && existing?.firedAt && now.getTime() - existing.firedAt.getTime() < rule.cooldownSec * 1000) {
-    return;
+// ─── Severity bands (value-driven severity escalation) ──────────────────────
+// Tier 0 = rule.severity + trigger.threshold + rule.actions/escalation; bands
+// stack higher tiers on top. The alert is ONE row per (rule,asset,dim); its
+// severity climbs with the value (re-notifying per bandNotify) and clears below
+// tier 0. See notificationTypes.severityForValue.
+
+interface EffectiveTier {
+  severity: string;
+  actions: AutomationAction[];
+  escalation: EscalationV2Config | null;
+}
+
+/** Whether this rule uses value-driven severity bands (numeric trigger only). */
+function ruleHasBands(rule: DbRule): boolean {
+  return !!(rule.severityBands && rule.severityBands.length) &&
+    (rule.trigger.type === "asset_metric" || rule.trigger.type === "host_metric");
+}
+
+/** The band severity for a numeric reading (null = below tier 0 / not firing). */
+function bandSeverityFor(rule: DbRule, value: number | null): string | null {
+  const t = rule.trigger;
+  if (t.type !== "asset_metric" && t.type !== "host_metric") return null;
+  return severityForValue(t.operator, t.threshold, rule.severity as Severity, rule.severityBands as SeverityBand[] | null, value);
+}
+
+/** The actions + escalation for a resolved severity. A band uses its OWN
+ *  actions/escalation when it carries any, else falls back to the base tier's
+ *  (severity tiers usually carry none — the alert re-notifies with the base
+ *  Actions-step actions + base escalation at the tier's severity). */
+export function tierForSeverity(rule: DbRule, severity: string): EffectiveTier {
+  if (severity !== rule.severity) {
+    const band = (rule.severityBands ?? []).find((b) => b.severity === severity);
+    if (band) {
+      const bandEsc = normalizeEscalationToV2(band.escalation);
+      return {
+        severity,
+        actions: band.actions && band.actions.length ? band.actions : rule.actions,
+        escalation: bandEsc ?? rule.escalation,
+      };
+    }
   }
-  // Fires are transition-guarded (rare), so the per-fire asset-detail lookup
-  // is negligible even at 2000 assets — the hot evaluate path stays on the
-  // tight SCOPE_SELECT.
-  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
-  const ctx = buildTemplateContext({ ...readingContextParts(rule, reading, now, composite), assetDetail: detail });
-  const message = renderMessage(rule, reading, ctx);
-  ctx["message"] = message;
-  const notif = await prisma.notification.create({
-    data: {
-      ruleId: rule.id,
-      assetId: reading.assetId || null,
-      assetHostname: reading.hostname,
-      severity: rule.severity,
-      message,
-      regionTags: regionSnapshot(reading.tags),
-      ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}),
-    },
-  });
-  await prisma.notificationRuleState.upsert({
-    where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
-    create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id },
-    update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null, recoveredSince: null },
-  });
-  await executeActionsSafe(notif.id, rule.actions, ctx, {
+  return { severity: rule.severity, actions: rule.actions, escalation: rule.escalation };
+}
+
+/** Normalized band-notify policy with defaults. */
+export function bandNotifyOf(rule: DbRule): { onIncrease: boolean; onDecrease: boolean; onResolved: boolean; resolvedMode: "reuse" | "dedicated"; resolvedActions: AutomationAction[] } {
+  const b: BandNotify | null = rule.bandNotify;
+  return {
+    onIncrease: b?.onIncrease ?? true,
+    onDecrease: b?.onDecrease ?? false,
+    onResolved: b?.onResolved ?? true,
+    resolvedMode: b?.resolvedMode ?? "reuse",
+    resolvedActions: b?.resolvedActions ?? [],
+  };
+}
+
+function severityLevel(severity: string): "error" | "warning" | "info" {
+  return severity === "critical" || severity === "serious" ? "error" : severity === "warning" ? "warning" : "info";
+}
+
+/** Fan the alert's actions out to the delivery pipeline (shared by initial fire
+ *  + band escalation/de-escalation + resolved). */
+async function enqueueAlertActions(notifId: string, actions: AutomationAction[], ctx: Record<string, string>, rule: DbRule, reading: Reading): Promise<void> {
+  await executeActionsSafe(notifId, actions, ctx, {
     scopeRegionTags: scopeRegionTagsOf(rule.scope),
     assetId: reading.assetId || null,
     ruleId: rule.id,
@@ -1040,16 +1184,131 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
     ruleEmailComposition: rule.emailComposition,
     actor: "system:notification-engine",
   });
+}
+
+async function fire(
+  rule: DbRule,
+  reading: Reading,
+  lastValue: number | null,
+  now: Date,
+  composite?: CompositeFireInfo,
+  opts?: { severity?: string; actions?: AutomationAction[] },
+): Promise<void> {
+  // Respect cooldown: if this (rule,asset,dim) fired within cooldownSec, skip.
+  const existing = await prisma.notificationRuleState.findUnique({
+    where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
+  });
+  if (rule.cooldownSec && existing?.firedAt && now.getTime() - existing.firedAt.getTime() < rule.cooldownSec * 1000) {
+    return;
+  }
+  const severity = opts?.severity ?? rule.severity;
+  const actions = opts?.actions ?? rule.actions;
+  // Fires are transition-guarded (rare), so the per-fire asset-detail lookup
+  // is negligible even at 2000 assets — the hot evaluate path stays on the
+  // tight SCOPE_SELECT.
+  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
+  const parts = readingContextParts(rule, reading, now, composite);
+  parts.severity = severity; // band-resolved severity for the {severity} token
+  const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
+  const message = renderMessage(rule, reading, ctx);
+  ctx["message"] = message;
+  const notif = await prisma.notification.create({
+    data: {
+      ruleId: rule.id,
+      assetId: reading.assetId || null,
+      assetHostname: reading.hostname,
+      severity,
+      message,
+      regionTags: regionSnapshot(reading.tags),
+      ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}),
+    },
+  });
+  await prisma.notificationRuleState.upsert({
+    where: { ruleId_assetId_dimensionKey: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey } },
+    create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id, firingSeverity: severity },
+    update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null, recoveredSince: null, firingSeverity: severity },
+  });
+  await enqueueAlertActions(notif.id, actions, ctx, rule, reading);
   await logEvent({
     action: "notification.triggered",
     resourceType: "notification",
     resourceId: notif.id,
     resourceName: rule.name,
     actor: "system:notification-engine",
-    level: (rule.severity === "critical" || rule.severity === "serious") ? "error" : rule.severity === "warning" ? "warning" : "info",
+    level: severityLevel(severity),
     message: notif.message,
-    details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey },
+    details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey, severity },
   });
+}
+
+/** A firing alert crossed into a different band. Update its severity + message,
+ *  re-notify per policy (increase always if onIncrease; decrease if onDecrease),
+ *  and reset the escalation timer so the new band's escalation starts fresh. */
+async function applyBandTransition(
+  rule: DbRule,
+  reading: Reading,
+  st: { id: string; notificationId: string | null; firingSeverity: string | null },
+  newSeverity: string,
+  now: Date,
+): Promise<void> {
+  const prevRank = severityRank(st.firingSeverity ?? rule.severity);
+  const increased = severityRank(newSeverity) > prevRank;
+  const policy = bandNotifyOf(rule);
+  const tier = tierForSeverity(rule, newSeverity);
+
+  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
+  const parts = readingContextParts(rule, reading, now);
+  parts.severity = newSeverity;
+  const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
+  const message = renderMessage(rule, reading, ctx);
+  ctx["message"] = message;
+
+  // Update the live alert in place (one alert per asset). Reset the escalation
+  // progress and stamp bandSince so the new band's escalation timers restart
+  // from band-entry (the sweep measures tier delays from bandSince ?? triggeredAt).
+  if (st.notificationId) {
+    await prisma.notification.updateMany({
+      where: { id: st.notificationId, cleared: false },
+      data: { severity: newSeverity, message, escalationState: { tiers: {}, bandSince: now.toISOString() } as any, ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}) },
+    });
+  }
+  await prisma.notificationRuleState.update({
+    where: { id: st.id },
+    data: { firingSeverity: newSeverity, lastValue: typeof reading.value === "number" ? reading.value : null, recoveredSince: null },
+  });
+
+  if ((increased && policy.onIncrease) || (!increased && policy.onDecrease)) {
+    if (st.notificationId) await enqueueAlertActions(st.notificationId, tier.actions, ctx, rule, reading);
+    await logEvent({
+      action: increased ? "notification.escalated" : "notification.deescalated",
+      resourceType: "notification",
+      resourceId: st.notificationId ?? undefined,
+      resourceName: rule.name,
+      actor: "system:notification-engine",
+      level: severityLevel(newSeverity),
+      message,
+      details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey, severity: newSeverity, from: st.firingSeverity },
+    }).catch(() => {});
+  }
+}
+
+/** Resolved (below tier 0): optionally send an all-clear before recovering. */
+async function fireResolved(
+  rule: DbRule,
+  reading: Reading,
+  st: { id: string; notificationId: string | null; firingSeverity: string | null },
+  now: Date,
+): Promise<void> {
+  const policy = bandNotifyOf(rule);
+  if (!policy.onResolved || !st.notificationId) return;
+  const actions = policy.resolvedMode === "dedicated" ? policy.resolvedActions : tierForSeverity(rule, st.firingSeverity ?? rule.severity).actions;
+  if (!actions.length) return;
+  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
+  const parts = readingContextParts(rule, reading, now);
+  parts.severity = "resolved";
+  const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
+  ctx["message"] = `Resolved: ${rule.name} — ${ctx["asset"] ?? reading.hostname ?? ""} recovered`;
+  await enqueueAlertActions(st.notificationId, actions, ctx, rule, reading);
 }
 
 async function recover(rule: DbRule, st: { id: string; notificationId: string | null }): Promise<void> {
@@ -1255,17 +1514,23 @@ export async function evaluateAllNotificationRules(): Promise<void> {
       messageTemplate: r.messageTemplate,
       emailComposition: (r.emailComposition ?? null) as EmailComposition | null,
       escalation: v2.escalation,
+      severityBands: v2.severityBands,
+      bandNotify: v2.bandNotify,
     };
   });
 
   clearAssetDetailCache();
+
+  // Precedence index: which asset_metric/asset_state rules can carve assets out
+  // of which (same trigger signature, higher scope specificity). Built once.
+  const shadowIndex = buildShadowIndex(rules);
 
   for (const rule of rules) {
     try {
       if (rule.trigger.type === "composite") {
         await evaluateCompositeRule(rule);
       } else if (rule.trigger.type === "asset_metric" || rule.trigger.type === "asset_state" || rule.trigger.type === "host_metric") {
-        await evaluateThresholdRule(rule);
+        await evaluateThresholdRule(rule, shadowIndex);
       }
     } catch (err) {
       await logEvent({ action: "notification.engine_error", actor: "system:notification-engine", level: "error", message: `Rule "${rule.name}" evaluation failed`, details: { ruleId: rule.id, err: (err as Error)?.message } }).catch(() => {});
@@ -1305,6 +1570,21 @@ export interface PreviewMatch {
   }>;
   /** Composite drafts only — "k of n conditions met". */
   conditionsSummary?: string;
+  /** Severity bands: the severity this value lands in (null = below tier 0). */
+  severity?: string | null;
+  /** Precedence: a more-specific same-trigger automation already covers this
+   *  asset, so the draft won't alert on it. */
+  excludedBy?: { ruleId: string; ruleName: string };
+}
+
+/** Precedence carve-out summary for a draft (both authoring directions). */
+export interface CarveOutSummary {
+  /** Direction 1 — assets carved OUT of this (more-general) draft by existing
+   *  higher-rank same-trigger automations. */
+  carvedOut?: { count: number; byRule: { ruleId: string; ruleName: string; count: number }[] };
+  /** Direction 2 — existing lower-rank same-trigger automations this (more-
+   *  specific) draft will remove assets FROM. */
+  carvesFrom?: { ruleId: string; ruleName: string; count: number; sampleHostnames: string[] }[];
 }
 
 export interface PreviewResult {
@@ -1314,6 +1594,87 @@ export interface PreviewResult {
   matches: PreviewMatch[];
   /** Rendered sample of the composed email (first match), when the draft has emailComposition. */
   emailPreview?: { subject: string; text: string; html?: string };
+  /** Precedence carve-out (present only for asset_metric/asset_state drafts). */
+  carveOut?: CarveOutSummary;
+  /** Draft scope specificity (asset-scoped drafts) — drives the wizard's
+   *  "Specificity" indicator + explains carve-out ranking. */
+  specificity?: { rank: number; label: string };
+}
+
+/** A same-signature peer rule for carve-out computation. */
+export interface CarveOutPeer {
+  id: string;
+  name: string;
+  scope: RuleScope;
+  rank: number;
+}
+
+/** Pure carve-out aggregation: given the draft's rank, the assets its scope
+ *  matches, and the same-signature peer rules, compute per-asset excludedBy
+ *  (direction 1) + the summary (dir 1 + dir 2). No DB access — unit-testable. */
+export function carveOutAggregate(
+  draftRank: number,
+  scopeAssets: ScopeAsset[],
+  peers: CarveOutPeer[],
+): { excludedBy: Map<string, { ruleId: string; ruleName: string }>; summary: CarveOutSummary } {
+  const excludedBy = new Map<string, { ruleId: string; ruleName: string }>();
+  const higher = peers.filter((o) => o.rank > draftRank);
+  const lower = peers.filter((o) => o.rank < draftRank);
+
+  // Direction 1: assets a higher-rank same-signature rule already covers — the
+  // draft won't alert on them. Attribute each to its highest-rank coverer.
+  const byRule = new Map<string, { ruleName: string; count: number }>();
+  for (const a of scopeAssets) {
+    let best: CarveOutPeer | null = null;
+    for (const o of higher) {
+      if (scopeMatchesAsset(o.scope, a) && (!best || o.rank > best.rank)) best = o;
+    }
+    if (best) {
+      excludedBy.set(a.id, { ruleId: best.id, ruleName: best.name });
+      const e = byRule.get(best.id) ?? { ruleName: best.name, count: 0 };
+      e.count++;
+      byRule.set(best.id, e);
+    }
+  }
+
+  // Direction 2: lower-rank rules this (more-specific) draft will carve assets
+  // from — the authoring warning "creating this removes N devices from X".
+  const carvesFrom: NonNullable<CarveOutSummary["carvesFrom"]> = [];
+  for (const o of lower) {
+    const hit = scopeAssets.filter((a) => scopeMatchesAsset(o.scope, a));
+    if (hit.length) {
+      carvesFrom.push({ ruleId: o.id, ruleName: o.name, count: hit.length, sampleHostnames: hit.slice(0, 5).map((a) => a.hostname ?? a.id) });
+    }
+  }
+
+  const summary: CarveOutSummary = {};
+  if (excludedBy.size) {
+    summary.carvedOut = { count: excludedBy.size, byRule: Array.from(byRule.entries()).map(([ruleId, v]) => ({ ruleId, ruleName: v.ruleName, count: v.count })) };
+  }
+  if (carvesFrom.length) summary.carvesFrom = carvesFrom;
+  return { excludedBy, summary };
+}
+
+/** Compute the precedence carve-out for a draft against the other enabled
+ *  same-signature rules (both authoring directions): fetch peers, delegate to
+ *  the pure carveOutAggregate. */
+async function computeCarveOut(
+  input: PreviewRuleInput,
+  scopeAssets: ScopeAssetRow[],
+): Promise<{ excludedBy: Map<string, { ruleId: string; ruleName: string }>; summary: CarveOutSummary }> {
+  const sig = input.trigger ? triggerSignature(input.trigger) : null;
+  if (!sig || scopeAssets.length === 0) return { excludedBy: new Map(), summary: {} };
+
+  const others = await prisma.notificationRule.findMany({
+    where: { enabled: true, ...(input.id ? { id: { not: input.id } } : {}) },
+    select: { id: true, name: true, trigger: true, scope: true },
+  });
+  const peers: CarveOutPeer[] = others
+    .filter((o) => triggerSignature(o.trigger as unknown as Trigger) === sig)
+    .map((o) => ({ id: o.id, name: o.name, scope: (o.scope ?? {}) as RuleScope, rank: scopeRank((o.scope ?? {}) as RuleScope) }));
+  if (peers.length === 0) return { excludedBy: new Map(), summary: {} };
+
+  return carveOutAggregate(scopeRank(input.scope), scopeAssets, peers);
 }
 
 /** Dry-run a draft rule against current data with NO writes. A draft without
@@ -1342,37 +1703,48 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
     return previewCompositeRule(trigger, input);
   }
 
+  let scopeAssets: ScopeAssetRow[] = [];
   if (trigger.type === "host_metric") {
     const r = await resolveHostMetricReading(trigger);
     readings = r ? [r] : [];
   } else if (trigger.type === "asset_metric") {
-    const assets = await loadScopeAssets(input.scope);
-    readings = await resolveAssetMetricReadings(trigger, assets);
+    scopeAssets = await loadScopeAssets(input.scope);
+    readings = await resolveAssetMetricReadings(trigger, scopeAssets);
   } else if (trigger.type === "asset_state") {
-    const assets = await loadScopeAssets(input.scope);
-    readings = await resolveAssetStateReadings(trigger, assets);
+    scopeAssets = await loadScopeAssets(input.scope);
+    readings = await resolveAssetStateReadings(trigger, scopeAssets);
   } else {
     return { supported: false, note: "Event and change rules fire on new audit events; there's nothing to preview against current data.", totalEvaluated: 0, matches: [] };
   }
 
+  // Severity bands: the tier a value lands in (numeric triggers only).
+  const banded = !!(input.severityBands && input.severityBands.length) && (trigger.type === "asset_metric" || trigger.type === "host_metric");
+  const bandSevOf = (v: number | string | boolean | null): string | null =>
+    banded && (trigger.type === "asset_metric" || trigger.type === "host_metric")
+      ? severityForValue(trigger.operator, trigger.threshold, input.severity as Severity, input.severityBands as SeverityBand[], typeof v === "number" ? v : null)
+      : null;
+
   const showHysteresis = input.reset.mode === "auto" && input.reset.clearThreshold != null;
   const matches: PreviewMatch[] = readings.map((r) => {
     const meets = readingMeets(trigger, r.value);
-    if (!showHysteresis) {
-      return { assetId: r.assetId || null, hostname: r.hostname, dimension: r.dimLabel, value: r.value, meets };
+    const base: PreviewMatch = { assetId: r.assetId || null, hostname: r.hostname, dimension: r.dimLabel, value: r.value, meets };
+    if (banded) base.severity = bandSevOf(r.value);
+    if (showHysteresis) {
+      const wouldClear = recoveredMeets(trigger, input.reset, r.value);
+      base.wouldClear = wouldClear;
+      base.inDeadBand = !meets && !wouldClear;
     }
-    const wouldClear = recoveredMeets(trigger, input.reset, r.value);
-    return {
-      assetId: r.assetId || null,
-      hostname: r.hostname,
-      dimension: r.dimLabel,
-      value: r.value,
-      meets,
-      wouldClear,
-      inDeadBand: !meets && !wouldClear,
-    };
+    return base;
   });
   matches.sort((a, b) => Number(b.meets) - Number(a.meets));
+
+  // Precedence carve-out (both authoring directions) for asset-scoped drafts.
+  const { excludedBy, summary: carveOut } = await computeCarveOut(input, scopeAssets);
+  if (excludedBy.size) {
+    for (const m of matches) {
+      if (m.assetId && excludedBy.has(m.assetId)) m.excludedBy = excludedBy.get(m.assetId);
+    }
+  }
 
   // Rendered sample of the composed email against the best reading (first
   // matching, else first evaluated) — templates only, no recipient resolution.
@@ -1384,6 +1756,7 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
       reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
+      severityBands: input.severityBands, bandNotify: input.bandNotify,
     };
     const sample = readings.find((r) => readingMeets(trigger, r.value)) ?? readings[0];
     // Direct fetch (not the per-tick cache — preview runs in the web process).
@@ -1399,7 +1772,16 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
     emailPreview = { subject: composed.subject, text: composed.text, html: composed.html };
   }
 
-  return { supported: true, totalEvaluated: readings.length, matches: matches.slice(0, 200), emailPreview };
+  return {
+    supported: true,
+    totalEvaluated: readings.length,
+    matches: matches.slice(0, 200),
+    emailPreview,
+    ...(carveOut.carvedOut || carveOut.carvesFrom ? { carveOut } : {}),
+    ...(trigger.type === "asset_metric" || trigger.type === "asset_state"
+      ? { specificity: { rank: scopeRank(input.scope), label: scopeRankLabel(scopeRank(input.scope)) } }
+      : {}),
+  };
 }
 
 /** Composite dry-run: one PreviewMatch per asset with a per-leaf breakdown
@@ -1449,6 +1831,7 @@ async function previewCompositeRule(trigger: CompositeTrigger, input: PreviewRul
       reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
+      severityBands: input.severityBands, bandNotify: input.bandNotify,
     };
     const best = matches[0];
     const outcome = outcomes.get(best.assetId ?? "")!;

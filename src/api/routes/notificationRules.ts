@@ -69,9 +69,15 @@ notificationRulesRouter.post("/preview", requirePermission("automationManagement
  * actions never needs the key — including edits that REMOVE script actions.
  */
 function assertScriptActionPermission(req: Request, input: RuleInput): void {
+  const tierHasScript = (esc: unknown) =>
+    (normalizeEscalationToV2(esc)?.tiers ?? []).some((t) => t.actions.some((a) => a.type === "script"));
   const hasScript =
     input.actions.some((a) => a.type === "script") ||
-    (normalizeEscalationToV2(input.escalation)?.tiers ?? []).some((t) => t.actions.some((a) => a.type === "script"));
+    tierHasScript(input.escalation) ||
+    // Severity-band actions + per-band escalation tiers + dedicated resolved
+    // actions are equally RCE-equivalent.
+    (input.severityBands ?? []).some((b) => b.actions.some((a) => a.type === "script") || tierHasScript(b.escalation)) ||
+    (input.bandNotify?.resolvedActions ?? []).some((a) => a.type === "script");
   if (hasScript && !hasPermission(req, "automationScripts", "fullwrite")) {
     throw new AppError(403, "Attaching script actions requires Full Read-Write on Automation Scripts (automationScripts)");
   }

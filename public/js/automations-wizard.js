@@ -312,7 +312,8 @@ async function openAutomationWizard(existing) {
       { field: "tag", label: "Tag", ops: ["has", "notHas"], optionsFrom: "tags" },
       { field: "subnet", label: "Subnet / IP", ops: ["inCidr", "notInCidr"], optionsFrom: "subnets" },
       { field: "status", label: "Lifecycle status", ops: ["equals", "notEquals"], optionsFrom: null, values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
-      { field: "assetId", label: "Asset ID", ops: ["equals", "notEquals"], optionsFrom: null },
+      // Asset ID intentionally omitted — a raw id targets one device with no
+      // precedence meaning; use hostname. Saved rules using it still evaluate.
     ],
     maxDepth: 5,
   };
@@ -348,17 +349,13 @@ async function openAutomationWizard(existing) {
   // ── Step 1: Name & description ─────────────────────────────────────────
   function step1Html() {
     return '<h3 style="margin:0 0 0.25rem">What is this automation?</h3>' +
-      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Name it, describe what it watches for, and pick the severity its alerts carry.</p>' +
+      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Name it and describe what it watches for. (Severity is set with the trigger on the next steps.)</p>' +
       '<div class="form-group"><label>Name</label><input type="text" id="aw-name" value="' + escapeHtml(draft.name || "") + '" placeholder="e.g. Switch temperature high"></div>' +
-      '<div class="form-group"><label>Description (optional)</label><input type="text" id="aw-desc" value="' + escapeHtml(draft.description || "") + '"></div>' +
-      '<div class="form-group"><label>Severity</label><select id="aw-severity" class="sev-select sev-' + escapeHtml(draft.severity || "warning") + '">' + sevOpt(draft.severity || "warning") + '</select></div>' +
-      '<div class="form-group"><label><input type="checkbox" id="aw-enabled"' + (draft.enabled === false ? "" : " checked") + '> Enabled</label></div>';
+      '<div class="form-group"><label>Description (optional)</label><input type="text" id="aw-desc" value="' + escapeHtml(draft.description || "") + '"></div>';
   }
   function collectStep1() {
     draft.name = document.getElementById("aw-name").value.trim();
     draft.description = document.getElementById("aw-desc").value.trim() || null;
-    draft.severity = document.getElementById("aw-severity").value;
-    draft.enabled = document.getElementById("aw-enabled").checked;
   }
   function validateStep1() {
     if (!draft.name) return "Name is required.";
@@ -1016,10 +1013,14 @@ async function openAutomationWizard(existing) {
     var typeOpts = TRIGGER_CATEGORIES.map(function (t) {
       return '<option value="' + t.value + '"' + (t.value === cat ? " selected" : "") + '>' + escapeHtml(t.label) + '</option>';
     }).join("");
-    return '<h3 style="margin:0 0 0.25rem">When should it fire?</h3>' +
+    var multi = !!(draft.severityBands && draft.severityBands.length);
+    return '<h3 id="aw-step3-heading" style="margin:0 0 0.25rem">When should it fire?</h3>' +
       '<div class="aw-sentence" id="aw-trigger-sentence">…</div>' +
+      '<div class="form-group"><label><input type="checkbox" id="aw-multi-sev"' + (multi ? " checked" : "") + '> Use multiple severity levels (escalate severity as the value climbs)</label></div>' +
+      '<div class="form-group" id="aw-single-sev-wrap"><label>Alert severity</label><select id="aw-trigger-severity" class="sev-select sev-' + escapeHtml(draft.severity || "warning") + '">' + sevOpt(draft.severity || "warning") + '</select></div>' +
       '<div class="form-group"><label>Trigger type</label><select id="aw-trigger-type">' + typeOpts + '</select></div>' +
       '<div id="aw-trigger-fields"></div>' +
+      '<div id="aw-bands-host" style="display:none"></div>' +
       '<details' + (draft.messageTemplate ? " open" : "") + ' style="margin:0.5rem 0"><summary style="font-size:0.82rem;cursor:pointer;color:var(--color-text-tertiary)">Alert message template (optional)</summary>' +
         '<div style="margin-top:6px">' + tokenPaletteHtml("aw-token-palette") +
         '<input type="text" id="aw-msg" class="tpl-field" value="' + escapeHtml(draft.messageTemplate || "") + '" placeholder="{asset} {metric} = {value} (threshold {threshold})" style="width:100%"></div>' +
@@ -1058,6 +1059,18 @@ async function openAutomationWizard(existing) {
   }
   function wireStep3() {
     var panel = document.getElementById("aw-step-3");
+    var sevSel = panel.querySelector("#aw-trigger-severity");
+    if (sevSel) {
+      sevSel.addEventListener("change", function () {
+        draft.severity = sevSel.value;
+        sevSel.className = "sev-select sev-" + sevSel.value;
+        var note = panel.querySelector("#aw-band-base-note");
+        if (note) note.innerHTML = bandBaseNoteHtml();
+        applySevAccent(panel);
+      });
+    }
+    var multiCb = panel.querySelector("#aw-multi-sev");
+    if (multiCb) multiCb.addEventListener("change", function () { syncSeverityMode(panel); });
     panel.querySelector("#aw-trigger-type").addEventListener("change", function () {
       renderTriggerFields(); // category swap renders fresh from the draft
     });
@@ -1065,11 +1078,13 @@ async function openAutomationWizard(existing) {
       return panel.querySelector("#aw-trigger-type").value === "host" ? "host" : "asset";
     }, refreshTriggerSentence);
     // Delegated: any input/select change re-renders the sentence (the tree's
-    // own change handler also calls it — a second render is harmless).
-    panel.addEventListener("input", function () { refreshTriggerSentence(); });
-    panel.addEventListener("change", function () { refreshTriggerSentence(); });
+    // own change handler also calls it — a second render is harmless) and
+    // re-syncs the severity mode (single dropdown vs multi tiers + accent).
+    panel.addEventListener("input", function () { refreshTriggerSentence(); syncSeverityMode(panel); });
+    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); });
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
     renderTriggerFields();
+    syncSeverityMode(panel);
     wireTokenPalette(panel);
   }
   function collectStep3() {
@@ -1098,6 +1113,11 @@ async function openAutomationWizard(existing) {
       draft.trigger = { type: "change", changeType: panel.querySelector("#tf-changetype").value };
     }
     draft.messageTemplate = (panel.querySelector("#aw-msg") ? panel.querySelector("#aw-msg").value.trim() : "") || null;
+    // Base severity: in multi mode it's the select injected into the condition
+    // group header (.scg-sev); in single mode the standalone Alert dropdown.
+    var baseSel = multiSevOn(panel) ? panel.querySelector("#aw-trig-root .scg-sev") : panel.querySelector("#aw-trigger-severity");
+    if (baseSel) draft.severity = baseSel.value;
+    collectBands(panel); // severity tiers live with the trigger (step 3)
   }
   function tgValidateLeaf(leaf, label) {
     if (leaf.type === "asset_state") {
@@ -1127,10 +1147,36 @@ async function openAutomationWizard(existing) {
         })({ op: tr.op, children: tr.children });
         if (emptyGroup) return "A condition group is empty — add a condition or remove the group.";
       }
-      return null;
+      return validateBands();
     }
     if (tr.type === "event" && !String(tr.actionPattern || "").trim()) {
       return "Enter an action pattern for the event trigger.";
+    }
+    return null;
+  }
+  // Severity bands live with the trigger (step 3): threshold + severity present,
+  // actions valid (tier ordering is enforced server-side against base+operator).
+  function validateBands() {
+    if (!bandsApplicable(draft.trigger) || !draft.severityBands) return null;
+    for (var b = 0; b < draft.severityBands.length; b++) {
+      var band = draft.severityBands[b]; var bn = "Severity band " + (b + 1);
+      if (band.threshold == null || isNaN(band.threshold)) return bn + ": enter a numeric threshold.";
+      if (!band.severity) return bn + ": pick a severity.";
+      for (var ba = 0; ba < (band.actions || []).length; ba++) {
+        var pb = validateAction(band.actions[ba], bn + ", action " + (ba + 1));
+        if (pb) return pb;
+      }
+      var betiers = (band.escalation && band.escalation.tiers) || [];
+      for (var be = 0; be < betiers.length; be++) {
+        if (!betiers[be].actions.length) return bn + ", escalation " + (be + 1) + ": add at least one action (or remove it).";
+      }
+    }
+    if (draft.bandNotify && draft.bandNotify.onResolved && draft.bandNotify.resolvedMode === "dedicated") {
+      var ra = draft.bandNotify.resolvedActions || [];
+      for (var r = 0; r < ra.length; r++) {
+        var pr = validateAction(ra[r], "Resolved action " + (r + 1));
+        if (pr) return pr;
+      }
     }
     return null;
   }
@@ -1411,6 +1457,246 @@ async function openAutomationWizard(existing) {
     wireTokenPalette(panel);
   }
 
+  // ── Severity bands (numeric single-metric triggers) — live on step 3 (with
+  //    the trigger, since bands are threshold-defined). Built lazily into
+  //    #aw-bands-host and shown only while the trigger is a single numeric
+  //    metric; syncBandsVisibility toggles as the trigger tree changes. ────────
+  function bandBaseNoteHtml() {
+    var tr = draft.trigger || {};
+    var opPhrase = ((s.comparatorPhrases || {})[tr.operator]) || tr.operator || ">=";
+    return 'This condition alerts at severity <strong>' + escapeHtml(draft.severity) + '</strong> when the value ' + escapeHtml(opPhrase) + ' <strong>' + escapeHtml(String(tr.threshold != null ? tr.threshold : "?")) + '</strong> (its actions live on the Actions step). Add another severity to escalate as the value climbs further.';
+  }
+  function bandsSectionHtml() {
+    // Base severity + the first "+ Severity" live INSIDE the condition group
+    // header (injectBaseSeverity); this section holds the added tier groups +
+    // the notify policy. #aw-band-base-note is kept (hidden) for legacy callers.
+    return '<div id="aw-bands-section">' +
+      '<p id="aw-band-base-note" style="display:none"></p>' +
+      '<div id="aw-bands"></div>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="aw-band-add" style="margin-top:4px;display:none">+ Severity</button>' +
+      '<div id="aw-band-notify" style="display:none;margin-top:10px;border-top:1px solid var(--color-border);padding-top:8px">' +
+        '<label style="font-weight:600;font-size:0.82rem;display:block;margin:0 0 4px">Notify on</label>' +
+        '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-increase" checked> Severity increase (re-notify with the new band’s actions)</label>' +
+        '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-decrease"> Severity decrease (run the lower band’s actions)</label>' +
+        '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-resolved" checked> Resolved (below the base tier)</label>' +
+        '<div id="aw-bn-resolved-wrap" style="margin:6px 0 0 1.2rem">' +
+          '<label style="font-size:0.8rem">Resolved actions</label> ' +
+          '<select id="aw-bn-resolved-mode" style="width:auto"><option value="reuse">Reuse the alert’s actions</option><option value="dedicated">Run dedicated actions</option></select>' +
+          '<div id="aw-bn-resolved-actions" style="margin-top:6px;display:none"></div>' +
+          '<button type="button" class="btn btn-sm btn-secondary" id="aw-bn-resolved-add" style="margin-top:4px;display:none">+ Add resolved action</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+  function bandSeverityOptions(sel) {
+    return (s.severities || []).map(function (sv) {
+      return '<option value="' + sv + '"' + (sv === sel ? " selected" : "") + '>' + escapeHtml(sv) + '</option>';
+    }).join("");
+  }
+  function wireBandsSection(panel) {
+    var section = panel.querySelector("#aw-bands-section");
+    if (!section) return; // not a numeric single-metric trigger
+    var bandsHost = panel.querySelector("#aw-bands");
+    (draft.severityBands || []).forEach(function (b) { addBandRow(bandsHost, b); });
+    var notifyBox = panel.querySelector("#aw-band-notify");
+    var syncNotify = function () { notifyBox.style.display = bandsHost.querySelectorAll(".aw-band").length ? "block" : "none"; };
+    panel.querySelector("#aw-band-add").addEventListener("click", function () { addBandRow(bandsHost, null); syncNotify(); });
+    // Notify policy state.
+    var bn = draft.bandNotify || {};
+    panel.querySelector("#aw-bn-increase").checked = bn.onIncrease !== false;
+    panel.querySelector("#aw-bn-decrease").checked = bn.onDecrease === true;
+    panel.querySelector("#aw-bn-resolved").checked = bn.onResolved !== false;
+    var modeSel = panel.querySelector("#aw-bn-resolved-mode");
+    modeSel.value = bn.resolvedMode === "dedicated" ? "dedicated" : "reuse";
+    var resActionsHost = panel.querySelector("#aw-bn-resolved-actions");
+    var resAddBtn = panel.querySelector("#aw-bn-resolved-add");
+    var syncResolved = function () {
+      var on = panel.querySelector("#aw-bn-resolved").checked;
+      var dedicated = on && modeSel.value === "dedicated";
+      panel.querySelector("#aw-bn-resolved-wrap").style.display = on ? "block" : "none";
+      resActionsHost.style.display = dedicated ? "block" : "none";
+      resAddBtn.style.display = dedicated ? "inline-block" : "none";
+    };
+    (bn.resolvedActions || []).forEach(function (a) { addActionRow(resActionsHost, a); });
+    panel.querySelector("#aw-bn-resolved").addEventListener("change", syncResolved);
+    modeSel.addEventListener("change", syncResolved);
+    resAddBtn.addEventListener("click", function () { addActionRow(resActionsHost, null); });
+    syncNotify();
+    syncResolved();
+  }
+  // Severity colors (mirror styles.css .sev-select palette) for the accent.
+  var SEV_COLORS = { notice: "#94a3b8", informational: "var(--color-accent)", warning: "var(--color-warning)", serious: "#ff8a00", critical: "var(--color-danger)" };
+  function sevColor(sev) { return SEV_COLORS[sev] || "var(--color-accent)"; }
+  function sevRankOf(sev) { return (s.severities || []).indexOf(sev); }
+  // Paint the step heading + the conditions group border to the base severity.
+  function applySevAccent(panel) {
+    var color = sevColor(draft.severity || "warning");
+    var h = panel.querySelector("#aw-step3-heading");
+    if (h) h.style.color = color;
+    var root = panel.querySelector("#aw-trig-root > .scg-group");
+    if (root) root.style.borderLeftColor = color;
+  }
+  function multiSevOn(panel) {
+    var cb = panel.querySelector("#aw-multi-sev");
+    return !!(cb && cb.checked && bandsApplicable(draft.trigger));
+  }
+  // Single mode → standalone Alert severity dropdown; multi mode → the severity
+  // levels panel (base severity + tiers) with the trigger's sampling shared.
+  // Built lazily; re-syncs as the trigger tree / checkbox change without wiping
+  // in-progress tiers. Also repaints the severity accent.
+  function syncSeverityMode(panel) {
+    var cb = panel.querySelector("#aw-multi-sev");
+    var applicable = bandsApplicable(draft.trigger);
+    if (cb) cb.disabled = !applicable;
+    var multi = multiSevOn(panel);
+    var singleWrap = panel.querySelector("#aw-single-sev-wrap");
+    if (singleWrap) singleWrap.style.display = multi ? "none" : "";
+    var hostWrap = panel.querySelector("#aw-bands-host");
+    if (hostWrap) {
+      if (multi) {
+        if (!hostWrap._built) { hostWrap.innerHTML = bandsSectionHtml(); hostWrap._built = true; wireBandsSection(panel); }
+        hostWrap.style.display = "";
+      } else {
+        hostWrap.style.display = "none";
+      }
+    }
+    // Base severity + the first "+ Severity" live in the condition group header.
+    injectBaseSeverity(panel, multi);
+    applySevAccent(panel);
+  }
+  function sevSelectHtml(cls, sev) {
+    return '<select class="' + cls + ' sev-select sev-' + escapeHtml(sev) + '" style="width:auto">' + bandSeverityOptions(sev) + '</select>';
+  }
+  // In multi mode, inject a Base severity select into the condition group header
+  // (before the AND/OR select) + a "+ Severity" button in the group's button row,
+  // and accent the group border. Removed again in single mode. Idempotent.
+  function injectBaseSeverity(panel, multi) {
+    var root = panel.querySelector("#aw-trig-root > .scg-group");
+    if (!root) return;
+    var header = root.querySelector(":scope > div"); // header row (holds .scg-op)
+    var btnRow = root.querySelector(":scope > div:last-child"); // +Condition/+Group row
+    var existingSev = header && header.querySelector(".scg-sev-wrap");
+    var existingAdd = btnRow && btnRow.querySelector(".scg-add-sev");
+    if (!multi) {
+      if (existingSev) existingSev.remove();
+      if (existingAdd) existingAdd.remove();
+      root.style.borderLeftColor = "";
+      return;
+    }
+    if (header && !existingSev) {
+      var wrap = document.createElement("span");
+      wrap.className = "scg-sev-wrap";
+      wrap.style.cssText = "display:flex;align-items:center;gap:6px;margin-right:6px";
+      wrap.innerHTML = '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' + sevSelectHtml("scg-sev", draft.severity || "warning");
+      header.insertBefore(wrap, header.firstChild);
+      var sel = wrap.querySelector(".scg-sev");
+      sel.addEventListener("change", function () {
+        draft.severity = sel.value;
+        sel.className = "scg-sev sev-select sev-" + sel.value;
+        applySevAccent(panel);
+        syncBandAddButtons(panel);
+      });
+    }
+    if (btnRow && !existingAdd) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn btn-sm btn-secondary scg-add-sev";
+      b.style.marginLeft = "4px";
+      b.textContent = "+ Severity";
+      b.addEventListener("click", function () { addBandRow(panel.querySelector("#aw-bands"), null); syncBandNotify(panel); });
+      btnRow.appendChild(b);
+    }
+    root.style.borderLeftColor = sevColor(draft.severity || "warning");
+    syncBandAddButtons(panel);
+  }
+  function syncBandNotify(panel) {
+    var box = panel.querySelector("#aw-band-notify");
+    var host = panel.querySelector("#aw-bands");
+    if (box && host) box.style.display = host.querySelectorAll(".aw-band").length ? "block" : "none";
+  }
+  // Default severity for a NEW tier: one rank above the most-severe existing
+  // tier (or the base) — enforces the "only increase severity" rule.
+  function nextTierSeverity(bandsHost) {
+    var maxRank = sevRankOf(draft.severity || "warning");
+    bandsHost.querySelectorAll(".band-severity").forEach(function (sel) { maxRank = Math.max(maxRank, sevRankOf(sel.value)); });
+    var sevs = s.severities || [];
+    return sevs[Math.min(maxRank + 1, sevs.length - 1)] || sevs[sevs.length - 1];
+  }
+  function addBandRow(host, band) {
+    if (host.querySelectorAll(".aw-band").length >= 4 && !band) { showToast("At most 4 additional severities", "info"); return null; }
+    band = band || { threshold: "", severity: nextTierSeverity(host), actions: [] };
+    var sev0 = band.severity || nextTierSeverity(host);
+    var tr = draft.trigger || {};
+    var kind = tr.type === "host_metric" ? "host" : "asset";
+    // Each tier is a full condition GROUP on the SAME metric + sampling as the
+    // base condition — only severity / operator / value vary (shared sampling).
+    var tierLeaf = {
+      type: kind === "host" ? "host_metric" : "asset_metric",
+      metric: tr.metric, aggregation: tr.aggregation || "latest", windowSec: tr.windowSec || 0,
+      operator: band.operator || tr.operator || ">=",
+      threshold: band.threshold != null && band.threshold !== "" ? band.threshold : null,
+      dimensionFilter: tr.dimensionFilter,
+    };
+    var panel = document.getElementById("aw-step-3");
+    var row = document.createElement("div");
+    row.className = "aw-band scg-group";
+    row.style.cssText = "border:1px solid var(--color-border);border-left:3px solid " + sevColor(sev0) + ";border-radius:6px;padding:0.55rem;margin:4px 0";
+    // A tier is just: severity + the (locked-metric) condition + "+ Severity".
+    // It carries NO per-tier actions/escalation — the alert re-notifies with the
+    // base (Actions-step) actions + base escalation at the tier's severity.
+    row.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap">' +
+        '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' +
+        sevSelectHtml("band-severity", sev0) +
+        '<button type="button" class="btn btn-sm btn-danger band-remove" title="Remove severity" style="margin-left:auto">&times;</button>' +
+      '</div>' +
+      '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
+      '<div class="band-cond scg-children">' + tgLeafRowHtml(tierLeaf, kind) + '</div>' +
+      '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>';
+    host.appendChild(row);
+    // Lock the shared-sampling fields on the tier's condition row — metric,
+    // aggregation, window, dimensions — so only operator + value are editable.
+    var cond = row.querySelector(".band-cond");
+    cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-window, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
+    var grip = cond.querySelector(".aw-grip"); if (grip) grip.style.display = "none";
+    var rmCond = cond.querySelector(".scr-remove"); if (rmCond) rmCond.style.display = "none";
+    row.querySelector(".band-add-sev").addEventListener("click", function () { addBandRow(host, null); syncBandNotify(panel); });
+    // Per-tier accent + "only increase severity" guard: a tier can't be set at
+    // or below the tier before it (or the base).
+    var sevSel = row.querySelector(".band-severity");
+    sevSel.addEventListener("change", function () {
+      var prev = row.previousElementSibling && row.previousElementSibling.classList.contains("aw-band")
+        ? sevRankOf(row.previousElementSibling.querySelector(".band-severity").value)
+        : sevRankOf(draft.severity || "warning");
+      if (sevRankOf(sevSel.value) <= prev) {
+        var sevs = s.severities || [];
+        sevSel.value = sevs[Math.min(prev + 1, sevs.length - 1)];
+        showToast("Each added severity must be higher than the one before it", "info");
+      }
+      sevSel.className = "band-severity sev-select sev-" + sevSel.value;
+      row.style.borderLeftColor = sevColor(sevSel.value);
+      syncBandAddButtons(panel);
+    });
+    row.querySelector(".band-remove").addEventListener("click", function () {
+      row.remove();
+      syncBandNotify(panel);
+      syncBandAddButtons(panel);
+    });
+    syncBandAddButtons(panel);
+    return row;
+  }
+  // Show a "+ Severity" button only while a HIGHER severity is still available
+  // (and fewer than 4 tiers) — so the chain can reach critical but not beyond.
+  function syncBandAddButtons(panel) {
+    var host = panel.querySelector("#aw-bands");
+    var sevs = s.severities || [];
+    var maxRank = sevRankOf(draft.severity || "warning");
+    var count = 0;
+    if (host) host.querySelectorAll(".band-severity").forEach(function (sel) { maxRank = Math.max(maxRank, sevRankOf(sel.value)); count++; });
+    var canAdd = count < 4 && maxRank < sevs.length - 1;
+    panel.querySelectorAll(".scg-add-sev, .band-add-sev").forEach(function (b) { b.style.display = canAdd ? "" : "none"; });
+  }
+
   // ── Step 6: Summary + affected devices ─────────────────────────────────
   function renderStep6() {
     var panel = document.getElementById("aw-step-6");
@@ -1434,16 +1720,51 @@ async function openAutomationWizard(existing) {
       return;
     }
     try {
-      var res = await api.automations.preview({ scope: draft.scope });
-      var names = (res.matches || []).slice(0, 100).map(function (m) {
-        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + '</td></tr>';
+      // Send the trigger + rule id so the preview can compute the precedence
+      // carve-out (which devices this automation shares with more/less-specific
+      // automations that watch the same thing) and exclude this rule itself.
+      var body = { scope: draft.scope, trigger: draft.trigger, reset: draft.reset || undefined };
+      if (editing && editing.id) body.id = editing.id;
+      var res = await api.automations.preview(body);
+      var matches = res.matches || [];
+      var names = matches.slice(0, 100).map(function (m) {
+        var carved = m.excludedBy
+          ? ' <span style="color:var(--color-warning, #b7791f);font-size:0.75rem">— covered by “' + escapeHtml(m.excludedBy.ruleName) + '”</span>'
+          : "";
+        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + carved + '</td></tr>';
       }).join("");
-      box.innerHTML = '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> device(s) match the filter right now.</p>' +
+      var spec = res.specificity
+        ? '<p style="font-size:0.8rem;margin:0 0 6px">Specificity: <strong>' + escapeHtml(res.specificity.label) + '</strong>' +
+          ' <span style="color:var(--color-text-tertiary)">— a more-specific automation watching the same thing takes precedence for the devices it covers.</span></p>'
+        : "";
+      box.innerHTML = spec +
+        '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> device(s) match the filter right now.</p>' +
+        carveOutWarningHtml(res.carveOut) +
         (names ? '<div class="table-wrapper" style="max-height:220px;overflow:auto"><table><tbody>' + names + '</tbody></table></div>' +
           (res.totalEvaluated > 100 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 100) + ' more.</p>' : "") : "");
     } catch (err) {
       box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">' + escapeHtml(err.message || "Preview unavailable") + '</p>';
     }
+  }
+  // Bidirectional precedence warning: what this draft takes from less-specific
+  // automations (carvesFrom) + what more-specific ones already cover (carvedOut).
+  function carveOutWarningHtml(carveOut) {
+    if (!carveOut) return "";
+    var parts = [];
+    if (carveOut.carvesFrom && carveOut.carvesFrom.length) {
+      var lines = carveOut.carvesFrom.map(function (c) {
+        var sample = (c.sampleHostnames || []).slice(0, 3).join(", ");
+        return '<li>“' + escapeHtml(c.ruleName) + '” — <strong>' + c.count + '</strong> device(s)' +
+          (sample ? ' <span style="color:var(--color-text-tertiary)">(' + escapeHtml(sample) + (c.count > 3 ? ", …" : "") + ')</span>' : "") + '</li>';
+      }).join("");
+      parts.push('<p style="margin:0 0 2px;font-size:0.82rem">Creating this will stop these less-specific automations from alerting on the devices it covers:</p><ul style="margin:0 0 6px 1.1rem;font-size:0.82rem">' + lines + '</ul>');
+    }
+    if (carveOut.carvedOut && carveOut.carvedOut.count) {
+      var by = (carveOut.carvedOut.byRule || []).map(function (b) { return '“' + escapeHtml(b.ruleName) + '” (' + b.count + ')'; }).join(", ");
+      parts.push('<p style="margin:0 0 6px;font-size:0.82rem"><strong>' + carveOut.carvedOut.count + '</strong> matched device(s) are already covered by a more-specific automation, so this one won’t alert on them: ' + by + '.</p>');
+    }
+    if (!parts.length) return "";
+    return '<div style="border:1px solid var(--color-warning, #d9a441);background:var(--color-warning-bg, rgba(217,164,65,0.08));border-radius:6px;padding:0.5rem 0.6rem;margin:0 0 8px">' + parts.join("") + '</div>';
   }
 
   // One action row — used for top-level actions AND escalation-tier actions.
@@ -1707,14 +2028,11 @@ async function openAutomationWizard(existing) {
     return row;
   }
 
-  function collectStep5() {
-    var panel = document.getElementById("aw-step-5");
-    var host = panel.querySelector("#aw-actions");
-    if (!host) return;
-    draft.actions = collectActionsFrom(host);
-    // Escalation exists iff at least one escalation row does — no toggle.
+  // Collect escalation-tier rows from a host (shared by the base escalation and
+  // each severity band's escalation).
+  function collectTierRows(host) {
     var tiers = [];
-    panel.querySelectorAll("#aw-esc-tiers .aw-tier").forEach(function (row) {
+    host.querySelectorAll(":scope > .aw-tier").forEach(function (row) {
       var t = { afterMin: Number(row.querySelector(".tier-after").value) || 0, actions: collectActionsFrom(row.querySelector(".tier-actions")) };
       var rep = row.querySelector(".tier-repeat").value;
       if (rep !== "") {
@@ -1724,10 +2042,58 @@ async function openAutomationWizard(existing) {
       }
       tiers.push(t);
     });
+    return tiers;
+  }
+  function collectStep5() {
+    var panel = document.getElementById("aw-step-5");
+    var host = panel.querySelector("#aw-actions");
+    if (!host) return;
+    draft.actions = collectActionsFrom(host);
+    // Escalation exists iff at least one escalation row does — no toggle.
+    var tiers = collectTierRows(panel.querySelector("#aw-esc-tiers"));
     draft.escalation = tiers.length
       ? { stopOn: panel.querySelector("#aw-esc-stopon").value, tiers: tiers }
       : null;
   }
+  // Severity tiers + notify policy — collected only in multi-severity mode
+  // (a single numeric metric). Single mode clears them.
+  function collectBands(panel) {
+    if (!multiSevOn(panel)) { draft.severityBands = null; draft.bandNotify = null; return; }
+    var bandsHost = panel.querySelector("#aw-bands");
+    if (!bandsHost) return; // section not rendered
+    var baseOp = (draft.trigger && draft.trigger.operator) || ">=";
+    var kind = (draft.trigger && draft.trigger.type === "host_metric") ? "host" : "asset";
+    var bands = [];
+    bandsHost.querySelectorAll(":scope > .aw-band").forEach(function (row) {
+      // The tier's operator + threshold come from its (locked-metric) condition
+      // row; metric + aggregation + window are shared with the base condition.
+      var condRow = row.querySelector(".band-cond .scr-row");
+      var leaf = condRow ? tgCollectLeaf(condRow, kind) : {};
+      // Tiers carry no per-tier actions/escalation — the alert re-notifies with
+      // the base (Actions-step) actions + base escalation at the tier's severity.
+      var band = {
+        threshold: leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : null,
+        severity: row.querySelector(".band-severity").value,
+        actions: [],
+      };
+      // Persist a per-tier operator only when it differs from the base.
+      if (leaf.operator && leaf.operator !== baseOp) band.operator = leaf.operator;
+      bands.push(band);
+    });
+    draft.severityBands = bands.length ? bands : null;
+    if (!bands.length) { draft.bandNotify = null; return; }
+    var np = {
+      onIncrease: panel.querySelector("#aw-bn-increase").checked,
+      onDecrease: panel.querySelector("#aw-bn-decrease").checked,
+      onResolved: panel.querySelector("#aw-bn-resolved").checked,
+      resolvedMode: panel.querySelector("#aw-bn-resolved-mode").value,
+    };
+    if (np.onResolved && np.resolvedMode === "dedicated") {
+      np.resolvedActions = collectActionsFrom(panel.querySelector("#aw-bn-resolved-actions"));
+    }
+    draft.bandNotify = np;
+  }
+  function bandsApplicable(tr) { return !!tr && (tr.type === "asset_metric" || tr.type === "host_metric"); }
   function validateAction(a, label) {
     if (a.type === "notify") {
       if (!a.channelId) return label + ": pick a channel.";
@@ -1797,12 +2163,21 @@ async function openAutomationWizard(existing) {
     var escLine = draft.escalation && draft.escalation.tiers && draft.escalation.tiers.length
       ? draft.escalation.tiers.length + " tier(s), stops on " + (draft.escalation.stopOn === "clear" ? "clear" : "acknowledge")
       : "off";
+    var bandsRow = "";
+    if (bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length) {
+      var op = (draft.trigger && draft.trigger.operator) || ">=";
+      var bandLine = draft.severityBands.map(function (b) { return escapeHtml(b.severity + " " + op + " " + b.threshold); }).join(", ");
+      var np = draft.bandNotify || {};
+      var notifyBits = [np.onIncrease !== false ? "increase" : null, np.onDecrease ? "decrease" : null, np.onResolved !== false ? "resolved" : null].filter(Boolean).join(" + ");
+      bandsRow = '<dt>Severity bands</dt><dd>' + bandLine + ' <span style="color:var(--color-text-tertiary)">— notify on ' + escapeHtml(notifyBits || "none") + '</span></dd>';
+    }
     box.innerHTML = '<dl class="review-grid">' +
       '<dt>Name</dt><dd>' + escapeHtml(draft.name || "…") + ' <span class="badge badge-level-' + (draft.severity || "warning") + '">' + escapeHtml((draft.severity || "warning").toUpperCase()) + '</span>' + (draft.enabled === false ? ' <span class="badge">disabled</span>' : "") + '</dd>' +
       '<dt>Devices</dt><dd>' + escapeHtml(scopeSummaryText(draft.scope)) + '</dd>' +
       '<dt>Trigger</dt><dd>' + triggerSentence(draft.trigger) + '</dd>' +
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
       '<dt>Actions</dt><dd>' + (actionLines.length ? actionLines.join("<br>") : '<span style="color:var(--color-text-tertiary)">in-app alert only</span>') + '</dd>' +
+      bandsRow +
       '<dt>Escalation</dt><dd>' + escapeHtml(escLine) + '</dd>' +
     '</dl>';
   }
@@ -1915,6 +2290,8 @@ async function openAutomationWizard(existing) {
       channels: ["in_app"],
       emailComposition: null, // per-action composition in v2; rule-level field retired by the wizard
       escalation: draft.escalation,
+      severityBands: bandsApplicable(draft.trigger) ? (draft.severityBands || null) : null,
+      bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
     };
     this.disabled = true;
     try {
@@ -1928,12 +2305,7 @@ async function openAutomationWizard(existing) {
   });
 
   // ── First render ───────────────────────────────────────────────────────
-  var sevSel = document.getElementById("aw-severity");
-  if (sevSel) {
-    sevSel.addEventListener("change", function () {
-      sevSel.className = "sev-select sev-" + sevSel.value;
-    });
-  }
+  // (Severity moved off step 1 onto the trigger step — wired in wireStep3.)
   wireStep2();
   wireStep3();
   updateStepper();
@@ -1982,5 +2354,7 @@ function _awDraftFromRule(r) {
     messageTemplate: r.messageTemplate != null ? r.messageTemplate : null,
     actions: JSON.parse(JSON.stringify(Array.isArray(r.actions) ? r.actions : [])),
     escalation: esc ? JSON.parse(JSON.stringify(esc)) : null,
+    severityBands: Array.isArray(r.severityBands) && r.severityBands.length ? JSON.parse(JSON.stringify(r.severityBands)) : null,
+    bandNotify: r.bandNotify ? JSON.parse(JSON.stringify(r.bandNotify)) : null,
   };
 }

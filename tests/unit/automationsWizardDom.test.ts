@@ -80,9 +80,10 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector(".modal")).toBeTruthy();
     expect(doc.querySelectorAll("#aw-stepper .stepper-step").length).toBe(6);
     expect(doc.querySelector("#aw-step-1.visible")).toBeTruthy();
-    // severity select carries the shared palette classes
-    expect(doc.querySelector("#aw-severity.sev-select")).toBeTruthy();
-    expect(doc.querySelectorAll("#aw-severity option.sev-critical").length).toBe(1);
+    // Severity + Enabled were removed from the name step (severity moved to the
+    // trigger step; enabled is managed from the list toggle).
+    expect(doc.querySelector("#aw-severity")).toBeFalsy();
+    expect(doc.querySelector("#aw-enabled")).toBeFalsy();
   });
 
   it("Next reaches step 2; All assets is checked by default and hides the builder", async () => {
@@ -154,6 +155,14 @@ describe("automation wizard DOM render", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(toastErrors).toEqual([]);
     expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
+    // Severity leads the trigger step (single mode default): standalone
+    // dropdown shown, multi-severity checkbox present + off, bands hidden.
+    expect(doc.querySelector("#aw-trigger-severity.sev-select")).toBeTruthy();
+    expect(doc.querySelectorAll("#aw-trigger-severity option.sev-critical").length).toBe(1);
+    const multiCb = doc.querySelector("#aw-multi-sev") as unknown as { checked: boolean; disabled: boolean; dispatchEvent: (e: unknown) => void };
+    expect(multiCb).toBeTruthy();
+    expect(multiCb.checked).toBe(false);
+    expect((doc.querySelector("#aw-bands-host") as unknown as { style: { display: string } }).style.display).toBe("none");
     // Category select (device/host/event/change) + the tree with one leaf row.
     const cat = doc.querySelector("#aw-trigger-type") as unknown as { value: string };
     expect(cat.value).toBe("device");
@@ -162,6 +171,30 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector("#aw-trig-root .tgl-what")).toBeTruthy();
     expect(doc.querySelector("#aw-trig-root .tgl-threshold")).toBeTruthy();
     expect(doc.querySelector("#aw-trig-root .scr-row .aw-grip[draggable='true']")).toBeTruthy();
+
+    // Enable multi-severity → single dropdown hides; the base severity select +
+    // a "+ Severity" button are injected INTO the condition group header/buttons.
+    multiCb.checked = true;
+    multiCb.dispatchEvent(new win.Event("change", { bubbles: true }));
+    expect((doc.querySelector("#aw-single-sev-wrap") as unknown as { style: { display: string } }).style.display).toBe("none");
+    expect(doc.querySelector("#aw-trig-root .scg-group .scg-sev")).toBeTruthy();   // base severity in the group header
+    const addSev = doc.querySelector("#aw-trig-root .scg-group .scg-add-sev");
+    expect(addSev).toBeTruthy();                                                   // + Severity next to +Condition/+Group
+    expect((doc.querySelector("#aw-band-notify") as unknown as { style: { display: string } }).style.display).toBe("none");
+
+    // Clicking + Severity adds a tier GROUP block: severity header + a condition
+    // row (locked metric, editable operator/value) + its own + Severity.
+    (addSev as unknown as { click: () => void }).click();
+    const band = doc.querySelector("#aw-bands .aw-band")!;
+    expect(band).toBeTruthy();
+    expect(band.querySelector(".band-severity")).toBeTruthy();
+    expect(band.querySelector(".band-add-sev")).toBeTruthy();                      // per-tier + Severity
+    expect((band.querySelector(".band-cond .tgl-what") as unknown as { disabled: boolean }).disabled).toBe(true); // metric locked
+    (band.querySelector(".band-cond .tgl-threshold") as unknown as { value: string }).value = "95"; // editable value
+    (band.querySelector(".band-severity") as unknown as { value: string }).value = "critical";
+    expect((doc.querySelector("#aw-band-notify") as unknown as { style: { display: string } }).style.display).toBe("block");
+    expect((doc.querySelector("#aw-bn-increase") as unknown as { checked: boolean }).checked).toBe(true);
+    expect((doc.querySelector("#aw-bn-decrease") as unknown as { checked: boolean }).checked).toBe(false);
   });
 
   it("step 4 shows the default-checked 'trigger no longer true' checkbox; step 6 lists affected devices", async () => {
@@ -198,11 +231,14 @@ describe("automation wizard DOM render", () => {
     (tier.querySelector(".tier-remove") as unknown as { click: () => void }).click();
     expect(doc.querySelector("#aw-esc-tiers .aw-tier")).toBeFalsy();
     expect((doc.querySelector("#aw-esc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
+    // Band editor is NOT on step 5 (it moved to step 3, with the trigger).
+    expect(doc.querySelector("#aw-step-5 #aw-bands-section")).toBeFalsy();
 
     (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(doc.querySelector("#aw-step-6.visible")).toBeTruthy();
     expect(doc.querySelector("#aw-summary")).toBeTruthy();
+    expect(doc.querySelector("#aw-summary")!.textContent).toContain("critical"); // band (added on step 3) in summary
     const affected = doc.querySelector("#aw-affected")!;
     expect(affected.textContent).toContain("3"); // stubbed preview totalEvaluated
     expect(toastErrors).toEqual([]);
