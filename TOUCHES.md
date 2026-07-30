@@ -2114,6 +2114,7 @@ Listed alphabetically.
 
 **When changing this:**
 - Keep `MERGEABLE_FIELDS` in sync with the comparison UI in `public/js/assets.js`.
+- The comparison UI defaults the survivor to the side with the longer polling history (`GET /assets/:id/polling-history` → `sampleHistoryService.readPollingHistorySummary`; span first, sample count as tiebreak) precisely because the ghost's samples are orphaned here — if the merge ever starts carrying sample history over, retire that auto-select + the confirm-step "deleting the longer record" warning in `public/js/assets.js`.
 - A new per-asset monitoring override column (polling method / credential / cadence / pin array) belongs in `MONITOR_CONFIG_FIELDS` or `MONITOR_PIN_FIELDS`, or a merge will enable monitoring without it. `ASSET_SELECT` derives from both lists, so adding it there is enough.
 - The merge modal's review step mirrors the carry-over client-side (`monitoringCarried` in `_buildMergePlan`, `public/js/assets.js`) — keep the rule 10 exclusion in sync so the preview can't promise a flip the server refuses.
 
@@ -3912,9 +3913,9 @@ Listed alphabetically.
 
 ## services/sampleHistoryService.ts
 
-**What it owns:** Tier-aware readers for the asset chart-history endpoints (monitor, telemetry, hardware sensors, storage, interfaces, IPsec, perf-SLA) — returns serialized rows + stats matching the chart renderers, with overflow-boundary points for unbroken polylines. (SD-WAN rules are current-state — read directly from `prisma.assetSdwanRule` in the route, no history reader here.)
+**What it owns:** Tier-aware readers for the asset chart-history endpoints (monitor, telemetry, hardware sensors, storage, interfaces, IPsec, perf-SLA) — returns serialized rows + stats matching the chart renderers, with overflow-boundary points for unbroken polylines. (SD-WAN rules are current-state — read directly from `prisma.assetSdwanRule` in the route, no history reader here.) Also the merge-comparison **polling-history summary** (`readPollingHistorySummary`): oldest/newest sample + stitched non-double-counting sample count across the monitor + telemetry streams' three tiers, served by `GET /assets/:id/polling-history`.
 
-**Public API:** `readMonitorHistory`, `readTelemetryHistory`, `readHardwareSensorHistory`, `readStorageHistory`, `readInterfaceHistory`, `readIpsecHistory`, `readPerfSlaHistory`, `readSdwanMembers`
+**Public API:** `readMonitorHistory`, `readTelemetryHistory`, `readHardwareSensorHistory`, `readStorageHistory`, `readInterfaceHistory`, `readIpsecHistory`, `readPerfSlaHistory`, `readSdwanMembers`, `readPollingHistorySummary`
 
 **Cross-service deps:** `sampleQueryRouter` (`SampleTier`), `prisma`.
 

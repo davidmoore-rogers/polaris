@@ -50,6 +50,7 @@ import {
   readInterfaceHistory,
   readStorageHistory,
   readProcessHistory,
+  readPollingHistorySummary,
 } from "../../services/sampleHistoryService.js";
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
@@ -3740,6 +3741,22 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
       movedSourceId: target.id,
       newAsset: result.newAsset,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/assets/:id/polling-history — how much sample history the asset
+// holds (monitor probes + telemetry across all retention tiers): oldest/newest
+// timestamps, span in days, and a stitched approximate sample count. Feeds the
+// merge comparison UI, which defaults the survivor to the side with the longer
+// history because the absorbed side's samples are orphaned by the merge.
+router.get("/:id/polling-history", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({ where: { id }, select: { id: true } });
+    if (!asset) throw new AppError(404, "Asset not found");
+    res.json(await readPollingHistorySummary(id));
   } catch (err) {
     next(err);
   }

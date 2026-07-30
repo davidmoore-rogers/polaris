@@ -879,6 +879,108 @@ export async function readPerfSlaHistory(
   };
 }
 
+// ─── Polling-history summary (merge comparison) ──────────────────────────────
+//
+// "How much polling history does this asset have?" for the asset-merge
+// comparison UI: the absorbed side's sample history is orphaned by a merge
+// (no-FK hypertables — see assetMergeService's header), so the modal shows
+// each side's history size and defaults the survivor to the longer one.
+//
+// Covers the two universal streams — monitor probes (response time / up-down)
+// and cpu/mem telemetry — across all three retention tiers. The daily rollup
+// holds the oldest history, detail the newest, so the span comes from the
+// min/max over every tier. The sample count is STITCHED so overlapping
+// coverage isn't double-counted: all of daily, plus hourly buckets past the
+// last daily bucket's end, plus detail rows past the last hourly bucket's end.
+// Rollup buckets are written on completed boundaries, so the stitch is exact
+// up to the newest partial bucket — the UI presents the count as approximate.
+
+export interface StreamHistorySummary {
+  oldestAt: Date | null;
+  newestAt: Date | null;
+  sampleCount: number;
+}
+
+export interface PollingHistorySummary {
+  oldestAt: Date | null;
+  newestAt: Date | null;
+  /** Whole days between oldestAt and newestAt (0 when empty or sub-day). */
+  spanDays: number;
+  /** monitor + telemetry stitched counts combined. */
+  sampleCount: number;
+  monitor: StreamHistorySummary;
+  telemetry: StreamHistorySummary;
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+type MinMaxCountRow = { mn: Date | null; mx: Date | null; cnt: bigint | number };
+
+async function streamHistorySummary(
+  assetId: string,
+  detailTable: string,
+  hourlyTable: string,
+  dailyTable: string,
+): Promise<StreamHistorySummary> {
+  // Table names are module-level constants below — never caller input.
+  const daily = (await prisma.$queryRawUnsafe<MinMaxCountRow[]>(
+    `SELECT min("bucketStart") AS mn, max("bucketStart") AS mx,
+            COALESCE(sum("sampleCount"), 0)::bigint AS cnt
+     FROM "${dailyTable}" WHERE "assetId" = $1`,
+    assetId,
+  ))[0];
+
+  // Hourly buckets already covered by a daily bucket ([bucketStart, +1d)) are
+  // excluded from the count; min/max stay unconditional for the span.
+  const hourlyFrom = daily?.mx ? new Date(daily.mx.getTime() + DAY_MS) : null;
+  const hourly = (await prisma.$queryRawUnsafe<MinMaxCountRow[]>(
+    `SELECT min("bucketStart") AS mn, max("bucketStart") AS mx,
+            COALESCE(sum("sampleCount") FILTER (WHERE $2::timestamptz IS NULL OR "bucketStart" >= $2::timestamptz), 0)::bigint AS cnt
+     FROM "${hourlyTable}" WHERE "assetId" = $1`,
+    assetId, hourlyFrom,
+  ))[0];
+
+  const detailFrom = hourly?.mx
+    ? new Date(hourly.mx.getTime() + HOUR_MS)
+    : hourlyFrom;
+  const detail = (await prisma.$queryRawUnsafe<MinMaxCountRow[]>(
+    `SELECT min("timestamp") AS mn, max("timestamp") AS mx,
+            COALESCE(count(*) FILTER (WHERE $2::timestamptz IS NULL OR "timestamp" >= $2::timestamptz), 0)::bigint AS cnt
+     FROM "${detailTable}" WHERE "assetId" = $1`,
+    assetId, detailFrom,
+  ))[0];
+
+  const mins = [daily?.mn, hourly?.mn, detail?.mn].filter((d): d is Date => d != null);
+  const maxs = [daily?.mx, hourly?.mx, detail?.mx].filter((d): d is Date => d != null);
+  return {
+    oldestAt: mins.length ? new Date(Math.min(...mins.map((d) => d.getTime()))) : null,
+    newestAt: maxs.length ? new Date(Math.max(...maxs.map((d) => d.getTime()))) : null,
+    sampleCount: Number(daily?.cnt ?? 0) + Number(hourly?.cnt ?? 0) + Number(detail?.cnt ?? 0),
+  };
+}
+
+export async function readPollingHistorySummary(assetId: string): Promise<PollingHistorySummary> {
+  const monitor = await streamHistorySummary(
+    assetId, "asset_monitor_samples", "asset_monitor_samples_hourly", "asset_monitor_samples_daily",
+  );
+  const telemetry = await streamHistorySummary(
+    assetId, "asset_telemetry_samples", "asset_telemetry_samples_hourly", "asset_telemetry_samples_daily",
+  );
+  const mins = [monitor.oldestAt, telemetry.oldestAt].filter((d): d is Date => d != null);
+  const maxs = [monitor.newestAt, telemetry.newestAt].filter((d): d is Date => d != null);
+  const oldestAt = mins.length ? new Date(Math.min(...mins.map((d) => d.getTime()))) : null;
+  const newestAt = maxs.length ? new Date(Math.max(...maxs.map((d) => d.getTime()))) : null;
+  return {
+    oldestAt,
+    newestAt,
+    spanDays: oldestAt && newestAt ? Math.floor((newestAt.getTime() - oldestAt.getTime()) / DAY_MS) : 0,
+    sampleCount: monitor.sampleCount + telemetry.sampleCount,
+    monitor,
+    telemetry,
+  };
+}
+
 // ─── SD-WAN members (per-interface health-check summary) ─────────────────────
 
 export interface SdwanMemberHealthCheck {

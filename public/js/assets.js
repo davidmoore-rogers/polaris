@@ -1456,6 +1456,8 @@ var _mergeThisAsset = null;        // the asset whose modal is open ("this"/A)
 var _mergeOtherAsset = null;       // the selected merge target ("other"/B)
 var _mergeThisSources = [];
 var _mergeOtherSources = [];
+var _mergeThisHistory = null;      // GET /assets/:id/polling-history summary (null = unknown)
+var _mergeOtherHistory = null;
 var _mergeSearchTimer = null;
 var _mergePreselected = false;     // true when opened from the bulk bar (both assets picked up front)
 
@@ -1475,6 +1477,7 @@ async function openAssetMergeModal(assetId, preselectOtherId) {
   if (!isAdmin()) return;
   _mergeThisAsset = null; _mergeOtherAsset = null;
   _mergeThisSources = []; _mergeOtherSources = [];
+  _mergeThisHistory = null; _mergeOtherHistory = null;
   _mergePreselected = !!preselectOtherId;
 
   var intro = preselectOtherId
@@ -1507,10 +1510,12 @@ async function openAssetMergeModal(assetId, preselectOtherId) {
   try {
     var fetched = await Promise.all([
       api.assets.get(assetId),
-      api.assets.getSources(assetId).catch(function () { return []; })
+      api.assets.getSources(assetId).catch(function () { return []; }),
+      api.assets.pollingHistory(assetId).catch(function () { return null; })
     ]);
     _mergeThisAsset = fetched[0];
     _mergeThisSources = Array.isArray(fetched[1]) ? fetched[1] : [];
+    _mergeThisHistory = fetched[2];
   } catch (err) {
     var rs = document.getElementById("merge-search-results");
     if (rs) rs.innerHTML = '<div class="empty-state" style="padding:1rem">Failed to load this asset: ' + escapeHtml(err.message || "error") + '</div>';
@@ -1560,10 +1565,12 @@ async function selectMergeTarget(otherId) {
   try {
     var fetched = await Promise.all([
       api.assets.get(otherId),
-      api.assets.getSources(otherId).catch(function () { return []; })
+      api.assets.getSources(otherId).catch(function () { return []; }),
+      api.assets.pollingHistory(otherId).catch(function () { return null; })
     ]);
     _mergeOtherAsset = fetched[0];
     _mergeOtherSources = Array.isArray(fetched[1]) ? fetched[1] : [];
+    _mergeOtherHistory = fetched[2];
   } catch (err) {
     if (cmp) cmp.innerHTML = '<div class="empty-state" style="padding:1rem">Failed to load asset: ' + escapeHtml(err.message || "error") + '</div>';
     return;
@@ -1576,7 +1583,7 @@ async function selectMergeTarget(otherId) {
 }
 
 function _mergeReopenSearch() {
-  _mergeOtherAsset = null; _mergeOtherSources = [];
+  _mergeOtherAsset = null; _mergeOtherSources = []; _mergeOtherHistory = null;
   var cmp = document.getElementById("merge-compare");
   if (cmp) cmp.innerHTML = "";
   var btn = document.getElementById("merge-confirm-btn");
@@ -1595,6 +1602,44 @@ function _mergeAssetLabel(a) {
   return escapeHtml(a.hostname || a.dnsName || a.ipAddress || a.id);
 }
 
+// ── Polling-history helpers (merge comparison) ──
+// The absorbed side's sample history is permanently deleted by a merge, so the
+// comparison surfaces how much each side holds and defaults the survivor to
+// the longer one. Summaries come from GET /assets/:id/polling-history
+// (monitor probes + telemetry across all retention tiers); null = the fetch
+// failed and history is unknown.
+
+// Comparable size of a summary: span first (ms between oldest and newest
+// sample), sample count as the tiebreak. [0,0] = no history.
+function _mergeHistoryScore(h) {
+  if (!h || !h.sampleCount || !h.oldestAt || !h.newestAt) return [0, 0];
+  var span = new Date(h.newestAt).getTime() - new Date(h.oldestAt).getTime();
+  return [span > 0 ? span : 0, h.sampleCount];
+}
+
+// True when `a` holds strictly more polling history than `b`.
+function _mergeHistoryLonger(a, b) {
+  var sa = _mergeHistoryScore(a), sb = _mergeHistoryScore(b);
+  if (sa[0] !== sb[0]) return sa[0] > sb[0];
+  return sa[1] > sb[1];
+}
+
+// Short text form: "412 days (≈1,234,000 samples)" / "<1 day (≈40 samples)".
+function _mergeHistoryText(h) {
+  if (!h) return "unknown";
+  if (!h.sampleCount) return "none";
+  var span = h.spanDays > 0 ? h.spanDays + " day" + (h.spanDays === 1 ? "" : "s") : "<1 day";
+  return span + " (≈" + Number(h.sampleCount).toLocaleString() + " samples)";
+}
+
+// Cell HTML for the comparison context row.
+function _mergeHistoryCell(h) {
+  if (!h) return '<em style="color:var(--color-text-secondary)">unknown</em>';
+  if (!h.sampleCount) return '<em style="color:var(--color-text-secondary)">none</em>';
+  return '<strong>' + escapeHtml(_mergeHistoryText(h)) + '</strong>' +
+    '<div style="font-size:0.78rem;color:var(--color-text-secondary)">since ' + escapeHtml(formatDate(h.oldestAt)) + '</div>';
+}
+
 function _mergeSourcesSummary(sources) {
   if (!sources || !sources.length) return '<em style="color:var(--color-text-secondary)">none</em>';
   return sources.map(function (s) {
@@ -1609,16 +1654,29 @@ function _renderMergeComparison() {
   var A = _mergeThisAsset, B = _mergeOtherAsset;
 
   // Survivor selector — which row's identity, monitoring history, dependency
-  // edges and FKs are kept. The absorbed row's sample history is deleted.
+  // edges and FKs are kept. The absorbed row's sample history is deleted, so
+  // the side with the longer polling history is auto-selected (the operator
+  // can still keep the other side — the radios stay live).
+  var bHasLongerHistory = _mergeHistoryLonger(_mergeOtherHistory, _mergeThisHistory);
+  var aHasLongerHistory = _mergeHistoryLonger(_mergeThisHistory, _mergeOtherHistory);
+  var histBadge = ' <span class="badge badge-active" title="This side holds more polling history — auto-selected as the survivor so no history is lost">longer polling history</span>';
   var survivorHTML =
     '<div class="section-block" style="margin-bottom:0.75rem;padding:0.6rem 0.75rem">' +
       '<div class="section-label" style="margin-bottom:0.4rem">Which asset survives?</div>' +
       '<label style="display:block;margin-bottom:0.25rem;cursor:pointer">' +
-        '<input type="radio" name="merge-survivor" value="this" checked> Keep <strong>' + _mergeAssetLabel(A) + '</strong> (' + (_mergePreselected ? 'A' : 'this asset') + ')' +
+        '<input type="radio" name="merge-survivor" value="this"' + (bHasLongerHistory ? '' : ' checked') + '> Keep <strong>' + _mergeAssetLabel(A) + '</strong> (' + (_mergePreselected ? 'A' : 'this asset') + ')' +
+        (aHasLongerHistory ? histBadge : '') +
       '</label>' +
       '<label style="display:block;cursor:pointer">' +
-        '<input type="radio" name="merge-survivor" value="other"> Keep <strong>' + _mergeAssetLabel(B) + '</strong> (' + (_mergePreselected ? 'B' : 'the other asset') + ')' +
+        '<input type="radio" name="merge-survivor" value="other"' + (bHasLongerHistory ? ' checked' : '') + '> Keep <strong>' + _mergeAssetLabel(B) + '</strong> (' + (_mergePreselected ? 'B' : 'the other asset') + ')' +
+        (bHasLongerHistory ? histBadge : '') +
       '</label>' +
+      ((aHasLongerHistory || bHasLongerHistory)
+        ? '<p class="hint" style="margin:0.4rem 0 0">Auto-selected the asset with the <strong>longer polling history</strong> (' +
+          (bHasLongerHistory ? _mergeAssetLabel(B) : _mergeAssetLabel(A)) + ': ' + escapeHtml(_mergeHistoryText(bHasLongerHistory ? _mergeOtherHistory : _mergeThisHistory)) +
+          ' vs ' + escapeHtml(_mergeHistoryText(bHasLongerHistory ? _mergeThisHistory : _mergeOtherHistory)) + ') — ' +
+          'the absorbed asset\'s history is permanently deleted. Pick the other option above to keep it instead.</p>'
+        : '') +
       '<p class="hint" style="margin:0.4rem 0 0">The survivor keeps its monitoring history, dependency edges and quarantine state. ' +
         'The absorbed asset\'s sample/telemetry history and interface-comment overrides are <strong>permanently deleted</strong>. ' +
         'Discovery sources, MAC / IP / sighting history from both assets are combined onto the survivor. ' +
@@ -1639,6 +1697,7 @@ function _renderMergeComparison() {
   var monB = B.monitored ? '<span class="badge badge-active">monitored</span>' + (B.monitorStatus ? ' ' + escapeHtml(B.monitorStatus) : "") : '<span style="color:var(--color-text-secondary)">not monitored</span>';
   var contextRows =
     ctxRow("Monitored", monA, monB) +
+    ctxRow("Polling history", _mergeHistoryCell(_mergeThisHistory), _mergeHistoryCell(_mergeOtherHistory)) +
     ctxRow("Sources", _mergeSourcesSummary(_mergeThisSources), _mergeSourcesSummary(_mergeOtherSources)) +
     ctxRow("Last Seen", escapeHtml(A.lastSeen ? formatDate(A.lastSeen) : "-"), escapeHtml(B.lastSeen ? formatDate(B.lastSeen) : "-")) +
     ctxRow("Tags", (A.tags && A.tags.length ? A.tags.map(escapeHtml).join(", ") : "-"), (B.tags && B.tags.length ? B.tags.map(escapeHtml).join(", ") : "-"));
@@ -1706,6 +1765,8 @@ function _buildMergePlan(survivor, fieldWinners) {
   var survivorAsset = survivor === "this" ? _mergeThisAsset : _mergeOtherAsset;
   var absorbedAsset = survivor === "this" ? _mergeOtherAsset : _mergeThisAsset;
   var absorbedSources = survivor === "this" ? _mergeOtherSources : _mergeThisSources;
+  var survivorHistory = survivor === "this" ? _mergeThisHistory : _mergeOtherHistory;
+  var absorbedHistory = survivor === "this" ? _mergeOtherHistory : _mergeThisHistory;
 
   var overwrites = [];
   _mergeCompareFields.forEach(function (f) {
@@ -1743,7 +1804,12 @@ function _buildMergePlan(survivor, fieldWinners) {
     absorbedSources: absorbedSources || [],
     overwrites: overwrites,
     tagsAdded: tagsAdded,
-    monitoringCarried: monitoringCarried
+    monitoringCarried: monitoringCarried,
+    survivorHistory: survivorHistory,
+    absorbedHistory: absorbedHistory,
+    // The operator kept the side with LESS polling history — allowed (their
+    // call), but the review calls it out since the longer history is deleted.
+    losingLongerHistory: _mergeHistoryLonger(absorbedHistory, survivorHistory)
   };
 }
 
@@ -1816,8 +1882,17 @@ function _showMergeReviewModal(survivor, fieldWinners) {
         '<div class="section-label" style="margin-bottom:0.4rem;color:var(--color-danger)">Permanently deleted</div>' +
         '<ul style="margin:0;padding-left:1.1rem;font-size:0.85rem;color:var(--color-text-secondary)">' +
           '<li>The absorbed asset <strong>' + absLabel + '</strong> (its row is removed)</li>' +
-          '<li>Its monitoring / telemetry / sample history and interface-comment overrides</li>' +
+          '<li>Its monitoring / telemetry / sample history' +
+            (plan.absorbedHistory && plan.absorbedHistory.sampleCount
+              ? ' — <strong>' + escapeHtml(_mergeHistoryText(plan.absorbedHistory)) + '</strong>'
+              : (plan.absorbedHistory ? ' (none recorded)' : '')) +
+            ' and interface-comment overrides</li>' +
         '</ul>' +
+        (plan.losingLongerHistory
+          ? '<p style="margin:0.5rem 0 0;font-size:0.82rem;color:var(--color-danger)"><strong>Note:</strong> the absorbed asset holds <strong>more</strong> polling history than the survivor (' +
+            escapeHtml(_mergeHistoryText(plan.absorbedHistory)) + ' vs ' + escapeHtml(_mergeHistoryText(plan.survivorHistory)) +
+            '). Keeping ' + survLabel + ' deletes the longer record — go Back and switch the survivor to preserve it.</p>'
+          : '') +
         '<p style="margin:0.5rem 0 0;font-size:0.82rem;color:var(--color-text-secondary)">This cannot be undone. Use <strong>Split</strong> afterward if you need to separate a source again.</p>' +
       '</div>';
 
