@@ -1882,6 +1882,8 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-v4         { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); }
 .badge-v6         { background: rgba(255,214,0,0.12); color: var(--color-warning); border: 1px solid rgba(255,214,0,0.25); }
 .badge-vlan       { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); font-family: var(--font-mono); font-size: 0.72rem; }
+/* "Auto" marker on machine-created discovery rules (Integrations → Polaris Agent) */
+.badge-auto-rule  { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); }
 .badge-admin      { background: rgba(255,23,68,0.12); color: var(--color-danger); border: 1px solid rgba(255,23,68,0.25); }
 .badge-network-admin { background: rgba(255,152,0,0.12); color: #ff9800; border: 1px solid rgba(255,152,0,0.25); }
 .badge-assets-admin { background: rgba(0,188,212,0.12); color: #00bcd4; border: 1px solid rgba(0,188,212,0.25); }

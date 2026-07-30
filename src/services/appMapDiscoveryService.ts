@@ -1,9 +1,23 @@
 /**
  * src/services/appMapDiscoveryService.ts
  *
- * "Discovery" for the Application Map: named MAP RULES that pin process programs
- * and service units onto the assets an operator chose — the ones that exist now
- * and the ones discovered later.
+ * Service & process DISCOVERY RULES (formerly the Application Map's "map rules"):
+ * named rules that pin process programs and service units onto the assets an
+ * operator chose — the ones that exist now and the ones discovered later. The
+ * rules list lives on Integrations → Polaris Agent (the inventory these rules
+ * select from is agent-fed), not on the Application Map page.
+ *
+ * Each rule carries a MODE: "map" rules put items on the Application Map AND
+ * monitor them (mapping implies monitoring); "monitor" rules only pin the
+ * monitoring surfaces (per-program CPU/RAM + logs, per-unit journal tailing) and
+ * never touch the map pins.
+ *
+ * Each rule also carries a SOURCE: "manual" rules are operator-authored in the
+ * wizard; "auto" rules are created by recordOperatorPinChanges when someone ticks
+ * a Monitor/Map checkbox on an asset's Services tab. Auto rules are single-item,
+ * target explicit assetIds, and CONSOLIDATE: pinning the same item on a second
+ * asset adds that asset to the existing auto rule instead of minting another.
+ * Manual rules are never consolidated into or edited by the hook.
  *
  * Why rules rather than a bulk action: pinning is per-asset (Asset.mappedProcesses
  * / Asset.mappedServices, one Services-tab checkbox at a time), so "map nginx on
@@ -89,9 +103,14 @@ const MAX_SELECTION_ENTRIES = 64;
  */
 export const PROCESS_CAPABLE_ASSET_TYPES = ["workstation", "server"] as const;
 
-/** Enough for real fleet segmentation without turning the list into a page. */
-const MAX_RULES = 50;
+/** Enough for real fleet segmentation without turning the list into a page.
+ *  Raised from 50 when auto rules landed — they're single-item, so a fleet that
+ *  pins by hand accumulates more (smaller) rules than one authored in the wizard. */
+const MAX_RULES = 200;
 const MAX_NAME_LEN = 64;
+/** Per-rule cap on explicit asset targets. Auto-rule consolidation grows this
+ *  one asset per operator click, so the cap is generous but still a bound. */
+const MAX_ASSET_IDS = 1000;
 const BATCH_SIZE = 50;
 
 // ─── Rule shape ─────────────────────────────────────────────────────────────
@@ -104,12 +123,30 @@ export interface AutoMapNameBlock {
   regex: boolean;
 }
 
+/** "map" pins the Application Map surfaces AND the monitoring surfaces (mapping
+ *  implies monitoring); "monitor" pins only the monitoring surfaces. */
+export type AppMapRuleMode = "map" | "monitor";
+/** "manual" = wizard-authored; "auto" = created/consolidated from a per-asset
+ *  Services-tab pin toggle (recordOperatorPinChanges). */
+export type AppMapRuleSource = "manual" | "auto";
+
 export interface AppMapRule {
   id: string;
   name: string;
   enabled: boolean;
-  /** Asset criteria. null = every monitored asset. */
+  mode: AppMapRuleMode;
+  source: AppMapRuleSource;
+  /** Asset criteria. null = every monitored asset — UNLESS assetIds is set. */
   scope: TagCriteria | null;
+  /**
+   * Explicit asset targets, unioned with the scope's matches (the
+   * MaintenanceSchedule targets = union(criteria, assetIds) precedent). A null
+   * scope with a non-empty assetIds means JUST those assets — this is how auto
+   * rules stay pinned to the assets whose checkboxes created them. An auto rule
+   * that loses its last assetId is deleted rather than left to decay into a
+   * null-scope match-everything rule.
+   */
+  assetIds: string[];
   processes: AutoMapNameBlock;
   services: AutoMapNameBlock;
 }
@@ -174,6 +211,26 @@ function normalizeBlock(raw: unknown, label: string): AutoMapNameBlock {
   return { names: normalizeStrings(r.names, `${label}.names`), patterns, regex };
 }
 
+/** Asset ids are opaque exact-match keys, so unlike normalizeStrings this dedups
+ *  case-SENSITIVELY and carries its own (much higher) cap. */
+function normalizeAssetIds(raw: unknown): string[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) throw new AppError(400, "assetIds must be an array of strings");
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const v of raw) {
+    if (typeof v !== "string") throw new AppError(400, "assetIds must be an array of strings");
+    const t = v.trim();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  if (out.length > MAX_ASSET_IDS) {
+    throw new AppError(400, `assetIds may not exceed ${MAX_ASSET_IDS} entries`);
+  }
+  return out;
+}
+
 /** Validate + normalize one posted rule. Throws AppError(400) on bad input. */
 export function normalizeRule(raw: unknown): AppMapRule {
   if (raw == null || typeof raw !== "object") throw new AppError(400, "Rule must be an object");
@@ -185,9 +242,13 @@ export function normalizeRule(raw: unknown): AppMapRule {
     id: typeof r.id === "string" && r.id.trim() ? r.id.trim() : randomUUID(),
     name,
     enabled: r.enabled !== false,
+    // Pre-mode rules were all map rules, so "map" is the compatible default.
+    mode: r.mode === "monitor" ? "monitor" : "map",
+    source: r.source === "auto" ? "auto" : "manual",
     // normalizeCriteria returns null when there are no usable rules, which is
     // exactly "no scope" — an empty tree must not mean "match nothing".
     scope: r.scope == null ? null : normalizeCriteria(r.scope),
+    assetIds: normalizeAssetIds(r.assetIds),
     processes: normalizeBlock(r.processes, "processes"),
     services:  normalizeBlock(r.services,  "services"),
   };
@@ -320,6 +381,19 @@ async function pinnedCounts(column: "mappedProcesses" | "mappedServices"): Promi
 async function scopedAssetIds(scope: TagCriteria | null): Promise<Set<string> | null> {
   if (!scope) return null;
   return resolveMatchingAssetIds(scope);
+}
+
+/**
+ * The assets ONE RULE targets: union(scope matches, explicit assetIds), or null
+ * for "every monitored asset". A null scope means "all" only while assetIds is
+ * empty — with assetIds set it contributes nothing, so an auto rule targets
+ * exactly the assets whose checkboxes created it.
+ */
+async function ruleTargetIds(rule: AppMapRule): Promise<Set<string> | null> {
+  if (rule.assetIds.length === 0) return scopedAssetIds(rule.scope);
+  const set = rule.scope ? new Set(await resolveMatchingAssetIds(rule.scope)) : new Set<string>();
+  for (const id of rule.assetIds) set.add(id);
+  return set;
 }
 
 /**
@@ -477,15 +551,15 @@ async function computePending(rules: AppMapRule[]): Promise<PendingUpdate[]> {
   if (assets.length === 0) return [];
   const byId = new Map(assets.map((a) => [a.id, a]));
 
-  // Resolve each distinct scope once.
-  const scopeSets = await Promise.all(live.map((r) => scopedAssetIds(r.scope)));
+  // Resolve each rule's target set (scope ∪ explicit assetIds) once.
+  const targetSets = await Promise.all(live.map((r) => ruleTargetIds(r)));
 
   // Which assets any rule touches, and what each needs loaded.
   const touched = new Set<string>();
   let needProcesses = false;
   let needServices = false;
   live.forEach((rule, i) => {
-    const allowed = scopeSets[i];
+    const allowed = targetSets[i];
     if (blockHasItems(rule.processes)) needProcesses = true;
     if (blockHasItems(rule.services)) needServices = true;
     for (const a of assets) {
@@ -497,9 +571,14 @@ async function computePending(rules: AppMapRule[]): Promise<PendingUpdate[]> {
 
   const inv = await loadInventories([...touched], needProcesses, needServices);
 
-  // Union the pins each rule contributes, per asset.
+  // Union the pins each rule contributes, per asset — split by surface. MAP
+  // wants come from "map"-mode rules only; MONITOR wants come from every rule
+  // (mapping implies monitoring, so a map rule contributes to both, while a
+  // "monitor"-mode rule contributes only here and never touches the map pins).
   const wantProc = new Map<string, Set<string>>();
   const wantSvc = new Map<string, Set<string>>();
+  const wantMonProc = new Map<string, Set<string>>();
+  const wantMonSvc = new Map<string, Set<string>>();
   const addAll = (m: Map<string, Set<string>>, id: string, vals: string[]) => {
     if (vals.length === 0) return;
     let s = m.get(id);
@@ -507,14 +586,19 @@ async function computePending(rules: AppMapRule[]): Promise<PendingUpdate[]> {
     for (const v of vals) s.add(v);
   };
   live.forEach((rule, i) => {
-    const allowed = scopeSets[i];
+    const allowed = targetSets[i];
+    const maps = rule.mode === "map";
     for (const a of assets) {
       if (allowed && !allowed.has(a.id)) continue;
       if (blockHasItems(rule.processes)) {
-        addAll(wantProc, a.id, resolveBlockPins(rule.processes, inv.processes.get(a.id) ?? []));
+        const picked = resolveBlockPins(rule.processes, inv.processes.get(a.id) ?? []);
+        if (maps) addAll(wantProc, a.id, picked);
+        addAll(wantMonProc, a.id, picked);
       }
       if (blockHasItems(rule.services)) {
-        addAll(wantSvc, a.id, resolveBlockPins(rule.services, inv.services.get(a.id) ?? []));
+        const picked = resolveBlockPins(rule.services, inv.services.get(a.id) ?? []);
+        if (maps) addAll(wantSvc, a.id, picked);
+        addAll(wantMonSvc, a.id, picked);
       }
     }
   });
@@ -540,8 +624,8 @@ async function computePending(rules: AppMapRule[]): Promise<PendingUpdate[]> {
     // behaviour existed, or monitor-unpinned by hand) would never catch up.
     const haveMonProc = new Set(a.monitoredProcesses);
     const haveMonSvc = new Set(a.monitoredServices);
-    const freshMonProcesses = [...(wantProc.get(id) ?? [])].filter((n) => !haveMonProc.has(n));
-    const freshMonServices  = [...(wantSvc.get(id)  ?? [])].filter((n) => !haveMonSvc.has(n));
+    const freshMonProcesses = [...(wantMonProc.get(id) ?? [])].filter((n) => !haveMonProc.has(n));
+    const freshMonServices  = [...(wantMonSvc.get(id)  ?? [])].filter((n) => !haveMonSvc.has(n));
 
     if (freshProcesses.length === 0 && freshServices.length === 0 &&
         freshMonProcesses.length === 0 && freshMonServices.length === 0) continue;
@@ -601,8 +685,19 @@ export interface ScopePreview {
   assets: Array<{ id: string; hostname: string | null; ipAddress: string | null; assetType: string | null }>;
 }
 
-export async function previewScope(scope: TagCriteria | null): Promise<ScopePreview> {
-  const allowed = await scopedAssetIds(scope);
+export async function previewScope(
+  scope: TagCriteria | null,
+  assetIds: string[] = [],
+): Promise<ScopePreview> {
+  // Same union semantics as ruleTargetIds: explicit assetIds join the scope's
+  // matches, and a null scope with assetIds means JUST those assets.
+  let allowed: Set<string> | null;
+  if (assetIds.length === 0) {
+    allowed = await scopedAssetIds(scope);
+  } else {
+    allowed = scope ? new Set(await resolveMatchingAssetIds(scope)) : new Set<string>();
+    for (const id of assetIds) allowed.add(id);
+  }
   const rows = await prisma.asset.findMany({
     where: {
       monitored: true,
@@ -723,18 +818,218 @@ export async function unmapEverywhere(kind: "process" | "service", name: string)
     }
   }
 
-  // Stop the reconciler from re-pinning what was just removed.
+  // Stop the reconciler from re-pinning what was just removed. Only "map"-mode
+  // rules can re-pin the MAP surfaces, so monitor-only rules keep their names —
+  // unmap-everywhere takes things off the map, it doesn't stop monitoring them.
   const cfg = await getConfig();
   let changed = false;
   for (const rule of cfg.rules) {
+    if (rule.mode !== "map") continue;
     const block = isProc ? rule.processes : rule.services;
     const before = block.names.length;
     block.names = block.names.filter((n) => n !== target);
     if (block.names.length !== before) changed = true;
   }
+  // An auto rule that just lost its only item is spent — delete it rather than
+  // leaving an inert row in the list. Manual rules stay: the operator authored
+  // them and may re-add items in the wizard.
+  const kept = cfg.rules.filter((r) => !(r.source === "auto" && isRuleEmpty(r)));
+  if (kept.length !== cfg.rules.length) {
+    cfg.rules = kept;
+    changed = true;
+  }
   if (changed) await saveConfig(cfg);
 
   return { devices, connectionRowsDeleted };
+}
+
+// ─── Auto rules from per-asset pin toggles ──────────────────────────────────
+
+/** One Services-tab checkbox flip, as observed by the assets PUT diff. */
+export interface OperatorPinChange {
+  assetId: string;
+  kind: "process" | "service";
+  name: string;
+  /** Which checkbox column moved: Monitor or Map. */
+  surface: "monitor" | "map";
+  action: "added" | "removed";
+}
+
+export interface PinChangeOutcome {
+  changed: boolean;
+  /** Auto rule names created for a first-time pin. */
+  createdRules: string[];
+  /** Auto rule names that gained an asset (consolidation). */
+  updatedRules: string[];
+  /** Auto rule names that lost this asset on an unpin. */
+  trimmedRules: string[];
+  /** Auto rule names deleted because the unpin removed their last asset. */
+  prunedRules: string[];
+  /** Additions that could not be recorded (rule/asset caps). The direct pin on
+   *  the asset still stands — only the future-assets bookkeeping is skipped. */
+  skipped: number;
+  /** Ids of rules to re-apply inline (so a map pin's implied monitor pin lands
+   *  now rather than on the next reconcile tick). */
+  touchedRuleIds: string[];
+}
+
+/** True when `rule` is the machine-managed single-item auto rule for
+ *  (kind, name, mode) — the only shape consolidation ever adds assets to. */
+function isSingleItemAutoRule(
+  rule: AppMapRule,
+  kind: "process" | "service",
+  name: string,
+  mode: AppMapRuleMode,
+): boolean {
+  if (rule.source !== "auto" || rule.mode !== mode) return false;
+  const mine = kind === "process" ? rule.processes : rule.services;
+  const other = kind === "process" ? rule.services : rule.processes;
+  return (
+    mine.names.length === 1 && mine.names[0] === name && mine.patterns.length === 0 &&
+    other.names.length === 0 && other.patterns.length === 0
+  );
+}
+
+/** "Auto: <item>" (+ " (monitor)" for monitor-only), truncated to the name cap
+ *  and disambiguated with a counter if an operator already used the name. */
+function uniqueAutoRuleName(takenLower: Set<string>, itemName: string, mode: AppMapRuleMode): string {
+  const suffix = mode === "monitor" ? " (monitor)" : "";
+  for (let n = 1; ; n++) {
+    const counter = n === 1 ? "" : ` ${n}`;
+    const budget = MAX_NAME_LEN - "Auto: ".length - suffix.length - counter.length;
+    const item = itemName.length > budget ? itemName.slice(0, Math.max(1, budget - 1)) + "…" : itemName;
+    const candidate = `Auto: ${item}${suffix}${counter}`;
+    if (!takenLower.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
+/**
+ * Fold a batch of operator pin flips into the rule set. PURE (mutates only the
+ * passed cfg): no DB, no I/O — recordOperatorPinChanges owns persistence.
+ *
+ * Adds consolidate: the first pin of an item mints a single-item AUTO rule
+ * targeting just that asset; pinning the same item on another asset adds that
+ * asset to the existing auto rule's assetIds. MANUAL rules are never candidates —
+ * an operator-authored rule keeps exactly the shape its author gave it.
+ *
+ * Removes are the mirror image, auto rules only: the asset comes off every auto
+ * rule pinning that item on the matching surface, and an auto rule that loses its
+ * LAST asset is deleted — it must never survive as {scope:null, assetIds:[]},
+ * which would read as "every monitored asset". (Un-ticking a box on a host inside
+ * a MANUAL rule's scope keeps today's behavior: the reconcile re-pins it, because
+ * the rule says so.)
+ */
+export function applyPinChangesToConfig(
+  cfg: AppMapAutoMapConfig,
+  changes: OperatorPinChange[],
+): PinChangeOutcome {
+  const out: PinChangeOutcome = {
+    changed: false, createdRules: [], updatedRules: [], trimmedRules: [],
+    prunedRules: [], skipped: 0, touchedRuleIds: [],
+  };
+  const touch = (id: string) => { if (!out.touchedRuleIds.includes(id)) out.touchedRuleIds.push(id); };
+
+  for (const c of changes) {
+    const mode: AppMapRuleMode = c.surface === "map" ? "map" : "monitor";
+
+    if (c.action === "added") {
+      const hit = cfg.rules.find((r) => isSingleItemAutoRule(r, c.kind, c.name, mode));
+      if (hit) {
+        if (!hit.assetIds.includes(c.assetId)) {
+          if (hit.assetIds.length >= MAX_ASSET_IDS) { out.skipped += 1; continue; }
+          hit.assetIds.push(c.assetId);
+          out.changed = true;
+          out.updatedRules.push(hit.name);
+          touch(hit.id);
+        }
+        continue;
+      }
+      if (cfg.rules.length >= MAX_RULES) { out.skipped += 1; continue; }
+      const taken = new Set(cfg.rules.map((r) => r.name.toLowerCase()));
+      const block: AutoMapNameBlock = { names: [c.name], patterns: [], regex: false };
+      const rule: AppMapRule = {
+        id: randomUUID(),
+        name: uniqueAutoRuleName(taken, c.name, mode),
+        enabled: true,
+        mode,
+        source: "auto",
+        scope: null,
+        assetIds: [c.assetId],
+        processes: c.kind === "process" ? block : emptyBlock(),
+        services:  c.kind === "service" ? block : emptyBlock(),
+      };
+      cfg.rules.push(rule);
+      out.changed = true;
+      out.createdRules.push(rule.name);
+      touch(rule.id);
+      continue;
+    }
+
+    // action === "removed"
+    const survivors: AppMapRule[] = [];
+    for (const r of cfg.rules) {
+      const block = c.kind === "process" ? r.processes : r.services;
+      const applies = r.source === "auto" && r.mode === mode &&
+        block.names.includes(c.name) && r.assetIds.includes(c.assetId);
+      if (!applies) { survivors.push(r); continue; }
+      r.assetIds = r.assetIds.filter((id) => id !== c.assetId);
+      out.changed = true;
+      if (r.assetIds.length === 0 && !r.scope) {
+        out.prunedRules.push(r.name);
+        continue; // dropped — see the doc comment on why it must not survive
+      }
+      out.trimmedRules.push(r.name);
+      survivors.push(r);
+    }
+    cfg.rules = survivors;
+  }
+  return out;
+}
+
+// Read-modify-write of the Setting row is not atomic, so concurrent checkbox
+// flips (two operators, two tabs) could lose one another's bookkeeping. Browser
+// PUTs all land on the web role, so an in-process chain is a sufficient lock.
+let pinChangeChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * The assets-PUT hook: record operator pin flips as auto rules. Never throws —
+ * the pin itself already landed on the asset row, and rule bookkeeping must not
+ * fail the operator's save. Returns the outcome (null when nothing changed) so
+ * the route can log the audit Event.
+ */
+export async function recordOperatorPinChanges(
+  changes: OperatorPinChange[],
+): Promise<PinChangeOutcome | null> {
+  const valid = changes.filter((c) => c.assetId && c.name);
+  if (valid.length === 0) return null;
+  const run = pinChangeChain.then(async () => {
+    const cfg = await getConfig();
+    const outcome = applyPinChangesToConfig(cfg, valid);
+    if (!outcome.changed) return null;
+    await saveConfig(cfg);
+    // Re-apply only the touched rules inline so a map pin's implied monitor pin
+    // lands now; assets discovered later still ride the reconcile tick.
+    const touched = cfg.rules.filter((r) => outcome.touchedRuleIds.includes(r.id));
+    if (touched.length > 0) await applyRules(touched);
+    return outcome;
+  });
+  pinChangeChain = run.catch(() => undefined); // keep the chain alive after a failure
+  return run;
+}
+
+/** Hostname (or IP, or id) per explicitly-targeted asset, for rendering an auto
+ *  rule's Devices cell — one bounded query across every rule's assetIds. */
+export async function resolveRuleAssetLabels(cfg: AppMapAutoMapConfig): Promise<Record<string, string>> {
+  const ids = new Set<string>();
+  for (const r of cfg.rules) for (const id of r.assetIds) ids.add(id);
+  if (ids.size === 0) return {};
+  const rows = await prisma.asset.findMany({
+    where: { id: { in: [...ids] } },
+    select: { id: true, hostname: true, ipAddress: true },
+  });
+  const out: Record<string, string> = {};
+  for (const row of rows) out[row.id] = row.hostname || row.ipAddress || row.id;
+  return out;
 }
 
 // ─── Reconcile entry point (periodic job + inline on save) ──────────────────

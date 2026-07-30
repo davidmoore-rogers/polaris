@@ -56,6 +56,7 @@ import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
 import { getAssetProcessConnections } from "../../services/applicationMapService.js";
+import { recordOperatorPinChanges, type OperatorPinChange } from "../../services/appMapDiscoveryService.js";
 import {
   readIpsecHistory,
   readPerfSlaHistory,
@@ -2879,6 +2880,52 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
         await prisma.assetProcessConnection.deleteMany({
           where: { assetId: id, unit: { in: removed } },
         });
+      }
+    }
+    // Pin flips become AUTO discovery rules (Integrations → Polaris Agent):
+    // ticking Monitor/Map on this asset mints (or consolidates into) a
+    // single-item auto rule targeting it; un-ticking takes the asset off the
+    // matching auto rules so the reconcile can't re-pin what was just removed.
+    // Fire-and-forget: the pin already landed on the asset row above, and rule
+    // bookkeeping must not fail or slow the operator's save.
+    {
+      const pinChanges: OperatorPinChange[] = [];
+      const diffPins = (
+        field: "monitoredProcesses" | "mappedProcesses" | "monitoredServices" | "mappedServices",
+        kind: "process" | "service",
+        surface: "monitor" | "map",
+      ) => {
+        const posted = (input as any)[field] as string[] | undefined;
+        if (posted === undefined) return;
+        const was = new Set(((existing as any)[field] ?? []) as string[]);
+        const now = new Set(posted);
+        for (const n of now) if (!was.has(n)) pinChanges.push({ assetId: id, kind, name: n, surface, action: "added" });
+        for (const n of was) if (!now.has(n)) pinChanges.push({ assetId: id, kind, name: n, surface, action: "removed" });
+      };
+      diffPins("monitoredProcesses", "process", "monitor");
+      diffPins("mappedProcesses", "process", "map");
+      diffPins("monitoredServices", "service", "monitor");
+      diffPins("mappedServices", "service", "map");
+      if (pinChanges.length > 0) {
+        const hostLabel = asset.hostname || asset.ipAddress || id;
+        recordOperatorPinChanges(pinChanges)
+          .then((outcome) => {
+            if (!outcome || !outcome.changed) return;
+            const bits: string[] = [];
+            if (outcome.createdRules.length) bits.push(`created ${outcome.createdRules.join(", ")}`);
+            if (outcome.updatedRules.length) bits.push(`added ${hostLabel} to ${outcome.updatedRules.join(", ")}`);
+            if (outcome.trimmedRules.length) bits.push(`removed ${hostLabel} from ${outcome.trimmedRules.join(", ")}`);
+            if (outcome.prunedRules.length) bits.push(`deleted ${outcome.prunedRules.join(", ")}`);
+            logEvent({
+              action: "application_map.autorule.synced",
+              resourceType: "application_map",
+              resourceId: "discovery",
+              actor: requestActor(req),
+              message: `Discovery auto-rules updated from pins on "${hostLabel}": ${bits.join("; ")}`,
+              details: { assetId: id, changes: pinChanges, outcome } as any,
+            });
+          })
+          .catch(() => {});
       }
     }
     // Operator set/cleared the IP pin: any pending ip-override conflict is

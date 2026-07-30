@@ -396,6 +396,11 @@ document.addEventListener("DOMContentLoaded", function () {
       if (addBtn) addBtn.style.display = (target === "integrations") ? "" : "none";
       if (target === "agents" && !_agentsTabLoaded) {
         _agentsTabLoaded = true;
+        // Discovery rules card first (it sits above the agent card), then the
+        // agent-build card — both render into their own static containers.
+        if (window.PolarisDiscoveryRules && window.PolarisDiscoveryRules.init) {
+          window.PolarisDiscoveryRules.init();
+        }
         if (window.PolarisAgentBuild && window.PolarisAgentBuild.init) {
           window.PolarisAgentBuild.init();
         }

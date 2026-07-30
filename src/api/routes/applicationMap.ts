@@ -32,6 +32,7 @@ import {
   previewScope,
   applyRules,
   unmapEverywhere,
+  resolveRuleAssetLabels,
   PROCESS_CAPABLE_ASSET_TYPES,
 } from "../../services/appMapDiscoveryService.js";
 import { normalizeCriteria } from "../../services/tagAssignmentService.js";
@@ -108,16 +109,24 @@ const requireDiscoveryWrite = [
 // GET /application-map/discovery — the stored rule set, plus the asset types a
 // rule can meaningfully target. The client uses that list to constrain its
 // asset-type picker instead of keeping a second copy of the constant in sync.
+// assetLabels resolves every rule's explicit assetIds to hostnames so the list
+// can render "which assets" for auto rules without a per-rule round-trip.
 router.get("/discovery", requirePermission("applicationMap", "read"), async (_req, res, next) => {
   try {
     const cfg = await getConfig();
-    res.json({ ...cfg, processCapableAssetTypes: [...PROCESS_CAPABLE_ASSET_TYPES] });
+    const assetLabels = await resolveRuleAssetLabels(cfg);
+    res.json({ ...cfg, assetLabels, processCapableAssetTypes: [...PROCESS_CAPABLE_ASSET_TYPES] });
   } catch (err) {
     next(err);
   }
 });
 
-const ScopeBodySchema = z.object({ scope: z.unknown().optional() });
+const ScopeBodySchema = z.object({
+  scope: z.unknown().optional(),
+  // Explicit asset targets (auto rules carry them) so the wizard's device
+  // preview can show scope ∪ assetIds — the set the rule actually targets.
+  assetIds: z.array(z.string().min(1).max(64)).max(1000).optional(),
+});
 
 // POST /application-map/discovery/scope-preview — which assets a scope selects.
 // Backs the wizard's asset-selection step so the operator can see they picked the
@@ -126,7 +135,7 @@ router.post("/discovery/scope-preview", requirePermission("applicationMap", "rea
   try {
     const body = ScopeBodySchema.parse(req.body ?? {});
     const scope = body.scope == null ? null : normalizeCriteria(body.scope);
-    res.json(await previewScope(scope));
+    res.json(await previewScope(scope, body.assetIds ?? []));
   } catch (err) {
     next(err);
   }
@@ -180,12 +189,14 @@ router.put("/discovery", ...requireDiscoveryWrite, async (req, res, next) => {
         resourceId: "discovery",
         actor,
         message:
-          `Map rules pinned ${applied.processPins} process(es) + ${applied.servicePins} service(s) ` +
+          `Discovery rules pinned ${applied.processPins} process(es) + ${applied.servicePins} service(s) ` +
           `across ${applied.devices} device(s)`,
         details: applied as any,
       });
     }
-    res.json({ ...cfg, applied });
+    // Same shape as the GET so the list can re-render from either response.
+    const assetLabels = await resolveRuleAssetLabels(cfg);
+    res.json({ ...cfg, assetLabels, applied });
   } catch (err) {
     next(err);
   }

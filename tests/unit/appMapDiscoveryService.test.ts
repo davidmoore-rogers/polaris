@@ -1,14 +1,16 @@
 /**
  * tests/unit/appMapDiscoveryService.test.ts
  *
- * Pure-logic coverage for the Application Map's Discovery MAP RULES:
- * normalizeRule / normalizeConfig (validation, dedup, pattern compilation, and
- * the fold-forward of the pre-rules single-selection shape) and resolveBlockPins
- * (which reported names a block selects).
+ * Pure-logic coverage for the service & process DISCOVERY RULES (Integrations →
+ * Polaris Agent): normalizeRule / normalizeConfig (validation, dedup, pattern
+ * compilation, mode/source/assetIds, and the fold-forward of the pre-rules
+ * single-selection shape), resolveBlockPins (which reported names a block
+ * selects), and applyPinChangesToConfig (the auto-rule mint / consolidate /
+ * trim / prune machinery behind the Services-tab Monitor/Map checkboxes).
  *
- * The DB-bound half (aggregates / previews / apply / unmapEverywhere) isn't
- * exercised here — prisma is stubbed only so importing the module doesn't open a
- * connection.
+ * The DB-bound half (aggregates / previews / apply / unmapEverywhere /
+ * recordOperatorPinChanges persistence) isn't exercised here — prisma is stubbed
+ * only so importing the module doesn't open a connection.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -31,7 +33,10 @@ import {
   resolveBlockPins,
   emptyConfig,
   isRuleEmpty,
+  applyPinChangesToConfig,
   PROCESS_CAPABLE_ASSET_TYPES,
+  type AppMapAutoMapConfig,
+  type OperatorPinChange,
 } from "../../src/services/appMapDiscoveryService.js";
 
 const block = (over: Record<string, unknown> = {}) =>
@@ -103,6 +108,28 @@ describe("normalizeRule", () => {
     expect(r.scope).not.toBeNull();
     expect(r.scope!.rules.length).toBe(1);
   });
+
+  it("defaults mode to map (pre-mode rules were map rules) and honours monitor", () => {
+    expect(normalizeRule(RULE()).mode).toBe("map");
+    expect(normalizeRule(RULE({ mode: "monitor" })).mode).toBe("monitor");
+    expect(normalizeRule(RULE({ mode: "bogus" })).mode).toBe("map");
+  });
+
+  it("defaults source to manual and honours auto", () => {
+    expect(normalizeRule(RULE()).source).toBe("manual");
+    expect(normalizeRule(RULE({ source: "auto" })).source).toBe("auto");
+    expect(normalizeRule(RULE({ source: "robot" })).source).toBe("manual");
+  });
+
+  it("normalizes assetIds: trims, dedups case-SENSITIVELY, drops blanks", () => {
+    const r = normalizeRule(RULE({ assetIds: [" a1 ", "", "a1", "A1"] }));
+    expect(r.assetIds).toEqual(["a1", "A1"]);
+    expect(normalizeRule(RULE()).assetIds).toEqual([]);
+  });
+
+  it("rejects a non-array assetIds", () => {
+    expect(() => normalizeRule(RULE({ assetIds: "a1" }))).toThrow(/array of strings/);
+  });
 });
 
 describe("normalizeConfig", () => {
@@ -126,9 +153,9 @@ describe("normalizeConfig", () => {
     })).toThrow(/Duplicate rule id/);
   });
 
-  it("caps the rule count", () => {
-    const rules = Array.from({ length: 51 }, (_, i) => RULE({ name: "r" + i }));
-    expect(() => normalizeConfig({ rules })).toThrow(/At most 50 rules/);
+  it("caps the rule count (raised to 200 for single-item auto rules)", () => {
+    const rules = Array.from({ length: 201 }, (_, i) => RULE({ name: "r" + i }));
+    expect(() => normalizeConfig({ rules })).toThrow(/At most 200 rules/);
   });
 
   // The pre-rules shape was a single {processes, services, scope} selection. It
@@ -225,5 +252,143 @@ describe("resolveBlockPins", () => {
     const got = resolveBlockPins(block({ names: ["nginx", "postgres"], patterns: ["nginx*"] }), reported);
     expect(got.sort()).toEqual(["nginx", "nginx-worker", "postgres"]);
     expect(new Set(got).size).toBe(got.length);
+  });
+});
+
+describe("applyPinChangesToConfig (auto rules from Services-tab pin toggles)", () => {
+  const cfgOf = (...rules: unknown[]): AppMapAutoMapConfig =>
+    normalizeConfig({ version: 2, rules });
+  const change = (over: Partial<OperatorPinChange> = {}): OperatorPinChange => ({
+    assetId: "asset-1", kind: "service", name: "nginx.service",
+    surface: "map", action: "added", ...over,
+  });
+
+  it("mints a single-item auto rule for a first-time MAP pin", () => {
+    const cfg = cfgOf();
+    const out = applyPinChangesToConfig(cfg, [change()]);
+    expect(out.changed).toBe(true);
+    expect(out.createdRules).toEqual(["Auto: nginx.service"]);
+    expect(cfg.rules.length).toBe(1);
+    const r = cfg.rules[0]!;
+    expect(r.source).toBe("auto");
+    expect(r.mode).toBe("map");
+    expect(r.scope).toBeNull();
+    expect(r.assetIds).toEqual(["asset-1"]);
+    expect(r.services.names).toEqual(["nginx.service"]);
+    expect(r.processes.names).toEqual([]);
+    expect(out.touchedRuleIds).toEqual([r.id]);
+  });
+
+  it("suffixes monitor-only auto rules and keeps the modes as separate rules", () => {
+    const cfg = cfgOf();
+    applyPinChangesToConfig(cfg, [change({ surface: "monitor" })]);
+    applyPinChangesToConfig(cfg, [change({ surface: "map" })]);
+    expect(cfg.rules.map((r) => r.name).sort()).toEqual([
+      "Auto: nginx.service", "Auto: nginx.service (monitor)",
+    ]);
+    expect(cfg.rules.find((r) => r.mode === "monitor")).toBeTruthy();
+    expect(cfg.rules.find((r) => r.mode === "map")).toBeTruthy();
+  });
+
+  it("consolidates: the same item pinned on a second asset joins the existing auto rule", () => {
+    const cfg = cfgOf();
+    applyPinChangesToConfig(cfg, [change({ assetId: "a1" })]);
+    const out = applyPinChangesToConfig(cfg, [change({ assetId: "a2" })]);
+    expect(cfg.rules.length).toBe(1);
+    expect(cfg.rules[0]!.assetIds).toEqual(["a1", "a2"]);
+    expect(out.createdRules).toEqual([]);
+    expect(out.updatedRules).toEqual(["Auto: nginx.service"]);
+  });
+
+  it("re-pinning an already-recorded asset is a no-op", () => {
+    const cfg = cfgOf();
+    applyPinChangesToConfig(cfg, [change()]);
+    const out = applyPinChangesToConfig(cfg, [change()]);
+    expect(out.changed).toBe(false);
+    expect(cfg.rules[0]!.assetIds).toEqual(["asset-1"]);
+  });
+
+  it("NEVER consolidates into a manual rule, even a single-item one", () => {
+    const cfg = cfgOf({
+      name: "Hand-made", source: "manual", mode: "map",
+      services: { names: ["nginx.service"] }, assetIds: ["a1"],
+    });
+    const out = applyPinChangesToConfig(cfg, [change({ assetId: "a2" })]);
+    // A NEW auto rule appears instead of the manual rule growing.
+    expect(cfg.rules.length).toBe(2);
+    expect(cfg.rules[0]!.assetIds).toEqual(["a1"]);
+    expect(out.createdRules.length).toBe(1);
+    // ...and the auto rule's name dodges the collision-prone base by counter
+    // only when needed (here the base name is free).
+    expect(out.createdRules[0]).toBe("Auto: nginx.service");
+  });
+
+  it("disambiguates the auto name when an operator already took it", () => {
+    const cfg = cfgOf({
+      name: "Auto: nginx.service", source: "manual", mode: "map",
+      services: { names: ["nginx.service", "other.service"] },
+    });
+    const out = applyPinChangesToConfig(cfg, [change()]);
+    expect(out.createdRules).toEqual(["Auto: nginx.service 2"]);
+  });
+
+  it("unpinning takes the asset off the matching auto rule", () => {
+    const cfg = cfgOf();
+    applyPinChangesToConfig(cfg, [change({ assetId: "a1" }), change({ assetId: "a2" })]);
+    const out = applyPinChangesToConfig(cfg, [change({ assetId: "a1", action: "removed" })]);
+    expect(out.trimmedRules).toEqual(["Auto: nginx.service"]);
+    expect(cfg.rules[0]!.assetIds).toEqual(["a2"]);
+  });
+
+  it("deletes an auto rule that loses its LAST asset (must not decay to match-everything)", () => {
+    const cfg = cfgOf();
+    applyPinChangesToConfig(cfg, [change()]);
+    const out = applyPinChangesToConfig(cfg, [change({ action: "removed" })]);
+    expect(out.prunedRules).toEqual(["Auto: nginx.service"]);
+    expect(cfg.rules).toEqual([]);
+  });
+
+  it("unpinning never touches MANUAL rules (the reconcile re-pins by design)", () => {
+    const cfg = cfgOf({
+      name: "Hand-made", source: "manual", mode: "map",
+      services: { names: ["nginx.service"] }, assetIds: ["asset-1"],
+    });
+    const out = applyPinChangesToConfig(cfg, [change({ action: "removed" })]);
+    expect(out.changed).toBe(false);
+    expect(cfg.rules.length).toBe(1);
+    expect(cfg.rules[0]!.assetIds).toEqual(["asset-1"]);
+  });
+
+  it("unpin only affects the matching surface's mode", () => {
+    const cfg = cfgOf();
+    applyPinChangesToConfig(cfg, [change({ surface: "monitor" }), change({ surface: "map" })]);
+    applyPinChangesToConfig(cfg, [change({ surface: "map", action: "removed" })]);
+    expect(cfg.rules.length).toBe(1);
+    expect(cfg.rules[0]!.mode).toBe("monitor");
+  });
+
+  it("keeps process and service pins in separate auto rules", () => {
+    const cfg = cfgOf();
+    applyPinChangesToConfig(cfg, [
+      change({ kind: "process", name: "nginx" }),
+      change({ kind: "service", name: "nginx" }),
+    ]);
+    expect(cfg.rules.length).toBe(2);
+    const proc = cfg.rules.find((r) => r.processes.names.length)!;
+    const svc = cfg.rules.find((r) => r.services.names.length)!;
+    expect(proc.processes.names).toEqual(["nginx"]);
+    expect(svc.services.names).toEqual(["nginx"]);
+  });
+
+  it("truncates very long item names into the 64-char rule-name cap", () => {
+    const long = "x".repeat(120);
+    const cfg = cfgOf();
+    const out = applyPinChangesToConfig(cfg, [change({ name: long })]);
+    expect(out.createdRules.length).toBe(1);
+    expect(out.createdRules[0]!.length).toBeLessThanOrEqual(64);
+    // The rule still pins the FULL name — only the display name is truncated.
+    expect(cfg.rules[0]!.services.names).toEqual([long]);
+    // And the whole config still round-trips validation.
+    expect(() => normalizeConfig(cfg)).not.toThrow();
   });
 });

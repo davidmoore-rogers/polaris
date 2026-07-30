@@ -1,33 +1,40 @@
-// appmap-discovery.js — the Application Map's "Discovery" entry point: a list of
-// named MAP RULES, each of which pins process/service items onto the assets its
-// scope selects (now, and on assets discovered later via the
-// reconcileAppMapAutoMap job).
+// appmap-discovery.js — the service & process DISCOVERY RULES list, rendered
+// inline on Integrations → Polaris Agent (above the Polaris Agent card). Each
+// rule pins process/service items for monitoring — or monitoring + the
+// Application Map, per its mode — onto the assets its scope selects (now, and on
+// assets discovered later via the reconcileAppMapAutoMap job).
 //
-// This file owns the LIST; the builder lives in appmap-rules-wizard.js. Same split
-// as automations.js / automations-wizard.js.
+// This file owns the LIST; the builder lives in appmap-rules-wizard.js. Same
+// split as automations.js / automations-wizard.js. The list used to be a modal
+// opened from the Application Map's Discovery button; it moved here because the
+// inventory the rules select from is agent-fed, and because monitor-only rules
+// have nothing to do with the map. The Application Map's empty state points
+// operators at this card.
 //
-// Why rules instead of one fleet-wide picker: a single selection could only say
-// "every asset that reports this program", which over-pins — mapping
-// truckscale.service for the three truckscale hosts also hit every other host
-// running it. Each rule carries its own asset scope, so the same unit can be
-// mapped in one part of the fleet and left alone elsewhere.
+// Two rule sources render side by side:
+//   - manual rules, authored in the wizard (+ Add rule);
+//   - AUTO rules, minted server-side when an operator ticks a Monitor/Map
+//     checkbox on an asset's Services tab. Auto rules are single-item, target
+//     the specific assets whose checkboxes created them, and consolidate — the
+//     same item pinned on a second asset joins the existing auto rule. They wear
+//     an "Auto" badge to set them apart; editing one in the wizard converts it
+//     to manual.
 //
 // Asymmetry worth knowing while reading this: removing an item from a rule, or
 // disabling/deleting the rule, stops FUTURE auto-pinning — it does not
-// retroactively unpin, because Asset.mappedProcesses/mappedServices are
-// operator-owned and someone may have pinned a name by hand. "Unmap everywhere" is
-// the separate, confirmation-gated strip.
-//
-// openModal reuses ONE overlay, so the wizard REPLACES this list on the way in and
-// reopens it on cancel/save (see openAppMapRuleWizard).
+// retroactively unpin, because the pin arrays are operator-owned and someone may
+// have pinned a name by hand. (The one exception: un-ticking the checkbox on an
+// asset takes that asset off the matching AUTO rules, so the reconcile can't
+// fight the operator.)
 
-/* global openModal, closeModal, showToast, showConfirm, escapeHtml, permAtLeast, api,
-   openAppMapRuleWizard */
+/* global showToast, showConfirm, escapeHtml, permAtLeast, api, openAppMapRuleWizard */
 
 (function () {
   "use strict";
 
   var rules = [];
+  var assetLabels = {};
+  var containerEl = null;
 
   function canWrite() {
     return typeof permAtLeast === "function" &&
@@ -35,13 +42,22 @@
   }
 
   function scopeSummary(r) {
-    if (!r.scope || !(r.scope.rules || []).length) return "All workstations & servers";
-    var n = r.scope.rules.length;
-    var first = r.scope.rules[0];
-    var label = first.field === "subnet"
-      ? "IP in " + (first.cidrs || []).join(", ")
-      : first.field + " " + first.op + " " + (first.values || []).join(", ");
-    return n === 1 ? label : label + " +" + (n - 1) + " more";
+    var parts = [];
+    if (r.scope && (r.scope.rules || []).length) {
+      var n = r.scope.rules.length;
+      var first = r.scope.rules[0];
+      var label = first.field === "subnet"
+        ? "IP in " + (first.cidrs || []).join(", ")
+        : first.field + " " + first.op + " " + (first.values || []).join(", ");
+      parts.push(n === 1 ? label : label + " +" + (n - 1) + " more");
+    }
+    var ids = r.assetIds || [];
+    if (ids.length) {
+      var names = ids.map(function (id) { return assetLabels[id] || id; });
+      parts.push(names.length <= 2 ? names.join(", ") : names.slice(0, 2).join(", ") + " +" + (names.length - 2) + " more");
+    }
+    if (!parts.length) return "All workstations & servers";
+    return parts.join(" · ");
   }
 
   function itemSummary(r) {
@@ -58,26 +74,20 @@
 
   function bodyHTML() {
     return '' +
-      '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.85rem">' +
-        'Map rules pin processes and services onto the devices you choose — on the devices that ' +
-        'match today, <strong>and on devices discovered later</strong>. Mapped items are also ' +
-        'monitored (mapping implies monitoring, not the reverse). Removing an item or ' +
-        "disabling a rule stops future auto-pinning; it doesn't unpin what's already there " +
-        '(use <em>Unmap everywhere</em> for that).' +
-      '</p>' +
       '<div style="display:flex;justify-content:flex-end;margin-bottom:0.6rem">' +
         (canWrite() ? '<button type="button" class="btn btn-primary btn-sm" id="apd-add">+ Add rule</button>' : "") +
       '</div>' +
-      '<div class="table-wrapper table-wrapper-modal-sticky" style="max-height:46vh">' +
+      '<div class="table-wrapper" style="max-height:46vh;overflow:auto">' +
         '<table class="data-table" style="margin:0">' +
           '<thead><tr>' +
             '<th style="width:4rem">On</th>' +
             '<th>Rule</th>' +
+            '<th style="width:9.5rem">Type</th>' +
             '<th>Devices</th>' +
             '<th>Items</th>' +
             '<th style="width:8rem"></th>' +
           '</tr></thead>' +
-          '<tbody id="apd-tbody"><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody>' +
+          '<tbody id="apd-tbody"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>' +
         '</table>' +
       '</div>';
   }
@@ -86,22 +96,28 @@
     var tbody = document.getElementById("apd-tbody");
     if (!tbody) return;
     if (!rules.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">' +
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">' +
         (canWrite()
-          ? "No map rules yet. Add one to choose which devices get which processes and services mapped."
-          : "No map rules configured.") +
+          ? "No discovery rules yet. Add one to choose which devices get which processes and services " +
+            "monitored (and optionally mapped) — or tick Monitor/Map on an asset's Services tab and a " +
+            "rule appears here automatically."
+          : "No discovery rules configured.") +
         "</td></tr>";
       return;
     }
     var dis = canWrite() ? "" : " disabled";
     tbody.innerHTML = rules.map(function (r) {
+      var autoBadge = r.source === "auto"
+        ? ' <span class="badge badge-auto-rule" title="Created automatically from a Monitor/Map checkbox on an asset’s Services tab. Consolidates as more assets pin the same item; editing it makes it manual.">Auto</span>'
+        : "";
       return "<tr>" +
         '<td><label class="toggle-switch" title="' +
           (r.enabled ? "Enabled — stops pinning new items when turned off" : "Disabled") + '">' +
           '<input type="checkbox" class="apd-toggle" data-id="' + escapeHtml(r.id) + '"' +
             (r.enabled ? " checked" : "") + dis + ">" +
           '<span class="toggle-slider"></span></label></td>' +
-        '<td><a href="#" class="apd-edit-link" data-id="' + escapeHtml(r.id) + '">' + escapeHtml(r.name) + "</a></td>" +
+        '<td><a href="#" class="apd-edit-link" data-id="' + escapeHtml(r.id) + '">' + escapeHtml(r.name) + "</a>" + autoBadge + "</td>" +
+        "<td>" + (r.mode === "monitor" ? "Monitor only" : "Monitor + map") + "</td>" +
         "<td>" + escapeHtml(scopeSummary(r)) + "</td>" +
         "<td>" + escapeHtml(itemSummary(r)) + "</td>" +
         '<td style="white-space:nowrap">' +
@@ -118,15 +134,20 @@
   async function persist(nextRules, successMsg) {
     var res = await api.applicationMap.saveDiscovery(nextRules);
     rules = res.rules || [];
+    assetLabels = res.assetLabels || assetLabels;
     var a = res.applied || {};
+    var mapped = (a.processPins || 0) + (a.servicePins || 0);
+    // A monitor-only rule maps nothing, so "pinned 0 item(s) (+3 for monitoring)"
+    // would read like a failure — say what actually happened instead.
+    var pinned = mapped
+      ? mapped + " item(s)" + (a.monitorPins ? " (+" + a.monitorPins + " for monitoring)" : "")
+      : (a.monitorPins || 0) + " item(s) for monitoring";
     showToast(
-      a.devices
-        ? successMsg + " — pinned " + ((a.processPins || 0) + (a.servicePins || 0)) + " item(s)" +
-          (a.monitorPins ? " (+" + a.monitorPins + " for monitoring)" : "") + " on " + a.devices + " device(s)"
-        : successMsg,
+      a.devices ? successMsg + " — pinned " + pinned + " on " + a.devices + " device(s)" : successMsg,
       "success",
     );
-    // The map itself changed, so reflect it without making the operator refresh.
+    // If the Application Map page is open in this tab (it isn't, on the
+    // Integrations page), reflect the pin changes without a manual refresh.
     if (typeof window.appMapReload === "function") window.appMapReload();
     return res;
   }
@@ -137,6 +158,7 @@
     var idx = rule.id ? next.findIndex(function (r) { return r.id === rule.id; }) : -1;
     if (idx >= 0) next[idx] = rule; else next.push(rule);
     await persist(next, idx >= 0 ? "Rule updated" : "Rule created");
+    renderRows();
   };
 
   function wire() {
@@ -153,6 +175,7 @@
       var editEl = ev.target.closest ? ev.target.closest(".apd-edit, .apd-edit-link") : null;
       if (editEl) {
         ev.preventDefault();
+        if (!canWrite()) return;
         var id = editEl.getAttribute("data-id");
         var hit = rules.filter(function (r) { return r.id === id; })[0];
         if (hit && typeof openAppMapRuleWizard === "function") openAppMapRuleWizard(hit);
@@ -164,7 +187,7 @@
         var row = rules.filter(function (r) { return r.id === did; })[0];
         if (!row) return;
         var ok = await showConfirm(
-          'Delete the map rule "' + row.name + '"? Devices it already pinned keep their pins — ' +
+          'Delete the discovery rule "' + row.name + '"? Devices it already pinned keep their pins — ' +
           "deleting only stops future auto-pinning.",
         );
         if (!ok) return;
@@ -199,6 +222,7 @@
   async function reload() {
     var cfg = await api.applicationMap.discovery();
     rules = (cfg && cfg.rules) || [];
+    assetLabels = (cfg && cfg.assetLabels) || {};
     // Published by the server so the wizard's asset-type picker can't offer a type
     // no rule could ever match — rather than keeping a second copy of the constant
     // in sync on the client.
@@ -206,29 +230,31 @@
     renderRows();
   }
 
-  // Named separately from the button handler so the wizard can return here.
-  window.openAppMapRulesList = async function openAppMapRulesList() {
-    openModal(
-      // Titled to tie back to the toolbar button the operator clicked.
-      "Discovery — map rules",
-      bodyHTML(),
-      '<button type="button" class="btn btn-secondary" id="apd-close">Close</button>',
-      { large: true },
-    );
-    var close = document.getElementById("apd-close");
-    if (close) close.addEventListener("click", closeModal);
+  // Entry point: render the card body into #agent-discovery-rules-body on the
+  // Integrations page's Polaris Agent tab. Idempotent per page load (the tab's
+  // lazy-init guard calls it once). Reading the rule set requires
+  // applicationMap:read; a 403 degrades to an explanatory line instead of an
+  // empty card.
+  async function initDiscoveryRulesCard() {
+    containerEl = document.getElementById("agent-discovery-rules-body");
+    if (!containerEl) return;
+    if (typeof permAtLeast === "function" && !permAtLeast("applicationMap", "read")) {
+      containerEl.innerHTML =
+        '<p class="empty-state" style="padding:0.5rem 0">You don’t have permission to view discovery rules.</p>';
+      return;
+    }
+    containerEl.innerHTML = bodyHTML();
     wire();
     try {
       await reload();
     } catch (err) {
       var tbody = document.getElementById("apd-tbody");
       if (tbody) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load: ' +
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load: ' +
           escapeHtml(err && err.message ? err.message : String(err)) + "</td></tr>";
       }
     }
-  };
+  }
 
-  // Kept as the toolbar button's entry point so appmap.js doesn't need to change.
-  window.openAppMapDiscovery = window.openAppMapRulesList;
+  window.PolarisDiscoveryRules = { init: initDiscoveryRulesCard };
 })();

@@ -52,7 +52,6 @@
         </div>
         <div class="appmap-toolbar-actions">
           <span id="appmap-status" class="appmap-status"></span>
-          <button type="button" class="btn btn-primary btn-sm" id="appmap-discovery-btn" hidden>Discovery</button>
           <button type="button" class="btn-icon" id="appmap-screenshot" aria-label="Screenshot" title="Copy the map (with the info panel) to the clipboard" style="line-height:0">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
@@ -103,11 +102,14 @@
           <div id="appmap-empty" class="appmap-empty" hidden>
             <h3 id="appmap-empty-title">No mapped processes or services yet</h3>
             <p id="appmap-empty-text">
-              Use <strong>Discovery</strong> above to pick from everything reported across the fleet,
-              or open an asset's <strong>Services</strong> tab and check <strong>Map</strong> on the
-              units and programs whose connectivity you want drawn here. Listening ports and
-              connections appear within a couple of minutes of mapping something.
+              Configure service/process <strong>discovery rules</strong> on
+              <a href="/integrations.html">Integrations &rarr; Polaris Agent</a> to map items across
+              many devices at once (including devices discovered later), or open an asset's
+              <strong>Services</strong> tab and check <strong>Map</strong> on the units and programs
+              whose connectivity you want drawn here. Listening ports and connections appear within
+              a couple of minutes of mapping something.
             </p>
+            <a class="btn btn-secondary" href="/integrations.html">Go to Integrations</a>
             <a class="btn btn-secondary" href="/assets.html">Go to Assets</a>
           </div>
         </div>
@@ -133,7 +135,7 @@
   <script src="/js/integrations.js"></script>
   <script src="/js/assets.js"></script>
   <script src="/js/appmap.js"></script>
-  <script src="/js/appmap-discovery.js"></script>
-  <script src="/js/appmap-rules-wizard.js"></script>
+  <!-- The discovery-rules list + wizard (appmap-discovery.js / appmap-rules-wizard.js)
+       moved to Integrations → Polaris Agent; the map page no longer loads them. -->
 </body>
 </html>

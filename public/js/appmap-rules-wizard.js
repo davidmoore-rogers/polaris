@@ -1,10 +1,13 @@
-// appmap-rules-wizard.js — the "map rule" builder for the Application Map.
+// appmap-rules-wizard.js — the DISCOVERY RULE builder (Integrations → Polaris
+// Agent → Service & Process Discovery Rules).
 //
-// A map rule is: a NAME, an ASSET SCOPE, and the process/service ITEMS to pin on
-// the assets that scope selects — now and on assets discovered later (the
-// reconcileAppMapAutoMap job re-applies it). Several rules coexist, which is the
-// point: "map truckscale.service" should be answerable for the three truckscale
-// hosts without also hitting every other host that happens to run it.
+// A discovery rule is: a NAME, a MODE (monitor only, or monitor + map on the
+// Application Map — mapping implies monitoring), an ASSET SCOPE, and the
+// process/service ITEMS to pin on the assets that scope selects — now and on
+// assets discovered later (the reconcileAppMapAutoMap job re-applies it).
+// Several rules coexist, which is the point: "map truckscale.service" should be
+// answerable for the three truckscale hosts without also hitting every other
+// host that happens to run it.
 //
 // Four steps: Name → Devices → Items → Summary. Built in the idiom of
 // automations-wizard.js (openAutomationWizard): one closure-scoped `draft` holding
@@ -28,11 +31,16 @@
 //     Changing the scope invalidates it, so it re-fetches on entry when the scope
 //     has moved.
 //
-// openModal reuses ONE overlay, so a wizard opened from the rules list REPLACES
-// it; Cancel and post-save both reopen the list rather than closing outright.
+// Editing an AUTO rule (one minted from a Services-tab checkbox) converts it to
+// MANUAL on save: once an operator shapes it by hand, the consolidation machinery
+// must stop adding assets to it. Its explicit assetIds survive the edit — the
+// wizard just doesn't render a UI for them beyond the step-2/step-4 counts.
+//
+// The rules list renders INLINE on the Integrations page (not in a modal), so
+// Cancel and post-save just close the modal — the save path re-renders the list
+// via appMapRulesSaveOne (appmap-discovery.js).
 
-/* global openModal, closeModal, showToast, showConfirm, escapeHtml, debounce, api,
-   openAppMapRulesList */
+/* global openModal, closeModal, showToast, showConfirm, escapeHtml, debounce, api */
 
 (function () {
   "use strict";
@@ -83,13 +91,21 @@
       id: null,
       name: "",
       enabled: true,
+      mode: "map",
+      source: "manual",
+      assetIds: [],
       scope: null,
       processes: { names: [], patterns: [], regex: false },
       services: { names: [], patterns: [], regex: false },
     };
+    if (!draft.mode) draft.mode = "map";           // pre-mode rules were map rules
+    if (!draft.assetIds) draft.assetIds = [];
+    var wasAuto = draft.source === "auto";
     // allAssets is UI-only state: a null scope means "every monitored asset"
-    // server-side, so the checkbox is just how that's expressed.
-    var allAssets = !draft.scope;
+    // server-side, so the checkbox is just how that's expressed — UNLESS the rule
+    // carries explicit assetIds (an auto rule), in which case a null scope means
+    // JUST those assets and the checkbox must start unchecked.
+    var allAssets = !draft.scope && !(draft.assetIds && draft.assetIds.length);
 
     // Step 3 state.
     var picked = { process: {}, service: {} };
@@ -112,6 +128,11 @@
 
     function step1Html() {
       return '' +
+        (wasAuto
+          ? '<p class="hint" style="margin-bottom:0.8rem">This rule was created automatically from a ' +
+            'Monitor/Map checkbox on an asset’s Services tab. Saving your edits converts it to a ' +
+            'manual rule — new per-asset pins will no longer be consolidated into it.</p>'
+          : "") +
         '<div class="form-group">' +
           '<label for="apr-name">Rule name</label>' +
           '<input type="text" id="apr-name" class="input" maxlength="64" ' +
@@ -119,17 +140,31 @@
           '<p class="hint">Names the rule in the list and in audit Events.</p>' +
         '</div>' +
         '<div class="form-group">' +
+          '<label>What should this rule do?</label>' +
+          '<label class="appmap-check" style="display:block;margin-bottom:4px">' +
+            '<input type="radio" name="apr-mode" value="map"' + (draft.mode !== "monitor" ? " checked" : "") + '> ' +
+            '<strong>Monitor + map</strong> — collect telemetry/logs AND draw the items’ connections ' +
+            'on the Application Map</label>' +
+          '<label class="appmap-check" style="display:block">' +
+            '<input type="radio" name="apr-mode" value="monitor"' + (draft.mode === "monitor" ? " checked" : "") + '> ' +
+            '<strong>Monitor only</strong> — per-program CPU/RAM + logs, per-unit journal tailing; ' +
+            'nothing is published to the Application Map</label>' +
+          '<p class="hint">Mapping implies monitoring, so a mapping rule pins both surfaces.</p>' +
+        '</div>' +
+        '<div class="form-group">' +
           '<label class="appmap-check"><input type="checkbox" id="apr-enabled"' +
             (draft.enabled ? " checked" : "") + '> Enabled</label>' +
           '<p class="hint">A disabled rule stops pinning anything new. It never un-pins ' +
-            'what it already mapped — use <em>Unmap everywhere</em> on the rules list for that.</p>' +
+            'what it already pinned — use <em>Unmap everywhere</em> for map pins.</p>' +
         '</div>';
     }
     function collectStep1() {
       var n = document.getElementById("apr-name");
       var e = document.getElementById("apr-enabled");
+      var m = document.querySelector('input[name="apr-mode"]:checked');
       if (n) draft.name = n.value.trim();
       if (e) draft.enabled = e.checked;
+      if (m) draft.mode = m.value === "monitor" ? "monitor" : "map";
     }
     function validateStep1() {
       if (!draft.name) return "Give the rule a name.";
@@ -190,6 +225,18 @@
       '</div>';
     }
 
+    function explicitDevicesHtml() {
+      var n = (draft.assetIds || []).length;
+      if (!n) return "";
+      return '<div class="form-group" id="apr-explicit-wrap">' +
+        '<p class="hint">Also explicitly targets <strong>' + n + '</strong> specific device(s) — ' +
+          'the assets whose Services-tab pins created this rule. Conditions below are unioned ' +
+          'with them. ' +
+          '<button type="button" class="btn btn-secondary btn-sm" id="apr-clear-explicit">Remove them</button>' +
+        '</p>' +
+      '</div>';
+    }
+
     function step2Html() {
       var rules = (draft.scope && draft.scope.rules) || [];
       return '' +
@@ -201,6 +248,7 @@
             'firewalls, switches, APs and printers report nothing to pin. ' +
             'Uncheck to narrow further; conditions are ANDed.</p>' +
         '</div>' +
+        explicitDevicesHtml() +
         '<div id="apr-scope-builder"' + (allAssets ? ' style="display:none"' : "") + '>' +
           '<div id="apr-rules">' + (rules.length ? rules.map(ruleRowHTML).join("") : ruleRowHTML(null)) + '</div>' +
           '<button type="button" class="btn btn-secondary btn-sm" id="apr-add-rule">+ Add condition</button>' +
@@ -255,11 +303,18 @@
       var cb = document.getElementById("apr-all-assets");
       if (cb) allAssets = cb.checked;
       draft.scope = allAssets ? null : collectCriteria();
+      // Ticking "all assets" makes explicit targets redundant AND would leave the
+      // stored shape ambiguous (null scope + assetIds means "just those"), so the
+      // checkbox clears them.
+      if (allAssets) draft.assetIds = [];
     }
     function validateStep2() {
       // Unchecked + empty is a mistake, not a synonym for all-assets: silently
       // widening to the whole fleet is exactly the over-pinning this replaced.
-      if (!allAssets && !draft.scope) return "Add a condition, or tick “All monitored workstations & servers”.";
+      // Explicit device targets (an auto rule's assets) count as a scope.
+      if (!allAssets && !draft.scope && !(draft.assetIds || []).length) {
+        return "Add a condition, or tick “All monitored workstations & servers”.";
+      }
       return null;
     }
 
@@ -271,7 +326,7 @@
       if (scopePreviewTimer) clearTimeout(scopePreviewTimer);
       scopePreviewTimer = setTimeout(async function () {
         try {
-          var res = await api.applicationMap.discoveryScope(draft.scope);
+          var res = await api.applicationMap.discoveryScope(draft.scope, draft.assetIds || []);
           if (!res.total) {
             el.innerHTML = '<em>No monitored assets match.</em>';
             return;
@@ -321,6 +376,13 @@
           document.getElementById("apr-rules").insertAdjacentHTML("beforeend", ruleRowHTML(null));
           return;
         }
+        if (ev.target.id === "apr-clear-explicit") {
+          draft.assetIds = [];
+          var wrap = document.getElementById("apr-explicit-wrap");
+          if (wrap) wrap.remove();
+          refreshScopePreview();
+          return;
+        }
         var rm = ev.target.closest ? ev.target.closest(".apr-rule-remove") : null;
         if (rm) {
           var rows = document.querySelectorAll("#apr-rules .apr-rule");
@@ -362,14 +424,26 @@
       });
     }
 
-    function step3Html() {
-      return '' +
-        '<p class="hint" style="margin-bottom:0.6rem">' +
-          'Programs and service units reported by the devices this rule selects. Tick what ' +
+    // The intro line depends on the rule's MODE (chosen on step 1), so it's
+    // re-synced every time step 3 is entered rather than baked in once.
+    function itemHintText() {
+      return draft.mode === "monitor"
+        ? 'Programs and service units reported by the devices this rule selects. Tick what you ' +
+          'want <strong>monitored</strong> — CPU/RAM history for a program, journal tailing for ' +
+          'a unit. Nothing is published to the Application Map.'
+        : 'Programs and service units reported by the devices this rule selects. Tick what ' +
           'belongs on the Application Map. Anything you map is also <strong>monitored</strong> ' +
           '(CPU/RAM history for a program, journal tailing for a unit) — mapping implies ' +
-          'monitoring, but not the reverse.' +
-        '</p>' +
+          'monitoring, but not the reverse.';
+    }
+    function syncItemHint() {
+      var el = document.getElementById("apr-item-hint");
+      if (el) el.innerHTML = itemHintText();
+    }
+
+    function step3Html() {
+      return '' +
+        '<p class="hint" id="apr-item-hint" style="margin-bottom:0.6rem">' + itemHintText() + '</p>' +
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:0.6rem">' +
           '<input type="search" id="apr-item-search" class="input" placeholder="Search programs / units…" ' +
                  'style="flex:1 1 200px;min-width:150px" autocomplete="off" spellcheck="false">' +
@@ -508,16 +582,25 @@
             var lbl = APR_FIELDS.filter(function (x) { return x.value === f; })[0];
             return (lbl ? lbl.label : f) + " " + r.op + " " + (r.values || []).join(", ");
           }).join("  AND  ");
+      if (!allAssets && (draft.assetIds || []).length) {
+        var explicit = draft.assetIds.length + " specific device(s)";
+        scopeText = scopeText ? scopeText + "  +  " + explicit : explicit;
+      }
       var items = draft.services.names.map(function (n) { return n + " (service)"; })
         .concat(draft.processes.names.map(function (n) { return n + " (process)"; }));
 
       panel.innerHTML =
         '<dl class="review-grid">' +
           "<dt>Name</dt><dd>" + escapeHtml(draft.name) + "</dd>" +
+          "<dt>Type</dt><dd>" + (draft.mode === "monitor" ? "Monitor only" : "Monitor + map") + "</dd>" +
           "<dt>Enabled</dt><dd>" + (draft.enabled ? "Yes" : "No") + "</dd>" +
           "<dt>Devices</dt><dd>" + escapeHtml(scopeText || "—") + "</dd>" +
           "<dt>Items</dt><dd>" + (items.length ? escapeHtml(items.join(", ")) : "—") + "</dd>" +
         "</dl>" +
+        (wasAuto
+          ? '<p class="hint" style="margin-top:0.6rem">Saving converts this automatically-created rule ' +
+            'to a manual rule.</p>'
+          : "") +
         '<div class="form-group" style="margin-top:0.8rem">' +
           "<label>What this will pin</label>" +
           '<div id="apr-rule-preview" class="hint">Checking…</div>' +
@@ -533,9 +616,11 @@
             return;
           }
           var names = (res.sampleDevices || []).map(function (d) { return d.hostname || d.assetId; });
-          el.innerHTML = "Adds <strong>" + res.processPins + "</strong> process pin(s) and <strong>" +
-            res.servicePins + "</strong> service pin(s)" +
-            (res.monitorPins ? " (plus <strong>" + res.monitorPins + "</strong> monitor pin(s))" : "") +
+          el.innerHTML = (draft.mode === "monitor"
+              ? "Adds <strong>" + res.monitorPins + "</strong> monitor pin(s)"
+              : "Adds <strong>" + res.processPins + "</strong> process pin(s) and <strong>" +
+                res.servicePins + "</strong> service pin(s)" +
+                (res.monitorPins ? " (plus <strong>" + res.monitorPins + "</strong> monitor pin(s))" : "")) +
             " across <strong>" + res.deviceCount + "</strong> device(s)" +
             (names.length ? ": " + escapeHtml(names.join(", ")) + (res.deviceCount > names.length ? ", …" : "") : "") + ".";
         } catch (err) {
@@ -596,7 +681,7 @@
       var body = document.querySelector(".modal-body");
       if (body) body.scrollTop = 0;
       if (n === 2) refreshScopePreview();
-      if (n === 3) loadInventoryIfNeeded();
+      if (n === 3) { syncItemHint(); loadInventoryIfNeeded(); }
       return true;
     }
 
@@ -625,11 +710,10 @@
       var n = Number(el.getAttribute("data-step"));
       if (n <= visited && n !== step) goToStep(n);
     });
-    // Cancel returns to the list rather than closing outright — openModal reuses
-    // one overlay, so the wizard REPLACED the list on the way in.
+    // The rules list lives inline on the Integrations page, so the wizard just
+    // closes; nothing to reopen.
     document.getElementById("apr-cancel").addEventListener("click", function () {
-      if (typeof openAppMapRulesList === "function") openAppMapRulesList();
-      else closeModal();
+      closeModal();
     });
 
     document.getElementById("apr-save").addEventListener("click", async function () {
@@ -642,11 +726,13 @@
           return;
         }
       }
+      // A hand-edited auto rule becomes manual: the consolidation machinery must
+      // stop adding assets to a rule the operator has shaped.
+      if (!draft.source || wasAuto) draft.source = "manual";
       this.disabled = true;
       try {
         await window.appMapRulesSaveOne(draft);
-        if (typeof openAppMapRulesList === "function") openAppMapRulesList();
-        else closeModal();
+        closeModal();
       } catch (err) {
         showToast("Save failed: " + (err && err.message ? err.message : String(err)), "error");
         this.disabled = false;
