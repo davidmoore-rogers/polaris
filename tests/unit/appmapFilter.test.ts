@@ -8,7 +8,8 @@
  * approach as tests/unit/topologyColumns.test.ts.
  *
  * The behaviour under test is the semantic the operator was promised: pills
- * combine OR WITHIN a kind and AND ACROSS kinds.
+ * combine OR WITHIN a kind and AND ACROSS kinds. Also covers consolidatePorts(),
+ * the listening-port range collapser from the same module.
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -42,6 +43,8 @@ interface Result { nodes: Node[]; edges: Array<{ edge: Edge; ports: Port[] }> }
 let applyGraphFilter: (n: Node[], e: Edge[], f: Filter, now: number) => Result;
 let buildFilterCatalog: (n: Node[], e: Edge[]) => Pill[];
 let rankSuggestions: (c: Pill[], q: string) => Pill[];
+let consolidatePorts: (p: Array<{ proto: string; port: number }>) =>
+  Array<{ proto: string; label: string; from: number; to: number; count: number }>;
 
 beforeAll(() => {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -59,6 +62,7 @@ beforeAll(() => {
   applyGraphFilter = sandbox.window.PolarisAppMap.applyGraphFilter;
   buildFilterCatalog = sandbox.window.PolarisAppMap.buildFilterCatalog;
   rankSuggestions = sandbox.window.PolarisAppMap.rankSuggestions;
+  consolidatePorts = sandbox.window.PolarisAppMap.consolidatePorts;
 });
 
 const NOW = Date.parse("2026-07-28T12:00:00Z");
@@ -297,5 +301,53 @@ describe("buildFilterCatalog / rankSuggestions", () => {
     const cat = buildFilterCatalog(nodes, edges);
     expect(rankSuggestions(cat, "").length).toBe(cat.length);
     expect(rankSuggestions(cat, "zzzzz")).toEqual([]);
+  });
+});
+
+describe("consolidatePorts", () => {
+  const P = (proto: string, ports: number[]) => ports.map((port) => ({ proto, port }));
+  const labels = (rows: Array<{ label: string }>) => rows.map((r) => r.label);
+
+  it("collapses a run of three or more into a range", () => {
+    // The real case: Oracle GoldenGate holding tcp/9000-9004 was five near-identical
+    // rows that buried the shape of the allocation.
+    expect(labels(consolidatePorts(P("tcp", [9000, 9001, 9002, 9003, 9004]))))
+      .toEqual(["tcp/9000-9004"]);
+  });
+
+  it("leaves a PAIR listed separately — '9000, 9001' beats '9000-9001'", () => {
+    expect(labels(consolidatePorts(P("tcp", [9000, 9001])))).toEqual(["tcp/9000", "tcp/9001"]);
+  });
+
+  it("leaves an isolated port alone", () => {
+    expect(labels(consolidatePorts(P("udp", [1901])))).toEqual(["udp/1901"]);
+  });
+
+  it("emits several ranges and singletons in port order", () => {
+    expect(labels(consolidatePorts(P("tcp", [9000, 9001, 9002, 9003, 9004, 9011, 9012, 9013, 9014]))))
+      .toEqual(["tcp/9000-9004", "tcp/9011-9014"]);
+  });
+
+  it("never merges across protocols", () => {
+    const rows = consolidatePorts([...P("tcp", [80, 81, 82]), ...P("udp", [83, 84, 85])]);
+    expect(labels(rows)).toEqual(["tcp/80-82", "udp/83-85"]);
+  });
+
+  it("sorts numerically, not lexically, and dedups repeated ports", () => {
+    // A service bound on several addresses reports the same port twice; unsorted
+    // input must not fragment a contiguous block.
+    expect(labels(consolidatePorts(P("tcp", [9002, 9000, 9001, 9002, 9003]))))
+      .toEqual(["tcp/9000-9003"]);
+  });
+
+  it("reports the range width so the UI can show how many ports it covers", () => {
+    const [row] = consolidatePorts(P("tcp", [100, 101, 102, 103]));
+    expect(row).toMatchObject({ proto: "tcp", from: 100, to: 103, count: 4 });
+  });
+
+  it("is empty for empty / missing input and skips unusable entries", () => {
+    expect(consolidatePorts([])).toEqual([]);
+    expect(consolidatePorts(undefined as never)).toEqual([]);
+    expect(consolidatePorts([{ proto: "tcp", port: NaN }])).toEqual([]);
   });
 });

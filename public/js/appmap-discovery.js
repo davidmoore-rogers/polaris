@@ -60,7 +60,8 @@
     return '' +
       '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.85rem">' +
         'Map rules pin processes and services onto the devices you choose — on the devices that ' +
-        'match today, <strong>and on devices discovered later</strong>. Removing an item or ' +
+        'match today, <strong>and on devices discovered later</strong>. Mapped items are also ' +
+        'monitored (mapping implies monitoring, not the reverse). Removing an item or ' +
         "disabling a rule stops future auto-pinning; it doesn't unpin what's already there " +
         '(use <em>Unmap everywhere</em> for that).' +
       '</p>' +
@@ -120,7 +121,8 @@
     var a = res.applied || {};
     showToast(
       a.devices
-        ? successMsg + " — pinned " + ((a.processPins || 0) + (a.servicePins || 0)) + " item(s) on " + a.devices + " device(s)"
+        ? successMsg + " — pinned " + ((a.processPins || 0) + (a.servicePins || 0)) + " item(s)" +
+          (a.monitorPins ? " (+" + a.monitorPins + " for monitoring)" : "") + " on " + a.devices + " device(s)"
         : successMsg,
       "success",
     );

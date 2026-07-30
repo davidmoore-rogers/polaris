@@ -28,6 +28,12 @@
  *     whether its nginx belongs on the map. The criteria vocabulary is
  *     tagAssignmentService's rather than a second one.
  *
+ *   - MAPPING IMPLIES MONITORING, one-way: everything a rule maps is also pinned
+ *     for monitoring (per-program CPU/RAM + logs, per-unit journal tailing),
+ *     because caring enough to put a service on the map means wanting its
+ *     telemetry. Monitoring something is NOT a request to publish its connections,
+ *     so nothing here writes a map pin from a monitor pin.
+ *
  *   - Apply is STRICTLY ADDITIVE and never strips. `mappedProcesses` /
  *     `mappedServices` are operator-owned — someone may have pinned a program by
  *     hand on one host — so removing an item from a rule (or disabling the rule)
@@ -392,6 +398,8 @@ interface CandidateAsset {
   hostname: string | null;
   mappedProcesses: string[];
   mappedServices: string[];
+  monitoredProcesses: string[];
+  monitoredServices: string[];
 }
 
 /** Every monitored, process-capable asset, once. Rule scopes are applied in
@@ -400,7 +408,12 @@ interface CandidateAsset {
 async function loadMonitoredAssets(): Promise<CandidateAsset[]> {
   return prisma.asset.findMany({
     where: { monitored: true, assetType: { in: [...PROCESS_CAPABLE_ASSET_TYPES] } },
-    select: { id: true, hostname: true, mappedProcesses: true, mappedServices: true },
+    select: {
+      id: true, hostname: true, mappedProcesses: true, mappedServices: true,
+      // Mapping implies monitoring (see computePending), so the monitor pin sets
+      // are part of the diff.
+      monitoredProcesses: true, monitoredServices: true,
+    },
   });
 }
 
@@ -442,6 +455,11 @@ interface PendingUpdate {
   freshServices: string[];
   nextProcesses: string[];
   nextServices: string[];
+  /** Monitor pins implied by the map pins — see the note in computePending. */
+  freshMonProcesses: string[];
+  freshMonServices: string[];
+  nextMonProcesses: string[];
+  nextMonServices: string[];
 }
 
 /**
@@ -509,7 +527,24 @@ async function computePending(rules: AppMapRule[]): Promise<PendingUpdate[]> {
     const haveSvc = new Set(a.mappedServices);
     const freshProcesses = [...(wantProc.get(id) ?? [])].filter((n) => !haveProc.has(n));
     const freshServices  = [...(wantSvc.get(id)  ?? [])].filter((n) => !haveSvc.has(n));
-    if (freshProcesses.length === 0 && freshServices.length === 0) continue;
+
+    // MAPPING IMPLIES MONITORING, one-way. Everything a rule maps is also pinned
+    // for monitoring (per-program CPU/RAM + logs, per-unit journal tailing),
+    // because an operator who cares enough about a service to put it on the map
+    // wants its telemetry too. The reverse does NOT hold: monitoring something is
+    // not a request to publish its connections, so nothing here ever writes
+    // mappedProcesses/mappedServices from a monitor pin.
+    //
+    // Computed against the FULL want-set, not just what was fresh for mapping —
+    // otherwise an item already mapped but never monitored (mapped before this
+    // behaviour existed, or monitor-unpinned by hand) would never catch up.
+    const haveMonProc = new Set(a.monitoredProcesses);
+    const haveMonSvc = new Set(a.monitoredServices);
+    const freshMonProcesses = [...(wantProc.get(id) ?? [])].filter((n) => !haveMonProc.has(n));
+    const freshMonServices  = [...(wantSvc.get(id)  ?? [])].filter((n) => !haveMonSvc.has(n));
+
+    if (freshProcesses.length === 0 && freshServices.length === 0 &&
+        freshMonProcesses.length === 0 && freshMonServices.length === 0) continue;
     pending.push({
       assetId: a.id,
       hostname: a.hostname,
@@ -517,6 +552,10 @@ async function computePending(rules: AppMapRule[]): Promise<PendingUpdate[]> {
       freshServices,
       nextProcesses: [...a.mappedProcesses, ...freshProcesses],
       nextServices:  [...a.mappedServices,  ...freshServices],
+      freshMonProcesses,
+      freshMonServices,
+      nextMonProcesses: [...a.monitoredProcesses, ...freshMonProcesses],
+      nextMonServices:  [...a.monitoredServices,  ...freshMonServices],
     });
   }
   return pending;
@@ -528,6 +567,8 @@ export interface AutoMapPreview {
   deviceCount: number;
   processPins: number;
   servicePins: number;
+  /** Monitor pins implied by the map pins (mapping implies monitoring, one-way). */
+  monitorPins: number;
   sampleDevices: Array<{ assetId: string; hostname: string | null; processes: string[]; services: string[] }>;
 }
 
@@ -536,6 +577,7 @@ function summarize(pending: PendingUpdate[]): AutoMapPreview {
     deviceCount: pending.length,
     processPins: pending.reduce((n, p) => n + p.freshProcesses.length, 0),
     servicePins: pending.reduce((n, p) => n + p.freshServices.length, 0),
+    monitorPins: pending.reduce((n, p) => n + p.freshMonProcesses.length + p.freshMonServices.length, 0),
     sampleDevices: pending.slice(0, 10).map((p) => ({
       assetId: p.assetId,
       hostname: p.hostname,
@@ -582,6 +624,7 @@ export interface AutoMapApplyResult {
   devices: number;
   processPins: number;
   servicePins: number;
+  monitorPins: number;
   sampleDevices: Array<{ assetId: string; hostname: string | null; processes: string[]; services: string[] }>;
 }
 
@@ -593,13 +636,14 @@ export interface AutoMapApplyResult {
  * job tick). Idempotent: a half-landed batch yields the same final set on re-run.
  */
 export async function applyRules(rules: AppMapRule[]): Promise<AutoMapApplyResult> {
-  const empty: AutoMapApplyResult = { devices: 0, processPins: 0, servicePins: 0, sampleDevices: [] };
+  const empty: AutoMapApplyResult = { devices: 0, processPins: 0, servicePins: 0, monitorPins: 0, sampleDevices: [] };
   const pending = await computePending(rules);
   if (pending.length === 0) return empty;
 
   let devices = 0;
   let processPins = 0;
   let servicePins = 0;
+  let monitorPins = 0;
   for (let i = 0; i < pending.length; i += BATCH_SIZE) {
     const chunk = pending.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
@@ -609,6 +653,9 @@ export async function applyRules(rules: AppMapRule[]): Promise<AutoMapApplyResul
           data: {
             ...(p.freshProcesses.length ? { mappedProcesses: p.nextProcesses } : {}),
             ...(p.freshServices.length  ? { mappedServices:  p.nextServices  } : {}),
+            // Mapping implies monitoring (one-way) — see computePending.
+            ...(p.freshMonProcesses.length ? { monitoredProcesses: p.nextMonProcesses } : {}),
+            ...(p.freshMonServices.length  ? { monitoredServices:  p.nextMonServices  } : {}),
           },
         }),
       ),
@@ -620,10 +667,11 @@ export async function applyRules(rules: AppMapRule[]): Promise<AutoMapApplyResul
       devices += 1;
       processPins += p.freshProcesses.length;
       servicePins += p.freshServices.length;
+      monitorPins += p.freshMonProcesses.length + p.freshMonServices.length;
     }
   }
 
-  return { ...summarize(pending), devices, processPins, servicePins };
+  return { ...summarize(pending), devices, processPins, servicePins, monitorPins };
 }
 
 // ─── Explicit un-map (the only subtractive path) ────────────────────────────

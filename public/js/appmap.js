@@ -88,6 +88,11 @@
     });
   }
 
+  function fadeStaleEnabled() {
+    var el = document.getElementById("appmap-fade-stale");
+    return el ? el.checked : true; // default on = the historical behaviour
+  }
+
   function canWriteLayout() {
     return typeof permAtLeast === "function" && permAtLeast("applicationMap", "write");
   }
@@ -120,6 +125,7 @@
       localStorage.setItem(key, JSON.stringify({
         age: age,
         hideExternal: !!(document.getElementById("appmap-hide-external") || {}).checked,
+        fadeStale: fadeStaleEnabled(),
         legend: !!(legend && !legend.hidden),
         pills: filterPills,
       }));
@@ -153,6 +159,8 @@
     }
     var he = document.getElementById("appmap-hide-external");
     if (he && typeof p.hideExternal === "boolean") he.checked = p.hideExternal;
+    var fs = document.getElementById("appmap-fade-stale");
+    if (fs && typeof p.fadeStale === "boolean") fs.checked = p.fadeStale;
     var legend = document.getElementById("appmap-legend");
     if (legend && p.legend === true) legend.hidden = false;
   }
@@ -395,11 +403,57 @@
   // its box shows only a name and looks like nothing was collected — the listen
   // ports are the whole signal in that case.
   function listenSuffix(n) {
-    var lp = n.listenPorts || [];
-    if (!lp.length) return "";
-    var parts = lp.slice(0, 3).map(function (p) { return p.proto + "/" + p.port; });
-    var extra = lp.length - 3;
+    var groups = consolidatePorts(n.listenPorts);
+    if (!groups.length) return "";
+    var parts = groups.slice(0, 3).map(function (g) { return g.label; });
+    var extra = groups.length - 3;
     return "\n" + parts.join(", ") + (extra > 0 ? " +" + extra : "");
+  }
+
+  // ─── Listening-port consolidation ──────────────────────────────────
+  //
+  // A service bound to a contiguous block (Oracle GoldenGate takes tcp/9000-9004,
+  // tcp/9011-9014, …) otherwise renders one row per port and buries the shape of
+  // the allocation in a wall of near-identical lines. Collapse runs of THREE OR
+  // MORE consecutive ports within the same protocol into "9000-9004"; a pair stays
+  // listed separately, since "9000, 9001" is clearer than "9000-9001". Protocols
+  // never merge — tcp/9000 and udp/9000 are unrelated facts.
+  //
+  // PURE (exposed for tests): [{proto, port}] → [{proto, label, from, to, count}]
+  // ordered by protocol then first port.
+  function consolidatePorts(listenPorts) {
+    var byProto = {};
+    (listenPorts || []).forEach(function (p) {
+      if (!p || p.port == null) return;
+      var port = Number(p.port);
+      if (!isFinite(port)) return;
+      var proto = String(p.proto || "").toLowerCase();
+      (byProto[proto] = byProto[proto] || []).push(port);
+    });
+    var out = [];
+    Object.keys(byProto).sort().forEach(function (proto) {
+      // Numeric sort + dedup — the same port arrives twice when a service binds it
+      // on several addresses.
+      var ports = byProto[proto].sort(function (a, b) { return a - b; })
+        .filter(function (v, i, arr) { return i === 0 || v !== arr[i - 1]; });
+      var i = 0;
+      while (i < ports.length) {
+        var start = ports[i];
+        var end = start;
+        while (i + 1 < ports.length && ports[i + 1] === end + 1) { i++; end = ports[i]; }
+        if (end - start >= 2) {
+          out.push({ proto: proto, from: start, to: end, count: end - start + 1,
+                     label: proto + "/" + start + "-" + end });
+        } else {
+          // Run of 1 or 2 — emit each port on its own.
+          for (var v = start; v <= end; v++) {
+            out.push({ proto: proto, from: v, to: v, count: 1, label: proto + "/" + v });
+          }
+        }
+        i++;
+      }
+    });
+    return out;
   }
 
   function nodeLabel(n) {
@@ -456,7 +510,10 @@
     });
     g.edges.forEach(function (r) {
       var e = r.edge;
-      var stale = now - Date.parse(e.lastSeen) > STALE_MS;
+      // Staleness is a RENDER option, not a filter: the edge is always present,
+      // it's only dimmed. With the toggle off, nothing is marked stale so every
+      // edge draws at full opacity.
+      var stale = fadeStaleEnabled() && now - Date.parse(e.lastSeen) > STALE_MS;
       els.push({
         group: "edges",
         data: {
@@ -914,7 +971,7 @@
       if (procs.length) {
         html += "<table><tr><th>Mapped process</th><th>Listening</th></tr>";
         procs.forEach(function (p) {
-          var lp = (p.listenPorts || []).map(function (x) { return x.proto + "/" + x.port; }).join(", ");
+          var lp = consolidatePorts(p.listenPorts).map(function (g) { return g.label; }).join(", ");
           html += "<tr><td>" + esc(p.processName) + "</td><td>" + esc(lp || "—") + "</td></tr>";
         });
         html += "</table>";
@@ -923,7 +980,7 @@
       if (svcs.length) {
         html += "<table><tr><th>Mapped service</th><th>Listening</th></tr>";
         svcs.forEach(function (p) {
-          var lp = (p.listenPorts || []).map(function (x) { return x.proto + "/" + x.port; }).join(", ");
+          var lp = consolidatePorts(p.listenPorts).map(function (g) { return g.label; }).join(", ");
           html += "<tr><td>" + esc(p.serviceUnit) + "</td><td>" + esc(lp || "—") + "</td></tr>";
         });
         html += "</table>";
@@ -933,10 +990,15 @@
       html += "<h3>" + esc(n.processName || n.serviceUnit) + "</h3>";
       var owner = findNode("asset:" + n.assetId);
       html += '<div class="appmap-info-sub">' + (n.kind === "service" ? "service" : "process") + " on " + esc(owner && (owner.hostname || owner.ipAddress) || n.assetId) + "</div>";
-      var lp2 = (n.listenPorts || []);
+      // Contiguous blocks collapse to a range, so a service holding tcp/9000-9004
+      // is one row instead of five near-identical ones. The Ports column states
+      // how many addresses a range covers.
+      var lp2 = consolidatePorts(n.listenPorts);
       if (lp2.length) {
-        html += "<table><tr><th>Listening port</th></tr>";
-        lp2.forEach(function (x) { html += "<tr><td>" + esc(x.proto + "/" + x.port) + "</td></tr>"; });
+        html += "<table><tr><th>Listening port</th><th>Ports</th></tr>";
+        lp2.forEach(function (g) {
+          html += "<tr><td>" + esc(g.label) + "</td><td>" + (g.count > 1 ? g.count : "") + "</td></tr>";
+        });
         html += "</table>";
       }
       var touching = edgesTouching(n.id);
@@ -1004,7 +1066,7 @@
   // ─── Toolbar / pill filter / hash focus ────────────────────────────
 
   function wireToolbar() {
-    ["appmap-age", "appmap-hide-external"].forEach(function (id) {
+    ["appmap-age", "appmap-hide-external", "appmap-fade-stale"].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.addEventListener("change", function () {
         savePrefs();
@@ -1013,6 +1075,9 @@
     });
     var refresh = document.getElementById("appmap-refresh");
     if (refresh) refresh.addEventListener("click", function () { loadGraph(true); });
+
+    var shot = document.getElementById("appmap-screenshot");
+    if (shot) shot.addEventListener("click", function () { screenshotMap(); });
 
     // Discovery modal (appmap-discovery.js). Reading the fleet aggregate is
     // applicationMap:read, but the only thing to DO in there is save a selection
@@ -1262,6 +1327,83 @@
     }
   }
 
+  // ─── Screenshot (graph + info rail) ────────────────────────────────
+  //
+  // Composited from two sources rather than one html-to-image pass over the whole
+  // layout: the graph is a cytoscape <canvas>, and cy.png() renders it
+  // independently of the live canvas (same call the Device Map screenshot uses),
+  // which is far more reliable than DOM-serializing a canvas. The info rail is
+  // ordinary DOM, so html-to-image handles it. Drawing both onto one canvas is what
+  // gets the port list INTO the picture — the whole point of the request.
+  //
+  // Delivery mirrors map.js: clipboard first, then a download fallback, because
+  // clipboard image writes need HTTPS + permission and silently fail otherwise.
+  async function screenshotMap() {
+    if (!cy) {
+      showToast("Map not loaded", "error");
+      return;
+    }
+    var rootCs = getComputedStyle(document.documentElement);
+    var bg = rootCs.getPropertyValue("--color-bg-primary").trim() ||
+             rootCs.getPropertyValue("--color-surface").trim() || "#ffffff";
+    var SCALE = 2;
+    var GAP = 16 * SCALE;
+
+    try {
+      var graphUri = cy.png({ output: "base64uri", scale: SCALE, full: true, bg: bg });
+      var graphImg = await new Promise(function (resolve, reject) {
+        var im = new Image();
+        im.onload = function () { resolve(im); };
+        im.onerror = function () { reject(new Error("graph render failed")); };
+        im.src = graphUri;
+      });
+
+      // Only composite the rail when it's actually open with content.
+      var rail = document.getElementById("appmap-info");
+      var railCanvas = null;
+      if (rail && !rail.hidden && rail.innerHTML.trim() &&
+          typeof htmlToImage !== "undefined" && htmlToImage.toCanvas) {
+        try {
+          railCanvas = await htmlToImage.toCanvas(rail, { pixelRatio: SCALE, backgroundColor: bg });
+        } catch (e) {
+          // A rail that won't serialize shouldn't cost the operator the graph.
+          railCanvas = null;
+        }
+      }
+
+      var railW = railCanvas ? railCanvas.width : 0;
+      var out = document.createElement("canvas");
+      out.width = graphImg.width + (railW ? GAP + railW : 0);
+      out.height = Math.max(graphImg.height, railCanvas ? railCanvas.height : 0);
+      var ctx = out.getContext("2d");
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, out.width, out.height);
+      ctx.drawImage(graphImg, 0, 0);
+      if (railCanvas) ctx.drawImage(railCanvas, graphImg.width + GAP, 0);
+
+      var blob = await new Promise(function (resolve) { out.toBlob(resolve, "image/png"); });
+      if (!blob) { showToast("Screenshot failed", "error"); return; }
+
+      if (navigator.clipboard && typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+          showToast(railCanvas ? "Map + info panel copied to clipboard" : "Map copied to clipboard");
+          return;
+        } catch (e) { /* fall through to download */ }
+      }
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "application-map-" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+      showToast("Screenshot downloaded");
+    } catch (err) {
+      showToast("Screenshot failed: " + (err && err.message ? err.message : String(err)), "error");
+    }
+  }
+
   // ─── Saved filters ─────────────────────────────────────────────────
   //
   // A named pill set, per user, in its own localStorage key (the toolbar prefs
@@ -1450,5 +1592,6 @@
     applyGraphFilter: applyGraphFilter,
     buildFilterCatalog: buildFilterCatalog,
     rankSuggestions: rankSuggestions,
+    consolidatePorts: consolidatePorts,
   };
 })();

@@ -366,7 +366,9 @@
       return '' +
         '<p class="hint" style="margin-bottom:0.6rem">' +
           'Programs and service units reported by the devices this rule selects. Tick what ' +
-          'belongs on the Application Map.' +
+          'belongs on the Application Map. Anything you map is also <strong>monitored</strong> ' +
+          '(CPU/RAM history for a program, journal tailing for a unit) — mapping implies ' +
+          'monitoring, but not the reverse.' +
         '</p>' +
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:0.6rem">' +
           '<input type="search" id="apr-item-search" class="input" placeholder="Search programs / units…" ' +
@@ -532,7 +534,9 @@
           }
           var names = (res.sampleDevices || []).map(function (d) { return d.hostname || d.assetId; });
           el.innerHTML = "Adds <strong>" + res.processPins + "</strong> process pin(s) and <strong>" +
-            res.servicePins + "</strong> service pin(s) across <strong>" + res.deviceCount + "</strong> device(s)" +
+            res.servicePins + "</strong> service pin(s)" +
+            (res.monitorPins ? " (plus <strong>" + res.monitorPins + "</strong> monitor pin(s))" : "") +
+            " across <strong>" + res.deviceCount + "</strong> device(s)" +
             (names.length ? ": " + escapeHtml(names.join(", ")) + (res.deviceCount > names.length ? ", …" : "") : "") + ".";
         } catch (err) {
           el.textContent = "Preview unavailable: " + (err && err.message ? err.message : String(err));

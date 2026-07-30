@@ -27,6 +27,7 @@
           <select id="appmap-age" class="input"></select>
         </label>
         <label class="appmap-check"><input type="checkbox" id="appmap-hide-external"> Hide external</label>
+        <label class="appmap-check" title="Dim connections not seen in the last 15 minutes"><input type="checkbox" id="appmap-fade-stale" checked> Fade stale</label>
         <!-- Token/pill filter. Protocol, port, host, device type, process,
              service and external-IP filters are all typed here; pills combine
              OR within a kind and AND across kinds. Applied pills render in a row BELOW the
@@ -52,6 +53,12 @@
         <div class="appmap-toolbar-actions">
           <span id="appmap-status" class="appmap-status"></span>
           <button type="button" class="btn btn-primary btn-sm" id="appmap-discovery-btn" hidden>Discovery</button>
+          <button type="button" class="btn-icon" id="appmap-screenshot" aria-label="Screenshot" title="Copy the map (with the info panel) to the clipboard" style="line-height:0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+              <circle cx="12" cy="13" r="4"/>
+            </svg>
+          </button>
           <button type="button" class="btn-icon" id="appmap-legend-btn" aria-label="Toggle legend" title="Toggle legend" style="line-height:0">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <circle cx="6" cy="6" r="2"/><line x1="11" y1="6" x2="21" y2="6"/>
