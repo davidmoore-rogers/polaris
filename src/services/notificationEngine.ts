@@ -131,6 +131,8 @@ interface ScopeAssetRow {
   manufacturer?: string | null;
   model?: string | null;
   os?: string | null;
+  // Read by the ifOperStatus/ifAdminStatus resolvers (pinned-interface gate).
+  monitoredInterfaces?: string[];
 }
 
 /** A single evaluated reading for a (asset, dimension). */
@@ -181,6 +183,8 @@ const SCOPE_SELECT = {
   // condition-tree evaluation reads these (manufacturer/model/os); small
   // string columns, still a tight select at 2000 assets.
   manufacturer: true, model: true, os: true,
+  // ifOperStatus/ifAdminStatus readings are restricted to PINNED interfaces.
+  monitoredInterfaces: true,
 } as const;
 
 /** Build a Prisma where from a scope, or null if the scope matches nothing.
@@ -447,7 +451,20 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
       const col = trigger.field === "ifOperStatus" ? "operStatus" : "adminStatus";
       const since = new Date(Date.now() - DEFAULT_LOOKBACK_MS);
       const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], distinct: ["assetId", "ifName"], select: { assetId: true, ifName: true, operStatus: true, adminStatus: true } });
-      return rows.filter((r) => substringMatch(r.ifName, df.ifNamePattern)).map((r) => { const a = index.get(r.assetId)!; return mk(a, r.ifName, r.ifName, (r as any)[col]); });
+      // Only PINNED interfaces produce readings (Asset.monitoredInterfaces —
+      // the same join the Down Interfaces widget uses): the interfaces stream
+      // samples every port a device reports, and an unpinned port is usually
+      // just unplugged — a 8-port switch must not raise 8 "interface down"
+      // alerts. ifOperStatus additionally requires admin-up (an admin-downed
+      // port is deliberately down, not an outage — the widget's adminStatus
+      // gate). An interface that leaves the pin set (or gets admin-downed)
+      // stops producing readings; the vanished-state sweep clears its alert.
+      return rows.filter((r) => {
+        const a = index.get(r.assetId);
+        if (!a?.monitoredInterfaces?.includes(r.ifName)) return false;
+        if (trigger.field === "ifOperStatus" && r.adminStatus !== "up") return false;
+        return substringMatch(r.ifName, df.ifNamePattern);
+      }).map((r) => { const a = index.get(r.assetId)!; return mk(a, r.ifName, r.ifName, (r as any)[col]); });
     }
     case "ipsecStatus": {
       const since = new Date(Date.now() - DEFAULT_LOOKBACK_MS);
@@ -652,6 +669,82 @@ export function isAssetShadowed(index: ShadowIndex, rule: DbRule, sig: string, r
 
 // ─── Threshold / state evaluation ───────────────────────────────────────────
 
+/** The rule-state subset the vanished-state sweep needs. */
+interface SweepStateRow {
+  id: string;
+  assetId: string | null;
+  dimensionKey: string;
+  state: string;
+  notificationId: string | null;
+}
+
+/**
+ * Clear firing/pending state rows the readings loop can no longer SEE — the
+ * asset left the rule's scope (scope edit, tag drift, asset deleted or
+ * unmonitored) or its dimension stopped being covered (interface unpinned or
+ * admin-downed, mount/tunnel gone, dimensionFilter edit). Without this they
+ * sit firing forever: the loop only re-evaluates keys that produce readings.
+ * Two deliberate freezes stay frozen: suppressed assets (maintenance /
+ * dependency — business rule 16; re-checked here for assets whose scope
+ * condition drops them WHILE suppressed, e.g. a `status = active` condition)
+ * and in-scope assets that produced no readings at all this tick (a
+ * collection gap is not evidence of recovery). Zero extra queries on the
+ * steady-state tick — the scope re-check only runs when orphans exist.
+ */
+async function clearVanishedStates(
+  rule: DbRule,
+  states: SweepStateRow[],
+  seenKeys: Set<string>,
+  scopeIds: Set<string>,
+  handledIds: Set<string>,
+  assetsWithReadings: Set<string>,
+): Promise<void> {
+  const vanished: Array<{ st: SweepStateRow; reason: "scope" | "dimension" }> = [];
+  const scopeChecks: SweepStateRow[] = [];
+  for (const st of states) {
+    if (!st.assetId) continue; // host/global rows have no scope to leave
+    if (st.state !== "firing" && st.state !== "pending") continue;
+    if (seenKeys.has(`${st.assetId}|${st.dimensionKey}`)) continue;
+    if (handledIds.has(st.assetId)) continue; // suppressed freeze / carve-out handoff own these
+    if (scopeIds.has(st.assetId)) {
+      if (assetsWithReadings.has(st.assetId)) vanished.push({ st, reason: "dimension" });
+      // else: the asset reported nothing this tick — stay frozen
+    } else {
+      scopeChecks.push(st);
+    }
+  }
+  if (scopeChecks.length > 0) {
+    const ids = Array.from(new Set(scopeChecks.map((s) => s.assetId as string)));
+    const rows = await prisma.asset.findMany({ where: { id: { in: ids } }, select: { id: true, status: true, dependencySuppressed: true } });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    for (const st of scopeChecks) {
+      const a = byId.get(st.assetId as string);
+      if (a && isSuppressedForNotifications(a)) continue; // rule-16 freeze wins over scope drift
+      vanished.push({ st, reason: "scope" });
+    }
+  }
+  for (const { st, reason } of vanished) {
+    if (st.state === "firing") {
+      await clearActiveNotification(st, "system:out-of-scope");
+      await logEvent({
+        action: "notification.out_of_scope",
+        resourceType: "notification",
+        resourceId: st.notificationId ?? undefined,
+        resourceName: rule.name,
+        actor: "system:notification-engine",
+        message: reason === "scope"
+          ? `Cleared: ${rule.name} — asset is no longer covered by this automation's scope`
+          : `Cleared: ${rule.name} — ${st.dimensionKey || "the dimension"} is no longer reported or monitored`,
+        details: { ruleId: rule.id, assetId: st.assetId, dimension: st.dimensionKey, reason },
+      }).catch(() => {});
+    }
+    await prisma.notificationRuleState.update({
+      where: { id: st.id },
+      data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null },
+    });
+  }
+}
+
 async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): Promise<void> {
   const trigger = rule.trigger;
   let readings: Reading[] = [];
@@ -659,12 +752,16 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
   const suppressedIds = new Set<string>();
   // Assets carved out this tick by a more-specific same-signature automation.
   const shadowedIds = new Set<string>();
+  // Every asset the scope resolved this tick (incl. suppressed/shadowed);
+  // null for host rules, which have no asset scope to leave.
+  let scopeIds: Set<string> | null = null;
 
   if (trigger.type === "host_metric") {
     const r = await resolveHostMetricReading(trigger);
     readings = r ? [r] : [];
   } else if (trigger.type === "asset_metric" || trigger.type === "asset_state") {
     const assets = await loadScopeAssets(rule.scope);
+    scopeIds = new Set(assets.map((a) => a.id));
     // Precedence: only worth checking when this rule isn't already the most
     // specific in its signature group (and the group has a higher-rank peer).
     const sig = shadowIndex ? triggerSignature(rule.trigger) : null;
@@ -734,8 +831,15 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
           // manual re-arms the state; timed waits for its sweep — same as ever.
           await recover(rule, st);
         } else if (!recoveredMeets(trigger, rule.reset, reading.value)) {
-          // Hysteresis dead band (below fire, above clear): stay firing.
-          if (st.recoveredSince) {
+          // Hysteresis dead band (below fire, above clear): stay firing — but
+          // a BANDED alert eases to the base severity here. The value is out
+          // of every band (only anti-flap keeps the alert active), and a CPU
+          // that crashes from the critical band straight into the dead band
+          // in one tick never passes through the lower bands — parked at the
+          // old band it would read critical indefinitely.
+          if (hasBands && (st.firingSeverity ?? rule.severity) !== rule.severity) {
+            await applyBandTransition(rule, reading, st, rule.severity, now);
+          } else if (st.recoveredSince) {
             await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
           }
         } else {
@@ -796,6 +900,16 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
         data: { state: "clear", conditionMetSince: null },
       });
     }
+  }
+
+  // Vanished states: assets that left the scope or dimensions that stopped
+  // being reported — the readings loop never sees them, so clear them here
+  // (suppressed assets stay frozen, in-scope assets with no readings at all
+  // stay frozen; see clearVanishedStates).
+  if (scopeIds) {
+    const handled = new Set([...suppressedIds, ...shadowedIds]);
+    const assetsWithReadings = new Set(readings.map((r) => r.assetId).filter(Boolean));
+    await clearVanishedStates(rule, states, seen, scopeIds, handled, assetsWithReadings);
   }
 
   // Timed auto-clear: firing states past their timer, even without an explicit
@@ -987,13 +1101,14 @@ async function applySustainedRecovery(
 async function evaluateCompositeRule(rule: DbRule): Promise<void> {
   const trigger = rule.trigger as CompositeTrigger;
   const suppressedIds = new Set<string>();
+  let scopeAssets: ScopeAssetRow[] = [];
   let activeAssets: ScopeAssetRow[];
   if (trigger.kind === "host") {
     activeAssets = [HOST_PSEUDO_ASSET];
   } else {
-    const assets = await loadScopeAssets(rule.scope);
+    scopeAssets = await loadScopeAssets(rule.scope);
     activeAssets = [];
-    for (const a of assets) {
+    for (const a of scopeAssets) {
       if (isSuppressedForNotifications(a)) suppressedIds.add(a.id);
       else activeAssets.push(a);
     }
@@ -1030,9 +1145,14 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
     }
   }
 
+  // Assets actually evaluated this tick (≥1 leaf reading) — the composite
+  // analogue of the per-reading path's `seen` set, for the vanished sweep.
+  const evaluatedIds = new Set<string>();
+
   for (const a of activeAssets) {
     const outcome = compositeOutcomeForAsset(trigger, a.id, leaves, truths);
     if (!outcome.hasAnyReading) continue; // no evidence either way — state frozen (parity with the per-reading path)
+    evaluatedIds.add(a.id);
     const st = stateMap.get(a.id);
     const reading: Reading = { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: "", dimLabel: "", value: null };
 
@@ -1085,6 +1205,20 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
     if (st.dimensionKey === "" && st.state === "pending" && st.assetId && suppressedIds.has(st.assetId)) {
       await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null } });
     }
+  }
+
+  // Vanished states: assets that left the rule's scope (composite state lives
+  // at dimensionKey "", so only the scope reason applies here — an evaluated
+  // asset is always `seen`). Same freeze contracts as the legacy path.
+  if (trigger.kind !== "host") {
+    await clearVanishedStates(
+      rule,
+      states.filter((s) => s.dimensionKey === ""),
+      new Set(Array.from(evaluatedIds, (id) => `${id}|`)),
+      new Set(scopeAssets.map((a) => a.id)),
+      suppressedIds,
+      evaluatedIds,
+    );
   }
 
   // Timed auto-clear sweep (identical to the legacy path; orphan rows already

@@ -63,7 +63,7 @@ const BASELINE_RULES: Record<string, unknown>[] = [
     trigger: { type: "asset_state", field: "ifOperStatus", operator: "==", value: "down" },
     scope: { allAssets: true },
     reset: { mode: "auto" },
-    messageTemplate: "{asset}: a monitored interface is down",
+    messageTemplate: "{asset}: monitored interface {dimension} is down",
   },
   {
     name: "IPsec tunnel down",
@@ -73,7 +73,7 @@ const BASELINE_RULES: Record<string, unknown>[] = [
     trigger: { type: "asset_state", field: "ipsecStatus", operator: "==", value: "down" },
     scope: { allAssets: true },
     reset: { mode: "auto" },
-    messageTemplate: "{asset}: an IPsec tunnel is down",
+    messageTemplate: "{asset}: IPsec tunnel {dimension} is down",
   },
 
   // ── Numeric thresholds (fire at CRITICAL, auto-clear at WARNING) ──

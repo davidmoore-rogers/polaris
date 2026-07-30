@@ -115,7 +115,10 @@ vi.mock("../../src/db.js", () => ({
         const ids: string[] = where.id?.in ?? (where.id ? [where.id] : []);
         let count = 0;
         for (const n of db.notifications) {
-          if (ids.includes(n.id) && n.cleared === where.cleared) {
+          // Match by id (engine clears) or by ruleId (the rule service's
+          // identity-change/disable/delete cleanup).
+          const match = where.ruleId !== undefined ? n.ruleId === where.ruleId : ids.includes(n.id);
+          if (match && n.cleared === where.cleared) {
             Object.assign(n, data);
             count++;
           }
@@ -484,7 +487,7 @@ describe("composite preview", () => {
 describe("rule-service trigger-identity cleanup", () => {
   it("updateRule clears alerts + deletes state rows when the trigger identity changes", async () => {
     db.rules = [compositeRule()];
-    db.notifications.push({ id: "nA", cleared: false });
+    db.notifications.push({ id: "nA", ruleId: "r1", cleared: false });
     db.states.push({
       id: "stA", ruleId: "r1", assetId: "a1", dimensionKey: "", state: "firing",
       conditionMetSince: null, recoveredSince: null, firedAt: T0, lastValue: null, notificationId: "nA",

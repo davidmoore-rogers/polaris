@@ -397,19 +397,16 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
   // their active alerts) are about something that no longer exists. Clear the
   // alerts + drop the rows so nothing lingers firing under a stale key; the
   // next tick re-evaluates from scratch (cooldown restarts — an edited
-  // trigger is a new condition).
-  if (identityChanged) {
-    const states = await prisma.notificationRuleState.findMany({
-      where: { ruleId: id },
-      select: { notificationId: true },
+  // trigger is a new condition). DISABLING gets the same cleanup: the engine
+  // only evaluates enabled rules, so a disabled rule's active alerts would
+  // otherwise sit uncleared forever (still counted by every widget). Clearing
+  // by ruleId (not via state-row notificationIds) also catches stragglers.
+  const disabling = existing.enabled && input.enabled === false;
+  if (identityChanged || disabling) {
+    await prisma.notification.updateMany({
+      where: { ruleId: id, cleared: false },
+      data: { cleared: true, clearedBy: identityChanged ? "system:rule-edited" : "system:rule-disabled", clearedAt: new Date() },
     });
-    const notifIds = states.map((s) => s.notificationId).filter((n): n is string => !!n);
-    if (notifIds.length > 0) {
-      await prisma.notification.updateMany({
-        where: { id: { in: notifIds }, cleared: false },
-        data: { cleared: true, clearedBy: "system:rule-edited", clearedAt: new Date() },
-      });
-    }
     await prisma.notificationRuleState.deleteMany({ where: { ruleId: id } });
   }
   bumpChangeSubscriptions();
@@ -427,6 +424,13 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
 
 export async function deleteRule(id: string, actor?: string) {
   const rule = await getRule(id);
+  // Clear the rule's ACTIVE alerts first: the cascade drops the state rows,
+  // so nothing could ever auto-clear them after the delete — they'd sit in
+  // every active-alert feed forever. Soft-clear keeps them as history.
+  await prisma.notification.updateMany({
+    where: { ruleId: id, cleared: false },
+    data: { cleared: true, clearedBy: "system:rule-deleted", clearedAt: new Date() },
+  });
   // Cascade drops NotificationRuleState; existing notifications keep ruleId
   // set to null (onDelete: SetNull) so history survives.
   await prisma.notificationRule.delete({ where: { id } });
