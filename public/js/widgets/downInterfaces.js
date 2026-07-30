@@ -101,6 +101,23 @@
     // Overall down total on the widget header — same red pill style as the
     // group counts. Pre-clip, so the row-limit doesn't shrink the number.
     PolarisWidgets.setHeaderCount(el, rows.length);
+    // Header export: the merged interface + tunnel list (pre-clip),
+    // severity-tiered on the owning asset's active automation alert.
+    PolarisWidgets.setHeaderExport(el, {
+      filename: "down-interfaces",
+      columns: [
+        { header: "Name", get: function (n) { return n.name || ""; } },
+        { header: "Kind", get: function (n) { return n.kind === "tunnel" ? "IPsec tunnel" : "Interface"; } },
+        { header: "Label", get: function (n) { return n.label || ""; } },
+        { header: "Hostname", get: function (n) { return n.hostname || ""; } },
+        { header: "IP Address", get: function (n) { return n.ipAddress || ""; } },
+        { header: "Gate", get: function (n) { return n.gate || ""; } },
+        { header: "Parent Interface", get: function (n) { return n.parentInterface || ""; } },
+        { header: "Remote Gateway", get: function (n) { return n.remoteGateway || ""; } },
+        { header: "Last Up", get: function (n) { return n.lastUpAt ? new Date(n.lastUpAt).toISOString() : ""; } },
+      ],
+      rows: rows,
+    });
     if (!rows.length) { el.innerHTML = '<p class="empty-state">No interfaces or tunnels down</p>'; return; }
     var groupBy = (config && config.groupBy) || "gate";
     var clipped = PolarisWidgets.clip(rows, config && config.rowLimit);

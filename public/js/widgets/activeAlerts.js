@@ -12,6 +12,19 @@
     rows = rows || [];
     var allowed = (config && Array.isArray(config.severities) && config.severities.length) ? config.severities : ["warning", "error"];
     var filtered = rows.filter(function (r) { return allowed.indexOf(r.severity) !== -1; });
+    // Header export: the configured-severity listing pre the 25-row display
+    // slice. These rows carry the audit-Event level (info/warning/error) —
+    // ranked by the shared ladder, so "Critical only" = error events.
+    PolarisWidgets.setHeaderExport(el, {
+      filename: "active-alerts",
+      severityOf: function (r) { return r.severity; },
+      columns: [
+        { header: "Hostname", get: function (r) { return r.hostname || ""; } },
+        { header: "Message", get: function (r) { return r.message || ""; } },
+        { header: "Raised At", get: function (r) { return r.raisedAt ? new Date(r.raisedAt).toISOString() : ""; } },
+      ],
+      rows: filtered,
+    });
     if (!filtered.length) { el.innerHTML = '<p class="empty-state">No active alerts</p>'; return; }
     el.innerHTML = filtered.slice(0, 25).map(function (r) {
       var sev = r.severity || "info";

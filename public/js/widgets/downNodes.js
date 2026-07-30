@@ -40,6 +40,20 @@
     var nodes = (data && data.nodes) || [];
     var total = (data && data.total != null) ? data.total : nodes.length;
     PolarisWidgets.setHeaderCount(el, total);
+    // Header export: the full fetched list (pre-clip), severity-tiered on each
+    // node's active automation alert (alertSeverity).
+    PolarisWidgets.setHeaderExport(el, {
+      filename: "down-nodes",
+      columns: [
+        { header: "Hostname", get: function (n) { return n.hostname || ""; } },
+        { header: "IP Address", get: function (n) { return n.ipAddress || ""; } },
+        { header: "Type", get: function (n) { return TYPE_LABELS[n.assetType] || n.assetType || ""; } },
+        { header: "Site", get: function (n) { return n.site || ""; } },
+        { header: "Division", get: function (n) { return n.division || ""; } },
+        { header: "Down Since", get: function (n) { return n.monitorStatusChangedAt ? new Date(n.monitorStatusChangedAt).toISOString() : ""; } },
+      ],
+      rows: nodes,
+    });
     if (!nodes.length) { el.innerHTML = '<p class="empty-state">No nodes down</p>'; return; }
     var groupBy = (config && config.groupBy) || "site";
     var clipped = PolarisWidgets.clip(nodes, config && config.rowLimit);

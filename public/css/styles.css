@@ -3960,6 +3960,52 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   padding-right: 0;
 }
 
+/* Severity-tier CSV export menu (widget header ⤓ button — setHeaderExport). */
+.widget-export-menu {
+  position: fixed;
+  z-index: 1300;
+  min-width: 176px;
+  padding: 4px;
+  background: var(--color-bg-elevated, #1c1f24);
+  border: 1px solid var(--color-border, rgba(255,255,255,0.10));
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.40);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.widget-export-menu-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--color-text-secondary);
+  padding: 5px 8px 3px;
+}
+.widget-export-menu button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 0.83rem;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+.widget-export-menu button:hover:not(:disabled) { background: rgba(255,255,255,0.06); }
+.widget-export-menu button:disabled { color: var(--color-text-tertiary); cursor: default; }
+.widget-export-count {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  background: rgba(255,255,255,0.07);
+  border-radius: 8px;
+  padding: 1px 7px;
+}
+
 /* Widget config popover (gear icon) — small, anchored, NOT a full modal. */
 .widget-config-popover {
   position: absolute;

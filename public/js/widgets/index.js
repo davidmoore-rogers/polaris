@@ -244,6 +244,155 @@
     pill.textContent = String(count);
   };
 
+  // ─── Severity-tier CSV export (widget header ⤓ button) ───────────────────
+  // Client-side mirror of the server's ALERT_SEVERITY_RANK in
+  // nocDashboardService.ts — the automation-alert ladder, with the audit-Event
+  // levels folded in at their pill-equivalent ranks (info = informational,
+  // error = critical), matching ALERT_SEV_PILL below.
+  window.PolarisWidgets.ALERT_SEVERITY_RANK = {
+    notice: 1, informational: 2, info: 2, warning: 3, serious: 4, error: 5, critical: 5,
+  };
+
+  var EXPORT_TIERS = [
+    { key: "all", label: "All rows", minRank: 0 },
+    { key: "critical", label: "Critical only", minRank: 5 },
+    { key: "serious", label: "Serious and up", minRank: 4 },
+    { key: "warning", label: "Warning and up", minRank: 3 },
+  ];
+
+  // downloadCsv lives in app.js; the Dash wallboard boots dash-boot.js instead,
+  // so carry a minimal local copy (same escaping rules as app.js _csvRow).
+  function csvDownload(headers, rows, filename) {
+    if (typeof downloadCsv === "function") { downloadCsv(headers, rows, filename); return; }
+    var esc = function (c) {
+      var s = String(c == null ? "" : c);
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    var text = [headers].concat(rows).map(function (r) { return r.map(esc).join(","); }).join("\n");
+    var blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function closeExportMenu() {
+    var m = document.querySelector(".widget-export-menu");
+    if (m) m.remove();
+    document.removeEventListener("click", exportMenuDismiss, true);
+    document.removeEventListener("keydown", exportMenuKey, true);
+    document.removeEventListener("scroll", exportMenuScroll, true);
+  }
+  // Page scroll detaches the fixed-position menu from its button — close it.
+  // Scrolls INSIDE a widget body are ignored: the NOC auto-scroll creeps
+  // overflowing widget bodies continuously and must not dismiss the menu.
+  function exportMenuScroll(ev) {
+    var t = ev.target;
+    if (t && t.closest && t.closest(".dashboard-widget-body")) return;
+    closeExportMenu();
+  }
+  // Outside-click dismiss ignores the export buttons themselves so a click on
+  // the owning button toggles (its own handler closes) instead of close+reopen.
+  function exportMenuDismiss(ev) {
+    var t = ev.target;
+    if (t && t.closest && (t.closest(".widget-export-menu") || t.closest(".widget-header-export"))) return;
+    closeExportMenu();
+  }
+  function exportMenuKey(ev) { if (ev.key === "Escape") closeExportMenu(); }
+
+  function openExportMenu(btn) {
+    var existing = document.querySelector(".widget-export-menu");
+    var wasMine = existing && existing.__owner === btn;
+    closeExportMenu();
+    if (wasMine) return; // second click on the same button = toggle closed
+    var provider = btn.__polarisExport;
+    if (!provider || !provider.rows || !provider.rows.length) return;
+    var sevOf = provider.severityOf || function (r) { return r.alertSeverity; };
+    function rankOf(r) { return window.PolarisWidgets.ALERT_SEVERITY_RANK[sevOf(r)] || 0; }
+
+    var menu = document.createElement("div");
+    menu.className = "widget-export-menu";
+    menu.__owner = btn;
+    menu.innerHTML = '<div class="widget-export-menu-title">Export CSV</div>' +
+      EXPORT_TIERS.map(function (t, i) {
+        var n = provider.rows.filter(function (r) { return rankOf(r) >= t.minRank; }).length;
+        return '<button type="button" data-tier="' + i + '"' + (n ? "" : " disabled") + '>' +
+          '<span>' + t.label + '</span><span class="widget-export-count">' + n + '</span></button>';
+      }).join("");
+    document.body.appendChild(menu);
+    var rect = btn.getBoundingClientRect();
+    menu.style.top = (rect.bottom + 4) + "px";
+    menu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8)) + "px";
+
+    menu.querySelectorAll("button[data-tier]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var tier = EXPORT_TIERS[parseInt(b.getAttribute("data-tier"), 10)];
+        var rows = provider.rows.filter(function (r) { return rankOf(r) >= tier.minRank; });
+        closeExportMenu();
+        if (!rows.length) return;
+        var headers = provider.columns.map(function (c) { return c.header; }).concat(["Severity"]);
+        var data = rows.map(function (r) {
+          return provider.columns.map(function (c) { return c.get(r); }).concat([sevOf(r) || ""]);
+        });
+        var filename = "polaris-" + provider.filename +
+          (tier.key === "all" ? "" : "-" + tier.key) + "-" +
+          new Date().toISOString().slice(0, 10) + ".csv";
+        csvDownload(headers, data, filename);
+        if (typeof showToast === "function") {
+          showToast("Exported " + rows.length + " row" + (rows.length === 1 ? "" : "s") + " to " + filename);
+        }
+      });
+    });
+    document.addEventListener("click", exportMenuDismiss, true);
+    document.addEventListener("keydown", exportMenuKey, true);
+    document.addEventListener("scroll", exportMenuScroll, true);
+  }
+
+  // Stamp (or remove) a CSV-export button (⤓) on the widget's header, next to
+  // the title. Re-call on every render tick with the FULL fetched row set —
+  // pre row-limit clip, so "Warning and up" reaches rows the visual cap hides.
+  // The menu offers severity tiers (All / Critical only / Serious and up /
+  // Warning and up) filtered on each row's active-alert severity.
+  // provider: {
+  //   columns:    [{ header, get(row) }] — a trailing "Severity" column is
+  //               appended automatically from severityOf
+  //   rows:       the exportable row array
+  //   filename:   kebab slug for the file name; defaults from the widget's
+  //               data-type (topCpu → top-cpu)
+  //   severityOf: (row) => severity string; default row.alertSeverity
+  // }
+  // No-ops outside a dashboard shell (library preview); zero rows removes the
+  // button (mirrors setHeaderCount).
+  window.PolarisWidgets.setHeaderExport = function (el, provider) {
+    var article = el && el.closest ? el.closest(".dashboard-widget") : null;
+    var header = article ? article.querySelector(".dashboard-widget-header") : null;
+    var title = header ? header.querySelector(".dashboard-widget-title") : null;
+    if (!title) return;
+    var btn = header.querySelector(".widget-header-export");
+    if (!provider || !provider.rows || !provider.rows.length) { if (btn) btn.remove(); return; }
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "dashboard-widget-action widget-header-export";
+      btn.title = "Export CSV…";
+      btn.textContent = "⤓";
+      title.insertAdjacentElement("afterend", btn);
+      btn.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        openExportMenu(btn);
+      });
+    }
+    if (!provider.filename) {
+      provider.filename = String(article.getAttribute("data-type") || "widget")
+        .replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+    }
+    btn.__polarisExport = provider;
+  };
+
   // The caller's effective region names, or [] when unrestricted. Used by the
   // Status Map (which fetches /map/sites, not /noc-summary).
   window.PolarisWidgets.myRegionNames = function () {

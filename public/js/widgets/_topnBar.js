@@ -53,6 +53,19 @@
       var d = (b.alertRank || 0) - (a.alertRank || 0);
       return d !== 0 ? d : (b.value || 0) - (a.value || 0);
     });
+    // Header export: the full ranked set (pre threshold/row-limit),
+    // severity-tiered on each asset's active automation alert. The filename
+    // defaults from the widget's data-type (topCpu → polaris-top-cpu-…).
+    PolarisWidgets.setHeaderExport(el, {
+      columns: [
+        { header: "Hostname", get: function (r) { return r.hostname || ""; } },
+        { header: "IP Address", get: function (r) { return r.ipAddress || ""; } },
+        { header: "Value (" + (opts.unit || "%") + ")", get: function (r) { return r.value == null ? "" : r.value; } },
+        { header: "Detail", get: function (r) { return r.detail || ""; } },
+        { header: "Site", get: function (r) { return r.site || ""; } },
+      ],
+      rows: sorted,
+    });
     var shown;
     if (opts.fillTo) {
       // Red guarantee: every row at/above the top color threshold shows even

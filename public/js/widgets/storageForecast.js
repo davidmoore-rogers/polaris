@@ -28,6 +28,19 @@
 
   function render(el, config, rows) {
     config = config || {};
+    // Header export: every fetched volume row (pre horizon filter + clip),
+    // severity-tiered on the owning asset's active automation alert.
+    PolarisWidgets.setHeaderExport(el, {
+      filename: "storage-forecast",
+      columns: [
+        { header: "Hostname", get: function (r) { return r.hostname || ""; } },
+        { header: "IP Address", get: function (r) { return r.ipAddress || ""; } },
+        { header: "Mount", get: function (r) { return r.detail || ""; } },
+        { header: "Days Until Full", get: function (r) { return r.value == null ? "" : Math.round(r.value * 10) / 10; } },
+        { header: "Used %", get: function (r) { return r.usedPct == null ? "" : r.usedPct; } },
+      ],
+      rows: rows || [],
+    });
     var sorted = (rows || []).slice().sort(function (a, b) {
       var d = (b.alertRank || 0) - (a.alertRank || 0);
       return d !== 0 ? d : (a.value || 0) - (b.value || 0); // soonest-full first
