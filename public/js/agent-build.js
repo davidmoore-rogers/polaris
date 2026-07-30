@@ -1015,11 +1015,18 @@
 
   // Privilege cell for the installed-agents table. The tier is Linux-only —
   // Windows agents always run as LocalSystem and macOS LaunchDaemons as root,
-  // so those render as fixed informational text. `ptrace` is called out in
-  // warning colour because the tier's capability pair (CAP_SYS_PTRACE +
-  // CAP_DAC_READ_SEARCH) permits reading any process's memory and any file;
-  // legacy `root` rows (pre-Satellite-posture installs, never emitted for new
-  // installs) are flagged danger so operators reinstall them down.
+  // so those render as fixed informational text.
+  //
+  // For the ptrace tier the cell renders the VERIFIED state when the agent has
+  // reported its effective capabilities (`caps`, decoded server-side from the
+  // heartbeat CapEff; agent ≥0.17.1) — `privilegeTier` alone is only what the
+  // operator requested at install kickoff, and a unit written by a
+  // pre-CAP_DAC_READ_SEARCH server grants less than the tier promises while
+  // collecting zero Application Map connections. Three states:
+  //   caps has the pair      → healthy (amber — it's still an elevated grant)
+  //   caps lacks DAC_READ    → stale unit (red, reinstall)
+  //   caps null              → unverified (amber; old binary or no heartbeat yet)
+  // Legacy `root` rows are flagged danger so operators reinstall them down.
   function _agentPrivilegeCell(a) {
     var tertiary = function (t) {
       return '<span style="color:var(--color-text-tertiary);font-size:0.78rem">' + escapeHtml(t) + '</span>';
@@ -1027,12 +1034,20 @@
     if (a.osPlatform === "windows") return tertiary("LocalSystem");
     if (a.osPlatform === "darwin")  return tertiary("root (daemon)");
     if (a.privilegeTier === "ptrace") {
+      if (a.caps && a.caps.sysPtrace && a.caps.dacReadSearch) {
+        return '<span style="color:var(--color-warning);font-weight:600;font-size:0.78rem" ' +
+          'title="Verified from the agent’s reported effective capabilities: CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH, the pair required to attribute Application Map connections to processes. These capabilities also let the agent read any process’s memory and any file on the host.">PTRACE + DAC_READ ✓</span>';
+      }
+      if (a.caps) {
+        return '<span style="color:var(--color-danger);font-weight:600;font-size:0.78rem" ' +
+          'title="The agent reports it is missing ' + (a.caps.sysPtrace ? 'CAP_DAC_READ_SEARCH' : 'the ptrace-tier capabilities') + ' — its systemd unit predates the CAP_DAC_READ_SEARCH fix, so it collects NO Application Map connections. Reinstall to rewrite the unit with the full pair.">CAP_SYS_PTRACE — stale, reinstall</span>';
+      }
       return '<span style="color:var(--color-warning);font-weight:600;font-size:0.78rem" ' +
-        'title="Agent runs unprivileged plus AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH, the pair required to attribute Application Map connections to processes. These capabilities also let it read any process’s memory and any file on the host. Agents installed before the CAP_DAC_READ_SEARCH fix carry only CAP_SYS_PTRACE and collect no connections — reinstall to update.">CAP_SYS_PTRACE</span>';
+        'title="Requested tier: CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH. Not yet verified — the agent hasn’t reported its effective capabilities (needs agent ≥0.17.1 and a heartbeat). If it was installed before the CAP_DAC_READ_SEARCH fix it collects no connections until reinstalled.">CAP_SYS_PTRACE (unverified)</span>';
     }
     if (a.privilegeTier === "root") {
       return '<span style="color:var(--color-danger);font-weight:600;font-size:0.78rem" ' +
-        'title="Legacy full-root install from before the Satellite-posture change. Reinstall to downgrade it to unprivileged or CAP_SYS_PTRACE.">root (legacy)</span>';
+        'title="Legacy full-root install from before the Satellite-posture change. Reinstall to downgrade it to unprivileged or the ptrace tier.">root (legacy)</span>';
     }
     return tertiary("unprivileged");
   }
@@ -1115,15 +1130,24 @@
     if (meta) {
       // Elevated = anything above the hardened unprivileged unit. Surfaced as a
       // header count so "how many hosts did we grant ptrace to?" is answerable
-      // without scanning the table.
-      var elevated = agents.filter(function (a) {
-        return a.osPlatform === "linux" && (a.privilegeTier === "ptrace" || a.privilegeTier === "root");
-      }).length;
+      // without scanning the table. Stale = ptrace-tier agents whose REPORTED
+      // capabilities lack CAP_DAC_READ_SEARCH (unit predates the DAC fix —
+      // collecting nothing); called out separately so a broken fleet is
+      // impossible to miss.
+      var elevated = 0, stale = 0;
+      agents.forEach(function (a) {
+        if (a.osPlatform !== "linux") return;
+        if (a.privilegeTier === "ptrace" || a.privilegeTier === "root") elevated++;
+        if (a.privilegeTier === "ptrace" && a.caps && !(a.caps.sysPtrace && a.caps.dacReadSearch)) stale++;
+      });
       meta.innerHTML =
         agents.length + ' installed agent' + (agents.length === 1 ? "" : "s") +
         (current ? ' · current build <strong>v' + escapeHtml(current) + '</strong>' : ' · no build on disk') +
         (elevated
-          ? ' · <span style="color:var(--color-warning);font-weight:600">' + elevated + ' with CAP_SYS_PTRACE</span>'
+          ? ' · <span style="color:var(--color-warning);font-weight:600">' + elevated + ' with ptrace tier</span>'
+          : "") +
+        (stale
+          ? ' · <span style="color:var(--color-danger);font-weight:600">' + stale + ' on a stale unit — reinstall</span>'
           : "");
     }
 

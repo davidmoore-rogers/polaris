@@ -4622,7 +4622,11 @@ router.get("/:id/agent", requirePermission("assets", "read"), async (req, res, n
       bearerHash: _bh,
       ...safe
     } = row;
-    res.json(safe);
+    // Decoded verified-capability state (null = not reported yet). The
+    // System-tab Privileges row renders from this when present so a
+    // pre-DAC-fix ptrace unit reads as broken instead of healthy.
+    const { decodeCapEff } = await import("../../utils/capEff.js");
+    res.json({ ...safe, caps: decodeCapEff(row.reportedCapEff) });
   } catch (err) { next(err); }
 });
 

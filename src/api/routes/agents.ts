@@ -855,16 +855,25 @@ agentsRouter.get("/config", async (req, res, next) => {
 
 const HeartbeatSchema = z.object({
   agentVersion: z.string().min(1).max(64).optional(),
+  // Raw CapEff hex from the agent's /proc/self/status (Linux, agent ≥0.17.1).
+  // The VERIFIED privilege state — decoded server-side (utils/capEff) so the
+  // Privilege surfaces can distinguish a healthy ptrace unit (SYS_PTRACE +
+  // DAC_READ_SEARCH) from the pre-fix SYS_PTRACE-only unit that collects no
+  // Application Map connections.
+  capEff: z.string().max(32).optional(),
 });
 
 agentsRouter.post("/heartbeat", async (req, res, next) => {
   try {
     const body = HeartbeatSchema.parse(req.body ?? {});
     const managedAgentId = req.managedAgent!.managedAgentId;
-    if (body.agentVersion) {
+    if (body.agentVersion || body.capEff) {
       await prisma.managedAgent.update({
         where: { id: managedAgentId },
-        data:  { agentVersion: body.agentVersion },
+        data: {
+          ...(body.agentVersion ? { agentVersion: body.agentVersion } : {}),
+          ...(body.capEff ? { reportedCapEff: body.capEff } : {}),
+        },
       });
     }
     // verifyBearer already bumped lastSeenAt/lastSeenIp opportunistically.

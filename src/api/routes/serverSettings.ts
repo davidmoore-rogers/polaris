@@ -1970,6 +1970,7 @@ router.get("/agents/installed-summary", async (_req, res, next) => {
 router.get("/agents/installed", async (_req, res, next) => {
   try {
     const { prisma } = await import("../../db.js");
+    const { decodeCapEff } = await import("../../utils/capEff.js");
     const { getInventory } = await import("../../services/agentBuildService.js");
     const inv = await getInventory();
     const currentVersion = inv.manifest?.currentVersion ?? null;
@@ -1984,6 +1985,7 @@ router.get("/agents/installed", async (_req, res, next) => {
         installError:        true,
         installTransport:    true,
         privilegeTier:       true,
+        reportedCapEff:      true,
         installedAt:         true,
         installedBy:         true,
         installCredentialId: true,
@@ -2005,6 +2007,10 @@ router.get("/agents/installed", async (_req, res, next) => {
       installError:         r.installError,
       installTransport:     r.installTransport,
       privilegeTier:        r.privilegeTier,
+      // Decoded verified-capability state (null = not reported: pre-0.17.1
+      // binary, Windows/macOS, or no heartbeat yet). The Privilege column
+      // renders from THIS when present — privilegeTier is only the request.
+      caps:                 decodeCapEff(r.reportedCapEff),
       installedAt:          r.installedAt,
       installedBy:          r.installedBy,
       hasInstallCredential: !!r.installCredentialId,

@@ -4669,13 +4669,25 @@ function assetAgentSubpanelHTML(a, agent) {
       (wsConnected ? 'Connected' : 'Disconnected') + '</strong></div>';
 
     // Privilege level the agent runs at. Windows = LocalSystem, macOS = root
-    // (LaunchDaemon), Linux = one of the privilege tiers. "ptrace" and the
-    // legacy "root" are highlighted since they're elevated.
+    // (LaunchDaemon), Linux = one of the privilege tiers. For the ptrace tier
+    // the row renders the VERIFIED state when the agent has reported its
+    // effective capabilities (`caps`, agent ≥0.17.1) — a unit written before
+    // the CAP_DAC_READ_SEARCH fix grants less than the tier promises and
+    // collects no Application Map connections (see _agentPrivilegeCell in
+    // agent-build.js, same three-state logic).
     var privLabel, privColor;
     if (agent.osPlatform === "windows") { privLabel = "LocalSystem"; privColor = ""; }
     else if (agent.osPlatform === "darwin") { privLabel = "Root"; privColor = "var(--color-warning)"; }
     else if (agent.privilegeTier === "root") { privLabel = "Root (legacy — reinstall to update)"; privColor = "var(--color-warning)"; }
-    else if (agent.privilegeTier === "ptrace") { privLabel = "CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH (connection mapping)"; privColor = "var(--color-warning)"; }
+    else if (agent.privilegeTier === "ptrace") {
+      if (agent.caps && agent.caps.sysPtrace && agent.caps.dacReadSearch) {
+        privLabel = "CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH ✓ (connection mapping)"; privColor = "var(--color-warning)";
+      } else if (agent.caps) {
+        privLabel = "CAP_SYS_PTRACE only — stale unit, reinstall (collects no connections)"; privColor = "var(--color-danger)";
+      } else {
+        privLabel = "CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH (unverified — awaiting agent report)"; privColor = "var(--color-warning)";
+      }
+    }
     else { privLabel = "Unprivileged"; privColor = ""; }
     var privRow = '<div>Privileges: <strong' + (privColor ? ' style="color:' + privColor + '"' : '') + '>' + privLabel + '</strong></div>';
 

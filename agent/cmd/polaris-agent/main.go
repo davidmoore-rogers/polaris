@@ -268,6 +268,11 @@ func runAgent(ctx context.Context, confPath string) {
 	// Stamp the ldflag-set version into the client so /enroll and
 	// /heartbeat report the version this binary was built at.
 	client.AgentVersion = version
+	// Effective capabilities (Linux; "" elsewhere) — heartbeat reports them so
+	// the server renders the VERIFIED privilege state, catching units that
+	// grant less than the requested tier (the SYS_PTRACE-only regression).
+	// Read once: caps are fixed for the life of the process.
+	client.CapEff = collectors.SelfCapEff()
 
 	// Latch verbose lifecycle logging from agent.conf. Diagnostic only —
 	// off by default; an operator sets `verbose = true` to trace the

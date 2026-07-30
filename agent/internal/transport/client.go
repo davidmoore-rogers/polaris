@@ -34,6 +34,13 @@ type Client struct {
 	// AgentVersion is reported on /enroll and /heartbeat so the server
 	// can render "v0.1.0" badges on the asset details page.
 	AgentVersion string
+
+	// CapEff is the process's effective-capability bitmask as the raw hex
+	// string from /proc/self/status (Linux; "" elsewhere), reported on
+	// /heartbeat so the server can render the VERIFIED privilege state
+	// rather than the tier requested at install time. Set once by main.go
+	// at startup — capabilities can't change for the life of the process.
+	CapEff string
 }
 
 // NewClient builds a Client that pins TLS to ANY fingerprint in certPins.
@@ -399,6 +406,9 @@ func (c *Client) Heartbeat() (*HeartbeatResponse, error) {
 		return nil, errors.New("Heartbeat called without a bearer token — enroll first")
 	}
 	body := map[string]string{"agentVersion": c.AgentVersion}
+	if c.CapEff != "" {
+		body["capEff"] = c.CapEff
+	}
 	var out HeartbeatResponse
 	if err := c.do("POST", "/api/v1/agents/heartbeat", body, &out, true); err != nil {
 		return nil, fmt.Errorf("heartbeat: %w", err)

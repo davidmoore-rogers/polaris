@@ -3040,6 +3040,16 @@ model ManagedAgent {
   osPlatform   String // "linux" | "darwin" | "windows"
   arch         String // "amd64" | "arm64"
   agentVersion String? // semver reported on enroll; null until first enroll
+  // Effective-capability bitmask the agent process actually holds, as the raw
+  // CapEff hex from its /proc/self/status, reported on heartbeat (agent
+  // ≥0.17.1, Linux only — null for Windows/macOS agents and pre-0.17.1
+  // binaries). This is the VERIFIED privilege state; `privilegeTier` is only
+  // what the operator requested at install kickoff. Decoded server-side by
+  // utils/capEff.decodeCapEff — the ptrace tier is healthy only when BOTH
+  // CAP_SYS_PTRACE (bit 19) and CAP_DAC_READ_SEARCH (bit 2) are set; a
+  // SYS_PTRACE-only mask means the unit predates the DAC fix and the agent
+  // collects no Application Map connections until reinstalled.
+  reportedCapEff String?
   installedBy  String // username of operator who clicked Install
   installedAt  DateTime @default(now())
 
