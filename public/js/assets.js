@@ -11787,6 +11787,13 @@ function _extractTabBlocks(root) {
       el.querySelectorAll('thead th').forEach(function (th) {
         headers.push((th.innerText || th.textContent || '').trim());
       });
+      // No <thead>? Some compact tables (Ports & Connections in the process/
+      // service slide-in) put their <th> row straight in the implicit tbody.
+      if (!headers.length) {
+        el.querySelectorAll('tr:first-child th').forEach(function (th) {
+          headers.push((th.innerText || th.textContent || '').trim());
+        });
+      }
       var rows = [];
       el.querySelectorAll('tbody tr').forEach(function (tr) {
         var row = [];
@@ -11820,9 +11827,9 @@ function _extractTabBlocks(root) {
   return blocks;
 }
 
-function _copyAssetDetails() {
-  var blocks = _extractTabBlocks(_activeAssetPanel());
-  if (blocks.length === 0) { showToast("Nothing to copy", "error"); return; }
+// Render extracted blocks (see _extractTabBlocks) as plaintext lines. Shared
+// by the asset-details Copy button and the process/service slide-in's Copy.
+function _blocksToPlaintext(blocks) {
   var lines = [];
   blocks.forEach(function (b) {
     if (b.type === 'heading') {
@@ -11844,7 +11851,13 @@ function _copyAssetDetails() {
     }
     // 'chart' blocks are images — nothing to put in a plaintext copy.
   });
-  navigator.clipboard.writeText(lines.join('\n')).then(function () {
+  return lines.join('\n');
+}
+
+function _copyAssetDetails() {
+  var blocks = _extractTabBlocks(_activeAssetPanel());
+  if (blocks.length === 0) { showToast("Nothing to copy", "error"); return; }
+  navigator.clipboard.writeText(_blocksToPlaintext(blocks)).then(function () {
     showToast("Asset details copied to clipboard");
   }).catch(function () {
     showToast("Copy failed", "error");
@@ -14924,9 +14937,8 @@ function openServiceDetailPanel(asset, svc) {
   var footerEl = document.getElementById("proc-panel-footer");
   titleEl.textContent = "Service — " + svc.unit;
   metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
-  footerEl.innerHTML = '<span style="flex:1"></span><button class="btn btn-sm btn-secondary" id="btn-proc-panel-close-btn">Close</button>';
+  _setProcPanelFooter(footerEl);
   requestAnimationFrame(function () { document.getElementById("proc-panel-overlay").classList.add("open"); });
-  document.getElementById("btn-proc-panel-close-btn").addEventListener("click", _closeProcPanel);
 
   function metaRow(label, value) {
     return '<div style="display:flex;justify-content:space-between;gap:12px;padding:0.3rem 0;border-bottom:1px solid var(--color-border)">' +
@@ -14963,6 +14975,7 @@ function openServiceDetailPanel(asset, svc) {
           '<h4 style="margin:0">Logs <span style="font-weight:400;font-size:0.75rem;color:var(--color-text-tertiary)">journalctl</span></h4>' +
           '<div style="display:flex;align-items:center;gap:10px">' +
             '<label style="font-size:0.78rem;display:flex;align-items:center;gap:4px"><input type="checkbox" id="svc-logs-flagged-only">Flagged only</label>' +
+            '<button class="btn btn-sm btn-secondary" id="btn-svc-logs-export" title="Download the collected log lines as CSV">Export</button>' +
             '<button class="btn btn-sm btn-secondary" id="btn-svc-logs-refresh">Refresh</button>' +
           '</div>' +
         '</div>' +
@@ -14977,6 +14990,11 @@ function openServiceDetailPanel(asset, svc) {
   if (refreshLogs) refreshLogs.addEventListener("click", function () { _loadServiceLogsFor(asset.id, svc.unit); });
   var flaggedOnly = document.getElementById("svc-logs-flagged-only");
   if (flaggedOnly) flaggedOnly.addEventListener("change", function () { _loadServiceLogsFor(asset.id, svc.unit); });
+  var exportLogs = document.getElementById("btn-svc-logs-export");
+  if (exportLogs) exportLogs.addEventListener("click", function () {
+    var fl = document.getElementById("svc-logs-flagged-only");
+    _exportPanelLogsCsv("service", asset, svc.unit, !!(fl && fl.checked), exportLogs);
+  });
   _loadServiceConnectionsFor(asset.id, svc.unit);
   _loadServiceLogsFor(asset.id, svc.unit);
 }
@@ -14995,9 +15013,10 @@ async function _loadServiceLogsFor(assetId, unit) {
         : "No log lines collected yet. Pin this unit for Logs (Services tab) — journald tailing starts within a minute or two (Linux only).";
       return;
     }
-    // Server returns newest-first; show oldest-first in the viewer.
-    el.innerHTML = logs.slice().reverse().map(function (l) {
-      var ts = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "";
+    // Server returns newest-first; keep that order (newest at the top).
+    el.innerHTML = logs.map(function (l) {
+      var d = l.timestamp ? new Date(l.timestamp) : null;
+      var ts = d ? d.toLocaleDateString() + " " + d.toLocaleTimeString() : "";
       var lvl = l.level ? "[" + escapeHtml(l.level) + "] " : "";
       var flags = Array.isArray(l.flags) ? l.flags : [];
       var badges = flags.map(function (f) {
@@ -15048,6 +15067,173 @@ function _closeProcPanel() {
   if (ov) ov.classList.remove("open");
 }
 
+// Footer for the process/service slide-in: Copy (plaintext of the panel body)
+// + Screenshot (html-to-image capture, asset-details pattern) on the left,
+// Close on the right. Shared by openServiceDetailPanel + openProcessDetailPanel.
+function _setProcPanelFooter(footerEl) {
+  footerEl.innerHTML =
+    '<button type="button" class="btn btn-sm btn-secondary" id="btn-proc-panel-copy">Copy</button>' +
+    '<button type="button" class="btn btn-sm btn-secondary" id="btn-proc-panel-shot">Screenshot</button>' +
+    '<span style="flex:1"></span>' +
+    '<button class="btn btn-sm btn-secondary" id="btn-proc-panel-close-btn">Close</button>';
+  document.getElementById("btn-proc-panel-close-btn").addEventListener("click", _closeProcPanel);
+  document.getElementById("btn-proc-panel-copy").addEventListener("click", _copyProcPanel);
+  document.getElementById("btn-proc-panel-shot").addEventListener("click", _screenshotProcPanel);
+}
+
+// Copy the process/service slide-in as plaintext: title + asset line, then the
+// same block extraction/formatting the asset-details Copy button uses.
+function _copyProcPanel() {
+  var bodyEl = document.getElementById("proc-panel-body");
+  var blocks = _extractTabBlocks(bodyEl);
+  if (!blocks.length) { showToast("Nothing to copy", "error"); return; }
+  var titleEl = document.getElementById("proc-panel-title");
+  var metaEl  = document.getElementById("proc-panel-meta");
+  var header = [];
+  var t = titleEl ? (titleEl.textContent || "").trim() : "";
+  if (t) { header.push(t); header.push(new Array(t.length + 1).join("=")); }
+  var m = metaEl ? (metaEl.textContent || "").trim() : "";
+  if (m) header.push(m);
+  var text = (header.length ? header.join("\n") + "\n\n" : "") + _blocksToPlaintext(blocks);
+  navigator.clipboard.writeText(text).then(function () {
+    showToast("Details copied to clipboard");
+  }).catch(function () {
+    showToast("Copy failed", "error");
+  });
+}
+
+// Screenshot the process/service slide-in and copy it to the clipboard as a
+// PNG. Same approach as the asset-details Screenshot (_runScreenshotCapture):
+// force the slide-over to a canonical width so output is independent of the
+// operator's drag-resize, let the charts' ResizeObservers re-render, rasterize
+// the live body via html-to-image, and draw a self-identifying title strip.
+function _screenshotProcPanel() {
+  var panel = document.getElementById("proc-panel-body");
+  var slideover = document.getElementById("proc-panel");
+  if (!panel) { showToast("Nothing to screenshot", "error"); return; }
+  if (typeof htmlToImage === "undefined") {
+    showToast("Screenshot failed — capture library not loaded", "error");
+    return;
+  }
+
+  var cs = getComputedStyle(document.documentElement);
+  var bgPrimary = cs.getPropertyValue("--color-bg-primary").trim() || "#ffffff";
+  var clrText   = cs.getPropertyValue("--color-text-primary").trim() || "#111";
+  var clrSec    = cs.getPropertyValue("--color-text-secondary").trim() || "#666";
+  var fontSans  = cs.getPropertyValue("--font-sans").trim() || "system-ui,-apple-system,sans-serif";
+
+  var btn = document.getElementById("btn-proc-panel-shot");
+  if (btn) btn.disabled = true;
+
+  var CAPTURE_WIDTH = 900; // px — canonical width for the nested slide-over
+  var prevWidth = slideover ? slideover.style.width : "";
+  if (slideover) slideover.style.width = CAPTURE_WIDTH + "px";
+  panel.classList.add("screenshot-hide-scrollbars");
+  function release() {
+    panel.classList.remove("screenshot-hide-scrollbars");
+    if (slideover) slideover.style.width = prevWidth;
+  }
+  function done() { if (btn) btn.disabled = false; }
+
+  var titleEl = document.getElementById("proc-panel-title");
+  var metaEl  = document.getElementById("proc-panel-meta");
+  var title = titleEl ? (titleEl.textContent || "").trim() : "";
+  var meta  = metaEl ? (metaEl.textContent || "").trim() : "";
+
+  // Double-rAF clears the relayout + ResizeObserver delivery for the width
+  // change; the timeout covers the chart re-renders those observers kick off.
+  requestAnimationFrame(function () {
+    requestAnimationFrame(function () {
+      setTimeout(function () {
+        var scale = 2;
+        // Capture the body's content wrapper, not the body itself — the body
+        // is the scroll container (viewport-bounded height), so capturing it
+        // would clip everything below the fold. The wrapper is content-height.
+        var target = panel.firstElementChild || panel;
+        htmlToImage.toCanvas(target, { pixelRatio: scale, backgroundColor: bgPrimary })
+          .then(function (capture) {
+            release();
+            var pad = 24;
+            var titleH = title ? (meta ? 58 : 40) : 0;
+            var w = capture.width / scale;
+            var h = capture.height / scale;
+            var canvas = document.createElement("canvas");
+            canvas.width  = (w + pad * 2) * scale;
+            canvas.height = (titleH + h + pad * (title ? 1 : 2)) * scale;
+            var ctx = canvas.getContext("2d");
+            ctx.scale(scale, scale);
+            ctx.fillStyle = bgPrimary;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            if (title) {
+              ctx.fillStyle = clrText;
+              ctx.font = "bold 17px " + fontSans;
+              ctx.fillText(title, pad, 30);
+              if (meta) {
+                ctx.fillStyle = clrSec;
+                ctx.font = "12px " + fontSans;
+                ctx.fillText(meta, pad, 48);
+              }
+            }
+            ctx.drawImage(capture, pad, titleH || pad, w, h);
+            canvas.toBlob(function (blob) {
+              done();
+              if (!blob) { showToast("Screenshot failed", "error"); return; }
+              if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
+                showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+                return;
+              }
+              navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
+                showToast("Screenshot copied to clipboard");
+              }).catch(function () {
+                showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+              });
+            }, "image/png");
+          })
+          .catch(function () {
+            release();
+            done();
+            showToast("Screenshot failed", "error");
+          });
+      }, 300);
+    });
+  });
+}
+
+// Fetch up to the server cap of log lines for the open service/process log
+// viewer (honoring the Flagged-only toggle) and download them as CSV.
+async function _exportPanelLogsCsv(kind, asset, key, flaggedOnly, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    var opts = { limit: 2000, flagged: flaggedOnly ? 1 : undefined };
+    var data = kind === "service"
+      ? await api.assets.serviceLogs(asset.id, key, opts)
+      : await api.assets.processLogs(asset.id, key, opts);
+    var logs = (data && data.logs) || [];
+    if (!logs.length) { showToast("No log lines to export", "error"); return; }
+    var headers = ["Timestamp", "Level", "Message", "Flags"];
+    // Server returns newest-first; export oldest-first like the viewer.
+    var rows = logs.slice().reverse().map(function (l) {
+      var flags = Array.isArray(l.flags)
+        ? l.flags.map(function (f) { return f.label || f.name || ""; }).filter(Boolean).join("; ")
+        : "";
+      return [
+        l.timestamp ? new Date(l.timestamp).toISOString() : "",
+        l.level || "",
+        l.message || "",
+        flags,
+      ];
+    });
+    var subject = _assetExportSubject(asset) + "-" + String(key).replace(/[^A-Za-z0-9._-]+/g, "-");
+    var filename = "polaris-" + kind + "-logs-" + subject + "-" + new Date().toISOString().slice(0, 10) + ".csv";
+    downloadCsv(headers, rows, filename);
+    showToast("Exported " + logs.length + " log lines to " + filename);
+  } catch (err) {
+    showToast(err && err.message ? err.message : "Export failed", "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
   if (!asset || !name) return;
   _ensureProcPanelDOM();
@@ -15057,11 +15243,10 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
   var footerEl = document.getElementById("proc-panel-footer");
   titleEl.textContent = "Process — " + name;
   metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
-  footerEl.innerHTML = '<span style="flex:1"></span><button class="btn btn-sm btn-secondary" id="btn-proc-panel-close-btn">Close</button>';
+  _setProcPanelFooter(footerEl);
   requestAnimationFrame(function () {
     document.getElementById("proc-panel-overlay").classList.add("open");
   });
-  document.getElementById("btn-proc-panel-close-btn").addEventListener("click", _closeProcPanel);
 
   var rangeBtns = _chartRangeBtnsHTML("proc-range-btn", [
     { value: "1h",  label: "1h" },
@@ -15123,6 +15308,7 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
           '<div style="display:flex;align-items:center;gap:10px">' +
             '<label style="font-size:0.78rem;display:flex;align-items:center;gap:4px"><input type="checkbox" id="proc-logs-flagged-only">Flagged only</label>' +
             (canEdit ? '<button class="btn btn-sm btn-secondary" id="btn-proc-flag-rules">Manage flag rules</button>' : '') +
+            '<button class="btn btn-sm btn-secondary" id="btn-proc-logs-export" title="Download the collected log lines as CSV">Export</button>' +
             '<button class="btn btn-sm btn-secondary" id="btn-proc-logs-refresh">Refresh</button>' +
           '</div>' +
         '</div>' +
@@ -15166,6 +15352,11 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
   if (refreshLogs) refreshLogs.addEventListener("click", function () { _loadProcessLogsFor(asset.id, name); });
   var flaggedOnly = document.getElementById("proc-logs-flagged-only");
   if (flaggedOnly) flaggedOnly.addEventListener("change", function () { _loadProcessLogsFor(asset.id, name); });
+  var exportLogs = document.getElementById("btn-proc-logs-export");
+  if (exportLogs) exportLogs.addEventListener("click", function () {
+    var fl = document.getElementById("proc-logs-flagged-only");
+    _exportPanelLogsCsv("process", asset, name, !!(fl && fl.checked), exportLogs);
+  });
   var manageRules = document.getElementById("btn-proc-flag-rules");
   if (manageRules) manageRules.addEventListener("click", function () { openLogFlagRulesModal(asset, name, function () { _loadProcessLogsFor(asset.id, name); }); });
   var saveCfg = document.getElementById("btn-proc-log-config-save");
@@ -15247,7 +15438,7 @@ async function _loadServiceConnectionsFor(assetId, unit) {
 // connection panels (identical DTO shape from getAssetProcessConnections).
 function _renderConnView(el, d, emptyMsg) {
   function remoteCell(r) {
-    var addr = escapeHtml(r.remoteIp) + (r.remotePort ? ":" + r.remotePort : "");
+    var addr = escapeHtml(r.remoteIp);
     if (r.remoteAssetId) {
       var label = escapeHtml(r.remoteHostname || r.remoteIp);
       return '<a href="#" class="proc-conn-asset-link" data-asset-id="' + escapeHtml(r.remoteAssetId) + '">' + label + '</a> <span style="color:var(--color-text-tertiary)">(' + addr + ')</span>';
@@ -15275,20 +15466,29 @@ function _renderConnView(el, d, emptyMsg) {
         '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
     }).join(""));
   }
+  // Outbound + inbound share one "Peers" section with identical columns.
+  // Source ports are ephemeral and never collected (agent stores only the
+  // listening/destination side), so that column renders "—".
+  function peerRow(r, srcPort, dstPort) {
+    return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
+      '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + srcPort + '</td>' +
+      '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + dstPort + '</td>' +
+      '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+  }
+  var peerHeaders = ["Peer", "Source port", "Destination port", "Last seen"];
+  if (d.outbound.length || d.inbound.length) {
+    html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Peers</h5>';
+  }
   if (d.outbound.length) {
-    html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Outbound (' + d.outbound.length + ')</h5>';
-    html += table(["Destination", "Proto", "Last seen"], d.outbound.map(function (r) {
-      return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
-        '<td style="padding:2px 8px 2px 0">' + escapeHtml(r.proto) + '</td>' +
-        '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+    html += '<div style="margin:0.35rem 0 0;font-size:0.76rem;color:var(--color-text-secondary)">Outbound (' + d.outbound.length + ')</div>';
+    html += table(peerHeaders, d.outbound.map(function (r) {
+      return peerRow(r, "—", escapeHtml(r.proto + "/" + r.remotePort));
     }).join(""));
   }
   if (d.inbound.length) {
-    html += '<h5 style="margin:0.4rem 0 0;font-size:0.8rem">Inbound peers (' + d.inbound.length + ')</h5>';
-    html += table(["Peer", "To port", "Last seen"], d.inbound.map(function (r) {
-      return '<tr><td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + remoteCell(r) + '</td>' +
-        '<td style="padding:2px 8px 2px 0;font-family:var(--font-mono)">' + escapeHtml(r.proto + "/" + r.localPort) + '</td>' +
-        '<td style="padding:2px 8px 2px 0">' + ago(r.lastSeen) + '</td></tr>';
+    html += '<div style="margin:0.35rem 0 0;font-size:0.76rem;color:var(--color-text-secondary)">Inbound (' + d.inbound.length + ')</div>';
+    html += table(peerHeaders, d.inbound.map(function (r) {
+      return peerRow(r, "—", escapeHtml(r.proto + "/" + r.localPort));
     }).join(""));
   }
   if (!html) {
@@ -15317,9 +15517,10 @@ async function _loadProcessLogsFor(assetId, name) {
         : "No log lines collected yet. Set a log source/path above (or enable journald on Linux) and check that the program is pinned for Monitor.";
       return;
     }
-    // Server returns newest-first; show oldest-first in the viewer.
-    el.innerHTML = logs.slice().reverse().map(function (l) {
-      var ts = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "";
+    // Server returns newest-first; keep that order (newest at the top).
+    el.innerHTML = logs.map(function (l) {
+      var d = l.timestamp ? new Date(l.timestamp) : null;
+      var ts = d ? d.toLocaleDateString() + " " + d.toLocaleTimeString() : "";
       var lvl = l.level ? "[" + escapeHtml(l.level) + "] " : "";
       var flags = Array.isArray(l.flags) ? l.flags : [];
       var badges = flags.map(function (f) {

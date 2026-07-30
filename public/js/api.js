@@ -413,6 +413,7 @@ const api = {
       var qs = ["name=" + encodeURIComponent(name)];
       if (opts.since) qs.push("since=" + encodeURIComponent(opts.since));
       if (opts.limit) qs.push("limit=" + encodeURIComponent(opts.limit));
+      if (opts.flagged) qs.push("flagged=1");
       return request("GET", `/assets/${id}/process-logs?` + qs.join("&"));
     },
     processConnections:   (id, name) => request("GET", `/assets/${id}/process-connections` + (name ? "?name=" + encodeURIComponent(name) : "")),
