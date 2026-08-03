@@ -57,4 +57,22 @@ describe("computeBaseline", () => {
       if (bl) expect(bl.thresholdMs).toBeGreaterThan(bl.avgMs);
     }
   });
+
+  it("autoAbortMs is 2× avg when that clears the slow threshold", () => {
+    // avg = 200_000 → threshold = 300_000 (×1.5 multiplier), 2× avg = 400_000.
+    const bl = computeBaseline([200_000, 200_000, 200_000])!;
+    expect(bl.autoAbortMs).toBe(400_000);
+  });
+
+  it("autoAbortMs never sits below the slow threshold", () => {
+    // Tiny avg: 2× avg = 20 s but threshold = avg + 60 s floor = 70 s.
+    // Aborting before the slow warning could even fire would be wrong.
+    const bl = computeBaseline([10_000, 10_000, 10_000])!;
+    expect(bl.thresholdMs).toBe(70_000);
+    expect(bl.autoAbortMs).toBe(70_000);
+    // High variance: avg+2σ dominates 2× avg.
+    const noisy = computeBaseline([10_000, 100_000, 190_000])!;
+    expect(noisy.autoAbortMs).toBe(noisy.thresholdMs);
+    expect(noisy.autoAbortMs).toBeGreaterThan(noisy.avgMs * 2);
+  });
 });

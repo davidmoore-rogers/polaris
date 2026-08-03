@@ -32,6 +32,7 @@ import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen, bumpLastSeen } from "../../utils/assetInvariants.js";
 import { recordSample, getBaselines, type Baseline } from "../../services/discoveryDurationService.js";
+import { evaluateAutoAbort, clearAutoAbortState } from "../../services/discoveryAutoAbortService.js";
 import { isPgbossRunning, publishDiscoveryJob } from "../../services/queueService.js";
 import {
   upsertQueuedRun,
@@ -1916,6 +1917,12 @@ export async function isDiscoveryRunning(integrationId: string): Promise<boolean
  * via `slowAlerted` / `slowAlertedDevices` on the activeDiscovery entry —
  * those flags are cleared when the run completes (or the device finishes).
  *
+ * Also enforces the auto-abort ceiling: a full (non-scoped) run that exceeds
+ * its baseline's autoAbortMs (~2× the rolling average) gets cancelRequested
+ * set — the same flag the operator's Cancel uses — and an
+ * `integration.discover.auto_aborted` event naming the slow/active
+ * FortiGates. The post-abort exemption lives in discoveryAutoAbortService.
+ *
  * Called by the 30s background job and inline on the /discoveries poll, so
  * the UI flips to amber promptly without waiting on the slower timer.
  */
@@ -1923,10 +1930,12 @@ export async function checkForSlowRuns(): Promise<void> {
   const rows = await listActiveRuns();
   if (rows.length === 0) return;
 
-  // Gather all (integration, device) unit keys we need baselines for.
+  // Gather all (integration, device) unit keys we need baselines for. The
+  // integration-level baseline is fetched even when the slow flag is already
+  // set — the auto-abort check below needs it for the rest of the run's life.
   const unitKeys: string[] = [];
   for (const row of rows) {
-    if (!row.slowAlerted) unitKeys.push(row.integrationId);
+    unitKeys.push(row.integrationId);
     if (row.type === "fortimanager") {
       for (const dev of row.activeDevices as { name: string; startedAt: number }[]) {
         if (!(row.slowAlertedDevices as string[]).includes(dev.name)) unitKeys.push(`${row.integrationId}:${dev.name}`);
@@ -2019,6 +2028,64 @@ export async function checkForSlowRuns(): Promise<void> {
     // accumulator is the worker's source of truth for activeDevices, not these
     // flags — checkForSlowRuns only runs in the web/scheduler role.
     if (mutated) await persistSlowFlags(id, slowAlerted, [...slowAlertedDevices]);
+
+    // ── Auto-abort: hard-cancel a run at ~2× its average duration ────────────
+    // Reuses the operator-cancel plumbing end to end: requestCancel sets the
+    // flag, the worker's 3s poll aborts, and the cancel watchdog force-exits
+    // the discovery process if the abort can't unwind. Scoped single-device
+    // runs are skipped (they have no baseline of their own — comparing them
+    // to the full-run average is meaningless), as are runs already carrying a
+    // cancel request (operator cancel in flight, or we already fired). The
+    // loop-breaker in discoveryAutoAbortService exempts the run after an
+    // auto-abort so a legitimately-grown fleet can complete once and refresh
+    // the baseline — aborted runs never record duration samples.
+    if (row.status === "running" && !row.cancelRequested && !row.scopeDeviceName) {
+      const bl = baselines.get(id) ?? null;
+      const elapsed = now - startedMs;
+      if (bl && elapsed > bl.autoAbortMs) {
+        const activeDevices = (row.activeDevices as { name: string; startedAt: number }[])
+          .map((d) => ({ name: d.name, elapsedMs: now - d.startedAt }));
+        const details = {
+          integrationId: id,
+          elapsedMs: elapsed,
+          avgMs: bl.avgMs,
+          thresholdMs: bl.thresholdMs,
+          autoAbortMs: bl.autoAbortMs,
+          sampleCount: bl.sampleCount,
+          activeDevices,
+          slowDevices: [...slowAlertedDevices],
+        };
+        const decision = await evaluateAutoAbort(id, row.startedAt.toISOString()).catch(() => null);
+        if (decision?.action === "abort") {
+          await requestCancel(id);
+          const slowSuffix = slowAlertedDevices.size > 0
+            ? ` Slow-flagged FortiGates: ${[...slowAlertedDevices].join(", ")}.`
+            : "";
+          const activeSuffix = activeDevices.length > 0
+            ? ` Still running: ${activeDevices.map((d) => `${d.name} (${fmtSec(d.elapsedMs)})`).join(", ")}.`
+            : "";
+          logEvent({
+            action: "integration.discover.auto_aborted",
+            resourceType: "integration",
+            resourceId: id,
+            resourceName: row.integrationName,
+            level: "warning",
+            message: `Auto-aborting discovery for "${row.integrationName}" — ${fmtSec(elapsed)} elapsed vs typical ${fmtSec(bl.avgMs)} (auto-abort threshold ${fmtSec(bl.autoAbortMs)}).${slowSuffix}${activeSuffix}`,
+            details,
+          });
+        } else if (decision?.action === "exempt" && decision.granted) {
+          logEvent({
+            action: "integration.discover.auto_abort_skipped",
+            resourceType: "integration",
+            resourceId: id,
+            resourceName: row.integrationName,
+            level: "warning",
+            message: `Discovery for "${row.integrationName}" exceeded its auto-abort threshold (${fmtSec(elapsed)} elapsed vs ${fmtSec(bl.autoAbortMs)}) but the previous run was auto-aborted — letting this run finish so a successful completion can refresh the duration baseline.`,
+            details,
+          });
+        }
+      }
+    }
   }
 }
 
@@ -2527,7 +2594,12 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
       // direction: a seconds-long run would drag the full-run baseline down
       // and false-flag future full runs as slow. (The per-device sample in
       // onProgress still records — that baseline is per-device and valid.)
-      if (!scopeDeviceName) recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
+      if (!scopeDeviceName) {
+        recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
+        // A successful full run resets the auto-abort loop-breaker — the fresh
+        // sample above is the re-baseline the exemption existed to obtain.
+        clearAutoAbortState(integrationId).catch(() => {});
+      }
       recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "success");
       // Refresh the precomputed "By name" checklist sources for the Auto-Monitor
       // cards so the edit modal loads them instantly (no fleet-wide DISTINCT ON on

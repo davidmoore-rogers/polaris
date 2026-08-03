@@ -33,6 +33,12 @@ const MULT_HEADROOM = 1.5;
 // Variance multiplier for the stddev-based threshold.
 const STDDEV_MULT = 2;
 
+// Auto-abort multiplier: checkForSlowRuns hard-cancels a run whose elapsed
+// time exceeds autoAbortMs. Clamped to never sit below thresholdMs, so the
+// slow warning always fires at or before the abort and short baselines keep
+// the absolute floor headroom (a 10s-avg integration aborts past ~70s, not 20s).
+const AUTO_ABORT_MULT = 2;
+
 interface UnitStats {
   samples: number[];
   updatedAt: string; // ISO timestamp
@@ -47,6 +53,7 @@ export interface Baseline {
   avgMs: number;
   stddevMs: number;
   thresholdMs: number;
+  autoAbortMs: number;
 }
 
 function emptyDoc(): StatsDoc {
@@ -104,7 +111,8 @@ export function computeBaseline(samples: number[]): Baseline | null {
     avg * MULT_HEADROOM,
     avg + FLOOR_HEADROOM_MS,
   );
-  return { sampleCount: n, avgMs: avg, stddevMs: stddev, thresholdMs: threshold };
+  const autoAbort = Math.max(avg * AUTO_ABORT_MULT, threshold);
+  return { sampleCount: n, avgMs: avg, stddevMs: stddev, thresholdMs: threshold, autoAbortMs: autoAbort };
 }
 
 /**

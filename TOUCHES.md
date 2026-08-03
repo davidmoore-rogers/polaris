@@ -2708,19 +2708,20 @@ Listed alphabetically.
 
 ## services/discoveryDurationService.ts
 
-**What it owns:** Rolling discovery-duration tracking per integration (and per-FortiGate within FMG runs), baseline computation for slow-run detection, and threshold formula.
+**What it owns:** Rolling discovery-duration tracking per integration (and per-FortiGate within FMG runs), baseline computation for slow-run detection, the threshold formula, and the auto-abort ceiling.
 
 **Public API:** `recordSample`, `getBaseline`, `getBaselines`, `computeBaseline`.
 
 **Cross-service deps:** none (reads/writes Settings key "discoveryDurationStats").
 
-**Used by:** `src/api/routes/integrations.ts` — slow-check baseline lookup (`checkForSlowRuns`), record per-FG and overall run durations, and the `GET /integrations` list endpoint attaches `discoveryBaseline` per row so the card UI can show an "Avg Discovery Time" sized against `pollInterval`. ~4 call sites.
+**Used by:** `src/api/routes/integrations.ts` — slow-check baseline lookup (`checkForSlowRuns`, which reads both `thresholdMs` for the warning and `autoAbortMs` for the hard cancel), record per-FG and overall run durations, and the `GET /integrations` list endpoint attaches `discoveryBaseline` per row so the card UI can show an "Avg Discovery Time" sized against `pollInterval`. ~4 call sites.
 
 **Invariants:**
-- Only successful (non-aborted, non-errored) runs recorded; failed runs skip `recordSample()` to avoid poisoning the average.
+- Only successful (non-aborted, non-errored) runs recorded; failed runs skip `recordSample()` to avoid poisoning the average. (This is why the auto-abort loop-breaker in `discoveryAutoAbortService` exists — an auto-aborted run can't refresh its own baseline.)
 - Rolling window = 10 samples; new sample appends, list trims to last 10.
 - Baseline requires ≥3 samples; returns null otherwise.
 - Slow-run threshold = `max(avg + 2σ, avg × 1.5, avg + 60s)` — ensures headroom even on uniform fast runs.
+- Auto-abort ceiling = `max(2× avg, thresholdMs)` — clamped to the slow threshold so the warning always fires at or before the abort, and tiny baselines keep the 60s floor instead of aborting at 2× a few seconds.
 - Unit key is either integrationId (overall) or `${integrationId}:${fortigateDevice}` (per-FG).
 - Stats are stored in Settings as `{ units: { [unitKey]: { samples: [ms], updatedAt } } }`.
 
@@ -2730,6 +2731,30 @@ Listed alphabetically.
 - Check getBaselines() batch reads are correct (no off-by-one in map population).
 - Confirm recordSample() ignores invalid input (negative ms, non-finite values).
 - Test edge case: if all 10 samples are identical, stddev=0 and threshold should still be avg + 60s (floor wins).
+- `autoAbortMs` must never drop below `thresholdMs` — checkForSlowRuns assumes the slow warning precedes any auto-abort.
+
+---
+
+## services/discoveryAutoAbortService.ts
+
+**What it owns:** The loop-breaker state behind discovery auto-abort — after `checkForSlowRuns` cancels a run at its `autoAbortMs` ceiling, the NEXT overlong run is exempt (alternating abort/exempt) so a fleet that legitimately outgrew its baseline can complete once and re-baseline.
+
+**Public API:** `decideAutoAbort` (pure), `evaluateAutoAbort`, `clearAutoAbortState`, `AutoAbortUnitState`, `AutoAbortDecision`.
+
+**Cross-service deps:** none (reads/writes Settings key "discoveryAutoAbortState").
+
+**Used by:** `src/api/routes/integrations.ts` — `checkForSlowRuns` calls `evaluateAutoAbort` when an over-ceiling run is found (web/scheduler role); `runDiscovery`'s completed branch calls `clearAutoAbortState` alongside `recordSample` (discovery role). Cross-process coherence rides the Setting row.
+
+**Invariants:**
+- An entry exists only between an auto-abort and the next successful full (non-scoped) run; success deletes it.
+- Exemption is granted to exactly one run (keyed by the run's `startedAt` ISO) and is stable across repeated 30s ticks; `granted: true` surfaces only on the first tick so the caller logs the skip Event once.
+- If the exempted run never completes successfully, the following overlong run is aborted again (abort/exempt alternation) — the sequence can only end via a successful run or the runs dropping back under the ceiling.
+- Scoped single-device runs never participate (checkForSlowRuns skips them before evaluating).
+
+**When changing this:**
+- Keep `decideAutoAbort` pure — it's the unit-tested core (`tests/unit/discoveryAutoAbortService.test.ts`).
+- Any new terminal outcome in `runDiscovery` that records a duration sample must also clear this state, or the alternation logic will keep exempting/aborting against a baseline that's already fresh.
+- The evaluate path only runs for over-ceiling runs, so Setting reads are rare — don't move it into the per-tick hot path for all runs.
 
 ---
 
