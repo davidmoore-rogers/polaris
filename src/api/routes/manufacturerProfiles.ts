@@ -25,14 +25,10 @@ import {
   COMBINER_KINDS,
   COMBINER_LABELS,
 } from "../../utils/symbolTransforms.js";
-import { logger } from "../../utils/logger.js";
+import { requestActor } from "../middleware/auth.js";
+import { logEvent } from "./events.js";
 
 const router: Router = Router();
-
-function actor(req: Request): string | null {
-  const u = (req as any).session?.user;
-  return (u && typeof u.username === "string") ? u.username : null;
-}
 
 function send(res: Response, body: unknown, status = 200): void {
   res.status(status).json(body);
@@ -67,8 +63,15 @@ router.post("/", requirePermission("manufacturerProfiles", "write"), handle(asyn
   if (!manufacturer || typeof manufacturer !== "string") {
     return send(res, { error: "manufacturer is required" }, 400);
   }
-  const profile = await createProfile({ manufacturer, createdBy: actor(req) });
-  logger.info({ profileId: profile.id, manufacturer: profile.manufacturer, actor: actor(req) }, "manufacturer profile created");
+  const profile = await createProfile({ manufacturer, createdBy: requestActor(req) ?? null });
+  logEvent({
+    action: "manufacturer_profile.created",
+    resourceType: "manufacturer_profile",
+    resourceId: profile.id,
+    resourceName: profile.manufacturer,
+    actor: requestActor(req),
+    message: `Manufacturer profile "${profile.manufacturer}" created`,
+  });
   send(res, { profile }, 201);
 }));
 
@@ -80,6 +83,13 @@ router.post("/", requirePermission("manufacturerProfiles", "write"), handle(asyn
 // transform null, empty-row state allowed).
 router.put("/:id/metrics/:metricKey", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
   const updated = await updateMetricRow(String(req.params.id), String(req.params.metricKey), req.body || {});
+  logEvent({
+    action: "manufacturer_profile.metric_updated",
+    resourceType: "manufacturer_profile",
+    resourceId: String(req.params.id),
+    actor: requestActor(req),
+    message: `Manufacturer profile metric "${String(req.params.metricKey)}" updated`,
+  });
   send(res, { metric: updated });
 }));
 
@@ -88,43 +98,97 @@ router.put("/:id/metrics/:metricKey", requirePermission("manufacturerProfiles", 
 // transform, order }. Same shape validation as the metric row.
 router.post("/:id/metrics/:metricKey/overrides", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
   const created = await createOverride(String(req.params.id), String(req.params.metricKey), req.body || {});
+  logEvent({
+    action: "manufacturer_profile.override_created",
+    resourceType: "manufacturer_profile",
+    resourceId: String(req.params.id),
+    actor: requestActor(req),
+    message: `Manufacturer profile override "${created.modelPattern}" added for metric "${String(req.params.metricKey)}"`,
+  });
   send(res, { override: created }, 201);
 }));
 
 // PUT /:id/metrics/:metricKey/overrides/:overrideId — edit.
 router.put("/:id/metrics/:metricKey/overrides/:overrideId", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
   const updated = await updateOverride(String(req.params.overrideId), req.body || {});
+  logEvent({
+    action: "manufacturer_profile.override_updated",
+    resourceType: "manufacturer_profile",
+    resourceId: String(req.params.id),
+    actor: requestActor(req),
+    message: `Manufacturer profile override "${updated.modelPattern}" updated for metric "${String(req.params.metricKey)}"`,
+  });
   send(res, { override: updated });
 }));
 
 // DELETE /:id/metrics/:metricKey/overrides/:overrideId.
 router.delete("/:id/metrics/:metricKey/overrides/:overrideId", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
   await deleteOverride(String(req.params.overrideId));
+  logEvent({
+    action: "manufacturer_profile.override_deleted",
+    resourceType: "manufacturer_profile",
+    resourceId: String(req.params.id),
+    actor: requestActor(req),
+    message: `Manufacturer profile override deleted for metric "${String(req.params.metricKey)}"`,
+  });
   res.status(204).end();
 }));
 
 // POST /:id/widgets — add a custom widget.
 router.post("/:id/widgets", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
-  const widget = await createWidget(String(req.params.id), { ...(req.body || {}), createdBy: actor(req) });
+  const widget = await createWidget(String(req.params.id), { ...(req.body || {}), createdBy: requestActor(req) ?? null });
+  logEvent({
+    action: "manufacturer_profile.widget_created",
+    resourceType: "manufacturer_profile",
+    resourceId: String(req.params.id),
+    resourceName: widget.name,
+    actor: requestActor(req),
+    message: `Manufacturer profile custom widget "${widget.name}" created`,
+  });
   send(res, { widget }, 201);
 }));
 
 // PUT /:id/widgets/:widgetId.
 router.put("/:id/widgets/:widgetId", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
   const widget = await updateWidget(String(req.params.widgetId), req.body || {});
+  logEvent({
+    action: "manufacturer_profile.widget_updated",
+    resourceType: "manufacturer_profile",
+    resourceId: String(req.params.id),
+    resourceName: widget.name,
+    actor: requestActor(req),
+    message: `Manufacturer profile custom widget "${widget.name}" updated`,
+  });
   send(res, { widget });
 }));
 
 // DELETE /:id/widgets/:widgetId.
 router.delete("/:id/widgets/:widgetId", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
   await deleteWidget(String(req.params.widgetId));
+  logEvent({
+    action: "manufacturer_profile.widget_deleted",
+    resourceType: "manufacturer_profile",
+    resourceId: String(req.params.id),
+    actor: requestActor(req),
+    message: "Manufacturer profile custom widget deleted",
+  });
   res.status(204).end();
 }));
 
 // DELETE /:id — admin only.
 router.delete("/:id", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
+  const existing = await getProfile(String(req.params.id));
   await deleteProfile(String(req.params.id));
-  logger.info({ profileId: String(req.params.id), actor: actor(req) }, "manufacturer profile deleted");
+  logEvent({
+    action: "manufacturer_profile.deleted",
+    resourceType: "manufacturer_profile",
+    resourceId: String(req.params.id),
+    resourceName: existing?.manufacturer,
+    actor: requestActor(req),
+    message: existing
+      ? `Manufacturer profile "${existing.manufacturer}" deleted`
+      : "Manufacturer profile deleted",
+  });
   res.status(204).end();
 }));
 
