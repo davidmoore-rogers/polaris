@@ -25,6 +25,7 @@ import {
 } from "../../services/roleService.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { normalizeTags } from "../../utils/tagNormalize.js";
+import * as mfaPending from "../../utils/mfaPending.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
@@ -202,6 +203,9 @@ router.put("/:id/password", requirePermission("users", "write"), async (req, res
       data: { passwordHash },
     });
     clearLockout(user.username);
+    // A pending TOTP challenge was minted against the OLD password — a
+    // successful password step must not survive the reset.
+    mfaPending.revokeForUser(id);
     logEvent({
       action: "user.password_reset",
       level: "warning",
