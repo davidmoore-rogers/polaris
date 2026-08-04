@@ -2073,6 +2073,87 @@ function controllerCacheKey(integrationId: string, deviceName: string, kind: "sw
   return `${integrationId}::${deviceName}::${kind}`;
 }
 
+/**
+ * Fetch a FortiOS REST path from a controller FortiGate through whichever
+ * transport the integration prescribes. One home for the dispatch the three
+ * controller fetchers (inventory / wifi clients / switch-ports CMDB) each
+ * carried a private copy of until the 2026-08 audit:
+ *
+ *  - fortimanager + useProxy=false → STRICT bypass: direct REST against the
+ *    device's mgmt IP (resolveControllerMgmtIp). Polaris never silently
+ *    falls back to proxy — if the direct path can't be assembled (missing
+ *    token / mgmt interface / unresolvable mgmt IP) the call fails with a
+ *    precondition-specific error so the operator sees what's misconfigured.
+ *    A silent fallback would turn "I disabled proxy" into "…except when
+ *    something else is wrong, in which case it re-enables itself and
+ *    overruns FMG's parallel-session limit."
+ *  - fortimanager (proxy, default) → /sys/proxy/json via fmgProxyRest, with
+ *    an AbortController-backed timeout.
+ *  - fortigate → direct REST with the integration's own config.
+ *
+ * `label` names the caller in the unsupported-type error.
+ */
+async function fetchViaFortinetTransport(
+  integration: { id: string; type: string; config: Record<string, unknown> },
+  deviceName: string,
+  path: string,
+  timeoutMs: number,
+  label: string,
+): Promise<unknown> {
+  if (integration.type === "fortimanager") {
+    const fmgConfig = integration.config as unknown as FortiManagerConfig;
+    if (fmgConfig.useProxy === false) {
+      if (!fmgConfig.fortigateApiToken) {
+        throw new AppError(
+          409,
+          "Direct mode is enabled (useProxy=false) but no FortiGate API token is configured on the integration. " +
+          "Set fortigateApiToken on the integration's Settings tab, or re-enable proxy mode.",
+        );
+      }
+      if (!fmgConfig.mgmtInterface?.trim()) {
+        throw new AppError(
+          409,
+          "Direct mode is enabled (useProxy=false) but mgmtInterface is empty. " +
+          "Set the FortiGate management interface name (e.g. \"mgmt\", \"port1\") on the integration's Settings tab.",
+        );
+      }
+      const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
+      if (!mgmtIp) {
+        throw new AppError(
+          502,
+          `Direct mode: could not resolve ${deviceName}'s management IP ` +
+          `(not found in Polaris asset inventory or FMG CMDB interface "${fmgConfig.mgmtInterface || "mgmt"}").`,
+        );
+      }
+      const directConfig: FortiGateConfig = {
+        host: mgmtIp,
+        port: 443,
+        apiUser: fmgConfig.fortigateApiUser || "",
+        apiToken: fmgConfig.fortigateApiToken,
+        verifySsl: fmgConfig.fortigateVerifySsl === true,
+      };
+      return fgRequest<unknown>(directConfig, "GET", path, { timeoutMs });
+    }
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      return await fmgProxyRest<unknown>(fmgConfig, deviceName, "GET", path, { signal: ac.signal, integrationId: integration.id });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (integration.type === "fortigate") {
+    return fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
+  }
+  throw new AppError(500, `Unsupported integration type for ${label}: ${integration.type}`);
+}
+
+/** FortiOS responses arrive either as a bare array or `{ results: [...] }`. */
+function unwrapFortiosRows(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  return Array.isArray((raw as any)?.results) ? (raw as any).results : [];
+}
+
 async function fetchFortinetControllerInventory(
   integration: { id: string; type: string; config: Record<string, unknown> },
   deviceName: string,
@@ -2101,70 +2182,8 @@ async function fetchFortinetControllerInventory(
       const path = kind === "switches"
         ? "/api/v2/monitor/switch-controller/managed-switch/status"
         : "/api/v2/monitor/wifi/managed_ap";
-
-      let rawRows: unknown;
-      if (integration.type === "fortimanager") {
-        const fmgConfig = integration.config as unknown as FortiManagerConfig;
-        // Strict bypass: when useProxy=false the operator has explicitly
-        // opted out of FMG proxy. Polaris will never silently fall back
-        // — if the direct path can't be assembled (missing token / mgmt
-        // interface / mgmt IP not resolvable in FMG) the probe fails
-        // with a precondition-specific error so the operator sees what's
-        // misconfigured. This matters at scale because a silent
-        // fallback to proxy turns "I disabled proxy" into "I disabled
-        // proxy except when something else is wrong, in which case it
-        // silently re-enables itself and overruns FMG's session limit."
-        if (fmgConfig.useProxy === false) {
-          if (!fmgConfig.fortigateApiToken) {
-            throw new AppError(
-              409,
-              "Direct mode is enabled (useProxy=false) but no FortiGate API token is configured on the integration. " +
-              "Set fortigateApiToken on the integration's Settings tab, or re-enable proxy mode.",
-            );
-          }
-          if (!fmgConfig.mgmtInterface?.trim()) {
-            throw new AppError(
-              409,
-              "Direct mode is enabled (useProxy=false) but mgmtInterface is empty. " +
-              "Set the FortiGate management interface name (e.g. \"mgmt\", \"port1\") on the integration's Settings tab.",
-            );
-          }
-          const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
-          if (!mgmtIp) {
-            throw new AppError(
-              502,
-              `Direct mode: could not resolve ${deviceName}'s management IP ` +
-              `(not found in Polaris asset inventory or FMG CMDB interface "${fmgConfig.mgmtInterface || "mgmt"}").`,
-            );
-          }
-          const directConfig: FortiGateConfig = {
-            host: mgmtIp,
-            port: 443,
-            apiUser: fmgConfig.fortigateApiUser || "",
-            apiToken: fmgConfig.fortigateApiToken,
-            verifySsl: fmgConfig.fortigateVerifySsl === true,
-          };
-          rawRows = await fgRequest<unknown>(directConfig, "GET", path, { timeoutMs });
-        } else {
-          // Proxy mode (default) — wrap in /sys/proxy/json. fmgProxyRest unwraps
-          // the FMG envelope + FortiOS envelope and returns the inner results.
-          const ac = new AbortController();
-          const timer = setTimeout(() => ac.abort(), timeoutMs);
-          try {
-            rawRows = await fmgProxyRest<unknown>(fmgConfig, deviceName, "GET", path, { signal: ac.signal, integrationId: integration.id });
-          } finally {
-            clearTimeout(timer);
-          }
-        }
-      } else if (integration.type === "fortigate") {
-        rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
-      } else {
-        throw new AppError(500, `Unsupported integration type for Fortinet controller probe: ${integration.type}`);
-      }
-
-      const rows: unknown[] = Array.isArray(rawRows)
-        ? rawRows
-        : Array.isArray((rawRows as any)?.results) ? (rawRows as any).results : [];
+      const rawRows = await fetchViaFortinetTransport(integration, deviceName, path, timeoutMs, "Fortinet controller probe");
+      const rows = unwrapFortiosRows(rawRows);
       const inventory = new Map<string, FortinetControllerEntry>();
       for (const row of rows) {
         const r = row as Record<string, unknown>;
@@ -2370,41 +2389,8 @@ async function fetchFortinetWifiClients(
   const fetchPromise = (async (): Promise<WifiClientSignalMap> => {
     try {
       const path = "/api/v2/monitor/wifi/client";
-      let rawRows: unknown;
-      if (integration.type === "fortimanager") {
-        const fmgConfig = integration.config as unknown as FortiManagerConfig;
-        if (fmgConfig.useProxy === false) {
-          if (!fmgConfig.fortigateApiToken || !fmgConfig.mgmtInterface?.trim()) {
-            throw new AppError(409, "Direct-mode prerequisites missing for wifi/client fetch");
-          }
-          const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
-          if (!mgmtIp) throw new AppError(502, `Could not resolve ${deviceName}'s management IP`);
-          const directConfig: FortiGateConfig = {
-            host: mgmtIp,
-            port: 443,
-            apiUser: fmgConfig.fortigateApiUser || "",
-            apiToken: fmgConfig.fortigateApiToken,
-            verifySsl: fmgConfig.fortigateVerifySsl === true,
-          };
-          rawRows = await fgRequest<unknown>(directConfig, "GET", path, { timeoutMs });
-        } else {
-          const ac = new AbortController();
-          const timer = setTimeout(() => ac.abort(), timeoutMs);
-          try {
-            rawRows = await fmgProxyRest<unknown>(fmgConfig, deviceName, "GET", path, { signal: ac.signal, integrationId: integration.id });
-          } finally {
-            clearTimeout(timer);
-          }
-        }
-      } else if (integration.type === "fortigate") {
-        rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
-      } else {
-        throw new AppError(500, `Unsupported integration type for wifi/client fetch: ${integration.type}`);
-      }
-
-      const rows: unknown[] = Array.isArray(rawRows)
-        ? rawRows
-        : Array.isArray((rawRows as any)?.results) ? (rawRows as any).results : [];
+      const rawRows = await fetchViaFortinetTransport(integration, deviceName, path, timeoutMs, "wifi/client fetch");
+      const rows = unwrapFortiosRows(rawRows);
       const clients: WifiClientSignalMap = new Map();
       for (const row of rows) {
         const r = row as Record<string, unknown>;
@@ -2556,41 +2542,8 @@ async function fetchFortiswitchControllerPortsCmdb(
       // older FortiOS ignores the flag and returns the raw string, which the
       // parser above handles too.
       const path = "/api/v2/cmdb/switch-controller/managed-switch?datasource=1";
-      let rawRows: unknown;
-      if (integration.type === "fortimanager") {
-        const fmgConfig = integration.config as unknown as FortiManagerConfig;
-        if (fmgConfig.useProxy === false) {
-          if (!fmgConfig.fortigateApiToken || !fmgConfig.mgmtInterface?.trim()) {
-            throw new AppError(409, "Direct-mode prerequisites missing for FortiSwitch CMDB ports fetch");
-          }
-          const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
-          if (!mgmtIp) throw new AppError(502, `Could not resolve ${deviceName}'s management IP`);
-          const directConfig: FortiGateConfig = {
-            host: mgmtIp,
-            port: 443,
-            apiUser: fmgConfig.fortigateApiUser || "",
-            apiToken: fmgConfig.fortigateApiToken,
-            verifySsl: fmgConfig.fortigateVerifySsl === true,
-          };
-          rawRows = await fgRequest<unknown>(directConfig, "GET", path, { timeoutMs });
-        } else {
-          const ac = new AbortController();
-          const timer = setTimeout(() => ac.abort(), timeoutMs);
-          try {
-            rawRows = await fmgProxyRest<unknown>(fmgConfig, deviceName, "GET", path, { signal: ac.signal, integrationId: integration.id });
-          } finally {
-            clearTimeout(timer);
-          }
-        }
-      } else if (integration.type === "fortigate") {
-        rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
-      } else {
-        throw new AppError(500, `Unsupported integration type for FortiSwitch CMDB ports fetch: ${integration.type}`);
-      }
-
-      const rows: unknown[] = Array.isArray(rawRows)
-        ? rawRows
-        : Array.isArray((rawRows as any)?.results) ? (rawRows as any).results : [];
+      const rawRows = await fetchViaFortinetTransport(integration, deviceName, path, timeoutMs, "FortiSwitch CMDB ports fetch");
+      const rows = unwrapFortiosRows(rawRows);
       const map: FortiswitchControllerPortsMap = new Map();
       for (const row of rows) {
         const r = row as Record<string, unknown>;
