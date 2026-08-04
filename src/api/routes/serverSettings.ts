@@ -2393,20 +2393,28 @@ router.post("/agents/cert-pins/bulk-add", requirePermission("serverSettingsSyste
       },
     });
 
-    let added = 0;
-    let alreadyPresent = 0;
-    for (const r of rows) {
+    // Compute the target set first, then write in batched transactions —
+    // a sequential await-per-agent loop is 2,000 serial round-trips inside
+    // one HTTP request at fleet scale (CLAUDE.md scale-check convention).
+    const toAdd = rows.filter((r) => {
       const union = [r.serverCertFingerprint.toLowerCase(), ...r.additionalServerCertFingerprints.map((p) => p.toLowerCase())];
-      if (union.includes(pin)) {
-        alreadyPresent += 1;
-        continue;
-      }
-      await prisma.managedAgent.update({
-        where: { id: r.id },
-        data:  { additionalServerCertFingerprints: { push: pin } },
-      });
-      added += 1;
-      // Fire-and-forget WS push so online agents apply within seconds.
+      return !union.includes(pin);
+    });
+    const alreadyPresent = rows.length - toAdd.length;
+    const WRITE_CHUNK = 200;
+    for (let i = 0; i < toAdd.length; i += WRITE_CHUNK) {
+      await prisma.$transaction(
+        toAdd.slice(i, i + WRITE_CHUNK).map((r) =>
+          prisma.managedAgent.update({
+            where: { id: r.id },
+            data:  { additionalServerCertFingerprints: { push: pin } },
+          }),
+        ),
+      );
+    }
+    const added = toAdd.length;
+    // Fire-and-forget WS push so online agents apply within seconds.
+    for (const r of toAdd) {
       try { refreshConfig(r.id); } catch { /* offline — picks up next poll */ }
     }
 
@@ -2448,9 +2456,11 @@ router.post("/agents/cert-pins/bulk-remove", requirePermission("serverSettingsSy
       },
     });
 
-    let removed = 0;
+    // Same batched-write shape as bulk-add: classify every agent first,
+    // then flush per-agent updates in chunked transactions.
     let notPresent = 0;
     let lastPinSkipped = 0;
+    const toUpdate: Array<{ id: string; remaining: string[] }> = [];
     for (const r of rows) {
       const union = [r.serverCertFingerprint, ...r.additionalServerCertFingerprints];
       const remaining = union.filter((p) => p.toLowerCase() !== pin);
@@ -2462,15 +2472,25 @@ router.post("/agents/cert-pins/bulk-remove", requirePermission("serverSettingsSy
         lastPinSkipped += 1;
         continue;
       }
-      await prisma.managedAgent.update({
-        where: { id: r.id },
-        data: {
-          serverCertFingerprint:            remaining[0],
-          additionalServerCertFingerprints: remaining.slice(1),
-        },
-      });
-      removed += 1;
-      try { refreshConfig(r.id); } catch { /* offline */ }
+      toUpdate.push({ id: r.id, remaining });
+    }
+    const WRITE_CHUNK = 200;
+    for (let i = 0; i < toUpdate.length; i += WRITE_CHUNK) {
+      await prisma.$transaction(
+        toUpdate.slice(i, i + WRITE_CHUNK).map((u) =>
+          prisma.managedAgent.update({
+            where: { id: u.id },
+            data: {
+              serverCertFingerprint:            u.remaining[0],
+              additionalServerCertFingerprints: u.remaining.slice(1),
+            },
+          }),
+        ),
+      );
+    }
+    const removed = toUpdate.length;
+    for (const u of toUpdate) {
+      try { refreshConfig(u.id); } catch { /* offline */ }
     }
 
     await logEvent({
