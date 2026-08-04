@@ -3591,6 +3591,17 @@ export interface SystemInfoSample {
    * `undefined` when CMDB wasn't fetched (SNMP-interfaces path).
    */
   fortilinkInterfaces?: string[];
+  /**
+   * Real hardware model detected during the scrape, when the matched vendor
+   * profile carries a model-identity query (FortiSwitch fsSysVersion — the
+   * value has the firmware version appended after the model token, and the
+   * profile's parse strips it). `undefined`/null = not collected or
+   * unrecognized → leave Asset.model alone. recordSystemInfoResult adopts a
+   * non-null value onto Asset.model only while the stored model is empty or
+   * still the generic discovery literal ("FortiSwitch…"), so an
+   * operator-typed model is never overwritten.
+   */
+  detectedModel?: string | null;
 }
 
 export interface CollectionResult<T> {
@@ -6324,6 +6335,25 @@ async function collectSystemInfoSnmp(
       } catch { /* leave storage empty; HRM-empty is the same outcome as before */ }
     }
 
+    // Vendor model identity: one scalar GET when the matched profile knows
+    // where the device publishes its real model (FortiSwitch fsSysVersion —
+    // discovery has no model source for managed switches, so this scrape is
+    // the only path to the real hardware model). Best-effort; a null parse
+    // (firmware-only string, empty value) leaves detectedModel unset so the
+    // persist layer doesn't touch Asset.model.
+    let detectedModel: string | null = null;
+    if (vendorProfile?.model) {
+      try {
+        await ensureRegistryLoaded();
+        const modelOid = resolveOidSync(vendorProfile.model.symbol, vendorScope);
+        if (modelOid) {
+          const vb  = await snmpGetScalar(session, modelOid).catch(() => null);
+          const raw = snmpVbToString(vb);
+          if (raw) detectedModel = vendorProfile.model.parse(raw);
+        }
+      } catch { /* best-effort — model stays undetected */ }
+    }
+
     // Interfaces: build a map keyed by ifIndex from IF-MIB columns. Prefer
     // ifName / ifHC*Octets / ifHighSpeed when present; otherwise fall back
     // to the legacy 32-bit columns.
@@ -6433,6 +6463,7 @@ async function collectSystemInfoSnmp(
       lldpNeighbors,
       lldpSource: opts.includeLldp !== false ? "snmp" : undefined,
       wirelessStations,
+      detectedModel,
     };
   }, opts.timeoutMs);
 }
@@ -7056,7 +7087,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     // One indexed PK read per scrape on the slow (~10 min) cadence.
     const pinned = await prisma.asset.findUnique({
       where: { id: assetId },
-      select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true },
+      select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true },
     });
     const pinnedIfaces  = new Set(pinned?.monitoredInterfaces ?? []);
     const pinnedStorage = new Set(pinned?.monitoredStorage ?? []);
@@ -7243,6 +7274,31 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
       await persistMclagPeers(assetId, d.mclagPeers);
       endMclag({ peers: d.mclagPeers.length });
       stopWrite();
+    }
+    // Detected hardware model (FortiSwitch fsSysVersion parse). Adopt onto
+    // Asset.model only while the stored model is empty or still generic —
+    // discovery stamps the literal "FortiSwitch" (the managed-switch CMDB has
+    // no model field) and the projection deliberately skips the fortiswitch
+    // source's model, so this write can't be clobbered by the next discovery
+    // cycle. A previously-detected "FortiSwitch <token>" stays overwritable
+    // (self-heals on a hardware swap behind the same IP); anything else is
+    // operator-typed and never touched. Edge-triggered: writes + logs only
+    // when the value actually changes.
+    if (typeof d.detectedModel === "string" && d.detectedModel && pinned) {
+      const currentModel = (pinned.model ?? "").trim();
+      const overwritable = !currentModel || /^fortiswitch\b/i.test(currentModel);
+      if (overwritable && currentModel !== d.detectedModel) {
+        await prisma.asset.update({ where: { id: assetId }, data: { model: d.detectedModel } });
+        logEvent({
+          action: "asset.model_detected",
+          resourceType: "asset",
+          resourceId: assetId,
+          resourceName: pinned.hostname || undefined,
+          level: "info",
+          message: `Model detected via SNMP: ${pinned.hostname || assetId} "${currentModel || "(none)"}" → "${d.detectedModel}"`,
+          details: { previousModel: currentModel || null, model: d.detectedModel, source: "snmp:fsSysVersion" },
+        });
+      }
     }
     // Only bump lastSystemInfoAt when the scrape returned interfaces. The
     // /system-info GET endpoint anchors its interface query to this

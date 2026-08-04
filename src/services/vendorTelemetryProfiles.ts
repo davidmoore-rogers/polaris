@@ -18,6 +18,8 @@
  * Entries are matched in array order; first match wins.
  */
 
+import { fortiswitchModelFromFsSysVersion } from "../utils/fortiswitchModel.js";
+
 export interface CpuQuery {
   symbol: string;                       // symbolic OID name (resolved via oidRegistry)
   mode: "scalar" | "walk-avg";          // scalar = .0, walk-avg = walk subtree + average
@@ -71,6 +73,22 @@ export interface TemperatureQuery {
   sensorName?: string;
 }
 
+/**
+ * Vendor model-identity shape. Used when the device's real hardware model is
+ * only reachable via a vendor SNMP scalar (FortiSwitch fsSysVersion — the
+ * FMG/FortiGate managed-switch CMDB has no model field, so discovery stamps
+ * the generic literal "FortiSwitch"). Consumed by `collectSystemInfoSnmp` on
+ * the heavy pass: one scalar GET, run through `parse` to strip whatever
+ * non-model payload the raw string carries (firmware suffix etc.), surfaced
+ * as `SystemInfoSample.detectedModel` and adopted onto `Asset.model` by
+ * `recordSystemInfoResult` when the stored model is still generic.
+ */
+export interface ModelQuery {
+  symbol: string;                       // symbolic OID name resolved via oidRegistry
+  /** Extract the display model from the raw scalar; null = unrecognized (nothing stamped). */
+  parse: (raw: string) => string | null;
+}
+
 export interface VendorTelemetryProfile {
   vendor: string;                       // human-readable label, used in logs
   match: RegExp;                        // case-insensitive regex tested against `${manufacturer} ${os}`
@@ -89,6 +107,12 @@ export interface VendorTelemetryProfile {
    * heuristic produced any rows — typical on FortiAPs.
    */
   temperature?: TemperatureQuery;
+  /**
+   * Vendor model-identity scalar. Consumed by `collectSystemInfoSnmp`; see
+   * ModelQuery. Not part of the editable ManufacturerProfile surface — the
+   * hardcoded profile is its only source.
+   */
+  model?: ModelQuery;
 }
 
 /**
@@ -169,6 +193,15 @@ export const VENDOR_TELEMETRY_PROFILES: VendorTelemetryProfile[] = [
       totalBytesSymbol: "fsSysDiskCapacity",
       mountPath:        "flash",
     },
+    // fsSysVersion @ 12356.106.4.1.1 carries the real hardware model, but as
+    // a combined string with the firmware version appended after the model
+    // token ("S548DF-v7.2.5-build0453,230511 (GA)"). The parse strips the
+    // firmware suffix and prefixes "FortiSwitch " — that prefix keeps this
+    // very profile matching (`match` is tested against a haystack that
+    // includes the model, and FortiSwitch assets have no `os` to match on).
+    // Discovery can't supply the model: the managed-switch CMDB has no model
+    // field, so the asset sits at the generic "FortiSwitch" until this reads.
+    model: { symbol: "fsSysVersion", parse: fortiswitchModelFromFsSysVersion },
   },
   {
     // FortiAP sits BEFORE the generic Fortinet entry so FortiAPs (manufacturer

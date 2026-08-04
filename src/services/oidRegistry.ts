@@ -96,6 +96,11 @@ export const BUILT_IN_OIDS: Record<string, string> = {
   // pair here is the used/total *bytes* form, not CPU/MemPercent. Seeded so
   // the vendor profile resolves CPU/memory without requiring the MIB upload.
   fnFortiSwitchMib:  "1.3.6.1.4.1.12356.106",
+  // fsSysVersion @ .1 → combined "model-firmware" string, e.g.
+  // "S548DF-v7.2.5-build0453,230511 (GA)". The system-info scrape reads it
+  // to derive the real hardware model (utils/fortiswitchModel.ts) — FMG /
+  // FortiGate discovery has no model field for managed switches.
+  fsSysVersion:      "1.3.6.1.4.1.12356.106.4.1.1",
   // fsSysCpuUsage @ .2 → scalar percent (0..100). Distinct from FortiGate's
   // fgSysCpuUsage which lives under the 12356.101 root.
   fsSysCpuUsage:     "1.3.6.1.4.1.12356.106.4.1.2",
