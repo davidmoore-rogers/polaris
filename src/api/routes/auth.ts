@@ -71,6 +71,31 @@ function regenerateSession(req: Request): Promise<void> {
   });
 }
 
+/**
+ * Stamp the freshly-regenerated session with the logged-in identity — the
+ * single home for the eight fields every login pathway must set (previously
+ * copy-pasted across the LDAP / local / TOTP / SAML / OIDC / Entra-proxy
+ * paths; adding a session field meant six coordinated edits).
+ * `mfaVerified` is true for every SSO/directory provider (the IdP owns MFA)
+ * and for the post-TOTP step; false only on the local password step of a
+ * TOTP-enrolled account.
+ */
+function stampLoginSession(
+  req: Request,
+  user: { id: string; username: string; roleId: string; role: Parameters<typeof snapshotFromRole>[0] & { name: string } },
+  authProvider: string,
+  mfaVerified: boolean,
+): void {
+  req.session.userId = user.id;
+  req.session.username = user.username;
+  req.session.roleId = user.roleId;
+  req.session.roleSnapshot = snapshotFromRole(user.role);
+  req.session.role = user.role.name;
+  req.session.authProvider = authProvider;
+  req.session.mfaVerified = mfaVerified;
+  req.session.lastActivity = Date.now();
+}
+
 const LoginSchema = z.object({
   username: z.string().min(1, "Username is required"),
   password: z.string().min(1, "Password is required"),
@@ -115,15 +140,8 @@ router.post("/login", async (req, res, next) => {
         const provisioned = await findOrProvisionLdapUser(result);
 
         await regenerateSession(req);
-        req.session.userId = provisioned.id;
-        req.session.username = provisioned.username;
-        req.session.roleId = provisioned.roleId;
-        req.session.roleSnapshot = snapshotFromRole(provisioned.role);
-        req.session.role = provisioned.role.name;
-        req.session.authProvider = "ldap";
         // Directory owns MFA for LDAP users (TOTP self-enroll is SSO-blocked).
-        req.session.mfaVerified = true;
-        req.session.lastActivity = Date.now();
+        stampLoginSession(req, provisioned, "ldap", true);
 
         logEvent({
           action: "auth.login.ldap",
@@ -229,14 +247,7 @@ router.post("/login", async (req, res, next) => {
     }
 
     await regenerateSession(req);
-    req.session.userId = user.id;
-    req.session.username = user.username;
-    req.session.roleId = user.roleId;
-    req.session.roleSnapshot = snapshotFromRole(user.role);
-    req.session.role = user.role.name;
-    req.session.authProvider = user.authProvider || "local";
-    req.session.mfaVerified = false;
-    req.session.lastActivity = Date.now();
+    stampLoginSession(req, user, user.authProvider || "local", false);
 
     logEvent({
       action: "auth.login.local",
@@ -340,14 +351,7 @@ router.post("/login/totp", async (req, res, next) => {
     await prisma.user.update({ where: { id: user.id }, data: postVerifyData });
 
     await regenerateSession(req);
-    req.session.userId = user.id;
-    req.session.username = user.username;
-    req.session.roleId = user.roleId;
-    req.session.roleSnapshot = snapshotFromRole(user.role);
-    req.session.role = user.role.name;
-    req.session.authProvider = user.authProvider || "local";
-    req.session.mfaVerified = true;
-    req.session.lastActivity = Date.now();
+    stampLoginSession(req, user, user.authProvider || "local", true);
 
     logEvent({
       action: "auth.login.local",
@@ -491,16 +495,9 @@ router.post("/azure/callback", async (req, res) => {
     // Regenerate after the relay-state check above has consumed the pre-auth
     // session; the new session drops the old ID (and samlRelayState with it).
     await regenerateSession(req);
-    req.session.userId = user.id;
-    req.session.username = user.username;
-    req.session.roleId = user.roleId;
-    req.session.roleSnapshot = snapshotFromRole(user.role);
-    req.session.role = user.role.name;
-    req.session.authProvider = "azure";
     // IdP is responsible for MFA on Azure SAML users; their session is
     // implicitly "mfa-verified" as far as Polaris is concerned.
-    req.session.mfaVerified = true;
-    req.session.lastActivity = Date.now();
+    stampLoginSession(req, user, "azure", true);
     req.session.samlNameID = profile.nameID;
     req.session.samlSessionIndex = profile.sessionIndex;
 
@@ -731,14 +728,7 @@ router.get("/oidc/callback", async (req, res) => {
     const user = await findOrProvisionOidcUser(claims);
 
     await regenerateSession(req);
-    req.session.userId = user.id;
-    req.session.username = user.username;
-    req.session.roleId = user.roleId;
-    req.session.roleSnapshot = snapshotFromRole(user.role);
-    req.session.role = user.role.name;
-    req.session.authProvider = "oidc";
-    req.session.mfaVerified = true; // IdP owns MFA
-    req.session.lastActivity = Date.now();
+    stampLoginSession(req, user, "oidc", true); // IdP owns MFA
 
     logEvent({
       action: "auth.login.oidc",
@@ -868,14 +858,7 @@ router.get("/entra-proxy/login", entraProxyLoginLimiter, async (req, res) => {
     const user = await findOrProvisionEntraProxyUser(identity);
 
     await regenerateSession(req);
-    req.session.userId = user.id;
-    req.session.username = user.username;
-    req.session.roleId = user.roleId;
-    req.session.roleSnapshot = snapshotFromRole(user.role);
-    req.session.role = user.role.name;
-    req.session.authProvider = "entra-proxy";
-    req.session.mfaVerified = true; // Entra pre-auth owns MFA
-    req.session.lastActivity = Date.now();
+    stampLoginSession(req, user, "entra-proxy", true); // Entra pre-auth owns MFA
 
     logEvent({
       action: "auth.login.entra_proxy",
