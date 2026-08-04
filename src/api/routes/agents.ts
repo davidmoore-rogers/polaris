@@ -56,6 +56,7 @@ import { reconcileMacAddresses, reconcileInterfaceMacs } from "../../utils/macAd
 import { logEvent } from "./events.js";
 import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
 import { fetchPendingCommands, recordCommandResult } from "../../services/agentCommandService.js";
+import { SCRIPT_OUTPUT_CAP_BYTES } from "../../services/automationScriptService.js";
 import { logger } from "../../utils/logger.js";
 import { macColonUpperOrNull } from "../../utils/mac.js";
 
@@ -903,8 +904,8 @@ const CommandResultSchema = z.object({
   // run_script results (0.13.0+): exit code + captured output (≤64 KB each,
   // the agent caps before sending; re-capped server-side on persist).
   exitCode:    z.number().int().nullable().optional(),
-  stdout:      z.string().max(64 * 1024).nullable().optional(),
-  stderr:      z.string().max(64 * 1024).nullable().optional(),
+  stdout:      z.string().max(SCRIPT_OUTPUT_CAP_BYTES).nullable().optional(),
+  stderr:      z.string().max(SCRIPT_OUTPUT_CAP_BYTES).nullable().optional(),
 });
 agentsRouter.post("/command-result", async (req, res, next) => {
   try {

@@ -16,6 +16,8 @@
  * code that has to be defensive about Prisma adapter shapes.
  */
 
+import { sleep } from "./sleep.js";
+
 export async function retryOnDeadlock<T>(op: () => Promise<T>): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -26,7 +28,7 @@ export async function retryOnDeadlock<T>(op: () => Promise<T>): Promise<T> {
       if (code !== "40P01") throw err;
       lastErr = err;
       const backoffMs = 25 + Math.floor(Math.random() * 75);
-      await new Promise((r) => setTimeout(r, backoffMs));
+      await sleep(backoffMs);
     }
   }
   throw lastErr;

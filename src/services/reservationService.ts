@@ -5,6 +5,7 @@
 import type { ReservationStatus } from "../generated/prisma/client.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { isFortinetIntegrationType } from "../utils/pollingCompatibility.js";
 import { ipInCidr, isValidIpAddress, enumerateSubnetIps, detectIpVersion } from "../utils/cidr.js";
 import {
   pushReservation,
@@ -99,7 +100,7 @@ export async function listReservations(filter: ListReservationsFilter = {}) {
     const pushEligible = !!(
       r.ipAddress &&
       integration &&
-      (integration.type === "fortimanager" || integration.type === "fortigate") &&
+      (isFortinetIntegrationType(integration.type)) &&
       cfg.pushReservations === true
     );
     // Strip the integration blob from the response — callers only need the
@@ -562,7 +563,7 @@ export async function updateReservation(
   const integrationConfig = (integration?.config ?? {}) as Record<string, unknown>;
   const pushEligible =
     !!integration &&
-    (integration.type === "fortimanager" || integration.type === "fortigate") &&
+    (isFortinetIntegrationType(integration.type)) &&
     integrationConfig.pushReservations === true &&
     !!reservation.subnet.fortigateDevice &&
     !!reservation.ipAddress;

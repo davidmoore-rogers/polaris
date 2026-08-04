@@ -117,6 +117,7 @@ import {
   isPollingMethodCompatible,
   isMethodValidForStream,
   assetSourceKindFromIntegrationType,
+  isFortinetIntegrationType,
 } from "../utils/pollingCompatibility.js";
 import { propagateAfterStatusChange } from "./dependencyTreeService.js";
 import { triggerRetryAfterStatusChange } from "./reservationService.js";
@@ -714,7 +715,7 @@ function defaultPollingForSource(
   // FortiGate). Keeping them off by default means no behavior change for
   // existing fleets until an operator turns them on at some tier.
   if (stream === "processes" || stream === "eventLog") return "disabled";
-  if (source === "fortimanager" || source === "fortigate") {
+  if (isFortinetIntegrationType(source)) {
     // FortiOS exposes lldp-neighbors but most fleets don't enable LLDP per
     // interface, so the endpoint returns nothing on every probe. Default
     // off; operators flip to rest_api when their fleet actually has it.
@@ -766,7 +767,7 @@ function pickClassStreamsBlock(
   cfg: Record<string, unknown>,
   assetType: string,
 ): Record<string, unknown> | undefined {
-  if (integrationType === "fortimanager" || integrationType === "fortigate") {
+  if (isFortinetIntegrationType(integrationType)) {
     let block: Record<string, unknown> | undefined;
     if (assetType === "firewall")          block = cfg.fortigateMonitor   as Record<string, unknown> | undefined;
     else if (assetType === "switch")       block = cfg.fortiswitchMonitor as Record<string, unknown> | undefined;
@@ -1764,7 +1765,7 @@ export async function probeAsset(
 
     const integration  = asset.discoveredByIntegration ?? null;
     const sourceKind   = assetSourceKindFromIntegrationType(integration?.type ?? null);
-    const isFortinetSrc = sourceKind === "fortimanager" || sourceKind === "fortigate";
+    const isFortinetSrc = isFortinetIntegrationType(sourceKind);
     const isAdSrc       = sourceKind === "activedirectory";
 
     // REST-API probes for managed FortiSwitches/FortiAPs query the parent
@@ -3610,7 +3611,7 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
   if (!targetIp) return { supported: false, error: "Asset has no IP address" };
 
   const integration   = asset.discoveredByIntegration ?? null;
-  const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+  const isFortinetSrc = isFortinetIntegrationType(integration?.type);
 
   try {
     if (polling === "rest_api") {
@@ -3712,7 +3713,7 @@ export async function collectHardwareSensors(assetId: string): Promise<Collectio
   if (!targetIp) return { supported: false, error: "Asset has no IP address" };
 
   const integration         = asset.discoveredByIntegration ?? null;
-  const isFortinetSrc       = integration?.type === "fortimanager" || integration?.type === "fortigate";
+  const isFortinetSrc       = isFortinetIntegrationType(integration?.type);
 
   try {
     if (polling === "rest_api") {
@@ -3845,7 +3846,7 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
   if (!targetIp) return { supported: false, error: "Asset has no IP address" };
 
   const integration   = asset.discoveredByIntegration ?? null;
-  const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+  const isFortinetSrc = isFortinetIntegrationType(integration?.type);
   const isManagedSwitchOrAp = asset.assetType === "switch" || asset.assetType === "access_point";
 
   try {
@@ -4036,7 +4037,7 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
   if (!targetIp) return { supported: false, error: "Asset has no IP address" };
 
   const integration   = asset.discoveredByIntegration ?? null;
-  const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+  const isFortinetSrc = isFortinetIntegrationType(integration?.type);
   const isManagedSwitchOrAp = asset.assetType === "switch" || asset.assetType === "access_point";
 
   try {
@@ -7620,6 +7621,12 @@ export async function persistProcessConnections(
  * topology endpoint reads this back to draw real edges to non-Fortinet gear
  * (LLDP catches what fortinetTopology can't see).
  */
+// LLDP stickiness window — one contract, two readers: persistLldpNeighbors
+// keeps a vanished neighbor row this long before deleting it, and
+// persistManagedApLldpNeighbors treats another writer's row younger than
+// this as "fresh" when deciding ownership. They must agree.
+const LLDP_STICKY_WINDOW_MS = 48 * 60 * 60 * 1000;
+
 async function persistLldpNeighbors(
   assetId: string,
   neighbors: LldpNeighborSample[],
@@ -7730,7 +7737,7 @@ async function persistLldpNeighbors(
   // a fresh scrape just learned a DIFFERENT neighbor on the same local
   // port (in which case the new value supersedes immediately — that's
   // a real topology change, not a missed advertisement).
-  const STALE_AFTER_MS = 48 * 60 * 60 * 1000;
+  const STALE_AFTER_MS = LLDP_STICKY_WINDOW_MS;
   const portsWithFreshNeighbor = new Set<string>();
   for (const n of neighbors) portsWithFreshNeighbor.add(n.localIfName);
   const toDelete: string[] = [];
@@ -7835,7 +7842,7 @@ export async function persistManagedApLldpNeighbors(
         where: {
           assetId,
           source: { not: "managed-ap" },
-          lastSeen: { gte: new Date(now.getTime() - 48 * 60 * 60 * 1000) },
+          lastSeen: { gte: new Date(now.getTime() - LLDP_STICKY_WINDOW_MS) },
         },
         select: { id: true },
       });
@@ -8857,7 +8864,7 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
   const direct = asset.customWidgetCredential ?? asset.cpuMemoryCredential ?? asset.monitorCredential;
   if (direct?.type === "snmp") {
     snmpCfg = direct.config as Record<string, unknown>;
-  } else if (asset.discoveredByIntegration?.type === "fortimanager" || asset.discoveredByIntegration?.type === "fortigate") {
+  } else if (isFortinetIntegrationType(asset.discoveredByIntegration?.type)) {
     try {
       snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(direct, asset.discoveredByIntegration);
     } catch { snmpCfg = null; }
@@ -9040,7 +9047,7 @@ export async function runLldpFor(assetId: string, labels: WorkItemLabels): Promi
       return "failure";
     }
     const integration = asset.discoveredByIntegration ?? null;
-    const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+    const isFortinetSrc = isFortinetIntegrationType(integration?.type);
     const lldpTimeout   = effective.lldpTimeoutMs;
     let neighbors: LldpNeighborSample[] | undefined;
     let sourceLabel: "fortios" | "snmp" = "snmp";
@@ -9137,7 +9144,7 @@ export async function runStorageFor(assetId: string, labels: WorkItemLabels): Pr
     // then integration fallback.
     const effectiveIfacesCred = asset.interfacesCredential ?? asset.monitorCredential;
     const integration = asset.discoveredByIntegration ?? null;
-    const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+    const isFortinetSrc = isFortinetIntegrationType(integration?.type);
     let snmpCfg: Record<string, unknown> | null = null;
     if (effectiveIfacesCred?.type === "snmp") {
       snmpCfg = effectiveIfacesCred.config as Record<string, unknown>;
@@ -9515,10 +9522,10 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   // doesn't reach a worker — the "not_delivered" label is a defensive
   // fallback only.
   function defaultProbeTransport(integrationType: string | null | undefined): string {
-    return (integrationType === "fortimanager" || integrationType === "fortigate") ? "rest_api" : "icmp";
+    return (isFortinetIntegrationType(integrationType)) ? "rest_api" : "icmp";
   }
   function defaultHeavyTransport(integrationType: string | null | undefined): string {
-    return (integrationType === "fortimanager" || integrationType === "fortigate") ? "rest_api" : "not_delivered";
+    return (isFortinetIntegrationType(integrationType)) ? "rest_api" : "not_delivered";
   }
   const transportByCadenceById = new Map<string, Record<MonitorCadence, string>>();
   const assetTypeById = new Map<string, string>();

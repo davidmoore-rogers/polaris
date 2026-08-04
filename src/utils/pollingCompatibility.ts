@@ -97,6 +97,17 @@ const COMPATIBILITY: Readonly<Record<AssetSourceKind, ReadonlySet<PollingMethod>
  * Unknown integration types map to "manual" (no source-specific tokens to
  * lean on, so the most permissive matrix applies).
  */
+/**
+ * True when the integration type is one of the two Fortinet transports
+ * (FortiManager / standalone FortiGate). The pair share every FortiOS
+ * pathway (discovery, DHCP push, quarantine, description sync, monitoring
+ * credentials) — this predicate replaces the `=== "fortimanager" ||
+ * === "fortigate"` literal pair that was retyped ~20 times.
+ */
+export function isFortinetIntegrationType(t: string | null | undefined): boolean {
+  return t === "fortimanager" || t === "fortigate";
+}
+
 export function assetSourceKindFromIntegrationType(integrationType: string | null | undefined): AssetSourceKind {
   if (!integrationType) return "manual";
   switch (integrationType) {

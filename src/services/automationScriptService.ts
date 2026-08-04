@@ -51,6 +51,13 @@ export function versionAtLeast(version: string | null | undefined, min: string):
 }
 
 export const MAX_SCRIPT_BODY_BYTES = 64 * 1024;
+/**
+ * Cap on captured stdout/stderr for a script run — shared by the server-side
+ * runner, the agent-result recorder, AND the /agents/command-result Zod
+ * validator, which must all agree (the agent enforces the same cap on its
+ * side before pushing).
+ */
+export const SCRIPT_OUTPUT_CAP_BYTES = 64 * 1024;
 export const MAX_SCRIPT_TIMEOUT_SEC = 600;
 const RUN_RETENTION_DAYS = 90;
 

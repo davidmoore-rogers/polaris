@@ -42,6 +42,7 @@ import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { requireAuth } from "../middleware/auth.js";
 import { hasPermission } from "../middleware/permissions.js";
+import { ENTRA_ASSET_TAG_PREFIX, AD_ASSET_TAG_PREFIX, AD_GUID_TAG_PREFIX, SID_TAG_PREFIX } from "../../utils/assetSourceTags.js";
 import { logEvent } from "./events.js";
 import { clampAcquiredToLastSeen, bumpLastSeen } from "../../utils/assetInvariants.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
@@ -56,10 +57,8 @@ import { recomputeMonitorOverrideForAssets } from "../../services/monitorOverrid
 const router = Router();
 router.use(requireAuth);
 
-const ENTRA_ASSET_TAG_PREFIX = "entra:";
-const AD_ASSET_TAG_PREFIX = "ad:";
-const AD_GUID_TAG_PREFIX = "ad-guid:";
-const SID_TAG_PREFIX = "sid:";
+// Shared with the discovery sync that writes these tags — see
+// src/utils/assetSourceTags.ts (imported at the top of this file).
 
 function assetTagPrefixFor(proposed: Record<string, any>): string {
   // Newer conflicts carry the prefix explicitly; older Entra-only conflicts

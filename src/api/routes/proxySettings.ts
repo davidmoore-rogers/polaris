@@ -29,6 +29,7 @@ import {
 import { getServerCertFingerprint } from "../../services/certInfo.js";
 import { isProxyMode } from "../../utils/proxyMode.js";
 import { requirePermission } from "../middleware/permissions.js";
+import { truncate } from "../../utils/text.js";
 import { AppError } from "../../utils/errors.js";
 import { logEvent } from "./events.js";
 import type { ProxyConfig } from "../../types/proxyConfig.js";
@@ -190,9 +191,5 @@ function extractCertKeyFromMultipart(req: any): { certPem: string; keyPem: strin
   };
 }
 
-function truncate(s: string, max = 200): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max) + "…";
-}
 
 export default router;

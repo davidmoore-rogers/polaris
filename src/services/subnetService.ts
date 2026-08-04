@@ -5,6 +5,7 @@
 import type { SubnetStatus } from "../generated/prisma/client.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { isFortinetIntegrationType } from "../utils/pollingCompatibility.js";
 import { logEvent, buildChanges } from "./eventLogService.js";
 import {
   normalizeCidr,
@@ -543,7 +544,7 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
   const integrationType = subnet.integration?.type;
   const pushEligible =
     !isIpv6 &&
-    (integrationType === "fortimanager" || integrationType === "fortigate") &&
+    (isFortinetIntegrationType(integrationType)) &&
     integrationConfig.pushReservations === true &&
     !!subnet.fortigateDevice;
 
@@ -552,7 +553,7 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
   // Independent of pushReservations — refresh is a read-only reconcile.
   const refreshEligible =
     !isIpv6 &&
-    (integrationType === "fortimanager" || integrationType === "fortigate") &&
+    (isFortinetIntegrationType(integrationType)) &&
     !!subnet.fortigateDevice;
 
   const subnetInfo = {

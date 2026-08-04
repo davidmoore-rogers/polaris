@@ -31,6 +31,7 @@
 import { request as httpsRequest, RequestOptions as HttpsRequestOptions } from "node:https";
 import { request as httpRequest } from "node:http";
 import { randomUUID } from "node:crypto";
+import { sleep } from "./sleep.js";
 
 export interface WinRmConnection {
   host:     string;
@@ -234,7 +235,9 @@ function addressingHeaders(
   return h;
 }
 
-function xmlEscape(s: string): string {
+// Exported: the vCenter SOAP transport shares this escaper (it carried a
+// byte-identical private copy until the 2026-08 audit).
+export function xmlEscape(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -243,9 +246,6 @@ function xmlEscape(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 function soapPost(conn: WinRmConnection, envelope: string): Promise<string> {
   const useHttps = conn.useHttps !== false;

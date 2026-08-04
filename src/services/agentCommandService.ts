@@ -15,6 +15,7 @@
 import { prisma } from "../db.js";
 import { logEvent } from "./eventLogService.js";
 import { AppError } from "../utils/errors.js";
+import { SCRIPT_OUTPUT_CAP_BYTES } from "./automationScriptService.js";
 
 export interface AgentCommandView {
   id: string;
@@ -54,7 +55,7 @@ export async function fetchPendingCommands(managedAgentId: string): Promise<Agen
   return cmds.map((c) => ({ id: c.id, action: c.action, target: c.target, ...(c.payload ? { payload: c.payload } : {}) }));
 }
 
-const OUTPUT_CAP_BYTES = 64 * 1024;
+const OUTPUT_CAP_BYTES = SCRIPT_OUTPUT_CAP_BYTES;
 const RUN_STATUSES = new Set(["succeeded", "failed", "timeout"]);
 
 /** Agent result report. Bound to the agent's own commands; audited.

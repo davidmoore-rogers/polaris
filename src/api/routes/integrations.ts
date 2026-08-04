@@ -18,6 +18,8 @@ import * as activeDirectory from "../../services/activeDirectoryService.js";
 import * as vcenter from "../../services/vcenterService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps, isPrivateIpv4 } from "../../utils/cidr.js";
 import { normalizeMacsDistinct, macHexKeyOrNull } from "../../utils/mac.js";
+import { isFortinetIntegrationType } from "../../utils/pollingCompatibility.js";
+import { ENTRA_ASSET_TAG_PREFIX, AD_ASSET_TAG_PREFIX, AD_GUID_TAG_PREFIX, SID_TAG_PREFIX } from "../../utils/assetSourceTags.js";
 import { SECRET_MASK, isMaskedSecret } from "../../utils/secretMask.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
@@ -967,7 +969,7 @@ router.post("/", async (req, res, next) => {
         );
       }
     }
-    if (input.type === "fortimanager" || input.type === "fortigate") {
+    if (isFortinetIntegrationType(input.type)) {
       const cfg = input.config as any;
       // Validate the integration-tier SNMP credential. Required whenever the
       // tier-3 polling block routes any stream through SNMP — the polling-
@@ -1057,7 +1059,9 @@ router.post("/", async (req, res, next) => {
 
     const response: Record<string, unknown> = stripSecret(integration);
 
-    // Auto-register FortiManager/FortiGate IP as asset/reservation
+    // Auto-register FortiManager/FortiGate IP as asset/reservation.
+    // Literal comparison kept (not isFortinetIntegrationType): it's the
+    // discriminant TS uses to narrow `input.config` to the Fortinet shapes.
     if ((input.type === "fortimanager" || input.type === "fortigate") && input.config.host) {
       const registration = await registerFortinetHost(input.type, input.config.host, input.name, false);
       if (registration?.conflicts?.length) {
@@ -1125,7 +1129,7 @@ router.put("/:id", async (req, res, next) => {
       // Validate the optional FMG/FortiGate response-time SNMP override.
       // Empty string and null both mean "clear" — normalize to null so the
       // probe path sees a consistent "not set" signal.
-      if (existing.type === "fortimanager" || existing.type === "fortigate") {
+      if (isFortinetIntegrationType(existing.type)) {
         const credId = newConfig.monitorCredentialId;
         if (credId === "" || credId == null) {
           newConfig.monitorCredentialId = null;
@@ -1262,7 +1266,7 @@ router.put("/:id", async (req, res, next) => {
     const response: Record<string, unknown> = stripSecret(updated);
 
     // Auto-register FortiManager/FortiGate IP as asset/reservation
-    if ((existing.type === "fortimanager" || existing.type === "fortigate") && finalConfig.host && typeof finalConfig.host === "string") {
+    if ((isFortinetIntegrationType(existing.type)) && finalConfig.host && typeof finalConfig.host === "string") {
       const registration = await registerFortinetHost(existing.type, finalConfig.host, updated.name, false);
       if (registration?.conflicts?.length) {
         response.conflicts = registration.conflicts;
@@ -2749,7 +2753,7 @@ router.post("/test", async (req, res, next) => {
         const cfg = input.config as Record<string, unknown>;
         const needsRestore = (v: unknown): boolean =>
           !v || typeof v !== "string" || isMaskedSecretSentinel(v);
-        if ((input.type === "fortimanager" || input.type === "fortigate") && needsRestore(cfg.apiToken)) {
+        if ((isFortinetIntegrationType(input.type)) && needsRestore(cfg.apiToken)) {
           cfg.apiToken = stored.apiToken;
         }
         if (input.type === "fortimanager" && needsRestore(cfg.fortigateApiToken)) {
@@ -3588,7 +3592,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // Full integration config retained for handing to the location-pull + coord-
   // push services (which need the FMG/FortiGate credentials inside it).
   let integrationConfig: Record<string, unknown> | null = null;
-  if (integrationType === "fortimanager" || integrationType === "fortigate") {
+  if (isFortinetIntegrationType(integrationType)) {
     const integ = await prisma.integration.findUnique({ where: { id: integrationId }, select: { config: true } });
     const cfg = (integ?.config as Record<string, unknown>) || {};
     integrationConfig = cfg;
@@ -3999,7 +4003,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // result.devices — the PROCESSED chunks (one device in a scoped run), not
   // the raw ADOM roster — so a scoped pass would decommission every fleet
   // firewall matched by serial only.
-  if (sweepPhaseEnabled(mode, "2a") && knownDeviceNames.size > 0 && (integrationType === "fortimanager" || integrationType === "fortigate")) {
+  if (sweepPhaseEnabled(mode, "2a") && knownDeviceNames.size > 0 && (isFortinetIntegrationType(integrationType))) {
     const candidateFws = await prisma.asset.findMany({
       where: {
         discoveredByIntegrationId: integrationId,
@@ -4203,7 +4207,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   //
   // Only applies to fortimanager + fortigate integrations. windowsserver /
   // entraid / activeDirectory don't manage Fortinet hardware.
-  if (sweepPhaseEnabled(mode, "2c") && (integrationType === "fortimanager" || integrationType === "fortigate")) {
+  if (sweepPhaseEnabled(mode, "2c") && (isFortinetIntegrationType(integrationType))) {
     const integ = await prisma.integration.findUnique({
       where: { id: integrationId },
       select: { config: true },
@@ -4257,7 +4261,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // observed blob for every member's AssetSource row and drive the
       // projection-tier-1 coord resolution; `snmpLocation` (when pulled) is
       // stored regardless for display on the asset General tab.
-      const fgIsFortinet = integrationType === "fortimanager" || integrationType === "fortigate";
+      const fgIsFortinet = isFortinetIntegrationType(integrationType);
       let devSnmpLocation: string | null = null;
       let devSnmpLocationFetchedAt: Date | null = null;
       let devGeocodedLat: number | null = null;
@@ -7395,7 +7399,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     // Read-only; never writes the device. FMG/FortiGate only. Best-effort —
     // failures are logged and never block the sync. Gated to {full, finalize}
     // so it runs once with the full fleet known (like Phases 12/13).
-    if (integrationType === "fortimanager" || integrationType === "fortigate") {
+    if (isFortinetIntegrationType(integrationType)) {
       try {
         const integrationRow = await prisma.integration.findUnique({
           where: { id: integrationId },
@@ -7466,7 +7470,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     // none, and re-push wherever the device drifted from a non-empty Polaris
     // value. Also the retry path for save-time pushes that failed
     // transiently. Best-effort — failures are logged and never block the sync.
-    if (integrationType === "fortimanager" || integrationType === "fortigate") {
+    if (isFortinetIntegrationType(integrationType)) {
       try {
         const integrationRow = await prisma.integration.findUnique({
           where: { id: integrationId },
@@ -7491,10 +7495,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
 // ─── Entra ID asset sync ─────────────────────────────────────────────────────
 
-const ENTRA_ASSET_TAG_PREFIX = "entra:";
-const AD_ASSET_TAG_PREFIX = "ad:";
-const SID_TAG_PREFIX = "sid:";
-const AD_GUID_TAG_PREFIX = "ad-guid:";
+// Shared with conflict resolution, which parses these tags back — see
+// src/utils/assetSourceTags.ts (imported at the top of this file).
 
 // Strip every non-hex character and uppercase, so "00:1A:2B:3C:4D:5E",
 // "001A2B-3C4D5E", "00-1A-2B-3C-4D-5E" all collapse to the same key. Used

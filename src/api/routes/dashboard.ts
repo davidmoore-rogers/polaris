@@ -22,6 +22,7 @@ import { prisma } from "../../db.js";
 import * as utilizationService from "../../services/utilizationService.js";
 import * as nocDashboardService from "../../services/nocDashboardService.js";
 import { createTtlCache } from "../../utils/ttlCache.js";
+import { csvParam } from "../../utils/text.js";
 import { ensureRoleSnapshot, hasPermission } from "../middleware/permissions.js";
 
 const router = Router();
@@ -172,9 +173,7 @@ router.get("/summary", async (req, res, next) => {
  * Feed computation + caching live in nocDashboardService.getNocSummaryPayload.
  */
 function parseCsvParam(raw: unknown): string[] | null {
-  if (typeof raw !== "string" || raw.length === 0) return null;
-  const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
-  return parts.length ? parts : null;
+  return csvParam(raw) ?? null;
 }
 
 // Row cap for the summary's recentReservations feed. Absent/invalid → default

@@ -41,6 +41,7 @@ import { linuxServiceBlock, normalizePrivilegeTier, type AgentPrivilegeTier } fr
 import { getCredential } from "./credentialService.js";
 import { mintEnrollmentToken } from "./agentTokenService.js";
 import { logEvent } from "./eventLogService.js";
+import { truncate } from "../utils/text.js";
 import { winrmRunOne, type WinRmConnection } from "../utils/winrm.js";
 import { withSshClient, sshExec, sftpPut } from "../utils/remoteExec.js";
 import { getPublicUrlPort } from "../utils/publicUrl.js";
@@ -916,9 +917,6 @@ async function sshUninstall(p: SshUninstallParams): Promise<void> {
 // withSshClient / sshExec / sftpPut / ExecResult moved to
 // src/utils/remoteExec.ts (shared with agentlessProcessService) — imported above.
 
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n) + "…" : s;
-}
 
 // ─── Embedded scripts + agent.conf templating ─────────────────────────
 //

@@ -32,6 +32,7 @@ import { AGENT_BIN_DIR, STATE_DIR } from "../utils/paths.js";
 import { AppError } from "../utils/errors.js";
 import { getAgentVersion, getAgentSourceDir } from "../utils/version.js";
 import { logEvent } from "./eventLogService.js";
+import { truncate } from "../utils/text.js";
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import {
@@ -1106,7 +1107,3 @@ export async function pruneOldAgentVersions(): Promise<PruneResult> {
 
 // ─── Small utilities ──────────────────────────────────────────────────
 
-function truncate(s: string, n: number): string {
-  if (s.length <= n) return s;
-  return s.slice(0, n - 1) + "…";
-}

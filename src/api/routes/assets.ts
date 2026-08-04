@@ -30,6 +30,7 @@ import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } 
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { resolvePendingIpOverrideConflicts } from "../../services/ipOverrideService.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
+import { csvParam } from "../../utils/text.js";
 import {
   probeAsset, recordProbeResult,
   collectTelemetry, recordTelemetryResult,
@@ -65,6 +66,7 @@ import {
 import {
   type PollingMethod,
   assetSourceKindFromIntegrationType,
+  isFortinetIntegrationType,
   isPollingMethodCompatible,
   pollingMethodLabel,
 } from "../../utils/pollingCompatibility.js";
@@ -407,11 +409,7 @@ const ASSET_TEXT_COLUMNS: Record<string, string> = {
 const ASSET_TEXT_OPS = new Set(["contains", "not_contains", "empty", "is_not_empty"]);
 
 /** CSV → string[]; empty entries dropped; returns undefined for no value. */
-function csvToArray(raw: string | undefined): string[] | undefined {
-  if (!raw) return undefined;
-  const parts = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-  return parts.length ? parts : undefined;
-}
+const csvToArray = csvParam;
 
 /**
  * Translate a text-filter op + value into a where fragment for a nullable
@@ -1024,7 +1022,7 @@ router.get("/:id", requirePermission("assets", "read"), async (req, res, next) =
       // tokens) so the asset edit form can cap the FortiAP Description at the
       // 35-char device `location` limit, but only when this AP's integration
       // actually syncs descriptions to the device.
-      if (asset.discoveredByIntegration.type === "fortimanager" || asset.discoveredByIntegration.type === "fortigate") {
+      if (isFortinetIntegrationType(asset.discoveredByIntegration.type)) {
         integrationSyncDescriptions = cfg.syncDescriptions === true;
       }
     }
@@ -2152,7 +2150,7 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
     const dsIntegration = assetMeta?.discoveredByIntegration ?? null;
     const dsRole = ((assetMeta?.fortinetTopology ?? {}) as { role?: string }).role;
     const descriptionSyncEnabled =
-      (dsIntegration?.type === "fortimanager" || dsIntegration?.type === "fortigate") &&
+      (isFortinetIntegrationType(dsIntegration?.type)) &&
       (dsIntegration?.config as { syncDescriptions?: boolean } | null)?.syncDescriptions === true &&
       (dsRole === "fortigate" || dsRole === "fortiswitch");
     res.json({

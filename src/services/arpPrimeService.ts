@@ -32,6 +32,7 @@
 
 import dgram from "node:dgram";
 import { logger } from "../utils/logger.js";
+import { sleep } from "../utils/sleep.js";
 
 /**
  * Destination port for sweep datagrams. Deliberately in the traceroute
@@ -97,9 +98,6 @@ export function planSweepBatches(
   return { batches, targets: capped.length, dropped };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /**
  * Fire one UDP datagram at each target IP, paced, fire-and-forget. Resolves

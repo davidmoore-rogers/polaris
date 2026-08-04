@@ -8,6 +8,7 @@ import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { SECRET_MASK, isMaskedSecret } from "../../utils/secretMask.js";
+import { csvParam } from "../../utils/text.js";
 import {
   getArchiveSettings,
   updateArchiveSettings,
@@ -93,11 +94,7 @@ function buildTextFilter(
 }
 
 /** CSV → string[]; empty entries dropped; returns undefined for no value. */
-function csvToArray(raw: string | undefined): string[] | undefined {
-  if (!raw) return undefined;
-  const parts = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-  return parts.length ? parts : undefined;
-}
+const csvToArray = csvParam;
 
 const router = Router();
 

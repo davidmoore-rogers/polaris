@@ -46,6 +46,7 @@ import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { isHypertable, ALL_HYPERTABLE_CANDIDATES } from "../services/timescaleService.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { sleep } from "../utils/sleep.js";
 
 const INTERVAL_MS = 6 * 60 * 60 * 1000;      // every 6h — fast self-heal without hammering locks
 const STARTUP_DELAY_MS = 10 * 60 * 1000;     // 10 min after boot — clear of the boot-time compression self-heal pass
@@ -63,10 +64,6 @@ const RETRY_ATTEMPTS = 6;                     // per chunk
 const RETRY_BACKOFF_MS = 30 * 1000;           // wait between lock-timeout retries
 const STATEMENT_TIMEOUT_MS = 10 * 60 * 1000; // generous per-chunk ceiling; 0-live rewrites finish in seconds
 
-/** Sleep helper for retry backoff. */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 // Scan EVERY hypertable for decompression bloat, not just the selection-aware
 // detail tables. The original list covered only the detail tables whose
@@ -162,7 +159,7 @@ async function reclaim(candidates: BloatCandidate[]): Promise<{ count: number; r
               { chunk: c.qualified, attempt },
               "VACUUM FULL lock_timeout; backing off and retrying",
             );
-            await delay(RETRY_BACKOFF_MS);
+            await sleep(RETRY_BACKOFF_MS);
             continue;
           }
           logger.warn(

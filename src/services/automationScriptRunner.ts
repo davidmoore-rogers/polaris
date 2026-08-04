@@ -30,11 +30,11 @@ import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { STATE_DIR } from "../utils/paths.js";
 import { logEvent } from "./eventLogService.js";
-import { pruneOldRuns } from "./automationScriptService.js";
+import { pruneOldRuns, SCRIPT_OUTPUT_CAP_BYTES } from "./automationScriptService.js";
 
 const CONCURRENCY = 2;
 const CLAIM_BATCH = 10;
-const OUTPUT_CAP_BYTES = 64 * 1024;
+const OUTPUT_CAP_BYTES = SCRIPT_OUTPUT_CAP_BYTES;
 const STUCK_GRACE_MS = 60_000;
 const SCRIPT_TMP_DIR = resolve(STATE_DIR, "data", "automation-scripts-tmp");
 

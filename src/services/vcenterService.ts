@@ -33,6 +33,7 @@
 
 import { request as httpsRequest } from "node:https";
 import { AppError } from "../utils/errors.js";
+import { xmlEscape } from "../utils/winrm.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { getConfiguredResolver } from "./dnsService.js";
 import { logger } from "../utils/logger.js";
@@ -396,15 +397,6 @@ interface SoapSession {
   rootFolder: string;
   propertyCollector: string;
   viewManager: string;
-}
-
-function xmlEscape(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
 }
 
 function soapEnvelope(inner: string): string {

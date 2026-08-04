@@ -32,6 +32,7 @@ import { cpus } from "node:os";
 import type { PgBoss as PgBossType, Job as PgBossJob } from "pg-boss";
 
 import { prisma } from "../db.js";
+import { sleep } from "../utils/sleep.js";
 import { logger } from "../utils/logger.js";
 import { getDirectDatabaseUrl } from "../utils/dbConnections.js";
 import {
@@ -301,9 +302,6 @@ let floatingLoopRunning = false;
 // below probe/fastFiltered so probes (the cheapest cadence) never starve.
 const FLOAT_PRIORITY: MonitorCadence[] = ["probe", "fastFiltered", "lldp", "storage", "processes", "telemetry", "systemInfo"];
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 // ─── Stalled-worker watchdog ─────────────────────────────────────────────────
 //
