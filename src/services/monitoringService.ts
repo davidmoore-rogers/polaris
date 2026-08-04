@@ -40,6 +40,7 @@ import { retryOnDeadlock } from "../utils/dbRetry.js";
 import { collectProcessesSsh, collectProcessesWinrm, type AgentlessProcessResult } from "./agentlessProcessService.js";
 import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
+import { applyTransform } from "../utils/symbolTransforms.js";
 import { reconcileInterfaceMacs, expandMacRange } from "../utils/macAddresses.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
@@ -8776,8 +8777,9 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
   });
   if (!asset || !asset.monitored || !asset.manufacturer) return;
 
-  const { getProfileFor } = await import("./manufacturerProfileService.js");
-  const profile = getProfileFor(asset.manufacturer);
+  // Same function as the static top-of-file import (aliased there as
+  // getDbManufacturerProfile) — no dynamic import on the telemetry hot path.
+  const profile = getDbManufacturerProfile(asset.manufacturer);
   if (!profile || profile.widgets.length === 0) return;
 
   // Per-model gating mirrors the read-endpoint filter.
@@ -8845,7 +8847,6 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
             }
             if (val == null) continue;
             // Apply transform if one is configured on the widget.
-            const { applyTransform } = await import("../utils/symbolTransforms.js");
             const transformed = applyTransform(val, w.transform);
             samples.push({ widgetId: w.id, kind: "scalar", value: transformed });
           } else {

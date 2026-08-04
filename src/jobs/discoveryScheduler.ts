@@ -32,7 +32,11 @@ async function runScheduledDiscoveries(): Promise<void> {
     const now = Date.now();
 
     for (const intg of integrations) {
-      if (await isDiscoveryRunning(intg.id)) continue;
+      // .catch(() => false): a throw here would propagate through
+      // runInstrumentedJob (which re-throws) into the bare setInterval kick
+      // below — an unhandled rejection in the scheduler process. Same guard
+      // the integrationConnectionTester uses on the identical call.
+      if (await isDiscoveryRunning(intg.id).catch(() => false)) continue;
 
       const intervalMs = (intg.pollInterval ?? 12) * 60 * 60 * 1000;
       const lastRun = intg.lastDiscoveryAt?.getTime();
@@ -50,6 +54,11 @@ async function runScheduledDiscoveries(): Promise<void> {
  * runsSchedulers, i.e. web/all). Fires once immediately, then every 15 min.
  */
 export function startDiscoveryScheduler(): void {
-  runScheduledDiscoveries();
-  setInterval(runScheduledDiscoveries, CHECK_INTERVAL_MS);
+  const kick = () => {
+    runScheduledDiscoveries().catch((err) => {
+      logger.error(err, "Discovery scheduler tick failed");
+    });
+  };
+  kick();
+  setInterval(kick, CHECK_INTERVAL_MS);
 }

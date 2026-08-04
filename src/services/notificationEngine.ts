@@ -54,6 +54,7 @@ import {
   triggerSignature,
   scopeRank,
   scopeRankLabel,
+  numMeets,
 } from "./notificationTypes.js";
 import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
 import { ipInCidr } from "../utils/cidr.js";
@@ -146,18 +147,10 @@ interface Reading {
 }
 
 // ─── Comparators ────────────────────────────────────────────────────────────
+// Delegates to notificationTypes.numMeets — trigger evaluation and severity-
+// band evaluation must share one comparator.
 
-export function compareNum(value: number, op: string, threshold: number): boolean {
-  switch (op) {
-    case ">": return value > threshold;
-    case ">=": return value >= threshold;
-    case "<": return value < threshold;
-    case "<=": return value <= threshold;
-    case "==": return value === threshold;
-    case "!=": return value !== threshold;
-    default: return false;
-  }
-}
+export const compareNum = numMeets;
 
 export function compareValue(value: number | string | boolean | null, op: string, target: number | string | boolean): boolean {
   if (value === null || value === undefined) return false;

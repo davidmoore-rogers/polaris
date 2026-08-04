@@ -49,7 +49,13 @@ export interface SeverityTier {
   operator?: Comparator;
 }
 
-function numMeets(value: number, operator: Comparator, threshold: number): boolean {
+/**
+ * THE six-way numeric comparator for automation thresholds. Exported so the
+ * engine's trigger evaluation uses the SAME function as band evaluation
+ * here — the two carried byte-identical private copies until the 2026-08
+ * audit, and threshold semantics must never diverge between them.
+ */
+export function numMeets(value: number, operator: Comparator | string, threshold: number): boolean {
   switch (operator) {
     case ">": return value > threshold;
     case ">=": return value >= threshold;

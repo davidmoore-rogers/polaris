@@ -42,6 +42,7 @@
  */
 
 import { prisma } from "../db.js";
+import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import { normalizeMacOrNull } from "../utils/mac.js";
 
@@ -304,14 +305,12 @@ export interface SnoozeReservationResult {
 export async function snoozeReservation(reservationId: string, actor?: string): Promise<SnoozeReservationResult> {
   const settings = await getStaleSettings();
   if (settings.staleAfterDays === 0) {
-    const { AppError } = await import("../utils/errors.js");
     throw new AppError(409, "Stale-reservation detection is disabled — set a non-zero threshold before snoozing alerts");
   }
   const row = await prisma.reservation.findUnique({
     where: { id: reservationId },
     select: { id: true, status: true, sourceType: true },
   });
-  const { AppError } = await import("../utils/errors.js");
   if (!row) throw new AppError(404, `Reservation ${reservationId} not found`);
   if (row.status !== "active" || row.sourceType !== "dhcp_reservation") {
     throw new AppError(409, `Cannot snooze — reservation must be active and dhcp_reservation (status=${row.status}, sourceType=${row.sourceType})`);
@@ -497,7 +496,6 @@ export async function setStaleIgnored(
   staleIgnored: boolean,
   actor?: string,
 ): Promise<IgnoreReservationResult> {
-  const { AppError } = await import("../utils/errors.js");
   const row = await prisma.reservation.findUnique({
     where: { id: reservationId },
     select: { id: true, status: true, sourceType: true },
