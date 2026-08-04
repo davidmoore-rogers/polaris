@@ -39,6 +39,7 @@ import { retryOnDeadlock } from "../utils/dbRetry.js";
 // `import type` only, so this pair can't cycle at runtime.
 import { collectProcessesSsh, collectProcessesWinrm, type AgentlessProcessResult } from "./agentlessProcessService.js";
 import { AppError } from "../utils/errors.js";
+import { matchesWildcard } from "../utils/integrationFilter.js";
 import { reconcileInterfaceMacs, expandMacRange } from "../utils/macAddresses.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
@@ -5342,15 +5343,9 @@ function applyFortiInterfaceFilter(
   }
 }
 
-function fortiInterfaceWildcardMatch(pattern: string, value: string): boolean {
-  const p = pattern.toLowerCase();
-  const v = value.toLowerCase();
-  if (p === "*") return true;
-  if (p.startsWith("*") && p.endsWith("*") && p.length > 2) return v.includes(p.slice(1, -1));
-  if (p.startsWith("*")) return v.endsWith(p.slice(1));
-  if (p.endsWith("*")) return v.startsWith(p.slice(0, -1));
-  return v === p;
-}
+// Shared glob-lite matcher — the interface filter MUST agree with the
+// discovery-side device filters, so all of them import the one canonical.
+const fortiInterfaceWildcardMatch = matchesWildcard;
 
 function normalizeFortiIfType(raw: unknown): string | null {
   if (!raw || typeof raw !== "string") return null;

@@ -44,7 +44,15 @@ interface AssetLite {
   assetType?: string | null;
 }
 
-function matchesWildcard(pattern: string, value: string): boolean {
+/**
+ * Case-insensitive glob-lite matcher: bare `*` matches everything,
+ * `*x*` contains, `*x` ends-with, `x*` starts-with, else exact. THE
+ * canonical copy — the discovery services (FMG/FortiGate/AD/Entra/vCenter),
+ * monitoringService's interface filter, and this module's own filters all
+ * share it, and discovery filters MUST agree with the post-hoc asset
+ * filter here.
+ */
+export function matchesWildcard(pattern: string, value: string): boolean {
   const p = pattern.toLowerCase();
   const v = value.toLowerCase();
   if (p === "*") return true;

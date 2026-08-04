@@ -33,6 +33,7 @@
 
 import { request as httpsRequest } from "node:https";
 import { AppError } from "../utils/errors.js";
+import { matchesWildcard } from "../utils/integrationFilter.js";
 import { getConfiguredResolver } from "./dnsService.js";
 import { logger } from "../utils/logger.js";
 
@@ -834,15 +835,9 @@ export function buildVcenterDependencyEdges(
 }
 
 /** Wildcard match (same semantics as the AD OU filters). Exported for tests. */
-export function matchesVmWildcard(pattern: string, value: string): boolean {
-  const p = pattern.toLowerCase();
-  const v = value.toLowerCase();
-  if (p === "*") return true;
-  if (p.startsWith("*") && p.endsWith("*") && p.length > 2) return v.includes(p.slice(1, -1));
-  if (p.startsWith("*")) return v.endsWith(p.slice(1));
-  if (p.endsWith("*")) return v.startsWith(p.slice(0, -1));
-  return v === p;
-}
+// Shared glob-lite matcher (exported alias — the unit tests exercise the
+// VM-filter semantics through this name).
+export const matchesVmWildcard = matchesWildcard;
 
 export function filterVms<T extends { name: string }>(
   vms: T[],

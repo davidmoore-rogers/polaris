@@ -12,6 +12,7 @@
  */
 
 import { AppError } from "../utils/errors.js";
+import { matchesWildcard } from "../utils/integrationFilter.js";
 import { normalizeMacOrNull } from "../utils/mac.js";
 
 export interface EntraIdConfig {
@@ -489,15 +490,8 @@ function formatMac(mac: unknown): string {
   return normalizeMacOrNull(String(mac)) ?? "";
 }
 
-function matchesWildcard(pattern: string, value: string): boolean {
-  const p = pattern.toLowerCase();
-  const v = value.toLowerCase();
-  if (p === "*") return true;
-  if (p.startsWith("*") && p.endsWith("*") && p.length > 2) return v.includes(p.slice(1, -1));
-  if (p.startsWith("*")) return v.endsWith(p.slice(1));
-  if (p.endsWith("*")) return v.startsWith(p.slice(0, -1));
-  return v === p;
-}
+// matchesWildcard is imported from ../utils/integrationFilter.js — the
+// canonical glob-lite matcher shared by every device/VM/interface filter.
 
 function filterDevices(
   devices: DiscoveredEntraDevice[],
