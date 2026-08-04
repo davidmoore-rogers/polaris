@@ -12,27 +12,26 @@
  * Reads are open to any authenticated caller so the asset-modal tier-badge
  * UI works for everyone. Writes require assetsadmin (or admin).
  *
- * Every write invalidates the in-memory resolver cache in monitoringService
- * for the matching scope so the next monitor pass picks up the change
- * within one tick.
+ * Thin route layer: Zod parsing + permission gates only. All business logic
+ * (Setting upserts, Integration config rewrites, MonitorClassOverride CRUD,
+ * asset reverse-lookups, polling-compatibility validation, resolver-cache
+ * invalidation) lives in src/services/monitorSettingsService.ts.
  */
 
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../../db.js";
-import { invalidateMonitorSettingsCache } from "../../services/monitoringService.js";
 import { requirePermission } from "../middleware/permissions.js";
-import { logEvent } from "./events.js";
-import { AppError } from "../../utils/errors.js";
 import {
-  type PollingMethod,
-  type AssetSourceKind,
-  type Stream,
-  assetSourceKindFromIntegrationType,
-  isPollingMethodCompatible,
-  isMethodValidForStream,
-  pollingMethodLabel,
-} from "../../utils/pollingCompatibility.js";
+  getManualMonitorSettings,
+  updateManualMonitorSettings,
+  getIntegrationMonitorSettings,
+  updateIntegrationMonitorSettings,
+  listClassOverrides,
+  createClassOverride,
+  updateClassOverride,
+  deleteClassOverride,
+  listAssetOverrides,
+} from "../../services/monitorSettingsService.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
 
 const router = Router();
@@ -178,98 +177,20 @@ const OverrideSettingsSchema = z.object({
   processesMibId:             z.string().nullable().optional(),
 });
 
-// Polling-method compatibility check shared by integration-tier and
-// class-override writes. A tier whose source is fixed (any single integration
-// or a class override scoped to one) cannot store a method that wouldn't
-// apply on the assets it covers — the resolver would silently fall through
-// and the operator would never see why their setting "didn't take." Manual
-// tier accepts every method (it covers any source).
-const POLLING_FIELDS = ["responseTimePolling", "cpuMemoryPolling", "temperaturePolling", "interfacesPolling", "lldpPolling", "storagePolling", "processesPolling", "eventLogPolling"] as const;
-type PollingField = (typeof POLLING_FIELDS)[number];
-
-function assertPollingCompatible(
-  source: AssetSourceKind,
-  input: Partial<Record<PollingField, PollingMethod | null | undefined>>,
-): void {
-  for (const field of POLLING_FIELDS) {
-    const v = input[field];
-    if (!v) continue;
-    if (!isPollingMethodCompatible(source, v)) {
-      throw new AppError(
-        400,
-        `${pollingMethodLabel(v)} polling is not supported for ${source} assets (field: ${field})`,
-      );
-    }
-    // Per-stream method restriction: the cross-transport streams (processes,
-    // eventLog) accept only a subset of methods — processes can't ride REST,
-    // eventLog can't ride SNMP, neither rides ICMP. The Stream name is the
-    // field minus its "Polling" suffix. Streams without a restriction (the
-    // original six) pass through unchanged.
-    const stream = field.replace(/Polling$/, "") as Stream;
-    if (!isMethodValidForStream(stream, v)) {
-      throw new AppError(
-        400,
-        `${pollingMethodLabel(v)} polling is not supported for the ${stream} stream (field: ${field})`,
-      );
-    }
-    // ICMP is only meaningful for the response-time probe — for telemetry /
-    // interfaces / LLDP / storage / temperature there's no payload to gather
-    // from an ICMP echo. Reject so an operator pick doesn't silently
-    // fall through at resolution time.
-    if (v === "icmp" && field !== "responseTimePolling") {
-      throw new AppError(
-        400,
-        `ICMP polling is only valid for the response-time stream (field: ${field})`,
-      );
-    }
-  }
-}
-
-const MANUAL_SETTING_KEY = "manualMonitorSettings";
-
 // ─── Manual tier ────────────────────────────────────────────────────────────
 
 /** Read the manual tier (settings for orphan / non-integration-discovered assets). */
 router.get("/manual", requirePermission("assetMonitorSettings", "read"), async (_req, res, next) => {
   try {
-    const row = await prisma.setting.findUnique({ where: { key: MANUAL_SETTING_KEY } });
-    // null = not yet seeded; the UI shows the hardcoded-floor defaults until
-    // an operator saves something.
-    res.json(row?.value ?? null);
+    res.json(await getManualMonitorSettings());
   } catch (err) { next(err); }
 });
-
-/**
- * Strip legacy retention keys from a tier-3 or class-override blob before
- * persistence. Retention moved to Setting("sampleRetention") in phase 5;
- * the schema still tolerates the keys on input so old clients don't 400,
- * but persistence drops them so the JSON stays clean.
- */
-function stripLegacyRetention<T extends Record<string, unknown>>(input: T): Omit<T, "sampleRetentionDays" | "telemetryRetentionDays" | "systemInfoRetentionDays"> {
-  const { sampleRetentionDays: _s, telemetryRetentionDays: _t, systemInfoRetentionDays: _i, ...rest } = input;
-  void _s; void _t; void _i;
-  return rest;
-}
 
 /** Write the manual tier. Affects every asset with discoveredByIntegrationId = null. */
 router.put("/manual", requirePermission("assetMonitorSettings", "write"), async (req, res, next) => {
   try {
-    const input = stripLegacyRetention(TierSettingsSchema.parse(req.body));
-    await prisma.setting.upsert({
-      where:  { key: MANUAL_SETTING_KEY },
-      update: { value: input as any },
-      create: { key: MANUAL_SETTING_KEY, value: input as any },
-    });
-    invalidateMonitorSettingsCache({ integrationId: null });
-    logEvent({
-      action: "monitor_settings.manual.updated",
-      resourceType: "monitor_settings",
-      resourceName: "Manual tier",
-      actor: req.session?.username,
-      message: "Manual monitoring settings updated",
-      details: { settings: input },
-    });
-    res.json(input);
+    const input = TierSettingsSchema.parse(req.body);
+    res.json(await updateManualMonitorSettings(input, req.session?.username));
   } catch (err) { next(err); }
 });
 
@@ -278,54 +199,15 @@ router.put("/manual", requirePermission("assetMonitorSettings", "write"), async 
 /** Read the integration tier (settings stored in Integration.config.monitorSettings). */
 router.get("/integration/:id", requirePermission("assetMonitorSettings", "read"), async (req, res, next) => {
   try {
-    const integration = await prisma.integration.findUnique({
-      where:  { id: req.params.id as string },
-      select: { id: true, name: true, type: true, config: true },
-    });
-    if (!integration) throw new AppError(404, "Integration not found");
-    const cfg = (integration.config as Record<string, unknown> | null) ?? {};
-    res.json({
-      integrationId:   integration.id,
-      integrationName: integration.name,
-      integrationType: integration.type,
-      // null = not yet seeded for this integration; UI displays defaults.
-      settings:        (cfg.monitorSettings as unknown) ?? null,
-    });
+    res.json(await getIntegrationMonitorSettings(req.params.id as string));
   } catch (err) { next(err); }
 });
 
 /** Write the integration tier. Affects every asset discovered by this integration. */
 router.put("/integration/:id", requirePermission("assetMonitorSettings", "write"), async (req, res, next) => {
   try {
-    const input = stripLegacyRetention(TierSettingsIntegrationSchema.parse(req.body));
-    const integrationId = req.params.id as string;
-    const integration = await prisma.integration.findUnique({
-      where:  { id: integrationId },
-      select: { id: true, name: true, type: true, config: true },
-    });
-    if (!integration) throw new AppError(404, "Integration not found");
-    // Tier-3 integration polling methods must apply on the integration's
-    // source kind — picking WinRM on a FortiManager tier silently drops to
-    // the source default at resolve time, leaving the operator confused
-    // about why their selection "didn't take."
-    assertPollingCompatible(assetSourceKindFromIntegrationType(integration.type), input);
-    const cfg = (integration.config as Record<string, unknown> | null) ?? {};
-    cfg.monitorSettings = input;
-    await prisma.integration.update({
-      where: { id: integrationId },
-      data:  { config: cfg as any },
-    });
-    invalidateMonitorSettingsCache({ integrationId });
-    logEvent({
-      action: "monitor_settings.integration.updated",
-      resourceType: "integration",
-      resourceId: integrationId,
-      resourceName: integration.name,
-      actor: req.session?.username,
-      message: `Monitoring settings updated for integration "${integration.name}"`,
-      details: { settings: input },
-    });
-    res.json(input);
+    const input = TierSettingsIntegrationSchema.parse(req.body);
+    res.json(await updateIntegrationMonitorSettings(req.params.id as string, input, req.session?.username));
   } catch (err) { next(err); }
 });
 
@@ -347,207 +229,41 @@ const ClassUpdateSchema = OverrideSettingsSchema;
  */
 router.get("/class-overrides", requirePermission("assetMonitorSettings", "read"), async (req, res, next) => {
   try {
-    const where: Record<string, unknown> = {};
-    const integrationIdParam = req.query.integrationId;
-    if (integrationIdParam === "null")          where.integrationId = null;
-    else if (typeof integrationIdParam === "string") where.integrationId = integrationIdParam;
-    if (typeof req.query.assetType === "string") where.assetType = req.query.assetType;
-
-    const rows = await prisma.monitorClassOverride.findMany({
-      where,
-      include: { integration: { select: { id: true, name: true, type: true } } },
-      orderBy: [{ assetType: "asc" }],
-    });
-    res.json(rows);
+    res.json(await listClassOverrides(req.query.integrationId, req.query.assetType));
   } catch (err) { next(err); }
 });
 
 router.post("/class-overrides", requirePermission("assetMonitorSettings", "write"), async (req, res, next) => {
   try {
     const input = ClassCreateSchema.parse(req.body);
-    // Phase 2 narrowing — integration-scoped class overrides are no longer
-    // accepted. Each integration owns per-class settings natively via its
-    // Monitoring tab's per-class streams blocks; the Assets-page
-    // Class Overrides surface is for manually-added assets only
-    // (integrationId = null). The Phase 2 migration job folds any
-    // existing integration-scoped rows into the integration streams blocks
-    // and deletes them, so by the time this guard fires the DB is clean.
-    if (input.integrationId !== null) {
-      throw new AppError(
-        400,
-        "Integration-scoped class overrides are no longer supported — configure per-class settings on the integration's Monitoring tab.",
-      );
-    }
-    const sourceKind: AssetSourceKind = "manual";
-    // Class overrides scoped to a single integration must use polling methods
-    // valid for that integration's source kind. Manual-tier overrides
-    // (integrationId = null) cover any source so they accept any method.
-    assertPollingCompatible(sourceKind, input);
-    // Service-layer uniqueness for the manual-tier case (Postgres treats nulls
-    // as distinct, so the @@unique alone won't catch it).
-    const existing = await prisma.monitorClassOverride.findFirst({
-      where: { integrationId: input.integrationId, assetType: input.assetType },
-    });
-    if (existing) {
-      throw new AppError(
-        409,
-        `Class override for (${input.integrationId ?? "manual"}, ${input.assetType}) already exists`,
-      );
-    }
-
-    const { integrationId, assetType, ...rest } = input;
-    const settings = stripLegacyRetention(rest);
-    const created = await prisma.monitorClassOverride.create({
-      data:    { integrationId, assetType, ...settings },
-      include: { integration: { select: { id: true, name: true, type: true } } },
-    });
-    invalidateMonitorSettingsCache({ integrationId, assetType });
-    logEvent({
-      action: "monitor_settings.class_override.created",
-      resourceType: "monitor_class_override",
-      resourceId: created.id,
-      resourceName: `${assetType} @ ${created.integration?.name ?? "Manual"}`,
-      actor: req.session?.username,
-      message: `Class override created for ${assetType} under ${created.integration?.name ?? "Manual"}`,
-      details: { settings },
-    });
+    const created = await createClassOverride(input, req.session?.username);
     res.status(201).json(created);
   } catch (err) { next(err); }
 });
 
 router.put("/class-overrides/:id", requirePermission("assetMonitorSettings", "write"), async (req, res, next) => {
   try {
-    const input = stripLegacyRetention(ClassUpdateSchema.parse(req.body));
-    const id = req.params.id as string;
-    const existing = await prisma.monitorClassOverride.findUnique({
-      where:   { id },
-      include: { integration: { select: { type: true } } },
-    });
-    if (!existing) throw new AppError(404, "Class override not found");
-    // Phase 2 narrowing — refuse updates to integration-scoped rows. The
-    // migration job should have folded + deleted these, but defend against
-    // a partial-rollback / leftover row that escaped the sweep.
-    if (existing.integrationId !== null) {
-      throw new AppError(
-        400,
-        "Integration-scoped class overrides are no longer supported — configure per-class settings on the integration's Monitoring tab.",
-      );
-    }
-    // Same compatibility check as create — keep operators from saving a
-    // method that wouldn't apply on the assets this row covers.
-    const sourceKind: AssetSourceKind = "manual";
-    void assetSourceKindFromIntegrationType; // kept for backward-compat with any future callsite
-    assertPollingCompatible(sourceKind, input);
-    const updated = await prisma.monitorClassOverride.update({
-      where:   { id },
-      data:    input,
-      include: { integration: { select: { id: true, name: true, type: true } } },
-    });
-    invalidateMonitorSettingsCache({
-      integrationId: existing.integrationId,
-      assetType:     existing.assetType,
-    });
-    logEvent({
-      action: "monitor_settings.class_override.updated",
-      resourceType: "monitor_class_override",
-      resourceId: updated.id,
-      resourceName: `${updated.assetType} @ ${updated.integration?.name ?? "Manual"}`,
-      actor: req.session?.username,
-      message: `Class override updated for ${updated.assetType} under ${updated.integration?.name ?? "Manual"}`,
-      details: { settings: input },
-    });
-    res.json(updated);
+    const input = ClassUpdateSchema.parse(req.body);
+    res.json(await updateClassOverride(req.params.id as string, input, req.session?.username));
   } catch (err) { next(err); }
 });
 
 router.delete("/class-overrides/:id", requirePermission("assetMonitorSettings", "write"), async (req, res, next) => {
   try {
-    const id = req.params.id as string;
-    const existing = await prisma.monitorClassOverride.findUnique({
-      where:   { id },
-      include: { integration: { select: { id: true, name: true } } },
-    });
-    if (!existing) throw new AppError(404, "Class override not found");
-    await prisma.monitorClassOverride.delete({ where: { id } });
-    invalidateMonitorSettingsCache({
-      integrationId: existing.integrationId,
-      assetType:     existing.assetType,
-    });
-    logEvent({
-      action: "monitor_settings.class_override.deleted",
-      resourceType: "monitor_class_override",
-      resourceId: id,
-      resourceName: `${existing.assetType} @ ${existing.integration?.name ?? "Manual"}`,
-      actor: req.session?.username,
-      message: `Class override deleted for ${existing.assetType} under ${existing.integration?.name ?? "Manual"}`,
-    });
+    await deleteClassOverride(req.params.id as string, req.session?.username);
     res.status(204).send();
   } catch (err) { next(err); }
 });
 
 // ─── Asset-overrides reverse lookup ─────────────────────────────────────────
 //
-// Lists assets that have at least one per-asset monitor setting override
-// (monitorIntervalSec / telemetryIntervalSec / systemInfoIntervalSec /
-// probeTimeoutMs). Filterable by the same scope as a class override, so the
-// "Asset Overrides" button on the integration/class modal can show "which
-// assets are individually deviating from the settings inherited at this
-// scope" — and the operator can click through to fix each one.
+// Lists assets that have at least one per-asset monitor setting override.
+// See listAssetOverrides in monitorSettingsService for the field set + scope
+// filter semantics.
 
 router.get("/asset-overrides", requirePermission("assetMonitorSettings", "read"), async (req, res, next) => {
   try {
-    const integrationIdParam = req.query.integrationId;
-    const assetType = typeof req.query.assetType === "string" ? req.query.assetType : undefined;
-
-    const where: Record<string, unknown> = {
-      OR: [
-        { monitorIntervalSec:     { not: null } },
-        { cpuMemoryIntervalSec:   { not: null } },
-        { temperatureIntervalSec: { not: null } },
-        { systemInfoIntervalSec:  { not: null } },
-        { probeTimeoutMs:         { not: null } },
-        { cpuMemoryTimeoutMs:     { not: null } },
-        { temperatureTimeoutMs:   { not: null } },
-        { systemInfoTimeoutMs:    { not: null } },
-        { responseTimePolling:    { not: null } },
-        { cpuMemoryPolling:       { not: null } },
-        { temperaturePolling:     { not: null } },
-        { interfacesPolling:      { not: null } },
-        { lldpPolling:            { not: null } },
-        { storagePolling:         { not: null } },
-      ],
-    };
-    if (integrationIdParam === "null") where.discoveredByIntegrationId = null;
-    else if (typeof integrationIdParam === "string") where.discoveredByIntegrationId = integrationIdParam;
-    if (assetType) where.assetType = assetType;
-
-    const assets = await prisma.asset.findMany({
-      where,
-      select: {
-        id:                       true,
-        hostname:                 true,
-        ipAddress:                true,
-        assetType:                true,
-        monitorIntervalSec:       true,
-        cpuMemoryIntervalSec:     true,
-        temperatureIntervalSec:   true,
-        systemInfoIntervalSec:    true,
-        probeTimeoutMs:           true,
-        cpuMemoryTimeoutMs:       true,
-        temperatureTimeoutMs:     true,
-        systemInfoTimeoutMs:      true,
-        responseTimePolling:      true,
-        cpuMemoryPolling:         true,
-        temperaturePolling:       true,
-        interfacesPolling:        true,
-        lldpPolling:              true,
-        storagePolling:           true,
-        discoveredByIntegrationId: true,
-      },
-      orderBy: { hostname: "asc" },
-      take:    500,
-    });
-    res.json(assets);
+    res.json(await listAssetOverrides(req.query.integrationId, req.query.assetType));
   } catch (err) { next(err); }
 });
 
