@@ -4,7 +4,7 @@
  * Shared MAC-address normalization. The storage convention across Polaris is
  * colon-separated UPPERCASE (e.g. "AA:BB:CC:DD:EE:FF") — see the pervasive
  * `.toUpperCase().replace(/-/g, ":")` pattern in the discovery services and the
- * comment at the top of `normalizeMacKey` in src/api/routes/integrations.ts.
+ * comment at the top of `normalizeMacKey` in src/services/discovery/discoveryEngine.ts.
  *
  * `normalizeMacOrNull` additionally rejects empty, malformed, and all-zero
  * MACs by returning null, so callers can skip writing a meaningless value.

@@ -11,7 +11,7 @@
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { triggerDiscovery, isDiscoveryRunning } from "../api/routes/integrations.js";
+import { triggerDiscovery, isDiscoveryRunning } from "../services/discovery/discoveryEngine.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;

@@ -43,7 +43,7 @@ import { startDiscoveryScheduler } from "./jobs/discoveryScheduler.js";
 import { ensureRegistryLoaded } from "./services/oidRegistry.js";
 import { detectTimescale, migrateToHypertables } from "./services/timescaleService.js";
 import { initializeQueue, startPgbossWorkers, startDiscoveryWorker, startQueueProducer, stopPgbossWorkers } from "./services/queueService.js";
-import { runDiscovery } from "./api/routes/integrations.js";
+import { runDiscovery } from "./services/discovery/discoveryEngine.js";
 import { startSampleWriteBuffer, shutdownFlushSampleBuffers } from "./services/sampleWriteBuffer.js";
 import { startProbePatchBuffer, shutdownFlushProbePatchBuffer } from "./services/probePatchBuffer.js";
 import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";

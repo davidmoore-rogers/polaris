@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sweepPhaseEnabled, cascadeControllerOf, type SyncMode } from "../../src/api/routes/integrations.js";
+import { sweepPhaseEnabled, cascadeControllerOf, type SyncMode } from "../../src/services/discovery/discoveryEngine.js";
 
 // The mode→sweep-phase matrix behind syncDhcpSubnets' destructive phases.
 // Getting this wrong on a scoped run mass-deprecates subnets (Phase 2) or

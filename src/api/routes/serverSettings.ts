@@ -60,7 +60,7 @@ import { validateBackupPassword } from "../../utils/backupPassword.js";
 import { getServerCertFingerprint, getServerCertHostnames, getServerCertExpiry } from "../../services/certInfo.js";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
-import { hasActiveDiscoveries } from "./integrations.js";
+import { hasActiveDiscoveries } from "../../services/discovery/discoveryEngine.js";
 import { logger } from "../../utils/logger.js";
 import { Prisma } from "../../generated/prisma/client.js";
 import { getCapacitySnapshot, recordCapacityTransition } from "../../services/capacityService.js";

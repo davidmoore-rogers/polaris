@@ -14,7 +14,7 @@
  * Import from app.ts to activate.
  */
 
-import { checkForSlowRuns, expireVerboseLogging } from "../api/routes/integrations.js";
+import { checkForSlowRuns, expireVerboseLogging } from "../services/discovery/discoveryEngine.js";
 import { logger } from "../utils/logger.js";
 import { runInstrumentedJob } from "./_metrics.js";
 

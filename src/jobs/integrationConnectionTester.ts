@@ -22,7 +22,7 @@
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { runPreflightTest, isDiscoveryRunning } from "../api/routes/integrations.js";
+import { runPreflightTest, isDiscoveryRunning } from "../services/discovery/discoveryEngine.js";
 import { logEvent } from "../services/eventLogService.js";
 import { recordIntegrationTest } from "../metrics.js";
 import { runInstrumentedJob } from "./_metrics.js";

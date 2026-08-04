@@ -1080,7 +1080,7 @@ export async function applyAutoMonitorForClass(
   if (pending.length === 0) return { devices: 0, interfacesAdded: 0, perDeviceMax: 0, sampleDevices: [] };
 
   // Chunked Promise.allSettled — mirrors `batchSettled` in
-  // src/api/routes/integrations.ts. 50 is the conventional batch size in
+  // src/services/discovery/discoveryEngine.ts. 50 is the conventional batch size in
   // this codebase; small enough to keep pool headroom for the rest of the
   // app on big fleets but large enough to amortize the per-batch overhead.
   const BATCH_SIZE = 50;

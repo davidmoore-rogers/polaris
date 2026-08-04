@@ -77,7 +77,7 @@ import {
 } from "../../services/peerInferredLldpService.js";
 // Cross-route-file import precedent: serverSettings.ts imports
 // hasActiveDiscoveries from ./integrations.js the same way.
-import { triggerDiscovery } from "./integrations.js";
+import { triggerDiscovery } from "../../services/discovery/discoveryEngine.js";
 import { isRunActive } from "../../services/discoveryRunState.js";
 
 const router = Router();
