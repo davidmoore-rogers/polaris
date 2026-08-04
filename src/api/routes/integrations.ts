@@ -17,7 +17,7 @@ import * as entraId from "../../services/entraIdService.js";
 import * as activeDirectory from "../../services/activeDirectoryService.js";
 import * as vcenter from "../../services/vcenterService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps, isPrivateIpv4 } from "../../utils/cidr.js";
-import { normalizeMacsDistinct } from "../../utils/mac.js";
+import { normalizeMacsDistinct, macHexKeyOrNull } from "../../utils/mac.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
@@ -7428,11 +7428,11 @@ const AD_GUID_TAG_PREFIX = "ad-guid:";
 // Strip every non-hex character and uppercase, so "00:1A:2B:3C:4D:5E",
 // "001A2B-3C4D5E", "00-1A-2B-3C-4D-5E" all collapse to the same key. Used
 // only for cross-asset MAC matching during discovery; storage convention
-// elsewhere keeps colon-separated uppercase form.
+// elsewhere keeps colon-separated uppercase form. Delegates to the shared
+// util, which also rejects the all-zero MAC so two unrelated devices
+// reporting 00:00:00:00:00:00 can't collide into one match key.
 function normalizeMacKey(mac: string | null | undefined): string {
-  if (!mac) return "";
-  const hex = mac.toUpperCase().replace(/[^0-9A-F]/g, "");
-  return hex.length === 12 ? hex : "";
+  return macHexKeyOrNull(mac) ?? "";
 }
 
 // NetBIOS / pre-Windows-2000 computer-name limit. AD's `cn` is often the

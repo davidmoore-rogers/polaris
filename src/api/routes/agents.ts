@@ -57,6 +57,7 @@ import { logEvent } from "./events.js";
 import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
 import { fetchPendingCommands, recordCommandResult } from "../../services/agentCommandService.js";
 import { logger } from "../../utils/logger.js";
+import { macColonUpperOrNull } from "../../utils/mac.js";
 
 // ─── /enroll (public) ─────────────────────────────────────────────────
 //
@@ -1091,10 +1092,7 @@ agentsRouter.post("/system-info", async (req, res, next) => {
 // stored format on AssetMacAddress.mac. Returns "" when the input isn't a
 // 12-hex-digit MAC after stripping separators.
 function formatMacColonUpper(mac: unknown): string {
-  if (!mac) return "";
-  const hex = String(mac).replace(/[^0-9A-Fa-f]/g, "").toUpperCase();
-  if (hex.length !== 12) return "";
-  return hex.match(/.{2}/g)!.join(":");
+  return macColonUpperOrNull(mac) ?? "";
 }
 
 async function computeConfigEtag(assetId: string): Promise<string> {

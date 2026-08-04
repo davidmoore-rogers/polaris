@@ -12,6 +12,7 @@
  */
 
 import { AppError } from "../utils/errors.js";
+import { normalizeMacOrNull } from "../utils/mac.js";
 
 export interface EntraIdConfig {
   tenantId: string;
@@ -480,11 +481,12 @@ function isMeaningfulDeviceId(id: string): boolean {
 
 // Normalize a single MAC value from Intune (returned without separators, e.g.
 // "A0B1C2D3E4F5") into Polaris's storage convention: colon-separated uppercase.
+// Unrecognizable or all-zero input yields "" (falsy → field omitted) — the
+// previous fallback stored the raw value uppercased, which poisoned the
+// MAC-match cascade with un-normalized junk.
 function formatMac(mac: unknown): string {
   if (!mac) return "";
-  const compact = String(mac).replace(/[^0-9A-Fa-f]/g, "").toUpperCase();
-  if (compact.length !== 12) return String(mac).toUpperCase();
-  return compact.match(/.{2}/g)!.join(":");
+  return normalizeMacOrNull(String(mac)) ?? "";
 }
 
 function matchesWildcard(pattern: string, value: string): boolean {

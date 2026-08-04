@@ -3,7 +3,13 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { normalizeMacOrNull, normalizeMacsDistinct } from "../../src/utils/mac.js";
+import {
+  normalizeMacOrNull,
+  normalizeMacsDistinct,
+  macColonUpperOrNull,
+  macHexKeyOrNull,
+  normalizeMacLowerColon,
+} from "../../src/utils/mac.js";
 
 describe("normalizeMacOrNull", () => {
   it("normalizes colon-separated lowercase to uppercase", () => {
@@ -45,6 +51,62 @@ describe("normalizeMacOrNull", () => {
 
   it("trims surrounding whitespace via the hex filter", () => {
     expect(normalizeMacOrNull("  38:C0:EA:81:55:0C  ")).toBe("38:C0:EA:81:55:0C");
+  });
+});
+
+describe("macColonUpperOrNull (loose)", () => {
+  it("normalizes every separator style to upper-colon", () => {
+    expect(macColonUpperOrNull("38:c0:ea:81:55:0c")).toBe("38:C0:EA:81:55:0C");
+    expect(macColonUpperOrNull("38-C0-EA-81-55-0C")).toBe("38:C0:EA:81:55:0C");
+    expect(macColonUpperOrNull("38c0.ea81.550c")).toBe("38:C0:EA:81:55:0C");
+  });
+
+  it("ACCEPTS the all-zero MAC (unlike the strict form)", () => {
+    expect(macColonUpperOrNull("000000000000")).toBe("00:00:00:00:00:00");
+    expect(macColonUpperOrNull("00:00:00:00:00:00")).toBe("00:00:00:00:00:00");
+  });
+
+  it("returns null for empty / wrong-length / non-hex input", () => {
+    expect(macColonUpperOrNull("")).toBeNull();
+    expect(macColonUpperOrNull(null)).toBeNull();
+    expect(macColonUpperOrNull("38:c0:ea:81:55")).toBeNull();
+    expect(macColonUpperOrNull("not-a-mac")).toBeNull();
+  });
+});
+
+describe("macHexKeyOrNull (match key)", () => {
+  it("emits bare-hex uppercase for any separator style", () => {
+    expect(macHexKeyOrNull("38:c0:ea:81:55:0c")).toBe("38C0EA81550C");
+    expect(macHexKeyOrNull("38-C0-EA-81-55-0C")).toBe("38C0EA81550C");
+    expect(macHexKeyOrNull("38c0.ea81.550c")).toBe("38C0EA81550C");
+  });
+
+  it("rejects the all-zero MAC so unrelated devices can't collide on it", () => {
+    expect(macHexKeyOrNull("00:00:00:00:00:00")).toBeNull();
+    expect(macHexKeyOrNull("000000000000")).toBeNull();
+  });
+
+  it("returns null for empty / malformed input", () => {
+    expect(macHexKeyOrNull("")).toBeNull();
+    expect(macHexKeyOrNull(null)).toBeNull();
+    expect(macHexKeyOrNull("38c0ea81")).toBeNull();
+  });
+});
+
+describe("normalizeMacLowerColon (FortiOS wire form)", () => {
+  it("emits colon-separated lowercase for a recognizable MAC", () => {
+    expect(normalizeMacLowerColon("38:C0:EA:81:55:0C")).toBe("38:c0:ea:81:55:0c");
+    expect(normalizeMacLowerColon("38C0EA81550C")).toBe("38:c0:ea:81:55:0c");
+    expect(normalizeMacLowerColon("38-C0-EA-81-55-0C")).toBe("38:c0:ea:81:55:0c");
+  });
+
+  it("keeps the all-zero MAC (device-side semantics, not identity)", () => {
+    expect(normalizeMacLowerColon("00:00:00:00:00:00")).toBe("00:00:00:00:00:00");
+  });
+
+  it("passes unrecognizable input through lowercased (device rejects it)", () => {
+    expect(normalizeMacLowerColon("NOT-A-MAC")).toBe("not-a-mac");
+    expect(normalizeMacLowerColon("38:c0:ea")).toBe("38:c0:ea");
   });
 });
 

@@ -110,6 +110,7 @@ import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { logEvent } from "../api/routes/events.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { macHexKeyOrNull } from "../utils/mac.js";
 
 type SourceTier = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
@@ -156,11 +157,9 @@ function tierForAsset(sourceKinds: string[]): SourceTier {
   return best;
 }
 
-function normMac(mac: string | null): string | null {
-  if (!mac) return null;
-  const hex = mac.replace(/[^0-9a-fA-F]/g, "").toUpperCase();
-  return hex.length === 12 ? hex : null;
-}
+// Shared bare-hex matching key — rejects the all-zero MAC so two unrelated
+// ghosts can't group into one merge candidate on 00:00:00:00:00:00.
+const normMac = macHexKeyOrNull;
 
 type Decision =
   | { kind: "merge"; canonical: AssetRow; ghosts: AssetRow[]; tiers: number[] }

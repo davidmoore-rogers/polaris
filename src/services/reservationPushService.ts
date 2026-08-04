@@ -25,6 +25,7 @@ import {
   type FortiManagerConfig,
 } from "./fortimanagerService.js";
 import { isValidIpAddress } from "../utils/cidr.js";
+import { normalizeMacLowerColon } from "../utils/mac.js";
 
 // ─── FortiOS DHCP CMDB shapes (subset we use) ───────────────────────────────
 
@@ -152,11 +153,12 @@ export async function callFortiOs<T>(
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-export function normalizeMac(mac: string): string {
-  const hex = mac.toLowerCase().replace(/[^0-9a-f]/g, "");
-  if (hex.length !== 12) return mac.toLowerCase();
-  return hex.match(/.{2}/g)!.join(":");
-}
+// FortiOS wire form — delegates to the shared util (colon-lowercase,
+// pass-through on unrecognizable input). Re-exported here because the
+// FortiOS-facing services (descriptionSync, fortigateLocation,
+// fortinetManagementAccess, subnetRefresh) import their MAC helper from
+// this module's Transport surface.
+export const normalizeMac = normalizeMacLowerColon;
 
 function buildDescription(
   hostname: string | null | undefined,

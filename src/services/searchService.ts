@@ -10,6 +10,7 @@
 import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { isValidIpAddress, normalizeCidr, ipInCidr } from "../utils/cidr.js";
+import { macColonUpperOrNull } from "../utils/mac.js";
 
 export interface SearchHit {
   type: "block" | "subnet" | "reservation" | "asset" | "ip" | "site";
@@ -51,8 +52,6 @@ const PER_GROUP_LIMIT = 8;
 const SCOPED_LIMIT = 200;
 
 // ─── Input classification ────────────────────────────────────────────────────
-
-const MAC_HEX_ONLY = /^[0-9a-f]{12}$/i;
 
 type SearchScope = "block" | "asset" | "reservation" | "map" | "network" | "tag";
 
@@ -106,11 +105,13 @@ export function parseSearchTerms(raw: string): string[] {
   return terms;
 }
 
-/** Normalize a MAC to UPPER:CASE:COLON:FORM if recognizable, else null. */
+/**
+ * Normalize a MAC to UPPER:CASE:COLON:FORM if recognizable, else null.
+ * Deliberately the LOOSE form (all-zero allowed) — searching for the zero
+ * MAC should find rows that carry it.
+ */
 export function normalizeMac(raw: string): string | null {
-  const compact = raw.replace(/[\s:\-.]/g, "").toLowerCase();
-  if (!MAC_HEX_ONLY.test(compact)) return null;
-  return compact.toUpperCase().match(/.{2}/g)!.join(":");
+  return macColonUpperOrNull(raw);
 }
 
 /**

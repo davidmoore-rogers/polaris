@@ -13,22 +13,60 @@
  * would collide in the byMac index and re-create the very duplicate the
  * firewall-mgmt-MAC capture is meant to prevent).
  *
- * NOTE: this differs from `normalizeMac` in assetQuarantineService.ts, which
- * emits LOWERCASE for FortiOS quarantine-object matching and never returns
- * null. Use that one for quarantine; use this one for Asset storage.
+ * Four shapes, one home: `macColonUpperOrNull` (loose upper-colon),
+ * `normalizeMacOrNull` (strict upper-colon — Asset storage), `macHexKeyOrNull`
+ * (strict bare-hex — match indexes), `normalizeMacLowerColon` (FortiOS wire
+ * form — DHCP push / quarantine).
  */
 
 const ALL_ZERO_HEX = "000000000000";
+
+/**
+ * LOOSE normalize: colon-separated uppercase, or null when the input is
+ * empty / not exactly 12 hex digits. Accepts the all-zero MAC — use this
+ * where zero is a legitimate value to represent faithfully (global search,
+ * the AssetMacAddress side-table's stored-shape normalization), and
+ * `normalizeMacOrNull` where a zero MAC must never become an identity.
+ */
+export function macColonUpperOrNull(raw: unknown): string | null {
+  if (!raw) return null;
+  const hex = String(raw).toUpperCase().replace(/[^0-9A-F]/g, "");
+  if (hex.length !== 12) return null;
+  return hex.match(/.{2}/g)!.join(":");
+}
 
 /**
  * Normalize a raw MAC to colon-separated uppercase, or null when the input is
  * empty / not exactly 12 hex digits / all-zero.
  */
 export function normalizeMacOrNull(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const hex = raw.toUpperCase().replace(/[^0-9A-F]/g, "");
-  if (hex.length !== 12) return null;
-  if (hex === ALL_ZERO_HEX) return null;
+  const norm = macColonUpperOrNull(raw);
+  if (norm === null) return null;
+  return norm.replace(/:/g, "") === ALL_ZERO_HEX ? null : norm;
+}
+
+/**
+ * Bare-hex UPPERCASE matching key ("AABBCCDDEEFF"), or null when the input
+ * is empty / not exactly 12 hex digits / all-zero. This is the shape for
+ * cross-asset MAC match indexes (discovery byMac, duplicate-hostname merge
+ * grouping) — all-zero is rejected so two unrelated devices reporting
+ * 00:00:00:00:00:00 can never collide into one identity.
+ */
+export function macHexKeyOrNull(raw: string | null | undefined): string | null {
+  const norm = normalizeMacOrNull(raw);
+  return norm === null ? null : norm.replace(/:/g, "");
+}
+
+/**
+ * FortiOS wire form: colon-separated LOWERCASE. Unrecognizable input passes
+ * through lowercased (unchanged historical behavior — the device rejects it
+ * with its own error, which is more actionable than silently dropping the
+ * value client-side). Use for DHCP-reservation push and quarantine-object
+ * matching; use `normalizeMacOrNull` for Asset storage.
+ */
+export function normalizeMacLowerColon(mac: string): string {
+  const hex = mac.toLowerCase().replace(/[^0-9a-f]/g, "");
+  if (hex.length !== 12) return mac.toLowerCase();
   return hex.match(/.{2}/g)!.join(":");
 }
 

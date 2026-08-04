@@ -31,6 +31,7 @@
 
 import { prisma } from "../db.js";
 import { retryOnDeadlock } from "./dbRetry.js";
+import { macColonUpperOrNull } from "./mac.js";
 
 export interface MacJsonEntry {
   mac: string;
@@ -203,15 +204,10 @@ export async function reconcileMacAddresses(
 /**
  * Normalize a MAC to canonical upper-colon form ("AA:BB:CC:DD:EE:FF"), the
  * shape every row in this side table is stored as. Returns null for anything
- * that isn't exactly 12 hex digits. Kept dependency-free (no import of the
- * service-layer normalizers) so this util stays a leaf module.
+ * that isn't exactly 12 hex digits. Loose form (all-zero kept) — the side
+ * table stores what the device reported; identity decisions live elsewhere.
  */
-function macColonUpper(mac: string | null | undefined): string | null {
-  if (!mac) return null;
-  const hex = String(mac).replace(/[^0-9A-Fa-f]/g, "").toUpperCase();
-  if (hex.length !== 12) return null;
-  return hex.match(/.{2}/g)!.join(":");
-}
+const macColonUpper = macColonUpperOrNull;
 
 // 48-bit MAC ↔ integer. 2^48 < 2^53, so plain JS numbers are exact.
 function macToInt(mac: string): number {
