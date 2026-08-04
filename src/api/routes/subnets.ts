@@ -6,7 +6,7 @@ import { Router } from "express";
 import { z } from "zod";
 import * as subnetService from "../../services/subnetService.js";
 import { refreshSubnet } from "../../services/subnetRefreshService.js";
-import { requirePermission, requireOwnership } from "../middleware/permissions.js";
+import { requirePermission, requireOwnership, assertOwnership } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
 
 const router = Router();
@@ -186,9 +186,7 @@ router.put("/:id", requireOwnership("subnets"), async (req, res, next) => {
     const id = req.params.id as string;
     const input = UpdateSubnetSchema.parse(req.body);
     const before = await subnetService.getSubnet(id);
-    if (req.permissionLevel !== "fullwrite" && before.createdBy !== req.session?.username) {
-      throw new AppError(403, "Forbidden — you can only edit networks you created");
-    }
+    assertOwnership(req, before.createdBy, "edit networks");
     const subnet = await subnetService.updateSubnet(id, {
       ...input,
       vlan: input.vlan ?? undefined,
@@ -206,9 +204,7 @@ router.delete("/:id", requireOwnership("subnets"), async (req, res, next) => {
     const id = req.params.id as string;
     if (req.permissionLevel !== "fullwrite") {
       const existing = await subnetService.getSubnet(id);
-      if (existing.createdBy !== req.session?.username) {
-        throw new AppError(403, "Forbidden — you can only delete networks you created");
-      }
+      assertOwnership(req, existing.createdBy, "delete networks");
     }
     await subnetService.deleteSubnet(id, req.session?.username);
     res.status(204).send();

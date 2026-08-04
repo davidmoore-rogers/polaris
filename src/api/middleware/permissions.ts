@@ -467,6 +467,22 @@ export function requireOwnership(functionKey: string) {
   return requirePermission(functionKey, "write");
 }
 
+/**
+ * Ownership-dimension row check for `subnets` / `reservations` (see
+ * CLAUDE.md "Ownership model"): a `write`-level caller may only touch rows
+ * whose createdBy matches their username; `fullwrite` bypasses the filter.
+ * Call after loading the row, on routes behind requireOwnership (which
+ * stamps req.permissionLevel). `action` reads as "you can only <action>
+ * you created" — e.g. "edit networks", "release reservations". Previously
+ * this predicate was hand-rolled at five call sites with drifting messages
+ * (and one copy forgetting the fullwrite bypass was the standing risk).
+ */
+export function assertOwnership(req: Request, createdBy: string | null, action: string): void {
+  if (req.permissionLevel === "fullwrite") return;
+  if (createdBy !== null && createdBy === req.session?.username) return;
+  throw new AppError(403, `Forbidden — you can only ${action} you created`);
+}
+
 // requireSessionOrTokenPermission retired in the api-tokens role cutover —
 // bearer tokens are bound to a Role and pass the plain requirePermission
 // gate; there is no parallel scope-string system anymore.

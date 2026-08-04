@@ -19,7 +19,7 @@ import { z } from "zod";
 import * as reservationService from "../../services/reservationService.js";
 import * as staleService from "../../services/reservationStaleService.js";
 import { AppError } from "../../utils/errors.js";
-import { requirePermission, requireOwnership } from "../middleware/permissions.js";
+import { requirePermission, requireOwnership, assertOwnership } from "../middleware/permissions.js";
 
 const router = Router();
 
@@ -178,9 +178,7 @@ router.post("/:id/retry-push", requireOwnership("reservations"), async (req, res
   try {
     const id = req.params.id as string;
     const before = await reservationService.getReservation(id);
-    if (req.permissionLevel !== "fullwrite" && before.createdBy !== req.session?.username) {
-      throw new AppError(403, "Forbidden — you can only retry reservations you created");
-    }
+    assertOwnership(req, before.createdBy, "retry reservations");
     const { outcome, reservation } = await reservationService.retryReservationNow(id, req.session?.username ?? null);
     res.json({ outcome, reservation });
   } catch (err) { next(err); }
@@ -243,9 +241,7 @@ router.put("/:id", requireOwnership("reservations"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const before = await reservationService.getReservation(id);
-    if (req.permissionLevel !== "fullwrite" && before.createdBy !== req.session?.username) {
-      throw new AppError(403, "Forbidden — you can only edit reservations you created");
-    }
+    assertOwnership(req, before.createdBy, "edit reservations");
     const input = UpdateReservationSchema.parse(req.body);
     const reservation = await reservationService.updateReservation(id, input, {
       actor: req.session?.username ?? null,
@@ -261,9 +257,7 @@ router.delete("/:id", requireOwnership("reservations"), async (req, res, next) =
     const id = req.params.id as string;
     if (req.permissionLevel !== "fullwrite") {
       const existing = await reservationService.getReservation(id);
-      if (existing.createdBy !== req.session?.username) {
-        throw new AppError(403, "Forbidden — you can only release reservations you created");
-      }
+      assertOwnership(req, existing.createdBy, "release reservations");
     }
     await reservationService.releaseReservation(id, req.session?.username);
     res.status(204).send();
