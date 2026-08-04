@@ -30,6 +30,7 @@ import {
   type LdapConnectionConfig,
 } from "./ldapClient.js";
 import { provisionExternalUser } from "./ssoProvisioning.js";
+import { SECRET_MASK, LEGACY_ASTERISK_MASK, isMaskedSecret } from "../utils/secretMask.js";
 
 export interface LdapSettings {
   enabled: boolean;
@@ -64,7 +65,10 @@ const LDAP_DEFAULTS: LdapSettings = {
   groupFilter: "(member={{userDn}})",
 };
 
-const MASK = "********";
+// Emits the shared bullet mask; the merge below additionally accepts the
+// pre-consolidation asterisk mask so an in-flight settings form from a
+// pre-upgrade page still round-trips without clobbering the stored secret.
+const MASK = SECRET_MASK;
 
 let _cache: { value: LdapSettings; expiry: number } | null = null;
 
@@ -91,7 +95,9 @@ export async function updateLdapSettings(input: Record<string, any>): Promise<Ld
     url: (input.url ?? cur.url ?? "").trim(),
     bindDn: (input.bindDn ?? cur.bindDn ?? "").trim(),
     // Preserve the stored secret when the UI sends the mask back unchanged.
-    bindPassword: input.bindPassword === MASK ? cur.bindPassword : (input.bindPassword ?? "").trim(),
+    bindPassword: isMaskedSecret(input.bindPassword) || input.bindPassword === LEGACY_ASTERISK_MASK
+      ? cur.bindPassword
+      : (input.bindPassword ?? "").trim(),
     searchBase: (input.searchBase ?? cur.searchBase ?? "").trim(),
     searchFilter: (input.searchFilter ?? cur.searchFilter ?? LDAP_DEFAULTS.searchFilter).trim(),
     tlsVerify: input.tlsVerify !== false,

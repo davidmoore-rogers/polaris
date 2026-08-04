@@ -17,8 +17,9 @@ import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import { CHANNEL_TYPE_META, CHANNEL_TRANSPORT, type ChannelType } from "./notificationTypes.js";
 import { generateVapidKeys } from "./notificationChannels/webPushChannel.js";
+import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
 
-export const MASK = "••••••••";
+export const MASK = SECRET_MASK;
 
 type ChannelRow = {
   id: string;
@@ -67,7 +68,7 @@ function mergeConfig(type: ChannelType, incoming: unknown, current: unknown): Re
   const out: Record<string, unknown> = { ...inc };
   for (const key of secretKeys(type)) {
     const v = inc[key];
-    if (typeof v !== "string" || v === MASK || v.trim() === "") {
+    if (typeof v !== "string" || isMaskedSecret(v) || v.trim() === "") {
       out[key] = cur[key] ?? ""; // keep the stored secret
     }
   }

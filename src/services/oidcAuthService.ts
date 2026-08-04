@@ -21,6 +21,7 @@ import * as client from "openid-client";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { provisionExternalUser } from "./ssoProvisioning.js";
+import { SECRET_MASK, LEGACY_ASTERISK_MASK, isMaskedSecret } from "../utils/secretMask.js";
 
 export interface OidcSettings {
   enabled: boolean;
@@ -46,7 +47,10 @@ const OIDC_DEFAULTS: OidcSettings = {
   displayNameClaim: "name",
 };
 
-const MASK = "********";
+// Emits the shared bullet mask; the merge below additionally accepts the
+// pre-consolidation asterisk mask so an in-flight settings form from a
+// pre-upgrade page still round-trips without clobbering the stored secret.
+const MASK = SECRET_MASK;
 const CALLBACK_PATH = "/api/v1/auth/oidc/callback";
 
 let _cache: { value: OidcSettings; expiry: number } | null = null;
@@ -93,7 +97,9 @@ export async function updateOidcSettings(input: Record<string, any>): Promise<Oi
     enabled: !!input.enabled,
     discoveryUrl: (input.discoveryUrl ?? cur.discoveryUrl ?? "").trim(),
     clientId: (input.clientId ?? cur.clientId ?? "").trim(),
-    clientSecret: input.clientSecret === MASK ? cur.clientSecret : (input.clientSecret ?? "").trim(),
+    clientSecret: isMaskedSecret(input.clientSecret) || input.clientSecret === LEGACY_ASTERISK_MASK
+      ? cur.clientSecret
+      : (input.clientSecret ?? "").trim(),
     scopes: (input.scopes ?? cur.scopes ?? OIDC_DEFAULTS.scopes).trim() || OIDC_DEFAULTS.scopes,
     groupsClaim: (input.groupsClaim ?? cur.groupsClaim ?? OIDC_DEFAULTS.groupsClaim).trim(),
     usernameClaim: (input.usernameClaim ?? cur.usernameClaim ?? OIDC_DEFAULTS.usernameClaim).trim(),

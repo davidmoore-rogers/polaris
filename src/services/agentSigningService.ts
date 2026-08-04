@@ -31,6 +31,7 @@ import { stat } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import { prisma } from "../db.js";
 import { STATE_DIR } from "../utils/paths.js";
+import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -39,8 +40,8 @@ const execFileAsync = promisify(execFile);
 export const AGENT_SIGNING_SETTING_KEY = "agent.codeSigning";
 export const SIGNING_FAILURE_SETTING_KEY = "agent.signing.lastFailure";
 
-/** Same sentinel as notificationChannelService — kept local to avoid coupling. */
-export const MASK = "••••••••";
+/** The shared UI mask sentinel — see src/utils/secretMask.ts. */
+export const MASK = SECRET_MASK;
 
 /** Env var jsign reads the access token from (`--storepass env:<name>`). */
 export const SIGNING_TOKEN_ENV = "POLARIS_SIGNING_TOKEN";
@@ -123,7 +124,7 @@ export function mergeSigningConfig(
     profileName: inc.profileName !== undefined ? str(inc.profileName) : current.profileName,
     tenantId: inc.tenantId !== undefined ? str(inc.tenantId) : current.tenantId,
     clientId: inc.clientId !== undefined ? str(inc.clientId) : current.clientId,
-    clientSecret: secret === "" || secret === MASK ? current.clientSecret : secret,
+    clientSecret: secret === "" || isMaskedSecret(secret) ? current.clientSecret : secret,
     jsignJarPath: inc.jsignJarPath !== undefined ? str(inc.jsignJarPath) : current.jsignJarPath,
   };
 }

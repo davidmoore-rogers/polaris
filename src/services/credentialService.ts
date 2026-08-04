@@ -13,6 +13,7 @@
 
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
 
 export type CredentialType = "snmp" | "winrm" | "ssh" | "restapi";
 
@@ -98,7 +99,7 @@ export interface UpdateCredentialInput {
   config?: Record<string, unknown>;
 }
 
-const MASK = "••••••••";
+const MASK = SECRET_MASK;
 
 /**
  * Field names treated as secrets. Returned masked on every GET and
@@ -128,7 +129,7 @@ export function stripSecrets(cred: CredentialRecord): CredentialRecord {
 }
 
 function isMaskedValue(v: unknown): boolean {
-  return typeof v === "string" && (v === MASK || v.trim() === "");
+  return isMaskedSecret(v) || (typeof v === "string" && v.trim() === "");
 }
 
 function normalizeName(name: string): string {

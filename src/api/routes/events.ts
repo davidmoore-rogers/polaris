@@ -7,6 +7,7 @@ import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { requirePermission } from "../middleware/permissions.js";
+import { SECRET_MASK, isMaskedSecret } from "../../utils/secretMask.js";
 import {
   getArchiveSettings,
   updateArchiveSettings,
@@ -222,7 +223,7 @@ router.get("/archive-settings", requirePermission("events", "write"), async (_re
     const settings = await getArchiveSettings();
     // Strip password from response
     const safe = { ...settings };
-    if (safe.password) safe.password = "••••••••";
+    if (safe.password) safe.password = SECRET_MASK;
     res.json(safe);
   } catch (err) {
     next(err);
@@ -234,10 +235,10 @@ router.put("/archive-settings", requirePermission("events", "write"), async (req
   try {
     const body = req.body;
     // Don't overwrite password if placeholder was sent back
-    if (body.password === "••••••••") delete body.password;
+    if (isMaskedSecret(body.password)) delete body.password;
     const updated = await updateArchiveSettings(body);
     const safe = { ...updated };
-    if (safe.password) safe.password = "••••••••";
+    if (safe.password) safe.password = SECRET_MASK;
     res.json(safe);
   } catch (err) {
     next(err);
@@ -249,7 +250,7 @@ router.post("/archive-test", requirePermission("events", "write"), async (req, r
   try {
     const settings = req.body;
     // If password is placeholder, fetch the real one
-    if (settings.password === "••••••••") {
+    if (isMaskedSecret(settings.password)) {
       const current = await getArchiveSettings();
       settings.password = current.password;
     }

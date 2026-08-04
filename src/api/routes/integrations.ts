@@ -18,6 +18,7 @@ import * as activeDirectory from "../../services/activeDirectoryService.js";
 import * as vcenter from "../../services/vcenterService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps, isPrivateIpv4 } from "../../utils/cidr.js";
 import { normalizeMacsDistinct, macHexKeyOrNull } from "../../utils/mac.js";
+import { SECRET_MASK, isMaskedSecret } from "../../utils/secretMask.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
@@ -149,7 +150,7 @@ export async function expireVerboseLogging(): Promise<void> {
 // tokens like "Bearer ••••••••" which Node's HTTP layer rejects with a
 // "ByteString" error on the next API call.
 function isMaskedSecretSentinel(value: unknown): boolean {
-  return typeof value === "string" && value.length > 0 && /^•+$/.test(value);
+  return isMaskedSecret(value);
 }
 
 // In-flight discovery state lives in the DiscoveryRun table (see
@@ -9669,20 +9670,8 @@ async function syncVcenterDevices(
 
 function stripSecret(integration: Record<string, any>) {
   const config = { ...(integration.config as Record<string, unknown>) };
-  if (config.apiToken) {
-    config.apiToken = "••••••••";
-  }
-  if (config.fortigateApiToken) {
-    config.fortigateApiToken = "••••••••";
-  }
-  if (config.password) {
-    config.password = "••••••••";
-  }
-  if (config.clientSecret) {
-    config.clientSecret = "••••••••";
-  }
-  if (config.bindPassword) {
-    config.bindPassword = "••••••••";
+  for (const field of ["apiToken", "fortigateApiToken", "password", "clientSecret", "bindPassword"]) {
+    if (config[field]) config[field] = SECRET_MASK;
   }
   return { ...integration, config };
 }
