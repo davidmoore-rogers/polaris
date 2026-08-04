@@ -14,14 +14,22 @@
  *     IPs (grouped per /24 (v6: /64) when >5 unknowns share the subnet,
  *     hard-capped at 100 after grouping + one overflow node).
  *   edges — outbound rows resolve remoteIp against known assets
- *     (Asset.ipAddress → AssetAssociatedIp.ip; AssetIpHistory is deliberately
- *     EXCLUDED — a rotated-off IP would draw the edge to the wrong former
- *     holder). A resolved destination with a mapped process LISTENING on that
- *     (proto, port) lands process→process; otherwise process→asset; otherwise
- *     process→unknown-ip. Inbound rows fill the reverse direction and are
- *     deduped against outbound-derived edges (outbound wins — it knows the
- *     source process). One rendered edge per (source, target) carrying a
- *     per-port breakdown (cap 16 + overflow count).
+ *     (Asset.ipAddress → AssetAssociatedIp.ip, then a TIME-SCOPED
+ *     AssetIpHistory fallback — see resolveIpsViaHistory: the history row
+ *     whose seen-interval best covers the connection's own last observation
+ *     wins, so an IP two assets held at different times attributes to the
+ *     holder most likely current when the traffic was seen; a bare
+ *     history-wide match was previously excluded outright because it drew
+ *     edges to rotated-off former holders). A resolved destination with a
+ *     mapped process LISTENING on that (proto, port) lands process→process;
+ *     otherwise process→asset; otherwise process→unknown-ip. Inbound rows
+ *     fill the reverse direction and are deduped against outbound-derived
+ *     edges (outbound wins — it knows the source process). One rendered edge
+ *     per (source, target) carrying a per-port breakdown (cap 16 + overflow
+ *     count); each port carries the distinct remote/local IPs the connection
+ *     was actually seen against (`ips`, cap 6) so the UI can state WHICH
+ *     address a service dialed — the disambiguator for multi-IP hosts and
+ *     same-asset service→service edges.
  *
  * Node ids are DETERMINISTIC (asset:<id>, proc:<assetId>:<b64url(name)>,
  * ip:<ip>, ipgroup:<cidr>) so saved layouts survive refresh.
@@ -31,8 +39,11 @@
  * GET /api/v1/application-map.
  */
 
+import { reverse as dnsReverse } from "node:dns/promises";
+
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { isPrivateIpv4 } from "../utils/cidr.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { loadIconResolutionCache, resolveIconUrl } from "./deviceIconService.js";
 import { sanitizePositions, type TopologyPositions } from "./topologyLayoutService.js";
@@ -86,10 +97,11 @@ export interface AppMapNode {
   ip?: string;
   cidr?: string;
   ips?: string[];
-  /** unknown-ip only: a name for an IP that matched no Asset, from the IP registry
-   *  (see resolveIpsToNameHints). Label-only — there is no asset to open. */
+  /** unknown-ip only: a name for an IP that matched no Asset — from the IP
+   *  registry (see resolveIpsToNameHints) or, for public IPs, reverse DNS
+   *  (see resolvePtrNames). Label-only — there is no asset to open. */
   ipHostname?: string | null;
-  ipNameSource?: "reservation" | null;
+  ipNameSource?: "reservation" | "dns" | null;
   connCount?: number;
   overflowCount?: number;
 }
@@ -100,6 +112,13 @@ export interface AppMapEdgePort {
   count: number;
   firstSeen: string;
   lastSeen: string;
+  /** Distinct addresses this port's connections were actually observed
+   *  against (outbound: the dialed remote IP; inbound: the local address the
+   *  connection landed on). Capped at EDGE_PORT_IP_CAP; "" observations are
+   *  skipped. This is what tells apart a service dialing the host's LAN IP
+   *  from one dialing a secondary address — loopback never appears because
+   *  the agent drops loopback peers at collection. */
+  ips: string[];
 }
 
 export interface AppMapEdge {
@@ -143,6 +162,7 @@ export interface AppMapGraph {
 const UNKNOWN_GROUP_THRESHOLD = 5;   // >5 unknowns in one subnet → group node
 const UNKNOWN_NODE_CAP = 100;        // after grouping; overflow collapses
 const EDGE_PORT_CAP = 16;
+const EDGE_PORT_IP_CAP = 6;          // distinct observed IPs kept per edge port
 
 // ─── Node-id helpers (deterministic — saved layouts key on these) ──────
 
@@ -202,17 +222,24 @@ const ASSET_LITE_SELECT = {
 
 export type ResolvedAssetLite = Omit<MappedAssetLite, "mappedProcesses" | "mappedServices">;
 
+// Decommissioned hardware is gone; live traffic must never attribute to it.
+// (Compound parents already drop via monitored=false — this closes the
+// resolved-edge-TARGET path, where a retired device holding a since-reused IP
+// would otherwise soak up other assets' connections.)
+const RESOLVABLE_ASSET_WHERE = { status: { not: "decommissioned" } } as const;
+
 /**
  * Resolve remote IPs to known assets: primary Asset.ipAddress first, then the
- * AssetAssociatedIp side table (multi-NIC / VIP addresses). AssetIpHistory is
- * deliberately excluded — a since-rotated-off IP would attribute live traffic
- * to the wrong (former) holder. Two findMany-in queries total.
+ * AssetAssociatedIp side table (multi-NIC / VIP addresses). Decommissioned
+ * assets never resolve (RESOLVABLE_ASSET_WHERE). AssetIpHistory is NOT
+ * consulted here — the time-scoped fallback lives in resolveIpsViaHistory so
+ * callers opt in with an observation time. Two findMany-in queries total.
  */
 export async function resolveIpsToAssets(ips: string[]): Promise<Map<string, ResolvedAssetLite>> {
   const out = new Map<string, ResolvedAssetLite>();
   if (ips.length === 0) return out;
   const primary = await prisma.asset.findMany({
-    where: { ipAddress: { in: ips } },
+    where: { ipAddress: { in: ips }, ...RESOLVABLE_ASSET_WHERE },
     select: ASSET_LITE_SELECT,
   });
   for (const a of primary) {
@@ -227,7 +254,7 @@ export async function resolveIpsToAssets(ips: string[]): Promise<Map<string, Res
     if (assoc.length > 0) {
       const byId = new Map(
         (await prisma.asset.findMany({
-          where: { id: { in: [...new Set(assoc.map((r) => r.assetId))] } },
+          where: { id: { in: [...new Set(assoc.map((r) => r.assetId))] }, ...RESOLVABLE_ASSET_WHERE },
           select: ASSET_LITE_SELECT,
         })).map((a) => [a.id, a]),
       );
@@ -236,6 +263,87 @@ export async function resolveIpsToAssets(ips: string[]): Promise<Map<string, Res
         if (a && !out.has(r.ip)) out.set(r.ip, a);
       }
     }
+  }
+  return out;
+}
+
+// ─── Time-scoped AssetIpHistory fallback ──────────────────────────────
+
+export interface IpHistoryCandidate {
+  assetId: string;
+  firstSeen: Date;
+  lastSeen: Date;
+}
+
+/**
+ * Pick the asset that most likely held an IP at `refTimeMs` (the newest
+ * connection observation referencing that IP). PURE — exported for tests.
+ *
+ * Preference order:
+ *   1. rows whose [firstSeen, lastSeen] interval covers refTime — latest
+ *      firstSeen wins (the asset that took the IP most recently);
+ *   2. otherwise the row whose interval sits closest to refTime, ties broken
+ *      by latest lastSeen, then assetId (determinism).
+ */
+export function pickHistoryHolder(rows: IpHistoryCandidate[], refTimeMs: number): string | null {
+  if (rows.length === 0) return null;
+  const covering = rows.filter((r) => r.firstSeen.getTime() <= refTimeMs && r.lastSeen.getTime() >= refTimeMs);
+  const pool = covering.length > 0 ? covering : rows;
+  const distance = (r: IpHistoryCandidate): number => {
+    if (covering.length > 0) return 0;
+    return r.lastSeen.getTime() < refTimeMs
+      ? refTimeMs - r.lastSeen.getTime()
+      : r.firstSeen.getTime() - refTimeMs;
+  };
+  const best = [...pool].sort((a, b) =>
+    distance(a) - distance(b) ||
+    b.firstSeen.getTime() - a.firstSeen.getTime() ||
+    b.lastSeen.getTime() - a.lastSeen.getTime() ||
+    a.assetId.localeCompare(b.assetId),
+  )[0];
+  return best.assetId;
+}
+
+/**
+ * History fallback for IPs the current-truth tables didn't resolve: an
+ * AssetIpHistory row names a PAST holder, so it only counts when scoped to
+ * when the traffic was actually seen — `refTimeByIp` carries, per IP, the
+ * newest connection-row lastSeen referencing it. When several assets held the
+ * same IP, pickHistoryHolder chooses the one most plausibly current at that
+ * time. Decommissioned assets are excluded like everywhere else.
+ */
+export async function resolveIpsViaHistory(
+  refTimeByIp: Map<string, number>,
+): Promise<Map<string, ResolvedAssetLite>> {
+  const out = new Map<string, ResolvedAssetLite>();
+  const ips = [...refTimeByIp.keys()];
+  if (ips.length === 0) return out;
+  const hist = await prisma.assetIpHistory.findMany({
+    where: { ip: { in: ips } },
+    select: { ip: true, assetId: true, firstSeen: true, lastSeen: true },
+  });
+  if (hist.length === 0) return out;
+  const byIp = new Map<string, IpHistoryCandidate[]>();
+  for (const h of hist) {
+    let list = byIp.get(h.ip);
+    if (!list) { list = []; byIp.set(h.ip, list); }
+    list.push(h);
+  }
+  const chosen = new Map<string, string>(); // ip → assetId
+  for (const [ip, rows] of byIp) {
+    const id = pickHistoryHolder(rows, refTimeByIp.get(ip) ?? Date.now());
+    if (id) chosen.set(ip, id);
+  }
+  if (chosen.size === 0) return out;
+  const byId = new Map(
+    (await prisma.asset.findMany({
+      where: { id: { in: [...new Set(chosen.values())] }, ...RESOLVABLE_ASSET_WHERE },
+      select: ASSET_LITE_SELECT,
+    })).map((a) => [a.id, a]),
+  );
+  for (const [ip, assetId] of chosen) {
+    const a = byId.get(assetId);
+    if (a) out.set(ip, a);
   }
   return out;
 }
@@ -258,9 +366,9 @@ export async function resolveIpsToAssets(ips: string[]): Promise<Map<string, Res
  */
 export interface IpNameHint {
   hostname: string;
-  /** Which registry surface named it — shown in the info rail so the operator
-   *  knows this is IPAM data, not a discovered asset. */
-  source: "reservation";
+  /** What named it — shown in the info rail so the operator knows this is
+   *  IPAM data / a PTR record, not a discovered asset. */
+  source: "reservation" | "dns";
 }
 
 export async function resolveIpsToNameHints(ips: string[]): Promise<Map<string, IpNameHint>> {
@@ -276,6 +384,90 @@ export async function resolveIpsToNameHints(ips: string[]): Promise<Map<string, 
     if (!ip || !hostname || out.has(ip)) continue;
     out.set(ip, { hostname, source: "reservation" });
   }
+  return out;
+}
+
+// ─── Reverse DNS (PTR) for public unknown IPs ─────────────────────────
+//
+// A service dialing a public address usually reads better as the PTR name
+// ("ec2-52-1-2-3.compute-1.amazonaws.com", "smtp.office365.com") than as a
+// bare IP. PUBLIC addresses only: internal IPs are the registry's job
+// (resolveIpsToNameHints) and blasting the site resolver with PTR queries for
+// RFC1918 space is noise. Lookups are cached in-process (positive 6h,
+// negative 30m) and budgeted per build — uncached IPs beyond the budget just
+// resolve on a later refresh, so one graph build never fans out unbounded DNS.
+
+/** Public = routable unicast we'd plausibly PTR: not noise (loopback / link-
+ *  local / multicast / unspecified), not RFC1918, not CGN 100.64/10, not v6
+ *  ULA fc00::/7. Exported for tests. */
+export function isPublicIp(ip: string): boolean {
+  const v = (ip || "").trim().toLowerCase();
+  if (!v || isNoiseIp(v)) return false;
+  if (v.includes(":")) {
+    return !(v.startsWith("fc") || v.startsWith("fd"));
+  }
+  const parts = v.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  if (isPrivateIpv4(v)) return false;
+  if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return false; // CGN
+  return true;
+}
+
+const PTR_POSITIVE_TTL_MS = 6 * 3600 * 1000;
+const PTR_NEGATIVE_TTL_MS = 30 * 60 * 1000;
+const PTR_LOOKUP_TIMEOUT_MS = 1500;
+const PTR_LOOKUPS_PER_BUILD = 25;
+const PTR_CACHE_MAX = 5000;
+
+const ptrCache = new Map<string, { name: string | null; expires: number }>();
+
+/** Test hook — the cache is module-level state. */
+export function clearPtrCacheForTests(): void {
+  ptrCache.clear();
+}
+
+/**
+ * PTR names for the PUBLIC subset of `ips`. Cached results answer instantly;
+ * at most PTR_LOOKUPS_PER_BUILD uncached lookups run (concurrently, each
+ * bounded to PTR_LOOKUP_TIMEOUT_MS — a dead resolver must not stall the graph
+ * build). Failures negative-cache so a dark IP isn't re-queried every 60s
+ * refresh. `lookup` is injectable for tests; production uses node:dns reverse.
+ */
+export async function resolvePtrNames(
+  ips: string[],
+  lookup: (ip: string) => Promise<string[]> = dnsReverse,
+): Promise<Map<string, IpNameHint>> {
+  const out = new Map<string, IpNameHint>();
+  const now = Date.now();
+  const misses: string[] = [];
+  for (const ip of ips) {
+    if (!isPublicIp(ip)) continue;
+    const hit = ptrCache.get(ip);
+    if (hit && hit.expires > now) {
+      if (hit.name) out.set(ip, { hostname: hit.name, source: "dns" });
+    } else {
+      misses.push(ip);
+    }
+  }
+  const batch = misses.slice(0, PTR_LOOKUPS_PER_BUILD);
+  if (batch.length === 0) return out;
+  // Bounded fill, not LRU: PTR churn is low and the map rebuild repopulates
+  // hot entries within a refresh or two.
+  if (ptrCache.size + batch.length > PTR_CACHE_MAX) ptrCache.clear();
+  await Promise.all(batch.map(async (ip) => {
+    let name: string | null = null;
+    try {
+      const names = await Promise.race([
+        lookup(ip),
+        new Promise<string[]>((resolve) => { setTimeout(() => resolve([]), PTR_LOOKUP_TIMEOUT_MS).unref?.(); }),
+      ]);
+      name = (names && names[0]) ? String(names[0]).trim() || null : null;
+    } catch {
+      name = null; // NXDOMAIN / refused / timeout — negative-cache below
+    }
+    ptrCache.set(ip, { name, expires: Date.now() + (name ? PTR_POSITIVE_TTL_MS : PTR_NEGATIVE_TTL_MS) });
+    if (name) out.set(ip, { hostname: name, source: "dns" });
+  }));
   return out;
 }
 
@@ -391,9 +583,16 @@ export function buildGraphFromRows(
   const outboundKeys = new Set<string>();
   const unknownConnCount = new Map<string, number>();
 
+  // Record an observed address on a port (dedup + cap). "" = not observed.
+  const addPortIp = (p: AppMapEdgePort, ip: string): void => {
+    if (!ip || p.ips.includes(ip)) return;
+    if (p.ips.length < EDGE_PORT_IP_CAP) p.ips.push(ip);
+  };
+
   const addEdge = (
     source: string, target: string, kind: AppMapEdge["kind"],
     proto: string, port: number, firstSeen: Date, lastSeen: Date,
+    viaIp: string,
   ): void => {
     const key = `${source}|${target}`;
     let acc = edgeAcc.get(key);
@@ -408,10 +607,20 @@ export function buildGraphFromRows(
       existing.count++;
       if (firstSeen.toISOString() < existing.firstSeen) existing.firstSeen = firstSeen.toISOString();
       if (lastSeen.toISOString() > existing.lastSeen) existing.lastSeen = lastSeen.toISOString();
+      addPortIp(existing, viaIp);
     } else {
-      acc.ports.set(pk, { proto, port, count: 1, firstSeen: firstSeen.toISOString(), lastSeen: lastSeen.toISOString() });
+      const p: AppMapEdgePort = { proto, port, count: 1, firstSeen: firstSeen.toISOString(), lastSeen: lastSeen.toISOString(), ips: [] };
+      addPortIp(p, viaIp);
+      acc.ports.set(pk, p);
     }
     if (lastSeen.getTime() > acc.lastSeen) acc.lastSeen = lastSeen.getTime();
+  };
+
+  // The address an INBOUND connection landed on — the closest thing the listen
+  // side knows to "which IP did the peer dial". Wildcard binds tell us nothing.
+  const inboundLocalAddr = (r: ProcessConnectionRow): string => {
+    const a = (r.localAddr || "").trim();
+    return a === "0.0.0.0" || a === "::" ? "" : a;
   };
 
   // Pass 1: outbound rows. Each row has ≥1 source child node (process and/or
@@ -428,19 +637,19 @@ export function buildGraphFromRows(
         if (listeners && listeners.size > 0) {
           for (const listenerNode of listeners) {
             if (target.id === r.assetId && listenerNode === srcNode) continue; // same-node self-loop
-            addEdge(srcNode, listenerNode, "process", r.proto, r.remotePort, r.firstSeen, r.lastSeen);
+            addEdge(srcNode, listenerNode, "process", r.proto, r.remotePort, r.firstSeen, r.lastSeen, r.remoteIp);
             outboundKeys.add(`${r.assetId}|${listenerNode}|${r.proto}|${r.remotePort}`);
           }
         } else {
           const targetNode = ensureTargetAsset(target);
-          addEdge(srcNode, targetNode, "asset", r.proto, r.remotePort, r.firstSeen, r.lastSeen);
+          addEdge(srcNode, targetNode, "asset", r.proto, r.remotePort, r.firstSeen, r.lastSeen, r.remoteIp);
           outboundKeys.add(`${r.assetId}|${targetNode}|${r.proto}|${r.remotePort}`);
         }
       }
     } else {
       unknownConnCount.set(r.remoteIp, (unknownConnCount.get(r.remoteIp) ?? 0) + 1);
       for (const srcNode of sources) {
-        addEdge(srcNode, `ip:${r.remoteIp}`, "external", r.proto, r.remotePort, r.firstSeen, r.lastSeen);
+        addEdge(srcNode, `ip:${r.remoteIp}`, "external", r.proto, r.remotePort, r.firstSeen, r.lastSeen, r.remoteIp);
       }
     }
   }
@@ -457,9 +666,9 @@ export function buildGraphFromRows(
       if (peer) {
         if (outboundKeys.has(`${peer.id}|${dstNode}|${r.proto}|${r.localPort}`)) continue;
         if (peer.id === r.assetId) continue; // self-connection seen from the listen side
-        addEdge(ensureTargetAsset(peer), dstNode, "asset", r.proto, r.localPort, r.firstSeen, r.lastSeen);
+        addEdge(ensureTargetAsset(peer), dstNode, "asset", r.proto, r.localPort, r.firstSeen, r.lastSeen, inboundLocalAddr(r));
       } else {
-        addEdge(`ip:${r.remoteIp}`, dstNode, "external-inbound", r.proto, r.localPort, r.firstSeen, r.lastSeen);
+        addEdge(`ip:${r.remoteIp}`, dstNode, "external-inbound", r.proto, r.localPort, r.firstSeen, r.lastSeen, inboundLocalAddr(r));
       }
     }
   }
@@ -541,8 +750,9 @@ export function buildGraphFromRows(
         ep.count += p.count;
         if (p.firstSeen < ep.firstSeen) ep.firstSeen = p.firstSeen;
         if (p.lastSeen > ep.lastSeen) ep.lastSeen = p.lastSeen;
+        for (const ip of p.ips) addPortIp(ep, ip);
       } else {
-        existing.ports.set(pk, { ...p });
+        existing.ports.set(pk, { ...p, ips: [...p.ips] });
       }
     }
     if (acc.lastSeen > existing.lastSeen) existing.lastSeen = acc.lastSeen;
@@ -611,10 +821,26 @@ export async function buildApplicationMapGraph(): Promise<AppMapGraph> {
   });
   const remoteIps = [...new Set(rows.map((r) => r.remoteIp).filter((ip) => ip && !isNoiseIp(ip)))];
   const ipToAsset = await resolveIpsToAssets(remoteIps);
-  // Only the leftovers need the IPAM lookup — an IP that already resolved to an
-  // asset has a real node and doesn't want a registry label.
+  // History fallback for the leftovers, scoped to when each IP's traffic was
+  // last observed (newest connection-row lastSeen per IP) so a shared IP
+  // attributes to whichever asset most plausibly held it in this window.
+  const refTimeByIp = new Map<string, number>();
+  for (const r of rows) {
+    if (!r.remoteIp || ipToAsset.has(r.remoteIp) || isNoiseIp(r.remoteIp)) continue;
+    const t = r.lastSeen.getTime();
+    if (t > (refTimeByIp.get(r.remoteIp) ?? 0)) refTimeByIp.set(r.remoteIp, t);
+  }
+  for (const [ip, a] of await resolveIpsViaHistory(refTimeByIp)) {
+    if (!ipToAsset.has(ip)) ipToAsset.set(ip, a);
+  }
+  // Only the still-unresolved need name hints — an IP that resolved to an
+  // asset has a real node and doesn't want a label. The registry
+  // (reservation) hint wins over reverse DNS; PTR fills in for public IPs the
+  // registry can't know about.
   const unresolvedIps = remoteIps.filter((ip) => !ipToAsset.has(ip));
   const ipNameHints = await resolveIpsToNameHints(unresolvedIps);
+  const ptrHints = await resolvePtrNames(unresolvedIps.filter((ip) => !ipNameHints.has(ip)));
+  for (const [ip, hint] of ptrHints) ipNameHints.set(ip, hint);
   const graph = buildGraphFromRows(assets, rows, ipToAsset, ipNameHints);
 
   // Device icons for asset nodes (same recipe as the topology endpoint).

@@ -37,7 +37,7 @@ interface Node {
 interface Port { proto: string; port: number; count?: number; firstSeen?: string; lastSeen?: string }
 interface Edge { id: string; source: string; target: string; kind: string; ports: Port[]; portOverflow?: number; lastSeen: string }
 interface Pill { kind: string; value: string }
-interface Filter { ageMs: number; hideExternal: boolean; pills: Pill[] }
+interface Filter { ageMs: number; hideExternal: boolean; hideWorkstations?: boolean; pills: Pill[] }
 interface Result { nodes: Node[]; edges: Array<{ edge: Edge; ports: Port[] }> }
 
 let applyGraphFilter: (n: Node[], e: Edge[], f: Filter, now: number) => Result;
@@ -117,6 +117,23 @@ describe("applyGraphFilter — no pills (baseline behaviour preserved)", () => {
     const r = run(noFilter({ hideExternal: true }));
     expect(edgeIds(r)).toEqual(["e1"]);
     expect(nodeIds(r)).not.toContain("ip:203.0.113.9");
+  });
+
+  // db01 is assetType "workstation" in the fixture.
+  it("hideWorkstations drops workstation boxes, their children, and their edges", () => {
+    const r = run(noFilter({ hideWorkstations: true }));
+    expect(edgeIds(r)).toEqual(["e2"]);
+    expect(nodeIds(r)).not.toContain("asset:B");
+    expect(nodeIds(r)).not.toContain("proc:B:postgres");
+    // web01 and its children survive, as does the external node e2 references.
+    expect(nodeIds(r)).toContain("asset:A");
+    expect(nodeIds(r)).toContain("ip:203.0.113.9");
+  });
+
+  it("hideWorkstations composes with hideExternal", () => {
+    const r = run(noFilter({ hideWorkstations: true, hideExternal: true }));
+    expect(edgeIds(r)).toEqual([]);
+    expect(nodeIds(r)).toContain("asset:A"); // mapped parents keep rendering
   });
 });
 

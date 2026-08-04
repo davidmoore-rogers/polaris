@@ -27,11 +27,16 @@ import {
   serviceNodeId,
   assetNodeId,
   isNoiseIp,
+  isPublicIp,
   subnetKeyOf,
+  pickHistoryHolder,
+  resolvePtrNames,
+  clearPtrCacheForTests,
   type MappedAssetLite,
   type ProcessConnectionRow,
   type ResolvedAssetLite,
   type IpNameHint,
+  type IpHistoryCandidate,
 } from "../../src/services/applicationMapService.js";
 
 const T0 = new Date("2026-07-20T00:00:00Z");
@@ -77,7 +82,7 @@ describe("buildGraphFromRows", () => {
     const e = g.edges.find((x) => x.kind === "process")!;
     expect(e.source).toBe(processNodeId("A", "nginx"));
     expect(e.target).toBe(processNodeId("B", "postgres"));
-    expect(e.ports).toEqual([{ proto: "tcp", port: 5432, count: 1, firstSeen: T0.toISOString(), lastSeen: T1.toISOString() }]);
+    expect(e.ports).toEqual([{ proto: "tcp", port: 5432, count: 1, firstSeen: T0.toISOString(), lastSeen: T1.toISOString(), ips: ["10.0.0.5"] }]);
     // Compound structure: process children carry parent = asset node.
     const procA = g.nodes.find((n) => n.id === processNodeId("A", "nginx"))!;
     expect(procA.parent).toBe(assetNodeId("A"));
@@ -305,6 +310,135 @@ describe("buildGraphFromRows — mapped services (Asset.mappedServices / unit)",
     expect(g.edges).toHaveLength(2);
     const sources = g.edges.map((e) => e.source).sort();
     expect(sources).toEqual([processNodeId("A", "java"), serviceNodeId("A", "myapp.service")].sort());
+  });
+});
+
+describe("buildGraphFromRows — per-port observed IPs", () => {
+  const web = asset("A", "10.0.0.1", ["nginx"]);
+  const db  = asset("B", "10.0.0.5", ["postgres"]);
+
+  it("records the dialed remote IP on outbound-derived edges", () => {
+    const rows = [
+      row("A", "nginx", "outbound", "tcp", { remoteIp: "10.0.0.5", remotePort: 5432 }),
+      row("B", "postgres", "listen", "tcp", { localPort: 5432 }),
+    ];
+    const g = buildGraphFromRows([web, db], rows, ipMapOf(web, db));
+    expect(g.edges[0].ports[0].ips).toEqual(["10.0.0.5"]);
+  });
+
+  it("records the landing local address on inbound-derived edges, skipping wildcard binds", () => {
+    const rows = [
+      row("B", "postgres", "listen", "tcp", { localPort: 5432 }),
+      row("B", "postgres", "inbound", "tcp", { remoteIp: "10.0.0.1", localPort: 5432, localAddr: "10.0.0.5" }),
+      row("B", "postgres", "inbound", "tcp", { remoteIp: "192.168.77.4", localPort: 5432, localAddr: "0.0.0.0" }),
+    ];
+    const g = buildGraphFromRows([web, db], rows, ipMapOf(web, db));
+    const fromA = g.edges.find((e) => e.source === assetNodeId("A"))!;
+    expect(fromA.ports[0].ips).toEqual(["10.0.0.5"]);
+    const fromUnknown = g.edges.find((e) => e.source === "ip:192.168.77.4")!;
+    expect(fromUnknown.ports[0].ips).toEqual([]);
+  });
+
+  it("dedups and caps observed IPs per port across merged rows", () => {
+    // Same (source, target, port) seen against many distinct remote IPs — the
+    // multi-homed-destination case. Cap is 6.
+    const multi = asset("C", "10.0.0.9", []);
+    const ipMap = ipMapOf(web);
+    for (let i = 1; i <= 9; i++) ipMap.set(`10.9.9.${i}`, multi);
+    const rows = Array.from({ length: 9 }, (_, i) =>
+      row("A", "nginx", "outbound", "tcp", { remoteIp: `10.9.9.${i + 1}`, remotePort: 445 }));
+    rows.push(row("A", "nginx", "outbound", "tcp", { remoteIp: "10.9.9.1", remotePort: 445 })); // dup
+    const g = buildGraphFromRows([web], rows, ipMap);
+    expect(g.edges).toHaveLength(1);
+    expect(g.edges[0].ports[0].ips).toHaveLength(6);
+    expect(new Set(g.edges[0].ports[0].ips).size).toBe(6);
+  });
+
+  it("keeps the observed IP on intra-asset service→service edges", () => {
+    const box = asset("D", "10.0.0.7", ["app", "redis"]);
+    const rows = [
+      row("D", "redis", "listen", "tcp", { localPort: 6379 }),
+      row("D", "app", "outbound", "tcp", { remoteIp: "10.0.0.7", remotePort: 6379 }),
+    ];
+    const g = buildGraphFromRows([box], rows, ipMapOf(box));
+    expect(g.edges[0].ports[0].ips).toEqual(["10.0.0.7"]);
+  });
+});
+
+describe("pickHistoryHolder", () => {
+  const d = (s: string) => new Date(s);
+  const cand = (assetId: string, from: string, to: string): IpHistoryCandidate =>
+    ({ assetId, firstSeen: d(from), lastSeen: d(to) });
+
+  it("returns null for no candidates", () => {
+    expect(pickHistoryHolder([], Date.now())).toBeNull();
+  });
+
+  it("prefers the row whose interval covers the observation time", () => {
+    const rows = [
+      cand("old", "2026-01-01T00:00:00Z", "2026-03-01T00:00:00Z"),
+      cand("cur", "2026-03-02T00:00:00Z", "2026-08-01T00:00:00Z"),
+    ];
+    expect(pickHistoryHolder(rows, Date.parse("2026-07-15T00:00:00Z"))).toBe("cur");
+    expect(pickHistoryHolder(rows, Date.parse("2026-02-01T00:00:00Z"))).toBe("old");
+  });
+
+  it("with several covering rows, the most recent taker wins", () => {
+    const rows = [
+      cand("early", "2026-01-01T00:00:00Z", "2026-08-01T00:00:00Z"),
+      cand("late",  "2026-06-01T00:00:00Z", "2026-08-01T00:00:00Z"),
+    ];
+    expect(pickHistoryHolder(rows, Date.parse("2026-07-01T00:00:00Z"))).toBe("late");
+  });
+
+  it("with no covering row, the interval closest to the observation wins", () => {
+    const rows = [
+      cand("far",  "2025-01-01T00:00:00Z", "2025-06-01T00:00:00Z"),
+      cand("near", "2026-01-01T00:00:00Z", "2026-05-01T00:00:00Z"),
+    ];
+    expect(pickHistoryHolder(rows, Date.parse("2026-07-01T00:00:00Z"))).toBe("near");
+  });
+});
+
+describe("isPublicIp", () => {
+  it("classifies", () => {
+    for (const ip of ["8.8.8.8", "52.1.2.3", "203.0.113.9", "2001:db8::1"]) {
+      expect(isPublicIp(ip), ip).toBe(true);
+    }
+    for (const ip of [
+      "10.0.0.1", "172.16.5.4", "192.168.1.1",       // RFC1918
+      "100.64.0.1", "100.127.255.254",                // CGN
+      "127.0.0.1", "::1", "169.254.9.9", "fe80::1",   // noise
+      "224.0.0.1", "0.0.0.0", "", "not-an-ip",
+      "fd00::1", "fc00::5",                            // ULA
+    ]) {
+      expect(isPublicIp(ip), ip).toBe(false);
+    }
+  });
+});
+
+describe("resolvePtrNames", () => {
+  it("resolves public IPs via the injected lookup, skips private, caches negatives", async () => {
+    clearPtrCacheForTests();
+    const calls: string[] = [];
+    const lookup = async (ip: string): Promise<string[]> => {
+      calls.push(ip);
+      if (ip === "8.8.8.8") return ["dns.google"];
+      throw new Error("NXDOMAIN");
+    };
+    const hints = await resolvePtrNames(["8.8.8.8", "52.9.9.9", "10.0.0.1"], lookup);
+    expect(hints.get("8.8.8.8")).toEqual({ hostname: "dns.google", source: "dns" });
+    expect(hints.has("52.9.9.9")).toBe(false);
+    expect(hints.has("10.0.0.1")).toBe(false);
+    expect(calls.sort()).toEqual(["52.9.9.9", "8.8.8.8"]); // private IP never queried
+
+    // Second call answers from cache — positive AND negative.
+    const calls2: string[] = [];
+    const lookup2 = async (ip: string): Promise<string[]> => { calls2.push(ip); return []; };
+    const again = await resolvePtrNames(["8.8.8.8", "52.9.9.9"], lookup2);
+    expect(again.get("8.8.8.8")?.hostname).toBe("dns.google");
+    expect(calls2).toEqual([]);
+    clearPtrCacheForTests();
   });
 });
 

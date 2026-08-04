@@ -52,6 +52,11 @@
   // Vertical slot per child node inside an asset box. Sized for the tallest
   // child (40px — a name plus its listen-ports line) with breathing room.
   var PROC_ROW_GAP = 58;
+  // Wider slot for a parent whose children connect to EACH OTHER: the edge
+  // runs vertically between stacked siblings, and its autorotated two-line
+  // label ("tcp/1521" + "via <ip>") needs real free space between the boxes
+  // to be readable — at the default gap the edge is ~18px and unreadable.
+  var INTRA_EDGE_ROW_GAP = 140;
 
   var cy = null;
   var payload = null;         // last server payload
@@ -127,6 +132,7 @@
       localStorage.setItem(key, JSON.stringify({
         age: age,
         hideExternal: !!(document.getElementById("appmap-hide-external") || {}).checked,
+        hideWorkstations: !!(document.getElementById("appmap-hide-workstations") || {}).checked,
         fadeStale: fadeStaleEnabled(),
         legend: !!(legend && !legend.hidden),
         pills: filterPills,
@@ -161,6 +167,8 @@
     }
     var he = document.getElementById("appmap-hide-external");
     if (he && typeof p.hideExternal === "boolean") he.checked = p.hideExternal;
+    var hw = document.getElementById("appmap-hide-workstations");
+    if (hw && typeof p.hideWorkstations === "boolean") hw.checked = p.hideWorkstations;
     var fs = document.getElementById("appmap-fade-stale");
     if (fs && typeof p.fadeStale === "boolean") fs.checked = p.fadeStale;
     var legend = document.getElementById("appmap-legend");
@@ -218,6 +226,7 @@
     return {
       ageMs: age > 0 ? age * 1000 : 0,
       hideExternal: !!(document.getElementById("appmap-hide-external") || {}).checked,
+      hideWorkstations: !!(document.getElementById("appmap-hide-workstations") || {}).checked,
       pills: filterPills,
     };
   }
@@ -286,6 +295,19 @@
       if (isChildNode(n.kind) && n.parent) (childrenOf[n.parent] = childrenOf[n.parent] || []).push(n.id);
     });
 
+    // Hide-workstations: workstation asset boxes, their children, and every
+    // edge touching either. Unlike a `type` pill (which narrows TO a type),
+    // this excludes one — the two compose.
+    var wsHidden = {};
+    if (f.hideWorkstations) {
+      allNodes.forEach(function (n) {
+        if (n.kind === "asset" && String(n.assetType || "").toLowerCase() === "workstation") {
+          wsHidden[n.id] = true;
+          (childrenOf[n.id] || []).forEach(function (cid) { wsHidden[cid] = true; });
+        }
+      });
+    }
+
     var protoVals = {}, protoAny = false;
     var portVals = {}, portAny = false;
     pills.forEach(function (p) {
@@ -319,6 +341,7 @@
       });
       if ((protoAny || portAny) && ports.length === 0 && e.ports.length > 0) continue;
       if (f.hideExternal && (isUnknownId(e.source) || isUnknownId(e.target))) continue;
+      if (f.hideWorkstations && (wsHidden[e.source] || wsHidden[e.target])) continue;
       var scoped = groups.every(function (g) { return g[e.source] || g[e.target]; });
       if (!scoped) continue;
       edges.push({ edge: e, ports: ports });
@@ -340,6 +363,7 @@
     }
 
     var nodes = allNodes.filter(function (n) {
+      if (f.hideWorkstations && wsHidden[n.id]) return false;
       var isExternal = !(n.kind === "asset" || isChildNode(n.kind));
       if (isExternal && f.hideExternal) return false;
       if (groups.length) {
@@ -487,9 +511,37 @@
     return parts.join(", ") + (extra > 0 ? " +" + extra : "");
   }
 
+  // Distinct observed addresses across an edge's ports (server caps each
+  // port's list; this is display-side dedup only).
+  function edgeIps(ports) {
+    var out = [];
+    (ports || []).forEach(function (p) {
+      (p.ips || []).forEach(function (ip) {
+        if (out.indexOf(ip) < 0) out.push(ip);
+      });
+    });
+    return out;
+  }
+
+  // Second label line for SAME-ASSET edges: which of the host's addresses the
+  // service actually dialed. Only intra-asset edges get it — everywhere else
+  // the target node already names the destination, and the full per-port IP
+  // list lives in the edge info rail. (No loopback ever shows here: the agent
+  // drops loopback peers at collection, so a drawn edge is real-IP-stack by
+  // definition.)
+  function edgeViaSuffix(ports) {
+    var ips = edgeIps(ports);
+    if (!ips.length) return "";
+    return "\nvia " + ips[0] + (ips.length > 1 ? " +" + (ips.length - 1) : "");
+  }
+
   function buildElements(g) {
     var now = Date.now();
     var els = [];
+    var parentById = {};
+    g.nodes.forEach(function (n) {
+      if (isChildNode(n.kind) && n.parent) parentById[n.id] = n.parent;
+    });
     g.nodes.forEach(function (n) {
       var data = {
         id: n.id,
@@ -516,6 +568,8 @@
       // it's only dimmed. With the toggle off, nothing is marked stale so every
       // edge draws at full opacity.
       var stale = fadeStaleEnabled() && now - Date.parse(e.lastSeen) > STALE_MS;
+      var ports = r.ports.length ? r.ports : e.ports;
+      var intra = parentById[e.source] && parentById[e.source] === parentById[e.target];
       els.push({
         group: "edges",
         data: {
@@ -523,7 +577,7 @@
           source: e.source,
           target: e.target,
           kind: e.kind,
-          label: edgeLabel(r.ports.length ? r.ports : e.ports, e.portOverflow),
+          label: edgeLabel(ports, e.portOverflow) + (intra ? edgeViaSuffix(ports) : ""),
           stale: stale ? 1 : 0,
         },
       });
@@ -643,6 +697,9 @@
           color: textColor,
           "font-size": "9px",
           "font-family": "Roboto Mono, monospace",
+          // Intra-asset edges carry a second "via <ip>" line; without wrap
+          // cytoscape renders the \n as a literal glyph.
+          "text-wrap": "wrap",
           "text-background-color": isDark ? "#1c2029" : "#ffffff",
           "text-background-opacity": 0.85,
           "text-background-padding": 2,
@@ -700,7 +757,44 @@
       (childrenByParent[n.parent] = childrenByParent[n.parent] || []).push(n.id);
     });
 
-    // Reserved bounding box for a collapsed node: children stack PROC_ROW_GAP
+    // Intra-asset child↔child edges (a service dialing a sibling on the same
+    // host). Their parents stack children on the WIDER gap so the edge and its
+    // label have room, and connected siblings are ordered adjacent so the edge
+    // doesn't lance through unrelated children between them.
+    var intraAdj = {};     // parentId → { childId: [connected sibling ids] }
+    g.edges.forEach(function (r) {
+      var ps = parentOf[r.edge.source];
+      var pt = parentOf[r.edge.target];
+      if (!ps || ps !== pt || r.edge.source === r.edge.target) return;
+      var adj = (intraAdj[ps] = intraAdj[ps] || {});
+      (adj[r.edge.source] = adj[r.edge.source] || []).push(r.edge.target);
+      (adj[r.edge.target] = adj[r.edge.target] || []).push(r.edge.source);
+    });
+    function rowGapFor(pid) {
+      return intraAdj[pid] ? INTRA_EDGE_ROW_GAP : PROC_ROW_GAP;
+    }
+    // Deterministic child order: alphabetical, except parents with intra-asset
+    // edges cluster connected siblings together (DFS over the sibling
+    // adjacency, seeded and visited in sorted order).
+    function orderedKids(pid) {
+      var kids = (childrenByParent[pid] || []).slice().sort();
+      var adj = intraAdj[pid];
+      if (!adj) return kids;
+      var out = [];
+      var seen = {};
+      function visit(id) {
+        if (seen[id]) return;
+        seen[id] = true;
+        out.push(id);
+        (adj[id] || []).slice().sort().forEach(function (nb) {
+          if (kids.indexOf(nb) >= 0) visit(nb);
+        });
+      }
+      kids.forEach(visit);
+      return out;
+    }
+
+    // Reserved bounding box for a collapsed node: children stack rowGapFor()
     // apart (height) and the box is as wide as its widest child label
     // (~7.3px/char in the 11px monospace child font) + padding. Childless
     // collapsed nodes (unknown IPs, resolved-target assets) get a small box.
@@ -714,7 +808,7 @@
       });
       return {
         w: Math.max(150, Math.round(maxChars * 7.3) + 48),
-        h: kids.length * PROC_ROW_GAP + 48,
+        h: kids.length * rowGapFor(id) + 48,
       };
     }
 
@@ -759,12 +853,14 @@
     g.nodes.forEach(function (n) {
       if (!isChildNode(n.kind) && anchor[n.id]) positions[n.id] = anchor[n.id];
     });
-    // Children stack centered on the parent's coordinate.
+    // Children stack centered on the parent's coordinate — adjacency-ordered,
+    // on the wider gap when siblings connect to each other.
     Object.keys(childrenByParent).forEach(function (pid) {
-      var kids = childrenByParent[pid].sort();
+      var kids = orderedKids(pid);
       var base = anchor[pid] || { x: 0, y: 0 };
+      var gap = rowGapFor(pid);
       kids.forEach(function (kid, i) {
-        positions[kid] = { x: base.x, y: base.y + (i - (kids.length - 1) / 2) * PROC_ROW_GAP };
+        positions[kid] = { x: base.x, y: base.y + (i - (kids.length - 1) / 2) * gap };
       });
     });
     return positions;
@@ -1016,8 +1112,8 @@
       html += "<h3>" + esc(nodeLabel(n).split("\n")[0]) + "</h3>";
       html += '<div class="appmap-info-sub">' + (n.kind === "unknown-ip-group" ? "External subnet (not matched to any asset)" : n.kind === "unknown-overflow" ? "Collapsed external endpoints" : "External IP (not matched to any asset)") + "</div>";
       if (n.ipHostname) {
-        html += '<div class="appmap-info-sub">Named <strong>' + esc(n.ipHostname) +
-          "</strong> by an IP " + esc(n.ipNameSource || "registry") +
+        html += '<div class="appmap-info-sub">Named <strong>' + esc(n.ipHostname) + "</strong> " +
+          (n.ipNameSource === "dns" ? "by reverse DNS (PTR)" : "by an IP " + esc(n.ipNameSource || "registry")) +
           " — no asset record exists for this address.</div>";
       }
       if (n.ips && n.ips.length) {
@@ -1051,9 +1147,12 @@
     var tgt = findNode(e.target);
     var html = "<h3>" + esc((src ? nodeLabel(src).split("\n")[0] : e.source) + " → " + (tgt ? nodeLabel(tgt).split("\n")[0] : e.target)) + "</h3>";
     html += '<div class="appmap-info-sub">' + esc(e.kind) + " connection</div>";
-    html += "<table><tr><th>Port</th><th>Seen</th><th>Last seen</th></tr>";
+    // "Via IP" = the address(es) the connection was actually observed against
+    // (outbound: dialed remote IP; inbound: local address it landed on) — the
+    // disambiguator for multi-IP hosts and same-asset service→service edges.
+    html += "<table><tr><th>Port</th><th>Via IP</th><th>Seen</th><th>Last seen</th></tr>";
     e.ports.forEach(function (p) {
-      html += "<tr><td>" + esc(p.proto + "/" + p.port) + "</td><td>" + p.count + "×</td><td>" + esc(new Date(p.lastSeen).toLocaleString()) + "</td></tr>";
+      html += "<tr><td>" + esc(p.proto + "/" + p.port) + "</td><td>" + esc((p.ips || []).join(", ") || "—") + "</td><td>" + p.count + "×</td><td>" + esc(new Date(p.lastSeen).toLocaleString()) + "</td></tr>";
     });
     html += "</table>";
     if (e.portOverflow > 0) html += '<div class="appmap-info-sub">+ ' + e.portOverflow + " more port(s)</div>";
@@ -1064,7 +1163,7 @@
   // ─── Toolbar / pill filter / hash focus ────────────────────────────
 
   function wireToolbar() {
-    ["appmap-age", "appmap-hide-external", "appmap-fade-stale"].forEach(function (id) {
+    ["appmap-age", "appmap-hide-external", "appmap-hide-workstations", "appmap-fade-stale"].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.addEventListener("change", function () {
         savePrefs();
