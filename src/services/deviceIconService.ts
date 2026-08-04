@@ -43,6 +43,7 @@ import { Resvg } from "@resvg/resvg-js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { normalizeManufacturer } from "../utils/manufacturerNormalize.js";
+import { isKnownAssetType } from "../utils/assetTypes.js";
 
 // Target pixel dimensions for SVG rasterization. 512px is comfortably
 // above any topology zoom we render at (typical FortiGate node is 64
@@ -145,10 +146,10 @@ function buildKey(scope: IconScope, manufacturer: string, typeOrModel: string): 
   return `${manufCanonical}/${tail}`;
 }
 
-const VALID_TYPE_KEYS = new Set([
-  "server", "switch", "router", "firewall", "workstation",
-  "printer", "access_point", "other",
-]);
+// Asset-type validation delegates to the live AssetTypeDef registry
+// (utils/assetTypes.isKnownAssetType) — the previous frozen literal set
+// predated the registry cutover and rejected uploads for the seeded
+// `hypervisor` built-in and every operator-added custom type.
 
 function validateSvg(data: Buffer): void {
   // Decode as UTF-8 with replacement so invalid sequences still surface
@@ -192,8 +193,8 @@ export function validateUpload(input: UploadedIcon): void {
   }
   if (input.scope === "manufacturer-type") {
     const typeKey = key.split("/").slice(1).join("/");
-    if (!VALID_TYPE_KEYS.has(typeKey)) {
-      throw new AppError(400, `Invalid asset type "${typeKey}" — must be one of: ${[...VALID_TYPE_KEYS].sort().join(", ")}`);
+    if (!isKnownAssetType(typeKey)) {
+      throw new AppError(400, `Invalid asset type "${typeKey}" — not in the asset-type registry (built-in or custom)`);
     }
   }
   if (!ALLOWED_MIME_TYPES.has(input.mimeType)) {
