@@ -11,6 +11,7 @@ import {
   classifyHardwareSensor,
   normalizeFgAlarmStatus,
   normalizeRestAlarmStatus,
+  SENSOR_CLASS_UNITS,
 } from "../../src/utils/hardwareSensors.js";
 
 describe("classifyHardwareSensor", () => {
@@ -45,6 +46,17 @@ describe("classifyHardwareSensor", () => {
   it("falls back to 'other' with no unit for unrecognized names", () => {
     expect(classifyHardwareSensor("WIDGET 7")).toEqual({ sensorClass: "other", unit: null });
     expect(classifyHardwareSensor("")).toEqual({ sensorClass: "other", unit: null });
+  });
+
+  it("always returns the unit from SENSOR_CLASS_UNITS (the map the automation builder renders)", () => {
+    // The wizard's per-class unit hint (schema sensorClassUnits) and the
+    // classifier must never drift apart — every classified sensor's unit is
+    // exactly the map entry for its class.
+    const names = ["TMP 1 CPUTIN", "FAN 1 CPU FAN", "VOL 1 PVCCIN_CPU", "PSU [1]", "DISK NVMe1", "WIDGET 7"];
+    for (const n of names) {
+      const c = classifyHardwareSensor(n);
+      expect(c.unit).toBe(SENSOR_CLASS_UNITS[c.sensorClass]);
+    }
   });
 
   it("matches standard temperature-sensor names (ENTITY-MIB style)", () => {

@@ -123,6 +123,16 @@ async function openAutomationWizard(existing) {
   }
   function metricLabel(m) { var x = s.metricMeta && s.metricMeta[m]; return x ? x.label : m; }
   function metricUnit(m) { var x = s.metricMeta && s.metricMeta[m]; return (x && x.unit) || ""; }
+  // hwSensorValue's unit depends on the sensor class in the dimension filter
+  // (metricMeta carries the "(sensor unit)" placeholder) — resolve it from the
+  // schema's sensorClassUnits map (temperature → °C, fan → RPM, voltage → V,
+  // disk → °C). "" when the class is empty/unknown or the class has no unit.
+  function leafUnit(metric, df) {
+    var u = metricUnit(metric);
+    if (u !== "(sensor unit)") return u;
+    var cls = df && df.sensorClass ? String(df.sensorClass).trim().toLowerCase() : "";
+    return (cls && s.sensorClassUnits && s.sensorClassUnits[cls]) || "";
+  }
   function fieldLabel(f) { var x = s.fieldMeta && s.fieldMeta[f]; return x ? x.label : f; }
   function changeLabel(c) { return (s.changeTypeMeta && s.changeTypeMeta[c]) || c; }
   var DIM_PLACEHOLDER = { ifNamePattern: "interface name contains", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", mountPathPattern: "mount path contains", healthCheck: "SD-WAN health-check name", link: "WAN member / link name", tunnelName: "IPsec tunnel name", widgetId: "custom widget id" };
@@ -200,7 +210,7 @@ async function openAutomationWizard(existing) {
     if (leaf.type === "asset_state") {
       return fieldLabel(leaf.field) + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + String(leaf.value == null || leaf.value === "" ? "…" : leaf.value);
     }
-    var unit = metricUnit(leaf.metric); unit = unit && unit !== "(sensor unit)" ? " " + unit : "";
+    var unit = leafUnit(leaf.metric, leaf.dimensionFilter); unit = unit ? " " + unit : "";
     var agg = leaf.aggregation && leaf.aggregation !== "latest" && leaf.windowSec
       ? " (" + (AGG_PHRASE[leaf.aggregation] || leaf.aggregation) + " " + humanDuration(leaf.windowSec) + ")" : "";
     var thr = leaf.threshold == null || isNaN(leaf.threshold) ? "…" : leaf.threshold;
@@ -231,7 +241,7 @@ async function openAutomationWizard(existing) {
       var agg = tr.aggregation && tr.aggregation !== "latest" && tr.windowSec
         ? " (" + (AGG_PHRASE[tr.aggregation] || tr.aggregation) + " " + humanDuration(tr.windowSec) + ")" : "";
       var thr = tr.threshold == null || isNaN(tr.threshold) ? "…" : tr.threshold;
-      var unit = metricUnit(tr.metric); unit = unit && unit !== "(sensor unit)" ? " " + unit : "";
+      var unit = leafUnit(tr.metric, tr.dimensionFilter); unit = unit ? " " + unit : "";
       out = "When <strong>" + escapeHtml(subject) + agg + " " + (CMP_PHRASE[tr.operator] || tr.operator) + " " + escapeHtml(String(thr)) + escapeHtml(unit) + "</strong>";
       var df = tr.dimensionFilter || {};
       Object.keys(df).forEach(function (k) {
@@ -268,7 +278,7 @@ async function openAutomationWizard(existing) {
       var numeric = tr && (tr.type === "asset_metric" || tr.type === "host_metric");
       if (numeric && reset.clearThreshold != null && !isNaN(reset.clearThreshold)) {
         var invOp = INV_CMP[tr.operator] || "<";
-        var unit = metricUnit(tr.metric); unit = unit && unit !== "(sensor unit)" ? " " + unit : "";
+        var unit = leafUnit(tr.metric, tr.dimensionFilter); unit = unit ? " " + unit : "";
         out = "Resets when the value <strong>" + (CMP_PHRASE[invOp] || invOp) + " " + escapeHtml(String(reset.clearThreshold)) + escapeHtml(unit) + "</strong>";
       } else {
         out = "Resets when <strong>the condition is no longer met</strong>";
@@ -892,9 +902,10 @@ async function openAutomationWizard(existing) {
       '</div>';
     var line2 = "";
     if (!isState) {
-      var unit = metricUnit(leaf.metric); if (unit === "(sensor unit)") unit = "sensor unit";
       var dims = kind === "host" ? [] : ((s.metricDimensions && s.metricDimensions[leaf.metric]) || []);
       var df = leaf.dimensionFilter || {};
+      var unit = leafUnit(leaf.metric, df);
+      if (!unit && metricUnit(leaf.metric) === "(sensor unit)") unit = "sensor unit";
       var dimInputs = dims.map(function (d) {
         return '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '" value="' + escapeHtml(df[d] || "") + '" style="flex:1;min-width:120px">';
       }).join("");
@@ -988,6 +999,19 @@ async function openAutomationWizard(existing) {
           .insertAdjacentHTML("beforeend", tgGroupHtml({ op: "or", children: [tgDefaultLeaf(kindFn())] }, depth, kindFn()));
         onChange();
       }
+    });
+    // Live unit hint: typing a sensor class into the hwSensorValue dimension
+    // filter swaps the row's unit chip (°C / RPM / V …) as the class resolves.
+    panel.addEventListener("input", function (e) {
+      var t = e.target;
+      if (!t || !t.classList || !t.classList.contains("tgl-dim") || t.getAttribute("data-dim") !== "sensorClass") return;
+      var root = panel.querySelector(rootSelector);
+      if (!root || !root.contains(t)) return;
+      var row = t.closest(".scr-row");
+      var span = row && row.querySelector(".tgl-unit");
+      if (!span) return;
+      var metric = String(row.querySelector(".tgl-what").value || "").slice(2);
+      span.textContent = leafUnit(metric, { sensorClass: t.value }) || "sensor unit";
     });
     panel.addEventListener("change", function (e) {
       var t = e.target;
@@ -1263,8 +1287,7 @@ async function openAutomationWizard(existing) {
       var selCustom = customModes.indexOf(reset.mode) !== -1 ? reset.mode : customModes[customModes.length - 1];
       var customReset = { mode: autoOn ? selCustom : reset.mode, afterSec: reset.afterSec, condition: reset.condition, sustainSec: reset.sustainSec };
 
-      var unit = numeric ? metricUnit(tr.metric) : "";
-      if (unit === "(sensor unit)") unit = "";
+      var unit = numeric ? leafUnit(tr.metric, tr.dimensionFilter) : "";
       var invOp = INV_CMP[tr.operator] || "<";
       var sustainHtml = '<div style="margin:6px 0 0;font-size:0.85rem">Must stay cleared for <input type="number" id="aw-sustain-min" min="0" value="' + Math.round((reset.sustainSec || 0) / 60) + '" style="width:80px"> min (0 = reset immediately)</div>';
       var autoExtras = "";

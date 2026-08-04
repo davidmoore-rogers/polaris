@@ -12,6 +12,7 @@
 import { z } from "zod";
 import { isValidCidr, isValidIpAddress, ipInCidr } from "../utils/cidr.js";
 import { TEMPLATE_VARIABLES } from "../utils/notificationTemplate.js";
+import { SENSOR_CLASS_UNITS } from "../utils/hardwareSensors.js";
 
 // Notification severity (rule.severity → notification.severity). Ordered
 // least → most severe. NOTE: distinct from EVENT_LEVELS below — that's the
@@ -1486,6 +1487,10 @@ export function buildSchemaCatalog() {
     fieldMeta: FIELD_META,
     changeTypeMeta: CHANGE_TYPE_META,
     metricDimensions: METRIC_DIMENSIONS,
+    // hwSensorValue's unit depends on the sensor class in the dimension filter
+    // (metricMeta carries the "(sensor unit)" placeholder). Class → display
+    // unit, sourced from the same map the sample classifier writes with.
+    sensorClassUnits: SENSOR_CLASS_UNITS,
     channelTypes: CHANNEL_TYPE_META,
     recipientRoutedTypes: RECIPIENT_ROUTED_TYPES,
     templateVariables: TEMPLATE_VARIABLES,

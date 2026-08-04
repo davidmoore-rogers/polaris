@@ -29,6 +29,25 @@ export interface ClassifiedSensor {
 }
 
 /**
+ * Canonical display unit per sensor class. Single source of truth shared by
+ * the classifier below and the automation-builder schema (`sensorClassUnits`),
+ * so the wizard's unit hint can never drift from what the samples store.
+ * `power` and `other` have no natural unit (PSU rows are status-style values).
+ */
+export const SENSOR_CLASS_UNITS: Record<HardwareSensorClass, string | null> = {
+  temperature: "°C",
+  fan:         "RPM",
+  voltage:     "V",
+  power:       null,
+  disk:        "°C",
+  other:       null,
+};
+
+function cls(sensorClass: HardwareSensorClass): ClassifiedSensor {
+  return { sensorClass, unit: SENSOR_CLASS_UNITS[sensorClass] };
+}
+
+/**
  * Classify one sensor. `restType` is the FortiOS REST `type` field when the
  * source is sensor-info (authoritative); omit it for SNMP rows so the name
  * heuristic decides.
@@ -39,24 +58,24 @@ export function classifyHardwareSensor(
 ): ClassifiedSensor {
   const t = (restType ?? "").trim().toLowerCase();
   if (t) {
-    if (t.includes("temp"))                       return { sensorClass: "temperature", unit: "°C" };
-    if (t.includes("fan"))                        return { sensorClass: "fan",         unit: "RPM" };
-    if (t.includes("volt"))                       return { sensorClass: "voltage",     unit: "V" };
-    if (t.includes("power") || t === "psu")       return { sensorClass: "power",       unit: null };
+    if (t.includes("temp"))                       return cls("temperature");
+    if (t.includes("fan"))                        return cls("fan");
+    if (t.includes("volt"))                       return cls("voltage");
+    if (t.includes("power") || t === "psu")       return cls("power");
   }
 
   const n = (name ?? "").trim().toLowerCase();
   // Order matters: fan/voltage/power names can also contain digits that the
   // temperature pattern would catch, so test the specific classes first.
-  if (/\bfan\b|rpm|tach/.test(n))                 return { sensorClass: "fan",     unit: "RPM" };
-  if (/\bvol\b|vcc|vdd|vrm|\bvin\b|p\d*v\d/.test(n)) return { sensorClass: "voltage", unit: "V" };
-  if (/psu|power|\bpwr\b/.test(n))                return { sensorClass: "power",   unit: null };
-  if (/\bdisk\b|nvme|\bssd\b|\bhdd\b/.test(n))    return { sensorClass: "disk",    unit: "°C" };
+  if (/\bfan\b|rpm|tach/.test(n))                 return cls("fan");
+  if (/\bvol\b|vcc|vdd|vrm|\bvin\b|p\d*v\d/.test(n)) return cls("voltage");
+  if (/psu|power|\bpwr\b/.test(n))                return cls("power");
+  if (/\bdisk\b|nvme|\bssd\b|\bhdd\b/.test(n))    return cls("disk");
   if (/temp|tmp|dts|adt\d|lm7\d|thermal|cputin|peci|°c/.test(n))
-                                                  return { sensorClass: "temperature", unit: "°C" };
+                                                  return cls("temperature");
   // Marvell switch-chip temps on FortiGates surface as mvlgen_* / MV_88E*.
-  if (/^mv[_l]/.test(n))                          return { sensorClass: "temperature", unit: "°C" };
-  return { sensorClass: "other", unit: null };
+  if (/^mv[_l]/.test(n))                          return cls("temperature");
+  return cls("other");
 }
 
 /**
