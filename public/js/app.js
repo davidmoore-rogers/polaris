@@ -1521,42 +1521,6 @@ function _csvRow(cells) {
   }).join(",");
 }
 
-// ─── Mock Heartbeat (demo only) ─────────────────────────────────────────────
-
-function startMockHeartbeat() {
-  var _mockIntegrations = null;
-
-  function runMock() {
-    if (!_mockIntegrations) return;
-    var enabled = _mockIntegrations.filter(function (i) { return i.enabled; });
-    if (!enabled.length) return;
-    enabled.forEach(function (intg) {
-      var controller = new AbortController();
-      var qid = _registerQuery("Polling " + intg.name, controller);
-      var duration = 5000 + Math.floor(Math.random() * 5000);
-      setTimeout(function () { _unregisterQuery(qid); }, duration);
-    });
-  }
-
-  // Fire a mock "Generating PDF" entry shortly after load so the user can see it
-  setTimeout(function () {
-    var controller = new AbortController();
-    var qid = _registerQuery("Generating PDF \u2014 Asset Report", controller);
-    setTimeout(function () {
-      if (!controller.signal.aborted) _unregisterQuery(qid);
-    }, 8000);
-  }, 2000);
-
-  // Fetch integrations list, then start the cycle
-  setTimeout(function () {
-    api.integrations.list().then(function (result) {
-      _mockIntegrations = result.integrations || result;
-      runMock();
-      setInterval(runMock, 30000);
-    }).catch(function () {});
-  }, 5000);
-}
-
 // ─── Toasts ───────────────────────────────────────────────────────────────────
 
 function getToastContainer() {

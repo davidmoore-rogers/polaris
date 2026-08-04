@@ -2626,7 +2626,7 @@ Listed alphabetically.
 
 **What it owns:** Operator-uploaded device icons (PNG/JPEG/WebP/SVG; 256KB cap raster, 32KB cap SVG; magic-byte check for raster, pattern-reject validation for SVG); bytes-in-DB storage. Every icon is keyed to (manufacturer, type-or-model); resolution priority is `manufacturer-model: <mfr>/<model>` → `manufacturer-type: <mfr>/<assetType>`. Manufacturer values canonicalized through `manufacturerAlias` map at both upload and resolution time.
 
-**Public API:** `uploadIcon(), listIcons(), getIconImage(), deleteIcon(), resolveIconForAsset(), loadIconResolutionCache(), resolveIconUrl(), validateUpload()`
+**Public API:** `uploadIcon(), listIcons(), getIconImage(), deleteIcon(), loadIconResolutionCache(), resolveIconUrl(), validateUpload()`
 
 **Cross-service deps:** `utils/manufacturerNormalize.normalizeManufacturer()` for alias-canonicalization of manufacturer values (both the standalone manufacturer scope and the manufacturer half of model:<mfr>/<model> keys).
 

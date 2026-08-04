@@ -434,12 +434,6 @@ const DEFAULT_CLASS_SETTINGS: MonitorClassSettings = {
   systemInfoRetentionDays:   HARDCODED_FLOOR.systemInfoRetentionDays,
 };
 
-const DEFAULT_SETTINGS: MonitorSettings = {
-  ...DEFAULT_CLASS_SETTINGS,
-  switch:      { ...DEFAULT_CLASS_SETTINGS },
-  accessPoint: { ...DEFAULT_CLASS_SETTINGS },
-};
-
 const sysUpTimeOid = "1.3.6.1.2.1.1.3.0";
 
 // Per-request timeout for SNMP sessions / FortiOS REST calls inside the
@@ -507,53 +501,9 @@ export async function getMonitorSettings(): Promise<MonitorSettings> {
   };
 }
 
-function mergeClassUpdate(current: MonitorClassSettings, input: Partial<MonitorClassSettings> | undefined): MonitorClassSettings {
-  if (!input) return current;
-  const pick = (v: unknown, fallback: number): number => v != null ? toPositiveInt(v, fallback) : fallback;
-  return {
-    intervalSeconds:           pick(input.intervalSeconds,           current.intervalSeconds),
-    failureThreshold:          pick(input.failureThreshold,          current.failureThreshold),
-    probeTimeoutMs:            pick(input.probeTimeoutMs,            current.probeTimeoutMs),
-    sampleRetentionDays:       pick(input.sampleRetentionDays,       current.sampleRetentionDays),
-    telemetryIntervalSeconds:  pick(input.telemetryIntervalSeconds,  current.telemetryIntervalSeconds),
-    systemInfoIntervalSeconds: pick(input.systemInfoIntervalSeconds, current.systemInfoIntervalSeconds),
-    telemetryRetentionDays:    pick(input.telemetryRetentionDays,    current.telemetryRetentionDays),
-    systemInfoRetentionDays:   pick(input.systemInfoRetentionDays,   current.systemInfoRetentionDays),
-  };
-}
-
-export type MonitorSettingsUpdateInput = Partial<MonitorClassSettings> & {
-  switch?:      Partial<MonitorClassSettings>;
-  accessPoint?: Partial<MonitorClassSettings>;
-};
-
-export async function updateMonitorSettings(input: MonitorSettingsUpdateInput): Promise<MonitorSettings> {
-  const current = await getMonitorSettings();
-  // Top-level values are written directly at the JSON root for backward compat
-  // with the existing API consumers.
-  const baseUpdate: Partial<MonitorClassSettings> = {
-    intervalSeconds:           input.intervalSeconds,
-    failureThreshold:          input.failureThreshold,
-    probeTimeoutMs:            input.probeTimeoutMs,
-    sampleRetentionDays:       input.sampleRetentionDays,
-    telemetryIntervalSeconds:  input.telemetryIntervalSeconds,
-    systemInfoIntervalSeconds: input.systemInfoIntervalSeconds,
-    telemetryRetentionDays:    input.telemetryRetentionDays,
-    systemInfoRetentionDays:   input.systemInfoRetentionDays,
-  };
-  const base = mergeClassUpdate(current, baseUpdate);
-  const next: MonitorSettings = {
-    ...base,
-    switch:      mergeClassUpdate(current.switch,      input.switch),
-    accessPoint: mergeClassUpdate(current.accessPoint, input.accessPoint),
-  };
-  await prisma.setting.upsert({
-    where:  { key: SETTING_KEY },
-    update: { value: next as any },
-    create: { key: SETTING_KEY, value: next as any },
-  });
-  return next;
-}
+// The legacy global-tier WRITE path (updateMonitorSettings + mergeClassUpdate)
+// was removed 2026-08 — exported with zero callers since the monitor-settings
+// hierarchy migration; getMonitorSettings (read) stays for capacityService.
 
 function toPositiveInt(v: unknown, fallback: number): number {
   const n = Number(v);

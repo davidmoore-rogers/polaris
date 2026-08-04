@@ -47,10 +47,3 @@ export function markSetupComplete(): void {
   }
 }
 
-/**
- * Returns true if the application needs the first-run wizard.
- * Retained for backwards compatibility with existing callers.
- */
-export function needsSetup(): boolean {
-  return getSetupState() === "needs-setup";
-}

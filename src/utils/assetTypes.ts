@@ -79,25 +79,6 @@ export function isBuiltInAssetType(name: string | null | undefined): name is Bui
   return (BUILT_IN_ASSET_TYPES as readonly string[]).includes(name);
 }
 
-/**
- * Returns the registry entries (snapshot). Empty array when the cache hasn't
- * loaded yet. Use the service's `listAssetTypes()` for a DB-fresh fetch.
- */
-export function snapshotAssetTypes(): Array<{ name: string; label: string; isBuiltIn: boolean }> {
-  if (_registry === null) return [];
-  return Array.from(_registry.values());
-}
-
-/**
- * Look up the display label for a registry name. Returns the name itself
- * when no entry is found (defensive fallback for legacy callers).
- */
-export function labelForAssetType(name: string | null | undefined): string {
-  if (!name) return "";
-  const entry = _registry?.get(name);
-  return entry ? entry.label : name;
-}
-
 /** Normalize a candidate type name: trim + lowercase. */
 export function normalizeAssetTypeName(raw: string): string {
   return raw.trim().toLowerCase();

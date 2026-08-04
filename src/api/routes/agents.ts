@@ -1140,7 +1140,6 @@ function computeEtag(payload: unknown): string {
 }
 
 // Surface debug helper for tests / curl smoke-tests.
-export function __debugLogger() { return logger; }
 
 // ─── /binary/:filename (public — for WinRM install path) ──────────────
 //

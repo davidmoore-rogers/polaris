@@ -361,27 +361,8 @@ export interface IconResolutionInput {
   assetType: string | null;
 }
 
-export async function resolveIconForAsset(
-  input: IconResolutionInput,
-  iconCache?: Map<string, string | null>,
-): Promise<string | null> {
-  const candidates = buildResolutionCandidates(input);
-  for (const c of candidates) {
-    const cacheKey = `${c.scope}|${c.key}`;
-    if (iconCache && iconCache.has(cacheKey)) {
-      const cached = iconCache.get(cacheKey);
-      if (cached !== null) return cached ?? null;
-      continue;
-    }
-    const row = await prisma.deviceIcon.findUnique({
-      where: { scope_key: { scope: c.scope, key: c.key } },
-      select: { id: true },
-    });
-    if (iconCache) iconCache.set(cacheKey, row?.id ?? null);
-    if (row) return row.id;
-  }
-  return null;
-}
+// (The per-asset async resolver that lived here was removed 2026-08 —
+// superseded by the bulk cache path below, zero callers remained.)
 
 // Bulk-resolution helper for renderers (e.g. topology endpoint) that need
 // icons for many assets in one go. Pre-loads all icons once and returns
