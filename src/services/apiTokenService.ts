@@ -24,7 +24,7 @@ import { randomBytes } from "node:crypto";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { hashPassword, verifyPassword } from "../utils/password.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 import {
   normalizePermissions,
   isAdminEquivalentPermissions,

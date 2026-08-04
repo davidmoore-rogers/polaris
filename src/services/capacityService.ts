@@ -48,7 +48,7 @@ import { getDeploymentContext } from "../utils/deploymentContext.js";
 import { BACKUP_DIR, STATE_DIR } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
 import { getDirectDatabaseUrl, isPgbouncerMode } from "../utils/dbConnections.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 import {
   deriveDbIoVerdict,
   IO_VERDICT_STALE_MS,

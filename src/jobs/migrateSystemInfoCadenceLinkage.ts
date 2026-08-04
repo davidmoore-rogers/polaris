@@ -30,7 +30,7 @@
 
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "../services/eventLogService.js";
 import { invalidateMonitorSettingsCache } from "../services/monitoringService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 

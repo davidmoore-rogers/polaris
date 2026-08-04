@@ -31,7 +31,7 @@ import { randomUUID } from "node:crypto";
 import { AGENT_BIN_DIR, STATE_DIR } from "../utils/paths.js";
 import { AppError } from "../utils/errors.js";
 import { getAgentVersion, getAgentSourceDir } from "../utils/version.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import {

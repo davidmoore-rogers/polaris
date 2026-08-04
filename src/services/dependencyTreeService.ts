@@ -28,7 +28,7 @@
 
 import { prisma } from "../db.js";
 import { inferInterfaceTopology } from "./interfaceTopologyService.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 import { logger } from "../utils/logger.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────

@@ -37,7 +37,7 @@ import { prisma } from "../db.js";
 import { AGENT_BIN_DIR } from "../utils/paths.js";
 import { getAgentVersion } from "../utils/version.js";
 import { goAvailable, startBuild } from "../services/agentBuildService.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "../services/eventLogService.js";
 import { logger } from "../utils/logger.js";
 import { runInstrumentedJob } from "./_metrics.js";
 

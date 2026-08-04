@@ -43,7 +43,7 @@ import type { WebSocket } from "ws";
 import pg from "pg";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 import { getDirectDatabaseUrl } from "../utils/dbConnections.js";
 import { CMD_WAKE_CHANNEL } from "./agentCommandWake.js";
 

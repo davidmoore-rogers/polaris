@@ -32,7 +32,7 @@
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 import { bumpLastSeen } from "../utils/assetInvariants.js";
 import { pingHost } from "../utils/icmpPing.js";
 

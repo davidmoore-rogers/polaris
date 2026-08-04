@@ -37,7 +37,7 @@ import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { hashPassword, verifyPassword } from "../utils/password.js";
 import { recomputeMonitorOverrideForAssets } from "./monitorOverrideService.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 
 const TOKEN_PREFIX = "polaris_";
 const TOKEN_PREFIX_LEN = TOKEN_PREFIX.length + 8; // "polaris_xxxxxxxx" — indexed lookup key

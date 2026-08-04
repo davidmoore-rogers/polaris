@@ -61,7 +61,7 @@ import {
   resolveDeviceMgmtIpViaFmg,
   type FortiManagerConfig,
 } from "./fortimanagerService.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEvents.js";
 import { isChangeActionSubscribed } from "./notificationRuleService.js";
 import { logger } from "../utils/logger.js";

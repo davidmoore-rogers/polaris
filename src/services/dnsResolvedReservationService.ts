@@ -23,7 +23,7 @@
 import { prisma } from "../db.js";
 import { isValidIpAddress, detectIpVersion } from "../utils/cidr.js";
 import { logger } from "../utils/logger.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 
 const SYSTEM_ACTOR = "system:dns-resolved";
 

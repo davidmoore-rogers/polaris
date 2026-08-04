@@ -108,7 +108,7 @@
 
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "../services/eventLogService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 import { macHexKeyOrNull } from "../utils/mac.js";
 

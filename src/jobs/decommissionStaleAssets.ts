@@ -19,7 +19,7 @@
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { getAssetDecommissionSettings } from "../services/eventArchiveService.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "../services/eventLogService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
 const INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours

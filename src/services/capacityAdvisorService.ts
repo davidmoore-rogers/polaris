@@ -51,7 +51,7 @@ import { setEnvVar } from "../utils/envFile.js";
 import { getMonitorWorkHistogramValues, type HistogramBucketValue } from "../metrics.js";
 import { setQueueMode, isPgbossInstalled, QUEUE_NAMES } from "./queueService.js";
 import type { CapacitySnapshot } from "./capacityService.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 

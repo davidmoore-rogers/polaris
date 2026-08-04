@@ -35,7 +35,7 @@
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 
 export const IP_OVERRIDE_COLLISION_REASON = "ip-override";
 

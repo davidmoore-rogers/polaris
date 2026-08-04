@@ -40,7 +40,7 @@ import { AGENT_BIN_DIR } from "../utils/paths.js";
 import { linuxServiceBlock, normalizePrivilegeTier, type AgentPrivilegeTier } from "../utils/agentUnit.js";
 import { getCredential } from "./credentialService.js";
 import { mintEnrollmentToken } from "./agentTokenService.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 import { winrmRunOne, type WinRmConnection } from "../utils/winrm.js";
 import { withSshClient, sshExec, sftpPut } from "../utils/remoteExec.js";
 import { getPublicUrlPort } from "../utils/publicUrl.js";

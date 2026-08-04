@@ -25,7 +25,7 @@
 
 import { logger } from "../utils/logger.js";
 import { reconcileAutoMap } from "../services/appMapDiscoveryService.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "../services/eventLogService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
 const INTERVAL_MS = 30 * 60 * 1000;
