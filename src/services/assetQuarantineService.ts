@@ -41,12 +41,12 @@
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "../api/routes/events.js";
-import { fgRequest, type FortiGateConfig } from "./fortigateService.js";
 import {
-  fmgProxyRest,
-  resolveDeviceMgmtIpViaFmg,
-  type FortiManagerConfig,
-} from "./fortimanagerService.js";
+  buildTransportForIntegration,
+  callFortiOs,
+  normalizeMac,
+  type Transport,
+} from "./reservationPushService.js";
 import { getQuarantineCandidates, type AssetSighting } from "./assetSightingService.js";
 import { expandMacRange } from "../utils/macAddresses.js";
 
@@ -62,95 +62,13 @@ interface FortiOsQuarantineTarget {
   }>;
 }
 
-// ─── Transport (mirrors reservationPushService) ─────────────────────────
-
-type Transport =
-  | { kind: "direct-fortigate"; fgConfig: FortiGateConfig; vdom: string }
-  | { kind: "fmg-proxy"; fmgConfig: FortiManagerConfig; deviceName: string; vdom: string; integrationId: string };
-
-async function buildTransport(
-  fmgConfig: FortiManagerConfig,
-  deviceName: string,
-  integrationId: string,
-): Promise<Transport> {
-  const vdom = "root";
-
-  if (fmgConfig.useProxy === false) {
-    if (!fmgConfig.fortigateApiToken) {
-      throw new AppError(400, "Direct mode requires a FortiGate API token on the integration");
-    }
-    if (!fmgConfig.mgmtInterface?.trim()) {
-      throw new AppError(400, 'Direct mode requires "Management Interface" to be set on the integration');
-    }
-    const mgmtIp = await resolveDeviceMgmtIpViaFmg(fmgConfig, deviceName, undefined, integrationId);
-    if (!mgmtIp) {
-      throw new AppError(502, `Could not resolve management IP for "${deviceName}" via FortiManager`);
-    }
-    const fgConfig: FortiGateConfig = {
-      host: mgmtIp,
-      port: 443,
-      apiUser: fmgConfig.fortigateApiUser || "",
-      apiToken: fmgConfig.fortigateApiToken,
-      vdom,
-      verifySsl: fmgConfig.fortigateVerifySsl === true,
-      mgmtInterface: fmgConfig.mgmtInterface,
-    };
-    return { kind: "direct-fortigate", fgConfig, vdom };
-  }
-
-  return { kind: "fmg-proxy", fmgConfig, deviceName, vdom, integrationId };
-}
-
-/**
- * Build a transport from an integration row. Delegates to buildTransport
- * for FMG; standalone FortiGate integrations connect direct using the
- * integration's own FortiGateConfig.
- */
-async function buildTransportForIntegration(
-  integration: { id: string; type: string; config: unknown },
-  deviceName: string,
-): Promise<Transport> {
-  if (integration.type === "fortimanager") {
-    return buildTransport(integration.config as FortiManagerConfig, deviceName, integration.id);
-  }
-  if (integration.type === "fortigate") {
-    const cfg = integration.config as FortiGateConfig;
-    if (!cfg?.host || !cfg?.apiToken) {
-      throw new AppError(400, `Standalone FortiGate integration ${integration.id} is missing host or apiToken`);
-    }
-    return {
-      kind: "direct-fortigate",
-      fgConfig: { ...cfg, vdom: cfg.vdom || "root" },
-      vdom: cfg.vdom || "root",
-    };
-  }
-  throw new AppError(
-    400,
-    `Quarantine push is not supported for integration type "${integration.type}"`,
-  );
-}
-
-async function callFortiOs<T>(
-  t: Transport,
-  method: "GET" | "POST" | "PUT" | "DELETE",
-  path: string,
-  body?: unknown,
-): Promise<T> {
-  if (t.kind === "direct-fortigate") {
-    return fgRequest<T>(t.fgConfig, method, path, { query: { vdom: t.vdom }, body });
-  }
-  const sep = path.includes("?") ? "&" : "?";
-  const resource = `${path}${sep}vdom=${encodeURIComponent(t.vdom)}`;
-  return fmgProxyRest<T>(t.fmgConfig, t.deviceName, method, resource, { body, integrationId: t.integrationId });
-}
+// ─── Transport ──────────────────────────────────────────────────────────
+// Shared with every other FortiOS write pathway: buildTransportForIntegration
+// / callFortiOs / normalizeMac are imported from reservationPushService (the
+// Transport surface's home). This file carried byte-identical private copies
+// until 2026-08 — audit finding, audit-reports/audit-2026-08-04.html.
 
 // ─── Helpers ───────────────────────────────────────────────────────────
-
-export function normalizeMac(mac: string): string {
-  const hex = mac.toLowerCase().replace(/[^0-9a-f]/g, "");
-  if (hex.length !== 12) return mac.toLowerCase();
-  return hex.match(/.{2}/g)!.join(":");
-}
 
 export function quarantineTargetName(assetId: string): string {
   // FortiOS object names are typically capped at 35 chars. `polaris-q-`

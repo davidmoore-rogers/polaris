@@ -84,9 +84,11 @@ export async function buildTransportForIntegration(
       vdom: cfg.vdom || "root",
     };
   }
+  // Shared by every FortiOS write pathway (DHCP push, quarantine push,
+  // description sync, lease release) — keep the message pathway-neutral.
   throw new AppError(
     400,
-    `DHCP write is not supported for integration type "${integration.type}"`,
+    `Fortinet device write is not supported for integration type "${integration.type}"`,
   );
 }
 
