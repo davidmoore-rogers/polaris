@@ -12,6 +12,7 @@
 
 import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
+import { insecureTlsDispatcher } from "../utils/tlsDispatcher.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
 import { parseRangeFirstIp } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
@@ -128,10 +129,7 @@ export async function fgRequest<T>(
   const onExternalAbort = () => controller.abort();
   opts.signal?.addEventListener("abort", onExternalAbort, { once: true });
 
-  const prevTls = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   try {
-    if (config.verifySsl === false) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${config.apiToken}`,
@@ -140,7 +138,15 @@ export async function fgRequest<T>(
     // but some admin/audit configurations log this header.
     if (config.apiUser) headers["access_user"] = config.apiUser;
 
-    const init: RequestInit = { method, headers, signal: controller.signal };
+    // verifySsl=false relaxes TLS for THIS connection only (undici
+    // dispatcher) — never via the process-global NODE_TLS_REJECT_UNAUTHORIZED
+    // flip, which raced the parallel per-device query chains.
+    const init: RequestInit & { dispatcher?: ReturnType<typeof insecureTlsDispatcher> } = {
+      method,
+      headers,
+      signal: controller.signal,
+      ...(config.verifySsl === false ? { dispatcher: insecureTlsDispatcher() } : {}),
+    };
     if (opts.body !== undefined && (method === "POST" || method === "PUT")) {
       init.body = JSON.stringify(opts.body);
     }
@@ -166,10 +172,6 @@ export async function fgRequest<T>(
 
     return (body?.results ?? body) as T;
   } finally {
-    if (config.verifySsl === false) {
-      if (prevTls === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-      else process.env.NODE_TLS_REJECT_UNAUTHORIZED = prevTls;
-    }
     clearTimeout(timeout);
     opts.signal?.removeEventListener("abort", onExternalAbort);
   }

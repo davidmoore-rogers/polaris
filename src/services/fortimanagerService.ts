@@ -6,6 +6,7 @@
 
 import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
+import { insecureTlsDispatcher } from "../utils/tlsDispatcher.js";
 import { logger } from "../utils/logger.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
 import { parseRangeFirstIp } from "../utils/cidr.js";
@@ -524,10 +525,7 @@ async function rpcAttempt(
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
 
-  const prevTls = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   try {
-    if (verifySsl === false) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${apiToken}`,
@@ -536,12 +534,16 @@ async function rpcAttempt(
 
     let res: Awaited<ReturnType<typeof fetch>>;
     try {
+      // verifySsl=false relaxes TLS for THIS connection only (undici
+      // dispatcher) — never via the process-global env flip, which raced
+      // concurrent requests. See src/utils/tlsDispatcher.ts.
       res = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
         signal: controller.signal,
-      });
+        ...(verifySsl === false ? { dispatcher: insecureTlsDispatcher() } : {}),
+      } as RequestInit);
     } catch (err: any) {
       // Intentional external abort (integration re-saved) — propagate as-is, never retry.
       if (externalSignal?.aborted && !timedOut) throw err;
@@ -563,10 +565,6 @@ async function rpcAttempt(
 
     return (await res.json()) as JsonRpcResponse;
   } finally {
-    if (verifySsl === false) {
-      if (prevTls === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-      else process.env.NODE_TLS_REJECT_UNAUTHORIZED = prevTls;
-    }
     clearTimeout(timeout);
     externalSignal?.removeEventListener("abort", onExternalAbort);
   }
