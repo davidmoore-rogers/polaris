@@ -171,10 +171,13 @@ router.use("/server-settings/manufacturer-profiles", manufacturerProfilesRouter)
 // they can lock out the operator from the UI if mis-set — so fullwrite is
 // the right floor regardless of the blanket gate's read level.
 router.use("/server-settings/proxy", proxySettingsRouter);
-// Blanket /server-settings gate: requires at least serverSettingsSystem
-// OR serverSettingsData read (today the OR is implicit — every route
-// inside currently uses serverSettingsSystem; a future per-route split
-// can break this into two gates without changing the mount).
+// Blanket /server-settings gate: serverSettingsSystem read floor for the
+// whole surface. Mutating routes inside additionally carry per-route
+// requirePermission escalations (serverSettingsSystem fullwrite for the
+// system cards, serverSettingsData read/fullwrite for backup download /
+// backup-restore / queue-mode / security tokens / restart / updates) —
+// so a Data-scoped role still needs serverSettingsSystem read to reach
+// its routes through this mount.
 router.use("/server-settings", requirePermission("serverSettingsSystem", "read"), serverSettingsRouter);
 // device-icons applies its own per-route guards (deviceIcons write on CRUD;
 // auth-only for image-serve since the asset details modal embeds icon URLs).

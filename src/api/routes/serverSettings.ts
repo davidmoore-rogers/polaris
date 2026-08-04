@@ -350,7 +350,7 @@ function backupFilePath(id: unknown): string | null {
   return p.startsWith(BACKUP_DIR + sep) ? p : null;
 }
 
-router.post("/database/backup", maintenanceLimiter, async (req, res, next) => {
+router.post("/database/backup", maintenanceLimiter, requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
   try {
     // Reject empty/weak passphrases before they become an AES-256-GCM key —
     // see src/utils/backupPassword.ts + the 2026-06-03 review (M5). null = no
@@ -433,7 +433,7 @@ router.post("/database/backup", maintenanceLimiter, async (req, res, next) => {
   }
 });
 
-router.post("/database/restore", maintenanceLimiter, restoreUpload.single("file"), async (req, res, next) => {
+router.post("/database/restore", maintenanceLimiter, requirePermission("serverSettingsData", "fullwrite"), restoreUpload.single("file"), async (req, res, next) => {
   // Track upload temp file for cleanup regardless of outcome. multer's
   // diskStorage generates the temp name itself, but the path rides in on
   // req.file — require containment under tmpdir() before touching it.
@@ -529,7 +529,7 @@ router.get("/database/backups", maintenanceLimiter, async (_req, res, next) => {
   }
 });
 
-router.delete("/database/backups/:id", maintenanceLimiter, async (req, res, next) => {
+router.delete("/database/backups/:id", maintenanceLimiter, requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const safePath = backupFilePath(id);
@@ -565,7 +565,9 @@ router.delete("/database/backups/:id", maintenanceLimiter, async (req, res, next
   }
 });
 
-router.get("/database/backups/:id/download", maintenanceLimiter, async (req, res, next) => {
+// Download hands out the full DB dump — data-sensitive beyond the blanket
+// serverSettingsSystem read on the mount.
+router.get("/database/backups/:id/download", maintenanceLimiter, requirePermission("serverSettingsData", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const filePath = backupFilePath(id);
@@ -598,7 +600,7 @@ router.get("/tags", async (_req, res, next) => {
   }
 });
 
-router.post("/tags", async (req, res, next) => {
+router.post("/tags", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const name = (req.body.name || "").trim();
     if (!name) throw new AppError(400, "Tag name is required");
@@ -647,7 +649,7 @@ router.get("/tags/settings", async (_req, res, next) => {
   }
 });
 
-router.put("/tags/settings", async (req, res, next) => {
+router.put("/tags/settings", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const value = { enforce: req.body.enforce === true };
     const row = await prisma.setting.upsert({
@@ -669,7 +671,7 @@ router.put("/tags/settings", async (req, res, next) => {
   }
 });
 
-router.put("/tags/:id", async (req, res, next) => {
+router.put("/tags/:id", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const existing = await prisma.tag.findUnique({ where: { id } });
@@ -736,9 +738,10 @@ router.put("/tags/:id", async (req, res, next) => {
   }
 });
 
-router.delete("/tags/:id", async (req, res, next) => {
+router.delete("/tags/:id", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
-    const tag = await prisma.tag.findUnique({ where: { id: req.params.id } });
+    const tagId = String(req.params.id);
+    const tag = await prisma.tag.findUnique({ where: { id: tagId } });
     if (!tag) throw new AppError(404, "Tag not found");
     // Strip engine-applied copies (and their provenance) before deleting. Manual
     // copies on assets the engine never tagged are untouched — same as before.
@@ -746,7 +749,7 @@ router.delete("/tags/:id", async (req, res, next) => {
     if (tag.criteria != null) {
       stripped = await stripTagAssignments(tag.id, tag.name);
     }
-    await prisma.tag.delete({ where: { id: req.params.id } });
+    await prisma.tag.delete({ where: { id: tagId } });
     await logEvent({
       level: "warning",
       action: "tag.deleted",
@@ -785,7 +788,7 @@ router.get("/ntp", async (_req, res, next) => {
   }
 });
 
-router.put("/ntp", async (req, res, next) => {
+router.put("/ntp", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     res.json(await updateNtpSettings(req.body));
   } catch (err) {
@@ -793,7 +796,8 @@ router.put("/ntp", async (req, res, next) => {
   }
 });
 
-router.post("/ntp/test", async (req, res, next) => {
+// Test probes an operator-supplied host from the server — gate like the write.
+router.post("/ntp/test", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     res.json(await testNtpSync(req.body));
   } catch (err) {
@@ -824,7 +828,7 @@ router.get("/certificates", async (_req, res, next) => {
 const SERVER_CERT_EXTERNAL_MESSAGE =
   "Polaris is fronted by an external proxy; manage the server cert via POLARIS_PROXY_CERT_PATH";
 
-router.post("/certificates", upload.single("file"), async (req, res, next) => {
+router.post("/certificates", requirePermission("serverSettingsSystem", "fullwrite"), upload.single("file"), async (req, res, next) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -842,14 +846,15 @@ router.post("/certificates", upload.single("file"), async (req, res, next) => {
   }
 });
 
-router.delete("/certificates/:id", async (req, res, next) => {
+router.delete("/certificates/:id", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const all = await listCertificates();
-    const target = [...all.serverCerts, ...all.trustedCAs].find((c) => c.id === req.params.id);
+    const certId = String(req.params.id);
+    const target = [...all.serverCerts, ...all.trustedCAs].find((c) => c.id === certId);
     if (target && target.category === "server") {
       return res.status(409).json({ error: SERVER_CERT_EXTERNAL_MESSAGE });
     }
-    await deleteCertificate(req.params.id);
+    await deleteCertificate(certId);
     res.status(204).end();
   } catch (err) {
     next(err);
@@ -895,7 +900,7 @@ router.get("/dns", async (_req, res, next) => {
   }
 });
 
-router.put("/dns", async (req, res, next) => {
+router.put("/dns", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const servers: string[] = (req.body.servers || [])
       .map((s: string) => s.trim())
@@ -926,7 +931,8 @@ router.put("/dns", async (req, res, next) => {
   }
 });
 
-router.post("/dns/test", async (req, res, next) => {
+// Test probes an operator-supplied server from the server — gate like the write.
+router.post("/dns/test", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const servers: string[] = (req.body.servers || [])
       .map((s: string) => s.trim())
@@ -984,7 +990,7 @@ router.get("/oui", async (_req, res, next) => {
   }
 });
 
-router.post("/oui/refresh", async (_req, res, next) => {
+router.post("/oui/refresh", requirePermission("serverSettingsSystem", "fullwrite"), async (_req, res, next) => {
   try {
     const result = await refreshOuiDatabase();
     res.json({ ok: true, ...result, message: `OUI database refreshed: ${result.entries.toLocaleString()} vendors loaded` });
@@ -1013,7 +1019,7 @@ router.get("/oui/overrides", async (_req, res, next) => {
   }
 });
 
-router.post("/oui/overrides", async (req, res, next) => {
+router.post("/oui/overrides", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const { prefix, manufacturer, device } = req.body;
     if (!prefix || !manufacturer) throw new AppError(400, "prefix and manufacturer are required");
@@ -1048,17 +1054,18 @@ router.post("/oui/overrides", async (req, res, next) => {
   }
 });
 
-router.delete("/oui/overrides/:prefix", async (req, res, next) => {
+router.delete("/oui/overrides/:prefix", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
-    await deleteOuiOverride(req.params.prefix);
+    const prefix = String(req.params.prefix);
+    await deleteOuiOverride(prefix);
     await logEvent({
       level: "info",
       action: "oui.override.removed",
       resourceType: "ouiOverride",
-      resourceId: req.params.prefix,
-      resourceName: req.params.prefix,
+      resourceId: prefix,
+      resourceName: prefix,
       actor: req.session?.username,
-      message: `OUI override removed for ${req.params.prefix}`,
+      message: `OUI override removed for ${prefix}`,
     });
     res.status(204).send();
   } catch (err) {
@@ -1316,7 +1323,7 @@ router.get("/queue-mode", async (_req, res, next) => {
   }
 });
 
-router.post("/queue-mode", async (req, res, next) => {
+router.post("/queue-mode", requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
   try {
     const requested = req.body?.mode;
     if (requested !== "cursor" && requested !== "pgboss") {
@@ -1360,7 +1367,7 @@ router.get("/sample-retention", async (_req, res, next) => {
   }
 });
 
-router.put("/sample-retention", async (req, res, next) => {
+router.put("/sample-retention", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const body = (req.body && typeof req.body === "object") ? req.body : {};
     const updated = await updateSampleRetention(body);
@@ -1446,7 +1453,7 @@ router.get("/agent-event-log", async (_req, res, next) => {
   }
 });
 
-router.put("/agent-event-log", async (req, res, next) => {
+router.put("/agent-event-log", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const body = (req.body && typeof req.body === "object") ? req.body : {};
     const updated = await updateAgentEventLogConfig(body);
@@ -1498,7 +1505,8 @@ router.get("/capacity-advisor", async (_req, res, next) => {
   }
 });
 
-router.post("/capacity-advisor/stage", async (req, res, next) => {
+// Stages .env changes on disk — operator-level blast radius.
+router.post("/capacity-advisor/stage", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const keysRaw = req.body?.keys;
     if (!Array.isArray(keysRaw) || keysRaw.length === 0) {
@@ -1555,7 +1563,7 @@ router.post("/capacity-advisor/stage", async (req, res, next) => {
 // `health_token_unset` capacity reasons. Writes a fresh 32-byte hex value
 // into .env and stamps process.env so the gate takes effect without a
 // restart. Admin-only by virtue of the parent /server-settings guard.
-router.post("/security-tokens/generate", async (req, res, next) => {
+router.post("/security-tokens/generate", requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
   try {
     const which = req.body?.which;
     if (which !== "metrics" && which !== "health") {
@@ -1586,7 +1594,7 @@ router.post("/security-tokens/generate", async (req, res, next) => {
 // On Linux exits with code 1 so systemd's Restart=on-failure brings the
 // process back; on Windows shells out to NSSM. Responds before the exit
 // so the client sees a clean 200 and can switch to its restart-polling UI.
-router.post("/restart", async (req, res, next) => {
+router.post("/restart", requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
   try {
     await logEvent({
       level: "warning",
@@ -1631,7 +1639,7 @@ router.get("/updates/repo", async (_req, res, next) => {
   }
 });
 
-router.post("/updates/apply", async (req, res, next) => {
+router.post("/updates/apply", requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
   try {
     if (!isUpdateMechanismAvailable()) {
       return res.status(409).json({ error: "In-app updates are disabled in this deployment." });
@@ -1654,7 +1662,7 @@ router.post("/updates/apply", async (req, res, next) => {
   }
 });
 
-router.post("/updates/dismiss", (_req, res) => {
+router.post("/updates/dismiss", requirePermission("serverSettingsData", "fullwrite"), (_req, res) => {
   clearUpdateStatus();
   res.json({ ok: true });
 });
@@ -1674,7 +1682,7 @@ router.get("/updates/settings", async (_req, res, next) => {
 // PUT accepts either/both of { skipBackup, train } and updates only the keys
 // present, so the frontend can persist the backup checkbox and the train
 // dropdown independently without clobbering the other.
-router.put("/updates/settings", async (req, res, next) => {
+router.put("/updates/settings", requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
   try {
     const body = req.body || {};
 
@@ -1762,7 +1770,7 @@ router.get("/branding", async (_req, res, next) => {
   }
 });
 
-router.put("/branding", async (req, res, next) => {
+router.put("/branding", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const current = await getBranding();
     const updated: BrandingSettings = {
@@ -1792,7 +1800,7 @@ router.put("/branding", async (req, res, next) => {
 const LOGO_DIR = UPLOADS_DIR;
 const logoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
-router.post("/branding/logo", maintenanceLimiter, logoUpload.single("file"), async (req, res, next) => {
+router.post("/branding/logo", maintenanceLimiter, requirePermission("serverSettingsSystem", "fullwrite"), logoUpload.single("file"), async (req, res, next) => {
   try {
     if (!req.file) throw new AppError(400, "No file uploaded");
     const ext = detectImageMagic(req.file.buffer);
@@ -1824,7 +1832,7 @@ router.post("/branding/logo", maintenanceLimiter, logoUpload.single("file"), asy
   }
 });
 
-router.delete("/branding/logo", maintenanceLimiter, async (req, res, next) => {
+router.delete("/branding/logo", maintenanceLimiter, requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const current = await getBranding();
     // Remove old custom logo file
@@ -1866,7 +1874,7 @@ router.get("/agents/inventory", async (_req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post("/agents/build", async (req, res, next) => {
+router.post("/agents/build", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const { startBuild, BuildQueueFullError, GoUnavailableError } =
       await import("../../services/agentBuildService.js");
@@ -2028,7 +2036,7 @@ router.get("/agents/installed", async (_req, res, next) => {
  * agentInstallService so the same path is reachable from the post-build
  * auto-upgrade hook.
  */
-router.post("/agents/upgrade-all", async (req, res, next) => {
+router.post("/agents/upgrade-all", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const { getInventory } = await import("../../services/agentBuildService.js");
     const { upgradeAllOutdated } = await import("../../services/agentInstallService.js");
@@ -2052,7 +2060,7 @@ router.get("/agents/auto-build-setting", async (_req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put("/agents/auto-build-setting", async (req, res, next) => {
+router.put("/agents/auto-build-setting", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const { prisma } = await import("../../db.js");
     const enabled = !!(req.body && req.body.enabled);
@@ -2088,7 +2096,7 @@ router.get("/agents/auto-upgrade-setting", async (_req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put("/agents/auto-upgrade-setting", async (req, res, next) => {
+router.put("/agents/auto-upgrade-setting", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const { prisma } = await import("../../db.js");
     const enabled = !!(req.body && req.body.enabled);
@@ -2109,7 +2117,7 @@ router.put("/agents/auto-upgrade-setting", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post("/agents/prune", async (req, res, next) => {
+router.post("/agents/prune", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const { pruneOldAgentVersions } = await import("../../services/agentBuildService.js");
     const { logEvent } = await import("./events.js");
@@ -2150,7 +2158,7 @@ router.get("/agents/server-url", async (_req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put("/agents/server-url", async (req, res, next) => {
+router.put("/agents/server-url", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const { prisma } = await import("../../db.js");
     const { logEvent } = await import("./events.js");
@@ -2367,7 +2375,7 @@ router.get("/agents/cert-pins/summary", async (_req, res, next) => {
  * effect within seconds; offline agents pick it up on next /config poll
  * (and restart via os.Exit so systemd cycles them with the new pin).
  */
-router.post("/agents/cert-pins/bulk-add", async (req, res, next) => {
+router.post("/agents/cert-pins/bulk-add", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const body = CertPinBulkAddSchema.parse(req.body);
     const pin = body.pin.toLowerCase();
@@ -2422,7 +2430,7 @@ router.post("/agents/cert-pins/bulk-add", async (req, res, next) => {
  * response carries `agentsWithLastPinSkipped: N` — the operator must
  * stage a replacement first.
  */
-router.post("/agents/cert-pins/bulk-remove", async (req, res, next) => {
+router.post("/agents/cert-pins/bulk-remove", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const body = CertPinBulkRemoveSchema.parse(req.body);
     const pin = body.pin.toLowerCase();
@@ -2477,7 +2485,7 @@ router.post("/agents/cert-pins/bulk-remove", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.delete("/agents/build/:buildId", async (req, res, next) => {
+router.delete("/agents/build/:buildId", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const { cancelBuild, BuildAlreadyFinishedError, BuildNotFoundError } =
       await import("../../services/agentBuildService.js");

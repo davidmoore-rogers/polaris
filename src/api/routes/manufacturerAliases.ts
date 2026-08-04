@@ -9,6 +9,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import * as aliasService from "../../services/manufacturerAliasService.js";
+import { requirePermission } from "../middleware/permissions.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
@@ -29,7 +30,7 @@ router.get("/", async (_req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post("/", async (req, res, next) => {
+router.post("/", requirePermission("manufacturerAliases", "write"), async (req, res, next) => {
   try {
     const input = CreateSchema.parse(req.body);
     const saved = await aliasService.createAlias(input);
@@ -45,7 +46,7 @@ router.post("/", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put("/:id", async (req, res, next) => {
+router.put("/:id", requirePermission("manufacturerAliases", "write"), async (req, res, next) => {
   try {
     const input = UpdateSchema.parse(req.body);
     const saved = await aliasService.updateAlias(req.params.id as string, input);
@@ -61,7 +62,7 @@ router.put("/:id", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.delete("/:id", async (req, res, next) => {
+router.delete("/:id", requirePermission("manufacturerAliases", "write"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const all = await aliasService.listAliases();
