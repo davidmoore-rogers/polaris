@@ -111,6 +111,8 @@ import { prisma } from "../db.js";
 import { logEvent } from "../services/eventLogService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 import { macHexKeyOrNull } from "../utils/mac.js";
+import { bumpLastSeen } from "../utils/assetInvariants.js";
+import { transferAssetSideTables } from "../services/assetMergeService.js";
 
 type SourceTier = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
@@ -142,6 +144,7 @@ type AssetRow = {
   acquiredAt: Date | null;
   lastSeen: Date | null;
   lastSeenSource: string | null;
+  monitored: boolean;
   updatedAt: Date;
   tags: string[];
   sources: { sourceKind: string }[];
@@ -261,6 +264,7 @@ async function mergeDuplicateHostnameAssets(): Promise<void> {
           acquiredAt: true,
           lastSeen: true,
           lastSeenSource: true,
+          monitored: true,
           updatedAt: true,
           tags: true,
           sources: { select: { sourceKind: true } },
@@ -382,104 +386,10 @@ setInterval(mergeDuplicateHostnameAssets, INTERVAL_MS);
 
 async function mergeGhostIntoCanonical(canonical: AssetRow, ghost: AssetRow): Promise<void> {
   await prisma.$transaction(async (tx) => {
-    // Side-table transfers. Same delete-on-conflict pattern as
-    // mergeFortiswitchEndpointGhosts.
-
-    // AssetMacAddress — unique on (assetId, mac).
-    {
-      const cur = await tx.assetMacAddress.findMany({
-        where: { assetId: canonical.id },
-        select: { mac: true },
-      });
-      const curSet = new Set(cur.map((m) => m.mac));
-      const incoming = await tx.assetMacAddress.findMany({
-        where: { assetId: ghost.id },
-        select: { id: true, mac: true },
-      });
-      for (const m of incoming) {
-        if (curSet.has(m.mac)) {
-          await tx.assetMacAddress.delete({ where: { id: m.id } });
-        } else {
-          await tx.assetMacAddress.update({
-            where: { id: m.id },
-            data: { assetId: canonical.id },
-          });
-          curSet.add(m.mac);
-        }
-      }
-    }
-
-    // AssetAssociatedIp — unique on (assetId, ip).
-    {
-      const cur = await tx.assetAssociatedIp.findMany({
-        where: { assetId: canonical.id },
-        select: { ip: true },
-      });
-      const curSet = new Set(cur.map((i) => i.ip));
-      const incoming = await tx.assetAssociatedIp.findMany({
-        where: { assetId: ghost.id },
-        select: { id: true, ip: true },
-      });
-      for (const i of incoming) {
-        if (curSet.has(i.ip)) {
-          await tx.assetAssociatedIp.delete({ where: { id: i.id } });
-        } else {
-          await tx.assetAssociatedIp.update({
-            where: { id: i.id },
-            data: { assetId: canonical.id },
-          });
-          curSet.add(i.ip);
-        }
-      }
-    }
-
-    // AssetIpHistory — unique on (assetId, ip).
-    {
-      const cur = await tx.assetIpHistory.findMany({
-        where: { assetId: canonical.id },
-        select: { ip: true },
-      });
-      const curSet = new Set(cur.map((h) => h.ip));
-      const incoming = await tx.assetIpHistory.findMany({
-        where: { assetId: ghost.id },
-        select: { id: true, ip: true },
-      });
-      for (const h of incoming) {
-        if (curSet.has(h.ip)) {
-          await tx.assetIpHistory.delete({ where: { id: h.id } });
-        } else {
-          await tx.assetIpHistory.update({
-            where: { id: h.id },
-            data: { assetId: canonical.id },
-          });
-          curSet.add(h.ip);
-        }
-      }
-    }
-
-    // AssetFortigateSighting — unique on (assetId, fortigateDevice).
-    {
-      const cur = await tx.assetFortigateSighting.findMany({
-        where: { assetId: canonical.id },
-        select: { fortigateDevice: true },
-      });
-      const curSet = new Set(cur.map((s) => s.fortigateDevice));
-      const incoming = await tx.assetFortigateSighting.findMany({
-        where: { assetId: ghost.id },
-        select: { id: true, fortigateDevice: true },
-      });
-      for (const s of incoming) {
-        if (curSet.has(s.fortigateDevice)) {
-          await tx.assetFortigateSighting.delete({ where: { id: s.id } });
-        } else {
-          await tx.assetFortigateSighting.update({
-            where: { id: s.id },
-            data: { assetId: canonical.id },
-          });
-          curSet.add(s.fortigateDevice);
-        }
-      }
-    }
+    // Side-table transfers — the shared delete-on-conflict helper (also used
+    // by the operator merge and mergeFortiswitchEndpointGhosts). This file
+    // carried four inline copies of the same pattern until the 2026-08 audit.
+    await transferAssetSideTables(tx, ghost.id, canonical.id);
 
     // Scalar-field absorption — only fill canonical's null/empty fields from
     // the ghost. Tags union-merge. Mirrors acceptAssetConflict.
@@ -496,12 +406,13 @@ async function mergeGhostIntoCanonical(canonical: AssetRow, ghost: AssetRow): Pr
     if (!canonical.learnedLocation && ghost.learnedLocation)
       update.learnedLocation = ghost.learnedLocation;
     if (!canonical.acquiredAt && ghost.acquiredAt) update.acquiredAt = ghost.acquiredAt;
-    // lastSeen — keep the more recent of the two so the canonical reflects
-    // any sighting from the ghost the canonical didn't have (provenance
-    // label travels with it).
-    if (ghost.lastSeen && (!canonical.lastSeen || ghost.lastSeen > canonical.lastSeen)) {
-      update.lastSeen = ghost.lastSeen;
-      if (ghost.lastSeenSource) update.lastSeenSource = ghost.lastSeenSource;
+    // lastSeen — adopt the ghost's sighting through bumpLastSeen so the
+    // business-rule-12 gates apply: no-regress, AND a monitored canonical
+    // never adopts discovery-origin evidence (polling owns its lastSeen).
+    // Ghosts without a provenance label are treated as discovery-origin —
+    // the conservative choice for the deferred-source gate.
+    if (ghost.lastSeen) {
+      bumpLastSeen(update, canonical, ghost.lastSeen, ghost.lastSeenSource ?? "discovery");
     }
     // tags — union, preserving canonical's order.
     const cTags = new Set(canonical.tags);
