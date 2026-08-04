@@ -5,7 +5,6 @@
 import type { ReservationStatus } from "../generated/prisma/client.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
-import { isFortinetIntegrationType } from "../utils/pollingCompatibility.js";
 import { ipInCidr, isValidIpAddress, enumerateSubnetIps, detectIpVersion } from "../utils/cidr.js";
 import {
   pushReservation,
@@ -14,6 +13,7 @@ import {
   releaseDhcpLease,
   normalizeMac,
   classifyPushError,
+  integrationPushEnabled,
   type PushReservationResult,
 } from "./reservationPushService.js";
 import { logEvent, buildChanges } from "./eventLogService.js";
@@ -96,13 +96,7 @@ export async function listReservations(filter: ListReservationsFilter = {}) {
   const decorated = reservations.map((r) => {
     const s = r.subnet as { integration: { type: string; config: unknown } | null } | null;
     const integration = s?.integration ?? null;
-    const cfg = (integration?.config ?? {}) as Record<string, unknown>;
-    const pushEligible = !!(
-      r.ipAddress &&
-      integration &&
-      (isFortinetIntegrationType(integration.type)) &&
-      cfg.pushReservations === true
-    );
+    const pushEligible = !!(r.ipAddress && integrationPushEnabled(integration));
     // Strip the integration blob from the response — callers only need the
     // computed flag, and config can carry credentials.
     const { integration: _omit, ...subnetOut } = (r.subnet ?? {}) as Record<string, unknown>;
@@ -142,11 +136,7 @@ function resolvePushEligibility(
   ipAddress: string | null,
 ): { eligible: boolean; integration: { id: string; type: string; config: unknown } | null; deviceName: string } {
   if (!ipAddress) return { eligible: false, integration: null, deviceName: "" };
-  if (!integration || (integration.type !== "fortimanager" && integration.type !== "fortigate")) {
-    return { eligible: false, integration: null, deviceName: "" };
-  }
-  const cfg = (integration.config ?? {}) as Record<string, unknown>;
-  if (cfg.pushReservations !== true) {
+  if (!integration || !integrationPushEnabled(integration)) {
     return { eligible: false, integration: null, deviceName: "" };
   }
   const deviceName = subnet.fortigateDevice || "";
@@ -560,11 +550,8 @@ export async function updateReservation(
 
   // Push eligibility for THIS reservation's subnet.
   const integration = reservation.subnet.integration;
-  const integrationConfig = (integration?.config ?? {}) as Record<string, unknown>;
   const pushEligible =
-    !!integration &&
-    (isFortinetIntegrationType(integration.type)) &&
-    integrationConfig.pushReservations === true &&
+    integrationPushEnabled(integration) &&
     !!reservation.subnet.fortigateDevice &&
     !!reservation.ipAddress;
 

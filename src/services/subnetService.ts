@@ -6,6 +6,7 @@ import type { SubnetStatus } from "../generated/prisma/client.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { isFortinetIntegrationType } from "../utils/pollingCompatibility.js";
+import { integrationPushEnabled } from "./reservationPushService.js";
 import { logEvent, buildChanges } from "./eventLogService.js";
 import {
   normalizeCidr,
@@ -540,12 +541,10 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
   // by an FMG or standalone FortiGate integration with pushReservations=true
   // are pushed. The frontend uses this to mark the MAC field required and
   // validate before submitting.
-  const integrationConfig = (subnet.integration?.config ?? {}) as Record<string, unknown>;
   const integrationType = subnet.integration?.type;
   const pushEligible =
     !isIpv6 &&
-    (isFortinetIntegrationType(integrationType)) &&
-    integrationConfig.pushReservations === true &&
+    integrationPushEnabled(subnet.integration) &&
     !!subnet.fortigateDevice;
 
   // Refresh eligibility: only subnets discovered by an FMG / FortiGate

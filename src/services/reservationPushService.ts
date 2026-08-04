@@ -26,6 +26,7 @@ import {
 } from "./fortimanagerService.js";
 import { isValidIpAddress } from "../utils/cidr.js";
 import { normalizeMacLowerColon } from "../utils/mac.js";
+import { isFortinetIntegrationType } from "../utils/pollingCompatibility.js";
 
 // ─── FortiOS DHCP CMDB shapes (subset we use) ───────────────────────────────
 
@@ -154,6 +155,22 @@ export async function callFortiOs<T>(
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * The push-policy nucleus every "is this push-eligible" check shares: the
+ * subnet's discovering integration is one of the two Fortinet transports
+ * AND the operator enabled DHCP push on it. Callers AND in their own
+ * site-specific dimensions explicitly (ipAddress present, fortigateDevice
+ * known, !IPv6) — those deliberately differ per surface; only this
+ * nucleus must never drift. Previously re-derived inline at four sites.
+ */
+export function integrationPushEnabled(
+  integration: { type: string; config: unknown } | null | undefined,
+): boolean {
+  if (!integration || !isFortinetIntegrationType(integration.type)) return false;
+  const cfg = (integration.config ?? {}) as Record<string, unknown>;
+  return cfg.pushReservations === true;
+}
 
 // FortiOS wire form — delegates to the shared util (colon-lowercase,
 // pass-through on unrecognizable input). Re-exported here because the
