@@ -3448,6 +3448,23 @@ export function sweepPhaseEnabled(mode: SyncMode, phase: "2" | "2a" | "2b" | "2c
   return true;
 }
 
+/**
+ * Pure matcher for the Phase 2a controller cascade: given a FortiSwitch/FortiAP
+ * asset's `fortinetTopology` blob and the set of just-decommissioned FortiGate
+ * hostnames (lowercased), return the matched controller name, or null when the
+ * child isn't managed by any of them. Case-insensitive on the controller side,
+ * mirroring Phase 2a's hostname fallback (FMG device names and FortiOS
+ * hostnames can disagree in case for the same device). Extracted (and exported)
+ * for the same reason as sweepPhaseEnabled — a wrong match here decommissions
+ * healthy switches/APs.
+ */
+export function cascadeControllerOf(fortinetTopology: unknown, staleFwNamesLc: Set<string>): string | null {
+  const topo = (fortinetTopology as Record<string, unknown> | null) || null;
+  const controller = typeof topo?.controllerFortigate === "string" ? topo.controllerFortigate : "";
+  if (!controller || !staleFwNamesLc.has(controller.toLowerCase())) return null;
+  return controller;
+}
+
 async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full", signal?: AbortSignal) {
   const syncLog = (level: "info" | "error", message: string) => {
     logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
@@ -4041,6 +4058,59 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         } catch (err: any) {
           syncLog("error", `Firewall tag decommission failed for "${hostname}": ${err?.message || "Unknown error"}`);
         }
+      }
+
+      // Cascade — a decommissioned FortiGate takes its managed FortiSwitches /
+      // FortiAPs with it. Phase 2b can't cover this case: it only judges
+      // children whose controller was successfully INVENTORIED this run, and a
+      // roster-removed gate is never queried again — so without this cascade
+      // its switches/APs would sit "active" forever (ghost infra). Linkage is
+      // fortinetTopology.controllerFortigate (the FMG device name the Phase 3b
+      // switch / Phase 6 AP paths stamp), matched case-insensitively against
+      // the just-decommissioned gates' hostnames via cascadeControllerOf.
+      // Children rehomed to another gate earlier this run already carry the
+      // new controller name, so they never match here. If the gate returns to
+      // FMG, Phase 3b resurrects it and the children resurrect through their
+      // own update paths once the controller reports them connected again.
+      const staleFwNamesLc = new Set(staleFwHostnames.map((h) => h.toLowerCase()));
+      const cascadeCandidates = await prisma.asset.findMany({
+        where: {
+          discoveredByIntegrationId: integrationId,
+          assetType: { in: ["switch", "access_point"] },
+          status: { not: "decommissioned" },
+        },
+        select: { id: true, hostname: true, serialNumber: true, assetType: true, fortinetTopology: true },
+      });
+      const cascadeIds: string[] = [];
+      for (const child of cascadeCandidates) {
+        const controller = cascadeControllerOf(child.fortinetTopology, staleFwNamesLc);
+        if (!controller) continue;
+        cascadeIds.push(child.id);
+        if (child.assetType === "switch") decommissionedSwitches.push(child.hostname || child.serialNumber || child.id);
+        else                              decommissionedAps.push(child.hostname || child.serialNumber || child.id);
+        logEvent({
+          action: child.assetType === "switch" ? "asset.fortiswitch.decommissioned" : "asset.fortiap.decommissioned",
+          resourceType: "asset",
+          resourceId: child.id,
+          resourceName: child.hostname || child.serialNumber || child.id,
+          actor,
+          message: `${child.assetType === "switch" ? "FortiSwitch" : "FortiAP"} "${child.hostname || child.serialNumber}" decommissioned — its controller FortiGate "${controller}" was decommissioned`,
+          details: { reason: "controller-decommissioned", controllerFortigate: controller, integrationId, integrationName },
+        });
+      }
+      if (cascadeIds.length > 0) {
+        // Force-exit maintenance for any of these in an open window (see 2a
+        // preamble) before the status flip.
+        await releaseAssetsForDecommission(cascadeIds, {
+          at: new Date(now),
+          actor,
+          statusChangedBy: integrationLabel,
+          reason: "its controller FortiGate was decommissioned",
+        });
+        await prisma.asset.updateMany({
+          where: { id: { in: cascadeIds } },
+          data: { status: "decommissioned", statusChangedAt: new Date(now), statusChangedBy: integrationLabel },
+        });
       }
     }
   }
