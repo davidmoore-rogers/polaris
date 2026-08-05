@@ -6,7 +6,6 @@ import { Router } from "express";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
-import { statfs } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
@@ -15,7 +14,7 @@ import { markSetupComplete } from "./detectSetup.js";
 import { hashPassword } from "../utils/password.js";
 import { ENV_FILE, STATE_DIR } from "../utils/paths.js";
 import { makeRateLimiter } from "../api/middleware/rateLimits.js";
-import { PG_DATA_DIR_CANDIDATES, pickFirstExistingPath } from "../utils/startupDiskCheck.js";
+import { PG_DATA_DIR_CANDIDATES, pickFirstExistingPath, probeDiskFree } from "../utils/startupDiskCheck.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -129,25 +128,17 @@ interface PreflightVolume {
 }
 
 async function statfsForPreflight(role: PreflightVolume["role"], path: string, recommendedMinFreeGb: number): Promise<PreflightVolume | null> {
-  try {
-    const fs = await statfs(path);
-    const freeBytes = Number(fs.bavail) * Number(fs.bsize);
-    const totalBytes = Number(fs.blocks) * Number(fs.bsize);
-    const freePct = totalBytes > 0 ? freeBytes / totalBytes : 1;
-    const minFreeBytes = recommendedMinFreeGb * 1024 ** 3;
-    return {
-      role,
-      path,
-      freeBytes,
-      totalBytes,
-      freePct,
-      recommendedMinFreeGb,
-      meetsRecommendation: freeBytes >= minFreeBytes,
-      notes: null,
-    };
-  } catch {
-    return null;
-  }
+  const base = await probeDiskFree(path);
+  if (!base) return null;
+  const minFreeBytes = recommendedMinFreeGb * 1024 ** 3;
+  return {
+    role,
+    path,
+    ...base,
+    recommendedMinFreeGb,
+    meetsRecommendation: base.freeBytes >= minFreeBytes,
+    notes: null,
+  };
 }
 
 

@@ -95,19 +95,30 @@ interface ProbedVolume {
   dev: number;
 }
 
-async function probe(role: ProbedVolume["role"], path: string): Promise<ProbedVolume | null> {
+/** Free/total/pct for the filesystem holding `path`. Shared by the boot-time
+ *  check here and the setup wizard's preflight. Null when statfs fails. */
+export interface DiskFreeProbe {
+  freeBytes: number;
+  totalBytes: number;
+  freePct: number;
+}
+
+export async function probeDiskFree(path: string): Promise<DiskFreeProbe | null> {
   try {
-    const [fs, st] = await Promise.all([statfs(path), stat(path)]);
+    const fs = await statfs(path);
     const freeBytes = Number(fs.bavail) * Number(fs.bsize);
     const totalBytes = Number(fs.blocks) * Number(fs.bsize);
-    return {
-      role,
-      path,
-      freeBytes,
-      totalBytes,
-      freePct: totalBytes > 0 ? freeBytes / totalBytes : 1,
-      dev: Number(st.dev),
-    };
+    return { freeBytes, totalBytes, freePct: totalBytes > 0 ? freeBytes / totalBytes : 1 };
+  } catch {
+    return null;
+  }
+}
+
+async function probe(role: ProbedVolume["role"], path: string): Promise<ProbedVolume | null> {
+  try {
+    const [base, st] = await Promise.all([probeDiskFree(path), stat(path)]);
+    if (!base) return null;
+    return { role, path, ...base, dev: Number(st.dev) };
   } catch {
     return null;
   }
