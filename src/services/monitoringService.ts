@@ -806,53 +806,62 @@ function pickClassStreamsBlock(
  * baseline, null/undefined leaves the baseline in place. Mutates `base`
  * in place and returns it for chaining convenience.
  */
+// The 8-stream → MonitorTierSettings field-name map, declared ONCE and walked
+// by both the value applier (applyClassStreamsOverlay) and the provenance
+// detector (detectPerClassFieldOrigins) so the two can never disagree on
+// which cell a stream field lands in. `failureThreshold` exists only on
+// responseTime (the only stream with a failure counter); `mibId` is absent
+// where the stream has no MIB selector.
+type ClassStreamKey = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage" | "processes" | "eventLog";
+type ClassStreamCells = {
+  polling:           keyof MonitorTierSettings;
+  credentialId:      keyof MonitorTierSettings;
+  intervalSeconds:   keyof MonitorTierSettings;
+  timeoutMs:         keyof MonitorTierSettings;
+  mibId?:            keyof MonitorTierSettings;
+  failureThreshold?: keyof MonitorTierSettings;
+};
+const CLASS_STREAM_FIELD_MAP: Record<ClassStreamKey, ClassStreamCells> = {
+  responseTime: { polling: "responseTimePolling", credentialId: "responseTimeCredentialId", intervalSeconds: "intervalSeconds",            timeoutMs: "probeTimeoutMs",        mibId: "responseTimeMibId", failureThreshold: "failureThreshold" },
+  cpuMemory:    { polling: "cpuMemoryPolling",    credentialId: "cpuMemoryCredentialId",    intervalSeconds: "cpuMemoryIntervalSeconds",   timeoutMs: "cpuMemoryTimeoutMs",    mibId: "cpuMemoryMibId" },
+  temperature:  { polling: "temperaturePolling",  credentialId: "temperatureCredentialId",  intervalSeconds: "temperatureIntervalSeconds", timeoutMs: "temperatureTimeoutMs",  mibId: "temperatureMibId" },
+  interfaces:   { polling: "interfacesPolling",   credentialId: "interfacesCredentialId",   intervalSeconds: "systemInfoIntervalSeconds",  timeoutMs: "systemInfoTimeoutMs",   mibId: "interfacesMibId" },
+  lldp:         { polling: "lldpPolling",         credentialId: "lldpCredentialId",         intervalSeconds: "lldpIntervalSeconds",        timeoutMs: "lldpTimeoutMs",         mibId: "lldpMibId" },
+  storage:      { polling: "storagePolling",      credentialId: "interfacesCredentialId",   intervalSeconds: "storageIntervalSeconds",     timeoutMs: "storageTimeoutMs" },
+  processes:    { polling: "processesPolling",    credentialId: "processesCredentialId",    intervalSeconds: "processesIntervalSeconds",   timeoutMs: "processesTimeoutMs",    mibId: "processesMibId" },
+  eventLog:     { polling: "eventLogPolling",     credentialId: "eventLogCredentialId",     intervalSeconds: "eventLogIntervalSeconds",    timeoutMs: "eventLogTimeoutMs" },
+};
+
+/**
+ * Walk a per-class streams block, calling `visit(tierField, value)` for every
+ * populated (validity-checked) stream field. The applier assigns, the
+ * provenance detector marks — same guards, one walker.
+ */
+function walkClassStreams(
+  streams: Record<string, unknown>,
+  visit: (field: keyof MonitorTierSettings, value: unknown) => void,
+): void {
+  for (const key of Object.keys(CLASS_STREAM_FIELD_MAP) as ClassStreamKey[]) {
+    const stream = streams[key] as Record<string, unknown> | null | undefined;
+    if (!stream || typeof stream !== "object") continue;
+    const cells = CLASS_STREAM_FIELD_MAP[key];
+    if ("polling" in stream && isPollingMethod(stream.polling)) visit(cells.polling, stream.polling);
+    if ("credentialId" in stream && typeof stream.credentialId === "string" && stream.credentialId.length > 0) visit(cells.credentialId, stream.credentialId);
+    if ("intervalSeconds" in stream && typeof stream.intervalSeconds === "number" && stream.intervalSeconds > 0) visit(cells.intervalSeconds, stream.intervalSeconds);
+    if ("timeoutMs" in stream && typeof stream.timeoutMs === "number" && stream.timeoutMs > 0) visit(cells.timeoutMs, stream.timeoutMs);
+    if (cells.mibId && "mibId" in stream && typeof stream.mibId === "string" && stream.mibId.length > 0) visit(cells.mibId, stream.mibId);
+    if (cells.failureThreshold && "failureThreshold" in stream && typeof stream.failureThreshold === "number" && stream.failureThreshold > 0) visit(cells.failureThreshold, stream.failureThreshold);
+  }
+}
+
 function applyClassStreamsOverlay(
   base: MonitorTierSettings,
   streams: Record<string, unknown> | undefined,
 ): MonitorTierSettings {
   if (!streams) return base;
-  type StreamKey = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage" | "processes" | "eventLog";
-  type StreamCells = {
-    pollingField:        keyof MonitorTierSettings;
-    credentialField:     keyof MonitorTierSettings;
-    intervalField:       keyof MonitorTierSettings;
-    timeoutField:        keyof MonitorTierSettings;
-    mibField?:           keyof MonitorTierSettings;
-    acceptsFailureField?: boolean;
-  };
-  const map: Record<StreamKey, StreamCells> = {
-    responseTime: { pollingField: "responseTimePolling", credentialField: "responseTimeCredentialId", intervalField: "intervalSeconds",            timeoutField: "probeTimeoutMs",        mibField: "responseTimeMibId", acceptsFailureField: true },
-    cpuMemory:    { pollingField: "cpuMemoryPolling",    credentialField: "cpuMemoryCredentialId",    intervalField: "cpuMemoryIntervalSeconds",   timeoutField: "cpuMemoryTimeoutMs",    mibField: "cpuMemoryMibId" },
-    temperature:  { pollingField: "temperaturePolling",  credentialField: "temperatureCredentialId",  intervalField: "temperatureIntervalSeconds", timeoutField: "temperatureTimeoutMs",  mibField: "temperatureMibId" },
-    interfaces:   { pollingField: "interfacesPolling",   credentialField: "interfacesCredentialId",   intervalField: "systemInfoIntervalSeconds",  timeoutField: "systemInfoTimeoutMs",   mibField: "interfacesMibId" },
-    lldp:         { pollingField: "lldpPolling",         credentialField: "lldpCredentialId",         intervalField: "lldpIntervalSeconds",        timeoutField: "lldpTimeoutMs",         mibField: "lldpMibId" },
-    storage:      { pollingField: "storagePolling",      credentialField: "interfacesCredentialId",   intervalField: "storageIntervalSeconds",     timeoutField: "storageTimeoutMs" },
-    processes:    { pollingField: "processesPolling",    credentialField: "processesCredentialId",    intervalField: "processesIntervalSeconds",   timeoutField: "processesTimeoutMs",    mibField: "processesMibId" },
-    eventLog:     { pollingField: "eventLogPolling",     credentialField: "eventLogCredentialId",     intervalField: "eventLogIntervalSeconds",    timeoutField: "eventLogTimeoutMs" },
-  };
-  for (const key of Object.keys(map) as StreamKey[]) {
-    const stream = streams[key] as Record<string, unknown> | null | undefined;
-    if (!stream || typeof stream !== "object") continue;
-    const cells = map[key];
-    if ("polling" in stream && isPollingMethod(stream.polling)) {
-      (base as any)[cells.pollingField] = stream.polling;
-    }
-    if ("credentialId" in stream && typeof stream.credentialId === "string" && stream.credentialId.length > 0) {
-      (base as any)[cells.credentialField] = stream.credentialId;
-    }
-    if ("intervalSeconds" in stream && typeof stream.intervalSeconds === "number" && stream.intervalSeconds > 0) {
-      (base as any)[cells.intervalField] = stream.intervalSeconds;
-    }
-    if ("timeoutMs" in stream && typeof stream.timeoutMs === "number" && stream.timeoutMs > 0) {
-      (base as any)[cells.timeoutField] = stream.timeoutMs;
-    }
-    if (cells.mibField && "mibId" in stream && typeof stream.mibId === "string" && stream.mibId.length > 0) {
-      (base as any)[cells.mibField] = stream.mibId;
-    }
-    if (cells.acceptsFailureField && "failureThreshold" in stream && typeof stream.failureThreshold === "number" && stream.failureThreshold > 0) {
-      base.failureThreshold = stream.failureThreshold;
-    }
-  }
+  walkClassStreams(streams, (field, value) => {
+    (base as any)[field] = value;
+  });
   return base;
 }
 
@@ -867,36 +876,9 @@ function detectPerClassFieldOrigins(
   streams: Record<string, unknown>,
 ): Partial<Record<keyof MonitorTierSettings, true>> {
   const out: Partial<Record<keyof MonitorTierSettings, true>> = {};
-  type StreamKey = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage" | "processes" | "eventLog";
-  type StreamCellMap = {
-    polling?:         keyof MonitorTierSettings;
-    credentialId?:    keyof MonitorTierSettings;
-    intervalSeconds?: keyof MonitorTierSettings;
-    timeoutMs?:       keyof MonitorTierSettings;
-    failureThreshold?: keyof MonitorTierSettings;
-    mibId?:           keyof MonitorTierSettings;
-  };
-  const map: Record<StreamKey, StreamCellMap> = {
-    responseTime: { polling: "responseTimePolling", credentialId: "responseTimeCredentialId", intervalSeconds: "intervalSeconds",            timeoutMs: "probeTimeoutMs",        failureThreshold: "failureThreshold", mibId: "responseTimeMibId" },
-    cpuMemory:    { polling: "cpuMemoryPolling",    credentialId: "cpuMemoryCredentialId",    intervalSeconds: "cpuMemoryIntervalSeconds",   timeoutMs: "cpuMemoryTimeoutMs",                                       mibId: "cpuMemoryMibId" },
-    temperature:  { polling: "temperaturePolling",  credentialId: "temperatureCredentialId",  intervalSeconds: "temperatureIntervalSeconds", timeoutMs: "temperatureTimeoutMs",                                     mibId: "temperatureMibId" },
-    interfaces:   { polling: "interfacesPolling",   credentialId: "interfacesCredentialId",   intervalSeconds: "systemInfoIntervalSeconds",  timeoutMs: "systemInfoTimeoutMs",                                      mibId: "interfacesMibId" },
-    lldp:         { polling: "lldpPolling",         credentialId: "lldpCredentialId",         intervalSeconds: "lldpIntervalSeconds",        timeoutMs: "lldpTimeoutMs",                                            mibId: "lldpMibId" },
-    storage:      { polling: "storagePolling",      credentialId: "interfacesCredentialId",   intervalSeconds: "storageIntervalSeconds",     timeoutMs: "storageTimeoutMs" },
-    processes:    { polling: "processesPolling",    credentialId: "processesCredentialId",    intervalSeconds: "processesIntervalSeconds",   timeoutMs: "processesTimeoutMs",                                       mibId: "processesMibId" },
-    eventLog:     { polling: "eventLogPolling",     credentialId: "eventLogCredentialId",     intervalSeconds: "eventLogIntervalSeconds",    timeoutMs: "eventLogTimeoutMs" },
-  };
-  for (const key of Object.keys(map) as StreamKey[]) {
-    const stream = streams[key] as Record<string, unknown> | null | undefined;
-    if (!stream || typeof stream !== "object") continue;
-    const cells = map[key];
-    if (cells.polling          && "polling"          in stream && isPollingMethod(stream.polling))                                       out[cells.polling]          = true;
-    if (cells.credentialId     && "credentialId"     in stream && typeof stream.credentialId === "string" && stream.credentialId.length) out[cells.credentialId]     = true;
-    if (cells.intervalSeconds  && "intervalSeconds"  in stream && typeof stream.intervalSeconds === "number" && stream.intervalSeconds > 0) out[cells.intervalSeconds] = true;
-    if (cells.timeoutMs        && "timeoutMs"        in stream && typeof stream.timeoutMs === "number" && stream.timeoutMs > 0)         out[cells.timeoutMs]        = true;
-    if (cells.failureThreshold && "failureThreshold" in stream && typeof stream.failureThreshold === "number" && stream.failureThreshold > 0) out[cells.failureThreshold] = true;
-    if (cells.mibId            && "mibId"            in stream && typeof stream.mibId === "string" && stream.mibId.length)             out[cells.mibId]            = true;
-  }
+  walkClassStreams(streams, (field) => {
+    out[field] = true;
+  });
   return out;
 }
 
@@ -1916,31 +1898,14 @@ async function probeFortinet(
   start: number,
   timeoutMs: number,
 ): Promise<ProbeResult> {
-  const cfg = integration.config || {};
-
   // SNMP routing is handled by the dispatcher in probeAsset via the
   // resolved responseTimePolling field. By the time we get here the polling
   // method already resolved to "rest_api" — only Fortinet-discovered
   // firewalls hit this function.
 
-  let apiUser  = "";
-  let apiToken = "";
-  if (integration.type === "fortimanager") {
-    apiUser  = String(cfg.fortigateApiUser  || "");
-    apiToken = String(cfg.fortigateApiToken || "");
-    if (!apiToken) return finish(start, false, "FortiManager direct-mode API token not configured");
-  } else {
-    apiUser  = String(cfg.apiUser  || "");
-    apiToken = String(cfg.apiToken || "");
-    if (!apiToken) return finish(start, false, "FortiGate API token not configured");
-  }
-
-  const fgConfig: FortiGateConfig = {
-    host,
-    apiUser,
-    apiToken,
-    verifySsl: cfg.verifySsl !== true ? false : true,
-  };
+  // Same credential/verifySsl assembly the FortiOS collectors use.
+  const fgConfig = buildFortinetConfig(host, integration);
+  if ("error" in fgConfig) return finish(start, false, fgConfig.error);
 
   try {
     // /api/v2/monitor/system/status doubles as our liveness check; capture
@@ -3033,7 +2998,6 @@ export async function withSnmpGate<T>(host: string, port: number, fn: () => Prom
 
 async function probeSnmp(host: string, config: Record<string, unknown>, start: number, timeoutMs: number): Promise<ProbeResult> {
   const port = toPositiveInt(config.port, 161);
-  const version = config.version === "v3" ? "v3" : "v2c";
   return withSnmpGate(host, port, () => new Promise<ProbeResult>((resolve) => {
     // Reset start INSIDE the gate so reported responseTimeMs reflects only
     // the device round-trip, not the FIFO wait behind a concurrent heavy
@@ -3050,38 +3014,8 @@ async function probeSnmp(host: string, config: Record<string, unknown>, start: n
 
     let session: any;
     try {
-      if (version === "v2c") {
-        session = snmp.createSession(host, String(config.community || ""), {
-          port,
-          version: snmp.Version2c,
-          timeout: timeoutMs,
-          retries: 0,
-        });
-      } else {
-        const securityLevel = config.securityLevel === "noAuthNoPriv"
-          ? snmp.SecurityLevel.noAuthNoPriv
-          : config.securityLevel === "authNoPriv"
-            ? snmp.SecurityLevel.authNoPriv
-            : snmp.SecurityLevel.authPriv;
-        const user: any = {
-          name: String(config.username || ""),
-          level: securityLevel,
-        };
-        if (securityLevel !== snmp.SecurityLevel.noAuthNoPriv) {
-          user.authProtocol = mapSnmpAuthProtocol(config.authProtocol);
-          user.authKey      = String(config.authKey || "");
-        }
-        if (securityLevel === snmp.SecurityLevel.authPriv) {
-          user.privProtocol = mapSnmpPrivProtocol(config.privProtocol);
-          user.privKey      = String(config.privKey || "");
-        }
-        session = snmp.createV3Session(host, user, {
-          port,
-          version: snmp.Version3,
-          timeout: timeoutMs,
-          retries: 0,
-        });
-      }
+      // Same v2c/v3 session construction the collectors use — one builder.
+      session = buildSnmpSession(host, config, timeoutMs);
 
       session.on("error", (err: Error) => finishOnce(finish(start, false, err?.message || "SNMP error")));
       session.get([sysUpTimeOid], (err: Error | null, varbinds: any[]) => {
