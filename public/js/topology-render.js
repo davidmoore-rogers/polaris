@@ -20,14 +20,9 @@
   // monitor-state palette — do NOT remap them. Extracting them here only
   // deduplicates the literals across the two files; the rendered values are
   // unchanged.
-  var HEALTH_NODE_COLORS = {
-    up:          "#2e7d32", // green
-    degraded:    "#f9a825", // amber
-    down:        "#c62828", // red
-    maintenance: "#9575cd", // purple — scheduler-held status="maintenance" (matches the assets-page pill + Status Map widget)
-    unknown:     "#9e9e9e", // gray — unknown / dep-suppressed
-    unmonitored: "#757575", // gray — unmonitored
-  };
+  // Canonical hexes live in api.js (POLARIS_HEALTH_COLORS — loaded first on
+  // every page); re-exposed here for the topology consumers.
+  var HEALTH_NODE_COLORS = window.POLARIS_HEALTH_COLORS;
 
   // Color a Fortinet-infrastructure node (FortiGate, FortiSwitch, FortiAP)
   // from its monitor health. Same priority as the asset list Status pill:

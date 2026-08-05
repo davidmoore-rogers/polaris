@@ -176,7 +176,8 @@
           title: site.hostname || "",
         });
         marker._site = site;   // clusterIcon() rolls up health across children
-        var color = { "monitor-up": "#2e7d32", "monitor-degraded": "#f9a825", "monitor-down": "#c62828", "monitor-dep-down": "#607d8b", "monitor-unmonitored": "#757575", "monitor-unknown": "#9e9e9e" }[monitorClass(site)] || "#9e9e9e";
+        var HP = window.POLARIS_HEALTH_COLORS;
+        var color = { "monitor-up": HP.up, "monitor-degraded": HP.degraded, "monitor-down": HP.down, "monitor-dep-down": HP.depDown, "monitor-unmonitored": HP.unmonitored, "monitor-unknown": HP.unknown }[monitorClass(site)] || HP.unknown;
         var name = escapeHtml(site.hostname || "(unnamed)");
         marker.bindTooltip(
           "<strong>" + name + "</strong>" +

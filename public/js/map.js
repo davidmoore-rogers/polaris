@@ -1568,15 +1568,15 @@
   // palette the firewall / switch / AP nodes use, so the path reads as a
   // single visual scheme.
   function endpointNodeColor(hop) {
-    // Shared node-health palette lives in topology-render.js (loaded first);
-    // "recovering" (#0288d1) is endpoint-only and stays a local literal.
+    // Shared node-health palette (api.js POLARIS_HEALTH_COLORS, re-exposed by
+    // topology-render.js which loads before this file).
     var P = window.PolarisTopologyRender.HEALTH_NODE_COLORS;
     if (!hop || !hop.monitored) return P.unmonitored;
     switch (hop.monitorStatus) {
       case "up":         return P.up;
       case "warning":    return P.degraded;
       case "down":       return P.down;
-      case "recovering": return "#0288d1";
+      case "recovering": return P.recovering;
       default:           return P.unknown;
     }
   }

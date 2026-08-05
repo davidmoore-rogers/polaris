@@ -1090,3 +1090,30 @@ function copyTextToClipboard(text) {
   return Promise.resolve(legacyCopy());
 }
 window.copyTextToClipboard = copyTextToClipboard;
+
+// ─── Shared status palettes (2026-08 audit) ─────────────────────────────────
+//
+// POLARIS_HEALTH_COLORS: the topology node-health hues (Device Map modal +
+// widget, mobile topology, map.js endpoint nodes). Deliberately distinct from
+// the CSS --color-* theme variables and from the assets-page monitor-state
+// palette — do NOT remap. topology-render.js re-exposes this object as
+// PolarisTopologyRender.HEALTH_NODE_COLORS.
+window.POLARIS_HEALTH_COLORS = {
+  up:          "#2e7d32", // green
+  degraded:    "#f9a825", // amber
+  down:        "#c62828", // red
+  maintenance: "#9575cd", // purple — scheduler-held status="maintenance"
+  unknown:     "#9e9e9e", // gray — unknown / dep-suppressed
+  unmonitored: "#757575", // gray — unmonitored
+  recovering:  "#0288d1", // blue — endpoint nodes only
+  depDown:     "#607d8b", // slate — Device Map widget's dep-suppressed pin
+};
+
+// The lighter material trio/quad the dashboard widgets use for pips + tiles
+// (statusSummary, sitesWithIssues).
+window.POLARIS_WIDGET_STATUS_COLORS = {
+  ok:      "#66bb6a",
+  warning: "#ffa726",
+  down:    "#ef5350",
+  neutral: "#90a4ae",
+};

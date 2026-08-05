@@ -479,13 +479,16 @@
   // palette the firewall / switch / AP nodes use so the path reads as a
   // single visual scheme. Mirrors desktop's endpointNodeColor.
   function endpointNodeColor(hop) {
-    if (!hop || !hop.monitored) return "#757575";
+    // Shared node-health palette (api.js POLARIS_HEALTH_COLORS, re-exposed by
+    // topology-render.js which mobile.html loads).
+    var P = window.POLARIS_HEALTH_COLORS;
+    if (!hop || !hop.monitored) return P.unmonitored;
     switch (hop.monitorStatus) {
-      case "up":         return "#2e7d32";
-      case "warning":    return "#f9a825";
-      case "down":       return "#c62828";
-      case "recovering": return "#0288d1";
-      default:           return "#9e9e9e";
+      case "up":         return P.up;
+      case "warning":    return P.degraded;
+      case "down":       return P.down;
+      case "recovering": return P.recovering;
+      default:           return P.unknown;
     }
   }
 

@@ -17,7 +17,8 @@
   }
 
   function statusPip(status) {
-    var color = status === "down" ? "#ef5350" : status === "warning" ? "#ffa726" : "#90a4ae";
+    var WC = window.POLARIS_WIDGET_STATUS_COLORS;
+    var color = status === "down" ? WC.down : status === "warning" ? WC.warning : WC.neutral;
     return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:6px"></span>';
   }
 

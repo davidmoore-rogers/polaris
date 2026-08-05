@@ -9,21 +9,21 @@
   // Tile catalog: id → { label, color, value(data) }. Color drives the tile's
   // left border + number. Uptime / alerts colors are computed per-value.
   var TILE_DEFS = [
-    { id: "total",   label: "Total",   color: "#90a4ae", val: function (d) { return d.statusCounts.total; } },
-    { id: "up",      label: "Up",      color: "#66bb6a", val: function (d) { return d.statusCounts.up; } },
-    { id: "down",    label: "Down",    color: "#ef5350", val: function (d) { return d.statusCounts.down; } },
-    { id: "warning", label: "Warning", color: "#ffa726", val: function (d) { return d.statusCounts.warning; } },
-    { id: "unknown", label: "Unknown", color: "#90a4ae", val: function (d) { return d.statusCounts.unknown; } },
+    { id: "total",   label: "Total",   color: WC.neutral, val: function (d) { return d.statusCounts.total; } },
+    { id: "up",      label: "Up",      color: WC.ok, val: function (d) { return d.statusCounts.up; } },
+    { id: "down",    label: "Down",    color: WC.down, val: function (d) { return d.statusCounts.down; } },
+    { id: "warning", label: "Warning", color: WC.warning, val: function (d) { return d.statusCounts.warning; } },
+    { id: "unknown", label: "Unknown", color: WC.neutral, val: function (d) { return d.statusCounts.unknown; } },
     // Maintenance-window assets — excluded from Up/Down/Warning server-side
     // (their frozen monitorStatus is not live state); purple matches the
     // assets-page maintenance pill and the Status Map dot.
-    { id: "maintenance", label: "Maint", color: "#9575cd", val: function (d) { return d.statusCounts.maintenance; } },
+    { id: "maintenance", label: "Maint", color: window.POLARIS_HEALTH_COLORS.maintenance, val: function (d) { return d.statusCounts.maintenance; } },
     { id: "uptime",  label: "Uptime",  color: null,      val: function (d) { return d.uptimePercent; } },
     { id: "alerts",  label: "Alerts",  color: null,      val: function (d) { return d.activeAlertCount; } },
   ];
   var ALL_IDS = TILE_DEFS.map(function (t) { return t.id; });
 
-  function uptimeColor(pct) { return pct >= 98 ? "#66bb6a" : pct >= 95 ? "#ffa726" : "#ef5350"; }
+  function uptimeColor(pct) { return pct >= 98 ? WC.ok : pct >= 95 ? WC.warning : WC.down; }
 
   function tileHTML(def, data) {
     var raw = def.val(data);
@@ -31,10 +31,10 @@
     var display;
     if (def.id === "uptime") {
       display = raw == null ? "—" : raw + "%";
-      color = raw == null ? "#90a4ae" : uptimeColor(raw);
+      color = raw == null ? WC.neutral : uptimeColor(raw);
     } else if (def.id === "alerts") {
       display = raw == null ? 0 : raw;
-      color = raw > 0 ? "#ef5350" : "#66bb6a";
+      color = raw > 0 ? WC.down : WC.ok;
     } else {
       display = raw == null ? 0 : raw;
     }
