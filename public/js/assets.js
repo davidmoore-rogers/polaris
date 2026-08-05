@@ -7852,14 +7852,8 @@ function _addChartScreenshotButton(container, label, axisOpts) {
     };
     _captureChartAsPng(container, meta, function (blob) {
       if (!blob) { showToast("Screenshot failed", "error"); return; }
-      if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-        showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-        return;
-      }
-      navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-        showToast(label + " chart copied to clipboard");
-      }).catch(function () {
-        showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+      copyPngToClipboard(blob).then(function (ok) {
+        showToast(ok ? label + " chart copied to clipboard" : "Screenshot failed — requires HTTPS or clipboard permission", ok ? "success" : "error");
       });
     });
   });
@@ -8087,14 +8081,8 @@ function _composeInterfaceScreenshot(parts) {
 
   canvas.toBlob(function (blob) {
     if (!blob) { showToast("Screenshot failed", "error"); return; }
-    if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-      showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-      return;
-    }
-    navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-      showToast("Interface screenshot copied to clipboard");
-    }).catch(function () {
-      showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+    copyPngToClipboard(blob).then(function (ok) {
+      showToast(ok ? "Interface screenshot copied to clipboard" : "Screenshot failed — requires HTTPS or clipboard permission", ok ? "success" : "error");
     });
   }, "image/png");
 }
@@ -12386,16 +12374,8 @@ function _runScreenshotCapture(asset, opts) {
           canvas.toBlob(function (blob) {
             done();
             if (!blob) { showToast("Screenshot failed", "error"); resolve(); return; }
-            if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-              showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-              resolve();
-              return;
-            }
-            navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-              showToast("Screenshot copied to clipboard");
-              resolve();
-            }).catch(function () {
-              showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+            copyPngToClipboard(blob).then(function (ok) {
+              showToast(ok ? "Screenshot copied to clipboard" : "Screenshot failed — requires HTTPS or clipboard permission", ok ? "success" : "error");
               resolve();
             });
           }, "image/png");
@@ -12898,14 +12878,8 @@ function _screenshotTableEl(tableEl, label, opts) {
 
   canvas.toBlob(function (blob) {
     if (!blob) { showToast("Screenshot failed", "error"); return; }
-    if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-      showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-      return;
-    }
-    navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-      showToast((label || "Table") + " copied to clipboard");
-    }).catch(function () {
-      showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+    copyPngToClipboard(blob).then(function (ok) {
+      showToast(ok ? (label || "Table") + " copied to clipboard" : "Screenshot failed — requires HTTPS or clipboard permission", ok ? "success" : "error");
     });
   }, "image/png");
 }
@@ -15604,14 +15578,8 @@ function _screenshotProcPanel() {
             canvas.toBlob(function (blob) {
               done();
               if (!blob) { showToast("Screenshot failed", "error"); return; }
-              if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-                showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-                return;
-              }
-              navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-                showToast("Screenshot copied to clipboard");
-              }).catch(function () {
-                showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+              copyPngToClipboard(blob).then(function (ok) {
+                showToast(ok ? "Screenshot copied to clipboard" : "Screenshot failed — requires HTTPS or clipboard permission", ok ? "success" : "error");
               });
             }, "image/png");
           })

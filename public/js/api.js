@@ -1117,3 +1117,22 @@ window.POLARIS_WIDGET_STATUS_COLORS = {
   down:    "#ef5350",
   neutral: "#90a4ae",
 };
+
+// Copy a PNG blob to the clipboard. Resolves true on success, false when the
+// clipboard image API is unavailable (HTTP context / permission denied) or the
+// write fails — callers own their toast/download-fallback UX. Companion to
+// copyTextToClipboard above; there is no legacy path for images.
+function copyPngToClipboard(blob) {
+  try {
+    if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
+      return Promise.resolve(false);
+    }
+    return navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(
+      function () { return true; },
+      function () { return false; },
+    );
+  } catch (_) {
+    return Promise.resolve(false);
+  }
+}
+window.copyPngToClipboard = copyPngToClipboard;

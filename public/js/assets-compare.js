@@ -834,13 +834,9 @@ function _cmpScreenshot() {
       canvas.toBlob(function (blob) {
         if (btn) btn.disabled = false;
         if (!blob) { showToast("Screenshot failed", "error"); return; }
-        if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-          showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-          return;
-        }
-        navigator.clipboard.write([new ClipboardItem({ "image/png": blob })])
-          .then(function () { showToast("Screenshot copied to clipboard"); })
-          .catch(function () { showToast("Screenshot failed — requires HTTPS or clipboard permission", "error"); });
+        copyPngToClipboard(blob).then(function (ok) {
+          showToast(ok ? "Screenshot copied to clipboard" : "Screenshot failed — requires HTTPS or clipboard permission", ok ? "success" : "error");
+        });
       }, "image/png");
     }).catch(function () {
       release();

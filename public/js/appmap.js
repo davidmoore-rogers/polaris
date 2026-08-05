@@ -1471,13 +1471,11 @@
       var blob = await new Promise(function (resolve) { out.toBlob(resolve, "image/png"); });
       if (!blob) { showToast("Screenshot failed", "error"); return; }
 
-      if (navigator.clipboard && typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
-        try {
-          await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-          showToast(railCanvas ? "Map + info panel copied to clipboard" : "Map copied to clipboard");
-          return;
-        } catch (e) { /* fall through to download */ }
+      if (await copyPngToClipboard(blob)) {
+        showToast(railCanvas ? "Map + info panel copied to clipboard" : "Map copied to clipboard");
+        return;
       }
+      // Clipboard unavailable/refused — fall through to download.
       var a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = "application-map-" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";

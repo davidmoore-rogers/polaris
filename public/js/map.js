@@ -603,14 +603,8 @@
       if (typeof showToast === "function") showToast("Screenshot failed", "error");
       return;
     }
-    if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-      if (typeof showToast === "function") showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-      return;
-    }
-    navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-      if (typeof showToast === "function") showToast("Topology copied to clipboard");
-    }).catch(function () {
-      if (typeof showToast === "function") showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+    copyPngToClipboard(blob).then(function (ok) {
+      if (typeof showToast === "function") showToast(ok ? "Topology copied to clipboard" : "Screenshot failed — requires HTTPS or clipboard permission", ok ? "success" : "error");
     });
   }
 
@@ -813,14 +807,8 @@
 
     canvas.toBlob(function (blob) {
       if (!blob) { if (typeof showToast === "function") showToast("Screenshot failed", "error"); return; }
-      if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-        if (typeof showToast === "function") showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-        return;
-      }
-      navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-        if (typeof showToast === "function") showToast("Topology view copied to clipboard");
-      }).catch(function () {
-        if (typeof showToast === "function") showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+      copyPngToClipboard(blob).then(function (ok) {
+        if (typeof showToast === "function") showToast(ok ? "Topology view copied to clipboard" : "Screenshot failed — requires HTTPS or clipboard permission", ok ? "success" : "error");
       });
     }, "image/png");
   }

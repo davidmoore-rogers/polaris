@@ -358,14 +358,9 @@
   }
 
   function copyOrDownloadScreenshot(blob, fname) {
-    if (navigator.clipboard && typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
-      return navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-        return "Screenshot copied to clipboard";
-      }).catch(function () {
-        return downloadScreenshot(blob, fname);
-      });
-    }
-    return Promise.resolve(downloadScreenshot(blob, fname));
+    return copyPngToClipboard(blob).then(function (ok) {
+      return ok ? "Screenshot copied to clipboard" : downloadScreenshot(blob, fname);
+    });
   }
 
   function downloadScreenshot(blob, fname) {
