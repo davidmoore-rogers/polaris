@@ -14,6 +14,7 @@
 import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { normalizeMacOrNull } from "../utils/mac.js";
+import { buildClientCredentialsTokenRequest } from "../utils/entraClientCredentials.js";
 
 export interface EntraIdConfig {
   tenantId: string;
@@ -100,11 +101,10 @@ async function getAccessToken(config: EntraIdConfig, signal?: AbortSignal): Prom
     return cached.token;
   }
 
-  const url = `https://login.microsoftonline.com/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/token`;
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: config.clientId,
-    client_secret: config.clientSecret,
+  const { url, body } = buildClientCredentialsTokenRequest({
+    tenantId: config.tenantId,
+    clientId: config.clientId,
+    clientSecret: config.clientSecret,
     scope: "https://graph.microsoft.com/.default",
   });
 

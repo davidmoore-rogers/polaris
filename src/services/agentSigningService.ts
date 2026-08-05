@@ -32,6 +32,7 @@ import { resolve as resolvePath } from "node:path";
 import { prisma } from "../db.js";
 import { STATE_DIR } from "../utils/paths.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
+import { buildClientCredentialsTokenRequest } from "../utils/entraClientCredentials.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -219,15 +220,7 @@ export function buildTokenRequest(cfg: Pick<AgentSigningConfig, "tenantId" | "cl
   url: string;
   body: URLSearchParams;
 } {
-  return {
-    url: `https://login.microsoftonline.com/${encodeURIComponent(cfg.tenantId)}/oauth2/v2.0/token`,
-    body: new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: cfg.clientId,
-      client_secret: cfg.clientSecret,
-      scope: SIGNING_TOKEN_SCOPE,
-    }),
-  };
+  return buildClientCredentialsTokenRequest({ ...cfg, scope: SIGNING_TOKEN_SCOPE });
 }
 
 /**
