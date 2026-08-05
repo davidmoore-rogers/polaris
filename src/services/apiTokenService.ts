@@ -20,7 +20,7 @@
  * Wire format: `Authorization: Bearer polaris_<32-char-base62-tail>`.
  */
 
-import { randomBytes } from "node:crypto";
+import { TOKEN_PREFIX, generateRawToken } from "../utils/bearerToken.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { hashPassword, verifyPassword } from "../utils/password.js";
@@ -31,8 +31,6 @@ import {
   type AccessLevel,
 } from "../api/middleware/permissions.js";
 
-const TOKEN_PREFIX = "polaris_";
-const TOKEN_RANDOM_BYTES = 24; // → 32 base64url chars
 
 export interface ApiTokenSummary {
   id: string;
@@ -55,14 +53,6 @@ export interface AuthenticatedToken {
   name: string;
   roleId: string;
   integrationIds: string[];
-}
-
-function generateRawToken(): string {
-  const tail = randomBytes(TOKEN_RANDOM_BYTES)
-    .toString("base64")
-    .replace(/[+/=]/g, "")
-    .slice(0, 32);
-  return `${TOKEN_PREFIX}${tail}`;
 }
 
 export interface CreateTokenInput {

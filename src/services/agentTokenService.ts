@@ -32,16 +32,16 @@
  * any client-supplied value — defense against stolen-bearer cross-asset reuse.
  */
 
-import { randomBytes } from "node:crypto";
+import { TOKEN_PREFIX, TOKEN_INDEX_PREFIX_LEN, generateRawToken } from "../utils/bearerToken.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { hashPassword, verifyPassword } from "../utils/password.js";
 import { recomputeMonitorOverrideForAssets } from "./monitorOverrideService.js";
 import { logEvent } from "./eventLogService.js";
 
-const TOKEN_PREFIX = "polaris_";
-const TOKEN_PREFIX_LEN = TOKEN_PREFIX.length + 8; // "polaris_xxxxxxxx" — indexed lookup key
-const TOKEN_RANDOM_BYTES = 24; // → 32 base64url chars
+// Token format constants + generator are shared with apiTokenService —
+// see utils/bearerToken.ts.
+const TOKEN_PREFIX_LEN = TOKEN_INDEX_PREFIX_LEN;
 const ENROLLMENT_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
@@ -60,14 +60,6 @@ export function shouldEnableMonitoringOnEnroll(asset: {
 }): boolean {
   if (asset.monitored) return false;
   return asset.status !== "decommissioned" && asset.status !== "disabled";
-}
-
-function generateRawToken(): string {
-  const tail = randomBytes(TOKEN_RANDOM_BYTES)
-    .toString("base64")
-    .replace(/[+/=]/g, "")
-    .slice(0, 32);
-  return `${TOKEN_PREFIX}${tail}`;
 }
 
 /**

@@ -31,6 +31,7 @@ import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { resolvePendingIpOverrideConflicts } from "../../services/ipOverrideService.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
 import { csvParam } from "../../utils/text.js";
+import { buildPrismaTextFilter, TEXT_FILTER_OPS } from "../../utils/prismaTextFilter.js";
 import {
   probeAsset, recordProbeResult,
   collectTelemetry, recordTelemetryResult,
@@ -406,7 +407,7 @@ const ASSET_TEXT_COLUMNS: Record<string, string> = {
   description: "description",
 };
 
-const ASSET_TEXT_OPS = new Set(["contains", "not_contains", "empty", "is_not_empty"]);
+const ASSET_TEXT_OPS = TEXT_FILTER_OPS;
 
 /** CSV → string[]; empty entries dropped; returns undefined for no value. */
 const csvToArray = csvParam;
@@ -417,23 +418,7 @@ const csvToArray = csvParam;
  * because empty / is_not_empty need OR / AND composition; the caller ANDs the
  * fragments together.
  */
-function buildAssetTextFilter(
-  field: string,
-  value: string | undefined,
-  op: string | undefined,
-): Record<string, unknown> | undefined {
-  const operator = op && ASSET_TEXT_OPS.has(op) ? op : "contains";
-  if (operator === "empty") return { OR: [{ [field]: null }, { [field]: "" }] };
-  if (operator === "is_not_empty") {
-    return { AND: [{ [field]: { not: null } }, { [field]: { not: "" } }] };
-  }
-  const v = (value || "").trim();
-  if (!v) return undefined;
-  if (operator === "not_contains") {
-    return { [field]: { not: { contains: v }, mode: "insensitive" } };
-  }
-  return { [field]: { contains: v, mode: "insensitive" } };
-}
+const buildAssetTextFilter = buildPrismaTextFilter;
 
 /**
  * The `_server` column displays `location || learnedLocation`, so its filter

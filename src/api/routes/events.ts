@@ -9,6 +9,7 @@ import { AppError } from "../../utils/errors.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { SECRET_MASK, isMaskedSecret } from "../../utils/secretMask.js";
 import { csvParam } from "../../utils/text.js";
+import { buildPrismaTextFilter } from "../../utils/prismaTextFilter.js";
 import {
   getArchiveSettings,
   updateArchiveSettings,
@@ -31,7 +32,6 @@ const SORT_WHITELIST = new Set([
 
 // Text-filter operators accepted from the TableSF text-column operator
 // dropdown. `contains` is the default and the only form pre-this-change.
-const TEXT_OPS = new Set(["contains", "not_contains", "empty", "is_not_empty"]);
 
 const ListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -73,24 +73,9 @@ function buildTextFilter(
   value: string | undefined,
   op: string | undefined,
 ): Record<string, unknown> | undefined {
-  const operator = op && TEXT_OPS.has(op) ? op : "contains";
-  const nullable = field === "actor";
-  if (operator === "empty") {
-    return nullable ? { OR: [{ [field]: null }, { [field]: "" }] } : { [field]: "" };
-  }
-  if (operator === "is_not_empty") {
-    return nullable
-      ? { AND: [{ [field]: { not: null } }, { [field]: { not: "" } }] }
-      : { [field]: { not: "" } };
-  }
-  const v = (value || "").trim();
-  if (!v) return undefined;
-  if (operator === "not_contains") {
-    // `mode` is a sibling of `not` in Prisma's string filter — nesting it
-    // inside the `not` object is rejected by the client.
-    return { [field]: { not: { contains: v }, mode: "insensitive" } };
-  }
-  return { [field]: { contains: v, mode: "insensitive" } };
+  // `actor` is the one nullable Event text column; action/message compare
+  // against "" only. Shared builder: utils/prismaTextFilter.
+  return buildPrismaTextFilter(field, value, op, { nullable: field === "actor" });
 }
 
 /** CSV → string[]; empty entries dropped; returns undefined for no value. */
