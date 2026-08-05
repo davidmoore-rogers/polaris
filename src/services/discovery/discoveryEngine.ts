@@ -86,10 +86,10 @@ import {
 import {
   MAC_ROW_SELECT,
   shapeMacRows,
-  reconcileMacAddresses,
   buildMacRowsForCreate,
   type MacJsonEntry,
 } from "../../utils/macAddresses.js";
+import { reconcileMacAddresses } from "../macAddressService.js";
 import { logger } from "../../utils/logger.js";
 
 /** Auto-disable window for per-integration verbose debug logging (30 minutes). */

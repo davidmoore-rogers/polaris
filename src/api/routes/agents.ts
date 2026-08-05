@@ -52,7 +52,7 @@ import {
   enqueueServiceLogSamples,
 } from "../../services/sampleWriteBuffer.js";
 import { persistAssetServices } from "../../services/serviceInventoryService.js";
-import { reconcileMacAddresses, reconcileInterfaceMacs } from "../../utils/macAddresses.js";
+import { reconcileMacAddresses, reconcileInterfaceMacs } from "../../services/macAddressService.js";
 import { logEvent } from "./events.js";
 import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
 import { fetchPendingCommands, recordCommandResult } from "../../services/agentCommandService.js";

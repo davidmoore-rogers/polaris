@@ -1546,6 +1546,25 @@ Listed alphabetically.
 
 ---
 
+## services/macAddressService.ts
+
+**What it owns:** The two AssetMacAddress side-table WRITERS (moved from utils/macAddresses 2026-08 — utils stay pure): `reconcileMacAddresses(assetId, macs)` (discovery's in-memory-list sync — bulk INSERT…ON CONFLICT, mac-sorted for deterministic lock order, deadlock-retried) and `reconcileInterfaceMacs(assetId, macs, now?)` (the interface-scrape fold into `[mac, macEnd]` range rows, source-scoped full-replace with the occupied-key slide).
+
+**Public API:** `reconcileMacAddresses`, `reconcileInterfaceMacs`.
+
+**Cross-service deps:** `prisma` (asset_mac_addresses), `utils/dbRetry.retryOnDeadlock`, and the pure surface in `utils/macAddresses` (INTERFACE_MAC_SOURCE, foldMacsToRanges, macToInt/intToMac, MacJsonEntry/MacRangeEntry).
+
+**Used by:** `discovery/discoveryEngine` (every asset-write site that rebuilt a mac list), `api/routes/agents.ts` (interfaces push + sample-merge), `monitoringService` (system-info interface scrape).
+
+**Invariants:**
+- Ownership split: rows with `source="monitor-interface"` (the only rows that may carry `macEnd`) belong to `reconcileInterfaceMacs`; `reconcileMacAddresses` filters them from its input AND scopes its deletes away from them. Neither writer may churn the other's rows.
+- When another source holds a would-be range's start key, the range starts one past it (the occupied row keeps its richer discovery metadata).
+- All writes ride `retryOnDeadlock`; the discovery reconcile sorts by mac asc so ~50 parallel reconciles acquire index-page locks in deterministic order.
+
+**When changing this:** search behavior depends on canonical colon-uppercase storage (string order == numeric order for range containment — see searchService); anything changing the stored MAC shape breaks range lookup.
+
+---
+
 ## services/pushSubscriptionService.ts
 
 **What it owns:** The write path for the `PushSubscription` table — per-user Web Push subscriptions stored by the `/push-subscriptions` routes.

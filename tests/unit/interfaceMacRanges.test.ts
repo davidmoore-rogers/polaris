@@ -27,9 +27,9 @@ vi.mock("../../src/db.js", () => ({
 import {
   foldMacsToRanges,
   expandMacRange,
-  reconcileInterfaceMacs,
   INTERFACE_MAC_SOURCE,
 } from "../../src/utils/macAddresses.js";
+import { reconcileInterfaceMacs } from "../../src/services/macAddressService.js";
 
 const now = new Date("2026-07-13T12:00:00.000Z");
 

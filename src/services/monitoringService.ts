@@ -42,7 +42,8 @@ import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { applyTransform } from "../utils/symbolTransforms.js";
 import { createTtlCache } from "../utils/ttlCache.js";
-import { reconcileInterfaceMacs, expandMacRange } from "../utils/macAddresses.js";
+import { expandMacRange } from "../utils/macAddresses.js";
+import { reconcileInterfaceMacs } from "./macAddressService.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
 import {
