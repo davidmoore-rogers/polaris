@@ -485,10 +485,8 @@ function showBackupCodesModal(codes) {
     '<button class="btn btn-primary" id="btn-backup-done">I\'ve saved them</button>';
   openModal("Backup Codes", body, footer);
   document.getElementById("btn-copy-backup").addEventListener("click", function () {
-    navigator.clipboard.writeText(codes.join("\n")).then(function () {
-      showToast("Backup codes copied");
-    }).catch(function () {
-      showToast("Copy failed — select the codes manually", "error");
+    copyTextToClipboard(codes.join("\n")).then(function (ok) {
+      showToast(ok ? "Backup codes copied" : "Copy failed — select the codes manually", ok ? "success" : "error");
     });
   });
   document.getElementById("btn-backup-done").addEventListener("click", closeModal);
@@ -1061,7 +1059,8 @@ function buildSessionTab(s) {
 
 function copyField(id, btn) {
   var input = document.getElementById(id);
-  navigator.clipboard.writeText(input.value).then(function () {
+  copyTextToClipboard(input.value).then(function (ok) {
+    if (!ok) return;
     var orig = btn.textContent;
     btn.textContent = "Copied!";
     setTimeout(function () { btn.textContent = orig; }, 1500);

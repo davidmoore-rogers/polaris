@@ -1054,3 +1054,39 @@ function toQuery(params) {
     .join("&");
   return qs ? "?" + qs : "";
 }
+
+// ─── Clipboard (shared, 2026-08 audit) ──────────────────────────────────────
+//
+// One robust text-copy for every page: navigator.clipboard when available
+// (secure contexts), else the textarea/execCommand legacy path (HTTP installs,
+// older browsers). Resolves true/false — callers own their toast/flash UX.
+// Previously two module-private robust helpers (map.js, ip-panel.js) next to
+// ~19 raw writeText sites that silently failed on non-secure contexts.
+function copyTextToClipboard(text) {
+  function legacyCopy() {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = !!(document.execCommand && document.execCommand("copy"));
+      document.body.removeChild(ta);
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(
+        function () { return true; },
+        function () { return legacyCopy(); },
+      );
+    }
+  } catch (_) { /* fall through to legacy path */ }
+  return Promise.resolve(legacyCopy());
+}
+window.copyTextToClipboard = copyTextToClipboard;

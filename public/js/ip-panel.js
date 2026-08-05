@@ -595,24 +595,8 @@ function _renderIpList(data) {
           window.showToast(ok ? ("Copied " + value) : "Copy failed", ok ? "success" : "error");
         }
       };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(value).then(function () { notify(true); }, function () { notify(false); });
-      } else {
-        // Fallback for non-secure contexts / older browsers
-        try {
-          var ta = document.createElement("textarea");
-          ta.value = value;
-          ta.style.position = "fixed";
-          ta.style.opacity = "0";
-          document.body.appendChild(ta);
-          ta.select();
-          var ok = document.execCommand && document.execCommand("copy");
-          document.body.removeChild(ta);
-          notify(!!ok);
-        } catch (_) {
-          notify(false);
-        }
-      }
+      // Shared robust copy (api.js) — clipboard API with legacy fallback.
+      copyTextToClipboard(value).then(notify);
     });
   }
 

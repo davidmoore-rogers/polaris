@@ -4974,13 +4974,9 @@ function _wireMibWalkCopy(result) {
         return label + "\t" + e.decoded + "\t" + (e.baseType || "");
       }).join("\n");
     }
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(text).then(function () {
-        showToast("Walk results copied", "success");
-      }).catch(function () {
-        showToast("Copy failed — select and copy by hand", "error");
-      });
-    }
+    copyTextToClipboard(text).then(function (ok) {
+      showToast(ok ? "Walk results copied" : "Copy failed — select and copy by hand", ok ? "success" : "error");
+    });
   });
 }
 
@@ -6673,7 +6669,7 @@ function _showRawTokenModal(name, rawToken) {
     '<button class="btn btn-primary" onclick="closeModal()">I have saved it</button>');
   document.getElementById("btn-copy-raw-token").addEventListener("click", async function () {
     try {
-      await navigator.clipboard.writeText(rawToken);
+      if (!(await copyTextToClipboard(rawToken))) throw new Error("copy failed");
       showToast("Token copied");
     } catch (_) {
       showToast("Copy failed — select the token text manually", "error");

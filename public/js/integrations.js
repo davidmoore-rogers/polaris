@@ -5988,10 +5988,11 @@ function openApiQueryModal(id, adom, useProxy) {
   document.getElementById("fmg-copy-btn").addEventListener("click", function () {
     var text = document.getElementById("fmg-response").textContent;
     var btn = this;
-    navigator.clipboard.writeText(text).then(function () {
+    copyTextToClipboard(text).then(function (ok) {
+      if (!ok) { showToast("Copy failed", "error"); return; }
       btn.textContent = "Copied!";
       setTimeout(function () { btn.textContent = "Copy"; }, 1500);
-    }).catch(function () { showToast("Copy failed", "error"); });
+    });
   });
 }
 
@@ -6231,10 +6232,11 @@ function openFgtApiQueryModal(id, vdom) {
   document.getElementById("fgt-copy-btn").addEventListener("click", function () {
     var text = document.getElementById("fgt-response").textContent;
     var btn = this;
-    navigator.clipboard.writeText(text).then(function () {
+    copyTextToClipboard(text).then(function (ok) {
+      if (!ok) { showToast("Copy failed", "error"); return; }
       btn.textContent = "Copied!";
       setTimeout(function () { btn.textContent = "Copy"; }, 1500);
-    }).catch(function () { showToast("Copy failed", "error"); });
+    });
   });
 }
 
@@ -6423,10 +6425,11 @@ function openEntraApiQueryModal(id) {
   document.getElementById("entra-copy-btn").addEventListener("click", function () {
     var text = document.getElementById("entra-response").textContent;
     var btn = this;
-    navigator.clipboard.writeText(text).then(function () {
+    copyTextToClipboard(text).then(function (ok) {
+      if (!ok) { showToast("Copy failed", "error"); return; }
       btn.textContent = "Copied!";
       setTimeout(function () { btn.textContent = "Copy"; }, 1500);
-    }).catch(function () { showToast("Copy failed", "error"); });
+    });
   });
 }
 
@@ -6641,10 +6644,11 @@ function openAdApiQueryModal(id) {
   document.getElementById("ad-copy-btn").addEventListener("click", function () {
     var text = document.getElementById("ad-response").textContent;
     var btn = this;
-    navigator.clipboard.writeText(text).then(function () {
+    copyTextToClipboard(text).then(function (ok) {
+      if (!ok) { showToast("Copy failed", "error"); return; }
       btn.textContent = "Copied!";
       setTimeout(function () { btn.textContent = "Copy"; }, 1500);
-    }).catch(function () { showToast("Copy failed", "error"); });
+    });
   });
 }
 
@@ -6843,9 +6847,10 @@ function openVcenterApiQueryModal(id) {
   document.getElementById("vc-copy-btn").addEventListener("click", function () {
     var text = document.getElementById("vc-response").textContent;
     var btn = this;
-    navigator.clipboard.writeText(text).then(function () {
+    copyTextToClipboard(text).then(function (ok) {
+      if (!ok) { showToast("Copy failed", "error"); return; }
       btn.textContent = "Copied!";
       setTimeout(function () { btn.textContent = "Copy"; }, 1500);
-    }).catch(function () { showToast("Copy failed", "error"); });
+    });
   });
 }

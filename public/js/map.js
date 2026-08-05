@@ -2624,28 +2624,8 @@
   }
 
   function _copyToClipboard(text, sourceEl) {
-    var done = function (ok) { _flashCopied(sourceEl, ok); };
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(_legacyCopy(text)); });
-        return;
-      }
-    } catch (_) { /* fall through to legacy path */ }
-    done(_legacyCopy(text));
-  }
-
-  function _legacyCopy(text) {
-    try {
-      var ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.focus(); ta.select();
-      var ok = document.execCommand("copy");
-      document.body.removeChild(ta);
-      return ok;
-    } catch (_) { return false; }
+    // Shared robust copy (api.js) — clipboard API with legacy fallback.
+    copyTextToClipboard(text).then(function (ok) { _flashCopied(sourceEl, ok); });
   }
 
   function _flashCopied(el, ok) {

@@ -829,7 +829,8 @@ function _handleCopyClick(e) {
   if (!el) return;
   var text = el.getAttribute('data-copy');
   if (!text) return;
-  navigator.clipboard.writeText(text).then(function () {
+  copyTextToClipboard(text).then(function (ok) {
+    if (!ok) return;
     el.classList.add('copy-cell-flash');
     setTimeout(function () { el.classList.remove('copy-cell-flash'); }, 600);
   });
@@ -12275,10 +12276,8 @@ function _blocksToPlaintext(blocks) {
 function _copyAssetDetails() {
   var blocks = _extractTabBlocks(_activeAssetPanel());
   if (blocks.length === 0) { showToast("Nothing to copy", "error"); return; }
-  navigator.clipboard.writeText(_blocksToPlaintext(blocks)).then(function () {
-    showToast("Asset details copied to clipboard");
-  }).catch(function () {
-    showToast("Copy failed", "error");
+  copyTextToClipboard(_blocksToPlaintext(blocks)).then(function (ok) {
+    showToast(ok ? "Asset details copied to clipboard" : "Copy failed", ok ? "success" : "error");
   });
 }
 
@@ -13032,14 +13031,9 @@ function _doSshLaunch(mgmtIp, action) {
   var target = _sshTarget(mgmtIp);
   if (action === "copy") {
     var cmd = "ssh " + target;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(cmd).then(
-        function () { showToast("Copied: " + cmd); },
-        function () { showToast("Copy failed — " + cmd, "error"); },
-      );
-    } else {
-      showToast(cmd);
-    }
+    copyTextToClipboard(cmd).then(function (ok) {
+      showToast(ok ? "Copied: " + cmd : "Copy failed — " + cmd, ok ? "success" : "error");
+    });
   } else {
     // Browsers are sandboxed: this hands ssh://user@host to whatever app the OS
     // has registered for the ssh:// scheme (PuTTY, Windows Terminal, Konsole…).
@@ -14664,7 +14658,7 @@ function _wireSnmpWalkTab(a) {
       }
       if (!text) return;
       try {
-        await navigator.clipboard.writeText(text);
+        if (!(await copyTextToClipboard(text))) throw new Error("copy failed");
         var count = lastMibResult ? lastMibResult.rowCount : lastResult.rows.length;
         showToast("Copied " + count + " row(s)", "success");
       } catch (_) {
@@ -15513,10 +15507,8 @@ function _copyProcPanel() {
   var m = metaEl ? (metaEl.textContent || "").trim() : "";
   if (m) header.push(m);
   var text = (header.length ? header.join("\n") + "\n\n" : "") + _blocksToPlaintext(blocks);
-  navigator.clipboard.writeText(text).then(function () {
-    showToast("Details copied to clipboard");
-  }).catch(function () {
-    showToast("Copy failed", "error");
+  copyTextToClipboard(text).then(function (ok) {
+    showToast(ok ? "Details copied to clipboard" : "Copy failed", ok ? "success" : "error");
   });
 }
 

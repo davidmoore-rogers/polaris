@@ -734,13 +734,13 @@ function _showAllocResults(result) {
 
   document.getElementById("btn-alloc-copy").addEventListener("click", function () {
     var text = result.created.map(function (s) { return s.name + "\t" + s.cidr; }).join("\n");
-    navigator.clipboard.writeText(text).then(function () { showToast("Copied to clipboard"); });
+    copyTextToClipboard(text).then(function (ok) { showToast(ok ? "Copied to clipboard" : "Copy failed", ok ? "success" : "error"); });
   });
 
   document.querySelectorAll(".alloc-cidr-copy").forEach(function (el) {
     el.addEventListener("click", function () {
       var cidr = el.getAttribute("data-cidr");
-      navigator.clipboard.writeText(cidr).then(function () { showToast("Copied " + cidr); });
+      copyTextToClipboard(cidr).then(function (ok) { showToast(ok ? "Copied " + cidr : "Copy failed", ok ? "success" : "error"); });
     });
   });
 
