@@ -23,6 +23,7 @@ import * as utilizationService from "../../services/utilizationService.js";
 import * as nocDashboardService from "../../services/nocDashboardService.js";
 import { createTtlCache } from "../../utils/ttlCache.js";
 import { csvParam } from "../../utils/text.js";
+import { EXCLUDED_LIFECYCLE_STATUSES } from "../../utils/assetInvariants.js";
 import { ensureRoleSnapshot, hasPermission } from "../middleware/permissions.js";
 
 const router = Router();
@@ -106,7 +107,7 @@ router.get("/summary", async (req, res, next) => {
       wants("assetTypes") && canAssets ? summaryCache.getOrCompute("assetTypes", () => prisma.asset.groupBy({
         by: ["assetType"],
         _count: { _all: true },
-        where: { status: { notIn: ["decommissioned", "disabled"] } },
+        where: { status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } },
       })) : Promise.resolve(emptyAssetRows),
       wants("monitorAlerts") && canAssets ? summaryCache.getOrCompute("monitorAlerts", () => prisma.asset.findMany({
         // Kept in lockstep with nocDashboardService's ALERT_WHERE (the NOC

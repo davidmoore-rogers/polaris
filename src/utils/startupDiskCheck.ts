@@ -27,6 +27,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { logger } from "./logger.js";
+import { dbIsLocal } from "./deploymentContext.js";
 import { BACKUP_DIR, STATE_DIR } from "./paths.js";
 
 const APP_DIR = dirname(fileURLToPath(import.meta.url));
@@ -42,7 +43,11 @@ const AMBER_THRESHOLD_PCT = 0.20; // 10–20% free → warn log
  * appear in the report — the periodic capacityWatch job will pick it up
  * authoritatively once the first query lands.
  */
-const PG_DATA_DIR_CANDIDATES: string[] = process.platform === "win32"
+// Exported: the setup preflight (setupRoutes) and the capacity fallback
+// scan (capacityService) share this list — it was declared verbatim in
+// all three files until the 2026-08 audit. Adding a PostgreSQL version /
+// distro path now happens once.
+export const PG_DATA_DIR_CANDIDATES: string[] = process.platform === "win32"
   ? [
       "C:\\Program Files\\PostgreSQL\\17\\data",
       "C:\\Program Files\\PostgreSQL\\16\\data",
@@ -63,15 +68,13 @@ const PG_DATA_DIR_CANDIDATES: string[] = process.platform === "win32"
       "/var/lib/postgresql/14/main",
     ];
 
-function isDbLocal(): boolean {
-  const url = process.env.DATABASE_URL || "";
-  const m = url.match(/@([^:/?]+)/);
-  if (!m) return false;
-  const host = m[1].toLowerCase();
-  return host === "localhost" || host === "127.0.0.1" || host === "::1";
-}
+// "Is the DB on this host" now delegates to deploymentContext.dbIsLocal —
+// the two utils previously disagreed (this file matched 3 literals; the
+// deployment context also matches the host's own interface addresses, so
+// a DATABASE_URL pointing at the machine's LAN IP no longer silently
+// skips the DB-volume check).
 
-async function pickFirstExistingPath(candidates: string[]): Promise<string | null> {
+export async function pickFirstExistingPath(candidates: string[]): Promise<string | null> {
   for (const p of candidates) {
     try {
       await stat(p);
@@ -123,7 +126,7 @@ export async function runStartupDiskCheck(): Promise<void> {
       { role: "backups", path: BACKUP_DIR },
     ];
 
-    if (isDbLocal()) {
+    if (dbIsLocal()) {
       const pgPath = await pickFirstExistingPath(PG_DATA_DIR_CANDIDATES);
       if (pgPath) candidates.push({ role: "db", path: pgPath });
     }

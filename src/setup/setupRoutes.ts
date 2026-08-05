@@ -6,7 +6,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
-import { statfs, stat } from "node:fs/promises";
+import { statfs } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
@@ -15,6 +15,7 @@ import { markSetupComplete } from "./detectSetup.js";
 import { hashPassword } from "../utils/password.js";
 import { ENV_FILE, STATE_DIR } from "../utils/paths.js";
 import { makeRateLimiter } from "../api/middleware/rateLimits.js";
+import { PG_DATA_DIR_CANDIDATES, pickFirstExistingPath } from "../utils/startupDiskCheck.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -100,24 +101,9 @@ router.get("/status", (_req, res) => {
 // per platform and report the first one that exists. The runtime
 // `capacityService` resolves PGDATA authoritatively via `SHOW data_directory`
 // once the DB connection is up.
-const PG_DATA_DIR_CANDIDATES: string[] = process.platform === "win32"
-  ? [
-      "C:\\Program Files\\PostgreSQL\\17\\data",
-      "C:\\Program Files\\PostgreSQL\\16\\data",
-      "C:\\Program Files\\PostgreSQL\\15\\data",
-      "C:\\Program Files\\PostgreSQL\\14\\data",
-      "C:\\Program Files\\PostgreSQL\\13\\data",
-    ]
-  : [
-      "/var/lib/pgsql/data",
-      "/var/lib/pgsql/17/data",
-      "/var/lib/pgsql/16/data",
-      "/var/lib/pgsql/15/data",
-      "/var/lib/postgresql/17/main",
-      "/var/lib/postgresql/16/main",
-      "/var/lib/postgresql/15/main",
-      "/var/lib/postgresql/14/main",
-    ];
+// Candidate list + first-existing probe shared with the boot-time check —
+// see utils/startupDiskCheck.ts (was a verbatim copy here until the
+// 2026-08 audit).
 
 const PreflightSchema = z.object({
   dbHost: z.string().min(1).optional(),
@@ -164,17 +150,6 @@ async function statfsForPreflight(role: PreflightVolume["role"], path: string, r
   }
 }
 
-async function pickFirstExistingPath(candidates: string[]): Promise<string | null> {
-  for (const p of candidates) {
-    try {
-      await stat(p);
-      return p;
-    } catch {
-      // not present, keep going
-    }
-  }
-  return null;
-}
 
 router.post("/preflight", async (req, res) => {
   try {

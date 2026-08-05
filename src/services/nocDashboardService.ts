@@ -30,6 +30,7 @@
  * parameters are unaffected.
  */
 
+import { EXCLUDED_LIFECYCLE_STATUSES } from "../utils/assetInvariants.js";
 import { prisma } from "../db.js";
 import { resolveMonitorSettings } from "./monitoringService.js";
 import { computeStorageForecast } from "./storageForecastService.js";
@@ -1089,7 +1090,7 @@ export interface FilterOptions {
 export async function getFilterOptions(): Promise<FilterOptions> {
   const [typeRows, regionRows, fortigateRows] = await Promise.all([
     prisma.asset.findMany({
-      where: { status: { notIn: ["decommissioned", "disabled"] } },
+      where: { status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } },
       select: { assetType: true },
       distinct: ["assetType"],
     }),
@@ -1103,7 +1104,7 @@ export async function getFilterOptions(): Promise<FilterOptions> {
       where: {
         assetType: "firewall",
         learnedLocation: { not: null },
-        status: { notIn: ["decommissioned", "disabled"] },
+        status: { notIn: EXCLUDED_LIFECYCLE_STATUSES },
       },
       select: { learnedLocation: true, tags: true },
       distinct: ["learnedLocation"],

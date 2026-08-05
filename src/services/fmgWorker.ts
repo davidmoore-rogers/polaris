@@ -56,6 +56,17 @@ interface QueueEntry<T = unknown> {
   onAbort?: () => void;
 }
 
+/**
+ * The worker's lane-state snapshot shape — the three getters below satisfy
+ * it, and fmgActivityService's heartbeat (FmgWorkerActivity) aliases it
+ * instead of mirroring the getters by hand.
+ */
+export interface FmgLaneState {
+  proxyInFlightLabel: string | null;
+  proxyQueueDepth: number;
+  nativeInFlightCount: number;
+}
+
 export class FmgWorker {
   readonly integrationId: string;
 

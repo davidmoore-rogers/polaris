@@ -12,7 +12,9 @@
 import { Client as SshClient } from "ssh2";
 import { winrmRunOne, type WinRmConnection, type CommandResult } from "./winrm.js";
 
-export interface ExecResult { exitCode: number | null; stdout: string; stderr: string }
+// Same shape as winrm's CommandResult — one struct for the SSH↔WinRM seam
+// instead of two identical declarations.
+export type ExecResult = CommandResult;
 
 /**
  * Open one SSH session from a credential config ({username, password |

@@ -22,6 +22,7 @@
  * map.ts's GET /sites pin-health payload, which shares them.
  */
 
+import { EXCLUDED_LIFECYCLE_STATUSES } from "../utils/assetInvariants.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { loadIconResolutionCache, resolveIconUrl } from "./deviceIconService.js";
@@ -156,7 +157,7 @@ export async function fetchRecentSampleStats(
 export async function buildSiteTopology(siteId: string) {
     const id = siteId;
     const fg = await prisma.asset.findFirst({
-      where: { id, status: { notIn: ["decommissioned", "disabled"] } },
+      where: { id, status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } },
       select: {
         id: true,
         hostname: true,
@@ -200,7 +201,7 @@ export async function buildSiteTopology(siteId: string) {
           where: {
             OR: [{ assetType: "switch" }, { assetType: "access_point" }],
             fortinetTopology: { path: ["controllerFortigate"], equals: fgHostname },
-            status: { notIn: ["decommissioned", "disabled"] },
+            status: { notIn: EXCLUDED_LIFECYCLE_STATUSES },
           },
           select: {
             id: true,
@@ -282,7 +283,7 @@ export async function buildSiteTopology(siteId: string) {
         prisma.asset.findMany({
           where: {
             assetType: { notIn: ["firewall", "switch", "access_point"] },
-            status: { notIn: ["decommissioned", "disabled"] },
+            status: { notIn: EXCLUDED_LIFECYCLE_STATUSES },
             OR: switchHostnames.map((h) => ({ lastSeenSwitch: { startsWith: `${h}/` } })),
           },
           select: {

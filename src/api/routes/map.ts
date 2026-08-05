@@ -19,6 +19,7 @@
  * a live device.
  */
 
+import { EXCLUDED_LIFECYCLE_STATUSES } from "../../utils/assetInvariants.js";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
@@ -76,7 +77,7 @@ router.get("/sites", async (req, res, next) => {
         assetType: "firewall",
         latitude: { not: null },
         longitude: { not: null },
-        status: { notIn: ["decommissioned", "disabled"] },
+        status: { notIn: EXCLUDED_LIFECYCLE_STATUSES },
         ...regionWhere,
       },
       select: {
@@ -170,7 +171,7 @@ router.get("/sites/:id/topology/search", async (req, res, next) => {
     if (!q) return res.json({ q: "", results: [] });
 
     const fg = await prisma.asset.findFirst({
-      where: { id, status: { notIn: ["decommissioned", "disabled"] } },
+      where: { id, status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } },
       select: { id: true, hostname: true, assetType: true },
     });
     if (!fg || fg.assetType !== "firewall") throw new AppError(404, "FortiGate not found");
@@ -181,7 +182,7 @@ router.get("/sites/:id/topology/search", async (req, res, next) => {
           where: {
             assetType: "switch",
             fortinetTopology: { path: ["controllerFortigate"], equals: fgHostname },
-            status: { notIn: ["decommissioned", "disabled"] },
+            status: { notIn: EXCLUDED_LIFECYCLE_STATUSES },
           },
           select: { id: true, hostname: true },
         })
@@ -195,7 +196,7 @@ router.get("/sites/:id/topology/search", async (req, res, next) => {
     const matches = await prisma.asset.findMany({
       where: {
         assetType: { notIn: ["firewall", "switch", "access_point"] },
-        status: { notIn: ["decommissioned", "disabled"] },
+        status: { notIn: EXCLUDED_LIFECYCLE_STATUSES },
         OR: switchHostnames.map((h) => ({ lastSeenSwitch: { startsWith: `${h}/` } })),
         AND: [
           {

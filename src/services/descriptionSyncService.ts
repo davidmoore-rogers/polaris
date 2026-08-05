@@ -56,6 +56,7 @@
  * reconcile pass self-heals rows whose push failed transiently, and is also
  * the pass that seeds empty Polaris fields from the device (adopt).
  */
+import { EXCLUDED_LIFECYCLE_STATUSES } from "../utils/assetInvariants.js";
 import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { logger } from "../utils/logger.js";
@@ -867,7 +868,7 @@ export async function runDescriptionSyncForIntegration(
   const assets: ReconcileAsset[] = await prisma.asset.findMany({
     where: {
       discoveredByIntegrationId: integration.id,
-      status: { notIn: ["decommissioned", "disabled"] },
+      status: { notIn: EXCLUDED_LIFECYCLE_STATUSES },
     },
     select: {
       id: true,

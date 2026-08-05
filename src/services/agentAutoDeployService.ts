@@ -46,7 +46,10 @@ const RUN_CEILING = 200;
 // eligibility filter) to guarantee idempotency.
 const INFLIGHT_STATUSES = ["pending", "uploading", "enrolling"];
 
-export type AgentOsPlatform = "windows" | "darwin" | "linux";
+// Single source of truth for the platform union is the install-script
+// catalog (this file re-exports it for its existing importers).
+import type { AgentOsPlatform } from "./agentInstallScripts.js";
+export type { AgentOsPlatform };
 export type AgentTransport = "ssh" | "winrm";
 
 export interface AgentDeployClassConfig {

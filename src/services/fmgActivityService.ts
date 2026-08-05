@@ -13,7 +13,7 @@
  */
 
 import { prisma } from "../db.js";
-import { getAllFmgWorkers } from "./fmgWorker.js";
+import { getAllFmgWorkers, type FmgLaneState } from "./fmgWorker.js";
 import { getRole, type PolarisRole } from "../utils/role.js";
 import { logger } from "../utils/logger.js";
 
@@ -24,11 +24,8 @@ const HEARTBEAT_MS = 2_000;
 // fresh/stale, but a genuinely-down heartbeat process surfaces inside ~10 s.
 export const STALENESS_MS = 10_000;
 
-export interface FmgWorkerActivity {
-  proxyInFlightLabel: string | null;
-  proxyQueueDepth: number;
-  nativeInFlightCount: number;
-}
+// The worker's own lane-state shape — see fmgWorker.FmgLaneState.
+export type FmgWorkerActivity = FmgLaneState;
 
 export interface FmgActivitySnapshot {
   updatedAt: string;

@@ -35,6 +35,7 @@
 
 import { totalmem, freemem, cpus, loadavg } from "node:os";
 import { statfs, stat } from "node:fs/promises";
+import { PG_DATA_DIR_CANDIDATES, pickFirstExistingPath } from "../utils/startupDiskCheck.js";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -526,37 +527,8 @@ const APP_DIR = dirname(fileURLToPath(import.meta.url));
 // install), which makes `data_directory` unreadable. Without this fallback a
 // separate /var on a STIG-style RHEL layout never enters the volume scan and
 // the UI shows only the app volume even when /var is the at-risk filesystem.
-// Mirrors the candidate list in `src/utils/startupDiskCheck.ts`.
-const PG_DATA_DIR_CANDIDATES: string[] = process.platform === "win32"
-  ? [
-      "C:\\Program Files\\PostgreSQL\\17\\data",
-      "C:\\Program Files\\PostgreSQL\\16\\data",
-      "C:\\Program Files\\PostgreSQL\\15\\data",
-      "C:\\Program Files\\PostgreSQL\\14\\data",
-      "C:\\Program Files\\PostgreSQL\\13\\data",
-    ]
-  : [
-      "/var/lib/pgsql/data",
-      "/var/lib/pgsql/17/data",
-      "/var/lib/pgsql/16/data",
-      "/var/lib/pgsql/15/data",
-      "/var/lib/postgresql/17/main",
-      "/var/lib/postgresql/16/main",
-      "/var/lib/postgresql/15/main",
-      "/var/lib/postgresql/14/main",
-    ];
-
-async function pickFirstExistingPath(candidates: string[]): Promise<string | null> {
-  for (const p of candidates) {
-    try {
-      await stat(p);
-      return p;
-    } catch {
-      // not present, keep going
-    }
-  }
-  return null;
-}
+// Candidate list + probe shared with the boot-time check — see
+// utils/startupDiskCheck.ts (was a verbatim copy here until the 2026-08 audit).
 
 function isDbLocal(): boolean {
   const url = process.env.DATABASE_URL || "";

@@ -177,6 +177,20 @@ const POLLING_DEFERRED_SOURCES = new Set<string>(["discovery", "device-inventory
  * current row value (and `monitored` flag); pass null/omit for creates.
  * Returns true when the bump was applied.
  */
+/**
+ * The lifecycle statuses excluded from every "live asset" query — the
+ * definition of "asset that counts" for dashboards, maps, description
+ * sync, and NOC feeds. Previously the `status: { notIn: [...] }` fragment
+ * was retyped verbatim at 14 sites across 6 files; adding a status to
+ * this policy (as happened with quarantined/storage) now happens once.
+ * NOTE: `maintenance` is deliberately NOT here — surfaces that treat
+ * maintenance as its own state (never an outage) filter it separately.
+ */
+export const EXCLUDED_LIFECYCLE_STATUSES: ("decommissioned" | "disabled")[] = [
+  "decommissioned",
+  "disabled",
+];
+
 export function bumpLastSeen(
   data: Record<string, unknown>,
   existing: { lastSeen?: DateLike; monitored?: boolean } | null | undefined,

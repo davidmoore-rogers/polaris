@@ -15,7 +15,7 @@ import { logEvent, buildChanges } from "./events.js";
 import { assetMatchesIntegrationFilter } from "../../utils/integrationFilter.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
-import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
+import { clampAcquiredToLastSeen, EXCLUDED_LIFECYCLE_STATUSES } from "../../utils/assetInvariants.js";
 import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistory } from "../../services/assetIpHistoryService.js";
 import { getSightingsForAsset, getSightingSettings, updateSightingSettings } from "../../services/assetSightingService.js";
 import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
@@ -3051,7 +3051,7 @@ router.post("/dns-lookup", requirePermission("assets", "write"), async (req, res
 
     // ── Primary IPs ──────────────────────────────────────────────────────────
     const primaryAssets = await prisma.asset.findMany({
-      where: { ipAddress: { not: null }, status: { notIn: ["decommissioned", "disabled"] } },
+      where: { ipAddress: { not: null }, status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } },
       select: { id: true, ipAddress: true, hostname: true, dnsName: true, dnsNameFetchedAt: true, dnsNameTtl: true },
     });
 
@@ -3091,7 +3091,7 @@ router.post("/dns-lookup", requirePermission("assets", "write"), async (req, res
     // hits an `update` only when something actually changed; ON CONFLICT
     // semantics aren't relevant here because each row already has a stable id.
     const assocRows = await prisma.assetAssociatedIp.findMany({
-      where: { asset: { status: { notIn: ["decommissioned", "disabled"] } } },
+      where: { asset: { status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } } },
       select: { id: true, ip: true, ptrName: true, ptrTtl: true, ptrFetchedAt: true },
     });
 
@@ -3239,7 +3239,7 @@ router.post("/:id/forward-lookup", requirePermission("assets", "write"), async (
 router.post("/oui-lookup", requirePermission("assets", "write"), async (req, res, next) => {
   try {
     const assets = await prisma.asset.findMany({
-      where: { macAddress: { not: null }, manufacturer: null, status: { notIn: ["decommissioned", "disabled"] } },
+      where: { macAddress: { not: null }, manufacturer: null, status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } },
       select: { id: true, macAddress: true, hostname: true, ipAddress: true },
     });
 
