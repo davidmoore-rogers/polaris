@@ -21,7 +21,6 @@ import {
   ipToPtrName,
   isPrivateOrLoopbackIp,
   normalizeAllowlistCidr,
-  ipMatchesAnyCidr,
 } from "../../src/utils/cidr.js";
 
 describe("normalizeCidr", () => {
@@ -298,25 +297,8 @@ describe("normalizeAllowlistCidr", () => {
   });
 });
 
-describe("ipMatchesAnyCidr", () => {
-  const list = ["10.0.0.0/8", "192.168.10.0/24", "203.0.113.5/32"];
-
-  it("matches an IP inside any listed CIDR", () => {
-    expect(ipMatchesAnyCidr("10.5.6.7", list)).toBe(true);
-    expect(ipMatchesAnyCidr("192.168.10.42", list)).toBe(true);
-    expect(ipMatchesAnyCidr("203.0.113.5", list)).toBe(true);
-    expect(ipMatchesAnyCidr("::ffff:10.1.2.3", list)).toBe(true); // v6-mapped v4
-  });
-
-  it("rejects IPs outside every CIDR, IPv6, and empty inputs", () => {
-    expect(ipMatchesAnyCidr("8.8.8.8", list)).toBe(false);
-    expect(ipMatchesAnyCidr("192.168.11.1", list)).toBe(false); // adjacent /24
-    expect(ipMatchesAnyCidr("203.0.113.6", list)).toBe(false); // adjacent /32
-    expect(ipMatchesAnyCidr("2001:db8::1", list)).toBe(false);
-    expect(ipMatchesAnyCidr("", list)).toBe(false);
-    expect(ipMatchesAnyCidr("10.0.0.1", [])).toBe(false);
-  });
-});
+// ipMatchesAnyCidr was retired (audit 2026-08) — the Dash gate's CIDR-list
+// behaviors are asserted through ipMatchesAllowlist in ipAllowlist.test.ts.
 
 describe("parseRangeFirstIp", () => {
   it("extracts the start of a FortiOS range and accepts a bare IP", () => {

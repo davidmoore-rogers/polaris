@@ -217,25 +217,9 @@ export function normalizeAllowlistCidr(raw: string): string | null {
   }
 }
 
-/**
- * Return true if `ip` falls within ANY of the given IPv4 CIDRs. Strips a
- * leading `::ffff:` (v6-mapped v4) so a dual-stack socket's client address
- * still matches; a genuine IPv6 source never matches (IPv4-only, see
- * normalizeAllowlistCidr). Empty/invalid inputs → false. Backs the Dash
- * wallboard's custom source-IP gate.
- */
-export function ipMatchesAnyCidr(ip: string, cidrs: string[]): boolean {
-  if (!ip || !Array.isArray(cidrs) || cidrs.length === 0) return false;
-  let candidate = ip.trim();
-  if (candidate.toLowerCase().startsWith("::ffff:") && candidate.includes(".")) {
-    candidate = candidate.slice(7);
-  }
-  if (candidate.includes(":")) return false;
-  for (const cidr of cidrs) {
-    if (ipInCidr(candidate, cidr)) return true;
-  }
-  return false;
-}
+// ipMatchesAnyCidr was retired 2026-08 (audit): it was an IPv4-only subset of
+// utils/ipAllowlist.ipMatchesAllowlist with the same ::ffff: unwrapping — the
+// Dash wallboard gate (its only caller) now uses the allowlist matcher.
 
 // ─── Allocation Helpers ───────────────────────────────────────────────────────
 

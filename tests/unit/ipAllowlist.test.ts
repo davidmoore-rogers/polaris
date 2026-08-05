@@ -71,3 +71,26 @@ describe("isValidAllowlistEntry", () => {
     expect(isValidAllowlistEntry("10.0.0.0/40")).toBe(false);
   });
 });
+
+// Dash wallboard custom-scope gate shapes (ported from the retired
+// cidr.ipMatchesAnyCidr tests — the gate's allowedCidrs are save-time
+// normalized IPv4 CIDRs, matched through ipMatchesAllowlist since 2026-08).
+describe("ipMatchesAllowlist (dash CIDR-list shapes)", () => {
+  const list = ["10.0.0.0/8", "192.168.10.0/24", "203.0.113.5/32"];
+
+  it("matches an IP inside any listed CIDR", () => {
+    expect(ipMatchesAllowlist("10.5.6.7", list)).toBe(true);
+    expect(ipMatchesAllowlist("192.168.10.42", list)).toBe(true);
+    expect(ipMatchesAllowlist("203.0.113.5", list)).toBe(true);
+    expect(ipMatchesAllowlist("::ffff:10.1.2.3", list)).toBe(true); // v6-mapped v4
+  });
+
+  it("rejects IPs outside every CIDR, IPv6 sources, and empty inputs", () => {
+    expect(ipMatchesAllowlist("8.8.8.8", list)).toBe(false);
+    expect(ipMatchesAllowlist("192.168.11.1", list)).toBe(false); // adjacent /24
+    expect(ipMatchesAllowlist("203.0.113.6", list)).toBe(false); // adjacent /32
+    expect(ipMatchesAllowlist("2001:db8::1", list)).toBe(false);
+    expect(ipMatchesAllowlist("", list)).toBe(false);
+    expect(ipMatchesAllowlist("10.0.0.1", [])).toBe(false);
+  });
+});
