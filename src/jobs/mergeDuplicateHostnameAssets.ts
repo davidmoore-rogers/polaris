@@ -110,101 +110,17 @@ import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { logEvent } from "../services/eventLogService.js";
 import { runInstrumentedJob } from "./_metrics.js";
-import { macHexKeyOrNull } from "../utils/mac.js";
-import { bumpLastSeen } from "../utils/assetInvariants.js";
-import { transferAssetSideTables } from "../services/assetMergeService.js";
+import {
+  decideDuplicateHostnameGroup,
+  mergeDuplicateHostnameGhost,
+  type DuplicateHostnameAssetRow,
+} from "../services/assetGhostMergeService.js";
 
-type SourceTier = 1 | 2 | 3 | 4 | 5 | 6 | 7;
-
-const KIND_TIER: Record<string, SourceTier> = {
-  entra: 1,
-  intune: 1,
-  ad: 1,
-  "polaris-agent": 1,
-  fortiswitch: 2,
-  fortiap: 3,
-  "fortigate-firewall": 4,
-  "fortigate-endpoint": 5,
-  manual: 6,
-};
-
-type AssetRow = {
-  id: string;
-  hostname: string | null;
-  ipAddress: string | null;
-  macAddress: string | null;
-  serialNumber: string | null;
-  manufacturer: string | null;
-  model: string | null;
-  os: string | null;
-  osVersion: string | null;
-  assignedTo: string | null;
-  notes: string | null;
-  learnedLocation: string | null;
-  acquiredAt: Date | null;
-  lastSeen: Date | null;
-  lastSeenSource: string | null;
-  monitored: boolean;
-  updatedAt: Date;
-  tags: string[];
-  sources: { sourceKind: string }[];
-};
-
-function tierForAsset(sourceKinds: string[]): SourceTier {
-  if (sourceKinds.length === 0) return 7;
-  let best: SourceTier = 7;
-  for (const k of sourceKinds) {
-    const t = (KIND_TIER[k] ?? 7) as SourceTier;
-    if (t < best) best = t;
-  }
-  return best;
-}
-
-// Shared bare-hex matching key — rejects the all-zero MAC so two unrelated
-// ghosts can't group into one merge candidate on 00:00:00:00:00:00.
-const normMac = macHexKeyOrNull;
-
-type Decision =
-  | { kind: "merge"; canonical: AssetRow; ghosts: AssetRow[]; tiers: number[] }
-  | { kind: "skip"; reason: string };
-
-function decideGroup(rows: AssetRow[]): Decision {
-  const decorated = rows.map((r) => ({
-    row: r,
-    tier: tierForAsset(r.sources.map((s) => s.sourceKind)),
-  }));
-  decorated.sort((a, b) => {
-    if (a.tier !== b.tier) return a.tier - b.tier;
-    const at = a.row.lastSeen?.getTime() ?? 0;
-    const bt = b.row.lastSeen?.getTime() ?? 0;
-    if (at !== bt) return bt - at;
-    return b.row.updatedAt.getTime() - a.row.updatedAt.getTime();
-  });
-  const canonical = decorated[0];
-  const rest = decorated.slice(1);
-
-  // Tie-safety: any same-tier sibling whose non-null MAC disagrees with the
-  // canonical's non-null MAC is treated as a genuine second device; skip the
-  // whole group so an operator can decide whether to rename or merge by hand.
-  const cMac = normMac(canonical.row.macAddress);
-  for (const g of rest) {
-    if (g.tier !== canonical.tier) continue;
-    const gMac = normMac(g.row.macAddress);
-    if (cMac && gMac && cMac !== gMac) {
-      return {
-        kind: "skip",
-        reason: `tied tier ${canonical.tier} with conflicting MACs (${cMac} vs ${gMac})`,
-      };
-    }
-  }
-
-  return {
-    kind: "merge",
-    canonical: canonical.row,
-    ghosts: rest.map((d) => d.row),
-    tiers: [canonical.tier, ...rest.map((d) => d.tier)],
-  };
-}
+// The canonical-pick policy (source-tier table + MAC tie-safety) and the
+// per-ghost merge transaction moved to assetGhostMergeService (2026-08
+// audit) so they're unit-testable and reachable from other surfaces. This
+// job owns the schedule, the duplicate-group query, dry-run, and logging.
+type AssetRow = DuplicateHostnameAssetRow;
 
 // Periodic safety-net interval. The job runs once at boot AND on this cadence
 // because discovery re-creates duplicate-hostname rows continuously (e.g. the
@@ -291,7 +207,7 @@ async function mergeDuplicateHostnameAssets(): Promise<void> {
         }
         groupsScanned++;
 
-        const decision = decideGroup(members);
+        const decision = decideDuplicateHostnameGroup(members);
         if (decision.kind === "skip") {
           groupsSkippedAmbiguous++;
           logger.warn(
@@ -324,7 +240,7 @@ async function mergeDuplicateHostnameAssets(): Promise<void> {
 
         try {
           for (const ghost of ghosts) {
-            await mergeGhostIntoCanonical(canonical, ghost);
+            await mergeDuplicateHostnameGhost(canonical, ghost);
             ghostsAbsorbed++;
           }
           groupsMerged++;
@@ -384,67 +300,3 @@ async function mergeDuplicateHostnameAssets(): Promise<void> {
 mergeDuplicateHostnameAssets();
 setInterval(mergeDuplicateHostnameAssets, INTERVAL_MS);
 
-async function mergeGhostIntoCanonical(canonical: AssetRow, ghost: AssetRow): Promise<void> {
-  await prisma.$transaction(async (tx) => {
-    // Side-table transfers — the shared delete-on-conflict helper (also used
-    // by the operator merge and mergeFortiswitchEndpointGhosts). This file
-    // carried four inline copies of the same pattern until the 2026-08 audit.
-    await transferAssetSideTables(tx, ghost.id, canonical.id);
-
-    // Scalar-field absorption — only fill canonical's null/empty fields from
-    // the ghost. Tags union-merge. Mirrors acceptAssetConflict.
-    const update: Record<string, unknown> = {};
-    if (!canonical.macAddress && ghost.macAddress) update.macAddress = ghost.macAddress;
-    if (!canonical.ipAddress && ghost.ipAddress) update.ipAddress = ghost.ipAddress;
-    if (!canonical.serialNumber && ghost.serialNumber) update.serialNumber = ghost.serialNumber;
-    if (!canonical.manufacturer && ghost.manufacturer) update.manufacturer = ghost.manufacturer;
-    if (!canonical.model && ghost.model) update.model = ghost.model;
-    if (!canonical.os && ghost.os) update.os = ghost.os;
-    if (!canonical.osVersion && ghost.osVersion) update.osVersion = ghost.osVersion;
-    if (!canonical.assignedTo && ghost.assignedTo) update.assignedTo = ghost.assignedTo;
-    if (!canonical.notes && ghost.notes) update.notes = ghost.notes;
-    if (!canonical.learnedLocation && ghost.learnedLocation)
-      update.learnedLocation = ghost.learnedLocation;
-    if (!canonical.acquiredAt && ghost.acquiredAt) update.acquiredAt = ghost.acquiredAt;
-    // lastSeen — adopt the ghost's sighting through bumpLastSeen so the
-    // business-rule-12 gates apply: no-regress, AND a monitored canonical
-    // never adopts discovery-origin evidence (polling owns its lastSeen).
-    // Ghosts without a provenance label are treated as discovery-origin —
-    // the conservative choice for the deferred-source gate.
-    if (ghost.lastSeen) {
-      bumpLastSeen(update, canonical, ghost.lastSeen, ghost.lastSeenSource ?? "discovery");
-    }
-    // tags — union, preserving canonical's order.
-    const cTags = new Set(canonical.tags);
-    const merged = [...canonical.tags];
-    for (const t of ghost.tags) {
-      if (!cTags.has(t)) {
-        merged.push(t);
-        cTags.add(t);
-      }
-    }
-    if (merged.length > canonical.tags.length) update.tags = merged;
-
-    if (Object.keys(update).length > 0) {
-      // Re-clamp acquiredAt to whichever lastSeen we now hold (the Asset write
-      // extension in src/db.ts enforces this invariant on every write, but
-      // we're already inside the transaction so it runs against our update).
-      await tx.asset.update({ where: { id: canonical.id }, data: update });
-    }
-
-    // Cascade-delete the ghost. Everything with an FK still pointing at it goes:
-    //   - AssetSource rows (the canonical's are authoritative; next discovery
-    //     re-observes anything still live).
-    //   - AssetLldpNeighbor / AssetWirelessStation (current-state, FK kept).
-    //   Sample/rollup time-series have NO FK (migration 20260615000000) — they
-    //   are NOT deleted here; they orphan and age out via drop_chunks (a cascade
-    //   delete would decompress their TimescaleDB chunks → bloat).
-    //   - AssetInterfaceOverride (rare on a ghost; loss is logged via the
-    //     summary line above).
-    //   - Conflict rows pointing at the ghost via assetId (pending sibling
-    //     hostname-collision conflicts dissolve, which is the point).
-    //   - AssetDependencyParent rows on either side; the 60s
-    //     dependencyReconciler tick recomputes from authoritative topology.
-    await tx.asset.delete({ where: { id: ghost.id } });
-  });
-}

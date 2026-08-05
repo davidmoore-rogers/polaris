@@ -48,6 +48,8 @@
 import { prisma } from "../db.js";
 import { transferAssetSideTables } from "./assetMergeService.js";
 import { recomputeMonitorOverrideForAssets } from "./monitorOverrideService.js";
+import { macHexKeyOrNull } from "../utils/mac.js";
+import { bumpLastSeen } from "../utils/assetInvariants.js";
 
 /**
  * Source kinds that mark an asset as having its own authoritative identity.
@@ -149,4 +151,158 @@ export async function mergeEndpointGhostIntoAsset(
   }
 
   return result;
+}
+
+// ─── Duplicate-hostname merge (the mergeDuplicateHostnameAssets job) ────────
+//
+// Policy + executor for the periodic duplicate-hostname sweep. The job
+// (src/jobs/mergeDuplicateHostnameAssets.ts — see its header for the full
+// ghost taxonomy, cascade/orphan semantics, and dry-run workflow) finds the
+// lower(hostname) groups and drives logging/cadence; the canonical-pick
+// policy and the merge transaction live here so they're testable and
+// reachable from other surfaces.
+
+/** Canonical-pick priority (lower wins). See the job header for rationale. */
+type SourceTier = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+const KIND_TIER: Record<string, SourceTier> = {
+  entra: 1,
+  intune: 1,
+  ad: 1,
+  "polaris-agent": 1,
+  fortiswitch: 2,
+  fortiap: 3,
+  "fortigate-firewall": 4,
+  "fortigate-endpoint": 5,
+  manual: 6,
+};
+
+export interface DuplicateHostnameAssetRow {
+  id: string;
+  hostname: string | null;
+  ipAddress: string | null;
+  macAddress: string | null;
+  serialNumber: string | null;
+  manufacturer: string | null;
+  model: string | null;
+  os: string | null;
+  osVersion: string | null;
+  assignedTo: string | null;
+  notes: string | null;
+  learnedLocation: string | null;
+  acquiredAt: Date | null;
+  lastSeen: Date | null;
+  lastSeenSource: string | null;
+  monitored: boolean;
+  updatedAt: Date;
+  tags: string[];
+  sources: { sourceKind: string }[];
+}
+
+function tierForAsset(sourceKinds: string[]): SourceTier {
+  if (sourceKinds.length === 0) return 7;
+  let best: SourceTier = 7;
+  for (const k of sourceKinds) {
+    const t = (KIND_TIER[k] ?? 7) as SourceTier;
+    if (t < best) best = t;
+  }
+  return best;
+}
+
+// Shared bare-hex matching key — rejects the all-zero MAC so two unrelated
+// ghosts can't group into one merge candidate on 00:00:00:00:00:00.
+const normMac = macHexKeyOrNull;
+
+export type DuplicateGroupDecision =
+  | { kind: "merge"; canonical: DuplicateHostnameAssetRow; ghosts: DuplicateHostnameAssetRow[]; tiers: number[] }
+  | { kind: "skip"; reason: string };
+
+/**
+ * Pick the canonical row of a duplicate-hostname group by source-kind tier
+ * (ties broken by most-recent lastSeen, then updatedAt). Tie-safety: a
+ * same-tier sibling whose non-null MAC disagrees with the canonical's is a
+ * genuine second device — the whole group is skipped for operator review.
+ */
+export function decideDuplicateHostnameGroup(rows: DuplicateHostnameAssetRow[]): DuplicateGroupDecision {
+  const decorated = rows.map((r) => ({
+    row: r,
+    tier: tierForAsset(r.sources.map((s) => s.sourceKind)),
+  }));
+  decorated.sort((a, b) => {
+    if (a.tier !== b.tier) return a.tier - b.tier;
+    const at = a.row.lastSeen?.getTime() ?? 0;
+    const bt = b.row.lastSeen?.getTime() ?? 0;
+    if (at !== bt) return bt - at;
+    return b.row.updatedAt.getTime() - a.row.updatedAt.getTime();
+  });
+  const canonical = decorated[0];
+  const rest = decorated.slice(1);
+
+  const cMac = normMac(canonical.row.macAddress);
+  for (const g of rest) {
+    if (g.tier !== canonical.tier) continue;
+    const gMac = normMac(g.row.macAddress);
+    if (cMac && gMac && cMac !== gMac) {
+      return {
+        kind: "skip",
+        reason: `tied tier ${canonical.tier} with conflicting MACs (${cMac} vs ${gMac})`,
+      };
+    }
+  }
+
+  return {
+    kind: "merge",
+    canonical: canonical.row,
+    ghosts: rest.map((d) => d.row),
+    tiers: [canonical.tier, ...rest.map((d) => d.tier)],
+  };
+}
+
+/**
+ * Absorb one duplicate-hostname ghost into its canonical, in one transaction:
+ * side-table transfer (shared delete-on-conflict helper), null-fill scalar
+ * absorption + tag union (mirrors acceptAssetConflict), lastSeen adoption
+ * through bumpLastSeen (business-rule-12 gates apply; unlabeled ghost
+ * sightings are treated as discovery-origin), then the ghost cascade-delete
+ * (sample hypertables have no FK and orphan by design — see the job header).
+ */
+export async function mergeDuplicateHostnameGhost(
+  canonical: DuplicateHostnameAssetRow,
+  ghost: DuplicateHostnameAssetRow,
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await transferAssetSideTables(tx, ghost.id, canonical.id);
+
+    const update: Record<string, unknown> = {};
+    if (!canonical.macAddress && ghost.macAddress) update.macAddress = ghost.macAddress;
+    if (!canonical.ipAddress && ghost.ipAddress) update.ipAddress = ghost.ipAddress;
+    if (!canonical.serialNumber && ghost.serialNumber) update.serialNumber = ghost.serialNumber;
+    if (!canonical.manufacturer && ghost.manufacturer) update.manufacturer = ghost.manufacturer;
+    if (!canonical.model && ghost.model) update.model = ghost.model;
+    if (!canonical.os && ghost.os) update.os = ghost.os;
+    if (!canonical.osVersion && ghost.osVersion) update.osVersion = ghost.osVersion;
+    if (!canonical.assignedTo && ghost.assignedTo) update.assignedTo = ghost.assignedTo;
+    if (!canonical.notes && ghost.notes) update.notes = ghost.notes;
+    if (!canonical.learnedLocation && ghost.learnedLocation)
+      update.learnedLocation = ghost.learnedLocation;
+    if (!canonical.acquiredAt && ghost.acquiredAt) update.acquiredAt = ghost.acquiredAt;
+    if (ghost.lastSeen) {
+      bumpLastSeen(update, canonical, ghost.lastSeen, ghost.lastSeenSource ?? "discovery");
+    }
+    const cTags = new Set(canonical.tags);
+    const merged = [...canonical.tags];
+    for (const t of ghost.tags) {
+      if (!cTags.has(t)) {
+        merged.push(t);
+        cTags.add(t);
+      }
+    }
+    if (merged.length > canonical.tags.length) update.tags = merged;
+
+    if (Object.keys(update).length > 0) {
+      await tx.asset.update({ where: { id: canonical.id }, data: update });
+    }
+
+    await tx.asset.delete({ where: { id: ghost.id } });
+  });
 }

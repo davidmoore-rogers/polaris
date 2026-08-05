@@ -2123,9 +2123,9 @@ Listed alphabetically.
 
 ## services/assetGhostMergeService.ts
 
-**What it owns:** Automated endpoint-ghost merge — collapses a duplicate `fortigate-endpoint` placeholder Asset (created when a managed FortiSwitch/FortiAP's mgmt interface pulled a DHCP lease and the FortiGate's DHCP/device-inventory pathway learned its MAC as an ordinary client; hostname = the device serial) into the canonical infrastructure asset, then deletes the ghost.
+**What it owns:** Automated ghost merging, two flavors: (1) the endpoint-ghost merge — collapses a duplicate `fortigate-endpoint` placeholder Asset (created when a managed FortiSwitch/FortiAP's mgmt interface pulled a DHCP lease and the FortiGate's DHCP/device-inventory pathway learned its MAC as an ordinary client; hostname = the device serial) into the canonical infrastructure asset, then deletes the ghost; and (2) the duplicate-hostname policy + executor behind the mergeDuplicateHostnameAssets sweep (moved from the job 2026-08 so they're unit-testable): `decideDuplicateHostnameGroup` picks the canonical by source-kind tier (identity-tagged 1 > fortiswitch 2 > fortiap 3 > firewall 4 > endpoint 5 > manual 6 > orphan 7; lastSeen/updatedAt tiebreak; same-tier conflicting-MAC groups skip for operator review) and `mergeDuplicateHostnameGhost` runs the per-ghost transaction (side-table transfer, null-fill scalar absorption + tag union, bumpLastSeen-gated lastSeen adoption, ghost cascade-delete).
 
-**Public API:** `isMergeableGhostSourceKinds` (pure), `isMergeableEndpointGhost`, `mergeEndpointGhostIntoAsset`, `GhostMergeResult`
+**Public API:** `isMergeableGhostSourceKinds` (pure), `isMergeableEndpointGhost`, `mergeEndpointGhostIntoAsset`, `GhostMergeResult`, `decideDuplicateHostnameGroup` (pure), `mergeDuplicateHostnameGhost`, `DuplicateHostnameAssetRow`, `DuplicateGroupDecision`
 
 **Cross-service deps:** `prisma`, `assetMergeService.transferAssetSideTables` (shared side-table transfer), `monitorOverrideService.recomputeMonitorOverrideForAssets` (after a monitored carry-over).
 
