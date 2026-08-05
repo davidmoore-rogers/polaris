@@ -99,7 +99,8 @@ router.delete("/:id", requirePermission("deviceIcons", "write"), async (req, res
       level: "info",
       message: `Deleted device icon ${id}`,
     });
-    res.json({ ok: true });
+    // 204 like every other router's DELETE (api.js request() maps it to null).
+    res.status(204).end();
   } catch (err) {
     next(err);
   }

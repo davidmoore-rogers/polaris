@@ -13015,13 +13015,29 @@ function _managementAccessButtonsHTML(asset) {
 }
 
 // Per-user SSH preferences live in localStorage (no backend) — same model as
-// other per-user UI prefs. `polaris.ssh.action` ∈ {uri, copy}; `polaris.ssh.user`
-// is an optional default username prepended to ssh:// links + copied commands.
+// other per-user UI prefs. Keys follow the standard "polaris-" dash convention
+// (the only dot-separated stragglers were renamed 2026-08; readers migrate the
+// legacy keys on first touch). `polaris-ssh-action` ∈ {uri, copy};
+// `polaris-ssh-user` is an optional default username prepended to ssh://
+// links + copied commands.
+function _sshPref(key, legacyKey) {
+  try {
+    var v = localStorage.getItem(key);
+    if (v === null) {
+      v = localStorage.getItem(legacyKey);
+      if (v !== null) {
+        localStorage.setItem(key, v);
+        localStorage.removeItem(legacyKey);
+      }
+    }
+    return v;
+  } catch (e) { return null; }
+}
 function _sshUser() {
-  try { return (localStorage.getItem("polaris.ssh.user") || "").trim(); } catch (e) { return ""; }
+  return (_sshPref("polaris-ssh-user", "polaris.ssh.user") || "").trim();
 }
 function _sshAction() {
-  try { return localStorage.getItem("polaris.ssh.action") === "copy" ? "copy" : "uri"; } catch (e) { return "uri"; }
+  return _sshPref("polaris-ssh-action", "polaris.ssh.action") === "copy" ? "copy" : "uri";
 }
 function _sshTarget(mgmtIp) {
   var user = _sshUser();
@@ -13066,13 +13082,13 @@ function _wireManagementAccessButtons(asset) {
           var cur = _sshUser();
           var v = window.prompt("Default SSH username for ssh:// links and copied commands (leave blank for none):", cur);
           if (v !== null) {
-            try { localStorage.setItem("polaris.ssh.user", v.trim()); } catch (e) {}
+            try { localStorage.setItem("polaris-ssh-user", v.trim()); } catch (e) {}
             showToast(v.trim() ? "SSH user set to " + v.trim() : "SSH user cleared");
           }
           return;
         }
         // uri | copy: remember as the new default, then perform it now.
-        try { localStorage.setItem("polaris.ssh.action", act); } catch (e) {}
+        try { localStorage.setItem("polaris-ssh-action", act); } catch (e) {}
         _doSshLaunch(info.mgmtIp, act);
       });
     });

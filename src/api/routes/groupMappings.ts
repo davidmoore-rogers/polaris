@@ -69,7 +69,8 @@ router.put("/:id", async (req, res, next) => {
 router.delete("/:id", async (req, res, next) => {
   try {
     await groupMappingService.deleteGroupMapping(req.params.id as string, req.session?.username);
-    res.json({ ok: true });
+    // 204 like every other router's DELETE (api.js request() maps it to null).
+    res.status(204).end();
   } catch (err) { next(err); }
 });
 
