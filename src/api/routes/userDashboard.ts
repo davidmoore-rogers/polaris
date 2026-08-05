@@ -19,7 +19,6 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { validate } from "../middleware/validate.js";
 import { AppError } from "../../utils/errors.js";
 import {
   getLayoutForUser,
@@ -83,11 +82,14 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-router.put("/", validate(LayoutSchema), async (req, res, next) => {
+router.put("/", async (req, res, next) => {
   try {
     const userId = req.session?.userId;
     if (!userId) throw new AppError(401, "Unauthorized");
-    const layout = await saveLayoutForUser(userId, req.body as DashboardLayout);
+    // Inline parse like every other route file — the global errorHandler
+    // formats a thrown ZodError into a field-labeled 400.
+    const body = LayoutSchema.parse(req.body) as DashboardLayout;
+    const layout = await saveLayoutForUser(userId, body);
     res.json(layout);
   } catch (err) {
     next(err);

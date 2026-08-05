@@ -67,6 +67,9 @@ router.get("/", requirePermission("serverSettingsSystem", "read"), async (_req, 
 
 router.put("/", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
+    // TS-level cast only — runtime validation lives in the service
+    // (saveProxyConfig → mergeProxyConfig + validateProxyConfig field-checks
+    // every value and 400s on bad input).
     const body = req.body as Partial<ProxyConfig>;
     // Block direct PUTs from flipping managedMode — that's what
     // /adopt-managed-mode is for. Everything else flows through.
@@ -105,6 +108,8 @@ router.post("/adopt-managed-mode", requirePermission("serverSettingsSystem", "fu
 
 router.post("/apply", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
+    // Cast is TS-level only — applyProxyConfig routes through saveProxyConfig's
+    // field-checked merge/validate before anything touches nginx.
     const result = await applyProxyConfig(req.body as Partial<ProxyConfig> | undefined);
     await logEvent({
       action: result.ok ? "proxy.config_applied" : "proxy.config_apply_failed",
