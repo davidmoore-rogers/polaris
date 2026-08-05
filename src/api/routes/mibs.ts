@@ -102,147 +102,22 @@ router.post("/std/:key/walk", requirePermission("mibDatabase", "read"), async (r
     if (!parsed.success) {
       throw new AppError(400, parsed.error.issues.map((e) => e.message).join("; "));
     }
-    const { assetId, credentialId, objectName, maxRows } = parsed.data;
 
     const key = req.params.key as string;
     const def = getStdMibDef(`std:${key}`);
     if (!def) throw new AppError(404, `Unknown standard MIB "${key}"`);
 
     const structured = getStdMibStructure(def.key);
-    const targetSymbol = structured.symbols.find((s) => s.name === objectName);
-    if (!targetSymbol) {
-      throw new AppError(400, `MIB ${def.moduleName} does not define an object named "${objectName}"`);
-    }
-    if (!targetSymbol.fullOid) {
-      throw new AppError(400, `Object "${objectName}" cannot be resolved to a numeric OID at the standard scope`);
-    }
-
-    const asset = await prisma.asset.findUnique({
-      where: { id: assetId },
-      select: { id: true, hostname: true, ipAddress: true },
-    });
-    if (!asset) throw new AppError(404, "Asset not found");
-    if (!asset.ipAddress) throw new AppError(400, "Asset has no IP address to walk");
-
-    const cred = await getCredential(credentialId, { revealSecrets: true });
-    if (cred.type !== "snmp") {
-      throw new AppError(400, `Credential "${cred.name}" is type "${cred.type}", expected "snmp"`);
-    }
-
-    const baseOid = targetSymbol.fullOid;
-    const label = asset.hostname || asset.ipAddress;
-
-    let walk;
-    try {
-      walk = await snmpWalkRaw(asset.ipAddress, cred.config as Record<string, unknown>, baseOid, maxRows);
-    } catch (err: any) {
-      const message = err?.message || "SNMP walk failed";
-      logEvent({
-        action: "asset.snmp_walk",
-        resourceType: "asset",
-        resourceId: assetId,
-        resourceName: asset.hostname || asset.ipAddress || undefined,
-        actor: req.session?.username,
-        level: "warning",
-        message: `MIB walk failed: ${label} — ${def.moduleName}::${objectName} — ${message}`,
-        details: {
-          mibId: def.key,             // "std:lldp" etc. — Events page treats this as opaque
-          mibModuleName: def.moduleName,
-          objectName,
-          oid: baseOid,
-          credentialName: cred.name,
-          error: message,
-        },
-      });
-      throw new AppError(502, message);
-    }
-
-    // Same decode + group pipeline as the uploaded-MIB walk.
-    type Entry = WalkScalarEntry & { symbolRef: MibSymbol | null };
-    const entries: Entry[] = walk.rows.map((row) => {
-      const hit = findSymbolForOid(row.oid, structured.symbols);
-      const symbolRef = hit?.symbol ?? null;
-      return {
-        oid: row.oid,
-        symbol: symbolRef?.name ?? null,
-        suffix: hit?.suffix ?? null,
-        syntax: symbolRef?.syntax ?? null,
-        baseType: symbolRef?.baseType ?? null,
-        raw: row.value,
-        decoded: decodeValue(row.value, symbolRef, row.type),
-        symbolRef,
-      };
-    });
-
-    let kind: "table" | "scalars" = "scalars";
-    let tablePayload: WalkTablePayload | null = null;
-    const rowParents = new Set<string>();
-    for (const e of entries) {
-      if (!e.symbolRef?.parentName) {
-        rowParents.clear();
-        break;
-      }
-      rowParents.add(e.symbolRef.parentName);
-    }
-    if (entries.length > 0 && rowParents.size === 1) {
-      const onlyParent = rowParents.values().next().value as string;
-      const tableMatch = structured.tables.find((t) => t.rowSymbol === onlyParent);
-      if (tableMatch) {
-        kind = "table";
-        tablePayload = renderTablePayload(tableMatch, entries);
-      }
-    }
-
-    const decodedCount = entries.filter((e) => e.symbol !== null).length;
-
-    logEvent({
-      action: "asset.snmp_walk",
-      resourceType: "asset",
-      resourceId: assetId,
-      resourceName: asset.hostname || asset.ipAddress || undefined,
-      actor: req.session?.username,
-      level: "info",
-      message: `MIB walk: ${label} — ${def.moduleName}::${objectName} → ${entries.length} row(s)${walk.truncated ? " (truncated)" : ""}`,
-      details: {
+    res.json(
+      await runMibWalk({
+        structured,
+        moduleName: def.moduleName,
         mibId: def.key,
-        mibModuleName: def.moduleName,
-        objectName,
-        oid: baseOid,
-        credentialName: cred.name,
-        kind,
-        rowCount: entries.length,
-        decodedCount,
-        truncated: walk.truncated,
-        durationMs: walk.durationMs,
-      },
-    });
-
-    if (kind === "table" && tablePayload) {
-      res.json({
-        kind,
-        table: tablePayload,
-        truncated: walk.truncated,
-        durationMs: walk.durationMs,
-        rowCount: entries.length,
-        decodedCount,
-        host: asset.ipAddress,
-        oid: baseOid,
-        objectName,
-      });
-      return;
-    }
-
-    res.json({
-      kind: "scalars",
-      entries: entries.map(({ symbolRef: _ignored, ...rest }) => rest),
-      truncated: walk.truncated,
-      durationMs: walk.durationMs,
-      rowCount: entries.length,
-      decodedCount,
-      host: asset.ipAddress,
-      oid: baseOid,
-      objectName,
-    });
+        unresolvedOidSuffix: " at the standard scope",
+        body: parsed.data,
+        actor: req.session?.username,
+      }),
+    );
   } catch (err) {
     next(err);
   }
@@ -452,13 +327,176 @@ function formatTimeTicks(ticks: number): string {
   return parts.join(" ");
 }
 
+/**
+ * Shared walk pipeline behind both walk routes (`POST /std/:key/walk` and
+ * `POST /:id/walk`). The caller has already Zod-parsed the body and loaded
+ * the MIB structure (bundled std lookup vs the uploaded MibFile row + OID
+ * resolution); everything downstream — object-name → OID resolution, asset +
+ * SNMP-credential load, the raw walk, the decode/group pipeline, the
+ * `asset.snmp_walk` Event, and the response payload — is identical.
+ * Returns the JSON payload for the route to send.
+ */
+async function runMibWalk(opts: {
+  structured: ParsedMibStructured;
+  moduleName: string;
+  /**
+   * Value stamped into the Event's `details.mibId` — the `"std:<key>"` key
+   * for bundled MIBs ("std:lldp" etc. — Events page treats this as opaque),
+   * the MibFile row id for uploads.
+   */
+  mibId: string;
+  /** Route-specific tail of the unresolved-OID 400 message. */
+  unresolvedOidSuffix: string;
+  body: z.infer<typeof WalkSchema>;
+  actor: string | undefined;
+}) {
+  const { structured, moduleName, mibId, unresolvedOidSuffix, actor } = opts;
+  const { assetId, credentialId, objectName, maxRows } = opts.body;
+
+  const targetSymbol = structured.symbols.find((s) => s.name === objectName);
+  if (!targetSymbol) {
+    throw new AppError(400, `MIB ${moduleName} does not define an object named "${objectName}"`);
+  }
+  if (!targetSymbol.fullOid) {
+    throw new AppError(400, `Object "${objectName}" cannot be resolved to a numeric OID${unresolvedOidSuffix}`);
+  }
+
+  const asset = await prisma.asset.findUnique({
+    where: { id: assetId },
+    select: { id: true, hostname: true, ipAddress: true },
+  });
+  if (!asset) throw new AppError(404, "Asset not found");
+  if (!asset.ipAddress) throw new AppError(400, "Asset has no IP address to walk");
+
+  const cred = await getCredential(credentialId, { revealSecrets: true });
+  if (cred.type !== "snmp") {
+    throw new AppError(400, `Credential "${cred.name}" is type "${cred.type}", expected "snmp"`);
+  }
+
+  const baseOid = targetSymbol.fullOid;
+  const label = asset.hostname || asset.ipAddress;
+
+  let walk;
+  try {
+    walk = await snmpWalkRaw(asset.ipAddress, cred.config as Record<string, unknown>, baseOid, maxRows);
+  } catch (err: any) {
+    const message = err?.message || "SNMP walk failed";
+    logEvent({
+      action: "asset.snmp_walk",
+      resourceType: "asset",
+      resourceId: assetId,
+      resourceName: asset.hostname || asset.ipAddress || undefined,
+      actor,
+      level: "warning",
+      message: `MIB walk failed: ${label} — ${moduleName}::${objectName} — ${message}`,
+      details: {
+        mibId,
+        mibModuleName: moduleName,
+        objectName,
+        oid: baseOid,
+        credentialName: cred.name,
+        error: message,
+      },
+    });
+    throw new AppError(502, message);
+  }
+
+  // Match each result row against the MIB's symbol map.
+  type Entry = WalkScalarEntry & { symbolRef: MibSymbol | null };
+  const entries: Entry[] = walk.rows.map((row) => {
+    const hit = findSymbolForOid(row.oid, structured.symbols);
+    const symbolRef = hit?.symbol ?? null;
+    return {
+      oid: row.oid,
+      symbol: symbolRef?.name ?? null,
+      suffix: hit?.suffix ?? null,
+      syntax: symbolRef?.syntax ?? null,
+      baseType: symbolRef?.baseType ?? null,
+      raw: row.value,
+      decoded: decodeValue(row.value, symbolRef, row.type),
+      symbolRef,
+    };
+  });
+
+  // Decide table vs scalar shape: every entry's parent must point at the
+  // same row symbol AND that row must be a known MibTable's rowSymbol.
+  let kind: "table" | "scalars" = "scalars";
+  let tablePayload: WalkTablePayload | null = null;
+
+  const rowParents = new Set<string>();
+  for (const e of entries) {
+    if (!e.symbolRef?.parentName) {
+      rowParents.clear();
+      break;
+    }
+    rowParents.add(e.symbolRef.parentName);
+  }
+  if (entries.length > 0 && rowParents.size === 1) {
+    const onlyParent = rowParents.values().next().value as string;
+    const tableMatch = structured.tables.find((t) => t.rowSymbol === onlyParent);
+    if (tableMatch) {
+      kind = "table";
+      tablePayload = renderTablePayload(tableMatch, entries);
+    }
+  }
+
+  const decodedCount = entries.filter((e) => e.symbol !== null).length;
+
+  logEvent({
+    action: "asset.snmp_walk",
+    resourceType: "asset",
+    resourceId: assetId,
+    resourceName: asset.hostname || asset.ipAddress || undefined,
+    actor,
+    level: "info",
+    message: `MIB walk: ${label} — ${moduleName}::${objectName} → ${entries.length} row(s)${walk.truncated ? " (truncated)" : ""}`,
+    details: {
+      mibId,
+      mibModuleName: moduleName,
+      objectName,
+      oid: baseOid,
+      credentialName: cred.name,
+      kind,
+      rowCount: entries.length,
+      decodedCount,
+      truncated: walk.truncated,
+      durationMs: walk.durationMs,
+    },
+  });
+
+  if (kind === "table" && tablePayload) {
+    return {
+      kind,
+      table: tablePayload,
+      truncated: walk.truncated,
+      durationMs: walk.durationMs,
+      rowCount: entries.length,
+      decodedCount,
+      host: asset.ipAddress,
+      oid: baseOid,
+      objectName,
+    };
+  }
+
+  return {
+    kind: "scalars",
+    entries: entries.map(({ symbolRef: _ignored, ...rest }) => rest),
+    truncated: walk.truncated,
+    durationMs: walk.durationMs,
+    rowCount: entries.length,
+    decodedCount,
+    host: asset.ipAddress,
+    oid: baseOid,
+    objectName,
+  };
+}
+
 router.post("/:id/walk", requirePermission("mibDatabase", "read"), async (req, res, next) => {
   try {
     const parsed = WalkSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new AppError(400, parsed.error.issues.map((e) => e.message).join("; "));
     }
-    const { assetId, credentialId, objectName, maxRows } = parsed.data;
 
     // Load MIB + its parsed structure first so a bad object name fails before
     // we touch the asset or credential.
@@ -472,143 +510,16 @@ router.post("/:id/walk", requirePermission("mibDatabase", "read"), async (req, r
       }
     }
 
-    const targetSymbol = structured.symbols.find((s) => s.name === objectName);
-    if (!targetSymbol) {
-      throw new AppError(400, `MIB ${mibRow.moduleName} does not define an object named "${objectName}"`);
-    }
-    if (!targetSymbol.fullOid) {
-      throw new AppError(400, `Object "${objectName}" cannot be resolved to a numeric OID — likely a missing IMPORTS dependency`);
-    }
-
-    const asset = await prisma.asset.findUnique({
-      where: { id: assetId },
-      select: { id: true, hostname: true, ipAddress: true },
-    });
-    if (!asset) throw new AppError(404, "Asset not found");
-    if (!asset.ipAddress) throw new AppError(400, "Asset has no IP address to walk");
-
-    const cred = await getCredential(credentialId, { revealSecrets: true });
-    if (cred.type !== "snmp") {
-      throw new AppError(400, `Credential "${cred.name}" is type "${cred.type}", expected "snmp"`);
-    }
-
-    const baseOid = targetSymbol.fullOid;
-    const label = asset.hostname || asset.ipAddress;
-
-    let walk;
-    try {
-      walk = await snmpWalkRaw(asset.ipAddress, cred.config as Record<string, unknown>, baseOid, maxRows);
-    } catch (err: any) {
-      const message = err?.message || "SNMP walk failed";
-      logEvent({
-        action: "asset.snmp_walk",
-        resourceType: "asset",
-        resourceId: assetId,
-        resourceName: asset.hostname || asset.ipAddress || undefined,
-        actor: req.session?.username,
-        level: "warning",
-        message: `MIB walk failed: ${label} — ${mibRow.moduleName}::${objectName} — ${message}`,
-        details: {
-          mibId: mibRow.id,
-          mibModuleName: mibRow.moduleName,
-          objectName,
-          oid: baseOid,
-          credentialName: cred.name,
-          error: message,
-        },
-      });
-      throw new AppError(502, message);
-    }
-
-    // Match each result row against the MIB's symbol map.
-    type Entry = WalkScalarEntry & { symbolRef: MibSymbol | null };
-    const entries: Entry[] = walk.rows.map((row) => {
-      const hit = findSymbolForOid(row.oid, structured.symbols);
-      const symbolRef = hit?.symbol ?? null;
-      return {
-        oid: row.oid,
-        symbol: symbolRef?.name ?? null,
-        suffix: hit?.suffix ?? null,
-        syntax: symbolRef?.syntax ?? null,
-        baseType: symbolRef?.baseType ?? null,
-        raw: row.value,
-        decoded: decodeValue(row.value, symbolRef, row.type),
-        symbolRef,
-      };
-    });
-
-    // Decide table vs scalar shape: every entry's parent must point at the
-    // same row symbol AND that row must be a known MibTable's rowSymbol.
-    let kind: "table" | "scalars" = "scalars";
-    let tablePayload: WalkTablePayload | null = null;
-
-    const rowParents = new Set<string>();
-    for (const e of entries) {
-      if (!e.symbolRef?.parentName) {
-        rowParents.clear();
-        break;
-      }
-      rowParents.add(e.symbolRef.parentName);
-    }
-    if (entries.length > 0 && rowParents.size === 1) {
-      const onlyParent = rowParents.values().next().value as string;
-      const tableMatch = structured.tables.find((t) => t.rowSymbol === onlyParent);
-      if (tableMatch) {
-        kind = "table";
-        tablePayload = renderTablePayload(tableMatch, entries);
-      }
-    }
-
-    const decodedCount = entries.filter((e) => e.symbol !== null).length;
-
-    logEvent({
-      action: "asset.snmp_walk",
-      resourceType: "asset",
-      resourceId: assetId,
-      resourceName: asset.hostname || asset.ipAddress || undefined,
-      actor: req.session?.username,
-      level: "info",
-      message: `MIB walk: ${label} — ${mibRow.moduleName}::${objectName} → ${entries.length} row(s)${walk.truncated ? " (truncated)" : ""}`,
-      details: {
+    res.json(
+      await runMibWalk({
+        structured,
+        moduleName: mibRow.moduleName,
         mibId: mibRow.id,
-        mibModuleName: mibRow.moduleName,
-        objectName,
-        oid: baseOid,
-        credentialName: cred.name,
-        kind,
-        rowCount: entries.length,
-        decodedCount,
-        truncated: walk.truncated,
-        durationMs: walk.durationMs,
-      },
-    });
-
-    if (kind === "table" && tablePayload) {
-      res.json({
-        kind,
-        table: tablePayload,
-        truncated: walk.truncated,
-        durationMs: walk.durationMs,
-        rowCount: entries.length,
-        decodedCount,
-        host: asset.ipAddress,
-        oid: baseOid,
-        objectName,
-      });
-      return;
-    }
-
-    res.json({
-      kind: "scalars",
-      entries: entries.map(({ symbolRef: _ignored, ...rest }) => rest),
-      truncated: walk.truncated,
-      durationMs: walk.durationMs,
-      rowCount: entries.length,
-      decodedCount,
-      host: asset.ipAddress,
-      oid: baseOid,
-      objectName,
-    });
+        unresolvedOidSuffix: " — likely a missing IMPORTS dependency",
+        body: parsed.data,
+        actor: req.session?.username,
+      }),
+    );
   } catch (err) {
     next(err);
   }
