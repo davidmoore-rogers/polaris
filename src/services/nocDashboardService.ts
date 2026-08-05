@@ -61,6 +61,44 @@ const ALERT_WHERE = {
   ...NOT_IN_MAINTENANCE,
 };
 
+/**
+ * /summary "assetTypeCounts" section — live-asset count per assetType
+ * (decommissioned/disabled excluded).
+ */
+export async function getAssetTypeCountRows(): Promise<Array<{ assetType: string; _count: { _all: number } }>> {
+  return prisma.asset.groupBy({
+    by: ["assetType"],
+    _count: { _all: true },
+    where: { status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } },
+  });
+}
+
+/**
+ * /summary "monitorAlerts" section — monitored assets currently in
+ * warning/down, newest transition first. Shares ALERT_WHERE with the NOC
+ * active-alert tile count so the list and the tile can never disagree
+ * (previously duplicated in dashboard.ts with a keep-in-lockstep comment).
+ * Returns up to cap+1 rows so the caller can detect overflow.
+ */
+export async function getMonitorAlertRows(cap: number) {
+  return prisma.asset.findMany({
+    where: ALERT_WHERE,
+    select: {
+      id: true,
+      hostname: true,
+      ipAddress: true,
+      assetType: true,
+      monitorStatus: true,
+      monitorStatusChangedAt: true,
+      discoveredByIntegration: { select: { name: true, type: true } },
+    },
+    // Newest transitions first; nulls (unknown transition time, typically
+    // pre-backfill assets) sink to the bottom.
+    orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
+    take: cap + 1,
+  });
+}
+
 // The eight built-in asset types the per-widget asset-type filter toggles.
 const BUILTIN_ASSET_TYPES = ["server", "switch", "router", "firewall", "workstation", "printer", "access_point", "other"];
 

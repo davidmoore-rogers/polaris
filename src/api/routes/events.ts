@@ -4,12 +4,12 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { SECRET_MASK, isMaskedSecret } from "../../utils/secretMask.js";
 import { csvParam } from "../../utils/text.js";
 import { buildPrismaTextFilter } from "../../utils/prismaTextFilter.js";
+import { queryEventsPage, listEventResourceTypes } from "../../services/eventLogService.js";
 import {
   getArchiveSettings,
   updateArchiveSettings,
@@ -158,15 +158,7 @@ router.get("/", requirePermission("events", "read"), async (req, res, next) => {
     const orderColumn = sortBy === "level" ? "levelRank" : sortBy;
     const orderBy = { [orderColumn]: sortDir };
 
-    const [events, total] = await Promise.all([
-      prisma.event.findMany({
-        where,
-        orderBy,
-        skip: offset,
-        take: limit,
-      }),
-      prisma.event.count({ where }),
-    ]);
+    const { events, total } = await queryEventsPage({ where, orderBy, skip: offset, take: limit });
 
     res.json({ events, total, limit, offset });
   } catch (err) {
@@ -184,15 +176,7 @@ router.get("/resource-types", requirePermission("events", "read"), async (_req, 
   try {
     const { retentionDays } = await getRetentionSettings();
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
-    const grouped = await prisma.event.groupBy({
-      by: ["resourceType"],
-      where: { timestamp: { gte: cutoff }, resourceType: { not: null } },
-    });
-    const resourceTypes = grouped
-      .map((g) => g.resourceType)
-      .filter((v): v is string => !!v)
-      .sort();
-    res.json({ resourceTypes });
+    res.json({ resourceTypes: await listEventResourceTypes(cutoff) });
   } catch (err) {
     next(err);
   }

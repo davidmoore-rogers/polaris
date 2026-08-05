@@ -12,7 +12,6 @@ import { z } from "zod";
 import * as credentialService from "../../services/credentialService.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { logEvent } from "./events.js";
-import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { probeCredentialAgainstHost } from "../../services/monitoringService.js";
 
@@ -126,11 +125,7 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
   try {
     const input = TestSchema.parse(req.body);
 
-    const asset = await prisma.asset.findUnique({
-      where: { id: input.assetId },
-      select: { id: true, hostname: true, ipAddress: true, dnsName: true },
-    });
-    if (!asset) throw new AppError(404, "Asset not found");
+    const asset = await credentialService.getTestAssetTarget(input.assetId);
     const host = asset.ipAddress || asset.dnsName || asset.hostname;
     // restapi credentials carry their own baseUrl, so a host on the asset is
     // optional — the credential is tested against its own URL. Every other

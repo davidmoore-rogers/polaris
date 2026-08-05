@@ -13,10 +13,10 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { getWebPushChannel } from "../../services/notificationChannelService.js";
+import { savePushSubscription, deletePushSubscription } from "../../services/pushSubscriptionService.js";
 
 const router = Router();
 
@@ -43,14 +43,7 @@ router.post("/", requirePermission("alerts", "read"), async (req, res, next) => 
     if (!userId) throw new AppError(401, "Not authenticated");
     const { endpoint, keys } = subscribeSchema.parse(req.body);
     const userAgent = (req.get("user-agent") ?? "").slice(0, 500) || null;
-    const now = new Date();
-    await prisma.pushSubscription.upsert({
-      where: { endpoint },
-      create: { userId, endpoint, p256dh: keys.p256dh, auth: keys.auth, userAgent, lastSeenAt: now },
-      // Re-subscribe may move the endpoint to a different user (shared machine) —
-      // re-own it and refresh the keys.
-      update: { userId, p256dh: keys.p256dh, auth: keys.auth, userAgent, lastSeenAt: now },
-    });
+    await savePushSubscription({ userId, endpoint, p256dh: keys.p256dh, auth: keys.auth, userAgent });
     res.status(204).end();
   } catch (err) {
     next(err);
@@ -62,7 +55,7 @@ router.delete("/", requirePermission("alerts", "read"), async (req, res, next) =
     const userId = req.session?.userId;
     if (!userId) throw new AppError(401, "Not authenticated");
     const endpoint = z.string().url().max(2000).parse(req.body?.endpoint);
-    await prisma.pushSubscription.deleteMany({ where: { endpoint, userId } });
+    await deletePushSubscription(userId, endpoint);
     res.status(204).end();
   } catch (err) {
     next(err);

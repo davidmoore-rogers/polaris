@@ -287,6 +287,13 @@ export async function requestScriptRun(req: ScriptRunRequest): Promise<{ runId: 
   return { runId: run.id };
 }
 
+/** Single run row — the Scripts-tab test-run polling read. */
+export async function getRun(id: string) {
+  const run = await prisma.automationScriptRun.findUnique({ where: { id } });
+  if (!run) throw new AppError(404, "Script run not found");
+  return run;
+}
+
 export async function listRuns(filter: { scriptId?: string; notificationId?: string; status?: string; limit?: number }) {
   return prisma.automationScriptRun.findMany({
     where: {

@@ -18,12 +18,10 @@
  */
 
 import { Router } from "express";
-import { prisma } from "../../db.js";
 import * as utilizationService from "../../services/utilizationService.js";
 import * as nocDashboardService from "../../services/nocDashboardService.js";
 import { createTtlCache } from "../../utils/ttlCache.js";
 import { csvParam } from "../../utils/text.js";
-import { EXCLUDED_LIFECYCLE_STATUSES } from "../../utils/assetInvariants.js";
 import { ensureRoleSnapshot, hasPermission } from "../middleware/permissions.js";
 
 const router = Router();
@@ -104,36 +102,14 @@ router.get("/summary", async (req, res, next) => {
             () => utilizationService.getRecentManualReservations(recentLimit, sourceTypes),
           )
         : Promise.resolve([]),
-      wants("assetTypes") && canAssets ? summaryCache.getOrCompute("assetTypes", () => prisma.asset.groupBy({
-        by: ["assetType"],
-        _count: { _all: true },
-        where: { status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } },
-      })) : Promise.resolve(emptyAssetRows),
-      wants("monitorAlerts") && canAssets ? summaryCache.getOrCompute("monitorAlerts", () => prisma.asset.findMany({
-        // Kept in lockstep with nocDashboardService's ALERT_WHERE (the NOC
-        // active-alert tile count) so the list and the tile never disagree.
-        // status<>maintenance: a maintenance window freezes monitorStatus
-        // (possibly at "down"/"warning") — planned downtime isn't an alert.
-        where: {
-          monitored: true,
-          monitorStatus: { in: ["warning", "down"] },
-          dependencySuppressed: false,
-          status: { not: "maintenance" },
-        },
-        select: {
-          id: true,
-          hostname: true,
-          ipAddress: true,
-          assetType: true,
-          monitorStatus: true,
-          monitorStatusChangedAt: true,
-          discoveredByIntegration: { select: { name: true, type: true } },
-        },
-        // Newest transitions first; nulls (unknown transition time, typically
-        // pre-backfill assets) sink to the bottom.
-        orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
-        take: MONITOR_ALERT_CAP + 1,
-      })) : Promise.resolve(emptyAssetRows),
+      wants("assetTypes") && canAssets
+        ? summaryCache.getOrCompute("assetTypes", () => nocDashboardService.getAssetTypeCountRows())
+        : Promise.resolve(emptyAssetRows),
+      // The alert list SHARES nocDashboardService.ALERT_WHERE with the NOC
+      // active-alert tile count, so the list and the tile can never disagree.
+      wants("monitorAlerts") && canAssets
+        ? summaryCache.getOrCompute("monitorAlerts", () => nocDashboardService.getMonitorAlertRows(MONITOR_ALERT_CAP))
+        : Promise.resolve(emptyAssetRows),
     ]) as [
       Awaited<ReturnType<typeof utilizationService.getGlobalUtilization>> | { blockUtilization: never[] },
       Awaited<ReturnType<typeof utilizationService.getRecentManualReservations>>,

@@ -92,6 +92,44 @@ export async function logEventsBatch(inputs: LogEventInput[]): Promise<number> {
   }
 }
 
+/**
+ * One page of the Events list (GET /events) — the route builds the validated
+ * where/orderBy (sort whitelist + operator-aware text filters live route-side
+ * with their Zod schema); this runs the paged read + total count together.
+ */
+export async function queryEventsPage(q: {
+  where: Record<string, unknown>;
+  orderBy: Record<string, "asc" | "desc">;
+  skip: number;
+  take: number;
+}): Promise<{ events: unknown[]; total: number }> {
+  const [events, total] = await Promise.all([
+    prisma.event.findMany({
+      where: q.where,
+      orderBy: q.orderBy,
+      skip: q.skip,
+      take: q.take,
+    }),
+    prisma.event.count({ where: q.where }),
+  ]);
+  return { events, total };
+}
+
+/**
+ * Distinct resourceType values inside the retention window — feeds the Events
+ * page Resource-column multi-select. Low cardinality, so groupBy is cheap.
+ */
+export async function listEventResourceTypes(cutoff: Date): Promise<string[]> {
+  const grouped = await prisma.event.groupBy({
+    by: ["resourceType"],
+    where: { timestamp: { gte: cutoff }, resourceType: { not: null } },
+  });
+  return grouped
+    .map((g) => g.resourceType)
+    .filter((v): v is string => !!v)
+    .sort();
+}
+
 export function buildChanges(
   before: Record<string, unknown>,
   after: Record<string, unknown>,

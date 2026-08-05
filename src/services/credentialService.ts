@@ -663,6 +663,19 @@ export async function getCredentialUsage(id: string): Promise<CredentialUsage> {
   return { credentialId: id, total, assetLevel, classLevel, integrationLevel, classRefCount, integrationRefCount };
 }
 
+/**
+ * Probe-target fields for POST /credentials/test — the asset the operator
+ * chose to exercise a credential against. 404s when the asset is gone.
+ */
+export async function getTestAssetTarget(assetId: string) {
+  const asset = await prisma.asset.findUnique({
+    where: { id: assetId },
+    select: { id: true, hostname: true, ipAddress: true, dnsName: true },
+  });
+  if (!asset) throw new AppError(404, "Asset not found");
+  return asset;
+}
+
 export async function deleteCredential(id: string): Promise<void> {
   const usage = await getCredentialUsage(id); // throws 404 if missing
   if (usage.total > 0) {

@@ -1546,6 +1546,24 @@ Listed alphabetically.
 
 ---
 
+## services/pushSubscriptionService.ts
+
+**What it owns:** The write path for the `PushSubscription` table — per-user Web Push subscriptions stored by the `/push-subscriptions` routes.
+
+**Public API:** `savePushSubscription({userId, endpoint, p256dh, auth, userAgent})` (upsert by endpoint; re-subscribe re-owns an endpoint that moved to a different user on a shared machine and refreshes the keys), `deletePushSubscription(userId, endpoint)` (owner-scoped deleteMany).
+
+**Cross-service deps:** `prisma` only.
+
+**Used by:** `src/api/routes/pushSubscriptions.ts` (POST/DELETE). Readers of the table live elsewhere: `notificationRecipientService` fans deliveries out to a user's endpoints, and the web_push sender prunes rows when an endpoint answers 410/404.
+
+**Invariants:**
+- Delete is scoped to the owning user — one user can never unsubscribe another's endpoint.
+- Upsert re-owns on endpoint collision by design (shared-machine re-subscribe); don't "fix" it into a 409.
+
+**When changing this:** the endpoint is the business key (`@unique`); anything that changes the stored key fields must stay compatible with what the web_push sender reads at delivery time.
+
+---
+
 ## services/notificationChannelService.ts
 
 **What it owns:** CRUD + secret handling for the `NotificationChannel` registry (Notifications → Delivery tab) — the operator-managed list of outbound delivery integrations.

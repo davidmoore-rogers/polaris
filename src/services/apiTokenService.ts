@@ -156,6 +156,51 @@ export async function createToken(input: CreateTokenInput): Promise<CreateTokenR
   return { token: toSummary(row), rawToken: raw };
 }
 
+/**
+ * The FMG/FortiGate rows the API Tokens tab's per-integration quarantine
+ * picker renders (with each one's enabled + pushQuarantine-config flags, so
+ * the UI can show the "push disabled" alert without a second round-trip
+ * to /integrations).
+ */
+export async function listQuarantineIntegrations() {
+  const rows = await prisma.integration.findMany({
+    where: { type: { in: ["fortimanager", "fortigate"] } },
+    select: { id: true, name: true, type: true, enabled: true, config: true },
+    orderBy: { name: "asc" },
+  });
+  return rows.map((r) => {
+    const cfg = (r.config ?? {}) as Record<string, unknown>;
+    return {
+      id: r.id,
+      name: r.name,
+      type: r.type,
+      enabled: r.enabled,
+      pushQuarantineEnabled: cfg.pushQuarantine === true,
+    };
+  });
+}
+
+/**
+ * Role catalogue for the "acts as role" dropdown — embedded in the tokens
+ * listing (rather than the UI calling /api/v1/roles) so the tab renders for
+ * any caller holding apiTokens=read regardless of their roles-function
+ * access. grantsQuarantineWrite drives the integration-picker toggle;
+ * adminEquivalent drives the "full control" warning banner.
+ */
+export async function listRoleChoices() {
+  return (await prisma.role.findMany({ orderBy: { name: "asc" } })).map((r) => {
+    const perms = normalizePermissions(r.permissions);
+    return {
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      grantsQuarantineWrite:
+        perms.assetsQuarantine === "write" || perms.assetsQuarantine === "fullwrite",
+      adminEquivalent: isAdminEquivalentPermissions(perms),
+    };
+  });
+}
+
 export async function listTokens(): Promise<ApiTokenSummary[]> {
   const rows = await prisma.apiToken.findMany({
     orderBy: { createdAt: "desc" },

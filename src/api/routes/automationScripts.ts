@@ -23,7 +23,6 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requirePermission } from "../middleware/permissions.js";
-import { AppError } from "../../utils/errors.js";
 import { SCRIPT_INTERPRETERS } from "../../services/notificationTypes.js";
 import {
   listScripts,
@@ -33,11 +32,11 @@ import {
   deleteScript,
   requestScriptRun,
   listRuns,
+  getRun,
   SCRIPT_RUN_TARGET_VALUES,
   MAX_SCRIPT_BODY_BYTES,
   MAX_SCRIPT_TIMEOUT_SEC,
 } from "../../services/automationScriptService.js";
-import { prisma } from "../../db.js";
 
 export const automationScriptsRouter = Router();
 
@@ -77,9 +76,7 @@ automationScriptsRouter.get("/runs", requirePermission("automationScripts", "rea
 
 automationScriptsRouter.get("/runs/:id", requirePermission("automationScripts", "read"), async (req, res, next) => {
   try {
-    const run = await prisma.automationScriptRun.findUnique({ where: { id: req.params.id as string } });
-    if (!run) throw new AppError(404, "Script run not found");
-    res.json({ run });
+    res.json({ run: await getRun(req.params.id as string) });
   } catch (err) { next(err); }
 });
 
