@@ -25,13 +25,15 @@ const router = Router();
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
+// Accepts the standard 48-bit MAC formats: bare hex, colon/dash pairs, or
+// Cisco dotted quads. Shared by every MAC field in this file.
+const MAC_FORMAT_RE = /^[0-9a-f]{12}$|^([0-9a-f]{2}[:\-]){5}[0-9a-f]{2}$|^([0-9a-f]{4}\.){2}[0-9a-f]{4}$/i;
+const MAC_FORMAT_MSG = "MAC address must be 12 hex chars (with optional :, -, or . separators)";
+
 const MacAddressSchema = z
   .string()
   .min(1)
-  .refine(
-    (s) => /^[0-9a-f]{12}$|^([0-9a-f]{2}[:\-]){5}[0-9a-f]{2}$|^([0-9a-f]{4}\.){2}[0-9a-f]{4}$/i.test(s),
-    "MAC address must be 12 hex chars (with optional :, -, or . separators)",
-  )
+  .refine((s) => MAC_FORMAT_RE.test(s), MAC_FORMAT_MSG)
   .optional();
 
 const CreateReservationSchema = z.object({
@@ -66,12 +68,7 @@ const UpdateReservationSchema = z.object({
   // the standard 48-bit MAC formats.
   macAddress: z
     .string()
-    .refine(
-      (s) =>
-        s === "" ||
-        /^[0-9a-f]{12}$|^([0-9a-f]{2}[:\-]){5}[0-9a-f]{2}$|^([0-9a-f]{4}\.){2}[0-9a-f]{4}$/i.test(s),
-      "MAC address must be 12 hex chars (with optional :, -, or . separators)",
-    )
+    .refine((s) => s === "" || MAC_FORMAT_RE.test(s), MAC_FORMAT_MSG)
     .optional(),
 });
 

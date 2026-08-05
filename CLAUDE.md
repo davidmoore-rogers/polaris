@@ -43,7 +43,7 @@ Code lives in `src/` (`api/routes/`, `api/middleware/`, `services/`, `jobs/`, `u
 | Validation | Zod |
 | Logging | Pino + pino-pretty |
 | Auth | argon2id via @node-rs/argon2, @node-saml/node-saml (Azure SAML SSO), otpauth + qrcode (optional TOTP second factor for local accounts) |
-| IP Math | netmask + cidr-tools |
+| IP Math | netmask |
 | Security | helmet, express-rate-limit |
 | File uploads | multer |
 | PDF export | jspdf + jspdf-autotable |

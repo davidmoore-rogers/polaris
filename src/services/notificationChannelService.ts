@@ -18,6 +18,7 @@ import { logEvent } from "./eventLogService.js";
 import { CHANNEL_TYPE_META, CHANNEL_TRANSPORT, type ChannelType } from "./notificationTypes.js";
 import { generateVapidKeys } from "./notificationChannels/webPushChannel.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
+import { asObject } from "../utils/object.js";
 
 export const MASK = SECRET_MASK;
 
@@ -40,9 +41,6 @@ function secretKeys(type: ChannelType): string[] {
   return CHANNEL_TYPE_META[type].fields.filter((f) => f.secret).map((f) => f.key);
 }
 
-function asObject(v: unknown): Record<string, unknown> {
-  return v && typeof v === "object" ? { ...(v as Record<string, unknown>) } : {};
-}
 
 /** Mask every secret field that has a value; report which are set. */
 function maskConfig(type: ChannelType, config: unknown): Record<string, unknown> {

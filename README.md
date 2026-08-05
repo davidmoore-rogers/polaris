@@ -286,7 +286,7 @@ npm run test:coverage     # with coverage report
 | Validation | Zod |
 | Logging | Pino |
 | Auth | argon2id, `@node-saml/node-saml`, `otpauth` + `qrcode` |
-| IP math | `netmask`, `cidr-tools` |
+| IP math | `netmask` |
 | LDAP | `ldapts` |
 | Monitoring transports | `net-snmp`, `ssh2`, built-in `node:https` (FortiOS REST + WinRM SOAP), system `ping` |
 | Mapping | Leaflet + leaflet.markercluster + leaflet-draw + OpenStreetMap |

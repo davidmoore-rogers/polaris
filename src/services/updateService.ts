@@ -22,6 +22,7 @@ import { randomBytes, scryptSync, createCipheriv, createHash } from "node:crypto
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { getAppVersion } from "../utils/version.js";
+import { deriveNginxServerName, derivePolarisPort } from "../utils/publicUrl.js";
 import { renderNginxConfig } from "./nginxRenderer.js";
 import { getProxyConfig, saveProxyConfig } from "./proxyConfigService.js";
 import { resolveDashPort } from "../utils/dashConfig.js";
@@ -919,8 +920,8 @@ export async function restartService() {
         } else {
           const rendered = renderNginxConfig({
             config: cfg,
-            serverName: deriveServerNameForRender(),
-            polarisPort: derivePolarisPortForRender(),
+            serverName: deriveNginxServerName(),
+            polarisPort: derivePolarisPort(),
             dashPort: resolveDashPort(),
           });
           let driftDetected = false;
@@ -1040,22 +1041,3 @@ export async function restartService() {
   }
 }
 
-// ─── nginx render env-derived inputs (duplicated from nginxApplyService) ───
-// Kept here to avoid a transitive dependency on nginxApplyService which
-// pulls in certInfo + privilegedSysadmin. The renderer itself only needs
-// these two values, derivable from env vars Polaris already reads at boot.
-
-function deriveServerNameForRender(): string {
-  const publicUrl = process.env.POLARIS_PUBLIC_URL;
-  if (publicUrl) {
-    try { return new URL(publicUrl).hostname; } catch { /* fall through */ }
-  }
-  return "polaris.example.com";
-}
-
-function derivePolarisPortForRender(): number {
-  const raw = process.env.PORT;
-  if (!raw) return 3000;
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 && n < 65536 ? n : 3000;
-}

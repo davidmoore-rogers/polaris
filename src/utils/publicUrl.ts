@@ -34,3 +34,26 @@ export function getPublicUrlPort(): number | null {
     return null;
   }
 }
+
+/**
+ * Hostname for nginx `server_name` when rendering the managed proxy config —
+ * POLARIS_PUBLIC_URL's hostname, else the documented placeholder. The
+ * fallback covers dev boxes / unit tests; production proxy mode requires
+ * POLARIS_PUBLIC_URL (see the runtimeConfig boot guard). Shared by
+ * nginxApplyService and updateService's restart-time config sync.
+ */
+export function deriveNginxServerName(): string {
+  const publicUrl = process.env.POLARIS_PUBLIC_URL;
+  if (publicUrl) {
+    try { return new URL(publicUrl).hostname; } catch { /* fall through */ }
+  }
+  return "polaris.example.com";
+}
+
+/** The local HTTP port Polaris listens on (PORT, bounds-checked, default 3000). */
+export function derivePolarisPort(): number {
+  const raw = process.env.PORT;
+  if (!raw) return 3000;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : 3000;
+}

@@ -41,6 +41,7 @@
 
 import { Resvg } from "@resvg/resvg-js";
 import { prisma } from "../db.js";
+import { logger } from "../utils/logger.js";
 import { AppError } from "../utils/errors.js";
 import { normalizeManufacturer } from "../utils/manufacturerNormalize.js";
 import { isKnownAssetType } from "../utils/assetTypes.js";
@@ -316,9 +317,7 @@ export async function rasterizeStoredSvgIcons(): Promise<{ converted: number; fa
       converted++;
     } catch (err) {
       failed++;
-      // Surface to the caller's logger — keeps this service free of
-      // a direct pino import for what's effectively a one-time job.
-      console.warn(`[deviceIconService] backfill: failed to rasterize SVG icon ${row.id}: ${err instanceof Error ? err.message : String(err)}`);
+      logger.warn({ err, iconId: row.id }, "deviceIconService backfill: failed to rasterize SVG icon");
     }
   }
   return { converted, failed };

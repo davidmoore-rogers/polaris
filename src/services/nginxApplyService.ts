@@ -48,6 +48,7 @@ import {
 } from "./proxyConfigService.js";
 import { invalidateCache as invalidateCertInfoCache, getServerCertFingerprint } from "./certInfo.js";
 import { isProxyMode } from "../utils/proxyMode.js";
+import { deriveNginxServerName, derivePolarisPort } from "../utils/publicUrl.js";
 import { resolveDashPort } from "../utils/dashConfig.js";
 import { logger } from "../utils/logger.js";
 import { AppError } from "../utils/errors.js";
@@ -95,7 +96,7 @@ export async function applyProxyConfig(changes?: Partial<ProxyConfig>): Promise<
 
   const { contents, sha256 } = renderNginxConfig({
     config: cfg,
-    serverName: deriveServerName(),
+    serverName: deriveNginxServerName(),
     polarisPort: derivePolarisPort(),
     dashPort: resolveDashPort(),
   });
@@ -270,25 +271,6 @@ export async function getDriftStatus(): Promise<DriftStatus> {
     expectedHash: cfg.lastAppliedHash,
     driftMarkers,
   };
-}
-
-// ─── env-derived render inputs ────────────────────────────────────────────
-
-function deriveServerName(): string {
-  const publicUrl = process.env.POLARIS_PUBLIC_URL;
-  if (publicUrl) {
-    try { return new URL(publicUrl).hostname; } catch { /* fall through */ }
-  }
-  // Fallback covers dev boxes / unit tests. Production proxy mode requires
-  // POLARIS_PUBLIC_URL — see src/utils/runtimeConfig.ts boot guard.
-  return "polaris.example.com";
-}
-
-function derivePolarisPort(): number {
-  const raw = process.env.PORT;
-  if (!raw) return 3000;
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 && n < 65536 ? n : 3000;
 }
 
 // ─── X.509 field helpers (copy of certInfo internals — not worth exporting) ─

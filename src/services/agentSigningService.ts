@@ -32,6 +32,7 @@ import { resolve as resolvePath } from "node:path";
 import { prisma } from "../db.js";
 import { STATE_DIR } from "../utils/paths.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
+import { asObject } from "../utils/object.js";
 import { buildClientCredentialsTokenRequest } from "../utils/entraClientCredentials.js";
 
 const execFileAsync = promisify(execFile);
@@ -91,10 +92,6 @@ export const DEFAULT_SIGNING_CONFIG: AgentSigningConfig = {
   clientSecret: "",
   jsignJarPath: "",
 };
-
-function asObject(v: unknown): Record<string, unknown> {
-  return v && typeof v === "object" ? { ...(v as Record<string, unknown>) } : {};
-}
 
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
