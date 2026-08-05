@@ -78,6 +78,7 @@ Per-pattern sections:
 - Tooltip: `_wireChartTooltip(container, formatHTML)` in `public/js/assets.js` — single shared hover handler all charts use.
 - Resize: `_observeChartResize(container, rerender)` — re-renders on container resize via ResizeObserver.
 - Stats line: `_renderChartStats(container, count, parts)` — single helper every chart calls; produces the canonical `<count> samples · <Label>: <value> · …` shape and writes a plaintext fallback to `container.dataset.summary` for screenshots/tooltips.
+- Camera button: `_addChartScreenshotButton(container, label, axisOpts)` — per-chart clipboard PNG with a self-identifying header (title / subject / asset / stats + axis labels drawn in canvas margins). Pass `getStats: _statsSummaryFrom("<stats-el-id>")` so the capture includes the same samples/Avg/Min/Max line shown above the chart (storage's per-mount bars use `_storageStatsSummaryFor(container)` instead — no fixed id).
 - Polling-method badge: `_streamSourceBadgeHTML(asset, stream)` (sync first paint) + `_updateStreamSourceBadgesFromEffective(assetId, asset)` (async overwrite from `/effective-monitor-settings`). Renders `<method> (<details>) · every <interval> · <tier>`.
 - Lookback overflow: route helper `extendSinceForLookback(since, bucketSeconds)` in `src/api/routes/assets.ts` + optional `fetchSince` parameter on every `read*History` service in `src/services/sampleHistoryService.ts` + frontend helpers `_chartClipId(prefix)` / `_chartClipDefs(id, padL, padT, innerW, innerH)` / `_chartClipAttr(id)` near the chart-prefs block in `public/js/assets.js`.
 
@@ -97,6 +98,7 @@ Per-pattern sections:
 - Pick a unique chart id and add it to the prefs key list above.
 - Reuse `_chartRangeBtnsHTML` for the toolbar — don't roll your own.
 - Wire `_wireChartTooltip` and `_observeChartResize` — every existing chart does, and skipping breaks behavior parity.
+- Wire `_addChartScreenshotButton` with a `getStats` callback (via `_statsSummaryFrom`) — a camera button without it produces screenshots missing the stats line.
 - Attach the loader's persisted range to the container dataset so silent refresh and probe-now refetch the same window.
 - Use `_renderChartStats` for the stats line. If your chart has additional "current" readings worth showing, put them in the Status block (or a sibling section that mirrors Status), not inline in the stats line.
 - Stats values must come from `data.stats` server-side or be derived once from the same samples the chart renders — don't duplicate aggregation logic.

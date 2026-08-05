@@ -7184,7 +7184,7 @@ function _renderSensorChart(container, samples, opts) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
       '<div>' + _hwFmtNum(c) + (unit ? " " + unit : "") + '</div>';
   });
-  _addChartScreenshotButton(container, opts.subject || "Sensor", { yAxis: (unit ? "Reading (" + unit + ")" : "Reading"), subject: opts.subject });
+  _addChartScreenshotButton(container, opts.subject || "Sensor", { yAxis: (unit ? "Reading (" + unit + ")" : "Reading"), subject: opts.subject, getStats: _statsSummaryFrom("sensor-stats") });
   _observeChartResize(container, function (c) { _renderSensorChart(c, samples, opts); });
 }
 
@@ -7568,6 +7568,19 @@ function _captureChartAsPng(container, meta, callback) {
   };
   img.onerror = function () { URL.revokeObjectURL(url); callback(null); };
   img.src = url;
+}
+
+// Builds a getStats callback for _addChartScreenshotButton that reads the
+// plaintext summary _renderChartStats stashes on the chart's stats bar
+// (dataset.summary), so the screenshot carries the same samples/Avg/Min/Max
+// line shown above the chart. Read at click time — the bar re-renders on
+// every range change, so capturing the element id (not its content) here
+// keeps the screenshot in sync with the visible view.
+function _statsSummaryFrom(statsElId) {
+  return function () {
+    var el = document.getElementById(statsElId);
+    return (el && el.dataset.summary) || "";
+  };
 }
 
 // Inject a small camera button at the top-right of a chart container. The
@@ -8009,7 +8022,7 @@ function _renderSystemChart(container, data, asset, si) {
       '<div>CPU: ' + (cpuRaw !== "" ? Number(cpuRaw).toFixed(1) + "%" : "—") + '</div>' +
       memLine;
   });
-  _addChartScreenshotButton(container, "CPU & Memory", { yAxis: "Utilization (%)" });
+  _addChartScreenshotButton(container, "CPU & Memory", { yAxis: "Utilization (%)", getStats: _statsSummaryFrom("asset-system-summary") });
   _observeChartResize(container, function (c) { _renderSystemChart(c, data, asset, si); });
 }
 
@@ -9146,10 +9159,7 @@ function _renderMonitorChart(container, data, transitions) {
   svgEl.addEventListener("mouseleave", function () { tip.style.display = "none"; });
   _addChartScreenshotButton(container, "Response time", {
     yAxis: "Response time (ms)",
-    getStats: function () {
-      var el = document.getElementById("asset-monitor-stats");
-      return (el && el.dataset.summary) || "";
-    },
+    getStats: _statsSummaryFrom("asset-monitor-stats"),
   });
   // Pass `transitions` through the resize closure — without it a container
   // resize silently dropped the polling-transition markers (and would drop
@@ -9874,7 +9884,7 @@ function _renderIfaceThroughputChart(container, derived, opts) {
       '<div>Input: '  + (inV  !== "" ? _fmtBitsPerSec(Number(inV))  : "—") + '</div>' +
       '<div>Output: ' + (outV !== "" ? _fmtBitsPerSec(Number(outV)) : "—") + '</div>';
   });
-  _addChartScreenshotButton(container, "Throughput", { yAxis: "Throughput (bps)", subject: opts.subject });
+  _addChartScreenshotButton(container, "Throughput", { yAxis: "Throughput (bps)", subject: opts.subject, getStats: _statsSummaryFrom("iface-tput-stats") });
   _observeChartResize(container, function (c) { _renderIfaceThroughputChart(c, derived, opts); });
 }
 
@@ -9971,7 +9981,7 @@ function _renderIfaceErrorChart(container, derived, opts) {
       '<div>In errors: ' + (inE  !== "" ? inE  : "—") + '</div>' +
       '<div>Out errors: ' + (outE !== "" ? outE : "—") + '</div>';
   });
-  _addChartScreenshotButton(container, "Interface errors", { yAxis: "Errors per interval", subject: opts.subject });
+  _addChartScreenshotButton(container, "Interface errors", { yAxis: "Errors per interval", subject: opts.subject, getStats: _statsSummaryFrom("iface-err-stats") });
   _observeChartResize(container, function (c) { _renderIfaceErrorChart(c, derived, opts); });
 }
 
@@ -10349,7 +10359,7 @@ function _renderIpsecStatusChart(container, samples, opts) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
       '<div>Status: ' + escapeHtml(target.getAttribute("data-status")) + '</div>';
   });
-  _addChartScreenshotButton(container, "IPsec status", { yAxis: "Status", subject: opts.subject });
+  _addChartScreenshotButton(container, "IPsec status", { yAxis: "Status", subject: opts.subject, getStats: _statsSummaryFrom("ipsec-stats") });
   _observeChartResize(container, function (c) { _renderIpsecStatusChart(c, samples, opts); });
 }
 
@@ -10427,7 +10437,7 @@ function _renderIpsecBpsChart(container, derived, side, opts) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
       '<div>' + (side === "in" ? "Incoming" : "Outgoing") + ': ' + _fmtBitsPerSec(Number(target.getAttribute("data-v"))) + '</div>';
   });
-  _addChartScreenshotButton(container, side === "in" ? "IPsec incoming" : "IPsec outgoing", { yAxis: "Throughput (bps)", subject: opts.subject });
+  _addChartScreenshotButton(container, side === "in" ? "IPsec incoming" : "IPsec outgoing", { yAxis: "Throughput (bps)", subject: opts.subject, getStats: _statsSummaryFrom("ipsec-stats") });
   _observeChartResize(container, function (c) { _renderIpsecBpsChart(c, derived, side, opts); });
 }
 
@@ -10957,7 +10967,7 @@ function _renderPerfSlaMultiChart(container, series, metricKey, meta, opts) {
       '<div>' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
       '<div>' + escapeHtml(meta.label || metricKey) + ': ' + escapeHtml(target.getAttribute("data-v")) + ' ' + escapeHtml(meta.unit || "") + '</div>';
   });
-  _addChartScreenshotButton(container, "SD-WAN " + (meta.label || metricKey), { yAxis: (meta.label || "") + " (" + (meta.unit || "") + ")", subject: opts.subject });
+  _addChartScreenshotButton(container, "SD-WAN " + (meta.label || metricKey), { yAxis: (meta.label || "") + " (" + (meta.unit || "") + ")", subject: opts.subject, getStats: _statsSummaryFrom("sdwan-perfsla-stats") });
   // Clickable legend → toggle the member across all three charts.
   container.querySelectorAll(".sdwan-legend-item").forEach(function (g) {
     g.addEventListener("click", function () { _togglePerfSlaMember(g.getAttribute("data-member")); });
@@ -11147,6 +11157,16 @@ async function openStorageDetailPanel(asset, focusMountPath, storage) {
       _loadAllStorageForAsset(asset.id, mounts.map(function (m) { return m.mountPath; }), { from: fromIso, to: toIso });
     });
   }
+}
+
+// Storage stats bars are per-mount (no fixed element id) — resolve the one in
+// the chart's own .storage-mount-section at click time.
+function _storageStatsSummaryFor(container) {
+  return function () {
+    var section = container.closest ? container.closest(".storage-mount-section") : null;
+    var el = section && section.querySelector("[data-storage-stats]");
+    return (el && el.dataset.summary) || "";
+  };
 }
 
 function _findStorageSection(mountPath) {
@@ -11654,13 +11674,13 @@ function _renderStorageChart(container, samples, opts) {
         '<div>Used: '  + (u !== "" ? _fmtBytes(Number(u)) : "—") + '</div>' +
         '<div>Total: ' + (t !== "" ? _fmtBytes(Number(t)) : "—") + '</div>';
     });
-    _addChartScreenshotButton(container, "Storage usage (bytes)", { yAxis: "Bytes", subject: opts.subject });
+    _addChartScreenshotButton(container, "Storage usage (bytes)", { yAxis: "Bytes", subject: opts.subject, getStats: _storageStatsSummaryFor(container) });
   } else {
     _wireChartTooltip(container, function (target) {
       return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
         '<div>Used: ' + Number(target.getAttribute("data-v")).toFixed(2) + '%</div>';
     });
-    _addChartScreenshotButton(container, "Storage usage %", { yAxis: "Used %", subject: opts.subject });
+    _addChartScreenshotButton(container, "Storage usage %", { yAxis: "Used %", subject: opts.subject, getStats: _storageStatsSummaryFor(container) });
   }
   _observeChartResize(container, function (c) { _renderStorageChart(c, samples, opts); });
 }
