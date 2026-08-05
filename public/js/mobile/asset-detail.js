@@ -44,7 +44,7 @@
   // the Monitor card. Telemetry chart follows the same range so both
   // sections move together when the operator switches windows.
   var DEFAULT_RANGE = "24h";
-  var RANGES = ["1h", "24h", "7d", "30d"];
+  var RANGES = ["1h", "12h", "24h", "7d", "30d"];
 
   // Human labels for AssetSource.sourceKind — mirrors `_assetSourceLabels` in
   // the desktop assets.js so both surfaces name discovery sources the same.
@@ -1132,7 +1132,7 @@
     }
 
     if (hcNames.length) {
-      var rangeButtons = ["1h", "24h", "7d", "30d"].map(function (rr) {
+      var rangeButtons = ["1h", "12h", "24h", "7d", "30d"].map(function (rr) {
         return '<button class="seg-item' + (rr === _sdwanSheetState.range ? " on" : "") + '" data-range="' + rr + '">' + rr + '</button>';
       }).join("");
       var hcOptions = hcNames.map(function (hc) {

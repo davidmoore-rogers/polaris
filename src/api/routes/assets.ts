@@ -1139,7 +1139,7 @@ router.get(["/:id/alerts", "/:id/notifications"], requirePermission("assets", "r
   }
 });
 
-// GET /api/v1/assets/:id/monitor-history?range=1h|24h|7d|30d OR ?from=ISO&to=ISO
+// GET /api/v1/assets/:id/monitor-history?range=1h|12h|24h|7d|30d OR ?from=ISO&to=ISO
 router.get("/:id/monitor-history", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
@@ -1161,6 +1161,7 @@ router.get("/:id/monitor-history", requirePermission("assets", "read"), async (r
       const range = String(req.query.range || "24h");
       const windowMs =
         range === "1h"  ?  1 * 60 * 60 * 1000 :
+        range === "12h" ? 12 * 60 * 60 * 1000 :
         range === "7d"  ?  7 * 24 * 60 * 60 * 1000 :
         range === "30d" ? 30 * 24 * 60 * 60 * 1000 :
                             24 * 60 * 60 * 1000;
@@ -1502,6 +1503,7 @@ router.post("/:id/snmp-walk", requirePermission("assetsProbe", "write"), async (
 
 const RANGE_MS: Record<string, number> = {
   "1h":  1 * 60 * 60 * 1000,
+  "12h": 12 * 60 * 60 * 1000,
   "24h": 24 * 60 * 60 * 1000,
   "7d":  7  * 24 * 60 * 60 * 1000,
   "30d": 30 * 24 * 60 * 60 * 1000,

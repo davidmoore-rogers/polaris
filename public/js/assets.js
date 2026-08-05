@@ -228,6 +228,192 @@ function _chartClipAttr(id) {
   return 'clip-path="url(#' + id + ')"';
 }
 
+// Failed-poll color shared by every failure-aware chart element (red baseline
+// dots, fade-to-red line segments). Matches the danger hue the tooltips use.
+var _CHART_FAIL_COLOR = "#d32f2f";
+
+// Failure-aware line rendering. `pts` is a time-ordered list of
+// { x, y, ok } plot points where failed polls sit at the chart baseline
+// (y = padT + innerH) with ok:false. Consecutive OK points connect in the
+// series color, consecutive failures connect in red along the baseline, and
+// each OK↔fail transition segment gets its own userSpaceOnUse linearGradient
+// so the line visibly fades from the series color into red (and back) instead
+// of jumping. Returns { defs, segments } SVG strings; `idPrefix` must be
+// unique per render (the chart's clipId works) so gradient ids never collide
+// across charts.
+function _failureAwareSeriesSVG(pts, seriesColor, idPrefix) {
+  var defs = "";
+  var segs = "";
+  for (var i = 1; i < pts.length; i++) {
+    var a = pts[i - 1], b = pts[i];
+    var stroke;
+    if (a.ok && b.ok) {
+      stroke = seriesColor;
+    } else if (!a.ok && !b.ok) {
+      stroke = _CHART_FAIL_COLOR;
+    } else {
+      var gid = idPrefix + "-seg-" + i;
+      defs += '<linearGradient id="' + gid + '" gradientUnits="userSpaceOnUse"' +
+        ' x1="' + a.x + '" y1="' + a.y + '" x2="' + b.x + '" y2="' + b.y + '">' +
+        '<stop offset="0%" stop-color="' + (a.ok ? seriesColor : _CHART_FAIL_COLOR) + '"/>' +
+        '<stop offset="100%" stop-color="' + (b.ok ? seriesColor : _CHART_FAIL_COLOR) + '"/>' +
+        '</linearGradient>';
+      stroke = 'url(#' + gid + ')';
+    }
+    segs += '<line x1="' + a.x + '" y1="' + a.y + '" x2="' + b.x + '" y2="' + b.y +
+      '" stroke="' + stroke + '" stroke-width="1.5"/>';
+  }
+  return { defs: defs, segments: segs };
+}
+
+// Red baseline dots for failed polls — one per failure point in `pts`
+// (companions to _failureAwareSeriesSVG). Slightly larger than the 1.5px
+// series dots so a lone failure is visible at a glance.
+function _failureDotsSVG(pts) {
+  return pts.filter(function (p) { return !p.ok; }).map(function (p) {
+    return '<circle cx="' + p.x + '" cy="' + p.y + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
+  }).join("");
+}
+
+// Detect missed-poll gaps in a time-ordered sample series (charts whose
+// streams have no explicit per-sample success flag — interface throughput /
+// errors — where a failed poll simply leaves no row). Returns synthetic
+// marker timestamps (ms) to plot as failures: one just after the last good
+// sample and one just before the next, so the line dives to the baseline
+// across the gap instead of drawing a straight bridge over it. A gap counts
+// when it exceeds 2.5× the series' median cadence (needs ≥3 samples to have
+// a meaningful median; rollup tiers work the same way — a missing bucket is
+// a gap in bucket-sized steps).
+function _pollGapMarkers(timestampsMs) {
+  if (!timestampsMs || timestampsMs.length < 3) return [];
+  var dts = [];
+  for (var i = 1; i < timestampsMs.length; i++) {
+    var dt = timestampsMs[i] - timestampsMs[i - 1];
+    if (dt > 0) dts.push(dt);
+  }
+  if (!dts.length) return [];
+  dts.sort(function (a, b) { return a - b; });
+  var median = dts[Math.floor(dts.length / 2)];
+  if (!(median > 0)) return [];
+  var threshold = median * 2.5;
+  var markers = [];
+  for (i = 1; i < timestampsMs.length; i++) {
+    var gap = timestampsMs[i] - timestampsMs[i - 1];
+    if (gap <= threshold) continue;
+    var a = timestampsMs[i - 1] + median;
+    var b = timestampsMs[i] - median;
+    if (b <= a) markers.push(timestampsMs[i - 1] + gap / 2);
+    else markers.push(a, b);
+  }
+  return markers;
+}
+
+// Stash the rendered plot geometry on the chart container so the drag-select
+// helper can translate mouse positions back into timestamps at event time.
+// Re-renders replace the SVG but keep the container element, so the dataset
+// is simply rewritten on every render and the wired listeners stay valid.
+function _stashChartGeometry(container, t0, t1, padL, innerW, viewW) {
+  if (!container || !container.dataset) return;
+  container.dataset.geomT0 = String(t0);
+  container.dataset.geomT1 = String(t1);
+  container.dataset.geomPadL = String(padL);
+  container.dataset.geomInnerW = String(innerW);
+  container.dataset.geomViewW = String(viewW);
+}
+
+// Click-drag on a chart's plot area selects a time window and applies it as
+// that chart's custom date range (works from any starting range — preset or
+// custom). Geometry comes from the dataset stamped by _stashChartGeometry at
+// render time. Drags under 6px fall through to normal click/hover behavior.
+// The SVG renders with preserveAspectRatio="none" at width:100%, so client-x
+// is scaled through the viewBox width before mapping onto the time axis.
+function _wireChartDragSelect(container, applySelection) {
+  if (!container || container._dragSelectWired) return;
+  container._dragSelectWired = true;
+  function geom() {
+    var d = container.dataset;
+    var g = {
+      t0: Number(d.geomT0), t1: Number(d.geomT1),
+      padL: Number(d.geomPadL), innerW: Number(d.geomInnerW), viewW: Number(d.geomViewW),
+    };
+    if (!isFinite(g.t0) || !isFinite(g.t1) || g.t1 <= g.t0 || !(g.innerW > 0) || !(g.viewW > 0)) return null;
+    return g;
+  }
+  function tsAtClientX(clientX, svgEl, g) {
+    var rect = svgEl.getBoundingClientRect();
+    if (!(rect.width > 0)) return null;
+    var xView = ((clientX - rect.left) / rect.width) * g.viewW;
+    var frac = (xView - g.padL) / g.innerW;
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
+    return g.t0 + frac * (g.t1 - g.t0);
+  }
+  container.addEventListener("mousedown", function (e) {
+    if (e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest(".chart-screenshot-btn")) return;
+    var svgEl = container.querySelector("svg");
+    if (!svgEl || !(svgEl === e.target || svgEl.contains(e.target))) return;
+    var g = geom();
+    if (!g) return;
+    e.preventDefault(); // stop text selection during the drag
+    var startX = e.clientX;
+    var box = null;
+    function place(curX) {
+      if (!box) {
+        box = document.createElement("div");
+        box.style.cssText = "position:absolute;top:" + svgEl.offsetTop + "px;height:" + svgEl.clientHeight +
+          "px;background:rgba(79,195,247,0.16);border:1px solid rgba(79,195,247,0.65);pointer-events:none;z-index:4";
+        container.appendChild(box);
+      }
+      var rect = container.getBoundingClientRect();
+      var x0 = Math.min(startX, curX) - rect.left;
+      var x1 = Math.max(startX, curX) - rect.left;
+      box.style.left = x0 + "px";
+      box.style.width = Math.max(1, x1 - x0) + "px";
+    }
+    function onMove(ev) {
+      if (!box && Math.abs(ev.clientX - startX) < 6) return;
+      ev.preventDefault();
+      place(ev.clientX);
+    }
+    function onUp(ev) {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      var dragged = !!box;
+      if (box && box.parentNode) box.parentNode.removeChild(box);
+      box = null;
+      if (!dragged || Math.abs(ev.clientX - startX) < 6) return;
+      var ta = tsAtClientX(startX, svgEl, g);
+      var tb = tsAtClientX(ev.clientX, svgEl, g);
+      if (ta == null || tb == null) return;
+      var from = Math.min(ta, tb), to = Math.max(ta, tb);
+      if (to - from < 1000) return; // sub-second selections are noise
+      applySelection(new Date(from).toISOString(), new Date(to).toISOString());
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+// Reflect a drag-selected custom window in a chart's range-button bar: preset
+// buttons drop to secondary, the Custom… button (when the surface has one)
+// goes primary, and the custom From/To panel opens pre-filled with the
+// selection so the operator can see — and fine-tune — the window that was
+// just applied. `ui` = { btnClass, customBtnId?, panelId?, fromId?, toId? }.
+function _applyCustomRangeSelection(ui, fromIso, toIso) {
+  document.querySelectorAll("." + ui.btnClass).forEach(function (x) {
+    x.classList.remove("btn-primary"); x.classList.add("btn-secondary");
+  });
+  var customBtn = ui.customBtnId ? document.getElementById(ui.customBtnId) : null;
+  if (customBtn) { customBtn.classList.remove("btn-secondary"); customBtn.classList.add("btn-primary"); }
+  var panel = ui.panelId ? document.getElementById(ui.panelId) : null;
+  if (panel) panel.style.display = "flex";
+  var fromInput = ui.fromId ? document.getElementById(ui.fromId) : null;
+  var toInput = ui.toId ? document.getElementById(ui.toId) : null;
+  if (fromInput) fromInput.value = _toLocalDatetimeInput(new Date(fromIso));
+  if (toInput) toInput.value = _toLocalDatetimeInput(new Date(toIso));
+}
+
 // Renders a stats line into the given container using the canonical
 // Response Time format (see TEMPLATES.md): leading "<count> samples"
 // span (count bolded), then one "<Label>: <value>" span per metric.
@@ -4562,6 +4748,25 @@ async function openViewModal(id) {
         _loadMonitorHistoryFor(a.id, { from: fromIso, to: toIso });
       });
     }
+    // Click-drag on a chart selects a time window and applies it as that
+    // chart's custom range (the custom panel opens pre-filled so the
+    // selection is visible and tweakable).
+    _wireChartDragSelect(document.getElementById("asset-monitor-chart"), function (fromIso, toIso) {
+      _applyCustomRangeSelection({
+        btnClass: "asset-monitor-range-btn", customBtnId: "btn-asset-monitor-custom",
+        panelId: "asset-monitor-custom-panel", fromId: "asset-monitor-from", toId: "asset-monitor-to",
+      }, fromIso, toIso);
+      _loadMonitorHistoryFor(a.id, { from: fromIso, to: toIso });
+    });
+    var systemDragApply = function (fromIso, toIso) {
+      _applyCustomRangeSelection({
+        btnClass: "asset-system-range-btn", customBtnId: "btn-asset-system-custom",
+        panelId: "asset-system-custom-panel", fromId: "asset-system-from", toId: "asset-system-to",
+      }, fromIso, toIso);
+      _loadSystemTabFor(a.id, { from: fromIso, to: toIso }, a, { chartOnly: true });
+    };
+    _wireChartDragSelect(document.getElementById("asset-system-chart"), systemDragApply);
+    _wireChartDragSelect(document.getElementById("asset-system-sessions-chart"), systemDragApply);
   } catch (err) {
     showToast(err.message, "error");
     closeAssetPanel();
@@ -5163,6 +5368,7 @@ function assetSystemViewHTML(a) {
   var rangeBtns =
     _chartRangeBtnsHTML("asset-system-range-btn", [
       { value: "1h",  label: "1h" },
+      { value: "12h", label: "12h" },
       { value: "24h", label: "24h" },
       { value: "7d",  label: "7d" },
       { value: "30d", label: "30d" },
@@ -5291,15 +5497,21 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
   if (!chart) return;
   // Accept a range string ("24h") or a { from, to } object for custom windows.
   var telOpts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
-  if (telOpts.from && telOpts.to) {
-    chart.dataset.from = telOpts.from;
-    chart.dataset.to = telOpts.to;
-    delete chart.dataset.range;
-  } else {
-    chart.dataset.range = telOpts.range || "24h";
-    delete chart.dataset.from;
-    delete chart.dataset.to;
-  }
+  // The sessions chart shares the CPU & Memory selection — stamp both
+  // containers so screenshots/refreshes read the same window from either.
+  var sessionsChartEl = document.getElementById("asset-system-sessions-chart");
+  [chart, sessionsChartEl].forEach(function (el) {
+    if (!el) return;
+    if (telOpts.from && telOpts.to) {
+      el.dataset.from = telOpts.from;
+      el.dataset.to = telOpts.to;
+      delete el.dataset.range;
+    } else {
+      el.dataset.range = telOpts.range || "24h";
+      delete el.dataset.from;
+      delete el.dataset.to;
+    }
+  });
   if (!silent) {
     chart.textContent = "Loading samples…";
     if (!chartOnly) {
@@ -5442,6 +5654,12 @@ function _resolveStaleStreamSec(assetId, asset, streamKey) {
   var effField = streamKey + "IntervalSeconds";
   var perAssetField = streamKey + "IntervalSec";
   var defaultSec = (streamKey === "systemInfo") ? 600 : 60;
+  // The response-time stream's interval fields predate the per-stream naming
+  // convention (resolved: intervalSeconds, per-asset: monitorIntervalSec).
+  if (streamKey === "responseTime") {
+    effField = "intervalSeconds";
+    perAssetField = "monitorIntervalSec";
+  }
   var effResolved = assetId ? _effectiveResolvedByAssetId.get(assetId) : null;
   if (effResolved && typeof effResolved[effField] === "number" && effResolved[effField] > 0) return effResolved[effField];
   if (asset && typeof asset[perAssetField] === "number" && asset[perAssetField] > 0) return asset[perAssetField];
@@ -5453,24 +5671,23 @@ function _resolveStaleStreamSec(assetId, asset, streamKey) {
 // Rewrites the Temperatures section header's updated stamp using the
 // table-specific timestamp (si.lastTemperatureAt). Falls back to
 // lastTelemetryAt when the temp table has never produced a row (typically
-// "no sensors reported"). When the temp data is older than 3× the resolved
-// telemetry cadence the stamp turns amber and the label flips to
-// "last successful update X ago" so the row-set freshness is unambiguous
-// and the previously-separate stale banner can be omitted.
+// "no sensors reported"). Staleness itself is surfaced by the standard amber
+// stale banner _renderTemperatures prepends above the table (same style as
+// every other section), so the stamp stays neutral.
 function _updateTemperatureUpdatedStamp(asset, si) {
   var slot = document.getElementById("asset-system-temps-updated");
   if (!slot) return;
   var tempLastAt = (si && (si.lastTemperatureAt || si.lastTelemetryAt)) ||
     (asset && asset.lastTelemetryAt) || null;
   if (!tempLastAt) { slot.innerHTML = ""; return; }
-  var resolvedSec = _resolveStaleStreamSec(asset && asset.id, asset, "telemetry");
-  var ageMs = Date.now() - new Date(tempLastAt).getTime();
-  var isStale = ageMs > resolvedSec * 3 * 1000;
-  var color = isStale ? "var(--color-warning)" : "var(--color-text-tertiary)";
-  var label = isStale ? "last successful update " : "updated ";
-  slot.innerHTML = '<span style="font-size:0.72rem;color:' + color + '" title="' +
-    escapeHtml(new Date(tempLastAt).toLocaleString()) + '">' +
-    (isStale ? "&#9888; " : "") + label + timeAgo(tempLastAt) + '</span>';
+  slot.innerHTML = '<span style="font-size:0.72rem;color:var(--color-text-tertiary)" title="' +
+    escapeHtml(new Date(tempLastAt).toLocaleString()) + '">updated ' + timeAgo(tempLastAt) + '</span>';
+}
+
+// Bare amber banner box — the shared visual for every chart/section stale
+// alert. `text` is plain text (escaped here).
+function _staleBannerBoxHTML(text) {
+  return "<div style=\"margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:rgba(245,127,23,0.08);border:1px solid rgba(245,127,23,0.3);border-radius:6px;font-size:0.8rem;color:var(--color-warning)\">&#9888; " + escapeHtml(text) + "</div>";
 }
 
 function _staleBannerInnerHTML(lastAt, resolvedSec) {
@@ -5478,7 +5695,7 @@ function _staleBannerInnerHTML(lastAt, resolvedSec) {
   var ageMs = Date.now() - new Date(lastAt).getTime();
   var thresholdMs = resolvedSec * 3 * 1000;
   if (ageMs <= thresholdMs) return "";
-  return "<div style=\"margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:rgba(245,127,23,0.08);border:1px solid rgba(245,127,23,0.3);border-radius:6px;font-size:0.8rem;color:var(--color-warning)\">&#9888; " + escapeHtml("Information last updated " + timeAgo(lastAt)) + "</div>";
+  return _staleBannerBoxHTML("Last successful update " + timeAgo(lastAt));
 }
 
 // Amber stale-data banner. Emits a slot wrapper carrying the assetId, stream
@@ -6384,10 +6601,12 @@ function _renderTemperatures(container, si, asset) {
   };
   var rows = latest.map(rowFor).join("");
   var hiddenRows = hidden.map(rowFor).join("");
-  // Stale-state surfaces in the section header's updated stamp instead of a
-  // separate banner — one stamp using the table-specific timestamp is
-  // unambiguous when CPU/mem succeeds but the sensor pull fails.
+  // Stale-state surfaces as the standard amber banner above the table — the
+  // same style every other section/chart uses — keyed on the table-specific
+  // timestamp so it fires when CPU/mem succeeds but the sensor pull fails.
   _updateTemperatureUpdatedStamp(asset, si);
+  var sensorStaleBanner = _staleBannerHTML(asset && asset.id, asset, "telemetry",
+    (si && (si.lastTemperatureAt || si.lastTelemetryAt)) || null);
   var headCells =
     '<th data-col-id="sensor" data-col-required="true">Sensor</th>' +
     '<th data-col-id="class">Class</th>' +
@@ -6407,6 +6626,7 @@ function _renderTemperatures(container, si, asset) {
       '</details>';
   }
   container.innerHTML =
+    sensorStaleBanner +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' + headCells +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
     toggleHTML;
@@ -6919,6 +7139,7 @@ async function openSensorDetailPanel(asset, sensorName) {
 
   var rangeBtns = _chartRangeBtnsHTML("sensor-range-btn", [
     { value: "1h",  label: "1h" },
+    { value: "12h", label: "12h" },
     { value: "24h", label: "24h" },
     { value: "7d",  label: "7d" },
     { value: "30d", label: "30d" },
@@ -7006,6 +7227,14 @@ async function openSensorDetailPanel(asset, sensorName) {
       _loadSensorHistoryFor(asset.id, sensorName, { from: fromIso, to: toIso });
     });
   }
+  // Drag-select on the chart applies the selection as the custom range.
+  _wireChartDragSelect(document.getElementById("sensor-chart"), function (fromIso, toIso) {
+    _applyCustomRangeSelection({
+      btnClass: "sensor-range-btn", customBtnId: "btn-sensor-custom",
+      panelId: "sensor-custom-panel", fromId: "sensor-custom-from", toId: "sensor-custom-to",
+    }, fromIso, toIso);
+    _loadSensorHistoryFor(asset.id, sensorName, { from: fromIso, to: toIso });
+  });
 }
 
 async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
@@ -7179,6 +7408,7 @@ function _renderSensorChart(container, samples, opts) {
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
 
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
   _wireChartTooltip(container, function (target) {
     var c = Number(target.getAttribute("data-c"));
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
@@ -7489,18 +7719,20 @@ function _captureChartAsPng(container, meta, callback) {
 
     // Build header. Line 1 is "<Title> — <Subject>" (subject = interface or
     // tunnel name when the chart is in a sub-panel). Line 2 is the asset.
-    // Line 3 is an optional stats summary (same one shown above the chart).
+    // Line 3 (when the chart is on a custom window) is the From/To range —
+    // preset ranges are implied by the x-axis, but a custom window needs to
+    // travel with the image. Line 4 is an optional stats summary (same one
+    // shown above the chart).
     var titleParts = [];
     if (meta.title)   titleParts.push(meta.title);
     if (meta.subject) titleParts.push(meta.subject);
     var headerLine1 = titleParts.join(" — ");
-    var headerLine2 = meta.asset || "";
-    var headerLine3 = meta.stats || "";
-    var headerH = 0;
-    var lineCount = (headerLine1 ? 1 : 0) + (headerLine2 ? 1 : 0) + (headerLine3 ? 1 : 0);
-    if (lineCount === 1) headerH = 24;
-    else if (lineCount === 2) headerH = 40;
-    else if (lineCount === 3) headerH = 56;
+    var headerLines = [];
+    if (headerLine1)  headerLines.push({ text: headerLine1, bold: true });
+    if (meta.asset)   headerLines.push({ text: meta.asset });
+    if (meta.range)   headerLines.push({ text: meta.range });
+    if (meta.stats)   headerLines.push({ text: meta.stats });
+    var headerH = headerLines.length ? 8 + headerLines.length * 16 : 0;
 
     var footerH  = meta.xAxis ? 22 : 0;
     var leftPadW = meta.yAxis ? 22 : 0;
@@ -7522,23 +7754,12 @@ function _captureChartAsPng(container, meta, callback) {
       ctx.textAlign = "left";
       var headerX = leftPadW + 8;
       var nextY = 8;
-      if (headerLine1) {
-        ctx.fillStyle = resolvedText;
-        ctx.font = "600 13px " + fontFamily;
-        ctx.fillText(headerLine1, headerX, nextY);
+      headerLines.forEach(function (line) {
+        ctx.fillStyle = line.bold ? resolvedText : textSec;
+        ctx.font = (line.bold ? "600 13px " : "11px ") + fontFamily;
+        ctx.fillText(line.text, headerX, nextY);
         nextY += 16;
-      }
-      if (headerLine2) {
-        ctx.fillStyle = textSec;
-        ctx.font = "11px " + fontFamily;
-        ctx.fillText(headerLine2, headerX, nextY);
-        nextY += 16;
-      }
-      if (headerLine3) {
-        ctx.fillStyle = textSec;
-        ctx.font = "11px " + fontFamily;
-        ctx.fillText(headerLine3, headerX, nextY);
-      }
+      });
     }
 
     ctx.drawImage(img, leftPadW, headerH, width, height);
@@ -7581,6 +7802,22 @@ function _statsSummaryFrom(statsElId) {
     var el = document.getElementById(statsElId);
     return (el && el.dataset.summary) || "";
   };
+}
+
+// "From <local datetime> to <local datetime>" label for a chart showing a
+// custom window (read from the dataset.from/to the loaders stamp on the
+// container). Empty string on preset ranges — those are implied by the
+// x-axis and don't need to travel with a screenshot.
+function _chartCustomRangeLabel(container) {
+  if (!container || !container.dataset || !container.dataset.from || !container.dataset.to) return "";
+  function fmt(iso) {
+    var d = new Date(iso);
+    if (isNaN(+d)) return iso;
+    return d.toLocaleString("en-US", {
+      month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+  }
+  return "From " + fmt(container.dataset.from) + " to " + fmt(container.dataset.to);
 }
 
 // Inject a small camera button at the top-right of a chart container. The
@@ -7626,6 +7863,10 @@ function _addChartScreenshotButton(container, label, axisOpts) {
       xAxis: axisOpts.xAxis || "Time",
       yAxis: axisOpts.yAxis || label,
       stats: statsLine,
+      // Charts on a custom window carry their From/To in the header so the
+      // captured image is unambiguous about what it shows. Read at click
+      // time from the dataset the loaders stamp on the container.
+      range: _chartCustomRangeLabel(container),
     };
     _captureChartAsPng(container, meta, function (blob) {
       if (!blob) { showToast("Screenshot failed", "error"); return; }
@@ -7725,7 +7966,10 @@ function _screenshotInterfacePanel(asset, ifName) {
   }
   var tputStatsText = _ifaceStatsText(tputStatsEl);
   var errStatsText  = _ifaceStatsText(errStatsEl);
-  var statsText = [tputStatsText, errStatsText].filter(Boolean).join(" · ");
+  // Custom-window charts prepend their From/To so the composite screenshot
+  // states the window it captured (preset ranges read off the x-axis).
+  var rangeText = _chartCustomRangeLabel(tputContainer);
+  var statsText = [rangeText, tputStatsText, errStatsText].filter(Boolean).join(" · ");
 
   // Resolved comment: textarea value if non-empty (covers in-progress edits and
   // saved overrides), else the discovered FortiOS CMDB description.
@@ -8006,6 +8250,7 @@ function _renderSystemChart(container, data, asset, si) {
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
   container.style.flexDirection = "column";
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
 
   _wireChartTooltip(container, function (target) {
     var ts = target.getAttribute("data-ts");
@@ -8111,6 +8356,7 @@ function _renderSessionsChart(container, data, asset) {
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
   container.style.flexDirection = "column";
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
 
   _wireChartTooltip(container, function (target) {
     var ts = target.getAttribute("data-ts");
@@ -8585,6 +8831,7 @@ function assetMonitoringViewHTML(a) {
   var rangeBtns =
     _chartRangeBtnsHTML("asset-monitor-range-btn", [
       { value: "1h",  label: "1h" },
+      { value: "12h", label: "12h" },
       { value: "24h", label: "24h" },
       { value: "7d",  label: "7d" },
       { value: "30d", label: "30d" },
@@ -8656,6 +8903,7 @@ function assetMonitoringViewHTML(a) {
       '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
     '</div>' +
     customPanel +
+    '<div id="asset-monitor-stale"></div>' +
     '<div id="asset-monitor-stats" style="display:flex;gap:1.25rem;flex-wrap:wrap;font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem"></div>' +
     '<div id="asset-monitor-chart" style="background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
       'Loading samples…' +
@@ -8848,6 +9096,7 @@ async function _loadMonitorHistoryFor(assetId, selection, callOpts) {
       transitions = await _fetchPollingTransitions(assetId, data && data.since, data && data.until);
     } catch (_) { /* defensive */ }
     _renderMonitorChart(chart, data, transitions);
+    _updateMonitorStaleBanner(assetId, data, opts);
     if (stats && data.stats) {
       var s = data.stats;
       var monitorParts = [
@@ -8885,6 +9134,35 @@ function _currentMonitorSelection() {
     return { from: chart.dataset.from, to: chart.dataset.to };
   }
   return chart.dataset.range || "24h";
+}
+
+// Amber stale banner above the Response Time chart — same style + wording as
+// every other section's banner ("Last successful update X ago"). The last
+// successful probe is read from the freshly-fetched history (the newest
+// sample with a response), so the banner updates on every load/auto-refresh
+// tick. Custom from/to windows are fixed historical views and say nothing
+// about live freshness, so the banner clears there. When the live window
+// contains samples but no successes at all, the probe has been failing for
+// at least the whole window — say so rather than staying silent.
+function _updateMonitorStaleBanner(assetId, data, opts) {
+  var slot = document.getElementById("asset-monitor-stale");
+  if (!slot) return;
+  if (opts && opts.from && opts.to) { slot.innerHTML = ""; return; }
+  var samples = (data && data.samples) || [];
+  var lastOk = null;
+  for (var i = samples.length - 1; i >= 0; i--) {
+    var s = samples[i];
+    var ok = (typeof s.successCount === "number") ? s.successCount > 0 : !!s.success;
+    if (ok) { lastOk = s.timestamp; break; }
+  }
+  if (lastOk) {
+    slot.innerHTML = _staleBannerHTML(assetId, _currentAssetForRefresh, "responseTime", lastOk);
+  } else if (samples.length) {
+    slot.innerHTML = _staleBannerBoxHTML(
+      "No successful update in the last " + (opts && opts.range ? opts.range : "window"));
+  } else {
+    slot.innerHTML = "";
+  }
 }
 
 function _toLocalDatetimeInput(d) {
@@ -8955,11 +9233,15 @@ function _renderMonitorChart(container, data, transitions) {
   function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
   function yFor(ms) { return padT + innerH - (ms / ceil) * innerH; }
 
-  var pointsAttr = oks.map(function (s) { return xFor(s.timestamp) + "," + yFor(s.responseTimeMs); }).join(" ");
-  var failureLines = samples.filter(ptIsFailure).map(function (s) {
-    var x = xFor(s.timestamp);
-    return '<line x1="' + x + '" y1="' + padT + '" x2="' + x + '" y2="' + (padT + innerH) + '" stroke="rgba(211,47,47,0.35)" stroke-width="1"/>';
-  }).join("");
+  // Failure-aware line: failed polls plot as red dots at 0 ms (the chart
+  // baseline) and stay connected to their neighbors — the connecting segment
+  // fades from blue into red (and back) so an outage reads as the line diving
+  // to zero rather than the old full-height vertical failure lines.
+  var linePts = [];
+  samples.forEach(function (s) {
+    if (ptHasResponse(s)) linePts.push({ x: xFor(s.timestamp), y: yFor(s.responseTimeMs), ok: true });
+    else if (ptIsFailure(s)) linePts.push({ x: xFor(s.timestamp), y: padT + innerH, ok: false });
+  });
 
   function fmtTooltipTs(ts) {
     var d = new Date(ts);
@@ -8984,11 +9266,10 @@ function _renderMonitorChart(container, data, transitions) {
     return attrs;
   }
   // Transparent hit targets so hover is forgiving for the 1.5px dots and the
-  // 1px failure lines. Successful samples use a 7px circle centered on the
-  // dot; failed samples use a full-height 10px rect centered on the failure
-  // line (otherwise the operator has to find the vertical middle of the line
-  // for the tooltip to fire — the line spans the chart but the hit target
-  // didn't). Same pattern as the polling-method transition rect above.
+  // baseline failure dots. Successful samples use a 7px circle centered on
+  // the dot; failed samples keep a full-height 10px rect centered on the
+  // sample's x so the tooltip fires anywhere in that column, not just on the
+  // small red dot. Same pattern as the polling-method transition rect above.
   var hitTargets = samples.map(function (s) {
     var x = xFor(s.timestamp);
     if (ptHasResponse(s)) {
@@ -9055,9 +9336,11 @@ function _renderMonitorChart(container, data, transitions) {
     }).join("");
 
   var clipId = _chartClipId("monitor");
+  var line = _failureAwareSeriesSVG(linePts, "var(--color-accent)", clipId);
   var svg =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      '<defs>' + line.defs + '</defs>' +
       ticks +
       xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
@@ -9066,11 +9349,11 @@ function _renderMonitorChart(container, data, transitions) {
       yTitle +
       xTitle +
       '<g ' + _chartClipAttr(clipId) + '>' +
-        failureLines +
-        (pointsAttr ? '<polyline points="' + pointsAttr + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
+        line.segments +
         oks.map(function (s) {
           return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.responseTimeMs) + '" r="1.5" fill="var(--color-accent)"/>';
         }).join("") +
+        _failureDotsSVG(linePts) +
         hitTargets +
       '</g>' +
     '</svg>' +
@@ -9079,6 +9362,7 @@ function _renderMonitorChart(container, data, transitions) {
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
   container.style.position = "relative";
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
 
   var tip = container.querySelector(".monitor-tooltip");
   var svgEl = container.querySelector("svg");
@@ -9236,6 +9520,7 @@ async function openInterfaceDetailPanel(asset, ifName, ifaceRow) {
 
   var rangeBtns = _chartRangeBtnsHTML("iface-range-btn", [
     { value: "1h",  label: "1h" },
+    { value: "12h", label: "12h" },
     { value: "24h", label: "24h" },
     { value: "7d",  label: "7d" },
     { value: "30d", label: "30d" },
@@ -9340,6 +9625,16 @@ async function openInterfaceDetailPanel(asset, ifName, ifaceRow) {
       _loadInterfaceHistoryFor(asset.id, ifName, { from: fromIso, to: toIso });
     });
   }
+  // Drag-select on either chart applies the selection as the custom range.
+  ["iface-tput-chart", "iface-err-chart"].forEach(function (cid) {
+    _wireChartDragSelect(document.getElementById(cid), function (fromIso, toIso) {
+      _applyCustomRangeSelection({
+        btnClass: "iface-range-btn", customBtnId: "btn-iface-custom",
+        panelId: "iface-custom-panel", fromId: "iface-custom-from", toId: "iface-custom-to",
+      }, fromIso, toIso);
+      _loadInterfaceHistoryFor(asset.id, ifName, { from: fromIso, to: toIso });
+    });
+  });
 }
 
 async function _loadInterfaceHistoryFor(assetId, ifName, range, callOpts) {
@@ -9817,8 +10112,28 @@ function _renderIfaceThroughputChart(container, derived, opts) {
   function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
   function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
 
-  var inPts  = inSeries .map(function (d) { return xFor(d.timestamp) + "," + yFor(d.inBps);  }).join(" ");
-  var outPts = outSeries.map(function (d) { return xFor(d.timestamp) + "," + yFor(d.outBps); }).join(" ");
+  // Missed polls (interface streams have no per-sample success flag — a
+  // failed poll simply leaves no row) render exactly like response-time
+  // failures: red dots at the baseline flanking each cadence gap, with the
+  // series lines fading into red across the gap instead of bridging it.
+  var gapMarkers = _pollGapMarkers(derived.map(function (d) { return new Date(d.timestamp).getTime(); }));
+  var baselineY = padT + innerH;
+  function failAwarePts(list, key) {
+    if (!list.length) return [];
+    var pts = list.map(function (d) {
+      return { t: new Date(d.timestamp).getTime(), x: xFor(d.timestamp), y: yFor(d[key]), ok: true };
+    });
+    gapMarkers.forEach(function (m) { pts.push({ t: m, x: xFor(m), y: baselineY, ok: false }); });
+    pts.sort(function (a, b) { return a.t - b.t; });
+    return pts;
+  }
+  var failDots = gapMarkers.map(function (m) {
+    return '<circle cx="' + xFor(m) + '" cy="' + baselineY + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
+  }).join("");
+  var missHits = gapMarkers.map(function (m) {
+    return '<rect class="chart-hit" x="' + (xFor(m) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
+      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m).toISOString()) + '" data-miss="1"/>';
+  }).join("");
 
   // Single hit point per timestamp so the tooltip names both values together.
   var hits = derived.map(function (d) {
@@ -9859,17 +10174,22 @@ function _renderIfaceThroughputChart(container, derived, opts) {
       '<text x="' + (padL + 84)  + '" y="11">Output</text>' +
     '</g>';
   var clipId = _chartClipId("ifaceTp");
+  var inLine  = _failureAwareSeriesSVG(failAwarePts(inSeries,  "inBps"),  inColor,  clipId + "-in");
+  var outLine = _failureAwareSeriesSVG(failAwarePts(outSeries, "outBps"), outColor, clipId + "-out");
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      '<defs>' + inLine.defs + outLine.defs + '</defs>' +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
-        (inPts  ? '<polyline points="' + inPts  + '" fill="none" stroke="' + inColor  + '" stroke-width="1.5"/>' : '') +
-        (outPts ? '<polyline points="' + outPts + '" fill="none" stroke="' + outColor + '" stroke-width="1.5"/>' : '') +
+        inLine.segments +
+        outLine.segments +
         inSeries .map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.inBps)  + '" r="1.5" fill="' + inColor  + '"/>'; }).join("") +
         outSeries.map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.outBps) + '" r="1.5" fill="' + outColor + '"/>'; }).join("") +
+        failDots +
+        missHits +
         hits +
       '</g>' +
       legend +
@@ -9877,7 +10197,12 @@ function _renderIfaceThroughputChart(container, derived, opts) {
   container.style.position = "relative";
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
   _wireChartTooltip(container, function (target) {
+    if (target.getAttribute("data-miss") === "1") {
+      return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+        '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+    }
     var inV  = target.getAttribute("data-in");
     var outV = target.getAttribute("data-out");
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
@@ -9917,11 +10242,30 @@ function _renderIfaceErrorChart(container, derived, opts) {
   var ceil = Math.ceil(maxE * 1.2);
   function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
   function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
-  function lineFor(arr, key) {
-    return arr.map(function (d) { return xFor(d.timestamp) + "," + yFor(d[key]); }).join(" ");
+  // In-errors render amber, out-errors purple — red is reserved for the
+  // missed-poll markers so a poll outage can't be misread as an error burst.
+  var inErrColor  = "#f59e0b";
+  var outErrColor = "#9b5de5";
+  // Same missed-poll treatment as the throughput chart: red baseline dots
+  // flanking each cadence gap, with the series lines fading into red.
+  var gapMarkers = _pollGapMarkers(derived.map(function (d) { return new Date(d.timestamp).getTime(); }));
+  var baselineY = padT + innerH;
+  function failAwarePts(list, key) {
+    if (!list.length) return [];
+    var pts = list.map(function (d) {
+      return { t: new Date(d.timestamp).getTime(), x: xFor(d.timestamp), y: yFor(d[key]), ok: true };
+    });
+    gapMarkers.forEach(function (m) { pts.push({ t: m, x: xFor(m), y: baselineY, ok: false }); });
+    pts.sort(function (a, b) { return a.t - b.t; });
+    return pts;
   }
-  var inPts  = lineFor(inSeries,  "inErr");
-  var outPts = lineFor(outSeries, "outErr");
+  var failDots = gapMarkers.map(function (m) {
+    return '<circle cx="' + xFor(m) + '" cy="' + baselineY + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
+  }).join("");
+  var missHits = gapMarkers.map(function (m) {
+    return '<rect class="chart-hit" x="' + (xFor(m) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
+      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m).toISOString()) + '" data-miss="1"/>';
+  }).join("");
   var hits = derived.map(function (d) {
     var y = padT + innerH;
     if (typeof d.inErr === "number") y = Math.min(y, yFor(d.inErr));
@@ -9950,23 +10294,28 @@ function _renderIfaceErrorChart(container, derived, opts) {
   }
   var legend =
     '<g font-size="10" fill="currentColor">' +
-      '<rect x="' + (padL + 10) + '" y="2" width="10" height="10" fill="#d32f2f"/>' +
+      '<rect x="' + (padL + 10) + '" y="2" width="10" height="10" fill="' + inErrColor + '"/>' +
       '<text x="' + (padL + 24) + '" y="11">In errors</text>' +
-      '<rect x="' + (padL + 110) + '" y="2" width="10" height="10" fill="#9b5de5"/>' +
+      '<rect x="' + (padL + 110) + '" y="2" width="10" height="10" fill="' + outErrColor + '"/>' +
       '<text x="' + (padL + 124) + '" y="11">Out errors</text>' +
     '</g>';
   var clipId = _chartClipId("ifaceErr");
+  var inLine  = _failureAwareSeriesSVG(failAwarePts(inSeries,  "inErr"),  inErrColor,  clipId + "-in");
+  var outLine = _failureAwareSeriesSVG(failAwarePts(outSeries, "outErr"), outErrColor, clipId + "-out");
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      '<defs>' + inLine.defs + outLine.defs + '</defs>' +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
-        (inPts  ? '<polyline points="' + inPts  + '" fill="none" stroke="#d32f2f" stroke-width="1.5"/>' : '') +
-        (outPts ? '<polyline points="' + outPts + '" fill="none" stroke="#9b5de5" stroke-width="1.5"/>' : '') +
-        inSeries .map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.inErr)  + '" r="1.5" fill="#d32f2f"/>'; }).join("") +
-        outSeries.map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.outErr) + '" r="1.5" fill="#9b5de5"/>'; }).join("") +
+        inLine.segments +
+        outLine.segments +
+        inSeries .map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.inErr)  + '" r="1.5" fill="' + inErrColor + '"/>'; }).join("") +
+        outSeries.map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.outErr) + '" r="1.5" fill="' + outErrColor + '"/>'; }).join("") +
+        failDots +
+        missHits +
         hits +
       '</g>' +
       legend +
@@ -9974,7 +10323,12 @@ function _renderIfaceErrorChart(container, derived, opts) {
   container.style.position = "relative";
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
   _wireChartTooltip(container, function (target) {
+    if (target.getAttribute("data-miss") === "1") {
+      return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+        '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+    }
     var inE  = target.getAttribute("data-in");
     var outE = target.getAttribute("data-out");
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
@@ -10045,6 +10399,7 @@ async function openIpsecTunnelDetailPanel(asset, tunnelName) {
 
   var rangeBtns = _chartRangeBtnsHTML("ipsec-range-btn", [
     { value: "1h",  label: "1h"  },
+    { value: "12h", label: "12h" },
     { value: "24h", label: "24h" },
     { value: "7d",  label: "7d"  },
     { value: "30d", label: "30d" },
@@ -10135,6 +10490,16 @@ async function openIpsecTunnelDetailPanel(asset, tunnelName) {
       _loadIpsecHistoryFor(asset.id, tunnelName, { from: fromIso, to: toIso });
     });
   }
+  // Drag-select on any of the three charts applies the custom range.
+  ["ipsec-status-chart", "ipsec-in-chart", "ipsec-out-chart"].forEach(function (cid) {
+    _wireChartDragSelect(document.getElementById(cid), function (fromIso, toIso) {
+      _applyCustomRangeSelection({
+        btnClass: "ipsec-range-btn", customBtnId: "btn-ipsec-custom",
+        panelId: "ipsec-custom-panel", fromId: "ipsec-custom-from", toId: "ipsec-custom-to",
+      }, fromIso, toIso);
+      _loadIpsecHistoryFor(asset.id, tunnelName, { from: fromIso, to: toIso });
+    });
+  });
 }
 
 async function _loadIpsecHistoryFor(assetId, tunnelName, range, callOpts) {
@@ -10355,6 +10720,7 @@ function _renderIpsecStatusChart(container, samples, opts) {
   container.style.position = "relative";
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
   _wireChartTooltip(container, function (target) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
       '<div>Status: ' + escapeHtml(target.getAttribute("data-status")) + '</div>';
@@ -10433,6 +10799,7 @@ function _renderIpsecBpsChart(container, derived, side, opts) {
   container.style.position = "relative";
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
   _wireChartTooltip(container, function (target) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
       '<div>' + (side === "in" ? "Incoming" : "Outgoing") + ': ' + _fmtBitsPerSec(Number(target.getAttribute("data-v"))) + '</div>';
@@ -10656,6 +11023,7 @@ function _assetSdwanTabHTML(a, rules, links, members) {
   if (links.length) {
     var rangeBtns = _chartRangeBtnsHTML("sdwan-range-btn", [
       { value: "1h",  label: "1h"  },
+      { value: "12h", label: "12h" },
       { value: "24h", label: "24h" },
       { value: "7d",  label: "7d"  },
       { value: "30d", label: "30d" },
@@ -10772,6 +11140,16 @@ function _wireSdwanTab(a, rules, links) {
       if (_sdwanTabState.hcName) _loadPerfSlaForHealthCheck(a.id, _sdwanTabState.hcName, _sdwanTabState.linksByHc[_sdwanTabState.hcName] || [], r);
     });
   });
+  // Drag-select on any Performance SLA chart applies the selection as a
+  // custom window across all three (no Custom… button on this bar — the
+  // preset highlights just clear).
+  ["sdwan-latency-chart", "sdwan-jitter-chart", "sdwan-loss-chart"].forEach(function (cid) {
+    _wireChartDragSelect(document.getElementById(cid), function (fromIso, toIso) {
+      _applyCustomRangeSelection({ btnClass: "sdwan-range-btn" }, fromIso, toIso);
+      var st = _sdwanTabState;
+      if (st && st.hcName) _loadPerfSlaForHealthCheck(a.id, st.hcName, st.linksByHc[st.hcName] || [], { from: fromIso, to: toIso });
+    });
+  });
 }
 
 // Load every member of a health-check in parallel and overlay them on the
@@ -10787,6 +11165,20 @@ async function _loadPerfSlaForHealthCheck(assetId, hcName, members, range) {
   latEl.textContent = jitEl.textContent = lossEl.textContent = "Loading samples…";
   if (stats) stats.textContent = "Loading…";
   var opts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
+  // Stash the active selection on each chart container (canonical convention)
+  // so screenshots carry a drag-selected custom window's From/To.
+  [latEl, jitEl, lossEl].forEach(function (el) {
+    if (!el) return;
+    if (opts.from && opts.to) {
+      el.dataset.from = opts.from;
+      el.dataset.to = opts.to;
+      delete el.dataset.range;
+    } else {
+      el.dataset.range = opts.range || "24h";
+      delete el.dataset.from;
+      delete el.dataset.to;
+    }
+  });
   var memberNames = members.map(function (m) { return m.link; });
   try {
     var results = await Promise.all(members.map(function (m) {
@@ -10962,6 +11354,7 @@ function _renderPerfSlaMultiChart(container, series, metricKey, meta, opts) {
   container.style.position = "relative";
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
   _wireChartTooltip(container, function (target) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(target.getAttribute("data-member")) + '</div>' +
       '<div>' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
@@ -11047,6 +11440,7 @@ async function openStorageDetailPanel(asset, focusMountPath, storage) {
 
   var rangeBtns = _chartRangeBtnsHTML("storage-range-btn", [
     { value: "1h",  label: "1h" },
+    { value: "12h", label: "12h" },
     { value: "24h", label: "24h" },
     { value: "7d",  label: "7d" },
     { value: "30d", label: "30d" },
@@ -11157,6 +11551,17 @@ async function openStorageDetailPanel(asset, focusMountPath, storage) {
       _loadAllStorageForAsset(asset.id, mounts.map(function (m) { return m.mountPath; }), { from: fromIso, to: toIso });
     });
   }
+  // Drag-select on any mount's chart applies the custom range to all mounts
+  // (the range bar is shared across the panel).
+  document.querySelectorAll("#storage-panel-body [data-storage-chart]").forEach(function (chartEl) {
+    _wireChartDragSelect(chartEl, function (fromIso, toIso) {
+      _applyCustomRangeSelection({
+        btnClass: "storage-range-btn", customBtnId: "btn-storage-custom",
+        panelId: "storage-custom-panel", fromId: "storage-custom-from", toId: "storage-custom-to",
+      }, fromIso, toIso);
+      _loadAllStorageForAsset(asset.id, mounts.map(function (m) { return m.mountPath; }), { from: fromIso, to: toIso });
+    });
+  });
 }
 
 // Storage stats bars are per-mount (no fixed element id) — resolve the one in
@@ -11284,21 +11689,34 @@ function _rerenderStorageSectionFromState(mountPath) {
 
 async function _loadAllStorageForAsset(assetId, mountPaths, range) {
   if (!Array.isArray(mountPaths) || mountPaths.length === 0) return;
+  var reqOpts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
+  var rangeKey = typeof range === "string" ? range : "custom";
+
   // Set every section's chart container to "Loading…" up front so the user
-  // sees activity across the pane, not just on the focused mount.
+  // sees activity across the pane, not just on the focused mount. Stamp the
+  // active selection on each chart container too (canonical convention) so
+  // screenshots and drag-select read the live window.
   mountPaths.forEach(function (mp) {
     var section = _findStorageSection(mp);
     if (!section) return;
     var chartEl = section.querySelector("[data-storage-chart]");
     var statsEl = section.querySelector("[data-storage-stats]");
     var headEl  = section.querySelector("[data-storage-forecast-headline]");
-    if (chartEl) chartEl.textContent = "Loading samples…";
+    if (chartEl) {
+      chartEl.textContent = "Loading samples…";
+      if (reqOpts.from && reqOpts.to) {
+        chartEl.dataset.from = reqOpts.from;
+        chartEl.dataset.to = reqOpts.to;
+        delete chartEl.dataset.range;
+      } else {
+        chartEl.dataset.range = reqOpts.range || "24h";
+        delete chartEl.dataset.from;
+        delete chartEl.dataset.to;
+      }
+    }
     if (statsEl) statsEl.textContent = "Loading…";
     if (headEl)  headEl.innerHTML = "";
   });
-
-  var reqOpts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
-  var rangeKey = typeof range === "string" ? range : "custom";
 
   // One {primary, 7d-forecast} pair per mount, deduped to a single fetch
   // when the operator's selected range happens to be 7d. All N pairs fire
@@ -11666,6 +12084,7 @@ function _renderStorageChart(container, samples, opts) {
   container.style.position = "relative";
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
+  _stashChartGeometry(container, t0, t1, padL, innerW, W);
   if (view === "bytes") {
     _wireChartTooltip(container, function (target) {
       var u = target.getAttribute("data-used");
@@ -12184,7 +12603,7 @@ async function _captureWithChoicesInner(asset, choices) {
 // Screenshot options modal — the footer Screenshot button lands here. Lists
 // the active tab's sections (from the data-shot-section wrappers) with
 // include/exclude checkboxes, an "Include hidden interfaces" sub-option on
-// the Interfaces section, and a time-range picker (1h/24h/7d/30d/Custom)
+// the Interfaces section, and a time-range picker (1h/12h/24h/7d/30d/Custom)
 // under each chart-bearing section defaulting to the chart's current
 // on-screen selection. Checkbox + hidden-iface choices persist per user+tab
 // (polaris-prefs-screenshot-<user>); ranges intentionally don't. Tabs with a
@@ -12211,7 +12630,7 @@ function _openScreenshotOptions(asset) {
   var prefs = _getScreenshotPrefs()[tabKey] || {};
   var savedSections = prefs.sections || {};
 
-  var RANGES = ["1h", "24h", "7d", "30d"];
+  var RANGES = ["1h", "12h", "24h", "7d", "30d"];
   function rangeSelectHTML(s) {
     var cur = _currentChartSelection(s.chartKey);
     var isCustom = typeof cur !== "string";
@@ -15268,6 +15687,7 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
 
   var rangeBtns = _chartRangeBtnsHTML("proc-range-btn", [
     { value: "1h",  label: "1h" },
+    { value: "12h", label: "12h" },
     { value: "24h", label: "24h" },
     { value: "7d",  label: "7d" },
     { value: "30d", label: "30d" },
@@ -15366,6 +15786,14 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
       _loadProcessHistoryFor(asset.id, name, range);
     });
   });
+  // Drag-select on either chart applies the selection as a custom window
+  // (no Custom… button on this bar — the preset highlights just clear).
+  ["proc-cpu-chart", "proc-mem-chart"].forEach(function (cid) {
+    _wireChartDragSelect(document.getElementById(cid), function (fromIso, toIso) {
+      _applyCustomRangeSelection({ btnClass: "proc-range-btn" }, fromIso, toIso);
+      _loadProcessHistoryFor(asset.id, name, { from: fromIso, to: toIso });
+    });
+  });
   var refreshLogs = document.getElementById("btn-proc-logs-refresh");
   if (refreshLogs) refreshLogs.addEventListener("click", function () { _loadProcessLogsFor(asset.id, name); });
   var flaggedOnly = document.getElementById("proc-logs-flagged-only");
@@ -15404,8 +15832,22 @@ async function _loadProcessHistoryFor(assetId, name, range) {
   var cpuStats = document.getElementById("proc-cpu-stats");
   var memStats = document.getElementById("proc-mem-stats");
   if (!cpuEl || !memEl) return;
+  // Stash the active selection on both chart containers (canonical
+  // convention) so screenshots carry a drag-selected custom window's From/To.
+  var procOpts = (typeof range === "string" || !range) ? { range: range || "1h" } : range;
+  [cpuEl, memEl].forEach(function (el) {
+    if (procOpts.from && procOpts.to) {
+      el.dataset.from = procOpts.from;
+      el.dataset.to = procOpts.to;
+      delete el.dataset.range;
+    } else {
+      el.dataset.range = procOpts.range || "1h";
+      delete el.dataset.from;
+      delete el.dataset.to;
+    }
+  });
   try {
-    var data = await api.assets.processHistory(assetId, name, range || "1h");
+    var data = await api.assets.processHistory(assetId, name, procOpts);
     var samples = data.samples || [];
     var cpu = samples.filter(function (s) { return typeof s.cpuPct === "number"; })
       .map(function (s) { return { timestamp: s.timestamp, value: s.cpuPct }; });
