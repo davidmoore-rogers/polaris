@@ -1676,6 +1676,37 @@ async function loadClassOverrideStreamCredential(
   return cred;
 }
 
+/**
+ * Resolve the SNMP config for one monitoring stream through the shared
+ * four-tier credential chain: the stream's effective asset credential
+ * (per-stream ?? asset default — the caller passes it already resolved),
+ * then the stream's class-override credential, then the Fortinet
+ * integration fallback (fortimanager/fortigate-sourced assets only), else
+ * `{ error }` with the given label. The Fortinet lookup may THROW — the
+ * probe path surfaces that as its own failure message and the soft LLDP/
+ * storage runners catch it to null. Previously copy-pasted at seven
+ * collector/runner sites with drifting error text (2026-08 audit).
+ */
+async function resolveSnmpConfigForStream(
+  streamCred: { type: string; config: unknown } | null | undefined,
+  classCredentialId: string | null,
+  isFortinetSrc: boolean,
+  integration: { config?: unknown } | null | undefined,
+  errorLabel = "No SNMP credential selected",
+): Promise<{ cfg: Record<string, unknown>; error?: undefined } | { cfg?: undefined; error: string }> {
+  if (streamCred?.type === "snmp") {
+    return { cfg: streamCred.config as Record<string, unknown> };
+  }
+  const classCred = await loadClassOverrideStreamCredential(classCredentialId, "snmp");
+  if (classCred) {
+    return { cfg: classCred.config as Record<string, unknown> };
+  }
+  if (isFortinetSrc && integration) {
+    return { cfg: await loadSnmpCredentialConfigForFortinetAsset(streamCred, integration) };
+  }
+  return { error: errorLabel };
+}
+
 async function loadSnmpCredentialConfigForFortinetAsset(
   effectiveCred: { type: string; config: unknown } | null | undefined,
   integration: { config?: unknown } | null | undefined,
@@ -1825,23 +1856,18 @@ export async function probeAsset(
     }
     if (polling === "snmp") {
       // Per-stream asset credential wins, then asset default, then class-
-      // override credential, then integration fallback.
-      if (effectiveRTCred?.type === "snmp") {
-        return await probeSnmp(targetIp, effectiveRTCred.config as Record<string, unknown>, start, timeoutMs);
+      // override credential, then integration fallback (shared chain in
+      // resolveSnmpConfigForStream). A Fortinet-lookup throw becomes a
+      // probe failure with the lookup's message, as before.
+      let probeCfg: Record<string, unknown>;
+      try {
+        const resolved = await resolveSnmpConfigForStream(effectiveRTCred, effective.responseTimeCredentialId, isFortinetSrc, integration);
+        if (resolved.error !== undefined) return finish(start, false, resolved.error);
+        probeCfg = resolved.cfg;
+      } catch (err: any) {
+        return finish(start, false, err?.message || "SNMP credential lookup failed");
       }
-      const classCred = await loadClassOverrideStreamCredential(effective.responseTimeCredentialId, "snmp");
-      if (classCred) {
-        return await probeSnmp(targetIp, classCred.config as Record<string, unknown>, start, timeoutMs);
-      }
-      if (isFortinetSrc && integration) {
-        try {
-          const credConfig = await loadSnmpCredentialConfigForFortinetAsset(effectiveRTCred, integration);
-          return await probeSnmp(targetIp, credConfig, start, timeoutMs);
-        } catch (err: any) {
-          return finish(start, false, err?.message || "SNMP credential lookup failed");
-        }
-      }
-      return finish(start, false, "No SNMP credential selected");
+      return await probeSnmp(targetIp, probeCfg, start, timeoutMs);
     }
     if (polling === "winrm") {
       // Per-stream credential wins, then asset default, then AD bind fallback.
@@ -3597,19 +3623,11 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
       // inside `collectHardwareSensors` so the two streams can authenticate
       // independently when an operator points each at a different community.
       const effectiveTelemetryCred = asset.cpuMemoryCredential ?? asset.monitorCredential;
-      let snmpCfg: Record<string, unknown>;
-      if (effectiveTelemetryCred?.type === "snmp") {
-        snmpCfg = effectiveTelemetryCred.config as Record<string, unknown>;
-      } else {
-        const classCred = await loadClassOverrideStreamCredential(effective.cpuMemoryCredentialId, "snmp");
-        if (classCred) {
-          snmpCfg = classCred.config as Record<string, unknown>;
-        } else if (isFortinetSrc && integration) {
-          snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(effectiveTelemetryCred, integration);
-        } else {
-          return { supported: true, error: "No SNMP credential selected" };
-        }
+      const resolvedTelemetryCfg = await resolveSnmpConfigForStream(effectiveTelemetryCred, effective.cpuMemoryCredentialId, isFortinetSrc, integration);
+      if (resolvedTelemetryCfg.error !== undefined) {
+        return { supported: true, error: resolvedTelemetryCfg.error };
       }
+      const snmpCfg = resolvedTelemetryCfg.cfg;
       const data = await collectTelemetrySnmp(
         targetIp,
         snmpCfg,
@@ -3692,19 +3710,11 @@ export async function collectHardwareSensors(assetId: string): Promise<Collectio
       // as cpuMemoryCredential but resolved against the temperature-stream
       // columns so the two streams can authenticate independently.
       const effectiveTempCred = asset.temperatureCredential ?? asset.monitorCredential;
-      let snmpCfg: Record<string, unknown>;
-      if (effectiveTempCred?.type === "snmp") {
-        snmpCfg = effectiveTempCred.config as Record<string, unknown>;
-      } else {
-        const classCred = await loadClassOverrideStreamCredential(effective.temperatureCredentialId, "snmp");
-        if (classCred) {
-          snmpCfg = classCred.config as Record<string, unknown>;
-        } else if (isFortinetSrc && integration) {
-          snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(effectiveTempCred, integration);
-        } else {
-          return { supported: true, error: "No SNMP credential selected" };
-        }
+      const resolvedTempCfg = await resolveSnmpConfigForStream(effectiveTempCred, effective.temperatureCredentialId, isFortinetSrc, integration);
+      if (resolvedTempCfg.error !== undefined) {
+        return { supported: true, error: resolvedTempCfg.error };
       }
+      const snmpCfg = resolvedTempCfg.cfg;
       const data = await collectHardwareSensorsViaSnmpSession(
         targetIp,
         snmpCfg,
@@ -3826,19 +3836,11 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
       });
     } else if (polling === "snmp") {
       const effectiveIfacesCred = asset.interfacesCredential ?? asset.monitorCredential;
-      let snmpCfg: Record<string, unknown>;
-      if (effectiveIfacesCred?.type === "snmp") {
-        snmpCfg = effectiveIfacesCred.config as Record<string, unknown>;
-      } else {
-        const classCred = await loadClassOverrideStreamCredential(effective.interfacesCredentialId, "snmp");
-        if (classCred) {
-          snmpCfg = classCred.config as Record<string, unknown>;
-        } else if (isFortinetSrc && integration) {
-          snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(effectiveIfacesCred, integration);
-        } else {
-          return { supported: true, error: "No SNMP credential selected" };
-        }
+      const resolvedIfCfg = await resolveSnmpConfigForStream(effectiveIfacesCred, effective.interfacesCredentialId, isFortinetSrc, integration);
+      if (resolvedIfCfg.error !== undefined) {
+        return { supported: true, error: resolvedIfCfg.error };
       }
+      const snmpCfg = resolvedIfCfg.cfg;
       // Wire-level filtered scrape: pulls only the columns/rows we actually
       // need (pinned ifNames + pinned mountPaths) instead of walking the full
       // IF-MIB / hrStorage subtrees. On a 48-port switch with one pinned
@@ -4005,36 +4007,22 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
       let snmpCfg: Record<string, unknown> | null = null;     // for the shared session (interfaces SNMP path)
       let lldpSnmpCfg: Record<string, unknown> | null = null; // for LLDP-only cross-transport overlay
       if (interfacesPolling === "snmp") {
-        if (effectiveIfacesCred?.type === "snmp") {
-          snmpCfg = effectiveIfacesCred.config as Record<string, unknown>;
-        } else {
-          const classCred = await loadClassOverrideStreamCredential(effective.interfacesCredentialId, "snmp");
-          if (classCred) {
-            snmpCfg = classCred.config as Record<string, unknown>;
-          } else if (isFortinetSrc && integration) {
-            snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(effectiveIfacesCred, integration);
-          } else {
-            return { supported: true, error: "No SNMP credential selected" };
-          }
+        const resolvedIf = await resolveSnmpConfigForStream(effectiveIfacesCred, effective.interfacesCredentialId, isFortinetSrc, integration);
+        if (resolvedIf.error !== undefined) {
+          return { supported: true, error: resolvedIf.error };
         }
+        snmpCfg = resolvedIf.cfg;
       }
       if (lldpPolling === "snmp") {
         if (interfacesPolling === "snmp") {
           // Same SNMP session covers LLDP; lldpSnmpCfg stays null (snmpCfg is used).
         } else {
           // Cross-transport: LLDP needs its own session with the LLDP credential.
-          if (effectiveLldpCred?.type === "snmp") {
-            lldpSnmpCfg = effectiveLldpCred.config as Record<string, unknown>;
-          } else {
-            const classCred = await loadClassOverrideStreamCredential(effective.lldpCredentialId, "snmp");
-            if (classCred) {
-              lldpSnmpCfg = classCred.config as Record<string, unknown>;
-            } else if (isFortinetSrc && integration) {
-              lldpSnmpCfg = await loadSnmpCredentialConfigForFortinetAsset(effectiveLldpCred, integration);
-            } else {
-              return { supported: true, error: "No SNMP credential selected for LLDP stream" };
-            }
+          const resolvedLldp = await resolveSnmpConfigForStream(effectiveLldpCred, effective.lldpCredentialId, isFortinetSrc, integration, "No SNMP credential selected for LLDP stream");
+          if (resolvedLldp.error !== undefined) {
+            return { supported: true, error: resolvedLldp.error };
           }
+          lldpSnmpCfg = resolvedLldp.cfg;
         }
       }
       // REST API for interfaces requires a Fortinet integration.
@@ -9002,18 +8990,13 @@ export async function runLldpFor(assetId: string, labels: WorkItemLabels): Promi
     } else if (lldpPolling === "snmp") {
       // Per-stream credential wins, then asset default, then integration fallback.
       const effectiveLldpCred = asset.lldpCredential ?? asset.monitorCredential;
+      // Soft resolution: chain exhaustion or a Fortinet-lookup throw both
+      // leave snmpCfg null (this runner skips rather than errors).
       let snmpCfg: Record<string, unknown> | null = null;
-      if (effectiveLldpCred?.type === "snmp") {
-        snmpCfg = effectiveLldpCred.config as Record<string, unknown>;
-      } else {
-        const classCred = await loadClassOverrideStreamCredential(effective.lldpCredentialId, "snmp");
-        if (classCred) {
-          snmpCfg = classCred.config as Record<string, unknown>;
-        } else if (isFortinetSrc && integration) {
-          try { snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(effectiveLldpCred, integration); }
-          catch { snmpCfg = null; }
-        }
-      }
+      try {
+        const resolved = await resolveSnmpConfigForStream(effectiveLldpCred, effective.lldpCredentialId, isFortinetSrc, integration);
+        snmpCfg = resolved.error !== undefined ? null : resolved.cfg;
+      } catch { snmpCfg = null; }
       if (!snmpCfg) {
         recordWorkOutcome("lldp", "failure", labels);
         return "failure";
@@ -9086,18 +9069,13 @@ export async function runStorageFor(assetId: string, labels: WorkItemLabels): Pr
     const effectiveIfacesCred = asset.interfacesCredential ?? asset.monitorCredential;
     const integration = asset.discoveredByIntegration ?? null;
     const isFortinetSrc = isFortinetIntegrationType(integration?.type);
+    // Soft resolution: chain exhaustion or a Fortinet-lookup throw both
+    // leave snmpCfg null (this runner skips rather than errors).
     let snmpCfg: Record<string, unknown> | null = null;
-    if (effectiveIfacesCred?.type === "snmp") {
-      snmpCfg = effectiveIfacesCred.config as Record<string, unknown>;
-    } else {
-      const classCred = await loadClassOverrideStreamCredential(effective.interfacesCredentialId, "snmp");
-      if (classCred) {
-        snmpCfg = classCred.config as Record<string, unknown>;
-      } else if (isFortinetSrc && integration) {
-        try { snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(effectiveIfacesCred, integration); }
-        catch { snmpCfg = null; }
-      }
-    }
+    try {
+      const resolved = await resolveSnmpConfigForStream(effectiveIfacesCred, effective.interfacesCredentialId, isFortinetSrc, integration);
+      snmpCfg = resolved.error !== undefined ? null : resolved.cfg;
+    } catch { snmpCfg = null; }
     if (!snmpCfg) {
       recordWorkOutcome("storage", "failure", labels);
       return "failure";
