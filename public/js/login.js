@@ -20,21 +20,18 @@
   var h2 = document.querySelector(".login-card h2");
   var subEl = document.querySelector(".login-card .subtitle");
   var logo = document.querySelector(".login-logo");
-  try {
-    var res = await fetch("/api/v1/server-settings/branding");
-    if (res.ok) {
-      var b = await res.json();
-      h2.textContent = b.appName || "Polaris";
-      document.title = (b.appName || "Polaris") + " — Login";
-      subEl.textContent = b.subtitle || "";
-      subEl.style.display = b.subtitle ? "" : "none";
-      if (b.logoUrl) {
-        logo.src = b.logoUrl;
-        var fav = document.querySelector('link[rel="icon"]');
-        if (fav) fav.href = b.logoUrl;
-      }
+  var b = await PolarisAuthFlow.fetchBranding();
+  if (b) {
+    h2.textContent = b.appName || "Polaris";
+    document.title = (b.appName || "Polaris") + " — Login";
+    subEl.textContent = b.subtitle || "";
+    subEl.style.display = b.subtitle ? "" : "none";
+    if (b.logoUrl) {
+      logo.src = b.logoUrl;
+      var fav = document.querySelector('link[rel="icon"]');
+      if (fav) fav.href = b.logoUrl;
     }
-  } catch (_) {}
+  }
   h2.style.visibility = "";
   subEl.style.visibility = "";
   logo.style.visibility = "";
@@ -99,9 +96,7 @@
 // Check SSO config and show button if enabled
 (async function () {
   try {
-    var res = await fetch("/api/v1/auth/azure/config");
-    if (!res.ok) return;
-    var cfg = await res.json();
+    var cfg = await PolarisAuthFlow.fetchAzureConfig();
     if (!cfg.enabled) return;
 
     var btn = document.getElementById("btn-sso");
@@ -203,26 +198,17 @@ document.getElementById("login-form").addEventListener("submit", async function 
   var username = document.getElementById("username").value.trim();
   var password = document.getElementById("password").value;
 
-  try {
-    var res = await fetch("/api/v1/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: username, password: password }),
-    });
-    var data = await res.json();
-    if (!res.ok) {
-      showError(data.error || "Login failed");
-      return;
-    }
-    if (data.mfaRequired) {
-      _mfaPendingToken = data.pendingToken;
-      showMfaStep();
-      return;
-    }
-    window.location.href = "/";
-  } catch (err) {
-    showError("Network error — try again");
+  var r = await PolarisAuthFlow.login(username, password);
+  if (!r.ok) {
+    showError(r.error);
+    return;
   }
+  if (r.mfaRequired) {
+    _mfaPendingToken = r.pendingToken;
+    showMfaStep();
+    return;
+  }
+  window.location.href = "/";
 });
 
 // Toggle between TOTP code and backup code
@@ -264,20 +250,11 @@ document.getElementById("mfa-form").addEventListener("submit", async function (e
   var isBackupCode = input.dataset.mode === "backup";
   if (!code) return;
 
-  try {
-    var res = await fetch("/api/v1/auth/login/totp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pendingToken: _mfaPendingToken, code: code, isBackupCode: isBackupCode }),
-    });
-    var data = await res.json();
-    if (!res.ok) {
-      showError(data.error || "Invalid code");
-      input.select();
-      return;
-    }
-    window.location.href = "/";
-  } catch (err) {
-    showError("Network error — try again");
+  var r = await PolarisAuthFlow.confirmTotp(_mfaPendingToken, code, isBackupCode);
+  if (!r.ok) {
+    showError(r.error);
+    if (!r.network) input.select();
+    return;
   }
+  window.location.href = "/";
 });

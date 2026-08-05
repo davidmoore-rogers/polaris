@@ -18,13 +18,7 @@
 
   async function loadSsoConfig() {
     if (ssoConfig !== null) return ssoConfig;
-    try {
-      var res = await fetch("/api/v1/auth/azure/config");
-      if (!res.ok) { ssoConfig = { enabled: false }; return ssoConfig; }
-      ssoConfig = await res.json();
-    } catch (_) {
-      ssoConfig = { enabled: false };
-    }
+    ssoConfig = await PolarisAuthFlow.fetchAzureConfig();
     return ssoConfig;
   }
 
@@ -61,9 +55,7 @@
       + '</div>';
 
     // Pull branding (logo + app name) — best-effort.
-    fetch("/api/v1/server-settings/branding").then(function (r) {
-      return r.ok ? r.json() : null;
-    }).then(function (b) {
+    PolarisAuthFlow.fetchBranding().then(function (b) {
       if (!b) return;
       if (b.appName) {
         document.getElementById("brand-name").textContent = b.appName;
@@ -174,25 +166,15 @@
     var password = document.getElementById("password").value;
     var btn = e.target.querySelector("button[type=submit]");
     btn.disabled = true;
-    try {
-      var res = await fetch("/api/v1/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: username, password: password }),
-      });
-      var data = await res.json().catch(function () { return {}; });
-      if (!res.ok) { showError(data.error || "Login failed"); btn.disabled = false; return; }
-      if (data.mfaRequired) {
-        pendingToken = data.pendingToken;
-        renderTotp(document.getElementById("app"));
-        return;
-      }
-      // Success — re-bootstrap with the new session.
-      window.PolarisMobile.boot();
-    } catch (err) {
-      showError("Network error — try again");
-      btn.disabled = false;
+    var r = await PolarisAuthFlow.login(username, password);
+    if (!r.ok) { showError(r.error); btn.disabled = false; return; }
+    if (r.mfaRequired) {
+      pendingToken = r.pendingToken;
+      renderTotp(document.getElementById("app"));
+      return;
     }
+    // Success — re-bootstrap with the new session.
+    window.PolarisMobile.boot();
   }
 
   async function onTotpSubmit(e) {
@@ -204,20 +186,15 @@
     var isBackupCode = input.dataset.mode === "backup";
     var btn = e.target.querySelector("button[type=submit]");
     btn.disabled = true;
-    try {
-      var res = await fetch("/api/v1/auth/login/totp", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pendingToken: pendingToken, code: code, isBackupCode: isBackupCode }),
-      });
-      var data = await res.json().catch(function () { return {}; });
-      if (!res.ok) { showError(data.error || "Invalid code"); input.select(); btn.disabled = false; return; }
-      pendingToken = null;
-      window.PolarisMobile.boot();
-    } catch (err) {
-      showError("Network error — try again");
+    var r = await PolarisAuthFlow.confirmTotp(pendingToken, code, isBackupCode);
+    if (!r.ok) {
+      showError(r.error);
+      if (!r.network) input.select();
       btn.disabled = false;
+      return;
     }
+    pendingToken = null;
+    window.PolarisMobile.boot();
   }
 
   window.PolarisAuth = {
