@@ -676,6 +676,51 @@ export async function updateReservation(
 
 // ─── Release ──────────────────────────────────────────────────────────────────
 
+/**
+ * Best-effort DHCP lease release on the owning FortiGate with the paired
+ * lease_release succeeded/failed audit Events. Never throws — device-side
+ * failure is recorded and the Polaris release proceeds. `failureContext`
+ * names what already happened Polaris-side so the failure Event tells the
+ * operator the local state.
+ */
+async function releaseLeaseBestEffort(opts: {
+  integration: Parameters<typeof releaseDhcpLease>[0]["integration"];
+  deviceName: string;
+  ip: string;
+  reservationId: string;
+  reservationHostname: string | null;
+  failureContext: string;
+}): Promise<void> {
+  const { integration, deviceName, ip } = opts;
+  try {
+    await releaseDhcpLease({ integration, deviceName, ip });
+    void logEvent({
+      action: "reservation.lease_release.succeeded",
+      level: "info",
+      resourceType: "reservation",
+      resourceId: opts.reservationId,
+      resourceName: opts.reservationHostname || ip,
+      message: `DHCP lease for ${ip} released on FortiGate "${deviceName}"`,
+      details: { deviceName, ip, integrationId: integration.id },
+    });
+  } catch (err: any) {
+    void logEvent({
+      action: "reservation.lease_release.failed",
+      level: "warning",
+      resourceType: "reservation",
+      resourceId: opts.reservationId,
+      resourceName: opts.reservationHostname || ip,
+      message: `DHCP lease release for ${ip} on FortiGate "${deviceName}" failed — ${opts.failureContext}: ${err?.message || "Unknown error"}`,
+      details: {
+        deviceName,
+        ip,
+        integrationId: integration.id,
+        error: err?.message || String(err),
+      },
+    });
+  }
+}
+
 export async function releaseReservation(id: string, actor?: string) {
   const reservation = await prisma.reservation.findUnique({
     where: { id },
@@ -800,34 +845,14 @@ export async function releaseReservation(id: string, actor?: string) {
       // freed on the device. Independent best-effort step — a lease-release
       // failure doesn't undo the unpush or block the Polaris release.
       if (reservation.ipAddress) {
-        const ip = reservation.ipAddress;
-        try {
-          await releaseDhcpLease({ integration, deviceName, ip });
-          void logEvent({
-            action: "reservation.lease_release.succeeded",
-            level: "info",
-            resourceType: "reservation",
-            resourceId: id,
-            resourceName: reservation.hostname || ip,
-            message: `DHCP lease for ${ip} released on FortiGate "${deviceName}"`,
-            details: { deviceName, ip, integrationId: integration.id },
-          });
-        } catch (err: any) {
-          void logEvent({
-            action: "reservation.lease_release.failed",
-            level: "warning",
-            resourceType: "reservation",
-            resourceId: id,
-            resourceName: reservation.hostname || ip,
-            message: `DHCP lease release for ${ip} on FortiGate "${deviceName}" failed — reservation entry removed but the device may still hold the lease: ${err?.message || "Unknown error"}`,
-            details: {
-              deviceName,
-              ip,
-              integrationId: integration.id,
-              error: err?.message || String(err),
-            },
-          });
-        }
+        await releaseLeaseBestEffort({
+          integration,
+          deviceName,
+          ip: reservation.ipAddress,
+          reservationId: id,
+          reservationHostname: reservation.hostname,
+          failureContext: "reservation entry removed but the device may still hold the lease",
+        });
       }
     }
   }
@@ -849,36 +874,14 @@ export async function releaseReservation(id: string, actor?: string) {
     reservation.subnet.fortigateDevice &&
     integrationConfig?.pushReservations === true
   ) {
-    const integration = reservation.subnet.integration;
-    const deviceName = reservation.subnet.fortigateDevice;
-    const ip = reservation.ipAddress;
-    try {
-      await releaseDhcpLease({ integration, deviceName, ip });
-      void logEvent({
-        action: "reservation.lease_release.succeeded",
-        level: "info",
-        resourceType: "reservation",
-        resourceId: id,
-        resourceName: reservation.hostname || ip,
-        message: `DHCP lease for ${ip} released on FortiGate "${deviceName}"`,
-        details: { deviceName, ip, integrationId: integration.id },
-      });
-    } catch (err: any) {
-      void logEvent({
-        action: "reservation.lease_release.failed",
-        level: "warning",
-        resourceType: "reservation",
-        resourceId: id,
-        resourceName: reservation.hostname || ip,
-        message: `DHCP lease release for ${ip} on FortiGate "${deviceName}" failed — Polaris release proceeded but the device may still hold the lease: ${err?.message || "Unknown error"}`,
-        details: {
-          deviceName,
-          ip,
-          integrationId: integration.id,
-          error: err?.message || String(err),
-        },
-      });
-    }
+    await releaseLeaseBestEffort({
+      integration: reservation.subnet.integration,
+      deviceName: reservation.subnet.fortigateDevice,
+      ip: reservation.ipAddress,
+      reservationId: id,
+      reservationHostname: reservation.hostname,
+      failureContext: "Polaris release proceeded but the device may still hold the lease",
+    });
   }
 
   const releasedRow = await prisma.$transaction(async (tx) => {

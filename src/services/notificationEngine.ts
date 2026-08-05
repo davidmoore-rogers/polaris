@@ -1807,6 +1807,41 @@ async function computeCarveOut(
 /** Dry-run a draft rule against current data with NO writes. A draft without
  *  a trigger is a SCOPE-ONLY preview: list the devices the scope matches
  *  (the wizard's asset-filtering step). */
+/** Draft DbRule assembled from a preview input — what both preview paths render templates against. */
+function draftRuleForPreview(input: PreviewRuleInput, trigger: DbRule["trigger"]): DbRule {
+  return {
+    id: "", name: input.name, description: input.description ?? null, severity: input.severity,
+    trigger, scope: input.scope,
+    reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
+    messageTemplate: input.messageTemplate ?? null,
+    emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
+    severityBands: input.severityBands, bandNotify: input.bandNotify,
+  };
+}
+
+/**
+ * Rendered composed-email sample for a preview — templates only, no recipient
+ * resolution. Direct asset fetch (not the per-tick cache — preview runs in
+ * the web process).
+ */
+async function renderPreviewEmail(
+  draft: DbRule,
+  composition: NonNullable<PreviewRuleInput["emailComposition"]>,
+  sample: Reading,
+  fireInfo?: CompositeFireInfo,
+): Promise<NonNullable<PreviewResult["emailPreview"]>> {
+  const detail = sample.assetId
+    ? await prisma.asset.findUnique({ where: { id: sample.assetId }, select: ASSET_DETAIL_SELECT })
+    : null;
+  const ctx = buildTemplateContext({
+    ...readingContextParts(draft, sample, new Date(), fireInfo),
+    assetDetail: detail ? { ...detail, status: String(detail.status) } : null,
+  });
+  ctx["message"] = renderMessage(draft, sample, ctx);
+  const composed = buildComposedEmail(composition, ctx);
+  return { subject: composed.subject, text: composed.text, html: composed.html };
+}
+
 export async function previewRule(input: PreviewRuleInput): Promise<PreviewResult> {
   const trigger = input.trigger;
   let readings: Reading[] = [];
@@ -1877,26 +1912,9 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
   // matching, else first evaluated) — templates only, no recipient resolution.
   let emailPreview: PreviewResult["emailPreview"];
   if (input.emailComposition && readings.length > 0) {
-    const draft: DbRule = {
-      id: "", name: input.name, description: input.description ?? null, severity: input.severity,
-      trigger, scope: input.scope,
-      reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
-      messageTemplate: input.messageTemplate ?? null,
-      emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
-      severityBands: input.severityBands, bandNotify: input.bandNotify,
-    };
+    const draft = draftRuleForPreview(input, trigger);
     const sample = readings.find((r) => readingMeets(trigger, r.value)) ?? readings[0];
-    // Direct fetch (not the per-tick cache — preview runs in the web process).
-    const detail = sample.assetId
-      ? await prisma.asset.findUnique({ where: { id: sample.assetId }, select: ASSET_DETAIL_SELECT })
-      : null;
-    const ctx = buildTemplateContext({
-      ...readingContextParts(draft, sample, new Date()),
-      assetDetail: detail ? { ...detail, status: String(detail.status) } : null,
-    });
-    ctx["message"] = renderMessage(draft, sample, ctx);
-    const composed = buildComposedEmail(input.emailComposition, ctx);
-    emailPreview = { subject: composed.subject, text: composed.text, html: composed.html };
+    emailPreview = await renderPreviewEmail(draft, input.emailComposition, sample);
   }
 
   return {
@@ -1952,27 +1970,11 @@ async function previewCompositeRule(trigger: CompositeTrigger, input: PreviewRul
 
   let emailPreview: PreviewResult["emailPreview"];
   if (input.emailComposition && matches.length > 0) {
-    const draft: DbRule = {
-      id: "", name: input.name, description: input.description ?? null, severity: input.severity,
-      trigger, scope: input.scope,
-      reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
-      messageTemplate: input.messageTemplate ?? null,
-      emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),
-      severityBands: input.severityBands, bandNotify: input.bandNotify,
-    };
+    const draft = draftRuleForPreview(input, trigger);
     const best = matches[0];
     const outcome = outcomes.get(best.assetId ?? "")!;
     const sample: Reading = { assetId: best.assetId ?? "", hostname: best.hostname, tags: [], dimKey: "", dimLabel: "", value: null };
-    const detail = best.assetId
-      ? await prisma.asset.findUnique({ where: { id: best.assetId }, select: ASSET_DETAIL_SELECT })
-      : null;
-    const ctx = buildTemplateContext({
-      ...readingContextParts(draft, sample, new Date(), compositeFireInfo(outcome)),
-      assetDetail: detail ? { ...detail, status: String(detail.status) } : null,
-    });
-    ctx["message"] = renderMessage(draft, sample, ctx);
-    const composed = buildComposedEmail(input.emailComposition, ctx);
-    emailPreview = { subject: composed.subject, text: composed.text, html: composed.html };
+    emailPreview = await renderPreviewEmail(draft, input.emailComposition, sample, compositeFireInfo(outcome));
   }
 
   return { supported: true, totalEvaluated: evaluated, matches: matches.slice(0, 200), emailPreview };

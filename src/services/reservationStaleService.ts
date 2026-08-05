@@ -354,6 +354,49 @@ export async function snoozeReservation(reservationId: string, actor?: string): 
  *   "ignored" — rows the operator has set staleIgnored=true on, regardless
  *               of whether they're still stale by the threshold rule
  */
+/** Shape of a reservation row as loaded by listStaleReservations' includes. */
+interface StaleCandidateRow {
+  id: string;
+  ipAddress: string | null;
+  hostname: string | null;
+  macAddress: string | null;
+  subnetId: string;
+  createdAt: Date;
+  lastSeenLeased: Date | null;
+  lastSeenArp: Date | null;
+  staleNotifiedAt: Date | null;
+  pushedToId: string | null;
+  subnet: { cidr: string; name: string; fortigateDevice: string | null };
+  pushedTo: { name: string } | null;
+}
+
+/** The one row→entry mapping both listStaleReservations modes share. */
+function toAlertEntry(
+  r: StaleCandidateRow,
+  presence: { lastSeen: Date | null; match: AssetPresenceMatch },
+  daysSinceSeen: number,
+): ReservationAlertEntry {
+  return {
+    id: r.id,
+    ipAddress: r.ipAddress,
+    hostname: r.hostname,
+    macAddress: r.macAddress,
+    subnetId: r.subnetId,
+    subnetCidr: r.subnet.cidr,
+    subnetName: r.subnet.name,
+    createdAt: r.createdAt,
+    lastSeenLeased: r.lastSeenLeased,
+    lastSeenArp: r.lastSeenArp,
+    staleNotifiedAt: r.staleNotifiedAt,
+    daysSinceSeen,
+    fortigateDevice: r.subnet.fortigateDevice,
+    pushedToId: r.pushedToId,
+    pushedToName: r.pushedTo?.name ?? null,
+    assetLastSeen: presence.lastSeen,
+    assetPresenceMatch: presence.match,
+  };
+}
+
 export async function listStaleReservations(
   mode: "active" | "ignored" = "active",
 ): Promise<ReservationAlertEntry[]> {
@@ -381,25 +424,7 @@ export async function listStaleReservations(
         assetLastSeenMs: presence.lastSeen?.getTime() ?? null,
         baselineMs: r.createdAt.getTime(),
       });
-      return {
-        id: r.id,
-        ipAddress: r.ipAddress,
-        hostname: r.hostname,
-        macAddress: r.macAddress,
-        subnetId: r.subnetId,
-        subnetCidr: r.subnet.cidr,
-        subnetName: r.subnet.name,
-        createdAt: r.createdAt,
-        lastSeenLeased: r.lastSeenLeased,
-        lastSeenArp: r.lastSeenArp,
-        staleNotifiedAt: r.staleNotifiedAt,
-        daysSinceSeen: Math.floor((nowMs - lastSignalMs) / (24 * 60 * 60 * 1000)),
-        fortigateDevice: r.subnet.fortigateDevice,
-        pushedToId: r.pushedToId,
-        pushedToName: r.pushedTo?.name ?? null,
-        assetLastSeen: presence.lastSeen,
-        assetPresenceMatch: presence.match,
-      };
+      return toAlertEntry(r, presence, Math.floor((nowMs - lastSignalMs) / (24 * 60 * 60 * 1000)));
     });
   }
 
@@ -453,26 +478,7 @@ export async function listStaleReservations(
     });
     if (lastSignalMs > cutoffMs) continue;
 
-    const daysSinceSeen = Math.floor((nowMs - lastSignalMs) / (24 * 60 * 60 * 1000));
-    result.push({
-      id: r.id,
-      ipAddress: r.ipAddress,
-      hostname: r.hostname,
-      macAddress: r.macAddress,
-      subnetId: r.subnetId,
-      subnetCidr: r.subnet.cidr,
-      subnetName: r.subnet.name,
-      createdAt: r.createdAt,
-      lastSeenLeased: r.lastSeenLeased,
-      lastSeenArp: r.lastSeenArp,
-      staleNotifiedAt: r.staleNotifiedAt,
-      daysSinceSeen,
-      fortigateDevice: r.subnet.fortigateDevice,
-      pushedToId: r.pushedToId,
-      pushedToName: r.pushedTo?.name ?? null,
-      assetLastSeen: presence.lastSeen,
-      assetPresenceMatch: presence.match,
-    });
+    result.push(toAlertEntry(r, presence, Math.floor((nowMs - lastSignalMs) / (24 * 60 * 60 * 1000))));
   }
   return result;
 }
