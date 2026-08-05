@@ -4125,11 +4125,11 @@ Listed alphabetically.
 
 **What it owns:** Subnet creation, allocation, bulk templates, and lifecycle (manual vs discovered), plus the `subnet.created` / `subnet.updated` / `subnet.deleted` / `subnet.bulk-allocated` audit Events (emitted in-service; inputs carry `actor?`, and `via: "auto-allocate"` discriminates the allocateNextSubnet message from a manual create).
 
-**Public API:** listSubnets, getSubnet, createSubnet, allocateNextSubnet, bulkAllocate, previewBulkAllocate, updateSubnet, getSubnetIps, deleteSubnet.
+**Public API:** listSubnets, getSubnet, createSubnet, allocateNextSubnet, bulkAllocate, previewBulkAllocate, updateSubnet, getSubnetIps, deleteSubnet, buildIpContexts + IpContext (batched IP → most-specific containing subnet + active-reservation summary; THE single implementation of the `cidr >>= ip` / `masklen DESC` containment SQL).
 
 **Cross-service deps:** ipService (indirectly via cidrContains/cidrOverlaps from utils/cidr.ts).
 
-**Used by:** src/api/routes/subnets.ts (all operations), src/services/reservationService.ts (subnet lookups, status checks), src/services/utilizationService.ts (subnet status grouping).
+**Used by:** src/api/routes/subnets.ts (all operations), src/api/routes/assets.ts (buildIpContexts — per-row `ipContext` for the asset table's View Lease button), src/services/dnsResolvedReservationService.ts (buildIpContexts — target-subnet resolution in the reconciler), src/services/reservationService.ts (subnet lookups, status checks), src/services/utilizationService.ts (subnet status grouping).
 
 **Invariants:**
 - Subnet must be contained within parent block CIDR

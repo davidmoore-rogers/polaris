@@ -115,23 +115,18 @@ async function executeActionsSafe(notificationId: string, actions: AutomationAct
   }
 }
 
-interface ScopeAssetRow {
-  id: string;
+// Extends ScopeAsset (which extends notificationTypes.ScopeConditionAsset), so
+// the condition-tree fields (manufacturer/model/os — SCOPE_SELECT populates
+// them; optional so the pseudo-host row can omit them) are inherited and the
+// three layers can't drift.
+interface ScopeAssetRow extends ScopeAsset {
   hostname: string | null;
-  assetType: string | null;
-  tags: string[];
-  discoveredByIntegrationId: string | null;
   monitorStatus: string | null;
   status: string;
   consecutiveFailures: number;
   dependencySuppressed: boolean;
   quarantinedAt: Date | null;
   ipAddress: string | null;
-  // Read by the condition-tree evaluator + the carve-out scope match
-  // (SCOPE_SELECT populates them; optional so the pseudo-host row can omit them).
-  manufacturer?: string | null;
-  model?: string | null;
-  os?: string | null;
   // Read by the ifOperStatus/ifAdminStatus resolvers (pinned-interface gate).
   monitoredInterfaces?: string[];
 }

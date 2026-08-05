@@ -24,20 +24,18 @@ import {
 } from "./notificationTypes.js";
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
 import { ipInCidr } from "../utils/cidr.js";
-import { scopeCidrOf } from "./notificationTypes.js";
+import { scopeCidrOf, type ScopeConditionAsset } from "./notificationTypes.js";
 
-/** Minimal asset shape needed to evaluate scope membership. */
-export interface ScopeAsset {
-  id: string;
+/**
+ * Minimal asset shape needed to evaluate scope membership. Extends the
+ * condition-evaluator's field vocabulary (notificationTypes.ScopeConditionAsset)
+ * so the flat-scope matcher and the condition tree can never drift apart —
+ * this layer just requires the dimensions the flat matcher always reads.
+ */
+export interface ScopeAsset extends ScopeConditionAsset {
   assetType: string | null;
   tags: string[];
   discoveredByIntegrationId: string | null;
-  manufacturer?: string | null;
-  model?: string | null;
-  ipAddress?: string | null;
-  hostname?: string | null;
-  os?: string | null;
-  status?: string | null;
 }
 
 /**

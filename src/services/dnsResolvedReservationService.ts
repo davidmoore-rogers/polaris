@@ -24,6 +24,7 @@ import { prisma } from "../db.js";
 import { isValidIpAddress, detectIpVersion } from "../utils/cidr.js";
 import { logger } from "../utils/logger.js";
 import { logEvent } from "./eventLogService.js";
+import { buildIpContexts } from "./subnetService.js";
 
 const SYSTEM_ACTOR = "system:dns-resolved";
 
@@ -56,19 +57,14 @@ interface ContainingSubnet {
   subnet_cidr: string;
 }
 
-// Single most-specific containing subnet for one IP. Mirrors the SQL shape used
-// by buildIpContexts() in src/api/routes/assets.ts — `inet`/`cidr` containment
-// in Postgres with `masklen DESC` so nested subnets pick the tighter one.
+// Single most-specific containing subnet for one IP — delegates to the shared
+// implementation in subnetService.buildIpContexts (`inet`/`cidr` containment
+// with `masklen DESC` so nested subnets pick the tighter one). The reservation
+// summary the shared query also returns is unused here — this reconciler
+// classifies reservations itself (authoritative vs dns_resolved).
 async function findContainingSubnet(ip: string): Promise<ContainingSubnet | null> {
-  const rows = await prisma.$queryRaw<ContainingSubnet[]>`
-    SELECT s.id AS subnet_id, s.cidr AS subnet_cidr
-    FROM subnets s
-    WHERE s.status <> 'deprecated'
-      AND s.cidr::cidr >>= ${ip}::inet
-    ORDER BY masklen(s.cidr::cidr) DESC
-    LIMIT 1
-  `;
-  return rows[0] ?? null;
+  const ctx = (await buildIpContexts([ip])).get(ip);
+  return ctx ? { subnet_id: ctx.subnetId, subnet_cidr: ctx.subnetCidr } : null;
 }
 
 interface SystemReservationRow {

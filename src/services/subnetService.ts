@@ -11,6 +11,7 @@ import { logEvent, buildChanges } from "./eventLogService.js";
 import {
   normalizeCidr,
   isValidCidr,
+  isValidIpAddress,
   cidrContains,
   cidrOverlaps,
   findNextAvailableSubnet,
@@ -18,6 +19,72 @@ import {
   enumerateSubnetIps,
   packIntoAnchor,
 } from "../utils/cidr.js";
+
+// ─── IP → containing-subnet context ─────────────────────────────────────────
+//
+// Each asset row in the UI carries an `ipContext` so the table can render a
+// "View Lease" button that jumps into the network slide-over at the asset's
+// IP. The button needs to know which subnet contains the IP (subnetId/cidr);
+// the active reservation summary (if any) is included for any future per-row
+// indicators. One subnet load + one IN-list reservation query covers an entire
+// page of assets. Also the single implementation of the most-specific-
+// containing-subnet SQL (`cidr >>= ip`, `masklen DESC`) — the
+// dns_resolved reconciler resolves its target subnet through this too.
+
+export interface IpContext {
+  subnetId: string;
+  subnetCidr: string;
+  reservation: { id: string; createdBy: string | null; sourceType: string } | null;
+}
+
+export async function buildIpContexts(ips: string[]): Promise<Map<string, IpContext>> {
+  // Pre-filter in JS: drop empties and anything that isn't a parseable IP.
+  // Postgres `inet` cast throws on bad input and we have no PG15-safe TRY_CAST,
+  // so we keep bad strings out of the query entirely. Subnet cidrs are written
+  // through cidr.ts validation, so we trust those.
+  const distinct = Array.from(new Set(ips.filter((ip) => !!ip && isValidIpAddress(ip))));
+  if (distinct.length === 0) return new Map();
+  // Single round-trip: containment + reservation join in Postgres. `DISTINCT ON`
+  // with `masklen DESC` picks the most-specific containing subnet per IP — the
+  // routing-style answer when subnets nest.
+  const rows = await prisma.$queryRaw<Array<{
+    ip: string;
+    subnet_id: string;
+    subnet_cidr: string;
+    reservation_id: string | null;
+    reservation_created_by: string | null;
+    reservation_source_type: string | null;
+  }>>`
+    WITH input_ips(ip) AS (SELECT unnest(${distinct}::text[]))
+    SELECT DISTINCT ON (i.ip)
+      i.ip                  AS ip,
+      s.id                  AS subnet_id,
+      s.cidr                AS subnet_cidr,
+      r.id                  AS reservation_id,
+      r."createdBy"         AS reservation_created_by,
+      r."sourceType"::text  AS reservation_source_type
+    FROM input_ips i
+    JOIN subnets s
+      ON s.status <> 'deprecated'
+     AND s.cidr::cidr >>= i.ip::inet
+    LEFT JOIN reservations r
+      ON r."subnetId"  = s.id
+     AND r."ipAddress" = i.ip
+     AND r.status      = 'active'
+    ORDER BY i.ip, masklen(s.cidr::cidr) DESC
+  `;
+  const out = new Map<string, IpContext>();
+  for (const row of rows) {
+    out.set(row.ip, {
+      subnetId: row.subnet_id,
+      subnetCidr: row.subnet_cidr,
+      reservation: row.reservation_id
+        ? { id: row.reservation_id, createdBy: row.reservation_created_by, sourceType: row.reservation_source_type as string }
+        : null,
+    });
+  }
+  return out;
+}
 
 export interface CreateSubnetInput {
   blockId: string;
