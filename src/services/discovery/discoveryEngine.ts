@@ -9,6 +9,7 @@
  * expiry, and the preflight connection test.
  */
 
+import { chunkArray } from "../../utils/chunk.js";
 import { prisma } from "../../db.js";
 import { AppError, throwIfAborted } from "../../utils/errors.js";
 import { armDiscoveryCancelWatchdog } from "../discoveryCancelWatchdog.js";
@@ -1100,8 +1101,7 @@ async function upsertConflict(
 const BATCH_SIZE = 50;
 async function batchSettled<T>(items: T[], fn: (item: T) => Promise<any>): Promise<PromiseSettledResult<any>[]> {
   const results: PromiseSettledResult<any>[] = [];
-  for (let i = 0; i < items.length; i += BATCH_SIZE) {
-    const chunk = items.slice(i, i + BATCH_SIZE);
+  for (const chunk of chunkArray(items, BATCH_SIZE)) {
     const batch = await Promise.allSettled(chunk.map(fn));
     results.push(...batch);
   }
@@ -5511,8 +5511,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
                 seen.add(src.assetId);
                 updates.push(prisma.asset.update({ where: { id: src.assetId }, data: { managementAccess: summary as any } }));
               }
-              for (let i = 0; i < updates.length; i += 200) {
-                await prisma.$transaction(updates.slice(i, i + 200));
+              for (const chunk of chunkArray(updates, 200)) {
+                await prisma.$transaction(chunk);
               }
               if (updates.length > 0) syncLog("info", `Management-access: read allowaccess for ${updates.length} device(s)`);
             }

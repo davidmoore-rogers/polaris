@@ -61,6 +61,7 @@
  * every rule against it in memory.
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import { randomUUID } from "node:crypto";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
@@ -739,8 +740,7 @@ export async function applyRules(rules: AppMapRule[]): Promise<AutoMapApplyResul
   let processPins = 0;
   let servicePins = 0;
   let monitorPins = 0;
-  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-    const chunk = pending.slice(i, i + BATCH_SIZE);
+  for (const chunk of chunkArray(pending, BATCH_SIZE)) {
     const results = await Promise.allSettled(
       chunk.map((p) =>
         prisma.asset.update({
@@ -798,8 +798,7 @@ export async function unmapEverywhere(kind: "process" | "service", name: string)
 
   let devices = 0;
   let connectionRowsDeleted = 0;
-  for (let i = 0; i < assets.length; i += BATCH_SIZE) {
-    const chunk = assets.slice(i, i + BATCH_SIZE);
+  for (const chunk of chunkArray(assets, BATCH_SIZE)) {
     const results = await Promise.allSettled(chunk.map(async (a) => {
       const next = (isProc ? a.mappedProcesses : a.mappedServices).filter((n) => n !== target);
       await prisma.asset.update({

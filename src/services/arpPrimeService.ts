@@ -30,6 +30,7 @@
  * sweep never throws.
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import dgram from "node:dgram";
 import { logger } from "../utils/logger.js";
 import { sleep } from "../utils/sleep.js";
@@ -91,10 +92,7 @@ export function planSweepBatches(
   }
   const dropped = Math.max(0, valid.length - maxTargets);
   const capped = valid.slice(0, maxTargets);
-  const batches: string[][] = [];
-  for (let i = 0; i < capped.length; i += batchSize) {
-    batches.push(capped.slice(i, i + batchSize));
-  }
+  const batches = chunkArray(capped, batchSize);
   return { batches, targets: capped.length, dropped };
 }
 

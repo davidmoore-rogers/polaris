@@ -56,6 +56,7 @@
  * reconcile pass self-heals rows whose push failed transiently, and is also
  * the pass that seeds empty Polaris fields from the device (adopt).
  */
+import { chunkArray } from "../utils/chunk.js";
 import { EXCLUDED_LIFECYCLE_STATUSES } from "../utils/assetInvariants.js";
 import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
@@ -926,9 +927,9 @@ export async function runDescriptionSyncForIntegration(
   // discovery parallelism floor without hammering FMG's proxy lane.
   const deviceNames = [...groups.keys()];
   const CHUNK = 5;
-  for (let i = 0; i < deviceNames.length; i += CHUNK) {
+  for (const nameChunk of chunkArray(deviceNames, CHUNK)) {
     await Promise.all(
-      deviceNames.slice(i, i + CHUNK).map(async (deviceName) => {
+      nameChunk.map(async (deviceName) => {
         const group = groups.get(deviceName)!;
         try {
           await reconcileDevice(integration, deviceName, group, overridesByAsset, summary, pushedThisRun);

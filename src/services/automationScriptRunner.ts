@@ -22,6 +22,7 @@
  *   - sweep: prunes completed runs older than the retention window.
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import { execFile } from "node:child_process";
 import { mkdir, writeFile, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -181,8 +182,7 @@ export async function runPendingServerScripts(): Promise<{ started: number; comp
   });
 
   let completed = 0;
-  for (let i = 0; i < claimed.length; i += CONCURRENCY) {
-    const chunk = claimed.slice(i, i + CONCURRENCY);
+  for (const chunk of chunkArray(claimed, CONCURRENCY)) {
     const results = await Promise.all(chunk.map(async (run) => ({ run, res: await executeServerScript(run) })));
     for (const { run, res } of results) {
       await prisma.automationScriptRun.update({

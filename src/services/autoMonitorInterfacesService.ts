@@ -50,6 +50,7 @@
  * tunnel by hand on the asset (apply is additive and never strips).
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { normalizeFortiapInterfaceName } from "../utils/fortiapInterfaceAlias.js";
@@ -1086,8 +1087,7 @@ export async function applyAutoMonitorForClass(
   const BATCH_SIZE = 50;
   let devices = 0;
   let interfacesAdded = 0;
-  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-    const chunk = pending.slice(i, i + BATCH_SIZE);
+  for (const chunk of chunkArray(pending, BATCH_SIZE)) {
     const results = await Promise.allSettled(
       chunk.map((p) =>
         prisma.asset.update({

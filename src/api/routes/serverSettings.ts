@@ -2,6 +2,7 @@
  * src/api/routes/serverSettings.ts — NTP and certificate management endpoints
  */
 
+import { chunkArray } from "../../utils/chunk.js";
 import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -2402,9 +2403,9 @@ router.post("/agents/cert-pins/bulk-add", requirePermission("serverSettingsSyste
     });
     const alreadyPresent = rows.length - toAdd.length;
     const WRITE_CHUNK = 200;
-    for (let i = 0; i < toAdd.length; i += WRITE_CHUNK) {
+    for (const chunk of chunkArray(toAdd, WRITE_CHUNK)) {
       await prisma.$transaction(
-        toAdd.slice(i, i + WRITE_CHUNK).map((r) =>
+        chunk.map((r) =>
           prisma.managedAgent.update({
             where: { id: r.id },
             data:  { additionalServerCertFingerprints: { push: pin } },
@@ -2475,9 +2476,9 @@ router.post("/agents/cert-pins/bulk-remove", requirePermission("serverSettingsSy
       toUpdate.push({ id: r.id, remaining });
     }
     const WRITE_CHUNK = 200;
-    for (let i = 0; i < toUpdate.length; i += WRITE_CHUNK) {
+    for (const chunk of chunkArray(toUpdate, WRITE_CHUNK)) {
       await prisma.$transaction(
-        toUpdate.slice(i, i + WRITE_CHUNK).map((u) =>
+        chunk.map((u) =>
           prisma.managedAgent.update({
             where: { id: u.id },
             data: {

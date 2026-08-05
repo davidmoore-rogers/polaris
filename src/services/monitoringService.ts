@@ -23,6 +23,7 @@
  * transitions emit one as well.
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import { performance } from "node:perf_hooks";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -5919,10 +5920,7 @@ function snmpMultiGet(session: any, oids: string[]): Promise<Map<string, unknown
     // Dedup + preserve order. Useful for callers that build OID lists across
     // many resolution steps and may accidentally repeat.
     const uniqueOids = Array.from(new Set(oids));
-    const batches: string[][] = [];
-    for (let i = 0; i < uniqueOids.length; i += SNMP_MULTI_GET_BATCH) {
-      batches.push(uniqueOids.slice(i, i + SNMP_MULTI_GET_BATCH));
-    }
+    const batches = chunkArray(uniqueOids, SNMP_MULTI_GET_BATCH);
     let remaining = batches.length;
     let aborted = false;
     const fail = (err: Error) => {
@@ -7447,8 +7445,7 @@ export async function persistProcessConnections(
   if (capped.length === 0) return;
 
   const nowIso = new Date().toISOString();
-  for (let i = 0; i < capped.length; i += PROCESS_CONN_CHUNK) {
-    const chunk = capped.slice(i, i + PROCESS_CONN_CHUNK);
+  for (const chunk of chunkArray(capped, PROCESS_CONN_CHUNK)) {
     const params: unknown[] = [];
     const tuples: string[] = [];
     let p = 1;

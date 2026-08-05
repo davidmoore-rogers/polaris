@@ -30,6 +30,7 @@
  * against the targets); the toggle lives on the AD/Entra Monitoring tab.
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { logEvent } from "./eventLogService.js";
@@ -196,8 +197,7 @@ export async function runPresenceVerification(opts: {
     );
   }
 
-  for (let i = 0; i < updates.length; i += WRITE_CHUNK) {
-    const chunk = updates.slice(i, i + WRITE_CHUNK);
+  for (const chunk of chunkArray(updates, WRITE_CHUNK)) {
     await prisma.$transaction(
       chunk.map((u) => prisma.asset.update({ where: { id: u.id }, data: u.data })),
     );

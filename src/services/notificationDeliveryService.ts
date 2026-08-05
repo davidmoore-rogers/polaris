@@ -17,6 +17,7 @@
  *   - write ONE summary audit Event per non-empty drain.
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { notificationsPageUrl } from "../utils/notificationTemplate.js";
@@ -193,8 +194,7 @@ export async function drainPendingDeliveries(): Promise<{ processed: number; sen
   const deadEndpoints: string[] = [];
   const now = new Date();
 
-  for (let i = 0; i < rows.length; i += CONCURRENCY) {
-    const chunk = rows.slice(i, i + CONCURRENCY);
+  for (const chunk of chunkArray(rows, CONCURRENCY)) {
     const results = await Promise.all(chunk.map(async (d) => ({ d, r: await dispatch(d, d.channelId ? channels.get(d.channelId) : undefined) })));
     for (const { d, r } of results) {
       if (r.ok) sentIds.push(d.id);

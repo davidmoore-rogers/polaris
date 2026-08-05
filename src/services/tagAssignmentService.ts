@@ -25,6 +25,7 @@
  * batched apply, compileWildcard for patterns).
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
@@ -506,8 +507,7 @@ async function applyDelta(
         updates.push({ id: row.id, tags: tags.filter((t) => t !== tagName) });
       }
     }
-    for (let i = 0; i < updates.length; i += BATCH) {
-      const chunk = updates.slice(i, i + BATCH);
+    for (const chunk of chunkArray(updates, BATCH)) {
       await prisma.$transaction(
         chunk.map((u) => prisma.asset.update({ where: { id: u.id }, data: { tags: u.tags } })),
       );

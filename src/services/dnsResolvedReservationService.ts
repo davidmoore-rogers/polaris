@@ -20,6 +20,7 @@
  *     extension's pre-delete hook).
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { isValidIpAddress, detectIpVersion } from "../utils/cidr.js";
 import { logger } from "../utils/logger.js";
@@ -322,8 +323,7 @@ export async function reconcileDnsResolvedForAllAssets(): Promise<{
   });
 
   const BATCH = 25;
-  for (let i = 0; i < assets.length; i += BATCH) {
-    const batch = assets.slice(i, i + BATCH);
+  for (const batch of chunkArray(assets, BATCH)) {
     const results = await Promise.all(
       batch.map((a) => reconcileDnsResolvedForAsset(a.id).catch(() => ({ created: 0, updated: 0, released: 0, skipped: true } as ReconcileResult)))
     );

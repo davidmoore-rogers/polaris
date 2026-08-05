@@ -32,6 +32,7 @@
  * interfaces service rather than duplicated.
  */
 
+import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { compilePattern } from "./autoMonitorInterfacesService.js";
 
@@ -353,8 +354,7 @@ export async function applyAutoMonitorStorageForClass(
   const BATCH_SIZE = 50;
   let devices = 0;
   let mountsAdded = 0;
-  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-    const chunk = pending.slice(i, i + BATCH_SIZE);
+  for (const chunk of chunkArray(pending, BATCH_SIZE)) {
     const results = await Promise.allSettled(
       chunk.map((p) =>
         prisma.asset.update({
