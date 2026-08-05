@@ -22,7 +22,7 @@
  * ssoProvisioning.ts.
  */
 
-import { prisma } from "../db.js";
+import { createSettingStore } from "./settingsStore.js";
 import { AppError } from "../utils/errors.js";
 import { ipMatchesAllowlist, isValidAllowlistEntry } from "../utils/ipAllowlist.js";
 import { provisionExternalUser } from "./ssoProvisioning.js";
@@ -82,21 +82,19 @@ export interface HeaderCarrier {
   ip?: string;
 }
 
-let _cache: { value: EntraProxySettings; expiry: number } | null = null;
+const entraProxyStore = createSettingStore<EntraProxySettings>({
+  key: "entraProxy",
+  ttlMs: 30000,
+  parse: (raw) => (raw ? { ...ENTRA_PROXY_DEFAULTS, ...(raw as Record<string, any>) } : { ...ENTRA_PROXY_DEFAULTS }),
+});
 
 export async function getEntraProxySettings(): Promise<EntraProxySettings> {
-  if (_cache && Date.now() < _cache.expiry) return _cache.value;
-  const row = await prisma.setting.findUnique({ where: { key: "entraProxy" } });
-  const value = row?.value
-    ? { ...ENTRA_PROXY_DEFAULTS, ...(row.value as Record<string, any>) }
-    : { ...ENTRA_PROXY_DEFAULTS };
-  _cache = { value, expiry: Date.now() + 30000 };
-  return value;
+  return entraProxyStore.get();
 }
 
 /** Test hook — drop the settings cache so the next read hits the DB. */
 export function clearEntraProxySettingsCache(): void {
-  _cache = null;
+  entraProxyStore.invalidate();
 }
 
 function normalizeHeaderName(raw: unknown, field: string, required: boolean): string {
@@ -150,13 +148,7 @@ export async function updateEntraProxySettings(input: Record<string, any>): Prom
   if (value.enabled && value.trustedSourceIps.length === 0) {
     throw new AppError(400, "At least one trusted source IP/CIDR (the App Proxy connector host) is required to enable header login");
   }
-  await prisma.setting.upsert({
-    where: { key: "entraProxy" },
-    update: { value: value as any },
-    create: { key: "entraProxy", value: value as any },
-  });
-  _cache = { value, expiry: Date.now() + 30000 };
-  return value;
+  return entraProxyStore.save(value);
 }
 
 /** Enabled AND minimally configured AND has a non-empty allowlist (fail closed). */

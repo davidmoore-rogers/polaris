@@ -3568,6 +3568,25 @@ Listed alphabetically.
 
 ---
 
+## services/settingsStore.ts
+
+**What it owns:** The generic TTL-cached accessor for JSON-blob Setting rows — `createSettingStore<T>({key, ttlMs, parse})` returning `{get, peek, save, invalidate}`. The store owns the read cache, the row I/O, and cache priming on save; callers keep their parse (defaults merge) and write-side validation/merge rules.
+
+**Public API:** `createSettingStore`, `SettingStore<T>`.
+
+**Cross-service deps:** `prisma` (settings) only.
+
+**Used by:** `azureAuthService` (key `sso`; `peek` backs the synchronous `isAzureSsoConfigured` fast path), `entraProxyAuthService` (key `entraProxy`), `dashSettingsService` (key `dashConfig`, 10s TTL = the cross-process propagation delay to the dash listener). Other Setting-blob sites still hand-roll the pattern — migrate them onto this as they're touched.
+
+**Invariants:**
+- The cache is per-process, exactly like the hand-rolled copies it replaced — a write in one role propagates to other roles only after their ttlMs expires. Don't shorten a TTL without checking what read frequency it implies (dash consults its store on every request).
+- `save` primes the cache with the written value (it does not invalidate) — callers that need a post-save DB re-read must call `invalidate()` themselves.
+- `parse` runs on every cache miss and must be total (handle `undefined` = missing row).
+
+**When changing this:** anything altering cache semantics changes every adopter at once — check each adopter's TTL expectation (auth gates, the dash listener's per-request read) before touching expiry behavior.
+
+---
+
 ## services/dashSettingsService.ts
 
 **What it owns:** Persistence of the Dash wallboard operator config — the `dashConfig` Setting row `{ enabled (default false), ipScope ("rfc1918"|"all"|"custom", default "rfc1918"), allowedCidrs (canonical IPv4 CIDRs for the custom scope) }` — with a ~10s TTL in-process cache. The TTL is the **cross-process propagation delay**: the web process writes the row (Server Settings → Web Server → Dash Wallboard), the dash process (`POLARIS_ROLE=dash`) reads it on every request through the cache, so a toggle lands within ~10s with no restart.

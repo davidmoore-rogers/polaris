@@ -9,6 +9,7 @@
 import { SAML, type SamlConfig, type Profile, ValidateInResponseTo } from "@node-saml/node-saml";
 import { randomBytes } from "node:crypto";
 import { prisma } from "../db.js";
+import { createSettingStore } from "./settingsStore.js";
 import { hashPassword } from "../utils/password.js";
 import { AppError } from "../utils/errors.js";
 
@@ -39,16 +40,14 @@ const SSO_DEFAULTS: SsoSettings = {
 };
 
 // Simple in-memory cache to avoid DB reads on every request
-let _ssoCache: { value: SsoSettings; expiry: number } | null = null;
+const ssoStore = createSettingStore<SsoSettings>({
+  key: "sso",
+  ttlMs: 30000,
+  parse: (raw) => (raw ? { ...SSO_DEFAULTS, ...(raw as Record<string, any>) } : { ...SSO_DEFAULTS }),
+});
 
 export async function getSsoSettings(): Promise<SsoSettings> {
-  if (_ssoCache && Date.now() < _ssoCache.expiry) return _ssoCache.value;
-  const row = await prisma.setting.findUnique({ where: { key: "sso" } });
-  const value = row?.value
-    ? { ...SSO_DEFAULTS, ...(row.value as Record<string, any>) }
-    : { ...SSO_DEFAULTS };
-  _ssoCache = { value, expiry: Date.now() + 30000 };
-  return value;
+  return ssoStore.get();
 }
 
 export async function updateSsoSettings(updates: Partial<SsoSettings>): Promise<SsoSettings> {
@@ -67,12 +66,7 @@ export async function updateSsoSettings(updates: Partial<SsoSettings>): Promise<
         ? Math.max(0, Math.min(1440, updates.autoLogoutMinutes))
         : current.autoLogoutMinutes,
   };
-  await prisma.setting.upsert({
-    where: { key: "sso" },
-    update: { value: merged as any },
-    create: { key: "sso", value: merged as any },
-  });
-  _ssoCache = { value: merged, expiry: Date.now() + 30000 };
+  await ssoStore.save(merged);
 
   // Invalidate cached SAML client so it gets rebuilt with new config
   _samlClient = null;
@@ -83,11 +77,8 @@ export async function updateSsoSettings(updates: Partial<SsoSettings>): Promise<
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 export function isAzureSsoConfigured(): boolean {
-  if (_ssoCache && Date.now() < _ssoCache.expiry) {
-    const s = _ssoCache.value;
-    return !!(s.enabled && s.idpEntityId && s.idpLoginUrl && s.idpCertificate);
-  }
-  return false;
+  const s = ssoStore.peek();
+  return !!(s && s.enabled && s.idpEntityId && s.idpLoginUrl && s.idpCertificate);
 }
 
 export async function isAzureSsoConfiguredAsync(): Promise<boolean> {

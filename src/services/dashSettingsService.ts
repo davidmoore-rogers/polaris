@@ -26,7 +26,7 @@
  * false→"all". The next save rewrites the row in the new shape.
  */
 
-import { prisma } from "../db.js";
+import { createSettingStore } from "./settingsStore.js";
 import { normalizeAllowlistCidr } from "../utils/cidr.js";
 import { AppError } from "../utils/errors.js";
 
@@ -47,21 +47,19 @@ export function defaultDashSettings(): DashSettings {
   return { enabled: false, ipScope: "rfc1918", allowedCidrs: [] };
 }
 
-const CACHE_TTL_MS = 10_000;
-let cache: { value: DashSettings; fetchedAt: number } | null = null;
+const dashStore = createSettingStore<DashSettings>({
+  key: DASH_SETTING_KEY,
+  ttlMs: 10_000,
+  parse: parseDashSettings,
+});
 
 export function invalidateDashSettingsCache(): void {
-  cache = null;
+  dashStore.invalidate();
 }
 
 /** TTL-cached read — the dash listener consults this on every request. */
 export async function getDashSettings(): Promise<DashSettings> {
-  const now = Date.now();
-  if (cache && now - cache.fetchedAt < CACHE_TTL_MS) return cache.value;
-  const row = await prisma.setting.findUnique({ where: { key: DASH_SETTING_KEY } });
-  const value = parseDashSettings(row?.value);
-  cache = { value, fetchedAt: now };
-  return value;
+  return dashStore.get();
 }
 
 export async function saveDashSettings(input: Partial<DashSettings>): Promise<DashSettings> {
@@ -101,13 +99,7 @@ export async function saveDashSettings(input: Partial<DashSettings>): Promise<Da
   }
 
   const merged: DashSettings = { enabled, ipScope, allowedCidrs };
-  await prisma.setting.upsert({
-    where: { key: DASH_SETTING_KEY },
-    update: { value: merged as any },
-    create: { key: DASH_SETTING_KEY, value: merged as any },
-  });
-  invalidateDashSettingsCache();
-  return merged;
+  return dashStore.save(merged);
 }
 
 function isDashIpScope(v: unknown): v is DashIpScope {
