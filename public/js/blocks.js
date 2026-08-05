@@ -9,41 +9,22 @@ var _blocksSF = null;
 var _blocksLayout = null;
 
 function _saveBlocksPrefs() {
-  if (!currentUsername) return;
-  try {
-    localStorage.setItem("polaris-prefs-blocks-" + currentUsername, JSON.stringify({
-      pageSize: _blocksPageSize,
-      sortKey: _blocksSF ? _blocksSF._sortKey : null,
-      sortDir: _blocksSF ? _blocksSF._sortDir : "asc",
-      sfFilters: _blocksSF ? Object.assign({}, _blocksSF._filters) : {},
-      layout: _blocksLayout ? _blocksLayout.getPrefs() : null,
-    }));
-  } catch (_) {}
+  PolarisPrefs.save("blocks", currentUsername, Object.assign(
+    { pageSize: _blocksPageSize, layout: _blocksLayout ? _blocksLayout.getPrefs() : null },
+    _blocksSF ? _blocksSF.getPrefs() : {},
+  ));
 }
 
 function _restoreBlocksPrefs() {
-  if (!currentUsername) return;
-  var raw;
-  try { raw = localStorage.getItem("polaris-prefs-blocks-" + currentUsername); } catch (_) { return; }
-  if (!raw) return;
-  try {
-    var p = JSON.parse(raw);
-    if (p.pageSize) {
-      _blocksPageSize = p.pageSize;
-      var psSel = document.getElementById("filter-pagesize");
-      if (psSel) psSel.value = String(p.pageSize);
-    }
-    if (_blocksSF) {
-      if (p.sortKey) _blocksSF._sortKey = p.sortKey;
-      if (p.sortDir) _blocksSF._sortDir = p.sortDir;
-      if (p.sfFilters) {
-        _blocksSF._filters = p.sfFilters;
-        _blocksSF.restoreFilterUI();
-      }
-      _blocksSF._updateIcons();
-    }
-    if (_blocksLayout && p.layout) _blocksLayout.setPrefs(p.layout);
-  } catch (_) {}
+  var p = PolarisPrefs.load("blocks", currentUsername);
+  if (!p) return;
+  if (p.pageSize) {
+    _blocksPageSize = p.pageSize;
+    var psSel = document.getElementById("filter-pagesize");
+    if (psSel) psSel.value = String(p.pageSize);
+  }
+  if (_blocksSF) _blocksSF.setPrefs(p);
+  if (_blocksLayout && p.layout) _blocksLayout.setPrefs(p.layout);
 }
 
 // Init is callable both by the legacy /blocks.html auto-run AND by the

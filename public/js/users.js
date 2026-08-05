@@ -25,39 +25,23 @@ var _groupMappingsById = {};   // { id: mapping }
 // other's settings. Save fires from the TableSF onChange callback; restore
 // runs once after `userReady` resolves so currentUsername is populated.
 function _saveUsersPrefs() {
-  if (!currentUsername) return;
-  try {
-    localStorage.setItem("polaris-prefs-users-" + currentUsername, JSON.stringify({
-      sortKey: _usersSF ? _usersSF._sortKey : null,
-      sortDir: _usersSF ? _usersSF._sortDir : "asc",
-      sfFilters: _usersSF ? Object.assign({}, _usersSF._filters) : {},
+  PolarisPrefs.save("users", currentUsername, Object.assign(
+    {
       layout: _usersLayout ? _usersLayout.getPrefs() : null,
       rolesLayout: _rolesLayout ? _rolesLayout.getPrefs() : null,
       groupMappingsLayout: _groupMappingsLayout ? _groupMappingsLayout.getPrefs() : null,
-    }));
-  } catch (_) {}
+    },
+    _usersSF ? _usersSF.getPrefs() : {},
+  ));
 }
 
 function _restoreUsersPrefs() {
-  if (!currentUsername) return;
-  var raw;
-  try { raw = localStorage.getItem("polaris-prefs-users-" + currentUsername); } catch (_) { return; }
-  if (!raw) return;
-  try {
-    var p = JSON.parse(raw);
-    if (_usersSF) {
-      if (p.sortKey) _usersSF._sortKey = p.sortKey;
-      if (p.sortDir) _usersSF._sortDir = p.sortDir;
-      if (p.sfFilters) {
-        _usersSF._filters = p.sfFilters;
-        _usersSF.restoreFilterUI();
-      }
-      _usersSF._updateIcons();
-    }
-    if (_usersLayout && p.layout) _usersLayout.setPrefs(p.layout);
-    if (_rolesLayout && p.rolesLayout) _rolesLayout.setPrefs(p.rolesLayout);
-    if (_groupMappingsLayout && p.groupMappingsLayout) _groupMappingsLayout.setPrefs(p.groupMappingsLayout);
-  } catch (_) {}
+  var p = PolarisPrefs.load("users", currentUsername);
+  if (!p) return;
+  if (_usersSF) _usersSF.setPrefs(p);
+  if (_usersLayout && p.layout) _usersLayout.setPrefs(p.layout);
+  if (_rolesLayout && p.rolesLayout) _rolesLayout.setPrefs(p.rolesLayout);
+  if (_groupMappingsLayout && p.groupMappingsLayout) _groupMappingsLayout.setPrefs(p.groupMappingsLayout);
 }
 
 document.addEventListener("DOMContentLoaded", async function () {

@@ -28,41 +28,22 @@ var _assetsSelectedMeta = {};
 var MONITOR_STATE_COLORS = { up: "#2a9d8f", down: "#d32f2f", warning: "#f4a261" };
 
 function _saveAssetsPrefs() {
-  if (!currentUsername) return;
-  try {
-    localStorage.setItem("polaris-prefs-assets-" + currentUsername, JSON.stringify({
-      pageSize: _assetsPageSize,
-      sortKey: _assetsSF ? _assetsSF._sortKey : null,
-      sortDir: _assetsSF ? _assetsSF._sortDir : "asc",
-      sfFilters: _assetsSF ? Object.assign({}, _assetsSF._filters) : {},
-      layout: _assetsLayout ? _assetsLayout.getPrefs() : null,
-    }));
-  } catch (_) {}
+  PolarisPrefs.save("assets", currentUsername, Object.assign(
+    { pageSize: _assetsPageSize, layout: _assetsLayout ? _assetsLayout.getPrefs() : null },
+    _assetsSF ? _assetsSF.getPrefs() : {},
+  ));
 }
 
 function _restoreAssetsPrefs() {
-  if (!currentUsername) return;
-  var raw;
-  try { raw = localStorage.getItem("polaris-prefs-assets-" + currentUsername); } catch (_) { return; }
-  if (!raw) return;
-  try {
-    var p = JSON.parse(raw);
-    if (p.pageSize) {
-      _assetsPageSize = p.pageSize;
-      var psSel = document.getElementById("filter-pagesize");
-      if (psSel) psSel.value = String(p.pageSize);
-    }
-    if (_assetsSF) {
-      if (p.sortKey) _assetsSF._sortKey = p.sortKey;
-      if (p.sortDir) _assetsSF._sortDir = p.sortDir;
-      if (p.sfFilters) {
-        _assetsSF._filters = p.sfFilters;
-        _assetsSF.restoreFilterUI();
-      }
-      _assetsSF._updateIcons();
-    }
-    if (_assetsLayout && p.layout) _assetsLayout.setPrefs(p.layout);
-  } catch (_) {}
+  var p = PolarisPrefs.load("assets", currentUsername);
+  if (!p) return;
+  if (p.pageSize) {
+    _assetsPageSize = p.pageSize;
+    var psSel = document.getElementById("filter-pagesize");
+    if (psSel) psSel.value = String(p.pageSize);
+  }
+  if (_assetsSF) _assetsSF.setPrefs(p);
+  if (_assetsLayout && p.layout) _assetsLayout.setPrefs(p.layout);
 }
 
 // Per-asset-type table-layout key for asset-detail tables (Interfaces, Storage,

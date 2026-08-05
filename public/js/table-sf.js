@@ -1244,3 +1244,56 @@ function applyTableLayout(tableEl, typeKey, options) {
   } catch (_) {}
   return layout;
 }
+
+// ─── Shared prefs round-trip (2026-08 audit) ────────────────────────────────
+//
+// Every list page persisted the same TableSF sort/filter state + a per-user
+// "polaris-prefs-<page>-<username>" JSON round-trip with hand-rolled copies.
+// The sort/filter half lives on TableSF; the storage half is PolarisPrefs.
+// Pages keep their own extra keys (pageSize, layout(s)) in the same blob.
+
+/** The persistable sort/filter state — spread into the page's prefs blob. */
+TableSF.prototype.getPrefs = function () {
+  return {
+    sortKey: this._sortKey,
+    sortDir: this._sortDir,
+    sfFilters: Object.assign({}, this._filters),
+  };
+};
+
+/**
+ * Apply a stored prefs blob's sort/filter state. Accepts both the standard
+ * shape (sortKey/sortDir/sfFilters) and events.js's legacy stored shape
+ * (sort:{key,dir} / filters) so pre-existing saved prefs keep restoring.
+ */
+TableSF.prototype.setPrefs = function (p) {
+  if (!p || typeof p !== "object") return;
+  var sortKey = p.sortKey || (p.sort && p.sort.key);
+  var sortDir = p.sortDir || (p.sort && p.sort.dir);
+  if (sortKey) this._sortKey = sortKey;
+  if (sortDir === "asc" || sortDir === "desc") this._sortDir = sortDir;
+  var filters = p.sfFilters || p.filters;
+  if (filters && typeof filters === "object") {
+    this._filters = filters;
+    this.restoreFilterUI();
+  }
+  this._updateIcons();
+};
+
+window.PolarisPrefs = {
+  /** Persist a page's prefs blob under polaris-prefs-<page>-<username>. */
+  save: function (page, username, obj) {
+    if (!username) return;
+    try {
+      localStorage.setItem("polaris-prefs-" + page + "-" + username, JSON.stringify(obj));
+    } catch (_) {}
+  },
+  /** Load a page's prefs blob; null when absent/unparseable/no user. */
+  load: function (page, username) {
+    if (!username) return null;
+    var raw;
+    try { raw = localStorage.getItem("polaris-prefs-" + page + "-" + username); } catch (_) { return null; }
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (_) { return null; }
+  },
+};

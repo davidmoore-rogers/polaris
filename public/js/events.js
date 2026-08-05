@@ -22,47 +22,27 @@ var _eventsSF = null;
   var currentTotal = 0;
 
   function _saveEventsPrefs() {
-    if (typeof currentUsername === "undefined" || !currentUsername) return;
-    try {
-      // Persist filter + sort state alongside the column layout so reloading
-      // the page restores what the operator was looking at, matching the
-      // other list pages (Assets, Subnets, Blocks, etc.).
-      var filters = _eventsSF ? _eventsSF._filters : null;
-      var sort = _eventsSF
-        ? { key: _eventsSF._sortKey, dir: _eventsSF._sortDir }
-        : null;
-      localStorage.setItem("polaris-prefs-events-" + currentUsername, JSON.stringify({
-        pageSize: pageSize,
-        layout: _eventsLayout ? _eventsLayout.getPrefs() : null,
-        filters: filters,
-        sort: sort,
-      }));
-    } catch (_) {}
+    if (typeof currentUsername === "undefined") return;
+    // Persist filter + sort state alongside the column layout, matching the
+    // other list pages. Written in the standard shape now; setPrefs still
+    // reads the page's legacy filters/sort shape from older saved blobs.
+    PolarisPrefs.save("events", currentUsername, Object.assign(
+      { pageSize: pageSize, layout: _eventsLayout ? _eventsLayout.getPrefs() : null },
+      _eventsSF ? _eventsSF.getPrefs() : {},
+    ));
   }
   function _restoreEventsPrefs() {
-    if (typeof currentUsername === "undefined" || !currentUsername) return;
-    var raw;
-    try { raw = localStorage.getItem("polaris-prefs-events-" + currentUsername); } catch (_) { return; }
-    if (!raw) return;
-    try {
-      var p = JSON.parse(raw);
-      if (p.pageSize) {
-        pageSize = p.pageSize;
-        _eventsPageSize = p.pageSize;
-        var psSel = document.getElementById("filter-pagesize");
-        if (psSel) psSel.value = String(p.pageSize);
-      }
-      if (_eventsLayout && p.layout) _eventsLayout.setPrefs(p.layout);
-      if (_eventsSF) {
-        if (p.filters && typeof p.filters === "object") _eventsSF._filters = p.filters;
-        if (p.sort && typeof p.sort === "object") {
-          if (p.sort.key) _eventsSF._sortKey = p.sort.key;
-          if (p.sort.dir === "asc" || p.sort.dir === "desc") _eventsSF._sortDir = p.sort.dir;
-        }
-        _eventsSF.restoreFilterUI();
-        _eventsSF._updateIcons();
-      }
-    } catch (_) {}
+    if (typeof currentUsername === "undefined") return;
+    var p = PolarisPrefs.load("events", currentUsername);
+    if (!p) return;
+    if (p.pageSize) {
+      pageSize = p.pageSize;
+      _eventsPageSize = p.pageSize;
+      var psSel = document.getElementById("filter-pagesize");
+      if (psSel) psSel.value = String(p.pageSize);
+    }
+    if (_eventsLayout && p.layout) _eventsLayout.setPrefs(p.layout);
+    if (_eventsSF) _eventsSF.setPrefs(p);
   }
 
   // Cached set of distinct resourceType values for the Resource-column

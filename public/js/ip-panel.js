@@ -11,21 +11,14 @@ var _panelSelected = new Set();
 var _ipPanelLayout = null;
 
 function _saveIpPanelPrefs() {
-  if (!currentUsername || !_ipPanelLayout) return;
-  try {
-    var prefs = _ipPanelLayout.getPrefs();
-    localStorage.setItem("polaris-prefs-ip-panel-" + currentUsername, JSON.stringify({ layout: prefs }));
-  } catch (_) {}
+  if (!_ipPanelLayout) return;
+  PolarisPrefs.save("ip-panel", currentUsername, { layout: _ipPanelLayout.getPrefs() });
 }
 
 function _restoreIpPanelPrefs() {
-  if (!currentUsername || !_ipPanelLayout) return;
-  try {
-    var raw = localStorage.getItem("polaris-prefs-ip-panel-" + currentUsername);
-    if (!raw) return;
-    var p = JSON.parse(raw);
-    if (p && p.layout) _ipPanelLayout.setPrefs(p.layout);
-  } catch (_) {}
+  if (!_ipPanelLayout) return;
+  var p = PolarisPrefs.load("ip-panel", currentUsername);
+  if (p && p.layout) _ipPanelLayout.setPrefs(p.layout);
 }
 // When set, _renderIpList scrolls to and highlights the row whose IP matches.
 // Cleared after a single render so subsequent page navigations don't keep
