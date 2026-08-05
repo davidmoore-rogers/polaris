@@ -475,39 +475,74 @@ function gateOf(a: { assetType: string; hostname: string | null; learnedLocation
  *      is unmonitored / suppressed / decommissioned drops out here (those assets
  *      stop being monitored, so only stale samples linger).
  */
-export async function getDownInterfaces(limit: number | null = 100, sinceMinutes = 240, assetIds: string[] | null = null): Promise<DownInterface[]> {
-  const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
-  const params: unknown[] = [String(sinceMinutes), limit];
-  if (assetIds) params.push(assetIds);
-  const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; ifName: string; ifLabel: string | null; lastUpAt: Date | null }>>(
-    `WITH win AS (
-       SELECT s."assetId" AS "assetId", s."ifName" AS "ifName",
-              COALESCE(NULLIF(s."alias", ''), NULLIF(s."description", '')) AS "ifLabel",
-              s."operStatus" AS "operStatus", s."adminStatus" AS "adminStatus",
-              row_number() OVER (PARTITION BY s."assetId", s."ifName" ORDER BY s."timestamp" DESC) AS rn,
-              max(s."timestamp") FILTER (WHERE s."operStatus" = 'up')
-                OVER (PARTITION BY s."assetId", s."ifName") AS "lastUpAt"
-       FROM "asset_interface_samples" s
-       JOIN "assets" a ON a."id" = s."assetId" AND s."ifName" = ANY(a."monitoredInterfaces")
-       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
+// The windowed current-state CTE both down-feeds share: latest sample per
+// (asset, <dim>) via row_number + the dimension's last-"up" timestamp via a
+// filtered window max, with the pin-array JOIN running BEFORE the window +
+// LIMIT so pinned-down rows can't be crowded out by unpinned noise. Every
+// slot is a compile-time literal from the two call sites — nothing
+// user-supplied enters the SQL text.
+function downFeedSql(q: {
+  table: string;       // sample hypertable
+  dimCol: string;      // per-asset dimension column (ifName / tunnelName)
+  pinCol: string;      // Asset pin array the JOIN filters on
+  statusCol: string;   // the up/down column
+  selectExtra: string; // extra projected columns ("" for none; trailing comma per line)
+  downWhere: string;   // the rn=1 "down" predicate on the outer select
+  selectOuter: string; // outer column list
+  idClause: string;
+}): string {
+  return `WITH win AS (
+       SELECT s."assetId" AS "assetId", s."${q.dimCol}" AS "${q.dimCol}",
+              ${q.selectExtra}s."${q.statusCol}" AS "${q.statusCol}",
+              row_number() OVER (PARTITION BY s."assetId", s."${q.dimCol}" ORDER BY s."timestamp" DESC) AS rn,
+              max(s."timestamp") FILTER (WHERE s."${q.statusCol}" = 'up')
+                OVER (PARTITION BY s."assetId", s."${q.dimCol}") AS "lastUpAt"
+       FROM "${q.table}" s
+       JOIN "assets" a ON a."id" = s."assetId" AND s."${q.dimCol}" = ANY(a."${q.pinCol}")
+       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${q.idClause}
      )
-     SELECT "assetId", "ifName", "ifLabel", "lastUpAt"
+     SELECT ${q.selectOuter}
      FROM win
-     WHERE rn = 1 AND "operStatus" = 'down' AND "adminStatus" = 'up'
+     WHERE rn = 1 AND ${q.downWhere}
      ORDER BY "lastUpAt" ASC NULLS FIRST
-     LIMIT $2`,
-    ...params,
-  );
-  if (rows.length === 0) return [];
-  const ids = Array.from(new Set(rows.map((r) => r.assetId)));
+     LIMIT $2`;
+}
+
+// The shared owner hydrate: one findMany over the (small) set of assets that
+// own a down row, scoped monitored + non-suppressed + not-in-maintenance so
+// stale samples from stopped assets drop out.
+async function hydrateDownFeedOwners(assetIds: string[]) {
   const assets = await prisma.asset.findMany({
-    where: { id: { in: ids }, monitored: true, dependencySuppressed: false, ...NOT_IN_MAINTENANCE },
+    where: { id: { in: assetIds }, monitored: true, dependencySuppressed: false, ...NOT_IN_MAINTENANCE },
     select: {
       id: true, hostname: true, ipAddress: true, assetType: true,
       location: true, learnedLocation: true, snmpLocation: true,
     },
   });
-  const byId = new Map(assets.map((a) => [a.id, a]));
+  return new Map(assets.map((a) => [a.id, a]));
+}
+
+export async function getDownInterfaces(limit: number | null = 100, sinceMinutes = 240, assetIds: string[] | null = null): Promise<DownInterface[]> {
+  const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
+  const params: unknown[] = [String(sinceMinutes), limit];
+  if (assetIds) params.push(assetIds);
+  const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; ifName: string; ifLabel: string | null; lastUpAt: Date | null }>>(
+    downFeedSql({
+      table: "asset_interface_samples",
+      dimCol: "ifName",
+      pinCol: "monitoredInterfaces",
+      statusCol: "operStatus",
+      selectExtra: `COALESCE(NULLIF(s."alias", ''), NULLIF(s."description", '')) AS "ifLabel",
+              s."adminStatus" AS "adminStatus",
+              `,
+      downWhere: `"operStatus" = 'down' AND "adminStatus" = 'up'`,
+      selectOuter: `"assetId", "ifName", "ifLabel", "lastUpAt"`,
+      idClause,
+    }),
+    ...params,
+  );
+  if (rows.length === 0) return [];
+  const byId = await hydrateDownFeedOwners(Array.from(new Set(rows.map((r) => r.assetId))));
   const out: DownInterface[] = [];
   for (const r of rows) {
     const a = byId.get(r.assetId);
@@ -562,34 +597,21 @@ export async function getDownIpsecTunnels(limit: number | null = 100, sinceMinut
   const params: unknown[] = [String(sinceMinutes), limit];
   if (assetIds) params.push(assetIds);
   const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; tunnelName: string; parentInterface: string | null; remoteGateway: string | null; lastUpAt: Date | null }>>(
-    `WITH win AS (
-       SELECT s."assetId" AS "assetId", s."tunnelName" AS "tunnelName",
-              s."parentInterface" AS "parentInterface", s."remoteGateway" AS "remoteGateway",
-              s."status" AS "status",
-              row_number() OVER (PARTITION BY s."assetId", s."tunnelName" ORDER BY s."timestamp" DESC) AS rn,
-              max(s."timestamp") FILTER (WHERE s."status" = 'up')
-                OVER (PARTITION BY s."assetId", s."tunnelName") AS "lastUpAt"
-       FROM "asset_ipsec_tunnel_samples" s
-       JOIN "assets" a ON a."id" = s."assetId" AND s."tunnelName" = ANY(a."monitoredIpsecTunnels")
-       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
-     )
-     SELECT "assetId", "tunnelName", "parentInterface", "remoteGateway", "lastUpAt"
-     FROM win
-     WHERE rn = 1 AND "status" = 'down'
-     ORDER BY "lastUpAt" ASC NULLS FIRST
-     LIMIT $2`,
+    downFeedSql({
+      table: "asset_ipsec_tunnel_samples",
+      dimCol: "tunnelName",
+      pinCol: "monitoredIpsecTunnels",
+      statusCol: "status",
+      selectExtra: `s."parentInterface" AS "parentInterface", s."remoteGateway" AS "remoteGateway",
+              `,
+      downWhere: `"status" = 'down'`,
+      selectOuter: `"assetId", "tunnelName", "parentInterface", "remoteGateway", "lastUpAt"`,
+      idClause,
+    }),
     ...params,
   );
   if (rows.length === 0) return [];
-  const ids = Array.from(new Set(rows.map((r) => r.assetId)));
-  const assets = await prisma.asset.findMany({
-    where: { id: { in: ids }, monitored: true, dependencySuppressed: false, ...NOT_IN_MAINTENANCE },
-    select: {
-      id: true, hostname: true, ipAddress: true, assetType: true,
-      location: true, learnedLocation: true, snmpLocation: true,
-    },
-  });
-  const byId = new Map(assets.map((a) => [a.id, a]));
+  const byId = await hydrateDownFeedOwners(Array.from(new Set(rows.map((r) => r.assetId))));
   const out: DownIpsecTunnel[] = [];
   for (const r of rows) {
     const a = byId.get(r.assetId);
