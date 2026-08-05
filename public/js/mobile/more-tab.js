@@ -32,15 +32,12 @@
     btn.addEventListener("click", function () { PolarisRouter.go("more"); });
   }
   // escapeHtml is the canonical global from api.js (loaded first on every page).
+  // api.js timeAgo with the mobile guard for empty/unparseable timestamps.
   function formatTimeAgo(iso) {
     if (!iso) return "";
     var d = new Date(iso);
     if (isNaN(d.getTime())) return "";
-    var sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-    if (sec < 60) return sec + "s ago";
-    if (sec < 3600) return Math.floor(sec / 60) + "m ago";
-    if (sec < 86400) return Math.floor(sec / 3600) + "h ago";
-    return Math.floor(sec / 86400) + "d ago";
+    return timeAgo(iso);
   }
   function loadingHtml() {
     return '<div class="loading-screen" style="padding:48px 0;"><div class="spinner"></div></div>';
@@ -247,10 +244,9 @@
     }
 
     document.getElementById("sign-out-btn").addEventListener("click", function () {
-      var headers = {};
-      var m = document.cookie.match(/(?:^|; )polaris_csrf=([^;]+)/);
-      if (m) headers["X-CSRF-Token"] = decodeURIComponent(m[1]);
-      fetch("/api/v1/auth/logout", { method: "POST", headers: headers })
+      // _csrfHeaders is the api.js canonical (carries the stale-Secure-cookie
+      // detection this inline copy bypassed — 2026-08 audit).
+      fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() })
         .finally(function () { window.PolarisMobile.boot(); });
     });
 

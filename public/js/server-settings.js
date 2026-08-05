@@ -1367,12 +1367,10 @@ function _wireAgentEventLogCard() {
   });
 }
 
+// api.js formatBytes with the capacity card's em-dash for missing kept.
 function _capacityFormatBytes(b) {
   if (b == null) return "—";
-  if (b >= 1024 * 1024 * 1024) return (b / (1024 * 1024 * 1024)).toFixed(1) + " GB";
-  if (b >= 1024 * 1024) return Math.round(b / (1024 * 1024)) + " MB";
-  if (b >= 1024) return Math.round(b / 1024) + " kB";
-  return b + " B";
+  return formatBytes(b);
 }
 
 function _capacityFormatPct(num, denom) {
@@ -5102,11 +5100,8 @@ function deviceIconsCardHTML() {
   return html;
 }
 
-function formatBytesShort(n) {
-  if (n < 1024) return n + " B";
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
-  return (n / 1024 / 1024).toFixed(2) + " MB";
-}
+// api.js canonical (2026-08 audit — this copy capped at MB).
+var formatBytesShort = formatBytes;
 
 function wireDeviceIconHandlers() {
   var btn = document.getElementById("btn-icon-upload");

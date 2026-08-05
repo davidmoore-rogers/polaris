@@ -235,7 +235,7 @@ function formHTML(defaults) {
     '<div class="form-group"><label>Description</label><textarea id="f-description" placeholder="Optional description">' + escapeHtml(defaults.description) + '</textarea></div>';
 }
 
-function val(id) { return document.getElementById(id).value.trim(); }
+// val() is the app.js canonical (2026-08 audit — five identical top-level copies shadowed each other on co-loaded pages).
 
 function cidrRangeTitle(cidr) {
   try {

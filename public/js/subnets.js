@@ -1010,7 +1010,7 @@ async function confirmDeleteSubnet(id, cidr, reservationCount) {
   }
 }
 
-function val(id) { return document.getElementById(id).value.trim(); }
+// val() is the app.js canonical (2026-08 audit — five identical top-level copies shadowed each other on co-loaded pages).
 
 /* ─── PDF / CSV Export ──────────────────────────────────────────────────────
    The Export button + menu now live in the IPAM top page-header and are wired

@@ -55,37 +55,10 @@ function permAtLeast(key, level) {
 }
 function isAdmin() { return false; }
 
-// ─── Toasts (simplified copy of app.js showToast) ───────────────────────────
-function getToastContainer() {
-  var c = document.querySelector(".toast-container");
-  if (!c) {
-    c = document.createElement("div");
-    c.className = "toast-container";
-    document.body.appendChild(c);
-  }
-  return c;
-}
-
-function showToast(message, type) {
-  type = type || "success";
-  var el = document.createElement("div");
-  el.className = "toast toast-" + type;
-  var text = document.createElement("span");
-  text.textContent = message;
-  el.appendChild(text);
-  getToastContainer().appendChild(el);
-  setTimeout(function () { el.remove(); }, 6000);
-}
-
-// ─── Helpers (copies of app.js originals) ───────────────────────────────────
-function timeAgo(dateStr) {
-  var diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-  if (diff < 0) return "just now";
-  if (diff < 60) return diff + "s ago";
-  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
-  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
-  return Math.floor(diff / 86400) + "d ago";
-}
+// ─── Toasts + timeAgo ───────────────────────────────────────────────────────
+// Both come from api.js (loaded before this file on dash.html) since the
+// 2026-08 audit — the "simplified copy" forks that lived here had already
+// drifted (6s hard remove, no copy button, class-based container lookup).
 
 // ─── Branding (title, header text, and favicon follow the operator's
 //     branding — favicon swap mirrors applyBranding in app.js) ───────────────

@@ -273,9 +273,11 @@ function rv(label, value) {
   return "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>";
 }
 
+// Delegates to this file's own escapeHtml (the api.js mirror above) — this
+// second copy silently omitted the apostrophe escape (2026-08 audit).
 function esc(s) {
   if (!s) return "";
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return escapeHtml(s);
 }
 
 // ─── Step 4: Finalize ─────────────────────────────────────────────

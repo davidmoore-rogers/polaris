@@ -7188,12 +7188,10 @@ function _renderSensorChart(container, samples, opts) {
   _observeChartResize(container, function (c) { _renderSensorChart(c, samples, opts); });
 }
 
+// api.js formatBytes with this table's em-dash for missing values kept.
 function _fmtBytes(n) {
   if (n == null || isNaN(n)) return "—";
-  var units = ["B","KB","MB","GB","TB","PB"];
-  var i = 0, v = Math.abs(n);
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return (v < 10 && i > 0 ? v.toFixed(2) : v.toFixed(0)) + " " + units[i];
+  return formatBytes(n);
 }
 
 // ─── Virtualization section (vCenter VMs + ESXi hosts) ─────────────────────
@@ -12938,7 +12936,7 @@ function dateInputVal(isoStr) {
   return new Date(isoStr).toISOString().split("T")[0];
 }
 
-function val(id) { return document.getElementById(id).value.trim(); }
+// val() is the app.js canonical (2026-08 audit — five identical top-level copies shadowed each other on co-loaded pages).
 
 /* ─── DNS Lookup ─────────────────────────────────────────────────────────── */
 
@@ -15445,13 +15443,10 @@ function _renderConnView(el, d, emptyMsg) {
     }
     return addr;
   }
-  function ago(iso) {
-    var s = Math.max(0, Date.now() - Date.parse(iso));
-    if (s < 90 * 1000) return "just now";
-    if (s < 3600 * 1000) return Math.round(s / 60000) + "m ago";
-    if (s < 86400 * 1000) return Math.round(s / 3600000) + "h ago";
-    return Math.round(s / 86400000) + "d ago";
-  }
+  // api.js canonical (2026-08 audit — the local copy said "just now" for
+  // anything under 90s and rounded up, so the same timestamp read
+  // differently here than everywhere else).
+  var ago = timeAgo;
   function table(headers, rowsHtml) {
     return '<table style="width:100%;border-collapse:collapse;font-size:0.78rem;margin:0.25rem 0 0.75rem">' +
       '<tr>' + headers.map(function (h) { return '<th style="text-align:left;padding:2px 8px 2px 0;border-bottom:1px solid var(--color-border);font-weight:500">' + h + '</th>'; }).join("") + '</tr>' +

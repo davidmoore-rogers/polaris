@@ -260,24 +260,10 @@
     { key: "warning", label: "Warning and up", minRank: 3 },
   ];
 
-  // downloadCsv lives in app.js; the Dash wallboard boots dash-boot.js instead,
-  // so carry a minimal local copy (same escaping rules as app.js _csvRow).
+  // downloadCsv is canonical in api.js (loaded on every surface incl. the
+  // Dash wallboard) since the 2026-08 audit — the fallback copy is gone.
   function csvDownload(headers, rows, filename) {
-    if (typeof downloadCsv === "function") { downloadCsv(headers, rows, filename); return; }
-    var esc = function (c) {
-      var s = String(c == null ? "" : c);
-      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-    };
-    var text = [headers].concat(rows).map(function (r) { return r.map(esc).join(","); }).join("\n");
-    var blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    downloadCsv(headers, rows, filename);
   }
 
   function closeExportMenu() {

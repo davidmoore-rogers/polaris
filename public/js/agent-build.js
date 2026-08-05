@@ -38,19 +38,11 @@
     try { return new Date(iso).toLocaleString(); }
     catch (_) { return iso || "—"; }
   }
-  function _timeAgo(iso) {
-    var ms = Date.now() - new Date(iso).getTime();
-    if (ms < 0) ms = 0;
-    if (ms < 60000) return Math.floor(ms / 1000) + "s ago";
-    if (ms < 3600000) return Math.floor(ms / 60000) + "m ago";
-    return Math.floor(ms / 3600000) + "h ago";
-  }
-  function _humanBytes(n) {
-    if (n < 1024) return n + " B";
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KiB";
-    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MiB";
-    return (n / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
-  }
+  // Relative time + byte size come from the api.js canonical helpers
+  // (2026-08 audit): _timeAgo previously capped at hours ("36h ago"), and
+  // _humanBytes used KiB/MiB labels unlike every other surface.
+  var _timeAgo = timeAgo;
+  var _humanBytes = formatBytes;
   function _formatElapsed(ms) {
     if (ms < 1000) return ms + " ms";
     var s = Math.floor(ms / 1000);

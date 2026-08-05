@@ -428,7 +428,7 @@ async function confirmDelete(id, username) {
   }
 }
 
-function val(id) { return document.getElementById(id).value.trim(); }
+// val() is the app.js canonical (2026-08 audit — five identical top-level copies shadowed each other on co-loaded pages).
 
 // ─── Self-service TOTP ─────────────────────────────────────────────────────
 

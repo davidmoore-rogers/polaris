@@ -42,6 +42,112 @@ function mobileFormatDate(iso) {
 }
 if (typeof window !== "undefined") window.mobileFormatDate = mobileFormatDate;
 
+// ─── Shared display + delivery helpers ──────────────────────────────────────
+// Canonical copies (2026-08 audit): every page loads api.js FIRST — including
+// dash.html (which boots dash-boot.js instead of app.js) and mobile.html — so
+// these live here rather than app.js. The dash-boot forks and the per-page
+// copies (agent-build, assets, server-settings, both mobile tabs) are gone.
+
+// Compact relative time ("5s ago" / "5m ago" / "3h ago" / "2d ago").
+function timeAgo(dateStr) {
+  var diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (diff < 0) return "just now";
+  if (diff < 60) return diff + "s ago";
+  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+  return Math.floor(diff / 86400) + "d ago";
+}
+if (typeof window !== "undefined") window.timeAgo = timeAgo;
+
+// Base-1024 byte formatter, decimal-KB labels (the convention the majority of
+// the previous four divergent copies used). One decimal above bytes.
+function formatBytes(n) {
+  if (n == null || isNaN(n)) return "";
+  if (n < 1024) return n + " B";
+  var units = ["KB", "MB", "GB", "TB", "PB"];
+  var v = n;
+  for (var i = 0; i < units.length; i++) {
+    v = v / 1024;
+    if (v < 1024 || i === units.length - 1) return v.toFixed(1) + " " + units[i];
+  }
+}
+if (typeof window !== "undefined") window.formatBytes = formatBytes;
+
+function getToastContainer() {
+  var c = document.getElementById("toast-container");
+  if (!c) {
+    c = document.createElement("div");
+    c.id = "toast-container";
+    c.className = "toast-container";
+    document.body.appendChild(c);
+  }
+  return c;
+}
+
+function showToast(message, type) {
+  type = type || "success";
+  var container = getToastContainer();
+  var el = document.createElement("div");
+  el.className = "toast toast-" + type;
+
+  var text = document.createElement("span");
+  text.textContent = message;
+
+  var btn = document.createElement("button");
+  btn.className = "toast-copy-btn";
+  btn.title = "Copy";
+  btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  btn.addEventListener("click", function () {
+    navigator.clipboard.writeText(message).then(function () {
+      btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+      setTimeout(function () {
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+      }, 1500);
+    });
+  });
+
+  el.appendChild(text);
+  el.appendChild(btn);
+  container.appendChild(el);
+  setTimeout(function () {
+    el.style.opacity = "0";
+    el.style.transition = "opacity 0.3s";
+    setTimeout(function () { el.remove(); }, 300);
+  }, 3500);
+}
+if (typeof window !== "undefined") {
+  window.getToastContainer = getToastContainer;
+  window.showToast = showToast;
+}
+
+function downloadCsv(headers, rows, filename) {
+  var csvContent = _csvRow(headers) + "\n" +
+    rows.map(function (r) { return _csvRow(r); }).join("\n");
+  var blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function _csvRow(cells) {
+  return cells.map(function (c) {
+    var s = String(c == null ? "" : c);
+    if (s.indexOf(",") !== -1 || s.indexOf('"') !== -1 || s.indexOf("\n") !== -1) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }).join(",");
+}
+if (typeof window !== "undefined") {
+  window.downloadCsv = downloadCsv;
+  window._csvRow = _csvRow;
+}
+
 // ─── Active Query Tracker ───────────────────────────────────────────────────
 
 var activeQueries = [];

@@ -1495,76 +1495,11 @@ async function trackedPdfExport(label, fn) {
   }
 }
 
-// ─── CSV Export Utility ─────────────────────────────────────────────────────
+// ─── CSV export + Toasts ────────────────────────────────────────────────────
+// downloadCsv/_csvRow and getToastContainer/showToast are canonical in
+// api.js (loaded before this file on every page, incl. dash/mobile) since
+// the 2026-08 audit — the dash-boot forks are gone.
 
-function downloadCsv(headers, rows, filename) {
-  var csvContent = _csvRow(headers) + "\n" +
-    rows.map(function (r) { return _csvRow(r); }).join("\n");
-  var blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-function _csvRow(cells) {
-  return cells.map(function (c) {
-    var s = String(c == null ? "" : c);
-    if (s.indexOf(",") !== -1 || s.indexOf('"') !== -1 || s.indexOf("\n") !== -1) {
-      return '"' + s.replace(/"/g, '""') + '"';
-    }
-    return s;
-  }).join(",");
-}
-
-// ─── Toasts ───────────────────────────────────────────────────────────────────
-
-function getToastContainer() {
-  let c = document.getElementById("toast-container");
-  if (!c) {
-    c = document.createElement("div");
-    c.id = "toast-container";
-    c.className = "toast-container";
-    document.body.appendChild(c);
-  }
-  return c;
-}
-
-function showToast(message, type) {
-  type = type || "success";
-  const container = getToastContainer();
-  const el = document.createElement("div");
-  el.className = "toast toast-" + type;
-
-  const text = document.createElement("span");
-  text.textContent = message;
-
-  const btn = document.createElement("button");
-  btn.className = "toast-copy-btn";
-  btn.title = "Copy";
-  btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-  btn.addEventListener("click", function () {
-    navigator.clipboard.writeText(message).then(function () {
-      btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-      setTimeout(function () {
-        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-      }, 1500);
-    });
-  });
-
-  el.appendChild(text);
-  el.appendChild(btn);
-  container.appendChild(el);
-  setTimeout(function () {
-    el.style.opacity = "0";
-    el.style.transition = "opacity 0.3s";
-    setTimeout(function () { el.remove(); }, 300);
-  }, 3500);
-}
 
 // ─── Modal ────────────────────────────────────────────────────────────────────
 
@@ -2101,15 +2036,6 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
 
 // escapeHtml is the canonical global from api.js (loaded first on every page).
 
-function timeAgo(dateStr) {
-  var diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-  if (diff < 0) return "just now";
-  if (diff < 60) return diff + "s ago";
-  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
-  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
-  return Math.floor(diff / 86400) + "d ago";
-}
-
 function formatDate(dateStr) {
   if (!dateStr) return "-";
   return new Date(dateStr).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
@@ -2133,6 +2059,10 @@ function formatUptime(seconds) {
 function statusBadge(status) {
   return '<span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>';
 }
+
+// Trimmed value of an input by id — THE copy (was five identical top-level
+// copies across page scripts, shadowing each other on co-loaded pages).
+function val(id) { return document.getElementById(id).value.trim(); }
 
 function tagsToArray(str) {
   return str.split(",").map(function (s) { return s.trim(); }).filter(Boolean);

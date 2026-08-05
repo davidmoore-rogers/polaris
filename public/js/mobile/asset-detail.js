@@ -1653,15 +1653,12 @@
     return bits.join(" · ");
   }
 
+  // api.js timeAgo with the mobile guard for empty/unparseable timestamps.
   function formatTimeAgo(iso) {
     if (!iso) return "";
     var d = new Date(iso);
     if (isNaN(d.getTime())) return "";
-    var sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-    if (sec < 60)    return sec + "s ago";
-    if (sec < 3600)  return Math.floor(sec / 60) + "m ago";
-    if (sec < 86400) return Math.floor(sec / 3600) + "h ago";
-    return Math.floor(sec / 86400) + "d ago";
+    return timeAgo(iso);
   }
   // formatDate is the shared mobileFormatDate global from api.js (local-time
   // YYYY-MM-DD). Was a UTC .toISOString().slice here — local is the correct
