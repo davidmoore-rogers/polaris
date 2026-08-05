@@ -26,6 +26,7 @@ import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 import { normalizeRuleToV2 } from "../services/notificationTypes.js";
 
 const MIGRATED_KEY = "automationRuleShapeV2MigratedAt";
@@ -33,8 +34,7 @@ const MIGRATED_KEY = "automationRuleShapeV2MigratedAt";
 (async () => {
   try {
     await runInstrumentedJob("migrateAutomationRuleShape", async () => {
-      const migratedRow = await prisma.setting.findUnique({ where: { key: MIGRATED_KEY } });
-      if (migratedRow) return;
+      if (await hasRunMarker(MIGRATED_KEY)) return;
 
       const rows = await prisma.notificationRule.findMany({
         where: { reset: { equals: Prisma.AnyNull } as never },
@@ -60,12 +60,7 @@ const MIGRATED_KEY = "automationRuleShapeV2MigratedAt";
         updated++;
       }
 
-      await prisma.setting.create({
-        data: {
-          key: MIGRATED_KEY,
-          value: { migratedAt: new Date().toISOString(), rowsUpdated: updated } as never,
-        },
-      });
+      await stampRunMarker(MIGRATED_KEY, { rowsUpdated: updated });
 
       if (updated > 0) {
         logger.info({ rowsUpdated: updated }, "Persisted rule-shape v2 (reset/actions) onto pre-v2 notification rules");

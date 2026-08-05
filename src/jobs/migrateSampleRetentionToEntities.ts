@@ -40,6 +40,7 @@ import {
   type TierRetention,
 } from "../services/sampleRetentionService.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 
 const MIGRATED_KEY = "sampleRetentionEntityMigratedAt";
 
@@ -65,8 +66,7 @@ function legacyStreamToTier(raw: unknown, fallback: TierRetention): TierRetentio
 (async () => {
   try {
     await runInstrumentedJob("migrateSampleRetentionToEntities", async () => {
-      const marker = await prisma.setting.findUnique({ where: { key: MIGRATED_KEY } });
-      if (marker) return;
+      if (await hasRunMarker(MIGRATED_KEY)) return;
 
       const row = await prisma.setting.findUnique({ where: { key: RETENTION_KEY } });
       const raw = (row?.value ?? null) as Record<string, any> | null;
@@ -109,9 +109,7 @@ function legacyStreamToTier(raw: unknown, fallback: TierRetention): TierRetentio
       });
       invalidateSampleRetentionCache();
 
-      await prisma.setting.create({
-        data: { key: MIGRATED_KEY, value: { migratedAt: new Date().toISOString(), migrated } as any },
-      });
+      await stampRunMarker(MIGRATED_KEY, { migrated });
 
       logger.info({ migrated }, "Sample retention migrated to per-entity shape");
     });

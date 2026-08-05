@@ -35,6 +35,7 @@ import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { invalidateMonitorSettingsCache } from "../services/monitoringService.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 
 const LEGACY_KEY   = "monitorSettings";
 const MANUAL_KEY   = "manualMonitorSettings";
@@ -94,17 +95,14 @@ function tierToOverride(tier: TierShape, base: TierShape): Partial<TierShape> {
   try {
     await runInstrumentedJob("migrateMonitorSettingsHierarchy", async () => {
     // Idempotency guard.
-    const migratedRow = await prisma.setting.findUnique({ where: { key: MIGRATED_KEY } });
-    if (migratedRow) return;
+    if (await hasRunMarker(MIGRATED_KEY)) return;
 
     const legacyRow = await prisma.setting.findUnique({ where: { key: LEGACY_KEY } });
 
     // Fresh install path: nothing to migrate, just stamp the marker so we
     // don't re-check on every boot.
     if (!legacyRow) {
-      await prisma.setting.create({
-        data: { key: MIGRATED_KEY, value: { migratedAt: new Date().toISOString(), nothingToMigrate: true } as any },
-      });
+      await stampRunMarker(MIGRATED_KEY, { nothingToMigrate: true });
       logger.info("Monitor-settings hierarchy migration: no legacy row found (fresh install) — marker stamped");
       return;
     }
@@ -182,17 +180,11 @@ function tierToOverride(tier: TierShape, base: TierShape): Partial<TierShape> {
     await prisma.setting.delete({ where: { key: LEGACY_KEY } });
 
     // Step 5: Stamp the migration marker.
-    await prisma.setting.create({
-      data: {
-        key:   MIGRATED_KEY,
-        value: {
-          migratedAt:             new Date().toISOString(),
-          manualSeeded,
-          integrationsSeeded,
-          switchOverridesCreated,
-          apOverridesCreated,
-        } as any,
-      },
+    await stampRunMarker(MIGRATED_KEY, {
+      manualSeeded,
+      integrationsSeeded,
+      switchOverridesCreated,
+      apOverridesCreated,
     });
 
     // Step 6: Drop the resolver cache so the next monitor pass reads through

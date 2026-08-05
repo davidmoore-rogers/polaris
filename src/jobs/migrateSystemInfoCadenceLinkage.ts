@@ -33,6 +33,7 @@ import { prisma } from "../db.js";
 import { logEvent } from "../services/eventLogService.js";
 import { invalidateMonitorSettingsCache } from "../services/monitoringService.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 
 const MIGRATED_KEY = "systemInfoCadenceLinkageMigratedAt";
 const HARDCODED_FLOOR_SYSINFO_SEC = 600;
@@ -40,8 +41,7 @@ const HARDCODED_FLOOR_SYSINFO_SEC = 600;
 (async () => {
   try {
     await runInstrumentedJob("migrateSystemInfoCadenceLinkage", async () => {
-      const migratedRow = await prisma.setting.findUnique({ where: { key: MIGRATED_KEY } });
-      if (migratedRow) return;
+      if (await hasRunMarker(MIGRATED_KEY)) return;
 
       const integrations = await prisma.integration.findMany({
         select: { id: true, name: true, pollInterval: true, config: true },
@@ -91,16 +91,7 @@ const HARDCODED_FLOOR_SYSINFO_SEC = 600;
         invalidateMonitorSettingsCache();
       }
 
-      await prisma.setting.create({
-        data: {
-          key: MIGRATED_KEY,
-          value: {
-            migratedAt: new Date().toISOString(),
-            affectedCount: affected.length,
-            affected,
-          } as any,
-        },
-      });
+      await stampRunMarker(MIGRATED_KEY, { affectedCount: affected.length, affected });
 
       if (affected.length > 0) {
         logger.info(

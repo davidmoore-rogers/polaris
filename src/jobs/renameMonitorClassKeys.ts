@@ -31,6 +31,7 @@ import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { invalidateMonitorSettingsCache } from "../services/monitoringService.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 
 const LEGACY_KEY   = "monitorSettings";
 const MANUAL_KEY   = "manualMonitorSettings";
@@ -66,8 +67,7 @@ function renameClassKeys(
   try {
     await runInstrumentedJob("renameMonitorClassKeys", async () => {
       // Idempotency guard.
-      const migratedRow = await prisma.setting.findUnique({ where: { key: MIGRATED_KEY } });
-      if (migratedRow) return;
+      if (await hasRunMarker(MIGRATED_KEY)) return;
 
       let legacyRenamed       = false;
       let manualRenamed       = false;
@@ -115,17 +115,7 @@ function renameClassKeys(
         }
       }
 
-      await prisma.setting.create({
-        data: {
-          key: MIGRATED_KEY,
-          value: {
-            migratedAt: new Date().toISOString(),
-            legacyRenamed,
-            manualRenamed,
-            integrationsRenamed,
-          } as any,
-        },
-      });
+      await stampRunMarker(MIGRATED_KEY, { legacyRenamed, manualRenamed, integrationsRenamed });
 
       // Resolver cache may have warmed up against the pre-rename JSON during
       // the brief startup window before this job ran.

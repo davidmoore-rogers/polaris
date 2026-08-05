@@ -23,6 +23,7 @@
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 import { coerceLegacySelection } from "../services/autoMonitorInterfacesService.js";
 
 const MIGRATED_KEY = "autoMonitorInterfacesShapeMigratedAt";
@@ -31,8 +32,7 @@ const BLOCK_KEYS = ["fortigateMonitor", "fortiswitchMonitor", "fortiapMonitor"] 
 (async () => {
   try {
     await runInstrumentedJob("migrateAutoMonitorInterfacesShape", async () => {
-      const migratedRow = await prisma.setting.findUnique({ where: { key: MIGRATED_KEY } });
-      if (migratedRow) return;
+      if (await hasRunMarker(MIGRATED_KEY)) return;
 
       const integrations = await prisma.integration.findMany({
         where: { type: { in: ["fortimanager", "fortigate"] } },
@@ -69,16 +69,7 @@ const BLOCK_KEYS = ["fortigateMonitor", "fortiswitchMonitor", "fortiapMonitor"] 
         }
       }
 
-      await prisma.setting.create({
-        data: {
-          key:   MIGRATED_KEY,
-          value: {
-            migratedAt: new Date().toISOString(),
-            rowsUpdated,
-            selectionsRewritten,
-          } as any,
-        },
-      });
+      await stampRunMarker(MIGRATED_KEY, { rowsUpdated, selectionsRewritten });
 
       if (rowsUpdated > 0) {
         logger.info(

@@ -17,6 +17,7 @@
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 import { VENDOR_TELEMETRY_PROFILES, type VendorTelemetryProfile, memoryQueryToDoubleScalar } from "../services/vendorTelemetryProfiles.js";
 import { refreshProfileCache } from "../services/manufacturerProfileService.js";
 import { normalizeManufacturer } from "../utils/manufacturerNormalize.js";
@@ -112,21 +113,8 @@ function profileToMetricSeeds(p: VendorTelemetryProfile): MetricSeed[] {
   return out;
 }
 
-async function alreadySeeded(): Promise<boolean> {
-  const row = await prisma.setting.findUnique({ where: { key: MARKER_KEY } });
-  return row !== null;
-}
-
-async function stampMarker(stats: { profiles: number; overrides: number }): Promise<void> {
-  await prisma.setting.upsert({
-    where:  { key: MARKER_KEY },
-    update: { value: { at: new Date().toISOString(), ...stats } },
-    create: { key: MARKER_KEY, value: { at: new Date().toISOString(), ...stats } },
-  });
-}
-
 export async function seedManufacturerProfiles(): Promise<{ profiles: number; overrides: number; skipped: boolean }> {
-  if (await alreadySeeded()) {
+  if (await hasRunMarker(MARKER_KEY)) {
     return { profiles: 0, overrides: 0, skipped: true };
   }
 
@@ -233,7 +221,7 @@ export async function seedManufacturerProfiles(): Promise<{ profiles: number; ov
     }
   }
 
-  await stampMarker({ profiles: createdProfiles, overrides: createdOverrides });
+  await stampRunMarker(MARKER_KEY, { profiles: createdProfiles, overrides: createdOverrides });
   return { profiles: createdProfiles, overrides: createdOverrides, skipped: false };
 }
 

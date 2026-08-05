@@ -25,26 +25,21 @@
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 
 const MIGRATED_KEY = "monitorStatusRenamePendingMigratedAt";
 
 (async () => {
   try {
     await runInstrumentedJob("migrateMonitorStatusRename", async () => {
-      const migratedRow = await prisma.setting.findUnique({ where: { key: MIGRATED_KEY } });
-      if (migratedRow) return;
+      if (await hasRunMarker(MIGRATED_KEY)) return;
 
       const result = await prisma.asset.updateMany({
         where: { monitorStatus: "pending" },
         data:  { monitorStatus: "recovering" },
       });
 
-      await prisma.setting.create({
-        data: {
-          key:   MIGRATED_KEY,
-          value: { migratedAt: new Date().toISOString(), rowsUpdated: result.count } as any,
-        },
-      });
+      await stampRunMarker(MIGRATED_KEY, { rowsUpdated: result.count });
 
       if (result.count > 0) {
         logger.info({ rowsUpdated: result.count }, "Renamed Asset.monitorStatus from 'pending' to 'recovering'");

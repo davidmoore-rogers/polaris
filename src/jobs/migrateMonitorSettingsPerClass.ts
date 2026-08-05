@@ -44,6 +44,7 @@ import { prisma } from "../db.js";
 import { invalidateMonitorSettingsCache } from "../services/monitoringService.js";
 import { logEvent } from "../services/eventLogService.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 
 const MIGRATED_KEY = "monitorSettingsPerClassMigratedAt";
 
@@ -204,8 +205,7 @@ interface MigrationOutcome {
 (async () => {
   try {
     await runInstrumentedJob("migrateMonitorSettingsPerClass", async () => {
-      const marker = await prisma.setting.findUnique({ where: { key: MIGRATED_KEY } });
-      if (marker) return;
+      if (await hasRunMarker(MIGRATED_KEY)) return;
 
       const integrations = await prisma.integration.findMany({
         where: { type: { in: ["fortimanager", "fortigate", "activedirectory", "entraid", "windowsserver"] } },
@@ -343,15 +343,9 @@ interface MigrationOutcome {
         invalidateMonitorSettingsCache();
       }
 
-      await prisma.setting.create({
-        data: {
-          key:   MIGRATED_KEY,
-          value: {
-            migratedAt: new Date().toISOString(),
-            integrationCount: outcomes.length,
-            foldedOverrideCount: outcomes.reduce((n, o) => n + o.foldedOverrideIds.length, 0),
-          } as any,
-        },
+      await stampRunMarker(MIGRATED_KEY, {
+        integrationCount: outcomes.length,
+        foldedOverrideCount: outcomes.reduce((n, o) => n + o.foldedOverrideIds.length, 0),
       });
 
       if (outcomes.length > 0) {

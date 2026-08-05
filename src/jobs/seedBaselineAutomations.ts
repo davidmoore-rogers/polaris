@@ -31,9 +31,9 @@
  * then restart. (This resurrects ALL baseline rules, including any you deleted.)
  */
 
-import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { runInstrumentedJob } from "./_metrics.js";
+import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 import { ruleInputSchema } from "../services/notificationTypes.js";
 import { createRule } from "../services/notificationRuleService.js";
 
@@ -168,21 +168,8 @@ const BASELINE_RULES: Record<string, unknown>[] = [
   },
 ];
 
-async function alreadySeeded(): Promise<boolean> {
-  const row = await prisma.setting.findUnique({ where: { key: MARKER_KEY } });
-  return row !== null;
-}
-
-async function stampMarker(stats: { created: number }): Promise<void> {
-  await prisma.setting.upsert({
-    where: { key: MARKER_KEY },
-    update: { value: { at: new Date().toISOString(), ...stats } },
-    create: { key: MARKER_KEY, value: { at: new Date().toISOString(), ...stats } },
-  });
-}
-
 export async function seedBaselineAutomations(): Promise<{ created: number; skipped: boolean }> {
-  if (await alreadySeeded()) {
+  if (await hasRunMarker(MARKER_KEY)) {
     return { created: 0, skipped: true };
   }
 
@@ -201,7 +188,7 @@ export async function seedBaselineAutomations(): Promise<{ created: number; skip
   // Stamp regardless of per-rule failures: this is seed-ONCE. Re-running would
   // re-create rules the operator may have deliberately deleted. A partial seed
   // is recoverable via the documented DELETE-the-marker escape hatch.
-  await stampMarker({ created });
+  await stampRunMarker(MARKER_KEY, { created });
   return { created, skipped: false };
 }
 
