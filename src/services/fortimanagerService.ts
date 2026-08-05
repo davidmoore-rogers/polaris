@@ -10,7 +10,7 @@ import { matchesWildcard } from "../utils/integrationFilter.js";
 import { insecureTlsDispatcher } from "../utils/tlsDispatcher.js";
 import { logger } from "../utils/logger.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
-import { parseRangeFirstIp } from "../utils/cidr.js";
+import { parseRangeFirstIp, isValidIpv4 } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
 import type { ApLldpNeighborSample } from "../utils/fortiapLldp.js";
 import { findFortiswitchUplinkPorts } from "../utils/fortiswitchCmdb.js";
@@ -169,7 +169,7 @@ export async function testConnection(
  */
 function _extractV4(raw: unknown): string | null {
   const ip = Array.isArray(raw) ? raw[0] : (raw as string | null | undefined);
-  if (!ip || ip === "0.0.0.0" || !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) return null;
+  if (!ip || ip === "0.0.0.0" || !isValidIpv4(ip)) return null;
   return ip;
 }
 
@@ -2028,7 +2028,7 @@ export async function discoverDhcpSubnets(
     let didDhcpReservationsQuery = false;
     let didDhcpLeasesQuery = false;
 
-    if (localDevice.mgmtIp && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(localDevice.mgmtIp)) {
+    if (localDevice.mgmtIp && isValidIpv4(localDevice.mgmtIp)) {
       localInterfaceIps.push({ device: deviceName, interfaceName: mgmtIfaceName, ipAddress: localDevice.mgmtIp, role: "management" });
     }
 
@@ -2048,7 +2048,7 @@ export async function discoverDhcpSubnets(
         const rawIp = found
           ? (Array.isArray(found.ip) ? found.ip[0] : (found.ip as string | null))
           : null;
-        if (rawIp && rawIp !== "0.0.0.0" && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawIp)) {
+        if (rawIp && rawIp !== "0.0.0.0" && isValidIpv4(rawIp)) {
           localDevice.mgmtIp = rawIp;
           const ifEntry = localInterfaceIps.find((e) => e.role === "management");
           if (ifEntry) ifEntry.ipAddress = rawIp;
@@ -2265,7 +2265,7 @@ export async function discoverDhcpSubnets(
               const rawSec = Array.isArray(sec?.ip)
                 ? (sec.ip[0] || "")
                 : (typeof sec?.ip === "string" ? sec.ip.split(" ")[0] : "");
-              if (rawSec && rawSec !== "0.0.0.0" && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawSec)) {
+              if (rawSec && rawSec !== "0.0.0.0" && isValidIpv4(rawSec)) {
                 localInterfaceIps.push({ device: deviceName, interfaceName: ifaceName, ipAddress: rawSec, role: "secondary" });
                 secondaryIpCount++;
               }

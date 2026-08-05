@@ -12,6 +12,7 @@ import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
+import { createTtlCache } from "../utils/ttlCache.js";
 import type { RuleScope, Trigger, RuleInput } from "./notificationTypes.js";
 import {
   isAssetScopedTrigger,
@@ -161,34 +162,31 @@ export async function listScopeOptions(): Promise<{
 // otherwise. Refreshed lazily (TTL) and on every rule write via
 // bumpChangeSubscriptions().
 
-let _subscribedChangeActions: Set<string> | null = null;
-let _subscribedLoadedAt = 0;
+// createTtlCache (2026-08 audit) replaces the hand-rolled value+timestamp
+// pair — same TTL/invalidation semantics plus in-flight coalescing.
 const SUBSCRIPTION_TTL_MS = 60_000;
+const _subscriptionCache = createTtlCache<Set<string>>({ ttlMs: SUBSCRIPTION_TTL_MS, maxEntries: 1 });
 
 export function bumpChangeSubscriptions(): void {
-  _subscribedChangeActions = null;
+  _subscriptionCache.invalidate();
 }
 
-export async function getSubscribedChangeActions(): Promise<Set<string>> {
-  const now = Date.now();
-  if (_subscribedChangeActions && now - _subscribedLoadedAt < SUBSCRIPTION_TTL_MS) {
-    return _subscribedChangeActions;
-  }
-  const rules = await prisma.notificationRule.findMany({
-    where: { enabled: true },
-    select: { trigger: true },
-  });
-  const actions = new Set<string>();
-  for (const r of rules) {
-    const t = r.trigger as unknown as Trigger;
-    if (t.type === "change") {
-      const action = CHANGE_TYPE_ACTIONS[t.changeType];
-      if (action) actions.add(action);
+export function getSubscribedChangeActions(): Promise<Set<string>> {
+  return _subscriptionCache.getOrCompute("", async () => {
+    const rules = await prisma.notificationRule.findMany({
+      where: { enabled: true },
+      select: { trigger: true },
+    });
+    const actions = new Set<string>();
+    for (const r of rules) {
+      const t = r.trigger as unknown as Trigger;
+      if (t.type === "change") {
+        const action = CHANGE_TYPE_ACTIONS[t.changeType];
+        if (action) actions.add(action);
+      }
     }
-  }
-  _subscribedChangeActions = actions;
-  _subscribedLoadedAt = now;
-  return actions;
+    return actions;
+  });
 }
 
 /** Is any enabled change-rule subscribed to this change action? */

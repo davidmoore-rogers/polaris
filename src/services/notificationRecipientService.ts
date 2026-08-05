@@ -24,6 +24,7 @@
 import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { resolveTagScopesForUser } from "./regionScopeService.js";
+import { createTtlCache } from "../utils/ttlCache.js";
 import { stripRegionPrefix } from "./notificationService.js";
 import { renderNotificationTemplate } from "../utils/notificationTemplate.js";
 import {
@@ -85,23 +86,23 @@ interface IndexedUser extends RecipientUser {
 }
 
 // ─── User tag index (short-TTL cache) ───────────────────────────────────────
-let _userIndex: IndexedUser[] | null = null;
-let _userIndexAt = 0;
+// createTtlCache (2026-08 audit) — the hand-rolled value+timestamp pair it
+// replaces had no in-flight coalescing, so a cold cache could stampede one
+// findMany per concurrent delivery expansion.
 const USER_INDEX_TTL_MS = 30_000;
+const _userIndexCache = createTtlCache<IndexedUser[]>({ ttlMs: USER_INDEX_TTL_MS, maxEntries: 1 });
 
 /** Drop the cached user→tags index (call after a user/role/group-mapping write). */
 export function bumpRecipientIndex(): void {
-  _userIndex = null;
+  _userIndexCache.invalidate();
 }
 
 function normalizeNeedle(tag: string): string {
   return stripRegionPrefix(tag).toLowerCase();
 }
 
-async function loadUserIndex(): Promise<IndexedUser[]> {
-  const now = Date.now();
-  if (_userIndex && now - _userIndexAt < USER_INDEX_TTL_MS) return _userIndex;
-
+function loadUserIndex(): Promise<IndexedUser[]> {
+  return _userIndexCache.getOrCompute("", async () => {
   const users = await prisma.user.findMany({
     select: {
       id: true,
@@ -124,9 +125,8 @@ async function loadUserIndex(): Promise<IndexedUser[]> {
     }
     index.push({ id: u.id, email: u.email, displayName: u.displayName, matchSet });
   }
-  _userIndex = index;
-  _userIndexAt = now;
   return index;
+  });
 }
 
 /**

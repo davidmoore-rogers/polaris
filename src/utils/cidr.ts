@@ -47,6 +47,18 @@ export function isValidCidr(cidr: string): boolean {
 }
 
 /**
+ * Return true if the given string is a valid dotted-quad IPv4 address
+ * (octets validated ≤ 255). The discovery services previously retyped a
+ * raw `\d{1,3}` regex at 8 sites, which accepted impossible octets like
+ * 999.1.1.1 — this is the sanctioned inline guard for IPv4-only contexts;
+ * use isValidIpAddress when IPv6 is also acceptable.
+ */
+export function isValidIpv4(ip: string): boolean {
+  if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) return false;
+  return ip.split(".").every((octet) => parseInt(octet) <= 255);
+}
+
+/**
  * Return true if the given IP address (without prefix) is a valid IPv4 or IPv6 address.
  */
 export function isValidIpAddress(ip: string): boolean {

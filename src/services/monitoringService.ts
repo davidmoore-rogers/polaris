@@ -41,6 +41,7 @@ import { collectProcessesSsh, collectProcessesWinrm, type AgentlessProcessResult
 import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { applyTransform } from "../utils/symbolTransforms.js";
+import { createTtlCache } from "../utils/ttlCache.js";
 import { reconcileInterfaceMacs, expandMacRange } from "../utils/macAddresses.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
@@ -8221,27 +8222,14 @@ interface LldpMatchIndex {
   byMac: Map<string, string>;
   byHostname: Map<string, string>;
 }
-let lldpMatchCache: LldpMatchIndex | null = null;
-let lldpMatchCachedAt = 0;
-let lldpMatchInflight: Promise<LldpMatchIndex> | null = null;
+// createTtlCache (2026-08 audit) — the hand-rolled cache+inflight trio it
+// replaces re-implemented exactly the promise-coalescing the shared util
+// provides (many parallel systemInfo workers hitting the same TTL-miss
+// window share ONE findMany).
+const lldpMatchCache = createTtlCache<LldpMatchIndex>({ ttlMs: LLDP_MATCH_CACHE_TTL_MS, maxEntries: 1 });
 
-async function getLldpAssetMatchIndex(): Promise<LldpMatchIndex> {
-  const now = Date.now();
-  if (lldpMatchCache && now - lldpMatchCachedAt < LLDP_MATCH_CACHE_TTL_MS) {
-    return lldpMatchCache;
-  }
-  // De-duplicate concurrent builders. Many parallel systemInfo workers can
-  // hit this within the same TTL miss window — let only the first one issue
-  // the findMany; the rest await the same promise.
-  if (lldpMatchInflight) return lldpMatchInflight;
-  lldpMatchInflight = buildLldpAssetMatchIndex().then((idx) => {
-    lldpMatchCache = idx;
-    lldpMatchCachedAt = Date.now();
-    return idx;
-  }).finally(() => {
-    lldpMatchInflight = null;
-  });
-  return lldpMatchInflight;
+function getLldpAssetMatchIndex(): Promise<LldpMatchIndex> {
+  return lldpMatchCache.getOrCompute("", buildLldpAssetMatchIndex);
 }
 
 /** Drop the cached LLDP match index so the next `persistLldpNeighbors`
@@ -8249,8 +8237,7 @@ async function getLldpAssetMatchIndex(): Promise<LldpMatchIndex> {
  *  relies on the 60 s TTL for refresh. Exported for tests and for future
  *  callers that want explicit control after a bulk asset write. */
 export function invalidateLldpMatchCache(): void {
-  lldpMatchCache = null;
-  lldpMatchCachedAt = 0;
+  lldpMatchCache.invalidate();
 }
 
 async function buildLldpAssetMatchIndex(): Promise<{

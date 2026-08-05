@@ -15,7 +15,7 @@ import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { insecureTlsDispatcher } from "../utils/tlsDispatcher.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
-import { parseRangeFirstIp } from "../utils/cidr.js";
+import { parseRangeFirstIp, isValidIpv4 } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
 import type {
   DiscoveredSubnet,
@@ -353,7 +353,7 @@ export async function discoverDhcpSubnets(
         const rawIp = Array.isArray(mgmtIface.ip)
           ? mgmtIface.ip[0]
           : (typeof mgmtIface.ip === "string" ? mgmtIface.ip.split(" ")[0] : "");
-        if (rawIp && rawIp !== "0.0.0.0" && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawIp)) {
+        if (rawIp && rawIp !== "0.0.0.0" && isValidIpv4(rawIp)) {
           mgmtIp = rawIp;
           log("discover.device.mgmtip", "info", `${deviceHostname}: Resolved management IP from ${mgmtIfaceName}: ${rawIp}`, deviceHostname);
         }
@@ -364,7 +364,7 @@ export async function discoverDhcpSubnets(
   } catch { /* best-effort */ }
 
   // If we couldn't resolve the management interface, fall back to the config host
-  if (!mgmtIp && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(config.host)) {
+  if (!mgmtIp && isValidIpv4(config.host)) {
     mgmtIp = config.host;
   }
 
@@ -625,7 +625,7 @@ export async function discoverDhcpSubnets(
         const rawIp = Array.isArray(iface.ip)
           ? iface.ip[0]
           : (typeof iface.ip === "string" ? iface.ip.split(" ")[0] : "");
-        if (rawIp && rawIp !== "0.0.0.0" && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawIp)) {
+        if (rawIp && rawIp !== "0.0.0.0" && isValidIpv4(rawIp)) {
           interfaceIps.push({
             device: deviceName,
             interfaceName: ifaceName,
@@ -644,7 +644,7 @@ export async function discoverDhcpSubnets(
             const rawSec = Array.isArray(sec?.ip)
               ? (sec.ip[0] || "")
               : (typeof sec?.ip === "string" ? sec.ip.split(" ")[0] : "");
-            if (rawSec && rawSec !== "0.0.0.0" && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawSec)) {
+            if (rawSec && rawSec !== "0.0.0.0" && isValidIpv4(rawSec)) {
               interfaceIps.push({
                 device: deviceName,
                 interfaceName: ifaceName,
