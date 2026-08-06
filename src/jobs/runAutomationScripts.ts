@@ -25,7 +25,7 @@ async function runAutomationScripts(): Promise<void> {
       await runPendingServerScripts();
     });
   } catch (err: any) {
-    logger.debug({ err: err?.message }, "runAutomationScripts job failed (non-fatal)");
+    logger.warn({ err: err?.message }, "runAutomationScripts job failed (non-fatal)");
   } finally {
     running = false;
   }

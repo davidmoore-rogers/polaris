@@ -23,7 +23,7 @@ async function runExpiry(): Promise<void> {
       }
     });
   } catch (err) {
-    logger.error(err, "Error running reservation expiry job");
+    logger.warn({ err }, "expireReservations tick failed (non-fatal)");
   }
 }
 

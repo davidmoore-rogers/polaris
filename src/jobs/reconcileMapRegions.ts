@@ -41,7 +41,7 @@ async function tick(): Promise<void> {
       }
     });
   } catch (err: any) {
-    logger.debug({ err: err?.message ?? String(err) }, "reconcileMapRegions tick failed (non-fatal)");
+    logger.warn({ err: err?.message ?? String(err) }, "reconcileMapRegions tick failed (non-fatal)");
   } finally {
     running = false;
   }

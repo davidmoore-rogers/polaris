@@ -35,7 +35,7 @@ async function tick(): Promise<void> {
       await reconcileDependencySuppression();
     });
   } catch (err: any) {
-    logger.debug({ err: err?.message ?? String(err) }, "dependencyReconciler tick failed (non-fatal)");
+    logger.warn({ err: err?.message ?? String(err) }, "dependencyReconciler tick failed (non-fatal)");
   } finally {
     running = false;
   }

@@ -34,6 +34,7 @@ import { EXCLUDED_LIFECYCLE_STATUSES } from "../utils/assetInvariants.js";
 import { prisma } from "../db.js";
 import { resolveMonitorSettings } from "./monitoringService.js";
 import { computeStorageForecast } from "./storageForecastService.js";
+import { queryProbeLossRatios } from "./probeLossQuery.js";
 import { createTtlCache } from "../utils/ttlCache.js";
 
 // Asset types treated as "infrastructure" for the uptime % gauge — mirrors the
@@ -861,20 +862,7 @@ export async function getHighestTemperature(limit: number | null = 100, assetIds
  * (intermittent) assets qualify.
  */
 export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 15, assetIds: string[] | null = null): Promise<TopNRow[]> {
-  const idClause = assetIds ? ` AND "assetId" = ANY($3::text[])` : "";
-  const params: unknown[] = [String(sinceMinutes), limit];
-  if (assetIds) params.push(assetIds);
-  const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; total: bigint; failed: bigint }>>(
-    `SELECT "assetId", count(*) AS total, count(*) FILTER (WHERE NOT "success") AS failed
-     FROM "asset_monitor_samples"
-     WHERE "timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
-     GROUP BY "assetId"
-     HAVING count(*) FILTER (WHERE NOT "success") > 0
-        AND count(*) FILTER (WHERE "success") > 0
-     ORDER BY (count(*) FILTER (WHERE NOT "success"))::float / count(*) DESC
-     LIMIT $2`,
-    ...params,
-  );
+  const rows = await queryProbeLossRatios({ sinceMinutes, assetIds, onlyLossy: true, limit });
   const ordered = rows.map((r) => ({
     assetId: r.assetId,
     value: Math.round((Number(r.failed) / Number(r.total)) * 1000) / 10,

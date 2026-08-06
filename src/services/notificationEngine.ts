@@ -64,6 +64,7 @@ import { ipInCidr } from "../utils/cidr.js";
 import { computeStorageForecast } from "./storageForecastService.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
 import { executeActions, type ActionExecContext } from "./automationActionService.js";
+import { queryProbeLossRatios } from "./probeLossQuery.js";
 import {
   buildTemplateContext,
   renderNotificationTemplate,
@@ -309,27 +310,16 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
       return reduceReadings(rows, index, () => "", () => "", (r) => r[trigger.metric] ?? null, agg);
     }
     case "probeLossPct": {
-      // Probe-failure ratio over the window — the SAME computation the dashboard
-      // Packet Loss widget uses (nocDashboardService.getPacketLoss), so it works
-      // for ANY monitored asset (switch/AP/server), not just SD-WAN. A windowed
-      // ratio: `aggregation` doesn't apply (the window IS the measurement
-      // interval). One grouped aggregate (1 row per asset), not a fetch-all —
-      // stays cheap at 2000 assets on the 60s engine tick.
-      //
-      // asset_monitor_samples.timestamp is `timestamp without time zone` holding
-      // UTC wall-clock, so we mirror getPacketLoss's `now() AT TIME ZONE 'UTC'`
-      // interval form rather than binding a JS Date (avoids tz skew). The window
-      // is windowSec, floored at DEFAULT_LOOKBACK (15m) — the widget's window.
+      // Probe-failure ratio over the window — the same shared query the
+      // dashboard Packet Loss widget uses (probeLossQuery.queryProbeLossRatios;
+      // the widget runs it in onlyLossy mode), so it works for ANY monitored
+      // asset (switch/AP/server), not just SD-WAN. A windowed ratio:
+      // `aggregation` doesn't apply (the window IS the measurement interval).
+      // One grouped aggregate (1 row per asset), not a fetch-all — stays cheap
+      // at 2000 assets on the 60s engine tick. The window is windowSec,
+      // floored at DEFAULT_LOOKBACK (15m) — the widget's window.
       const sinceMinutes = Math.max(trigger.windowSec, DEFAULT_LOOKBACK_MS / 1000) / 60;
-      const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; total: bigint; failed: bigint }>>(
-        `SELECT "assetId", count(*) AS total, count(*) FILTER (WHERE NOT "success") AS failed
-           FROM "asset_monitor_samples"
-          WHERE "timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval
-            AND "assetId" = ANY($2::text[])
-          GROUP BY "assetId"
-         HAVING count(*) FILTER (WHERE "success") > 0`,
-        String(sinceMinutes), ids,
-      );
+      const rows = await queryProbeLossRatios({ sinceMinutes, assetIds: ids });
       // Emit the true ratio for every asset with at least one successful probe,
       // INCLUDING 0% (no failures) so an auto-clear/hysteresis rule recovers.
       // Fully-down assets (0 successes) are dropped by the HAVING — asset-down

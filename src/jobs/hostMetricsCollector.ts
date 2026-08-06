@@ -82,7 +82,7 @@ async function runHostMetricsCollector(): Promise<void> {
       }
     });
   } catch (err: any) {
-    logger.debug({ err: err?.message }, "hostMetricsCollector job failed (non-fatal)");
+    logger.warn({ err: err?.message }, "hostMetricsCollector job failed (non-fatal)");
   }
 }
 

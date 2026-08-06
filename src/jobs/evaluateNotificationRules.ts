@@ -20,7 +20,7 @@ async function runEvaluateNotificationRules(): Promise<void> {
       await evaluateAllNotificationRules();
     });
   } catch (err: any) {
-    logger.debug({ err: err?.message }, "evaluateNotificationRules job failed (non-fatal)");
+    logger.warn({ err: err?.message }, "evaluateNotificationRules job failed (non-fatal)");
   }
 }
 

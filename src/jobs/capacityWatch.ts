@@ -75,7 +75,7 @@ async function runCapacityWatch(): Promise<void> {
       await recomputeAdvisorFromSnapshot(snap, stubPgTuning);
     });
   } catch (err: any) {
-    logger.debug({ err: err?.message }, "capacityWatch job failed (non-fatal)");
+    logger.warn({ err: err?.message }, "capacityWatch job failed (non-fatal)");
   }
 }
 

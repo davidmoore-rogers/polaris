@@ -40,7 +40,7 @@ async function tick(): Promise<void> {
       await reapStaleRuns(REAP_STALE_AFTER_MS);
     });
   } catch (err) {
-    logger.debug({ err }, "discoveryRunReaper tick failed");
+    logger.warn({ err }, "discoveryRunReaper tick failed");
   } finally {
     running = false;
   }

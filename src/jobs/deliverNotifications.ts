@@ -21,7 +21,7 @@ async function runDeliverNotifications(): Promise<void> {
       await drainPendingDeliveries();
     });
   } catch (err: any) {
-    logger.debug({ err: err?.message }, "deliverNotifications job failed (non-fatal)");
+    logger.warn({ err: err?.message }, "deliverNotifications job failed (non-fatal)");
   }
 }
 

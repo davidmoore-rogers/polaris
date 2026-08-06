@@ -36,6 +36,7 @@ import { resolve as resolvePath } from "node:path";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
+import { mapWithConcurrency } from "../utils/concurrency.js";
 import { AGENT_BIN_DIR } from "../utils/paths.js";
 import { linuxServiceBlock, normalizePrivilegeTier, type AgentPrivilegeTier } from "../utils/agentUnit.js";
 import { getCredential } from "./credentialService.js";
@@ -232,20 +233,14 @@ export async function upgradeAllOutdated(actor: string): Promise<UpgradeAllResul
   });
   const perAsset: UpgradeAllResult["perAsset"] = [];
   const POOL_SIZE = 4;
-  let cursor = 0;
-  async function worker() {
-    while (cursor < eligible.length) {
-      const i = cursor++;
-      const e = eligible[i];
-      try {
-        await startUpgrade({ managedAgentId: e.id, actor });
-        perAsset.push({ assetId: e.assetId, managedAgentId: e.id, ok: true });
-      } catch (err: any) {
-        perAsset.push({ assetId: e.assetId, managedAgentId: e.id, ok: false, error: err?.message ?? String(err) });
-      }
+  await mapWithConcurrency(eligible, POOL_SIZE, async (e) => {
+    try {
+      await startUpgrade({ managedAgentId: e.id, actor });
+      perAsset.push({ assetId: e.assetId, managedAgentId: e.id, ok: true });
+    } catch (err: any) {
+      perAsset.push({ assetId: e.assetId, managedAgentId: e.id, ok: false, error: err?.message ?? String(err) });
     }
-  }
-  await Promise.all(Array.from({ length: Math.min(POOL_SIZE, eligible.length) }, () => worker()));
+  });
   return {
     eligible: eligible.length,
     queued:   perAsset.filter((p) => p.ok).length,
@@ -416,16 +411,11 @@ export async function bulkInstallAgents(input: BulkInstallInput): Promise<BulkIn
   // escaping is logged, never thrown into the pool.
   if (queue.length > 0) {
     setImmediate(() => {
-      let cursor = 0;
-      const worker = async () => {
-        while (cursor < queue.length) {
-          const q = queue[cursor++]!;
-          await runInstall({ managedAgentId: q.managedAgentId, credentialId: q.credentialId }).catch((err) => {
-            logger.error({ err, managedAgentId: q.managedAgentId }, "Bulk agent install crashed unexpectedly");
-          });
-        }
-      };
-      void Promise.all(Array.from({ length: Math.min(BULK_INSTALL_POOL, queue.length) }, () => worker()));
+      void mapWithConcurrency(queue, BULK_INSTALL_POOL, (q) =>
+        runInstall({ managedAgentId: q.managedAgentId, credentialId: q.credentialId }).catch((err) => {
+          logger.error({ err, managedAgentId: q.managedAgentId }, "Bulk agent install crashed unexpectedly");
+        }),
+      );
     });
   }
 

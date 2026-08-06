@@ -31,7 +31,7 @@ async function tick(): Promise<void> {
       await reconcileMaintenance();
     });
   } catch (err: any) {
-    logger.debug({ err: err?.message ?? String(err) }, "maintenanceScheduler tick failed (non-fatal)");
+    logger.warn({ err: err?.message ?? String(err) }, "maintenanceScheduler tick failed (non-fatal)");
   }
 }
 

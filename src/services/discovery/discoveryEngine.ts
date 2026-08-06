@@ -10,6 +10,7 @@
  */
 
 import { chunkArray } from "../../utils/chunk.js";
+import { mapSettledWithConcurrency } from "../../utils/concurrency.js";
 import { prisma } from "../../db.js";
 import { AppError, throwIfAborted } from "../../utils/errors.js";
 import { armDiscoveryCancelWatchdog } from "../discoveryCancelWatchdog.js";
@@ -1091,15 +1092,14 @@ async function upsertConflict(
 }
 
 // ─── Batch helper ────────────────────────────────────────────────────────────
-// Runs promises in chunks to avoid overwhelming the connection pool
+// Bounded fan-out so DB writes don't overwhelm the connection pool. Since the
+// 2026-08 dedup this rides the shared utils/concurrency mapper: a rolling
+// window of BATCH_SIZE in flight (strictly gentler than the old chunk
+// barrier — same cap, no convoy behind a slow chunk), settled results in
+// input order.
 const BATCH_SIZE = 50;
 async function batchSettled<T>(items: T[], fn: (item: T) => Promise<any>): Promise<PromiseSettledResult<any>[]> {
-  const results: PromiseSettledResult<any>[] = [];
-  for (const chunk of chunkArray(items, BATCH_SIZE)) {
-    const batch = await Promise.allSettled(chunk.map(fn));
-    results.push(...batch);
-  }
-  return results;
+  return mapSettledWithConcurrency(items, BATCH_SIZE, fn);
 }
 
 // ─── FortiGate firewall AssetSource helpers (Phase 2 cutover) ──────────────

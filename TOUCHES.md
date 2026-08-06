@@ -1461,6 +1461,25 @@ Listed alphabetically.
 
 ---
 
+## services/probeLossQuery.ts
+
+**What it owns:** The single windowed failed-probe-ratio SQL over `asset_monitor_samples` (UTC-wall-clock-anchored `now() AT TIME ZONE 'UTC'` window, grouped per asset).
+
+**Public API:** `queryProbeLossRatios({ sinceMinutes, assetIds?, onlyLossy?, limit? })`, `ProbeLossRow`.
+
+**Used by:**
+- `src/services/notificationEngine.ts` — the `probeLossPct` trigger (engine mode: every asset with ≥1 successful probe, INCLUDING 0%-loss rows so hysteresis/auto-clear rules recover).
+- `src/services/nocDashboardService.ts` — `getPacketLoss` (widget mode `onlyLossy: true`: additionally requires ≥1 failure, orders lossiest-first, caps at `limit`; `limit` null = uncapped via Postgres `LIMIT NULL`).
+
+**Invariants:**
+- Fully-down assets (0 successes in the window) are excluded in BOTH modes — asset-down alerting/widgets own them.
+- The engine/widget HAVING difference is a real semantic (0%-loss rows feed hysteresis recovery; the widget hides clean assets) — it is the `onlyLossy` parameter, never re-fork the query.
+- All SQL fragments are compile-time literals; user data rides positional parameters only.
+
+**When changing this:** both consumers' post-processing assumes `{ assetId, total, failed }` bigint rows; the window must stay UTC-wall-clock-anchored (the hypertable's timestamps are naive UTC).
+
+---
+
 ## services/regionScopeService.ts
 
 **What it owns:** The shared effective-tag resolver — `union(role, user, group)` for region + other tags.

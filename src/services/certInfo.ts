@@ -8,8 +8,10 @@
  * Design review notes folded in:
  *   §5 (layered cache): hash file bytes as the cache key, only re-parse on
  *       content change. parseFromBytes is the expensive step.
- *   §6 (zero-byte / atomic-rename): bounded retry (100ms x 1), suppress
- *       repeat warnings while the failure persists, return last-known-good.
+ *   §6 (zero-byte / atomic-rename): return last-known-good immediately and
+ *       refresh the cache asynchronously (100ms unref'd timer — replaced the
+ *       synchronous spin-wait 2026-08); suppress repeat warnings while the
+ *       failure persists.
  */
 
 import { readFileSync } from "node:fs";
@@ -64,20 +66,22 @@ function readActiveCert(): CachedCert | null {
 }
 
 /**
- * Read the raw PEM bytes from POLARIS_PROXY_CERT_PATH. Bounded retry
- * (100ms × 1) on ENOENT / zero-byte / read error so a certbot-style atomic
- * rename window doesn't poison the cache.
+ * Read the raw PEM bytes from POLARIS_PROXY_CERT_PATH. On ENOENT /
+ * zero-byte / read error (a certbot-style atomic-rename window), return
+ * null NOW — the accessor serves last-known-good — and schedule one
+ * asynchronous re-read so the cache refreshes shortly after the window
+ * closes. Replaced the 100ms event-loop spin-wait (the accessors are
+ * reachable from HTTP handlers, and blocking every in-flight request for
+ * the rotation window was worse than one stale read).
  */
 function readPemBytes(): Buffer | null {
   const path = process.env.POLARIS_PROXY_CERT_PATH;
   if (!path) return null;
   const first = tryReadFile(path);
   if (first && first.length > 0) return first;
-  sleepSync(100);
-  const second = tryReadFile(path);
-  if (second && second.length > 0) return second;
+  scheduleAsyncRefresh(path);
   if (!warnSuppressed) {
-    logger.warn({ path }, "Cert file unreadable or empty after retry — returning last-known-good (may be null)");
+    logger.warn({ path }, "Cert file unreadable or empty — returning last-known-good (may be null) and refreshing asynchronously");
     warnSuppressed = true;
   }
   return null;
@@ -91,17 +95,28 @@ function tryReadFile(path: string): Buffer | null {
   }
 }
 
-/**
- * Synchronous sleep — fine here because we're already on the slow path
- * (file read failed) and the alternative is to make every cert accessor
- * async, which ripples through 20+ callers. 100ms is the bounded constant.
- */
-function sleepSync(ms: number): void {
-  const end = Date.now() + ms;
-  // Use Atomics.wait on a shared buffer? Not worth it for 100ms. Spinwait.
-  // Note: Node's event loop is blocked here, but only on the failure path
-  // which is rare and short-lived.
-  while (Date.now() < end) { /* spin */ }
+// One in-flight refresh timer at most; unref'd so it never holds the
+// process open. If the file is still unreadable when it fires, the next
+// accessor call schedules the next attempt — no self-perpetuating loop.
+let refreshTimer: NodeJS.Timeout | null = null;
+function scheduleAsyncRefresh(path: string): void {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    const bytes = tryReadFile(path);
+    if (!bytes || bytes.length === 0) return;
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (lastGood && lastGood.sha256 === sha256) return;
+    const parsed = parseFromBytes(bytes, sha256);
+    if (parsed) {
+      lastGood = parsed;
+      if (warnSuppressed) {
+        logger.info("Cert read+parse succeeded on async refresh — clearing warn suppression");
+        warnSuppressed = false;
+      }
+    }
+  }, 100);
+  refreshTimer.unref?.();
 }
 function parseFromBytes(bytes: Buffer, sha256: string): CachedCert | null {
   try {
@@ -201,6 +216,7 @@ export function getServerCertExpiry(): string | null {
 export function invalidateCache(): void {
   lastGood = null;
   warnSuppressed = false;
+  if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
 }
 
 /**
@@ -211,4 +227,5 @@ export function invalidateCache(): void {
 export function __resetCertInfoCacheForTests(): void {
   lastGood = null;
   warnSuppressed = false;
+  if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
 }

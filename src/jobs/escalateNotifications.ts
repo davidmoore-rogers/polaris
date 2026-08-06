@@ -22,7 +22,7 @@ async function runEscalateNotifications(): Promise<void> {
       await runEscalationSweep();
     });
   } catch (err: any) {
-    logger.debug({ err: err?.message }, "escalateNotifications job failed (non-fatal)");
+    logger.warn({ err: err?.message }, "escalateNotifications job failed (non-fatal)");
   }
 }
 

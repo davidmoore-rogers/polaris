@@ -28,6 +28,7 @@
  */
 
 import { buildTransportForIntegration, callFortiOs } from "./reservationPushService.js";
+import { mapWithConcurrency } from "../utils/concurrency.js";
 import { logger } from "../utils/logger.js";
 
 export type ManagementAccessSource = "firewall-interface" | "fortiswitch" | "fortiap-profile";
@@ -250,20 +251,7 @@ export interface DeviceAccessGroup {
   aps: Array<{ serial: string; ipAddress?: string | null }>;
 }
 
-/** Run async work over `items` with a bounded concurrency. */
-async function mapWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-  const queue = [...items];
-  const runners: Promise<void>[] = [];
-  const worker = async () => {
-    for (;;) {
-      const next = queue.shift();
-      if (next === undefined) return;
-      await fn(next);
-    }
-  };
-  for (let i = 0; i < Math.max(1, Math.min(limit, items.length)); i++) runners.push(worker());
-  await Promise.all(runners);
-}
+// Bounded-concurrency mapper shared via utils/concurrency (2026-08 dedup).
 
 /**
  * Collect management-access summaries for every firewall / switch / AP in the
