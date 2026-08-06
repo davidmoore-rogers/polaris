@@ -5651,22 +5651,98 @@ function _substituteFmgAdom(paramsStr, adom) {
   return String(paramsStr).replace(/<adom>/g, adom || "root");
 }
 
-function _fmgLoadQueries() {
-  try {
-    var stored = JSON.parse(localStorage.getItem("polaris-fmg-queries") || "null");
-    if (!stored || stored.v !== _FMG_QUERIES_VERSION) {
-      var seed = _FMG_PROXY_PRESET_QUERIES.concat(_FMG_DIRECT_PRESET_QUERIES);
-      var initial = { v: _FMG_QUERIES_VERSION, queries: seed.slice() };
-      localStorage.setItem("polaris-fmg-queries", JSON.stringify(initial));
-      return seed.slice();
-    }
-    return stored.queries;
-  } catch (_) { return []; }
+// ─── Saved-query store + console wiring (shared by the five Query API
+// consoles). Each console owns its presets, storage key, and form fields;
+// the localStorage versioned store, the saved-select rendering, and the
+// Load/Delete/Save button wiring are identical by design and live here.
+// The FMG console reuses the store but keeps its own mode-filtered select
+// (proxy vs direct presets) and button wiring.
+
+function _makeSavedQueryStore(storageKey, version, presets) {
+  return {
+    load: function () {
+      try {
+        var stored = JSON.parse(localStorage.getItem(storageKey) || "null");
+        if (!stored || stored.v !== version) {
+          // A version bump reseeds the presets; operator-saved custom names
+          // are lost on bump — the documented contract (see _FMG_QUERIES_VERSION).
+          localStorage.setItem(storageKey, JSON.stringify({ v: version, queries: presets.slice() }));
+          return presets.slice();
+        }
+        return stored.queries;
+      } catch (_) { return []; }
+    },
+    persist: function (queries) {
+      localStorage.setItem(storageKey, JSON.stringify({ v: version, queries: queries }));
+    },
+  };
 }
 
-function _fmgPersistQueries(queries) {
-  localStorage.setItem("polaris-fmg-queries", JSON.stringify({ v: _FMG_QUERIES_VERSION, queries: queries }));
+function _renderSavedQuerySelect(selectId, queries, selectValue) {
+  var sel = document.getElementById(selectId);
+  if (!sel) return;
+  sel.innerHTML = '<option value="">— load a saved query —</option>' +
+    queries.map(function (q, i) {
+      return '<option value="' + i + '"' + (String(i) === String(selectValue) ? " selected" : "") + '>' + escapeHtml(q.name) + '</option>';
+    }).join("");
 }
+
+// Wire one console's Load/Delete/Save buttons against its
+// `<prefix>-saved-select` / `<prefix>-save-name` elements. `readForm()`
+// returns the console's query fields (everything but name); `writeForm(q)`
+// populates them on Load. Returns the live savedQueries array the handlers
+// close over.
+function _wireSavedQueryConsole(store, prefix, readForm, writeForm) {
+  var savedQueries = store.load();
+  var selectId = prefix + "-saved-select";
+  _renderSavedQuerySelect(selectId, savedQueries);
+
+  document.getElementById(prefix + "-load-btn").addEventListener("click", function () {
+    var idx = parseInt(document.getElementById(selectId).value, 10);
+    if (isNaN(idx) || !savedQueries[idx]) return;
+    var q = savedQueries[idx];
+    writeForm(q);
+    document.getElementById(prefix + "-save-name").value = q.name;
+  });
+
+  document.getElementById(prefix + "-delete-btn").addEventListener("click", async function () {
+    var idx = parseInt(document.getElementById(selectId).value, 10);
+    if (isNaN(idx) || !savedQueries[idx]) return;
+    var ok = await showConfirm("Delete saved query \"" + savedQueries[idx].name + "\"?");
+    if (!ok) return;
+    savedQueries.splice(idx, 1);
+    store.persist(savedQueries);
+    _renderSavedQuerySelect(selectId, savedQueries);
+  });
+
+  document.getElementById(prefix + "-save-btn").addEventListener("click", function () {
+    var name = document.getElementById(prefix + "-save-name").value.trim();
+    if (!name) { showToast("Enter a name for this query", "error"); return; }
+    var existIdx = -1;
+    savedQueries.forEach(function (q, i) { if (q.name === name) existIdx = i; });
+    var entry = Object.assign({ name: name }, readForm());
+    if (existIdx >= 0) {
+      savedQueries[existIdx] = entry;
+    } else {
+      savedQueries.push(entry);
+      existIdx = savedQueries.length - 1;
+    }
+    store.persist(savedQueries);
+    _renderSavedQuerySelect(selectId, savedQueries, existIdx);
+    showToast("Query saved");
+  });
+
+  return savedQueries;
+}
+
+var _fmgQueryStore = _makeSavedQueryStore(
+  "polaris-fmg-queries",
+  _FMG_QUERIES_VERSION,
+  _FMG_PROXY_PRESET_QUERIES.concat(_FMG_DIRECT_PRESET_QUERIES),
+);
+
+function _fmgLoadQueries() { return _fmgQueryStore.load(); }
+function _fmgPersistQueries(queries) { _fmgQueryStore.persist(queries); }
 
 // Filters `queries` to the entries matching `mode` ("fmg" | "fortigate"). Entries
 // saved before the mode field existed are treated as "fmg" (the legacy default).
@@ -6057,30 +6133,7 @@ var _FGT_PRESET_QUERIES = [
 
 var _FGT_QUERIES_VERSION = 1;
 
-function _fgtLoadQueries() {
-  try {
-    var stored = JSON.parse(localStorage.getItem("polaris-fgt-queries") || "null");
-    if (!stored || stored.v !== _FGT_QUERIES_VERSION) {
-      var initial = { v: _FGT_QUERIES_VERSION, queries: _FGT_PRESET_QUERIES.slice() };
-      localStorage.setItem("polaris-fgt-queries", JSON.stringify(initial));
-      return _FGT_PRESET_QUERIES.slice();
-    }
-    return stored.queries;
-  } catch (_) { return []; }
-}
-
-function _fgtPersistQueries(queries) {
-  localStorage.setItem("polaris-fgt-queries", JSON.stringify({ v: _FGT_QUERIES_VERSION, queries: queries }));
-}
-
-function _fgtRenderSavedSelect(queries, selectValue) {
-  var sel = document.getElementById("fgt-saved-select");
-  if (!sel) return;
-  sel.innerHTML = '<option value="">— load a saved query —</option>' +
-    queries.map(function (q, i) {
-      return '<option value="' + i + '"' + (String(i) === String(selectValue) ? " selected" : "") + '>' + escapeHtml(q.name) + '</option>';
-    }).join("");
-}
+var _fgtQueryStore = _makeSavedQueryStore("polaris-fgt-queries", _FGT_QUERIES_VERSION, _FGT_PRESET_QUERIES);
 
 function openFgtApiQueryModal(id, vdom) {
   vdom = vdom || "root";
@@ -6137,50 +6190,21 @@ function openFgtApiQueryModal(id, vdom) {
 
   openModal("FortiGate API Query", body, footer, { wide: true });
 
-  var savedQueries = _fgtLoadQueries();
-  _fgtRenderSavedSelect(savedQueries);
-
-  document.getElementById("fgt-load-btn").addEventListener("click", function () {
-    var idx = parseInt(document.getElementById("fgt-saved-select").value, 10);
-    if (isNaN(idx) || !savedQueries[idx]) return;
-    var q = savedQueries[idx];
-    document.getElementById("fgt-method").value = q.method || "GET";
-    document.getElementById("fgt-path").value = q.path || "";
-    document.getElementById("fgt-query").value = q.query || "";
-    document.getElementById("fgt-body").value = q.body || "";
-    document.getElementById("fgt-save-name").value = q.name;
-  });
-
-  document.getElementById("fgt-delete-btn").addEventListener("click", async function () {
-    var idx = parseInt(document.getElementById("fgt-saved-select").value, 10);
-    if (isNaN(idx) || !savedQueries[idx]) return;
-    var ok = await showConfirm("Delete saved query \"" + savedQueries[idx].name + "\"?");
-    if (!ok) return;
-    savedQueries.splice(idx, 1);
-    _fgtPersistQueries(savedQueries);
-    _fgtRenderSavedSelect(savedQueries);
-  });
-
-  document.getElementById("fgt-save-btn").addEventListener("click", function () {
-    var name = document.getElementById("fgt-save-name").value.trim();
-    if (!name) { showToast("Enter a name for this query", "error"); return; }
-    var method = document.getElementById("fgt-method").value;
-    var path = document.getElementById("fgt-path").value.trim();
-    var query = document.getElementById("fgt-query").value;
-    var bodyText = document.getElementById("fgt-body").value;
-    var existIdx = -1;
-    savedQueries.forEach(function (q, i) { if (q.name === name) existIdx = i; });
-    var entry = { name: name, method: method, path: path, query: query, body: bodyText };
-    if (existIdx >= 0) {
-      savedQueries[existIdx] = entry;
-    } else {
-      savedQueries.push(entry);
-      existIdx = savedQueries.length - 1;
-    }
-    _fgtPersistQueries(savedQueries);
-    _fgtRenderSavedSelect(savedQueries, existIdx);
-    showToast("Query saved");
-  });
+  _wireSavedQueryConsole(_fgtQueryStore, "fgt",
+    function () {
+      return {
+        method: document.getElementById("fgt-method").value,
+        path: document.getElementById("fgt-path").value.trim(),
+        query: document.getElementById("fgt-query").value,
+        body: document.getElementById("fgt-body").value,
+      };
+    },
+    function (q) {
+      document.getElementById("fgt-method").value = q.method || "GET";
+      document.getElementById("fgt-path").value = q.path || "";
+      document.getElementById("fgt-query").value = q.query || "";
+      document.getElementById("fgt-body").value = q.body || "";
+    });
 
   document.getElementById("fgt-send").addEventListener("click", async function () {
     var btn = this;
@@ -6287,30 +6311,7 @@ var _ENTRA_PRESET_QUERIES = [
 
 var _ENTRA_QUERIES_VERSION = 1;
 
-function _entraLoadQueries() {
-  try {
-    var stored = JSON.parse(localStorage.getItem("polaris-entra-queries") || "null");
-    if (!stored || stored.v !== _ENTRA_QUERIES_VERSION) {
-      var initial = { v: _ENTRA_QUERIES_VERSION, queries: _ENTRA_PRESET_QUERIES.slice() };
-      localStorage.setItem("polaris-entra-queries", JSON.stringify(initial));
-      return _ENTRA_PRESET_QUERIES.slice();
-    }
-    return stored.queries;
-  } catch (_) { return []; }
-}
-
-function _entraPersistQueries(queries) {
-  localStorage.setItem("polaris-entra-queries", JSON.stringify({ v: _ENTRA_QUERIES_VERSION, queries: queries }));
-}
-
-function _entraRenderSavedSelect(queries, selectValue) {
-  var sel = document.getElementById("entra-saved-select");
-  if (!sel) return;
-  sel.innerHTML = '<option value="">— load a saved query —</option>' +
-    queries.map(function (q, i) {
-      return '<option value="' + i + '"' + (String(i) === String(selectValue) ? " selected" : "") + '>' + escapeHtml(q.name) + '</option>';
-    }).join("");
-}
+var _entraQueryStore = _makeSavedQueryStore("polaris-entra-queries", _ENTRA_QUERIES_VERSION, _ENTRA_PRESET_QUERIES);
 
 function openEntraApiQueryModal(id) {
   var body =
@@ -6349,46 +6350,17 @@ function openEntraApiQueryModal(id) {
 
   openModal("Entra ID / Graph API Query", body, footer, { wide: true });
 
-  var savedQueries = _entraLoadQueries();
-  _entraRenderSavedSelect(savedQueries);
-
-  document.getElementById("entra-load-btn").addEventListener("click", function () {
-    var idx = parseInt(document.getElementById("entra-saved-select").value, 10);
-    if (isNaN(idx) || !savedQueries[idx]) return;
-    var q = savedQueries[idx];
-    document.getElementById("entra-path").value = q.path || "";
-    document.getElementById("entra-query").value = q.query || "";
-    document.getElementById("entra-save-name").value = q.name;
-  });
-
-  document.getElementById("entra-delete-btn").addEventListener("click", async function () {
-    var idx = parseInt(document.getElementById("entra-saved-select").value, 10);
-    if (isNaN(idx) || !savedQueries[idx]) return;
-    var ok = await showConfirm("Delete saved query \"" + savedQueries[idx].name + "\"?");
-    if (!ok) return;
-    savedQueries.splice(idx, 1);
-    _entraPersistQueries(savedQueries);
-    _entraRenderSavedSelect(savedQueries);
-  });
-
-  document.getElementById("entra-save-btn").addEventListener("click", function () {
-    var name = document.getElementById("entra-save-name").value.trim();
-    if (!name) { showToast("Enter a name for this query", "error"); return; }
-    var path = document.getElementById("entra-path").value.trim();
-    var query = document.getElementById("entra-query").value;
-    var existIdx = -1;
-    savedQueries.forEach(function (q, i) { if (q.name === name) existIdx = i; });
-    var entry = { name: name, path: path, query: query };
-    if (existIdx >= 0) {
-      savedQueries[existIdx] = entry;
-    } else {
-      savedQueries.push(entry);
-      existIdx = savedQueries.length - 1;
-    }
-    _entraPersistQueries(savedQueries);
-    _entraRenderSavedSelect(savedQueries, existIdx);
-    showToast("Query saved");
-  });
+  _wireSavedQueryConsole(_entraQueryStore, "entra",
+    function () {
+      return {
+        path: document.getElementById("entra-path").value.trim(),
+        query: document.getElementById("entra-query").value,
+      };
+    },
+    function (q) {
+      document.getElementById("entra-path").value = q.path || "";
+      document.getElementById("entra-query").value = q.query || "";
+    });
 
   document.getElementById("entra-send").addEventListener("click", async function () {
     var btn = this;
@@ -6488,30 +6460,7 @@ var _AD_PRESET_QUERIES = [
 
 var _AD_QUERIES_VERSION = 1;
 
-function _adLoadQueries() {
-  try {
-    var stored = JSON.parse(localStorage.getItem("polaris-ad-queries") || "null");
-    if (!stored || stored.v !== _AD_QUERIES_VERSION) {
-      var initial = { v: _AD_QUERIES_VERSION, queries: _AD_PRESET_QUERIES.slice() };
-      localStorage.setItem("polaris-ad-queries", JSON.stringify(initial));
-      return _AD_PRESET_QUERIES.slice();
-    }
-    return stored.queries;
-  } catch (_) { return []; }
-}
-
-function _adPersistQueries(queries) {
-  localStorage.setItem("polaris-ad-queries", JSON.stringify({ v: _AD_QUERIES_VERSION, queries: queries }));
-}
-
-function _adRenderSavedSelect(queries, selectValue) {
-  var sel = document.getElementById("ad-saved-select");
-  if (!sel) return;
-  sel.innerHTML = '<option value="">— load a saved query —</option>' +
-    queries.map(function (q, i) {
-      return '<option value="' + i + '"' + (String(i) === String(selectValue) ? " selected" : "") + '>' + escapeHtml(q.name) + '</option>';
-    }).join("");
-}
+var _adQueryStore = _makeSavedQueryStore("polaris-ad-queries", _AD_QUERIES_VERSION, _AD_PRESET_QUERIES);
 
 function openAdApiQueryModal(id) {
   var body =
@@ -6568,48 +6517,19 @@ function openAdApiQueryModal(id) {
 
   openModal("Active Directory LDAP Query", body, footer, { wide: true });
 
-  var savedQueries = _adLoadQueries();
-  _adRenderSavedSelect(savedQueries);
-
-  document.getElementById("ad-load-btn").addEventListener("click", function () {
-    var idx = parseInt(document.getElementById("ad-saved-select").value, 10);
-    if (isNaN(idx) || !savedQueries[idx]) return;
-    var q = savedQueries[idx];
-    document.getElementById("ad-filter").value = q.filter || "";
-    document.getElementById("ad-attributes").value = q.attributes || "";
-    if (q.sizeLimit) document.getElementById("ad-sizelimit").value = q.sizeLimit;
-    document.getElementById("ad-save-name").value = q.name;
-  });
-
-  document.getElementById("ad-delete-btn").addEventListener("click", async function () {
-    var idx = parseInt(document.getElementById("ad-saved-select").value, 10);
-    if (isNaN(idx) || !savedQueries[idx]) return;
-    var ok = await showConfirm("Delete saved query \"" + savedQueries[idx].name + "\"?");
-    if (!ok) return;
-    savedQueries.splice(idx, 1);
-    _adPersistQueries(savedQueries);
-    _adRenderSavedSelect(savedQueries);
-  });
-
-  document.getElementById("ad-save-btn").addEventListener("click", function () {
-    var name = document.getElementById("ad-save-name").value.trim();
-    if (!name) { showToast("Enter a name for this query", "error"); return; }
-    var filter = document.getElementById("ad-filter").value.trim();
-    var attributes = document.getElementById("ad-attributes").value;
-    var sizeLimit = document.getElementById("ad-sizelimit").value;
-    var existIdx = -1;
-    savedQueries.forEach(function (q, i) { if (q.name === name) existIdx = i; });
-    var entry = { name: name, filter: filter, attributes: attributes, sizeLimit: sizeLimit };
-    if (existIdx >= 0) {
-      savedQueries[existIdx] = entry;
-    } else {
-      savedQueries.push(entry);
-      existIdx = savedQueries.length - 1;
-    }
-    _adPersistQueries(savedQueries);
-    _adRenderSavedSelect(savedQueries, existIdx);
-    showToast("Query saved");
-  });
+  _wireSavedQueryConsole(_adQueryStore, "ad",
+    function () {
+      return {
+        filter: document.getElementById("ad-filter").value.trim(),
+        attributes: document.getElementById("ad-attributes").value,
+        sizeLimit: document.getElementById("ad-sizelimit").value,
+      };
+    },
+    function (q) {
+      document.getElementById("ad-filter").value = q.filter || "";
+      document.getElementById("ad-attributes").value = q.attributes || "";
+      if (q.sizeLimit) document.getElementById("ad-sizelimit").value = q.sizeLimit;
+    });
 
   document.getElementById("ad-send").addEventListener("click", async function () {
     var btn = this;
@@ -6697,30 +6617,7 @@ var _VC_PRESET_QUERIES = [
 
 var _VC_QUERIES_VERSION = 1;
 
-function _vcLoadQueries() {
-  try {
-    var stored = JSON.parse(localStorage.getItem("polaris-vcenter-queries") || "null");
-    if (!stored || stored.v !== _VC_QUERIES_VERSION) {
-      var initial = { v: _VC_QUERIES_VERSION, queries: _VC_PRESET_QUERIES.slice() };
-      localStorage.setItem("polaris-vcenter-queries", JSON.stringify(initial));
-      return _VC_PRESET_QUERIES.slice();
-    }
-    return stored.queries;
-  } catch (_) { return []; }
-}
-
-function _vcPersistQueries(queries) {
-  localStorage.setItem("polaris-vcenter-queries", JSON.stringify({ v: _VC_QUERIES_VERSION, queries: queries }));
-}
-
-function _vcRenderSavedSelect(queries, selectValue) {
-  var sel = document.getElementById("vc-saved-select");
-  if (!sel) return;
-  sel.innerHTML = '<option value="">— load a saved query —</option>' +
-    queries.map(function (q, i) {
-      return '<option value="' + i + '"' + (String(i) === String(selectValue) ? " selected" : "") + '>' + escapeHtml(q.name) + '</option>';
-    }).join("");
-}
+var _vcQueryStore = _makeSavedQueryStore("polaris-vcenter-queries", _VC_QUERIES_VERSION, _VC_PRESET_QUERIES);
 
 function openVcenterApiQueryModal(id) {
   var body =
@@ -6768,48 +6665,19 @@ function openVcenterApiQueryModal(id) {
 
   openModal("vCenter API Query", body, footer, { wide: true });
 
-  var savedQueries = _vcLoadQueries();
-  _vcRenderSavedSelect(savedQueries);
-
-  document.getElementById("vc-load-btn").addEventListener("click", function () {
-    var idx = parseInt(document.getElementById("vc-saved-select").value, 10);
-    if (isNaN(idx) || !savedQueries[idx]) return;
-    var q = savedQueries[idx];
-    document.getElementById("vc-method").value = q.method || "GET";
-    document.getElementById("vc-path").value = q.path || "";
-    document.getElementById("vc-query").value = q.query || "";
-    document.getElementById("vc-save-name").value = q.name;
-  });
-
-  document.getElementById("vc-delete-btn").addEventListener("click", async function () {
-    var idx = parseInt(document.getElementById("vc-saved-select").value, 10);
-    if (isNaN(idx) || !savedQueries[idx]) return;
-    var ok = await showConfirm("Delete saved query \"" + savedQueries[idx].name + "\"?");
-    if (!ok) return;
-    savedQueries.splice(idx, 1);
-    _vcPersistQueries(savedQueries);
-    _vcRenderSavedSelect(savedQueries);
-  });
-
-  document.getElementById("vc-save-btn").addEventListener("click", function () {
-    var name = document.getElementById("vc-save-name").value.trim();
-    if (!name) { showToast("Enter a name for this query", "error"); return; }
-    var method = document.getElementById("vc-method").value;
-    var path = document.getElementById("vc-path").value.trim();
-    var query = document.getElementById("vc-query").value;
-    var existIdx = -1;
-    savedQueries.forEach(function (q, i) { if (q.name === name) existIdx = i; });
-    var entry = { name: name, method: method, path: path, query: query };
-    if (existIdx >= 0) {
-      savedQueries[existIdx] = entry;
-    } else {
-      savedQueries.push(entry);
-      existIdx = savedQueries.length - 1;
-    }
-    _vcPersistQueries(savedQueries);
-    _vcRenderSavedSelect(savedQueries, existIdx);
-    showToast("Query saved");
-  });
+  _wireSavedQueryConsole(_vcQueryStore, "vc",
+    function () {
+      return {
+        method: document.getElementById("vc-method").value,
+        path: document.getElementById("vc-path").value.trim(),
+        query: document.getElementById("vc-query").value,
+      };
+    },
+    function (q) {
+      document.getElementById("vc-method").value = q.method || "GET";
+      document.getElementById("vc-path").value = q.path || "";
+      document.getElementById("vc-query").value = q.query || "";
+    });
 
   document.getElementById("vc-send").addEventListener("click", async function () {
     var btn = this;
