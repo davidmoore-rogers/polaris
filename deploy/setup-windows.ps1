@@ -343,7 +343,26 @@ POLARIS_SECRET_KEY=$polarisSecretKey
 "@ | Set-Content $envFile -Encoding UTF8
     Write-Info ".env created with generated SESSION_SECRET + POLARIS_SECRET_KEY"
 } else {
-    Write-Info ".env already exists — skipping"
+    Write-Info ".env already exists — appending secret-key env var if missing"
+    # Installs that predate secrets-at-rest have no key, so device + integration
+    # credentials sit in the clear in Postgres (and in every pg_dump). Mint one
+    # here; the backfillSecretEncryption job seals the existing rows on next boot.
+    if (-not (Select-String -Path $envFile -Pattern '^POLARIS_SECRET_KEY=' -Quiet)) {
+        $keyBytes = New-Object 'System.Byte[]' 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($keyBytes)
+        $polarisSecretKey = -join ($keyBytes | ForEach-Object { $_.ToString('x2') })
+        @"
+
+# Added by setup-windows.ps1 — encryption key for secrets stored in the database
+# (SNMP communities, WinRM/SSH passwords + private keys, FortiManager/FortiGate
+# API tokens, the Entra client secret, vCenter credentials, delivery-channel
+# secrets). KEEP A COPY OFF THIS HOST: sealed secrets cannot be recovered
+# without this key, and a backup restored onto a host with a different key
+# needs its device + integration secrets re-entered.
+POLARIS_SECRET_KEY=$polarisSecretKey
+"@ | Add-Content $envFile -Encoding UTF8
+        Write-Warn "Generated POLARIS_SECRET_KEY — back it up somewhere other than this host before the next backup"
+    }
 }
 
 # ─── 6. Install dependencies & build ─────────────────────────────────────────

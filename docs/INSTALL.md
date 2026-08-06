@@ -632,6 +632,42 @@ Use the shipped `docker-compose.yml` — one image, per-service `POLARIS_ROLE`, 
 one-shot `migrate` service the app services gate on
 (`service_completed_successfully`), and `monitor` with `deploy.replicas`.
 
+**Secrets are not auto-generated for the compose stack.** The `deploy/setup-*`
+scripts and the first-run wizard mint `SESSION_SECRET` and `POLARIS_SECRET_KEY`
+for you, but neither runs here: this stack supplies `DATABASE_URL` up front, and
+a set `DATABASE_URL` is exactly what tells Polaris to boot normally instead of
+starting the wizard. (A single-container deployment that *does* let the wizard
+run — the Unraid path in the README — gets both values written into
+`/app/state/.env` for free.) For compose, write them into `./state/.env` before
+the first `compose up`:
+
+```bash
+mkdir -p ./state
+{
+  echo "DATABASE_URL=postgresql://polaris:<password>@<host>:5432/polaris"
+  echo "SESSION_SECRET=$(openssl rand -base64 32)"
+  echo "POLARIS_SECRET_KEY=$(openssl rand -hex 32)"
+} >> ./state/.env
+chmod 600 ./state/.env
+```
+
+`POLARIS_SECRET_KEY` encrypts the credentials Polaris uses to reach your
+infrastructure — see [Secrets at rest](#secrets-at-rest) for the full list and
+for what to do if you skipped it and the values are already in the clear.
+Without it they are stored as **plaintext**, which means plaintext in every
+`pg_dump` and in any snapshot of the database volume.
+
+Two container-specific cautions:
+
+- **`./state/.env` is on a bind mount, not in the image.** A `docker compose
+  down -v` or a rebuilt host loses it. Back the key up somewhere else *before*
+  you take the first backup — a dump you cannot decrypt is worth less than you
+  think.
+- **Prefer your orchestrator's secret store.** In Kubernetes or Swarm, deliver
+  both values as secrets rather than a file on disk; in a managed deployment
+  inject them from Azure Key Vault. Do not inline them into
+  `docker-compose.yml` — it is committed, `./state/.env` is gitignored.
+
 ### Sizing — connections multiply
 
 Each process opens its own Prisma + pg-boss pool, so the group needs roughly
@@ -993,7 +1029,7 @@ Two more things worth knowing before you need them:
 
 Polaris stores the credentials it uses to reach your infrastructure in its own database: SNMP communities, WinRM and SSH passwords and private keys, FortiManager and FortiGate API tokens, the Entra client secret, the AD bind password, vCenter credentials, and delivery-channel secrets (SMTP password, M365 client secret, Slack/Teams webhook URLs, the Web Push private key).
 
-`POLARIS_SECRET_KEY` in `/opt/polaris/.env` encrypts those values (AES-256-GCM, per-value). The setup wizard and every `deploy/setup-*` script generate one automatically, so a fresh install is already covered. Verify with:
+`POLARIS_SECRET_KEY` in `/opt/polaris/.env` encrypts those values (AES-256-GCM, per-value). The first-run wizard and every `deploy/setup-*` script generate one automatically, so a fresh install is already covered — and re-running a setup script over an existing `.env` appends a key if one is missing. The exception is **Docker**, where no wizard or setup script runs: you supply the key yourself (see [Docker](#docker)). Verify with:
 
 ```bash
 grep -c '^POLARIS_SECRET_KEY=' /opt/polaris/.env    # expect 1

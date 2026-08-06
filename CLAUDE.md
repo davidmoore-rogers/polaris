@@ -372,7 +372,11 @@ METRICS_TOKEN=
 
 # Encryption key for secrets stored in the DB (32 bytes as 64 hex chars) —
 # Credential.config, Integration.config, NotificationChannel.config and the
-# secret-bearing Setting rows. Auto-generated at first-run setup. When UNSET the
+# secret-bearing Setting rows. Auto-generated at first-run setup and by every
+# deploy/setup-* script — including onto an EXISTING .env on re-run, so an
+# install that predates the feature picks one up. The multi-container
+# docker-compose stack is the exception (it presets DATABASE_URL, so the wizard
+# never runs): supply it in ./state/.env yourself. When UNSET the
 # sealing in db.ts is a NO-OP and those values are stored as PLAINTEXT (the
 # pre-2026-08 behavior, so an in-app update never breaks a running install);
 # the absence surfaces a `secrets_key_unset` watch reason. Setting it and

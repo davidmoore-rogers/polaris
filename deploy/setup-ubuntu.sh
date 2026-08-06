@@ -324,7 +324,7 @@ ENVFILE
   chmod 600 "$APP_DIR/.env"
   info ".env created with generated SESSION_SECRET + POLARIS_SECRET_KEY + proxy-mode env vars"
 else
-  info ".env already exists — appending proxy-mode + replica env vars if missing"
+  info ".env already exists — appending proxy-mode + replica + secret-key env vars if missing"
   if ! grep -q '^POLARIS_PROXY_CERT_PATH=' "$APP_DIR/.env"; then
     {
       echo ""
@@ -339,6 +339,22 @@ else
       echo "# Added by setup-ubuntu.sh — split-role replica count (Capacity Advisor input)"
       echo "POLARIS_MONITOR_REPLICAS=${MONITOR_REPLICAS}"
     } >> "$APP_DIR/.env"
+  fi
+  # Installs that predate secrets-at-rest have no key, so device + integration
+  # credentials sit in the clear in Postgres (and in every pg_dump). Mint one
+  # here; the backfillSecretEncryption job seals the existing rows on next boot.
+  if ! grep -q '^POLARIS_SECRET_KEY=' "$APP_DIR/.env"; then
+    {
+      echo ""
+      echo "# Added by setup-ubuntu.sh — encryption key for secrets stored in the database"
+      echo "# (SNMP communities, WinRM/SSH passwords + private keys, FortiManager/FortiGate"
+      echo "# API tokens, the Entra client secret, vCenter credentials, delivery-channel"
+      echo "# secrets). KEEP A COPY OFF THIS HOST: sealed secrets cannot be recovered"
+      echo "# without this key, and a backup restored onto a host with a different key"
+      echo "# needs its device + integration secrets re-entered."
+      echo "POLARIS_SECRET_KEY=$(openssl rand -hex 32)"
+    } >> "$APP_DIR/.env"
+    warn "Generated POLARIS_SECRET_KEY — back it up somewhere other than this host before the next backup"
   fi
 fi
 

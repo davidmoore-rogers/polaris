@@ -163,7 +163,9 @@ Multi-stage image, ~940 MB, x86_64. PostgreSQL is **not** included — run a `po
 |---|---|---|
 | `/app/state` | `/mnt/user/appdata/polaris` | `.env`, `.setup-complete`, `data/backups/`, `public/uploads/` |
 
-On first launch the container starts the setup wizard at `http://<host>:3000` (DB host, admin account, session secret). The wizard supports self-signed Postgres TLS via an "Allow self-signed certificate" toggle. After finalize, the container restarts itself into the main app.
+On first launch the container starts the setup wizard at `http://<host>:3000` (DB host, admin account, session secret). The wizard supports self-signed Postgres TLS via an "Allow self-signed certificate" toggle. After finalize, the container restarts itself into the main app — with a generated `POLARIS_SECRET_KEY` in `/app/state/.env` that encrypts stored device + integration credentials. **Back that key up off the host:** it lives on the bind mount, and sealed secrets cannot be recovered without it.
+
+If you instead run the multi-container `docker-compose.yml` stack, it supplies `DATABASE_URL` up front so the wizard never runs — generate `SESSION_SECRET` and `POLARIS_SECRET_KEY` into `./state/.env` yourself first. See [docs/INSTALL.md → Docker](docs/INSTALL.md#docker).
 
 Updates: `docker pull` + restart. The in-app updater under Server Settings → Maintenance is for the script-deployed RHEL / Ubuntu / Windows path; image-based deployments update by pulling a new tag. Every commit to `main` builds and publishes `:latest`, the branch name, and `:sha-<short>` to GHCR via GitHub Actions.
 
