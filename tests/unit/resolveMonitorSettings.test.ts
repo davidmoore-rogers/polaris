@@ -527,7 +527,12 @@ describe("resolveMonitorSettingsWithProvenance — labels each field", () => {
     });
     expect(out.tier3Source).toBe("integration");
     expect(out.classOverrideId).toBeNull();
-    Object.values(out.provenance).forEach((tier) => expect(tier).toBe("integration"));
+    // Polling fields where no tier supplies a method resolve to the runtime
+    // source default and are labeled "default" (2026-08 resolver fold —
+    // TUNED_TIER sets no polling methods). Every other field is tier-3's.
+    for (const [field, tier] of Object.entries(out.provenance)) {
+      expect(tier, field).toBe(field.endsWith("Polling") ? "default" : "integration");
+    }
   });
 
   it("labels manual when asset has no integration", async () => {
@@ -544,7 +549,9 @@ describe("resolveMonitorSettingsWithProvenance — labels each field", () => {
       probeTimeoutMs:            null,
     });
     expect(out.tier3Source).toBe("manual");
-    Object.values(out.provenance).forEach((tier) => expect(tier).toBe("manual"));
+    for (const [field, tier] of Object.entries(out.provenance)) {
+      expect(tier, field).toBe(field.endsWith("Polling") ? "default" : "manual");
+    }
   });
 
   it("labels per-field provenance correctly when class + asset overrides mix", async () => {
@@ -577,5 +584,36 @@ describe("resolveMonitorSettingsWithProvenance — labels each field", () => {
     expect(out.provenance.probeTimeoutMs).toBe("class");
     expect(out.provenance.failureThreshold).toBe("integration");
     expect(out.classOverrideId).toBe("class-row-id");
+  });
+
+  it("labels the runtime truth when a tier's polling method is incompatible (resolver fold)", async () => {
+    // AD-sourced asset with a class override pinning cpuMemoryPolling to
+    // rest_api — a method the compatibility matrix rejects for directory
+    // sources. Pre-fold, the provenance path adopted the class value ungated
+    // (badge said "class: REST API" while the runtime used the source
+    // default). Post-fold both resolvers substitute the default and the
+    // label says so.
+    (prisma.integration.findUnique as any).mockResolvedValue({ config: { monitorSettings: TUNED_TIER }, type: "activedirectory" });
+    (prisma.monitorClassOverride.findFirst as any).mockResolvedValue({ cpuMemoryPolling: "rest_api" });
+
+    const ctx = {
+      assetType:                   "server",
+      discoveredByIntegrationId:   "ad-1",
+      discoveredByIntegrationType: "activedirectory",
+      monitorIntervalSec:          null,
+      cpuMemoryIntervalSec:        null,
+      temperatureIntervalSec:      null,
+      systemInfoIntervalSec:       null,
+      probeTimeoutMs:              null,
+    };
+    const out = await resolveMonitorSettingsWithProvenance(ctx);
+    // AD sources have no cpuMemory default — the incompatible class value is
+    // skipped, not displayed.
+    expect(out.resolved.cpuMemoryPolling).toBeNull();
+    expect(out.provenance.cpuMemoryPolling).toBe("default");
+    expect(out.inheritPolling.values.cpuMemoryPolling).toBeNull();
+    expect(out.inheritPolling.provenance.cpuMemoryPolling).toBe("default");
+    // The fold's guarantee: the UI payload IS the runtime resolution.
+    expect(await resolveMonitorSettings(ctx)).toEqual(out.resolved);
   });
 });

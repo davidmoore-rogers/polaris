@@ -299,20 +299,21 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
 // ─── Effective settings + provenance resolver ──────────────────────────────
 
 d("GET /api/v1/assets/:id/effective-monitor-settings", () => {
-  it("returns null polling (source-default sentinel) for an asset under the manual tier with no overrides", async () => {
+  it("returns the runtime source defaults for an asset under the manual tier with no overrides", async () => {
     const { agent } = await authedAgent(app);
     const asset = await prisma.asset.create({
       data: { hostname: "manual-host", assetType: "server" },
     });
     const resp = await agent.get(`/api/v1/assets/${asset.id}/effective-monitor-settings`);
     expect(resp.status).toBe(200);
-    // Polling fields stay null at every tier when unset — null means "source
-    // default", which is applied at dispatch time by defaultPollingForSource
-    // (manual → icmp for response-time) and mirrored client-side in the UI.
-    // The provenance endpoint reports the stored tier values, not the
-    // materialized defaults.
-    expect(resp.body.resolved.responseTimePolling).toBeNull();
+    // Since the 2026-08 resolver fold, the provenance endpoint reports the
+    // MATERIALIZED runtime resolution: when no tier sets a method, resolved
+    // carries the source default (manual → icmp for response-time, null for
+    // telemetry) labeled "default".
+    expect(resp.body.resolved.responseTimePolling).toBe("icmp");
+    expect(resp.body.provenance.responseTimePolling).toBe("default");
     expect(resp.body.resolved.cpuMemoryPolling).toBeNull();
+    expect(resp.body.provenance.cpuMemoryPolling).toBe("default");
     expect(resp.body.tier3Source).toBe("manual");
   });
 
@@ -339,10 +340,10 @@ d("GET /api/v1/assets/:id/effective-monitor-settings", () => {
     expect(resp.status).toBe(200);
     expect(resp.body.resolved.cpuMemoryPolling).toBe("snmp");
     expect(resp.body.provenance.cpuMemoryPolling).toBe("asset");
-    // Unset streams stay null (source default is applied at dispatch time,
-    // not here); provenance reports the tier-3 baseline for them.
-    expect(resp.body.resolved.responseTimePolling).toBeNull();
-    expect(resp.body.provenance.responseTimePolling).toBe("integration");
+    // Unset streams materialize the runtime source default (2026-08 resolver
+    // fold): FMG-sourced response-time defaults to icmp, labeled "default".
+    expect(resp.body.resolved.responseTimePolling).toBe("icmp");
+    expect(resp.body.provenance.responseTimePolling).toBe("default");
     expect(resp.body.tier3Source).toBe("integration");
   });
 });

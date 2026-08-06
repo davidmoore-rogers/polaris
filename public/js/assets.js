@@ -3595,7 +3595,9 @@ async function _populateAssetMonitorTierBadges(asset) {
     if (!sel) return;
     var hasPreview = eff.inheritPolling && eff.inheritPolling.provenance && (fieldKey in eff.inheritPolling.provenance);
     var prov = hasPreview ? eff.inheritPolling.provenance[fieldKey] : eff.provenance[fieldKey];
-    if (!prov || prov === "asset") return;
+    // "default" = no tier sets a compatible method; the hardcoded
+    // "Source default: X" label the HTML was built with is already right.
+    if (!prov || prov === "asset" || prov === "default") return;
     var resolved = hasPreview ? eff.inheritPolling.values[fieldKey] : eff.resolved[fieldKey];
     var inheritOpt = sel.querySelector('option[value=""]');
     if (!inheritOpt) return;
@@ -8443,13 +8445,17 @@ function _assetMonitorStreamSource(asset, stream) {
 }
 
 // Tier labels for the four-tier hierarchy. Provenance values
-// ("asset"|"class"|"integration"|"manual") come from /effective-monitor-
-// settings. The badge tells the operator where to go to change the value.
+// ("asset"|"class"|"integration"|"manual"|"default") come from
+// /effective-monitor-settings. The badge tells the operator where to go to
+// change the value; "default" means no tier set a compatible method and the
+// runtime source default applies (2026-08 resolver fold — the badges now
+// always describe what the monitor runtime actually does).
 var _TIER_LABELS = {
   asset:       "Asset override",
   class:       "Class override",
   integration: "Integration",
   manual:      "Manual",
+  default:     "Source default",
 };
 
 // Transport descriptor for a resolved polling method. Returns the inner

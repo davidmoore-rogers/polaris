@@ -1136,186 +1136,19 @@ export interface AssetMonitorContext {
  *      in place.
  *   3. Class override applies the same compatible-or-skip rule.
  *   4. Per-asset value applies the same rule.
+ *
+ * SINGLE IMPLEMENTATION (2026-08 fold): this wrapper and
+ * `resolveMonitorSettingsWithProvenance` both derive from
+ * `resolveMonitorSettingsCore`, so the values the UI labels are BY
+ * CONSTRUCTION the values the monitor runtime uses. The previous parallel
+ * implementation let the provenance path adopt tier-3/class polling methods
+ * ungated, so the asset modal could display a method the runtime silently
+ * ignored.
  */
 export async function resolveMonitorSettings(asset: AssetMonitorContext): Promise<ResolvedMonitorSettings> {
-  // Tier 3 (integration-tier or manual-tier). Per-class streams overlay is
-  // applied inside loadIntegrationTierSettings when the integration carries
-  // a matching `<klass>Monitor.streams` block for asset.assetType.
-  const tier3 = asset.discoveredByIntegrationId
-    ? await loadIntegrationTierSettings(asset.discoveredByIntegrationId, asset.assetType)
-    : await loadManualTierSettings();
-
-  // Tier 2 (class override scoped to the same tier-3 source).
-  const classOverride = await loadClassOverride(
-    asset.discoveredByIntegrationId,
-    asset.assetType,
-  );
-
-  // Resolve the asset's source kind once — drives both the polling default
-  // and the compatibility check at every layer.
-  const sourceKind = assetSourceKindFromIntegrationType(asset.discoveredByIntegrationType ?? null);
-
-  // Compose tier 3 → tier 2 for the cadence/retention fields. Polling fields
-  // are resolved separately below with the compatibility-aware fallthrough.
-  const merged: ResolvedMonitorSettings = { ...tier3 };
-  if (classOverride) {
-    if (classOverride.intervalSeconds            != null) merged.intervalSeconds            = classOverride.intervalSeconds;
-    if (classOverride.failureThreshold           != null) merged.failureThreshold           = classOverride.failureThreshold;
-    if (classOverride.probeTimeoutMs             != null) merged.probeTimeoutMs             = classOverride.probeTimeoutMs;
-    if (classOverride.cpuMemoryTimeoutMs         != null) merged.cpuMemoryTimeoutMs         = classOverride.cpuMemoryTimeoutMs;
-    if (classOverride.temperatureTimeoutMs       != null) merged.temperatureTimeoutMs       = classOverride.temperatureTimeoutMs;
-    if (classOverride.systemInfoTimeoutMs        != null) merged.systemInfoTimeoutMs        = classOverride.systemInfoTimeoutMs;
-    if (classOverride.cpuMemoryIntervalSeconds   != null) merged.cpuMemoryIntervalSeconds   = classOverride.cpuMemoryIntervalSeconds;
-    if (classOverride.temperatureIntervalSeconds != null) merged.temperatureIntervalSeconds = classOverride.temperatureIntervalSeconds;
-    if (classOverride.systemInfoIntervalSeconds  != null) merged.systemInfoIntervalSeconds  = classOverride.systemInfoIntervalSeconds;
-    if (classOverride.sampleRetentionDays        != null) merged.sampleRetentionDays        = classOverride.sampleRetentionDays;
-    if (classOverride.telemetryRetentionDays     != null) merged.telemetryRetentionDays     = classOverride.telemetryRetentionDays;
-    if (classOverride.systemInfoRetentionDays    != null) merged.systemInfoRetentionDays    = classOverride.systemInfoRetentionDays;
-  }
-
-  // Tier 1 (per-asset cadence / timeout overrides).
-  if (asset.monitorIntervalSec     != null) merged.intervalSeconds            = asset.monitorIntervalSec;
-  if (asset.cpuMemoryIntervalSec   != null) merged.cpuMemoryIntervalSeconds   = asset.cpuMemoryIntervalSec;
-  if (asset.temperatureIntervalSec != null) merged.temperatureIntervalSeconds = asset.temperatureIntervalSec;
-  if (asset.systemInfoIntervalSec  != null) merged.systemInfoIntervalSeconds  = asset.systemInfoIntervalSec;
-  if (asset.lldpIntervalSec        != null) merged.lldpIntervalSeconds        = asset.lldpIntervalSec;
-  if (asset.storageIntervalSec     != null) merged.storageIntervalSeconds     = asset.storageIntervalSec;
-  if (asset.probeTimeoutMs         != null) merged.probeTimeoutMs             = asset.probeTimeoutMs;
-  if (asset.cpuMemoryTimeoutMs     != null) merged.cpuMemoryTimeoutMs         = asset.cpuMemoryTimeoutMs;
-  if (asset.temperatureTimeoutMs   != null) merged.temperatureTimeoutMs       = asset.temperatureTimeoutMs;
-  if (asset.systemInfoTimeoutMs    != null) merged.systemInfoTimeoutMs        = asset.systemInfoTimeoutMs;
-
-  // Per-stream polling resolution — see header comment above for rules.
-  function resolveStream(
-    stream: Stream,
-    tierVal: PollingMethod | null,
-    classVal: PollingMethod | null | undefined,
-    assetVal: string | null | undefined,
-  ): PollingMethod | null {
-    // A tier's method is adopted only when it's valid for BOTH the asset's
-    // source (compatibility matrix) AND the stream (cross-transport streams
-    // restrict the method set — e.g. eventLog can't ride SNMP, processes can't
-    // ride REST). Incompatible values are silently skipped — the layer below
-    // stays in place.
-    const ok = (m: PollingMethod) => isPollingMethodCompatible(sourceKind, m) && isMethodValidForStream(stream, m);
-    let resolved: PollingMethod | null = defaultPollingForSource(sourceKind, stream);
-    if (tierVal && ok(tierVal)) {
-      resolved = tierVal;
-    }
-    if (classVal && ok(classVal)) {
-      resolved = classVal;
-    }
-    if (isPollingMethod(assetVal) && ok(assetVal)) {
-      resolved = assetVal;
-    }
-    return resolved;
-  }
-
-  merged.responseTimePolling = resolveStream(
-    "responseTime",
-    tier3.responseTimePolling,
-    classOverride?.responseTimePolling ?? null,
-    asset.responseTimePolling,
-  );
-  merged.cpuMemoryPolling = resolveStream(
-    "cpuMemory",
-    tier3.cpuMemoryPolling,
-    classOverride?.cpuMemoryPolling ?? null,
-    asset.cpuMemoryPolling,
-  );
-  merged.temperaturePolling = resolveStream(
-    "temperature",
-    tier3.temperaturePolling,
-    classOverride?.temperaturePolling ?? null,
-    asset.temperaturePolling,
-  );
-  merged.interfacesPolling = resolveStream(
-    "interfaces",
-    tier3.interfacesPolling,
-    classOverride?.interfacesPolling ?? null,
-    asset.interfacesPolling,
-  );
-  merged.lldpPolling = resolveStream(
-    "lldp",
-    tier3.lldpPolling,
-    classOverride?.lldpPolling ?? null,
-    asset.lldpPolling,
-  );
-  merged.storagePolling = resolveStream(
-    "storage",
-    tier3.storagePolling,
-    classOverride?.storagePolling ?? null,
-    asset.storagePolling,
-  );
-  merged.processesPolling = resolveStream(
-    "processes",
-    tier3.processesPolling,
-    classOverride?.processesPolling ?? null,
-    asset.processesPolling,
-  );
-  merged.eventLogPolling = resolveStream(
-    "eventLog",
-    tier3.eventLogPolling,
-    classOverride?.eventLogPolling ?? null,
-    asset.eventLogPolling,
-  );
-
-  // Cross-transport cadences/timeouts: tier-3 baseline → class override →
-  // per-asset, mirroring LLDP/Storage.
-  if (classOverride?.processesIntervalSeconds != null) merged.processesIntervalSeconds = classOverride.processesIntervalSeconds;
-  if (classOverride?.eventLogIntervalSeconds  != null) merged.eventLogIntervalSeconds  = classOverride.eventLogIntervalSeconds;
-  if (classOverride?.processesTimeoutMs       != null) merged.processesTimeoutMs       = classOverride.processesTimeoutMs;
-  if (classOverride?.eventLogTimeoutMs        != null) merged.eventLogTimeoutMs        = classOverride.eventLogTimeoutMs;
-  if (asset.processesIntervalSec != null) merged.processesIntervalSeconds = asset.processesIntervalSec;
-  if (asset.eventLogIntervalSec  != null) merged.eventLogIntervalSeconds  = asset.eventLogIntervalSec;
-  if (asset.processesTimeoutMs   != null) merged.processesTimeoutMs       = asset.processesTimeoutMs;
-  if (asset.eventLogTimeoutMs    != null) merged.eventLogTimeoutMs        = asset.eventLogTimeoutMs;
-
-  // Per-stream MIB id resolution. Same tier order as polling, but no
-  // compatibility check — the MIB id is a hint that gets consumed downstream
-  // (collectCpuMemorySnmp / collectTemperatureSnmp look up the MibFile to
-  // override profile selection).
-  function resolveMibId(
-    tier3Val: string | null,
-    classVal: string | null | undefined,
-    assetVal: string | null | undefined,
-  ): string | null {
-    let resolved: string | null = tier3Val ?? null;
-    if (classVal) resolved = classVal;
-    if (assetVal) resolved = assetVal;
-    return resolved;
-  }
-  merged.responseTimeMibId = resolveMibId(tier3.responseTimeMibId, classOverride?.responseTimeMibId, asset.responseTimeMibId);
-  merged.cpuMemoryMibId    = resolveMibId(tier3.cpuMemoryMibId,    classOverride?.cpuMemoryMibId,    asset.cpuMemoryMibId);
-  merged.temperatureMibId  = resolveMibId(tier3.temperatureMibId,  classOverride?.temperatureMibId,  asset.temperatureMibId);
-  merged.interfacesMibId   = resolveMibId(tier3.interfacesMibId,   classOverride?.interfacesMibId,   asset.interfacesMibId);
-  merged.lldpMibId         = resolveMibId(tier3.lldpMibId,         classOverride?.lldpMibId,         asset.lldpMibId);
-  merged.processesMibId    = resolveMibId(tier3.processesMibId,    classOverride?.processesMibId,    asset.processesMibId);
-
-  // Per-stream credential IDs from the class override. Per-asset overrides
-  // come from the Prisma `include` on each dispatcher, not the resolver.
-  merged.responseTimeCredentialId = classOverride?.responseTimeCredentialId ?? null;
-  merged.cpuMemoryCredentialId    = classOverride?.cpuMemoryCredentialId    ?? null;
-  merged.temperatureCredentialId  = classOverride?.temperatureCredentialId  ?? null;
-  merged.interfacesCredentialId   = classOverride?.interfacesCredentialId   ?? null;
-  merged.lldpCredentialId         = classOverride?.lldpCredentialId         ?? null;
-  merged.processesCredentialId    = classOverride?.processesCredentialId    ?? null;
-  merged.eventLogCredentialId     = classOverride?.eventLogCredentialId     ?? null;
-
-  return merged;
+  return (await resolveMonitorSettingsCore(asset)).resolved;
 }
 
-/**
- * Per-field "where did this value come from?" label. Drives the asset-modal
- * tier badges.
- *
- * `"integrationPollInterval"` is a sub-label of the integration tier used for
- * `systemInfoIntervalSeconds` only — it means the value was derived from the
- * integration's discovery `pollInterval` rather than read from an explicit
- * tier-3 JSON setting. The UI renders it as
- * `Inherit: 14400s (4h, from <integration> discovery cycle)` so operators see
- * why their interface scrape cadence matches discovery.
- */
 /**
  * Provenance label tier names:
  *   - "asset"             — per-asset column on Asset
@@ -1329,8 +1162,12 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
  *   - "manual"            — manualMonitorSettings Setting
  *   - "integrationPollInterval" — systemInfoIntervalSeconds derived from the
  *                           integration's discovery pollInterval
+ *   - "default"           — polling fields only: no tier supplied a
+ *                           compatible method, so the runtime source default
+ *                           applies (may itself be null = stream not
+ *                           delivered for this source kind)
  */
-export type ProvenanceTier = "asset" | "class" | "integration" | "integration-class" | "manual" | "integrationPollInterval";
+export type ProvenanceTier = "asset" | "class" | "integration" | "integration-class" | "manual" | "integrationPollInterval" | "default";
 
 export interface ResolvedSettingsWithProvenance {
   resolved:        ResolvedMonitorSettings;
@@ -1344,10 +1181,10 @@ export interface ResolvedSettingsWithProvenance {
    * Per-stream polling methods AS RESOLVED WITHOUT the per-asset tier — the
    * value an operator would get by selecting "Inherit". Snapshotted just
    * before the asset overlay so the edit modal's Inherit option can preview
-   * the fallback even when the asset currently carries its own override
-   * (`provenance[field] === "asset"` used to leave the label stuck on the
-   * static source-default text in that case). Null value = no tier sets a
-   * method and the runtime source default applies.
+   * the fallback even when the asset currently carries its own override.
+   * Provenance "default" = no tier sets a compatible method and the runtime
+   * source default applies (the value carries that default, which may be
+   * null when the stream isn't delivered for the source kind).
    */
   inheritPolling: {
     values:     Partial<Record<PollingField, string | null>>;
@@ -1366,67 +1203,44 @@ const POLLING_FIELDS: PollingField[] = [
   "processesPolling", "eventLogPolling",
 ];
 
+interface ResolvedCore {
+  resolved:       ResolvedMonitorSettings;
+  provenance:     Record<keyof MonitorTierSettings, ProvenanceTier>;
+  inheritPolling: ResolvedSettingsWithProvenance["inheritPolling"];
+}
+
 /**
- * Resolve effective settings for one asset AND report which tier supplied each
- * field. Slower than `resolveMonitorSettings` (one extra DB lookup for the
- * class-override row id when present) — intended for one-shot UI loads, not
- * the hot monitor loop.
+ * The one four-tier merge. Values follow RUNTIME semantics exactly — the
+ * compatibility-gated polling fallthrough, class-override-only credentials,
+ * truthy MIB adoption — and every adoption stamps the provenance label of the
+ * tier that actually won. Only the resolver caches are consulted (tier-3 +
+ * class override), so this is safe on the monitor hot path; the UI-only
+ * extras (per-class origin sub-labels, class-override row id) live in
+ * `resolveMonitorSettingsWithProvenance`.
  */
-export async function resolveMonitorSettingsWithProvenance(
-  asset: AssetMonitorContext,
-): Promise<ResolvedSettingsWithProvenance> {
+async function resolveMonitorSettingsCore(asset: AssetMonitorContext): Promise<ResolvedCore> {
   const tier3Source: "integration" | "manual" = asset.discoveredByIntegrationId ? "integration" : "manual";
+  // Tier 3 (integration-tier or manual-tier). Per-class streams overlay is
+  // applied inside loadIntegrationTierSettings when the integration carries
+  // a matching `<klass>Monitor.streams` block for asset.assetType.
   const tier3 = asset.discoveredByIntegrationId
     ? await loadIntegrationTierSettings(asset.discoveredByIntegrationId, asset.assetType)
     : await loadManualTierSettings();
 
-  // Per-class streams block detection (Phase 2). When this asset's integration
-  // carries a per-class streams block for asset.assetType AND that block sets
-  // a non-null value on a stream, the corresponding `tier3` field originated
-  // at the class level rather than the flat baseline — provenance reports
-  // "integration-class" so the asset modal can label the badge accordingly.
-  // Cheap extra lookup (one integration row, already-cached config blob);
-  // skipped for manual-tier assets which never have per-class streams.
-  let perClassFieldOrigins: Partial<Record<keyof MonitorTierSettings, true>> = {};
-  if (asset.discoveredByIntegrationId) {
-    const intRow = await prisma.integration.findUnique({
-      where:  { id: asset.discoveredByIntegrationId },
-      select: { config: true, type: true },
-    });
-    const cfg = (intRow?.config as Record<string, unknown> | null) ?? {};
-    const streams = pickClassStreamsBlock(intRow?.type ?? null, cfg, asset.assetType);
-    if (streams) {
-      perClassFieldOrigins = detectPerClassFieldOrigins(streams);
-    }
-  }
+  // Tier 2 (class override scoped to the same tier-3 source).
+  const classOverride = await loadClassOverride(
+    asset.discoveredByIntegrationId,
+    asset.assetType,
+  );
 
-  const classOverride = await loadClassOverride(asset.discoveredByIntegrationId, asset.assetType);
+  // Resolve the asset's source kind once — drives both the polling default
+  // and the compatibility check at every layer.
+  const sourceKind = assetSourceKindFromIntegrationType(asset.discoveredByIntegrationType ?? null);
 
-  // Class-override row id (extra lookup; only needed by this provenance API).
-  let classOverrideId: string | null = null;
-  if (classOverride) {
-    const row = await prisma.monitorClassOverride.findFirst({
-      where:  { integrationId: asset.discoveredByIntegrationId, assetType: asset.assetType },
-      select: { id: true },
-    });
-    classOverrideId = row?.id ?? null;
-  }
-
-  const resolved: ResolvedMonitorSettings = { ...tier3 };
-  // systemInfoIntervalSeconds carries a sub-label: when the integration tier
-  // derived the value from Integration.pollInterval (rather than an explicit
-  // tier-3 JSON entry), provenance reads "integrationPollInterval" so the UI
-  // can render a discovery-cycle-aware hint. Only applies to the integration
-  // tier — manual-tier orphan assets always carry the literal "manual" label.
-  const systemInfoTier3Label: ProvenanceTier =
-    tier3Source === "integration"
-      && asset.discoveredByIntegrationId != null
-      && tierSystemInfoFromPollIntervalCache.get(`${asset.discoveredByIntegrationId}:${asset.assetType}`) === true
-      ? "integrationPollInterval"
-      : tier3Source;
-  // Initialize provenance to tier3Source for every field; class/asset layers
-  // overwrite below. Listing the keys explicitly keeps the type checker happy
-  // (Record<keyof X, ...>) without an Object.fromEntries dance.
+  const merged: ResolvedMonitorSettings = { ...tier3 };
+  // Every field starts attributed to tier 3; each adopting layer below
+  // overwrites its label. Listing the keys explicitly keeps the type checker
+  // happy (Record<keyof X, ...>) without an Object.fromEntries dance.
   const provenance: Record<keyof MonitorTierSettings, ProvenanceTier> = {
     intervalSeconds:            tier3Source,
     failureThreshold:           tier3Source,
@@ -1436,7 +1250,7 @@ export async function resolveMonitorSettingsWithProvenance(
     systemInfoTimeoutMs:        tier3Source,
     cpuMemoryIntervalSeconds:   tier3Source,
     temperatureIntervalSeconds: tier3Source,
-    systemInfoIntervalSeconds:  systemInfoTier3Label,
+    systemInfoIntervalSeconds:  tier3Source,
     lldpIntervalSeconds:        tier3Source,
     lldpTimeoutMs:              tier3Source,
     storageIntervalSeconds:     tier3Source,
@@ -1462,9 +1276,8 @@ export async function resolveMonitorSettingsWithProvenance(
     interfacesMibId:            tier3Source,
     lldpMibId:                  tier3Source,
     processesMibId:             tier3Source,
-    // Credential IDs are class-override only; UI badges treat the resolved
-    // value as "class" when set, but the initial label tracks the tier-3
-    // source for consistency. The dispatcher walks the same fallback chain.
+    // Credential IDs are class-override only at runtime; the label flips to
+    // "class" when one is set and the tier-3 label on a null value is inert.
     responseTimeCredentialId:   tier3Source,
     cpuMemoryCredentialId:      tier3Source,
     temperatureCredentialId:    tier3Source,
@@ -1474,161 +1287,202 @@ export async function resolveMonitorSettingsWithProvenance(
     eventLogCredentialId:       tier3Source,
   };
 
-  // Stamp "integration-class" on every field the per-class streams block
-  // contributed. Done BEFORE the classOverride layer so a real
-  // MonitorClassOverride hit later still wins. Manual-tier orphan assets
-  // keep the literal "manual" label since the perClassFieldOrigins map is
-  // always empty for them.
-  for (const field of Object.keys(perClassFieldOrigins) as Array<keyof MonitorTierSettings>) {
-    provenance[field] = "integration-class";
-  }
-
+  // Compose tier 3 → tier 2 for the cadence/retention fields. Polling fields
+  // are resolved separately below with the compatibility-aware fallthrough.
   if (classOverride) {
-    // Field-by-field copy + provenance bump. The mixed value types (numbers
-    // for cadence, PollingMethod for polling) make the previous loop hostile
-    // to TypeScript's narrowing — listing each field explicitly keeps the
-    // types straight without `as any`.
-    if (classOverride.intervalSeconds            != null) { resolved.intervalSeconds            = classOverride.intervalSeconds;            provenance.intervalSeconds            = "class"; }
-    if (classOverride.failureThreshold           != null) { resolved.failureThreshold           = classOverride.failureThreshold;           provenance.failureThreshold           = "class"; }
-    if (classOverride.probeTimeoutMs             != null) { resolved.probeTimeoutMs             = classOverride.probeTimeoutMs;             provenance.probeTimeoutMs             = "class"; }
-    if (classOverride.cpuMemoryTimeoutMs         != null) { resolved.cpuMemoryTimeoutMs         = classOverride.cpuMemoryTimeoutMs;         provenance.cpuMemoryTimeoutMs         = "class"; }
-    if (classOverride.temperatureTimeoutMs       != null) { resolved.temperatureTimeoutMs       = classOverride.temperatureTimeoutMs;       provenance.temperatureTimeoutMs       = "class"; }
-    if (classOverride.systemInfoTimeoutMs        != null) { resolved.systemInfoTimeoutMs        = classOverride.systemInfoTimeoutMs;        provenance.systemInfoTimeoutMs        = "class"; }
-    if (classOverride.cpuMemoryIntervalSeconds   != null) { resolved.cpuMemoryIntervalSeconds   = classOverride.cpuMemoryIntervalSeconds;   provenance.cpuMemoryIntervalSeconds   = "class"; }
-    if (classOverride.temperatureIntervalSeconds != null) { resolved.temperatureIntervalSeconds = classOverride.temperatureIntervalSeconds; provenance.temperatureIntervalSeconds = "class"; }
-    if (classOverride.systemInfoIntervalSeconds  != null) { resolved.systemInfoIntervalSeconds  = classOverride.systemInfoIntervalSeconds;  provenance.systemInfoIntervalSeconds  = "class"; }
-    if (classOverride.sampleRetentionDays        != null) { resolved.sampleRetentionDays        = classOverride.sampleRetentionDays;        provenance.sampleRetentionDays        = "class"; }
-    if (classOverride.telemetryRetentionDays     != null) { resolved.telemetryRetentionDays     = classOverride.telemetryRetentionDays;     provenance.telemetryRetentionDays     = "class"; }
-    if (classOverride.systemInfoRetentionDays    != null) { resolved.systemInfoRetentionDays    = classOverride.systemInfoRetentionDays;    provenance.systemInfoRetentionDays    = "class"; }
-    if (classOverride.responseTimePolling)         { resolved.responseTimePolling = classOverride.responseTimePolling; provenance.responseTimePolling = "class"; }
-    if (classOverride.cpuMemoryPolling)            { resolved.cpuMemoryPolling    = classOverride.cpuMemoryPolling;    provenance.cpuMemoryPolling    = "class"; }
-    if (classOverride.temperaturePolling)          { resolved.temperaturePolling  = classOverride.temperaturePolling;  provenance.temperaturePolling  = "class"; }
-    if (classOverride.interfacesPolling)           { resolved.interfacesPolling   = classOverride.interfacesPolling;   provenance.interfacesPolling   = "class"; }
-    if (classOverride.lldpPolling)                 { resolved.lldpPolling         = classOverride.lldpPolling;         provenance.lldpPolling         = "class"; }
-    if (classOverride.storagePolling)              { resolved.storagePolling      = classOverride.storagePolling;      provenance.storagePolling      = "class"; }
-    if (classOverride.processesPolling)            { resolved.processesPolling    = classOverride.processesPolling;    provenance.processesPolling    = "class"; }
-    if (classOverride.eventLogPolling)             { resolved.eventLogPolling     = classOverride.eventLogPolling;     provenance.eventLogPolling     = "class"; }
-    if (classOverride.processesIntervalSeconds   != null) { resolved.processesIntervalSeconds = classOverride.processesIntervalSeconds; provenance.processesIntervalSeconds = "class"; }
-    if (classOverride.eventLogIntervalSeconds    != null) { resolved.eventLogIntervalSeconds  = classOverride.eventLogIntervalSeconds;  provenance.eventLogIntervalSeconds  = "class"; }
-    if (classOverride.processesTimeoutMs         != null) { resolved.processesTimeoutMs       = classOverride.processesTimeoutMs;       provenance.processesTimeoutMs       = "class"; }
-    if (classOverride.eventLogTimeoutMs          != null) { resolved.eventLogTimeoutMs        = classOverride.eventLogTimeoutMs;        provenance.eventLogTimeoutMs        = "class"; }
-    if (classOverride.responseTimeMibId)           { resolved.responseTimeMibId   = classOverride.responseTimeMibId;   provenance.responseTimeMibId   = "class"; }
-    if (classOverride.cpuMemoryMibId)              { resolved.cpuMemoryMibId      = classOverride.cpuMemoryMibId;      provenance.cpuMemoryMibId      = "class"; }
-    if (classOverride.temperatureMibId)            { resolved.temperatureMibId    = classOverride.temperatureMibId;    provenance.temperatureMibId    = "class"; }
-    if (classOverride.interfacesMibId)             { resolved.interfacesMibId     = classOverride.interfacesMibId;     provenance.interfacesMibId     = "class"; }
-    if (classOverride.lldpMibId)                   { resolved.lldpMibId           = classOverride.lldpMibId;           provenance.lldpMibId           = "class"; }
-    if (classOverride.responseTimeCredentialId)    { resolved.responseTimeCredentialId  = classOverride.responseTimeCredentialId;  provenance.responseTimeCredentialId  = "class"; }
-    if (classOverride.cpuMemoryCredentialId)       { resolved.cpuMemoryCredentialId     = classOverride.cpuMemoryCredentialId;     provenance.cpuMemoryCredentialId     = "class"; }
-    if (classOverride.temperatureCredentialId)     { resolved.temperatureCredentialId   = classOverride.temperatureCredentialId;   provenance.temperatureCredentialId   = "class"; }
-    if (classOverride.interfacesCredentialId)      { resolved.interfacesCredentialId    = classOverride.interfacesCredentialId;    provenance.interfacesCredentialId    = "class"; }
-    if (classOverride.lldpCredentialId)            { resolved.lldpCredentialId          = classOverride.lldpCredentialId;          provenance.lldpCredentialId          = "class"; }
-    if (classOverride.processesMibId)              { resolved.processesMibId            = classOverride.processesMibId;            provenance.processesMibId            = "class"; }
-    if (classOverride.processesCredentialId)       { resolved.processesCredentialId     = classOverride.processesCredentialId;     provenance.processesCredentialId     = "class"; }
-    if (classOverride.eventLogCredentialId)        { resolved.eventLogCredentialId      = classOverride.eventLogCredentialId;      provenance.eventLogCredentialId      = "class"; }
+    if (classOverride.intervalSeconds            != null) { merged.intervalSeconds            = classOverride.intervalSeconds;            provenance.intervalSeconds            = "class"; }
+    if (classOverride.failureThreshold           != null) { merged.failureThreshold           = classOverride.failureThreshold;           provenance.failureThreshold           = "class"; }
+    if (classOverride.probeTimeoutMs             != null) { merged.probeTimeoutMs             = classOverride.probeTimeoutMs;             provenance.probeTimeoutMs             = "class"; }
+    if (classOverride.cpuMemoryTimeoutMs         != null) { merged.cpuMemoryTimeoutMs         = classOverride.cpuMemoryTimeoutMs;         provenance.cpuMemoryTimeoutMs         = "class"; }
+    if (classOverride.temperatureTimeoutMs       != null) { merged.temperatureTimeoutMs       = classOverride.temperatureTimeoutMs;       provenance.temperatureTimeoutMs       = "class"; }
+    if (classOverride.systemInfoTimeoutMs        != null) { merged.systemInfoTimeoutMs        = classOverride.systemInfoTimeoutMs;        provenance.systemInfoTimeoutMs        = "class"; }
+    if (classOverride.cpuMemoryIntervalSeconds   != null) { merged.cpuMemoryIntervalSeconds   = classOverride.cpuMemoryIntervalSeconds;   provenance.cpuMemoryIntervalSeconds   = "class"; }
+    if (classOverride.temperatureIntervalSeconds != null) { merged.temperatureIntervalSeconds = classOverride.temperatureIntervalSeconds; provenance.temperatureIntervalSeconds = "class"; }
+    if (classOverride.systemInfoIntervalSeconds  != null) { merged.systemInfoIntervalSeconds  = classOverride.systemInfoIntervalSeconds;  provenance.systemInfoIntervalSeconds  = "class"; }
+    if (classOverride.sampleRetentionDays        != null) { merged.sampleRetentionDays        = classOverride.sampleRetentionDays;        provenance.sampleRetentionDays        = "class"; }
+    if (classOverride.telemetryRetentionDays     != null) { merged.telemetryRetentionDays     = classOverride.telemetryRetentionDays;     provenance.telemetryRetentionDays     = "class"; }
+    if (classOverride.systemInfoRetentionDays    != null) { merged.systemInfoRetentionDays    = classOverride.systemInfoRetentionDays;    provenance.systemInfoRetentionDays    = "class"; }
   }
 
-  // Inherit preview: snapshot the per-stream polling methods BEFORE the
-  // asset tier overlays them, so the edit modal can label its "Inherit"
-  // option with the real fallback even when a per-asset override is active.
+  // Tier 1 (per-asset cadence / timeout overrides).
+  if (asset.monitorIntervalSec     != null) { merged.intervalSeconds            = asset.monitorIntervalSec;     provenance.intervalSeconds            = "asset"; }
+  if (asset.cpuMemoryIntervalSec   != null) { merged.cpuMemoryIntervalSeconds   = asset.cpuMemoryIntervalSec;   provenance.cpuMemoryIntervalSeconds   = "asset"; }
+  if (asset.temperatureIntervalSec != null) { merged.temperatureIntervalSeconds = asset.temperatureIntervalSec; provenance.temperatureIntervalSeconds = "asset"; }
+  if (asset.systemInfoIntervalSec  != null) { merged.systemInfoIntervalSeconds  = asset.systemInfoIntervalSec;  provenance.systemInfoIntervalSeconds  = "asset"; }
+  if (asset.lldpIntervalSec        != null) { merged.lldpIntervalSeconds        = asset.lldpIntervalSec;        provenance.lldpIntervalSeconds        = "asset"; }
+  if (asset.storageIntervalSec     != null) { merged.storageIntervalSeconds     = asset.storageIntervalSec;     provenance.storageIntervalSeconds     = "asset"; }
+  if (asset.probeTimeoutMs         != null) { merged.probeTimeoutMs             = asset.probeTimeoutMs;         provenance.probeTimeoutMs             = "asset"; }
+  if (asset.cpuMemoryTimeoutMs     != null) { merged.cpuMemoryTimeoutMs         = asset.cpuMemoryTimeoutMs;     provenance.cpuMemoryTimeoutMs         = "asset"; }
+  if (asset.temperatureTimeoutMs   != null) { merged.temperatureTimeoutMs       = asset.temperatureTimeoutMs;   provenance.temperatureTimeoutMs       = "asset"; }
+  if (asset.systemInfoTimeoutMs    != null) { merged.systemInfoTimeoutMs        = asset.systemInfoTimeoutMs;    provenance.systemInfoTimeoutMs        = "asset"; }
+
+  // Per-stream polling resolution — see resolveMonitorSettings header for the
+  // rules. A tier's method is adopted only when it's valid for BOTH the
+  // asset's source (compatibility matrix) AND the stream (cross-transport
+  // streams restrict the method set — e.g. eventLog can't ride SNMP,
+  // processes can't ride REST). Incompatible values are silently skipped —
+  // the layer below stays in place. The pre-asset snapshot feeds the edit
+  // modal's Inherit preview.
   const inheritPolling: ResolvedSettingsWithProvenance["inheritPolling"] = { values: {}, provenance: {} };
-  for (const f of POLLING_FIELDS) {
-    inheritPolling.values[f] = (resolved[f] as string | null | undefined) ?? null;
-    inheritPolling.provenance[f] = provenance[f];
+  function resolveStream(
+    field: PollingField,
+    stream: Stream,
+    tierVal: PollingMethod | null,
+    classVal: PollingMethod | null | undefined,
+    assetVal: string | null | undefined,
+  ): void {
+    const ok = (m: PollingMethod) => isPollingMethodCompatible(sourceKind, m) && isMethodValidForStream(stream, m);
+    let resolved: PollingMethod | null = defaultPollingForSource(sourceKind, stream);
+    let tier: ProvenanceTier = "default";
+    if (tierVal && ok(tierVal)) {
+      resolved = tierVal;
+      tier = tier3Source;
+    }
+    if (classVal && ok(classVal)) {
+      resolved = classVal;
+      tier = "class";
+    }
+    inheritPolling.values[field] = resolved;
+    inheritPolling.provenance[field] = tier;
+    if (isPollingMethod(assetVal) && ok(assetVal)) {
+      resolved = assetVal;
+      tier = "asset";
+    }
+    merged[field] = resolved;
+    provenance[field] = tier;
   }
 
-  // Per-asset (only the cadence + timeout overrides).
-  if (asset.monitorIntervalSec != null) {
-    resolved.intervalSeconds = asset.monitorIntervalSec;
-    provenance.intervalSeconds = "asset";
-  }
-  if (asset.cpuMemoryIntervalSec != null) {
-    resolved.cpuMemoryIntervalSeconds = asset.cpuMemoryIntervalSec;
-    provenance.cpuMemoryIntervalSeconds = "asset";
-  }
-  if (asset.temperatureIntervalSec != null) {
-    resolved.temperatureIntervalSeconds = asset.temperatureIntervalSec;
-    provenance.temperatureIntervalSeconds = "asset";
-  }
-  if (asset.systemInfoIntervalSec != null) {
-    resolved.systemInfoIntervalSeconds = asset.systemInfoIntervalSec;
-    provenance.systemInfoIntervalSeconds = "asset";
-  }
-  if (asset.lldpIntervalSec != null) {
-    resolved.lldpIntervalSeconds = asset.lldpIntervalSec;
-    provenance.lldpIntervalSeconds = "asset";
-  }
-  if (asset.storageIntervalSec != null) {
-    resolved.storageIntervalSeconds = asset.storageIntervalSec;
-    provenance.storageIntervalSeconds = "asset";
-  }
-  if (asset.probeTimeoutMs != null) {
-    resolved.probeTimeoutMs = asset.probeTimeoutMs;
-    provenance.probeTimeoutMs = "asset";
-  }
-  if (asset.cpuMemoryTimeoutMs != null) {
-    resolved.cpuMemoryTimeoutMs = asset.cpuMemoryTimeoutMs;
-    provenance.cpuMemoryTimeoutMs = "asset";
-  }
-  if (asset.temperatureTimeoutMs != null) {
-    resolved.temperatureTimeoutMs = asset.temperatureTimeoutMs;
-    provenance.temperatureTimeoutMs = "asset";
-  }
-  if (asset.systemInfoTimeoutMs != null) {
-    resolved.systemInfoTimeoutMs = asset.systemInfoTimeoutMs;
-    provenance.systemInfoTimeoutMs = "asset";
-  }
-  if (asset.processesIntervalSec != null) {
-    resolved.processesIntervalSeconds = asset.processesIntervalSec;
-    provenance.processesIntervalSeconds = "asset";
-  }
-  if (asset.eventLogIntervalSec != null) {
-    resolved.eventLogIntervalSeconds = asset.eventLogIntervalSec;
-    provenance.eventLogIntervalSeconds = "asset";
-  }
-  if (asset.processesTimeoutMs != null) {
-    resolved.processesTimeoutMs = asset.processesTimeoutMs;
-    provenance.processesTimeoutMs = "asset";
-  }
-  if (asset.eventLogTimeoutMs != null) {
-    resolved.eventLogTimeoutMs = asset.eventLogTimeoutMs;
-    provenance.eventLogTimeoutMs = "asset";
-  }
-  // Per-asset polling overrides — only adopted when they're a real
-  // PollingMethod string AND valid for the asset's source AND the stream.
-  // A stale legacy "rest" or an incompatible value silently falls through to
-  // the class/tier value. The Stream name is derived from the field by
-  // stripping the "Polling" suffix.
-  const sourceKindForAsset = assetSourceKindFromIntegrationType(asset.discoveredByIntegrationType ?? null);
-  function takeAssetPolling(field: keyof Pick<MonitorTierSettings, "responseTimePolling" | "cpuMemoryPolling" | "temperaturePolling" | "interfacesPolling" | "lldpPolling" | "storagePolling" | "processesPolling" | "eventLogPolling">, raw: string | null | undefined) {
-    const streamName = field.replace(/Polling$/, "") as Stream;
-    if (isPollingMethod(raw) && isPollingMethodCompatible(sourceKindForAsset, raw) && isMethodValidForStream(streamName, raw)) {
-      resolved[field] = raw;
-      provenance[field] = "asset";
-    }
-  }
-  takeAssetPolling("responseTimePolling", asset.responseTimePolling);
-  takeAssetPolling("cpuMemoryPolling",    asset.cpuMemoryPolling);
-  takeAssetPolling("temperaturePolling",  asset.temperaturePolling);
-  takeAssetPolling("interfacesPolling",   asset.interfacesPolling);
-  takeAssetPolling("lldpPolling",         asset.lldpPolling);
-  takeAssetPolling("storagePolling",      asset.storagePolling);
-  takeAssetPolling("processesPolling",    asset.processesPolling);
-  takeAssetPolling("eventLogPolling",     asset.eventLogPolling);
+  resolveStream("responseTimePolling", "responseTime", tier3.responseTimePolling, classOverride?.responseTimePolling ?? null, asset.responseTimePolling);
+  resolveStream("cpuMemoryPolling",    "cpuMemory",    tier3.cpuMemoryPolling,    classOverride?.cpuMemoryPolling    ?? null, asset.cpuMemoryPolling);
+  resolveStream("temperaturePolling",  "temperature",  tier3.temperaturePolling,  classOverride?.temperaturePolling  ?? null, asset.temperaturePolling);
+  resolveStream("interfacesPolling",   "interfaces",   tier3.interfacesPolling,   classOverride?.interfacesPolling   ?? null, asset.interfacesPolling);
+  resolveStream("lldpPolling",         "lldp",         tier3.lldpPolling,         classOverride?.lldpPolling         ?? null, asset.lldpPolling);
+  resolveStream("storagePolling",      "storage",      tier3.storagePolling,      classOverride?.storagePolling      ?? null, asset.storagePolling);
+  resolveStream("processesPolling",    "processes",    tier3.processesPolling,    classOverride?.processesPolling    ?? null, asset.processesPolling);
+  resolveStream("eventLogPolling",     "eventLog",     tier3.eventLogPolling,     classOverride?.eventLogPolling     ?? null, asset.eventLogPolling);
 
-  // Per-asset MIB id overrides. Empty strings are treated as inherit; only
-  // non-empty values take effect (matches the resolver's resolveMibId rule).
-  function takeAssetMibId(stream: keyof Pick<MonitorTierSettings, "responseTimeMibId" | "cpuMemoryMibId" | "temperatureMibId" | "interfacesMibId" | "lldpMibId" | "processesMibId">, raw: string | null | undefined) {
-    if (typeof raw === "string" && raw.trim().length > 0) {
-      resolved[stream] = raw;
-      provenance[stream] = "asset";
+  // Cross-transport cadences/timeouts: tier-3 baseline → class override →
+  // per-asset, mirroring LLDP/Storage.
+  if (classOverride?.processesIntervalSeconds != null) { merged.processesIntervalSeconds = classOverride.processesIntervalSeconds; provenance.processesIntervalSeconds = "class"; }
+  if (classOverride?.eventLogIntervalSeconds  != null) { merged.eventLogIntervalSeconds  = classOverride.eventLogIntervalSeconds;  provenance.eventLogIntervalSeconds  = "class"; }
+  if (classOverride?.processesTimeoutMs       != null) { merged.processesTimeoutMs       = classOverride.processesTimeoutMs;       provenance.processesTimeoutMs       = "class"; }
+  if (classOverride?.eventLogTimeoutMs        != null) { merged.eventLogTimeoutMs        = classOverride.eventLogTimeoutMs;        provenance.eventLogTimeoutMs        = "class"; }
+  if (asset.processesIntervalSec != null) { merged.processesIntervalSeconds = asset.processesIntervalSec; provenance.processesIntervalSeconds = "asset"; }
+  if (asset.eventLogIntervalSec  != null) { merged.eventLogIntervalSeconds  = asset.eventLogIntervalSec;  provenance.eventLogIntervalSeconds  = "asset"; }
+  if (asset.processesTimeoutMs   != null) { merged.processesTimeoutMs       = asset.processesTimeoutMs;   provenance.processesTimeoutMs       = "asset"; }
+  if (asset.eventLogTimeoutMs    != null) { merged.eventLogTimeoutMs        = asset.eventLogTimeoutMs;    provenance.eventLogTimeoutMs        = "asset"; }
+
+  // Per-stream MIB id resolution. Same tier order as polling, but no
+  // compatibility check — the MIB id is a hint that gets consumed downstream
+  // (collectCpuMemorySnmp / collectTemperatureSnmp look up the MibFile to
+  // override profile selection).
+  function resolveMibId(
+    field: keyof Pick<MonitorTierSettings, "responseTimeMibId" | "cpuMemoryMibId" | "temperatureMibId" | "interfacesMibId" | "lldpMibId" | "processesMibId">,
+    tier3Val: string | null,
+    classVal: string | null | undefined,
+    assetVal: string | null | undefined,
+  ): void {
+    let resolved: string | null = tier3Val ?? null;
+    let tier: ProvenanceTier = tier3Source;
+    if (classVal) { resolved = classVal; tier = "class"; }
+    if (assetVal) { resolved = assetVal; tier = "asset"; }
+    merged[field] = resolved;
+    provenance[field] = tier;
+  }
+  resolveMibId("responseTimeMibId", tier3.responseTimeMibId, classOverride?.responseTimeMibId, asset.responseTimeMibId);
+  resolveMibId("cpuMemoryMibId",    tier3.cpuMemoryMibId,    classOverride?.cpuMemoryMibId,    asset.cpuMemoryMibId);
+  resolveMibId("temperatureMibId",  tier3.temperatureMibId,  classOverride?.temperatureMibId,  asset.temperatureMibId);
+  resolveMibId("interfacesMibId",   tier3.interfacesMibId,   classOverride?.interfacesMibId,   asset.interfacesMibId);
+  resolveMibId("lldpMibId",         tier3.lldpMibId,         classOverride?.lldpMibId,         asset.lldpMibId);
+  resolveMibId("processesMibId",    tier3.processesMibId,    classOverride?.processesMibId,    asset.processesMibId);
+
+  // Per-stream credential IDs from the class override. Per-asset overrides
+  // come from the Prisma `include` on each dispatcher, not the resolver.
+  merged.responseTimeCredentialId = classOverride?.responseTimeCredentialId ?? null;
+  merged.cpuMemoryCredentialId    = classOverride?.cpuMemoryCredentialId    ?? null;
+  merged.temperatureCredentialId  = classOverride?.temperatureCredentialId  ?? null;
+  merged.interfacesCredentialId   = classOverride?.interfacesCredentialId   ?? null;
+  merged.lldpCredentialId         = classOverride?.lldpCredentialId         ?? null;
+  merged.processesCredentialId    = classOverride?.processesCredentialId    ?? null;
+  merged.eventLogCredentialId     = classOverride?.eventLogCredentialId     ?? null;
+  if (merged.responseTimeCredentialId) provenance.responseTimeCredentialId = "class";
+  if (merged.cpuMemoryCredentialId)    provenance.cpuMemoryCredentialId    = "class";
+  if (merged.temperatureCredentialId)  provenance.temperatureCredentialId  = "class";
+  if (merged.interfacesCredentialId)   provenance.interfacesCredentialId   = "class";
+  if (merged.lldpCredentialId)         provenance.lldpCredentialId         = "class";
+  if (merged.processesCredentialId)    provenance.processesCredentialId    = "class";
+  if (merged.eventLogCredentialId)     provenance.eventLogCredentialId     = "class";
+
+  return { resolved: merged, provenance, inheritPolling };
+}
+
+/**
+ * Resolve effective settings for one asset AND report which tier supplied
+ * each field. Values come from the SAME core as `resolveMonitorSettings`, so
+ * the badges always describe what the runtime actually does; this wrapper
+ * only adds the UI sub-labels ("integration-class", "integrationPollInterval")
+ * and the class-override row id. Slower than the plain resolver (up to two
+ * extra DB lookups) — intended for one-shot UI loads, not the hot monitor
+ * loop.
+ */
+export async function resolveMonitorSettingsWithProvenance(
+  asset: AssetMonitorContext,
+): Promise<ResolvedSettingsWithProvenance> {
+  const tier3Source: "integration" | "manual" = asset.discoveredByIntegrationId ? "integration" : "manual";
+  const { resolved, provenance, inheritPolling } = await resolveMonitorSettingsCore(asset);
+
+  // Per-class streams block detection (Phase 2). When this asset's integration
+  // carries a per-class streams block for asset.assetType AND that block sets
+  // a non-null value on a stream, the corresponding tier-3 field originated
+  // at the class level rather than the flat baseline — relabel every field
+  // the core attributed to the integration tier as "integration-class" so
+  // the asset modal can render "FortiSwitch subtab" instead of generic
+  // "FortiManager". Fields won by a lower layer (class/asset) or by the
+  // source default keep their accurate label. Cheap extra lookup (one
+  // integration row, already-cached config blob); skipped for manual-tier
+  // assets which never have per-class streams.
+  if (asset.discoveredByIntegrationId) {
+    const intRow = await prisma.integration.findUnique({
+      where:  { id: asset.discoveredByIntegrationId },
+      select: { config: true, type: true },
+    });
+    const cfg = (intRow?.config as Record<string, unknown> | null) ?? {};
+    const streams = pickClassStreamsBlock(intRow?.type ?? null, cfg, asset.assetType);
+    if (streams) {
+      const origins = detectPerClassFieldOrigins(streams);
+      for (const field of Object.keys(origins) as Array<keyof MonitorTierSettings>) {
+        if (provenance[field] === "integration") provenance[field] = "integration-class";
+        if ((POLLING_FIELDS as readonly string[]).includes(field) && inheritPolling.provenance[field as PollingField] === "integration") {
+          inheritPolling.provenance[field as PollingField] = "integration-class";
+        }
+      }
     }
   }
-  takeAssetMibId("responseTimeMibId", asset.responseTimeMibId);
-  takeAssetMibId("cpuMemoryMibId",    asset.cpuMemoryMibId);
-  takeAssetMibId("temperatureMibId",  asset.temperatureMibId);
-  takeAssetMibId("interfacesMibId",   asset.interfacesMibId);
-  takeAssetMibId("lldpMibId",         asset.lldpMibId);
-  takeAssetMibId("processesMibId",    asset.processesMibId);
+
+  // systemInfoIntervalSeconds carries a sub-label: when the integration tier
+  // derived the value from Integration.pollInterval (rather than an explicit
+  // tier-3 JSON entry), provenance reads "integrationPollInterval" so the UI
+  // can render a discovery-cycle-aware hint. Only applies when the
+  // integration tier actually won the field — manual-tier orphan assets and
+  // class/asset-overridden values keep their literal label.
+  if (
+    provenance.systemInfoIntervalSeconds === "integration"
+    && asset.discoveredByIntegrationId != null
+    && tierSystemInfoFromPollIntervalCache.get(`${asset.discoveredByIntegrationId}:${asset.assetType}`) === true
+  ) {
+    provenance.systemInfoIntervalSeconds = "integrationPollInterval";
+  }
+
+  // Class-override row id (extra lookup; only needed by this provenance API).
+  let classOverrideId: string | null = null;
+  const classOverride = await loadClassOverride(asset.discoveredByIntegrationId, asset.assetType);
+  if (classOverride) {
+    const row = await prisma.monitorClassOverride.findFirst({
+      where:  { integrationId: asset.discoveredByIntegrationId, assetType: asset.assetType },
+      select: { id: true },
+    });
+    classOverrideId = row?.id ?? null;
+  }
 
   return { resolved, provenance, tier3Source, classOverrideId, inheritPolling };
 }
