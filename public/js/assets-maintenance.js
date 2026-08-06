@@ -324,32 +324,16 @@ function _maintEditorHTML() {
 }
 
 function _maintCollectCriteria() {
-  var rules = [];
-  document.querySelectorAll("#maint-rules .maint-rule").forEach(function (row) {
-    var field = row.querySelector(".maint-rule-field").value;
-    if (field === "integration") {
-      var intSel = row.querySelector(".maint-rule-integration");
-      if (intSel && intSel.value) rules.push({ field: "integration", op: "exact", values: [intSel.value] });
-      return;
-    }
-    var input = row.querySelector(".maint-rule-input");
-    var parts = (input && input.value ? input.value : "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
-    if (!parts.length) return;
-    if (field === "subnet") {
-      // Bare IPs are promoted to /32 (v4) or /128 (v6) so "10.2.3.4" works.
-      var cidrs = parts.map(function (p) {
-        if (p.indexOf("/") !== -1) return p;
-        return p.indexOf(":") !== -1 ? p + "/128" : p + "/32";
-      });
-      rules.push({ field: "subnet", op: "inCidr", cidrs: cidrs });
-    } else {
-      var op = "exact";
-      var opSel = row.querySelector(".maint-rule-op");
-      if (opSel) op = opSel.value; // string + fortigate kinds render the op select
-      rules.push({ field: field, op: op, values: parts });
-    }
+  // Shared DOM→TagCriteria walker (api.js collectTagCriteria) — the wire
+  // shape (comma-split, bare-IP→/32 promotion, integration single-id) is
+  // identical to the appmap discovery wizard's device step by requirement.
+  return collectTagCriteria({
+    rowSelector: "#maint-rules .maint-rule",
+    fieldSel: ".maint-rule-field",
+    integrationSel: ".maint-rule-integration",
+    opSel: ".maint-rule-op",
+    inputSel: ".maint-rule-input",
   });
-  return rules.length ? { version: 1, match: "all", rules: rules } : null;
 }
 
 function _maintCollectSchedule() {

@@ -263,40 +263,20 @@
         '</datalist>';
     }
 
-    // DOM → TagCriteria. Mirrors _maintCollectCriteria: comma-split multi-value
-    // inputs, bare IPs promoted to /32 (or /128), empty rows dropped silently, and
-    // null when nothing usable is left — null means "every monitored asset", NOT
-    // "match nothing".
+    // DOM → TagCriteria via the shared walker (api.js collectTagCriteria) —
+    // same wire shape as the Maintenance builder by requirement: comma-split
+    // multi-value inputs, bare IPs promoted to /32 (or /128) so a save can't
+    // 400 on something the operator typed reasonably, empty rows dropped, and
+    // null when nothing usable is left — null means "every monitored asset",
+    // NOT "match nothing".
     function collectCriteria() {
-      var rules = [];
-      document.querySelectorAll("#apr-rules .apr-rule").forEach(function (row) {
-        var field = row.querySelector(".apr-rule-field").value;
-        if (fieldKind(field) === "integration") {
-          var sel = row.querySelector(".apr-rule-integration");
-          var id = sel ? sel.value : "";
-          if (id) rules.push({ field: "integration", op: "exact", values: [id] });
-          return;
-        }
-        var input = row.querySelector(".apr-rule-input");
-        if (!input) return;
-        var parts = input.value.split(",").map(function (p) { return p.trim(); }).filter(Boolean);
-        if (!parts.length) return;
-        if (field === "subnet") {
-          rules.push({
-            field: "subnet", op: "inCidr",
-            // normalizeCriteria requires real CIDRs, so a bare IP must be promoted
-            // or the save 400s on something the operator typed reasonably.
-            cidrs: parts.map(function (p) {
-              if (p.indexOf("/") >= 0) return p;
-              return p.indexOf(":") >= 0 ? p + "/128" : p + "/32";
-            }),
-          });
-        } else {
-          var opSel = row.querySelector(".apr-rule-op");
-          rules.push({ field: field, op: opSel ? opSel.value : "exact", values: parts });
-        }
+      return collectTagCriteria({
+        rowSelector: "#apr-rules .apr-rule",
+        fieldSel: ".apr-rule-field",
+        integrationSel: ".apr-rule-integration",
+        opSel: ".apr-rule-op",
+        inputSel: ".apr-rule-input",
       });
-      return rules.length ? { version: 1, match: "all", rules: rules } : null;
     }
 
     function collectStep2() {

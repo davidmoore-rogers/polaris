@@ -1136,3 +1136,44 @@ function copyPngToClipboard(blob) {
   }
 }
 window.copyPngToClipboard = copyPngToClipboard;
+
+// ─── Flat-criteria collector (2026-08 audit) ────────────────────────────────
+//
+// DOM → TagCriteria for the two flat criteria builders (the Maintenance
+// schedule editor and the appmap Service & Process Discovery wizard's device
+// step, which was ported from it). Both render rows as
+// [field select][op?/integration-select?/value input][remove]; this walks
+// them with the caller's selectors and produces the exact wire shape
+// tagAssignmentService.normalizeCriteria accepts — comma-split multi-values,
+// bare IPs promoted to /32 (v4) / /128 (v6), single-id integration rules,
+// empty rows dropped, and null when nothing usable remains (null = "no
+// criteria", NOT "match nothing"). The RENDER halves stay per-page (they
+// diverge deliberately); the wire shape must never drift, so it lives here.
+function collectTagCriteria(cfg) {
+  var rules = [];
+  document.querySelectorAll(cfg.rowSelector).forEach(function (row) {
+    var field = row.querySelector(cfg.fieldSel).value;
+    if (field === "integration") {
+      var sel = row.querySelector(cfg.integrationSel);
+      if (sel && sel.value) rules.push({ field: "integration", op: "exact", values: [sel.value] });
+      return;
+    }
+    var input = row.querySelector(cfg.inputSel);
+    var parts = (input && input.value ? input.value : "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!parts.length) return;
+    if (field === "subnet") {
+      rules.push({
+        field: "subnet", op: "inCidr",
+        cidrs: parts.map(function (p) {
+          if (p.indexOf("/") !== -1) return p;
+          return p.indexOf(":") !== -1 ? p + "/128" : p + "/32";
+        }),
+      });
+    } else {
+      var opSel = row.querySelector(cfg.opSel);
+      rules.push({ field: field, op: opSel ? opSel.value : "exact", values: parts });
+    }
+  });
+  return rules.length ? { version: 1, match: "all", rules: rules } : null;
+}
+window.collectTagCriteria = collectTagCriteria;
