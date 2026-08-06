@@ -1538,6 +1538,805 @@ export function buildFmgOsVersion(raw: any): string {
  * Returns discovered subnets, device metadata (for asset creation),
  * and interface IPs (for reservation creation).
  */
+// --- FMG per-device discovery steps (split 2026-08, template: the FGT chain
+// conversion in fortigateService.ts) --- each numbered step is a named
+// function over one per-device context. Accumulator arrays mutate in place
+// through the context references; the query-landed booleans the sync's
+// decommission / Phase 5b sweeps consume live in ctx.flags (an object, so
+// writes propagate across the function boundary). Bodies are verbatim from
+// the pre-split processDevice except the flags.* prefix and the offline
+// gates hoisted to early returns.
+interface FmgDeviceCtx {
+  config: FortiManagerConfig;
+  baseUrl: string;
+  adom: string;
+  apiUser: FortiManagerConfig["apiUser"];
+  apiToken: FortiManagerConfig["apiToken"];
+  verifySsl: FortiManagerConfig["verifySsl"];
+  signal: AbortSignal | undefined;
+  integrationId: string | undefined;
+  log: DiscoveryProgressCallback;
+  mgmtIfaceName: string;
+  inventoryMaxAgeHours: number;
+  arpSweepTargets: Map<string, string[]> | undefined;
+  deviceName: string;
+  offline: boolean;
+  localDevice: DiscoveredDevice;
+  localSubnets: DiscoveredSubnet[];
+  localInterfaceIps: DiscoveredInterfaceIp[];
+  localDhcpEntries: DiscoveredDhcpEntry[];
+  localInventory: DiscoveredInventoryDevice[];
+  localSwitches: DiscoveredFortiSwitch[];
+  localAps: DiscoveredFortiAP[];
+  localSwitchMacTable: DiscoveredSwitchMacEntry[];
+  localArpTable: DiscoveredArpEntry[];
+  localCmdbSwitchSerials: Array<{ device: string; serial: string }>;
+  localCmdbApSerials: Array<{ device: string; serial: string }>;
+  localVips: DiscoveredVip[];
+  flags: {
+    didInventory: boolean;
+    didSwitchQuery: boolean;
+    didApQuery: boolean;
+    didVipQuery: boolean;
+    didDhcpReservationsQuery: boolean;
+    didDhcpLeasesQuery: boolean;
+  };
+}
+
+// Step 1: resolve the management-interface IP + MACs from FMG's device CMDB.
+async function fmgStepMgmtIp(ctx: FmgDeviceCtx): Promise<void> {
+  const { baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, mgmtIfaceName, localDevice, localInterfaceIps } = ctx;
+    // Step 1: Resolve management interface IP from device config
+    try {
+      const mgmtIfacePayload: JsonRpcRequest = {
+        id: 6,
+        method: "get",
+        // No name filter — fetch ALL interfaces so we capture every physical
+        // MAC (see DiscoveredDevice.interfaceMacs), not just the mgmt one.
+        params: [{ url: `/pm/config/device/${deviceName}/global/system/interface`, fields: ["name", "ip", "macaddr"], loadsub: 0 }],
+      };
+      const mgmtIfaceRes = await rpc(baseUrl, mgmtIfacePayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      const ifaceList = mgmtIfaceRes.result?.[0]?.data;
+      if (Array.isArray(ifaceList)) {
+        const found = (ifaceList as any[]).find((i) => i.name === mgmtIfaceName);
+        const rawIp = found
+          ? (Array.isArray(found.ip) ? found.ip[0] : (found.ip as string | null))
+          : null;
+        if (rawIp && rawIp !== "0.0.0.0" && isValidIpv4(rawIp)) {
+          localDevice.mgmtIp = rawIp;
+          const ifEntry = localInterfaceIps.find((e) => e.role === "management");
+          if (ifEntry) ifEntry.ipAddress = rawIp;
+          else localInterfaceIps.push({ device: deviceName, interfaceName: mgmtIfaceName, ipAddress: rawIp, role: "management" });
+          log("discover.device.mgmtip", "info", `${deviceName}: Resolved management IP from ${mgmtIfaceName}: ${rawIp}`, deviceName);
+        }
+        // mgmt-interface MAC (scalar identity) + every physical interface MAC
+        // (see DiscoveredDevice.mgmtMac / interfaceMacs).
+        const macNorm = normalizeMacOrNull(found && typeof found.macaddr === "string" ? found.macaddr : null);
+        if (macNorm) localDevice.mgmtMac = macNorm;
+        const ifaceMacs = normalizeMacsDistinct((ifaceList as any[]).map((i) => (typeof i?.macaddr === "string" ? i.macaddr : null)));
+        if (ifaceMacs.length) localDevice.interfaceMacs = ifaceMacs;
+      }
+    } catch { /* best-effort; keep device.ip as fallback */ }
+}
+
+// Step 2: DHCP server config -- subnets and static reservations.
+async function fmgStepDhcpConfig(ctx: FmgDeviceCtx): Promise<void> {
+  const { baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, localSubnets, localDhcpEntries, flags } = ctx;
+    try {
+      // Step 2: DHCP server config — subnets and static reservations
+      const dhcpPayload: JsonRpcRequest = {
+        id: 2,
+        method: "get",
+        params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/dhcp/server` }],
+      };
+      const dhcpRes = await rpc(baseUrl, dhcpPayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      const dhcpData = dhcpRes.result?.[0]?.data;
+      if (!Array.isArray(dhcpData)) {
+        const dhcpStatus = dhcpRes.result?.[0]?.status;
+        if (dhcpStatus && dhcpStatus.code !== undefined && dhcpStatus.code !== 0) {
+          log("discover.dhcp", "error", `${deviceName}: DHCP server query returned status ${dhcpStatus.code}: ${dhcpStatus.message || "(no message)"}`, deviceName);
+        } else {
+          // Empty-result success — the gate has no DHCP servers configured.
+          // Treat as "queried successfully" so Phase 5b can release stale
+          // dhcp_reservation rows that survived after operator config wipes.
+          flags.didDhcpReservationsQuery = true;
+          log("discover.dhcp", "info", `${deviceName}: No DHCP servers configured`, deviceName);
+        }
+      } else {
+        flags.didDhcpReservationsQuery = true;
+        let deviceSubnetCount = 0;
+        let deviceReservationCount = 0;
+        for (const server of dhcpData) {
+          const iface = typeof server.interface === "string" ? server.interface : String(server.interface ?? "");
+          const serverId = String(server.id || iface);
+          const netmaskStr = server.netmask;
+          const ranges = server["ip-range"];
+          if (!netmaskStr || !Array.isArray(ranges) || ranges.length === 0) continue;
+          const startIp = ranges[0]["start-ip"];
+          if (!startIp) continue;
+          try {
+            const block = new Netmask(`${startIp}/${netmaskStr}`);
+            const cidr = `${block.base}/${block.bitmask}`;
+            localSubnets.push({ cidr, name: iface || `dhcp-${serverId}`, fortigateDevice: deviceName, dhcpServerId: serverId });
+            deviceSubnetCount++;
+          } catch { /* skip invalid netmask/IP */ }
+
+          const reservedAddrs = server["reserved-address"];
+          if (Array.isArray(reservedAddrs)) {
+            for (const entry of reservedAddrs) {
+              const rIp = entry.ip;
+              const rMac = entry.mac || "";
+              if (!rIp || rIp === "0.0.0.0") continue;
+              const numericScopeId = typeof server.id === "number" ? server.id : Number(server.id);
+              const numericEntryId = typeof entry.id === "number" ? entry.id : Number(entry.id);
+              localDhcpEntries.push({
+                device: deviceName,
+                interfaceName: iface || `dhcp-${serverId}`,
+                ipAddress: rIp,
+                macAddress: rMac,
+                hostname: entry.description || entry.action === 6 ? (entry.description || "") : "",
+                type: "dhcp-reservation",
+                scopeId: Number.isFinite(numericScopeId) ? numericScopeId : undefined,
+                entryId: Number.isFinite(numericEntryId) ? numericEntryId : undefined,
+              });
+              deviceReservationCount++;
+            }
+          }
+        }
+        log("discover.dhcp", "info", `${deviceName}: Found ${deviceSubnetCount} DHCP subnet(s) and ${deviceReservationCount} static reservation(s)`, deviceName);
+      }
+    } catch (err: any) {
+      log("discover.dhcp", "error", `${deviceName}: Failed to query DHCP server config — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Step 3a: live DHCP monitor (merges INTO the CMDB list). Offline gates skip.
+async function fmgStepDhcpMonitor(ctx: FmgDeviceCtx): Promise<void> {
+  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, localSubnets, localDhcpEntries, flags } = ctx;
+    // Step 3a: Live DHCP monitor — replaces config-based reservation fallback if successful.
+    // Skipped for offline gates (device unreachable → /sys/proxy/json fails).
+  if (offline) return;
+    try {
+      const leasePayload: JsonRpcRequest = {
+        id: 4,
+        method: "exec",
+        params: [{
+          url: `/sys/proxy/json`,
+          data: {
+            target: [`/adom/${adom}/device/${deviceName}`],
+            action: "get",
+            resource: "/api/v2/monitor/system/dhcp?format=ip|mac|hostname|interface|reserved|expire_time|access_point|ssid|vci",
+          },
+        }],
+      };
+      const leaseRes = await rpc(baseUrl, leasePayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      flags.didDhcpLeasesQuery = true;
+      const leaseData = leaseRes.result?.[0]?.data;
+      const monitorStatus = Array.isArray(leaseData) ? leaseData[0]?.status?.code : undefined;
+      const rawResults = Array.isArray(leaseData)
+        ? leaseData[0]?.response?.results
+        : (leaseData as any)?.response?.results;
+
+      let resultsArray: any[] = [];
+      if (Array.isArray(rawResults)) resultsArray = rawResults;
+      else if (rawResults && typeof rawResults === "object") resultsArray = Object.values(rawResults);
+
+      const flatLeases: any[] = [];
+      for (const entry of resultsArray) {
+        if (Array.isArray(entry.leases)) {
+          const serverIface = String(entry.server_interface || entry.interface || "");
+          for (const lease of entry.leases) flatLeases.push({ ...lease, _serverIface: serverIface });
+        } else if (entry.ip) {
+          flatLeases.push(entry);
+        }
+      }
+      log("discover.leases", "info", `${deviceName}: Raw DHCP entries from monitor: ${flatLeases.length}`, deviceName);
+
+      // Merge monitor data INTO the CMDB-derived list rather than wiping it.
+      // /api/v2/monitor/system/dhcp only returns reservations whose target
+      // client is currently online and holding a lease — a static reservation
+      // for a device that's powered off doesn't appear in the monitor results.
+      // Wiping CMDB and trusting only monitor would silently drop those
+      // offline-target reservations from discovery. Now: CMDB is the base set,
+      // and the monitor pass below adds anything not already covered (live
+      // leases for IPs CMDB doesn't have a static reservation for). The dedup
+      // by-ip below means CMDB wins on overlap, which is the right call for
+      // static reservations — CMDB is the configured truth.
+
+      let deviceEntryCount = 0;
+      for (const lease of flatLeases) {
+        const leaseIp = lease.ip;
+        const leaseMac = lease.mac || "";
+        let leaseIface = lease.interface || lease._serverIface || "";
+        if (!leaseIp || leaseIp === "0.0.0.0") continue;
+
+        // CMDB already has this static reservation — mark it as currently
+        // leased so the stale-reservation job knows the target has been
+        // seen actively holding its IP. CMDB wins on field overlap; we just
+        // annotate the seen-leased signal.
+        const existingIdx = localDhcpEntries.findIndex((e) => e.ipAddress === leaseIp);
+        if (existingIdx >= 0) {
+          localDhcpEntries[existingIdx].seenLeased = true;
+          continue;
+        }
+        if (!leaseIface) {
+          const matched = localSubnets.find((s) => {
+            try { return new Netmask(s.cidr).contains(leaseIp); } catch { return false; }
+          });
+          leaseIface = matched?.name || "";
+        }
+        localDhcpEntries.push({
+          device: deviceName,
+          interfaceName: leaseIface || "unknown",
+          ipAddress: leaseIp,
+          macAddress: leaseMac,
+          hostname: lease.hostname || "",
+          type: lease.reserved === true ? "dhcp-reservation" : "dhcp-lease",
+          expireTime: lease.expire_time || undefined,
+          accessPoint: lease.access_point || undefined,
+          ssid: lease.ssid || undefined,
+          vci: lease.vci || undefined,
+          // Monitor confirms the IP is actively leased right now — feeds the
+          // stale-reservation job's "still online" signal.
+          seenLeased: true,
+        });
+        deviceEntryCount++;
+      }
+      log("discover.leases", "info", `${deviceName}: Found ${deviceEntryCount} DHCP entry/entries from monitor`, deviceName);
+    } catch (err: any) {
+      log("discover.leases", "error", `${deviceName}: Failed to query DHCP monitor — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Step 3: interface IPs + VLAN backfill onto this device's subnets.
+async function fmgStepInterfaceIps(ctx: FmgDeviceCtx): Promise<void> {
+  const { config, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, mgmtIfaceName, localSubnets, localInterfaceIps } = ctx;
+    // Step 3: Interface IPs + VLAN backfill onto local subnets
+    try {
+      const ifacePayload: JsonRpcRequest = {
+        id: 3,
+        method: "get",
+        // secondary-ip is a child mkey table on system/interface — each row
+        // carries its own `ip` (in "x.x.x.x y.y.y.y" form). Asking for the
+        // parent field returns the whole nested array as embedded JSON.
+        params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/interface`, fields: ["name", "ip", "vlanid", "switch-controller-mgmt-vlan", "secondary-ip"] }],
+      };
+      const ifaceRes = await rpc(baseUrl, ifacePayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      const ifaceData = ifaceRes.result?.[0]?.data;
+      const ifaceVlanMap = new Map<string, number>();
+      let ifaceIpCount = 0;
+      let secondaryIpCount = 0;
+      if (Array.isArray(ifaceData)) {
+        for (const iface of ifaceData) {
+          const ifaceName = iface.name || "";
+          const parseVid = (v: unknown): number => {
+            const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
+            return !isNaN(n) && n > 0 ? n : 0;
+          };
+          const vid = parseVid(iface.vlanid) || parseVid(iface["switch-controller-mgmt-vlan"]);
+          if (vid > 0) ifaceVlanMap.set(ifaceName, vid);
+          if (ifaceName === mgmtIfaceName) continue;
+          if (!matchesInterfaceFilter(ifaceName, config)) continue;
+          const ipArr = iface.ip;
+          if (Array.isArray(ipArr) && ipArr.length >= 1 && ipArr[0] && ipArr[0] !== "0.0.0.0") {
+            localInterfaceIps.push({ device: deviceName, interfaceName: ifaceName, ipAddress: ipArr[0], role: "interface" });
+            ifaceIpCount++;
+          }
+          // Secondary IPs: nested table on the interface. Each row has its own
+          // `ip` in either "x.x.x.x y.y.y.y" (IP + mask) string form or as a
+          // [ip, mask] array. Strip to the dotted-quad and push as
+          // role="secondary" so Phase 4 can label the reservation appropriately.
+          const secondaries = iface["secondary-ip"];
+          if (Array.isArray(secondaries)) {
+            for (const sec of secondaries) {
+              const rawSec = Array.isArray(sec?.ip)
+                ? (sec.ip[0] || "")
+                : (typeof sec?.ip === "string" ? sec.ip.split(" ")[0] : "");
+              if (rawSec && rawSec !== "0.0.0.0" && isValidIpv4(rawSec)) {
+                localInterfaceIps.push({ device: deviceName, interfaceName: ifaceName, ipAddress: rawSec, role: "secondary" });
+                secondaryIpCount++;
+              }
+            }
+          }
+        }
+      }
+      for (const sub of localSubnets) {
+        const vid = ifaceVlanMap.get(sub.name);
+        if (vid) sub.vlan = vid;
+      }
+      log("discover.interfaces", "info", `${deviceName}: Resolved ${ifaceIpCount} interface IP(s)${secondaryIpCount > 0 ? ` + ${secondaryIpCount} secondary IP(s)` : ""}`, deviceName);
+    } catch (err: any) {
+      log("discover.interfaces", "error", `${deviceName}: Failed to query interfaces — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Step 3b: device inventory (detected clients). Offline gates skip.
+async function fmgStepInventory(ctx: FmgDeviceCtx): Promise<void> {
+  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, inventoryMaxAgeHours, localInventory, flags } = ctx;
+    // Step 3b: Device inventory. Skipped for offline gates (live monitor query).
+  if (offline) return;
+    try {
+      const inventoryPayload: JsonRpcRequest = {
+        id: 5,
+        method: "exec",
+        params: [{
+          url: `/sys/proxy/json`,
+          data: {
+            target: [`/adom/${adom}/device/${deviceName}`],
+            action: "get",
+            resource: "/api/v2/monitor/user/device/query?format=mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen",
+          },
+        }],
+      };
+      const inventoryRes = await rpc(baseUrl, inventoryPayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      const inventoryData = inventoryRes.result?.[0]?.data;
+      const results = Array.isArray(inventoryData)
+        ? inventoryData[0]?.response?.results
+        : (inventoryData as any)?.response?.results;
+      const inventoryCutoffMs = Date.now() - inventoryMaxAgeHours * 60 * 60 * 1000;
+      let inventoryCount = 0;
+      if (Array.isArray(results)) {
+        for (const client of results) {
+          const mac = client.mac || "";
+          const ip = client.ip || "";
+          if (!mac && !ip) continue;
+          if (!client.last_seen || client.last_seen * 1000 < inventoryCutoffMs) continue;
+          localInventory.push({
+            device: deviceName,
+            macAddress: mac,
+            ipAddress: ip,
+            hostname: client.hostname || client.host || "",
+            os: client.os || client.type || "",
+            osVersion: client.os_version || "",
+            hardwareVendor: client.hardware_vendor || "",
+            interfaceName: client.interface || "",
+            switchName: client.switch_fortilink || client.fortiswitch || "",
+            switchPort: client.switch_port != null ? String(client.switch_port) : "",
+            apName: client.ap_name || client.fortiap || "",
+            user: client.user || client.detected_user || "",
+            isOnline: !!client.is_online,
+            lastSeen: new Date(client.last_seen * 1000).toISOString(),
+          });
+          inventoryCount++;
+        }
+      }
+      flags.didInventory = true;
+      log("discover.inventory", "info", `${deviceName}: Found ${inventoryCount} device inventory client(s)`, deviceName);
+    } catch (err: any) {
+      log("discover.inventory", "error", `${deviceName}: Failed to query device inventory — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Step 3c: managed FortiSwitches (live status + CMDB uplink/description join). Offline gates skip.
+async function fmgStepSwitches(ctx: FmgDeviceCtx): Promise<void> {
+  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, localSwitches, flags } = ctx;
+    // Step 3c: Managed FortiSwitches (live status). Skipped for offline gates —
+    // this whole block, including the nested /sys/proxy/json CMDB-uplink read,
+    // requires the device to be reachable. The native CMDB switch roster in
+    // Step 3c.5 below still runs offline (decommission protection only).
+  if (offline) return;
+    try {
+      const switchPayload: JsonRpcRequest = {
+        id: 8,
+        method: "exec",
+        params: [{
+          url: `/sys/proxy/json`,
+          data: {
+            target: [`/adom/${adom}/device/${deviceName}`],
+            action: "get",
+            resource: "/api/v2/monitor/switch-controller/managed-switch/status?format=connecting_from|fgt_peer_intf_name|join_time|os_version|serial|switch-id|state|status",
+          },
+        }],
+      };
+      const switchRes = await rpc(baseUrl, switchPayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      const switchData = switchRes.result?.[0]?.data;
+      const switchProxyEntry = Array.isArray(switchData) ? switchData[0] : switchData as any;
+      const switchProxyStatus = switchProxyEntry?.status?.code ?? 0;
+      const switchHttpStatus = switchProxyEntry?.response?.http_status ?? 200;
+      const switchResults = switchProxyEntry?.response?.results;
+      let switchCount = 0;
+      if (switchProxyStatus !== 0 || switchHttpStatus === 404) {
+        // 404 = switch-controller feature not licensed/enabled, which is the
+        // same as "controller has zero managed switches." Mark the query as
+        // inventoried so any pre-existing switches behind this gate get
+        // decommissioned (the controller is reachable, just not managing them).
+        flags.didSwitchQuery = true;
+        log("discover.fortiswitches", "info", `${deviceName}: switch-controller not available (proxy status ${switchProxyStatus}, HTTP ${switchHttpStatus}) — skipping`, deviceName);
+      } else if (Array.isArray(switchResults)) {
+        flags.didSwitchQuery = true;
+        // Switch-side physical uplink ports come from the managed-switch CMDB
+        // (the status query above only carries fgt_peer_intf_name = "fortilink").
+        // One extra proxy read per controller; serial → single uplink port
+        // (chained / dual-homed switches are omitted, leaving the FG↔switch
+        // edge label to LLDP). Best-effort — a failure just leaves it null.
+        // Mirrors fetchFortiswitchUplinkPorts in fortigateService (direct path).
+        const uplinkBySerial = new Map<string, string>();
+        // Admin description from the same CMDB rows (already fetched in
+        // full) — carries a:/b:/f:/r:/jb: location codes for the Device Map.
+        const descriptionBySerial = new Map<string, string>();
+        try {
+          const cmdbPayload: JsonRpcRequest = {
+            id: 9,
+            method: "exec",
+            params: [{
+              url: `/sys/proxy/json`,
+              data: {
+                target: [`/adom/${adom}/device/${deviceName}`],
+                action: "get",
+                resource: "/api/v2/cmdb/switch-controller/managed-switch?datasource=1",
+              },
+            }],
+          };
+          const cmdbRes = await rpc(baseUrl, cmdbPayload, apiUser, apiToken, verifySsl, signal, integrationId);
+          const cmdbData = cmdbRes.result?.[0]?.data;
+          const cmdbEntry = Array.isArray(cmdbData) ? cmdbData[0] : cmdbData as any;
+          const cmdbRows = cmdbEntry?.response?.results;
+          if (Array.isArray(cmdbRows)) {
+            for (const row of cmdbRows) {
+              const serial = String(row?.sn || row?.["switch-id"] || row?.name || "").trim();
+              if (!serial) continue;
+              const uplinks = findFortiswitchUplinkPorts(row?.ports);
+              if (uplinks.length === 1) uplinkBySerial.set(serial.toUpperCase(), uplinks[0]);
+              const desc = typeof row?.description === "string" ? row.description.trim() : "";
+              if (desc) descriptionBySerial.set(serial.toUpperCase(), desc);
+            }
+          }
+        } catch { /* best-effort — fall back to LLDP for the switch-side label */ }
+        for (const sw of switchResults) {
+          localSwitches.push({
+            device: deviceName,
+            name: sw["switch-id"] || "",
+            serial: sw.serial || "",
+            ipAddress: sw.connecting_from || "",
+            fgtInterface: sw.fgt_peer_intf_name || "",
+            osVersion: sw.os_version || "",
+            joinTime: Number.isFinite(sw.join_time) && sw.join_time > 0 ? sw.join_time : undefined,
+            state: sw.state || "",
+            connected: sw.status === "Connected",
+            uplinkPhysicalPort: uplinkBySerial.get((sw.serial || "").toUpperCase()) ?? null,
+            description: descriptionBySerial.get((sw.serial || "").toUpperCase()) ?? null,
+          });
+          switchCount++;
+        }
+        log("discover.fortiswitches", "info", `${deviceName}: Found ${switchCount} managed FortiSwitch(es)`, deviceName);
+      } else {
+        log("discover.fortiswitches", "info", `${deviceName}: Found 0 managed FortiSwitch(es)`, deviceName);
+      }
+    } catch (err: any) {
+      log("discover.fortiswitches", "error", `${deviceName}: Failed to query managed FortiSwitches — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Step 3c.5: native-CMDB roster of configured FortiSwitches (decommission protection; runs offline too).
+async function fmgStepSwitchCmdbRoster(ctx: FmgDeviceCtx): Promise<void> {
+  const { baseUrl, apiUser, apiToken, verifySsl, signal, log, deviceName, localCmdbSwitchSerials } = ctx;
+    // Step 3c.5: CMDB roster of configured FortiSwitches for this device.
+    // Native FMG CMDB read — no /sys/proxy/json wrapper, parallelizes
+    // freely. Defensive: a switch that's authorized at FMG but currently
+    // offline / in a brief post-config-push window may be missing from
+    // the live status query above; the decommission sweep treats serials
+    // surfaced here as "still known" so they're not declared stale.
+    // Best-effort: failures swallow (we still have the live answer).
+    try {
+      const swCmdbRes = await rpc(
+        baseUrl,
+        {
+          id: 16,
+          method: "get",
+          params: [{
+            url: `/pm/config/device/${deviceName}/global/switch-controller/managed-switch`,
+            fields: ["switch-id", "name"],
+            loadsub: 0,
+          }],
+        },
+        apiUser, apiToken, verifySsl, signal,
+      );
+      const swCmdbList = swCmdbRes.result?.[0]?.data;
+      if (Array.isArray(swCmdbList)) {
+        for (const sw of swCmdbList) {
+          // FortiSwitches are keyed by their serial as `switch-id` in CMDB
+          // (matches what the live query reports as `switch-id`). The
+          // optional `name` is the operator-set display label.
+          const serial = typeof sw["switch-id"] === "string" ? sw["switch-id"].trim() : "";
+          if (serial) localCmdbSwitchSerials.push({ device: deviceName, serial });
+        }
+      }
+    } catch (err: any) {
+      log("discover.fortiswitches.cmdb", "info", `${deviceName}: CMDB managed-switch roster lookup skipped — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Step 3d: managed FortiAPs (live status). Offline gates skip.
+async function fmgStepAps(ctx: FmgDeviceCtx): Promise<void> {
+  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, localAps, flags } = ctx;
+    // Step 3d: Managed FortiAPs (live status). Skipped for offline gates; the
+    // native CMDB AP roster in Step 3d.4 below still runs offline.
+  if (offline) return;
+    try {
+      const apPayload: JsonRpcRequest = {
+        id: 9,
+        method: "exec",
+        params: [{
+          url: `/sys/proxy/json`,
+          data: {
+            target: [`/adom/${adom}/device/${deviceName}`],
+            action: "get",
+            resource: `/api/v2/monitor/wifi/managed_ap?format=${FORTIAP_MONITOR_FORMAT}`,
+          },
+        }],
+      };
+      const apRes = await rpc(baseUrl, apPayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      const apData = apRes.result?.[0]?.data;
+      const apProxyEntry = Array.isArray(apData) ? apData[0] : apData as any;
+      const apProxyStatus = apProxyEntry?.status?.code ?? 0;
+      const apHttpStatus = apProxyEntry?.response?.http_status ?? 200;
+      const apResults = apProxyEntry?.response?.results;
+      let apCount = 0;
+      if (apProxyStatus !== 0 || apHttpStatus === 404) {
+        // Same reasoning as the switch path: 404 here means wireless-controller
+        // is not licensed/enabled. The controller is reachable, so the
+        // decommission sweep can act on stale APs behind it.
+        flags.didApQuery = true;
+        log("discover.fortiaps", "info", `${deviceName}: wifi/managed_ap not available (proxy status ${apProxyStatus}, HTTP ${apHttpStatus}) — skipping`, deviceName);
+      } else if (Array.isArray(apResults)) {
+        flags.didApQuery = true;
+        for (const ap of apResults) {
+          // Shared parser — same shape across FMG proxy and standalone
+          // FortiGate REST paths. See utils/fortiapMonitorRow.ts.
+          const parsed = parseFortiapMonitorRow(ap as Record<string, unknown>);
+          localAps.push({ device: deviceName, ...parsed });
+          apCount++;
+        }
+        log("discover.fortiaps", "info", `${deviceName}: Found ${apCount} managed FortiAP(s)`, deviceName);
+      } else {
+        log("discover.fortiaps", "info", `${deviceName}: Found 0 managed FortiAP(s)`, deviceName);
+      }
+    } catch (err: any) {
+      log("discover.fortiaps", "error", `${deviceName}: Failed to query managed FortiAPs — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Step 3d.4: native-CMDB WTP roster (decommission protection + the AP admin-description join; runs offline too).
+async function fmgStepApCmdbRoster(ctx: FmgDeviceCtx): Promise<void> {
+  const { baseUrl, apiUser, apiToken, verifySsl, signal, log, deviceName, localCmdbApSerials, localAps } = ctx;
+    // Step 3d.4: CMDB roster of configured FortiAPs (WTPs) for this device.
+    // Mirror of Step 3c.5 — native FMG CMDB read, decommission protection
+    // for configured-but-currently-offline APs. Best-effort. Also the only
+    // place the AP admin description lives: the monitor endpoint in Step 3d
+    // doesn't carry it, so it's joined onto localAps here (location codes
+    // for the Device Map — see utils/locationCodes.ts). The description
+    // surface is the wtp `location` field (AP Manager's field, 35-char cap —
+    // FMG's device-DB copy carries `location` but no `comment` at all when
+    // APs are centrally managed, so a comment-only read comes back empty);
+    // `comment` is still requested as a fallback for per-device-managed
+    // ADOMs whose copy retains it.
+    try {
+      const apCmdbRes = await rpc(
+        baseUrl,
+        {
+          id: 17,
+          method: "get",
+          params: [{
+            url: `/pm/config/device/${deviceName}/vdom/root/wireless-controller/wtp`,
+            fields: ["wtp-id", "name", "location", "comment"],
+            loadsub: 0,
+          }],
+        },
+        apiUser, apiToken, verifySsl, signal,
+      );
+      const apCmdbList = apCmdbRes.result?.[0]?.data;
+      if (Array.isArray(apCmdbList)) {
+        const descriptionBySerial = new Map<string, string>();
+        for (const ap of apCmdbList) {
+          // FortiAPs are keyed by serial as `wtp-id` in CMDB (matches what
+          // the live monitor query reports as `wtp_id` / `serial`).
+          const serial = typeof ap["wtp-id"] === "string" ? ap["wtp-id"].trim() : "";
+          if (!serial) continue;
+          localCmdbApSerials.push({ device: deviceName, serial });
+          const location = typeof ap.location === "string" ? ap.location.trim() : "";
+          const comment = typeof ap.comment === "string" ? ap.comment.trim() : "";
+          const description = location || comment;
+          if (description) descriptionBySerial.set(serial.toUpperCase(), description);
+        }
+        for (const ap of localAps) {
+          if (ap.device !== deviceName) continue;
+          ap.description = descriptionBySerial.get((ap.serial || "").toUpperCase()) ?? null;
+        }
+      }
+    } catch (err: any) {
+      log("discover.fortiaps.cmdb", "info", `${deviceName}: CMDB WTP roster lookup skipped — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Step 3d.5: FortiAP -> FortiSwitch port mapping via the detected-device MAC table. Offline gates skip.
+async function fmgStepApPortMap(ctx: FmgDeviceCtx): Promise<void> {
+  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, localAps, localSwitches, localSwitchMacTable } = ctx;
+    // Step 3d.5: FortiAP → FortiSwitch port mapping via detected-device MAC table
+    // Pulls all switch port MAC learnings in one shot and matches each AP's base_mac
+    // to its switch + port. APs not seen on any managed switch stay un-peered and
+    // will render as hanging off the FortiGate directly in the topology graph.
+    // Skipped for offline gates (live monitor query).
+  if (offline) return;
+    try {
+      const detectedPayload: JsonRpcRequest = {
+        id: 12,
+        method: "exec",
+        params: [{
+          url: `/sys/proxy/json`,
+          data: {
+            target: [`/adom/${adom}/device/${deviceName}`],
+            action: "get",
+            resource: "/api/v2/monitor/switch-controller/detected-device?format=mac|switch_id|port_name|vlan_id|last_seen|ipv4_address|ipv6_address|device_name|host_src|device_type|os_name|is_fortilink_peer",
+          },
+        }],
+      };
+      const detRes = await rpc(baseUrl, detectedPayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      const detData = detRes.result?.[0]?.data;
+      const detEntry = Array.isArray(detData) ? detData[0] : detData as any;
+      const detStatus = detEntry?.status?.code ?? 0;
+      const detResults = detEntry?.response?.results;
+      if (detStatus === 0 && Array.isArray(detResults)) {
+        // Shared post-fetch processing (utils/fortinetDetectedDevice) —
+        // identical to the direct-REST path by requirement.
+        processDetectedDeviceRows({
+          rows: detResults,
+          deviceName,
+          displayName: deviceName,
+          aps: localAps,
+          switches: localSwitches,
+          macTable: localSwitchMacTable,
+          log,
+        });
+      }
+    } catch (err: any) {
+      log("discover.ap-uplinks", "info", `${deviceName}: detected-device query skipped — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Steps 3d.54 + 3d.55: opt-in ARP presence sweep, then the ARP table read. Offline gates skip.
+async function fmgStepArp(ctx: FmgDeviceCtx): Promise<void> {
+  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, arpSweepTargets, localArpTable } = ctx;
+    // Step 3d.55: FortiGate ARP table. Authoritative IP↔MAC binding for any
+    // subnet the FortiGate routes for. Pairs with the macmap above —
+    // detected-device tells us "MAC X is on FortiSwitch Y / port Z," ARP
+    // tells us "MAC X has IP A right now." Together they let the sync
+    // pipeline enrich existing endpoint assets with both location + IP.
+    // Skipped for offline gates (live monitor query).
+  if (offline) return;
+    try {
+      // Step 3d.54: ARP presence sweep (opt-in — targets prebuilt by the
+      // caller from this device's active dhcp_reservation rows). Fire the
+      // UDP sweep, settle briefly, THEN read the table, so every live
+      // reserved IP resolves into a fresh neighbor-cache entry first.
+      const sweepIps = arpSweepTargets?.get(fmgNameKey(deviceName));
+      if (sweepIps?.length && !signal?.aborted) {
+        const { sent, dropped } = await primeArpCache(sweepIps);
+        if (sent > 0) {
+          log("discover.arp", "info", `${deviceName}: ARP presence sweep — probed ${sent} reserved IP(s)${dropped > 0 ? ` (${dropped} over cap, skipped)` : ""}`, deviceName);
+          await sleepWithAbort(ARP_SETTLE_MS, signal);
+        }
+      }
+      const arpPayload: JsonRpcRequest = {
+        id: 14,
+        method: "exec",
+        params: [{
+          url: `/sys/proxy/json`,
+          data: {
+            target: [`/adom/${adom}/device/${deviceName}`],
+            action: "get",
+            resource: "/api/v2/monitor/network/arp",
+          },
+        }],
+      };
+      const arpRes = await rpc(baseUrl, arpPayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      const arpData = arpRes.result?.[0]?.data;
+      const arpEntry = Array.isArray(arpData) ? arpData[0] : arpData as any;
+      const arpStatus = arpEntry?.status?.code ?? 0;
+      const arpResults = arpEntry?.response?.results;
+      if (arpStatus === 0 && Array.isArray(arpResults)) {
+        // Shared row parse (utils/fortinetDetectedDevice) — identical to the
+        // direct-REST path by requirement.
+        processArpRows({ rows: arpResults, deviceName, displayName: deviceName, arpTable: localArpTable, log });
+      }
+    } catch (err: any) {
+      log("discover.arp", "info", `${deviceName}: ARP query skipped — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
+// Step 3d.6: geo-coordinate fallback from FMG's CMDB copy of system/global (self-gated on missing coords).
+async function fmgStepGeoFallback(ctx: FmgDeviceCtx): Promise<void> {
+  const { baseUrl, apiUser, apiToken, verifySsl, signal, log, deviceName, localDevice } = ctx;
+    // Step 3d.6: Geo coordinates fallback — only runs when FMG's device record
+    // didn't already provide coords (see `fmgCoordsOk` above). Reads the
+    // FortiGate's `config system global` from FMG's CMDB **natively**
+    // (`/pm/config/device/<name>/global/system/global`) — no `/sys/proxy/json`
+    // wrapper. config system global is a CMDB object so FMG already has it
+    // in sync with the device; querying natively avoids the proxy mode's
+    // forced concurrency=1 and removes one round-trip per device per
+    // discovery cycle.
+    if (localDevice.latitude === undefined || localDevice.longitude === undefined) {
+      try {
+        const geoRes = await rpc(
+          baseUrl,
+          {
+            id: 13,
+            method: "get",
+            params: [{
+              url: `/pm/config/device/${deviceName}/global/system/global`,
+              fields: ["gui-device-latitude", "gui-device-longitude", "latitude", "longitude"],
+              loadsub: 0,
+            }],
+          },
+          apiUser, apiToken, verifySsl, signal,
+        );
+        const geoResults = geoRes.result?.[0]?.data;
+        if (geoResults && typeof geoResults === "object" && !Array.isArray(geoResults)) {
+          const lat = parseFloat(String((geoResults as any)["gui-device-latitude"] ?? (geoResults as any).latitude ?? ""));
+          const lng = parseFloat(String((geoResults as any)["gui-device-longitude"] ?? (geoResults as any).longitude ?? ""));
+          if (Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0)) {
+            localDevice.latitude = lat;
+            localDevice.longitude = lng;
+            log("discover.geo", "info", `${deviceName}: Resolved coordinates from FMG CMDB: ${lat.toFixed(4)}, ${lng.toFixed(4)}`, deviceName);
+          } else {
+            // Surface where coords are (or aren't) so the operator can locate them
+            const keys = Object.keys(geoResults).slice(0, 30).join(", ");
+            log("discover.geo", "info", `${deviceName}: No latitude/longitude in FMG CMDB system/global (keys: ${keys || "(empty)"})`, deviceName);
+          }
+        } else {
+          log("discover.geo", "info", `${deviceName}: FMG CMDB system/global returned no usable result — check FMG's CMDB sync state for this device`, deviceName);
+        }
+      } catch (err: any) {
+        log("discover.geo", "info", `${deviceName}: Geo lookup skipped — ${err.message || "Unknown error"}`, deviceName);
+      }
+    }
+}
+
+// Step 3e: firewall VIPs.
+async function fmgStepVips(ctx: FmgDeviceCtx): Promise<void> {
+  const { baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, localVips, flags } = ctx;
+    // Step 3e: Firewall VIPs
+    try {
+      const vipPayload: JsonRpcRequest = {
+        id: 11,
+        method: "get",
+        params: [{ url: `/pm/config/device/${deviceName}/vdom/root/firewall/vip`, fields: ["name", "extip", "mappedip", "extintf", "type", "realservers"] }],
+      };
+      const vipRes = await rpc(baseUrl, vipPayload, apiUser, apiToken, verifySsl, signal, integrationId);
+      flags.didVipQuery = true;
+      const vipData = vipRes.result?.[0]?.data;
+      let vipCount = 0;
+      if (Array.isArray(vipData)) {
+        for (const vip of vipData) {
+          const name = vip.name || "";
+          if (!name) continue;
+          // FMG's fields-projected get flattens extip/extintf to
+          // single-element string arrays and the mappedip child table to
+          // flat range strings (verified against FMG 7.x / FortiOS 7.x);
+          // the FortiOS-REST encoding is plain strings + { range } objects.
+          // Handle both — the { range } form was the only one parsed
+          // historically, which silently dropped mapped IPs in proxy mode.
+          const extipRaw = Array.isArray(vip.extip) ? vip.extip[0] : vip.extip;
+          const extip = parseRangeFirstIp(String(extipRaw || ""));
+          if (!extip) continue;
+          const mappedips: string[] = [];
+          if (Array.isArray(vip.mappedip)) {
+            for (const m of vip.mappedip) {
+              const ip = parseRangeFirstIp(String((typeof m === "string" ? m : m?.range) || ""));
+              if (ip) mappedips.push(ip);
+            }
+          }
+          const extintfRaw = Array.isArray(vip.extintf) ? vip.extintf[0] : vip.extintf;
+          const { isVirtualServer, realservers } = parseVipServerInfo(vip);
+          localVips.push({ device: deviceName, name, extip, mappedips, extintf: String(extintfRaw || ""), isVirtualServer, realservers });
+          vipCount++;
+        }
+      }
+      log("discover.vips", "info", `${deviceName}: Found ${vipCount} firewall VIP(s)`, deviceName);
+    } catch (err: any) {
+      log("discover.vips", "error", `${deviceName}: Failed to query firewall VIPs — ${err.message || "Unknown error"}`, deviceName);
+    }
+}
+
 export async function discoverDhcpSubnets(
   config: FortiManagerConfig,
   signal?: AbortSignal,
@@ -2004,730 +2803,44 @@ export async function discoverDhcpSubnets(
     if (fmgCoordsOk) {
       log("discover.geo", "info", `${deviceName}: Using FMG-configured coordinates ${fmgLat.toFixed(4)}, ${fmgLng.toFixed(4)}`, deviceName);
     }
-    const localSubnets: DiscoveredSubnet[] = [];
-    const localInterfaceIps: DiscoveredInterfaceIp[] = [];
-    const localDhcpEntries: DiscoveredDhcpEntry[] = [];
-    const localInventory: DiscoveredInventoryDevice[] = [];
-    let didInventory = false;
-    const localSwitches: DiscoveredFortiSwitch[] = [];
-    const localAps: DiscoveredFortiAP[] = [];
-    const localSwitchMacTable: DiscoveredSwitchMacEntry[] = [];
-    const localArpTable: DiscoveredArpEntry[] = [];
-    const localCmdbSwitchSerials: Array<{ device: string; serial: string }> = [];
-    const localCmdbApSerials: Array<{ device: string; serial: string }> = [];
-    const localVips: DiscoveredVip[] = [];
-    // Track whether each inventory query returned a usable response so the
-    // sync's decommission pass can distinguish "controller offline" (don't
-    // decommission its switches/APs) from "controller responded but no
-    // longer reports this device" (do decommission).
-    let didSwitchQuery = false;
-    let didApQuery = false;
-    // Same pattern for the authoritative-source queries Phase 5b consumes —
-    // a failed VIP or DHCP CMDB query must NOT cause Polaris to wipe rows
-    // we haven't actually heard the gate disclaim.
-    let didVipQuery = false;
-    let didDhcpReservationsQuery = false;
-    let didDhcpLeasesQuery = false;
+    const ctx: FmgDeviceCtx = {
+      config, baseUrl, adom, apiUser, apiToken, verifySsl, signal, integrationId, log,
+      mgmtIfaceName, inventoryMaxAgeHours, arpSweepTargets,
+      deviceName, offline, localDevice,
+      localSubnets: [], localInterfaceIps: [], localDhcpEntries: [], localInventory: [],
+      localSwitches: [], localAps: [], localSwitchMacTable: [], localArpTable: [],
+      localCmdbSwitchSerials: [], localCmdbApSerials: [], localVips: [],
+      // Track whether each inventory query returned a usable response so the
+      // sync's decommission pass can distinguish "controller offline" (don't
+      // decommission its switches/APs) from "controller responded but no
+      // longer reports this device" (do decommission). Same pattern for the
+      // authoritative-source queries Phase 5b consumes -- a failed VIP or
+      // DHCP CMDB query must NOT cause Polaris to wipe rows we haven't
+      // actually heard the gate disclaim.
+      flags: {
+        didInventory: false, didSwitchQuery: false, didApQuery: false,
+        didVipQuery: false, didDhcpReservationsQuery: false, didDhcpLeasesQuery: false,
+      },
+    };
+    const { localSubnets, localInterfaceIps, localDhcpEntries, localInventory, localSwitches, localAps, localSwitchMacTable, localArpTable, localCmdbSwitchSerials, localCmdbApSerials, localVips, flags } = ctx;
 
     if (localDevice.mgmtIp && isValidIpv4(localDevice.mgmtIp)) {
       localInterfaceIps.push({ device: deviceName, interfaceName: mgmtIfaceName, ipAddress: localDevice.mgmtIp, role: "management" });
     }
 
-    // Step 1: Resolve management interface IP from device config
-    try {
-      const mgmtIfacePayload: JsonRpcRequest = {
-        id: 6,
-        method: "get",
-        // No name filter — fetch ALL interfaces so we capture every physical
-        // MAC (see DiscoveredDevice.interfaceMacs), not just the mgmt one.
-        params: [{ url: `/pm/config/device/${deviceName}/global/system/interface`, fields: ["name", "ip", "macaddr"], loadsub: 0 }],
-      };
-      const mgmtIfaceRes = await rpc(baseUrl, mgmtIfacePayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      const ifaceList = mgmtIfaceRes.result?.[0]?.data;
-      if (Array.isArray(ifaceList)) {
-        const found = (ifaceList as any[]).find((i) => i.name === mgmtIfaceName);
-        const rawIp = found
-          ? (Array.isArray(found.ip) ? found.ip[0] : (found.ip as string | null))
-          : null;
-        if (rawIp && rawIp !== "0.0.0.0" && isValidIpv4(rawIp)) {
-          localDevice.mgmtIp = rawIp;
-          const ifEntry = localInterfaceIps.find((e) => e.role === "management");
-          if (ifEntry) ifEntry.ipAddress = rawIp;
-          else localInterfaceIps.push({ device: deviceName, interfaceName: mgmtIfaceName, ipAddress: rawIp, role: "management" });
-          log("discover.device.mgmtip", "info", `${deviceName}: Resolved management IP from ${mgmtIfaceName}: ${rawIp}`, deviceName);
-        }
-        // mgmt-interface MAC (scalar identity) + every physical interface MAC
-        // (see DiscoveredDevice.mgmtMac / interfaceMacs).
-        const macNorm = normalizeMacOrNull(found && typeof found.macaddr === "string" ? found.macaddr : null);
-        if (macNorm) localDevice.mgmtMac = macNorm;
-        const ifaceMacs = normalizeMacsDistinct((ifaceList as any[]).map((i) => (typeof i?.macaddr === "string" ? i.macaddr : null)));
-        if (ifaceMacs.length) localDevice.interfaceMacs = ifaceMacs;
-      }
-    } catch { /* best-effort; keep device.ip as fallback */ }
-
-    try {
-      // Step 2: DHCP server config — subnets and static reservations
-      const dhcpPayload: JsonRpcRequest = {
-        id: 2,
-        method: "get",
-        params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/dhcp/server` }],
-      };
-      const dhcpRes = await rpc(baseUrl, dhcpPayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      const dhcpData = dhcpRes.result?.[0]?.data;
-      if (!Array.isArray(dhcpData)) {
-        const dhcpStatus = dhcpRes.result?.[0]?.status;
-        if (dhcpStatus && dhcpStatus.code !== undefined && dhcpStatus.code !== 0) {
-          log("discover.dhcp", "error", `${deviceName}: DHCP server query returned status ${dhcpStatus.code}: ${dhcpStatus.message || "(no message)"}`, deviceName);
-        } else {
-          // Empty-result success — the gate has no DHCP servers configured.
-          // Treat as "queried successfully" so Phase 5b can release stale
-          // dhcp_reservation rows that survived after operator config wipes.
-          didDhcpReservationsQuery = true;
-          log("discover.dhcp", "info", `${deviceName}: No DHCP servers configured`, deviceName);
-        }
-      } else {
-        didDhcpReservationsQuery = true;
-        let deviceSubnetCount = 0;
-        let deviceReservationCount = 0;
-        for (const server of dhcpData) {
-          const iface = typeof server.interface === "string" ? server.interface : String(server.interface ?? "");
-          const serverId = String(server.id || iface);
-          const netmaskStr = server.netmask;
-          const ranges = server["ip-range"];
-          if (!netmaskStr || !Array.isArray(ranges) || ranges.length === 0) continue;
-          const startIp = ranges[0]["start-ip"];
-          if (!startIp) continue;
-          try {
-            const block = new Netmask(`${startIp}/${netmaskStr}`);
-            const cidr = `${block.base}/${block.bitmask}`;
-            localSubnets.push({ cidr, name: iface || `dhcp-${serverId}`, fortigateDevice: deviceName, dhcpServerId: serverId });
-            deviceSubnetCount++;
-          } catch { /* skip invalid netmask/IP */ }
-
-          const reservedAddrs = server["reserved-address"];
-          if (Array.isArray(reservedAddrs)) {
-            for (const entry of reservedAddrs) {
-              const rIp = entry.ip;
-              const rMac = entry.mac || "";
-              if (!rIp || rIp === "0.0.0.0") continue;
-              const numericScopeId = typeof server.id === "number" ? server.id : Number(server.id);
-              const numericEntryId = typeof entry.id === "number" ? entry.id : Number(entry.id);
-              localDhcpEntries.push({
-                device: deviceName,
-                interfaceName: iface || `dhcp-${serverId}`,
-                ipAddress: rIp,
-                macAddress: rMac,
-                hostname: entry.description || entry.action === 6 ? (entry.description || "") : "",
-                type: "dhcp-reservation",
-                scopeId: Number.isFinite(numericScopeId) ? numericScopeId : undefined,
-                entryId: Number.isFinite(numericEntryId) ? numericEntryId : undefined,
-              });
-              deviceReservationCount++;
-            }
-          }
-        }
-        log("discover.dhcp", "info", `${deviceName}: Found ${deviceSubnetCount} DHCP subnet(s) and ${deviceReservationCount} static reservation(s)`, deviceName);
-      }
-    } catch (err: any) {
-      log("discover.dhcp", "error", `${deviceName}: Failed to query DHCP server config — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3a: Live DHCP monitor — replaces config-based reservation fallback if successful.
-    // Skipped for offline gates (device unreachable → /sys/proxy/json fails).
-    if (!offline) try {
-      const leasePayload: JsonRpcRequest = {
-        id: 4,
-        method: "exec",
-        params: [{
-          url: `/sys/proxy/json`,
-          data: {
-            target: [`/adom/${adom}/device/${deviceName}`],
-            action: "get",
-            resource: "/api/v2/monitor/system/dhcp?format=ip|mac|hostname|interface|reserved|expire_time|access_point|ssid|vci",
-          },
-        }],
-      };
-      const leaseRes = await rpc(baseUrl, leasePayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      didDhcpLeasesQuery = true;
-      const leaseData = leaseRes.result?.[0]?.data;
-      const monitorStatus = Array.isArray(leaseData) ? leaseData[0]?.status?.code : undefined;
-      const rawResults = Array.isArray(leaseData)
-        ? leaseData[0]?.response?.results
-        : (leaseData as any)?.response?.results;
-
-      let resultsArray: any[] = [];
-      if (Array.isArray(rawResults)) resultsArray = rawResults;
-      else if (rawResults && typeof rawResults === "object") resultsArray = Object.values(rawResults);
-
-      const flatLeases: any[] = [];
-      for (const entry of resultsArray) {
-        if (Array.isArray(entry.leases)) {
-          const serverIface = String(entry.server_interface || entry.interface || "");
-          for (const lease of entry.leases) flatLeases.push({ ...lease, _serverIface: serverIface });
-        } else if (entry.ip) {
-          flatLeases.push(entry);
-        }
-      }
-      log("discover.leases", "info", `${deviceName}: Raw DHCP entries from monitor: ${flatLeases.length}`, deviceName);
-
-      // Merge monitor data INTO the CMDB-derived list rather than wiping it.
-      // /api/v2/monitor/system/dhcp only returns reservations whose target
-      // client is currently online and holding a lease — a static reservation
-      // for a device that's powered off doesn't appear in the monitor results.
-      // Wiping CMDB and trusting only monitor would silently drop those
-      // offline-target reservations from discovery. Now: CMDB is the base set,
-      // and the monitor pass below adds anything not already covered (live
-      // leases for IPs CMDB doesn't have a static reservation for). The dedup
-      // by-ip below means CMDB wins on overlap, which is the right call for
-      // static reservations — CMDB is the configured truth.
-
-      let deviceEntryCount = 0;
-      for (const lease of flatLeases) {
-        const leaseIp = lease.ip;
-        const leaseMac = lease.mac || "";
-        let leaseIface = lease.interface || lease._serverIface || "";
-        if (!leaseIp || leaseIp === "0.0.0.0") continue;
-
-        // CMDB already has this static reservation — mark it as currently
-        // leased so the stale-reservation job knows the target has been
-        // seen actively holding its IP. CMDB wins on field overlap; we just
-        // annotate the seen-leased signal.
-        const existingIdx = localDhcpEntries.findIndex((e) => e.ipAddress === leaseIp);
-        if (existingIdx >= 0) {
-          localDhcpEntries[existingIdx].seenLeased = true;
-          continue;
-        }
-        if (!leaseIface) {
-          const matched = localSubnets.find((s) => {
-            try { return new Netmask(s.cidr).contains(leaseIp); } catch { return false; }
-          });
-          leaseIface = matched?.name || "";
-        }
-        localDhcpEntries.push({
-          device: deviceName,
-          interfaceName: leaseIface || "unknown",
-          ipAddress: leaseIp,
-          macAddress: leaseMac,
-          hostname: lease.hostname || "",
-          type: lease.reserved === true ? "dhcp-reservation" : "dhcp-lease",
-          expireTime: lease.expire_time || undefined,
-          accessPoint: lease.access_point || undefined,
-          ssid: lease.ssid || undefined,
-          vci: lease.vci || undefined,
-          // Monitor confirms the IP is actively leased right now — feeds the
-          // stale-reservation job's "still online" signal.
-          seenLeased: true,
-        });
-        deviceEntryCount++;
-      }
-      log("discover.leases", "info", `${deviceName}: Found ${deviceEntryCount} DHCP entry/entries from monitor`, deviceName);
-    } catch (err: any) {
-      log("discover.leases", "error", `${deviceName}: Failed to query DHCP monitor — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3: Interface IPs + VLAN backfill onto local subnets
-    try {
-      const ifacePayload: JsonRpcRequest = {
-        id: 3,
-        method: "get",
-        // secondary-ip is a child mkey table on system/interface — each row
-        // carries its own `ip` (in "x.x.x.x y.y.y.y" form). Asking for the
-        // parent field returns the whole nested array as embedded JSON.
-        params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/interface`, fields: ["name", "ip", "vlanid", "switch-controller-mgmt-vlan", "secondary-ip"] }],
-      };
-      const ifaceRes = await rpc(baseUrl, ifacePayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      const ifaceData = ifaceRes.result?.[0]?.data;
-      const ifaceVlanMap = new Map<string, number>();
-      let ifaceIpCount = 0;
-      let secondaryIpCount = 0;
-      if (Array.isArray(ifaceData)) {
-        for (const iface of ifaceData) {
-          const ifaceName = iface.name || "";
-          const parseVid = (v: unknown): number => {
-            const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
-            return !isNaN(n) && n > 0 ? n : 0;
-          };
-          const vid = parseVid(iface.vlanid) || parseVid(iface["switch-controller-mgmt-vlan"]);
-          if (vid > 0) ifaceVlanMap.set(ifaceName, vid);
-          if (ifaceName === mgmtIfaceName) continue;
-          if (!matchesInterfaceFilter(ifaceName, config)) continue;
-          const ipArr = iface.ip;
-          if (Array.isArray(ipArr) && ipArr.length >= 1 && ipArr[0] && ipArr[0] !== "0.0.0.0") {
-            localInterfaceIps.push({ device: deviceName, interfaceName: ifaceName, ipAddress: ipArr[0], role: "interface" });
-            ifaceIpCount++;
-          }
-          // Secondary IPs: nested table on the interface. Each row has its own
-          // `ip` in either "x.x.x.x y.y.y.y" (IP + mask) string form or as a
-          // [ip, mask] array. Strip to the dotted-quad and push as
-          // role="secondary" so Phase 4 can label the reservation appropriately.
-          const secondaries = iface["secondary-ip"];
-          if (Array.isArray(secondaries)) {
-            for (const sec of secondaries) {
-              const rawSec = Array.isArray(sec?.ip)
-                ? (sec.ip[0] || "")
-                : (typeof sec?.ip === "string" ? sec.ip.split(" ")[0] : "");
-              if (rawSec && rawSec !== "0.0.0.0" && isValidIpv4(rawSec)) {
-                localInterfaceIps.push({ device: deviceName, interfaceName: ifaceName, ipAddress: rawSec, role: "secondary" });
-                secondaryIpCount++;
-              }
-            }
-          }
-        }
-      }
-      for (const sub of localSubnets) {
-        const vid = ifaceVlanMap.get(sub.name);
-        if (vid) sub.vlan = vid;
-      }
-      log("discover.interfaces", "info", `${deviceName}: Resolved ${ifaceIpCount} interface IP(s)${secondaryIpCount > 0 ? ` + ${secondaryIpCount} secondary IP(s)` : ""}`, deviceName);
-    } catch (err: any) {
-      log("discover.interfaces", "error", `${deviceName}: Failed to query interfaces — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3b: Device inventory. Skipped for offline gates (live monitor query).
-    if (!offline) try {
-      const inventoryPayload: JsonRpcRequest = {
-        id: 5,
-        method: "exec",
-        params: [{
-          url: `/sys/proxy/json`,
-          data: {
-            target: [`/adom/${adom}/device/${deviceName}`],
-            action: "get",
-            resource: "/api/v2/monitor/user/device/query?format=mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen",
-          },
-        }],
-      };
-      const inventoryRes = await rpc(baseUrl, inventoryPayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      const inventoryData = inventoryRes.result?.[0]?.data;
-      const results = Array.isArray(inventoryData)
-        ? inventoryData[0]?.response?.results
-        : (inventoryData as any)?.response?.results;
-      const inventoryCutoffMs = Date.now() - inventoryMaxAgeHours * 60 * 60 * 1000;
-      let inventoryCount = 0;
-      if (Array.isArray(results)) {
-        for (const client of results) {
-          const mac = client.mac || "";
-          const ip = client.ip || "";
-          if (!mac && !ip) continue;
-          if (!client.last_seen || client.last_seen * 1000 < inventoryCutoffMs) continue;
-          localInventory.push({
-            device: deviceName,
-            macAddress: mac,
-            ipAddress: ip,
-            hostname: client.hostname || client.host || "",
-            os: client.os || client.type || "",
-            osVersion: client.os_version || "",
-            hardwareVendor: client.hardware_vendor || "",
-            interfaceName: client.interface || "",
-            switchName: client.switch_fortilink || client.fortiswitch || "",
-            switchPort: client.switch_port != null ? String(client.switch_port) : "",
-            apName: client.ap_name || client.fortiap || "",
-            user: client.user || client.detected_user || "",
-            isOnline: !!client.is_online,
-            lastSeen: new Date(client.last_seen * 1000).toISOString(),
-          });
-          inventoryCount++;
-        }
-      }
-      didInventory = true;
-      log("discover.inventory", "info", `${deviceName}: Found ${inventoryCount} device inventory client(s)`, deviceName);
-    } catch (err: any) {
-      log("discover.inventory", "error", `${deviceName}: Failed to query device inventory — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3c: Managed FortiSwitches (live status). Skipped for offline gates —
-    // this whole block, including the nested /sys/proxy/json CMDB-uplink read,
-    // requires the device to be reachable. The native CMDB switch roster in
-    // Step 3c.5 below still runs offline (decommission protection only).
-    if (!offline) try {
-      const switchPayload: JsonRpcRequest = {
-        id: 8,
-        method: "exec",
-        params: [{
-          url: `/sys/proxy/json`,
-          data: {
-            target: [`/adom/${adom}/device/${deviceName}`],
-            action: "get",
-            resource: "/api/v2/monitor/switch-controller/managed-switch/status?format=connecting_from|fgt_peer_intf_name|join_time|os_version|serial|switch-id|state|status",
-          },
-        }],
-      };
-      const switchRes = await rpc(baseUrl, switchPayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      const switchData = switchRes.result?.[0]?.data;
-      const switchProxyEntry = Array.isArray(switchData) ? switchData[0] : switchData as any;
-      const switchProxyStatus = switchProxyEntry?.status?.code ?? 0;
-      const switchHttpStatus = switchProxyEntry?.response?.http_status ?? 200;
-      const switchResults = switchProxyEntry?.response?.results;
-      let switchCount = 0;
-      if (switchProxyStatus !== 0 || switchHttpStatus === 404) {
-        // 404 = switch-controller feature not licensed/enabled, which is the
-        // same as "controller has zero managed switches." Mark the query as
-        // inventoried so any pre-existing switches behind this gate get
-        // decommissioned (the controller is reachable, just not managing them).
-        didSwitchQuery = true;
-        log("discover.fortiswitches", "info", `${deviceName}: switch-controller not available (proxy status ${switchProxyStatus}, HTTP ${switchHttpStatus}) — skipping`, deviceName);
-      } else if (Array.isArray(switchResults)) {
-        didSwitchQuery = true;
-        // Switch-side physical uplink ports come from the managed-switch CMDB
-        // (the status query above only carries fgt_peer_intf_name = "fortilink").
-        // One extra proxy read per controller; serial → single uplink port
-        // (chained / dual-homed switches are omitted, leaving the FG↔switch
-        // edge label to LLDP). Best-effort — a failure just leaves it null.
-        // Mirrors fetchFortiswitchUplinkPorts in fortigateService (direct path).
-        const uplinkBySerial = new Map<string, string>();
-        // Admin description from the same CMDB rows (already fetched in
-        // full) — carries a:/b:/f:/r:/jb: location codes for the Device Map.
-        const descriptionBySerial = new Map<string, string>();
-        try {
-          const cmdbPayload: JsonRpcRequest = {
-            id: 9,
-            method: "exec",
-            params: [{
-              url: `/sys/proxy/json`,
-              data: {
-                target: [`/adom/${adom}/device/${deviceName}`],
-                action: "get",
-                resource: "/api/v2/cmdb/switch-controller/managed-switch?datasource=1",
-              },
-            }],
-          };
-          const cmdbRes = await rpc(baseUrl, cmdbPayload, apiUser, apiToken, verifySsl, signal, integrationId);
-          const cmdbData = cmdbRes.result?.[0]?.data;
-          const cmdbEntry = Array.isArray(cmdbData) ? cmdbData[0] : cmdbData as any;
-          const cmdbRows = cmdbEntry?.response?.results;
-          if (Array.isArray(cmdbRows)) {
-            for (const row of cmdbRows) {
-              const serial = String(row?.sn || row?.["switch-id"] || row?.name || "").trim();
-              if (!serial) continue;
-              const uplinks = findFortiswitchUplinkPorts(row?.ports);
-              if (uplinks.length === 1) uplinkBySerial.set(serial.toUpperCase(), uplinks[0]);
-              const desc = typeof row?.description === "string" ? row.description.trim() : "";
-              if (desc) descriptionBySerial.set(serial.toUpperCase(), desc);
-            }
-          }
-        } catch { /* best-effort — fall back to LLDP for the switch-side label */ }
-        for (const sw of switchResults) {
-          localSwitches.push({
-            device: deviceName,
-            name: sw["switch-id"] || "",
-            serial: sw.serial || "",
-            ipAddress: sw.connecting_from || "",
-            fgtInterface: sw.fgt_peer_intf_name || "",
-            osVersion: sw.os_version || "",
-            joinTime: Number.isFinite(sw.join_time) && sw.join_time > 0 ? sw.join_time : undefined,
-            state: sw.state || "",
-            connected: sw.status === "Connected",
-            uplinkPhysicalPort: uplinkBySerial.get((sw.serial || "").toUpperCase()) ?? null,
-            description: descriptionBySerial.get((sw.serial || "").toUpperCase()) ?? null,
-          });
-          switchCount++;
-        }
-        log("discover.fortiswitches", "info", `${deviceName}: Found ${switchCount} managed FortiSwitch(es)`, deviceName);
-      } else {
-        log("discover.fortiswitches", "info", `${deviceName}: Found 0 managed FortiSwitch(es)`, deviceName);
-      }
-    } catch (err: any) {
-      log("discover.fortiswitches", "error", `${deviceName}: Failed to query managed FortiSwitches — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3c.5: CMDB roster of configured FortiSwitches for this device.
-    // Native FMG CMDB read — no /sys/proxy/json wrapper, parallelizes
-    // freely. Defensive: a switch that's authorized at FMG but currently
-    // offline / in a brief post-config-push window may be missing from
-    // the live status query above; the decommission sweep treats serials
-    // surfaced here as "still known" so they're not declared stale.
-    // Best-effort: failures swallow (we still have the live answer).
-    try {
-      const swCmdbRes = await rpc(
-        baseUrl,
-        {
-          id: 16,
-          method: "get",
-          params: [{
-            url: `/pm/config/device/${deviceName}/global/switch-controller/managed-switch`,
-            fields: ["switch-id", "name"],
-            loadsub: 0,
-          }],
-        },
-        apiUser, apiToken, verifySsl, signal,
-      );
-      const swCmdbList = swCmdbRes.result?.[0]?.data;
-      if (Array.isArray(swCmdbList)) {
-        for (const sw of swCmdbList) {
-          // FortiSwitches are keyed by their serial as `switch-id` in CMDB
-          // (matches what the live query reports as `switch-id`). The
-          // optional `name` is the operator-set display label.
-          const serial = typeof sw["switch-id"] === "string" ? sw["switch-id"].trim() : "";
-          if (serial) localCmdbSwitchSerials.push({ device: deviceName, serial });
-        }
-      }
-    } catch (err: any) {
-      log("discover.fortiswitches.cmdb", "info", `${deviceName}: CMDB managed-switch roster lookup skipped — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3d: Managed FortiAPs (live status). Skipped for offline gates; the
-    // native CMDB AP roster in Step 3d.4 below still runs offline.
-    if (!offline) try {
-      const apPayload: JsonRpcRequest = {
-        id: 9,
-        method: "exec",
-        params: [{
-          url: `/sys/proxy/json`,
-          data: {
-            target: [`/adom/${adom}/device/${deviceName}`],
-            action: "get",
-            resource: `/api/v2/monitor/wifi/managed_ap?format=${FORTIAP_MONITOR_FORMAT}`,
-          },
-        }],
-      };
-      const apRes = await rpc(baseUrl, apPayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      const apData = apRes.result?.[0]?.data;
-      const apProxyEntry = Array.isArray(apData) ? apData[0] : apData as any;
-      const apProxyStatus = apProxyEntry?.status?.code ?? 0;
-      const apHttpStatus = apProxyEntry?.response?.http_status ?? 200;
-      const apResults = apProxyEntry?.response?.results;
-      let apCount = 0;
-      if (apProxyStatus !== 0 || apHttpStatus === 404) {
-        // Same reasoning as the switch path: 404 here means wireless-controller
-        // is not licensed/enabled. The controller is reachable, so the
-        // decommission sweep can act on stale APs behind it.
-        didApQuery = true;
-        log("discover.fortiaps", "info", `${deviceName}: wifi/managed_ap not available (proxy status ${apProxyStatus}, HTTP ${apHttpStatus}) — skipping`, deviceName);
-      } else if (Array.isArray(apResults)) {
-        didApQuery = true;
-        for (const ap of apResults) {
-          // Shared parser — same shape across FMG proxy and standalone
-          // FortiGate REST paths. See utils/fortiapMonitorRow.ts.
-          const parsed = parseFortiapMonitorRow(ap as Record<string, unknown>);
-          localAps.push({ device: deviceName, ...parsed });
-          apCount++;
-        }
-        log("discover.fortiaps", "info", `${deviceName}: Found ${apCount} managed FortiAP(s)`, deviceName);
-      } else {
-        log("discover.fortiaps", "info", `${deviceName}: Found 0 managed FortiAP(s)`, deviceName);
-      }
-    } catch (err: any) {
-      log("discover.fortiaps", "error", `${deviceName}: Failed to query managed FortiAPs — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3d.4: CMDB roster of configured FortiAPs (WTPs) for this device.
-    // Mirror of Step 3c.5 — native FMG CMDB read, decommission protection
-    // for configured-but-currently-offline APs. Best-effort. Also the only
-    // place the AP admin description lives: the monitor endpoint in Step 3d
-    // doesn't carry it, so it's joined onto localAps here (location codes
-    // for the Device Map — see utils/locationCodes.ts). The description
-    // surface is the wtp `location` field (AP Manager's field, 35-char cap —
-    // FMG's device-DB copy carries `location` but no `comment` at all when
-    // APs are centrally managed, so a comment-only read comes back empty);
-    // `comment` is still requested as a fallback for per-device-managed
-    // ADOMs whose copy retains it.
-    try {
-      const apCmdbRes = await rpc(
-        baseUrl,
-        {
-          id: 17,
-          method: "get",
-          params: [{
-            url: `/pm/config/device/${deviceName}/vdom/root/wireless-controller/wtp`,
-            fields: ["wtp-id", "name", "location", "comment"],
-            loadsub: 0,
-          }],
-        },
-        apiUser, apiToken, verifySsl, signal,
-      );
-      const apCmdbList = apCmdbRes.result?.[0]?.data;
-      if (Array.isArray(apCmdbList)) {
-        const descriptionBySerial = new Map<string, string>();
-        for (const ap of apCmdbList) {
-          // FortiAPs are keyed by serial as `wtp-id` in CMDB (matches what
-          // the live monitor query reports as `wtp_id` / `serial`).
-          const serial = typeof ap["wtp-id"] === "string" ? ap["wtp-id"].trim() : "";
-          if (!serial) continue;
-          localCmdbApSerials.push({ device: deviceName, serial });
-          const location = typeof ap.location === "string" ? ap.location.trim() : "";
-          const comment = typeof ap.comment === "string" ? ap.comment.trim() : "";
-          const description = location || comment;
-          if (description) descriptionBySerial.set(serial.toUpperCase(), description);
-        }
-        for (const ap of localAps) {
-          if (ap.device !== deviceName) continue;
-          ap.description = descriptionBySerial.get((ap.serial || "").toUpperCase()) ?? null;
-        }
-      }
-    } catch (err: any) {
-      log("discover.fortiaps.cmdb", "info", `${deviceName}: CMDB WTP roster lookup skipped — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3d.5: FortiAP → FortiSwitch port mapping via detected-device MAC table
-    // Pulls all switch port MAC learnings in one shot and matches each AP's base_mac
-    // to its switch + port. APs not seen on any managed switch stay un-peered and
-    // will render as hanging off the FortiGate directly in the topology graph.
-    // Skipped for offline gates (live monitor query).
-    if (!offline) try {
-      const detectedPayload: JsonRpcRequest = {
-        id: 12,
-        method: "exec",
-        params: [{
-          url: `/sys/proxy/json`,
-          data: {
-            target: [`/adom/${adom}/device/${deviceName}`],
-            action: "get",
-            resource: "/api/v2/monitor/switch-controller/detected-device?format=mac|switch_id|port_name|vlan_id|last_seen|ipv4_address|ipv6_address|device_name|host_src|device_type|os_name|is_fortilink_peer",
-          },
-        }],
-      };
-      const detRes = await rpc(baseUrl, detectedPayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      const detData = detRes.result?.[0]?.data;
-      const detEntry = Array.isArray(detData) ? detData[0] : detData as any;
-      const detStatus = detEntry?.status?.code ?? 0;
-      const detResults = detEntry?.response?.results;
-      if (detStatus === 0 && Array.isArray(detResults)) {
-        // Shared post-fetch processing (utils/fortinetDetectedDevice) —
-        // identical to the direct-REST path by requirement.
-        processDetectedDeviceRows({
-          rows: detResults,
-          deviceName,
-          displayName: deviceName,
-          aps: localAps,
-          switches: localSwitches,
-          macTable: localSwitchMacTable,
-          log,
-        });
-      }
-    } catch (err: any) {
-      log("discover.ap-uplinks", "info", `${deviceName}: detected-device query skipped — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3d.55: FortiGate ARP table. Authoritative IP↔MAC binding for any
-    // subnet the FortiGate routes for. Pairs with the macmap above —
-    // detected-device tells us "MAC X is on FortiSwitch Y / port Z," ARP
-    // tells us "MAC X has IP A right now." Together they let the sync
-    // pipeline enrich existing endpoint assets with both location + IP.
-    // Skipped for offline gates (live monitor query).
-    if (!offline) try {
-      // Step 3d.54: ARP presence sweep (opt-in — targets prebuilt by the
-      // caller from this device's active dhcp_reservation rows). Fire the
-      // UDP sweep, settle briefly, THEN read the table, so every live
-      // reserved IP resolves into a fresh neighbor-cache entry first.
-      const sweepIps = arpSweepTargets?.get(fmgNameKey(deviceName));
-      if (sweepIps?.length && !signal?.aborted) {
-        const { sent, dropped } = await primeArpCache(sweepIps);
-        if (sent > 0) {
-          log("discover.arp", "info", `${deviceName}: ARP presence sweep — probed ${sent} reserved IP(s)${dropped > 0 ? ` (${dropped} over cap, skipped)` : ""}`, deviceName);
-          await sleepWithAbort(ARP_SETTLE_MS, signal);
-        }
-      }
-      const arpPayload: JsonRpcRequest = {
-        id: 14,
-        method: "exec",
-        params: [{
-          url: `/sys/proxy/json`,
-          data: {
-            target: [`/adom/${adom}/device/${deviceName}`],
-            action: "get",
-            resource: "/api/v2/monitor/network/arp",
-          },
-        }],
-      };
-      const arpRes = await rpc(baseUrl, arpPayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      const arpData = arpRes.result?.[0]?.data;
-      const arpEntry = Array.isArray(arpData) ? arpData[0] : arpData as any;
-      const arpStatus = arpEntry?.status?.code ?? 0;
-      const arpResults = arpEntry?.response?.results;
-      if (arpStatus === 0 && Array.isArray(arpResults)) {
-        // Shared row parse (utils/fortinetDetectedDevice) — identical to the
-        // direct-REST path by requirement.
-        processArpRows({ rows: arpResults, deviceName, displayName: deviceName, arpTable: localArpTable, log });
-      }
-    } catch (err: any) {
-      log("discover.arp", "info", `${deviceName}: ARP query skipped — ${err.message || "Unknown error"}`, deviceName);
-    }
-
-    // Step 3d.6: Geo coordinates fallback — only runs when FMG's device record
-    // didn't already provide coords (see `fmgCoordsOk` above). Reads the
-    // FortiGate's `config system global` from FMG's CMDB **natively**
-    // (`/pm/config/device/<name>/global/system/global`) — no `/sys/proxy/json`
-    // wrapper. config system global is a CMDB object so FMG already has it
-    // in sync with the device; querying natively avoids the proxy mode's
-    // forced concurrency=1 and removes one round-trip per device per
-    // discovery cycle.
-    if (localDevice.latitude === undefined || localDevice.longitude === undefined) {
-      try {
-        const geoRes = await rpc(
-          baseUrl,
-          {
-            id: 13,
-            method: "get",
-            params: [{
-              url: `/pm/config/device/${deviceName}/global/system/global`,
-              fields: ["gui-device-latitude", "gui-device-longitude", "latitude", "longitude"],
-              loadsub: 0,
-            }],
-          },
-          apiUser, apiToken, verifySsl, signal,
-        );
-        const geoResults = geoRes.result?.[0]?.data;
-        if (geoResults && typeof geoResults === "object" && !Array.isArray(geoResults)) {
-          const lat = parseFloat(String((geoResults as any)["gui-device-latitude"] ?? (geoResults as any).latitude ?? ""));
-          const lng = parseFloat(String((geoResults as any)["gui-device-longitude"] ?? (geoResults as any).longitude ?? ""));
-          if (Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0)) {
-            localDevice.latitude = lat;
-            localDevice.longitude = lng;
-            log("discover.geo", "info", `${deviceName}: Resolved coordinates from FMG CMDB: ${lat.toFixed(4)}, ${lng.toFixed(4)}`, deviceName);
-          } else {
-            // Surface where coords are (or aren't) so the operator can locate them
-            const keys = Object.keys(geoResults).slice(0, 30).join(", ");
-            log("discover.geo", "info", `${deviceName}: No latitude/longitude in FMG CMDB system/global (keys: ${keys || "(empty)"})`, deviceName);
-          }
-        } else {
-          log("discover.geo", "info", `${deviceName}: FMG CMDB system/global returned no usable result — check FMG's CMDB sync state for this device`, deviceName);
-        }
-      } catch (err: any) {
-        log("discover.geo", "info", `${deviceName}: Geo lookup skipped — ${err.message || "Unknown error"}`, deviceName);
-      }
-    }
-
-    // Step 3e: Firewall VIPs
-    try {
-      const vipPayload: JsonRpcRequest = {
-        id: 11,
-        method: "get",
-        params: [{ url: `/pm/config/device/${deviceName}/vdom/root/firewall/vip`, fields: ["name", "extip", "mappedip", "extintf", "type", "realservers"] }],
-      };
-      const vipRes = await rpc(baseUrl, vipPayload, apiUser, apiToken, verifySsl, signal, integrationId);
-      didVipQuery = true;
-      const vipData = vipRes.result?.[0]?.data;
-      let vipCount = 0;
-      if (Array.isArray(vipData)) {
-        for (const vip of vipData) {
-          const name = vip.name || "";
-          if (!name) continue;
-          // FMG's fields-projected get flattens extip/extintf to
-          // single-element string arrays and the mappedip child table to
-          // flat range strings (verified against FMG 7.x / FortiOS 7.x);
-          // the FortiOS-REST encoding is plain strings + { range } objects.
-          // Handle both — the { range } form was the only one parsed
-          // historically, which silently dropped mapped IPs in proxy mode.
-          const extipRaw = Array.isArray(vip.extip) ? vip.extip[0] : vip.extip;
-          const extip = parseRangeFirstIp(String(extipRaw || ""));
-          if (!extip) continue;
-          const mappedips: string[] = [];
-          if (Array.isArray(vip.mappedip)) {
-            for (const m of vip.mappedip) {
-              const ip = parseRangeFirstIp(String((typeof m === "string" ? m : m?.range) || ""));
-              if (ip) mappedips.push(ip);
-            }
-          }
-          const extintfRaw = Array.isArray(vip.extintf) ? vip.extintf[0] : vip.extintf;
-          const { isVirtualServer, realservers } = parseVipServerInfo(vip);
-          localVips.push({ device: deviceName, name, extip, mappedips, extintf: String(extintfRaw || ""), isVirtualServer, realservers });
-          vipCount++;
-        }
-      }
-      log("discover.vips", "info", `${deviceName}: Found ${vipCount} firewall VIP(s)`, deviceName);
-    } catch (err: any) {
-      log("discover.vips", "error", `${deviceName}: Failed to query firewall VIPs — ${err.message || "Unknown error"}`, deviceName);
-    }
+    await fmgStepMgmtIp(ctx);
+    await fmgStepDhcpConfig(ctx);
+    await fmgStepDhcpMonitor(ctx);
+    await fmgStepInterfaceIps(ctx);
+    await fmgStepInventory(ctx);
+    await fmgStepSwitches(ctx);
+    await fmgStepSwitchCmdbRoster(ctx);
+    await fmgStepAps(ctx);
+    await fmgStepApCmdbRoster(ctx);
+    await fmgStepApPortMap(ctx);
+    await fmgStepArp(ctx);
+    await fmgStepGeoFallback(ctx);
+    await fmgStepVips(ctx);
 
     // Enrich inventory: fill blank interfaceNames from this device's own DHCP data
     const macToIface = new Map<string, string>();
@@ -2758,15 +2871,15 @@ export async function discoverDhcpSubnets(
     // offline gate's cached roster (or a staged replacement gate's cloned
     // config) must never vouch for devices owned by other controllers.
     if (offline) {
-      didInventory = false;
-      didSwitchQuery = false;
-      didApQuery = false;
-      didVipQuery = false;
-      didDhcpReservationsQuery = false;
-      didDhcpLeasesQuery = false;
+      flags.didInventory = false;
+      flags.didSwitchQuery = false;
+      flags.didApQuery = false;
+      flags.didVipQuery = false;
+      flags.didDhcpReservationsQuery = false;
+      flags.didDhcpLeasesQuery = false;
     }
 
-    return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips, switchMacTable: localSwitchMacTable, arpTable: localArpTable, cmdbSwitchSerials: localCmdbSwitchSerials, cmdbApSerials: localCmdbApSerials, didSwitchQuery, didApQuery, didVipQuery, didDhcpReservationsQuery, didDhcpLeasesQuery };
+    return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory: flags.didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips, switchMacTable: localSwitchMacTable, arpTable: localArpTable, cmdbSwitchSerials: localCmdbSwitchSerials, cmdbApSerials: localCmdbApSerials, didSwitchQuery: flags.didSwitchQuery, didApQuery: flags.didApQuery, didVipQuery: flags.didVipQuery, didDhcpReservationsQuery: flags.didDhcpReservationsQuery, didDhcpLeasesQuery: flags.didDhcpLeasesQuery };
   }
 
   // Process up to `concurrency` FortiGates in parallel.
