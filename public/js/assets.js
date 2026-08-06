@@ -4099,72 +4099,7 @@ async function openViewModal(id) {
     var a = fetched[0];
     if (fetched[1]) _monitorSettingsCache = fetched[1];
     _currentAssetForRefresh = a;
-    // Dependency tree block (General tab) — populated asynchronously after
-    // openViewModal awaits api.assets.getDependencies(id) below. Rendered
-    // beneath the details table so the at-a-glance facts (hostname / IP /
-    // status) come first.
-    var dependencyTreeMountHTML = '<div data-shot-section="depTree" data-shot-label="Dependency Tree"><div id="asset-dep-tree-mount-' + escapeHtml(a.id) + '"></div></div>';
-
-    var generalHTML = '<div data-shot-section="details" data-shot-label="Details">' +
-      _managementAccessNoticeHTML(a) +
-      '<div class="asset-view-grid">' +
-      (a.ipAddress && !a.hostname
-        ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value">- <button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\')" title="Reverse DNS lookup (PTR record)">PTR Lookup</button></span></div>'
-        : (a.hostnameOverride
-          ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value"><span class="copy-cell" title="Click to copy" data-copy="' + escapeHtml(a.hostname || "") + '">' + escapeHtml(a.hostname || "-") + '</span><span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#6b728018;color:#9ca3af;border:1px solid #6b728030;margin-left:6px" title="Hostname manually overridden — discovery will not change it. Clear the Hostname field in Edit to resume the discovered value.">overridden</span></span></div>'
-          : viewRow("Hostname", a.hostname, false, false, true))) +
-      viewRow("DNS Name", a.dnsName, false, false, true) +
-      ipViewRow(a) +
-      viewRow("MAC Address", a.macAddress, true, false, true) +
-      macAddressesViewHTML(a.macAddresses) +
-      viewRow("Asset Tag", a.assetTag) +
-      viewRow("Serial Number", a.serialNumber, false, false, true) +
-      (a.macAddress && !a.manufacturer
-        ? '<div class="detail-row"><span class="detail-label">Manufacturer</span><span class="detail-value">- <button class="btn btn-sm btn-secondary" onclick="singleOuiLookup(\'' + a.id + '\')" title="OUI manufacturer lookup from MAC address">OUI Lookup</button></span></div>'
-        : viewRow("Manufacturer", a.manufacturer)) +
-      viewRow("Model", a.model) +
-      viewRow("Type", ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
-      viewRow("Status", a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-") +
-      authorizationRowHTML(a) +
-      disabledInHTML(a.tags) +
-      viewRow("Location", a.location || a.learnedLocation) +
-      ((a.latitude != null && a.longitude != null)
-        ? viewRow("Coordinates", a.latitude.toFixed(4) + ", " + a.longitude.toFixed(4) + (a.coordSource === "manual" ? " (manual)" : ""), true)
-        : "") +
-      (a.learnedAddress ? viewRow("Address", a.learnedAddress) : "") +
-      (a.snmpLocation ? viewRow("SNMP Location", a.snmpLocation) : "") +
-      viewRow("Department", a.department) +
-      viewRow("Assigned To", a.assignedTo) +
-      viewRow("OS / Firmware", a.osVersion || a.os) +
-      haTopologyHTML(a) +
-      viewRow("Last Seen Switch", a.lastSeenSwitch) +
-      viewRow("Last Seen AP", a.lastSeenAp) +
-      '<div class="detail-row"><span class="detail-label">Last Seen Firewall</span><span class="detail-value" id="asset-last-fw-' + escapeHtml(a.id) + '">-</span></div>' +
-      '<div id="asset-mclag-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
-      associatedUsersViewHTML(a.associatedUsers) +
-      lastSeenRowHTML(a) +
-      '<div id="asset-dir-activity-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
-      viewRow("Acquired", (a.acquiredAt || a.createdAt) ? formatDate(a.acquiredAt || a.createdAt) : null) +
-      viewRow("Warranty Expires", a.warrantyExpiry ? formatDate(a.warrantyExpiry) : null) +
-      viewRow("Purchase Order", a.purchaseOrder) +
-      viewRow("Tags", (a.tags || []).join(", ") || null, false, true) +
-      viewRow("Description", a.description
-        ? a.description + (a.descriptionSync && a.descriptionSync.status === "failed"
-            ? " ⚠ (device sync failed)"
-            : (a.descriptionSync && a.descriptionSync.status === "conflict"
-                ? " ⚠ (sync conflict — device also edited; edit to resolve)"
-                : (a.descriptionSync && a.descriptionSync.status === "synced" ? " (synced to device)" : "")))
-        : null, false, true) +
-      viewRow("Notes", a.notes, false, true) +
-      viewRow("Created", formatDate(a.createdAt)) +
-      viewRow("Updated", formatDate(a.updatedAt)) +
-    '</div></div>' +
-    // Virtualization section (vCenter VMs + ESXi hosts) — async-fetched;
-    // stays empty for assets without vCenter data.
-    (a.virtualization
-      ? '<div data-shot-section="virtualization" data-shot-label="Virtualization"><div id="asset-virt-mount-' + escapeHtml(a.id) + '"></div></div>'
-      : '') +
-    dependencyTreeMountHTML;
+    var generalHTML = _assetGeneralTabHTML(a);
 
     var monitoringHTML = assetMonitoringViewHTML(a);
     var agentSubpanelHTML = ""; // filled in after the parallel load below
@@ -4350,6 +4285,114 @@ async function openViewModal(id) {
     if (!isInfraProc) _wireAssetServicesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     if (permAtLeast("alerts", "read")) _loadAssetNotificationsTab(a.id);
+    _mountAssetViewAsyncSections(a, dependencies, sources, sightings, managedAgent, agentSubpanelHTML);
+    _wireHoverTriggersIn(bodyEl);
+    bodyEl.addEventListener("click", _handleCopyClick);
+    document.getElementById("btn-asset-copy").addEventListener("click", _copyAssetDetails);
+    document.getElementById("btn-asset-screenshot").addEventListener("click", function () {
+      _openScreenshotOptions(a);
+    });
+    _wireAssetRefreshExport(a);
+    _wireManagementAccessButtons(a);
+    document.getElementById("btn-asset-panel-close-btn").addEventListener("click", closeAssetPanel);
+    var editBtn = document.getElementById("btn-asset-panel-edit-btn");
+    if (editBtn) {
+      editBtn.addEventListener("click", function () {
+        closeAssetPanel();
+        openEditModal(a.id);
+      });
+    }
+    if (a.monitored) _loadMonitorHistoryFor(a.id, _getChartRangePref("assetMonitor", "24h"));
+    if (a.monitored) _loadSystemTabFor(a.id, _getChartRangePref("assetSystem", "1h"), a);
+    if (a.monitored) _renderIntermittencyBar(a.id);
+    if (a.monitored) _updateStreamSourceBadgesFromEffective(a.id, a);
+    _wireAssetMonitorActions(a);
+    _wireAssetRediscover(a);
+    _wireAssetChartRangeControls(a);
+  } catch (err) {
+    showToast(err.message, "error");
+    closeAssetPanel();
+  }
+}
+
+// --- openViewModal phases (split 2026-08 --- render-HTML / async-mount /
+// wire-events helpers extracted verbatim from the 697-line orchestrator;
+// each closes over nothing beyond its params + module globals) ---
+
+// General-tab HTML (details grid + virtualization mount + dependency-tree mount).
+function _assetGeneralTabHTML(a) {
+    // Dependency tree block (General tab) — populated asynchronously after
+    // openViewModal awaits api.assets.getDependencies(id) below. Rendered
+    // beneath the details table so the at-a-glance facts (hostname / IP /
+    // status) come first.
+    var dependencyTreeMountHTML = '<div data-shot-section="depTree" data-shot-label="Dependency Tree"><div id="asset-dep-tree-mount-' + escapeHtml(a.id) + '"></div></div>';
+
+    var generalHTML = '<div data-shot-section="details" data-shot-label="Details">' +
+      _managementAccessNoticeHTML(a) +
+      '<div class="asset-view-grid">' +
+      (a.ipAddress && !a.hostname
+        ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value">- <button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\')" title="Reverse DNS lookup (PTR record)">PTR Lookup</button></span></div>'
+        : (a.hostnameOverride
+          ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value"><span class="copy-cell" title="Click to copy" data-copy="' + escapeHtml(a.hostname || "") + '">' + escapeHtml(a.hostname || "-") + '</span><span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#6b728018;color:#9ca3af;border:1px solid #6b728030;margin-left:6px" title="Hostname manually overridden — discovery will not change it. Clear the Hostname field in Edit to resume the discovered value.">overridden</span></span></div>'
+          : viewRow("Hostname", a.hostname, false, false, true))) +
+      viewRow("DNS Name", a.dnsName, false, false, true) +
+      ipViewRow(a) +
+      viewRow("MAC Address", a.macAddress, true, false, true) +
+      macAddressesViewHTML(a.macAddresses) +
+      viewRow("Asset Tag", a.assetTag) +
+      viewRow("Serial Number", a.serialNumber, false, false, true) +
+      (a.macAddress && !a.manufacturer
+        ? '<div class="detail-row"><span class="detail-label">Manufacturer</span><span class="detail-value">- <button class="btn btn-sm btn-secondary" onclick="singleOuiLookup(\'' + a.id + '\')" title="OUI manufacturer lookup from MAC address">OUI Lookup</button></span></div>'
+        : viewRow("Manufacturer", a.manufacturer)) +
+      viewRow("Model", a.model) +
+      viewRow("Type", ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
+      viewRow("Status", a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-") +
+      authorizationRowHTML(a) +
+      disabledInHTML(a.tags) +
+      viewRow("Location", a.location || a.learnedLocation) +
+      ((a.latitude != null && a.longitude != null)
+        ? viewRow("Coordinates", a.latitude.toFixed(4) + ", " + a.longitude.toFixed(4) + (a.coordSource === "manual" ? " (manual)" : ""), true)
+        : "") +
+      (a.learnedAddress ? viewRow("Address", a.learnedAddress) : "") +
+      (a.snmpLocation ? viewRow("SNMP Location", a.snmpLocation) : "") +
+      viewRow("Department", a.department) +
+      viewRow("Assigned To", a.assignedTo) +
+      viewRow("OS / Firmware", a.osVersion || a.os) +
+      haTopologyHTML(a) +
+      viewRow("Last Seen Switch", a.lastSeenSwitch) +
+      viewRow("Last Seen AP", a.lastSeenAp) +
+      '<div class="detail-row"><span class="detail-label">Last Seen Firewall</span><span class="detail-value" id="asset-last-fw-' + escapeHtml(a.id) + '">-</span></div>' +
+      '<div id="asset-mclag-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
+      associatedUsersViewHTML(a.associatedUsers) +
+      lastSeenRowHTML(a) +
+      '<div id="asset-dir-activity-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
+      viewRow("Acquired", (a.acquiredAt || a.createdAt) ? formatDate(a.acquiredAt || a.createdAt) : null) +
+      viewRow("Warranty Expires", a.warrantyExpiry ? formatDate(a.warrantyExpiry) : null) +
+      viewRow("Purchase Order", a.purchaseOrder) +
+      viewRow("Tags", (a.tags || []).join(", ") || null, false, true) +
+      viewRow("Description", a.description
+        ? a.description + (a.descriptionSync && a.descriptionSync.status === "failed"
+            ? " ⚠ (device sync failed)"
+            : (a.descriptionSync && a.descriptionSync.status === "conflict"
+                ? " ⚠ (sync conflict — device also edited; edit to resolve)"
+                : (a.descriptionSync && a.descriptionSync.status === "synced" ? " (synced to device)" : "")))
+        : null, false, true) +
+      viewRow("Notes", a.notes, false, true) +
+      viewRow("Created", formatDate(a.createdAt)) +
+      viewRow("Updated", formatDate(a.updatedAt)) +
+    '</div></div>' +
+    // Virtualization section (vCenter VMs + ESXi hosts) — async-fetched;
+    // stays empty for assets without vCenter data.
+    (a.virtualization
+      ? '<div data-shot-section="virtualization" data-shot-label="Virtualization"><div id="asset-virt-mount-' + escapeHtml(a.id) + '"></div></div>'
+      : '') +
+    dependencyTreeMountHTML;
+    return generalHTML;
+}
+
+// Async section mounts on the General/System tabs: dependency tree, directory
+// activity, last-seen firewall, MCLAG peers, virtualization, agent sub-panel.
+function _mountAssetViewAsyncSections(a, dependencies, sources, sightings, managedAgent, agentSubpanelHTML) {
     // Mount the dependency tree into its placeholder div on the General tab.
     var depMount = document.getElementById("asset-dep-tree-mount-" + a.id);
     if (depMount) {
@@ -4439,12 +4482,10 @@ async function openViewModal(id) {
       agentMount.innerHTML = agentSubpanelHTML;
       _wireAgentSubpanel(a, managedAgent);
     }
-    _wireHoverTriggersIn(bodyEl);
-    bodyEl.addEventListener("click", _handleCopyClick);
-    document.getElementById("btn-asset-copy").addEventListener("click", _copyAssetDetails);
-    document.getElementById("btn-asset-screenshot").addEventListener("click", function () {
-      _openScreenshotOptions(a);
-    });
+}
+
+// Footer Refresh button + the Events-tab Export dropdown.
+function _wireAssetRefreshExport(a) {
     // Refresh: re-fetch + re-render the whole slide-over, then restore the
     // tab the operator was on (openViewModal rebuilds the DOM with General
     // active; clicking the saved tab also re-fires _syncAssetFooterButtons
@@ -4492,15 +4533,10 @@ async function openViewModal(id) {
         });
       }
     }
-    _wireManagementAccessButtons(a);
-    document.getElementById("btn-asset-panel-close-btn").addEventListener("click", closeAssetPanel);
-    var editBtn = document.getElementById("btn-asset-panel-edit-btn");
-    if (editBtn) {
-      editBtn.addEventListener("click", function () {
-        closeAssetPanel();
-        openEditModal(a.id);
-      });
-    }
+}
+
+// System-tab monitor actions: override reset + Poll Now.
+function _wireAssetMonitorActions(a) {
     var monitorResetBtn = document.getElementById("btn-asset-monitor-reset");
     if (monitorResetBtn) {
       monitorResetBtn.addEventListener("click", async function () {
@@ -4522,48 +4558,6 @@ async function openViewModal(id) {
           monitorResetBtn.disabled = false;
           monitorResetBtn.textContent = "Reset to integration default";
         }
-      });
-    }
-    if (a.monitored) _loadMonitorHistoryFor(a.id, _getChartRangePref("assetMonitor", "24h"));
-    if (a.monitored) _loadSystemTabFor(a.id, _getChartRangePref("assetSystem", "1h"), a);
-    if (a.monitored) _renderIntermittencyBar(a.id);
-    if (a.monitored) _updateStreamSourceBadgesFromEffective(a.id, a);
-    document.querySelectorAll(".asset-system-range-btn").forEach(function (b) {
-      b.addEventListener("click", function () {
-        var range = b.getAttribute("data-range");
-        var panel = document.getElementById("asset-system-custom-panel");
-        if (range === "custom") {
-          if (!panel) return;
-          var willOpen = panel.style.display === "none";
-          panel.style.display = willOpen ? "flex" : "none";
-          if (willOpen) {
-            var toInput = document.getElementById("asset-system-to");
-            var fromInput = document.getElementById("asset-system-from");
-            if (toInput && !toInput.value) toInput.value = _toLocalDatetimeInput(new Date());
-            if (fromInput && !fromInput.value) fromInput.value = _toLocalDatetimeInput(new Date(Date.now() - 24 * 3600 * 1000));
-          }
-          return;
-        }
-        if (panel) panel.style.display = "none";
-        document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
-        b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
-        _setChartRangePref("assetSystem", range);
-        _loadSystemTabFor(a.id, range, a, { chartOnly: true });
-      });
-    });
-    var sysApplyBtn = document.getElementById("btn-asset-system-custom-apply");
-    if (sysApplyBtn) {
-      sysApplyBtn.addEventListener("click", function () {
-        var fromInput = document.getElementById("asset-system-from");
-        var toInput   = document.getElementById("asset-system-to");
-        if (!fromInput.value || !toInput.value) { showToast("Enter both From and To", "error"); return; }
-        var fromIso = new Date(fromInput.value).toISOString();
-        var toIso   = new Date(toInput.value).toISOString();
-        if (new Date(fromIso) >= new Date(toIso)) { showToast("From must be before To", "error"); return; }
-        document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
-        var customBtn = document.getElementById("btn-asset-system-custom");
-        if (customBtn) { customBtn.classList.remove("btn-secondary"); customBtn.classList.add("btn-primary"); }
-        _loadSystemTabFor(a.id, { from: fromIso, to: toIso }, a, { chartOnly: true });
       });
     }
     var probeBtn = document.getElementById("btn-asset-probe-now");
@@ -4636,6 +4630,10 @@ async function openViewModal(id) {
         }
       });
     }
+}
+
+// Single-FortiGate re-discover button + the appear-then-disappear run watch.
+function _wireAssetRediscover(a) {
     var rediscoverBtn = document.getElementById("btn-asset-rediscover");
     if (rediscoverBtn && !rediscoverBtn.disabled) {
       rediscoverBtn.addEventListener("click", async function () {
@@ -4692,6 +4690,49 @@ async function openViewModal(id) {
           showToast(err.message || "Re-discovery failed to start", "error");
           restore();
         }
+      });
+    }
+}
+
+// Chart range buttons + custom-range panels + drag-select, for both the
+// monitor (response-time) chart and the System-tab charts.
+function _wireAssetChartRangeControls(a) {
+    document.querySelectorAll(".asset-system-range-btn").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var range = b.getAttribute("data-range");
+        var panel = document.getElementById("asset-system-custom-panel");
+        if (range === "custom") {
+          if (!panel) return;
+          var willOpen = panel.style.display === "none";
+          panel.style.display = willOpen ? "flex" : "none";
+          if (willOpen) {
+            var toInput = document.getElementById("asset-system-to");
+            var fromInput = document.getElementById("asset-system-from");
+            if (toInput && !toInput.value) toInput.value = _toLocalDatetimeInput(new Date());
+            if (fromInput && !fromInput.value) fromInput.value = _toLocalDatetimeInput(new Date(Date.now() - 24 * 3600 * 1000));
+          }
+          return;
+        }
+        if (panel) panel.style.display = "none";
+        document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+        b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+        _setChartRangePref("assetSystem", range);
+        _loadSystemTabFor(a.id, range, a, { chartOnly: true });
+      });
+    });
+    var sysApplyBtn = document.getElementById("btn-asset-system-custom-apply");
+    if (sysApplyBtn) {
+      sysApplyBtn.addEventListener("click", function () {
+        var fromInput = document.getElementById("asset-system-from");
+        var toInput   = document.getElementById("asset-system-to");
+        if (!fromInput.value || !toInput.value) { showToast("Enter both From and To", "error"); return; }
+        var fromIso = new Date(fromInput.value).toISOString();
+        var toIso   = new Date(toInput.value).toISOString();
+        if (new Date(fromIso) >= new Date(toIso)) { showToast("From must be before To", "error"); return; }
+        document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+        var customBtn = document.getElementById("btn-asset-system-custom");
+        if (customBtn) { customBtn.classList.remove("btn-secondary"); customBtn.classList.add("btn-primary"); }
+        _loadSystemTabFor(a.id, { from: fromIso, to: toIso }, a, { chartOnly: true });
       });
     }
     document.querySelectorAll(".asset-monitor-range-btn").forEach(function (b) {
@@ -4751,10 +4792,6 @@ async function openViewModal(id) {
     };
     _wireChartDragSelect(document.getElementById("asset-system-chart"), systemDragApply);
     _wireChartDragSelect(document.getElementById("asset-system-sessions-chart"), systemDragApply);
-  } catch (err) {
-    showToast(err.message, "error");
-    closeAssetPanel();
-  }
 }
 
 // ─── Polaris Agent sub-panel (System tab) ─────────────────────────────────
