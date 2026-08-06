@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Production Readiness Audit</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<style>
+  :root{
+    --bg:#0e1014; --bg-2:#14181e; --panel:#181d24; --panel-2:#1e242c;
+    --border:#2b323d; --border-soft:#232a33;
+    --ink:#e7e9ec; --ink-mute:#99a1ac; --ink-faint:#69727d;
+    --ember:#d8814a; --ember-bright:#ec9a5b; --ember-deep:#ab5f31;
+    --crit:#e3514f; --high:#e2853f; --med:#d3a23d; --low:#7e8c9d;
+    --ok:#45b587; --info:#5a8fc7; --defer:#b07cc7;
+    --serif:Georgia,'Times New Roman',serif;
+    --sans:Calibri,'Segoe UI',system-ui,-apple-system,sans-serif;
+    --mono:'JetBrains Mono','Cascadia Code','SF Mono',Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  a{color:inherit}
+  .wrap{max-width:1100px;margin:0 auto;padding:32px 24px 96px}
+
+  /* Header / ledger */
+  .ledger{border:1px solid var(--border);background:linear-gradient(180deg,var(--panel) 0%,var(--bg-2) 100%);border-radius:10px;padding:26px 28px;animation:rise .5s ease both}
+  .ledger__eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--ember);margin-bottom:10px}
+  .ledger__title{font-family:var(--serif);font-size:30px;font-weight:600;line-height:1.1}
+  .ledger__meta{font-family:var(--mono);font-size:12px;color:var(--ink-faint);margin-top:8px;display:flex;gap:18px;flex-wrap:wrap}
+  .ledger__bar{display:flex;height:10px;border-radius:5px;overflow:hidden;margin:22px 0 16px;background:var(--bg);border:1px solid var(--border-soft)}
+  .ledger__bar span{display:block;height:100%}
+  .chips{display:flex;gap:10px;flex-wrap:wrap}
+  .chip{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);background:var(--bg);border-radius:7px;padding:7px 13px;font-size:13px}
+  .chip b{font-family:var(--mono);font-size:15px}
+  .chip .dot{width:9px;height:9px;border-radius:2px}
+  .readout{margin-top:18px;font-size:15px;color:var(--ink-mute);display:flex;align-items:center;gap:10px}
+  .readout i{color:var(--ember)}
+
+  /* Progress */
+  .progress{margin-top:16px;display:none;align-items:center;gap:14px}
+  .progress.on{display:flex}
+  .progress__track{flex:1;height:7px;background:var(--bg);border:1px solid var(--border-soft);border-radius:4px;overflow:hidden}
+  .progress__fill{height:100%;background:linear-gradient(90deg,var(--ember-deep),var(--ok));transition:width .4s ease}
+  .progress__label{font-family:var(--mono);font-size:12px;color:var(--ink-mute);white-space:nowrap}
+
+  /* Map strip */
+  .map{margin-top:26px}
+  .map__h{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px}
+  .map__grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+  .cell{border:1px solid var(--border-soft);background:var(--panel);border-radius:8px;padding:13px 15px}
+  .cell__k{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-faint)}
+  .cell__v{font-family:var(--mono);font-size:18px;margin-top:5px;color:var(--ink)}
+  .cell--warn{border-color:rgba(226,133,63,.45)}
+  .cell--warn .cell__v{color:var(--high)}
+
+  /* Toolbar */
+  .toolbar{position:sticky;top:0;z-index:5;display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:30px 0 18px;padding:14px 0;background:linear-gradient(180deg,var(--bg) 70%,transparent);backdrop-filter:blur(2px)}
+  .segs{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  .seg{background:var(--panel);color:var(--ink-mute);border:0;padding:8px 14px;font-family:var(--sans);font-size:13px;cursor:pointer;border-right:1px solid var(--border);transition:.15s}
+  .seg:last-child{border-right:0}
+  .seg:hover{color:var(--ink)}
+  .seg.active{background:var(--ember-deep);color:#fff}
+  .field{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);background:var(--panel);border-radius:8px;padding:8px 12px}
+  .field i{color:var(--ink-faint);font-size:12px}
+  .field input,.field select{background:transparent;border:0;color:var(--ink);font-family:var(--sans);font-size:13px;outline:none;min-width:140px}
+  .field select option{background:var(--panel)}
+  .btn{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);background:var(--panel);color:var(--ink);border-radius:8px;padding:8px 14px;font-family:var(--sans);font-size:13px;cursor:pointer;transition:.15s}
+  .btn:hover{border-color:var(--ember);color:var(--ember-bright)}
+  .btn--solid{background:var(--ember-deep);border-color:var(--ember-deep);color:#fff}
+  .btn--solid:hover{background:var(--ember);border-color:var(--ember);color:#fff}
+  .spacer{flex:1}
+
+  /* Group heading */
+  .group{margin-top:14px}
+  .group__h{display:flex;align-items:center;gap:11px;font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);margin:26px 0 12px}
+  .group__h .tick{width:10px;height:10px;border-radius:2px}
+  .group__h .n{margin-left:auto;color:var(--ink-faint)}
+
+  /* Finding card */
+  .card{position:relative;border:1px solid var(--border);background:var(--panel);border-radius:10px;padding:18px 20px 18px 22px;margin-bottom:12px;overflow:hidden;animation:rise .35s ease both}
+  .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--low)}
+  .card[data-sev="critical"]::before{background:var(--crit)}
+  .card[data-sev="high"]::before{background:var(--high)}
+  .card[data-sev="medium"]::before{background:var(--med)}
+  .card[data-sev="low"]::before{background:var(--low)}
+  .card.fixed{opacity:.62}
+  .card.fixed .card__title{text-decoration:line-through;text-decoration-color:var(--ink-faint)}
+  .card__top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:9px}
+  .id{font-family:var(--mono);font-size:12px;color:var(--ink-faint)}
+  .badge{font-size:11px;letter-spacing:.03em;border:1px solid var(--border);border-radius:5px;padding:3px 8px;color:var(--ink-mute)}
+  .sev{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:3px 9px;border-radius:5px}
+  .sev--critical{background:rgba(227,81,79,.14);color:var(--crit)}
+  .sev--high{background:rgba(226,133,63,.14);color:var(--high)}
+  .sev--medium{background:rgba(211,162,61,.14);color:var(--med)}
+  .sev--low{background:rgba(126,140,157,.14);color:var(--low)}
+  .card__title{font-family:var(--serif);font-size:19px;font-weight:600;line-height:1.25;margin-bottom:10px}
+  .loc{display:inline-flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12.5px;color:var(--ember-bright);background:var(--bg);border:1px solid var(--border-soft);border-radius:6px;padding:5px 10px;margin-bottom:12px}
+  .loc .copy{color:var(--ink-faint);cursor:pointer;border:0;background:none;font-size:11px}
+  .loc .copy:hover{color:var(--ember)}
+  .row{display:flex;gap:10px;margin-bottom:10px}
+  .row__k{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);min-width:62px;padding-top:2px}
+  .row__v{flex:1;color:var(--ink)}
+  .fix{position:relative;font-family:var(--mono);font-size:13px;line-height:1.55;background:var(--bg);border:1px solid var(--border-soft);border-left:3px solid var(--ember-deep);border-radius:7px;padding:12px 40px 12px 13px;color:#dfe3e8;white-space:pre-wrap;word-break:break-word}
+  .fix .copy{position:absolute;top:8px;right:8px;border:0;background:var(--panel);color:var(--ink-faint);border-radius:5px;padding:5px 7px;font-size:11px;cursor:pointer}
+  .fix .copy:hover{color:var(--ember)}
+  .confirm{display:flex;gap:10px;align-items:flex-start;margin-top:10px;font-size:13.5px;color:var(--med);background:rgba(211,162,61,.08);border:1px solid rgba(211,162,61,.3);border-radius:7px;padding:10px 13px}
+  .card__foot{display:flex;align-items:center;gap:10px;margin-top:14px;padding-top:13px;border-top:1px solid var(--border-soft)}
+  .status{font-family:var(--sans);font-size:12.5px;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:7px;padding:6px 10px;cursor:pointer;outline:none}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase;padding:4px 9px;border-radius:20px}
+  .pill .dot{width:7px;height:7px;border-radius:50%}
+  .pill--open{color:var(--low);background:rgba(126,140,157,.13)}
+  .pill--accepted{color:var(--info);background:rgba(90,143,199,.13)}
+  .pill--fixed{color:var(--ok);background:rgba(69,181,135,.13)}
+  .pill--wontfix{color:var(--ink-faint);background:rgba(105,114,125,.13)}
+  .pill--deferred{color:var(--defer);background:rgba(176,124,199,.13)}
+
+  .empty{text-align:center;color:var(--ink-faint);font-family:var(--mono);font-size:13px;padding:50px 0}
+  .foot{margin-top:40px;padding-top:18px;border-top:1px solid var(--border-soft);font-family:var(--mono);font-size:11px;color:var(--ink-faint);display:flex;gap:16px;flex-wrap:wrap}
+
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+  @media (max-width:640px){.ledger__title{font-size:24px}.toolbar{position:static}.field input,.field select{min-width:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="ledger">
+    <div class="ledger__eyebrow">Production Readiness Audit</div>
+    <h1 class="ledger__title" id="appName">App</h1>
+    <div class="ledger__meta" id="meta"></div>
+    <div class="ledger__bar" id="bar"></div>
+    <div class="chips" id="chips"></div>
+    <div class="readout" id="readout"></div>
+    <div class="progress" id="progress">
+      <div class="progress__track"><div class="progress__fill" id="progressFill"></div></div>
+      <div class="progress__label" id="progressLabel"></div>
+    </div>
+  </header>
+
+  <section class="map">
+    <div class="map__h">Codebase map</div>
+    <div class="map__grid" id="map"></div>
+  </section>
+
+  <div class="toolbar">
+    <div class="segs" id="sevFilter">
+      <button class="seg active" data-sev="all">All</button>
+      <button class="seg" data-sev="critical">Critical</button>
+      <button class="seg" data-sev="high">High</button>
+      <button class="seg" data-sev="medium">Medium</button>
+      <button class="seg" data-sev="low">Low</button>
+    </div>
+    <div class="field"><i class="fa-solid fa-layer-group"></i>
+      <select id="catFilter"><option value="all">All categories</option></select>
+    </div>
+    <div class="field"><i class="fa-solid fa-magnifying-glass"></i>
+      <input id="search" placeholder="Search findings, files...">
+    </div>
+    <div class="spacer"></div>
+    <button class="btn" id="acceptHigh"><i class="fa-solid fa-circle-check"></i> Accept critical + high</button>
+    <button class="btn btn--solid" id="export"><i class="fa-solid fa-download"></i> Export findings.json</button>
+  </div>
+
+  <div id="findings"></div>
+
+  <div class="foot" id="foot"></div>
+</div>
+
+<script>
+/* =================== AUDIT DATA =====================================
+   The audit replaces ONLY the object below. Keep the shape identical.
+   status values: open | accepted | fixed | wontfix | deferred
+   ================================================================== */
+const REPORT = {
+  "app": "Polaris",
+  "repo": "C:\\Users\\dmoore\\VSCode\\polaris",
+  "generated": "2026-08-06",
+  "map": {
+    "Route handlers": "427",
+    "DB call sites": "2697 Prisma + 82 raw SQL (all parameterized)",
+    "LLM call sites": "0",
+    "External integrations": "6 services (FMG, FortiGate, Entra/Graph, AD/LDAP, WinRM, vCenter) + 16 fetch sites",
+    "Multi-step write paths": "56 $transaction blocks, 4 bulk routes",
+    "Migrations": "149 versioned (prisma migrate deploy, single owner)",
+    "Postgres backup": {
+      "value": "pg_dump, in-memory, not Timescale-aware",
+      "warn": true
+    },
+    "Secrets": {
+      "value": "env vars + plaintext in DB",
+      "warn": true
+    },
+    "Critical-path tests": {
+      "value": "194 files; backup/restore + update pipeline uncovered",
+      "warn": true
+    }
+  },
+  "findings": [
+    {
+      "id": "OPS-01",
+      "severity": "high",
+      "category": "Operability",
+      "title": "Backup and restore are not TimescaleDB-aware, so the disaster-recovery path is unvalidated",
+      "file": "src/api/routes/serverSettings.ts",
+      "line": 375,
+      "risk": "Every documented production install enables TimescaleDB (docs/INSTALL.md installs timescaledb-2-postgresql-15, and timescaleService.ts converts 21 sample and rollup tables into hypertables with compression policies). Backup runs a plain pg_dump and restore pipes the dump into `psql --single-transaction`. Neither calls `timescaledb_pre_restore()` or `timescaledb_post_restore()`, which Timescale documents as required around a restore: without them, hypertable catalog rows and chunk metadata restore in the wrong order and the restore either aborts or produces hypertables whose chunks are invisible. Nothing in the repo exercises a restore, so the failure only shows up the day it is needed.",
+      "fix": "Wrap the restore in the documented Timescale sequence before shipping. In the restore handler, after opening psql, run:\npsql \"$CONN\" -c 'SELECT timescaledb_pre_restore();'\nthen stream the dump, then\npsql \"$CONN\" -c 'SELECT timescaledb_post_restore();'\nOn the backup side, prefer `pg_dump --format=custom` so pg_restore can order objects, and add `--exclude-table-data` for the internal `_timescaledb_internal` chunk tables only if you adopt Timescale's documented chunk-level procedure instead. Then prove it: a CI or staging job that takes a backup of a Timescale-enabled DB, restores it into an empty database, and asserts that `SELECT count(*) FROM timescaledb_information.hypertables` and a per-table row count both match the source.",
+      "confirm": "Confirm with the DBA which Timescale version prod runs, since the supported dump/restore procedure differs between 2.x minor lines. This must be validated by a human against a real Timescale install before it is relied on.",
+      "status": "fixed",
+      "note": "Fixed and VERIFIED: restore wrapped in timescaledb_pre_restore()/post_restore() in three separate psql sessions, post_restore in a finally. TimescaleDB 2.28.3 was installed into the dev Postgres (compose.dev.yml now uses timescale/timescaledb:latest-pg15) and tests/integration/backupRestore.test.ts passes all 6 cases against it, including both round trips and the leaves-the-DB-usable-after-a-failed-restore case. Running it surfaced a second, pre-existing defect now also fixed: --clean --if-exists invalidates every open connection, so the restore reported success and the app then threw 'could not open relation with OID <n>' on arbitrary queries. restoreBackup now recycles the pool and the route returns restartRequired."
+    },
+    {
+      "id": "OPS-02",
+      "severity": "high",
+      "category": "Operability",
+      "title": "Manual backup route is synchronous and holds the whole dump in memory three times",
+      "file": "src/api/routes/serverSettings.ts",
+      "line": 375,
+      "risk": "The handler calls `execSync(pg_dump ...)` with a 120000 ms timeout, then `readFileSync(tmpFile)`, then `gzipSync(payload)`, then encrypts into another Buffer, then `res.end(payload)`. execSync blocks the web role's single event loop for the entire dump, so every session, agent sample push and WebSocket heartbeat stalls until it finishes. docs/INSTALL.md sizes the DB volume at 50 GB recommended, and setupRoutes.ts warns below RECOMMENDED_DB_FREE_GB = 50, so the dump is expected to be gigabytes: the 120 s cap fails it outright at that size, and if it does complete, readFileSync plus gzipSync plus the cipher output puts three copies of a multi-gigabyte payload in the heap and OOMs the process. The result is that backup silently stops working exactly when the database is big enough to matter.",
+      "fix": "Copy the streaming pattern the pre-update backup already uses in src/services/updateService.ts:\nconst dump = spawn('pg_dump', ['--no-owner','--no-acl','--clean','--if-exists'], { env: { ...process.env, PGPASSWORD, PGHOST, PGPORT, PGUSER, PGDATABASE } });\nawait pipeline(dump.stdout, createGzip(), cipherStream, createWriteStream(backupPath));\nUse createCipheriv as a Transform in the pipeline instead of buffering, then stream the finished file to the client with createReadStream(backupPath).pipe(res). Drop the fixed 120 s timeout in favour of a no-output watchdog, and report progress through the existing status endpoint rather than holding the HTTP request open.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: streamed pg_dump -> gzip -> optional cipher -> file in services/backupService.ts; route streams the file back. execSync/readFileSync/gzipSync gone; fixed 120s cap replaced by a no-output watchdog."
+    },
+    {
+      "id": "OPS-03",
+      "severity": "high",
+      "category": "Operability",
+      "title": "Device, integration and delivery-channel secrets are stored in plaintext in Postgres",
+      "file": "src/services/credentialService.ts",
+      "line": 5,
+      "risk": "credentialService.ts states the design outright: \"plaintext at rest, masked at\" read time. Credential.config, Integration.config and NotificationChannel.config are plain Json columns holding SNMP community strings, WinRM passwords, SSH passwords and SSH private keys, FortiManager and FortiGate API keys, the Entra client secret, vCenter credentials, SMTP and M365 secrets, Slack and Teams webhook URLs, and the Web Push VAPID private key. Masking happens only on the API read path, so anyone with a psql session, a read replica, a stolen volume snapshot, or one backup file holds the credentials to the entire managed network. The backup passphrase is optional (validateBackupPassword accepts null as \"a legitimate choice\"), so the default download is an unencrypted dump of all of it, and any custom role granted serverSettingsData read can fetch it from GET /server-settings/database/backups/:id/download.",
+      "fix": "Envelope-encrypt the secret fields rather than the whole row. Keep the existing secretFieldsFor() map as the field list, add a small helper that seals and opens values with AES-256-GCM under a key that never lives in the database, and call it at the service seam so route code is unchanged:\nconst sealed = seal(config.password);   // { v:1, iv, tag, ct }\nconst plain  = open(sealed);\nSource the key from Azure Key Vault (or, as an interim step, a POLARIS_SECRET_KEY env var delivered the same way SESSION_SECRET is) so a database dump on its own is inert. Ship a one-shot startup job that seals existing rows in place, keyed on the absence of the version marker, exactly like the other backfill jobs in src/jobs/. Separately, make the backup passphrase mandatory while the data is still plaintext.",
+      "confirm": "Confirm with IT which key source is approved for this app (Key Vault reference versus env-delivered key) before implementing, and confirm whether the org accepts encrypt-at-rest on the volume as a compensating control for the interim.",
+      "status": "fixed",
+      "note": "Fixed: per-value AES-256-GCM sealing at the Prisma-extension seam (utils/secretBox.ts + utils/configSecretFields.ts + db.ts), key from POLARIS_SECRET_KEY, backfillSecretEncryption job converts existing rows. VERIFIED against the dev Postgres: the raw stored value is ciphertext while reads return plaintext, and the no-key path still stores plaintext (pre-feature behavior). Key source still needs IT sign-off (Key Vault vs env-delivered)."
+    },
+    {
+      "id": "OPS-04",
+      "severity": "high",
+      "category": "Operability",
+      "title": "Docker migrate container exits 0 after a failed migration, defeating the dependency gate",
+      "file": "docker-entrypoint.sh",
+      "line": 26,
+      "risk": "The entrypoint runs `if ! npx --no-install prisma migrate deploy; then echo WARN ... continuing anyway; fi`, then falls through to `if ROLE = migrate: exit 0`. docker-compose.yml gates web, monitor and discovery on `migrate: condition: service_completed_successfully`, so a migration that fails still satisfies the gate and the whole stack comes up against a stale schema. Prisma then throws `column \"<name>\" does not exist` on the affected tables at runtime instead of the stack refusing to start, and the operator sees a healthy-looking `docker compose up` on a half-migrated database. docs/INSTALL.md presents this compose file as a supported production shape.",
+      "fix": "Fail the container so the orchestrator's gate means something:\nif ! npx --no-install prisma migrate deploy; then\n  echo \"[entrypoint] FATAL: prisma migrate deploy failed\" >&2\n  exit 1\nfi\nThis matches how the systemd path already behaves (polaris-migrate.service is Type=oneshot and the app units Require= it) and how applyUpdate in src/services/updateService.ts already handles it (failUpdate on step 5, no restart).",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: docker-entrypoint.sh exits 1 on a failed migrate deploy, so compose's service_completed_successfully gate means something again."
+    },
+    {
+      "id": "TXN-01",
+      "severity": "high",
+      "category": "Transactional Integrity",
+      "title": "Subnet creation checks for overlap outside any transaction and has no backing DB constraint",
+      "file": "src/services/subnetService.ts",
+      "line": 195,
+      "risk": "createSubnet reads all sibling CIDRs with `prisma.subnet.findMany`, tests them with cidrOverlaps, then calls `prisma.subnet.create` as a separate statement, with no transaction and no row locking. allocateNextSubnet has the same shape: it reads the sibling set, computes the next free CIDR, then delegates to createSubnet. The Subnet model carries only indexes on cidr and blockId, no unique or exclusion constraint, so two concurrent POSTs of the same or overlapping CIDR both pass the check and both insert. Business rules 1 and 2 are then violated silently, and once two subnets overlap, every downstream IP allocation across them can hand the same address to two owners. This is the core IPAM invariant, and it has no enforcement below the application layer.",
+      "fix": "Two layers. First, make the invariant enforceable in the database. A unique index kills exact duplicates immediately and needs no extension:\nCREATE UNIQUE INDEX subnets_block_cidr_key ON subnets (\"blockId\", cidr);\nFor true overlap, add btree_gist and an exclusion constraint on the inet range:\nCREATE EXTENSION IF NOT EXISTS btree_gist;\nALTER TABLE subnets ADD CONSTRAINT subnets_no_overlap\n  EXCLUDE USING gist (\"blockId\" WITH =, inet(cidr) inet_ops WITH &&);\nSecond, wrap the read plus write in one transaction and serialize per block so the check cannot be raced:\nawait prisma.$transaction(async (tx) => {\n  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${blockId}))`;\n  // re-read siblings, test overlap, create\n});\nTranslate the resulting P2002 or 23P01 into the existing 409 AppError so the API contract does not change.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: per-block pg_advisory_xact_lock + in-transaction overlap re-check in createSubnetRowChecked/lockBlockForSubnetWrites; UNIQUE index on (blockId, cidr) as backstop; allocateNextSubnet retries a lost race. VERIFIED against the dev Postgres, including that a create bypassing the seam is rejected by the index."
+    },
+    {
+      "id": "AUTH-01",
+      "severity": "medium",
+      "category": "Authorization",
+      "title": "Device Map site and topology reads are not gated on the deviceMap permission",
+      "file": "src/api/routes/map.ts",
+      "line": 64,
+      "risk": "GET /map/sites, GET /map/sites/:id/topology and GET /map/sites/:id/topology/search carry no requirePermission call, and router.ts mounts /map with no gate either. Only the two layout writes check deviceMap=write. Any authenticated session, and any bearer token bound to any role including one with deviceMap set to none, reads every FortiGate hostname, its coordinates, and its full topology (managed switches, access points, wireless stations, LLDP neighbours, MCLAG peers). The nav table in public/js/app.js gives the Device Map entry no perm either, so the only thing that looks like access control here is the UI, and it is not applied. router.ts line 139 documents a floor that the code does not implement: \"the rest of /map is read-only and open to any authenticated user with at least deviceMap=read\".",
+      "fix": "Either enforce the documented floor or delete the claim. To enforce it, gate the mount the same way /utilization and /map/regions already are:\nrouter.use(\"/map\", requirePermission(\"deviceMap\", \"read\"), mapRouter);\nand add `perm: [\"deviceMap\", \"read\"]` to the Device Map entry in NAV_ITEMS so the sidebar matches. tests/integration/topologyLayout.test.ts currently asserts the reads work for a deviceMap=read caller, which stays true; add a case for a deviceMap=none role expecting 403.",
+      "confirm": "Intent decides this. Confirm whether the Device Map is meant to be visible to every authenticated user (in which case remove the deviceMap read level from the docs and the function-key description) or whether deviceMap=none is meant to hide site inventory. The function key exists and the router comment claims a read floor, which is why this is flagged.",
+      "status": "fixed",
+      "note": "Fixed: deviceMap=read floor on the /map mount (main router + dash listener), page gate on /map.html, nav perm, and the siteMap widget re-gated onto deviceMap. All four seeded non-admin roles already carry deviceMap=read, so this is non-breaking."
+    },
+    {
+      "id": "TXN-02",
+      "severity": "medium",
+      "category": "Transactional Integrity",
+      "title": "Bulk allocate is atomic but not isolated, so its overlap re-check can be raced",
+      "file": "src/services/subnetService.ts",
+      "line": 357,
+      "risk": "bulkAllocate correctly wraps the whole batch in `prisma.$transaction` and re-reads the sibling set inside it, and its comment says this is so \"concurrent allocations don't race with us\". At Postgres READ COMMITTED, which is the default and is not overridden anywhere in the codebase, that re-read does not see another in-flight transaction's uncommitted inserts and takes no locks on the rows it is reasoning about. Two concurrent bulk allocations against the same block can both pick the same free anchor region and both commit, producing an overlapping template pair. The transaction guarantees all-or-nothing, which is what the comment describes, but not the mutual exclusion the invariant needs.",
+      "fix": "Take the same per-block advisory lock as the TXN-01 fix as the first statement inside the existing transaction, so the two paths serialize against each other as well as against themselves:\nconst result = await prisma.$transaction(async (tx) => {\n  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.blockId}))`;\n  const existing = await tx.subnet.findMany({ where: { blockId: input.blockId }, select: { cidr: true } });\n  ...\n});\nThe exclusion constraint from TXN-01 is the backstop if the lock is ever bypassed.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: bulkAllocate takes the same per-block advisory lock as the single-row seam inside its existing transaction."
+    },
+    {
+      "id": "OPS-05",
+      "severity": "medium",
+      "category": "Operability",
+      "title": "Database URL with password is interpolated into a shell command and can be returned to the caller",
+      "file": "src/api/routes/serverSettings.ts",
+      "line": 375,
+      "risk": "The backup handler builds `execSync(\\`pg_dump \"${connUrl}\" ...\\`)` where connUrl is the full DATABASE_URL or POLARIS_DB_DIRECT_URL including the password. Two exposures follow. The command line is visible to any local user via `ps aux` and lands in any process listing, audit trail or core dump for the duration of the dump. And on failure the handler throws `new AppError(500, \"pg_dump failed: \" + (err.stderr?.toString() || err.message))`: Node sets err.message to \"Command failed: <the full command>\", so whenever stderr is empty, which is what a timeout kill produces, the connection string with the password is returned in the HTTP response body and rendered in the UI. The restore path passes connUrl as an argv element to spawn (line 489), which is not shell-injectable but has the same ps visibility.",
+      "fix": "Stop putting the URL on the command line. Parse it once and pass the parts through the environment, which pg_dump and psql both read:\nconst u = new URL(connUrl);\nconst env = { ...process.env, PGHOST: u.hostname, PGPORT: u.port || '5432', PGUSER: decodeURIComponent(u.username), PGPASSWORD: decodeURIComponent(u.password), PGDATABASE: u.pathname.slice(1) };\nspawn('pg_dump', ['--no-owner','--no-acl','--clean','--if-exists'], { env });\nAnd never echo a child-process error message to the client: log err.message server-side through pino and return a fixed string, for example `throw new AppError(500, \"pg_dump failed; see server logs\")`.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: connection passed via libpq PG* env vars (utils/pgEnv.ts), never argv; child-process stderr logged, never returned to the caller."
+    },
+    {
+      "id": "OPS-06",
+      "severity": "medium",
+      "category": "Operability",
+      "title": "Pre-update backup failure is non-fatal and reported to the operator as a completed step",
+      "file": "src/services/updateService.ts",
+      "line": 686,
+      "risk": "The pre-update backup is wrapped so that any failure calls `setStep(0, \"done\", \"Backup skipped: \" + message)` and the update continues. Step 0 renders as done, not as a warning or a failure, so the Application Updates card shows a green step while the only rollback point for the update has silently not been created. The update then proceeds through `git pull`, `npm ci` and `prisma migrate deploy`, and migrations are not reversible: if a migration or the new code goes wrong there is nothing to restore. Given OPS-01, the backup may also be unrestorable even when it is taken, so the operator has two independent reasons to believe they are protected when they are not.",
+      "fix": "Make the missing backup a decision the operator takes deliberately rather than one the code takes for them. Mark the step failed and stop by default:\n} catch (err: any) {\n  failUpdate(0, \"Pre-update backup failed: \" + (err.message || \"pg_dump not available\"));\n  return;\n}\nand add an explicit `allowWithoutBackup: true` flag on POST /server-settings/updates/apply, surfaced in the UI as a checkbox that has to be ticked, for the case where the operator genuinely wants to proceed. If a soft path is kept, use a distinct step state so it does not render green.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: a failed pre-update backup now marks the step failed and ABORTS the update; continuing requires the operator to tick 'proceed even if the backup fails' (allowWithoutBackup), which is audited."
+    },
+    {
+      "id": "OPS-07",
+      "severity": "medium",
+      "category": "Operability",
+      "title": "Fleet-wide DNS sweep does serial lookups and one UPDATE per asset inside a request handler",
+      "file": "src/api/routes/assets.ts",
+      "line": 3047,
+      "risk": "POST /assets/dns-lookup loads every non-excluded asset with an IP, then loops `for (const asset of needsPrimary)` doing one `await resolver.reverse()` followed by one `await prisma.asset.update()` per asset, with no concurrency cap and no batching. The associated-IP loop immediately below it (line 3081) does the same. At the 2000-asset fleet size CLAUDE.md requires every change to be reasoned about, that is thousands of serial DNS round trips plus thousands of individual UPDATE round trips inside a single HTTP request: the request outlives any nginx proxy_read_timeout, the operator sees a gateway error while the sweep keeps running, and a slow or unreachable resolver multiplies the whole thing by the per-lookup timeout. The sibling per-asset route at line 3145 already collects its updates and applies them in one `prisma.$transaction`, so the correct pattern exists a few lines away.",
+      "fix": "Bound the concurrency and batch the writes, using the mapWithConcurrency helper the agent installer already uses:\nconst results = await mapWithConcurrency(needsPrimary, 20, async (asset) => { ... return { id, data }; });\nawait prisma.$transaction(results.map(r => prisma.asset.update({ where: { id: r.id }, data: r.data })));\nChunk the transaction at a few hundred statements. Better still, move the sweep behind the existing job machinery in src/jobs/ and have the route return 202 with a run id the UI polls, which is how discovery and bulk agent install already behave.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: bounded lookup pool + batched transactional writes in POST /assets/dns-lookup."
+    },
+    {
+      "id": "OPS-08",
+      "severity": "medium",
+      "category": "Operability",
+      "title": "Bulk quarantine accepts an unbounded id list and pushes to devices serially",
+      "file": "src/api/routes/assets.ts",
+      "line": 4510,
+      "risk": "POST /assets/bulk-quarantine and POST /assets/bulk-quarantine/release validate `ids: z.array(z.string()).min(1)` with no upper bound, then loop `for (const id of input.ids)` awaiting quarantineAsset / releaseQuarantine one at a time. Each iteration performs live FortiGate device I/O. A 2000-id selection is therefore 2000 serial device writes held inside one HTTP request, which will exceed the proxy timeout and leave the operator with no reliable view of what actually landed. The sibling POST /assets/bulk-monitor at line 827 was already converted from a per-asset loop to a single updateMany with the comment \"Was 1000 sequential round trips, is now one statement\", so the scale concern is already recognised on this route file.",
+      "fix": "Cap the batch and bound the fan-out. Add `.max(500)` to both id arrays so an oversized request is a clean 400 rather than a hung one, and replace the serial loop with the bounded pool already used for bulk agent install:\nconst results = await mapWithConcurrency(input.ids, 8, async (id) => { try { ... } catch (err) { return { id, ok: false, message: err.message }; } });\nKeep the per-item ok/message result shape, which is already correct. If a larger batch has to be supported, return 202 and drain it through a job the way bulk-agent-install does.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: bulk-quarantine and release cap at 500 ids and drain through a bounded pool."
+    },
+    {
+      "id": "ERR-01",
+      "severity": "medium",
+      "category": "Error Handling",
+      "title": "No process-level unhandledRejection or uncaughtException handler in any role",
+      "file": "src/index.ts",
+      "line": 12,
+      "risk": "There is no `process.on(\"unhandledRejection\")` or `process.on(\"uncaughtException\")` anywhere in src/. The units run plain `/usr/bin/node dist/index.js` with no --unhandled-rejections flag, so Node 20's default is to throw and terminate. The individual paths are disciplined (logEvent swallows internally, every job tick is wrapped in try/catch, the floating prisma updates in agentChannelService carry .catch), so this is a missing last resort rather than a live crash, but there is no floor: one escaped rejection anywhere in 322 files takes down a whole web, monitor or discovery process, and all the operator gets is Node's bare stack trace on stderr. There is no pino line, no Event row, and no capacity signal, and Restart=on-failure brings the process back so the incident can repeat unseen.",
+      "fix": "Add a handler in src/index.ts before anything else boots, so every role inherits it:\nprocess.on(\"unhandledRejection\", (reason) => {\n  logger.fatal({ err: reason, role: process.env.POLARIS_ROLE ?? \"all\" }, \"unhandled promise rejection\");\n  process.exit(1);\n});\nprocess.on(\"uncaughtException\", (err) => {\n  logger.fatal({ err, role: process.env.POLARIS_ROLE ?? \"all\" }, \"uncaught exception\");\n  process.exit(1);\n});\nExit rather than continue, so systemd still restarts into a known state, but the structured log now names the origin. Pair it with a `polaris_process_crash_total{role}` counter so a restart loop is visible in Grafana instead of only in journald.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: utils/crashHandlers.ts installs unhandledRejection/uncaughtException handlers from src/index.ts, logs a structured fatal line with the role, increments polaris_process_crash_total, and exits 70. Grafana panels + README bullet added."
+    },
+    {
+      "id": "OPS-09",
+      "severity": "medium",
+      "category": "Operability",
+      "title": "No scheduled backup exists, and backups land next to the application they protect",
+      "file": "docs/INSTALL.md",
+      "line": 18,
+      "risk": "The only two ways a backup is ever created are an operator clicking Backup on the Maintenance tab and the pre-update backup, which OPS-06 shows is skippable. There is no backup job in src/jobs/ (57 files, none of them a backup), no cron or systemd timer in deploy/, and docs/INSTALL.md never tells the operator to schedule one; it only sizes the volume for `data/backups/`. Backups therefore accumulate on the same host and often the same volume as the application, and the inventory of them lives in a `backup_history` Setting row capped at 50 entries inside the very database being backed up. A host loss takes the database and every backup of it at once, and an install where nobody remembers to click the button has no recovery point at all.",
+      "fix": "Ship the schedule rather than documenting the intent. Add a `scheduledBackup` job to src/jobs/ following the maintenanceScheduler shape (interval tick, try/catch, runInstrumentedJob) driven by a `backupSchedule` Setting row edited on the Maintenance tab: cadence, retention count, passphrase source, and a target directory the operator can point at a mounted share. Then add a section to docs/INSTALL.md that states the retention policy, where the copies go off-host, and how to verify one restores, referencing the OPS-01 restore procedure.",
+      "confirm": "Confirm with IT whether an existing enterprise backup product already covers this Postgres instance. If it does, the fix is to document that and drop the in-app scheduler rather than build a second mechanism.",
+      "status": "fixed",
+      "note": "Fixed: backupScheduleService + scheduledBackup job + GET|PUT /database/backup-schedule + a Maintenance-tab card, default-off, with retention and an off-host copy directory. INSTALL.md gained a 'Backups: set this up on day one' section. Still worth confirming whether an enterprise backup product already covers this instance."
+    },
+    {
+      "id": "TEST-01",
+      "severity": "medium",
+      "category": "Test Coverage",
+      "title": "Backup and restore have zero automated coverage",
+      "file": "tests/integration",
+      "line": 0,
+      "risk": "194 test files cover permission gates, reservations, subnets, sample rollup, maintenance schedules, agent ingest and the dash server, but nothing touches the backup or restore routes: grep for `database/backup`, `database/restore` or `pg_dump` across tests/ returns nothing. tests/unit/backupPassword.test.ts covers only passphrase validation. The one path whose failure is unrecoverable is therefore the one path with no test, which is why OPS-01 and OPS-02 could both be true at the same time without anything flagging it.",
+      "fix": "Add one integration test that closes the loop against the podman dev Postgres the suite already uses: POST /server-settings/database/backup with a passphrase, assert the POLARIS\\0 magic header and a non-zero size, then POST /server-settings/database/restore with that file into a scratch database and assert a known row count survives. Assert the same for the unencrypted variant. If the dev container can have the timescaledb extension enabled, make that the default fixture so the OPS-01 gap is covered by the same test. Run it with --no-file-parallelism like the rest of the DB-touching suite.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed and RUNNING: tests/unit/backupEnvelope.test.ts pins the on-disk format (runs everywhere) and tests/integration/backupRestore.test.ts does the real round trip. With TimescaleDB installed in the dev stack and the suite run inside the app container (which has pg_dump/psql), the whole suite is 201/201 files and 2538/2538 tests with ZERO skips - previously 31 files / 289 tests skipped."
+    },
+    {
+      "id": "AUTH-02",
+      "severity": "low",
+      "category": "Authorization",
+      "title": "Conflict resolution records no actor for bearer-token callers",
+      "file": "src/api/routes/conflicts.ts",
+      "line": 86,
+      "risk": "The accept, merge and reject handlers pass `req.session?.username` as the actor into acceptConflict, mergeAssetConflict and rejectConflict. Those routes are reachable by bearer tokens, which pass the same hasPermission(\"discoveryConflicts\", \"write\") gate but carry no session, so username is undefined and the resulting audit trail attributes the resolution to nobody. Conflict resolution overwrites asset and reservation fields and absorbs ghost assets, so this is exactly the class of mutation the audit log exists for. src/api/middleware/auth.ts already exports requestActor(req) for this, and the assets and reservations route files use it.",
+      "fix": "Use the shared helper in all three handlers:\nimport { requestActor } from \"../middleware/auth.js\";\n...\nawait acceptConflict(conflict, requestActor(req));\nIt returns the session username for browser callers and `api:<token name>` for bearer callers, so token-driven resolutions become traceable to the token.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: conflicts.ts resolves the actor through requestActor(req), so bearer-token resolutions are attributed."
+    },
+    {
+      "id": "OPS-10",
+      "severity": "low",
+      "category": "Operability",
+      "title": "Pre-update backup is read entirely into memory just to measure its size",
+      "file": "src/services/updateService.ts",
+      "line": 666,
+      "risk": "`const sizeBytes = existsSync(backupFile) ? readFileSync(backupFile).length : 0;` loads the whole gzipped dump into the heap only to take its length, then discards it. The dump itself was correctly streamed to disk on the lines above, so this single line reintroduces the memory profile the streaming avoided, on a multi-gigabyte file, at the exact moment the process is about to run npm ci and a TypeScript build.",
+      "fix": "Ask the filesystem instead:\nconst sizeBytes = existsSync(backupFile) ? statSync(backupFile).size : 0;\nstatSync is already imported in the module's sibling utilities and the call is O(1).",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: statSync(f).size replaces readFileSync(f).length for the pre-update backup size."
+    },
+    {
+      "id": "TEST-02",
+      "severity": "low",
+      "category": "Test Coverage",
+      "title": "The in-app update pipeline has no coverage beyond train selection",
+      "file": "tests/unit/updateTrain.test.ts",
+      "line": 0,
+      "risk": "applyUpdate is the highest-blast-radius code path in the repo: it takes a backup, repoints the git remote, checks out a tag or fast-forwards a branch, runs npm ci, regenerates the Prisma client, builds, runs migrate deploy, syncs systemd units and the nginx config, and restarts polaris.target. The only test that touches updateService is tests/unit/updateTrain.test.ts, which covers getUpdateTrain and setUpdateTrain normalisation and nothing else. The step sequencing, the failUpdate-and-stop behaviour at each gate, and the OPS-06 backup-skip branch are all unverified, and CLAUDE.md directs operators to use this mechanism for every production deployment.",
+      "fix": "Test the orchestration with the shell seams stubbed rather than the shell itself. Extract the exec calls behind an injectable runner, then assert: a failure at each step calls failUpdate with that step index and never reaches the restart; a successful run advances the steps in order; the release train checks out the highest tag from `git tag --sort=-v:refname`; and the backup branch is reached before the pull. That is a handful of fast unit tests with no Docker dependency and it locks in the rollback contract the OPS-06 fix depends on.",
+      "confirm": "",
+      "status": "fixed",
+      "note": "Fixed: tests/unit/updatePipeline.test.ts covers step sequencing, the fail-and-stop contract at each gate, the backup-abort branch, and train selection, via a _setExecRunnerForTests seam."
+    }
+  ],
+  "remediated": "2026-08-06"
+};
+/* =================== END AUDIT DATA =============================== */
+
+const SEV = { critical:0, high:1, medium:2, low:3 };
+const SEVCOLOR = { critical:'var(--crit)', high:'var(--high)', medium:'var(--med)', low:'var(--low)' };
+const STORE = 'rgi-audit:' + REPORT.app;
+
+// merge any saved status overrides
+(function(){ try { const o = JSON.parse(localStorage.getItem(STORE) || '{}');
+  REPORT.findings.forEach(f => { if (o[f.id]) f.status = o[f.id]; }); } catch(e){} })();
+function persist(){ const o = {}; REPORT.findings.forEach(f => o[f.id] = f.status);
+  try { localStorage.setItem(STORE, JSON.stringify(o)); } catch(e){} }
+
+let sevFilter = 'all', catFilter = 'all', q = '';
+const el = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+function counts(){ const c = {critical:0,high:0,medium:0,low:0};
+  REPORT.findings.forEach(f => c[f.severity]++); return c; }
+
+function renderHeader(){
+  el('appName').textContent = REPORT.app;
+  el('meta').innerHTML = `<span><i class="fa-solid fa-folder"></i> ${esc(REPORT.repo)}</span>`
+    + `<span><i class="fa-regular fa-calendar"></i> ${esc(REPORT.generated)}</span>`
+    + `<span>${REPORT.findings.length} findings</span>`;
+  const c = counts(), total = REPORT.findings.length || 1;
+  el('bar').innerHTML = ['critical','high','medium','low'].map(s =>
+    c[s] ? `<span style="flex:${c[s]};background:${SEVCOLOR[s]}"></span>` : '').join('');
+  el('chips').innerHTML = ['critical','high','medium','low'].map(s =>
+    `<span class="chip"><span class="dot" style="background:${SEVCOLOR[s]}"></span>${s[0].toUpperCase()+s.slice(1)} <b>${c[s]}</b></span>`).join('');
+  let msg, ic;
+  if (c.critical){ msg = `Not production-ready. ${c.critical} critical issue${c.critical>1?'s':''} must clear first.`; ic='fa-circle-exclamation'; }
+  else if (c.high){ msg = `${c.high} high-severity issue${c.high>1?'s':''} to resolve before release.`; ic='fa-triangle-exclamation'; }
+  else if (c.medium){ msg = `No blockers. ${c.medium} medium item${c.medium>1?'s':''} to schedule.`; ic='fa-circle-info'; }
+  else if (c.low){ msg = `No blockers. ${c.low} low item${c.low>1?'s':''} noted.`; ic='fa-circle-info'; }
+  else { msg = 'Clean on the audited paths.'; ic='fa-circle-check'; }
+  el('readout').innerHTML = `<i class="fa-solid ${ic}"></i> ${msg}`;
+  const fixed = REPORT.findings.filter(f => f.status==='fixed').length;
+  const p = el('progress');
+  if (fixed > 0){ p.classList.add('on');
+    el('progressFill').style.width = Math.round(fixed/REPORT.findings.length*100)+'%';
+    el('progressLabel').textContent = `${fixed} of ${REPORT.findings.length} fixed`;
+  } else p.classList.remove('on');
+}
+
+function renderMap(){
+  el('map').innerHTML = Object.entries(REPORT.map).map(([k,v]) => {
+    const warn = v && typeof v === 'object' && v.warn;
+    const val = (v && typeof v === 'object') ? v.value : v;
+    return `<div class="cell ${warn?'cell--warn':''}"><div class="cell__k">${esc(k)}</div>`
+      + `<div class="cell__v">${esc(val)}${warn?' <i class="fa-solid fa-triangle-exclamation" style="font-size:12px"></i>':''}</div></div>`;
+  }).join('');
+}
+
+function buildCatFilter(){
+  const cats = [...new Set(REPORT.findings.map(f => f.category))].sort();
+  el('catFilter').innerHTML = '<option value="all">All categories</option>'
+    + cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+}
+
+function statusPill(s){
+  return `<span class="pill pill--${s}"><span class="dot" style="background:currentColor"></span>${s}</span>`;
+}
+
+function card(f){
+  const loc = f.line ? `${esc(f.file)}:${f.line}` : esc(f.file);
+  return `<div class="card ${f.status==='fixed'?'fixed':''}" data-sev="${f.severity}">
+    <div class="card__top">
+      <span class="id">${esc(f.id)}</span>
+      <span class="sev sev--${f.severity}">${f.severity}</span>
+      <span class="badge">${esc(f.category)}</span>
+      ${statusPill(f.status)}
+    </div>
+    <div class="card__title">${esc(f.title)}</div>
+    <div class="loc"><i class="fa-solid fa-code" style="font-size:11px"></i>${loc}
+      <button class="copy" data-copy="${esc(loc)}" title="Copy path"><i class="fa-regular fa-copy"></i></button></div>
+    <div class="row"><div class="row__k">Risk</div><div class="row__v">${esc(f.risk)}</div></div>
+    <div class="row"><div class="row__k">Fix</div><div class="row__v">
+      <div class="fix">${esc(f.fix)}<button class="copy" data-copy="${esc(f.fix)}" title="Copy fix"><i class="fa-regular fa-copy"></i> copy</button></div>
+    </div></div>
+    ${f.confirm ? `<div class="confirm"><i class="fa-solid fa-circle-question" style="margin-top:3px"></i><div>${esc(f.confirm)}</div></div>` : ''}
+    <div class="card__foot">
+      <span class="row__k" style="min-width:0">Status</span>
+      <select class="status" data-id="${esc(f.id)}">
+        ${['open','accepted','fixed','wontfix','deferred'].map(s =>
+          `<option value="${s}" ${f.status===s?'selected':''}>${s}</option>`).join('')}
+      </select>
+    </div>
+  </div>`;
+}
+
+function renderFindings(){
+  const list = REPORT.findings.filter(f => {
+    if (sevFilter !== 'all' && f.severity !== sevFilter) return false;
+    if (catFilter !== 'all' && f.category !== catFilter) return false;
+    if (q){ const hay = (f.title+' '+f.risk+' '+f.fix+' '+f.file+' '+f.id+' '+f.category).toLowerCase();
+      if (!hay.includes(q)) return false; }
+    return true;
+  }).sort((a,b) => SEV[a.severity]-SEV[b.severity]);
+
+  const host = el('findings');
+  if (!list.length){ host.innerHTML = '<div class="empty">No findings match the current filters.</div>'; return; }
+
+  let html = '', cur = null;
+  for (const f of list){
+    if (f.severity !== cur){ cur = f.severity;
+      const n = list.filter(x => x.severity===cur).length;
+      html += `<div class="group__h"><span class="tick" style="background:${SEVCOLOR[cur]}"></span>${cur} severity<span class="n">${n}</span></div>`;
+    }
+    html += card(f);
+  }
+  host.innerHTML = html;
+}
+
+function renderFoot(){
+  el('foot').innerHTML = `<span>Rogers Group IT</span><span>Generated ${esc(REPORT.generated)}</span>`
+    + `<span>Review here, mark status, export findings.json, then run the implement command.</span>`;
+}
+
+function rerender(){ renderHeader(); renderFindings(); }
+function renderAll(){ renderHeader(); renderMap(); buildCatFilter(); renderFindings(); renderFoot(); }
+
+// events
+document.getElementById('sevFilter').addEventListener('click', e => {
+  const b = e.target.closest('.seg'); if (!b) return;
+  document.querySelectorAll('#sevFilter .seg').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); sevFilter = b.dataset.sev; renderFindings();
+});
+el('catFilter').addEventListener('change', e => { catFilter = e.target.value; renderFindings(); });
+el('search').addEventListener('input', e => { q = e.target.value.trim().toLowerCase(); renderFindings(); });
+
+document.body.addEventListener('change', e => {
+  const sel = e.target.closest('.status'); if (!sel) return;
+  const f = REPORT.findings.find(x => x.id === sel.dataset.id);
+  if (f){ f.status = sel.value; persist(); rerender(); }
+});
+document.body.addEventListener('click', e => {
+  const c = e.target.closest('.copy'); if (!c) return;
+  navigator.clipboard?.writeText(c.dataset.copy);
+  const ic = c.querySelector('i'); if (ic){ const old = ic.className; ic.className = 'fa-solid fa-check';
+    setTimeout(() => ic.className = old, 1000); }
+});
+el('acceptHigh').addEventListener('click', () => {
+  REPORT.findings.forEach(f => { if ((f.severity==='critical'||f.severity==='high') && f.status==='open') f.status='accepted'; });
+  persist(); rerender();
+});
+el('export').addEventListener('click', () => {
+  const out = { app:REPORT.app, repo:REPORT.repo, generated:REPORT.generated, map:REPORT.map, findings:REPORT.findings };
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type:'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'findings.json'; a.click(); URL.revokeObjectURL(a.href);
+});
+
+renderAll();
+</script>
+</body>
+</html>
