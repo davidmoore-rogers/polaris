@@ -3,7 +3,9 @@
  *
  * Shared topology layouts — PUT/DELETE /map/sites/:id/topology/layout and the
  * savedLayouts embed on GET /map/sites/:id/topology. Write routes are gated
- * deviceMap=write; reads ride the auth-only topology GET.
+ * deviceMap=write; reads carry a deviceMap=read floor applied at the /map mount
+ * in router.ts (added 2026-08 — the reads were previously auth-only, so a
+ * deviceMap=none role could enumerate every site and its full topology).
  *
  * Skips cleanly when DATABASE_URL isn't reachable; see _helpers.ts.
  */
@@ -53,11 +55,40 @@ beforeAll(async () => {
       authProvider: "local",
     },
   });
+
+  // A caller with read on everything EXCEPT deviceMap. No seeded role looks
+  // like this, but an operator-built custom role can, and it is the case the
+  // /map read floor exists for.
+  const noMapMatrix: Record<string, string> = { ...roMatrix, deviceMap: "none" };
+  const noMapRole = await prisma.role.create({ data: { name: `${PFX}-role-nomap`, permissions: noMapMatrix } });
+  await prisma.user.create({
+    data: {
+      username: `${PFX}-user-nomap`,
+      passwordHash: await hashPassword(PASSWORD),
+      roleId: noMapRole.id,
+      authProvider: "local",
+    },
+  });
 });
+
+/** Log in as one of the fixture users and return the agent + its CSRF token. */
+async function loginAs(username: string): Promise<{ agent: request.Agent; csrf: string }> {
+  const agent = request.agent(app);
+  await agent.get("/api/v1/auth/me");
+  const login = await agent
+    .post("/api/v1/auth/login")
+    .send({ username, password: PASSWORD })
+    .set("Content-Type", "application/json");
+  expect(login.status).toBe(200);
+  await agent.get("/api/v1/auth/me"); // refresh CSRF post-login-regeneration
+  const cookies = (agent.jar as any).getCookies({ domain: "127.0.0.1", path: "/", secure: false, script: false });
+  const csrf = (cookies.find((c: any) => c.name === "polaris_csrf") || {}).value || "";
+  return { agent, csrf };
+}
 
 afterAll(async () => {
   if (!dbReachable) return;
-  await prisma.user.deleteMany({ where: { username: { startsWith: `${PFX}-user-` } } });
+  await prisma.user.deleteMany({ where: { username: { startsWith: `${PFX}-user` } } });
   await prisma.role.deleteMany({ where: { name: { startsWith: `${PFX}-role-` } } });
   await prisma.asset.deleteMany({ where: { hostname: { startsWith: PFX } } });
   await prisma.$disconnect();
@@ -130,16 +161,7 @@ d("topology layout persistence", () => {
   });
 
   it("403s the write routes for a deviceMap=read caller (reads still work)", async () => {
-    const agent = request.agent(app);
-    await agent.get("/api/v1/auth/me");
-    const login = await agent
-      .post("/api/v1/auth/login")
-      .send({ username: `${PFX}-user-ro`, password: PASSWORD })
-      .set("Content-Type", "application/json");
-    expect(login.status).toBe(200);
-    await agent.get("/api/v1/auth/me"); // refresh CSRF post-login-regeneration
-    const cookies = (agent.jar as any).getCookies({ domain: "127.0.0.1", path: "/", secure: false, script: false });
-    const csrf = (cookies.find((c: any) => c.name === "polaris_csrf") || {}).value || "";
+    const { agent, csrf } = await loginAs(`${PFX}-user-ro`);
 
     const put = await agent
       .put(`/api/v1/map/sites/${fgId}/topology/layout`)
@@ -155,6 +177,28 @@ d("topology layout persistence", () => {
     const topo = await agent.get(`/api/v1/map/sites/${fgId}/topology`);
     expect(topo.status).toBe(200);
     expect(topo.body.savedLayouts.flat.positions).toEqual(FLAT);
+  });
+
+  it("403s every /map read for a deviceMap=none caller", async () => {
+    const { agent } = await loginAs(`${PFX}-user-nomap`);
+
+    // All three reads sit behind the mount-level deviceMap=read floor.
+    for (const path of [
+      "/api/v1/map/sites",
+      `/api/v1/map/sites/${fgId}/topology`,
+      `/api/v1/map/sites/${fgId}/topology/search?q=fg`,
+    ]) {
+      const resp = await agent.get(path);
+      expect(resp.status, path).toBe(403);
+    }
+  });
+
+  it("still allows /map/sites for a deviceMap=read caller", async () => {
+    // Guards the other direction: the floor must not lock out the seeded
+    // non-admin roles, all four of which carry deviceMap=read.
+    const { agent } = await loginAs(`${PFX}-user-ro`);
+    const resp = await agent.get("/api/v1/map/sites");
+    expect(resp.status).toBe(200);
   });
 
   it("DELETE removes only the named view and is idempotent (204)", async () => {

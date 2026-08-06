@@ -135,11 +135,18 @@ router.use("/notifications", deprecatedAlias("/api/v1/alerts"), notificationsRou
 router.use("/push-subscriptions", pushSubscriptionsRouter);
 router.use("/search", searchRouter);
 // Region routes are mounted BEFORE /map so Express's first-match routing picks
-// the more-specific path. Region CRUD is gated by the mapRegions function key;
-// the rest of /map is read-only and open to any authenticated user with at
-// least deviceMap=read.
+// the more-specific path. Region CRUD is gated by the mapRegions function key.
+//
+// /map carries a blanket deviceMap=read floor. This is the gate the surrounding
+// comment used to only CLAIM: before 2026-08 the three read routes (/sites,
+// /sites/:id/topology, /sites/:id/topology/search) had no requirePermission at
+// all, so any authenticated session — and any bearer token bound to a role with
+// deviceMap=none — could read every FortiGate's hostname, coordinates and full
+// topology (switches, APs, wireless stations, LLDP neighbours). The nav entry
+// was ungated too, so the only thing resembling access control was the UI.
+// The layout writes inside mapRouter escalate to deviceMap=write on top of this.
 router.use("/map/regions", requirePermission("mapRegions", "read"), mapRegionsRouter);
-router.use("/map", mapRouter);
+router.use("/map", requirePermission("deviceMap", "read"), mapRouter);
 // Application Map: process-connectivity graph + shared layout. Per-route
 // gates on the applicationMap function key (read = graph, write = layout).
 router.use("/application-map", applicationMapRouter);

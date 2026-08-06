@@ -128,7 +128,7 @@ function canEditReservation(reservation) {
 
 const NAV_ITEMS = [
   { href: "/",                label: "Dashboard",    icon: "grid" },
-  { href: "/map.html",        label: "Device Map",   icon: "mapPin" },
+  { href: "/map.html",        label: "Device Map",   icon: "mapPin", perm: ["deviceMap", "read"] },
   { href: "/appmap.html",     label: "Application Map", icon: "share2", perm: ["applicationMap", "read"] },
   { href: "/ipam.html",       label: "IPAM",         icon: "layers" },
   { href: "/assets.html",         label: "Assets",       icon: "monitor" },

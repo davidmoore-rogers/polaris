@@ -1,13 +1,15 @@
 /**
  * src/api/routes/map.ts — Device Map endpoints
  *
- * Read endpoints, all behind requireAuth (registered in router.ts):
+ * Read endpoints — requireAuth + a blanket deviceMap=read floor, both applied
+ * at the mount in router.ts (the floor was added 2026-08; these reads were
+ * previously auth-only despite the function key existing):
  *   GET /map/sites              — every firewall asset with lat/lng coords
  *   GET /map/search?q=<query>   — autocomplete over firewall hostnames
  *   GET /map/sites/:id/topology — FortiGate + its FortiSwitches + FortiAPs + edges
  *                                 (+ savedLayouts: shared per-view node positions)
  *
- * Write endpoints (gated deviceMap=write):
+ * Write endpoints (escalate to deviceMap=write per-route):
  *   PUT    /map/sites/:id/topology/layout — full-replace one (site, view) layout
  *   DELETE /map/sites/:id/topology/layout?view=<key> — reset one view's layout
  *

@@ -11,6 +11,10 @@
  *   - exact-path API allowlist: unlisted paths 404 before touching a router
  *   - synthetic /auth/me: readonly-role identity in the real /auth/me shape
  *   - headers: CSP present, Cache-Control: no-store on API responses
+ *
+ * Everything above runs without a database. The one exception is the
+ * /map/sites regression guard, which needs a real query to prove the gate lets
+ * the request THROUGH — it is skipped when DATABASE_URL is unreachable.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,6 +22,7 @@ import request from "supertest";
 import { buildDashApp } from "../../src/dash/dashServer.js";
 import type { DashSettings } from "../../src/services/dashSettingsService.js";
 import type { DashRoleIdentity } from "../../src/services/dashRoleSnapshotService.js";
+import { dbReachable } from "./_helpers.js";
 
 const savedCert = process.env.POLARIS_PROXY_CERT_PATH;
 
@@ -30,12 +35,22 @@ afterEach(() => {
   else process.env.POLARIS_PROXY_CERT_PATH = savedCert;
 });
 
+// Mirrors the seeded built-in `readonly` matrix for the keys the dash surface
+// actually consults. deviceMap=read matters: the /map mount carries a
+// deviceMap=read floor (same as the main router), and the Status Map / Device
+// Map wallboard widgets fetch GET /map/sites through it.
 const READONLY_IDENTITY: DashRoleIdentity = {
   snapshot: {
     id: "role-readonly-id",
     name: "readonly",
     isProtected: true,
-    permissions: { assets: "read", events: "read", ipBlocks: "read", reservations: "read" },
+    permissions: {
+      assets: "read",
+      events: "read",
+      ipBlocks: "read",
+      reservations: "read",
+      deviceMap: "read",
+    },
     updatedAt: "2026-01-01T00:00:00.000Z",
   },
   regionTags: [],
@@ -148,6 +163,21 @@ describe("API path allowlist", () => {
       expect(res.status, path).toBe(404);
     }
   });
+
+  // Needs a DB: proving the gate lets the request through means letting the
+  // handler run its query. Skipped rather than asserted loosely, because a
+  // "not 403" that is really a timeout would pass for the wrong reason.
+  it.skipIf(!dbReachable)(
+    "still serves /map/sites, which the wallboard map widgets depend on",
+    async () => {
+      // Regression guard for the deviceMap=read floor added to both /map mounts:
+      // the dash identity must satisfy it, or the Status Map and Device Map
+      // widgets silently render empty on every wallboard.
+      const res = await request(buildApp()).get("/dash/api/v1/map/sites");
+      expect(res.status).toBe(200);
+    },
+    30_000,
+  );
 });
 
 describe("synthetic /auth/me", () => {

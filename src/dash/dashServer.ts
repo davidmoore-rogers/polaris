@@ -44,6 +44,7 @@ import reservationsRouter from "../api/routes/reservations.js";
 import mapRouter from "../api/routes/map.js";
 import weatherRouter from "../api/routes/weather.js";
 import { errorHandler } from "../api/middleware/errorHandler.js";
+import { requirePermission } from "../api/middleware/permissions.js";
 import { dashWeatherLimiter, makeRateLimiter } from "../api/middleware/rateLimits.js";
 import { isPrivateOrLoopbackIp } from "../utils/cidr.js";
 import { ipMatchesAllowlist } from "../utils/ipAllowlist.js";
@@ -257,7 +258,12 @@ export function buildDashApp(opts: BuildDashAppOptions = {}): express.Express {
 
   api.use("/dashboard", dashboardRouter);
   api.use("/reservations", reservationsRouter);
-  api.use("/map", mapRouter);
+  // Same deviceMap=read floor the main router applies, so the two mounts of
+  // mapRouter agree. requirePermission reads req.roleSnapshot first, which the
+  // identity middleware above already stamped with the built-in readonly Role
+  // (deviceMap=read in every seeded matrix), so this passes on a stock install
+  // and fails closed if an operator ever edits that role down.
+  api.use("/map", requirePermission("deviceMap", "read"), mapRouter);
   api.use("/weather", weatherRouter);
 
   app.use("/dash/api/v1", api);

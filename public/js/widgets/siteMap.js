@@ -100,7 +100,11 @@
     defaultSize: { width: 6, height: 2 },
     minSize: { width: 4, height: 1 },
     defaultConfig: { issuesOnly: false, regionScope: "mine" },
-    requiredPermission: { key: "assets", level: "read" },
+    // Gated on deviceMap, not assets: this widget's only data source is
+    // GET /map/sites, which carries a deviceMap=read floor. Declaring
+    // assets=read here would leave the widget visible to a deviceMap=none
+    // role and render it permanently empty (fetchData swallows the 403).
+    requiredPermission: { key: "deviceMap", level: "read" },
 
     fetchData: function (config) {
       return api.map.sites(PolarisWidgets.regionNamesForConfig(config)).catch(function () { return []; });

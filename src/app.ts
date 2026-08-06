@@ -471,6 +471,12 @@ const pageRequiredPermission: Record<string, { key: string; level: "read" | "wri
   "/automations.html":     { key: "automationManagement", level: "read" },
   "/server-settings.html": { key: "serverSettingsSystem", level: "read" },
   "/appmap.html":          { key: "applicationMap",       level: "read" },
+  // Added 2026-08 alongside the deviceMap=read floor on the /map API mount.
+  // Without it a deviceMap=none role could still load the page shell (the nav
+  // entry is hidden, but the URL is typeable) and sit on an empty map issuing
+  // 403s — the same "gate the page and the API it consumes together" rule the
+  // rest of this map follows.
+  "/map.html":             { key: "deviceMap",            level: "read" },
 };
 const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
 app.use(async (req, res, next) => {
