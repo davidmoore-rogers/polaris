@@ -94,9 +94,6 @@ async function openAutomationWizard(existing) {
   var STEPS = ["Name", "Devices", "Trigger", "Reset", "Actions", "Summary"];
   var scopePreviewTimer = null;
   var trigPreviewTimer = null;
-  // Step-5 escalation: shows/hides the "stop escalating when" config as
-  // escalation rows come and go (set by renderStep5, called by addTierRow).
-  var _escSyncFn = null;
 
   // ── Small shared helpers (schema-driven options / labels) ──────────────
   function opt(list, sel) {
@@ -1453,49 +1450,95 @@ async function openAutomationWizard(existing) {
     var cardHelp = isEC
       ? "Every fire creates an in-app alert (the Alerts tab). This is built in and can’t be removed. The message template below customizes the alert text — {value} is the source event’s own message; leave blank for the default."
       : "Every fire writes an audit Event and creates an in-app alert (the Alerts tab). This is built in and can’t be removed. The message template below customizes what both say; leave blank for the default.";
-    panel.innerHTML = '<h3 style="margin:0 0 0.25rem">What should happen?</h3>' +
+    var html = '<h3 style="margin:0 0 0.25rem">What should happen?</h3>' +
       '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 0.75rem">Notifications route through Delivery-tab channels; API calls POST to your systems; scripts run on the Polaris server or the triggering asset’s agent.</p>' +
       '<div class="form-group" id="aw-inapp-card" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
         '<label style="font-weight:600;margin:0 0 4px;display:block">' + cardTitle + '</label>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">' + cardHelp + '</p>' +
         tokenPaletteHtml("aw-token-palette") +
         '<input type="text" id="aw-msg" class="tpl-field" value="' + escapeHtml(draft.messageTemplate || "") + '" placeholder="' + (isEC ? "{rule}: {value}" : "{asset} {metric} = {value} (threshold {threshold})") + '" style="width:100%;margin-top:4px">' +
-      '</div>' +
-      '<div class="form-group"><label style="font-weight:600">Actions when this fires</label>' +
-        '<div id="aw-actions"></div>' +
-        '<button type="button" class="btn btn-sm btn-secondary" id="aw-add-action" style="margin-top:6px">+ Add action</button>' +
-      '</div>' +
-      '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
-        '<label style="font-weight:600;margin:0 0 4px;display:block">Escalation</label>' +
-        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">If an alert stays unhandled, run more actions after a delay — e.g. notify a wider group 15 minutes in. Each escalation runs once its delay elapses (checked every minute), optionally repeating until the alert is handled.</p>' +
-        '<div id="aw-esc-config" style="display:none;margin-bottom:6px"><label style="font-size:0.8rem">Stop escalating when</label><select id="aw-esc-stopon"><option value="acknowledge"' + (esc && esc.stopOn === "acknowledge" ? " selected" : "") + '>Acknowledged (or cleared)</option><option value="clear"' + (esc && esc.stopOn === "clear" ? " selected" : "") + '>Cleared only — acknowledging does not stop it</option></select></div>' +
-        '<div id="aw-esc-tiers"></div>' +
-        '<button type="button" class="btn btn-sm btn-secondary" id="aw-esc-add" style="margin-top:6px">+ Add escalation</button>' +
+        // The rule-LEVEL escalation chain lives on the mandatory card: "if the
+        // alert stays unhandled, do more" — it fires regardless of which
+        // actions exist, exactly like the stored rule-level escalation (chain
+        // key ""), so pre-redesign rules render here with no migration.
+        escSectionHtml() +
       '</div>';
 
-    var host = panel.querySelector("#aw-actions");
-    (draft.actions || []).forEach(function (a) { addActionRow(host, a); });
-    panel.querySelector("#aw-add-action").addEventListener("click", function () { addActionRow(host, null); });
+    // Per-severity action sections: with severity bands, each tier gets its
+    // own actions (server: band actions run when the alert ENTERS that band;
+    // an empty band falls back to the base actions). Single mode = one list.
+    var bands = (bandsApplicable(draft.trigger) && draft.severityBands) || [];
+    var baseLabel = bands.length
+      ? 'Actions at <span style="color:' + sevColor(draft.severity) + '">' + escapeHtml(draft.severity) + '</span> (base severity)'
+      : "Actions when this fires";
+    html += '<div class="form-group" style="' + (bands.length ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
+      '<label style="font-weight:600">' + baseLabel + '</label>' +
+      (bands.length ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These actions also run at higher severities that don’t define their own.</p>' : "") +
+      '<div id="aw-actions"></div>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="aw-add-action" style="margin-top:6px">+ Add action</button>' +
+    '</div>';
+    bands.forEach(function (b, i) {
+      var opPhrase = ((s.comparatorPhrases || {})[b.operator || (draft.trigger && draft.trigger.operator)] || "").toString();
+      html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem">' +
+        '<label style="font-weight:600">Actions at <span style="color:' + sevColor(b.severity) + '">' + escapeHtml(b.severity) + '</span> <span style="font-weight:400;color:var(--color-text-tertiary)">(value ' + escapeHtml(opPhrase || "meets") + ' ' + escapeHtml(String(b.threshold != null ? b.threshold : "?")) + ')</span></label>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">' + escapeHtml((s.bandMeta && s.bandMeta.emptyBandNote) || "Leave empty to run the base actions at this severity.") + '</p>' +
+        '<div class="ba-actions"></div>' +
+        '<button type="button" class="btn btn-sm btn-secondary ba-add" style="margin-top:6px">+ Add action</button>' +
+      '</div>';
+    });
+    panel.innerHTML = html;
 
-    var tiersHost = panel.querySelector("#aw-esc-tiers");
-    // "Stop escalating when" is meaningful only once at least one escalation
-    // exists; addTierRow's remove handler calls this too (via _escSyncFn).
-    _escSyncFn = function () {
-      var any = tiersHost.querySelectorAll(".aw-tier").length > 0;
-      panel.querySelector("#aw-esc-config").style.display = any ? "block" : "none";
+    // Mandatory-card escalation = the rule-level chain.
+    wireEscSection(panel.querySelector("#aw-inapp-card > .aw-esc-sec"), esc);
+
+    var host = panel.querySelector("#aw-actions");
+    (draft.actions || []).forEach(function (a) { addActionRow(host, a, true); });
+    panel.querySelector("#aw-add-action").addEventListener("click", function () { addActionRow(host, null, true); });
+
+    panel.querySelectorAll(".aw-band-actions").forEach(function (sec, i) {
+      var bHost = sec.querySelector(".ba-actions");
+      (((draft.severityBands || [])[i] || {}).actions || []).forEach(function (a) { addActionRow(bHost, a, true); });
+      sec.querySelector(".ba-add").addEventListener("click", function () { addActionRow(bHost, null, true); });
+    });
+    wireTokenPalette(panel);
+  }
+
+  // ── Per-item escalation section (the mandatory card + every action row) ──
+  // "Escalate if unhandled": tiers of follow-up actions on a delay. The card's
+  // section maps to the rule-level chain; an action row's section maps to
+  // action.escalation. Tier-hosted action rows never render one (no nesting —
+  // the server schema rejects chains inside escalation tiers).
+  function escSectionHtml() {
+    return '<div class="aw-esc-sec" style="margin-top:8px;border-top:1px dashed var(--color-border);padding-top:6px">' +
+      '<div class="aesc-config" style="display:none;margin-bottom:4px"><label style="font-size:0.78rem">Stop escalating when</label> ' +
+        '<select class="aesc-stopon" style="width:auto"><option value="acknowledge">Acknowledged (or cleared)</option><option value="clear">Cleared only — acknowledging does not stop it</option></select></div>' +
+      '<div class="aesc-tiers"></div>' +
+      '<button type="button" class="btn btn-sm btn-secondary aesc-add" style="margin-top:4px">+ Escalate if unhandled…</button>' +
+    '</div>';
+  }
+  function wireEscSection(sec, esc) {
+    if (!sec) return;
+    var tiersHost = sec.querySelector(".aesc-tiers");
+    var sync = function () {
+      sec.querySelector(".aesc-config").style.display = tiersHost.querySelectorAll(":scope > .aw-tier").length ? "block" : "none";
     };
-    ((esc && esc.tiers) || []).forEach(function (t) { addTierRow(tiersHost, t); });
-    _escSyncFn();
-    panel.querySelector("#aw-esc-add").addEventListener("click", function () {
+    if (esc && esc.stopOn) sec.querySelector(".aesc-stopon").value = esc.stopOn;
+    ((esc && esc.tiers) || []).forEach(function (t) { addTierRow(tiersHost, t, sync); });
+    sync();
+    sec.querySelector(".aesc-add").addEventListener("click", function () {
       var max = (s.escalationMeta && s.escalationMeta.maxTiers) || 5;
-      if (tiersHost.querySelectorAll(".aw-tier").length >= max) { showToast("Maximum " + max + " escalation tiers", "info"); return; }
-      var row = addTierRow(tiersHost, null);
+      if (tiersHost.querySelectorAll(":scope > .aw-tier").length >= max) { showToast("Maximum " + max + " escalation tiers", "info"); return; }
+      var row = addTierRow(tiersHost, null, sync);
       // Seed a notify action so the channel + recipient fields are right
       // there — an escalation without an action can't do anything anyway.
       addActionRow(row.querySelector(".tier-actions"), null);
-      _escSyncFn();
+      sync();
     });
-    wireTokenPalette(panel);
+  }
+  function collectEscSection(sec) {
+    if (!sec) return null;
+    var tiers = collectTierRows(sec.querySelector(".aesc-tiers"));
+    return tiers.length ? { stopOn: sec.querySelector(".aesc-stopon").value, tiers: tiers } : null;
   }
 
   // ── Severity bands (numeric single-metric triggers) — live on step 3 (with
@@ -1682,9 +1725,11 @@ async function openAutomationWizard(existing) {
     var row = document.createElement("div");
     row.className = "aw-band scg-group";
     row.style.cssText = "border:1px solid var(--color-border);border-left:3px solid " + sevColor(sev0) + ";border-radius:6px;padding:0.55rem;margin:4px 0";
-    // A tier is just: severity + the (locked-metric) condition + "+ Severity".
-    // It carries NO per-tier actions/escalation — the alert re-notifies with the
-    // base (Actions-step) actions + base escalation at the tier's severity.
+    // A tier here is just: severity + the (locked-metric) condition +
+    // "+ Severity". Its ACTIONS live on the Actions step (the per-severity
+    // section) — stashed on the row so collectBands round-trips them.
+    row._bandActions = (band.actions && band.actions.length ? band.actions : []) || [];
+    row._bandEscalation = band.escalation || null;
     row.innerHTML =
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap">' +
         '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' +
@@ -1809,7 +1854,10 @@ async function openAutomationWizard(existing) {
   }
 
   // One action row — used for top-level actions AND escalation-tier actions.
-  function addActionRow(host, action) {
+  // escalatable: top-level + per-severity-band action rows get their own
+  // "Escalate if unhandled" chain (action.escalation). Tier-hosted rows and
+  // band resolved-action rows don't (the server schema keeps those bare).
+  function addActionRow(host, action, escalatable) {
     action = action || { type: "notify", channelId: channels.length ? channels[0].id : "" };
     var types = availableActionTypes();
     var row = document.createElement("div");
@@ -1824,13 +1872,15 @@ async function openAutomationWizard(existing) {
         '<span class="aw-action-summary" style="flex:1;font-size:0.8rem;color:var(--color-text-tertiary)"></span>' +
         '<button type="button" class="btn btn-sm btn-danger aw-action-remove">Remove</button>' +
       '</div>' +
-      '<div class="aw-action-fields"></div>';
+      '<div class="aw-action-fields"></div>' +
+      (escalatable ? escSectionHtml() : "");
     host.appendChild(row);
     row.querySelector(".aw-action-remove").addEventListener("click", function () { row.remove(); });
     row.querySelector(".aw-action-type").addEventListener("change", function () {
       renderActionFields(row, { type: row.querySelector(".aw-action-type").value });
     });
     renderActionFields(row, action);
+    if (escalatable) wireEscSection(row.querySelector(":scope > .aw-esc-sec"), action.escalation || null);
   }
   function renderActionFields(row, action) {
     var box = row.querySelector(".aw-action-fields");
@@ -1972,7 +2022,16 @@ async function openAutomationWizard(existing) {
   }
   function collectAction(row) {
     var t = row.querySelector(".aw-action-type").value;
-    var box = row.querySelector(".aw-action-fields");
+    var box = row.querySelector(":scope > .aw-action-fields");
+    var a = collectActionCore(t, box);
+    if (!a) return null;
+    // Per-action escalation (escalatable rows only — tier-hosted rows have no
+    // .aw-esc-sec, and :scope keeps a nested tier's sections out of reach).
+    var esc = collectEscSection(row.querySelector(":scope > .aw-esc-sec"));
+    if (esc) a.escalation = esc;
+    return a;
+  }
+  function collectActionCore(t, box) {
     if (t === "notify") {
       var chSel = box.querySelector(".na-channel");
       if (!chSel || !chSel.value) return null;
@@ -2043,7 +2102,9 @@ async function openAutomationWizard(existing) {
   }
 
   // Escalation tier row — afterMin/repeat controls + a nested action list.
-  function addTierRow(host, tier) {
+  // onChange (optional) fires when the row is removed, so the owning
+  // escalation section can hide its stop-condition config.
+  function addTierRow(host, tier, onChange) {
     tier = tier || { afterMin: 15, actions: [] };
     var row = document.createElement("div");
     row.className = "aw-tier";
@@ -2063,8 +2124,10 @@ async function openAutomationWizard(existing) {
     host.appendChild(row);
     row.querySelector(".tier-remove").addEventListener("click", function () {
       row.remove();
-      if (_escSyncFn) _escSyncFn();
+      if (onChange) onChange();
     });
+    // Tier-hosted action rows are never escalatable (no chains inside chains —
+    // the server schema rejects it).
     var actionsHost = row.querySelector(".tier-actions");
     (tier.actions || []).forEach(function (a) { addActionRow(actionsHost, a); });
     row.querySelector(".tier-add-action").addEventListener("click", function () { addActionRow(actionsHost, null); });
@@ -2094,12 +2157,20 @@ async function openAutomationWizard(existing) {
     // The alert/event message rides the mandatory in-app card on this step.
     var msgEl = panel.querySelector("#aw-msg");
     if (msgEl) draft.messageTemplate = msgEl.value.trim() || null;
+    // The card's "Escalate if unhandled" chain IS the rule-level escalation.
+    draft.escalation = collectEscSection(panel.querySelector("#aw-inapp-card > .aw-esc-sec"));
     draft.actions = collectActionsFrom(host);
-    // Escalation exists iff at least one escalation row does — no toggle.
-    var tiers = collectTierRows(panel.querySelector("#aw-esc-tiers"));
-    draft.escalation = tiers.length
-      ? { stopOn: panel.querySelector("#aw-esc-stopon").value, tiers: tiers }
-      : null;
+    // Per-severity sections write back onto their bands — and onto the step-3
+    // band DOM rows' stash, so a later step-3 re-collect (collectBands) can't
+    // lose them. Sections render in draft.severityBands order, which matches
+    // the #aw-bands row order (both come from the same collect).
+    var bandRows = document.querySelectorAll("#aw-bands > .aw-band");
+    panel.querySelectorAll(".aw-band-actions").forEach(function (sec, i) {
+      var band = (draft.severityBands || [])[i];
+      if (!band) return;
+      band.actions = collectActionsFrom(sec.querySelector(".ba-actions"));
+      if (bandRows[i]) bandRows[i]._bandActions = band.actions;
+    });
   }
   // Severity tiers + notify policy — collected only in multi-severity mode
   // (a single numeric metric). Single mode clears them.
@@ -2115,13 +2186,17 @@ async function openAutomationWizard(existing) {
       // row; metric + aggregation + window are shared with the base condition.
       var condRow = row.querySelector(".band-cond .scr-row");
       var leaf = condRow ? tgCollectLeaf(condRow, kind) : {};
-      // Tiers carry no per-tier actions/escalation — the alert re-notifies with
-      // the base (Actions-step) actions + base escalation at the tier's severity.
+      // Per-tier actions live on the Actions step (per-severity sections) and
+      // ride the row stash between collects: hydrated at addBandRow, updated
+      // by collectStep5 — so a step-3 re-collect can't strip them. Band-LEVEL
+      // escalation isn't offered in the builder (per-action chains are), but
+      // an API-authored one round-trips through the same stash.
       var band = {
         threshold: leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : null,
         severity: row.querySelector(".band-severity").value,
-        actions: [],
+        actions: row._bandActions || [],
       };
+      if (row._bandEscalation) band.escalation = row._bandEscalation;
       // Persist a per-tier operator only when it differs from the base.
       if (leaf.operator && leaf.operator !== baseOp) band.operator = leaf.operator;
       bands.push(band);
@@ -2156,24 +2231,42 @@ async function openAutomationWizard(existing) {
     }
     return null;
   }
-  function validateStep5() {
-    var acts = draft.actions || [];
-    for (var i = 0; i < acts.length; i++) {
-      var p = validateAction(acts[i], "Action " + (i + 1));
-      if (p) return p;
-    }
-    if (draft.escalation) {
-      var tiers = draft.escalation.tiers || [];
-      for (var j = 0; j < tiers.length; j++) {
-        var t = tiers[j]; var tn = j + 1;
-        if (!t.afterMin || isNaN(t.afterMin) || t.afterMin < 1) return "Escalation " + tn + ": enter the delay in minutes (1 or more).";
-        if (!t.actions.length) return "Escalation " + tn + ": add at least one action (or remove it).";
-        for (var k = 0; k < t.actions.length; k++) {
-          var p2 = validateAction(t.actions[k], "Escalation tier " + tn + ", action " + (k + 1));
-          if (p2) return p2;
-        }
-        if (t.repeatEveryMin != null && (isNaN(t.repeatEveryMin) || t.repeatEveryMin < 5)) return "Escalation tier " + tn + ": repeat interval must be 5 minutes or more.";
+  // Validate one escalation chain (the card's rule-level chain or an
+  // action's own): tier delay + at least one valid action per tier.
+  function validateEscalation(esc, label) {
+    if (!esc) return null;
+    var tiers = esc.tiers || [];
+    for (var j = 0; j < tiers.length; j++) {
+      var t = tiers[j]; var tn = j + 1;
+      if (!t.afterMin || isNaN(t.afterMin) || t.afterMin < 1) return label + " escalation " + tn + ": enter the delay in minutes (1 or more).";
+      if (!t.actions.length) return label + " escalation " + tn + ": add at least one action (or remove it).";
+      for (var k = 0; k < t.actions.length; k++) {
+        var p = validateAction(t.actions[k], label + " escalation " + tn + ", action " + (k + 1));
+        if (p) return p;
       }
+      if (t.repeatEveryMin != null && (isNaN(t.repeatEveryMin) || t.repeatEveryMin < 5)) return label + " escalation " + tn + ": repeat interval must be 5 minutes or more.";
+    }
+    return null;
+  }
+  function validateActionList(acts, prefix) {
+    for (var i = 0; i < (acts || []).length; i++) {
+      var label = prefix + " " + (i + 1);
+      var p = validateAction(acts[i], label);
+      if (p) return p;
+      var p2 = validateEscalation(acts[i].escalation, label);
+      if (p2) return p2;
+    }
+    return null;
+  }
+  function validateStep5() {
+    var p = validateEscalation(draft.escalation, "Alert");
+    if (p) return p;
+    p = validateActionList(draft.actions, "Action");
+    if (p) return p;
+    for (var b = 0; b < (draft.severityBands || []).length; b++) {
+      var band = draft.severityBands[b];
+      p = validateActionList(band.actions, band.severity + " action");
+      if (p) return p;
     }
     return null;
   }
@@ -2205,14 +2298,35 @@ async function openAutomationWizard(existing) {
   function renderSummary() {
     var box = document.getElementById("aw-summary");
     if (!box) return;
-    var actionLines = (draft.actions || []).map(function (a) { return escapeHtml(actionSummary(a)); });
-    var escLine = draft.escalation && draft.escalation.tiers && draft.escalation.tiers.length
-      ? draft.escalation.tiers.length + " tier(s), stops on " + (draft.escalation.stopOn === "clear" ? "clear" : "acknowledge")
-      : "off";
+    // One line per action; per-action chains annotate their line. Band
+    // sections contribute severity-prefixed lines.
+    var escSuffix = function (a) {
+      return a.escalation && a.escalation.tiers && a.escalation.tiers.length
+        ? " (+" + a.escalation.tiers.length + " escalation tier" + (a.escalation.tiers.length === 1 ? "" : "s") + ")"
+        : "";
+    };
+    var actionLines = (draft.actions || []).map(function (a) { return escapeHtml(actionSummary(a) + escSuffix(a)); });
+    (draft.severityBands || []).forEach(function (b) {
+      (b.actions || []).forEach(function (a) {
+        actionLines.push('<span style="color:' + sevColor(b.severity) + '">at ' + escapeHtml(b.severity) + ':</span> ' + escapeHtml(actionSummary(a) + escSuffix(a)));
+      });
+    });
+    // Escalation = the alert's (rule-level) chain + every per-action chain.
+    var chains = [];
+    if (draft.escalation && draft.escalation.tiers && draft.escalation.tiers.length) chains.push(draft.escalation);
+    (draft.actions || []).forEach(function (a) { if (a.escalation && a.escalation.tiers && a.escalation.tiers.length) chains.push(a.escalation); });
+    (draft.severityBands || []).forEach(function (b) {
+      (b.actions || []).forEach(function (a) { if (a.escalation && a.escalation.tiers && a.escalation.tiers.length) chains.push(a.escalation); });
+    });
+    var tierTotal = chains.reduce(function (n, c) { return n + c.tiers.length; }, 0);
+    var escLine = chains.length ? chains.length + " chain(s), " + tierTotal + " tier(s)" : "off";
+    var msgRow = draft.messageTemplate
+      ? '<dt>Message</dt><dd><code style="font-size:0.8rem">' + escapeHtml(draft.messageTemplate) + '</code></dd>'
+      : "";
     var bandsRow = "";
     if (bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length) {
       var op = (draft.trigger && draft.trigger.operator) || ">=";
-      var bandLine = draft.severityBands.map(function (b) { return escapeHtml(b.severity + " " + op + " " + b.threshold); }).join(", ");
+      var bandLine = draft.severityBands.map(function (b) { return escapeHtml(b.severity + " " + (b.operator || op) + " " + b.threshold); }).join(", ");
       var np = draft.bandNotify || {};
       var notifyBits = [np.onIncrease !== false ? "increase" : null, np.onDecrease ? "decrease" : null, np.onResolved !== false ? "resolved" : null].filter(Boolean).join(" + ");
       bandsRow = '<dt>Severity bands</dt><dd>' + bandLine + ' <span style="color:var(--color-text-tertiary)">— notify on ' + escapeHtml(notifyBits || "none") + '</span></dd>';
@@ -2222,6 +2336,7 @@ async function openAutomationWizard(existing) {
       '<dt>Devices</dt><dd>' + escapeHtml(scopeSummaryText(draft.scope)) + '</dd>' +
       '<dt>Trigger</dt><dd>' + triggerSentence(draft.trigger) + '</dd>' +
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
+      msgRow +
       '<dt>Actions</dt><dd>' + (actionLines.length ? actionLines.join("<br>") : '<span style="color:var(--color-text-tertiary)">in-app alert only</span>') + '</dd>' +
       bandsRow +
       '<dt>Escalation</dt><dd>' + escapeHtml(escLine) + '</dd>' +
