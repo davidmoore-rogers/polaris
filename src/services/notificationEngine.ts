@@ -35,6 +35,9 @@ import {
   type EscalationV2Config,
   type ResetConfig,
   type AutomationAction,
+  type EscalatableAction,
+  ruleHasAnyEscalation,
+  allRuleActionRefs,
   type CompositeTrigger,
   type CompositeLeaf,
   type TriggerConditionGroup,
@@ -83,8 +86,9 @@ interface DbRule {
   scope: RuleScope;
   /** v2 reset semantics (legacy clearBehavior/clearAfterSec normalized in). */
   reset: ResetConfig;
-  /** v2 unified action list (legacy targets normalized in). */
-  actions: AutomationAction[];
+  /** v2 unified action list (legacy targets normalized in); actions may carry
+   *  their own escalation chain (per-action escalation). */
+  actions: EscalatableAction[];
   cooldownSec: number | null;
   messageTemplate: string | null;
   emailComposition: EmailComposition | null;
@@ -579,26 +583,26 @@ function round2(n: number): string {
   return (Math.round(n * 100) / 100).toString();
 }
 
-/** Does this rule need the fire-time template context (composition/escalation/asset tokens)? */
+/** Does this rule need the fire-time template context (composition/escalation/asset tokens)?
+ *  ANY escalation chain counts — rule-level, per-action, band-level, or
+ *  band-per-action — since the sweep renders from the templateCtx snapshot. */
 function ruleWantsContext(rule: DbRule): boolean {
-  return !!(rule.emailComposition || rule.escalation);
+  return !!(rule.emailComposition || ruleHasAnyEscalation(rule));
 }
 
 function ruleWantsAssetDetail(rule: DbRule): boolean {
   const comp = rule.emailComposition;
   // Action-level templates can reference {asset.*} too: per-action email
-  // composition, api_call bodies, script args — for the top-level actions AND
-  // every escalation tier's actions (v2 tiers carry actions).
+  // composition, api_call bodies, script args — walked over EVERY place
+  // actions live (top-level + per-action tiers + rule tiers + band actions +
+  // band tiers + resolved actions) via the canonical allRuleActionRefs.
   const templatesOf = (a: AutomationAction) =>
     a.type === "notify"
       ? [a.emailComposition?.subjectTemplate, a.emailComposition?.bodyTextTemplate, a.emailComposition?.bodyHtmlTemplate]
       : a.type === "api_call"
         ? [a.bodyTemplate]
         : [a.argsTemplate];
-  const actionTemplates = [
-    ...rule.actions,
-    ...(rule.escalation?.tiers ?? []).flatMap((t) => t.actions),
-  ].flatMap(templatesOf);
+  const actionTemplates = allRuleActionRefs(rule).flatMap((r) => templatesOf(r.action));
   return (
     ruleWantsContext(rule) ||
     templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...actionTemplates])

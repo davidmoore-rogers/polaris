@@ -274,6 +274,71 @@ describe("per-band escalation (value-driven)", () => {
   });
 });
 
+describe("per-action escalation chains", () => {
+  const actionChain = (url: string, stopOn = "acknowledge") => ({
+    stopOn,
+    tiers: [{ afterMin: 30, actions: [{ type: "api_call", method: "POST", url, timeoutSec: 15 }] }],
+  });
+
+  it("an action's own chain runs alongside the rule-level chain with disjoint state keys", async () => {
+    seedRule({
+      actions: [{ type: "notify", channelId: "ch-email", addresses: ["a@example.com"], escalation: actionChain("https://pager.example.com/action0") }],
+      escalation: actionChain("https://pager.example.com/rule"),
+    });
+    seedNotif();
+    const runs = await runEscalationSweep(NOW);
+    expect(runs).toBe(2);
+    const urls = db.deliveries.map((d) => d.meta.url).sort();
+    expect(urls).toEqual(["https://pager.example.com/action0", "https://pager.example.com/rule"]);
+    // Level chain keeps the bare numeric key; the per-action chain keys a0:t0.
+    const state = db.notifUpdates[0].data.escalationState.tiers;
+    expect(Object.keys(state).sort()).toEqual(["0", "a0:t0"]);
+  });
+
+  it("stopOn is per chain: ack stops the acknowledge chain, the clear chain keeps escalating", async () => {
+    seedRule({
+      actions: [{ type: "notify", channelId: "ch-email", addresses: ["a@example.com"], escalation: actionChain("https://pager.example.com/keep-going", "clear") }],
+      escalation: actionChain("https://pager.example.com/stopped", "acknowledge"),
+    });
+    seedNotif({ acknowledged: true });
+    const runs = await runEscalationSweep(NOW);
+    expect(runs).toBe(1);
+    expect(db.deliveries.map((d) => d.meta.url)).toEqual(["https://pager.example.com/keep-going"]);
+  });
+
+  it("a rule whose ONLY chain is per-action still enters the sweep", async () => {
+    seedRule({
+      actions: [{ type: "notify", channelId: "ch-email", addresses: ["a@example.com"], escalation: actionChain("https://pager.example.com/only") }],
+      escalation: null,
+    });
+    seedNotif();
+    expect(await runEscalationSweep(NOW)).toBe(1);
+    expect(db.deliveries[0].meta.url).toBe("https://pager.example.com/only");
+  });
+
+  it("band severity runs the band ACTION's chain; empty band falls back to the base actions' chains", async () => {
+    seedRule({
+      severity: "warning",
+      actions: [{ type: "notify", channelId: "ch-email", addresses: ["a@example.com"], escalation: actionChain("https://pager.example.com/base-action") }],
+      escalation: null,
+      severityBands: [
+        { threshold: 90, severity: "serious", actions: [] }, // empty → base fallback
+        { threshold: 95, severity: "critical", actions: [{ type: "api_call", method: "POST", url: "https://x.example.com", timeoutSec: 15, escalation: actionChain("https://pager.example.com/band-action") }] },
+      ],
+    });
+    seedNotif({ severity: "critical" });
+    expect(await runEscalationSweep(NOW)).toBe(1);
+    expect(db.deliveries[0].meta.url).toBe("https://pager.example.com/band-action");
+
+    db.deliveries.length = 0;
+    db.notifUpdates.length = 0;
+    db.notifs[0].severity = "serious";
+    db.notifs[0].escalationState = null;
+    expect(await runEscalationSweep(NOW)).toBe(1);
+    expect(db.deliveries[0].meta.url).toBe("https://pager.example.com/base-action");
+  });
+});
+
 describe("tierIsDue (unchanged semantics)", () => {
   const tier = { afterMin: 30, repeatEveryMin: 60, maxRepeats: 2 };
   it("first send after afterMin, repeats per repeatEveryMin, capped at maxRepeats", () => {
