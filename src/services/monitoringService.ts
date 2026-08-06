@@ -3751,6 +3751,211 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
   }
 }
 
+// ─── collectSystemInfo overlay helpers (split 2026-08 — the dispatch gates
+// are pinned in tests/integration/collectSystemInfoGates.test.ts; each
+// overlay below is a best-effort enrichment of the in-memory SystemInfoSample
+// and never fails the scrape).
+
+/**
+ * Resolve the parent-FortiGate controller name for a managed FortiSwitch /
+ * FortiAP: the fortinetTopology.controllerFortigate stamp discovery wrote,
+ * falling back to the standalone-FortiGate integration's host. "" = unknown.
+ */
+function fortinetControllerNameOf(
+  asset: { fortinetTopology: unknown },
+  integration: { type: string; config: unknown },
+): string {
+  const topology = (asset.fortinetTopology ?? {}) as Record<string, unknown>;
+  const stamped = typeof topology.controllerFortigate === "string"
+    ? topology.controllerFortigate.trim()
+    : "";
+  if (stamped) return stamped;
+  if (integration.type === "fortigate") {
+    return String((integration.config as Record<string, unknown>).host || "");
+  }
+  return "";
+}
+
+/**
+ * FortiSwitch port-VLAN + trunk-member overlay (SNMP interfaces path). SNMP
+ * IF-MIB gives us per-port counters but neither VLAN membership nor the
+ * trunk→physical-member mapping; the parent FortiGate's switch-controller
+ * CMDB carries both. One cached call per controller per 30s, keyed by
+ * serial, joined onto the in-memory InterfaceSample list by port-name ==
+ * ifName. Also stamps MCLAG ICL peers (definitive when the switch is in
+ * CMDB; left undefined otherwise so stored rows survive — the LLDP
+ * undefined-vs-[] convention). Best-effort: any failure leaves the VLAN
+ * fields null on every row and the interface scrape proceeds.
+ */
+async function overlayFortiswitchCmdbOntoSnmp(
+  asset: { assetType: string; serialNumber: string | null; fortinetTopology: unknown },
+  integration: { type: string; config: unknown },
+  data: SystemInfoSample,
+  sysInfoTimeout: number,
+): Promise<void> {
+  if (asset.assetType !== "switch" || !asset.serialNumber) return;
+  const controllerName = fortinetControllerNameOf(asset, integration);
+  if (!controllerName) return;
+  const endVlan = startPhase("systeminfo.snmp.fortiswitch_vlan_overlay");
+  try {
+    const portsMap = await fetchFortiswitchControllerPortsCmdb(
+      integration as any,
+      controllerName,
+      sysInfoTimeout,
+    );
+    const portsForSwitch = portsMap.get(asset.serialNumber.toUpperCase());
+    // When the switch is present in the controller CMDB we know its
+    // MCLAG state definitively — stamp it (empty array = wipe stale
+    // ICL rows) even if the VLAN map is empty. Leaving it undefined
+    // when the switch isn't in CMDB preserves stored rows (no-wipe),
+    // matching the LLDP undefined-vs-[] convention.
+    if (portsForSwitch) {
+      data.mclagPeers = portsForSwitch.mclagPeers;
+    }
+    if (portsForSwitch && portsForSwitch.vlanByPort.size > 0) {
+      let overlaid = 0;
+      for (const iface of data.interfaces) {
+        // Port description comes from the same CMDB payload; SNMP
+        // leaves description null on every switch-port row, so
+        // this overlay is its only source.
+        const desc = portsForSwitch.descriptionByPort.get(iface.ifName);
+        if (desc && !iface.description) iface.description = desc;
+        const cfg = portsForSwitch.vlanByPort.get(iface.ifName);
+        if (!cfg) continue;
+        iface.nativeVlan     = cfg.nativeVlan;
+        iface.taggedVlans    = cfg.taggedVlans;
+        iface.trunksAllVlans = cfg.trunksAllVlans;
+        overlaid++;
+      }
+      const trunkOverlaid = overlayFortiswitchTrunkMembers(
+        data.interfaces,
+        portsForSwitch.trunkMembers,
+      );
+      endVlan({ overlaid, total: data.interfaces.length, trunkLinks: trunkOverlaid, mclagPeers: portsForSwitch.mclagPeers.length });
+    } else {
+      endVlan({ overlaid: 0, total: data.interfaces.length, reason: "switch_not_in_cmdb" });
+    }
+  } catch (err: any) {
+    endVlan({ overlaid: 0, total: data.interfaces.length, error: err?.message || String(err) });
+  }
+}
+
+/**
+ * FortiAP wireless-station signal overlay (SNMP interfaces path).
+ * fapStationTable (SNMP) gives us the connected clients + band, but
+ * per-client RSSI lives only on the controller's /api/v2/monitor/wifi/client.
+ * One cached call per controller, joined onto the in-memory station list by
+ * normalized MAC. Best-effort: any failure leaves signal/noise null.
+ */
+async function overlayFortiapStationSignals(
+  asset: { assetType: string; fortinetTopology: unknown },
+  integration: { type: string; config: unknown },
+  data: SystemInfoSample,
+  sysInfoTimeout: number,
+): Promise<void> {
+  if (asset.assetType !== "access_point") return;
+  if (!Array.isArray(data.wirelessStations) || data.wirelessStations.length === 0) return;
+  const controllerName = fortinetControllerNameOf(asset, integration);
+  if (!controllerName) return;
+  const endSignal = startPhase("systeminfo.snmp.wifi_signal_overlay_rest");
+  try {
+    const signals = await fetchFortinetWifiClients(integration as any, controllerName, sysInfoTimeout);
+    let overlaid = 0;
+    for (const st of data.wirelessStations) {
+      const sig = signals.get(st.staMacAddr.toUpperCase());
+      if (!sig) continue;
+      st.signalStrength = sig.signalStrength;
+      st.noise          = sig.noise;
+      overlaid++;
+    }
+    endSignal({ overlaid, total: data.wirelessStations.length });
+  } catch (err: any) {
+    endSignal({ overlaid: 0, total: data.wirelessStations.length, error: err?.message || String(err) });
+  }
+}
+
+/**
+ * Cross-transport LLDP overlay: when the chosen LLDP source differs from the
+ * interfaces transport the collection above already used, fetch the neighbor
+ * list over LLDP's own transport and stamp it (with its source) onto the
+ * sample. No-op when the transports agree or the overlay isn't applicable.
+ */
+async function overlayCrossTransportLldp(
+  data: SystemInfoSample,
+  opts: {
+    targetIp: string;
+    integration: { type: string; config: unknown } | null;
+    interfacesPolling: string;
+    lldpPolling: string | null;
+    lldpSnmpCfg: Record<string, unknown> | null;
+    isFortinetSrc: boolean;
+    isManagedSwitchOrAp: boolean;
+    sysInfoTimeout: number;
+  },
+): Promise<void> {
+  const { targetIp, integration, interfacesPolling, lldpPolling, lldpSnmpCfg, isFortinetSrc, isManagedSwitchOrAp, sysInfoTimeout } = opts;
+  if (lldpPolling === "snmp" && interfacesPolling === "rest_api" && lldpSnmpCfg) {
+    const endOverlay = startPhase("systeminfo.lldp_overlay_snmp");
+    const neighbors = await collectLldpOnlySnmp(targetIp, lldpSnmpCfg, sysInfoTimeout).catch(() => undefined);
+    endOverlay({ neighbors: neighbors?.length ?? null });
+    if (neighbors !== undefined) {
+      data.lldpNeighbors = neighbors;
+      data.lldpSource    = "snmp";
+    }
+  } else if (lldpPolling === "rest_api" && interfacesPolling === "snmp" && isFortinetSrc && integration && !isManagedSwitchOrAp) {
+    const endOverlay = startPhase("systeminfo.lldp_overlay_rest");
+    const neighbors = await collectLldpOnlyFortinet(targetIp, integration as any, sysInfoTimeout).catch(() => undefined);
+    endOverlay({ neighbors: neighbors?.length ?? null });
+    if (neighbors !== undefined) {
+      data.lldpNeighbors = neighbors;
+      data.lldpSource    = "fortios";
+    }
+  }
+}
+
+/**
+ * FortiLink LLDP exclusion (opt-in per integration, default off). Drop LLDP
+ * neighbors learned on FortiLink-enabled interfaces — the fortilink aggregate
+ * + its member ports — so internal FortiGate↔FortiSwitch links don't clutter
+ * the Neighbor column. Authoritative source is the CMDB `fortilink` flag.
+ * FortiGate firewalls only (the CMDB query targets the polled device; managed
+ * switches/APs carry no FortiGate CMDB here). The REST-interfaces path
+ * already fetched CMDB (data.fortilinkInterfaces is set, possibly []); the
+ * SNMP-interfaces path didn't, so we make one gated CMDB call. Peer-inferred
+ * FortiLink rows are unaffected — they're synthesized from topology, not LLDP.
+ */
+async function applyFortilinkLldpExclusion(
+  data: SystemInfoSample,
+  opts: {
+    targetIp: string;
+    integration: { type: string; config: unknown } | null;
+    isFortinetSrc: boolean;
+    isManagedSwitchOrAp: boolean;
+    sysInfoTimeout: number;
+  },
+): Promise<void> {
+  const { targetIp, integration, isFortinetSrc, isManagedSwitchOrAp, sysInfoTimeout } = opts;
+  if (
+    !isFortinetSrc || !integration || isManagedSwitchOrAp ||
+    ((integration as any).config as any)?.excludeFortilinkLldp !== true ||
+    !Array.isArray(data.lldpNeighbors) || data.lldpNeighbors.length === 0
+  ) {
+    return;
+  }
+  const endFl = startPhase("systeminfo.lldp_fortilink_exclude");
+  let fortilinkSet: Set<string> | null =
+    data.fortilinkInterfaces !== undefined ? new Set(data.fortilinkInterfaces) : null;
+  if (fortilinkSet === null) {
+    const fg = buildFortinetConfig(targetIp, integration as any);
+    fortilinkSet = "error" in fg ? new Set() : await fetchFortilinkInterfaceSet(fg, sysInfoTimeout).catch(() => new Set<string>());
+  }
+  const before = data.lldpNeighbors.length;
+  if (fortilinkSet.size > 0) {
+    data.lldpNeighbors = data.lldpNeighbors.filter((n) => !fortilinkSet!.has(n.localIfName));
+  }
+  endFl({ excluded: before - data.lldpNeighbors.length, fortilinkIfs: fortilinkSet.size });
+}
+
 export async function collectSystemInfo(assetId: string): Promise<CollectionResult<SystemInfoSample>> {
   const endLoad = startPhase("systeminfo.load_asset");
   const asset = await prisma.asset.findUnique({
@@ -3859,98 +4064,8 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
             endIpsec({ tunnels: ipsec?.length ?? null });
             if (ipsec !== undefined) data.ipsecTunnels = ipsec;
           }
-          // FortiSwitch port-VLAN + trunk-member overlay. SNMP IF-MIB gives
-          // us per-port counters but neither VLAN membership nor the
-          // trunk→physical-member mapping; the parent FortiGate's
-          // switch-controller CMDB carries both. One cached call per
-          // controller per 30s, keyed by serial, joined onto the in-memory
-          // InterfaceSample list by port-name == ifName. Best-effort: any
-          // failure leaves the VLAN fields null on every row and the
-          // interface scrape proceeds.
-          if (asset.assetType === "switch" && asset.serialNumber) {
-            const topology = (asset.fortinetTopology ?? {}) as Record<string, unknown>;
-            let controllerName = typeof topology.controllerFortigate === "string"
-              ? topology.controllerFortigate.trim()
-              : "";
-            if (!controllerName && integration.type === "fortigate") {
-              controllerName = String((integration.config as Record<string, unknown>).host || "");
-            }
-            if (controllerName) {
-              const endVlan = startPhase("systeminfo.snmp.fortiswitch_vlan_overlay");
-              try {
-                const portsMap = await fetchFortiswitchControllerPortsCmdb(
-                  integration as any,
-                  controllerName,
-                  sysInfoTimeout,
-                );
-                const portsForSwitch = portsMap.get(asset.serialNumber.toUpperCase());
-                // When the switch is present in the controller CMDB we know its
-                // MCLAG state definitively — stamp it (empty array = wipe stale
-                // ICL rows) even if the VLAN map is empty. Leaving it undefined
-                // when the switch isn't in CMDB preserves stored rows (no-wipe),
-                // matching the LLDP undefined-vs-[] convention.
-                if (portsForSwitch) {
-                  data.mclagPeers = portsForSwitch.mclagPeers;
-                }
-                if (portsForSwitch && portsForSwitch.vlanByPort.size > 0) {
-                  let overlaid = 0;
-                  for (const iface of data.interfaces) {
-                    // Port description comes from the same CMDB payload; SNMP
-                    // leaves description null on every switch-port row, so
-                    // this overlay is its only source.
-                    const desc = portsForSwitch.descriptionByPort.get(iface.ifName);
-                    if (desc && !iface.description) iface.description = desc;
-                    const cfg = portsForSwitch.vlanByPort.get(iface.ifName);
-                    if (!cfg) continue;
-                    iface.nativeVlan     = cfg.nativeVlan;
-                    iface.taggedVlans    = cfg.taggedVlans;
-                    iface.trunksAllVlans = cfg.trunksAllVlans;
-                    overlaid++;
-                  }
-                  const trunkOverlaid = overlayFortiswitchTrunkMembers(
-                    data.interfaces,
-                    portsForSwitch.trunkMembers,
-                  );
-                  endVlan({ overlaid, total: data.interfaces.length, trunkLinks: trunkOverlaid, mclagPeers: portsForSwitch.mclagPeers.length });
-                } else {
-                  endVlan({ overlaid: 0, total: data.interfaces.length, reason: "switch_not_in_cmdb" });
-                }
-              } catch (err: any) {
-                endVlan({ overlaid: 0, total: data.interfaces.length, error: err?.message || String(err) });
-              }
-            }
-          }
-          // FortiAP wireless-station signal overlay. fapStationTable (SNMP)
-          // gives us the connected clients + band, but per-client RSSI lives
-          // only on the controller's /api/v2/monitor/wifi/client. One cached
-          // call per controller, joined onto the in-memory station list by
-          // normalized MAC. Best-effort: any failure leaves signal/noise null.
-          if (asset.assetType === "access_point" && Array.isArray(data.wirelessStations) && data.wirelessStations.length > 0) {
-            const topology = (asset.fortinetTopology ?? {}) as Record<string, unknown>;
-            let controllerName = typeof topology.controllerFortigate === "string"
-              ? topology.controllerFortigate.trim()
-              : "";
-            if (!controllerName && integration.type === "fortigate") {
-              controllerName = String((integration.config as Record<string, unknown>).host || "");
-            }
-            if (controllerName) {
-              const endSignal = startPhase("systeminfo.snmp.wifi_signal_overlay_rest");
-              try {
-                const signals = await fetchFortinetWifiClients(integration as any, controllerName, sysInfoTimeout);
-                let overlaid = 0;
-                for (const st of data.wirelessStations) {
-                  const sig = signals.get(st.staMacAddr.toUpperCase());
-                  if (!sig) continue;
-                  st.signalStrength = sig.signalStrength;
-                  st.noise          = sig.noise;
-                  overlaid++;
-                }
-                endSignal({ overlaid, total: data.wirelessStations.length });
-              } catch (err: any) {
-                endSignal({ overlaid: 0, total: data.wirelessStations.length, error: err?.message || String(err) });
-              }
-            }
-          }
+          await overlayFortiswitchCmdbOntoSnmp(asset, integration, data, sysInfoTimeout);
+          await overlayFortiapStationSignals(asset, integration, data, sysInfoTimeout);
         }
       } else {
         // FortiOS REST path. Skip the FortiOS LLDP call when LLDP is on SNMP.
@@ -3963,25 +4078,11 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
         });
         endRest({ interfaces: data.interfaces.length, ipsec: data.ipsecTunnels?.length ?? null, lldp: data.lldpNeighbors?.length ?? null, perfSla: data.perfSla?.length ?? null, sdwanRules: data.sdwanRules?.length ?? null });
       }
-      // Cross-transport LLDP overlay: when the chosen LLDP source differs
-      // from the interfaces source we already used above.
-      if (lldpPolling === "snmp" && interfacesPolling === "rest_api" && lldpSnmpCfg) {
-        const endOverlay = startPhase("systeminfo.lldp_overlay_snmp");
-        const neighbors = await collectLldpOnlySnmp(targetIp, lldpSnmpCfg, sysInfoTimeout).catch(() => undefined);
-        endOverlay({ neighbors: neighbors?.length ?? null });
-        if (neighbors !== undefined) {
-          data.lldpNeighbors = neighbors;
-          data.lldpSource    = "snmp";
-        }
-      } else if (lldpPolling === "rest_api" && interfacesPolling === "snmp" && isFortinetSrc && integration && !isManagedSwitchOrAp) {
-        const endOverlay = startPhase("systeminfo.lldp_overlay_rest");
-        const neighbors = await collectLldpOnlyFortinet(targetIp, integration as any, sysInfoTimeout).catch(() => undefined);
-        endOverlay({ neighbors: neighbors?.length ?? null });
-        if (neighbors !== undefined) {
-          data.lldpNeighbors = neighbors;
-          data.lldpSource    = "fortios";
-        }
-      }
+
+      await overlayCrossTransportLldp(data, {
+        targetIp, integration, interfacesPolling, lldpPolling, lldpSnmpCfg,
+        isFortinetSrc, isManagedSwitchOrAp, sysInfoTimeout,
+      });
       // Storage stream is independent of interfaces. Storage rows only come
       // from the SNMP path (HOST-RESOURCES-MIB + vendor disk fallback); when
       // the operator has storage routed anywhere but SNMP — including the
@@ -3990,34 +4091,9 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
       if (effective.storagePolling !== "snmp") {
         data.storage = [];
       }
-      // FortiLink LLDP exclusion (opt-in per integration, default off). Drop
-      // LLDP neighbors learned on FortiLink-enabled interfaces — the fortilink
-      // aggregate + its member ports — so internal FortiGate↔FortiSwitch links
-      // don't clutter the Neighbor column. Authoritative source is the CMDB
-      // `fortilink` flag. FortiGate firewalls only (the CMDB query targets the
-      // polled device; managed switches/APs carry no FortiGate CMDB here). The
-      // REST-interfaces path already fetched CMDB (data.fortilinkInterfaces is
-      // set, possibly []); the SNMP-interfaces path didn't, so we make one
-      // gated CMDB call. Peer-inferred FortiLink rows are unaffected — they're
-      // synthesized from topology, not LLDP.
-      if (
-        isFortinetSrc && integration && !isManagedSwitchOrAp &&
-        ((integration as any).config as any)?.excludeFortilinkLldp === true &&
-        Array.isArray(data.lldpNeighbors) && data.lldpNeighbors.length > 0
-      ) {
-        const endFl = startPhase("systeminfo.lldp_fortilink_exclude");
-        let fortilinkSet: Set<string> | null =
-          data.fortilinkInterfaces !== undefined ? new Set(data.fortilinkInterfaces) : null;
-        if (fortilinkSet === null) {
-          const fg = buildFortinetConfig(targetIp, integration as any);
-          fortilinkSet = "error" in fg ? new Set() : await fetchFortilinkInterfaceSet(fg, sysInfoTimeout).catch(() => new Set<string>());
-        }
-        const before = data.lldpNeighbors.length;
-        if (fortilinkSet.size > 0) {
-          data.lldpNeighbors = data.lldpNeighbors.filter((n) => !fortilinkSet!.has(n.localIfName));
-        }
-        endFl({ excluded: before - data.lldpNeighbors.length, fortilinkIfs: fortilinkSet.size });
-      }
+      await applyFortilinkLldpExclusion(data, {
+        targetIp, integration, isFortinetSrc, isManagedSwitchOrAp, sysInfoTimeout,
+      });
       return { supported: true, data };
     }
     // winrm / ssh / icmp — no interfaces / storage / IPsec / LLDP support yet.
