@@ -6752,246 +6752,324 @@ export async function recordHardwareSensorResult(assetId: string, result: Collec
   }
 }
 
+// ─── recordSystemInfoResult stream persisters (split 2026-08 — the contract
+// tests in tests/integration/recordSystemInfoContract.test.ts pin each
+// stream's behavior: pin-aware cadence stamps, the MAC fold's source scoping,
+// the assoc-IP full-replace, LLDP stickiness interplay, detected-model
+// adoption, and the lastSystemInfoAt empty-interfaces guard). Each helper
+// owns exactly one stream family; the orchestrator below reads as the list
+// of streams a system-info scrape can carry.
+
+/** The per-asset pins + identity bits the persisters need. One indexed PK read per scrape. */
+type SystemInfoPins = {
+  monitoredInterfaces: string[];
+  monitoredStorage: string[];
+  monitoredIpsecTunnels: string[];
+  ipAddress: string | null;
+  model: string | null;
+  hostname: string | null;
+} | null;
+
+/**
+ * Interface samples (pin-aware cadence) + the Associated-MACs range fold.
+ * Selection-aware cadence: the full scrape covers every entity, so stamp
+ * each row "fast" when its entity is operator-pinned (kept at full retention
+ * + rolled up) and "slow" otherwise (kept 24h, never rolled up).
+ */
+async function persistInterfaceSampleStream(
+  assetId: string,
+  interfaces: InterfaceSample[],
+  pinned: SystemInfoPins,
+  now: Date,
+): Promise<void> {
+  if (interfaces.length === 0) return;
+  const pinnedIfaces = new Set(pinned?.monitoredInterfaces ?? []);
+  enqueueInterfaceSamples(
+    interfaces.map((i) => ({
+      assetId,
+      timestamp: now,
+      cadence:     pinnedIfaces.has(i.ifName) ? ("fast" as const) : ("slow" as const),
+      ifName:      i.ifName,
+      adminStatus: i.adminStatus ?? null,
+      operStatus:  i.operStatus ?? null,
+      speedBps:    i.speedBps != null ? BigInt(Math.round(i.speedBps)) : null,
+      ipAddress:   i.ipAddress ?? null,
+      macAddress:  i.macAddress ?? null,
+      inOctets:    i.inOctets  != null ? BigInt(Math.round(i.inOctets))  : null,
+      outOctets:   i.outOctets != null ? BigInt(Math.round(i.outOctets)) : null,
+      inErrors:    i.inErrors  != null ? BigInt(Math.round(i.inErrors))  : null,
+      outErrors:   i.outErrors != null ? BigInt(Math.round(i.outErrors)) : null,
+      ifType:      i.ifType   ?? null,
+      ifParent:    i.ifParent ?? null,
+      vlanId:      i.vlanId   ?? null,
+      nativeVlan:  i.nativeVlan ?? null,
+      taggedVlans: i.taggedVlans ?? [],
+      trunksAllVlans: i.trunksAllVlans === true,
+      alias:       i.alias       ?? null,
+      description: i.description ?? null,
+      addressingMode: i.addressingMode ?? null,
+    })),
+  );
+  // Fold EVERY scraped interface MAC (monitored or not) into the asset's
+  // Associated MACs list (AssetMacAddress), coalescing contiguous MACs
+  // into range rows so a 48-port switch costs one row instead of 48.
+  // Source-scoped full-replace over source="monitor-interface" only —
+  // rows owned by discovery/agent/manual writers are never touched.
+  const ifaceMacs = interfaces
+    .map((i) => i.macAddress)
+    .filter((m): m is string => !!m);
+  if (ifaceMacs.length > 0) {
+    const stopMacWrite = startSampleWriteTimer("asset_mac_addresses");
+    const endMac = startPhase("systeminfo.persist.iface_macs");
+    await reconcileInterfaceMacs(assetId, ifaceMacs, now);
+    endMac({ macs: ifaceMacs.length });
+    stopMacWrite();
+  }
+}
+
+function persistStorageSampleStream(
+  assetId: string,
+  storage: StorageSample[],
+  pinned: SystemInfoPins,
+  now: Date,
+): void {
+  if (storage.length === 0) return;
+  const pinnedStorage = new Set(pinned?.monitoredStorage ?? []);
+  enqueueStorageSamples(
+    storage.map((s) => ({
+      assetId,
+      timestamp: now,
+      cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
+      mountPath:  s.mountPath,
+      totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
+      usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
+    })),
+  );
+}
+
+function persistIpsecTunnelSampleStream(
+  assetId: string,
+  tunnels: IpsecTunnelSample[] | undefined,
+  pinned: SystemInfoPins,
+  now: Date,
+): void {
+  if (!Array.isArray(tunnels) || tunnels.length === 0) return;
+  const pinnedTunnels = new Set(pinned?.monitoredIpsecTunnels ?? []);
+  enqueueIpsecTunnelSamples(
+    tunnels.map((t) => ({
+      assetId,
+      timestamp: now,
+      cadence:         pinnedTunnels.has(t.tunnelName) ? ("fast" as const) : ("slow" as const),
+      tunnelName:      t.tunnelName,
+      parentInterface: t.parentInterface,
+      remoteGateway:   t.remoteGateway,
+      status:          t.status,
+      incomingBytes:   t.incomingBytes != null ? BigInt(Math.round(t.incomingBytes)) : null,
+      outgoingBytes:   t.outgoingBytes != null ? BigInt(Math.round(t.outgoingBytes)) : null,
+      proxyIdCount:    t.proxyIdCount,
+    })),
+  );
+}
+
+/**
+ * SD-WAN SLA time-series (gated by Integration.config.pullSdwan, only present
+ * when collectSdwanFortinet ran on this heavy pass). No pinned-subset concept
+ * — every row is stamped "fast" so the rollup (which filters cadence='fast')
+ * includes it and prune treats them all uniformly.
+ */
+function persistPerfSlaSampleStream(
+  assetId: string,
+  perfSla: PerfSlaSample[] | undefined,
+  now: Date,
+): void {
+  if (!Array.isArray(perfSla) || perfSla.length === 0) return;
+  enqueuePerfSlaSamples(
+    perfSla.map((p) => ({
+      assetId,
+      timestamp:   now,
+      cadence:     "fast" as const,
+      healthCheck: p.healthCheck,
+      link:        p.link,
+      zone:        p.zone,
+      state:       p.state,
+      latencyMs:   p.latencyMs,
+      jitterMs:    p.jitterMs,
+      packetLoss:  p.packetLoss,
+      latencyThresholdMs:  p.latencyThresholdMs,
+      jitterThresholdMs:   p.jitterThresholdMs,
+      packetLossThreshold: p.packetLossThreshold,
+    })),
+  );
+}
+
+/**
+ * Mirror per-interface IPs+MACs into the asset_associated_ips side table.
+ * Replaces the legacy JSONB read-modify-write pattern. Discovery no longer
+ * populates interface IPs, so the System tab is the single source for them
+ * once monitoring is on. Manual entries (source = "manual") are preserved by
+ * deleting only the non-manual rows before re-inserting the fresh monitor
+ * set. Skipped entirely when the scrape returned no interface IPs (better to
+ * keep the previous list than wipe it on a transient empty result). Also
+ * folds the scraped IPs into IP History (fire-and-forget).
+ */
+async function persistAssocIpMirror(
+  assetId: string,
+  interfaces: InterfaceSample[],
+  pinned: SystemInfoPins,
+  now: Date,
+): Promise<void> {
+  const monitorAssocEntries = buildMonitorAssocIpEntries(interfaces, now);
+  if (monitorAssocEntries.length === 0) return;
+  const stopWrite = startSampleWriteTimer("asset_associated_ips");
+  const endAssoc = startPhase("systeminfo.persist.assoc_ips_txn");
+  // One $transaction so the delete + insert pair is atomic — a concurrent
+  // reader will either see the old set or the new set, never an empty
+  // intermediate. retryOnDeadlock: a concurrent system-info / probe-patch
+  // writer can win a deadlock against this delete+insert pair (40P01). The
+  // op is idempotent (full-replace of the asset's non-manual IPs), so re-run
+  // on deadlock instead of crashing the whole system-info scrape.
+  await retryOnDeadlock(() =>
+    prisma.$transaction([
+      prisma.assetAssociatedIp.deleteMany({
+        where: { assetId, source: { not: "manual" } },
+      }),
+      prisma.assetAssociatedIp.createMany({
+        data: monitorAssocEntries.map((e) => ({ ...e, assetId })),
+        skipDuplicates: true,
+      }),
+    ]),
+  );
+  endAssoc({ rows: monitorAssocEntries.length });
+  stopWrite();
+  // Fold the asset's interface IPs into IP History so the timeline captures
+  // every IP the device holds — including public WAN / secondary addresses,
+  // which never become the primary `ipAddress` and so were previously absent
+  // from the history. The primary IP is already recorded by the db.ts Prisma
+  // extension; recordIpHistoryEntries skips it to avoid firstSeen churn on
+  // the shared management address. Fire-and-forget — best-effort, never
+  // blocks or fails the scrape.
+  void recordIpHistoryEntries(
+    assetId,
+    monitorAssocEntries.map((e) => ({ ip: e.ip, source: e.source })),
+    pinned?.ipAddress ?? null,
+  );
+}
+
+/**
+ * Detected hardware model (FortiSwitch fsSysVersion parse). Adopt onto
+ * Asset.model only while the stored model is empty or still generic —
+ * discovery stamps the literal "FortiSwitch" (the managed-switch CMDB has
+ * no model field) and the projection deliberately skips the fortiswitch
+ * source's model, so this write can't be clobbered by the next discovery
+ * cycle. A previously-detected "FortiSwitch <token>" stays overwritable
+ * (self-heals on a hardware swap behind the same IP); anything else is
+ * operator-typed and never touched. Edge-triggered: writes + logs only
+ * when the value actually changes.
+ */
+async function adoptDetectedModel(
+  assetId: string,
+  detectedModel: string | null | undefined,
+  pinned: SystemInfoPins,
+): Promise<void> {
+  if (typeof detectedModel !== "string" || !detectedModel || !pinned) return;
+  const currentModel = (pinned.model ?? "").trim();
+  const overwritable = !currentModel || /^fortiswitch\b/i.test(currentModel);
+  if (!overwritable || currentModel === detectedModel) return;
+  await prisma.asset.update({ where: { id: assetId }, data: { model: detectedModel } });
+  logEvent({
+    action: "asset.model_detected",
+    resourceType: "asset",
+    resourceId: assetId,
+    resourceName: pinned.hostname || undefined,
+    level: "info",
+    message: `Model detected via SNMP: ${pinned.hostname || assetId} "${currentModel || "(none)"}" → "${detectedModel}"`,
+    details: { previousModel: currentModel || null, model: detectedModel, source: "snmp:fsSysVersion" },
+  });
+}
+
 export async function recordSystemInfoResult(assetId: string, result: CollectionResult<SystemInfoSample>): Promise<void> {
   if (!result.supported) return;
   const now = new Date();
-  if (result.data) {
-    const d = result.data;
-    // Selection-aware cadence: the full scrape covers every entity, so stamp
-    // each row "fast" when its entity is operator-pinned (kept at full
-    // retention + rolled up) and "slow" otherwise (kept 24h, never rolled up).
-    // One indexed PK read per scrape on the slow (~10 min) cadence.
-    const pinned = await prisma.asset.findUnique({
-      where: { id: assetId },
-      select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true },
-    });
-    const pinnedIfaces  = new Set(pinned?.monitoredInterfaces ?? []);
-    const pinnedStorage = new Set(pinned?.monitoredStorage ?? []);
-    const pinnedTunnels = new Set(pinned?.monitoredIpsecTunnels ?? []);
-    if (d.interfaces.length > 0) {
-      enqueueInterfaceSamples(
-        d.interfaces.map((i) => ({
-          assetId,
-          timestamp: now,
-          cadence:     pinnedIfaces.has(i.ifName) ? ("fast" as const) : ("slow" as const),
-          ifName:      i.ifName,
-          adminStatus: i.adminStatus ?? null,
-          operStatus:  i.operStatus ?? null,
-          speedBps:    i.speedBps != null ? BigInt(Math.round(i.speedBps)) : null,
-          ipAddress:   i.ipAddress ?? null,
-          macAddress:  i.macAddress ?? null,
-          inOctets:    i.inOctets  != null ? BigInt(Math.round(i.inOctets))  : null,
-          outOctets:   i.outOctets != null ? BigInt(Math.round(i.outOctets)) : null,
-          inErrors:    i.inErrors  != null ? BigInt(Math.round(i.inErrors))  : null,
-          outErrors:   i.outErrors != null ? BigInt(Math.round(i.outErrors)) : null,
-          ifType:      i.ifType   ?? null,
-          ifParent:    i.ifParent ?? null,
-          vlanId:      i.vlanId   ?? null,
-          nativeVlan:  i.nativeVlan ?? null,
-          taggedVlans: i.taggedVlans ?? [],
-          trunksAllVlans: i.trunksAllVlans === true,
-          alias:       i.alias       ?? null,
-          description: i.description ?? null,
-          addressingMode: i.addressingMode ?? null,
-        })),
-      );
-      // Fold EVERY scraped interface MAC (monitored or not) into the asset's
-      // Associated MACs list (AssetMacAddress), coalescing contiguous MACs
-      // into range rows so a 48-port switch costs one row instead of 48.
-      // Source-scoped full-replace over source="monitor-interface" only —
-      // rows owned by discovery/agent/manual writers are never touched.
-      const ifaceMacs = d.interfaces
-        .map((i) => i.macAddress)
-        .filter((m): m is string => !!m);
-      if (ifaceMacs.length > 0) {
-        const stopMacWrite = startSampleWriteTimer("asset_mac_addresses");
-        const endMac = startPhase("systeminfo.persist.iface_macs");
-        await reconcileInterfaceMacs(assetId, ifaceMacs, now);
-        endMac({ macs: ifaceMacs.length });
-        stopMacWrite();
-      }
-    }
-    if (d.storage.length > 0) {
-      enqueueStorageSamples(
-        d.storage.map((s) => ({
-          assetId,
-          timestamp: now,
-          cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
-          mountPath:  s.mountPath,
-          totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
-          usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
-        })),
-      );
-    }
-    if (Array.isArray(d.ipsecTunnels) && d.ipsecTunnels.length > 0) {
-      enqueueIpsecTunnelSamples(
-        d.ipsecTunnels.map((t) => ({
-          assetId,
-          timestamp: now,
-          cadence:         pinnedTunnels.has(t.tunnelName) ? ("fast" as const) : ("slow" as const),
-          tunnelName:      t.tunnelName,
-          parentInterface: t.parentInterface,
-          remoteGateway:   t.remoteGateway,
-          status:          t.status,
-          incomingBytes:   t.incomingBytes != null ? BigInt(Math.round(t.incomingBytes)) : null,
-          outgoingBytes:   t.outgoingBytes != null ? BigInt(Math.round(t.outgoingBytes)) : null,
-          proxyIdCount:    t.proxyIdCount,
-        })),
-      );
-    }
-    // SD-WAN streams (gated by Integration.config.pullSdwan, only present when
-    // collectSdwanFortinet ran on this heavy pass). No pinned-subset concept —
-    // every row is stamped "fast" so the rollup (which filters cadence='fast')
-    // includes it and prune treats them all uniformly.
-    if (Array.isArray(d.perfSla) && d.perfSla.length > 0) {
-      enqueuePerfSlaSamples(
-        d.perfSla.map((p) => ({
-          assetId,
-          timestamp:   now,
-          cadence:     "fast" as const,
-          healthCheck: p.healthCheck,
-          link:        p.link,
-          zone:        p.zone,
-          state:       p.state,
-          latencyMs:   p.latencyMs,
-          jitterMs:    p.jitterMs,
-          packetLoss:  p.packetLoss,
-          latencyThresholdMs:  p.latencyThresholdMs,
-          jitterThresholdMs:   p.jitterThresholdMs,
-          packetLossThreshold: p.packetLossThreshold,
-        })),
-      );
-    }
-    // SD-WAN rules are CURRENT-STATE (no history): replace the asset's rows on
-    // every pass that collected SD-WAN data. `undefined` = collector didn't run
-    // → leave existing rows alone; an array (even empty) = full-replace. Mirrors
-    // the LLDP / wireless-station delete-replace pattern. (The SLA-metrics
-    // stream above stays a time-series.)
-    if (Array.isArray(d.sdwanRules)) {
-      const stopWrite = startSampleWriteTimer("asset_sdwan_rules");
-      const endSdwan = startPhase("systeminfo.persist.sdwan_rules");
-      await persistSdwanRules(assetId, d.sdwanRules);
-      endSdwan({ rules: d.sdwanRules.length });
-      stopWrite();
-    }
-    // Mirror per-interface IPs+MACs into the asset_associated_ips side
-    // table. Replaces the legacy JSONB read-modify-write pattern. Discovery
-    // no longer populates interface IPs, so the System tab is the single
-    // source for them once monitoring is on. Manual entries (source =
-    // "manual") are preserved by deleting only the non-manual rows before
-    // re-inserting the fresh monitor set.
-    //
-    // One $transaction so the delete + insert pair is atomic — a concurrent
-    // reader will either see the old set or the new set, never an empty
-    // intermediate. Skipped entirely when the scrape returned no interface
-    // IPs (better to keep the previous list than wipe it on a transient
-    // empty result, matching the prior null-return behavior).
-    const monitorAssocEntries = buildMonitorAssocIpEntries(d.interfaces, now);
-    if (monitorAssocEntries.length > 0) {
-      const stopWrite = startSampleWriteTimer("asset_associated_ips");
-      const endAssoc = startPhase("systeminfo.persist.assoc_ips_txn");
-      // retryOnDeadlock: a concurrent system-info / probe-patch writer can
-      // win a deadlock against this delete+insert pair (40P01). The op is
-      // idempotent (full-replace of the asset's non-manual IPs), so re-run on
-      // deadlock instead of crashing the whole system-info scrape.
-      await retryOnDeadlock(() =>
-        prisma.$transaction([
-          prisma.assetAssociatedIp.deleteMany({
-            where: { assetId, source: { not: "manual" } },
-          }),
-          prisma.assetAssociatedIp.createMany({
-            data: monitorAssocEntries.map((e) => ({ ...e, assetId })),
-            skipDuplicates: true,
-          }),
-        ]),
-      );
-      endAssoc({ rows: monitorAssocEntries.length });
-      stopWrite();
-      // Fold the asset's interface IPs into IP History so the timeline captures
-      // every IP the device holds — including public WAN / secondary addresses,
-      // which never become the primary `ipAddress` and so were previously absent
-      // from the history. The primary IP is already recorded by the db.ts Prisma
-      // extension; recordIpHistoryEntries skips it to avoid firstSeen churn on
-      // the shared management address. Fire-and-forget — best-effort, never
-      // blocks or fails the scrape.
-      void recordIpHistoryEntries(
-        assetId,
-        monitorAssocEntries.map((e) => ({ ip: e.ip, source: e.source })),
-        pinned?.ipAddress ?? null,
-      );
-    }
-    // LLDP neighbors. `undefined` = the collector didn't run / unsupported
-    // transport, so leave the existing rows alone. `[]` or a populated array
-    // = queried successfully → replace the asset's neighbor set.
-    if (Array.isArray(d.lldpNeighbors)) {
-      const stopWrite = startSampleWriteTimer("asset_lldp_neighbors");
-      const endLldp = startPhase("systeminfo.persist.lldp");
-      await persistLldpNeighbors(assetId, d.lldpNeighbors, now, d.lldpSource ?? "fortios");
-      endLldp({ neighbors: d.lldpNeighbors.length });
-      stopWrite();
-    }
-    // Wireless stations (FortiAP only). Same undefined/[] semantics as LLDP —
-    // undefined leaves rows alone, [] wipes them. Per-scrape full-replace
-    // with NO 48h stickiness window: wireless clients are transient by
-    // design and a missing station means the client roamed or disconnected.
-    if (Array.isArray(d.wirelessStations)) {
-      const stopWrite = startSampleWriteTimer("asset_wireless_stations");
-      const endWireless = startPhase("systeminfo.persist.wireless");
-      await persistWirelessStations(assetId, d.wirelessStations);
-      endWireless({ stations: d.wirelessStations.length });
-      stopWrite();
-    }
-    // MCLAG ICL peers (FortiSwitch only). Same undefined/[] semantics as LLDP:
-    // undefined = not collected (switch not in CMDB / fetch failed) → leave rows
-    // alone; an array (even empty) = full-replace this switch's ICL-peer rows.
-    if (Array.isArray(d.mclagPeers)) {
-      const stopWrite = startSampleWriteTimer("asset_mclag_peers");
-      const endMclag = startPhase("systeminfo.persist.mclag_peers");
-      await persistMclagPeers(assetId, d.mclagPeers);
-      endMclag({ peers: d.mclagPeers.length });
-      stopWrite();
-    }
-    // Detected hardware model (FortiSwitch fsSysVersion parse). Adopt onto
-    // Asset.model only while the stored model is empty or still generic —
-    // discovery stamps the literal "FortiSwitch" (the managed-switch CMDB has
-    // no model field) and the projection deliberately skips the fortiswitch
-    // source's model, so this write can't be clobbered by the next discovery
-    // cycle. A previously-detected "FortiSwitch <token>" stays overwritable
-    // (self-heals on a hardware swap behind the same IP); anything else is
-    // operator-typed and never touched. Edge-triggered: writes + logs only
-    // when the value actually changes.
-    if (typeof d.detectedModel === "string" && d.detectedModel && pinned) {
-      const currentModel = (pinned.model ?? "").trim();
-      const overwritable = !currentModel || /^fortiswitch\b/i.test(currentModel);
-      if (overwritable && currentModel !== d.detectedModel) {
-        await prisma.asset.update({ where: { id: assetId }, data: { model: d.detectedModel } });
-        logEvent({
-          action: "asset.model_detected",
-          resourceType: "asset",
-          resourceId: assetId,
-          resourceName: pinned.hostname || undefined,
-          level: "info",
-          message: `Model detected via SNMP: ${pinned.hostname || assetId} "${currentModel || "(none)"}" → "${d.detectedModel}"`,
-          details: { previousModel: currentModel || null, model: d.detectedModel, source: "snmp:fsSysVersion" },
-        });
-      }
-    }
-    // Only bump lastSystemInfoAt when the scrape returned interfaces. The
-    // /system-info GET endpoint anchors its interface query to this
-    // timestamp, so bumping it on an empty interfaces[] silently empties the
-    // System tab table — operators on REST API direct have seen FortiOS
-    // return 200 OK with an empty results object (token without monitor
-    // scope, VDOM weirdness, transient state) which used to slip past the
-    // earlier "result.data is set" guard. Preserving the prior interface set
-    // is strictly better than displaying nothing while the device is online.
-    // The other streams (storage / ipsec / temperatures / lldp) read their
-    // own latest-row timestamp and are written above unconditionally, so they
-    // still refresh on every successful pull.
-    if (d.interfaces.length > 0) {
-      const endUpdate = startPhase("systeminfo.persist.update_asset");
-      await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: now } });
-      endUpdate();
-    }
+  if (!result.data) return;
+  const d = result.data;
+  // One indexed PK read per scrape on the slow (~10 min) cadence — the pins
+  // drive the fast/slow cadence stamps, the identity bits feed the assoc-IP
+  // history fold and the model adoption.
+  const pinned: SystemInfoPins = await prisma.asset.findUnique({
+    where: { id: assetId },
+    select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true },
+  });
+
+  await persistInterfaceSampleStream(assetId, d.interfaces, pinned, now);
+  persistStorageSampleStream(assetId, d.storage, pinned, now);
+  persistIpsecTunnelSampleStream(assetId, d.ipsecTunnels, pinned, now);
+  persistPerfSlaSampleStream(assetId, d.perfSla, now);
+
+  // SD-WAN rules are CURRENT-STATE (no history): replace the asset's rows on
+  // every pass that collected SD-WAN data. `undefined` = collector didn't run
+  // → leave existing rows alone; an array (even empty) = full-replace. Mirrors
+  // the LLDP / wireless-station delete-replace pattern. (The SLA-metrics
+  // stream above stays a time-series.)
+  if (Array.isArray(d.sdwanRules)) {
+    const stopWrite = startSampleWriteTimer("asset_sdwan_rules");
+    const endSdwan = startPhase("systeminfo.persist.sdwan_rules");
+    await persistSdwanRules(assetId, d.sdwanRules);
+    endSdwan({ rules: d.sdwanRules.length });
+    stopWrite();
+  }
+
+  await persistAssocIpMirror(assetId, d.interfaces, pinned, now);
+
+  // LLDP neighbors. `undefined` = the collector didn't run / unsupported
+  // transport, so leave the existing rows alone. An array = queried
+  // successfully → persistLldpNeighbors reconciles it (with the 48h sticky
+  // window, so one empty scrape doesn't flap a live neighbor off).
+  if (Array.isArray(d.lldpNeighbors)) {
+    const stopWrite = startSampleWriteTimer("asset_lldp_neighbors");
+    const endLldp = startPhase("systeminfo.persist.lldp");
+    await persistLldpNeighbors(assetId, d.lldpNeighbors, now, d.lldpSource ?? "fortios");
+    endLldp({ neighbors: d.lldpNeighbors.length });
+    stopWrite();
+  }
+  // Wireless stations (FortiAP only). Same undefined/[] semantics as LLDP —
+  // undefined leaves rows alone, [] wipes them. Per-scrape full-replace
+  // with NO 48h stickiness window: wireless clients are transient by
+  // design and a missing station means the client roamed or disconnected.
+  if (Array.isArray(d.wirelessStations)) {
+    const stopWrite = startSampleWriteTimer("asset_wireless_stations");
+    const endWireless = startPhase("systeminfo.persist.wireless");
+    await persistWirelessStations(assetId, d.wirelessStations);
+    endWireless({ stations: d.wirelessStations.length });
+    stopWrite();
+  }
+  // MCLAG ICL peers (FortiSwitch only). Same undefined/[] semantics as LLDP:
+  // undefined = not collected (switch not in CMDB / fetch failed) → leave rows
+  // alone; an array (even empty) = full-replace this switch's ICL-peer rows.
+  if (Array.isArray(d.mclagPeers)) {
+    const stopWrite = startSampleWriteTimer("asset_mclag_peers");
+    const endMclag = startPhase("systeminfo.persist.mclag_peers");
+    await persistMclagPeers(assetId, d.mclagPeers);
+    endMclag({ peers: d.mclagPeers.length });
+    stopWrite();
+  }
+
+  await adoptDetectedModel(assetId, d.detectedModel, pinned);
+
+  // Only bump lastSystemInfoAt when the scrape returned interfaces. The
+  // /system-info GET endpoint anchors its interface query to this
+  // timestamp, so bumping it on an empty interfaces[] silently empties the
+  // System tab table — operators on REST API direct have seen FortiOS
+  // return 200 OK with an empty results object (token without monitor
+  // scope, VDOM weirdness, transient state) which used to slip past the
+  // earlier "result.data is set" guard. Preserving the prior interface set
+  // is strictly better than displaying nothing while the device is online.
+  // The other streams (storage / ipsec / temperatures / lldp) read their
+  // own latest-row timestamp and are written above unconditionally, so they
+  // still refresh on every successful pull.
+  if (d.interfaces.length > 0) {
+    const endUpdate = startPhase("systeminfo.persist.update_asset");
+    await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: now } });
+    endUpdate();
   }
 }
 
