@@ -16,6 +16,7 @@
 - **Write buffers & rollups** — pg-boss queue jobs by queue × state, sample rollup p95 by tier × table, sample buffer depth per table, probe-patch buffer depth + write p95
 - **Discovery phases** — per-phase p95 wall-clock by integration type × phase (top 20)
 - **Boot-time config snapshot** — queue mode (cursor vs pgboss), DB connection mode (direct vs pgbouncer), workers per cadence queue, DB pool role capacity by `POLARIS_ROLE`
+- **Process crashes** — `increase(polaris_process_crash_total[1h])` by role × kind, plus a 24h total stat that is red above zero. Emitted by the last-resort `unhandledRejection` / `uncaughtException` handlers immediately before the process exits, so the counter dies with the process and any single scrape reads 0 or 1 — the signal is the restart, which is what `increase()` shows. Steady state is a flat zero. A non-zero bar means a role died and systemd's `Restart=on-failure` brought it back; the structured fatal line naming the origin is in `journalctl -u polaris-<role>`. Repeating bars are a crash loop, which is otherwise invisible outside journald.
 
 ## Prerequisites
 

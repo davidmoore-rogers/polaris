@@ -3,7 +3,10 @@
     "list": [
       {
         "builtIn": 1,
-        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -20,78 +23,220 @@
   "panels": [
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 100,
       "panels": [],
       "title": "Fleet overview",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
-      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "max(polaris_monitored_assets)", "legendFormat": "monitored", "refId": "A" }
+        {
+          "expr": "max(polaris_monitored_assets)",
+          "legendFormat": "monitored",
+          "refId": "A"
+        }
       ],
       "title": "Monitored assets",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
             ]
           }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "up" },      "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
-          { "matcher": { "id": "byName", "options": "down" },    "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
-          { "matcher": { "id": "byName", "options": "unknown" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "up"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "down"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unknown"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 9, "x": 6, "y": 1 },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 6,
+        "y": 1
+      },
       "id": 2,
-      "options": { "displayLabels": ["name", "percent"], "legend": { "displayMode": "list", "placement": "right", "showLegend": true }, "pieType": "donut" },
+      "options": {
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "pieType": "donut"
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "max by (status) (polaris_monitored_assets_by_status)", "legendFormat": "{{status}}", "refId": "A" }
+        {
+          "expr": "max by (status) (polaris_monitored_assets_by_status)",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
       ],
       "title": "Assets by monitor status",
       "type": "piechart"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "max": 1,
           "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "yellow", "value": 0.95 },
-              { "color": "green", "value": 0.99 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.95
+              },
+              {
+                "color": "green",
+                "value": 0.99
+              }
             ]
           },
           "unit": "percentunit"
         }
       },
-      "gridPos": { "h": 4, "w": 9, "x": 15, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 9,
+        "x": 15,
+        "y": 1
+      },
       "id": 3,
-      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "pluginVersion": "9.0.0",
       "targets": [
         {
@@ -104,744 +249,2537 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 5
+      },
       "id": 4,
-      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "max(polaris_monitored_assets_by_status{status=\"down\"})", "legendFormat": "down", "refId": "A" }
+        {
+          "expr": "max(polaris_monitored_assets_by_status{status=\"down\"})",
+          "legendFormat": "down",
+          "refId": "A"
+        }
       ],
       "title": "Assets currently down",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "ops", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": { "h": 4, "w": 9, "x": 15, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 9,
+        "x": 15,
+        "y": 5
+      },
       "id": 5,
-      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "sum(rate(polaris_probe_total[1m]))", "legendFormat": "probes/sec", "refId": "A" }
+        {
+          "expr": "sum(rate(polaris_probe_total[1m]))",
+          "legendFormat": "probes/sec",
+          "refId": "A"
+        }
       ],
       "title": "Probe rate (per second)",
       "type": "stat"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
       "id": 101,
       "panels": [],
       "title": "Cadence health",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "p50 / p95 / p99 wall-clock of one runMonitorPass call. Watch this rise toward the configured cadence as a saturation signal — when p99 approaches your monitor.intervalSeconds, the pool is falling behind.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "p50 / p95 / p99 wall-clock of one runMonitorPass call. Watch this rise toward the configured cadence as a saturation signal \u2014 when p99 approaches your monitor.intervalSeconds, the pool is falling behind.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
       "id": 6,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum by (le) (rate(polaris_monitor_pass_duration_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A" },
-        { "expr": "histogram_quantile(0.95, sum by (le) (rate(polaris_monitor_pass_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B" },
-        { "expr": "histogram_quantile(0.99, sum by (le) (rate(polaris_monitor_pass_duration_seconds_bucket[5m])))", "legendFormat": "p99", "refId": "C" }
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(polaris_monitor_pass_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(polaris_monitor_pass_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(polaris_monitor_pass_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
       ],
       "title": "Monitor pass duration (p50 / p95 / p99)",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Items queued at the start of each pass, by cadence. Sustained non-zero values mean the pool is producing slower than the publisher.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10, "stacking": { "mode": "normal" } } } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
       "id": 7,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "max by (cadence) (polaris_monitor_queue_depth)", "legendFormat": "{{cadence}}", "refId": "A" }
+        {
+          "expr": "max by (cadence) (polaris_monitor_queue_depth)",
+          "legendFormat": "{{cadence}}",
+          "refId": "A"
+        }
       ],
       "title": "Queue depth by cadence",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Per-cadence work outcomes. crash = unhandled exception in the worker (never expected), failure = the work ran but reported a sad-path result, success = clean run.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "ops" } },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
       "id": 8,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "sum by (cadence, outcome) (rate(polaris_monitor_work_total[1m]))", "legendFormat": "{{cadence}} {{outcome}}", "refId": "A" }
+        {
+          "expr": "sum by (cadence, outcome) (rate(polaris_monitor_work_total[1m]))",
+          "legendFormat": "{{cadence}} {{outcome}}",
+          "refId": "A"
+        }
       ],
       "title": "Work item rate by cadence + outcome",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
       "id": 102,
       "panels": [],
       "title": "Probe latency by transport",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "p95 probe wall-clock by transport. Compare across fortimanager / fortigate / snmp / winrm / ssh / icmp / activedirectory to spot transport-specific slowness.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
       "id": 9,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le, transport) (rate(polaris_probe_duration_seconds_bucket[5m])))", "legendFormat": "{{transport}}", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, transport) (rate(polaris_probe_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{transport}}",
+          "refId": "A"
+        }
       ],
       "title": "Probe duration p95 by transport",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Per-transport probe rate, separated by outcome. Sustained failures on one transport often mean a credential or network issue on a specific integration.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "ops" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
       "id": 10,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "sum by (transport, outcome) (rate(polaris_probe_total[1m]))", "legendFormat": "{{transport}} {{outcome}}", "refId": "A" }
+        {
+          "expr": "sum by (transport, outcome) (rate(polaris_probe_total[1m]))",
+          "legendFormat": "{{transport}} {{outcome}}",
+          "refId": "A"
+        }
       ],
       "title": "Probe rate by transport + outcome",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
       "id": 103,
       "panels": [],
       "title": "Process health",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Node.js event-loop lag p99. Healthy: under 25 ms. Watch: 25–50 ms. Pressure: 50–100 ms. Saturated: 100 ms+. Polaris tested at 15 ms p99 on the Rogers Group fleet (1844 monitored assets).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Node.js event-loop lag p99. Healthy: under 25 ms. Watch: 25\u201350 ms. Pressure: 50\u2013100 ms. Saturated: 100 ms+. Polaris tested at 15 ms p99 on the Rogers Group fleet (1844 monitored assets).",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10, "thresholdsStyle": { "mode": "line+area" } },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.05 },
-              { "color": "orange", "value": 0.1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.05
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              }
             ]
           },
           "unit": "s"
         }
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 36 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 36
+      },
       "id": 11,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
       "targets": [
-        { "expr": "nodejs_eventloop_lag_p99_seconds", "legendFormat": "p99 ({{job}})", "refId": "A" },
-        { "expr": "nodejs_eventloop_lag_seconds", "legendFormat": "mean ({{job}})", "refId": "B" }
+        {
+          "expr": "nodejs_eventloop_lag_p99_seconds",
+          "legendFormat": "p99 ({{job}})",
+          "refId": "A"
+        },
+        {
+          "expr": "nodejs_eventloop_lag_seconds",
+          "legendFormat": "mean ({{job}})",
+          "refId": "B"
+        }
       ],
       "title": "Event loop lag",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Node.js process memory: RSS (total resident) and heap used. Watch heap_used trending up between GC cycles for a memory leak.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "bytes" } },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 36 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 36
+      },
       "id": 12,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "process_resident_memory_bytes", "legendFormat": "RSS ({{job}})", "refId": "A" },
-        { "expr": "nodejs_heap_size_used_bytes", "legendFormat": "heap used ({{job}})", "refId": "B" },
-        { "expr": "nodejs_heap_size_total_bytes", "legendFormat": "heap total ({{job}})", "refId": "C" }
+        {
+          "expr": "process_resident_memory_bytes",
+          "legendFormat": "RSS ({{job}})",
+          "refId": "A"
+        },
+        {
+          "expr": "nodejs_heap_size_used_bytes",
+          "legendFormat": "heap used ({{job}})",
+          "refId": "B"
+        },
+        {
+          "expr": "nodejs_heap_size_total_bytes",
+          "legendFormat": "heap total ({{job}})",
+          "refId": "C"
+        }
       ],
       "title": "Process memory",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Node.js process CPU usage (user + system, summed across the event-loop core). Spikes correlate with discovery sync cycles.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "percentunit" } },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 36 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 36
+      },
       "id": 13,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
       "targets": [
-        { "expr": "rate(process_cpu_seconds_total[1m])", "legendFormat": "cpu ({{job}})", "refId": "A" }
+        {
+          "expr": "rate(process_cpu_seconds_total[1m])",
+          "legendFormat": "cpu ({{job}})",
+          "refId": "A"
+        }
       ],
       "title": "Process CPU",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
       "id": 104,
       "panels": [],
       "title": "Capacity & growth",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Overall capacity severity from capacityService — drives the Maintenance tab pill and the sidebar critical alert. 0=ok, 1=watch (you have weeks), 2=amber (you have days), 3=red (act now).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Overall capacity severity from capacityService \u2014 drives the Maintenance tab pill and the sidebar critical alert. 0=ok, 1=watch (you have weeks), 2=amber (you have days), 3=red (act now).",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [
-            { "options": { "0": { "text": "OK",    "color": "green"  } }, "type": "value" },
-            { "options": { "1": { "text": "Watch", "color": "blue"   } }, "type": "value" },
-            { "options": { "2": { "text": "Amber", "color": "orange" } }, "type": "value" },
-            { "options": { "3": { "text": "Red",   "color": "red"    } }, "type": "value" }
+            {
+              "options": {
+                "0": {
+                  "text": "OK",
+                  "color": "green"
+                }
+              },
+              "type": "value"
+            },
+            {
+              "options": {
+                "1": {
+                  "text": "Watch",
+                  "color": "blue"
+                }
+              },
+              "type": "value"
+            },
+            {
+              "options": {
+                "2": {
+                  "text": "Amber",
+                  "color": "orange"
+                }
+              },
+              "type": "value"
+            },
+            {
+              "options": {
+                "3": {
+                  "text": "Red",
+                  "color": "red"
+                }
+              },
+              "type": "value"
+            }
           ],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "blue", "value": 1 }, { "color": "orange", "value": 2 }, { "color": "red", "value": 3 }] }
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "blue",
+                "value": 1
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          }
         }
       },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 45 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 45
+      },
       "id": 14,
-      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "max(polaris_capacity_severity)", "legendFormat": "severity", "refId": "A" }
+        {
+          "expr": "max(polaris_capacity_severity)",
+          "legendFormat": "severity",
+          "refId": "A"
+        }
       ],
       "title": "Capacity severity",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "DB connection pool — current in-use, peak observed since boot, Polaris-owned capacity (Prisma + pg-boss pools), Postgres-side max_connections.",
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
-      "gridPos": { "h": 4, "w": 9, "x": 6, "y": 45 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "DB connection pool \u2014 current in-use, peak observed since boot, Polaris-owned capacity (Prisma + pg-boss pools), Postgres-side max_connections.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 9,
+        "x": 6,
+        "y": 45
+      },
       "id": 15,
-      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "sum(polaris_db_pool_in_use)",            "legendFormat": "in use",   "refId": "A" },
-        { "expr": "sum(polaris_db_pool_peak_observed)",     "legendFormat": "peak",     "refId": "B" },
-        { "expr": "sum(polaris_db_pool_polaris_capacity)",  "legendFormat": "capacity", "refId": "C" },
-        { "expr": "max(polaris_db_pool_max)",               "legendFormat": "pg max",   "refId": "D" }
+        {
+          "expr": "sum(polaris_db_pool_in_use)",
+          "legendFormat": "in use",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(polaris_db_pool_peak_observed)",
+          "legendFormat": "peak",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(polaris_db_pool_polaris_capacity)",
+          "legendFormat": "capacity",
+          "refId": "C"
+        },
+        {
+          "expr": "max(polaris_db_pool_max)",
+          "legendFormat": "pg max",
+          "refId": "D"
+        }
       ],
-      "title": "DB pool — in use / peak / capacity / max",
+      "title": "DB pool \u2014 in use / peak / capacity / max",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "DB pool utilization vs Polaris-owned capacity. peak_observed/polaris_capacity is the actionable line — yellow at 0.7, red at 0.9. When it approaches 1, the app stalls at pool acquisition.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "DB pool utilization vs Polaris-owned capacity. peak_observed/polaris_capacity is the actionable line \u2014 yellow at 0.7, red at 0.9. When it approaches 1, the app stalls at pool acquisition.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10, "thresholdsStyle": { "mode": "line+area" } },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
           "max": 1,
           "min": 0,
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.7 }, { "color": "red", "value": 0.9 }] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          },
           "unit": "percentunit"
         }
       },
-      "gridPos": { "h": 8, "w": 9, "x": 15, "y": 45 },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 15,
+        "y": 45
+      },
       "id": 16,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "sum(polaris_db_pool_peak_observed) / clamp_min(sum(polaris_db_pool_polaris_capacity), 1)", "legendFormat": "peak / capacity", "refId": "A" },
-        { "expr": "sum(polaris_db_pool_in_use)        / clamp_min(sum(polaris_db_pool_polaris_capacity), 1)", "legendFormat": "now / capacity",  "refId": "B" }
+        {
+          "expr": "sum(polaris_db_pool_peak_observed) / clamp_min(sum(polaris_db_pool_polaris_capacity), 1)",
+          "legendFormat": "peak / capacity",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(polaris_db_pool_in_use)        / clamp_min(sum(polaris_db_pool_polaris_capacity), 1)",
+          "legendFormat": "now / capacity",
+          "refId": "B"
+        }
       ],
       "title": "DB pool utilization (peak & current vs capacity)",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Database size now vs projected steady-state at current cadences and retention. Steady-state is what the DB will grow to *if nothing changes* — the gap between the two lines is your remaining growth runway.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "bytes" } },
-      "gridPos": { "h": 4, "w": 15, "x": 0, "y": 49 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Database size now vs projected steady-state at current cadences and retention. Steady-state is what the DB will grow to *if nothing changes* \u2014 the gap between the two lines is your remaining growth runway.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 15,
+        "x": 0,
+        "y": 49
+      },
       "id": 17,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "max(polaris_db_size_bytes)",              "legendFormat": "current",      "refId": "A" },
-        { "expr": "max(polaris_db_steady_state_size_bytes)", "legendFormat": "steady-state", "refId": "B" }
+        {
+          "expr": "max(polaris_db_size_bytes)",
+          "legendFormat": "current",
+          "refId": "A"
+        },
+        {
+          "expr": "max(polaris_db_steady_state_size_bytes)",
+          "legendFormat": "steady-state",
+          "refId": "B"
+        }
       ],
-      "title": "Database size — current vs steady-state",
+      "title": "Database size \u2014 current vs steady-state",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Free-space ratio per filesystem Polaris/Postgres write to. Pre-deduped by stat.dev. Watch threshold at 30%, amber at 20%, red at 10%.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10, "thresholdsStyle": { "mode": "line+area" } },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
           "max": 1,
           "min": 0,
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "orange", "value": 0.1 }, { "color": "yellow", "value": 0.2 }, { "color": "blue", "value": 0.3 }, { "color": "green", "value": 0.5 }] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "yellow",
+                "value": 0.2
+              },
+              {
+                "color": "blue",
+                "value": 0.3
+              },
+              {
+                "color": "green",
+                "value": 0.5
+              }
+            ]
+          },
           "unit": "percentunit"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 53 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 53
+      },
       "id": 18,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "max by (volume, roles) (polaris_disk_free_ratio)", "legendFormat": "{{volume}} ({{roles}})", "refId": "A" }
+        {
+          "expr": "max by (volume, roles) (polaris_disk_free_ratio)",
+          "legendFormat": "{{volume}} ({{roles}})",
+          "refId": "A"
+        }
       ],
       "title": "Disk free ratio per volume",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Dead-tuple ratio per sample table. Yellow at 0.2, red at 0.3 — autovacuum is falling behind the insert rate. TimescaleDB hypertables exempt themselves on the capacity reasons side; expect a single non-hypertable line if you've enabled the extension.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Dead-tuple ratio per sample table. Yellow at 0.2, red at 0.3 \u2014 autovacuum is falling behind the insert rate. TimescaleDB hypertables exempt themselves on the capacity reasons side; expect a single non-hypertable line if you've enabled the extension.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10, "thresholdsStyle": { "mode": "line+area" } },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
           "max": 1,
           "min": 0,
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.2 }, { "color": "red", "value": 0.3 }] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.2
+              },
+              {
+                "color": "red",
+                "value": 0.3
+              }
+            ]
+          },
           "unit": "percentunit"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 53 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 53
+      },
       "id": 19,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "max by (table) (polaris_db_dead_tuple_ratio)", "legendFormat": "{{table}}", "refId": "A" }
+        {
+          "expr": "max by (table) (polaris_db_dead_tuple_ratio)",
+          "legendFormat": "{{table}}",
+          "refId": "A"
+        }
       ],
       "title": "Dead tuple ratio per table",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 61 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 61
+      },
       "id": 105,
       "panels": [],
       "title": "Throughput & queue health",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Age of the oldest pg-boss job per queue × state. Pg-boss mode only — stays at 0 in cursor mode. A queue at non-zero depth AND oldest age climbing past ~60s = stalled worker. The watchdog already auto-recovers after 1 min, but the gauge tells you it happened.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Age of the oldest pg-boss job per queue \u00d7 state. Pg-boss mode only \u2014 stays at 0 in cursor mode. A queue at non-zero depth AND oldest age climbing past ~60s = stalled worker. The watchdog already auto-recovers after 1 min, but the gauge tells you it happened.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10, "thresholdsStyle": { "mode": "line+area" } },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 300 }] },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
           "unit": "s"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 62 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 62
+      },
       "id": 20,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "max by (queue, state) (polaris_pgboss_oldest_job_age_seconds)", "legendFormat": "{{queue}} ({{state}})", "refId": "A" }
+        {
+          "expr": "max by (queue, state) (polaris_pgboss_oldest_job_age_seconds)",
+          "legendFormat": "{{queue}} ({{state}})",
+          "refId": "A"
+        }
       ],
       "title": "Pg-boss oldest job age",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "p95 of one bulk write into a sample table. Splits DB-write cost out of the broader monitor work duration so a slow autovacuum / index bloat / lock contention is visible separately from network probe time.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 62 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 62
+      },
       "id": 21,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le, table) (rate(polaris_sample_write_duration_seconds_bucket[5m])))", "legendFormat": "{{table}}", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, table) (rate(polaris_sample_write_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{table}}",
+          "refId": "A"
+        }
       ],
       "title": "Sample-write p95 by table",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "p95 end-to-end discovery wall-clock by integration type, on a 1-hour rolling window (discovery cycles are minutes-long, so a 5m window doesn't have enough samples). 'Is discovery getting slower as we add more devices?' as a graph.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 70 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 70
+      },
       "id": 22,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le, integration_type) (rate(polaris_discovery_duration_seconds_bucket[1h])))", "legendFormat": "{{integration_type}}", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, integration_type) (rate(polaris_discovery_duration_seconds_bucket[1h])))",
+          "legendFormat": "{{integration_type}}",
+          "refId": "A"
+        }
       ],
       "title": "Discovery duration p95 by integration type (1h window)",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Discovery runs by integration type and outcome. Failure rate climbing on one integration usually means preflight credentials / connectivity. Aborted means the operator hit the cancel button (or another discovery superseded a stuck one).",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 80, "stacking": { "mode": "normal" } }, "unit": "ops" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 70 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 70
+      },
       "id": 23,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "sum by (integration_type, outcome) (rate(polaris_discovery_total[1h]))", "legendFormat": "{{integration_type}} {{outcome}}", "refId": "A" }
+        {
+          "expr": "sum by (integration_type, outcome) (rate(polaris_discovery_total[1h]))",
+          "legendFormat": "{{integration_type}} {{outcome}}",
+          "refId": "A"
+        }
       ],
       "title": "Discovery rate by integration + outcome",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 78 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 78
+      },
       "id": 106,
       "panels": [],
       "title": "HTTP latency",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "p95 HTTP request duration, top-10 routes by max latency over the window. /metrics + /health are excluded from the source data. Climbing across all routes ≈ DB pool exhausted; climbing on one route = that handler is hanging.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 79 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "p95 HTTP request duration, top-10 routes by max latency over the window. /metrics + /health are excluded from the source data. Climbing across all routes \u2248 DB pool exhausted; climbing on one route = that handler is hanging.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 79
+      },
       "id": 24,
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max"] }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "topk(10, histogram_quantile(0.95, sum by (le, route) (rate(polaris_http_request_duration_seconds_bucket[5m]))))", "legendFormat": "{{route}}", "refId": "A" }
+        {
+          "expr": "topk(10, histogram_quantile(0.95, sum by (le, route) (rate(polaris_http_request_duration_seconds_bucket[5m]))))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
       ],
       "title": "HTTP p95 by route (top 10)",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "HTTP requests currently being handled by the Polaris process. Climbing under monitor load = handler backpressure. Combined with DB pool utilization above, this tells you whether the backpressure is in HTTP or DB.",
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 25 }, { "color": "red", "value": 100 }] } } },
-      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 79 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 25
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 79
+      },
       "id": 25,
-      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "max(polaris_http_in_flight)", "legendFormat": "in flight", "refId": "A" }
+        {
+          "expr": "max(polaris_http_in_flight)",
+          "legendFormat": "in flight",
+          "refId": "A"
+        }
       ],
       "title": "HTTP in-flight",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Request rate by HTTP status class. 5xx > 0 means the application threw an unhandled error (errorHandler caught it); 4xx is mostly auth/CSRF rejects (some background level expected during page navigations).",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10, "stacking": { "mode": "normal" } }, "unit": "ops" } },
-      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 83 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 83
+      },
       "id": 26,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "sum by (status_class) (rate(polaris_http_request_duration_seconds_count[5m]))", "legendFormat": "{{status_class}}", "refId": "A" }
+        {
+          "expr": "sum by (status_class) (rate(polaris_http_request_duration_seconds_count[5m]))",
+          "legendFormat": "{{status_class}}",
+          "refId": "A"
+        }
       ],
       "title": "HTTP rate by status class",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 87 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 87
+      },
       "id": 107,
       "panels": [],
       "title": "Job health",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "p95 duration of one tick of each scheduled background job. Watch a job's line approach its tick interval (60s for dependencyReconciler, 30s for monitorAssets.heavy, 5s for monitorAssets.probe, 6h for reconcileMapRegions) — that's the early-warning that scheduled work is lagging.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 88 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "p95 duration of one tick of each scheduled background job. Watch a job's line approach its tick interval (60s for dependencyReconciler, 30s for monitorAssets.heavy, 5s for monitorAssets.probe, 6h for reconcileMapRegions) \u2014 that's the early-warning that scheduled work is lagging.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 88
+      },
       "id": 27,
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max"] }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le, job) (rate(polaris_job_duration_seconds_bucket[15m])))", "legendFormat": "{{job}}", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, job) (rate(polaris_job_duration_seconds_bucket[15m])))",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
       ],
       "title": "Job duration p95 by job",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Job tick failure rate, by job. Sustained failures on one job = its downstream dependency (DB connection, FMG, an external service) is broken; check the corresponding pino logs by `job` value.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "ops" } },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 88 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 88
+      },
       "id": 28,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "sum by (job) (rate(polaris_job_total{outcome=\"failure\"}[15m]))", "legendFormat": "{{job}}", "refId": "A" }
+        {
+          "expr": "sum by (job) (rate(polaris_job_total{outcome=\"failure\"}[15m]))",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
       ],
       "title": "Job failure rate",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 96 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 96
+      },
       "id": 108,
       "panels": [],
       "title": "Monitor work duration (by cadence x transport x asset_type)",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "p95 of one monitor work item, sliced by cadence. Top-level signal for 'which cadence is bottlenecked'. Pairs with the per-cadence queue-depth panel above.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 97 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 97
+      },
       "id": 29,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le, cadence) (rate(polaris_monitor_work_duration_seconds_bucket[5m])))", "legendFormat": "{{cadence}}", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, cadence) (rate(polaris_monitor_work_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{cadence}}",
+          "refId": "A"
+        }
       ],
       "title": "Work duration p95 by cadence",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "p95 of one monitor work item, sliced by transport. Use this to see whether SNMP, FortiOS REST, WinRM, SSH, or ICMP is the slow leg. Work duration includes DB writes and patch-buffer flushes, not just the network call.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 97 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 97
+      },
       "id": 30,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le, transport) (rate(polaris_monitor_work_duration_seconds_bucket[5m])))", "legendFormat": "{{transport}}", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, transport) (rate(polaris_monitor_work_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{transport}}",
+          "refId": "A"
+        }
       ],
       "title": "Work duration p95 by transport",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "p95 of one monitor work item, sliced by cadence x asset_type. The Capacity Advisor reads the same histogram to recommend worker counts. If a specific cadence/device-class combo dominates p95, that is the slice to scale.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 105 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 105
+      },
       "id": 31,
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max"] }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le, cadence, asset_type) (rate(polaris_monitor_work_duration_seconds_bucket[5m])))", "legendFormat": "{{cadence}} / {{asset_type}}", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, cadence, asset_type) (rate(polaris_monitor_work_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{cadence}} / {{asset_type}}",
+          "refId": "A"
+        }
       ],
       "title": "Work duration p95 by cadence x asset_type",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 113 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 113
+      },
       "id": 109,
       "panels": [],
       "title": "FMG worker (per-integration dual lane)",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Queued FMG tasks awaiting dispatch on the per-integration single-consumer worker. FMG drops parallel API calls past 1-2 concurrent requests, so every FMG-bound code path funnels through this worker. Sustained non-zero values during discovery are expected; sustained non-zero values OUTSIDE a discovery window indicate a stuck worker.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 } } },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 114 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 114
+      },
       "id": 32,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "max by (integrationId) (polaris_fmg_worker_queue_depth)", "legendFormat": "{{integrationId}}", "refId": "A" }
+        {
+          "expr": "max by (integrationId) (polaris_fmg_worker_queue_depth)",
+          "legendFormat": "{{integrationId}}",
+          "refId": "A"
+        }
       ],
       "title": "FMG worker queue depth",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "1 when the FMG worker's PROXY lane (strict concurrency=1) is executing a /sys/proxy/json call; 0 when idle. Persistently 1 across a long window = the proxy lane is saturated, and queue depth above will be non-zero.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "stepBefore", "lineWidth": 2, "fillOpacity": 30 }, "max": 1, "min": 0 } },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 114 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepBefore",
+            "lineWidth": 2,
+            "fillOpacity": 30
+          },
+          "max": 1,
+          "min": 0
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 114
+      },
       "id": 33,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "max by (integrationId) (polaris_fmg_worker_inflight)", "legendFormat": "{{integrationId}}", "refId": "A" }
+        {
+          "expr": "max by (integrationId) (polaris_fmg_worker_inflight)",
+          "legendFormat": "{{integrationId}}",
+          "refId": "A"
+        }
       ],
       "title": "FMG proxy lane inflight",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Count of native FMG calls (CMDB, dvmdb, auth - anything that is NOT /sys/proxy/json) currently in flight per integration. Unbounded by design - native endpoints hit FMG's own DB and don't share the proxy concurrency constraint. Persistently high values indicate genuine native-call parallelism (good), not a bottleneck.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 } } },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 114 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 114
+      },
       "id": 34,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "max by (integrationId) (polaris_fmg_worker_native_inflight)", "legendFormat": "{{integrationId}}", "refId": "A" }
+        {
+          "expr": "max by (integrationId) (polaris_fmg_worker_native_inflight)",
+          "legendFormat": "{{integrationId}}",
+          "refId": "A"
+        }
       ],
       "title": "FMG native lane inflight",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 122 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 122
+      },
       "id": 110,
       "panels": [],
       "title": "Write buffers & rollups",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Pg-boss job counts by queue x state. `created` = queued; `active` = currently processed. Pair with the oldest-job-age panel under Throughput - a queue with sustained non-zero `created` AND oldest age climbing past 60s = stalled worker. Cursor mode: all zero.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 } } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 123 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 123
+      },
       "id": 35,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "max by (queue, state) (polaris_pgboss_queue_jobs)", "legendFormat": "{{queue}} ({{state}})", "refId": "A" }
+        {
+          "expr": "max by (queue, state) (polaris_pgboss_queue_jobs)",
+          "legendFormat": "{{queue}} ({{state}})",
+          "refId": "A"
+        }
       ],
       "title": "Pg-boss queue jobs (by queue x state)",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "p95 wall-clock of one rollup INSERT...ON CONFLICT per (tier, table). Hourly tier runs every 30 min; daily runs at 02:30 UTC. Watch for an hourly line approaching 1800s - that is the rollup taking longer than its cadence and starting to fall behind.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 123 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 123
+      },
       "id": 36,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le, tier, table) (rate(polaris_sample_rollup_duration_seconds_bucket[1h])))", "legendFormat": "{{table}} ({{tier}})", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, tier, table) (rate(polaris_sample_rollup_duration_seconds_bucket[1h])))",
+          "legendFormat": "{{table}} ({{tier}})",
+          "refId": "A"
+        }
       ],
       "title": "Sample rollup p95 by tier x table (1h window)",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Rows currently held in the in-memory write buffer for each monitor sample table. Oscillates between near-0 and the steady-state batch size between 2s flush ticks. A persistently rising value means the flush can't keep up with the enqueue rate.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 } } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 131 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 131
+      },
       "id": 37,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "sum by (table) (polaris_sample_buffer_depth)", "legendFormat": "{{table}}", "refId": "A" }
+        {
+          "expr": "sum by (table) (polaris_sample_buffer_depth)",
+          "legendFormat": "{{table}}",
+          "refId": "A"
+        }
       ],
       "title": "Sample buffer depth by table",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Patches currently held in the in-memory probe-patch buffer. Oscillates between near-0 and steady-state batch size between 2s flush ticks; a persistently rising value means the bulk UPDATE flush can't keep up.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 } } },
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 131 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 131
+      },
       "id": 38,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "sum by (table) (polaris_probe_patch_buffer_depth)", "legendFormat": "{{table}}", "refId": "A" }
+        {
+          "expr": "sum by (table) (polaris_probe_patch_buffer_depth)",
+          "legendFormat": "{{table}}",
+          "refId": "A"
+        }
       ],
       "title": "Probe-patch buffer depth",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "p95 wall-clock of one bulk UPDATE flush from the probe-patch buffer. One observation per 2s flush tick. Splits per-flush state-write cost out of monitor-work duration so a slow DB write (lock contention, index bloat) is visible separately from network probe time.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 135 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 135
+      },
       "id": 39,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le) (rate(polaris_probe_patch_write_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(polaris_probe_patch_write_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
       ],
       "title": "Probe-patch write p95",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 139 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 139
+      },
       "id": 111,
       "panels": [],
       "title": "Discovery phases (FMG / standalone FortiGate)",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "p95 wall-clock per phase inside one discovery run. Phase labels match the phaseMark() markers in code (e.g. '1', '2a', '3b', '7.5', '13'). When overall discovery duration is climbing, this panel tells you WHICH phase is dragging - usually a specific FMG API call or DB sweep, not the whole pipeline.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 140 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 140
+      },
       "id": 40,
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "mean"] }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "topk(20, histogram_quantile(0.95, sum by (le, integration_type, phase) (rate(polaris_discovery_phase_duration_seconds_bucket[1h]))))", "legendFormat": "{{integration_type}} / {{phase}}", "refId": "A" }
+        {
+          "expr": "topk(20, histogram_quantile(0.95, sum by (le, integration_type, phase) (rate(polaris_discovery_phase_duration_seconds_bucket[1h]))))",
+          "legendFormat": "{{integration_type}} / {{phase}}",
+          "refId": "A"
+        }
       ],
       "title": "Discovery phase p95 (top 20, 1h window)",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 148 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 148
+      },
       "id": 112,
       "panels": [],
       "title": "Boot-time config snapshot",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Active monitor queue mode at boot. cursor = in-process light/heavy loops; pgboss = pg-boss queue with per-cadence workers. Set once at startup.",
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "max": 1, "min": 0, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 149 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 149
+      },
       "id": 41,
-      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "max by (mode) (polaris_monitor_queue_mode)", "legendFormat": "{{mode}}", "refId": "A" }
+        {
+          "expr": "max by (mode) (polaris_monitor_queue_mode)",
+          "legendFormat": "{{mode}}",
+          "refId": "A"
+        }
       ],
       "title": "Queue mode (cursor vs pgboss)",
       "type": "bargauge"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "DB connection topology detected at boot. direct = single DATABASE_URL pointed at Postgres; pgbouncer = Polaris app traffic goes through PgBouncer (pg-boss / pg_dump / pg_stat_activity reads via POLARIS_DB_DIRECT_URL).",
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "max": 1, "min": 0, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 149 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 149
+      },
       "id": 42,
-      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "max by (mode) (polaris_db_connection_mode)", "legendFormat": "{{mode}}", "refId": "A" }
+        {
+          "expr": "max by (mode) (polaris_db_connection_mode)",
+          "legendFormat": "{{mode}}",
+          "refId": "A"
+        }
       ],
       "title": "DB connection mode (direct vs pgbouncer)",
       "type": "bargauge"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Configured worker count per cadence queue, stamped once at boot. Tune via POLARIS_MONITOR_PROBE_WORKERS / POLARIS_MONITOR_FAST_WORKERS / POLARIS_MONITOR_HEAVY_WORKERS / POLARIS_MONITOR_FLOATING_WORKERS / POLARIS_MONITOR_LLDP_WORKERS / POLARIS_MONITOR_STORAGE_WORKERS.",
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 149 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 149
+      },
       "id": 43,
-      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "sum by (queue) (polaris_monitor_workers)", "legendFormat": "{{queue}}", "refId": "A" }
+        {
+          "expr": "sum by (queue) (polaris_monitor_workers)",
+          "legendFormat": "{{queue}}",
+          "refId": "A"
+        }
       ],
       "title": "Workers per cadence queue",
       "type": "bargauge"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Per-process Polaris connection capacity, labeled by POLARIS_ROLE (web / monitor / discovery / all). In a multi-process deployment, sum across role series for the group's footprint against polaris_db_pool_max.",
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 149 },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 149
+      },
       "id": 44,
-      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "max by (role) (polaris_db_pool_role_capacity)", "legendFormat": "{{role}}", "refId": "A" }
+        {
+          "expr": "max by (role) (polaris_db_pool_role_capacity)",
+          "legendFormat": "{{role}}",
+          "refId": "A"
+        }
       ],
       "title": "DB pool role capacity",
       "type": "bargauge"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 153 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 153
+      },
       "id": 113,
       "panels": [],
       "title": "Integration connection tester (10-min auto-test)",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Per-tick outcome of the 10-min integrationConnectionTester job, sliced by integration_type and outcome (success | failure | skipped). `skipped` is the in-discovery-run branch (preserves prior lastTestAt/Ok to avoid false-positive failures on healthy FMG). A run of `failure` entries without a `success` follow-up explains why an integration stayed in the Failed state across multiple ticks — pair with `journalctl -t polaris | grep integrationConnectionTester` for the per-tick error message.",
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 80, "stacking": { "mode": "normal" } }, "unit": "ops" } },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 154 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Per-tick outcome of the 10-min integrationConnectionTester job, sliced by integration_type and outcome (success | failure | skipped). `skipped` is the in-discovery-run branch (preserves prior lastTestAt/Ok to avoid false-positive failures on healthy FMG). A run of `failure` entries without a `success` follow-up explains why an integration stayed in the Failed state across multiple ticks \u2014 pair with `journalctl -t polaris | grep integrationConnectionTester` for the per-tick error message.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 154
+      },
       "id": 45,
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        { "expr": "sum by (integration_type, outcome) (rate(polaris_integration_test_total[1h]))", "legendFormat": "{{integration_type}} {{outcome}}", "refId": "A" }
+        {
+          "expr": "sum by (integration_type, outcome) (rate(polaris_integration_test_total[1h]))",
+          "legendFormat": "{{integration_type}} {{outcome}}",
+          "refId": "A"
+        }
       ],
       "title": "Integration auto-test rate by type + outcome (1h)",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 162
+      },
+      "id": 114,
+      "panels": [],
+      "title": "Process crashes (unhandled rejection / uncaught exception)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Process terminations caused by an unhandled promise rejection or uncaught exception, by role and kind. The counter lives in the dying process's registry, so any single scrape reads 0 or 1 \u2014 the operational signal is the RESTART, which is what increase() over a window shows. Steady state is a flat zero. Any non-zero bar means a role died and systemd's Restart=on-failure brought it back: check `journalctl -u polaris-<role> | grep -i 'unhandled promise rejection\\|uncaught exception'` for the structured fatal line naming the origin. Repeating bars are a crash loop, which is otherwise invisible outside journald.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 163
+      },
+      "id": 115,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (role, kind) (increase(polaris_process_crash_total[1h]))",
+          "legendFormat": "{{role}} {{kind}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Process crashes by role + kind (1h)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Total process crashes across every role in the last 24h. Should be 0. Anything above 0 warrants reading the fatal log line before it ages out of journald.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 163
+      },
+      "id": 116,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(polaris_process_crash_total[24h]))",
+          "legendFormat": "crashes",
+          "refId": "A"
+        }
+      ],
+      "title": "Process crashes (24h)",
+      "type": "stat"
     }
   ],
   "refresh": "30s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["polaris", "monitoring"],
+  "tags": [
+    "polaris",
+    "monitoring"
+  ],
   "templating": {
     "list": [
       {
-        "current": { "selected": false, "text": "Prometheus", "value": "prometheus" },
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "prometheus"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Datasource",
@@ -856,10 +2794,13 @@
       }
     ]
   },
-  "time": { "from": "now-1h", "to": "now" },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
-  "title": "Polaris — Monitoring",
+  "title": "Polaris \u2014 Monitoring",
   "uid": "polaris-monitoring",
   "version": 3,
   "weekStart": ""

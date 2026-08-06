@@ -308,6 +308,21 @@ const jobTotal = new Counter({
   registers: [registry],
 });
 
+// ─── Process crashes ──────────────────────────────────────────────────────
+//
+// Incremented by the last-resort handlers in src/index.ts immediately before
+// the process exits. The counter itself dies with the process, so its value is
+// always 0 or 1 in a single scrape — the operational signal is the *restart*:
+// `increase(polaris_process_crash_total[1h])` across a role's instances turns
+// an invisible systemd Restart=on-failure loop into a graph.
+
+const processCrashTotal = new Counter({
+  name: "polaris_process_crash_total",
+  help: "Process terminations caused by an unhandled promise rejection or uncaught exception, labelled by role and kind. Scraped as 0 in a healthy process; a non-zero increase() over time means a role is crash-looping.",
+  labelNames: ["role", "kind"] as const,
+  registers: [registry],
+});
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 export type Cadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes";
@@ -560,6 +575,12 @@ export function startJobTimer(job: string): () => number {
 
 export function recordJobOutcome(job: string, outcome: JobOutcome): void {
   jobTotal.inc({ job, outcome });
+}
+
+export type CrashKind = "unhandled_rejection" | "uncaught_exception";
+
+export function recordProcessCrash(role: string, kind: CrashKind): void {
+  processCrashTotal.inc({ role, kind });
 }
 
 export interface HistogramBucketValue {

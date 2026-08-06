@@ -4,10 +4,17 @@
  * Checks if the app needs first-run setup (no DATABASE_URL configured).
  * If so, starts a lightweight setup wizard server.
  * Otherwise, starts the full application.
+ *
+ * Also installs the process-level last-resort crash handlers — see
+ * installCrashHandlers below. They go here, before any subsystem imports, so
+ * every role (web / monitor / discovery / dash / setup wizard) inherits them.
  */
 
 import { getSetupState, markSetupComplete } from "./setup/detectSetup.js";
 import { getRole } from "./utils/role.js";
+import { installCrashHandlers } from "./utils/crashHandlers.js";
+
+installCrashHandlers();
 
 (async () => {
   const state = getSetupState();
