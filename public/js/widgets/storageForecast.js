@@ -60,7 +60,10 @@
     el.innerHTML = shown.map(function (r) {
       var days = r.value || 0;
       var pct = Math.max(2, Math.min(100, Math.round((1 - days / BAR_HORIZON_DAYS) * 100)));
-      var color = colorFor(days);
+      // Alert severity wins over the days-to-full color so the bar agrees with
+      // the pill beside it (same rule as _topnBar).
+      var sevColor = PolarisWidgets.alertSeverityBarColor ? PolarisWidgets.alertSeverityBarColor(r.alertSeverity) : null;
+      var color = sevColor || colorFor(days);
       var name = escapeHtml(r.hostname || r.ipAddress || "(unnamed)");
       var detail = r.detail ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">' + escapeHtml(r.detail) + '</span>' : "";
       var usedNote = r.usedPct != null ? " — " + r.usedPct + "% used now" : "";

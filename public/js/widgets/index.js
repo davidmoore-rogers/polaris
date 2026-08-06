@@ -658,6 +658,26 @@
     return '<span class="widget-pill ' + cls + '" title="Highest active alert: ' + escapeHtml(sev) + '" style="margin-right:4px;flex:0 0 auto">' + escapeHtml(String(sev)) + '</span>';
   };
 
+  // Bar-fill color for an alerting row, matching the pill's own text color
+  // one-for-one (keep in lockstep with ALERT_SEV_PILL above + the
+  // .widget-pill-* rules in styles.css). The _topnBar / Storage Forecast bars
+  // color by static value thresholds, which disagrees with the pill whenever an
+  // operator's automation threshold isn't the widget's — a 77 °C row pilled
+  // `critical` drew the widget's yellow 65–80 band. When a row carries an
+  // active alert the ALERT is the authoritative signal, so its severity wins;
+  // un-alerted rows keep their value-threshold color.
+  var ALERT_SEV_BAR = {
+    notice: "var(--color-sev-notice)",
+    informational: "#4fc3f7", info: "#4fc3f7",
+    warning: "#ffd54f",
+    serious: "var(--color-sev-serious)",
+    critical: "#ef5350", error: "#ef5350",
+  };
+  window.PolarisWidgets.alertSeverityBarColor = function (sev) {
+    if (!sev) return null;
+    return ALERT_SEV_BAR[sev] || null;
+  };
+
   // "5m 03s" / "2h 17m" / "3d 4h" — same shape the legacy dashboard used.
   window.PolarisWidgets.durationSince = function (iso) {
     if (!iso) return "—";

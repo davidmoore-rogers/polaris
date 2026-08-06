@@ -712,6 +712,9 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/bootstrapProxyConfig.js",
       "./jobs/migrateAutomationRuleShape.js",
       "./jobs/seedBaselineAutomations.js",
+      // Deliberately not marker-guarded — retries the subnet (blockId, cidr)
+      // unique index every boot until the data allows it. See its header.
+      "./jobs/enforceSubnetUniqueIndex.js",
     ]) await importJob(p);
   }
 

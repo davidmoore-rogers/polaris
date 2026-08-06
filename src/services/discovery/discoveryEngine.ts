@@ -55,6 +55,7 @@ import {
   type RunAccumulator,
 } from "../discoveryRunState.js";
 import { releaseDnsResolvedAt } from "../dnsResolvedReservationService.js";
+import { createSubnetRowChecked } from "../subnetService.js";
 import { isMergeableEndpointGhost, mergeEndpointGhostIntoAsset } from "../assetGhostMergeService.js";
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
 import { getAdMonitorProtocol, persistManagedApLldpNeighbors, invalidateLldpMatchCache } from "../monitoringService.js";
@@ -1970,7 +1971,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       continue;
     }
 
-    // Check for overlaps with non-deprecated siblings (in-memory)
+    // Cheap in-memory pre-filter against the siblings this run already knows
+    // about — avoids a pointless transaction for the common "obviously
+    // overlapping" case and keeps the skip reason specific.
     const siblings = siblingsByBlockId.get(matchingBlock.id) || [];
     const overlap = siblings.find((s: any) => cidrOverlaps(s.cidr, cidr));
     if (overlap) {
@@ -1978,21 +1981,25 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       continue;
     }
 
-    // Create the subnet
+    // Create the subnet through the locked seam in subnetService. Discovery
+    // runs in its own process, concurrently with operators creating subnets in
+    // the web UI, so the in-memory sibling snapshot above is inherently stale:
+    // it was read at the top of this phase. createSubnetRowChecked re-tests the
+    // overlap against committed state under the per-block advisory lock, so a
+    // subnet an operator added mid-run is seen and this create is skipped
+    // instead of landing an overlapping row.
     try {
-      const newSubnet = await prisma.subnet.create({
-        data: {
-          blockId: matchingBlock.id,
-          cidr,
-          name: `DHCP: ${entry.name} (${entry.fortigateDevice})`,
-          purpose: `Discovered from ${integrationLabel} DHCP`,
-          status: "available",
-          discoveredBy: integrationId,
-          fortigateDevice: entry.fortigateDevice,
-          lastDiscoveredAt: new Date(),
-          tags: ["dhcp-discovered", integrationType],
-          ...(entry.vlan != null ? { vlan: entry.vlan } : {}),
-        },
+      const newSubnet = await createSubnetRowChecked({
+        blockId: matchingBlock.id,
+        cidr,
+        name: `DHCP: ${entry.name} (${entry.fortigateDevice})`,
+        purpose: `Discovered from ${integrationLabel} DHCP`,
+        status: "available",
+        discoveredBy: integrationId,
+        fortigateDevice: entry.fortigateDevice,
+        lastDiscoveredAt: new Date(),
+        tags: ["dhcp-discovered", integrationType],
+        ...(entry.vlan != null ? { vlan: entry.vlan } : {}),
       });
       // Update in-memory state so later phases can find this subnet
       allSubnets.push(newSubnet);
@@ -2002,8 +2009,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       siblingsByBlockId.set(matchingBlock.id, blockSiblings);
       created.push(cidr);
     } catch (err: any) {
-      skipped.push(`${cidr} (create failed)`);
-      syncLog("error", `Failed to create subnet ${cidr}: ${err.message || "Unknown error"}`);
+      // A 409 is the locked seam telling us a sibling landed between this run's
+      // sibling snapshot and now (an operator created it mid-run). That is a
+      // normal skip, not a failure, so it must not colour the run's log red.
+      if (err instanceof AppError && err.httpStatus === 409) {
+        skipped.push(`${cidr} (${err.message})`);
+        syncLog("info", `Skipped subnet ${cidr}: ${err.message}`);
+      } else {
+        skipped.push(`${cidr} (create failed)`);
+        syncLog("error", `Failed to create subnet ${cidr}: ${err.message || "Unknown error"}`);
+      }
     }
   }
 

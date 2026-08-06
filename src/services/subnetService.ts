@@ -1,8 +1,41 @@
 /**
  * src/services/subnetService.ts
+ *
+ * ─── Overlap invariant (business rules 1 + 2) ───────────────────────────────
+ *
+ * "No overlapping subnets within a block" is a check-then-insert, which means
+ * it is only as strong as whatever serializes the check against the insert.
+ * Before 2026-08 nothing did: createSubnet read every sibling CIDR, tested
+ * cidrOverlaps in JS, then issued a separate `subnet.create`, with no
+ * transaction and no DB constraint. Two concurrent requests both passed and
+ * both inserted, and overlapping subnets then let the same address be handed
+ * to two owners. bulkAllocate had a transaction but, at READ COMMITTED, its
+ * in-transaction re-read still could not see a concurrent writer's uncommitted
+ * rows and took no locks.
+ *
+ * Every subnet-creating path now goes through one of two seams here:
+ *   - createSubnetRowChecked(data) — single-row writers (createSubnet, and the
+ *     DHCP-discovery create in discoveryEngine): one transaction that takes the
+ *     per-block advisory lock, re-reads siblings, re-tests overlap, inserts.
+ *   - lockBlockForSubnetWrites(tx, blockId) — batch writers (bulkAllocate) that
+ *     already own a transaction and create many rows under one lock.
+ *
+ * The lock is per (block), so allocation in unrelated blocks stays fully
+ * parallel; it is an xact lock, so it releases on commit or rollback with no
+ * unlock bookkeeping. Backstop: a UNIQUE index on (blockId, cidr) added by
+ * migration 20260806000000, which catches the exact-duplicate case (the usual
+ * race outcome — two "next available" calls returning the SAME cidr) even from
+ * a future code path that forgets the lock.
+ *
+ * Why no exclusion constraint for true overlap: stock PostgreSQL has no
+ * GiST-indexable overlap operator for `inet`/`cidr` (btree_gist's gist_inet_ops
+ * covers the btree operators only, not `&&`), so an
+ * `EXCLUDE ... (inet(cidr) WITH &&)` does not build without a third-party
+ * extension. The advisory lock is the exact guard; the unique index is the
+ * portable backstop.
  */
 
-import type { SubnetStatus } from "../generated/prisma/client.js";
+import type { Prisma, SubnetStatus } from "../generated/prisma/client.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { isFortinetIntegrationType } from "../utils/pollingCompatibility.js";
@@ -19,6 +52,89 @@ import {
   enumerateSubnetIps,
   packIntoAnchor,
 } from "../utils/cidr.js";
+
+/**
+ * The client handed to an interactive `$transaction` callback.
+ *
+ * Derived from our own `prisma` singleton rather than `Prisma.TransactionClient`
+ * because db.ts wraps the base client in a `$extends` (the hostnameOverride /
+ * ipOverride / clampMonitoredForStatus guards), and the extended client's model
+ * delegates are not assignable to the unextended `Prisma.TransactionClient`.
+ */
+type TxClient = Omit<
+  typeof prisma,
+  "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends"
+>;
+
+// ─── Per-block write serialization ──────────────────────────────────────────
+//
+// Advisory-lock namespace. The two-int form of pg_advisory_xact_lock keys on
+// (classid, objid); classid partitions namespaces so two unrelated lock users
+// can never collide on a coincidentally-equal objid. The retention prune uses
+// 0x504c5253 ("PLRS") with objid 1 — see PRUNE_LOCK_CLASSID in
+// monitoringService.ts. Subnet writes take the next classid in that sequence
+// with objid = hashtext(blockId).
+const SUBNET_LOCK_CLASSID = 0x504c5254; // "PLRT" — subnet-per-block write lock
+
+/**
+ * Serialize subnet writes for one block against every other subnet writer.
+ *
+ * MUST be the first statement inside the caller's transaction, before the
+ * sibling re-read whose result the overlap decision depends on. Blocks until
+ * any other holder commits or rolls back; releases automatically at end of
+ * transaction (no unlock path to leak).
+ *
+ * hashtext() can collide across different blockIds, which is harmless: a
+ * collision only means two unrelated blocks briefly serialize against each
+ * other. It can never let two writers into the same block concurrently.
+ */
+export async function lockBlockForSubnetWrites(
+  tx: TxClient,
+  blockId: string,
+): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SUBNET_LOCK_CLASSID}::int, hashtext(${blockId})::int)`;
+}
+
+/**
+ * Insert one subnet row with the overlap invariant enforced under the per-block
+ * lock. The caller has already validated shape (CIDR validity, containment in
+ * the parent block, IP-version match) and normalized the CIDR; this seam owns
+ * only the part that has to be atomic: lock, re-read siblings, re-test overlap,
+ * insert.
+ *
+ * Throws AppError 409 when a sibling overlaps — including the case where the
+ * sibling was committed by a concurrent writer between the caller's own
+ * pre-check and this call, which is exactly the race that used to slip through.
+ * A P2002 from the (blockId, cidr) unique index is translated to the same 409
+ * so callers see one error shape.
+ */
+export async function createSubnetRowChecked(
+  data: Prisma.SubnetUncheckedCreateInput,
+) {
+  const { blockId, cidr } = data;
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await lockBlockForSubnetWrites(tx, blockId);
+      const siblings = await tx.subnet.findMany({
+        where: { blockId },
+        select: { cidr: true },
+      });
+      const overlap = siblings.find((s) => cidrOverlaps(s.cidr, cidr));
+      if (overlap) {
+        throw new AppError(
+          409,
+          `Subnet ${cidr} overlaps with existing subnet ${overlap.cidr}`,
+        );
+      }
+      return await tx.subnet.create({ data });
+    });
+  } catch (err: any) {
+    if (err?.code === "P2002") {
+      throw new AppError(409, `Subnet ${cidr} already exists in this block`);
+    }
+    throw err;
+  }
+}
 
 // ─── IP → containing-subnet context ─────────────────────────────────────────
 //
@@ -191,29 +307,20 @@ export async function createSubnet(input: CreateSubnetInput) {
       `Subnet IP version does not match block IP version (${block.ipVersion})`
     );
 
-  // No overlapping sibling subnets
-  const siblings = await prisma.subnet.findMany({
-    where: { blockId: input.blockId },
-    select: { cidr: true },
-  });
-  const overlap = siblings.find((s) => cidrOverlaps(s.cidr, normalizedCidr));
-  if (overlap)
-    throw new AppError(
-      409,
-      `Subnet ${normalizedCidr} overlaps with existing subnet ${overlap.cidr}`
-    );
-
-  const created = await prisma.subnet.create({
-    data: {
-      blockId: input.blockId,
-      cidr: normalizedCidr,
-      name: input.name,
-      purpose: input.purpose,
-      vlan: input.vlan,
-      tags: input.tags ?? [],
-      status: "available",
-      createdBy: input.createdBy,
-    },
+  // No overlapping sibling subnets. The check and the insert happen together
+  // inside createSubnetRowChecked, under the per-block advisory lock — doing
+  // the findMany here and the create as a separate statement is what let two
+  // concurrent requests both pass (see the overlap-invariant note at the top
+  // of this file). It throws 409 on overlap or on the unique-index violation.
+  const created = await createSubnetRowChecked({
+    blockId: input.blockId,
+    cidr: normalizedCidr,
+    name: input.name,
+    purpose: input.purpose,
+    vlan: input.vlan,
+    tags: input.tags ?? [],
+    status: "available",
+    createdBy: input.createdBy,
   });
   void logEvent({
     action: "subnet.created",
@@ -244,24 +351,41 @@ export async function allocateNextSubnet(
   if (prefixLength < 8 || prefixLength > 32)
     throw new AppError(400, "Prefix length must be between 8 and 32");
 
-  const existing = await prisma.subnet.findMany({
-    where: { blockId },
-    select: { cidr: true },
-  });
+  // Pick-then-create, so the pick can go stale: two concurrent auto-allocates
+  // read the same sibling set and choose the SAME free CIDR. createSubnet's
+  // locked insert now turns the loser into a clean 409 instead of a silent
+  // duplicate — but the caller asked for "any free /N", so a 409 here would be
+  // the wrong answer. Re-pick against the now-committed state and try again;
+  // each attempt sees one more taken CIDR, so a handful of retries absorbs far
+  // more concurrency than this endpoint will ever see. Only the overlap/dup 409
+  // is retried — a genuine "block full" 409 is raised by the pick itself and
+  // returns immediately.
+  const MAX_ATTEMPTS = 5;
+  for (let attempt = 1; ; attempt++) {
+    const existing = await prisma.subnet.findMany({
+      where: { blockId },
+      select: { cidr: true },
+    });
 
-  const nextCidr = findNextAvailableSubnet(
-    block.cidr,
-    existing.map((s) => s.cidr),
-    prefixLength
-  );
-
-  if (!nextCidr)
-    throw new AppError(
-      409,
-      `No available /${prefixLength} subnet found in block ${block.cidr}`
+    const nextCidr = findNextAvailableSubnet(
+      block.cidr,
+      existing.map((s) => s.cidr),
+      prefixLength
     );
 
-  return createSubnet({ ...metadata, blockId, cidr: nextCidr, via: "auto-allocate" });
+    if (!nextCidr)
+      throw new AppError(
+        409,
+        `No available /${prefixLength} subnet found in block ${block.cidr}`
+      );
+
+    try {
+      return await createSubnet({ ...metadata, blockId, cidr: nextCidr, via: "auto-allocate" });
+    } catch (err: any) {
+      const lostRace = err instanceof AppError && err.httpStatus === 409;
+      if (!lostRace || attempt >= MAX_ATTEMPTS) throw err;
+    }
+  }
 }
 
 // ─── Bulk allocation from a template ─────────────────────────────────────────
@@ -352,9 +476,15 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
   const prefix = input.prefix.trim();
   const tags = input.tags ?? [];
 
-  // Compute the packed CIDRs under a transaction. Re-query existing subnets
-  // inside the transaction so concurrent allocations don't race with us.
+  // Compute the packed CIDRs under a transaction. The transaction alone gives
+  // all-or-nothing, NOT mutual exclusion: at READ COMMITTED the re-read below
+  // cannot see a concurrent writer's uncommitted inserts and takes no locks, so
+  // two bulk allocations against the same block could both pick the same free
+  // anchor region and both commit. The advisory lock is what makes the re-read
+  // authoritative, and it is the same lock createSubnetRowChecked takes, so
+  // batch and single-row writers serialize against each other too.
   const result = await prisma.$transaction(async (tx) => {
+    await lockBlockForSubnetWrites(tx, input.blockId);
     const existing = await tx.subnet.findMany({
       where: { blockId: input.blockId },
       select: { cidr: true },

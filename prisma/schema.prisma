@@ -98,6 +98,15 @@ model Subnet {
 
   reservations Reservation[]
 
+  // DB backstop for business rule 1 (no overlapping subnets in a block). The
+  // exact guard is the per-block advisory lock every subnet writer takes
+  // (lockBlockForSubnetWrites in services/subnetService.ts); this catches the
+  // exact-duplicate case even from a path that forgets the lock. Added by
+  // migration 20260806000000, which SKIPS creation on an install that already
+  // carries duplicates from the pre-lock race — the enforceSubnetUniqueIndex
+  // startup job adds it once they are cleaned up, so `prisma migrate diff` can
+  // legitimately report this index missing on such an install.
+  @@unique([blockId, cidr], map: "subnets_block_cidr_key")
   @@index([blockId])
   @@index([blockId, status])
   @@index([cidr])

@@ -4,7 +4,8 @@
  * Disk Usage, Highest Temperature). These are structurally identical: a ranked
  * list of { id, hostname, ipAddress, value, detail?, site? }
  * rows drawn as a name + utilization bar + value, with per-widget units, color
- * thresholds, an optional value floor, and an optional Group-by-Site view
+ * thresholds (overridden by an alerting row's own severity color), an optional
+ * value floor, and an optional Group-by-Site view
  * (gear option; buckets the ranked rows under site headers, groups ordered
  * by their hottest row). Underscore-prefixed = internal helper; it registers
  * no widget of its own.
@@ -95,7 +96,11 @@
     function rowHTML(r) {
       var v = r.value || 0;
       var pct = Math.min(100, Math.round((v / scaleMax) * 100));
-      var color = pickColor(v, opts.thresholds, opts.baseColor);
+      // An active alert's severity wins over the widget's value thresholds so
+      // the bar can't disagree with the pill beside it (see
+      // alertSeverityBarColor); un-alerted rows color by value.
+      var sevColor = PolarisWidgets.alertSeverityBarColor ? PolarisWidgets.alertSeverityBarColor(r.alertSeverity) : null;
+      var color = sevColor || pickColor(v, opts.thresholds, opts.baseColor);
       var name = escapeHtml(r.hostname || r.ipAddress || "(unnamed)");
       // Optional secondary label (e.g. the mount path for Highest Disk Usage),
       // shown muted after the hostname in the same cell.
