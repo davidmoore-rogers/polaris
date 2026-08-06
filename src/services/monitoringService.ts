@@ -9305,15 +9305,10 @@ export const MONITOR_CANDIDATE_WHERE = {
  * first so when the worker pool is saturated, the lightweight cadence
  * drains before the heavy ones.
  */
-export async function runMonitorPass(opts?: { concurrency?: number; cadences?: MonitorCadence[] }): Promise<RunStats> {
-  const enabled = new Set<MonitorCadence>(
-    opts?.cadences ?? ["probe", "fastFiltered", "telemetry", "systemInfo"],
-  );
-  const endPassTimer = startPassTimer();
-  const concurrency = Math.max(1, Math.min(opts?.concurrency ?? 8, 32));
-  const now = new Date();
-
-  const candidates = await prisma.asset.findMany({
+/** The cursor pass's candidate load — mirrored (deliberately, see the note in
+ *  monitorAssets.ts publishDueWork) by the pg-boss publisher's own query. */
+export async function loadMonitorPassCandidates() {
+  return prisma.asset.findMany({
     where: MONITOR_CANDIDATE_WHERE,
     select: {
       id: true,
@@ -9347,73 +9342,41 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       dependencySuppressed: true,
     },
   });
+}
+export type MonitorPassCandidate = Awaited<ReturnType<typeof loadMonitorPassCandidates>>[number];
 
-  // Asset-count gauges. Set every pass so the Grafana view stays current
-  // even when the fleet size changes between ticks.
-  let upCount = 0, downCount = 0, unknownCount = 0;
-  for (const a of candidates) {
-    if (a.monitorStatus === "up") upCount++;
-    else if (a.monitorStatus === "down") downCount++;
-    else unknownCount++;
-  }
-  setMonitoredAssets(candidates.length, { up: upCount, down: downCount, unknown: unknownCount });
+export type MonitorWorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes";
+export type MonitorWork = { id: string; kind: MonitorWorkKind };
+export interface DueMonitorWork {
+  probes: MonitorWork[];
+  fastFiltereds: MonitorWork[];
+  telemetries: MonitorWork[];
+  systemInfos: MonitorWork[];
+  processesWork: MonitorWork[];
+}
 
-  // Per-asset resolved transport labels for the work-duration histogram and
-  // per-probe histogram. Probe uses responseTimePolling; telemetry uses
-  // telemetryPolling; systemInfo + fastFiltered use interfacesPolling.
-  // Falls back to the integration-source default when the per-asset column
-  // is null (full resolver fidelity would require the class-override +
-  // tier-3 lookup but that's overkill for a metric label).
-  //
-  // Source defaults (from CLAUDE.md): fortimanager/fortigate → rest_api on
-  // probe / telemetry / interfaces; everything else → icmp on probe and
-  // null (= "not delivered") on the other streams. The publishDueWork +
-  // canTelemetry/canSystemInfo gates already block work items whose stream
-  // resolves to null, so in practice the non-fortinet null case here
-  // doesn't reach a worker — the "not_delivered" label is a defensive
-  // fallback only.
-  function defaultProbeTransport(integrationType: string | null | undefined): string {
-    return (isFortinetIntegrationType(integrationType)) ? "rest_api" : "icmp";
-  }
-  function defaultHeavyTransport(integrationType: string | null | undefined): string {
-    return (isFortinetIntegrationType(integrationType)) ? "rest_api" : "not_delivered";
-  }
-  const transportByCadenceById = new Map<string, Record<MonitorCadence, string>>();
-  const assetTypeById = new Map<string, string>();
-  for (const a of candidates) {
-    const integrationType = a.discoveredByIntegration?.type;
-    const probeT = a.responseTimePolling || defaultProbeTransport(integrationType);
-    const telT   = a.cpuMemoryPolling    || defaultHeavyTransport(integrationType);
-    const ifT    = a.interfacesPolling   || defaultHeavyTransport(integrationType);
-    transportByCadenceById.set(a.id, {
-      probe:        probeT,
-      telemetry:    telT,
-      systemInfo:   ifT,
-      fastFiltered: ifT,
-      // Phase 2 carve-out: LLDP + Storage cadences are pg-boss-only and don't
-      // dispatch through runMonitorPass in cursor mode. Fill the transport
-      // labels anyway so the histogram label set is complete if a future
-      // cursor-mode dispatcher needs them.
-      lldp:         a.lldpPolling    || ifT,
-      storage:      a.storagePolling || ifT,
-      processes:    a.processesPolling || "not_delivered",
-    });
-    assetTypeById.set(a.id, a.assetType ?? "unknown");
-  }
-
+/**
+ * The due-set computation extracted from runMonitorPass (2026-08; unit tests
+ * in tests/unit/computeDueWork.test.ts pin the eligibility semantics).
+ * DB-READ-ONLY: resolves each candidate's effective settings (cached) and
+ * applies the cadence + eligibility gates — no transports are touched.
+ */
+export async function computeDueWork(
+  candidates: MonitorPassCandidate[],
+  enabled: Set<MonitorCadence>,
+  now: Date,
+): Promise<DueMonitorWork> {
   function isDue(last: Date | null, intervalSec: number): boolean {
     if (intervalSec <= 0) return false;
     if (!last) return true;
     return now.getTime() - last.getTime() >= intervalSec * 1000;
   }
 
-  type WorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes";
-  type Work = { id: string; kind: WorkKind };
-  const probes: Work[]       = [];
-  const fastFiltereds: Work[] = [];
-  const telemetries: Work[]  = [];
-  const systemInfos: Work[]  = [];
-  const processesWork: Work[] = [];
+  const probes: MonitorWork[]       = [];
+  const fastFiltereds: MonitorWork[] = [];
+  const telemetries: MonitorWork[]  = [];
+  const systemInfos: MonitorWork[]  = [];
+  const processesWork: MonitorWork[] = [];
   for (const a of candidates) {
     // Resolve effective settings through the four-tier hierarchy. Internally
     // memoized — first asset in a (integration|manual, assetType) bucket
@@ -9549,13 +9512,82 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       if (processesDue) processesWork.push({ id: a.id, kind: "processes" });
     }
   }
+  return { probes, fastFiltereds, telemetries, systemInfos, processesWork };
+}
+
+export async function runMonitorPass(opts?: { concurrency?: number; cadences?: MonitorCadence[] }): Promise<RunStats> {
+  const enabled = new Set<MonitorCadence>(
+    opts?.cadences ?? ["probe", "fastFiltered", "telemetry", "systemInfo"],
+  );
+  const endPassTimer = startPassTimer();
+  const concurrency = Math.max(1, Math.min(opts?.concurrency ?? 8, 32));
+  const now = new Date();
+
+  const candidates = await loadMonitorPassCandidates();
+
+  // Asset-count gauges. Set every pass so the Grafana view stays current
+  // even when the fleet size changes between ticks.
+  let upCount = 0, downCount = 0, unknownCount = 0;
+  for (const a of candidates) {
+    if (a.monitorStatus === "up") upCount++;
+    else if (a.monitorStatus === "down") downCount++;
+    else unknownCount++;
+  }
+  setMonitoredAssets(candidates.length, { up: upCount, down: downCount, unknown: unknownCount });
+
+  // Per-asset resolved transport labels for the work-duration histogram and
+  // per-probe histogram. Probe uses responseTimePolling; telemetry uses
+  // telemetryPolling; systemInfo + fastFiltered use interfacesPolling.
+  // Falls back to the integration-source default when the per-asset column
+  // is null (full resolver fidelity would require the class-override +
+  // tier-3 lookup but that's overkill for a metric label).
+  //
+  // Source defaults (from CLAUDE.md): fortimanager/fortigate → rest_api on
+  // probe / telemetry / interfaces; everything else → icmp on probe and
+  // null (= "not delivered") on the other streams. The publishDueWork +
+  // canTelemetry/canSystemInfo gates already block work items whose stream
+  // resolves to null, so in practice the non-fortinet null case here
+  // doesn't reach a worker — the "not_delivered" label is a defensive
+  // fallback only.
+  function defaultProbeTransport(integrationType: string | null | undefined): string {
+    return (isFortinetIntegrationType(integrationType)) ? "rest_api" : "icmp";
+  }
+  function defaultHeavyTransport(integrationType: string | null | undefined): string {
+    return (isFortinetIntegrationType(integrationType)) ? "rest_api" : "not_delivered";
+  }
+  const transportByCadenceById = new Map<string, Record<MonitorCadence, string>>();
+  const assetTypeById = new Map<string, string>();
+  for (const a of candidates) {
+    const integrationType = a.discoveredByIntegration?.type;
+    const probeT = a.responseTimePolling || defaultProbeTransport(integrationType);
+    const telT   = a.cpuMemoryPolling    || defaultHeavyTransport(integrationType);
+    const ifT    = a.interfacesPolling   || defaultHeavyTransport(integrationType);
+    transportByCadenceById.set(a.id, {
+      probe:        probeT,
+      telemetry:    telT,
+      systemInfo:   ifT,
+      fastFiltered: ifT,
+      // Phase 2 carve-out: LLDP + Storage cadences are pg-boss-only and don't
+      // dispatch through runMonitorPass in cursor mode. Fill the transport
+      // labels anyway so the histogram label set is complete if a future
+      // cursor-mode dispatcher needs them.
+      lldp:         a.lldpPolling    || ifT,
+      storage:      a.storagePolling || ifT,
+      processes:    a.processesPolling || "not_delivered",
+    });
+    assetTypeById.set(a.id, a.assetType ?? "unknown");
+  }
+
+  const { probes, fastFiltereds, telemetries, systemInfos, processesWork } =
+    await computeDueWork(candidates, enabled, now);
+
   // Order matters: probes first so a saturated worker pool drains the cheap
   // cadence ahead of the heavy walks. Fast-filtered scrapes ride the same
   // 60s cadence as probes and are still small relative to a full systemInfo
   // pass, so they queue right behind probes. Telemetry and systemInfo bring
   // up the rear — those are what actually time out on dead hosts, and they
   // shouldn't get to block per-minute polling for the rest of the fleet.
-  const work: Work[] = [...probes, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork];
+  const work: MonitorWork[] = [...probes, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork];
 
   setQueueDepth({
     probe: probes.length,
