@@ -328,12 +328,313 @@ const SamplesBodySchema = z.discriminatedUnion("stream", [
   z.object({ stream: z.literal("serviceLog"), samples: z.array(ServiceLogSampleSchema).min(1).max(2000) }),
 ]);
 
+// ─── Per-stream ingest handlers (split from the /samples dispatcher, 2026-08
+// audit — the ingest tests in tests/integration/agentSamplesIngest.test.ts
+// pin every branch's contract). Each takes the schema-narrowed samples for
+// its stream and returns the accepted count.
+
+type SamplesBody = z.infer<typeof SamplesBodySchema>;
+type StreamSamples<S extends SamplesBody["stream"]> = Extract<SamplesBody, { stream: S }>["samples"];
+
+async function ingestResponseTime(assetId: string, samples: StreamSamples<"responseTime">, now: Date): Promise<number> {
+  let accepted = 0;
+  for (const s of samples) {
+    const ts = s.timestamp ? new Date(s.timestamp) : now;
+    // Enqueue the time-series sample.
+    enqueueMonitorSample({
+      assetId,
+      timestamp:      ts,
+      success:        s.success,
+      responseTimeMs: s.success ? (s.responseTimeMs ?? 0) : null,
+      error:          s.success ? null : (s.error ?? "Agent reported failure"),
+    });
+    // Drive the state machine + Asset row fields. opts.fromAgent
+    // bypasses the agent-polling guard in recordProbeResult.
+    await recordProbeResult(
+      assetId,
+      s.success
+        ? { success: true,  responseTimeMs: s.responseTimeMs ?? 0, uptimeSec: s.uptimeSec ?? undefined }
+        : { success: false, responseTimeMs: 0, error: s.error ?? "Agent reported failure", uptimeSec: s.uptimeSec ?? undefined },
+      null,
+      { fromAgent: true },
+    );
+    accepted++;
+  }
+  return accepted;
+}
+
+async function ingestTelemetry(assetId: string, samples: StreamSamples<"telemetry">, now: Date, sampleLog: boolean): Promise<number> {
+  let accepted = 0;
+  for (const s of samples) {
+    const ts = s.timestamp ? new Date(s.timestamp) : now;
+    enqueueTelemetrySample({
+      assetId,
+      timestamp:     ts,
+      cpuPct:        s.cpuPct ?? null,
+      memPct:        s.memPct ?? null,
+      memUsedBytes:  s.memUsedBytes  != null ? BigInt(Math.round(s.memUsedBytes))  : null,
+      memTotalBytes: s.memTotalBytes != null ? BigInt(Math.round(s.memTotalBytes)) : null,
+      sessionCount:  null, // FortiGate-only metric; agents don't report it
+    });
+    if (s.temperatures && s.temperatures.length > 0) {
+      // The Go agent still posts `temperatures` ({sensorName, celsius}).
+      // Map them forward into the unified hardware-sensor stream as the
+      // temperature class so existing agents keep working without a
+      // binary bump; a richer agent-side sensor payload can land later.
+      enqueueHardwareSensorSamples(
+        s.temperatures.map((t) => ({
+          assetId,
+          timestamp:   ts,
+          sensorName:  t.sensorName,
+          sensorClass: "temperature",
+          value:       t.celsius,
+          unit:        "°C",
+          alarmStatus: null,
+        })),
+      );
+    }
+    accepted++;
+  }
+  // Bump lastTelemetryAt so the System tab reflects freshness.
+  await prisma.asset.update({ where: { id: assetId }, data: { lastTelemetryAt: now } });
+  if (sampleLog) {
+    logger.info(
+      { assetId, enqueued: accepted },
+      "agent telemetry samples enqueued to write buffer",
+    );
+  }
+  return accepted;
+}
+
+async function ingestInterfaces(assetId: string, samples: StreamSamples<"interfaces">, now: Date): Promise<number> {
+  // Selection-aware cadence: the agent reports the host's full NIC table,
+  // so stamp pinned interfaces "fast" (full retention + rollup) and the
+  // rest "slow" (24h). See selection-aware retention.
+  const pinnedIfaces = new Set(
+    (await prisma.asset.findUnique({ where: { id: assetId }, select: { monitoredInterfaces: true } }))?.monitoredInterfaces ?? [],
+  );
+  // Anchor every row AND lastSystemInfoAt to ONE shared timestamp. The agent
+  // sends its full NIC table in a single push (all rows share one collection
+  // time), and the /system-info GET endpoint loads interfaces with an exact
+  // equality match `timestamp = lastSystemInfoAt`. If the rows carry the
+  // agent's clock while lastSystemInfoAt carries the server's `now`, the two
+  // never match and the System tab interface table renders empty for every
+  // agent-monitored asset (platform-independent). Use the agent's reported
+  // timestamp when present (more accurate for the time-series/rollups),
+  // falling back to server `now`, and pin lastSystemInfoAt to the same value.
+  const sampleTs = samples[0]?.timestamp ? new Date(samples[0].timestamp) : now;
+  const rows = samples.map((s) => ({
+    assetId,
+    timestamp:   sampleTs,
+    cadence:     pinnedIfaces.has(s.ifName) ? ("fast" as const) : ("slow" as const),
+    ifName:      s.ifName,
+    adminStatus: s.adminStatus ?? null,
+    operStatus:  s.operStatus ?? null,
+    speedBps:    s.speedBps != null ? BigInt(Math.round(s.speedBps)) : null,
+    ipAddress:   s.ipAddress ?? null,
+    macAddress:  s.macAddress ?? null,
+    inOctets:    s.inOctets  != null ? BigInt(Math.round(s.inOctets))  : null,
+    outOctets:   s.outOctets != null ? BigInt(Math.round(s.outOctets)) : null,
+    inErrors:    s.inErrors  != null ? BigInt(Math.round(s.inErrors))  : null,
+    outErrors:   s.outErrors != null ? BigInt(Math.round(s.outErrors)) : null,
+    ifType:      s.ifType ?? null,
+    ifParent:    s.ifParent ?? null,
+    vlanId:      s.vlanId ?? null,
+    // The Polaris Agent doesn't observe switch-port VLAN config — it
+    // reads its own host's NIC table. Always null/empty from this source.
+    nativeVlan:  null,
+    taggedVlans: [] as number[],
+    trunksAllVlans: false,
+    alias:       s.alias ?? null,
+    description: s.description ?? null,
+    // The Polaris Agent doesn't report L3 addressing mode (no FortiOS CMDB
+    // equivalent on a generic host); leave null.
+    addressingMode: null,
+  }));
+  enqueueInterfaceSamples(rows);
+  // Fold EVERY pushed interface MAC (monitored or not) into the asset's
+  // Associated MACs list (AssetMacAddress) — the same range-coalescing
+  // fold recordSystemInfoResult does for the SNMP/REST scrape. For
+  // agent-monitored hosts this push IS the system-info source. Contiguous
+  // MACs collapse to [mac, macEnd] range rows; the replace is scoped to
+  // source="monitor-interface" so rows owned by discovery/manual writers
+  // (including the enroll path's primaryMac reconcile) are never touched.
+  const ifaceMacs = samples
+    .map((s) => s.macAddress)
+    .filter((m): m is string => !!m);
+  if (ifaceMacs.length > 0) {
+    await reconcileInterfaceMacs(assetId, ifaceMacs, sampleTs);
+  }
+  await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: sampleTs } });
+  return rows.length;
+}
+
+async function ingestEventLog(assetId: string, samples: StreamSamples<"eventLog">, sampleLog: boolean): Promise<number> {
+  // OS event-log entries are curated into the audit Event table (not a
+  // sample table) so they appear in the asset Events tab + ride syslog/SFTP
+  // archival. Gated by the global agentEventLog master switch — if an
+  // operator turned it off, a stale agent's push is dropped rather than
+  // flooding the audit log. ingestOsEventLog applies the min-level filter,
+  // dedupe, per-push cap, and per-asset hourly rate cap.
+  const cfg = await getAgentEventLogConfig();
+  if (!cfg.enabled) return 0;
+  const hostname =
+    (await prisma.asset.findUnique({ where: { id: assetId }, select: { hostname: true } }))?.hostname ?? null;
+  const result = await ingestOsEventLog(
+    assetId,
+    hostname,
+    samples.map((s) => ({
+      timestamp: s.timestamp ?? null,
+      channel:   s.channel,
+      provider:  s.provider ?? null,
+      eventId:   s.eventId ?? null,
+      level:     s.level,
+      message:   s.message,
+      count:     s.count ?? null,
+    })),
+    cfg,
+  );
+  if (sampleLog) {
+    logger.info({ assetId, accepted: result.accepted, suppressed: result.suppressed }, "agent eventLog ingested");
+  }
+  return result.accepted;
+}
+
+async function ingestProcessInventory(assetId: string, samples: StreamSamples<"processInventory">): Promise<number> {
+  // Current-state inventory: full-replace the asset's process rows. The
+  // agent aggregates by name; serviceUnit/controllable resolution lands in
+  // Phase 4 (the agent doesn't report it yet, so controllable stays false).
+  await persistAssetProcesses(
+    assetId,
+    samples.map((s) => ({
+      name:          s.name,
+      instanceCount: s.instanceCount ?? 1,
+      cpuPct:        s.cpuPct ?? null,
+      memRssBytes:   s.memRssBytes != null ? BigInt(Math.round(s.memRssBytes)) : null,
+      exePath:       s.exePath ?? null,
+      username:      s.username ?? null,
+      startedAt:     s.startedAt ? new Date(s.startedAt) : null,
+      serviceUnit:   s.serviceUnit ?? null,
+      controllable:  Boolean(s.serviceUnit),
+    })),
+  );
+  return samples.length;
+}
+
+async function ingestProcessTelemetry(assetId: string, samples: StreamSamples<"processTelemetry">, now: Date): Promise<number> {
+  // Per-pinned-program CPU/RAM time-series. All rows cadence="fast" (only
+  // pinned programs are sampled). Bumps lastSystemInfoAt like other
+  // system-info-class streams so freshness reflects.
+  const rows = samples.map((s) => ({
+    assetId,
+    timestamp:     s.timestamp ? new Date(s.timestamp) : now,
+    cadence:       "fast" as const,
+    name:          s.name,
+    cpuPct:        s.cpuPct ?? null,
+    memRssBytes:   s.memRssBytes != null ? BigInt(Math.round(s.memRssBytes)) : null,
+    instanceCount: s.instanceCount ?? null,
+  }));
+  enqueueProcessSamples(rows);
+  return rows.length;
+}
+
+async function ingestProcessLog(assetId: string, samples: StreamSamples<"processLog">, now: Date): Promise<number> {
+  const rows = samples.map((s) => ({
+    assetId,
+    timestamp: s.timestamp ? new Date(s.timestamp) : now,
+    name:      s.name,
+    level:     s.level ?? null,
+    message:   s.message,
+    source:    s.source ?? null,
+  }));
+  enqueueProcessLogSamples(rows);
+  return rows.length;
+}
+
+async function ingestProcessConnections(assetId: string, samples: StreamSamples<"processConnections">): Promise<number> {
+  // Application Map socket facts. Intersect pushed names with the CURRENT
+  // mapped set — a guard against agents running on a stale config (the
+  // agent filters on-host; this is the server-side backstop, same posture
+  // as the storage arm's pinned lookup).
+  const mapRow = await prisma.asset.findUnique({
+    where: { id: assetId },
+    select: { mappedProcesses: true, mappedServices: true },
+  });
+  const mappedNames = new Set(mapRow?.mappedProcesses ?? []);
+  const mappedUnits = new Set(mapRow?.mappedServices ?? []);
+  const rows = samples
+    // Keep a row if its program is mapped by name OR its unit is mapped
+    // (Phase 3) — the two pin dimensions are independent.
+    .filter((s) => mappedNames.has(s.name) || (s.unit != null && mappedUnits.has(s.unit)))
+    .map((s) => ({
+      processName: s.name,
+      kind:        s.kind,
+      proto:       s.proto,
+      localAddr:   s.localAddr ?? null,
+      localPort:   s.localPort ?? null,
+      remoteIp:    s.remoteIp ?? null,
+      remotePort:  s.remotePort ?? null,
+      unit:        s.unit ?? null,
+    }));
+  await persistProcessConnections(assetId, rows);
+  return rows.length;
+}
+
+async function ingestServiceInventory(assetId: string, samples: StreamSamples<"serviceInventory">): Promise<number> {
+  // Current-state inventory: full-replace the asset's service rows. The
+  // server derives `controllable` from platform + load state.
+  await persistAssetServices(
+    assetId,
+    samples.map((s) => ({
+      unit:         s.unit,
+      platform:     s.platform,
+      displayName:  s.displayName ?? null,
+      loadState:    s.loadState ?? null,
+      activeState:  s.activeState ?? null,
+      subState:     s.subState ?? null,
+      enabledState: s.enabledState ?? null,
+      mainPid:      s.mainPid ?? null,
+      mainProcess:  s.mainProcess ?? null,
+      memBytes:     s.memBytes != null ? BigInt(Math.round(s.memBytes)) : null,
+    })),
+  );
+  return samples.length;
+}
+
+async function ingestServiceLog(assetId: string, samples: StreamSamples<"serviceLog">, now: Date): Promise<number> {
+  const rows = samples.map((s) => ({
+    assetId,
+    timestamp: s.timestamp ? new Date(s.timestamp) : now,
+    unit:      s.unit,
+    level:     s.level ?? null,
+    message:   s.message,
+    source:    s.source ?? null,
+  }));
+  enqueueServiceLogSamples(rows);
+  return rows.length;
+}
+
+async function ingestStorage(assetId: string, samples: StreamSamples<"storage">, now: Date): Promise<number> {
+  const pinnedStorage = new Set(
+    (await prisma.asset.findUnique({ where: { id: assetId }, select: { monitoredStorage: true } }))?.monitoredStorage ?? [],
+  );
+  const rows = samples.map((s) => ({
+    assetId,
+    timestamp:  s.timestamp ? new Date(s.timestamp) : now,
+    cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
+    mountPath:  s.mountPath,
+    totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
+    usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
+  }));
+  enqueueStorageSamples(rows);
+  await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: now } });
+  return rows.length;
+}
+
 agentsRouter.post("/samples", async (req, res, next) => {
   try {
     const assetId = req.managedAgent!.assetId;
     const body = SamplesBodySchema.parse(req.body);
-
-    let accepted = 0;
     const now = new Date();
 
     // Diagnostic receive-logging, opt-in via POLARIS_AGENT_SAMPLE_LOG=1 on the
@@ -355,280 +656,18 @@ agentsRouter.post("/samples", async (req, res, next) => {
       );
     }
 
-    if (body.stream === "responseTime") {
-      for (const s of body.samples) {
-        const ts = s.timestamp ? new Date(s.timestamp) : now;
-        // Enqueue the time-series sample.
-        enqueueMonitorSample({
-          assetId,
-          timestamp:      ts,
-          success:        s.success,
-          responseTimeMs: s.success ? (s.responseTimeMs ?? 0) : null,
-          error:          s.success ? null : (s.error ?? "Agent reported failure"),
-        });
-        // Drive the state machine + Asset row fields. opts.fromAgent
-        // bypasses the agent-polling guard in recordProbeResult.
-        await recordProbeResult(
-          assetId,
-          s.success
-            ? { success: true,  responseTimeMs: s.responseTimeMs ?? 0, uptimeSec: s.uptimeSec ?? undefined }
-            : { success: false, responseTimeMs: 0, error: s.error ?? "Agent reported failure", uptimeSec: s.uptimeSec ?? undefined },
-          null,
-          { fromAgent: true },
-        );
-        accepted++;
-      }
-    } else if (body.stream === "telemetry") {
-      for (const s of body.samples) {
-        const ts = s.timestamp ? new Date(s.timestamp) : now;
-        enqueueTelemetrySample({
-          assetId,
-          timestamp:     ts,
-          cpuPct:        s.cpuPct ?? null,
-          memPct:        s.memPct ?? null,
-          memUsedBytes:  s.memUsedBytes  != null ? BigInt(Math.round(s.memUsedBytes))  : null,
-          memTotalBytes: s.memTotalBytes != null ? BigInt(Math.round(s.memTotalBytes)) : null,
-          sessionCount:  null, // FortiGate-only metric; agents don't report it
-        });
-        if (s.temperatures && s.temperatures.length > 0) {
-          // The Go agent still posts `temperatures` ({sensorName, celsius}).
-          // Map them forward into the unified hardware-sensor stream as the
-          // temperature class so existing agents keep working without a
-          // binary bump; a richer agent-side sensor payload can land later.
-          enqueueHardwareSensorSamples(
-            s.temperatures.map((t) => ({
-              assetId,
-              timestamp:   ts,
-              sensorName:  t.sensorName,
-              sensorClass: "temperature",
-              value:       t.celsius,
-              unit:        "°C",
-              alarmStatus: null,
-            })),
-          );
-        }
-        accepted++;
-      }
-      // Bump lastTelemetryAt so the System tab reflects freshness.
-      await prisma.asset.update({ where: { id: assetId }, data: { lastTelemetryAt: now } });
-      if (sampleLog) {
-        logger.info(
-          { assetId, enqueued: accepted },
-          "agent telemetry samples enqueued to write buffer",
-        );
-      }
-    } else if (body.stream === "interfaces") {
-      // Selection-aware cadence: the agent reports the host's full NIC table,
-      // so stamp pinned interfaces "fast" (full retention + rollup) and the
-      // rest "slow" (24h). See selection-aware retention.
-      const pinnedIfaces = new Set(
-        (await prisma.asset.findUnique({ where: { id: assetId }, select: { monitoredInterfaces: true } }))?.monitoredInterfaces ?? [],
-      );
-      // Anchor every row AND lastSystemInfoAt to ONE shared timestamp. The agent
-      // sends its full NIC table in a single push (all rows share one collection
-      // time), and the /system-info GET endpoint loads interfaces with an exact
-      // equality match `timestamp = lastSystemInfoAt`. If the rows carry the
-      // agent's clock while lastSystemInfoAt carries the server's `now`, the two
-      // never match and the System tab interface table renders empty for every
-      // agent-monitored asset (platform-independent). Use the agent's reported
-      // timestamp when present (more accurate for the time-series/rollups),
-      // falling back to server `now`, and pin lastSystemInfoAt to the same value.
-      const sampleTs = body.samples[0]?.timestamp ? new Date(body.samples[0].timestamp) : now;
-      const rows = body.samples.map((s) => ({
-        assetId,
-        timestamp:   sampleTs,
-        cadence:     pinnedIfaces.has(s.ifName) ? ("fast" as const) : ("slow" as const),
-        ifName:      s.ifName,
-        adminStatus: s.adminStatus ?? null,
-        operStatus:  s.operStatus ?? null,
-        speedBps:    s.speedBps != null ? BigInt(Math.round(s.speedBps)) : null,
-        ipAddress:   s.ipAddress ?? null,
-        macAddress:  s.macAddress ?? null,
-        inOctets:    s.inOctets  != null ? BigInt(Math.round(s.inOctets))  : null,
-        outOctets:   s.outOctets != null ? BigInt(Math.round(s.outOctets)) : null,
-        inErrors:    s.inErrors  != null ? BigInt(Math.round(s.inErrors))  : null,
-        outErrors:   s.outErrors != null ? BigInt(Math.round(s.outErrors)) : null,
-        ifType:      s.ifType ?? null,
-        ifParent:    s.ifParent ?? null,
-        vlanId:      s.vlanId ?? null,
-        // The Polaris Agent doesn't observe switch-port VLAN config — it
-        // reads its own host's NIC table. Always null/empty from this source.
-        nativeVlan:  null,
-        taggedVlans: [] as number[],
-        trunksAllVlans: false,
-        alias:       s.alias ?? null,
-        description: s.description ?? null,
-        // The Polaris Agent doesn't report L3 addressing mode (no FortiOS CMDB
-        // equivalent on a generic host); leave null.
-        addressingMode: null,
-      }));
-      enqueueInterfaceSamples(rows);
-      accepted = rows.length;
-      // Fold EVERY pushed interface MAC (monitored or not) into the asset's
-      // Associated MACs list (AssetMacAddress) — the same range-coalescing
-      // fold recordSystemInfoResult does for the SNMP/REST scrape. For
-      // agent-monitored hosts this push IS the system-info source. Contiguous
-      // MACs collapse to [mac, macEnd] range rows; the replace is scoped to
-      // source="monitor-interface" so rows owned by discovery/manual writers
-      // (including the enroll path's primaryMac reconcile) are never touched.
-      const ifaceMacs = body.samples
-        .map((s) => s.macAddress)
-        .filter((m): m is string => !!m);
-      if (ifaceMacs.length > 0) {
-        await reconcileInterfaceMacs(assetId, ifaceMacs, sampleTs);
-      }
-      await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: sampleTs } });
-    } else if (body.stream === "eventLog") {
-      // OS event-log entries are curated into the audit Event table (not a
-      // sample table) so they appear in the asset Events tab + ride syslog/SFTP
-      // archival. Gated by the global agentEventLog master switch — if an
-      // operator turned it off, a stale agent's push is dropped rather than
-      // flooding the audit log. ingestOsEventLog applies the min-level filter,
-      // dedupe, per-push cap, and per-asset hourly rate cap.
-      const cfg = await getAgentEventLogConfig();
-      if (!cfg.enabled) {
-        accepted = 0;
-      } else {
-        const hostname =
-          (await prisma.asset.findUnique({ where: { id: assetId }, select: { hostname: true } }))?.hostname ?? null;
-        const result = await ingestOsEventLog(
-          assetId,
-          hostname,
-          body.samples.map((s) => ({
-            timestamp: s.timestamp ?? null,
-            channel:   s.channel,
-            provider:  s.provider ?? null,
-            eventId:   s.eventId ?? null,
-            level:     s.level,
-            message:   s.message,
-            count:     s.count ?? null,
-          })),
-          cfg,
-        );
-        accepted = result.accepted;
-        if (sampleLog) {
-          logger.info({ assetId, accepted: result.accepted, suppressed: result.suppressed }, "agent eventLog ingested");
-        }
-      }
-    } else if (body.stream === "processInventory") {
-      // Current-state inventory: full-replace the asset's process rows. The
-      // agent aggregates by name; serviceUnit/controllable resolution lands in
-      // Phase 4 (the agent doesn't report it yet, so controllable stays false).
-      await persistAssetProcesses(
-        assetId,
-        body.samples.map((s) => ({
-          name:          s.name,
-          instanceCount: s.instanceCount ?? 1,
-          cpuPct:        s.cpuPct ?? null,
-          memRssBytes:   s.memRssBytes != null ? BigInt(Math.round(s.memRssBytes)) : null,
-          exePath:       s.exePath ?? null,
-          username:      s.username ?? null,
-          startedAt:     s.startedAt ? new Date(s.startedAt) : null,
-          serviceUnit:   s.serviceUnit ?? null,
-          controllable:  Boolean(s.serviceUnit),
-        })),
-      );
-      accepted = body.samples.length;
-    } else if (body.stream === "processTelemetry") {
-      // Per-pinned-program CPU/RAM time-series. All rows cadence="fast" (only
-      // pinned programs are sampled). Bumps lastSystemInfoAt like other
-      // system-info-class streams so freshness reflects.
-      const rows = body.samples.map((s) => ({
-        assetId,
-        timestamp:     s.timestamp ? new Date(s.timestamp) : now,
-        cadence:       "fast" as const,
-        name:          s.name,
-        cpuPct:        s.cpuPct ?? null,
-        memRssBytes:   s.memRssBytes != null ? BigInt(Math.round(s.memRssBytes)) : null,
-        instanceCount: s.instanceCount ?? null,
-      }));
-      enqueueProcessSamples(rows);
-      accepted = rows.length;
-    } else if (body.stream === "processLog") {
-      const rows = body.samples.map((s) => ({
-        assetId,
-        timestamp: s.timestamp ? new Date(s.timestamp) : now,
-        name:      s.name,
-        level:     s.level ?? null,
-        message:   s.message,
-        source:    s.source ?? null,
-      }));
-      enqueueProcessLogSamples(rows);
-      accepted = rows.length;
-    } else if (body.stream === "processConnections") {
-      // Application Map socket facts. Intersect pushed names with the CURRENT
-      // mapped set — a guard against agents running on a stale config (the
-      // agent filters on-host; this is the server-side backstop, same posture
-      // as the storage arm's pinned lookup).
-      const mapRow = await prisma.asset.findUnique({
-        where: { id: assetId },
-        select: { mappedProcesses: true, mappedServices: true },
-      });
-      const mappedNames = new Set(mapRow?.mappedProcesses ?? []);
-      const mappedUnits = new Set(mapRow?.mappedServices ?? []);
-      const rows = body.samples
-        // Keep a row if its program is mapped by name OR its unit is mapped
-        // (Phase 3) — the two pin dimensions are independent.
-        .filter((s) => mappedNames.has(s.name) || (s.unit != null && mappedUnits.has(s.unit)))
-        .map((s) => ({
-          processName: s.name,
-          kind:        s.kind,
-          proto:       s.proto,
-          localAddr:   s.localAddr ?? null,
-          localPort:   s.localPort ?? null,
-          remoteIp:    s.remoteIp ?? null,
-          remotePort:  s.remotePort ?? null,
-          unit:        s.unit ?? null,
-        }));
-      await persistProcessConnections(assetId, rows);
-      accepted = rows.length;
-    } else if (body.stream === "serviceInventory") {
-      // Current-state inventory: full-replace the asset's service rows. The
-      // server derives `controllable` from platform + load state.
-      await persistAssetServices(
-        assetId,
-        body.samples.map((s) => ({
-          unit:         s.unit,
-          platform:     s.platform,
-          displayName:  s.displayName ?? null,
-          loadState:    s.loadState ?? null,
-          activeState:  s.activeState ?? null,
-          subState:     s.subState ?? null,
-          enabledState: s.enabledState ?? null,
-          mainPid:      s.mainPid ?? null,
-          mainProcess:  s.mainProcess ?? null,
-          memBytes:     s.memBytes != null ? BigInt(Math.round(s.memBytes)) : null,
-        })),
-      );
-      accepted = body.samples.length;
-    } else if (body.stream === "serviceLog") {
-      const rows = body.samples.map((s) => ({
-        assetId,
-        timestamp: s.timestamp ? new Date(s.timestamp) : now,
-        unit:      s.unit,
-        level:     s.level ?? null,
-        message:   s.message,
-        source:    s.source ?? null,
-      }));
-      enqueueServiceLogSamples(rows);
-      accepted = rows.length;
-    } else {
-      // storage
-      const pinnedStorage = new Set(
-        (await prisma.asset.findUnique({ where: { id: assetId }, select: { monitoredStorage: true } }))?.monitoredStorage ?? [],
-      );
-      const rows = body.samples.map((s) => ({
-        assetId,
-        timestamp:  s.timestamp ? new Date(s.timestamp) : now,
-        cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
-        mountPath:  s.mountPath,
-        totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
-        usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
-      }));
-      enqueueStorageSamples(rows);
-      accepted = rows.length;
-      await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: now } });
-    }
+    let accepted = 0;
+    if (body.stream === "responseTime")            accepted = await ingestResponseTime(assetId, body.samples, now);
+    else if (body.stream === "telemetry")          accepted = await ingestTelemetry(assetId, body.samples, now, sampleLog);
+    else if (body.stream === "interfaces")         accepted = await ingestInterfaces(assetId, body.samples, now);
+    else if (body.stream === "eventLog")           accepted = await ingestEventLog(assetId, body.samples, sampleLog);
+    else if (body.stream === "processInventory")   accepted = await ingestProcessInventory(assetId, body.samples);
+    else if (body.stream === "processTelemetry")   accepted = await ingestProcessTelemetry(assetId, body.samples, now);
+    else if (body.stream === "processLog")         accepted = await ingestProcessLog(assetId, body.samples, now);
+    else if (body.stream === "processConnections") accepted = await ingestProcessConnections(assetId, body.samples);
+    else if (body.stream === "serviceInventory")   accepted = await ingestServiceInventory(assetId, body.samples);
+    else if (body.stream === "serviceLog")         accepted = await ingestServiceLog(assetId, body.samples, now);
+    else                                           accepted = await ingestStorage(assetId, body.samples, now);
 
     res.json({ accepted, rejected: 0 });
   } catch (err) { next(err); }
