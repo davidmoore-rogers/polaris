@@ -175,6 +175,8 @@ function _looksLikeDeviceId(tag) {
   // Build a full rule-input body from a loaded rule record, applying overrides.
   // The PUT /notification-rules/:id route validates the complete ruleInputSchema,
   // so the inline enable/disable toggle must resend every field.
+  // Exposed on window for the unit-test harness (automationsRuleToInput.test.ts)
+  // — this function silently dropping a v2 field is a data-loss bug class.
   function _ruleToInput(r, overrides) {
     // Rule-shape v2: resend reset + actions (the server's list endpoint always
     // returns them) so this full-record PUT can't strip the v2 fields. The
@@ -194,8 +196,11 @@ function _looksLikeDeviceId(tag) {
       channels: r.channels || ["in_app"],
       emailComposition: r.emailComposition || null,
       escalation: r.escalation || null,
+      severityBands: Array.isArray(r.severityBands) && r.severityBands.length ? r.severityBands : null,
+      bandNotify: r.bandNotify || null,
     }, overrides || {});
   }
+  window._ruleToInput = _ruleToInput;
 
   function scopeSummary(scope) {
     if (!scope || typeof scope !== "object") return "-";
