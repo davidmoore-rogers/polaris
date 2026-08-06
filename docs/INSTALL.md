@@ -876,6 +876,19 @@ Use the official Timescale image instead of vanilla Postgres in your compose fil
 services:
   postgres:
     image: timescale/timescaledb:latest-pg15   # was: postgres:15
+    # REQUIRED when swapping the image on an EXISTING volume. The TimescaleDB
+    # entrypoint only writes shared_preload_libraries into postgresql.conf
+    # during initdb, and initdb does not re-run on an already-initialized data
+    # directory. Without this the container starts and CREATE EXTENSION appears
+    # to succeed, then everything touching a hypertable fails with
+    # `could not access file "$libdir/timescaledb"`. As a server flag it applies
+    # to fresh and existing volumes alike.
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - timescaledb.telemetry_level=off
     volumes:
       - polaris-pgdata:/var/lib/postgresql/data
     environment:
@@ -884,11 +897,20 @@ services:
       POSTGRES_DB: polaris
 ```
 
-Existing data on the named volume is preserved across the image swap. After bringing the new container up, enable the extension once:
+Match the PostgreSQL major version your volume already holds (`latest-pg15` for a PG 15 data directory). Existing data is preserved across the image swap. After bringing the new container up, confirm the library actually loaded, then enable the extension once:
 
 ```bash
 docker exec -it <postgres-container> psql -U polaris -d polaris \
+  -c "SHOW shared_preload_libraries;"            # must list timescaledb
+docker exec -it <postgres-container> psql -U polaris -d polaris \
   -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+```
+
+Polaris converts its own sample and rollup tables to hypertables on the next boot (`create_hypertable(..., migrate_data => TRUE)`, so existing rows carry over) and attaches the compression policies. Verify:
+
+```bash
+docker exec -it <postgres-container> psql -U polaris -d polaris \
+  -c "SELECT count(*) FROM timescaledb_information.hypertables;"
 ```
 
 ### Windows Server
@@ -922,6 +944,75 @@ After install, Polaris monitors disk space on every filesystem it (and PostgreSQ
 - **Server Settings → Maintenance**: live volume bars + per-reason advisory cards. Severity tiering is **watch** at 20–30% free, **amber** at 10–20%, **red** below 10%.
 
 The watch tier is the new "you have weeks, not minutes" warning. Don't ignore it.
+
+---
+
+## Backups — set this up on day one
+
+Polaris can take a full logical backup of its own database, but **nothing takes one for you until you say so.** Decide which of these two you are doing before you go live:
+
+**Option A — an existing enterprise backup product already covers this PostgreSQL instance.** Nothing to configure in Polaris. Confirm with whoever owns that product that this database is in scope, and read the *Restoring* section below anyway: a Polaris database with TimescaleDB installed needs a specific restore procedure, and a generic `psql < dump.sql` will not do it correctly.
+
+**Option B — let Polaris schedule its own backups.** Open **Server Settings → Maintenance → Scheduled Backups**:
+
+| Field | What it does |
+| --- | --- |
+| **Enable scheduled backups** | Off by default. Nothing runs until you tick this. |
+| **Every (hours)** | 1 to 168. The first backup runs immediately when you enable it, not one interval later. |
+| **At UTC hour** | Optional. Pins runs to a maintenance window. If the host is down through that hour, the backup runs at the next opportunity rather than skipping the day. |
+| **Keep last** | How many *scheduled* backups to retain on disk. Manual and pre-update backups are never pruned by this. |
+| **Encryption passphrase** | Optional but recommended — see the warning below. Same strength floor as a manual backup (12+ characters, 4+ distinct). |
+| **Off-host copy directory** | An absolute path to a mounted share. Each finished backup is copied there. **Set this.** Without it, every backup lives on the same host as the database it protects, and one host loss takes both. |
+
+Failures are visible three ways: a red `lastError` on the card, a `server.backup.scheduled_failed` Event (which rides your syslog/SFTP archival), and a `journalctl -t polaris` line. A failed off-host copy is reported separately as a warning and does not fail the backup itself.
+
+### Encrypt your backups
+
+A backup is a complete copy of the database. If `POLARIS_SECRET_KEY` is set (see *Secrets at rest* below), device and integration credentials inside it are already encrypted — but everything else, including password hashes and your whole IP-space inventory, is not. Use a passphrase, and store it somewhere other than the Polaris host.
+
+### Restoring
+
+Restore through **Server Settings → Maintenance → Restore** rather than by hand. On a TimescaleDB install, Polaris wraps the restore in the procedure Timescale requires:
+
+```
+SELECT timescaledb_pre_restore();   -- separate session
+<the dump>
+SELECT timescaledb_post_restore();  -- separate session, always runs
+```
+
+Skipping that pair restores hypertable metadata in the wrong order, and the restore either aborts or leaves you with hypertables whose chunks are invisible. If you must restore outside the app, run those two statements yourself, in their own `psql` invocations, on either side of the dump.
+
+Two more things worth knowing before you need them:
+
+- **Version match.** Restore a backup into the same Polaris version that produced it where possible. The Restore card reads the version out of the filename and warns on a mismatch; a schema that has moved on since the dump can fail the restore.
+- **Practise it.** Restore a backup into a scratch database at least once, before you are doing it under pressure. `tests/integration/backupRestore.test.ts` does exactly this round trip and runs anywhere `pg_dump` and `psql` are on `PATH`.
+
+---
+
+## Secrets at rest
+
+Polaris stores the credentials it uses to reach your infrastructure in its own database: SNMP communities, WinRM and SSH passwords and private keys, FortiManager and FortiGate API tokens, the Entra client secret, the AD bind password, vCenter credentials, and delivery-channel secrets (SMTP password, M365 client secret, Slack/Teams webhook URLs, the Web Push private key).
+
+`POLARIS_SECRET_KEY` in `/opt/polaris/.env` encrypts those values (AES-256-GCM, per-value). The setup wizard and every `deploy/setup-*` script generate one automatically, so a fresh install is already covered. Verify with:
+
+```bash
+grep -c '^POLARIS_SECRET_KEY=' /opt/polaris/.env    # expect 1
+```
+
+**If it is missing** — an install that predates this feature, or a hand-written `.env` — those values are stored as **plaintext**, which means plaintext in every `pg_dump`, volume snapshot and read replica. Server Settings → Maintenance shows a watch-severity `secrets_key_unset` advisory while that is the case. To fix it:
+
+```bash
+printf '\nPOLARIS_SECRET_KEY=%s\n' "$(openssl rand -hex 32)" >> /opt/polaris/.env
+sudo systemctl restart polaris.target
+```
+
+On the next boot Polaris encrypts the existing rows in place (the `backfillSecretEncryption` job) and writes one `server.secrets.encrypted_at_rest` Event with the counts. No downtime beyond the restart, and nothing needs re-entering.
+
+> **Back the key up somewhere other than this host.** Sealed secrets cannot be recovered without it. If you restore a Polaris backup onto a host with a *different* key, the app works and your users can still log in — but every device credential, integration secret and delivery-channel secret has to be re-entered, because Polaris cannot decrypt them. Keep the key with your other break-glass material, alongside the backup passphrase.
+>
+> In a managed deployment, inject the key from Azure Key Vault the same way you deliver `SESSION_SECRET`, rather than leaving it in a file on the host.
+
+Rotating the key is not a supported in-place operation: there is no re-encrypt-with-new-key pass, so a rotation means re-entering the secrets. Treat it as a one-time value.
 
 ---
 
@@ -1262,5 +1353,5 @@ PgBouncer isn't officially packaged for Windows. If you've crossed the threshold
 ### After enabling PgBouncer
 
 - **`max_connections`** on PostgreSQL can drop materially. PgBouncer's `default_pool_size` × pool count is what hits Postgres now, not Polaris's pool. The Capacity Advisor's `max_connections` recommendation becomes an upper bound rather than a strict requirement; size PG to comfortably exceed `(default_pool_size + reserve_pool_size + admin/autovacuum)` × number of DBs.
-- **`pg_dump` backups** taken from Server Settings → Maintenance → Backup automatically use `POLARIS_DB_DIRECT_URL`. If you script backups outside the app, target port 5432 directly — not 6432.
+- **`pg_dump` backups** (manual, scheduled, and pre-update) automatically use `POLARIS_DB_DIRECT_URL`. The connection is passed to `pg_dump`/`psql` through libpq `PG*` environment variables, never on the command line, so the database password does not appear in `ps` output. If you script backups outside the app, target port 5432 directly — not 6432.
 - **Prisma migrations** (when you upgrade Polaris and the in-app updater runs `prisma migrate`) need the direct URL too. CLI migrations require `DATABASE_URL=<direct URL> npx prisma migrate deploy`.

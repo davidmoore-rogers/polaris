@@ -24,8 +24,22 @@ Two services under the compose project name `polaris` (containers become
 
 ### `postgres`
 
-- `postgres:15-alpine`, data on the `pgdata` named volume (survives
-  `compose down`; only `compose down -v` wipes it).
+- `timescale/timescaledb:latest-pg15` (PG 15.x on the same Alpine base the
+  previous `postgres:15-alpine` used), data on the `pgdata` named volume
+  (survives `compose down`; only `compose down -v` wipes it).
+- **TimescaleDB is installed in dev on purpose**, so dev matches what every
+  documented production install runs. Without it the 21 sample + rollup tables
+  stay plain tables locally, and hypertable behavior — compression policies,
+  `drop_chunks` pruning, and the `timescaledb_pre_restore()` /
+  `timescaledb_post_restore()` gates in `backupService` — is only ever exercised
+  in production. `shared_preload_libraries=timescaledb` is set as a server flag
+  in the compose `command:`, NOT left to the image: the TimescaleDB entrypoint
+  only writes it into `postgresql.conf` during initdb, which does not re-run on
+  an already-initialized volume, so an existing dev database would otherwise come
+  up with the extension installed but unloadable. `CREATE EXTENSION timescaledb`
+  runs once per database; Polaris converts the sample tables to hypertables
+  itself at boot (`timescaleService.convertToHypertables`, `migrate_data => TRUE`,
+  so existing rows carry over).
 - Credentials `polaris` / `polaris`, database `polaris` (dev-only values).
 - Published on `127.0.0.1:5432` so host tools (psql, DBeaver, `npm run dev`,
   Prisma Studio) can reach it. Inside the compose network the app reaches it
@@ -141,6 +155,28 @@ instead.
 To run any of these inside the containerized app:
 `podman compose -f compose.dev.yml run --rm app <command>` (or `exec` against
 the running `app` service).
+
+### Running the full test suite
+
+Use `--no-file-parallelism`; the default parallel mode fails spuriously on the
+DB-touching suites.
+
+The integration suites need two things the Windows host does not have: the
+compose network name `postgres` (the host reaches the DB at `127.0.0.1:5432`
+instead) and `pg_dump` / `psql` on `PATH`. They self-skip when either is absent,
+so a host-side `npm test` reports ~31 files skipped and still passes. To run
+**everything**, run it inside the app container, which has both:
+
+```bash
+podman exec polaris-app-1 sh -c \
+  'cd /app && DATABASE_URL="postgresql://polaris:polaris@postgres:5432/polaris" \
+   npx vitest run --no-file-parallelism'
+```
+
+That is the only way to exercise `tests/integration/backupRestore.test.ts`,
+which additionally requires the timescaledb extension to cover the
+`pre_restore` / `post_restore` gates. A green host-side run is NOT coverage of
+that path — the suite logs which branch it took.
 
 ### Resetting the dev database
 

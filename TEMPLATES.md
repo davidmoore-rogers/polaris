@@ -36,6 +36,8 @@ Per-pattern sections:
 - [Cross-asset graph derivation + persisted DAG](#cross-asset-graph-derivation--persisted-dag)
 - [Setting-backed admin CRUD with periodic + on-demand reconciler](#setting-backed-admin-crud-with-periodic--on-demand-reconciler)
 - [Discovery-driven managed tag namespace](#discovery-driven-managed-tag-namespace)
+- [Serialized check-then-insert (per-scope advisory lock + DB backstop)](#serialized-check-then-insert-per-scope-advisory-lock--db-backstop)
+- [Encrypt-at-rest for a JSON config column](#encrypt-at-rest-for-a-json-config-column)
 - [Prometheus metric instrumentation](#prometheus-metric-instrumentation)
 - [High-volume append-only time-series writes (batch-flush buffer)](#high-volume-append-only-time-series-writes-batch-flush-buffer)
 - [Tiered time-series rollups (hourly + daily aggregates over detail samples)](#tiered-time-series-rollups-hourly--daily-aggregates-over-detail-samples)
@@ -419,6 +421,53 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - Service-level uniqueness validation must run before persistence. Tests cover the create-create / update-rename collision.
 - If you have a reconciler: provide three entry points — `applyOne(record)` (used inline by create / polygon-only update), `applyRename(record, previousName)` (rename branch), `applyDelete(record)` (delete branch), and `reconcileAll()` (periodic + discovery hook). Periodic job uses the additive `reconcileAll()`; never call the rename/delete helpers from there (those are CRUD-only).
 - Add a TOUCHES.md `services/<feature>.ts` section for the service AND a cross-cutting section if your reconciler writes to a shared namespace (e.g. asset tags). The index keeps the additive vs authoritative writer split visible.
+
+---
+
+## Serialized check-then-insert (per-scope advisory lock + DB backstop)
+
+**What it is:** An invariant that can only be enforced by reading existing rows, deciding, then inserting — "no overlapping subnets in this block", "no second active X for this Y". A plain `findMany` + decide + `create` is a race: two concurrent requests both read the pre-insert state, both pass, both insert. Wrapping it in a transaction gives ATOMICITY but not ISOLATION — at Postgres READ COMMITTED (the default, and never overridden in this codebase) an in-transaction re-read still cannot see another transaction's uncommitted rows and takes no locks.
+
+**Canonical implementation:** `lockBlockForSubnetWrites` + `createSubnetRowChecked` in [src/services/subnetService.ts](src/services/subnetService.ts), with the DB backstop in [prisma/migrations/20260806000000_subnet_block_cidr_unique](prisma/migrations/20260806000000_subnet_block_cidr_unique/migration.sql) and the self-heal in [src/jobs/enforceSubnetUniqueIndex.ts](src/jobs/enforceSubnetUniqueIndex.ts). Callers: `createSubnet`, `allocateNextSubnet`, `bulkAllocate`, and the DHCP-discovery create in `discoveryEngine`.
+
+**Key conventions:**
+- **One lock primitive, one guarded-insert seam.** Export `lock<Scope>ForWrites(tx, scopeId)` for batch writers that already own a transaction and insert many rows under one lock, and `create<Row>Checked(data)` for single-row writers (its own transaction: lock, re-read, re-decide, insert). Every writer must go through one of them — a single bare `prisma.x.create` re-opens the race, so the invariant is only as strong as its least careful caller. Discovery counts as a caller: it runs in its own process, concurrently with the web UI.
+- **Lock, THEN read.** The advisory lock must be the FIRST statement inside the transaction, before the read whose result the decision depends on. A lock taken after the read is decorative. Assert the ordering in a test (`prisma.$executeRaw.mock.invocationCallOrder[0] < prisma.x.findMany.mock.invocationCallOrder[0]`) — it is the kind of thing a later refactor silently reorders.
+- **`pg_advisory_xact_lock(classid, objid)`, not the session form.** The xact form releases on commit OR rollback with no unlock bookkeeping to leak. `classid` partitions namespaces so two unrelated lock users can never collide on a coincidentally-equal objid — allocate a new one per feature and comment it next to the existing values (`0x504c5253` "PLRS" = retention prune in `monitoringService.ts`, `0x504c5254` "PLRT" = subnet writes). `objid = hashtext(scopeId)`; a hash collision only makes two unrelated scopes briefly serialize, which is harmless.
+- **Lock the narrowest scope that makes the invariant safe.** Per-block, not global — unrelated blocks stay fully parallel.
+- **Add a DB constraint as the backstop, even a partial one.** A UNIQUE index catches the exact-duplicate case (which is the usual race outcome) even from a future path that forgets the lock. Where the full invariant is not expressible as a constraint, say so in the migration and the service header rather than leaving the reader to wonder: stock PostgreSQL has no GiST-indexable `&&` for `inet`/`cidr`, so a general overlap exclusion constraint does not build without a third-party extension.
+- **A constraint that existing data violates must not fail the migration.** Detect the violation, `RAISE WARNING` naming the offending rows, skip creation, and ship a NOT-marker-guarded startup job that retries every boot so the constraint appears on its own once an operator cleans up. Failing the migration blocks the whole upgrade over historical data.
+- **Translate the constraint violation into the service's normal error.** Catch `err.code === "P2002"` at the seam and rethrow the same `AppError(409, …)` the in-transaction check raises, so callers see one error shape.
+- **A "give me any free X" caller should RETRY, not 409.** `allocateNextSubnet` picks a CIDR outside the lock, so a concurrent writer can take it; a 409 would be the wrong answer to "any free /24". Re-pick against committed state and try again (bounded attempts), and only retry the overlap/duplicate 409 — a genuine "scope full" 409 returns immediately.
+
+**When adding a new instance:**
+- Grep for every writer of the table BEFORE you start; the one you miss is the one that breaks the invariant.
+- Allocate a new advisory-lock `classid` and comment it beside the existing ones.
+- Unit-test with a mocked `$transaction` that runs its callback against the same mock, so the lock-then-read-then-insert ordering is observable.
+- Note the invariant in CLAUDE.md's Business Rules list, pointing at the seam functions by name so the next author knows not to call `create` directly.
+
+---
+
+## Encrypt-at-rest for a JSON config column
+
+**What it is:** Secrets stored inside a JSON column (device credentials, integration API keys, outbound-channel secrets) that must not be readable from a `pg_dump`, a volume snapshot, or a psql session. Masking on the API read path is a UI courtesy, not encryption.
+
+**Canonical implementation:** [src/utils/secretBox.ts](src/utils/secretBox.ts) (seal/open) + [src/utils/configSecretFields.ts](src/utils/configSecretFields.ts) (which keys, and the walk) + the per-model `secretHooks()` registration in [src/db.ts](src/db.ts) + [src/jobs/backfillSecretEncryption.ts](src/jobs/backfillSecretEncryption.ts) (converts existing rows). Covers `Credential.config`, `Integration.config`, `NotificationChannel.config`, `Setting.value`.
+
+**Key conventions:**
+- **Enforce in the Prisma extension, not the service.** The extension is the one seam every caller passes through. Several legacy route files still read these models with inline `prisma.x.findUnique` (see the interim-state note in CLAUDE.md), and encrypting at the service layer leaves those reading ciphertext. Register hooks PER MODEL — `$allModels.$allOperations` widens every model's result type across the whole generated client, so the codebase loses Prisma's types wholesale.
+- **Seal values, not rows.** Non-secret fields in the same blob stay queryable, which matters: `monitorOverrideService` reads `integrations.config #>> '{fortigateMonitor,addAsMonitored}'` in raw SQL. Raw SQL bypasses the extension entirely — enumerate the raw readers of the column and confirm none of them touch a secret field.
+- **Field list is a NAME UNION, not per-type.** The services keep their per-type lists for MASKING; encryption deliberately does not reuse them. A per-type list that MISSES a field stores a real secret in plaintext silently; a union that includes a field which happens not to be secret for some type merely encrypts a harmless value. Over-sealing is a non-event, under-sealing is the bug.
+- **Self-describing token, so plaintext and sealed coexist.** `psec:v1:<iv>:<tag>:<ct>`. `sealValue` is idempotent (no-ops on already-sealed input) and `openValue` passes plaintext through, which is what lets a partially-backfilled install work — and what lets the backfill be safely re-runnable.
+- **Fresh IV per value.** Deterministic ciphertext would leak "these two devices share a community string" to anyone reading the dump.
+- **Key absent must mean PRE-FEATURE behavior, not breakage.** With no key, sealing is a no-op and values store as plaintext exactly as before. An in-app update that made a new env var mandatory would leave installs unable to reach their own devices. Surface the absence as a capacity watch reason plus a boot warning instead.
+- **The open path must never throw.** A wrong or missing key logs once per process and returns `""`, so a key mismatch degrades to "this credential stopped authenticating" (diagnosable, fixable by re-entering it) rather than an exception on every monitor tick.
+- **Backfill is NOT marker-guarded.** The key may be configured later than the upgrade that ships the code, so the job must retry on later boots. It reads through the UNEXTENDED client (`prismaBase`) because it has to see the RAW stored value to tell sealed from unsealed, and writes through the extended one.
+
+**When adding a new instance:**
+- Add the JSON key to `SECRET_CONFIG_KEYS` in the SAME change as the masking entry, and the model to `SECRET_BEARING_MODELS` + `secretJsonFieldFor` + the `secretHooks()` registration in db.ts. A model in the registry without a hook gets sealed by the backfill and never opened on read — the credential simply stops working.
+- Confirm no raw SQL reads that column's secret fields.
+- Document the key-loss consequence wherever the operator will look: `.env.example`, `docs/INSTALL.md`, and the capacity reason's suggestion text.
 
 ---
 

@@ -31,3 +31,14 @@ audit-reports/
 # Runtime update-progress state written by the in-app updater (survives restarts
 # so the Application Updates card can resume its progress view). Not source.
 .update-status.json
+
+# Docker-stack persistent state (POLARIS_STATE_DIR=/app/state in
+# docker-compose.yml): holds .env — which carries DATABASE_URL, SESSION_SECRET
+# and POLARIS_SECRET_KEY — plus the nginx cert/key, uploaded branding, and
+# database backups. Nothing under here is ever source, and committing it would
+# publish secrets.
+state/
+
+# Temp files the automation-script runner writes before execFile'ing them
+# (0600, unlinked after the run; a killed run can leave one behind).
+data/automation-scripts-tmp/
