@@ -1481,6 +1481,42 @@ export function globToRegExp(glob: string): RegExp {
 
 const LEVEL_RANK: Record<string, number> = { info: 0, warning: 1, error: 2 };
 
+/**
+ * Timed reset for event/change rules. The two timed sweeps walk
+ * NotificationRuleState rows, but the event tail never creates state rows —
+ * so without this pass a timed event rule's notifications stayed uncleared
+ * forever (and `timed` is the wizard DEFAULT for event triggers). One
+ * updateMany per timed event rule per tick — independent of fleet size.
+ */
+export async function runEventRuleTimedClear(rules: DbRule[], now = new Date()): Promise<number> {
+  const timedRules = rules.filter(
+    (r) =>
+      (r.trigger.type === "event" || r.trigger.type === "change") &&
+      r.reset.mode === "timed" &&
+      r.reset.afterSec != null,
+  );
+  let cleared = 0;
+  for (const rule of timedRules) {
+    const cutoff = new Date(now.getTime() - (rule.reset.afterSec as number) * 1000);
+    const res = await prisma.notification.updateMany({
+      where: { ruleId: rule.id, cleared: false, triggeredAt: { lte: cutoff } },
+      data: { cleared: true, clearedBy: "system:timed", clearedAt: now },
+    });
+    if (res.count > 0) {
+      cleared += res.count;
+      await logEvent({
+        action: "notification.auto_cleared",
+        resourceType: "notification",
+        resourceName: rule.name,
+        actor: "system:notification-engine",
+        message: `Timed reset: cleared ${res.count} alert(s) of "${rule.name}" older than ${rule.reset.afterSec}s`,
+        details: { ruleId: rule.id, count: res.count, afterSec: rule.reset.afterSec },
+      }).catch(() => {});
+    }
+  }
+  return cleared;
+}
+
 async function runEventTail(rules: DbRule[]): Promise<void> {
   const eventRules = rules.filter((r) => r.trigger.type === "event" || r.trigger.type === "change");
   if (eventRules.length === 0) return;
@@ -1495,6 +1531,29 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
     take: 1000,
   });
   if (events.length === 0) return;
+
+  // Cooldown pre-pass: the event tail has no per-(rule,asset) state rows, so
+  // cooldownSec is enforced against the recent Notification rows themselves —
+  // one query for all cooldown-bearing event rules, keyed by the same
+  // (rule, assetId-or-resourceName) identity the notifications store. The map
+  // updates in-loop so a single 1000-event batch also self-dedupes.
+  const cooldownRules = eventRules.filter((r) => r.cooldownSec && r.cooldownSec > 0);
+  const lastFired = new Map<string, number>();
+  if (cooldownRules.length > 0) {
+    const maxCooldownMs = Math.max(...cooldownRules.map((r) => (r.cooldownSec as number) * 1000));
+    const recent = await prisma.notification.findMany({
+      where: {
+        ruleId: { in: cooldownRules.map((r) => r.id) },
+        triggeredAt: { gte: new Date(Date.now() - maxCooldownMs) },
+      },
+      select: { ruleId: true, assetId: true, assetHostname: true, triggeredAt: true },
+    });
+    for (const n of recent) {
+      const key = `${n.ruleId}|${n.assetId ?? n.assetHostname ?? ""}`;
+      const t = n.triggeredAt.getTime();
+      if ((lastFired.get(key) ?? 0) < t) lastFired.set(key, t);
+    }
+  }
 
   // Precompile matchers. flatMap so non-event/change rules (shouldn't appear,
   // but the filter predicate isn't a type guard) are dropped and TS narrows.
@@ -1534,6 +1593,15 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       // suppressed behind one/an outage. (The event cursor still advances —
       // suppressed events are skipped, not deferred.)
       if (detail && isSuppressedForNotifications(detail)) continue;
+      // Cooldown: skip when this (rule, asset/resource) fired within
+      // cooldownSec — and stamp the map so later events in this batch dedupe.
+      if (c.rule.cooldownSec) {
+        const cdKey = `${c.rule.id}|${assetId ?? ev.resourceName ?? ""}`;
+        const last = lastFired.get(cdKey);
+        const evT = ev.timestamp.getTime();
+        if (last !== undefined && evT - last < c.rule.cooldownSec * 1000) continue;
+        lastFired.set(cdKey, evT);
+      }
       const tags = detail?.tags ?? [];
       // Event-path token mapping: {asset}=resourceName, {metric}=action,
       // {value}=event message; threshold/dimension are empty.
@@ -1671,6 +1739,12 @@ export async function evaluateAllNotificationRules(): Promise<void> {
     await runEventTail(rules);
   } catch (err) {
     await logEvent({ action: "notification.engine_error", actor: "system:notification-engine", level: "error", message: "Event-tail evaluation failed", details: { err: (err as Error)?.message } }).catch(() => {});
+  }
+
+  try {
+    await runEventRuleTimedClear(rules);
+  } catch (err) {
+    await logEvent({ action: "notification.engine_error", actor: "system:notification-engine", level: "error", message: "Event-rule timed clear failed", details: { err: (err as Error)?.message } }).catch(() => {});
   }
 }
 
