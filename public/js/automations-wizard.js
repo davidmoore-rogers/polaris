@@ -33,86 +33,13 @@
 var _awScripts = null;      // AutomationScript registry (null = not loadable — no automationScripts read)
 var _awDraftStash = null;   // in-memory draft stash (never persisted — may contain addresses)
 
-async function openAutomationWizard(existing) {
-  // ── Load the catalogs the steps render from ────────────────────────────
-  if (!_ruleSchema) {
-    try { _ruleSchema = await api.automations.schema(); }
-    catch (err) { showToast("Failed to load the automation schema", "error"); return; }
-  }
-  if (_ruleTagList === null) {
-    try { var _td = await api.assets.tags(); _ruleTagList = ((_td && _td.tags) || []).filter(function (t) { return !_looksLikeDeviceId(t); }); }
-    catch (_e) { _ruleTagList = []; }
-  }
-  if (_ruleAssetTypes === null) {
-    // GET /asset-types returns { types: [...] } (the old builder read the
-    // wrong key and always showed "No asset types in the registry").
-    try { var _at = await api.assetTypes.list(); _ruleAssetTypes = Array.isArray(_at) ? _at : ((_at && (_at.types || _at.assetTypes)) || []); }
-    catch (_e) { _ruleAssetTypes = []; }
-  }
-  // Scope-picker option lists (distinct manufacturers/models + IPAM subnets) —
-  // refreshed every open, they're one cheap query each.
-  var _awScopeOptions = { manufacturers: [], models: [], subnets: [] };
-  try { _awScopeOptions = await api.automations.scopeOptions(); } catch (_e) {}
-  try { var _cd = await api.deliveryChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
-  catch (_e) { _ruleChannels = _ruleChannels || []; }
-  if (_ruleRecipientUsers === null) {
-    try { var _ru = await api.automations.recipientUsers(); _ruleRecipientUsers = (_ru && _ru.users) || []; }
-    catch (_e) { _ruleRecipientUsers = []; }
-  }
-  // Script registry — readable only with the automationScripts key; a 403
-  // hides the script action type rather than erroring the wizard.
-  if (_awScripts === null && permAtLeast("automationScripts", "read")) {
-    try { var _sd = await api.automationScripts.list(); _awScripts = (_sd && _sd.scripts) || []; }
-    catch (_e) { _awScripts = null; }
-  } else if (permAtLeast("automationScripts", "read")) {
-    try { var _sd2 = await api.automationScripts.list(); _awScripts = (_sd2 && _sd2.scripts) || []; } catch (_e) {}
-  }
-
-  var s = _ruleSchema;
-  var editing = existing || null;
-
-  // ── Draft (rule-shape v2) ──────────────────────────────────────────────
-  var draft;
-  if (editing) {
-    draft = _awDraftFromRule(editing);
-  } else if (_awDraftStash && await showConfirm("Restore your unsaved automation draft?")) {
-    draft = _awDraftStash;
-  } else {
-    draft = {
-      name: "", description: null, enabled: true, severity: "warning",
-      scope: { allAssets: true },
-      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: null, forDurationSec: 0 },
-      reset: null, // defaulted per trigger type on Step-4 entry
-      cooldownSec: null, messageTemplate: null,
-      actions: [], escalation: null,
-    };
-  }
-  _awDraftStash = null;
-
-  var step = 1;
-  var visited = editing ? 6 : 1;
-  var STEPS = ["Name", "Devices", "Trigger", "Reset", "Actions", "Summary"];
-  var scopePreviewTimer = null;
-  var trigPreviewTimer = null;
-  // Step-5 escalation: shows/hides the "stop escalating when" config as
-  // escalation rows come and go (set by renderStep5, called by addTierRow).
-  var _escSyncFn = null;
-
-  // ── Small shared helpers (schema-driven options / labels) ──────────────
-  function opt(list, sel) {
-    return (list || []).map(function (v) { return '<option value="' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(v) + '</option>'; }).join("");
-  }
-  // Severity options carry the shared badge palette (styles.css .sev-select).
-  function sevOpt(sel) {
-    return (s.severities || []).map(function (v) {
-      return '<option value="' + escapeHtml(v) + '" class="sev-' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(v) + '</option>';
-    }).join("");
-  }
-  function optLabeled(list, sel, labelFor) {
-    return (list || []).map(function (v) {
-      return '<option value="' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(labelFor ? labelFor(v) : v) + '</option>';
-    }).join("");
-  }
+// ─── Sentence builder (pure; factory over the /schema payload) ───
+// Everything the live wizard sentence + summary rendering needs, closed over
+// only the schema `s` — no draft/DOM state — so it is unit-testable
+// (tests/unit/automationSentences.test.ts evaluates this file in a Node vm
+// and pulls the factory off window.PolarisAutomationSentences, same idiom as
+// the appmap filter core). Extracted verbatim from openAutomationWizard 2026-08.
+function makeAutomationSentences(s) {
   function findType(t) { return s.triggerTypes.find(function (x) { return x.type === t; }); }
   /** Device-scoped? Composite depends on kind (host composites ignore scope). */
   function isTriggerScoped(tr) {
@@ -135,58 +62,6 @@ async function openAutomationWizard(existing) {
   }
   function fieldLabel(f) { var x = s.fieldMeta && s.fieldMeta[f]; return x ? x.label : f; }
   function changeLabel(c) { return (s.changeTypeMeta && s.changeTypeMeta[c]) || c; }
-  var DIM_PLACEHOLDER = { ifNamePattern: "interface name contains", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", mountPathPattern: "mount path contains", healthCheck: "SD-WAN health-check name", link: "WAN member / link name", tunnelName: "IPsec tunnel name", widgetId: "custom widget id" };
-
-  var channels = _ruleChannels || [];
-  var routedTypes = s.recipientRoutedTypes || ["smtp", "oauth_m365", "web_push"];
-  function chanById(id) { return channels.find(function (c) { return c.id === id; }); }
-  function chanTypeLabel(type) { return (s.channelTypes && s.channelTypes[type] && s.channelTypes[type].label) || type; }
-  function isRouted(type) { return routedTypes.indexOf(type) !== -1; }
-  function isEmailType(type) { return type === "smtp" || type === "oauth_m365"; }
-  function channelOptions(selId) {
-    if (channels.length === 0) return '<option value="">No channels configured</option>';
-    return channels.map(function (c) {
-      var lbl = c.name + " — " + chanTypeLabel(c.type) + (c.enabled ? "" : " (disabled)");
-      return '<option value="' + escapeHtml(c.id) + '"' + (c.id === selId ? " selected" : "") + '>' + escapeHtml(lbl) + '</option>';
-    }).join("");
-  }
-  function userMultiSelect(selectedIds, cls) {
-    var sel = new Set(selectedIds || []);
-    var users = _ruleRecipientUsers || [];
-    if (!users.length) return '<select multiple class="' + cls + '" size="4" style="width:100%" disabled><option>No users found</option></select>';
-    var opts = users.map(function (u) {
-      var label = (u.displayName || u.username) + (u.email ? " <" + u.email + ">" : " (no email)");
-      return '<option value="' + escapeHtml(u.id) + '"' + (sel.has(u.id) ? " selected" : "") + '>' + escapeHtml(label) + '</option>';
-    }).join("");
-    return '<select multiple class="' + cls + '" size="4" style="width:100%">' + opts + '</select>';
-  }
-  function emailSuggestOptions() {
-    var seen = {};
-    return (_ruleRecipientUsers || [])
-      .map(function (u) { return u.email; })
-      .filter(function (e) { if (!e || seen[e]) return false; seen[e] = 1; return true; })
-      .map(function (e) { return '<option value="' + escapeHtml(e) + '">'; })
-      .join("");
-  }
-  function tokenPaletteHtml(id) {
-    var vars = s.templateVariables || [];
-    if (!vars.length) return "";
-    var chips = vars.map(function (v) {
-      return '<button type="button" class="btn btn-sm btn-secondary tpl-token" data-token="' + escapeHtml(v.token) + '" title="' + escapeHtml(v.description) + '" style="margin:2px 4px 2px 0;font-family:var(--font-mono);font-size:0.72rem;padding:1px 6px">' + escapeHtml(v.token) + '</button>';
-    }).join("");
-    return '<details id="' + id + '" style="margin:2px 0 6px"><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Insert variable…</summary><div style="margin-top:4px">' + chips + '</div></details>';
-  }
-  function csvOf(val) { return String(val || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
-  function scriptById(id) { return (_awScripts || []).find(function (x) { return x.id === id; }); }
-
-  // Which action types the picker offers: catalog-driven, script additionally
-  // needs the registry to be readable + the fullwrite key to attach.
-  function availableActionTypes() {
-    return (s.actionTypes || [{ type: "notify", label: "Send a notification" }]).filter(function (t) {
-      if (t.type === "script") return Array.isArray(_awScripts) && permAtLeast("automationScripts", "fullwrite");
-      return true;
-    });
-  }
 
   // ── Sentence builder ───────────────────────────────────────────────────
   var CMP_PHRASE = Object.assign({ ">": "is above", ">=": "is at or above", "<": "is below", "<=": "is at or below", "==": "equals", "!=": "is not" }, s.comparatorPhrases || {});
@@ -289,6 +164,160 @@ async function openAutomationWizard(existing) {
     if (cooldownSec > 0) out += " Won’t re-fire within <strong>" + humanDuration(cooldownSec) + "</strong> of the last alert.";
     return out;
   }
+
+  return {
+    findType: findType, isTriggerScoped: isTriggerScoped,
+    metricLabel: metricLabel, metricUnit: metricUnit, leafUnit: leafUnit,
+    fieldLabel: fieldLabel, changeLabel: changeLabel, humanDuration: humanDuration,
+    tgLeafPhrase: tgLeafPhrase, tgTreePhrase: tgTreePhrase,
+    triggerSentence: triggerSentence, resetSentence: resetSentence,
+    CMP_PHRASE: CMP_PHRASE, INV_CMP: INV_CMP, AGG_PHRASE: AGG_PHRASE, DIM_PHRASE: DIM_PHRASE,
+  };
+}
+if (typeof window !== "undefined") window.PolarisAutomationSentences = { make: makeAutomationSentences };
+
+async function openAutomationWizard(existing) {
+  // ── Load the catalogs the steps render from ────────────────────────────
+  if (!_ruleSchema) {
+    try { _ruleSchema = await api.automations.schema(); }
+    catch (err) { showToast("Failed to load the automation schema", "error"); return; }
+  }
+  if (_ruleTagList === null) {
+    try { var _td = await api.assets.tags(); _ruleTagList = ((_td && _td.tags) || []).filter(function (t) { return !_looksLikeDeviceId(t); }); }
+    catch (_e) { _ruleTagList = []; }
+  }
+  if (_ruleAssetTypes === null) {
+    // GET /asset-types returns { types: [...] } (the old builder read the
+    // wrong key and always showed "No asset types in the registry").
+    try { var _at = await api.assetTypes.list(); _ruleAssetTypes = Array.isArray(_at) ? _at : ((_at && (_at.types || _at.assetTypes)) || []); }
+    catch (_e) { _ruleAssetTypes = []; }
+  }
+  // Scope-picker option lists (distinct manufacturers/models + IPAM subnets) —
+  // refreshed every open, they're one cheap query each.
+  var _awScopeOptions = { manufacturers: [], models: [], subnets: [] };
+  try { _awScopeOptions = await api.automations.scopeOptions(); } catch (_e) {}
+  try { var _cd = await api.deliveryChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
+  catch (_e) { _ruleChannels = _ruleChannels || []; }
+  if (_ruleRecipientUsers === null) {
+    try { var _ru = await api.automations.recipientUsers(); _ruleRecipientUsers = (_ru && _ru.users) || []; }
+    catch (_e) { _ruleRecipientUsers = []; }
+  }
+  // Script registry — readable only with the automationScripts key; a 403
+  // hides the script action type rather than erroring the wizard.
+  if (_awScripts === null && permAtLeast("automationScripts", "read")) {
+    try { var _sd = await api.automationScripts.list(); _awScripts = (_sd && _sd.scripts) || []; }
+    catch (_e) { _awScripts = null; }
+  } else if (permAtLeast("automationScripts", "read")) {
+    try { var _sd2 = await api.automationScripts.list(); _awScripts = (_sd2 && _sd2.scripts) || []; } catch (_e) {}
+  }
+
+  var s = _ruleSchema;
+  var editing = existing || null;
+
+  // ── Draft (rule-shape v2) ──────────────────────────────────────────────
+  var draft;
+  if (editing) {
+    draft = _awDraftFromRule(editing);
+  } else if (_awDraftStash && await showConfirm("Restore your unsaved automation draft?")) {
+    draft = _awDraftStash;
+  } else {
+    draft = {
+      name: "", description: null, enabled: true, severity: "warning",
+      scope: { allAssets: true },
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: null, forDurationSec: 0 },
+      reset: null, // defaulted per trigger type on Step-4 entry
+      cooldownSec: null, messageTemplate: null,
+      actions: [], escalation: null,
+    };
+  }
+  _awDraftStash = null;
+
+  var step = 1;
+  var visited = editing ? 6 : 1;
+  var STEPS = ["Name", "Devices", "Trigger", "Reset", "Actions", "Summary"];
+  var scopePreviewTimer = null;
+  var trigPreviewTimer = null;
+  // Step-5 escalation: shows/hides the "stop escalating when" config as
+  // escalation rows come and go (set by renderStep5, called by addTierRow).
+  var _escSyncFn = null;
+
+  // ── Small shared helpers (schema-driven options / labels) ──────────────
+  function opt(list, sel) {
+    return (list || []).map(function (v) { return '<option value="' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(v) + '</option>'; }).join("");
+  }
+  // Severity options carry the shared badge palette (styles.css .sev-select).
+  function sevOpt(sel) {
+    return (s.severities || []).map(function (v) {
+      return '<option value="' + escapeHtml(v) + '" class="sev-' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(v) + '</option>';
+    }).join("");
+  }
+  function optLabeled(list, sel, labelFor) {
+    return (list || []).map(function (v) {
+      return '<option value="' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(labelFor ? labelFor(v) : v) + '</option>';
+    }).join("");
+  }
+  // Schema-label + sentence helpers — the pure factory above owns them; the
+  // wizard aliases what its step renderers reference.
+  var _sent = makeAutomationSentences(s);
+  var findType = _sent.findType, isTriggerScoped = _sent.isTriggerScoped,
+      metricLabel = _sent.metricLabel, metricUnit = _sent.metricUnit, leafUnit = _sent.leafUnit,
+      fieldLabel = _sent.fieldLabel, changeLabel = _sent.changeLabel,
+      humanDuration = _sent.humanDuration, tgTreePhrase = _sent.tgTreePhrase,
+      triggerSentence = _sent.triggerSentence, resetSentence = _sent.resetSentence,
+      CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
+  var DIM_PLACEHOLDER = { ifNamePattern: "interface name contains", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", mountPathPattern: "mount path contains", healthCheck: "SD-WAN health-check name", link: "WAN member / link name", tunnelName: "IPsec tunnel name", widgetId: "custom widget id" };
+
+  var channels = _ruleChannels || [];
+  var routedTypes = s.recipientRoutedTypes || ["smtp", "oauth_m365", "web_push"];
+  function chanById(id) { return channels.find(function (c) { return c.id === id; }); }
+  function chanTypeLabel(type) { return (s.channelTypes && s.channelTypes[type] && s.channelTypes[type].label) || type; }
+  function isRouted(type) { return routedTypes.indexOf(type) !== -1; }
+  function isEmailType(type) { return type === "smtp" || type === "oauth_m365"; }
+  function channelOptions(selId) {
+    if (channels.length === 0) return '<option value="">No channels configured</option>';
+    return channels.map(function (c) {
+      var lbl = c.name + " — " + chanTypeLabel(c.type) + (c.enabled ? "" : " (disabled)");
+      return '<option value="' + escapeHtml(c.id) + '"' + (c.id === selId ? " selected" : "") + '>' + escapeHtml(lbl) + '</option>';
+    }).join("");
+  }
+  function userMultiSelect(selectedIds, cls) {
+    var sel = new Set(selectedIds || []);
+    var users = _ruleRecipientUsers || [];
+    if (!users.length) return '<select multiple class="' + cls + '" size="4" style="width:100%" disabled><option>No users found</option></select>';
+    var opts = users.map(function (u) {
+      var label = (u.displayName || u.username) + (u.email ? " <" + u.email + ">" : " (no email)");
+      return '<option value="' + escapeHtml(u.id) + '"' + (sel.has(u.id) ? " selected" : "") + '>' + escapeHtml(label) + '</option>';
+    }).join("");
+    return '<select multiple class="' + cls + '" size="4" style="width:100%">' + opts + '</select>';
+  }
+  function emailSuggestOptions() {
+    var seen = {};
+    return (_ruleRecipientUsers || [])
+      .map(function (u) { return u.email; })
+      .filter(function (e) { if (!e || seen[e]) return false; seen[e] = 1; return true; })
+      .map(function (e) { return '<option value="' + escapeHtml(e) + '">'; })
+      .join("");
+  }
+  function tokenPaletteHtml(id) {
+    var vars = s.templateVariables || [];
+    if (!vars.length) return "";
+    var chips = vars.map(function (v) {
+      return '<button type="button" class="btn btn-sm btn-secondary tpl-token" data-token="' + escapeHtml(v.token) + '" title="' + escapeHtml(v.description) + '" style="margin:2px 4px 2px 0;font-family:var(--font-mono);font-size:0.72rem;padding:1px 6px">' + escapeHtml(v.token) + '</button>';
+    }).join("");
+    return '<details id="' + id + '" style="margin:2px 0 6px"><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Insert variable…</summary><div style="margin-top:4px">' + chips + '</div></details>';
+  }
+  function csvOf(val) { return String(val || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
+  function scriptById(id) { return (_awScripts || []).find(function (x) { return x.id === id; }); }
+
+  // Which action types the picker offers: catalog-driven, script additionally
+  // needs the registry to be readable + the fullwrite key to attach.
+  function availableActionTypes() {
+    return (s.actionTypes || [{ type: "notify", label: "Send a notification" }]).filter(function (t) {
+      if (t.type === "script") return Array.isArray(_awScripts) && permAtLeast("automationScripts", "fullwrite");
+      return true;
+    });
+  }
+
 
   // Builder vocabularies — must initialize BEFORE the body assembly below
   // (step2Html/step3Html render from them during the openModal call).
