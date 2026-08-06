@@ -166,6 +166,8 @@ describe("automation wizard DOM render", () => {
     // Category select (device/host/event/change) + the tree with one leaf row.
     const cat = doc.querySelector("#aw-trigger-type") as unknown as { value: string };
     expect(cat.value).toBe("device");
+    // The message template moved to the Actions step (mandatory in-app card).
+    expect(doc.querySelector("#aw-step-3 #aw-msg")).toBeFalsy();
     expect(doc.querySelector("#aw-trig-root .scg-group")).toBeTruthy();
     expect(doc.querySelectorAll("#aw-trig-root .scr-row").length).toBe(1);
     expect(doc.querySelector("#aw-trig-root .tgl-what")).toBeTruthy();
@@ -215,6 +217,16 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector("#aw-step-5.visible")).toBeTruthy();
     expect(doc.querySelector("#aw-summary")).toBeFalsy(); // summary moved to step 6
 
+    // The mandatory in-app card leads the Actions step: not an .aw-action row
+    // (so it can't be collected/removed), carries the moved message template,
+    // and names the audit event for metric/state triggers.
+    const inapp = doc.querySelector("#aw-step-5 #aw-inapp-card")!;
+    expect(inapp).toBeTruthy();
+    expect(inapp.classList.contains("aw-action")).toBe(false);
+    expect(inapp.querySelector("#aw-msg")).toBeTruthy();
+    expect(inapp.textContent).toContain("event + in-app alert");
+    expect(inapp.querySelector(".aw-action-remove")).toBeFalsy();
+
     // Escalation is button-based (no enable checkbox): adding an escalation
     // reveals the delay field, seeds a notify action (channel + recipients),
     // and shows the stop-condition select; removing it hides them again.
@@ -227,6 +239,10 @@ describe("automation wizard DOM render", () => {
     expect(tier.querySelector(".tier-after")).toBeTruthy(); // minutes-before field
     expect(tier.querySelector(".tier-actions .aw-action")).toBeTruthy(); // seeded notify action
     expect(tier.querySelector(".na-channel")).toBeTruthy(); // channel select → recipients render from it
+    // Recipient sources: device-region replaces the scope-region checkbox
+    // (legacy scope-region renders only on actions that already carry it).
+    expect(tier.querySelector(".na-device-region")).toBeTruthy();
+    expect(tier.querySelector(".na-scope-region")).toBeFalsy();
     expect((doc.querySelector("#aw-esc-config") as unknown as { style: { display: string } }).style.display).toBe("block");
     (tier.querySelector(".tier-remove") as unknown as { click: () => void }).click();
     expect(doc.querySelector("#aw-esc-tiers .aw-tier")).toBeFalsy();

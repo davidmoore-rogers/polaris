@@ -1051,10 +1051,8 @@ async function openAutomationWizard(existing) {
       '<div class="form-group"><label>Trigger type</label><select id="aw-trigger-type">' + typeOpts + '</select></div>' +
       '<div id="aw-trigger-fields"></div>' +
       '<div id="aw-bands-host" style="display:none"></div>' +
-      '<details' + (draft.messageTemplate ? " open" : "") + ' style="margin:0.5rem 0"><summary style="font-size:0.82rem;cursor:pointer;color:var(--color-text-tertiary)">Alert message template (optional)</summary>' +
-        '<div style="margin-top:6px">' + tokenPaletteHtml("aw-token-palette") +
-        '<input type="text" id="aw-msg" class="tpl-field" value="' + escapeHtml(draft.messageTemplate || "") + '" placeholder="{asset} {metric} = {value} (threshold {threshold})" style="width:100%"></div>' +
-      '</details>' +
+      // The alert/event message template lives on the Actions step (inside the
+      // mandatory in-app card) — the trigger step is conditions-only.
       '<div style="margin:0.5rem 0"><button type="button" class="btn btn-sm btn-secondary" id="aw-trigger-test">Test against current data</button></div>' +
       '<div id="aw-trigger-preview"></div>';
   }
@@ -1115,7 +1113,6 @@ async function openAutomationWizard(existing) {
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
     renderTriggerFields();
     syncSeverityMode(panel);
-    wireTokenPalette(panel);
   }
   function collectStep3() {
     var panel = document.getElementById("aw-step-3");
@@ -1142,7 +1139,6 @@ async function openAutomationWizard(existing) {
     } else if (cat === "change") {
       draft.trigger = { type: "change", changeType: panel.querySelector("#tf-changetype").value };
     }
-    draft.messageTemplate = (panel.querySelector("#aw-msg") ? panel.querySelector("#aw-msg").value.trim() : "") || null;
     // Base severity: in multi mode it's the select injected into the condition
     // group header (.scg-sev); in single mode the standalone Alert dropdown.
     var baseSel = multiSevOn(panel) ? panel.querySelector("#aw-trig-root .scg-sev") : panel.querySelector("#aw-trigger-severity");
@@ -1447,8 +1443,24 @@ async function openAutomationWizard(existing) {
   function renderStep5() {
     var panel = document.getElementById("aw-step-5");
     var esc = draft.escalation;
+    // The mandatory first "action": every fire creates the in-app alert (and,
+    // for metric/state/composite triggers, writes an audit Event carrying the
+    // same rendered message). Not removable — only its message is editable.
+    // Sibling of #aw-actions, so collectActionsFrom's :scope > .aw-action
+    // never picks it up.
+    var isEC = draft.trigger && (draft.trigger.type === "event" || draft.trigger.type === "change");
+    var cardTitle = isEC ? "Create an in-app alert (always happens)" : "Create an event + in-app alert (always happens)";
+    var cardHelp = isEC
+      ? "Every fire creates an in-app alert (the Alerts tab). This is built in and can’t be removed. The message template below customizes the alert text — {value} is the source event’s own message; leave blank for the default."
+      : "Every fire writes an audit Event and creates an in-app alert (the Alerts tab). This is built in and can’t be removed. The message template below customizes what both say; leave blank for the default.";
     panel.innerHTML = '<h3 style="margin:0 0 0.25rem">What should happen?</h3>' +
-      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 0.75rem">In-app alerts (the Alerts tab) are always created — actions run in addition. Notifications route through Delivery-tab channels; API calls POST to your systems; scripts run on the Polaris server or the triggering asset’s agent.</p>' +
+      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 0.75rem">Notifications route through Delivery-tab channels; API calls POST to your systems; scripts run on the Polaris server or the triggering asset’s agent.</p>' +
+      '<div class="form-group" id="aw-inapp-card" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
+        '<label style="font-weight:600;margin:0 0 4px;display:block">' + cardTitle + '</label>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">' + cardHelp + '</p>' +
+        tokenPaletteHtml("aw-token-palette") +
+        '<input type="text" id="aw-msg" class="tpl-field" value="' + escapeHtml(draft.messageTemplate || "") + '" placeholder="' + (isEC ? "{rule}: {value}" : "{asset} {metric} = {value} (threshold {threshold})") + '" style="width:100%;margin-top:4px">' +
+      '</div>' +
       '<div class="form-group"><label style="font-weight:600">Actions when this fires</label>' +
         '<div id="aw-actions"></div>' +
         '<button type="button" class="btn btn-sm btn-secondary" id="aw-add-action" style="margin-top:6px">+ Add action</button>' +
@@ -1854,18 +1866,16 @@ async function openAutomationWizard(existing) {
         if (isEmailType(ch.type)) {
           h += '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">…or custom email addresses (comma-separated)</label><input type="text" class="na-addresses" value="' + escapeHtml((action.addresses || []).join(", ")) + '" placeholder="oncall@example.com"></div>';
         }
-        var regions = (draft.scope && draft.scope.tags || []).filter(function (x) { return /^region:/i.test(x); });
-        // Condition-tree scopes carry tags inside rules — collect positive
-        // region: tag rules too (mirrors the server's scopeRegionTagsOf).
-        (function walk(node) {
-          if (!node || typeof node !== "object") return;
-          if (Array.isArray(node.children)) { node.children.forEach(walk); return; }
-          if (node.field === "tag" && node.operator === "has" && /^region:/i.test(node.value || "")) regions.push(node.value);
-        })(draft.scope && draft.scope.condition);
-        var regionLabel = regions.length
-          ? "…or users associated with the automation's region (" + regions.map(function (x) { return x.replace(/^region:/i, ""); }).join(", ") + ")"
-          : "…or users associated with the automation's region (add a region: tag on the Devices step)";
-        h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-scope-region"' + (action.recipientScopeRegion ? " checked" : "") + (regions.length ? "" : " disabled") + '> ' + escapeHtml(regionLabel) + '</label>';
+        // Device-region routing: match users' region tags against the
+        // TRIGGERING asset's own region: tag(s) at fire time — works with any
+        // device filter (no region: tag needed on the scope).
+        h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-device-region"' + (action.recipientDeviceRegion ? " checked" : "") + '> …or users associated with the triggering device’s region (its region: tag)</label>';
+        // Legacy scope-region routing (replaced by device-region in the
+        // builder): rendered ONLY when the edited action already carries it,
+        // so editing an old rule can't silently drop the recipients.
+        if (action.recipientScopeRegion) {
+          h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-scope-region" checked> …or users associated with the automation’s region (legacy — routes by the region: tag in the device filter)</label>';
+        }
         fbox.innerHTML = h;
       };
       box.querySelector(".na-html-enable").addEventListener("change", function () {
@@ -1974,6 +1984,10 @@ async function openAutomationWizard(existing) {
       }
       var addrEl = box.querySelector(".na-addresses");
       if (addrEl) { var addrs = csvOf(addrEl.value); if (addrs.length) a.addresses = addrs; }
+      var devRegEl = box.querySelector(".na-device-region");
+      if (devRegEl && devRegEl.checked) a.recipientDeviceRegion = true;
+      // Legacy scope-region checkbox renders only on actions that already
+      // carried the flag — unchecking it drops the flag deliberately.
       var regEl = box.querySelector(".na-scope-region");
       if (regEl && regEl.checked) a.recipientScopeRegion = true;
       // Per-action email composition (email channels only; hidden otherwise).
@@ -2077,6 +2091,9 @@ async function openAutomationWizard(existing) {
     var panel = document.getElementById("aw-step-5");
     var host = panel.querySelector("#aw-actions");
     if (!host) return;
+    // The alert/event message rides the mandatory in-app card on this step.
+    var msgEl = panel.querySelector("#aw-msg");
+    if (msgEl) draft.messageTemplate = msgEl.value.trim() || null;
     draft.actions = collectActionsFrom(host);
     // Escalation exists iff at least one escalation row does — no toggle.
     var tiers = collectTierRows(panel.querySelector("#aw-esc-tiers"));
@@ -2128,7 +2145,7 @@ async function openAutomationWizard(existing) {
       if (!a.channelId) return label + ": pick a channel.";
       var ch = chanById(a.channelId);
       if (ch && isRouted(ch.type)) {
-        var hasRecip = (a.recipientUserIds && a.recipientUserIds.length) || (a.addresses && a.addresses.length) || a.recipientScopeRegion;
+        var hasRecip = (a.recipientUserIds && a.recipientUserIds.length) || (a.addresses && a.addresses.length) || a.recipientDeviceRegion || a.recipientScopeRegion;
         if (!hasRecip) return label + " (" + ch.name + "): choose at least one recipient.";
       }
     } else if (a.type === "api_call") {
