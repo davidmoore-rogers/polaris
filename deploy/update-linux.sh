@@ -27,6 +27,24 @@ APP_USER="polaris"
 DB_NAME="polaris"
 BACKUP_DIR="/opt/polaris/backups"
 
+# Proceed even if the pre-update backup can't be taken. OFF by default: step 5
+# runs `prisma migrate deploy`, which is irreversible, so an update with no
+# recovery point is the difference between a bad update and an unrecoverable
+# one. Mirrors applyUpdate(password, allowWithoutBackup) in
+# src/services/updateService.ts — keep the two in lockstep.
+ALLOW_WITHOUT_BACKUP=0
+for arg in "$@"; do
+  case "$arg" in
+    --allow-without-backup) ALLOW_WITHOUT_BACKUP=1 ;;
+    -h|--help)
+      echo "Usage: $0 [--allow-without-backup]"
+      echo "  --allow-without-backup  Continue when pg_dump is unavailable or the backup fails."
+      exit 0
+      ;;
+    *) echo "[ERROR] Unknown argument: $arg" >&2; exit 1 ;;
+  esac
+done
+
 # Phase 3+: single-process polaris.service is no longer supported as a
 # production deployment. Every install runs the split-role layout
 # (polaris.target + web/monitor@N/discovery/migrate). Fresh installs land
@@ -172,13 +190,32 @@ step "2/9  Creating pre-update database backup..."
 mkdir -p "$BACKUP_DIR"
 BACKUP_FILE="${BACKUP_DIR}/polaris-pre-update-${OLD_VERSION}-$(date +%Y%m%d-%H%M%S).sql.gz"
 
+backup_unavailable() {
+  # Same contract as the in-app updater: abort unless the operator explicitly
+  # accepted the risk. A missing backup must never be a silent warning that
+  # scrolls past on the way into an irreversible migration.
+  if [[ "$ALLOW_WITHOUT_BACKUP" -eq 1 ]]; then
+    warn "$1 — continuing anyway (--allow-without-backup)."
+    BACKUP_FILE=""
+    return 0
+  fi
+  echo "[ERROR] $1" >&2
+  echo "[ERROR] Refusing to update without a recovery point: step 5 runs 'prisma migrate deploy', which cannot be rolled back." >&2
+  echo "[ERROR] Install the PostgreSQL client tools (or fix the backup), then re-run." >&2
+  echo "[ERROR] To proceed anyway, re-run with --allow-without-backup." >&2
+  exit 1
+}
+
 if command -v pg_dump &>/dev/null; then
-  sudo -u postgres pg_dump --clean --if-exists "$DB_NAME" | gzip > "$BACKUP_FILE"
-  BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-  info "Backup created: $BACKUP_FILE ($BACKUP_SIZE)"
+  if sudo -u postgres pg_dump --clean --if-exists "$DB_NAME" | gzip > "$BACKUP_FILE"; then
+    BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
+    info "Backup created: $BACKUP_FILE ($BACKUP_SIZE)"
+  else
+    rm -f "$BACKUP_FILE"
+    backup_unavailable "pg_dump failed"
+  fi
 else
-  warn "pg_dump not found — skipping backup. Proceed with caution."
-  BACKUP_FILE=""
+  backup_unavailable "pg_dump not found"
 fi
 
 # ─── 3. Pull latest code ────────────────────────────────────────────────────

@@ -23,8 +23,14 @@
 # CA cert; the bundled self-signed cert is for local stack-up only.
 #
 # Secrets via env_file (./state/.env) or your orchestrator's secret store —
-# do NOT inline DATABASE_URL / SESSION_SECRET here. POLARIS_ROLE is set
-# per-service in this file and kept OUT of .env.
+# do NOT inline DATABASE_URL / SESSION_SECRET / POLARIS_SECRET_KEY here.
+# POLARIS_ROLE is set per-service in this file and kept OUT of .env.
+#
+# POLARIS_SECRET_KEY encrypts device + integration credentials at rest. It is
+# NOT auto-generated for container deployments (no first-run wizard runs), so
+# put one in ./state/.env — `openssl rand -hex 32` — or those values are stored
+# as plaintext and appear in plaintext in every pg_dump. Back the key up off
+# this host: sealed secrets cannot be recovered without it.
 
 x-polaris-common: &polaris-common
   # Published image; override with POLARIS_IMAGE for a locally-built tag.

@@ -23,8 +23,17 @@ ROLE="${POLARIS_ROLE:-all}"
 if [ -n "${DATABASE_URL:-}" ]; then
   if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ] || [ "$ROLE" = "migrate" ]; then
     echo "[entrypoint] Applying Prisma migrations (role=$ROLE)..."
+    # FATAL, not a warning. docker-compose.yml gates web/monitor/discovery on
+    # `migrate: condition: service_completed_successfully`, so exiting 0 here
+    # after a failed migration would satisfy that gate and bring the whole
+    # stack up against a stale schema — Prisma then throws
+    # `column "<name>" does not exist` at runtime instead of the stack
+    # refusing to start. Matches polaris-migrate.service (Type=oneshot, the
+    # app units Require= it) and applyUpdate's failUpdate-and-stop on the
+    # migration step.
     if ! npx --no-install prisma migrate deploy; then
-      echo "[entrypoint] WARN: prisma migrate deploy failed; continuing anyway." >&2
+      echo "[entrypoint] FATAL: prisma migrate deploy failed — refusing to start against a stale schema." >&2
+      exit 1
     fi
   else
     echo "[entrypoint] role=$ROLE — skipping migrations (web/migrate role owns them)."

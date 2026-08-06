@@ -21,12 +21,33 @@ name: polaris
 
 services:
   postgres:
-    image: postgres:15-alpine
+    # TimescaleDB, not plain postgres:15-alpine — dev should match what every
+    # documented production install runs (docs/INSTALL.md installs
+    # timescaledb-2-postgresql-15). Without the extension here, the 21 sample +
+    # rollup tables stay plain tables in dev, so hypertable-specific behavior
+    # (compression policies, drop_chunks pruning, the
+    # timescaledb_pre_restore/post_restore gates in backupService) is only ever
+    # exercised in production. Same Alpine base and same PG 15.x as the previous
+    # image, so an existing `pgdata` volume carries over untouched.
+    image: timescale/timescaledb:latest-pg15
     restart: unless-stopped
     environment:
       POSTGRES_USER: polaris
       POSTGRES_PASSWORD: polaris
       POSTGRES_DB: polaris
+    # shared_preload_libraries MUST be set here, not left to the image. The
+    # TimescaleDB entrypoint only writes it into postgresql.conf during initdb,
+    # which does not re-run on an already-initialized volume — so an existing dev
+    # database would come up with the extension installed but unloadable
+    # ("could not access file $libdir/timescaledb"). Setting it as a server flag
+    # applies to fresh and existing volumes alike.
+    # telemetry_level=off keeps a corporate-network dev box from phoning home.
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - timescaledb.telemetry_level=off
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:

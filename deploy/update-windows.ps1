@@ -25,7 +25,14 @@ param(
     [string]$AppDir      = "C:\polaris",
     [string]$DbName      = "polaris",
     [string]$ServiceName = "Polaris",
-    [int]   $Port        = 3000
+    [int]   $Port        = 3000,
+    # Proceed even if the pre-update backup can't be taken. OFF by default:
+    # step 5 runs `prisma migrate deploy`, which is irreversible, so an update
+    # with no recovery point is the difference between a bad update and an
+    # unrecoverable one. Mirrors applyUpdate(password, allowWithoutBackup) in
+    # src/services/updateService.ts and --allow-without-backup in
+    # deploy/update-linux.sh -- keep all three in lockstep.
+    [switch]$AllowWithoutBackup
 )
 
 $ErrorActionPreference = "Stop"
@@ -142,6 +149,23 @@ try { $OldCommit = (git rev-parse --short HEAD) } catch {}
 Write-Info "Current version: v${OldVersion} (${OldCommit})"
 
 # ─── 2. Pre-update database backup ──────────────────────────────────────────
+# Same contract as the in-app updater: abort unless the operator explicitly
+# accepted the risk. A missing backup must never be a warning that scrolls past
+# on the way into an irreversible migration.
+function Stop-WithoutBackup {
+    param([string]$Reason)
+    if ($AllowWithoutBackup) {
+        Write-Warn "$Reason -- continuing anyway (-AllowWithoutBackup)."
+        $script:BackupFile = ""
+        return
+    }
+    Write-Err "$Reason"
+    Write-Err "Refusing to update without a recovery point: step 5 runs 'prisma migrate deploy', which cannot be rolled back."
+    Write-Err "Install the PostgreSQL client tools (or fix the backup), then re-run."
+    Write-Err "To proceed anyway, re-run with -AllowWithoutBackup."
+    exit 1
+}
+
 Write-Step "2/8  Creating pre-update database backup..."
 
 $backupDir = Join-Path $AppDir "backups"
@@ -163,11 +187,11 @@ if (Test-Command "pg_dump") {
         $sizeKb = [math]::Round((Get-Item $BackupFile).Length / 1024, 1)
         Write-Info "Backup created: $BackupFile (${sizeKb} KB)"
     } else {
-        Write-Warn "pg_dump failed — skipping backup. Proceed with caution."
-        $BackupFile = ""
+        if (Test-Path $BackupFile) { Remove-Item $BackupFile -Force }
+        Stop-WithoutBackup "pg_dump failed"
     }
 } else {
-    Write-Warn "pg_dump not found — skipping backup. Proceed with caution."
+    Stop-WithoutBackup "pg_dump not found"
 }
 
 # ─── 3. Pull latest code ────────────────────────────────────────────────────
