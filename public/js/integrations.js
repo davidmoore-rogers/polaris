@@ -4727,10 +4727,180 @@ async function openCreateModal(type) {
   });
 }
 
+// Edit-modal orchestrator (split 2026-08): per-type form spec, tab assembly,
+// then the test-connection and save phases — bodies extracted verbatim.
 async function openEditModal(id) {
   try {
     var intg = await api.integrations.get(id);
     var config = intg.config || {};
+    var isWin = intg.type === "windowsserver";
+    var isFgt = intg.type === "fortigate";
+    var isEntra = intg.type === "entraid";
+    var isAd = intg.type === "activedirectory";
+    var isVc = intg.type === "vcenter";
+    var spec = _intgEditFormSpec(intg, config);
+    var body = spec.body;
+    var formGetter = spec.formGetter;
+
+    // FMG + FortiGate get the full Monitoring tab (Cadence + Discovery
+    // Defaults + Class Overrides). AD / Entra / WindowsServer get the same
+    // Monitoring tab minus the Discovery Defaults section (those concerns
+    // don't apply to non-Fortinet integrations). All tier-3 settings are
+    // now per-integration — this tab edits THIS integration's settings
+    // only. Manual tier + cross-source class overrides live on the Assets
+    // page Monitoring Settings modal.
+    var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
+    var monCapable = isFmgOrFgt || isAd || isEntra || isWin || isVc;
+    if (!isFmgOrFgt && monCapable) {
+      // AD / Entra / WindowsServer / vCenter: wrap the existing flat form as
+      // the General tab and add a Monitoring tab alongside it.
+      var monSettings = {};
+      try {
+        var resp = await api.monitorSettings.getIntegration(intg.id);
+        if (resp && resp.settings) monSettings = resp.settings;
+      } catch (e) { /* fall back to defaults */ }
+      // vCenter's VM agent auto-deploy card needs the credential list.
+      var nonFortinetCreds = [];
+      if (isVc) {
+        try { var vcEditCredResp = await api.credentials.list(); nonFortinetCreds = Array.isArray(vcEditCredResp) ? vcEditCredResp : []; } catch (e) { /* pickers render empty */ }
+      }
+      var generalTabBody = body;
+      var nonFortinetTabs = [
+        { key: "general",    label: "General",    html: generalTabBody },
+        { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, {
+          integrationId:   id,
+          integrationType: intg.type,
+          integrationName: intg.name,
+          pollInterval:    intg.pollInterval,
+          snmpCredentials: nonFortinetCreds,
+          // Phase 2 — forward AD/Entra/WinSrv per-class blocks so per-class
+          // subtabs can render their own saved stream values. Blocks are
+          // freshly seeded by the migration job; pre-migration installs see
+          // an empty object → overlay no-ops → flat baseline shows through.
+          workstationMonitor: config.workstationMonitor || null,
+          serverMonitor:      config.serverMonitor      || null,
+          vmMonitor:          config.vmMonitor          || null,
+          hostMonitor:        config.hostMonitor        || null,
+          verifyPresence:     config.verifyPresence,
+        }) },
+      ];
+      body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
+    }
+    if (isFmgOrFgt) {
+      var monSettings = {};
+      var creds = [];
+      try {
+        var resp = await api.monitorSettings.getIntegration(intg.id);
+        var tier = resp && resp.settings;
+        // Tier may be null on a fresh integration whose tier-3 hasn't been
+        // saved yet — the form falls back to its hardcoded defaults.
+        if (tier) monSettings = tier;
+      } catch (e) { /* fall back to defaults */ }
+      try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
+      var generalHtml = (intg.type === "fortimanager") ? fortiManagerGeneralHTML(defaults) : fortiGateGeneralHTML(defaults);
+      var filtersHtml = (intg.type === "fortimanager") ? fortiManagerFiltersHTML(defaults) : fortiGateFiltersHTML(defaults);
+      var editTabs = [
+        { key: "general",    label: "General",    html: generalHtml },
+        { key: "filters",    label: "Filters",    html: filtersHtml },
+      ];
+      editTabs.push(
+        { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, {
+          snmpCredentials: creds,
+          monitorCredentialId: config.monitorCredentialId || null,
+          sshCredentialId:    config.sshCredentialId    || null,
+          fortigateMonitor:   config.fortigateMonitor   || null,
+          fortiswitchMonitor: config.fortiswitchMonitor || null,
+          fortiapMonitor:     config.fortiapMonitor     || null,
+          excludeFortilinkLldp: config.excludeFortilinkLldp === true,
+          integrationId:      id,
+          integrationType:    intg.type,
+          integrationName:    intg.name,
+          pollInterval:       intg.pollInterval,
+          // The relocated useDirect toggle + direct-mode credentials block
+          // lives inside the FortiGate class subtab in the Monitoring tab.
+          // Pass the FMG `defaults` blob so it renders with the current
+          // values. Standalone FortiGate doesn't carry these fields and
+          // the block is skipped on that path.
+          fmgDefaults:        defaults,
+        }) },
+      );
+      // Reservation Push + Quarantine Push tabs render for both FMG and
+      // standalone FortiGate. The `useProxy` flag is meaningful only for FMG;
+      // standalone always goes direct REST so we pass true so the proxy/
+      // direct copy in the form helpers doesn't render an irrelevant warning.
+      {
+        var pushUseProxy = intg.type === "fortimanager" ? (config.useProxy !== false) : true;
+        editTabs.push({
+          key: "push",
+          label: "DHCP Push",
+          html: reservationPushFormHTML(config.pushReservations === true, pushUseProxy, config.arpPresenceSweep === true),
+        });
+        editTabs.push({
+          key: "quarantine-push",
+          label: "Quarantine Push",
+          html: quarantinePushFormHTML(config.pushQuarantine === true, pushUseProxy),
+        });
+        editTabs.push({
+          key: "description-sync",
+          label: "Description Sync",
+          html: descriptionSyncFormHTML(config.syncDescriptions === true, pushUseProxy),
+        });
+        editTabs.push({
+          key: "sdwan",
+          label: "SD‑WAN",
+          html: sdwanFormHTML(config.pullSdwan === true),
+        });
+        // Geographic Location tab (FMG + standalone FortiGate). Carries the
+        // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
+        // inside Monitoring → FortiGate. DOM ids preserved so the existing
+        // save path (`_readFortigateMonitorBlock`) keeps finding them.
+        var fwFgCfgEdit = config.fortigateMonitor || {};
+        editTabs.push({
+          key: "geographicLocation",
+          label: "Geographic Location",
+          html: geographicLocationFormHTML(
+            fwFgCfgEdit.pullSnmpLocation === true,
+            fwFgCfgEdit.useSnmpLocationCoords === true,
+            fwFgCfgEdit.pushGeocodedCoords === true,
+            fwFgCfgEdit.latitudeMetavar || "Latitude",
+            fwFgCfgEdit.longitudeMetavar || "Longitude",
+            fwFgCfgEdit.addressMetavar || "",
+            intg.type,
+          ),
+        });
+      }
+      body = _intRenderTabbedBody("intg-edit", editTabs);
+    }
+
+    var footer = '<button class="btn btn-secondary" id="btn-test-existing">Test Connection</button>' +
+      '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
+    openModal("Edit Integration", body, footer, { wide: true });
+    if (isFmgOrFgt) {
+      _intWireModalTabs("intg-edit");
+      _wireMonitoringTabSubtabs(intg.type);
+      wireAutoMonitorCards(id);
+      _wireProbeTimeoutWarning();
+      _wireCredentialPickerVisibility();
+      _populateUploadedMibsInDropdowns();
+    } else if (isAd || isEntra || isWin || isVc) {
+      _intWireModalTabs("intg-edit");
+      _wireMonitoringTabSubtabs(intg.type);
+      if (isAd || isEntra) wireWorkstationServerCards(id);
+      if (isVc) wireVcenterCards(id);
+      _wireProbeTimeoutWarning();
+    }
+
+    _wireIntgEditTest(id, intg);
+    _wireIntgEditSave(id, intg, formGetter);
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+// Per-type edit-form defaults + body HTML + the form-config getter that
+// strips blank keep-current secrets before a PUT.
+function _intgEditFormSpec(intg, config) {
     var isWin = intg.type === "windowsserver";
     var isFgt = intg.type === "fortigate";
     var isEntra = intg.type === "entraid";
@@ -4901,156 +5071,17 @@ async function openEditModal(id) {
         return fc;
       };
     }
+    return { body: body, formGetter: formGetter };
+}
 
-    // FMG + FortiGate get the full Monitoring tab (Cadence + Discovery
-    // Defaults + Class Overrides). AD / Entra / WindowsServer get the same
-    // Monitoring tab minus the Discovery Defaults section (those concerns
-    // don't apply to non-Fortinet integrations). All tier-3 settings are
-    // now per-integration — this tab edits THIS integration's settings
-    // only. Manual tier + cross-source class overrides live on the Assets
-    // page Monitoring Settings modal.
-    var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
-    var monCapable = isFmgOrFgt || isAd || isEntra || isWin || isVc;
-    if (!isFmgOrFgt && monCapable) {
-      // AD / Entra / WindowsServer / vCenter: wrap the existing flat form as
-      // the General tab and add a Monitoring tab alongside it.
-      var monSettings = {};
-      try {
-        var resp = await api.monitorSettings.getIntegration(intg.id);
-        if (resp && resp.settings) monSettings = resp.settings;
-      } catch (e) { /* fall back to defaults */ }
-      // vCenter's VM agent auto-deploy card needs the credential list.
-      var nonFortinetCreds = [];
-      if (isVc) {
-        try { var vcEditCredResp = await api.credentials.list(); nonFortinetCreds = Array.isArray(vcEditCredResp) ? vcEditCredResp : []; } catch (e) { /* pickers render empty */ }
-      }
-      var generalTabBody = body;
-      var nonFortinetTabs = [
-        { key: "general",    label: "General",    html: generalTabBody },
-        { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, {
-          integrationId:   id,
-          integrationType: intg.type,
-          integrationName: intg.name,
-          pollInterval:    intg.pollInterval,
-          snmpCredentials: nonFortinetCreds,
-          // Phase 2 — forward AD/Entra/WinSrv per-class blocks so per-class
-          // subtabs can render their own saved stream values. Blocks are
-          // freshly seeded by the migration job; pre-migration installs see
-          // an empty object → overlay no-ops → flat baseline shows through.
-          workstationMonitor: config.workstationMonitor || null,
-          serverMonitor:      config.serverMonitor      || null,
-          vmMonitor:          config.vmMonitor          || null,
-          hostMonitor:        config.hostMonitor        || null,
-          verifyPresence:     config.verifyPresence,
-        }) },
-      ];
-      body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
-    }
-    if (isFmgOrFgt) {
-      var monSettings = {};
-      var creds = [];
-      try {
-        var resp = await api.monitorSettings.getIntegration(intg.id);
-        var tier = resp && resp.settings;
-        // Tier may be null on a fresh integration whose tier-3 hasn't been
-        // saved yet — the form falls back to its hardcoded defaults.
-        if (tier) monSettings = tier;
-      } catch (e) { /* fall back to defaults */ }
-      try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
-      var generalHtml = (intg.type === "fortimanager") ? fortiManagerGeneralHTML(defaults) : fortiGateGeneralHTML(defaults);
-      var filtersHtml = (intg.type === "fortimanager") ? fortiManagerFiltersHTML(defaults) : fortiGateFiltersHTML(defaults);
-      var editTabs = [
-        { key: "general",    label: "General",    html: generalHtml },
-        { key: "filters",    label: "Filters",    html: filtersHtml },
-      ];
-      editTabs.push(
-        { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, {
-          snmpCredentials: creds,
-          monitorCredentialId: config.monitorCredentialId || null,
-          sshCredentialId:    config.sshCredentialId    || null,
-          fortigateMonitor:   config.fortigateMonitor   || null,
-          fortiswitchMonitor: config.fortiswitchMonitor || null,
-          fortiapMonitor:     config.fortiapMonitor     || null,
-          excludeFortilinkLldp: config.excludeFortilinkLldp === true,
-          integrationId:      id,
-          integrationType:    intg.type,
-          integrationName:    intg.name,
-          pollInterval:       intg.pollInterval,
-          // The relocated useDirect toggle + direct-mode credentials block
-          // lives inside the FortiGate class subtab in the Monitoring tab.
-          // Pass the FMG `defaults` blob so it renders with the current
-          // values. Standalone FortiGate doesn't carry these fields and
-          // the block is skipped on that path.
-          fmgDefaults:        defaults,
-        }) },
-      );
-      // Reservation Push + Quarantine Push tabs render for both FMG and
-      // standalone FortiGate. The `useProxy` flag is meaningful only for FMG;
-      // standalone always goes direct REST so we pass true so the proxy/
-      // direct copy in the form helpers doesn't render an irrelevant warning.
-      {
-        var pushUseProxy = intg.type === "fortimanager" ? (config.useProxy !== false) : true;
-        editTabs.push({
-          key: "push",
-          label: "DHCP Push",
-          html: reservationPushFormHTML(config.pushReservations === true, pushUseProxy, config.arpPresenceSweep === true),
-        });
-        editTabs.push({
-          key: "quarantine-push",
-          label: "Quarantine Push",
-          html: quarantinePushFormHTML(config.pushQuarantine === true, pushUseProxy),
-        });
-        editTabs.push({
-          key: "description-sync",
-          label: "Description Sync",
-          html: descriptionSyncFormHTML(config.syncDescriptions === true, pushUseProxy),
-        });
-        editTabs.push({
-          key: "sdwan",
-          label: "SD‑WAN",
-          html: sdwanFormHTML(config.pullSdwan === true),
-        });
-        // Geographic Location tab (FMG + standalone FortiGate). Carries the
-        // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
-        // inside Monitoring → FortiGate. DOM ids preserved so the existing
-        // save path (`_readFortigateMonitorBlock`) keeps finding them.
-        var fwFgCfgEdit = config.fortigateMonitor || {};
-        editTabs.push({
-          key: "geographicLocation",
-          label: "Geographic Location",
-          html: geographicLocationFormHTML(
-            fwFgCfgEdit.pullSnmpLocation === true,
-            fwFgCfgEdit.useSnmpLocationCoords === true,
-            fwFgCfgEdit.pushGeocodedCoords === true,
-            fwFgCfgEdit.latitudeMetavar || "Latitude",
-            fwFgCfgEdit.longitudeMetavar || "Longitude",
-            fwFgCfgEdit.addressMetavar || "",
-            intg.type,
-          ),
-        });
-      }
-      body = _intRenderTabbedBody("intg-edit", editTabs);
-    }
-
-    var footer = '<button class="btn btn-secondary" id="btn-test-existing">Test Connection</button>' +
-      '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
-    openModal("Edit Integration", body, footer, { wide: true });
-    if (isFmgOrFgt) {
-      _intWireModalTabs("intg-edit");
-      _wireMonitoringTabSubtabs(intg.type);
-      wireAutoMonitorCards(id);
-      _wireProbeTimeoutWarning();
-      _wireCredentialPickerVisibility();
-      _populateUploadedMibsInDropdowns();
-    } else if (isAd || isEntra || isWin || isVc) {
-      _intWireModalTabs("intg-edit");
-      _wireMonitoringTabSubtabs(intg.type);
-      if (isAd || isEntra) wireWorkstationServerCards(id);
-      if (isVc) wireVcenterCards(id);
-      _wireProbeTimeoutWarning();
-    }
-
+// Test Connection button — posts the current (unsaved) form config; on an
+// FMG in bypass mode also verifies the direct-FortiGate path.
+function _wireIntgEditTest(id, intg) {
+    var isWin = intg.type === "windowsserver";
+    var isFgt = intg.type === "fortigate";
+    var isEntra = intg.type === "entraid";
+    var isAd = intg.type === "activedirectory";
+    var isVc = intg.type === "vcenter";
     document.getElementById("btn-test-existing").addEventListener("click", async function () {
       var btn = this;
       btn.disabled = true;
@@ -5093,7 +5124,18 @@ async function openEditModal(id) {
         btn.textContent = "Test Connection";
       }
     });
+}
 
+// Save phase: buildEditConfig (form read, no persist) + commitSave (the PUT +
+// monitor-settings PUT) + the Save button handler with the Auto-Monitor
+// capacity-warning confirm that must run BEFORE anything persists.
+function _wireIntgEditSave(id, intg, formGetter) {
+    var isWin = intg.type === "windowsserver";
+    var isFgt = intg.type === "fortigate";
+    var isEntra = intg.type === "entraid";
+    var isAd = intg.type === "activedirectory";
+    var isVc = intg.type === "vcenter";
+    var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
     // Reads the form into an editConfig WITHOUT persisting it. Split from
     // commitSave so the Auto-Monitor capacity-warning confirm can run BEFORE
     // the PUT — previously the integration was already saved by the time the
@@ -5343,9 +5385,6 @@ async function openEditModal(id) {
         btn.textContent = "Save Changes";
       }
     });
-  } catch (err) {
-    showToast(err.message, "error");
-  }
 }
 
 async function testConnection(id, btn) {
