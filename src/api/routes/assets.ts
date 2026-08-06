@@ -3906,6 +3906,126 @@ const dependencyOverrideBodySchema = z.object({
   parentAssetIds: z.array(z.string().min(1)).max(20),
 });
 
+// ─── GET /:id/dependencies phases (split 2026-08 — the contract tests in
+// tests/integration/assetDependenciesContract.test.ts pin the override-wins
+// rule, the per-child binding filter, the grandchild layer, the ordering,
+// and the HA-peer block). The child and grandchild blocks were near-duplicate
+// inline copies of the same binding-rule walk; they now share
+// loadBoundChildRows.
+
+// Stable display order: type (firewall→switch→ap→other), then hostname.
+const DEP_TYPE_ORDER: Record<string, number> = { firewall: 1, switch: 2, access_point: 3 };
+function byDepTypeThenHostname(a: { assetType: string; hostname: string | null }, b: { assetType: string; hostname: string | null }): number {
+  const ta = DEP_TYPE_ORDER[a.assetType] ?? 99;
+  const tb = DEP_TYPE_ORDER[b.assetType] ?? 99;
+  if (ta !== tb) return ta - tb;
+  return (a.hostname || "").localeCompare(b.hostname || "");
+}
+
+interface BoundChildRow {
+  parentAssetId: string;
+  id: string;
+  hostname: string | null;
+  assetType: string;
+  dependencyLayer: number | null;
+  monitorStatus: string | null;
+  monitored: boolean;
+  dependencySuppressed: boolean;
+  dependencyTestUntil: Date | null;
+  source: string;
+  detectedVia: string | null;
+}
+
+/**
+ * Every asset BOUND to one of `parentIds` as a dependency child. Binding
+ * resolution per child: if the child has ANY override row, only its override
+ * rows count; otherwise only its computed rows count — the same rule the
+ * parents view applies. Rows come back in (source asc, createdAt asc) order;
+ * callers own dedupe/grouping/sorting.
+ */
+async function loadBoundChildRows(parentIds: string[]): Promise<BoundChildRow[]> {
+  if (parentIds.length === 0) return [];
+  const rows = await prisma.assetDependencyParent.findMany({
+    where: { parentAssetId: { in: parentIds } },
+    include: {
+      asset: {
+        select: {
+          id: true,
+          hostname: true,
+          assetType: true,
+          dependencyLayer: true,
+          monitorStatus: true,
+          monitored: true,
+          dependencySuppressed: true,
+          dependencyTestUntil: true,
+        },
+      },
+    },
+    orderBy: [{ source: "asc" }, { createdAt: "asc" }],
+  });
+  const ids = [...new Set(rows.map((r) => r.assetId))];
+  const overrideMap = new Map<string, boolean>();
+  if (ids.length > 0) {
+    const overrides = await prisma.assetDependencyParent.findMany({
+      where: { assetId: { in: ids }, source: "override" },
+      select: { assetId: true },
+    });
+    for (const r of overrides) overrideMap.set(r.assetId, true);
+  }
+  const out: BoundChildRow[] = [];
+  for (const r of rows) {
+    const childHasOverride = overrideMap.get(r.assetId) === true;
+    const isBinding = childHasOverride ? r.source === "override" : r.source === "computed";
+    if (!isBinding) continue;
+    out.push({
+      parentAssetId:        r.parentAssetId,
+      id:                   r.asset.id,
+      hostname:             r.asset.hostname,
+      assetType:            r.asset.assetType,
+      dependencyLayer:      r.asset.dependencyLayer,
+      monitorStatus:        r.asset.monitorStatus,
+      monitored:            r.asset.monitored,
+      dependencySuppressed: r.asset.dependencySuppressed,
+      dependencyTestUntil:  r.asset.dependencyTestUntil,
+      source:               r.source,
+      detectedVia:          r.detectedVia,
+    });
+  }
+  return out;
+}
+
+/**
+ * HA peer (firewalls only) — the other member of this asset's HA cluster,
+ * resolved via the fortinetTopology.haPeerSerial stamp. The dependency DAG
+ * deliberately has NO edge between HA members (both are layer-1 roots;
+ * member↔member LLDP edges are same-layer and pruned), so without this the
+ * tree panel can never show the cluster's second box. Display-only — it is
+ * NOT a parent or child.
+ */
+async function loadDependencyHaPeer(asset: { assetType: string; fortinetTopology: unknown }) {
+  const selfTopo = (asset.fortinetTopology as Record<string, unknown> | null) ?? null;
+  const peerSerial = typeof selfTopo?.haPeerSerial === "string" ? selfTopo.haPeerSerial : null;
+  if (asset.assetType !== "firewall" || !peerSerial) return null;
+  const peer = await prisma.asset.findFirst({
+    where: { serialNumber: { equals: peerSerial, mode: "insensitive" } },
+    select: {
+      id: true, hostname: true, assetType: true, dependencyLayer: true,
+      monitorStatus: true, monitored: true, fortinetTopology: true,
+    },
+  });
+  if (!peer) return null;
+  const peerTopo = (peer.fortinetTopology as Record<string, unknown> | null) ?? null;
+  return {
+    id: peer.id,
+    hostname: peer.hostname,
+    assetType: peer.assetType,
+    dependencyLayer: peer.dependencyLayer,
+    monitorStatus: peer.monitorStatus,
+    monitored: peer.monitored,
+    haRole: typeof peerTopo?.haRole === "string" ? peerTopo.haRole : null,
+  };
+}
+
 router.get("/:id/dependencies", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
@@ -3927,40 +4047,7 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
     });
     if (!asset) throw new AppError(404, "Asset not found");
 
-    // HA peer (firewalls only) — the other member of this asset's HA
-    // cluster, resolved via the fortinetTopology.haPeerSerial stamp. The
-    // dependency DAG deliberately has NO edge between HA members (both are
-    // layer-1 roots; member↔member LLDP edges are same-layer and pruned),
-    // so without this the tree panel can never show the cluster's second
-    // box. Display-only — it is NOT a parent or child.
-    let haPeer: {
-      id: string; hostname: string | null; assetType: string;
-      dependencyLayer: number | null; monitorStatus: string | null;
-      monitored: boolean; haRole: string | null;
-    } | null = null;
-    const selfTopo = (asset.fortinetTopology as Record<string, unknown> | null) ?? null;
-    const peerSerial = typeof selfTopo?.haPeerSerial === "string" ? selfTopo.haPeerSerial : null;
-    if (asset.assetType === "firewall" && peerSerial) {
-      const peer = await prisma.asset.findFirst({
-        where: { serialNumber: { equals: peerSerial, mode: "insensitive" } },
-        select: {
-          id: true, hostname: true, assetType: true, dependencyLayer: true,
-          monitorStatus: true, monitored: true, fortinetTopology: true,
-        },
-      });
-      if (peer) {
-        const peerTopo = (peer.fortinetTopology as Record<string, unknown> | null) ?? null;
-        haPeer = {
-          id: peer.id,
-          hostname: peer.hostname,
-          assetType: peer.assetType,
-          dependencyLayer: peer.dependencyLayer,
-          monitorStatus: peer.monitorStatus,
-          monitored: peer.monitored,
-          haRole: typeof peerTopo?.haRole === "string" ? peerTopo.haRole : null,
-        };
-      }
-    }
+    const haPeer = await loadDependencyHaPeer(asset);
 
     const rows = await prisma.assetDependencyParent.findMany({
       where: { assetId: id },
@@ -4006,138 +4093,38 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
     const hasOverride = overrideParents.length > 0;
     const effectiveParents = hasOverride ? overrideParents : computedParents;
 
-    // Direct children — every asset that has THIS asset as one of its
-    // EFFECTIVE parents. We pull every asset_dependency_parents row pointing
-    // at this id, then resolve each child's effective-parent rule (override
-    // wins when present) to filter out children that pin this asset only via
-    // their computed set when an override has since replaced it.
-    const childRows = await prisma.assetDependencyParent.findMany({
-      where: { parentAssetId: id },
-      include: {
-        asset: {
-          select: {
-            id: true,
-            hostname: true,
-            assetType: true,
-            dependencyLayer: true,
-            monitorStatus: true,
-            monitored: true,
-            dependencySuppressed: true,
-            dependencyTestUntil: true,
-          },
-        },
-      },
-      orderBy: [{ source: "asc" }, { createdAt: "asc" }],
-    });
-    // For each candidate child, ask "does this child have any override row?"
-    // — if yes, only the override row counts as binding; if no, only the
-    // computed row counts. Same resolution rule as the parents view.
-    const childIds = [...new Set(childRows.map(r => r.assetId))];
-    const childOverrideMap = new Map<string, boolean>();
-    if (childIds.length > 0) {
-      const childOverrides = await prisma.assetDependencyParent.findMany({
-        where: { assetId: { in: childIds }, source: "override" },
-        select: { assetId: true },
-      });
-      for (const r of childOverrides) childOverrideMap.set(r.assetId, true);
-    }
+    // Direct children — every asset bound to THIS asset as an effective
+    // parent (loadBoundChildRows applies the override-wins binding rule per
+    // child). Dedupe by child id keeping the first binding row.
+    const boundChildren = await loadBoundChildRows([id]);
     const seenChildIds = new Set<string>();
-    const children = [];
-    for (const r of childRows) {
-      const childHasOverride = childOverrideMap.get(r.assetId) === true;
-      const isBinding = childHasOverride ? r.source === "override" : r.source === "computed";
-      if (!isBinding) continue;
-      if (seenChildIds.has(r.assetId)) continue; // dedupe if a child pins us via both computed AND override
-      seenChildIds.add(r.assetId);
-      children.push({
-        id:                  r.asset.id,
-        hostname:            r.asset.hostname,
-        assetType:           r.asset.assetType,
-        dependencyLayer:     r.asset.dependencyLayer,
-        monitorStatus:       r.asset.monitorStatus,
-        monitored:           r.asset.monitored,
-        dependencySuppressed: r.asset.dependencySuppressed,
-        dependencyTestUntil: r.asset.dependencyTestUntil,
-        source:              r.source,
-        detectedVia:         r.detectedVia,
-      });
+    const children: Array<Omit<BoundChildRow, "parentAssetId">> = [];
+    for (const r of boundChildren) {
+      if (seenChildIds.has(r.id)) continue; // dedupe if a child pins us via both computed AND override
+      seenChildIds.add(r.id);
+      const { parentAssetId: _p, ...child } = r;
+      children.push(child);
     }
-    // Stable display order: type (firewall→switch→ap→other), then hostname.
-    const TYPE_ORDER: Record<string, number> = { firewall: 1, switch: 2, access_point: 3 };
-    children.sort((a, b) => {
-      const ta = TYPE_ORDER[a.assetType] ?? 99;
-      const tb = TYPE_ORDER[b.assetType] ?? 99;
-      if (ta !== tb) return ta - tb;
-      return (a.hostname || "").localeCompare(b.hostname || "");
-    });
+    children.sort(byDepTypeThenHostname);
 
     // One additional layer down (grandchildren) so the asset details modal can
-    // render firewall → switch → AP without click-through. Same binding rule
-    // as direct children: a grandchild is bound to its parent via override
-    // when any override exists for the grandchild, else via computed.
-    const grandchildrenByParent = new Map<string, typeof children>();
-    const childIdSet = children.map(c => c.id);
-    if (childIdSet.length > 0) {
-      const gcRows = await prisma.assetDependencyParent.findMany({
-        where: { parentAssetId: { in: childIdSet } },
-        include: {
-          asset: {
-            select: {
-              id: true,
-              hostname: true,
-              assetType: true,
-              dependencyLayer: true,
-              monitorStatus: true,
-              monitored: true,
-              dependencySuppressed: true,
-              dependencyTestUntil: true,
-            },
-          },
-        },
-        orderBy: [{ source: "asc" }, { createdAt: "asc" }],
-      });
-      const gcIds = [...new Set(gcRows.map(r => r.assetId))];
-      const gcOverrideMap = new Map<string, boolean>();
-      if (gcIds.length > 0) {
-        const gcOverrides = await prisma.assetDependencyParent.findMany({
-          where: { assetId: { in: gcIds }, source: "override" },
-          select: { assetId: true },
-        });
-        for (const r of gcOverrides) gcOverrideMap.set(r.assetId, true);
-      }
-      // Dedupe per (parentId, childId) so an MCLAG pair doesn't render twice
-      // under one parent.
-      const seenGc = new Set<string>();
-      for (const r of gcRows) {
-        const gcHasOverride = gcOverrideMap.get(r.assetId) === true;
-        const isBinding = gcHasOverride ? r.source === "override" : r.source === "computed";
-        if (!isBinding) continue;
-        const dedupeKey = r.parentAssetId + "|" + r.assetId;
-        if (seenGc.has(dedupeKey)) continue;
-        seenGc.add(dedupeKey);
-        const list = grandchildrenByParent.get(r.parentAssetId) ?? [];
-        list.push({
-          id:                  r.asset.id,
-          hostname:            r.asset.hostname,
-          assetType:           r.asset.assetType,
-          dependencyLayer:     r.asset.dependencyLayer,
-          monitorStatus:       r.asset.monitorStatus,
-          monitored:           r.asset.monitored,
-          dependencySuppressed: r.asset.dependencySuppressed,
-          dependencyTestUntil: r.asset.dependencyTestUntil,
-          source:              r.source,
-          detectedVia:         r.detectedVia,
-        });
-        grandchildrenByParent.set(r.parentAssetId, list);
-      }
-      for (const list of grandchildrenByParent.values()) {
-        list.sort((a, b) => {
-          const ta = TYPE_ORDER[a.assetType] ?? 99;
-          const tb = TYPE_ORDER[b.assetType] ?? 99;
-          if (ta !== tb) return ta - tb;
-          return (a.hostname || "").localeCompare(b.hostname || "");
-        });
-      }
+    // render firewall → switch → AP without click-through. Same binding rule;
+    // dedupe per (parentId, childId) so an MCLAG pair doesn't render twice
+    // under one parent.
+    const grandchildrenByParent = new Map<string, Array<Omit<BoundChildRow, "parentAssetId">>>();
+    const boundGrandchildren = await loadBoundChildRows(children.map(c => c.id));
+    const seenGc = new Set<string>();
+    for (const r of boundGrandchildren) {
+      const dedupeKey = r.parentAssetId + "|" + r.id;
+      if (seenGc.has(dedupeKey)) continue;
+      seenGc.add(dedupeKey);
+      const { parentAssetId, ...gc } = r;
+      const list = grandchildrenByParent.get(parentAssetId) ?? [];
+      list.push(gc);
+      grandchildrenByParent.set(parentAssetId, list);
+    }
+    for (const list of grandchildrenByParent.values()) {
+      list.sort(byDepTypeThenHostname);
     }
     const childrenWithGrandchildren = children.map(c => ({
       ...c,
