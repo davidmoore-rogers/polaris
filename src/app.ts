@@ -758,6 +758,11 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/reclaimBloatedChunks.js",
       "./jobs/autoBuildAgents.js",
       "./jobs/discoveryRunReaper.js",
+      // Automatic database backups on the operator's cadence. Default-OFF; the
+      // tick is a cheap due-check until Server Settings → Maintenance →
+      // Scheduled Backups is enabled. Scheduler role only, so a split-role
+      // install takes one backup rather than one per monitor replica.
+      "./jobs/scheduledBackup.js",
       // integrationConnectionTester DISABLED 2026-06-02: the 10-min synthetic
       // /sys/status probe fired false-positive `integration.test.failed`
       // warnings on FMG (a transient RPC -11 "no valid session" — session reap

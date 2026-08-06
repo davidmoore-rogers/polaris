@@ -2268,6 +2268,45 @@ async function loadDatabaseInfo() {
 
       '</div>' + // close 3-column row of Backup/Restore/History cards
 
+      // ── Scheduled Backups card ──
+      // Manual backup alone means "someone remembers to click the button".
+      // This is the standing recovery point; default off so it never competes
+      // with an enterprise backup product already covering this Postgres.
+      '<div class="settings-card">' +
+        '<h4>Scheduled Backups</h4>' +
+        '<p class="hint" style="margin-bottom:0.75rem">Take a backup automatically on a fixed cadence. Off by default — leave it off if an enterprise backup product already covers this PostgreSQL instance. Copies land in <code>data/backups/</code> on this host; set an off-host directory so losing the host does not lose every backup with it.</p>' +
+        '<label style="display:flex;align-items:center;gap:8px;margin-bottom:0.75rem">' +
+          '<input type="checkbox" id="bksched-enabled">' +
+          '<span>Enable scheduled backups</span>' +
+        '</label>' +
+        '<div id="bksched-fields" class="form-row" style="align-items:flex-end;gap:12px;flex-wrap:wrap">' +
+          '<div style="min-width:130px">' +
+            '<label for="bksched-interval">Every (hours)</label>' +
+            '<input type="number" id="bksched-interval" min="1" max="168" step="1">' +
+          '</div>' +
+          '<div style="min-width:150px">' +
+            '<label for="bksched-hour">At UTC hour <span style="color:var(--color-text-tertiary)">(optional)</span></label>' +
+            '<input type="number" id="bksched-hour" min="0" max="23" step="1" placeholder="any">' +
+          '</div>' +
+          '<div style="min-width:130px">' +
+            '<label for="bksched-retain">Keep last</label>' +
+            '<input type="number" id="bksched-retain" min="1" max="50" step="1">' +
+          '</div>' +
+          '<div style="flex:1;min-width:200px">' +
+            '<label for="bksched-passphrase">Encryption passphrase <span style="color:var(--color-text-tertiary)">(optional)</span></label>' +
+            '<input type="password" id="bksched-passphrase" placeholder="Leave blank for unencrypted" autocomplete="new-password">' +
+          '</div>' +
+          '<div style="flex:1;min-width:220px">' +
+            '<label for="bksched-copyto">Off-host copy directory <span style="color:var(--color-text-tertiary)">(optional)</span></label>' +
+            '<input type="text" id="bksched-copyto" placeholder="/mnt/backups/polaris">' +
+          '</div>' +
+          '<div>' +
+            '<button class="btn btn-primary" id="btn-bksched-save" style="white-space:nowrap">Save Schedule</button>' +
+          '</div>' +
+        '</div>' +
+        '<div id="bksched-status" style="margin-top:0.5rem"></div>' +
+      '</div>' +
+
       '<div style="display:flex;gap:8px;align-items:center">' +
         '<button class="btn btn-secondary" id="btn-db-refresh">Refresh</button>' +
       '</div>';
@@ -2281,6 +2320,7 @@ async function loadDatabaseInfo() {
     initBackupControls();
     initRestoreControls();
     loadBackupHistory();
+    loadBackupSchedule();
     initUpdateControls();
     initCapacityActions();
     initCapacityAdvisorActions();
@@ -2559,6 +2599,24 @@ function initRestoreControls() {
         (result.backupDate ? ' (backup from ' + escapeHtml(formatDate(result.backupDate)) + ')' : '') + '</span>';
       showToast("Database restored successfully", "success");
 
+      // A restore drops and recreates every table, so the running processes are
+      // holding stale relation OIDs (the service recycles its own pool, but the
+      // monitor/discovery roles have their own) and possibly a generated Prisma
+      // client built against a different schema version. Make the restart
+      // impossible to miss rather than leaving the operator on a subtly broken
+      // instance.
+      if (result.restartRequired) {
+        statusEl.innerHTML +=
+          '<div style="margin-top:0.75rem;padding:0.6rem 0.75rem;border-radius:6px;' +
+          'background:color-mix(in srgb, var(--color-warning) 12%, transparent);' +
+          'border:1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);' +
+          'font-size:0.85rem;color:var(--color-text-primary)">' +
+          '<strong style="color:var(--color-warning)">Restart required</strong> — ' +
+          'every Polaris process must restart to pick up the restored schema. ' +
+          'Until then, queries may fail with "could not open relation".' +
+          '</div>';
+      }
+
       // Reset the form
       _restoreFile = null;
       fileInfo.style.display = "none";
@@ -2641,6 +2699,75 @@ function selectRestoreFile(file) {
     };
     reader.readAsArrayBuffer(file.slice(0, 8));
   }
+}
+
+// ─── Scheduled Backups ──────────────────────────────────────────────────────
+
+async function loadBackupSchedule() {
+  var enabledEl = document.getElementById("bksched-enabled");
+  if (!enabledEl) return;
+  var statusEl = document.getElementById("bksched-status");
+
+  function syncFieldState() {
+    var on = enabledEl.checked;
+    ["bksched-interval", "bksched-hour", "bksched-retain", "bksched-passphrase", "bksched-copyto"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.disabled = !on;
+    });
+  }
+
+  try {
+    var s = await api.serverSettings.getBackupSchedule();
+    enabledEl.checked = !!s.enabled;
+    document.getElementById("bksched-interval").value = s.intervalHours;
+    document.getElementById("bksched-hour").value = s.hourUtc === null ? "" : s.hourUtc;
+    document.getElementById("bksched-retain").value = s.retainCount;
+    // The GET returns the mask sentinel, never the stored passphrase. Sending it
+    // back unchanged means "keep what is stored" (server-side isMaskedSecret).
+    document.getElementById("bksched-passphrase").value = s.passphrase || "";
+    document.getElementById("bksched-copyto").value = s.copyToDir || "";
+    syncFieldState();
+
+    if (s.lastError) {
+      statusEl.innerHTML = '<span class="badge badge-danger">Last run failed: ' + escapeHtml(s.lastError) + '</span>';
+    } else if (s.lastRunAt) {
+      statusEl.innerHTML = '<span class="hint">Last successful backup: ' + escapeHtml(formatDate(s.lastRunAt)) + '</span>';
+    } else if (s.enabled) {
+      statusEl.innerHTML = '<span class="hint">Enabled — the first backup runs shortly.</span>';
+    } else {
+      statusEl.innerHTML = '';
+    }
+  } catch (err) {
+    statusEl.innerHTML = '<span class="badge badge-danger">Could not load schedule: ' + escapeHtml(err.message) + '</span>';
+    return;
+  }
+
+  enabledEl.addEventListener("change", syncFieldState);
+
+  document.getElementById("btn-bksched-save").addEventListener("click", async function () {
+    var btn = this;
+    var hourRaw = document.getElementById("bksched-hour").value;
+    var body = {
+      enabled: enabledEl.checked,
+      intervalHours: parseInt(document.getElementById("bksched-interval").value, 10) || 24,
+      hourUtc: hourRaw === "" ? null : parseInt(hourRaw, 10),
+      retainCount: parseInt(document.getElementById("bksched-retain").value, 10) || 7,
+      passphrase: document.getElementById("bksched-passphrase").value,
+      copyToDir: document.getElementById("bksched-copyto").value,
+    };
+    btn.disabled = true;
+    btn.textContent = "Saving...";
+    try {
+      await api.serverSettings.saveBackupSchedule(body);
+      showToast("Backup schedule saved", "success");
+      await loadBackupSchedule();
+    } catch (err) {
+      showToast("Could not save schedule: " + err.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Save Schedule";
+    }
+  });
 }
 
 // ─── Backup History ─────────────────────────────────────────────────────────
@@ -2984,10 +3111,14 @@ async function applyUpdateUI() {
   var backupEnabled = backupCheckbox ? backupCheckbox.checked : true;
 
   var password = null;
+  // Server default: a FAILED pre-update backup aborts the update. This flag is
+  // the operator's explicit "proceed anyway", collected in the password modal.
+  var allowWithoutBackup = false;
   if (backupEnabled) {
     var pwResult = await promptUpdateBackupPassword();
     if (pwResult === null) return; // user cancelled
-    password = pwResult || null;   // empty string → unencrypted
+    password = pwResult.password || null; // empty string → unencrypted
+    allowWithoutBackup = !!pwResult.allowWithoutBackup;
   } else {
     var confirmed = await showConfirm(
       "Apply this update? Backup is disabled — no recovery point will be created. " +
@@ -3001,7 +3132,7 @@ async function applyUpdateUI() {
   btn.textContent = "Starting update...";
 
   try {
-    await api.serverSettings.applyUpdate(password);
+    await api.serverSettings.applyUpdate(password, allowWithoutBackup);
     renderUpdateProgress();
     startUpdatePolling();
   } catch (err) {
@@ -3011,7 +3142,8 @@ async function applyUpdateUI() {
   }
 }
 
-// Returns the entered password (string), "" for proceed-without-encryption, or null for cancel.
+// Resolves to { password, allowWithoutBackup } — password "" means
+// proceed-without-encryption — or null when the operator cancels.
 function promptUpdateBackupPassword() {
   return new Promise(function (resolve) {
     var body =
@@ -3029,7 +3161,14 @@ function promptUpdateBackupPassword() {
           '<input type="password" id="update-backup-pw-confirm" placeholder="Re-enter password" autocomplete="new-password">' +
         '</div>' +
       '</div>' +
-      '<div id="update-backup-pw-error" style="color:var(--color-danger);font-size:0.82rem;margin-top:0.5rem;min-height:1em"></div>';
+      '<div id="update-backup-pw-error" style="color:var(--color-danger);font-size:0.82rem;margin-top:0.5rem;min-height:1em"></div>' +
+      // Unticked by default: if the backup fails, the update stops. Migrations
+      // are not reversible, so continuing past a failed backup means the update
+      // has no recovery point at all.
+      '<label style="display:flex;align-items:flex-start;gap:8px;margin-top:1rem;font-size:0.85rem;color:var(--color-text-secondary)">' +
+        '<input type="checkbox" id="update-allow-nobackup" style="margin-top:3px">' +
+        '<span>Proceed even if the backup fails. Leave this off unless you accept that a failed migration would have no recovery point.</span>' +
+      '</label>';
     var footer =
       '<button class="btn btn-secondary" id="upd-pw-cancel">Cancel</button>' +
       '<button class="btn btn-primary" id="upd-pw-ok">Apply Update</button>';
@@ -3048,8 +3187,9 @@ function promptUpdateBackupPassword() {
         return;
       }
       errEl.textContent = "";
+      var allowEl = document.getElementById("update-allow-nobackup");
       closeModal();
-      resolve(pw || "");
+      resolve({ password: pw || "", allowWithoutBackup: !!(allowEl && allowEl.checked) });
     };
     var pwInput = document.getElementById("update-backup-pw");
     if (pwInput) pwInput.focus();

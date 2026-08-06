@@ -26,3 +26,8 @@ desktop.ini
 Audit/
 
 # Audit report output
+audit-reports/
+
+# Runtime update-progress state written by the in-app updater (survives restarts
+# so the Application Updates card can resume its progress view). Not source.
+.update-status.json

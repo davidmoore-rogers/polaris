@@ -867,6 +867,10 @@ const api = {
       });
     },
     listBackups: () => request("GET", "/server-settings/database/backups"),
+    // Scheduled backups. The GET returns the passphrase masked; echoing the mask
+    // back on save means "keep the stored value".
+    getBackupSchedule:  () => request("GET", "/server-settings/database/backup-schedule"),
+    saveBackupSchedule: (body) => request("PUT", "/server-settings/database/backup-schedule", body),
     deleteBackup: (id) => request("DELETE", `/server-settings/database/backups/${id}`),
     downloadBackup: (id) => {
       return fetch(API_BASE + "/server-settings/database/backups/" + id + "/download").then(function (res) {
@@ -994,7 +998,15 @@ const api = {
     restart: () => request("POST", "/server-settings/restart"),
     checkForUpdates: () => request("GET", "/server-settings/updates/check"),
     getUpdateStatus: () => request("GET", "/server-settings/updates/status"),
-    applyUpdate:     (password) => request("POST", "/server-settings/updates/apply", password ? { password: password } : undefined),
+    // allowWithoutBackup: only sent when the operator ticked the confirmation in
+    // the Apply Update modal. Absent/false means the server ABORTS the update if
+    // the pre-update backup fails.
+    applyUpdate:     (password, allowWithoutBackup) => {
+      const body = {};
+      if (password) body.password = password;
+      if (allowWithoutBackup) body.allowWithoutBackup = true;
+      return request("POST", "/server-settings/updates/apply", Object.keys(body).length ? body : undefined);
+    },
     dismissUpdate:   () => request("POST", "/server-settings/updates/dismiss"),
     getUpdateHistory: (limit) => request("GET", "/server-settings/updates/history" + (limit ? "?limit=" + limit : "")),
     getUpdateRepo:   () => request("GET", "/server-settings/updates/repo"),

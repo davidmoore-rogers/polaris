@@ -6,22 +6,11 @@ import { chunkArray } from "../../utils/chunk.js";
 import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
-import { execSync, spawn } from "node:child_process";
-import { gzipSync, createGunzip } from "node:zlib";
-import {
-  createCipheriv,
-  createDecipheriv,
-  randomBytes,
-  scryptSync,
-  X509Certificate,
-  createPrivateKey,
-} from "node:crypto";
-import { existsSync, unlinkSync, readFileSync, writeFileSync, mkdirSync, createReadStream, openSync, readSync, closeSync } from "node:fs";
-import { pipeline } from "node:stream/promises";
+import { X509Certificate, createPrivateKey, randomBytes } from "node:crypto";
+import { existsSync, unlinkSync, writeFileSync, mkdirSync, createReadStream, statSync } from "node:fs";
 import { totalmem } from "node:os";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve, sep } from "node:path";
 import {
   getNtpSettings,
   updateNtpSettings,
@@ -35,7 +24,25 @@ import type { DnsSettings } from "../../services/dnsService.js";
 import { getOuiStatus, refreshOuiDatabase, getOuiOverrides, setOuiOverride, deleteOuiOverride, lookupOuiDetailed } from "../../services/ouiService.js";
 import { getDashSettings, saveDashSettings } from "../../services/dashSettingsService.js";
 import { requirePermission } from "../middleware/permissions.js";
+import { requestActor } from "../middleware/auth.js";
 import { logEvent } from "./events.js";
+import { buildChanges } from "../../services/eventLogService.js";
+import {
+  createBackup,
+  restoreBackup,
+  listBackups,
+  deleteBackup,
+  getBackupRecord,
+  backupFilePath,
+} from "../../services/backupService.js";
+import {
+  getBackupScheduleMasked,
+  saveBackupSchedule,
+  MIN_INTERVAL_HOURS,
+  MAX_INTERVAL_HOURS,
+  MIN_RETAIN,
+  MAX_RETAIN,
+} from "../../services/backupScheduleService.js";
 import {
   normalizeCriteria,
   reconcileTag,
@@ -76,7 +83,6 @@ import {
 import { BACKUP_DIR, UPLOADS_DIR } from "../../utils/paths.js";
 import { maintenanceLimiter } from "../middleware/rateLimits.js";
 import { getAppVersion } from "../../utils/version.js";
-import { getDirectDatabaseUrl } from "../../utils/dbConnections.js";
 import { isTimescaleAvailable } from "../../services/timescaleService.js";
 
 const TAG_COLORS = ["#4fc3f7","#4ade80","#f59e0b","#f472b6","#a78bfa","#fb923c","#38bdf8","#34d399","#e879f9","#facc15","#f87171","#2dd4bf","#818cf8","#c084fc"];
@@ -343,14 +349,6 @@ router.get("/database", async (_req, res, next) => {
 
 mkdirSync(BACKUP_DIR, { recursive: true });
 
-// Backup ids are server-generated (`bk-<ts>`), but the delete/download routes
-// accept them from the URL — resolve and require containment under BACKUP_DIR
-// before any filesystem access. Returns null for anything that escapes.
-function backupFilePath(id: unknown): string | null {
-  const p = resolve(BACKUP_DIR, String(id));
-  return p.startsWith(BACKUP_DIR + sep) ? p : null;
-}
-
 router.post("/database/backup", maintenanceLimiter, requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
   try {
     // Reject empty/weak passphrases before they become an AES-256-GCM key —
@@ -362,73 +360,23 @@ router.post("/database/backup", maintenanceLimiter, requirePermission("serverSet
     } catch (e: any) {
       throw new AppError(400, e?.message || "Invalid backup password");
     }
-    // pg_dump goes direct to Postgres even under PgBouncer — the COPY-heavy
-    // dump protocol doesn't proxy reliably through transaction-pool mode.
-    // Falls back to DATABASE_URL when POLARIS_DB_DIRECT_URL is unset.
-    const connUrl = getDirectDatabaseUrl();
-    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const backupId = `bk-${Date.now()}`;
-    const filename = `polaris-backup-${APP_VERSION}-${ts}${password ? ".enc" : ""}.gz`;
-    const tmpFile = join(tmpdir(), `polaris-dump-${Date.now()}.sql`);
 
-    try {
-      execSync(`pg_dump "${connUrl}" --no-owner --no-acl --clean --if-exists -f "${tmpFile}"`, {
-        timeout: 120000,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-    } catch (err: any) {
-      throw new AppError(500, "pg_dump failed: " + (err.stderr?.toString() || err.message));
-    }
-
-    let payload = readFileSync(tmpFile);
-    try { unlinkSync(tmpFile); } catch {}
-
-    payload = gzipSync(payload);
-
-    if (password) {
-      const salt = randomBytes(32);
-      const key = scryptSync(password, salt, 32);
-      const iv = randomBytes(16);
-      const cipher = createCipheriv("aes-256-gcm", key, iv);
-      const encrypted = Buffer.concat([cipher.update(payload), cipher.final()]);
-      const authTag = cipher.getAuthTag();
-      const magic = Buffer.from("POLARIS\0");
-      payload = Buffer.concat([magic, salt, iv, authTag, encrypted]);
-    }
-
-    writeFileSync(join(BACKUP_DIR, backupId), payload);
-
-    const backupRecord = {
-      id: backupId,
-      filename,
-      size: payload.length,
-      encrypted: !!password,
-      createdAt: new Date().toISOString(),
-    };
-    const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
-    const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
-    history.push(backupRecord);
-    if (history.length > 50) history.splice(0, history.length - 50);
-    await prisma.setting.upsert({
-      where: { key: "backup_history" },
-      update: { value: history },
-      create: { key: "backup_history", value: history },
-    });
-
-    await logEvent({
-      level: "info",
-      action: "server.backup.created",
-      resourceType: "backup",
-      resourceId: backupId,
-      resourceName: filename,
-      actor: req.session?.username,
-      message: `Database backup created: ${filename} (${payload.length} bytes${password ? ", encrypted" : ""})`,
+    // Everything below the seam lives in services/backupService.ts: the dump is
+    // streamed to disk (pg_dump stdout → gzip → optional cipher → file), the
+    // connection rides PG* env vars rather than argv, and there is no
+    // wall-clock cap. The route only streams the finished file back, so peak
+    // memory is a couple of stream watermarks instead of three copies of the
+    // dump.
+    const { record, path } = await createBackup({
+      password,
+      kind: "manual",
+      actor: requestActor(req),
     });
 
     res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    res.setHeader("Content-Length", payload.length);
-    res.end(payload);
+    res.setHeader("Content-Disposition", `attachment; filename="${record.filename}"`);
+    res.setHeader("Content-Length", String(record.size));
+    createReadStream(path).pipe(res);
   } catch (err) {
     next(err);
   }
@@ -443,88 +391,99 @@ router.post("/database/restore", maintenanceLimiter, requirePermission("serverSe
     rawUploadedPath && resolve(rawUploadedPath).startsWith(tmpdir() + sep)
       ? resolve(rawUploadedPath)
       : undefined;
-  let decryptedTempPath: string | null = null;
-
   try {
     if (!req.file || !uploadedPath) throw new AppError(400, "No backup file uploaded");
     if (await hasActiveDiscoveries()) throw new AppError(409, "A discovery is currently running — wait for it to finish or abort it before restoring");
-    const password: string | null = req.body?.password || null;
-    // psql restore goes direct — see backup-route comment above for why.
-    const connUrl = getDirectDatabaseUrl();
 
-    // Check magic bytes from disk to detect encryption without loading the whole file
-    const magic = Buffer.from("POLARIS\0");
-    const headerBuf = Buffer.alloc(8);
-    const fd = openSync(uploadedPath!, "r");
-    try { readSync(fd, headerBuf, 0, 8, 0); } finally { closeSync(fd); }
-    const isEncrypted = req.file.size > 72 && headerBuf.equals(magic);
+    // restoreBackup owns the whole mechanism: encryption detection from the
+    // magic header, STREAMED decryption (the old inline version readFileSync'd
+    // the entire ciphertext), and — the part that actually made restores
+    // unreliable — the timescaledb_pre_restore() / post_restore() gates around
+    // the psql run, with post_restore in a finally so a failed restore can't
+    // leave the database stuck in restoring mode.
+    await restoreBackup({ filePath: uploadedPath, password: req.body?.password || null });
 
-    // gzipSourcePath points to the (possibly decrypted) gzip file to stream into psql
-    let gzipSourcePath = uploadedPath!;
-
-    if (isEncrypted) {
-      if (!password) throw new AppError(400, "This backup is encrypted — a password is required to restore it");
-      const payload = readFileSync(uploadedPath!);
-      const salt = payload.subarray(8, 40);
-      const iv = payload.subarray(40, 56);
-      const authTag = payload.subarray(56, 72);
-      const ciphertext = payload.subarray(72);
-      const key = scryptSync(password, salt, 32);
-      const decipher = createDecipheriv("aes-256-gcm", key, iv);
-      decipher.setAuthTag(authTag);
-      let decrypted: Buffer;
-      try {
-        decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-      } catch {
-        throw new AppError(400, "Decryption failed — incorrect password or corrupted file");
-      }
-      decryptedTempPath = join(tmpdir(), `polaris-restore-dec-${Date.now()}.gz`);
-      writeFileSync(decryptedTempPath, decrypted);
-      gzipSourcePath = decryptedTempPath;
-    }
-
-    // Stream: gzip file → gunzip → psql stdin
-    // No decompressed-size cap or upload-size cap — handles arbitrarily large databases.
-    const psql = spawn("psql", [connUrl, "--single-transaction"], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    if (!psql.stdin) throw new AppError(500, "Failed to open psql stdin");
-
-    let psqlStderr = "";
-    psql.stderr.on("data", (chunk: Buffer) => { psqlStderr += chunk.toString(); });
-
-    const psqlExit = new Promise<void>((resolve, reject) => {
-      psql.on("error", reject);
-      psql.on("close", (code: number) => {
-        if (code === 0) resolve();
-        else reject(new AppError(500, `psql restore failed (exit ${code}): ${psqlStderr.slice(-500) || "no output"}`));
-      });
+    await logEvent({
+      level: "warning",
+      action: "server.backup.restored",
+      resourceType: "backup",
+      resourceName: req.file.originalname,
+      actor: requestActor(req),
+      message: `Database restored from uploaded backup: ${req.file.originalname}`,
     });
 
-    try {
-      await pipeline(createReadStream(gzipSourcePath), createGunzip(), psql.stdin);
-      await psqlExit;
-    } catch (err: any) {
-      psql.kill();
-      if (err instanceof AppError) throw err;
-      throw new AppError(500, "Restore failed: " + (err.message || String(err)));
-    }
-
-    res.json({ ok: true, message: "Database restored successfully" });
+    // restartRequired is not advisory politeness. A restored dump can carry a
+    // different schema version than the running process's generated Prisma
+    // client, and restoreBackup can only recycle the connection pool (which
+    // clears the stale relation OIDs `--clean --if-exists` leaves behind) — it
+    // cannot reload the client. Restarting is the only way to guarantee the
+    // process matches what is now on disk.
+    res.json({
+      ok: true,
+      message: "Database restored successfully. Restart Polaris now so every process picks up the restored schema.",
+      restartRequired: true,
+    });
   } catch (err) {
     next(err);
   } finally {
-    if (decryptedTempPath) { try { unlinkSync(decryptedTempPath); } catch {} }
-    if (uploadedPath) { try { unlinkSync(uploadedPath); } catch {} }
+    if (uploadedPath) { try { unlinkSync(uploadedPath); } catch { /* best effort */ } }
   }
 });
 
 router.get("/database/backups", maintenanceLimiter, async (_req, res, next) => {
   try {
-    const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
-    const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
-    const enriched = history.map((r: any) => ({ ...r, path: backupFilePath(r.id) }));
-    res.json(enriched.reverse());
+    res.json(await listBackups());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Scheduled backups ─────────────────────────────────────────────────────
+//
+// The cadence that turns backup from "someone remembers to click the button"
+// into a standing recovery point. Read carries the blanket serverSettingsSystem
+// floor; the write is serverSettingsData=fullwrite like every other
+// backup-touching route, since it can schedule gigabytes of writes and holds a
+// passphrase.
+
+const BackupScheduleSchema = z.object({
+  enabled:       z.boolean().optional(),
+  intervalHours: z.number().int().min(MIN_INTERVAL_HOURS).max(MAX_INTERVAL_HOURS).optional(),
+  hourUtc:       z.number().int().min(0).max(23).nullable().optional(),
+  retainCount:   z.number().int().min(MIN_RETAIN).max(MAX_RETAIN).optional(),
+  passphrase:    z.string().max(512).nullable().optional(),
+  copyToDir:     z.string().max(1024).nullable().optional(),
+});
+
+router.get("/database/backup-schedule", async (_req, res, next) => {
+  try {
+    res.json(await getBackupScheduleMasked());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/database/backup-schedule", requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
+  try {
+    const input = BackupScheduleSchema.parse(req.body);
+    const before = await getBackupScheduleMasked();
+    const saved = await saveBackupSchedule(input);
+    await logEvent({
+      level: "info",
+      action: "server.backup.schedule_updated",
+      resourceType: "setting",
+      resourceName: "backupSchedule",
+      actor: requestActor(req),
+      message: saved.enabled
+        ? `Scheduled backups enabled: every ${saved.intervalHours}h, keeping ${saved.retainCount}${saved.copyToDir ? `, copied to ${saved.copyToDir}` : ""}`
+        : "Scheduled backups disabled",
+      details: buildChanges(
+        { enabled: before.enabled, intervalHours: before.intervalHours, hourUtc: before.hourUtc, retainCount: before.retainCount, copyToDir: before.copyToDir },
+        { enabled: saved.enabled, intervalHours: saved.intervalHours, hourUtc: saved.hourUtc, retainCount: saved.retainCount, copyToDir: saved.copyToDir },
+      ),
+    });
+    // Respond masked — never echo the stored passphrase back.
+    res.json(await getBackupScheduleMasked());
   } catch (err) {
     next(err);
   }
@@ -532,34 +491,7 @@ router.get("/database/backups", maintenanceLimiter, async (_req, res, next) => {
 
 router.delete("/database/backups/:id", maintenanceLimiter, requirePermission("serverSettingsData", "fullwrite"), async (req, res, next) => {
   try {
-    const id = req.params.id as string;
-    const safePath = backupFilePath(id);
-    if (!safePath) throw new AppError(400, "Invalid backup id");
-    const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
-    const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
-    const idx = history.findIndex((r: any) => r.id === id);
-    if (idx === -1) throw new AppError(404, "Backup not found");
-
-    const removed = history[idx];
-    history.splice(idx, 1);
-    await prisma.setting.upsert({
-      where: { key: "backup_history" },
-      update: { value: history },
-      create: { key: "backup_history", value: history },
-    });
-
-    if (existsSync(safePath)) unlinkSync(safePath);
-
-    await logEvent({
-      level: "warning",
-      action: "server.backup.deleted",
-      resourceType: "backup",
-      resourceId: id,
-      resourceName: removed?.filename || id,
-      actor: req.session?.username,
-      message: `Database backup deleted: ${removed?.filename || id}`,
-    });
-
+    await deleteBackup(req.params.id as string, requestActor(req));
     res.status(204).send();
   } catch (err) {
     next(err);
@@ -573,18 +505,16 @@ router.get("/database/backups/:id/download", maintenanceLimiter, requirePermissi
     const id = req.params.id as string;
     const filePath = backupFilePath(id);
     if (!filePath) throw new AppError(400, "Invalid backup id");
-    const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
-    const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
-    const record = history.find((r: any) => r.id === id);
+    const record = await getBackupRecord(id);
     if (!record) throw new AppError(404, "Backup not found");
-
     if (!existsSync(filePath)) throw new AppError(404, "Backup file no longer exists on disk");
 
-    const payload = readFileSync(filePath);
+    // Streamed, not readFileSync'd — a multi-GB dump must not be buffered into
+    // the heap to be served.
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("Content-Disposition", `attachment; filename="${record.filename}"`);
-    res.setHeader("Content-Length", payload.length);
-    res.end(payload);
+    res.setHeader("Content-Length", String(statSync(filePath).size));
+    createReadStream(filePath).pipe(res);
   } catch (err) {
     next(err);
   }
@@ -1652,8 +1582,22 @@ router.post("/updates/apply", requirePermission("serverSettingsData", "fullwrite
     const password: string | null = (req.body && typeof req.body.password === "string" && req.body.password.length > 0)
       ? req.body.password
       : null;
+    // Opt-in override: proceed even if the pre-update backup fails. Default
+    // false, in which case a failed backup ABORTS the update instead of
+    // silently running the irreversible migration step with no rollback point.
+    // The UI only sends this when the operator ticks the confirmation box.
+    const allowWithoutBackup = req.body?.allowWithoutBackup === true;
+    if (allowWithoutBackup) {
+      await logEvent({
+        level: "warning",
+        action: "server.update.backup_override",
+        resourceType: "setting",
+        actor: requestActor(req),
+        message: "Update started with 'proceed without a backup' confirmed — a failed pre-update backup will not abort the update",
+      });
+    }
     // Start the update in the background
-    applyUpdate(password).catch((err) => {
+    applyUpdate(password, allowWithoutBackup).catch((err) => {
       logger.error({ err }, "Update failed");
     });
     // Return immediately — client should poll /updates/status

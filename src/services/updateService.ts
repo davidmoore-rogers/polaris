@@ -17,8 +17,8 @@ import {
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execSync, spawn } from "node:child_process";
-import { randomBytes, scryptSync, createCipheriv, createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { getAppVersion } from "../utils/version.js";
@@ -26,13 +26,51 @@ import { deriveNginxServerName, derivePolarisPort } from "../utils/publicUrl.js"
 import { renderNginxConfig } from "./nginxRenderer.js";
 import { getProxyConfig, saveProxyConfig } from "./proxyConfigService.js";
 import { resolveDashPort } from "../utils/dashConfig.js";
+import { createBackup } from "./backupService.js";
 
-const execAsync = promisify(exec);
+/**
+ * Every shell-out in this file goes through `execAsync`, which is a thin
+ * indirection over promisified `exec` rather than the promisified function
+ * itself. Two reasons:
+ *
+ *  - applyUpdate is the highest-blast-radius path in the repo (git checkout,
+ *    npm ci, prisma migrate deploy, systemd restart) and had no coverage beyond
+ *    update-train selection. Its step SEQUENCING and its fail-and-stop contract
+ *    at each gate are exactly what a test needs to pin, and neither is testable
+ *    if the shell is hard-wired.
+ *  - The indirection is one function call, so nothing about production behavior
+ *    changes; `_setExecRunnerForTests(null)` restores the real runner.
+ */
+type ExecResult = { stdout: string; stderr: string };
+export type ExecRunner = (cmd: string, opts?: Record<string, unknown>) => Promise<ExecResult>;
+
+const _realExec = promisify(exec) as unknown as ExecRunner;
+let _execRunner: ExecRunner = _realExec;
+
+const execAsync: ExecRunner = (cmd, opts) => _execRunner(cmd, opts);
+
+/** Test seam. Pass null to restore the real `exec`. */
+export function _setExecRunnerForTests(fn: ExecRunner | null): void {
+  _execRunner = fn ?? _realExec;
+}
+
+/**
+ * Test seam: clear the in-flight guard.
+ *
+ * On the SUCCESS path `_applying` is deliberately never reset — the pipeline's
+ * last act is to restart the service, so the flag dies with the process and a
+ * second Apply cannot race the restart. Deliberately NOT folded into
+ * clearUpdateStatus(), which is the operator-facing Dismiss button: clearing the
+ * guard there would let someone dismiss a running update and start a second one
+ * on top of it.
+ */
+export function _resetApplyingForTests(): void {
+  _applying = false;
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_DIR = join(__dirname, "..", "..");
 const STATUS_FILE = join(APP_DIR, ".update-status.json");
-const BACKUP_DIR = join(APP_DIR, "data", "backups");
 
 // Git repository the in-app updater fetches/pulls from. Operators can point
 // installs at a fork or internal mirror by setting POLARIS_UPDATE_REPO in .env.
@@ -544,8 +582,16 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
  *                 database backup. When set, the backup is wrapped in the same
  *                 POLARIS\0 envelope used by manual backups so the existing
  *                 restore flow accepts it.
+ * @param allowWithoutBackup Proceed even if the pre-update backup fails. Default
+ *                 false, which ABORTS the update instead — a failed backup means
+ *                 the irreversible `prisma migrate deploy` ahead has no rollback
+ *                 point. The Apply endpoint only sets this when the operator has
+ *                 explicitly confirmed it.
  */
-export async function applyUpdate(password?: string | null): Promise<void> {
+export async function applyUpdate(
+  password?: string | null,
+  allowWithoutBackup = false,
+): Promise<void> {
   if (!_updateEnvironment.available) {
     _status = disabledStatus();
     return;
@@ -554,7 +600,6 @@ export async function applyUpdate(password?: string | null): Promise<void> {
   _applying = true;
 
   const train = await getUpdateTrain();
-  const connUrl = process.env.DATABASE_URL || "";
 
   const steps: NonNullable<UpdateStatus["steps"]> = [
     { name: "Backup database", status: "pending", message: "" },
@@ -596,97 +641,43 @@ export async function applyUpdate(password?: string | null): Promise<void> {
 
   try {
     // ── Step 1: Backup database ──
-    // Stream pg_dump → gzip → file so backup size isn't bounded by an
-    // in-memory buffer. Saved to data/backups/ so it appears in the
-    // Backup History list and can be downloaded from the Maintenance tab.
+    // Delegates to services/backupService.ts (streamed pg_dump → gzip →
+    // optional cipher → file, connection via PG* env vars, Timescale-aware
+    // restore on the way back). It also registers the file in backup_history so
+    // the Maintenance tab shows it with a Download button.
     setStep(0, "running");
     const skipBackupSetting = await prisma.setting.findUnique({ where: { key: "update.skip_backup" } });
     if (skipBackupSetting?.value === true) {
       setStep(0, "done", "Backup skipped (disabled in settings)");
     } else {
       try {
-        mkdirSync(BACKUP_DIR, { recursive: true });
-        const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-        const version = readCurrentVersion();
-        const backupId = `bk-pre-update-${Date.now()}`;
-        const isEncrypted = !!(password && password.length > 0);
-        const filename = `polaris-pre-update-${version}-${ts}${isEncrypted ? ".enc" : ".sql"}.gz`;
-        const backupFile = join(BACKUP_DIR, backupId);
-
-        const { createGzip } = await import("node:zlib");
-        const { createWriteStream, createReadStream } = await import("node:fs");
-        const { pipeline } = await import("node:stream/promises");
-
-        const dump = spawn(
-          "pg_dump",
-          [connUrl, "--no-owner", "--no-acl", "--clean", "--if-exists"],
-          { cwd: APP_DIR }
-        );
-        let dumpStderr = "";
-        dump.stderr.on("data", (chunk) => { dumpStderr += chunk.toString(); });
-        const dumpExit = new Promise<void>((resolve, reject) => {
-          dump.on("error", reject);
-          dump.on("close", (code) => {
-            if (code === 0) resolve();
-            else reject(new Error(`pg_dump exited with code ${code}: ${dumpStderr.trim() || "no stderr"}`));
-          });
+        const { record } = await createBackup({
+          password: password && password.length > 0 ? password : null,
+          kind: "pre-update",
+          actor: "system:update",
         });
-
-        if (isEncrypted) {
-          // Stream pg_dump → gzip → AES-256-GCM cipher → temp ciphertext file,
-          // then assemble the final file as: [POLARIS\0][salt][iv][authTag][ciphertext].
-          // We can't write the auth tag until the cipher finishes, so we stage
-          // the ciphertext separately rather than reserving and patching bytes.
-          const salt = randomBytes(32);
-          const iv = randomBytes(16);
-          const key = scryptSync(password!, salt, 32);
-          const cipher = createCipheriv("aes-256-gcm", key, iv);
-          const ciphertextFile = backupFile + ".tmp-ct";
-
-          await Promise.all([
-            pipeline(dump.stdout, createGzip(), cipher, createWriteStream(ciphertextFile)),
-            dumpExit,
-          ]);
-
-          const authTag = cipher.getAuthTag();
-          const header = Buffer.concat([Buffer.from("POLARIS\0"), salt, iv, authTag]);
-          const out = createWriteStream(backupFile);
-          await new Promise<void>((resolve, reject) => {
-            out.write(header, (err) => (err ? reject(err) : resolve()));
-          });
-          await pipeline(createReadStream(ciphertextFile), out);
-          try { unlinkSync(ciphertextFile); } catch {}
-        } else {
-          await Promise.all([
-            pipeline(dump.stdout, createGzip(), createWriteStream(backupFile)),
-            dumpExit,
-          ]);
-        }
-
-        const sizeBytes = existsSync(backupFile) ? readFileSync(backupFile).length : 0;
-        const sizeKb = Math.round(sizeBytes / 1024);
-
-        // Register in backup_history so the Maintenance tab shows it with a Download button
-        try {
-          const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
-          const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
-          history.push({ id: backupId, filename, size: sizeBytes, encrypted: isEncrypted, preUpdate: true, createdAt: new Date().toISOString() });
-          if (history.length > 50) history.splice(0, history.length - 50);
-          await prisma.setting.upsert({
-            where: { key: "backup_history" },
-            update: { value: history },
-            create: { key: "backup_history", value: history },
-          });
-        } catch (dbErr) {
-          logger.warn({ err: dbErr }, "Pre-update backup created but failed to register in backup_history");
-        }
-
-        _status.backupFile = filename;
-        setStep(0, "done", `Backup created (${sizeKb} KB${isEncrypted ? ", encrypted" : ""})`);
+        _status.backupFile = record.filename;
+        setStep(0, "done", `Backup created (${Math.round(record.size / 1024)} KB${record.encrypted ? ", encrypted" : ""})`);
       } catch (err: any) {
-        // Non-fatal — warn but continue
-        setStep(0, "done", "Backup skipped: " + (err.message || "pg_dump not available"));
-        logger.warn({ err }, "Pre-update backup failed — continuing without backup");
+        // FATAL by default. This used to call setStep(0, "done", "Backup
+        // skipped: ...") and continue: the update then ran `git pull`, `npm ci`
+        // and `prisma migrate deploy` with no rollback point, while the
+        // Application Updates card showed step 1 as a completed green step.
+        // Migrations are not reversible, so a silently-missing backup is the
+        // difference between a bad update and an unrecoverable one.
+        //
+        // Two deliberate ways to proceed without a backup, both explicit:
+        //   - the `update.skip_backup` Setting (handled above), or
+        //   - allowWithoutBackup on this call, which the Apply endpoint only
+        //     sets when the operator ticks the confirmation checkbox.
+        const detail = err?.message || "pg_dump not available";
+        if (!allowWithoutBackup) {
+          failUpdate(0, `Pre-update backup failed: ${detail}. Fix the backup path, or re-run the update with "proceed without a backup" ticked if you accept the risk.`);
+          logger.error({ err }, "Pre-update backup failed — update aborted");
+          return;
+        }
+        setStep(0, "failed", `Backup failed, proceeding anyway (operator override): ${detail}`);
+        logger.warn({ err }, "Pre-update backup failed — continuing because allowWithoutBackup was set");
       }
     }
 
