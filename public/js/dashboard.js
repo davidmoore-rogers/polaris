@@ -444,9 +444,9 @@
     queueSave();
   }
 
-  function deleteDashboard(id) {
+  async function deleteDashboard(id) {
     if (state.layout.dashboards.length <= 1) return; // never remove the last
-    if (!window.confirm("Delete this dashboard and its widgets?")) return;
+    if (!(await showConfirm("Delete this dashboard and its widgets?"))) return;
     applyChange(function () {
       state.layout.dashboards = state.layout.dashboards.filter(function (x) { return x.id !== id; });
       if (state.layout.activeId === id) state.layout.activeId = state.layout.dashboards[0].id;

@@ -633,11 +633,11 @@
 
       var retireBtns = slot.querySelectorAll("button[data-retire-pin]");
       retireBtns.forEach(function (btn) {
-        btn.addEventListener("click", function () {
+        btn.addEventListener("click", async function () {
           var pin = btn.getAttribute("data-retire-pin");
           if (!pin) return;
           var disp = pin.slice(0, 19) + "..." + pin.slice(-6);
-          if (!confirm("Retire pin " + disp + " from every active agent? Skipped on any agent where this would be the last pin.")) {
+          if (!(await showConfirm("Retire pin " + disp + " from every active agent? Skipped on any agent where this would be the last pin."))) {
             return;
           }
           btn.disabled = true;

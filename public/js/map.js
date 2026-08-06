@@ -2769,7 +2769,7 @@
       }).catch(function (err) {
         failures++;
         // Per-polygon alert so the operator knows exactly which one failed.
-        window.alert("Failed to save region \"" + (poly._polarisRegionName || "") + "\": " + (err && err.message ? err.message : err));
+        showToast("Failed to save region \"" + (poly._polarisRegionName || "") + "\": " + (err && err.message ? err.message : err), "error");
       });
     }));
     if (failures > 0) {
@@ -2914,7 +2914,7 @@
       addRegionPolygon(saved);
       setStatus("Region \"" + saved.name + "\" saved.");
     } catch (err) {
-      window.alert("Failed to save region: " + (err && err.message ? err.message : err));
+      showToast("Failed to save region: " + (err && err.message ? err.message : err), "error");
     }
   }
 
@@ -2985,7 +2985,7 @@
       }
       setStatus("Region \"" + name + "\" recolored.");
     } catch (err) {
-      window.alert("Failed to recolor region: " + (err && err.message ? err.message : err));
+      showToast("Failed to recolor region: " + (err && err.message ? err.message : err), "error");
     }
   }
 
@@ -3001,12 +3001,12 @@
       }
       setStatus("Region renamed to \"" + updated.name + "\".");
     } catch (err) {
-      window.alert("Failed to rename region: " + (err && err.message ? err.message : err));
+      showToast("Failed to rename region: " + (err && err.message ? err.message : err), "error");
     }
   }
 
   async function deleteRegion(id, name) {
-    var ok = window.confirm('Delete region "' + name + '"? The "region:' + name + '" tag will be removed from every asset that carries it.');
+    var ok = await showConfirm('Delete region "' + name + '"? The "region:' + name + '" tag will be removed from every asset that carries it.');
     if (!ok) return;
     try {
       await api.mapRegions.delete(id);
@@ -3015,7 +3015,7 @@
       delete regionState.polygonsByRegionId[id];
       setStatus("Region \"" + name + "\" deleted.");
     } catch (err) {
-      window.alert("Failed to delete region: " + (err && err.message ? err.message : err));
+      showToast("Failed to delete region: " + (err && err.message ? err.message : err), "error");
     }
   }
 

@@ -929,7 +929,7 @@ async function handleDashSave() {
   }
 
   if (enabled && ipScope === "all" &&
-      !confirm("Allow ALL source IPs to view the Dash wallboard without logging in?")) {
+      !(await showConfirm("Allow ALL source IPs to view the Dash wallboard without logging in?"))) {
     return;
   }
 
@@ -943,12 +943,12 @@ async function handleDashSave() {
 }
 
 async function handleProxyAdopt() {
-  if (!confirm("Adopt Polaris-managed nginx config mode? Hand-edits beyond the six controls will be overwritten on the next Apply.")) return;
+  if (!(await showConfirm("Adopt Polaris-managed nginx config mode? Hand-edits beyond the six controls will be overwritten on the next Apply."))) return;
   try {
     await api.serverSettings.proxyAdoptManagedMode();
     await loadCertificates();
   } catch (err) {
-    alert("Failed to adopt managed mode: " + (err.message || err));
+    showToast("Failed to adopt managed mode: " + (err.message || err), "error");
   }
 }
 
@@ -1101,7 +1101,7 @@ function openRotateCertModal() {
         var summary = await api.serverSettings.agentCertPinsSummary();
         var entry = (summary.pins || []).find(function (p) { return p.pin === state.preflight.newFingerprint.toLowerCase(); });
         var have = entry ? entry.canonical + entry.staged : 0;
-        alert("Cert pin uptake: " + have + " / " + summary.totalActiveAgents + " active agents have the new pin.");
+        showToast("Cert pin uptake: " + have + " / " + summary.totalActiveAgents + " active agents have the new pin.");
       });
       document.getElementById("rotate-swap-btn").disabled = false;
     } catch (err) {
@@ -1112,7 +1112,7 @@ function openRotateCertModal() {
 
   document.getElementById("rotate-swap-btn").addEventListener("click", async function () {
     if (!state.preflight) return;
-    if (!confirm("Swap /etc/polaris-nginx/{cert,key}.pem and reload nginx? Make sure all active agents have heartbeated with the new pin staged.")) return;
+    if (!(await showConfirm("Swap /etc/polaris-nginx/{cert,key}.pem and reload nginx? Make sure all active agents have heartbeated with the new pin staged."))) return;
     clearError();
     this.disabled = true;
     try {
@@ -1143,14 +1143,14 @@ function openRotateCertModal() {
 
   document.getElementById("rotate-retire-btn").addEventListener("click", async function () {
     if (!state.oldFingerprint) return;
-    if (!confirm("Retire the previous pin (" + state.oldFingerprint + ") from every active agent's accepted set? Skipped on any agent where it would be the last pin.")) return;
+    if (!(await showConfirm("Retire the previous pin (" + state.oldFingerprint + ") from every active agent's accepted set? Skipped on any agent where it would be the last pin."))) return;
     clearError();
     this.disabled = true;
     try {
       var result = await api.serverSettings.agentCertPinBulkRemove(state.oldFingerprint);
       var msg = "Retired on " + result.removed + " agent(s)";
       if (result.lastPinSkipped > 0) msg += "; " + result.lastPinSkipped + " skipped (would have been last pin)";
-      alert(msg + ". Rotation complete.");
+      showToast(msg + ". Rotation complete.");
       closeModal();
       await loadCertificates();
     } catch (err) {
