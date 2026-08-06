@@ -7,11 +7,11 @@
  * in src/services/conflictResolutionService.ts — see its header for the
  * conflict-variant semantics.
  *
- * Role-based access:
- *   admin         — all conflicts
- *   networkadmin  — reservation conflicts only
- *   assetsadmin   — asset conflicts only
- *   others        — no access (empty list, 403 on resolve)
+ * Access rides the discoveryConflicts permission alone: read = list both
+ * entity types, write = resolve both. (The historical networkadmin↔
+ * reservation / assetsadmin↔asset role-NAME partition was dropped 2026-08 —
+ * it silently stopped applying when the seeded roles were renamed and never
+ * applied to bearer-token callers.)
  */
 
 import { Router, type Request } from "express";
@@ -30,26 +30,13 @@ import {
 const router = Router();
 router.use(requireAuth);
 
-// Per-entity-type visibility. Built-in non-admin roles keep the historical
-// split (networkadmin sees reservation conflicts; assetsadmin sees asset
-// conflicts). Custom roles with discoveryConflicts permission see both
-// types — admins who create a custom role can scope to a single entity
-// type via the matrix description if they want, since the role-name
-// partition only applies to the two seeded built-ins.
 function visibleEntityTypes(req: Request): ("reservation" | "asset")[] {
   if (!hasPermission(req, "discoveryConflicts", "read")) return [];
-  const roleName = req.session?.role;
-  if (roleName === "networkadmin") return ["reservation"];
-  if (roleName === "assetsadmin") return ["asset"];
   return ["reservation", "asset"];
 }
 
-function canResolve(req: Request, entityType: string): boolean {
-  if (!hasPermission(req, "discoveryConflicts", "write")) return false;
-  const roleName = req.session?.role;
-  if (roleName === "networkadmin") return entityType === "reservation";
-  if (roleName === "assetsadmin") return entityType === "asset";
-  return true;
+function canResolve(req: Request): boolean {
+  return hasPermission(req, "discoveryConflicts", "write");
 }
 
 // GET /api/v1/conflicts — list conflicts visible to the current role
@@ -92,7 +79,7 @@ router.get("/count", async (req, res, next) => {
 router.post("/:id/accept", async (req, res, next) => {
   try {
     const conflict = await loadPendingConflict(req.params.id);
-    if (!canResolve(req, conflict.entityType)) {
+    if (!canResolve(req)) {
       throw new AppError(403, "You do not have permission to resolve this conflict");
     }
 
@@ -116,7 +103,7 @@ router.post("/:id/merge", async (req, res, next) => {
     if (conflict.entityType !== "asset") {
       throw new AppError(400, "Merge with per-field selection is only supported for asset conflicts");
     }
-    if (!canResolve(req, conflict.entityType)) {
+    if (!canResolve(req)) {
       throw new AppError(403, "You do not have permission to resolve this conflict");
     }
 
@@ -138,7 +125,7 @@ router.post("/:id/merge", async (req, res, next) => {
 router.post("/:id/reject", async (req, res, next) => {
   try {
     const conflict = await loadPendingConflict(req.params.id);
-    if (!canResolve(req, conflict.entityType)) {
+    if (!canResolve(req)) {
       throw new AppError(403, "You do not have permission to resolve this conflict");
     }
 
