@@ -719,7 +719,7 @@ function _renderCompareChart(container, spec) {
   var bounds = _chartTimeBounds(boundsPts, since, until);
   var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -730,8 +730,8 @@ function _renderCompareChart(container, spec) {
   if (spec.pct) { yMax = 100; }
   else { yMax = yPeak > 0 ? yPeak * 1.1 : 1; }
 
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(v)  { return padT + innerH - ((v - yMin) / (yMax - yMin)) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, yMin, yMax);
 
   var ticks = "";
   for (var i = 0; i <= 4; i++) {

@@ -7022,6 +7022,29 @@ function _formatNumber(n) {
 // X axis at 24h — the user can't see "no past data" because the data is
 // re-stretched to fill the chart. Falls back to sample-derived bounds when no
 // window is supplied.
+// --- Shared chart scaffolding (2026-08 consolidation) ---
+// The byte-identical closures every SVG chart renderer used to re-declare:
+// zero-padded time parts, the span-aware X-tick label formatter, and the
+// linear time->x / value->y scales. Renderers keep their own paddings, tick
+// loops, and series drawing -- those genuinely differ per chart.
+// assets-compare.js (loaded after this file on assets.html) shares them.
+function _chartPad2(n) { return n < 10 ? "0" + n : String(n); }
+// Span-aware tick label: HH:MM inside one day, M/D beyond.
+function _chartTickFmt(t0, t1) {
+  var spanMs = t1 - t0, oneDayMs = 86400000;
+  return function (ts) {
+    var d = new Date(ts);
+    if (spanMs <= oneDayMs) return _chartPad2(d.getHours()) + ":" + _chartPad2(d.getMinutes());
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  };
+}
+function _chartXScale(padL, innerW, t0, t1) {
+  return function (ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; };
+}
+function _chartYScale(padT, innerH, min, max) {
+  return function (v) { return padT + innerH - ((v - min) / (max - min)) * innerH; };
+}
+
 function _chartTimeBounds(samples, since, until) {
   function ms(v) {
     if (v == null) return null;
@@ -7375,7 +7398,7 @@ function _renderSensorChart(container, samples, opts) {
   var bounds = _chartTimeBounds(samples, opts.since, opts.until);
   var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -7395,8 +7418,8 @@ function _renderSensorChart(container, samples, opts) {
     minC -= span * 0.1; maxC += span * 0.1;
   }
 
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(c)  { return padT + innerH - ((c - minC) / (maxC - minC)) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, minC, maxC);
 
   var pts = samples.map(function (s) { return xFor(s.timestamp) + "," + yFor(s.value); }).join(" ");
   var hits = samples.map(function (s) {
@@ -8183,7 +8206,7 @@ function _renderSystemChart(container, data, asset, si) {
   var bounds = _chartTimeBounds(samples, since, until);
   var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -8196,8 +8219,8 @@ function _renderSystemChart(container, data, asset, si) {
                          .filter(function (e) { return typeof e.v === "number"; });
 
   var yMin = 0, yMax = 100;
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(v)  { return padT + innerH - ((v - yMin) / (yMax - yMin)) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, yMin, yMax);
 
   var cpuPts = cpuValues.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
   var memPts = memValues.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
@@ -8326,7 +8349,7 @@ function _renderSessionsChart(container, data, asset) {
   var bounds = _chartTimeBounds(samples, since, until);
   var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -8340,8 +8363,8 @@ function _renderSessionsChart(container, data, asset) {
   var maxV = 0;
   vals.forEach(function (e) { if (e.v > maxV) maxV = e.v; });
   var yMin = 0, yMax = maxV > 0 ? maxV * 1.1 : 1;
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(v)  { return padT + innerH - ((v - yMin) / (yMax - yMin)) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, yMin, yMax);
   var pts = vals.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
 
   var sorted = vals.slice().sort(function (a, b) { return new Date(a.s.timestamp).getTime() - new Date(b.s.timestamp).getTime(); });
@@ -9224,7 +9247,7 @@ function _renderMonitorChart(container, data, transitions) {
   var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0;
   var oneDayMs = 24 * 60 * 60 * 1000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -9265,8 +9288,8 @@ function _renderMonitorChart(container, data, transitions) {
   var step = maxRtt > 1000 ? 250 : maxRtt > 200 ? 50 : 10;
   var ceil = Math.ceil(maxRtt / step) * step;
 
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(ms) { return padT + innerH - (ms / ceil) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, 0, ceil);
 
   // Failure-aware line: failed polls plot as red dots at 0 ms (the chart
   // baseline) and stay connected to their neighbors — the connecting segment
@@ -10126,7 +10149,7 @@ function _renderIfaceThroughputChart(container, derived, opts) {
   var bounds = _chartTimeBounds(derived, opts.since, opts.until);
   var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -10144,8 +10167,8 @@ function _renderIfaceThroughputChart(container, derived, opts) {
   }
   var ceil = tidyCeil(maxV);
 
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, 0, ceil);
 
   // Missed polls (interface streams have no per-sample success flag — a
   // failed poll simply leaves no row) render exactly like response-time
@@ -10262,7 +10285,7 @@ function _renderIfaceErrorChart(container, derived, opts) {
   var bounds = _chartTimeBounds(derived, opts.since, opts.until);
   var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -10275,8 +10298,8 @@ function _renderIfaceErrorChart(container, derived, opts) {
   });
   if (maxE < 5) maxE = 5;
   var ceil = Math.ceil(maxE * 1.2);
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, 0, ceil);
   // In-errors render amber, out-errors purple — red is reserved for the
   // missed-poll markers so a poll outage can't be misread as an error burst.
   var inErrColor  = "#f59e0b";
@@ -10697,7 +10720,7 @@ function _renderIpsecStatusChart(container, samples, opts) {
     ? (new Date(samples[samples.length - 1].timestamp).getTime() - new Date(samples[samples.length - 2].timestamp).getTime())
     : 600000;
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -10709,7 +10732,7 @@ function _renderIpsecStatusChart(container, samples, opts) {
     if (s === "dynamic") return "#7b8794"; // dial-up server template — neutral gray
     return MONITOR_STATE_COLORS.warning;
   }
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
   // Each sample covers from its own x to the next sample's x (or the chart edge).
   var bars = samples.map(function (s, i) {
     var x  = xFor(s.timestamp);
@@ -10779,7 +10802,7 @@ function _renderIpsecBpsChart(container, derived, side, opts) {
   var bounds = _chartTimeBounds(samplesForBounds, opts.since, opts.until);
   var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -10794,8 +10817,8 @@ function _renderIpsecBpsChart(container, derived, side, opts) {
     return step * exp;
   }
   var ceil = tidyCeil(maxV);
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, 0, ceil);
   var pts = values.map(function (e) { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
   var hits = values.map(function (e) {
     return '<circle class="chart-hit" cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="6" fill="transparent" style="cursor:crosshair"' +
@@ -11313,8 +11336,8 @@ function _renderPerfSlaMultiChart(container, series, metricKey, meta, opts) {
   var bounds = _chartTimeBounds(allTs, opts.since, opts.until);
   var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
-  function fmtTick(ts) { var d = new Date(ts); return spanMs <= oneDayMs ? pad2(d.getHours()) + ":" + pad2(d.getMinutes()) : (d.getMonth() + 1) + "/" + d.getDate(); }
+  var pad2 = _chartPad2;
+  var fmtTick = _chartTickFmt(t0, t1);
   var hasThreshold = typeof meta.threshold === "number" && meta.threshold > 0;
   // Scale the y-axis to the VISIBLE series so hiding a high member rescales the
   // rest (fall back to all members when everything is hidden).
@@ -11323,8 +11346,8 @@ function _renderPerfSlaMultiChart(container, series, metricKey, meta, opts) {
   if (hasThreshold) maxV = Math.max(maxV, meta.threshold * 1.05);
   function tidyCeil(n) { var exp = Math.pow(10, Math.floor(Math.log10(n))); var mant = n / exp; var step = mant <= 1 ? 1 : mant <= 2 ? 2 : mant <= 5 ? 5 : 10; return step * exp; }
   var ceil = tidyCeil(maxV);
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, 0, ceil);
   var thresholdLine = "";
   if (hasThreshold) {
     var ty = yFor(meta.threshold);
@@ -11976,7 +11999,7 @@ function _renderStorageChart(container, samples, opts) {
     if (forecastEndTs > t1) t1 = forecastEndTs;
   }
   var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  var pad2 = _chartPad2;
   function fmtTick(ts) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -12001,8 +12024,8 @@ function _renderStorageChart(container, samples, opts) {
   } else {
     ceil = 100;
   }
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
+  var xFor = _chartXScale(padL, innerW, t0, t1);
+  var yFor = _chartYScale(padT, innerH, 0, ceil);
 
   var ticks = "";
   for (var i = 0; i <= 4; i++) {
