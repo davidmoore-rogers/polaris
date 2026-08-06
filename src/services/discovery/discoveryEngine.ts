@@ -68,12 +68,6 @@ import { runDescriptionSyncForIntegration } from "../descriptionSyncService.js";
 import { reconcileMapRegions } from "../mapRegionService.js";
 import { releaseAssetsForDecommission } from "../maintenanceScheduleService.js";
 import { reconcileAllTags } from "../tagAssignmentService.js";
-import {
-  reconcileFirewallTagsForIntegration,
-  seedFirewallTagRegistry,
-  applyFirewallRename,
-  applyFirewallDecommission,
-} from "../firewallTagService.js";
 import * as sightings from "../assetSightingService.js";
 import { quarantineAsset, verifyAssetQuarantine } from "../assetQuarantineService.js";
 import { fetchFortigateSysLocation } from "../fortigateLocationService.js";
@@ -2114,18 +2108,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         where: { id: { in: staleFwIds } },
         data: { status: "decommissioned", statusChangedAt: new Date(now), statusChangedBy: integrationLabel },
       });
-      // Strip the `firewall:<hostname>` tag from every asset that carried
-      // it and remove the registry row so the tag picker stops offering a
-      // dead FortiGate. Best-effort — failures shouldn't block the status
-      // flip above. See src/services/firewallTagService.ts.
-      for (const hostname of staleFwHostnames) {
-        try {
-          await applyFirewallDecommission(hostname);
-        } catch (err: any) {
-          syncLog("error", `Firewall tag decommission failed for "${hostname}": ${err?.message || "Unknown error"}`);
-        }
-      }
-
       // Cascade — a decommissioned FortiGate takes its managed FortiSwitches /
       // FortiAPs with it. Phase 2b can't cover this case: it only judges
       // children whose controller was successfully INVENTORIED this run, and a
@@ -2661,10 +2643,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // Standby HA members are excluded.
         const isStandbyMember = haMembers != null && !member.isPrimary;
         Object.assign(updateData, buildFortigateMonitorStamp(existingAsset, isStandbyMember));
-        // Snapshot pre-write hostname so we can detect a rename below and
-        // rotate the firewall:* tag on every dependent asset before Phase 13.5
-        // recomputes membership.
-        const previousHostname: string | null = existingAsset.hostname || null;
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
         logDiscoveryAssetUpdated(fwBefore, updateData, existingAsset.id, memberDevice.hostname || device.name, {
           integrationName, integrationId, sourceKind: "fortigate-firewall", actor,
@@ -2696,35 +2674,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
         if (fwMacListForReconcile) {
           await reconcileMacAddresses(existingAsset.id, fwMacListForReconcile);
-        }
-        // Rename rotation + tag registry seeding — only meaningful for the
-        // PRIMARY member. Endpoint sightings tag with the FMG device name
-        // (cluster identity, stable), and the standby never has endpoints
-        // sighted through it, so the standby's hostname doesn't need a
-        // registry row. Skipping for the standby also keeps the registry
-        // from churning across failovers (where each member alternates
-        // being primary). Best-effort; Phase 13.5 reconciler catches misses.
-        if (member.isPrimary) {
-          // Operator hostname pin: the db.ts guard rewrote this cycle's
-          // hostname write back to `hostnameOverride`, so the projected name
-          // never lands on the row — "projected ≠ previous" is the pin
-          // diverging by design, not a rename (it would spuriously fire
-          // every cycle). The pin is the effective hostname for tags.
-          const hostnamePin = (existingAsset.hostnameOverride as string | null | undefined) || null;
-          const projectedHostnameRaw = updateData.hostname as string | null | undefined;
-          if (!hostnamePin && projectedHostnameRaw && previousHostname && projectedHostnameRaw !== previousHostname) {
-            try {
-              await applyFirewallRename(previousHostname, projectedHostnameRaw);
-            } catch (err: any) {
-              syncLog(
-                "error",
-                `Firewall tag rename failed (${previousHostname} → ${projectedHostnameRaw}): ${err?.message || "Unknown error"}`,
-              );
-            }
-          }
-          try {
-            await seedFirewallTagRegistry(hostnamePin || projectedHostnameRaw || previousHostname || fgHostname);
-          } catch { /* best-effort */ }
         }
         // Update in-memory index. For the primary, mirror the cluster IP +
         // active hostname back; for the standby, clear IP and use member
@@ -2851,14 +2800,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           resourceName: memberDevice.hostname || device.name, actor, level: "warning",
           message: `[${integrationName}] HA standby ${memberDevice.hostname || member.serial} (${member.serial}) reported DOWN in cluster ${device.name || fgHostname}'s HA roster`,
         });
-      }
-      // Seed the `firewall:<hostname>` Tag registry row so the asset-edit
-      // tag picker carries the entry from day one — only meaningful for
-      // the primary (endpoints are sighted through the active member).
-      if (member.isPrimary) {
-        try {
-          await seedFirewallTagRegistry(memberDevice.hostname || fgHostname);
-        } catch { /* best-effort */ }
       }
       assetIdx.add(newAsset);
       assetNames.push(`${memberDevice.hostname || device.name}${haMembers ? ` (HA ${member.isPrimary ? "primary" : "secondary"})` : ""}`);
@@ -5415,26 +5356,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       }
     } catch (err: any) {
       syncLog("error", `Map region reconcile failed: ${err?.message || "Unknown error"}`);
-    }
-
-    phaseMark("13.5");
-    // Phase 13.5 — Reconcile `firewall:<hostname>` breadcrumb tags. Rebuilds
-    // the per-asset firewall:* tag set from the data Phase 3b/Phase 6 just
-    // wrote: Asset.fortinetTopology.controllerFortigate (managed switches /
-    // APs) plus AssetFortigateSighting rows within sightingMaxAgeDays
-    // (DHCP-discovered endpoints). Only strips tags that point at this
-    // integration's own FortiGates — cross-integration tags survive. See
-    // src/services/firewallTagService.ts.
-    try {
-      const summary = await reconcileFirewallTagsForIntegration(integrationId);
-      if (summary.assetsTouched > 0) {
-        syncLog(
-          "info",
-          `Firewall tags: +${summary.added} / -${summary.removed} on ${summary.assetsTouched} asset(s)`,
-        );
-      }
-    } catch (err: any) {
-      syncLog("error", `Firewall tag reconcile failed: ${err?.message || "Unknown error"}`);
     }
 
     phaseMark("13.65");

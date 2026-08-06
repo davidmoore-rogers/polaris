@@ -20,8 +20,8 @@
  *   - reconcileTagsForAsset(id)   — one asset vs. all managed tags (asset-write hook)
  *   - previewTagCriteria(...)     — dry-run match count + diff for the editor UI
  *
- * Modeled on mapRegionService (add/remove tag primitives), firewallTagService
- * (diff-based reconcile), and autoMonitorInterfacesService (resolver → preview →
+ * Modeled on mapRegionService (add/remove tag primitives + diff-based
+ * reconcile) and autoMonitorInterfacesService (resolver → preview →
  * batched apply, compileWildcard for patterns).
  */
 

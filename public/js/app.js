@@ -2095,11 +2095,12 @@ function _ensureTagCache() {
   });
 }
 
-// Auto-managed tag prefixes. These are reconciled by the backend (firewall
-// breadcrumb tags by firewallTagService, region tags by mapRegionService) and
-// must never be added or removed through the UI — the picker hides them and
-// getTagFieldValue preserves them from the existing record on save.
-var PROTECTED_TAG_PREFIXES = ["firewall:", "region:"];
+// Auto-managed tag prefixes. These are reconciled by the backend (region tags
+// by mapRegionService) and must never be added or removed through the UI —
+// the picker hides them and getTagFieldValue preserves them from the existing
+// record on save. (firewall: was dropped 2026-08 with firewallTagService —
+// leftover firewall: tags are plain operator-managed tags now.)
+var PROTECTED_TAG_PREFIXES = ["region:"];
 
 function isProtectedTag(name) {
   for (var i = 0; i < PROTECTED_TAG_PREFIXES.length; i++) {
@@ -2203,7 +2204,7 @@ function tagFieldHTML(selected, opts) {
 
 /**
  * Read selected tags from the form — works for both enforced and free-text modes.
- * Auto-managed tags (firewall:/region:) stashed on the picker at render time
+ * Auto-managed tags (region:) stashed on the picker at render time
  * are merged back in so a save can neither add nor remove them.
  */
 function getTagFieldValue() {

@@ -235,7 +235,7 @@ Assets converge via the multi-source model: every discovery pathway upserts `Ass
 
 Hybrid-join detection links AD and Entra/Intune via on-prem SID (`ad.observed.objectSid` ↔ `entra.observed.onPremisesSecurityIdentifier`). Re-discovery key precedence: AssetSource `(sourceKind, externalId)` → SID match → Ethernet MAC match (Entra only) → hostname collision (raises a Conflict).
 
-> Full per-integration phase narratives (FMG worker dual-lane architecture, direct-mode warm-cache producer, CMDB-vs-monitor query policy, FMG proxy field filtering, FortiSwitch / FortiAP attribution rules, HA cluster awareness, geo-coordinate resolution chain, stale-subnet / stale-firewall sweeps, auto-monitor apply pass, dependency tree recompute, firewall tag reconcile): [ARCHITECTURE.md → Discovery Workflows](ARCHITECTURE.md#fmg-discovery-workflow).
+> Full per-integration phase narratives (FMG worker dual-lane architecture, direct-mode warm-cache producer, CMDB-vs-monitor query policy, FMG proxy field filtering, FortiSwitch / FortiAP attribution rules, HA cluster awareness, geo-coordinate resolution chain, stale-subnet / stale-firewall sweeps, auto-monitor apply pass, dependency tree recompute): [ARCHITECTURE.md → Discovery Workflows](ARCHITECTURE.md#fmg-discovery-workflow).
 
 ---
 

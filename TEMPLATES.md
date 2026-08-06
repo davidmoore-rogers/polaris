@@ -422,35 +422,6 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 
 ---
 
-## Discovery-driven managed tag namespace
-
-**What it is:** A breadcrumb tag prefix (`firewall:`, future analogues) stamped on assets purely from data already written by FMG / FortiGate discovery. No operator CRUD, no Setting blob — every input that drives the tag set comes from discovery itself, so end-of-discovery is the natural and only reconciliation point. Distinct from the **Setting-backed admin CRUD with reconciler** pattern above, which has operator-edited inputs (polygons, names) and therefore needs a periodic safety net to catch out-of-band edits.
-
-**Canonical implementation:** `firewallTagService` in [src/services/firewallTagService.ts](src/services/firewallTagService.ts), wired into [src/api/routes/integrations.ts](src/api/routes/integrations.ts) at Phase 2a (decommission strip), Phase 3 firewall create (registry seed), Phase 3 firewall update (rename rotation), and Phase 13.5 (end-of-sync reconciler). No periodic job.
-
-**Key conventions:**
-- **Single owner per prefix.** Document the prefix in [TOUCHES.md](TOUCHES.md) under the cross-cutting "Asset.tags writers" section. Don't add a second writer to `firewall:*` (or whatever your prefix is) — pick a different prefix.
-- **Strip allowlist scoped to the integration's owned set.** The reconciler computes "tags I'm allowed to remove" as `firewall:<hostname>` for every active firewall this integration discovered. Tags pointing at FortiGates owned by other integrations or operator-typed `firewall:fake` survive every pass. Without this scoping, two integrations would fight over the same asset's tags.
-- **Self-attribution skip.** A FortiGate firewall asset never gets its own `firewall:<own-hostname>` tag. Bake the skip into the membership compute.
-- **Per-asset diff write.** Read current `Asset.tags`, compute expected, walk both sets to build the next array (carry non-`firewall:*` tags through; keep allowlist-external `firewall:*` tags; add expected; drop allowlist-internal expected-misses). Update only when the array actually differs — most reconciler ticks should be no-ops on healthy fleets.
-- **Inline lifecycle hooks.** The four Phase wiring points cover the cases the periodic reconciler can't reach in time:
-  - Phase 2a — `applyFirewallDecommission(hostname)` strips the tag everywhere + drops the registry row, so a removed FortiGate stops being a filterable option immediately.
-  - Phase 3 create — `seedFirewallTagRegistry(hostname)` upserts the registry row so the tag picker carries the entry from day one.
-  - Phase 3 update — `applyFirewallRename(oldHostname, newHostname)` rotates the tag on every dependent asset + the registry row when the projected hostname differs from the existing value.
-  - Phase 13.5 — `reconcileFirewallTagsForIntegration()` runs a full reconcile after Phase 13 (map-region pass), gated `mode in {"full", "finalize"}`.
-- **No periodic safety-net job.** If every input is discovery-written, there's nothing for a periodic tick to catch that the next discovery won't. Don't copy the `reconcileMapRegions.ts` job pattern — it exists because polygon edits and firewall lat/lng updates are operator-driven outside discovery, which doesn't apply here.
-- **Tag registry mirror.** Upsert a `Tag` row at `<prefix><value>` under a category that names the namespace (e.g. `"FortiGate"`) so operators see the managed tags in the same picker as manual tags. Idempotent re-upserts in the reconciler keep the registry intact even after manual deletions.
-- **Best-effort everywhere.** Wrap every Phase hook + the reconciler call in try/catch and `syncLog("error", ...)` so a tag failure never blocks the sync return. Tags are derived state — losing a write means at most one cycle of stale tags.
-
-**When adding a new instance:**
-- Pick a unique tag prefix and a registry category. Document both in [TOUCHES.md](TOUCHES.md) under the "Asset.tags writers" cross-cutting entry.
-- Define the membership rule explicitly: which assets get the tag, sourced from which fields / tables. Pure functions over inputs already written by discovery.
-- Define the strip allowlist: which tags THIS reconciler is allowed to remove (always scoped to "things owned by the current integration").
-- Wire the four lifecycle points. The reconciler is the source of truth; the inline hooks are latency optimizations + invariants on registry-row presence.
-- Skip the periodic job unless you have an input that genuinely changes outside discovery — and if you do, you're probably in the **Setting-backed admin CRUD with reconciler** pattern instead.
-
----
-
 ## Prometheus metric instrumentation
 
 **What it is:** Adding a new metric (counter / gauge / histogram) or instrumenting a new code path with an existing one. Single Registry singleton + helper functions per metric — callers never import metric objects directly. Default Node.js metrics from `prom-client.collectDefaultMetrics` are registered alongside Polaris-specific ones, all under one `/metrics` endpoint.

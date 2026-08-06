@@ -737,7 +737,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "p95 wall-clock per phase inside one discovery run. Phase labels match the phaseMark() markers in code (e.g. '1', '2a', '3b', '7.5', '13.5'). When overall discovery duration is climbing, this panel tells you WHICH phase is dragging - usually a specific FMG API call or DB sweep, not the whole pipeline.",
+      "description": "p95 wall-clock per phase inside one discovery run. Phase labels match the phaseMark() markers in code (e.g. '1', '2a', '3b', '7.5', '13'). When overall discovery duration is climbing, this panel tells you WHICH phase is dragging - usually a specific FMG API call or DB sweep, not the whole pipeline.",
       "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" } },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 140 },
       "id": 40,
