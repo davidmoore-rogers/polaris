@@ -72,20 +72,22 @@ describe("executeActions", () => {
       { type: "notify", channelId: "c1", addresses: ["a@example.com"], emailComposition: { subjectTemplate: "action-level {asset}" } },
       { type: "notify", channelId: "c2", emailComposition: null },
     ];
-    await executeActions("n1", actions, CTX, { ruleEmailComposition: { subjectTemplate: "rule-level {asset}" }, scopeRegionTags: ["region:East"] });
+    await executeActions("n1", actions, CTX, { ruleEmailComposition: { subjectTemplate: "rule-level {asset}" }, scopeRegionTags: ["region:East"], assetRegionTags: ["Atlanta"] });
 
     expect(expandDeliveriesMock).toHaveBeenCalledTimes(2);
     const [firstCall, secondCall] = expandDeliveriesMock.mock.calls as any[];
     // targets converted from the action (per-action composition never leaks into the target)
     expect(firstCall[1]).toEqual([{ channelId: "c1", addresses: ["a@example.com"] }]);
-    expect(firstCall[2]).toEqual(["region:East"]);
-    expect(firstCall[3].subject).toBe("action-level sw-core-1");
-    expect(secondCall[3].subject).toBe("rule-level sw-core-1");
+    expect(firstCall[2].scopeRegionTags).toEqual(["region:East"]);
+    // The triggering asset's region snapshot rides through for recipientDeviceRegion routing.
+    expect(firstCall[2].assetRegionTags).toEqual(["Atlanta"]);
+    expect(firstCall[2].composedEmail.subject).toBe("action-level sw-core-1");
+    expect(secondCall[2].composedEmail.subject).toBe("rule-level sw-core-1");
   });
 
   it("notify without any composition sends the legacy per-address shape (no composed email)", async () => {
     await executeActions("n1", [{ type: "notify", channelId: "c1" }], CTX, {});
-    expect(expandDeliveriesMock.mock.calls[0]![3]).toBeUndefined();
+    expect((expandDeliveriesMock.mock.calls[0] as any[])[2].composedEmail).toBeUndefined();
   });
 
   it("api_call: creates a NULL-channel delivery row with the body rendered at fire time", async () => {

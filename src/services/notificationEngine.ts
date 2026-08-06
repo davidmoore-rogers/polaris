@@ -1300,6 +1300,9 @@ function severityLevel(severity: string): "error" | "warning" | "info" {
 async function enqueueAlertActions(notifId: string, actions: AutomationAction[], ctx: Record<string, string>, rule: DbRule, reading: Reading): Promise<void> {
   await executeActionsSafe(notifId, actions, ctx, {
     scopeRegionTags: scopeRegionTagsOf(rule.scope),
+    // The triggering asset's own region tags (stripped) — recipientDeviceRegion
+    // routing. Same snapshot fire() writes to Notification.regionTags.
+    assetRegionTags: regionSnapshot(reading.tags),
     assetId: reading.assetId || null,
     ruleId: rule.id,
     ruleName: rule.name,
@@ -1511,7 +1514,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   // Notifications from rules with actions get a client-generated id so we can
   // execute their actions after the batch insert (createMany returns no ids).
   // The fire-time template context rides along — api_call bodies render from it.
-  const deliverAfter: { id: string; rule: DbRule; assetId: string | null; ctx: Record<string, string> }[] = [];
+  const deliverAfter: { id: string; rule: DbRule; assetId: string | null; ctx: Record<string, string>; assetRegionTags: string[] }[] = [];
   for (const ev of events) {
     for (const c of compiled) {
       if (!c.re.test(ev.action)) continue;
@@ -1551,7 +1554,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       const hasActions = c.rule.actions.length > 0;
       const id = hasActions ? randomUUID() : undefined;
       if (hasActions && id) {
-        deliverAfter.push({ id, rule: c.rule, assetId, ctx });
+        deliverAfter.push({ id, rule: c.rule, assetId, ctx, assetRegionTags: regionSnapshot(tags) });
       }
       toCreate.push({
         ...(id ? { id } : {}),
@@ -1572,6 +1575,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   for (const d of deliverAfter) {
     await executeActionsSafe(d.id, d.rule.actions, d.ctx, {
       scopeRegionTags: scopeRegionTagsOf(d.rule.scope),
+      assetRegionTags: d.assetRegionTags,
       assetId: d.assetId,
       ruleId: d.rule.id,
       ruleName: d.rule.name,

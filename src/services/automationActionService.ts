@@ -50,6 +50,9 @@ import {
 export interface ActionExecContext {
   /** region: tags from the rule's scope (recipientScopeRegion routing). */
   scopeRegionTags?: string[];
+  /** The TRIGGERING asset's region tags — stripped snapshot (regionSnapshot /
+   *  Notification.regionTags) — for recipientDeviceRegion routing. */
+  assetRegionTags?: string[];
   /** The triggering asset, when the alert has one (script actions target it). */
   assetId?: string | null;
   ruleId?: string;
@@ -81,7 +84,12 @@ export async function executeActions(
     try {
       if (action.type === "notify") {
         const composed = composeForNotify(action.emailComposition ?? null, exec, ctx);
-        const rows = await expandDeliveries(notificationId, actionsToTargets([action]), exec.scopeRegionTags, composed, exec.escalation);
+        const rows = await expandDeliveries(notificationId, actionsToTargets([action]), {
+          scopeRegionTags: exec.scopeRegionTags,
+          assetRegionTags: exec.assetRegionTags,
+          composedEmail: composed,
+          escalation: exec.escalation,
+        });
         if (rows > 0) executed++;
       } else if (action.type === "api_call") {
         await enqueueApiCall(notificationId, action, ctx, exec);

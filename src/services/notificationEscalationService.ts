@@ -159,6 +159,9 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
     select: {
       id: true, ruleId: true, assetId: true, assetHostname: true, severity: true, message: true,
       triggeredAt: true, acknowledged: true, templateCtx: true, escalationState: true,
+      // The fire-time asset-region snapshot (already region:-stripped) —
+      // recipientDeviceRegion routing; survives asset deletion.
+      regionTags: true,
     },
   });
   if (notifs.length === 0) return 0;
@@ -227,6 +230,7 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
 
       const { executed } = await executeActions(n.id, tier.actions, ctx, {
         scopeRegionTags: scopeRegionTagsOf(rule.scope),
+        assetRegionTags: n.regionTags,
         assetId: n.assetId,
         ruleId: rule.id,
         ruleName: rule.name,
