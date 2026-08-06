@@ -642,6 +642,7 @@ export const deliveryTargetSchema = z.object({
   recipientUserIds: z.array(z.string().max(100)).max(500).optional(), // specific Polaris users → their email / push subs
   addresses: z.array(z.string().email().max(320)).max(100).optional(), // custom email addresses (email channels)
   recipientScopeRegion: z.boolean().optional(), // users whose region tags match the rule's scope region tag(s)
+  recipientDeviceRegion: z.boolean().optional(), // users whose region tags match the TRIGGERING asset's region: tag(s)
   recipientTags: z.array(z.string().max(100)).max(200).optional(), // legacy tag-routing (kept for back-compat)
 });
 
@@ -749,6 +750,11 @@ export const notifyActionSchema = z
     recipientUserIds: z.array(z.string().max(100)).max(500).optional(),
     addresses: z.array(z.string().email().max(320)).max(100).optional(),
     recipientScopeRegion: z.boolean().optional(),
+    // Route to users whose region tags match the TRIGGERING asset's region:
+    // tag(s) — works with any device filter (no region: tag needed on the
+    // scope). The engine threads the asset's stripped region snapshot into
+    // the expander (Notification.regionTags on the escalation sweep).
+    recipientDeviceRegion: z.boolean().optional(),
     recipientTags: z.array(z.string().max(100)).max(200).optional(),
     // Per-action email composition override; falls back to the rule-level
     // emailComposition, then the pre-feature defaults. Email transports only.
@@ -817,6 +823,30 @@ export const escalationV2Schema = z
   })
   .strict();
 
+// ─── Per-action escalation (escalatable actions) ────────────────────────────
+// A rule's top-level actions and each severity band's actions may carry their
+// OWN escalation chain — "notify team A, and if unhandled 15 min later notify
+// their manager" — instead of (or alongside) the rule/band-level chain. The
+// chain shape is the same escalation config; accepts legacy email tiers too
+// (readers normalize via normalizeEscalationToV2). ONE level only: actions
+// INSIDE escalation tiers (and bandNotify.resolvedActions) stay on the bare
+// actionSchema, so a nested `escalation` key fails .strict() parsing — no
+// chains-of-chains. Escalation state keys are derived per chain:
+// escalationTierStateKey("", j) = "j" (the rule/band-level chain — unchanged
+// from pre-feature rows) and escalationTierStateKey("a<i>", j) = "a<i>:t<j>".
+const perActionEscalation = z.union([escalationSchema, escalationV2Schema]).optional().nullable();
+
+export const notifyActionEscalatableSchema = notifyActionSchema.extend({ escalation: perActionEscalation });
+export const apiCallActionEscalatableSchema = apiCallActionSchema.extend({ escalation: perActionEscalation });
+export const scriptActionEscalatableSchema = scriptActionSchema.extend({ escalation: perActionEscalation });
+
+export const escalatableActionSchema = z.discriminatedUnion("type", [
+  notifyActionEscalatableSchema,
+  apiCallActionEscalatableSchema,
+  scriptActionEscalatableSchema,
+]);
+export type EscalatableAction = z.infer<typeof escalatableActionSchema>;
+
 // ─── Severity bands (value-driven severity escalation) ──────────────────────
 // Higher tiers stacked on the base trigger (tier 0 = rule.severity +
 // trigger.threshold + rule.actions + rule.escalation). Each band carries its
@@ -833,7 +863,7 @@ export const severityBandSchema = z
     // the trigger's sampling — aggregation / window / dimensionFilter — so only
     // the comparison + threshold + severity vary per tier.
     operator: z.enum(COMPARATORS).optional(),
-    actions: z.array(actionSchema).max(20).default([]),
+    actions: z.array(escalatableActionSchema).max(20).default([]),
     // Per-band time escalation (same shape as rule-level; accepts legacy or v2).
     escalation: z.union([escalationSchema, escalationV2Schema]).optional().nullable(),
   })
@@ -995,7 +1025,7 @@ const ruleInputBaseSchema = z.object({
   scope: scopeSchema.default({}),
   // v2 canonical fields:
   reset: resetSchema.optional().nullable(),
-  actions: z.array(actionSchema).max(20).optional(),
+  actions: z.array(escalatableActionSchema).max(20).optional(),
   // Legacy fields, folded into v2 by the transform (v2 wins when both given):
   clearBehavior: z.enum(CLEAR_BEHAVIORS).optional(),
   clearAfterSec: z.number().int().min(1).max(2592000).optional().nullable(),
@@ -1026,7 +1056,7 @@ export interface RuleInput {
   trigger: Trigger;
   scope: RuleScope;
   reset: ResetConfig;
-  actions: AutomationAction[];
+  actions: EscalatableAction[];
   cooldownSec: number | null;
   messageTemplate: string | null;
   channels: string[];
@@ -1084,6 +1114,7 @@ export function targetsToNotifyActions(
     ...(t.recipientUserIds?.length ? { recipientUserIds: t.recipientUserIds } : {}),
     ...(t.addresses?.length ? { addresses: t.addresses } : {}),
     ...(t.recipientScopeRegion !== undefined ? { recipientScopeRegion: t.recipientScopeRegion } : {}),
+    ...(t.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: t.recipientDeviceRegion } : {}),
     ...(t.recipientTags?.length ? { recipientTags: t.recipientTags } : {}),
     emailComposition: emailComposition ?? null,
   }));
@@ -1100,6 +1131,7 @@ export function actionsToTargets(actions: AutomationAction[]): DeliveryTarget[] 
       ...(a.recipientUserIds?.length ? { recipientUserIds: a.recipientUserIds } : {}),
       ...(a.addresses?.length ? { addresses: a.addresses } : {}),
       ...(a.recipientScopeRegion !== undefined ? { recipientScopeRegion: a.recipientScopeRegion } : {}),
+      ...(a.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: a.recipientDeviceRegion } : {}),
       ...(a.recipientTags?.length ? { recipientTags: a.recipientTags } : {}),
     }));
 }
@@ -1274,7 +1306,7 @@ export const previewInputSchema = ruleInputBaseSchema
 /** The v2 view of a stored rule row. */
 export interface RuleV2View {
   reset: ResetConfig;
-  actions: AutomationAction[];
+  actions: EscalatableAction[];
   /** Escalation as v2 tiers-of-actions (legacy tiers converted); null when unset. */
   escalation: EscalationV2Config | null;
   /** Severity bands (numeric triggers); null = single-severity. */
@@ -1356,11 +1388,11 @@ export function normalizeRuleToV2(row: {
         : null)
     : null;
 
-  let actions: AutomationAction[];
+  let actions: EscalatableAction[];
   if (Array.isArray(row.actions)) {
     actions = row.actions
-      .map((a) => actionSchema.safeParse(a))
-      .filter((r): r is { success: true; data: AutomationAction } => r.success)
+      .map((a) => escalatableActionSchema.safeParse(a))
+      .filter((r): r is { success: true; data: EscalatableAction } => r.success)
       .map((r) => r.data);
   } else {
     const targets = Array.isArray(row.targets) ? (row.targets as DeliveryTarget[]) : [];
@@ -1379,6 +1411,108 @@ export function normalizeRuleToV2(row: {
     : null;
 
   return { reset, actions, escalation: normalizeEscalationToV2(row.escalation), severityBands, bandNotify };
+}
+
+// ─── Canonical action walk + escalation-chain selection ─────────────────────
+// Actions live in seven places on a rule: top-level actions, each top-level
+// action's escalation tiers, the rule-level escalation tiers, each severity
+// band's actions, each band action's escalation tiers, each band-level
+// escalation tiers, and bandNotify.resolvedActions. Every consumer that must
+// see ALL of them (the automationScripts route gate, assertActionRefs'
+// channel/SSRF/script checks, ruleWantsAssetDetail) walks through
+// allRuleActionRefs so a new action location can't silently escape a gate.
+
+/** The minimal rule shape the walk needs — RuleInput and normalized rows both fit. */
+export interface RuleActionCarrier {
+  actions?: EscalatableAction[] | null;
+  escalation?: unknown;
+  severityBands?: SeverityBand[] | null;
+  bandNotify?: BandNotify | null;
+}
+
+export interface RuleActionRef {
+  action: AutomationAction;
+  /** Human label for save-time validation errors ("Action 2 escalation tier 1: …"). */
+  label: string;
+}
+
+export function allRuleActionRefs(rule: RuleActionCarrier): RuleActionRef[] {
+  const out: RuleActionRef[] = [];
+  const addTiers = (esc: unknown, prefix: string) => {
+    (normalizeEscalationToV2(esc)?.tiers ?? []).forEach((t, ti) => {
+      t.actions.forEach((a) => out.push({ action: a, label: `${prefix} escalation tier ${ti + 1}` }));
+    });
+  };
+  const addActions = (list: EscalatableAction[] | null | undefined, prefix: string) => {
+    (list ?? []).forEach((a, i) => {
+      out.push({ action: a, label: `${prefix} ${i + 1}` });
+      addTiers(a.escalation, `${prefix} ${i + 1}`);
+    });
+  };
+  addActions(rule.actions, "Action");
+  addTiers(rule.escalation, "Rule");
+  for (const b of rule.severityBands ?? []) {
+    addActions(b.actions, `${b.severity} band action`);
+    addTiers(b.escalation, `${b.severity} band`);
+  }
+  (rule.bandNotify?.resolvedActions ?? []).forEach((a, i) => out.push({ action: a, label: `Resolved action ${i + 1}` }));
+  return out;
+}
+
+/** Whether ANY escalation chain exists anywhere on the rule (rule-level,
+ *  per-action, band-level, or band-per-action). Drives ruleWantsContext —
+ *  a rule with any chain needs the templateCtx snapshot for the sweep. */
+export function ruleHasAnyEscalation(rule: RuleActionCarrier): boolean {
+  const has = (esc: unknown) => (normalizeEscalationToV2(esc)?.tiers.length ?? 0) > 0;
+  if (has(rule.escalation)) return true;
+  if ((rule.actions ?? []).some((a) => has(a.escalation))) return true;
+  return (rule.severityBands ?? []).some((b) => has(b.escalation) || (b.actions ?? []).some((a) => has(a.escalation)));
+}
+
+/** One due-sweepable escalation chain: the rule/band-LEVEL chain (key "") or a
+ *  per-action chain (key "a<i>", i = index in the severity's effective action
+ *  list). Tier state in Notification.escalationState.tiers is keyed by
+ *  escalationTierStateKey(chain.key, tierIdx). */
+export interface EscalationChain {
+  key: string;
+  escalation: EscalationV2Config;
+}
+
+/** Escalation-state key for a tier: the level chain keeps the bare numeric
+ *  keys pre-feature rows already carry; per-action chains use "a<i>:t<j>". */
+export function escalationTierStateKey(chainKey: string, tierIdx: number): string {
+  return chainKey ? `${chainKey}:t${tierIdx}` : String(tierIdx);
+}
+
+/**
+ * All escalation chains active at a given alert severity — mirrors the
+ * engine's tierForSeverity band semantics: at a band severity, the band's
+ * actions (else the base actions — the band fallback) carry the per-action
+ * chains, and the band's own level chain (else the rule's) is the "" chain.
+ * Shared by the escalation sweep; band transitions reset escalationState, so
+ * per-action keys never collide across bands.
+ */
+export function escalationChainsForSeverity(
+  rule: RuleActionCarrier & { severity: string },
+  severity: string,
+): EscalationChain[] {
+  let effActions = rule.actions ?? [];
+  let levelEsc = normalizeEscalationToV2(rule.escalation);
+  if (severity !== rule.severity) {
+    const band = (rule.severityBands ?? []).find((b) => b.severity === severity);
+    if (band) {
+      if (band.actions?.length) effActions = band.actions;
+      const bandEsc = normalizeEscalationToV2(band.escalation);
+      if (bandEsc?.tiers.length) levelEsc = bandEsc;
+    }
+  }
+  const chains: EscalationChain[] = [];
+  if (levelEsc?.tiers.length) chains.push({ key: "", escalation: levelEsc });
+  effActions.forEach((a, i) => {
+    const esc = normalizeEscalationToV2(a.escalation);
+    if (esc?.tiers.length) chains.push({ key: `a${i}`, escalation: esc });
+  });
+  return chains;
 }
 
 /** Trigger categories that select assets via `scope` (vs. event/host).
@@ -1569,7 +1703,15 @@ export function buildSchemaCatalog() {
       languages: SCRIPT_INTERPRETERS,
       help: "Scripts execute as the Polaris service account on the server, or as root/LocalSystem on the triggering asset's agent. A human must review every script before enabling it in production.",
     },
-    escalationMeta: { maxTiers: 5, minRepeatEveryMin: 5, maxActionsPerTier: 10 },
+    // perAction: escalation chains attach to individual actions (top-level +
+    // per-band); tier actions themselves can't nest another chain.
+    escalationMeta: { maxTiers: 5, minRepeatEveryMin: 5, maxActionsPerTier: 10, perAction: true },
+    // Severity-band vocabulary for the wizard's per-severity action sections.
+    bandMeta: {
+      maxBands: 4,
+      maxActionsPerBand: 20,
+      emptyBandNote: "A severity tier with no actions of its own runs the base actions when entered.",
+    },
     // Sentence-builder vocabulary (server-owned wording; the wizard renders
     // the live plain-English trigger/reset summary from these).
     comparatorPhrases: {

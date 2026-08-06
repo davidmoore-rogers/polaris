@@ -21,6 +21,10 @@ import {
   actionsToTargets,
   legacyMirrorOfV2,
   buildSchemaCatalog,
+  allRuleActionRefs,
+  ruleHasAnyEscalation,
+  escalationChainsForSeverity,
+  escalationTierStateKey,
   type DeliveryTarget,
   type EmailComposition,
 } from "../../src/services/notificationTypes.js";
@@ -558,5 +562,138 @@ describe("condition-mode reset", () => {
         reset: { mode: "condition", condition: { op: "and", children: [hostLeaf] } },
       }),
     ).toThrow(/match the trigger's kind/);
+  });
+});
+
+// ─── Per-action escalation + device-region recipient flag + chain helpers ───
+
+describe("escalatable actions (per-action escalation)", () => {
+  const chain = { stopOn: "acknowledge", tiers: [{ afterMin: 15, actions: [{ type: "notify", channelId: "c2" }] }] };
+
+  it("accepts an escalation chain on top-level and band actions", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "x", trigger: metricTrigger,
+      actions: [{ type: "notify", channelId: "c1", escalation: chain }],
+      severityBands: [{ threshold: 95, severity: "critical", actions: [{ type: "api_call", url: "https://x.example.com/hook", escalation: chain }] }],
+    });
+    expect((parsed.actions[0] as { escalation?: unknown }).escalation).toBeTruthy();
+    expect((parsed.severityBands?.[0]?.actions[0] as { escalation?: unknown }).escalation).toBeTruthy();
+  });
+
+  it("rejects nested chains: actions INSIDE escalation tiers cannot escalate", () => {
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x", trigger: metricTrigger,
+        actions: [{
+          type: "notify", channelId: "c1",
+          escalation: { tiers: [{ afterMin: 15, actions: [{ type: "notify", channelId: "c2", escalation: chain }] }] },
+        }],
+      }),
+    ).toThrow();
+    // resolvedActions are bare too.
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x", trigger: metricTrigger,
+        severityBands: [{ threshold: 95, severity: "critical" }],
+        bandNotify: { resolvedActions: [{ type: "notify", channelId: "c1", escalation: chain }] },
+      }),
+    ).toThrow();
+  });
+
+  it("normalizeRuleToV2 preserves stored per-action escalation (strict-schema drop regression)", () => {
+    const v2 = normalizeRuleToV2({
+      reset: { mode: "manual" },
+      actions: [{ type: "notify", channelId: "c1", escalation: chain }],
+    });
+    expect(v2.actions).toHaveLength(1);
+    expect((v2.actions[0] as { escalation?: unknown }).escalation).toBeTruthy();
+  });
+
+  it("legacy mirror drops per-action escalation but keeps the recipient flags", () => {
+    const targets = actionsToTargets([
+      { type: "notify", channelId: "c1", recipientDeviceRegion: true, escalation: chain } as never,
+    ]);
+    expect(targets).toEqual([{ channelId: "c1", recipientDeviceRegion: true }]);
+  });
+});
+
+describe("recipientDeviceRegion round-trip", () => {
+  it("survives targets → actions → targets (both converters)", () => {
+    const actions = targetsToNotifyActions([{ channelId: "c1", recipientDeviceRegion: true }], null);
+    expect((actions[0] as { recipientDeviceRegion?: boolean }).recipientDeviceRegion).toBe(true);
+    expect(actionsToTargets(actions)[0]).toMatchObject({ channelId: "c1", recipientDeviceRegion: true });
+  });
+
+  it("is accepted by ruleInputSchema on notify actions", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "x", trigger: metricTrigger,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+    });
+    expect((parsed.actions[0] as { recipientDeviceRegion?: boolean }).recipientDeviceRegion).toBe(true);
+  });
+});
+
+describe("allRuleActionRefs / ruleHasAnyEscalation / escalationChainsForSeverity", () => {
+  const chainTo = (channelId: string) => ({ stopOn: "acknowledge" as const, tiers: [{ afterMin: 10, actions: [{ type: "notify" as const, channelId }] }] });
+  const rule = {
+    severity: "warning",
+    actions: [
+      { type: "notify" as const, channelId: "base-1", escalation: chainTo("base-1-esc") },
+      { type: "api_call" as const, method: "POST" as const, url: "https://x.example.com", timeoutSec: 15 },
+    ],
+    escalation: chainTo("rule-esc"),
+    severityBands: [
+      { threshold: 95, severity: "critical", actions: [{ type: "notify" as const, channelId: "band-1", escalation: chainTo("band-1-esc") }], escalation: chainTo("band-esc") },
+      { threshold: 90, severity: "serious", actions: [] },
+    ],
+    bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" as const, resolvedActions: [{ type: "notify" as const, channelId: "resolved-1" }] },
+  };
+
+  it("allRuleActionRefs walks all seven action locations", () => {
+    const ids = allRuleActionRefs(rule as never).map((r) =>
+      r.action.type === "notify" ? r.action.channelId : r.action.type,
+    );
+    expect(ids).toEqual(expect.arrayContaining([
+      "base-1", "base-1-esc", "api_call", "rule-esc", "band-1", "band-1-esc", "band-esc", "resolved-1",
+    ]));
+    expect(ids).toHaveLength(8);
+  });
+
+  it("ruleHasAnyEscalation sees chains at every level (and none when absent)", () => {
+    expect(ruleHasAnyEscalation(rule as never)).toBe(true);
+    expect(ruleHasAnyEscalation({ actions: [{ type: "notify", channelId: "c" }] } as never)).toBe(false);
+    expect(ruleHasAnyEscalation({ actions: [{ type: "notify", channelId: "c", escalation: chainTo("x") }] } as never)).toBe(true);
+    expect(ruleHasAnyEscalation({ severityBands: [{ threshold: 1, severity: "critical", actions: [], escalation: chainTo("x") }] } as never)).toBe(true);
+  });
+
+  it("escalationChainsForSeverity: base severity = rule chain + per-action chains", () => {
+    const chains = escalationChainsForSeverity(rule as never, "warning");
+    expect(chains.map((c) => c.key)).toEqual(["", "a0"]);
+    expect(chains[0]!.escalation.tiers[0]!.actions[0]).toMatchObject({ channelId: "rule-esc" });
+    expect(chains[1]!.escalation.tiers[0]!.actions[0]).toMatchObject({ channelId: "base-1-esc" });
+  });
+
+  it("band severity uses the band's chains; empty band falls back to base actions + rule chain", () => {
+    const critical = escalationChainsForSeverity(rule as never, "critical");
+    expect(critical.map((c) => c.key)).toEqual(["", "a0"]);
+    expect(critical[0]!.escalation.tiers[0]!.actions[0]).toMatchObject({ channelId: "band-esc" });
+    expect(critical[1]!.escalation.tiers[0]!.actions[0]).toMatchObject({ channelId: "band-1-esc" });
+    // The "serious" band has no actions and no chain → base actions' chains + rule chain.
+    const serious = escalationChainsForSeverity(rule as never, "serious");
+    expect(serious.map((c) => c.key)).toEqual(["", "a0"]);
+    expect(serious[0]!.escalation.tiers[0]!.actions[0]).toMatchObject({ channelId: "rule-esc" });
+    expect(serious[1]!.escalation.tiers[0]!.actions[0]).toMatchObject({ channelId: "base-1-esc" });
+  });
+
+  it("escalationTierStateKey keeps bare numeric keys for the level chain", () => {
+    expect(escalationTierStateKey("", 0)).toBe("0");
+    expect(escalationTierStateKey("", 2)).toBe("2");
+    expect(escalationTierStateKey("a1", 0)).toBe("a1:t0");
+  });
+
+  it("catalog advertises per-action escalation + band meta", () => {
+    const cat = buildSchemaCatalog();
+    expect(cat.escalationMeta.perAction).toBe(true);
+    expect(cat.bandMeta.maxBands).toBe(4);
   });
 });

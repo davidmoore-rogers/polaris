@@ -15,7 +15,7 @@ import { Router } from "express";
 import type { Request } from "express";
 import { requirePermission, hasPermission } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
-import { ruleInputSchema, previewInputSchema, buildSchemaCatalog, normalizeEscalationToV2, type RuleInput } from "../../services/notificationTypes.js";
+import { ruleInputSchema, previewInputSchema, buildSchemaCatalog, allRuleActionRefs, type RuleInput } from "../../services/notificationTypes.js";
 import { listRules, createRule, updateRule, deleteRule, listScopeOptions } from "../../services/notificationRuleService.js";
 import { previewRule } from "../../services/notificationEngine.js";
 import { listRecipientUsers } from "../../services/notificationRecipientService.js";
@@ -69,15 +69,10 @@ notificationRulesRouter.post("/preview", requirePermission("automationManagement
  * actions never needs the key — including edits that REMOVE script actions.
  */
 function assertScriptActionPermission(req: Request, input: RuleInput): void {
-  const tierHasScript = (esc: unknown) =>
-    (normalizeEscalationToV2(esc)?.tiers ?? []).some((t) => t.actions.some((a) => a.type === "script"));
-  const hasScript =
-    input.actions.some((a) => a.type === "script") ||
-    tierHasScript(input.escalation) ||
-    // Severity-band actions + per-band escalation tiers + dedicated resolved
-    // actions are equally RCE-equivalent.
-    (input.severityBands ?? []).some((b) => b.actions.some((a) => a.type === "script") || tierHasScript(b.escalation)) ||
-    (input.bandNotify?.resolvedActions ?? []).some((a) => a.type === "script");
+  // allRuleActionRefs is the canonical walk over every place actions live —
+  // top-level (+ per-action escalation tiers), rule-level escalation tiers,
+  // severity-band actions (+ their tiers), band-level tiers, resolved actions.
+  const hasScript = allRuleActionRefs(input).some((r) => r.action.type === "script");
   if (hasScript && !hasPermission(req, "automationScripts", "fullwrite")) {
     throw new AppError(403, "Attaching script actions requires Full Read-Write on Automation Scripts (automationScripts)");
   }
