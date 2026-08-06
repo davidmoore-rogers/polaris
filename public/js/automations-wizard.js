@@ -890,6 +890,14 @@ async function openAutomationWizard(existing) {
     leaf = leaf || tgDefaultLeaf(kind);
     var isState = leaf.type === "asset_state";
     var what = isState ? "f:" + leaf.field : "m:" + leaf.metric;
+    // Unit chip sits beside the threshold value it qualifies (read-only —
+    // never part of the input). hwSensorValue resolves it from the typed
+    // sensor class; "sensor unit" is the unresolved placeholder.
+    var unit = "";
+    if (!isState) {
+      unit = leafUnit(leaf.metric, leaf.dimensionFilter || {});
+      if (!unit && metricUnit(leaf.metric) === "(sensor unit)") unit = "sensor unit";
+    }
     var line1 =
       '<div style="display:flex;gap:6px;align-items:center">' +
         '<span class="aw-grip" draggable="true" title="Drag to move">&#x2842;</span>' +
@@ -897,21 +905,19 @@ async function openAutomationWizard(existing) {
         '<select class="tgl-op" style="width:64px">' + opt(s.comparators, leaf.operator || (isState ? "==" : ">=")) + '</select>' +
         (isState
           ? tgStateValueControl(leaf.field, leaf.value)
-          : '<input type="number" step="any" class="tgl-threshold" value="' + (leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : "") + '" placeholder="value" style="width:110px">') +
+          : '<input type="number" step="any" class="tgl-threshold" value="' + (leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : "") + '" placeholder="value" style="width:110px">' +
+            (unit ? '<span class="tgl-unit" style="font-size:0.8rem;color:var(--color-text-tertiary);white-space:nowrap">' + escapeHtml(unit) + '</span>' : "")) +
         '<button type="button" class="btn btn-sm btn-danger scr-remove" title="Remove condition">&times;</button>' +
       '</div>';
     var line2 = "";
     if (!isState) {
       var dims = kind === "host" ? [] : ((s.metricDimensions && s.metricDimensions[leaf.metric]) || []);
       var df = leaf.dimensionFilter || {};
-      var unit = leafUnit(leaf.metric, df);
-      if (!unit && metricUnit(leaf.metric) === "(sensor unit)") unit = "sensor unit";
       var dimInputs = dims.map(function (d) {
         return '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '" value="' + escapeHtml(df[d] || "") + '" style="flex:1;min-width:120px">';
       }).join("");
       line2 =
         '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
-          (unit ? '<span class="tgl-unit">' + escapeHtml(unit) + '</span>' : "") +
           '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + opt(s.aggregations, leaf.aggregation || "latest") + '</select>' +
           '<span>over</span><input type="number" class="tgl-window" value="' + (leaf.windowSec || 0) + '" style="width:70px"><span>sec (0 = latest)</span>' +
           dimInputs +
