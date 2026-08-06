@@ -16,7 +16,7 @@
 
 import { Router, type Request } from "express";
 import { AppError } from "../../utils/errors.js";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requestActor } from "../middleware/auth.js";
 import { hasPermission } from "../middleware/permissions.js";
 import {
   listConflicts,
@@ -83,7 +83,7 @@ router.post("/:id/accept", async (req, res, next) => {
       throw new AppError(403, "You do not have permission to resolve this conflict");
     }
 
-    await acceptConflict(conflict, req.session?.username);
+    await acceptConflict(conflict, requestActor(req));
 
     res.json({ ok: true });
   } catch (err) {
@@ -113,7 +113,7 @@ router.post("/:id/merge", async (req, res, next) => {
       if (v === "existing" || v === "proposed") fieldWinners[k] = v;
     }
 
-    await mergeAssetConflict(conflict, req.session?.username, fieldWinners);
+    await mergeAssetConflict(conflict, requestActor(req), fieldWinners);
 
     res.json({ ok: true });
   } catch (err) {
@@ -129,7 +129,7 @@ router.post("/:id/reject", async (req, res, next) => {
       throw new AppError(403, "You do not have permission to resolve this conflict");
     }
 
-    await rejectConflict(conflict, req.session?.username);
+    await rejectConflict(conflict, requestActor(req));
 
     res.json({ ok: true });
   } catch (err) {

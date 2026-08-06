@@ -8,6 +8,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
+import { mapWithConcurrency } from "../../utils/concurrency.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { requestActor } from "../middleware/auth.js";
 import { machineApiLimiter } from "../middleware/rateLimits.js";
@@ -3024,6 +3025,44 @@ function isPtrExpired(fetchedAt: Date | string | null | undefined, ttlSeconds: n
   return (now - fetched) > ttlMs;
 }
 
+// Fleet-wide DNS sweep tuning.
+//
+// The sweep used to run one `await resolver.reverse()` followed by one
+// `await prisma.*.update()` per row, strictly serially, inside the request
+// handler. At the 2000-asset fleet size CLAUDE.md requires every change to be
+// reasoned about, that is thousands of serial DNS round trips plus thousands of
+// individual UPDATE round trips in one HTTP request: it outlives any nginx
+// proxy_read_timeout, and a slow resolver multiplies the whole thing by the
+// per-lookup timeout.
+//
+// Now: lookups run through a bounded pool, and the writes are collected and
+// applied in batched transactions (the same shape the per-asset sibling route
+// below already used). DNS_SWEEP_LOOKUP_CONCURRENCY is deliberately modest —
+// the target is usually a single corporate resolver pair, and a wide fan-out
+// there looks like a flood rather than a sweep.
+const DNS_SWEEP_LOOKUP_CONCURRENCY = 16;
+const DNS_SWEEP_WRITE_CHUNK = 250;
+
+/**
+ * Apply collected per-row updates in bounded transactions. One transaction per
+ * chunk keeps each statement batch small enough that it cannot hold locks or a
+ * pool connection for the length of the whole sweep.
+ */
+async function applyDnsUpdatesChunked(
+  updates: Array<{ table: "asset" | "assetAssociatedIp"; id: string; data: Record<string, unknown> }>,
+): Promise<void> {
+  for (let i = 0; i < updates.length; i += DNS_SWEEP_WRITE_CHUNK) {
+    const chunk = updates.slice(i, i + DNS_SWEEP_WRITE_CHUNK);
+    await prisma.$transaction(
+      chunk.map((u) =>
+        u.table === "asset"
+          ? prisma.asset.update({ where: { id: u.id }, data: u.data as any })
+          : prisma.assetAssociatedIp.update({ where: { id: u.id }, data: u.data as any }),
+      ),
+    );
+  }
+}
+
 // POST /api/v1/assets/dns-lookup — bulk PTR lookup; skips IPs whose cached result is within TTL
 router.post("/dns-lookup", requirePermission("assets", "write"), async (req, res, next) => {
   try {
@@ -3043,27 +3082,31 @@ router.post("/dns-lookup", requirePermission("assets", "write"), async (req, res
     let resolved = 0;
     let failed = 0;
     const results: Array<{ id: string; ip: string; dnsName: string }> = [];
+    // One collected list for BOTH passes, applied in batched transactions after
+    // the lookups finish. Nothing here reads a value another row's update wrote,
+    // so deferring the writes changes no outcome.
+    const updates: Array<{ table: "asset" | "assetAssociatedIp"; id: string; data: Record<string, unknown> }> = [];
 
-    for (const asset of needsPrimary) {
-      if (!asset.ipAddress) continue;
+    await mapWithConcurrency(needsPrimary, DNS_SWEEP_LOOKUP_CONCURRENCY, async (asset) => {
+      if (!asset.ipAddress) return;
       const fetchedAt = new Date();
       try {
         const records = await resolver.reverse(asset.ipAddress);
         if (records.length > 0) {
           const { name: dnsName, ttl } = records[0];
-          await prisma.asset.update({ where: { id: asset.id }, data: { dnsName, dnsNameFetchedAt: fetchedAt, dnsNameTtl: ttl } });
+          updates.push({ table: "asset", id: asset.id, data: { dnsName, dnsNameFetchedAt: fetchedAt, dnsNameTtl: ttl } });
           results.push({ id: asset.id, ip: asset.ipAddress, dnsName });
           resolved++;
-        } else {
-          // Negative cache: record the attempt so we don't retry until TTL expires
-          await prisma.asset.update({ where: { id: asset.id }, data: { dnsNameFetchedAt: fetchedAt, dnsNameTtl: null } });
-          failed++;
+          return;
         }
+        // Negative cache: record the attempt so we don't retry until TTL expires
+        updates.push({ table: "asset", id: asset.id, data: { dnsNameFetchedAt: fetchedAt, dnsNameTtl: null } });
+        failed++;
       } catch {
-        await prisma.asset.update({ where: { id: asset.id }, data: { dnsNameFetchedAt: fetchedAt, dnsNameTtl: null } });
+        updates.push({ table: "asset", id: asset.id, data: { dnsNameFetchedAt: fetchedAt, dnsNameTtl: null } });
         failed++;
       }
-    }
+    });
 
     // ── Associated IPs ───────────────────────────────────────────────────────
     // Iterate every active asset_associated_ips row directly (the side table is
@@ -3078,28 +3121,32 @@ router.post("/dns-lookup", requirePermission("assets", "write"), async (req, res
 
     let assocResolved = 0;
     let assocSkipped = 0;
-    for (const row of assocRows) {
-      if (!row.ip) continue;
+    const assocNeedsLookup = assocRows.filter((row) => {
+      if (!row.ip) return false;
       const fetchedAtIso = row.ptrFetchedAt ? row.ptrFetchedAt.toISOString() : null;
-      if (!isPtrExpired(fetchedAtIso, row.ptrTtl, now)) { assocSkipped++; continue; }
+      if (!isPtrExpired(fetchedAtIso, row.ptrTtl, now)) { assocSkipped++; return false; }
+      return true;
+    });
+
+    await mapWithConcurrency(assocNeedsLookup, DNS_SWEEP_LOOKUP_CONCURRENCY, async (row) => {
       const ptrFetchedAt = new Date();
       try {
-        const records = await resolver.reverse(row.ip);
+        const records = await resolver.reverse(row.ip!);
         if (records.length > 0) {
           assocResolved++;
-          await prisma.assetAssociatedIp.update({
-            where: { id: row.id },
+          updates.push({
+            table: "assetAssociatedIp",
+            id: row.id,
             data: { ptrName: records[0].name, ptrTtl: records[0].ttl, ptrFetchedAt },
           });
-          continue;
+          return;
         }
-      } catch {}
+      } catch { /* fall through to the negative cache below */ }
       // Negative cache — preserve any existing ptrName, clear ttl, stamp fetchedAt
-      await prisma.assetAssociatedIp.update({
-        where: { id: row.id },
-        data: { ptrTtl: null, ptrFetchedAt },
-      });
-    }
+      updates.push({ table: "assetAssociatedIp", id: row.id, data: { ptrTtl: null, ptrFetchedAt } });
+    });
+
+    await applyDnsUpdatesChunked(updates);
 
     logEvent({
       action: "asset.dns.bulk", resourceType: "asset", actor: requestActor(req),
@@ -4503,24 +4550,41 @@ router.post("/:id/quarantine/verify", machineApiLimiter, requirePermission("asse
   }
 });
 
+// Bulk-quarantine batching.
+//
+// Every id in the batch drives live FortiGate device I/O (push a MAC into the
+// quarantine table, or release it). These routes used to take an UNBOUNDED id
+// array and walk it strictly serially, so a 2000-asset selection meant 2000
+// serial device writes held inside one HTTP request — past any proxy timeout,
+// with the operator left unsure what actually landed. Sibling precedent:
+// bulk-monitor collapsed its per-asset loop into one updateMany, and
+// bulk-agent-install caps at 200 ids and drains through a bounded pool.
+//
+// The cap makes an oversized request a clean 400 instead of a hung one; the
+// pool keeps the fan-out at the gates modest (each push is a REST call plus a
+// read-back, and a wide fan-out at one FortiGate is how you get rate-limited).
+const BULK_QUARANTINE_MAX_IDS = 500;
+const BULK_QUARANTINE_POOL = 8;
+
 // POST /api/v1/assets/bulk-quarantine — admin, assets admin, or token with assets:quarantine scope
 router.post("/bulk-quarantine", requirePermission("assetsQuarantine", "write"), async (req, res, next) => {
   try {
     const Schema = z.object({
-      ids: z.array(z.string()).min(1),
+      ids: z.array(z.string()).min(1).max(BULK_QUARANTINE_MAX_IDS),
       reason: z.string().max(500).optional(),
     });
     const input = Schema.parse(req.body);
     const actor = requestActor(req) || "unknown";
-    const results: Array<{ id: string; ok: boolean; message: string; succeededCount?: number; failedCount?: number }> = [];
-    for (const id of input.ids) {
+    // Per-item ok/message shape preserved — a single bad asset must not fail the
+    // batch. mapWithConcurrency keeps results in input order.
+    const results = await mapWithConcurrency(input.ids, BULK_QUARANTINE_POOL, async (id) => {
       try {
         const r = await quarantineAsset({ assetId: id, actor, reason: input.reason, tokenIntegrationIds: req.apiToken?.integrationIds });
-        results.push({ id, ok: true, message: r.message, succeededCount: r.succeededCount, failedCount: r.failedCount });
+        return { id, ok: true, message: r.message, succeededCount: r.succeededCount, failedCount: r.failedCount };
       } catch (err: any) {
-        results.push({ id, ok: false, message: err?.message || "Quarantine failed" });
+        return { id, ok: false, message: err?.message || "Quarantine failed" };
       }
-    }
+    });
     res.json({ results });
   } catch (err) {
     next(err);
@@ -4530,18 +4594,17 @@ router.post("/bulk-quarantine", requirePermission("assetsQuarantine", "write"), 
 // POST /api/v1/assets/bulk-quarantine/release — admin, assets admin, or token with assets:quarantine scope
 router.post("/bulk-quarantine/release", requirePermission("assetsQuarantine", "write"), async (req, res, next) => {
   try {
-    const Schema = z.object({ ids: z.array(z.string()).min(1) });
+    const Schema = z.object({ ids: z.array(z.string()).min(1).max(BULK_QUARANTINE_MAX_IDS) });
     const input = Schema.parse(req.body);
     const actor = requestActor(req) || "unknown";
-    const results: Array<{ id: string; ok: boolean; message: string }> = [];
-    for (const id of input.ids) {
+    const results = await mapWithConcurrency(input.ids, BULK_QUARANTINE_POOL, async (id) => {
       try {
         const r = await releaseQuarantine({ assetId: id, actor, tokenIntegrationIds: req.apiToken?.integrationIds });
-        results.push({ id, ok: true, message: r.message });
+        return { id, ok: true, message: r.message };
       } catch (err: any) {
-        results.push({ id, ok: false, message: err?.message || "Release failed" });
+        return { id, ok: false, message: err?.message || "Release failed" };
       }
-    }
+    });
     res.json({ results });
   } catch (err) {
     next(err);
