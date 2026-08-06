@@ -306,6 +306,7 @@ fi
 if [[ ! -f "$APP_DIR/.env" ]]; then
   info "Creating .env from template..."
   SESSION_SECRET=$(openssl rand -base64 32)
+  POLARIS_SECRET_KEY=$(openssl rand -hex 32)
   cat > "$APP_DIR/.env" <<ENVFILE
 # Database
 DATABASE_URL=postgresql://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}
@@ -317,6 +318,15 @@ LOG_LEVEL=info
 
 # Auth
 SESSION_SECRET=${SESSION_SECRET}
+
+# Encryption key for secrets stored in the database (SNMP communities, WinRM/SSH
+# passwords + private keys, FortiManager/FortiGate API tokens, the Entra client
+# secret, vCenter credentials, delivery-channel secrets). Without it those
+# values are stored as PLAINTEXT, and therefore appear in plaintext in every
+# pg_dump. KEEP A COPY OFF THIS HOST: sealed secrets cannot be recovered
+# without this key, and a backup restored onto a host with a different key
+# needs its device + integration secrets re-entered.
+POLARIS_SECRET_KEY=${POLARIS_SECRET_KEY}
 
 # Reverse-proxy (nginx) front-end — Phase 1+. Polaris listens HTTP-only on
 # 127.0.0.1:3000; nginx terminates TLS on 443 using the cert at
@@ -332,7 +342,7 @@ POLARIS_MONITOR_REPLICAS=${MONITOR_REPLICAS}
 ENVFILE
   chown "$APP_USER:$APP_GROUP" "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
-  info ".env created with generated SESSION_SECRET + proxy-mode env vars"
+  info ".env created with generated SESSION_SECRET + POLARIS_SECRET_KEY + proxy-mode env vars"
 else
   info ".env already exists — appending proxy-mode + replica env vars if missing"
   if ! grep -q '^POLARIS_PROXY_CERT_PATH=' "$APP_DIR/.env"; then

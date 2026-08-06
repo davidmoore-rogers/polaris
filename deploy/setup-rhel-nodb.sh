@@ -230,6 +230,7 @@ cd "$APP_DIR"
 if [[ ! -f "$APP_DIR/.env" ]]; then
   info "Creating .env..."
   SESSION_SECRET=$(openssl rand -base64 32)
+  POLARIS_SECRET_KEY=$(openssl rand -hex 32)
   cat > "$APP_DIR/.env" <<ENVFILE
 # Database (remote)
 DATABASE_URL=${DATABASE_URL}
@@ -241,6 +242,15 @@ LOG_LEVEL=info
 
 # Auth
 SESSION_SECRET=${SESSION_SECRET}
+
+# Encryption key for secrets stored in the database (SNMP communities, WinRM/SSH
+# passwords + private keys, FortiManager/FortiGate API tokens, the Entra client
+# secret, vCenter credentials, delivery-channel secrets). Without it those
+# values are stored as PLAINTEXT, and therefore appear in plaintext in every
+# pg_dump. KEEP A COPY OFF THIS HOST: sealed secrets cannot be recovered
+# without this key, and a backup restored onto a host with a different key
+# needs its device + integration secrets re-entered.
+POLARIS_SECRET_KEY=${POLARIS_SECRET_KEY}
 ENVFILE
   chown "$APP_USER:$APP_GROUP" "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"

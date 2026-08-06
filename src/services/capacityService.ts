@@ -1361,6 +1361,29 @@ function computeReasons(
     });
   }
 
+  // Secrets-at-rest. Without POLARIS_SECRET_KEY the Prisma extension's sealing
+  // is a no-op, so device and integration secrets sit in the clear in Postgres
+  // and therefore in the clear in every pg_dump. Watch-severity rather than
+  // amber: it is the pre-2026-08 behaviour, so it must not paint an upgraded
+  // install red, but it should not stay invisible either.
+  if (!process.env.POLARIS_SECRET_KEY || process.env.POLARIS_SECRET_KEY.trim() === "") {
+    reasons.push({
+      severity: "watch",
+      code: "secrets_key_unset",
+      family: "secrets_key",
+      message:
+        "POLARIS_SECRET_KEY is not set, so SNMP communities, WinRM/SSH passwords and keys, " +
+        "FortiManager/FortiGate API tokens, the Entra client secret, vCenter credentials and " +
+        "delivery-channel secrets are stored as plaintext in the database — and therefore in " +
+        "plaintext in every database backup.",
+      suggestion:
+        "Add a 32-byte key to .env as POLARIS_SECRET_KEY (`openssl rand -hex 32`) and restart. " +
+        "Existing secrets are encrypted automatically on the next boot. Keep a copy of the key " +
+        "somewhere other than this host: sealed secrets cannot be recovered without it, and a " +
+        "backup restored onto a host with a different key needs them re-entered.",
+    });
+  }
+
   // ── Disk-read pressure (replaces the old size-based ram_insufficient) ─────
   // Only meaningful once the DB can't fully fit in RAM — below that, disk
   // pressure can't come from the working set spilling out of cache. We never

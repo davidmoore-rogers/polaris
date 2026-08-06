@@ -15,6 +15,7 @@ import { hashPassword } from "../utils/password.js";
 import { ENV_FILE, STATE_DIR } from "../utils/paths.js";
 import { makeRateLimiter } from "../api/middleware/rateLimits.js";
 import { PG_DATA_DIR_CANDIDATES, pickFirstExistingPath, probeDiskFree } from "../utils/startupDiskCheck.js";
+import { generateSecretKey } from "../utils/secretBox.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -310,6 +311,10 @@ router.post("/finalize", setupActionLimiter, async (req, res) => {
     const databaseUrl = buildConnectionString(db);
     const healthToken = randomBytes(32).toString("hex");
     const metricsToken = randomBytes(32).toString("hex");
+    // Secret-at-rest key. Generated here rather than left to the operator so a
+    // fresh install NEVER stores device/integration credentials in plaintext —
+    // an unset key makes the sealing in db.ts a silent no-op.
+    const secretKey = generateSecretKey();
 
     // Preserve any reverse-proxy env vars that setup-rhel.sh / setup-ubuntu.sh
     // wrote BEFORE the wizard ran. Without this, finalize would clobber them
@@ -381,6 +386,21 @@ router.post("/finalize", setupActionLimiter, async (req, res) => {
       "# surface a warning while it is unset).",
       `METRICS_TOKEN=${metricsToken}`,
       "",
+      "# Encryption key for secrets stored in the database (SNMP communities,",
+      "# WinRM/SSH passwords + private keys, FortiManager/FortiGate API tokens,",
+      "# the Entra client secret, vCenter credentials, SMTP/M365/Slack/Teams",
+      "# delivery secrets, the Web Push VAPID private key). 32 bytes as hex.",
+      "#",
+      "# KEEP A COPY SOMEWHERE OTHER THAN THIS HOST. Sealed secrets cannot be",
+      "# recovered without this key, and a database backup restored onto a host",
+      "# with a different key needs every secret re-entered. Losing the key does",
+      "# not lock you out of Polaris (local logins and SSO are unaffected) — it",
+      "# loses the stored device credentials.",
+      "#",
+      "# Clearing the value reverts to storing secrets in plaintext; the",
+      "# Maintenance tab surfaces a warning while it is unset.",
+      `POLARIS_SECRET_KEY=${secretKey}`,
+      "",
       ...reverseProxyBlock,
     ].join("\n");
 
@@ -395,6 +415,7 @@ router.post("/finalize", setupActionLimiter, async (req, res) => {
     process.env.SESSION_SECRET = app.sessionSecret;
     process.env.HEALTH_TOKEN = healthToken;
     process.env.METRICS_TOKEN = metricsToken;
+    process.env.POLARIS_SECRET_KEY = secretKey;
 
     // Step 4: Run Prisma migrations
     const projectRoot = resolve(__dirname, "..", "..");

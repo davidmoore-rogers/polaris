@@ -718,6 +718,11 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/bootstrapProxyConfig.js",
       "./jobs/migrateAutomationRuleShape.js",
       "./jobs/seedBaselineAutomations.js",
+      // Seals previously-plaintext secrets in Credential / Integration /
+      // NotificationChannel config + Setting values. Not marker-guarded: the
+      // operator may set POLARIS_SECRET_KEY after this code lands, and the job
+      // must pick that up on the next boot. See its header.
+      "./jobs/backfillSecretEncryption.js",
       // Deliberately not marker-guarded — retries the subnet (blockId, cidr)
       // unique index every boot until the data allows it. See its header.
       "./jobs/enforceSubnetUniqueIndex.js",

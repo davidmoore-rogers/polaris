@@ -41,6 +41,8 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { normalizeManufacturer } from "./utils/manufacturerNormalize.js";
 import { applyHostnameOverride, applyIpOverride, type IpOverrideOutcome } from "./utils/assetInvariants.js";
 import { deriveAssetSources, type AssetSnapshot } from "./utils/assetSourceDerivation.js";
+import { sealValue, openValue } from "./utils/secretBox.js";
+import { transformSecretFields } from "./utils/configSecretFields.js";
 
 // Lazy-resolved to break the import cycle (dnsResolvedReservationService imports
 // `prisma` from this file). The hooks below only invoke the service at runtime,
@@ -352,9 +354,101 @@ function fireIpOverrideFollowUp(outcome: OperatorOverrideOutcome, assetId: strin
   })();
 }
 
+// ─── Secret-at-rest layer ───────────────────────────────────────────────────
+//
+// Seals secret JSON fields on the way into the database and opens them on the
+// way out, for Credential.config / Integration.config /
+// NotificationChannel.config / Setting.value. See utils/secretBox.ts for the
+// threat model (plaintext credentials in every pg_dump) and
+// utils/configSecretFields.ts for which keys are covered and why the key set is
+// a name union rather than per-type lists.
+//
+// This lives in the Prisma extension for the same reason the hostnameOverride
+// and clampMonitoredForStatus guards do: it is the ONE seam every caller passes
+// through. Several route files still read `prisma.credential.findUnique` and
+// `prisma.integration.findUnique` inline (see the interim-state note in
+// CLAUDE.md), and encrypting at the service layer would have left those reading
+// ciphertext. Raw SQL bypasses this — the only raw reader of these columns is
+// monitorOverrideService's `integrations.config #>> '{…,addAsMonitored}'`, which
+// touches no secret field.
+//
+// Writes are sealed; reads are opened. `openValue` passes plaintext through
+// unchanged, so an install mid-backfill (or with no key at all) works exactly as
+// before.
+
+function sealArgsData(data: unknown, jsonField: "config" | "value"): void {
+  if (!data || typeof data !== "object") return;
+  // Array form: createMany({ data: [...] }).
+  if (Array.isArray(data)) {
+    for (const row of data) sealArgsData(row, jsonField);
+    return;
+  }
+  const d = data as Record<string, unknown>;
+  const blob = d[jsonField];
+  if (blob === undefined || blob === null) return;
+  // A `{ set: … }` JSON-field wrapper is valid Prisma input; unwrap it.
+  if (typeof blob === "object" && !Array.isArray(blob) && "set" in (blob as Record<string, unknown>)) {
+    const inner = (blob as Record<string, unknown>).set;
+    d[jsonField] = { set: transformSecretFields(inner, sealValue) };
+    return;
+  }
+  d[jsonField] = transformSecretFields(blob, sealValue);
+}
+
+function openResultRows(result: unknown, jsonField: "config" | "value"): unknown {
+  if (Array.isArray(result)) return result.map((r) => openResultRows(r, jsonField));
+  if (!result || typeof result !== "object") return result;
+  const row = result as Record<string, unknown>;
+  if (!(jsonField in row)) return result;
+  const blob = row[jsonField];
+  if (blob === undefined || blob === null) return result;
+  return { ...row, [jsonField]: transformSecretFields(blob, openValue) };
+}
+
+// Hooks are registered PER MODEL rather than via `$allModels.$allOperations`.
+// $allOperations widens every model's result type to `{}` / `any` across the
+// whole generated client (its callback signature is untyped by construction), so
+// the codebase loses Prisma's types wholesale. Per-model hooks keep them, at the
+// cost of this small amount of repetition — the same trade the asset and mibFile
+// hooks below already make.
+
+type Hook = { args: any; query: (args: any) => Promise<any> };
+
+/** The seal-on-write / open-on-read hook set for one secret-bearing model. */
+function secretHooks(jsonField: "config" | "value") {
+  const seal = (data: unknown) => sealArgsData(data, jsonField);
+  const open = (result: unknown) => openResultRows(result, jsonField);
+  return {
+    async create({ args, query }: Hook) { seal(args?.data); return open(await query(args)); },
+    async createMany({ args, query }: Hook) { seal(args?.data); return query(args); },
+    async update({ args, query }: Hook) { seal(args?.data); return open(await query(args)); },
+    async updateMany({ args, query }: Hook) { seal(args?.data); return query(args); },
+    async upsert({ args, query }: Hook) {
+      seal(args?.create);
+      seal(args?.update);
+      return open(await query(args));
+    },
+    async findUnique({ args, query }: Hook) { return open(await query(args)); },
+    async findUniqueOrThrow({ args, query }: Hook) { return open(await query(args)); },
+    async findFirst({ args, query }: Hook) { return open(await query(args)); },
+    async findFirstOrThrow({ args, query }: Hook) { return open(await query(args)); },
+    async findMany({ args, query }: Hook) { return open(await query(args)); },
+    async delete({ args, query }: Hook) { return open(await query(args)); },
+  };
+}
+
 function _buildClient(base: PrismaClient) {
   return base.$extends({
     query: {
+      // Secret-at-rest coverage. Must stay in step with SECRET_BEARING_MODELS /
+      // secretJsonFieldFor() in utils/configSecretFields.ts, which is what the
+      // backfill job walks — a model listed there but missing here would have
+      // its existing rows sealed by the backfill and then never opened on read.
+      // The tests in tests/unit/secretsAtRest.test.ts assert the two agree.
+      credential: secretHooks("config"),
+      integration: secretHooks("config"),
+      notificationChannel: secretHooks("config"),
+      setting: secretHooks("value"),
       asset: {
         async create({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.data);
@@ -467,6 +561,18 @@ function _buildClient(base: PrismaClient) {
 
 const _base: PrismaClient = g._prismaBase ?? buildBaseClient();
 export const prisma: ReturnType<typeof _buildClient> = g.prisma ?? _buildClient(_base);
+
+/**
+ * The UNEXTENDED client. Almost nothing should use this — the extension carries
+ * real invariants (operator overrides, monitored clamping, manufacturer
+ * normalization, secret-at-rest sealing), and bypassing it bypasses those.
+ *
+ * The one legitimate caller is the secret-encryption backfill, which has to see
+ * the RAW stored value to decide whether a row still holds plaintext: reading
+ * through the extension would hand it decrypted strings and it could never tell
+ * a sealed row from an unsealed one.
+ */
+export const prismaBase: PrismaClient = _base;
 
 if (process.env.NODE_ENV !== "production") {
   g._prismaBase = _base;

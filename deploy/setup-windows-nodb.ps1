@@ -241,6 +241,10 @@ $envFile = Join-Path $AppDir ".env"
 if (-not (Test-Path $envFile)) {
     Write-Info "Creating .env..."
     $sessionSecret = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
+    # 32 bytes as hex for POLARIS_SECRET_KEY (secret-at-rest encryption key).
+    $keyBytes = New-Object 'System.Byte[]' 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($keyBytes)
+    $polarisSecretKey = -join ($keyBytes | ForEach-Object { $_.ToString('x2') })
     @"
 # Database (remote)
 DATABASE_URL=$DbUrl
@@ -252,6 +256,14 @@ LOG_LEVEL=info
 
 # Auth
 SESSION_SECRET=$sessionSecret
+
+# Encryption key for secrets stored in the database (SNMP communities, WinRM/SSH
+# passwords + private keys, FortiManager/FortiGate API tokens, the Entra client
+# secret, vCenter credentials, delivery-channel secrets). Without it those
+# values are stored as PLAINTEXT, and therefore appear in plaintext in every
+# pg_dump. KEEP A COPY OFF THIS HOST: sealed secrets cannot be recovered
+# without this key.
+POLARIS_SECRET_KEY=$polarisSecretKey
 "@ | Set-Content $envFile -Encoding UTF8
     Write-Info ".env created with remote DATABASE_URL"
 } else {
