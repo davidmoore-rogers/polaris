@@ -2600,293 +2600,344 @@ router.post("/", requirePermission("assets", "write"), async (req, res, next) =>
 });
 
 // PUT /api/v1/assets/:id — update (assets admin)
+// ─── PUT /:id phases (split 2026-08 — the contract tests in
+// tests/integration/assetPutContract.test.ts pin the guards, the pin/override
+// semantics, the status stamps, and the unmap side effect). requestActor is
+// resolved once in the handler and threaded down.
+
+type UpdateAssetInput = z.infer<typeof UpdateAssetSchema>;
+
+async function loadAssetForUpdate(id: string) {
+  return prisma.asset.findUnique({
+    where:   { id },
+    include: { discoveredByIntegration: { select: { type: true } } },
+  });
+}
+type ExistingAssetForUpdate = NonNullable<Awaited<ReturnType<typeof loadAssetForUpdate>>>;
+
+// Phase 1 — request-level guards that must 400 before anything is staged.
+async function validateAssetUpdate(id: string, existing: ExistingAssetForUpdate, input: UpdateAssetInput): Promise<void> {
+  // Per-asset polling overrides must be valid for the asset's source kind.
+  // Falling through silently at the resolver would leave the operator
+  // confused about why their selection didn't take.
+  {
+    const sourceKind = assetSourceKindFromIntegrationType(existing.discoveredByIntegration?.type ?? null);
+    const fields: Array<["responseTimePolling" | "cpuMemoryPolling" | "temperaturePolling" | "interfacesPolling" | "lldpPolling" | "storagePolling", PollingMethod | null | undefined]> = [
+      ["responseTimePolling", input.responseTimePolling],
+      ["cpuMemoryPolling",    input.cpuMemoryPolling],
+      ["temperaturePolling",  input.temperaturePolling],
+      ["interfacesPolling",   input.interfacesPolling],
+      ["lldpPolling",         input.lldpPolling],
+      ["storagePolling",      input.storagePolling],
+    ];
+    for (const [name, value] of fields) {
+      if (!value) continue;
+      if (!isPollingMethodCompatible(sourceKind, value)) {
+        throw new AppError(
+          400,
+          `${pollingMethodLabel(value)} polling is not supported for ${sourceKind} assets (field: ${name})`,
+        );
+      }
+      // "vcenter" reads the vCenter server's batched quickStats, so it's
+      // cpuMemory-only AND requires a vcenter-vm AssetSource to resolve
+      // the integration through. The matrix allows the method on the
+      // directory source kinds (merged VMs); this is the precise check.
+      // (UpdateAssetSchema's polling enum currently excludes "vcenter", so
+      // through THIS route the rejection happens at the schema — this guard
+      // is defense in depth for the monitor-settings pathway shape.)
+      if (value === "vcenter") {
+        if (name !== "cpuMemoryPolling") {
+          throw new AppError(400, `vCenter polling only applies to the CPU/Memory stream (field: ${name})`);
+        }
+        const vmSource = await prisma.assetSource.findFirst({
+          where: { assetId: id, sourceKind: "vcenter-vm" },
+          select: { id: true },
+        });
+        if (!vmSource) {
+          throw new AppError(400, "vCenter polling requires this asset to be a vCenter-discovered VM (no vcenter-vm source on file)");
+        }
+      }
+    }
+  }
+  // Lock assetType on Fortinet infrastructure discovered via an integration.
+  // The next discovery cycle would re-stamp the asset anyway, so accepting
+  // the change just to revert it is misleading.
+  if (
+    input.assetType !== undefined &&
+    input.assetType !== existing.assetType &&
+    existing.discoveredByIntegrationId &&
+    (existing.assetType === "firewall" || existing.assetType === "switch" || existing.assetType === "access_point")
+  ) {
+    throw new AppError(400, `Asset type is locked — discovered as ${existing.assetType} by an integration`);
+  }
+  // Quarantine status is owned by the dedicated quarantine endpoints —
+  // setting it via the generic asset PUT would skip the FortiGate push
+  // (or skip the device-side unpush on release), creating divergence
+  // between Polaris's view and the FortiGate's enforcement state.
+  if (input.status === "quarantined" && existing.status !== "quarantined") {
+    throw new AppError(400, "Use POST /assets/:id/quarantine to quarantine an asset");
+  }
+  if (input.status !== undefined && input.status !== "quarantined" && existing.status === "quarantined") {
+    throw new AppError(400, "Use DELETE /assets/:id/quarantine to release the quarantine before changing status");
+  }
+  const coordErr = manualCoordPatchError(input.latitude, input.longitude);
+  if (coordErr) throw new AppError(400, coordErr);
+}
+
+// Phase 2 — stage the update patch: field normalization, the hostname/IP
+// operator pins (set / echo / clear semantics), date coercion, the manual-
+// coordinate pin, status stamps (+ the operator-wins maintenance release),
+// and the monitored/acquiredAt clamps. Returns the patch plus the flags the
+// post-write side effects branch on.
+async function buildAssetUpdatePatch(
+  id: string,
+  existing: ExistingAssetForUpdate,
+  input: UpdateAssetInput,
+  actor: string | undefined,
+): Promise<{ data: Record<string, unknown>; ipOverrideTouched: boolean; coordChanged: boolean }> {
+  const data: Record<string, unknown> = { ...input };
+  if (input.macAddress) data.macAddress = input.macAddress.toUpperCase().replace(/-/g, ":");
+  // Description: empty string clears to null (an empty Polaris description
+  // is re-seeded from the device on the next discovery when the
+  // integration's syncDescriptions toggle is on).
+  if (typeof input.description === "string") data.description = input.description.trim() || null;
+  // Notes: empty string clears to null (notes are operator-only — an
+  // emptied box is an intentional clear, not "not provided").
+  if (typeof input.notes === "string") data.notes = input.notes.trim() || null;
+  // Discovery projection (lazy, computed at most once) — needed when a
+  // pin-clear reverts hostname or ipAddress to the projected value.
+  let _projection: ReturnType<typeof projectAssetFromSources> | null = null;
+  const loadProjection = async () => {
+    if (!_projection) {
+      const overrideSources = await prisma.assetSource.findMany({
+        where: { assetId: id },
+        select: { sourceKind: true, inferred: true, observed: true },
+      });
+      _projection = projectAssetFromSources(
+        overrideSources.map((s) => ({
+          sourceKind: s.sourceKind,
+          inferred: s.inferred,
+          observed: s.observed as Record<string, unknown> | null,
+        })),
+      );
+    }
+    return _projection;
+  };
+  // Hostname: an edit-time write is an operator override (coordSource-style
+  // pin — the db.ts extension re-asserts it over discovery projection
+  // writes). Only a real change pins, since the edit form echoes the
+  // current hostname back on every save. Clearing (empty string) releases
+  // the pin and reverts hostname to the discovery-projected value (null
+  // when no source has an opinion, e.g. manually-created assets).
+  if (input.hostname !== undefined) {
+    const trimmed = input.hostname.trim();
+    if (!trimmed) {
+      data.hostnameOverride = null;
+      data.hostname = (await loadProjection()).projected.hostname;
+    } else if (trimmed !== existing.hostname) {
+      data.hostname = trimmed;
+      data.hostnameOverride = trimmed;
+    } else {
+      delete data.hostname;
+    }
+  }
+  // IP Address: same operator-override pattern as Hostname, with
+  // discovery-gets-a-vote semantics on later writes (see Asset.ipOverride
+  // in schema.prisma: discovery reporting the pinned IP releases the pin;
+  // a different IP re-asserts it and raises an ip-override Conflict).
+  // Only a real change pins; clearing (empty string) releases the pin and
+  // reverts to the discovery-projected address. Any set/clear here also
+  // closes the asset's pending ip-override conflict — the operator just
+  // made the call the conflict was asking about.
+  let ipOverrideTouched = false;
+  if (input.ipAddress !== undefined) {
+    const trimmed = input.ipAddress.trim();
+    if (!trimmed) {
+      data.ipOverride = null;
+      const { projected, provenance } = await loadProjection();
+      data.ipAddress = projected.ipAddress;
+      data.ipSource = projected.ipAddress ? (provenance.ipAddress ?? "discovery") : null;
+      ipOverrideTouched = !!existing.ipOverride;
+    } else if (trimmed !== existing.ipAddress) {
+      data.ipAddress = trimmed;
+      data.ipOverride = trimmed;
+      data.ipSource = "manual";
+      ipOverrideTouched = true;
+    } else {
+      delete data.ipAddress;
+    }
+  }
+  if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
+  else if (input.acquiredAt === undefined) delete data.acquiredAt;
+  if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
+  else if (input.warrantyExpiry === undefined) delete data.warrantyExpiry;
+  // Manual coordinates: only a real change stamps coordSource — the edit
+  // form echoes the current values back on every save, and silently pinning
+  // discovery-stamped coords as "manual" would freeze discovery updates for
+  // the asset. Clearing (null pair) releases the pin so discovery may
+  // repopulate on its next cycle.
+  let coordChanged = false;
+  if (input.latitude !== undefined) {
+    coordChanged = input.latitude !== existing.latitude || input.longitude !== existing.longitude;
+    if (coordChanged) {
+      data.coordSource = input.latitude === null ? null : "manual";
+    } else {
+      delete data.latitude;
+      delete data.longitude;
+    }
+  }
+  if (input.status !== undefined) {
+    data.statusChangedAt = new Date();
+    data.statusChangedBy = actor ?? "manual";
+  }
+  // Operator moves status OFF "maintenance" while maintenance windows are
+  // open: the operator wins. Close the windows first (endReason "operator"
+  // — suppresses scheduler re-entry for each schedule's current occurrence)
+  // so the reconcile can't re-flip this write.
+  if (
+    input.status !== undefined &&
+    input.status !== "maintenance" &&
+    existing.status === "maintenance"
+  ) {
+    await operatorReleaseAsset(id, actor);
+  }
+  clampMonitoredState(data);
+  clampAcquiredToLastSeen(data, existing);
+  return { data, ipOverrideTouched, coordChanged };
+}
+
+// Phase 3 — post-write side effects: monitor-override recompute, the
+// unmap-deletes-connections cleanups, pin-flip auto-rule bookkeeping,
+// pending ip-override conflict resolution, the audit Event, description
+// sync, tag reconcile, and the map-region refresh.
+async function applyAssetUpdateSideEffects(
+  id: string,
+  existing: ExistingAssetForUpdate,
+  asset: Awaited<ReturnType<typeof prisma.asset.update>>,
+  input: UpdateAssetInput,
+  actor: string | undefined,
+  flags: { ipOverrideTouched: boolean; coordChanged: boolean },
+): Promise<void> {
+  // When the operator's `monitored` choice changes (or assetType changes,
+  // which moves the asset into a different per-class block), recompute
+  // monitorOverride against the discovering integration's addAsMonitored.
+  // A single SQL UPDATE handles the JSON-path lookup in one round-trip.
+  if (input.monitored !== undefined || input.assetType !== undefined) {
+    await recomputeMonitorOverrideForAssets(prisma, [id]);
+  }
+  // Unmapping a process removes its accumulated connection rows immediately —
+  // the Application Map must not keep drawing edges for up to the retention
+  // window after the operator opted the process out.
+  if (input.mappedProcesses !== undefined) {
+    const kept = new Set(input.mappedProcesses);
+    const removed = (existing.mappedProcesses ?? []).filter((n) => !kept.has(n));
+    if (removed.length > 0) {
+      await prisma.assetProcessConnection.deleteMany({
+        where: { assetId: id, processName: { in: removed } },
+      });
+    }
+  }
+  // Unmapping a UNIT likewise drops its accumulated connection rows now
+  // (Phase 3) — rows carry the owning unit, so delete by unit.
+  if (input.mappedServices !== undefined) {
+    const kept = new Set(input.mappedServices);
+    const removed = (existing.mappedServices ?? []).filter((u) => !kept.has(u));
+    if (removed.length > 0) {
+      await prisma.assetProcessConnection.deleteMany({
+        where: { assetId: id, unit: { in: removed } },
+      });
+    }
+  }
+  // Pin flips become AUTO discovery rules (Integrations → Polaris Agent):
+  // ticking Monitor/Map on this asset mints (or consolidates into) a
+  // single-item auto rule targeting it; un-ticking takes the asset off the
+  // matching auto rules so the reconcile can't re-pin what was just removed.
+  // Fire-and-forget: the pin already landed on the asset row above, and rule
+  // bookkeeping must not fail or slow the operator's save.
+  {
+    const pinChanges: OperatorPinChange[] = [];
+    const diffPins = (
+      field: "monitoredProcesses" | "mappedProcesses" | "monitoredServices" | "mappedServices",
+      kind: "process" | "service",
+      surface: "monitor" | "map",
+    ) => {
+      const posted = (input as any)[field] as string[] | undefined;
+      if (posted === undefined) return;
+      const was = new Set(((existing as any)[field] ?? []) as string[]);
+      const now = new Set(posted);
+      for (const n of now) if (!was.has(n)) pinChanges.push({ assetId: id, kind, name: n, surface, action: "added" });
+      for (const n of was) if (!now.has(n)) pinChanges.push({ assetId: id, kind, name: n, surface, action: "removed" });
+    };
+    diffPins("monitoredProcesses", "process", "monitor");
+    diffPins("mappedProcesses", "process", "map");
+    diffPins("monitoredServices", "service", "monitor");
+    diffPins("mappedServices", "service", "map");
+    if (pinChanges.length > 0) {
+      const hostLabel = asset.hostname || asset.ipAddress || id;
+      recordOperatorPinChanges(pinChanges)
+        .then((outcome) => {
+          if (!outcome || !outcome.changed) return;
+          const bits: string[] = [];
+          if (outcome.createdRules.length) bits.push(`created ${outcome.createdRules.join(", ")}`);
+          if (outcome.updatedRules.length) bits.push(`added ${hostLabel} to ${outcome.updatedRules.join(", ")}`);
+          if (outcome.trimmedRules.length) bits.push(`removed ${hostLabel} from ${outcome.trimmedRules.join(", ")}`);
+          if (outcome.prunedRules.length) bits.push(`deleted ${outcome.prunedRules.join(", ")}`);
+          logEvent({
+            action: "application_map.autorule.synced",
+            resourceType: "application_map",
+            resourceId: "discovery",
+            actor,
+            message: `Discovery auto-rules updated from pins on "${hostLabel}": ${bits.join("; ")}`,
+            details: { assetId: id, changes: pinChanges, outcome } as any,
+          });
+        })
+        .catch(() => {});
+    }
+  }
+  // Operator set/cleared the IP pin: any pending ip-override conflict is
+  // now moot (best-effort — a leftover pending row would only linger until
+  // the next discovery cycle refreshes or re-raises it).
+  if (flags.ipOverrideTouched) {
+    resolvePendingIpOverrideConflicts(id, actor ?? "manual").catch(() => {});
+  }
+  const trackFields = ["hostname", "hostnameOverride", "ipAddress", "ipOverride", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
+  const before: Record<string, unknown> = {};
+  const after: Record<string, unknown> = {};
+  for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
+  const changes = buildChanges(before, after);
+  logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor, message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated`, details: changes ? { changes } : undefined });
+  // Description sync (Polaris-primary): a changed device description on a
+  // Fortinet asset whose integration opted in is mirrored to the device.
+  // Fire-and-forget — the Polaris row is authoritative and already saved;
+  // failures stamp Asset.descriptionSync + a warning Event inside the
+  // service, and the per-discovery reconcile self-heals.
+  if (input.description !== undefined && (existing as any).description !== asset.description) {
+    syncDescriptionsOnSave({ assetId: id, scope: "device", actor }).catch(() => {});
+  }
+  // Re-evaluate criteria-based auto-tags when a criteria-relevant field changed
+  // (best-effort; the periodic job is the safety net).
+  const TAG_CRITERIA_FIELDS = ["manufacturer", "model", "os", "osVersion", "hostname", "department", "location", "assetType", "status", "ipAddress"] as const;
+  if (TAG_CRITERIA_FIELDS.some((f) => (input as any)[f] !== undefined)) {
+    reconcileTagsForAsset(id).catch(() => {});
+  }
+  // A firewall's coords drive map-region membership (region: tags) —
+  // refresh now instead of waiting for the periodic reconcile job.
+  if (flags.coordChanged && asset.assetType === "firewall") {
+    reconcileMapRegions().catch(() => {});
+  }
+}
+
 router.put("/:id", requirePermission("assets", "write"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
-    const existing = await prisma.asset.findUnique({
-      where:   { id },
-      include: { discoveredByIntegration: { select: { type: true } } },
-    });
+    const existing = await loadAssetForUpdate(id);
     if (!existing) throw new AppError(404, "Asset not found");
     const input = UpdateAssetSchema.parse(req.body);
-    // Per-asset polling overrides must be valid for the asset's source kind.
-    // Falling through silently at the resolver would leave the operator
-    // confused about why their selection didn't take.
-    {
-      const sourceKind = assetSourceKindFromIntegrationType(existing.discoveredByIntegration?.type ?? null);
-      const fields: Array<["responseTimePolling" | "cpuMemoryPolling" | "temperaturePolling" | "interfacesPolling" | "lldpPolling" | "storagePolling", PollingMethod | null | undefined]> = [
-        ["responseTimePolling", input.responseTimePolling],
-        ["cpuMemoryPolling",    input.cpuMemoryPolling],
-        ["temperaturePolling",  input.temperaturePolling],
-        ["interfacesPolling",   input.interfacesPolling],
-        ["lldpPolling",         input.lldpPolling],
-        ["storagePolling",      input.storagePolling],
-      ];
-      for (const [name, value] of fields) {
-        if (!value) continue;
-        if (!isPollingMethodCompatible(sourceKind, value)) {
-          throw new AppError(
-            400,
-            `${pollingMethodLabel(value)} polling is not supported for ${sourceKind} assets (field: ${name})`,
-          );
-        }
-        // "vcenter" reads the vCenter server's batched quickStats, so it's
-        // cpuMemory-only AND requires a vcenter-vm AssetSource to resolve
-        // the integration through. The matrix allows the method on the
-        // directory source kinds (merged VMs); this is the precise check.
-        if (value === "vcenter") {
-          if (name !== "cpuMemoryPolling") {
-            throw new AppError(400, `vCenter polling only applies to the CPU/Memory stream (field: ${name})`);
-          }
-          const vmSource = await prisma.assetSource.findFirst({
-            where: { assetId: id, sourceKind: "vcenter-vm" },
-            select: { id: true },
-          });
-          if (!vmSource) {
-            throw new AppError(400, "vCenter polling requires this asset to be a vCenter-discovered VM (no vcenter-vm source on file)");
-          }
-        }
-      }
-    }
-    // Lock assetType on Fortinet infrastructure discovered via an integration.
-    // The next discovery cycle would re-stamp the asset anyway, so accepting
-    // the change just to revert it is misleading.
-    if (
-      input.assetType !== undefined &&
-      input.assetType !== existing.assetType &&
-      existing.discoveredByIntegrationId &&
-      (existing.assetType === "firewall" || existing.assetType === "switch" || existing.assetType === "access_point")
-    ) {
-      throw new AppError(400, `Asset type is locked — discovered as ${existing.assetType} by an integration`);
-    }
-    // Quarantine status is owned by the dedicated quarantine endpoints —
-    // setting it via the generic asset PUT would skip the FortiGate push
-    // (or skip the device-side unpush on release), creating divergence
-    // between Polaris's view and the FortiGate's enforcement state.
-    if (input.status === "quarantined" && existing.status !== "quarantined") {
-      throw new AppError(400, "Use POST /assets/:id/quarantine to quarantine an asset");
-    }
-    if (input.status !== undefined && input.status !== "quarantined" && existing.status === "quarantined") {
-      throw new AppError(400, "Use DELETE /assets/:id/quarantine to release the quarantine before changing status");
-    }
-    const coordErr = manualCoordPatchError(input.latitude, input.longitude);
-    if (coordErr) throw new AppError(400, coordErr);
-    const data: Record<string, unknown> = { ...input };
-    if (input.macAddress) data.macAddress = input.macAddress.toUpperCase().replace(/-/g, ":");
-    // Description: empty string clears to null (an empty Polaris description
-    // is re-seeded from the device on the next discovery when the
-    // integration's syncDescriptions toggle is on).
-    if (typeof input.description === "string") data.description = input.description.trim() || null;
-    // Notes: empty string clears to null (notes are operator-only — an
-    // emptied box is an intentional clear, not "not provided").
-    if (typeof input.notes === "string") data.notes = input.notes.trim() || null;
-    // Discovery projection (lazy, computed at most once) — needed when a
-    // pin-clear reverts hostname or ipAddress to the projected value.
-    let _projection: ReturnType<typeof projectAssetFromSources> | null = null;
-    const loadProjection = async () => {
-      if (!_projection) {
-        const overrideSources = await prisma.assetSource.findMany({
-          where: { assetId: id },
-          select: { sourceKind: true, inferred: true, observed: true },
-        });
-        _projection = projectAssetFromSources(
-          overrideSources.map((s) => ({
-            sourceKind: s.sourceKind,
-            inferred: s.inferred,
-            observed: s.observed as Record<string, unknown> | null,
-          })),
-        );
-      }
-      return _projection;
-    };
-    // Hostname: an edit-time write is an operator override (coordSource-style
-    // pin — the db.ts extension re-asserts it over discovery projection
-    // writes). Only a real change pins, since the edit form echoes the
-    // current hostname back on every save. Clearing (empty string) releases
-    // the pin and reverts hostname to the discovery-projected value (null
-    // when no source has an opinion, e.g. manually-created assets).
-    if (input.hostname !== undefined) {
-      const trimmed = input.hostname.trim();
-      if (!trimmed) {
-        data.hostnameOverride = null;
-        data.hostname = (await loadProjection()).projected.hostname;
-      } else if (trimmed !== existing.hostname) {
-        data.hostname = trimmed;
-        data.hostnameOverride = trimmed;
-      } else {
-        delete data.hostname;
-      }
-    }
-    // IP Address: same operator-override pattern as Hostname, with
-    // discovery-gets-a-vote semantics on later writes (see Asset.ipOverride
-    // in schema.prisma: discovery reporting the pinned IP releases the pin;
-    // a different IP re-asserts it and raises an ip-override Conflict).
-    // Only a real change pins; clearing (empty string) releases the pin and
-    // reverts to the discovery-projected address. Any set/clear here also
-    // closes the asset's pending ip-override conflict — the operator just
-    // made the call the conflict was asking about.
-    let ipOverrideTouched = false;
-    if (input.ipAddress !== undefined) {
-      const trimmed = input.ipAddress.trim();
-      if (!trimmed) {
-        data.ipOverride = null;
-        const { projected, provenance } = await loadProjection();
-        data.ipAddress = projected.ipAddress;
-        data.ipSource = projected.ipAddress ? (provenance.ipAddress ?? "discovery") : null;
-        ipOverrideTouched = !!existing.ipOverride;
-      } else if (trimmed !== existing.ipAddress) {
-        data.ipAddress = trimmed;
-        data.ipOverride = trimmed;
-        data.ipSource = "manual";
-        ipOverrideTouched = true;
-      } else {
-        delete data.ipAddress;
-      }
-    }
-    if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
-    else if (input.acquiredAt === undefined) delete data.acquiredAt;
-    if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
-    else if (input.warrantyExpiry === undefined) delete data.warrantyExpiry;
-    // Manual coordinates: only a real change stamps coordSource — the edit
-    // form echoes the current values back on every save, and silently pinning
-    // discovery-stamped coords as "manual" would freeze discovery updates for
-    // the asset. Clearing (null pair) releases the pin so discovery may
-    // repopulate on its next cycle.
-    let coordChanged = false;
-    if (input.latitude !== undefined) {
-      coordChanged = input.latitude !== existing.latitude || input.longitude !== existing.longitude;
-      if (coordChanged) {
-        data.coordSource = input.latitude === null ? null : "manual";
-      } else {
-        delete data.latitude;
-        delete data.longitude;
-      }
-    }
-    if (input.status !== undefined) {
-      data.statusChangedAt = new Date();
-      data.statusChangedBy = requestActor(req) ?? "manual";
-    }
-    // Operator moves status OFF "maintenance" while maintenance windows are
-    // open: the operator wins. Close the windows first (endReason "operator"
-    // — suppresses scheduler re-entry for each schedule's current occurrence)
-    // so the reconcile can't re-flip this write.
-    if (
-      input.status !== undefined &&
-      input.status !== "maintenance" &&
-      existing.status === "maintenance"
-    ) {
-      await operatorReleaseAsset(id, requestActor(req) ?? undefined);
-    }
-    clampMonitoredState(data);
-    clampAcquiredToLastSeen(data, existing);
+    await validateAssetUpdate(id, existing, input);
+    const actor = requestActor(req);
+    const { data, ipOverrideTouched, coordChanged } = await buildAssetUpdatePatch(id, existing, input, actor);
     const asset = await prisma.asset.update({ where: { id }, data: data as any });
-    // When the operator's `monitored` choice changes (or assetType changes,
-    // which moves the asset into a different per-class block), recompute
-    // monitorOverride against the discovering integration's addAsMonitored.
-    // A single SQL UPDATE handles the JSON-path lookup in one round-trip.
-    if (input.monitored !== undefined || input.assetType !== undefined) {
-      await recomputeMonitorOverrideForAssets(prisma, [id]);
-    }
-    // Unmapping a process removes its accumulated connection rows immediately —
-    // the Application Map must not keep drawing edges for up to the retention
-    // window after the operator opted the process out.
-    if (input.mappedProcesses !== undefined) {
-      const kept = new Set(input.mappedProcesses);
-      const removed = (existing.mappedProcesses ?? []).filter((n) => !kept.has(n));
-      if (removed.length > 0) {
-        await prisma.assetProcessConnection.deleteMany({
-          where: { assetId: id, processName: { in: removed } },
-        });
-      }
-    }
-    // Unmapping a UNIT likewise drops its accumulated connection rows now
-    // (Phase 3) — rows carry the owning unit, so delete by unit.
-    if (input.mappedServices !== undefined) {
-      const kept = new Set(input.mappedServices);
-      const removed = (existing.mappedServices ?? []).filter((u) => !kept.has(u));
-      if (removed.length > 0) {
-        await prisma.assetProcessConnection.deleteMany({
-          where: { assetId: id, unit: { in: removed } },
-        });
-      }
-    }
-    // Pin flips become AUTO discovery rules (Integrations → Polaris Agent):
-    // ticking Monitor/Map on this asset mints (or consolidates into) a
-    // single-item auto rule targeting it; un-ticking takes the asset off the
-    // matching auto rules so the reconcile can't re-pin what was just removed.
-    // Fire-and-forget: the pin already landed on the asset row above, and rule
-    // bookkeeping must not fail or slow the operator's save.
-    {
-      const pinChanges: OperatorPinChange[] = [];
-      const diffPins = (
-        field: "monitoredProcesses" | "mappedProcesses" | "monitoredServices" | "mappedServices",
-        kind: "process" | "service",
-        surface: "monitor" | "map",
-      ) => {
-        const posted = (input as any)[field] as string[] | undefined;
-        if (posted === undefined) return;
-        const was = new Set(((existing as any)[field] ?? []) as string[]);
-        const now = new Set(posted);
-        for (const n of now) if (!was.has(n)) pinChanges.push({ assetId: id, kind, name: n, surface, action: "added" });
-        for (const n of was) if (!now.has(n)) pinChanges.push({ assetId: id, kind, name: n, surface, action: "removed" });
-      };
-      diffPins("monitoredProcesses", "process", "monitor");
-      diffPins("mappedProcesses", "process", "map");
-      diffPins("monitoredServices", "service", "monitor");
-      diffPins("mappedServices", "service", "map");
-      if (pinChanges.length > 0) {
-        const hostLabel = asset.hostname || asset.ipAddress || id;
-        recordOperatorPinChanges(pinChanges)
-          .then((outcome) => {
-            if (!outcome || !outcome.changed) return;
-            const bits: string[] = [];
-            if (outcome.createdRules.length) bits.push(`created ${outcome.createdRules.join(", ")}`);
-            if (outcome.updatedRules.length) bits.push(`added ${hostLabel} to ${outcome.updatedRules.join(", ")}`);
-            if (outcome.trimmedRules.length) bits.push(`removed ${hostLabel} from ${outcome.trimmedRules.join(", ")}`);
-            if (outcome.prunedRules.length) bits.push(`deleted ${outcome.prunedRules.join(", ")}`);
-            logEvent({
-              action: "application_map.autorule.synced",
-              resourceType: "application_map",
-              resourceId: "discovery",
-              actor: requestActor(req),
-              message: `Discovery auto-rules updated from pins on "${hostLabel}": ${bits.join("; ")}`,
-              details: { assetId: id, changes: pinChanges, outcome } as any,
-            });
-          })
-          .catch(() => {});
-      }
-    }
-    // Operator set/cleared the IP pin: any pending ip-override conflict is
-    // now moot (best-effort — a leftover pending row would only linger until
-    // the next discovery cycle refreshes or re-raises it).
-    if (ipOverrideTouched) {
-      resolvePendingIpOverrideConflicts(id, requestActor(req) ?? "manual").catch(() => {});
-    }
-    const trackFields = ["hostname", "hostnameOverride", "ipAddress", "ipOverride", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
-    const before: Record<string, unknown> = {};
-    const after: Record<string, unknown> = {};
-    for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
-    const changes = buildChanges(before, after);
-    logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: requestActor(req), message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated`, details: changes ? { changes } : undefined });
-    // Description sync (Polaris-primary): a changed device description on a
-    // Fortinet asset whose integration opted in is mirrored to the device.
-    // Fire-and-forget — the Polaris row is authoritative and already saved;
-    // failures stamp Asset.descriptionSync + a warning Event inside the
-    // service, and the per-discovery reconcile self-heals.
-    if (input.description !== undefined && (existing as any).description !== asset.description) {
-      syncDescriptionsOnSave({ assetId: id, scope: "device", actor: requestActor(req) ?? undefined }).catch(() => {});
-    }
-    // Re-evaluate criteria-based auto-tags when a criteria-relevant field changed
-    // (best-effort; the periodic job is the safety net).
-    const TAG_CRITERIA_FIELDS = ["manufacturer", "model", "os", "osVersion", "hostname", "department", "location", "assetType", "status", "ipAddress"] as const;
-    if (TAG_CRITERIA_FIELDS.some((f) => (input as any)[f] !== undefined)) {
-      reconcileTagsForAsset(id).catch(() => {});
-    }
-    // A firewall's coords drive map-region membership (region: tags) —
-    // refresh now instead of waiting for the periodic reconcile job.
-    if (coordChanged && asset.assetType === "firewall") {
-      reconcileMapRegions().catch(() => {});
-    }
+    await applyAssetUpdateSideEffects(id, existing, asset, input, actor, { ipOverrideTouched, coordChanged });
     res.json(asset);
   } catch (err) {
     next(err);
