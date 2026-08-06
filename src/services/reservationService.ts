@@ -202,17 +202,18 @@ async function releaseSupersededDhcpLeaseAt(
   await releaseReservation(lease.id, actor ?? undefined);
 }
 
-async function createReservationFlow(input: CreateReservationInput) {
-  // 1. Load the target subnet (with integration for push eligibility)
-  const subnet = await prisma.subnet.findUnique({
-    where: { id: input.subnetId },
-    include: { integration: true },
-  });
-  if (!subnet) throw new AppError(404, `Subnet ${input.subnetId} not found`);
-  if (subnet.status === "deprecated")
-    throw new AppError(409, `Subnet ${subnet.cidr} is deprecated and cannot accept new reservations`);
-
-  // 2. If a specific IP was given, validate it belongs to the subnet
+// Phase 2 of the create flow: validate the requested target and 409 on
+// collision. dns_resolved rows are observational fallback markers and
+// dhcp_lease rows are observed device leases — neither is a reservation a
+// user "owns". A manual create at the same IP is an explicit operator claim
+// that should take over silently, so both are excluded from the collision
+// check here and released inline by the persist phase before the transaction
+// commits. dhcp_reservation / vip / interface / fortiswitch / fortinap /
+// manual rows are authoritative and still 409.
+async function assertReservationTargetAvailable(
+  input: CreateReservationInput,
+  subnet: { cidr: string },
+): Promise<void> {
   if (input.ipAddress) {
     if (!isValidIpAddress(input.ipAddress))
       throw new AppError(400, `Invalid IP address: ${input.ipAddress}`);
@@ -223,13 +224,6 @@ async function createReservationFlow(input: CreateReservationInput) {
         `IP ${input.ipAddress} is not within subnet ${subnet.cidr}`
       );
 
-    // Check for existing active reservation on this IP. dns_resolved rows are
-    // observational fallback markers and dhcp_lease rows are observed device
-    // leases — neither is a reservation a user "owns". A manual create at the
-    // same IP is an explicit operator claim that should take over silently, so
-    // both are excluded from the collision check here and released inline
-    // below before the transaction commits. dhcp_reservation / vip / interface
-    // / fortiswitch / fortinap / manual rows are authoritative and still 409.
     const existing = await prisma.reservation.findFirst({
       where: {
         subnetId: input.subnetId,
@@ -254,48 +248,26 @@ async function createReservationFlow(input: CreateReservationInput) {
         `Subnet ${subnet.cidr} is already fully reserved (reservation: ${existing.id})`
       );
   }
+}
 
-  // 3. Resolve push eligibility BEFORE creating the row so we can fail fast
-  //    on missing MAC without leaving a half-created reservation behind.
-  const push = resolvePushEligibility(
-    subnet,
-    subnet.integration,
-    input.ipAddress ?? null,
-  );
-  if (push.eligible) {
-    if (!input.macAddress || !input.macAddress.trim()) {
-      throw new AppError(
-        400,
-        "MAC address is required — this subnet's integration is configured to push reservations to the FortiGate, and DHCP reservations are MAC→IP",
-      );
-    }
-    if (!push.deviceName) {
-      throw new AppError(
-        409,
-        `Subnet ${subnet.cidr} has no fortigateDevice — the integration discovered the subnet without a device name, so push cannot resolve a target FortiGate`,
-      );
-    }
-  }
-
-  // 4. Create the reservation & mark subnet as reserved if full-subnet.
-  // Release any dns_resolved fallback row OR observed dhcp_lease at the same
-  // target FIRST — the manual create is the authoritative claim and the
-  // unique-on-active constraint won't let both coexist. A dhcp_lease is
-  // observed device presence, not a user-owned reservation, so superseding it
-  // is part of this create (no separate ownership-gated release). The lease
-  // supersede delegates to releaseReservation, so on push-enabled subnets the
-  // device lease is expired exactly as the old client release+create flow did.
-  // Per-IP only; full-subnet reservations don't collide with the per-IP rows.
+// Phase 4: release any superseded observational rows at the target, then
+// create the row (+ flip the subnet to reserved for a full-subnet claim) in
+// one transaction. Releasing the dns_resolved fallback / observed dhcp_lease
+// FIRST is required — the manual create is the authoritative claim and the
+// unique-on-active constraint won't let both coexist. The lease supersede
+// delegates to releaseReservation, so on push-enabled subnets the device
+// lease is expired exactly as the old client release+create flow did.
+// Per-IP only; full-subnet reservations don't collide with the per-IP rows.
+async function persistReservationRow(
+  input: CreateReservationInput,
+  macClean: string | null,
+  resolvedOwner: string | null,
+) {
   if (input.ipAddress) {
     await releaseDnsResolvedAt(input.subnetId, input.ipAddress);
     await releaseSupersededDhcpLeaseAt(input.subnetId, input.ipAddress, input.createdBy ?? null);
   }
-  const macClean = input.macAddress ? normalizeMac(input.macAddress) : null;
-  // Auto-stamp owner with the creator's username when they didn't type one —
-  // mirrors updateReservation's actor auto-stamp so a freshly created row
-  // shows who claimed the IP instead of an empty Owner cell.
-  const resolvedOwner = input.owner || input.createdBy || null;
-  const reservation = await prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx) => {
     const res = await tx.reservation.create({
       data: {
         subnetId: input.subnetId,
@@ -320,26 +292,92 @@ async function createReservationFlow(input: CreateReservationInput) {
 
     return res;
   });
+}
+
+async function createReservationFlow(input: CreateReservationInput) {
+  // 1. Load the target subnet (with integration for push eligibility)
+  const subnet = await prisma.subnet.findUnique({
+    where: { id: input.subnetId },
+    include: { integration: true },
+  });
+  if (!subnet) throw new AppError(404, `Subnet ${input.subnetId} not found`);
+  if (subnet.status === "deprecated")
+    throw new AppError(409, `Subnet ${subnet.cidr} is deprecated and cannot accept new reservations`);
+
+  // 2. Validate the requested IP / full-subnet target and 409 on collision.
+  await assertReservationTargetAvailable(input, subnet);
+
+  // 3. Resolve push eligibility BEFORE creating the row so we can fail fast
+  //    on missing MAC without leaving a half-created reservation behind.
+  const push = resolvePushEligibility(
+    subnet,
+    subnet.integration,
+    input.ipAddress ?? null,
+  );
+  if (push.eligible) {
+    if (!input.macAddress || !input.macAddress.trim()) {
+      throw new AppError(
+        400,
+        "MAC address is required — this subnet's integration is configured to push reservations to the FortiGate, and DHCP reservations are MAC→IP",
+      );
+    }
+    if (!push.deviceName) {
+      throw new AppError(
+        409,
+        `Subnet ${subnet.cidr} has no fortigateDevice — the integration discovered the subnet without a device name, so push cannot resolve a target FortiGate`,
+      );
+    }
+  }
+
+  // 4. Create the reservation (+ mark subnet reserved if full-subnet) —
+  // superseded observational rows released first inside persistReservationRow.
+  const macClean = input.macAddress ? normalizeMac(input.macAddress) : null;
+  // Auto-stamp owner with the creator's username when they didn't type one —
+  // mirrors updateReservation's actor auto-stamp so a freshly created row
+  // shows who claimed the IP instead of an empty Owner cell.
+  const resolvedOwner = input.owner || input.createdBy || null;
+  const reservation = await persistReservationRow(input, macClean, resolvedOwner);
 
   // 5. If push isn't eligible, we're done.
   if (!push.eligible || !push.integration || !input.ipAddress || !macClean) {
     return reservation;
   }
 
-  // 6. Push to FortiGate. Three outcomes:
-  //    - Success: stamp pushed pointers + flip sourceType to dhcp_reservation.
-  //    - Permanent failure (4xx, verify mismatch, auth fail): roll back the
-  //      Polaris row so the create reads as atomic from the operator's
-  //      perspective and they see the underlying error.
-  //    - Transient failure (FortiGate offline, FMG unreachable, timeout):
-  //      KEEP the Polaris row, stamp pushStatus="pending" + queue cols, and
-  //      let the retry job push it when the gate comes back. Operator's
-  //      claim on the IP survives the outage.
-  //
-  //    Pre-flight: if the originating FortiGate's firewall Asset is monitored
-  //    and currently down, skip the transport attempt entirely — we already
-  //    know it will fail, and the 15s+ transport timeout is wasted UI latency
-  //    on the create critical path.
+  // 6. Push to FortiGate. (The guard above narrowed push.integration and
+  // input.ipAddress non-null — restate that for the helper's param types.)
+  return pushNewReservation(
+    reservation,
+    input,
+    subnet,
+    { integration: push.integration, deviceName: push.deviceName },
+    input.ipAddress,
+    macClean,
+  );
+}
+
+// Phase 6 of the create flow: push the freshly created reservation to its
+// FortiGate. Three outcomes:
+//   - Success: stamp pushed pointers + flip sourceType to dhcp_reservation.
+//   - Permanent failure (4xx, verify mismatch, auth fail): roll back the
+//     Polaris row so the create reads as atomic from the operator's
+//     perspective and they see the underlying error.
+//   - Transient failure (FortiGate offline, FMG unreachable, timeout):
+//     KEEP the Polaris row, stamp pushStatus="pending" + queue cols, and
+//     let the retry job push it when the gate comes back. Operator's
+//     claim on the IP survives the outage.
+//
+// Pre-flight: if the originating FortiGate's firewall Asset is monitored
+// and currently down, skip the transport attempt entirely — we already
+// know it will fail, and the 15s+ transport timeout is wasted UI latency
+// on the create critical path.
+async function pushNewReservation(
+  reservation: { id: string },
+  input: CreateReservationInput,
+  subnet: { cidr: string; discoveredBy: string | null },
+  push: { integration: { id: string; type: string; config: unknown }; deviceName: string },
+  ip: string,
+  macClean: string,
+) {
   let firewallKnownDown = false;
   try {
     const firewallAsset = await prisma.asset.findFirst({
@@ -382,7 +420,7 @@ async function createReservationFlow(input: CreateReservationInput) {
       message: `Reservation queued for push to FortiGate "${push.deviceName}" — gate is down, will retry when it recovers`,
       details: {
         deviceName: push.deviceName,
-        ip: input.ipAddress,
+        ip,
         mac: macClean,
         reason: "firewall_down",
       },
@@ -394,7 +432,7 @@ async function createReservationFlow(input: CreateReservationInput) {
     const pushed: PushReservationResult = await pushReservation({
       reservationId: reservation.id,
       subnetCidr: subnet.cidr,
-      ip: input.ipAddress,
+      ip,
       mac: macClean,
       hostname: input.hostname ?? null,
       notes: input.notes ?? null,
@@ -440,7 +478,7 @@ async function createReservationFlow(input: CreateReservationInput) {
         scopeId: pushed.scopeId,
         entryId: pushed.entryId,
         serverInterface: pushed.serverInterface,
-        ip: input.ipAddress,
+        ip,
         mac: macClean,
       },
     });
@@ -473,7 +511,7 @@ async function createReservationFlow(input: CreateReservationInput) {
         message: `Reservation queued for push to FortiGate "${push.deviceName}" — ${err?.message || "transient transport failure"}; will retry automatically`,
         details: {
           deviceName: push.deviceName,
-          ip: input.ipAddress,
+          ip,
           mac: macClean,
           error: err?.message || String(err),
         },
@@ -495,7 +533,7 @@ async function createReservationFlow(input: CreateReservationInput) {
       message: `Reservation push to FortiGate "${push.deviceName}" failed — reservation aborted: ${err?.message || "Unknown error"}`,
       details: {
         deviceName: push.deviceName,
-        ip: input.ipAddress,
+        ip,
         mac: macClean,
         error: err?.message || String(err),
       },
