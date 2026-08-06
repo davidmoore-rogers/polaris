@@ -35,6 +35,9 @@ import {
   type EscalationV2Config,
   type ResetConfig,
   type AutomationAction,
+  type EscalatableAction,
+  ruleHasAnyEscalation,
+  allRuleActionRefs,
   type CompositeTrigger,
   type CompositeLeaf,
   type TriggerConditionGroup,
@@ -83,8 +86,9 @@ interface DbRule {
   scope: RuleScope;
   /** v2 reset semantics (legacy clearBehavior/clearAfterSec normalized in). */
   reset: ResetConfig;
-  /** v2 unified action list (legacy targets normalized in). */
-  actions: AutomationAction[];
+  /** v2 unified action list (legacy targets normalized in); actions may carry
+   *  their own escalation chain (per-action escalation). */
+  actions: EscalatableAction[];
   cooldownSec: number | null;
   messageTemplate: string | null;
   emailComposition: EmailComposition | null;
@@ -579,26 +583,26 @@ function round2(n: number): string {
   return (Math.round(n * 100) / 100).toString();
 }
 
-/** Does this rule need the fire-time template context (composition/escalation/asset tokens)? */
+/** Does this rule need the fire-time template context (composition/escalation/asset tokens)?
+ *  ANY escalation chain counts — rule-level, per-action, band-level, or
+ *  band-per-action — since the sweep renders from the templateCtx snapshot. */
 function ruleWantsContext(rule: DbRule): boolean {
-  return !!(rule.emailComposition || rule.escalation);
+  return !!(rule.emailComposition || ruleHasAnyEscalation(rule));
 }
 
 function ruleWantsAssetDetail(rule: DbRule): boolean {
   const comp = rule.emailComposition;
   // Action-level templates can reference {asset.*} too: per-action email
-  // composition, api_call bodies, script args — for the top-level actions AND
-  // every escalation tier's actions (v2 tiers carry actions).
+  // composition, api_call bodies, script args — walked over EVERY place
+  // actions live (top-level + per-action tiers + rule tiers + band actions +
+  // band tiers + resolved actions) via the canonical allRuleActionRefs.
   const templatesOf = (a: AutomationAction) =>
     a.type === "notify"
       ? [a.emailComposition?.subjectTemplate, a.emailComposition?.bodyTextTemplate, a.emailComposition?.bodyHtmlTemplate]
       : a.type === "api_call"
         ? [a.bodyTemplate]
         : [a.argsTemplate];
-  const actionTemplates = [
-    ...rule.actions,
-    ...(rule.escalation?.tiers ?? []).flatMap((t) => t.actions),
-  ].flatMap(templatesOf);
+  const actionTemplates = allRuleActionRefs(rule).flatMap((r) => templatesOf(r.action));
   return (
     ruleWantsContext(rule) ||
     templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...actionTemplates])
@@ -1300,6 +1304,9 @@ function severityLevel(severity: string): "error" | "warning" | "info" {
 async function enqueueAlertActions(notifId: string, actions: AutomationAction[], ctx: Record<string, string>, rule: DbRule, reading: Reading): Promise<void> {
   await executeActionsSafe(notifId, actions, ctx, {
     scopeRegionTags: scopeRegionTagsOf(rule.scope),
+    // The triggering asset's own region tags (stripped) — recipientDeviceRegion
+    // routing. Same snapshot fire() writes to Notification.regionTags.
+    assetRegionTags: regionSnapshot(reading.tags),
     assetId: reading.assetId || null,
     ruleId: rule.id,
     ruleName: rule.name,
@@ -1474,6 +1481,42 @@ export function globToRegExp(glob: string): RegExp {
 
 const LEVEL_RANK: Record<string, number> = { info: 0, warning: 1, error: 2 };
 
+/**
+ * Timed reset for event/change rules. The two timed sweeps walk
+ * NotificationRuleState rows, but the event tail never creates state rows —
+ * so without this pass a timed event rule's notifications stayed uncleared
+ * forever (and `timed` is the wizard DEFAULT for event triggers). One
+ * updateMany per timed event rule per tick — independent of fleet size.
+ */
+export async function runEventRuleTimedClear(rules: DbRule[], now = new Date()): Promise<number> {
+  const timedRules = rules.filter(
+    (r) =>
+      (r.trigger.type === "event" || r.trigger.type === "change") &&
+      r.reset.mode === "timed" &&
+      r.reset.afterSec != null,
+  );
+  let cleared = 0;
+  for (const rule of timedRules) {
+    const cutoff = new Date(now.getTime() - (rule.reset.afterSec as number) * 1000);
+    const res = await prisma.notification.updateMany({
+      where: { ruleId: rule.id, cleared: false, triggeredAt: { lte: cutoff } },
+      data: { cleared: true, clearedBy: "system:timed", clearedAt: now },
+    });
+    if (res.count > 0) {
+      cleared += res.count;
+      await logEvent({
+        action: "notification.auto_cleared",
+        resourceType: "notification",
+        resourceName: rule.name,
+        actor: "system:notification-engine",
+        message: `Timed reset: cleared ${res.count} alert(s) of "${rule.name}" older than ${rule.reset.afterSec}s`,
+        details: { ruleId: rule.id, count: res.count, afterSec: rule.reset.afterSec },
+      }).catch(() => {});
+    }
+  }
+  return cleared;
+}
+
 async function runEventTail(rules: DbRule[]): Promise<void> {
   const eventRules = rules.filter((r) => r.trigger.type === "event" || r.trigger.type === "change");
   if (eventRules.length === 0) return;
@@ -1488,6 +1531,29 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
     take: 1000,
   });
   if (events.length === 0) return;
+
+  // Cooldown pre-pass: the event tail has no per-(rule,asset) state rows, so
+  // cooldownSec is enforced against the recent Notification rows themselves —
+  // one query for all cooldown-bearing event rules, keyed by the same
+  // (rule, assetId-or-resourceName) identity the notifications store. The map
+  // updates in-loop so a single 1000-event batch also self-dedupes.
+  const cooldownRules = eventRules.filter((r) => r.cooldownSec && r.cooldownSec > 0);
+  const lastFired = new Map<string, number>();
+  if (cooldownRules.length > 0) {
+    const maxCooldownMs = Math.max(...cooldownRules.map((r) => (r.cooldownSec as number) * 1000));
+    const recent = await prisma.notification.findMany({
+      where: {
+        ruleId: { in: cooldownRules.map((r) => r.id) },
+        triggeredAt: { gte: new Date(Date.now() - maxCooldownMs) },
+      },
+      select: { ruleId: true, assetId: true, assetHostname: true, triggeredAt: true },
+    });
+    for (const n of recent) {
+      const key = `${n.ruleId}|${n.assetId ?? n.assetHostname ?? ""}`;
+      const t = n.triggeredAt.getTime();
+      if ((lastFired.get(key) ?? 0) < t) lastFired.set(key, t);
+    }
+  }
 
   // Precompile matchers. flatMap so non-event/change rules (shouldn't appear,
   // but the filter predicate isn't a type guard) are dropped and TS narrows.
@@ -1511,7 +1577,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   // Notifications from rules with actions get a client-generated id so we can
   // execute their actions after the batch insert (createMany returns no ids).
   // The fire-time template context rides along — api_call bodies render from it.
-  const deliverAfter: { id: string; rule: DbRule; assetId: string | null; ctx: Record<string, string> }[] = [];
+  const deliverAfter: { id: string; rule: DbRule; assetId: string | null; ctx: Record<string, string>; assetRegionTags: string[] }[] = [];
   for (const ev of events) {
     for (const c of compiled) {
       if (!c.re.test(ev.action)) continue;
@@ -1527,6 +1593,15 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       // suppressed behind one/an outage. (The event cursor still advances —
       // suppressed events are skipped, not deferred.)
       if (detail && isSuppressedForNotifications(detail)) continue;
+      // Cooldown: skip when this (rule, asset/resource) fired within
+      // cooldownSec — and stamp the map so later events in this batch dedupe.
+      if (c.rule.cooldownSec) {
+        const cdKey = `${c.rule.id}|${assetId ?? ev.resourceName ?? ""}`;
+        const last = lastFired.get(cdKey);
+        const evT = ev.timestamp.getTime();
+        if (last !== undefined && evT - last < c.rule.cooldownSec * 1000) continue;
+        lastFired.set(cdKey, evT);
+      }
       const tags = detail?.tags ?? [];
       // Event-path token mapping: {asset}=resourceName, {metric}=action,
       // {value}=event message; threshold/dimension are empty.
@@ -1551,7 +1626,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       const hasActions = c.rule.actions.length > 0;
       const id = hasActions ? randomUUID() : undefined;
       if (hasActions && id) {
-        deliverAfter.push({ id, rule: c.rule, assetId, ctx });
+        deliverAfter.push({ id, rule: c.rule, assetId, ctx, assetRegionTags: regionSnapshot(tags) });
       }
       toCreate.push({
         ...(id ? { id } : {}),
@@ -1572,6 +1647,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   for (const d of deliverAfter) {
     await executeActionsSafe(d.id, d.rule.actions, d.ctx, {
       scopeRegionTags: scopeRegionTagsOf(d.rule.scope),
+      assetRegionTags: d.assetRegionTags,
       assetId: d.assetId,
       ruleId: d.rule.id,
       ruleName: d.rule.name,
@@ -1663,6 +1739,12 @@ export async function evaluateAllNotificationRules(): Promise<void> {
     await runEventTail(rules);
   } catch (err) {
     await logEvent({ action: "notification.engine_error", actor: "system:notification-engine", level: "error", message: "Event-tail evaluation failed", details: { err: (err as Error)?.message } }).catch(() => {});
+  }
+
+  try {
+    await runEventRuleTimedClear(rules);
+  } catch (err) {
+    await logEvent({ action: "notification.engine_error", actor: "system:notification-engine", level: "error", message: "Event-rule timed clear failed", details: { err: (err as Error)?.message } }).catch(() => {});
   }
 }
 

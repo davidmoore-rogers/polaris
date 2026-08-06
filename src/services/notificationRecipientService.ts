@@ -203,15 +203,24 @@ export function dedupeEmailRecipients(to: string[], cc: string[], bcc: string[])
  * Disabled or missing channels are skipped. Best-effort: returns the number of
  * rows created.
  */
+export interface ExpandDeliveriesOptions {
+  /** `region:` tags mined from the RULE's scope (recipientScopeRegion routing). */
+  scopeRegionTags?: string[];
+  /** The TRIGGERING asset's region tags — stripped snapshot (regionSnapshot /
+   *  Notification.regionTags) — for recipientDeviceRegion routing. */
+  assetRegionTags?: string[];
+  composedEmail?: ComposedEmail;
+  /** Escalation provenance (tier/attempt) — stamped into every row's meta so
+   *  the View tab's "Escalated" marker and audits can attribute the send. */
+  escalation?: { tier: number; attempt: number };
+}
+
 export async function expandDeliveries(
   notificationId: string,
   targets: DeliveryTarget[] | undefined,
-  scopeRegionTags?: string[],
-  composedEmail?: ComposedEmail,
-  /** Escalation provenance (tier/attempt) — stamped into every row's meta so
-   *  the View tab's "Escalated" marker and audits can attribute the send. */
-  escalation?: { tier: number; attempt: number },
+  opts: ExpandDeliveriesOptions = {},
 ): Promise<number> {
+  const { scopeRegionTags, assetRegionTags, composedEmail, escalation } = opts;
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -237,11 +246,13 @@ export async function expandDeliveries(
   };
 
   // Recipient users for a target = union of: specific user ids + (if opted in)
-  // users in the rule's scope region(s) + legacy tag-routing. Deduped by id.
+  // users in the TRIGGERING asset's region(s) + (if opted in) users in the
+  // rule's scope region(s) + legacy tag-routing. Deduped by id.
   const usersForTarget = async (t: DeliveryTarget): Promise<RecipientUser[]> => {
     const map = new Map<string, RecipientUser>();
     const addUsers = (us: RecipientUser[]) => us.forEach((u) => map.set(u.id, u));
     if (t.recipientUserIds?.length) addUsers(await resolveRecipientUsersByIds(t.recipientUserIds));
+    if (t.recipientDeviceRegion && assetRegionTags?.length) addUsers(await resolveRecipientUsers(assetRegionTags));
     if (t.recipientScopeRegion && scopeRegionTags?.length) addUsers(await resolveRecipientUsers(scopeRegionTags));
     if (t.recipientTags?.length) addUsers(await resolveRecipientUsers(t.recipientTags)); // legacy
     return Array.from(map.values());

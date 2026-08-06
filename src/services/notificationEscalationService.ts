@@ -4,8 +4,15 @@
  * The escalation sweep behind the escalateNotifications job (60s): while a
  * notification stays unhandled, run each of its rule's escalation tiers when
  * the tier's delay elapses (optionally repeating every repeatEveryMin up to
- * maxRepeats). "Unhandled" is per the rule's stopOn: "acknowledge" stops on
+ * maxRepeats). "Unhandled" is per chain stopOn: "acknowledge" stops on
  * acknowledge OR clear; "clear" ignores acknowledgment and only stops on clear.
+ *
+ * PER-ACTION ESCALATION: chains live at the rule/band LEVEL (key "" — bare
+ * numeric tier state keys, unchanged from pre-feature rows) and on individual
+ * actions (key "a<i>" — state keys "a<i>:t<j>"). escalationChainsForSeverity
+ * (notificationTypes) selects the chains active at the alert's current
+ * severity: the band's level chain + its actions' chains, with the engine's
+ * empty-band fallback to the base actions mirrored here.
  *
  * ESCALATION V2: a tier carries ACTIONS (notify / api_call / script), not just
  * an email — every due tier fans out through automationActionService.
@@ -37,8 +44,12 @@ import { scopeRegionTagsOf } from "./notificationRecipientService.js";
 import {
   normalizeRuleToV2,
   normalizeEscalationToV2,
+  escalationChainsForSeverity,
+  escalationTierStateKey,
   type EmailComposition,
   type EscalationV2Config,
+  type EscalatableAction,
+  type SeverityBand,
   type RuleScope,
 } from "./notificationTypes.js";
 
@@ -52,28 +63,30 @@ interface EscalationRule {
   emailComposition: EmailComposition | null;
   /** Base severity (tier 0). */
   severity: string;
-  /** Tier-0 (rule-level) escalation, or null. */
-  ruleEscalation: EscalationV2Config | null;
-  /** Per-band escalations keyed by band severity (value-driven escalation). */
-  bands: { severity: string; escalation: EscalationV2Config | null }[];
+  /** v2 action list — actions may carry their own escalation chain. */
+  actions: EscalatableAction[];
+  /** Rule-level escalation chain, or null. */
+  escalation: EscalationV2Config | null;
+  /** Severity bands — band-level chains + per-band-action chains. */
+  severityBands: SeverityBand[] | null;
 }
 
-/** The escalation config that applies to an alert at `severity`: the matching
- *  band's escalation when the alert is in a band, else the rule-level (tier 0)
- *  escalation. */
-function escalationForSeverity(rule: EscalationRule, severity: string): EscalationV2Config | null {
-  if (severity !== rule.severity) {
-    const band = rule.bands.find((b) => b.severity === severity);
-    if (band?.escalation && band.escalation.tiers.length) return band.escalation;
-  }
-  return rule.ruleEscalation;
-}
-
-/** Every escalation config a rule can present (tier 0 + each band). */
+/** Every escalation chain a rule can present — rule-level, per-action,
+ *  band-level, and band-per-action — for rule inclusion + the minAfterMin
+ *  candidate cutoff. */
 function allEscalationsOf(rule: EscalationRule): EscalationV2Config[] {
-  return [rule.ruleEscalation, ...rule.bands.map((b) => b.escalation)].filter(
-    (e): e is EscalationV2Config => !!e && e.tiers.length > 0,
-  );
+  const out: EscalationV2Config[] = [];
+  const add = (esc: unknown) => {
+    const e = normalizeEscalationToV2(esc);
+    if (e && e.tiers.length > 0) out.push(e);
+  };
+  add(rule.escalation);
+  for (const a of rule.actions) add(a.escalation);
+  for (const b of rule.severityBands ?? []) {
+    add(b.escalation);
+    for (const a of b.actions ?? []) add(a.escalation);
+  }
+  return out;
 }
 
 interface TierState {
@@ -127,8 +140,6 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
   const rules = new Map<string, EscalationRule>();
   for (const r of dbRules) {
     const v2 = normalizeRuleToV2(r);
-    const ruleEscalation = v2.escalation;
-    const bands = (v2.severityBands ?? []).map((b) => ({ severity: b.severity, escalation: normalizeEscalationToV2(b.escalation) }));
     const rule: EscalationRule = {
       id: r.id,
       name: r.name,
@@ -136,10 +147,11 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
       scope: (r.scope ?? {}) as RuleScope,
       emailComposition: r.emailComposition as EmailComposition | null,
       severity: r.severity,
-      ruleEscalation,
-      bands,
+      actions: v2.actions,
+      escalation: v2.escalation,
+      severityBands: v2.severityBands,
     };
-    // Include the rule if ANY tier exists (rule-level or on a band).
+    // Include the rule if ANY chain exists (rule-level, per-action, or band).
     if (allEscalationsOf(rule).length > 0) rules.set(r.id, rule);
   }
   if (rules.size === 0) return 0;
@@ -159,6 +171,9 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
     select: {
       id: true, ruleId: true, assetId: true, assetHostname: true, severity: true, message: true,
       triggeredAt: true, acknowledged: true, templateCtx: true, escalationState: true,
+      // The fire-time asset-region snapshot (already region:-stripped) —
+      // recipientDeviceRegion routing; survives asset deletion.
+      regionTags: true,
     },
   });
   if (notifs.length === 0) return 0;
@@ -188,11 +203,12 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
     const rule = rules.get(n.ruleId!);
     if (!rule) continue;
     // Value-driven escalation: the alert's CURRENT band (its severity) selects
-    // which escalation chain applies. The engine resets escalationState on every
-    // band change, so a newly-entered band's tiers start their timers fresh.
-    const escalation = escalationForSeverity(rule, n.severity);
-    if (!escalation || escalation.tiers.length === 0) continue;
-    if (escalation.stopOn !== "clear" && n.acknowledged) continue; // "acknowledge" stops on ack
+    // which chains apply — the band's level chain + its actions' chains (empty
+    // band → the base actions' chains, matching the engine's action fallback).
+    // The engine resets escalationState on every band change, so a newly-
+    // entered band's tiers start their timers fresh.
+    const chains = escalationChainsForSeverity(rule, n.severity);
+    if (chains.length === 0) continue;
     if (n.assetId && suppressedAssetIds.has(n.assetId)) continue; // silenced — resumes post-window
 
     const state = stateOf(n.escalationState);
@@ -200,52 +216,61 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
     const startAt = state.bandSince ? new Date(state.bandSince) : n.triggeredAt;
     let dirty = false;
 
-    for (const [idx, tier] of escalation.tiers.entries()) {
-      const tierKey = String(idx);
-      if (!tierIsDue(tier, startAt, state.tiers[tierKey], now)) continue;
+    for (const chain of chains) {
+      // stopOn is per chain: an acknowledged alert stops "acknowledge" chains
+      // while its "clear" chains keep escalating until the alert clears.
+      if (chain.escalation.stopOn !== "clear" && n.acknowledged) continue;
 
-      // Context: fire-time snapshot + live escalation tokens. Pre-feature
-      // notifications (no templateCtx) get a minimal context from the row.
-      const base = n.templateCtx && typeof n.templateCtx === "object"
-        ? (n.templateCtx as Record<string, string>)
-        : buildTemplateContext({
-            asset: n.assetHostname ?? "",
-            severity: n.severity,
-            time: n.triggeredAt,
-            link: notificationsPageUrl(),
-            message: n.message,
-            ruleName: rule.name,
-            ruleDescription: rule.description,
-          });
-      const prev = state.tiers[tierKey];
-      const attempt = (prev?.count ?? 0) + 1;
-      const ctx: Record<string, string> = {
-        ...base,
-        "escalation.tier": String(idx + 1),
-        "escalation.elapsed": formatElapsed(now.getTime() - n.triggeredAt.getTime()),
-      };
+      for (const [idx, tier] of chain.escalation.tiers.entries()) {
+        // Level chain ("") keeps the bare numeric keys pre-feature rows carry;
+        // per-action chains key as "a<i>:t<j>".
+        const tierKey = escalationTierStateKey(chain.key, idx);
+        if (!tierIsDue(tier, startAt, state.tiers[tierKey], now)) continue;
 
-      const { executed } = await executeActions(n.id, tier.actions, ctx, {
-        scopeRegionTags: scopeRegionTagsOf(rule.scope),
-        assetId: n.assetId,
-        ruleId: rule.id,
-        ruleName: rule.name,
-        ruleEmailComposition: rule.emailComposition,
-        escalation: { tier: idx + 1, attempt },
-        actor: "system:notification-escalation",
-      });
-
-      // A tier counts as sent only when something actually ran — a tier whose
-      // recipients resolved empty / channel is disabled retries next sweep
-      // (same behavior as the pre-v2 sweep).
-      if (executed > 0) {
-        state.tiers[tierKey] = {
-          firstSentAt: prev?.firstSentAt ?? now.toISOString(),
-          lastSentAt: now.toISOString(),
-          count: attempt,
+        // Context: fire-time snapshot + live escalation tokens. Pre-feature
+        // notifications (no templateCtx) get a minimal context from the row.
+        const base = n.templateCtx && typeof n.templateCtx === "object"
+          ? (n.templateCtx as Record<string, string>)
+          : buildTemplateContext({
+              asset: n.assetHostname ?? "",
+              severity: n.severity,
+              time: n.triggeredAt,
+              link: notificationsPageUrl(),
+              message: n.message,
+              ruleName: rule.name,
+              ruleDescription: rule.description,
+            });
+        const prev = state.tiers[tierKey];
+        const attempt = (prev?.count ?? 0) + 1;
+        const ctx: Record<string, string> = {
+          ...base,
+          "escalation.tier": String(idx + 1),
+          "escalation.elapsed": formatElapsed(now.getTime() - n.triggeredAt.getTime()),
         };
-        dirty = true;
-        tierRuns++;
+
+        const { executed } = await executeActions(n.id, tier.actions, ctx, {
+          scopeRegionTags: scopeRegionTagsOf(rule.scope),
+          assetRegionTags: n.regionTags,
+          assetId: n.assetId,
+          ruleId: rule.id,
+          ruleName: rule.name,
+          ruleEmailComposition: rule.emailComposition,
+          escalation: { tier: idx + 1, attempt },
+          actor: "system:notification-escalation",
+        });
+
+        // A tier counts as sent only when something actually ran — a tier whose
+        // recipients resolved empty / channel is disabled retries next sweep
+        // (same behavior as the pre-v2 sweep).
+        if (executed > 0) {
+          state.tiers[tierKey] = {
+            firstSentAt: prev?.firstSentAt ?? now.toISOString(),
+            lastSentAt: now.toISOString(),
+            count: attempt,
+          };
+          dirty = true;
+          tierRuns++;
+        }
       }
     }
 

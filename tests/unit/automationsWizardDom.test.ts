@@ -17,13 +17,14 @@ import { describe, it, expect, beforeAll, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Window } from "happy-dom";
-import { buildSchemaCatalog } from "../../src/services/notificationTypes.js";
+import { buildSchemaCatalog, ruleInputSchema } from "../../src/services/notificationTypes.js";
 
 vi.mock("../../src/db.js", () => ({ prisma: {} }));
 
 const g = globalThis as Record<string, unknown>;
 let doc: Window["document"];
 let toastErrors: string[];
+const savedPayloads: Record<string, unknown>[] = [];
 
 beforeAll(() => {
   const win = new Window();
@@ -47,6 +48,8 @@ beforeAll(() => {
   };
   g.api = {
     automations: {
+      update: async (_id: string, payload: unknown) => { savedPayloads.push(payload as Record<string, unknown>); return { rule: {} }; },
+      create: async (payload: unknown) => { savedPayloads.push(payload as Record<string, unknown>); return { rule: {} }; },
       schema: async () => buildSchemaCatalog(),
       recipientUsers: async () => ({ users: [{ id: "u1", username: "op", displayName: "Op", email: "op@x.com" }] }),
       scopeOptions: async () => ({
@@ -166,6 +169,8 @@ describe("automation wizard DOM render", () => {
     // Category select (device/host/event/change) + the tree with one leaf row.
     const cat = doc.querySelector("#aw-trigger-type") as unknown as { value: string };
     expect(cat.value).toBe("device");
+    // The message template moved to the Actions step (mandatory in-app card).
+    expect(doc.querySelector("#aw-step-3 #aw-msg")).toBeFalsy();
     expect(doc.querySelector("#aw-trig-root .scg-group")).toBeTruthy();
     expect(doc.querySelectorAll("#aw-trig-root .scr-row").length).toBe(1);
     expect(doc.querySelector("#aw-trig-root .tgl-what")).toBeTruthy();
@@ -215,24 +220,61 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector("#aw-step-5.visible")).toBeTruthy();
     expect(doc.querySelector("#aw-summary")).toBeFalsy(); // summary moved to step 6
 
-    // Escalation is button-based (no enable checkbox): adding an escalation
-    // reveals the delay field, seeds a notify action (channel + recipients),
-    // and shows the stop-condition select; removing it hides them again.
+    // The mandatory in-app card leads the Actions step: not an .aw-action row
+    // (so it can't be collected/removed), carries the moved message template,
+    // and names the audit event for metric/state triggers.
+    const inapp = doc.querySelector("#aw-step-5 #aw-inapp-card")!;
+    expect(inapp).toBeTruthy();
+    expect(inapp.classList.contains("aw-action")).toBe(false);
+    expect(inapp.querySelector("#aw-msg")).toBeTruthy();
+    expect(inapp.textContent).toContain("event + in-app alert");
+    expect(inapp.querySelector(".aw-action-remove")).toBeFalsy();
+
+    // Escalation is PER ITEM now: the mandatory card hosts the alert's
+    // (rule-level) chain, each action row hosts its own. The old bottom
+    // escalation box is gone entirely.
     expect(doc.querySelector("#aw-esc-enable")).toBeFalsy();
-    const escAdd = doc.querySelector("#aw-esc-add")!;
-    expect(escAdd.textContent).toContain("Add escalation");
-    expect((doc.querySelector("#aw-esc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
-    (escAdd as unknown as { click: () => void }).click();
-    const tier = doc.querySelector("#aw-esc-tiers .aw-tier")!;
+    expect(doc.querySelector("#aw-esc-add")).toBeFalsy();
+    expect(doc.querySelector("#aw-esc-tiers")).toBeFalsy();
+    const cardEsc = doc.querySelector("#aw-inapp-card .aw-esc-sec")!;
+    expect(cardEsc).toBeTruthy();
+    expect(cardEsc.querySelector(".aesc-add")!.textContent).toContain("Escalate if unhandled");
+    expect((cardEsc.querySelector(".aesc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
+    (cardEsc.querySelector(".aesc-add") as unknown as { click: () => void }).click();
+    const tier = cardEsc.querySelector(".aesc-tiers .aw-tier")!;
     expect(tier.querySelector(".tier-after")).toBeTruthy(); // minutes-before field
     expect(tier.querySelector(".tier-actions .aw-action")).toBeTruthy(); // seeded notify action
     expect(tier.querySelector(".na-channel")).toBeTruthy(); // channel select → recipients render from it
-    expect((doc.querySelector("#aw-esc-config") as unknown as { style: { display: string } }).style.display).toBe("block");
+    // Recipient sources: device-region replaces the scope-region checkbox
+    // (legacy scope-region renders only on actions that already carry it).
+    expect(tier.querySelector(".na-device-region")).toBeTruthy();
+    expect(tier.querySelector(".na-scope-region")).toBeFalsy();
+    // No chains inside chains: the tier-hosted action row has no footer.
+    expect(tier.querySelector(".tier-actions .aw-action .aw-esc-sec")).toBeFalsy();
+    expect((cardEsc.querySelector(".aesc-config") as unknown as { style: { display: string } }).style.display).toBe("block");
     (tier.querySelector(".tier-remove") as unknown as { click: () => void }).click();
-    expect(doc.querySelector("#aw-esc-tiers .aw-tier")).toBeFalsy();
-    expect((doc.querySelector("#aw-esc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
+    expect(cardEsc.querySelector(".aesc-tiers .aw-tier")).toBeFalsy();
+    expect((cardEsc.querySelector(".aesc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
     // Band editor is NOT on step 5 (it moved to step 3, with the trigger).
     expect(doc.querySelector("#aw-step-5 #aw-bands-section")).toBeFalsy();
+
+    // Multi-severity carries into Actions: a per-severity section per band,
+    // whose action rows get their own "Escalate if unhandled" footer.
+    const bandSec = doc.querySelector("#aw-step-5 .aw-band-actions")!;
+    expect(bandSec).toBeTruthy();
+    expect(bandSec.textContent).toContain("critical");
+    expect(bandSec.textContent).toContain("base actions"); // empty-band fallback note
+    (bandSec.querySelector(".ba-add") as unknown as { click: () => void }).click();
+    const bandAction = bandSec.querySelector(".ba-actions .aw-action")!;
+    expect(bandAction).toBeTruthy();
+    expect(bandAction.querySelector(".aw-esc-sec .aesc-add")).toBeTruthy(); // per-action chain
+    // Top-level action rows are escalatable too.
+    (doc.querySelector("#aw-add-action") as unknown as { click: () => void }).click();
+    const baseAction = doc.querySelector("#aw-actions .aw-action")!;
+    expect(baseAction.querySelector(".aw-esc-sec .aesc-add")).toBeTruthy();
+    // Remove both again so step-5 validation (notify needs a recipient) passes.
+    (bandAction.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
+    (baseAction.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
 
     (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
@@ -242,5 +284,48 @@ describe("automation wizard DOM render", () => {
     const affected = doc.querySelector("#aw-affected")!;
     expect(affected.textContent).toContain("3"); // stubbed preview totalEvaluated
     expect(toastErrors).toEqual([]);
+  });
+
+  it("edit-mode round-trip: per-action escalation, band actions, device-region and the moved template survive save", async () => {
+    // Fresh document — the previous wizard's modal would duplicate every id.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    const chain = { stopOn: "clear", tiers: [{ afterMin: 20, actions: [{ type: "api_call", method: "POST", url: "https://pager.example.com/x", timeoutSec: 15 }] }] };
+    const rule = {
+      id: "r-edit",
+      name: "Hot CPU",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto", clearThreshold: 75 },
+      cooldownSec: null,
+      messageTemplate: "{asset} cpu {value}",
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true, escalation: chain }],
+      escalation: { stopOn: "acknowledge", tiers: [{ afterMin: 15, actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.com"] }] }] },
+      severityBands: [{ threshold: 95, severity: "critical", actions: [{ type: "api_call", method: "POST", url: "https://x.example.com/crit", timeoutSec: 15 }] }],
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" },
+    };
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)(rule);
+    expect(toastErrors).toEqual([]);
+    // Save straight from step 1 (edit mode): steps 4-6 were never rendered, so
+    // the payload comes from the hydrated draft — the exact data-loss surface
+    // this test pins.
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    expect(savedPayloads).toHaveLength(1);
+    const p = savedPayloads[0]! as Record<string, any>;
+    expect(p.messageTemplate).toBe("{asset} cpu {value}");
+    expect(p.actions).toHaveLength(1);
+    expect(p.actions[0].recipientDeviceRegion).toBe(true);
+    expect(p.actions[0].escalation).toEqual(chain);
+    expect(p.escalation).toEqual(rule.escalation);
+    expect(p.severityBands).toHaveLength(1);
+    expect(p.severityBands[0].actions).toEqual(rule.severityBands[0].actions);
+    expect(p.bandNotify).toEqual(rule.bandNotify);
+    // And the payload passes the real server-side schema.
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
   });
 });

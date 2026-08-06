@@ -20,6 +20,7 @@ import {
   legacyMirrorOfV2,
   normalizeRuleToV2,
   normalizeEscalationToV2,
+  allRuleActionRefs,
   evaluateScopeCondition,
 } from "./notificationTypes.js";
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
@@ -210,25 +211,11 @@ export async function isChangeActionSubscribed(action: string): Promise<boolean>
  * enforced at the route layer — permissions are not a service concern.)
  */
 async function assertActionRefs(input: RuleInput): Promise<void> {
-  const tierActions = (normalizeEscalationToV2(input.escalation)?.tiers ?? []).flatMap((t, ti) =>
-    t.actions.map((a) => ({ action: a, label: `Escalation tier ${ti + 1}` })),
-  );
-  // Severity-band actions + each band's own time-escalation tiers, plus the
-  // dedicated resolved actions — all subject to the same channel/script ref +
-  // SSRF checks as the base actions.
-  const bandActions = (input.severityBands ?? []).flatMap((b) => [
-    ...b.actions.map((a, i) => ({ action: a, label: `${b.severity} band action ${i + 1}` })),
-    ...(normalizeEscalationToV2(b.escalation)?.tiers ?? []).flatMap((t, ti) =>
-      t.actions.map((a) => ({ action: a, label: `${b.severity} band escalation tier ${ti + 1}` })),
-    ),
-  ]);
-  const resolvedActions = (input.bandNotify?.resolvedActions ?? []).map((a, i) => ({ action: a, label: `Resolved action ${i + 1}` }));
-  const all = [
-    ...input.actions.map((a, i) => ({ action: a, label: `Action ${i + 1}` })),
-    ...tierActions,
-    ...bandActions,
-    ...resolvedActions,
-  ];
+  // Canonical walk over EVERY place actions live — top-level (+ their
+  // per-action escalation tiers), rule-level escalation tiers, severity-band
+  // actions (+ their per-action tiers), band-level tiers, and the dedicated
+  // resolved actions — so a new action location can't escape these checks.
+  const all = allRuleActionRefs(input);
 
   const notifyRefs: { label: string; channelId: string }[] = [];
   const scriptRefs: { label: string; scriptId: string; runOn: string }[] = [];
