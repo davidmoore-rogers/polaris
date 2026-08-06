@@ -20,16 +20,20 @@
  * in via SAML and later arrives through App Proxy lands on the same account.
  * The existing-user branch stamps `authProvider` to the current provider so
  * `resolveTagScopesForUser` re-resolves the freshly-written ssoGroups under
- * the matching group-mapping provider. A later SAML login leaves
- * authProvider/ssoGroups untouched (findOrProvisionSamlUser doesn't write
- * them), which stays self-consistent.
+ * the matching group-mapping provider. Since the 2026-08 fold the Azure SAML
+ * path (findOrProvisionSamlUser) delegates here too with provider "azure":
+ * the LAST login path owns authProvider + ssoGroups, so an azureOid account
+ * alternating between SAML and App Proxy always has its stored groups
+ * re-resolved under the provider that wrote them. authProvider "azure" is
+ * not itself a group-mapping provider — its groups resolve under "saml"
+ * (mappingProviderForAuthProvider), the key the Group Mappings UI offers.
  */
 
 import { randomBytes } from "node:crypto";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { hashPassword } from "../utils/password.js";
-import { resolveGroupsToAccess, normalizeGroupKey } from "./groupMappingService.js";
+import { resolveGroupsToAccess, normalizeGroupKey, mappingProviderForAuthProvider } from "./groupMappingService.js";
 
 // Cap stored groups so an IdP that emits hundreds of group claims can't bloat
 // the row. The resolver only needs the groups that might match a mapping.
@@ -37,13 +41,19 @@ const SSO_GROUPS_MAX = 256;
 const USERNAME_SAFE_RE = /[^a-z0-9._-]/g;
 
 export interface ExternalUserProfile {
-  provider: "oidc" | "ldap" | "entra-proxy";
+  /**
+   * The authProvider value stamped on the user. "azure" (the SAML path) is
+   * special-cased for group resolution: its mappings live under the "saml"
+   * provider key, but its username-collision suffixes still use "azure" —
+   * which reproduces the pre-fold SAML naming byte-for-byte.
+   */
+  provider: "oidc" | "ldap" | "entra-proxy" | "azure";
   externalIdField: "oidcSubject" | "ldapUid" | "azureOid";
   externalId: string; // OIDC `sub`, LDAP objectGUID hex, or Entra object ID — stable per user
   usernameHint: string; // preferred_username / sAMAccountName / email local-part
   displayName?: string | null;
   email?: string | null;
-  groups: string[]; // raw group claim values / group DNs
+  groups: string[]; // raw group claim values / group DNs / SAML group object-IDs
 }
 
 function deriveUsername(hint: string, provider: string, externalId: string): string {
@@ -72,8 +82,11 @@ export async function provisionExternalUser(profile: ExternalUserProfile) {
   const { provider, externalIdField, externalId } = profile;
   if (!externalId) throw new AppError(502, `${provider} login: missing stable user identifier`);
 
-  const access = await resolveGroupsToAccess(provider, profile.groups);
-  const ssoGroups = normalizeGroupList(provider, profile.groups);
+  // Group resolution rides the MAPPING provider key ("azure" → "saml");
+  // username derivation below keeps the authProvider name.
+  const groupProvider = mappingProviderForAuthProvider(provider);
+  const access = await resolveGroupsToAccess(groupProvider, profile.groups);
+  const ssoGroups = normalizeGroupList(groupProvider, profile.groups);
 
   // Validate a group-resolved role actually exists (it could have been deleted
   // between resolve and now → onDelete:SetNull already nulled the mapping, but

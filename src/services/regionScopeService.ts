@@ -12,7 +12,7 @@
  */
 
 import { prisma } from "../db.js";
-import { resolveGroupsToAccess } from "./groupMappingService.js";
+import { resolveGroupsToAccess, mappingProviderForAuthProvider } from "./groupMappingService.js";
 import { unionTags } from "../utils/tagNormalize.js";
 
 export interface TagScope {
@@ -50,7 +50,9 @@ export async function resolveTagScopesForUser(u: UserWithRoleTags): Promise<User
   let groupRegions: string[] = [];
   let groupOther: string[] = [];
   if (Array.isArray(u.ssoGroups) && u.ssoGroups.length > 0) {
-    const access = await resolveGroupsToAccess(u.authProvider, u.ssoGroups);
+    // authProvider "azure" resolves under the "saml" mapping provider —
+    // SAML logins write ssoGroups too since the 2026-08 provisioning fold.
+    const access = await resolveGroupsToAccess(mappingProviderForAuthProvider(u.authProvider), u.ssoGroups);
     groupRegions = access.regionTags;
     groupOther = access.otherTags;
   }

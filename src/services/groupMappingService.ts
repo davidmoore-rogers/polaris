@@ -80,6 +80,18 @@ function isValidProvider(p: string): p is GroupMappingProvider {
   return (GROUP_MAPPING_PROVIDERS as readonly string[]).includes(p);
 }
 
+/**
+ * Translate a User.authProvider value to the group-mapping provider key its
+ * groups resolve under. The two vocabularies differ in exactly one place:
+ * SAML logins stamp authProvider "azure" but their mappings live under
+ * "saml" (the protocol name the Group Mappings UI offers). Everything else
+ * is identity — including values (like "local") that aren't mapping
+ * providers at all; resolveGroupsToAccess returns empty for those.
+ */
+export function mappingProviderForAuthProvider(authProvider: string): string {
+  return authProvider === "azure" ? "saml" : authProvider;
+}
+
 function assertValidProvider(p: string): GroupMappingProvider {
   if (!isValidProvider(p)) {
     throw new AppError(400, `Unknown group-mapping provider "${p}" (expected one of ${GROUP_MAPPING_PROVIDERS.join(", ")})`);
@@ -153,6 +165,11 @@ const enabledCache = new Map<string, CachedRows>();
 
 function invalidateCache(): void {
   enabledCache.clear();
+}
+
+/** Test hook: drop the enabled-mappings cache so rows seeded via raw Prisma are visible. */
+export function invalidateGroupMappingCacheForTests(): void {
+  invalidateCache();
 }
 
 async function getEnabledMappings(provider: string) {

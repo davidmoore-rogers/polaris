@@ -8,9 +8,8 @@
 
 import { SAML, type SamlConfig, type Profile, ValidateInResponseTo } from "@node-saml/node-saml";
 import { randomBytes } from "node:crypto";
-import { prisma } from "../db.js";
 import { createSettingStore } from "./settingsStore.js";
-import { hashPassword } from "../utils/password.js";
+import { provisionExternalUser } from "./ssoProvisioning.js";
 import { AppError } from "../utils/errors.js";
 
 // ─── SSO Settings (stored in Setting table) ─────────────────────────────────
@@ -153,6 +152,16 @@ export async function getSamlLogoutUrl(nameID: string, sessionIndex: string, rel
 
 // ─── User Provisioning ───────────────────────────────────────────────────────
 
+/**
+ * SAML claim extraction + delegation to the shared find-or-provision path
+ * (2026-08 fold — this used to be a parallel re-implementation that lacked
+ * group-mapping handling). Provider "azure" reproduces the historical SAML
+ * username derivation exactly (email local-part, "-azure" collision suffix,
+ * "azure-<oid>" fallbacks), while group mappings resolve under the "saml"
+ * provider key the Group Mappings UI offers. Azure AD emits the groups claim
+ * as group object-ID GUIDs (when the app is configured to send it) — map
+ * those GUIDs unless the IdP is set to emit names.
+ */
 export async function findOrProvisionSamlUser(profile: Profile) {
   // SAML profile attributes — Azure AD typically sends these
   const nameID: string = profile.nameID || "";
@@ -173,56 +182,24 @@ export async function findOrProvisionSamlUser(profile: Profile) {
 
   if (!oid) throw new AppError(502, "SAML assertion missing user identifier");
 
-  // Look up by Azure OID
-  const existing = await prisma.user.findUnique({ where: { azureOid: oid }, include: { role: true } });
-  if (existing) {
-    const isFirstLogin = existing.lastLogin === null;
-    const stampReview = isFirstLogin && existing.role.name !== "admin";
-    return prisma.user.update({
-      where: { id: existing.id },
-      data: {
-        displayName: displayName || existing.displayName,
-        email: email || existing.email,
-        lastLogin: new Date(),
-        ...(stampReview ? { needsRoleReview: true } : {}),
-      },
-      include: { role: true },
-    });
-  }
+  // Azure AD's SAML groups claim. A single group arrives as a bare string,
+  // several as an array; absent (app not configured to emit groups, or the
+  // >150-group omission) yields [] — group resolution then returns empty and
+  // an existing user's role is left untouched.
+  const groupsRaw = profile["http://schemas.microsoft.com/ws/2008/06/identity/claims/groups"];
+  const groups: string[] = Array.isArray(groupsRaw)
+    ? groupsRaw.filter((g): g is string => typeof g === "string")
+    : typeof groupsRaw === "string" && groupsRaw
+      ? [groupsRaw]
+      : [];
 
-  // Derive a username from the email
-  let username = email.split("@")[0].toLowerCase().replace(/[^a-z0-9._-]/g, "");
-  if (!username) username = `azure-${oid.slice(0, 8)}`;
-
-  // Handle username collision
-  const collision = await prisma.user.findUnique({ where: { username } });
-  if (collision) {
-    username = `${username}-azure`;
-    const collision2 = await prisma.user.findUnique({ where: { username } });
-    if (collision2) username = `azure-${oid.slice(0, 12)}`;
-  }
-
-  // Create with a random password hash (SAML users never use it). Default
-  // role is `readonly` (matches pre-cutover SAML auto-provision behavior);
-  // admin reassigns via the Users page once needsRoleReview surfaces them.
-  const placeholderHash = await hashPassword(randomBytes(32).toString("hex"));
-  const defaultRole = await prisma.role.findUnique({ where: { name: "readonly" } });
-  if (!defaultRole) {
-    throw new AppError(500, "SAML auto-provision: built-in 'readonly' role not found — Polaris is mis-seeded");
-  }
-
-  return prisma.user.create({
-    data: {
-      username,
-      passwordHash: placeholderHash,
-      roleId: defaultRole.id,
-      authProvider: "azure",
-      azureOid: oid,
-      displayName: displayName || null,
-      email: email || null,
-      lastLogin: new Date(),
-      needsRoleReview: true,
-    },
-    include: { role: true },
+  return provisionExternalUser({
+    provider: "azure",
+    externalIdField: "azureOid",
+    externalId: oid,
+    usernameHint: email,
+    displayName: displayName || null,
+    email: email || null,
+    groups,
   });
 }
