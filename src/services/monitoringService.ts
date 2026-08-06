@@ -4235,6 +4235,185 @@ function clampPct(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+// ─── FortiOS interface parse/merge cores (split 2026-08) ────────────────────
+// Pure functions over the two REST payloads (CMDB system/interface + monitor
+// system/interface) so the payload quirks — hyphenated member keys, the
+// ipv4_addresses vs legacy `ip` fallback, Mbps→bps, aggregate-member
+// synthesis — are unit-testable with fixtures
+// (tests/unit/fortiInterfaceParse.test.ts). collectSystemInfoFortinet keeps
+// the transport fan-out + error semantics.
+
+export interface FortiCmdbInterfaceEntry {
+  type: string | null;
+  parent: string | null;
+  vlanId: number | null;
+  members: string[];
+  alias: string | null;
+  description: string | null;
+  addressingMode: string | null;
+}
+
+/**
+ * Build the name → CMDB-metadata map from a `/api/v2/cmdb/system/interface`
+ * response. Tolerates both the bare-array and `{results: []}` envelope
+ * shapes; a null/failed response yields an empty map (callers fall back to
+ * monitor-only types — same as the original try/catch).
+ */
+export function parseFortiCmdbInterfaceTable(cmdbRes: unknown): Map<string, FortiCmdbInterfaceEntry> {
+  const cmdbByName = new Map<string, FortiCmdbInterfaceEntry>();
+  if (!cmdbRes) return cmdbByName;
+  const arr = Array.isArray(cmdbRes)
+    ? cmdbRes
+    : (Array.isArray((cmdbRes as any)?.results) ? (cmdbRes as any).results : []);
+  for (const c of arr) {
+    if (!c || typeof c !== "object" || typeof c.name !== "string") continue;
+    const t = typeof c.type === "string" ? c.type : null;
+    // CMDB `member` is an array of { "interface-name": "<port>" } entries on
+    // aggregate and hard-switch / vap-switch interfaces. The FortiOS REST
+    // envelope returns the key with a hyphen — the JS-friendly underscore
+    // form (`interface_name`) doesn't exist, and accessing it would silently
+    // yield undefined, collapsing the members list to empty. `q_origin_key`
+    // duplicates the value for the table's primary key, so it's a reliable
+    // fallback when a firmware variant drops `interface-name`.
+    const members: string[] = Array.isArray(c.member)
+      ? c.member.map((m: any) => {
+          if (typeof m === "string") return m;
+          if (m && typeof m === "object") {
+            if (typeof m["interface-name"] === "string") return m["interface-name"];
+            if (typeof m.q_origin_key  === "string") return m.q_origin_key;
+            if (typeof m.interface_name === "string") return m.interface_name;
+          }
+          return null;
+        }).filter(Boolean)
+      : [];
+    const alias       = typeof c.alias       === "string" && c.alias.trim()       ? c.alias.trim()       : null;
+    const description = typeof c.description === "string" && c.description.trim() ? c.description.trim() : null;
+    // L3 addressing mode — CMDB `mode` is "static" | "dhcp" | "pppoe". Keep
+    // only known values so a firmware-specific surprise doesn't leak into the
+    // UI; anything else (or absent) leaves addressingMode null.
+    const rawMode = typeof c.mode === "string" ? c.mode.trim().toLowerCase() : "";
+    const addressingMode = (rawMode === "static" || rawMode === "dhcp" || rawMode === "pppoe") ? rawMode : null;
+    cmdbByName.set(c.name, {
+      type:    t,
+      parent:  t === "vlan" && typeof c.interface === "string" ? c.interface : null,
+      vlanId:  t === "vlan" && typeof c.vlanid === "number" ? c.vlanid : null,
+      members,
+      alias,
+      description,
+      addressingMode,
+    });
+  }
+  return cmdbByName;
+}
+
+/**
+ * Merge the `/api/v2/monitor/system/interface` payload with the CMDB map
+ * into InterfaceSample rows. CMDB type/parent/vlanid/alias/description win;
+ * the monitor payload supplies runtime state (link, counters, IP, MAC,
+ * speed — reported in Mbps, converted to bps here).
+ */
+export function buildFortiInterfaceSamples(
+  monitorObj: Record<string, any>,
+  cmdbByName: Map<string, FortiCmdbInterfaceEntry>,
+): InterfaceSample[] {
+  const interfaces: InterfaceSample[] = [];
+  for (const [name, info] of Object.entries(monitorObj)) {
+    if (!info || typeof info !== "object") continue;
+    const i = info as any;
+    // Pick the first IPv4 if the device exposes a list, else fall back to the legacy `ip` string.
+    let ip: string | null = null;
+    if (Array.isArray(i.ipv4_addresses) && i.ipv4_addresses.length > 0) {
+      const a = i.ipv4_addresses[0];
+      ip = typeof a === "string" ? a : (a?.ip || null);
+    } else if (typeof i.ip === "string") {
+      ip = i.ip.split(" ")[0];
+    }
+    const speedMbps = typeof i.speed === "number" ? i.speed : null;
+    // Prefer CMDB type/parent/vlanid; fall back to whatever the monitor
+    // payload happened to include.
+    const cmdbEntry = cmdbByName.get(name);
+    const rawType   = cmdbEntry?.type ?? (typeof i.type === "string" ? i.type : null);
+    const rawParent = cmdbEntry?.parent ?? (i.type === "vlan" && typeof i.interface === "string" ? i.interface : null);
+    const rawVlanId = cmdbEntry?.vlanId ?? (i.type === "vlan" && typeof i.vlanid === "number" ? i.vlanid : null);
+    interfaces.push({
+      ifName:      name,
+      adminStatus: i.status === "down" ? "down" : i.status === "up" ? "up" : (i.status ?? null),
+      operStatus:  i.link === false ? "down" : i.link === true ? "up" : null,
+      speedBps:    speedMbps != null ? Math.round(speedMbps * 1_000_000) : null,
+      ipAddress:   ip,
+      macAddress:  typeof i.mac === "string" ? i.mac.toUpperCase() : null,
+      inOctets:    pickFiniteNumber(i.rx_bytes),
+      outOctets:   pickFiniteNumber(i.tx_bytes),
+      inErrors:    pickFiniteNumber(i.rx_errors  ?? i.errors_in),
+      outErrors:   pickFiniteNumber(i.tx_errors  ?? i.errors_out),
+      ifType:      normalizeFortiIfType(rawType),
+      ifParent:    rawParent,
+      vlanId:      rawVlanId,
+      alias:       cmdbEntry?.alias       ?? null,
+      description: cmdbEntry?.description ?? null,
+      addressingMode: cmdbEntry?.addressingMode ?? null,
+    });
+  }
+  return interfaces;
+}
+
+/**
+ * Back-fill ifParent on member ports of aggregate / hard-switch / vap-switch
+ * interfaces. CMDB carries the canonical `member` array; we also accept the
+ * monitor-side `member` array as a fallback.
+ *
+ * Member ports owned by an aggregate (the `set members "port15" "port16"`
+ * ports under FortiLink) are typically *omitted* from the monitor endpoint —
+ * FortiOS treats them as subordinate to the aggregate and doesn't surface
+ * them as standalone interfaces. CMDB still lists them. For those, synthesize
+ * a row from CMDB metadata so the System tab tree can render them nested
+ * under their aggregate; runtime fields stay null because the monitor
+ * endpoint never returned counters for them. Mutates `interfaces` in place.
+ */
+export function backfillFortiAggregateMembers(
+  interfaces: InterfaceSample[],
+  monitorObj: Record<string, any>,
+  cmdbByName: Map<string, FortiCmdbInterfaceEntry>,
+): void {
+  const ifMap = new Map(interfaces.map((s) => [s.ifName, s]));
+  for (const iface of interfaces.slice()) {
+    if (iface.ifType !== "aggregate") continue;
+    const cmdbEntry = cmdbByName.get(iface.ifName);
+    const monitorEntry = monitorObj[iface.ifName] as any;
+    const members =
+      cmdbEntry?.members.length ? cmdbEntry.members :
+      Array.isArray(monitorEntry?.member) ? monitorEntry.member.map(String) : [];
+    for (const memberName of members) {
+      const memberStr = String(memberName);
+      const existing = ifMap.get(memberStr);
+      if (existing) {
+        if (!existing.ifParent) existing.ifParent = iface.ifName;
+        continue;
+      }
+      const memberCmdb = cmdbByName.get(memberStr);
+      const synthetic: InterfaceSample = {
+        ifName:      memberStr,
+        adminStatus: null,
+        operStatus:  null,
+        speedBps:    null,
+        ipAddress:   null,
+        macAddress:  null,
+        inOctets:    null,
+        outOctets:   null,
+        inErrors:    null,
+        outErrors:   null,
+        ifType:      memberCmdb?.type ? normalizeFortiIfType(memberCmdb.type) : "physical",
+        ifParent:    iface.ifName,
+        vlanId:      memberCmdb?.vlanId ?? null,
+        alias:       memberCmdb?.alias ?? null,
+        description: memberCmdb?.description ?? null,
+      };
+      interfaces.push(synthetic);
+      ifMap.set(memberStr, synthetic);
+    }
+  }
+}
+
 async function collectSystemInfoFortinet(
   host: string,
   integration: { type: string; config: Record<string, unknown> },
@@ -4301,144 +4480,18 @@ async function collectSystemInfoFortinet(
     sdwanPromise,
   ]);
 
-  // Build cmdbByName from the CMDB response. Non-fatal failure → empty map
-  // → falls back to monitor-only types (same as the original try/catch).
-  const cmdbByName = new Map<string, { type: string | null; parent: string | null; vlanId: number | null; members: string[]; alias: string | null; description: string | null; addressingMode: string | null }>();
+  const cmdbByName = parseFortiCmdbInterfaceTable(cmdbRes);
   // FortiLink-enabled interface set (fortilink-flagged interfaces + their member
   // ports) from the same CMDB response — fed back to the caller so the LLDP
   // exclusion filter can drop FortiLink links without a second CMDB fetch.
   const fortilinkInterfaces = [...fortilinkInterfaceNamesFromCmdb(cmdbRes)];
-  if (cmdbRes) {
-    const arr = Array.isArray(cmdbRes) ? cmdbRes : (Array.isArray(cmdbRes?.results) ? cmdbRes.results : []);
-    for (const c of arr) {
-      if (!c || typeof c !== "object" || typeof c.name !== "string") continue;
-      const t = typeof c.type === "string" ? c.type : null;
-      // CMDB `member` is an array of { "interface-name": "<port>" } entries on
-      // aggregate and hard-switch / vap-switch interfaces. The FortiOS REST
-      // envelope returns the key with a hyphen — the JS-friendly underscore
-      // form (`interface_name`) doesn't exist, and accessing it would silently
-      // yield undefined, collapsing the members list to empty. `q_origin_key`
-      // duplicates the value for the table's primary key, so it's a reliable
-      // fallback when a firmware variant drops `interface-name`.
-      const members: string[] = Array.isArray(c.member)
-        ? c.member.map((m: any) => {
-            if (typeof m === "string") return m;
-            if (m && typeof m === "object") {
-              if (typeof m["interface-name"] === "string") return m["interface-name"];
-              if (typeof m.q_origin_key  === "string") return m.q_origin_key;
-              if (typeof m.interface_name === "string") return m.interface_name;
-            }
-            return null;
-          }).filter(Boolean)
-        : [];
-      const alias       = typeof c.alias       === "string" && c.alias.trim()       ? c.alias.trim()       : null;
-      const description = typeof c.description === "string" && c.description.trim() ? c.description.trim() : null;
-      // L3 addressing mode — CMDB `mode` is "static" | "dhcp" | "pppoe". Keep
-      // only known values so a firmware-specific surprise doesn't leak into the
-      // UI; anything else (or absent) leaves addressingMode null.
-      const rawMode = typeof c.mode === "string" ? c.mode.trim().toLowerCase() : "";
-      const addressingMode = (rawMode === "static" || rawMode === "dhcp" || rawMode === "pppoe") ? rawMode : null;
-      cmdbByName.set(c.name, {
-        type:    t,
-        parent:  t === "vlan" && typeof c.interface === "string" ? c.interface : null,
-        vlanId:  t === "vlan" && typeof c.vlanid === "number" ? c.vlanid : null,
-        members,
-        alias,
-        description,
-        addressingMode,
-      });
-    }
-  }
 
-  const interfaces: InterfaceSample[] = [];
+  let interfaces: InterfaceSample[] = [];
   if (monitorOutcome.ok) {
     const res = monitorOutcome.res;
     const obj = (res && typeof res === "object" && !Array.isArray(res)) ? res as Record<string, any> : {};
-    for (const [name, info] of Object.entries(obj)) {
-      if (!info || typeof info !== "object") continue;
-      const i = info as any;
-      // Pick the first IPv4 if the device exposes a list, else fall back to the legacy `ip` string.
-      let ip: string | null = null;
-      if (Array.isArray(i.ipv4_addresses) && i.ipv4_addresses.length > 0) {
-        const a = i.ipv4_addresses[0];
-        ip = typeof a === "string" ? a : (a?.ip || null);
-      } else if (typeof i.ip === "string") {
-        ip = i.ip.split(" ")[0];
-      }
-      const speedMbps = typeof i.speed === "number" ? i.speed : null;
-      // Prefer CMDB type/parent/vlanid; fall back to whatever the monitor
-      // payload happened to include.
-      const cmdbEntry = cmdbByName.get(name);
-      const rawType   = cmdbEntry?.type ?? (typeof i.type === "string" ? i.type : null);
-      const rawParent = cmdbEntry?.parent ?? (i.type === "vlan" && typeof i.interface === "string" ? i.interface : null);
-      const rawVlanId = cmdbEntry?.vlanId ?? (i.type === "vlan" && typeof i.vlanid === "number" ? i.vlanid : null);
-      interfaces.push({
-        ifName:      name,
-        adminStatus: i.status === "down" ? "down" : i.status === "up" ? "up" : (i.status ?? null),
-        operStatus:  i.link === false ? "down" : i.link === true ? "up" : null,
-        speedBps:    speedMbps != null ? Math.round(speedMbps * 1_000_000) : null,
-        ipAddress:   ip,
-        macAddress:  typeof i.mac === "string" ? i.mac.toUpperCase() : null,
-        inOctets:    pickFiniteNumber(i.rx_bytes),
-        outOctets:   pickFiniteNumber(i.tx_bytes),
-        inErrors:    pickFiniteNumber(i.rx_errors  ?? i.errors_in),
-        outErrors:   pickFiniteNumber(i.tx_errors  ?? i.errors_out),
-        ifType:      normalizeFortiIfType(rawType),
-        ifParent:    rawParent,
-        vlanId:      rawVlanId,
-        alias:       cmdbEntry?.alias       ?? null,
-        description: cmdbEntry?.description ?? null,
-        addressingMode: cmdbEntry?.addressingMode ?? null,
-      });
-    }
-    // Back-fill ifParent on member ports of aggregate / hard-switch /
-    // vap-switch interfaces. CMDB carries the canonical `member` array; we
-    // also accept the monitor-side `member` array as a fallback.
-    //
-    // Member ports owned by an aggregate (the `set members "port15" "port16"`
-    // ports under FortiLink) are typically *omitted* from the monitor
-    // endpoint — FortiOS treats them as subordinate to the aggregate and
-    // doesn't surface them as standalone interfaces. CMDB still lists them.
-    // For those, synthesize a row from CMDB metadata so the System tab tree
-    // can render them nested under their aggregate; runtime fields stay null
-    // because the monitor endpoint never returned counters for them.
-    const ifMap = new Map(interfaces.map((s) => [s.ifName, s]));
-    for (const iface of interfaces.slice()) {
-      if (iface.ifType !== "aggregate") continue;
-      const cmdbEntry = cmdbByName.get(iface.ifName);
-      const monitorEntry = obj[iface.ifName] as any;
-      const members =
-        cmdbEntry?.members.length ? cmdbEntry.members :
-        Array.isArray(monitorEntry?.member) ? monitorEntry.member.map(String) : [];
-      for (const memberName of members) {
-        const memberStr = String(memberName);
-        const existing = ifMap.get(memberStr);
-        if (existing) {
-          if (!existing.ifParent) existing.ifParent = iface.ifName;
-          continue;
-        }
-        const memberCmdb = cmdbByName.get(memberStr);
-        const synthetic: InterfaceSample = {
-          ifName:      memberStr,
-          adminStatus: null,
-          operStatus:  null,
-          speedBps:    null,
-          ipAddress:   null,
-          macAddress:  null,
-          inOctets:    null,
-          outOctets:   null,
-          inErrors:    null,
-          outErrors:   null,
-          ifType:      memberCmdb?.type ? normalizeFortiIfType(memberCmdb.type) : "physical",
-          ifParent:    iface.ifName,
-          vlanId:      memberCmdb?.vlanId ?? null,
-          alias:       memberCmdb?.alias ?? null,
-          description: memberCmdb?.description ?? null,
-        };
-        interfaces.push(synthetic);
-        ifMap.set(memberStr, synthetic);
-      }
-    }
+    interfaces = buildFortiInterfaceSamples(obj, cmdbByName);
+    backfillFortiAggregateMembers(interfaces, obj, cmdbByName);
   } else if (interfaces.length === 0) {
     // Monitor failed AND we have no interfaces from the (also-failing) cmdb
     // synthesis path — re-throw the original error to match the prior
