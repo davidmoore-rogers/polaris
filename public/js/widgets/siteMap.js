@@ -583,7 +583,7 @@
       function updateClock(unixSec) {
         if (clockEl == null || unixSec == null) return;
         var d = new Date(unixSec * 1000);
-        clockEl.textContent = "RADAR " + d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+        clockEl.textContent = "RADAR " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: true });
         clockEl.style.display = radarEnabled ? "block" : "none";
       }
 

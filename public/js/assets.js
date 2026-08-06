@@ -2550,7 +2550,7 @@ function assetStatusBadge(asset) {
     if (asset.statusChangedBy) parts.push("Changed by: " + asset.statusChangedBy);
     if (asset.statusChangedAt) {
       var d = new Date(asset.statusChangedAt);
-      parts.push(d.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }));
+      parts.push(d.toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }));
     }
     if (parts.length) title = ' title="' + parts.join("\n") + '"';
   }
@@ -7573,7 +7573,7 @@ function _fmtBitsPerSecAxis(bps) {
 function _fmtTooltipTs(ts) {
   function p(n) { return n < 10 ? "0" + n : String(n); }
   var d = new Date(ts);
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) +
     " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
 }
 
@@ -7795,7 +7795,7 @@ function _chartCustomRangeLabel(container) {
   function fmt(iso) {
     var d = new Date(iso);
     if (isNaN(+d)) return iso;
-    return d.toLocaleString("en-US", {
+    return d.toLocaleString(undefined, {
       month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit",
     });
   }
@@ -8827,7 +8827,7 @@ function assetMonitoringViewHTML(a) {
     var _elapsed = Math.max(0, Math.floor((Date.now() - _obsAt) / 1000));
     var _upNow = a.monitorStatus === "down" ? _obsUp : _obsUp + _elapsed;
     var _sinceMs = a.lastRebootAt ? new Date(a.lastRebootAt).getTime() : (_obsAt - _obsUp * 1000);
-    var _since = new Date(_sinceMs).toLocaleString("en-US",
+    var _since = new Date(_sinceMs).toLocaleString(undefined,
       { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     uptimeRow =
       '<div class="detail-row" title="' + escapeHtml("Uptime as of " + timeAgo(a.lastMonitorAt)) + '">' +
@@ -9215,7 +9215,7 @@ function _renderMonitorChart(container, data, transitions) {
 
   function fmtTooltipTs(ts) {
     var d = new Date(ts);
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) +
       " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
   }
   function hitAttrs(s) {
@@ -16074,7 +16074,7 @@ function _loadAssetNotificationsTab(assetId) {
     var aTbody = document.getElementById("asset-notif-active-tbody");
     if (aTbody) {
       aTbody.innerHTML = active.length ? active.map(function (n) {
-        var ts = new Date(n.triggeredAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+        var ts = new Date(n.triggeredAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
         var ack = n.acknowledged ? escapeHtml(n.acknowledgedBy || "yes") : '<span style="color:var(--color-text-tertiary)">—</span>';
         return '<tr><td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ts) + '</td>' +
           '<td><span class="badge badge-level-' + (n.severity || "info") + '">' + (n.severity || "info").toUpperCase() + '</span></td>' +
@@ -16132,8 +16132,7 @@ function _assetEventsTabHTML(assetId) {
 
 function _renderAssetEventRow(ev, idx) {
   var ts = new Date(ev.timestamp);
-  var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
-    " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  var timeStr = formatShortDateTime(ts);
 
   var levelClass = "badge-level-" + (ev.level || "info");
   var levelLabel = (ev.level || "info").toUpperCase();
@@ -16428,8 +16427,7 @@ function _generateAssetEventCsv(events, asset) {
   var headers = ["Timestamp", "Level", "Action", "Resource Type", "Resource Name", "Message", "User"];
   var rows = events.map(function (ev) {
     var ts = new Date(ev.timestamp);
-    var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
-      " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    var timeStr = formatDateTime(ts);
     return [
       timeStr, (ev.level || "info").toUpperCase(), ev.action || "",
       ev.resourceType || "", ev.resourceName || "", ev.message || "", ev.actor || "",
@@ -16462,8 +16460,7 @@ function _generateAssetEventPdf(events, label, asset) {
   var head = [["Timestamp", "Level", "Action", "Resource", "Message", "User"]];
   var body = events.map(function (ev) {
     var ts = new Date(ev.timestamp);
-    var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
-      " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    var timeStr = formatShortDateTime(ts);
     var resource = ev.resourceType || "-";
     if (ev.resourceName) resource += " (" + ev.resourceName + ")";
     return [
@@ -16537,8 +16534,7 @@ function _showAssetEventDetail(ev) {
   }).join("");
 
   var ts = new Date(ev.timestamp);
-  var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
-    " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  var timeStr = formatDateTime(ts);
 
   var body =
     '<div style="margin-bottom:1rem;font-size:0.85rem;color:var(--color-text-secondary)">' +

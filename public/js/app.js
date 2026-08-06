@@ -2038,7 +2038,7 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
 
 function formatDate(dateStr) {
   if (!dateStr) return "-";
-  return new Date(dateStr).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  return new Date(dateStr).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 // Compact device-uptime duration: "42d 6h" / "6h 12m" / "12m" / "<1m".

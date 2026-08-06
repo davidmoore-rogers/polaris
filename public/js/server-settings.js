@@ -167,7 +167,7 @@ function updateCurrentTime() {
   try {
     var opts = { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short" };
     if (tzVal) opts.timeZone = tzVal;
-    el.textContent = "Current server time: " + new Date().toLocaleString("en-US", opts);
+    el.textContent = "Current server time: " + new Date().toLocaleString(undefined, opts);
   } catch (_) {
     el.textContent = "Current server time: " + new Date().toLocaleTimeString();
   }
@@ -203,7 +203,7 @@ function formatLocalTime(iso) {
       timeZoneName: "short",
     };
     if (_tzOverride) opts.timeZone = _tzOverride;
-    return d.toLocaleString("en-US", opts);
+    return d.toLocaleString(undefined, opts);
   } catch (_) {
     return iso;
   }

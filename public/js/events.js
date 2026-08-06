@@ -205,8 +205,7 @@ var _eventsSF = null;
 
     tbody.innerHTML = events.map(function (ev, idx) {
       var ts = new Date(ev.timestamp);
-      var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
-        " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      var timeStr = formatShortDateTime(ts);
 
       var levelClass = "badge-level-" + (ev.level || "info");
       var levelLabel = (ev.level || "info").toUpperCase();
@@ -808,8 +807,8 @@ function getAlertsFormData() {
     if (c.resolvedBy) meta += " by " + escapeHtml(c.resolvedBy);
     if (c.resolvedAt) {
       var ts = new Date(c.resolvedAt);
-      meta += " · " + ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
-        " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+      meta += " · " + ts.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) +
+        " " + ts.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     }
     return '<span class="badge ' + statusClass + '" style="text-transform:capitalize">' + escapeHtml(c.status) + '</span>' +
       (meta ? ' <span style="color:var(--color-text-tertiary);font-size:0.75rem">' + meta + '</span>' : '');
@@ -1534,8 +1533,7 @@ function generateEventPdf(events, label) {
   var head = [["Timestamp", "Level", "Action", "Resource", "Message", "User"]];
   var body = events.map(function (ev) {
     var ts = new Date(ev.timestamp);
-    var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
-      " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    var timeStr = formatShortDateTime(ts);
     var resource = ev.resourceType || "-";
     if (ev.resourceName) resource += " (" + ev.resourceName + ")";
     return [
@@ -1599,8 +1597,7 @@ function showEventDetail(ev) {
   }).join("");
 
   var ts = new Date(ev.timestamp);
-  var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
-    " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  var timeStr = formatDateTime(ts);
 
   var body =
     '<div style="margin-bottom:1rem;font-size:0.85rem;color:var(--color-text-secondary)">' +
@@ -1633,8 +1630,7 @@ function generateEventCsv(events) {
   var headers = ["Timestamp", "Level", "Action", "Resource Type", "Resource Name", "Message", "User"];
   var rows = events.map(function (ev) {
     var ts = new Date(ev.timestamp);
-    var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
-      " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    var timeStr = formatDateTime(ts);
     return [
       timeStr, (ev.level || "info").toUpperCase(), ev.action || "",
       ev.resourceType || "", ev.resourceName || "", ev.message || "", ev.actor || "",

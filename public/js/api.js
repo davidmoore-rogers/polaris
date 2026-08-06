@@ -59,6 +59,29 @@ function timeAgo(dateStr) {
 }
 if (typeof window !== "undefined") window.timeAgo = timeAgo;
 
+// Absolute datetime formatters — BROWSER locale (operator decision 2026-08:
+// no hardcoded en-US; the same event should render the same way everywhere,
+// in the viewer's own conventions). formatDateTime carries the year + seconds
+// (detail panes, exports); formatShortDateTime drops the year (dense tables
+// of recent rows). Accepts Date | ISO string | epoch ms; "" on falsy/invalid.
+function formatDateTime(value) {
+  if (!value) return "";
+  var d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) +
+    " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+if (typeof window !== "undefined") window.formatDateTime = formatDateTime;
+
+function formatShortDateTime(value) {
+  if (!value) return "";
+  var d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
+    " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+if (typeof window !== "undefined") window.formatShortDateTime = formatShortDateTime;
+
 // Base-1024 byte formatter, decimal-KB labels (the convention the majority of
 // the previous four divergent copies used). One decimal above bytes.
 function formatBytes(n) {
