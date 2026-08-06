@@ -616,14 +616,21 @@ TableSF.prototype.apply = function (data) {
 };
 
 /**
- * setupColumnLayout(tableEl, options) — Resizable column widths + show/hide
- * column chooser. Independent of TableSF (works on any <table>), but when a
- * table uses both, construct TableSF FIRST: TableSF._setup rebuilds each
+ * setupColumnLayout(tableEl, options) — Resizable column widths + show/hide/
+ * reorder column chooser. Independent of TableSF (works on any <table>), but
+ * when a table uses both, construct TableSF FIRST: TableSF._setup rebuilds each
  * header th via innerHTML, which wipes the resize handles this helper appends.
  *
  * Each <th> is given a stable column id derived from data-sf-key, then
  * data-col-id, then "__col<index>". Columns marked data-col-required="true"
- * (or with class "cb-col" / "fav-col") cannot be hidden via the chooser.
+ * (or with class "cb-col" / "fav-col") cannot be hidden via the chooser, and
+ * are anchors for reordering: they hold their authored index while the other
+ * columns are dragged around them.
+ *
+ * Reordering physically moves the <th>, its <col>, and each body row's cells,
+ * because there is no CSS way to permute table columns. Pages that rebuild
+ * their tbody keep working without changes — a MutationObserver re-applies the
+ * order after each render (installed only once the order is non-default).
  *
  * options:
  *   chooserButton  — element; clicking it toggles the column chooser popover
@@ -684,6 +691,140 @@ function setupColumnLayout(tableEl, options) {
   }
   var cols = Array.prototype.slice.call(colgroup.children).slice(0, ths.length);
 
+  var srcIdxOf = {};
+  colIds.forEach(function (id, i) { srcIdxOf[id] = i; });
+
+  // ─── Column order ─────────────────────────────────────────────────────────
+  // `order` is the operator's sequence for the MOVABLE columns — exactly the
+  // set the chooser lists (everything not marked required / utility). Required
+  // columns are anchors: they keep their authored index and the movable columns
+  // fill the slots between them, so a leading checkbox column or a trailing
+  // Actions column can't be dragged out of place.
+  //
+  // Storing a permutation of only the movable subset (rather than absolute
+  // indexes) is what lets a saved order survive a Polaris update that adds a
+  // column: normalizeOrder splices the newcomer back in next to its authored
+  // neighbour instead of stranding it at the end.
+  var movableSrc = colIds.filter(function (id) { return !required[id]; });
+  var order = movableSrc.slice();
+
+  function normalizeOrder(saved) {
+    var known = {};
+    movableSrc.forEach(function (id) { known[id] = true; });
+    var seen = {};
+    var out = [];
+    (saved || []).forEach(function (id) {
+      if (!known[id] || seen[id]) return;
+      seen[id] = true;
+      out.push(id);
+    });
+    // Columns missing from the saved order (added since it was written) land
+    // immediately after their nearest preceding authored sibling.
+    movableSrc.forEach(function (id, idx) {
+      if (seen[id]) return;
+      var pos = out.length;
+      for (var k = idx - 1; k >= 0; k--) {
+        var p = out.indexOf(movableSrc[k]);
+        if (p >= 0) { pos = p + 1; break; }
+      }
+      out.splice(pos, 0, id);
+    });
+    return out;
+  }
+
+  function isDefaultOrder() {
+    return order.every(function (id, i) { return movableSrc[i] === id; });
+  }
+
+  /** Column ids in DISPLAY order: required anchors at their authored index. */
+  function displayIds() {
+    var out = [];
+    var mi = 0;
+    for (var i = 0; i < colIds.length; i++) {
+      if (required[colIds[i]]) out.push(colIds[i]);
+      else out.push(order[mi++]);
+    }
+    return out;
+  }
+
+  /**
+   * Move `els` (already in the desired order) into place under `parent`.
+   * All-or-nothing: a gap in `els` means the caller's mapping doesn't describe
+   * this parent, and a half-applied move is worse than none. Returns whether
+   * it ran.
+   */
+  function placeInOrder(parent, els) {
+    for (var g = 0; g < els.length; g++) if (!els[g]) return false;
+    for (var i = 0; i < els.length; i++) {
+      if (parent.children[i] !== els[i]) parent.insertBefore(els[i], parent.children[i] || null);
+    }
+    return true;
+  }
+
+  /** This table's own <tbody> elements (never a nested table's). */
+  function ownBodies() {
+    return Array.prototype.filter.call(tableEl.children, function (el) {
+      return el.tagName === "TBODY";
+    });
+  }
+
+  // The order each row's cells are CURRENTLY in. A row the page just rendered
+  // is absent from the map and therefore in authored order; a row this helper
+  // has already touched is in whatever order it left it. Reading the previous
+  // order back is what makes a second reorder (or a reset) correct — mapping a
+  // dragged row as though it were still authored-order scrambles it. WeakMap
+  // rather than a data- attribute so re-rendered rows cost nothing and the
+  // markup stays clean.
+  var rowOrder = new WeakMap();
+
+  function applyBodyOrder(disp) {
+    var sig = disp.join(",");
+    ownBodies().forEach(function (tb) {
+      Array.prototype.forEach.call(tb.children, function (row) {
+        if (row.tagName !== "TR") return;
+        var prev = rowOrder.get(row);
+        if (prev === sig) return;
+        // Skip colspan / section-header rows: their cells don't map 1:1 onto
+        // the column set (the interfaces table's group headers, empty states).
+        if (row.children.length !== colIds.length) return;
+        var curIdxOf = srcIdxOf;
+        if (prev) {
+          curIdxOf = {};
+          prev.split(",").forEach(function (id, p) { curIdxOf[id] = p; });
+        }
+        var kids = Array.prototype.slice.call(row.children);
+        if (placeInOrder(row, disp.map(function (id) { return kids[curIdxOf[id]]; }))) {
+          rowOrder.set(row, sig);
+        }
+      });
+    });
+  }
+
+  // Re-apply the order after the page re-renders its tbody. Only tbody
+  // childList is observed, so our own cell moves (a mutation on the ROW) can't
+  // re-trigger it. Installed lazily — a table left in authored order pays
+  // nothing. Self-disconnects once the table is detached.
+  var orderObserver = null;
+  function ensureOrderObserver() {
+    if (orderObserver || typeof MutationObserver !== "function") return;
+    var bodies = ownBodies();
+    if (!bodies.length) return;
+    orderObserver = new MutationObserver(function () {
+      if (!tableEl.isConnected) { orderObserver.disconnect(); orderObserver = null; return; }
+      if (isDefaultOrder()) return;
+      applyBodyOrder(displayIds());
+    });
+    bodies.forEach(function (tb) { orderObserver.observe(tb, { childList: true }); });
+  }
+
+  function applyColumnOrder() {
+    var disp = displayIds();
+    placeInOrder(headerRow, disp.map(function (id) { return ths[srcIdxOf[id]]; }));
+    placeInOrder(colgroup, disp.map(function (id) { return cols[srcIdxOf[id]]; }));
+    applyBodyOrder(disp);
+    if (!isDefaultOrder()) ensureOrderObserver();
+  }
+
   // Per-table <style> block holding hide rules. Targeted by data-sf-table-id
   // so multiple tables on the same page don't collide.
   var tableId = tableEl.getAttribute("data-sf-table-id");
@@ -735,10 +876,11 @@ function setupColumnLayout(tableEl, options) {
   function rewriteHideStyle() {
     var rules = [];
     var sel = 'table[data-sf-table-id="' + tableId + '"]';
-    Object.keys(hidden).forEach(function (id) {
-      var idx = colIds.indexOf(id);
-      if (idx < 0) return;
-      var n = idx + 1;
+    // nth-child indexes are DISPLAY positions — a reordered table's cells sit
+    // at different offsets than their authored ones.
+    displayIds().forEach(function (id, pos) {
+      if (!hidden[id]) return;
+      var n = pos + 1;
       rules.push(sel + ' > thead > tr > :nth-child(' + n + ') { display: none; }');
       rules.push(sel + ' > tbody > tr > :nth-child(' + n + ') { display: none; }');
       rules.push(sel + ' > colgroup > col:nth-child(' + n + ') { display: none; }');
@@ -746,13 +888,15 @@ function setupColumnLayout(tableEl, options) {
     styleEl.textContent = rules.join("\n");
   }
 
-  // Index of the rightmost visible, resizable (non-utility) column. This
-  // column is deliberately left without an explicit width so it auto-fills the
-  // remaining space — keeping its right edge pinned to the table border (no
-  // trailing gap). It recomputes as columns are hidden/shown.
+  // Source index of the rightmost visible, resizable (non-utility) column —
+  // "rightmost" in DISPLAY order, so it follows a drag-reorder. This column is
+  // deliberately left without an explicit width so it auto-fills the remaining
+  // space — keeping its right edge pinned to the table border (no trailing
+  // gap). It recomputes as columns are hidden/shown/reordered.
   function lastVisibleResizableIdx() {
-    for (var k = colIds.length - 1; k >= 0; k--) {
-      if (!hidden[colIds[k]] && isResizableCol(colIds[k])) return k;
+    var disp = displayIds();
+    for (var k = disp.length - 1; k >= 0; k--) {
+      if (!hidden[disp[k]] && isResizableCol(disp[k])) return srcIdxOf[disp[k]];
     }
     return -1;
   }
@@ -883,10 +1027,13 @@ function setupColumnLayout(tableEl, options) {
       // Divider behavior: a drag only affects the column on each side of the
       // handle. Find the next visible, resizable column to the right — the
       // "right neighbor" we trade width with (skip hidden / fixed columns).
+      // Walked in DISPLAY order so a reordered table trades with the column
+      // the operator actually sees to the right of the handle.
       var lastIdx = lastVisibleResizableIdx();
+      var dispNow = displayIds();
       var nIdx = -1;
-      for (var nk = i + 1; nk < colIds.length; nk++) {
-        if (!hidden[colIds[nk]] && isResizableCol(colIds[nk])) { nIdx = nk; break; }
+      for (var nk = dispNow.indexOf(id) + 1; nk > 0 && nk < dispNow.length; nk++) {
+        if (!hidden[dispNow[nk]] && isResizableCol(dispNow[nk])) { nIdx = srcIdxOf[dispNow[nk]]; break; }
       }
       // When the right neighbor is the auto-fill (last) column it has no fixed
       // width — let it absorb the delta naturally (only this column + the
@@ -1112,18 +1259,103 @@ function setupColumnLayout(tableEl, options) {
       applyWidths();   // recompute which column auto-fills to the right edge
       if (typeof options.onChange === "function") options.onChange();
     });
+    wireChooserReorder();
     document.body.appendChild(chooserPop);
     return chooserPop;
   }
 
+  // ─── Chooser drag-to-reorder ──────────────────────────────────────────────
+  // Same idiom as the automations condition builder: a grip carries
+  // draggable="true", the row it lives in is what moves, and the hovered row
+  // shows a before/after edge cue. Delegated on the popover because
+  // renderChooser() rebuilds its innerHTML on every open.
+  var dragColId = null;
+  var dropCueRow = null;
+
+  function clearDropCue() {
+    if (!dropCueRow) return;
+    dropCueRow.classList.remove("sf-drop-before", "sf-drop-after");
+    dropCueRow = null;
+  }
+
+  function wireChooserReorder() {
+    chooserPop.addEventListener("dragstart", function (e) {
+      var grip = e.target && e.target.classList && e.target.classList.contains("sf-col-grip") ? e.target : null;
+      if (!grip) { return; }
+      var row = grip.closest(".sf-col-chooser-row");
+      dragColId = row ? row.getAttribute("data-col-id") : null;
+      if (!dragColId) return;
+      row.classList.add("sf-col-dragging");
+      try { e.dataTransfer.setData("text/plain", dragColId); e.dataTransfer.effectAllowed = "move"; } catch (_) {}
+    });
+    chooserPop.addEventListener("dragover", function (e) {
+      if (!dragColId) return;
+      var row = e.target.closest && e.target.closest(".sf-col-chooser-row");
+      if (!row || row.getAttribute("data-col-id") === dragColId) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = "move"; } catch (_) {}
+      clearDropCue();
+      var rect = row.getBoundingClientRect();
+      row.classList.add(e.clientY - rect.top < rect.height / 2 ? "sf-drop-before" : "sf-drop-after");
+      dropCueRow = row;
+    });
+    chooserPop.addEventListener("drop", function (e) {
+      var row = dropCueRow;
+      var before = !!(row && row.classList.contains("sf-drop-before"));
+      var targetId = row ? row.getAttribute("data-col-id") : null;
+      clearDropCue();
+      if (!dragColId || !targetId || targetId === dragColId) { dragColId = null; return; }
+      e.preventDefault();
+      moveColumn(dragColId, targetId, before);
+      dragColId = null;
+    });
+    chooserPop.addEventListener("dragend", function () {
+      clearDropCue();
+      dragColId = null;
+      var lifted = chooserPop.querySelector(".sf-col-dragging");
+      if (lifted) lifted.classList.remove("sf-col-dragging");
+    });
+    // A grip inside the <label> would otherwise toggle that column's checkbox.
+    chooserPop.addEventListener("click", function (e) {
+      if (e.target && e.target.classList && e.target.classList.contains("sf-col-grip")) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      var reset = e.target && e.target.closest && e.target.closest(".sf-col-chooser-reset");
+      if (!reset) return;
+      e.preventDefault();
+      order = movableSrc.slice();
+      commitOrder();
+    });
+  }
+
+  function moveColumn(fromId, toId, before) {
+    var next = order.filter(function (id) { return id !== fromId; });
+    var at = next.indexOf(toId);
+    if (at < 0) return;
+    next.splice(before ? at : at + 1, 0, fromId);
+    order = next;
+    commitOrder();
+  }
+
+  function commitOrder() {
+    applyColumnOrder();
+    rewriteHideStyle();   // nth-child hide rules are display-position based
+    applyWidths();        // the auto-fill column may have changed
+    renderChooser();
+    if (typeof options.onChange === "function") options.onChange();
+  }
+
   function renderChooser() {
     buildChooser();
-    var html = '<div class="sf-col-chooser-title">Show columns</div>';
+    var html = '<div class="sf-col-chooser-title">Show columns</div>' +
+      '<div class="sf-col-chooser-hint">Drag ⠿ to reorder</div>';
     var any = false;
-    ths.forEach(function (th, i) {
-      var id = colIds[i];
+    displayIds().forEach(function (id) {
       if (required[id]) return;
       any = true;
+      var th = ths[srcIdxOf[id]];
       var label = (typeof options.labelFor === "function" ? options.labelFor(th) : null);
       if (!label) {
         var labelEl = th.querySelector(".sf-label");
@@ -1131,11 +1363,15 @@ function setupColumnLayout(tableEl, options) {
       }
       if (!label) label = id;
       var checked = hidden[id] ? "" : "checked";
-      html += '<label class="sf-col-chooser-row sf-multi-option">' +
+      html += '<label class="sf-col-chooser-row sf-multi-option" data-col-id="' + escapeHtml(id) + '">' +
+        '<span class="sf-col-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⠿</span>' +
         '<input type="checkbox" data-col-id="' + escapeHtml(id) + '" ' + checked + '>' +
-        '<span>' + escapeHtml(label) + '</span></label>';
+        '<span class="sf-col-chooser-label">' + escapeHtml(label) + '</span></label>';
     });
     if (!any) html += '<div class="sf-col-chooser-empty">No optional columns.</div>';
+    if (any && !isDefaultOrder()) {
+      html += '<button type="button" class="sf-col-chooser-reset">Reset column order</button>';
+    }
     chooserPop.innerHTML = html;
   }
 
@@ -1181,10 +1417,16 @@ function setupColumnLayout(tableEl, options) {
       // "I turned this on" decision survives reloads even for columns that
       // default to hidden.
       var shown = colIds.filter(function (id) { return !required[id] && !hidden[id]; });
-      return { widths: Object.assign({}, widths), hidden: Object.keys(hidden), shown: shown };
+      return {
+        widths: Object.assign({}, widths),
+        hidden: Object.keys(hidden),
+        shown: shown,
+        order: order.slice(),
+      };
     },
     setPrefs: function (p) {
       if (!p) return;
+      if (Array.isArray(p.order)) order = normalizeOrder(p.order);
       if (p.widths && typeof p.widths === "object") {
         Object.keys(p.widths).forEach(function (id) {
           // Utility + static-width columns stay at their pinned/declared width;
@@ -1207,18 +1449,20 @@ function setupColumnLayout(tableEl, options) {
           if (!required[id]) hidden[id] = true;
         });
       }
+      applyColumnOrder();
       applyWidths();
       rewriteHideStyle();
     },
     openChooser: openChooser,
-    refresh: function () { applyWidths(); rewriteHideStyle(); },
+    refresh: function () { applyColumnOrder(); applyWidths(); rewriteHideStyle(); },
   };
 }
 
 /**
  * applyTableLayout(tableEl, typeKey, options?) — per-table-type wrapper around
  * setupColumnLayout for tables that are rebuilt on every render. Persists
- * widths + hidden cols under `polaris-table-layout-<typeKey>-<username>` so
+ * widths + hidden cols + column order under
+ * `polaris-table-layout-<typeKey>-<username>` so
  * the same Interface table widths apply to every asset and survive each
  * re-render. Safe to call after every innerHTML replacement; idempotent on
  * the same DOM since setupColumnLayout's chooser/resize handles are guarded
