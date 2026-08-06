@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sweepPhaseEnabled, cascadeControllerOf, type SyncMode } from "../../src/services/discovery/discoveryEngine.js";
+import { sweepPhaseEnabled, cascadeControllerOf, isVouchedManagedDevice, type SyncMode, type ManagedDeviceSightings } from "../../src/services/discovery/discoveryEngine.js";
 
 // The mode→sweep-phase matrix behind syncDhcpSubnets' destructive phases.
 // Getting this wrong on a scoped run mass-deprecates subnets (Phase 2) or
@@ -59,5 +59,56 @@ describe("cascadeControllerOf — Phase 2a switch/AP cascade matcher", () => {
 
   it("matches nothing against an empty stale set (no gates decommissioned this run)", () => {
     expect(cascadeControllerOf({ controllerFortigate: "JEFFERSON-101F-1" }, new Set())).toBeNull();
+  });
+});
+
+// Phase 2b sighting decision — serial is authoritative when the asset has one
+// on file. The regression this pins: a replaced (RMA'd) switch/AP keeps the
+// old unit's hostname, and the former `seenBySerial || seenByHostname` OR let
+// the replacement's live hostname sighting vouch for the dead serial's asset
+// forever (prod 2026-08: three JEFFERSON-112F-7 switch assets, distinct
+// serials, only one still on the gate — the stale two never decommissioned).
+describe("isVouchedManagedDevice — Phase 2b stale switch/AP sighting decision", () => {
+  const sightings = (over: Partial<ManagedDeviceSightings> = {}): ManagedDeviceSightings => ({
+    seenSerials: new Set(),
+    seenHostnamesByController: new Map(),
+    cmdbSerialsByController: new Map(),
+    ...over,
+  });
+
+  it("vouches for a serial seen in the live monitor query", () => {
+    const s = sightings({ seenSerials: new Set(["SR12FPTY26000391"]) });
+    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY26000391", hostname: "JEFFERSON-112F-7" }, "JEFFERSON-112F-1", s)).toBe(true);
+  });
+
+  it("does NOT let a same-hostname sighting vouch for a different serial (replaced-unit regression)", () => {
+    // The replacement unit is live under the same hostname; the old serial is gone.
+    const s = sightings({
+      seenSerials: new Set(["SR12FPTY26000391"]),
+      seenHostnamesByController: new Map([["jefferson-112f-1", new Set(["JEFFERSON-112F-7"])]]),
+    });
+    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY25017536", hostname: "JEFFERSON-112F-7" }, "JEFFERSON-112F-1", s)).toBe(false);
+  });
+
+  it("vouches via the OWN controller's CMDB roster (configured-but-offline protection)", () => {
+    const s = sightings({ cmdbSerialsByController: new Map([["jefferson-112f-1", new Set(["SR12FPTY25017445"])]]) });
+    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY25017445", hostname: null }, "JEFFERSON-112F-1", s)).toBe(true);
+  });
+
+  it("ignores ANOTHER controller's CMDB roster (staged/offline gate must not vouch fleet-wide)", () => {
+    const s = sightings({ cmdbSerialsByController: new Map([["jefferson-201g-1", new Set(["SR12FPTY25017445"])]]) });
+    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY25017445", hostname: null }, "JEFFERSON-112F-1", s)).toBe(false);
+  });
+
+  it("falls back to hostname ONLY when no serial is on file, scoped to the own controller, case-insensitive on the controller", () => {
+    const s = sightings({ seenHostnamesByController: new Map([["jefferson-112f-1", new Set(["JEFFERSON-112F-7"])]]) });
+    expect(isVouchedManagedDevice({ serialNumber: null, hostname: "JEFFERSON-112F-7" }, "Jefferson-112F-1", s)).toBe(true);
+    // Same hostname sighted behind a different gate does not vouch.
+    expect(isVouchedManagedDevice({ serialNumber: null, hostname: "JEFFERSON-112F-7" }, "GLENROSE-61F-1", s)).toBe(false);
+  });
+
+  it("does not vouch for a serial-less, hostname-less asset (decommission proceeds)", () => {
+    const s = sightings({ seenHostnamesByController: new Map([["jefferson-112f-1", new Set(["JEFFERSON-112F-7"])]]) });
+    expect(isVouchedManagedDevice({ serialNumber: null, hostname: null }, "JEFFERSON-112F-1", s)).toBe(false);
   });
 });

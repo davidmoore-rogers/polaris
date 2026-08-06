@@ -1525,6 +1525,48 @@ export function cascadeControllerOf(fortinetTopology: unknown, staleFwNamesLc: S
   return controller;
 }
 
+/**
+ * Sighting evidence for the Phase 2b stale FortiSwitch/FortiAP sweep, built
+ * once per sync from the discovery result. Serials are fleet-wide (globally
+ * unique); hostname and CMDB sightings are keyed by lowercased controller
+ * device name so one gate's roster never vouches for another gate's devices.
+ */
+export interface ManagedDeviceSightings {
+  seenSerials: Set<string>;
+  seenHostnamesByController: Map<string, Set<string>>;
+  cmdbSerialsByController: Map<string, Set<string>>;
+}
+
+/**
+ * Pure Phase 2b decision: is this previously-discovered FortiSwitch/FortiAP
+ * asset still vouched for this run? (Caller has already established that the
+ * asset's controller was queried successfully.)
+ *
+ * Serial is AUTHORITATIVE when the asset has one on file: a same-hostname
+ * sighting must never vouch for a different serial. An RMA'd/replaced unit
+ * keeps the old unit's hostname, and the former `seenBySerial || seenByHostname`
+ * OR let the replacement's name shield the dead serial's asset from
+ * decommission forever (prod 2026-08: three JEFFERSON-112F-7 switch assets,
+ * distinct serials, only one still on the gate — none ever decommissioned).
+ * Hostname is consulted only for assets with no serial on file, and only
+ * against sightings on the asset's OWN controller — same per-controller
+ * scoping the CMDB protection already uses (a staged/offline gate's cloned
+ * config must not vouch for another gate's fleet).
+ */
+export function isVouchedManagedDevice(
+  asset: { serialNumber: string | null; hostname: string | null },
+  controller: string,
+  sightings: ManagedDeviceSightings,
+): boolean {
+  const ctlKey = controller.toLowerCase();
+  if (asset.serialNumber) {
+    if (sightings.seenSerials.has(asset.serialNumber)) return true;
+    // CMDB decommission protection: configured-but-currently-offline.
+    return !!sightings.cmdbSerialsByController.get(ctlKey)?.has(asset.serialNumber);
+  }
+  return !!(asset.hostname && sightings.seenHostnamesByController.get(ctlKey)?.has(asset.hostname));
+}
+
 async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full", signal?: AbortSignal) {
   const syncLog = (level: "info" | "error", message: string) => {
     logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
@@ -1693,17 +1735,27 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // Populated unconditionally so the pass works in both per-device sync
   // mode (full / skip-deprecation) and the post-pass finalize mode, which
   // gets the *aggregated* discoveryResult and runs the deprecation step.
-  const seenSwitchSerials   = new Set<string>();
-  const seenSwitchHostnames = new Set<string>();
-  const seenApSerials       = new Set<string>();
-  const seenApHostnames     = new Set<string>();
+  // Hostname sightings are scoped per controller (lowercased device name),
+  // mirroring the CMDB roster maps below — and they only vouch for assets
+  // with NO serial on file (see isVouchedManagedDevice).
+  const seenSwitchSerials = new Set<string>();
+  const seenApSerials     = new Set<string>();
+  const seenSwitchHostnamesByController = new Map<string, Set<string>>();
+  const seenApHostnamesByController     = new Map<string, Set<string>>();
+  const addControllerHostname = (map: Map<string, Set<string>>, device: string | undefined, name: string | undefined) => {
+    const key = (device || "").toLowerCase();
+    if (!key || !name) return;
+    let set = map.get(key);
+    if (!set) { set = new Set(); map.set(key, set); }
+    set.add(name);
+  };
   for (const sw of result.fortiSwitches || []) {
     if (sw.serial) seenSwitchSerials.add(sw.serial);
-    if (sw.name)   seenSwitchHostnames.add(sw.name);
+    addControllerHostname(seenSwitchHostnamesByController, sw.device, sw.name);
   }
   for (const ap of result.fortiAps || []) {
     if (ap.serial) seenApSerials.add(ap.serial);
-    if (ap.name)   seenApHostnames.add(ap.name);
+    addControllerHostname(seenApHostnamesByController, ap.device, ap.name);
   }
   // Decommission protection: a serial that appears in FMG's CMDB roster
   // (managed-switch / wireless-controller wtp config) but is missing from
@@ -2203,15 +2255,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // Skip when this asset's controller wasn't reachable this run — we
       // didn't get a fresh answer either way.
       if (!controller || !inventoriedSet.has(controller)) continue;
-      const seenBySerial   = a.serialNumber && (a.assetType === "switch" ? seenSwitchSerials   : seenApSerials).has(a.serialNumber);
-      const seenByHostname = a.hostname     && (a.assetType === "switch" ? seenSwitchHostnames : seenApHostnames).has(a.hostname);
-      // CMDB decommission protection, scoped to THIS asset's controller —
-      // see the roster-map construction above for why fleet-wide vouching
-      // is wrong (offline/staged gates' cached configs).
-      const cmdbProtected = !!(a.serialNumber &&
-        (a.assetType === "switch" ? cmdbSwitchSerialsByDevice : cmdbApSerialsByDevice)
-          .get(controller.toLowerCase())?.has(a.serialNumber));
-      if (seenBySerial || seenByHostname || cmdbProtected) continue;
+      // Serial-authoritative sighting check (pure, unit-tested): serial on
+      // file must reappear (live monitor or this controller's CMDB roster);
+      // hostname vouches only for serial-less assets, and only on the same
+      // controller. See isVouchedManagedDevice for the replaced-unit rationale.
+      const vouched = isVouchedManagedDevice(a, controller, a.assetType === "switch"
+        ? { seenSerials: seenSwitchSerials, seenHostnamesByController: seenSwitchHostnamesByController, cmdbSerialsByController: cmdbSwitchSerialsByDevice }
+        : { seenSerials: seenApSerials,     seenHostnamesByController: seenApHostnamesByController,     cmdbSerialsByController: cmdbApSerialsByDevice });
+      if (vouched) continue;
       staleIds.push(a.id);
       if (a.assetType === "switch")        decommissionedSwitches.push(a.hostname || a.serialNumber || a.id);
       else if (a.assetType === "access_point") decommissionedAps.push(a.hostname || a.serialNumber || a.id);
