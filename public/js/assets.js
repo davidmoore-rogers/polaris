@@ -5778,6 +5778,9 @@ function _notAvailableViaPollingHTML(label, pollingMethod, description) {
   "</div>";
 }
 
+// Orchestrator for the System-tab interfaces table (split 2026-08): the DOM
+// build (tree + rows + headers, returning the mutable pin-set state) and the
+// event wiring are separate phases; bodies extracted verbatim.
 function _renderInterfacesTable(container, si, asset) {
   if (!container) return;
   var rows = (si && si.interfaces) || [];
@@ -5787,6 +5790,15 @@ function _renderInterfacesTable(container, si, asset) {
     container.innerHTML = '<p class="empty-state">No interface data yet — system info is collected every ~10 minutes after monitoring is enabled.</p>';
     return;
   }
+  var state = _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll);
+  _wireInterfacesTable(container, si, asset, rows, state);
+}
+
+// Build + inject the table DOM. Returns the state the wiring phase needs:
+// the pin sets (mutated there as toggles save), edit rights, and the
+// inactive-row count (drives the show-inactive toggle label).
+function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
+  var lldpAll = (si && si.lldpNeighbors) || [];
   var staleBanner = _staleBannerHTML(asset && asset.id, asset, "systemInfo", si && si.lastSystemInfoAt);
   var monitored        = new Set(((si && si.monitoredInterfaces)   || (asset && asset.monitoredInterfaces)   || []));
   var monitoredTunnels = new Set(((si && si.monitoredIpsecTunnels) || (asset && asset.monitoredIpsecTunnels) || []));
@@ -6204,7 +6216,17 @@ function _renderInterfacesTable(container, si, asset) {
       onScreenshot: function (t) { _screenshotTableEl(t, "Interfaces", { hiddenNoun: "interface" }); },
     });
   }
+  return { monitored: monitored, monitoredTunnels: monitoredTunnels, canEdit: canEdit, inactiveCount: inactiveCount };
+}
 
+// Wire the built table: select-all + per-row pin toggles (PUTs), collapse
+// state, show-inactive toggle, and the interface / tunnel / LLDP-neighbor
+// drill-down links.
+function _wireInterfacesTable(container, si, asset, rows, state) {
+  var monitored        = state.monitored;
+  var monitoredTunnels = state.monitoredTunnels;
+  var canEdit          = state.canEdit;
+  var inactiveCount    = state.inactiveCount;
   // Header select-all checkbox — mirrors the aggregate state of every Poll 1m
   // checkbox in the table (interfaces AND nested IPsec tunnels, hidden
   // inactive/collapsed rows included): checked = all pinned, indeterminate =
