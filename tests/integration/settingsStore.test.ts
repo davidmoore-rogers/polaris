@@ -1,10 +1,12 @@
 /**
- * tests/unit/settingsStore.test.ts — createSettingStore TTL cache + row I/O.
- * Uses a throwaway Setting key against the test DB.
+ * tests/integration/settingsStore.test.ts — createSettingStore TTL cache + row I/O.
+ * Uses a throwaway Setting key against the test DB (integration: the cache
+ * semantics are only observable against real row round-trips).
  */
 
-import { describe, it, expect, beforeEach, afterAll } from "vitest";
+import { it, expect, beforeEach, afterAll } from "vitest";
 import { prisma } from "../../src/db.js";
+import { dbDescribe, dbReachable } from "./_helpers.js";
 import { createSettingStore } from "../../src/services/settingsStore.js";
 
 const KEY = "test:settingsStore";
@@ -21,14 +23,16 @@ function makeStore(ttlMs = 30000) {
 }
 
 beforeEach(async () => {
+  if (!dbReachable) return;
   await prisma.setting.deleteMany({ where: { key: KEY } });
 });
 
 afterAll(async () => {
+  if (!dbReachable) return;
   await prisma.setting.deleteMany({ where: { key: KEY } });
 });
 
-describe("createSettingStore", () => {
+dbDescribe("createSettingStore", () => {
   it("parses undefined into defaults when no row exists", async () => {
     const store = makeStore();
     expect(await store.get()).toEqual(DEFAULTS);

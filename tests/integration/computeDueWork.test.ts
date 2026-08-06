@@ -1,14 +1,16 @@
 /**
- * tests/unit/computeDueWork.test.ts — the due-set computation extracted from
+ * tests/integration/computeDueWork.test.ts — the due-set computation extracted from
  * runMonitorPass. Pins the eligibility semantics the monitor tick lives by:
  * cadence due-ness, the dependency-suppression probe slowdown, the heavy-
  * cadence up-only gates, the per-method telemetry/systemInfo exclusions, the
  * fastFiltered skip-when-systemInfo-due rule, and the agentless processes
  * gating. Candidates are synthetic — computeDueWork touches the DB only
- * through the (cached) settings resolver.
+ * through the (cached) settings resolver -- which is why this lives in
+ * tests/integration: the resolver reads the manual-tier Setting row.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { it, expect, beforeAll } from "vitest";
+import { dbDescribe, dbReachable } from "./_helpers.js";
 import {
   computeDueWork,
   resolveMonitorSettings,
@@ -62,6 +64,7 @@ function ago(sec: number): Date {
 }
 
 beforeAll(async () => {
+  if (!dbReachable) return;
   // Resolve the effective defaults once so relative-timestamp tests hold
   // whatever the manual tier / hardcoded floor happens to configure.
   const eff = await resolveMonitorSettings({
@@ -72,7 +75,7 @@ beforeAll(async () => {
   sysInfoSec = eff.systemInfoIntervalSeconds;
 });
 
-describe("computeDueWork", () => {
+dbDescribe("computeDueWork", () => {
   it("a never-probed asset is probe-due; a freshly probed one is not", async () => {
     const due = await computeDueWork([cand()], ALL, now);
     expect(due.probes.map((w) => w.id)).toEqual(["cand-1"]);
