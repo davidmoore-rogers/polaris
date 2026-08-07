@@ -47,7 +47,10 @@
       nodes = PolarisWidgets.filterByMinSeverity(nodes, config);
       total = nodes.length;
     }
-    PolarisWidgets.setHeaderCount(el, total);
+    // Header pill takes its color from the most severe active alert among the
+    // fetched nodes (the feed is severity-first server-side, so the cap keeps
+    // the worst ones) — a fleet of `serious` nodes reads orange, not red.
+    PolarisWidgets.setHeaderCount(el, total, PolarisWidgets.maxAlertSeverity(nodes));
     // Header export: the full fetched list (pre-clip), severity-tiered on each
     // node's active automation alert (alertSeverity).
     PolarisWidgets.setHeaderExport(el, {
@@ -87,7 +90,9 @@
       var list = groups[k];
       return '<div class="dash-alert-group-header" style="display:flex;align-items:center;gap:8px;margin:6px 0 4px;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.03em;color:var(--color-text-secondary)">' +
         '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(k) + '</span>' +
-        '<span class="widget-pill widget-pill-red">' + list.length + '</span>' +
+        // Count pill colored to the group's most severe row, matching the
+        // per-row severity pills underneath it.
+        '<span class="' + PolarisWidgets.countPillClass(list) + '">' + list.length + '</span>' +
       '</div>' + list.map(nodeRowHTML).join("");
     }).join("");
   }

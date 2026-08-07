@@ -221,15 +221,18 @@
     return parseInt(rowLimit, 10) || 0;
   };
 
-  // Stamp (or clear) a red count pill on the widget's header title — the same
-  // widget-pill-red style the group headers use, so "Down Nodes (Firewall) [4]"
-  // reads as the overall total. `el` is the widget body; resolves the shell
-  // header via closest(). No-ops outside a dashboard shell (e.g. the widget
-  // library preview renders without the .dashboard-widget wrapper). Count of
-  // 0/null removes the pill. Re-call on every render tick — updateConfig
-  // rewrites the title's textContent, which drops the pill until the next
-  // render re-stamps it.
-  window.PolarisWidgets.setHeaderCount = function (el, count) {
+  // Stamp (or clear) a count pill on the widget's header title — the same style
+  // the group headers use, so "Down Nodes (Firewall) [4]" reads as the overall
+  // total. `el` is the widget body; resolves the shell header via closest().
+  // No-ops outside a dashboard shell (e.g. the widget library preview renders
+  // without the .dashboard-widget wrapper). Count of 0/null removes the pill.
+  // Re-call on every render tick — updateConfig rewrites the title's
+  // textContent, which drops the pill until the next render re-stamps it.
+  //
+  // Optional `severity` colors the pill to the highest active alert severity in
+  // the set (see countPillClass) so it agrees with the per-row severity pills
+  // underneath it; omit it to keep the plain red count pill.
+  window.PolarisWidgets.setHeaderCount = function (el, count, severity) {
     var article = el && el.closest ? el.closest(".dashboard-widget") : null;
     var title = article ? article.querySelector(".dashboard-widget-title") : null;
     if (!title) return;
@@ -237,10 +240,14 @@
     if (!count) { if (pill) pill.remove(); return; }
     if (!pill) {
       pill = document.createElement("span");
-      pill.className = "widget-pill widget-pill-red widget-header-count";
       pill.style.marginLeft = "8px";
       title.appendChild(pill);
     }
+    // Re-stamped every tick, not just on create — the set's top severity can
+    // change between renders.
+    pill.className = "widget-pill " +
+      (window.PolarisWidgets.alertSeverityPillClass(severity) || "widget-pill-red") +
+      " widget-header-count";
     pill.textContent = String(count);
   };
 
@@ -756,6 +763,35 @@
     if (!sev) return "";
     var cls = ALERT_SEV_PILL[sev] || "widget-pill-watch";
     return '<span class="widget-pill ' + cls + '" title="Highest active alert: ' + escapeHtml(sev) + '" style="margin-right:4px;flex:0 0 auto">' + escapeHtml(String(sev)) + '</span>';
+  };
+
+  // Just the pill class for a severity (null when unknown/absent) — lets count
+  // pills reuse the row palette without rendering a labeled pill.
+  window.PolarisWidgets.alertSeverityPillClass = function (sev) {
+    return (sev && ALERT_SEV_PILL[sev]) || null;
+  };
+
+  // Highest active-alert severity across a row set (null when no row carries
+  // one). Rows attach `alertSeverity` from the noc-summary feeds.
+  window.PolarisWidgets.maxAlertSeverity = function (rows) {
+    var best = null;
+    var bestRank = 0;
+    (rows || []).forEach(function (r) {
+      var sev = r && r.alertSeverity;
+      var rank = (sev && window.PolarisWidgets.ALERT_SEVERITY_RANK[sev]) || 0;
+      if (sev && rank > bestRank) { best = sev; bestRank = rank; }
+    });
+    return best;
+  };
+
+  // Full class string for a count pill summarizing a row set: colored to the
+  // set's most severe active alert so a group of `serious` rows gets an orange
+  // count instead of the flat red that read as `critical`. Falls back to red
+  // when NO row carries an alert — there's no severity to honor there, and red
+  // stays the widgets' generic "these are down" count.
+  window.PolarisWidgets.countPillClass = function (rows) {
+    var cls = window.PolarisWidgets.alertSeverityPillClass(window.PolarisWidgets.maxAlertSeverity(rows));
+    return "widget-pill " + (cls || "widget-pill-red");
   };
 
   // Bar-fill color for an alerting row, matching the pill's own text color

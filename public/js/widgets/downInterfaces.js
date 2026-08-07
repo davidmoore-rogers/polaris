@@ -101,9 +101,10 @@
     // alert at/above the configured tier, before the header count / export /
     // clip so all three agree.
     rows = PolarisWidgets.filterByMinSeverity(rows, config);
-    // Overall down total on the widget header — same red pill style as the
-    // group counts. Pre-clip, so the row-limit doesn't shrink the number.
-    PolarisWidgets.setHeaderCount(el, rows.length);
+    // Overall down total on the widget header — same pill style as the group
+    // counts, colored to the most severe active alert in the set. Pre-clip, so
+    // the row-limit doesn't shrink the number.
+    PolarisWidgets.setHeaderCount(el, rows.length, PolarisWidgets.maxAlertSeverity(rows));
     // Header export: the merged interface + tunnel list (pre-clip),
     // severity-tiered on the owning asset's active automation alert.
     PolarisWidgets.setHeaderExport(el, {
@@ -147,7 +148,9 @@
       var list = groups[k];
       return '<div class="dash-alert-group-header" style="display:flex;align-items:center;gap:8px;margin:6px 0 4px;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.03em;color:var(--color-text-secondary)">' +
         '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(k) + '</span>' +
-        '<span class="widget-pill widget-pill-red">' + list.length + '</span>' +
+        // Count pill colored to the group's most severe row, so a gate whose
+        // rows are all `serious` reads orange instead of critical-red.
+        '<span class="' + PolarisWidgets.countPillClass(list) + '">' + list.length + '</span>' +
       '</div>' + list.slice().sort(byName).map(rowHTML).join("");
     }).join("");
   }
