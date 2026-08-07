@@ -1,0 +1,12 @@
+-- Per-severity-band sustained durations.
+--
+-- Each severity tier (base + every band) may now carry its own
+-- `forDurationSec` ("Sustained for"), so a tier applies only once ITS own
+-- condition has held continuously for ITS own duration. One shared
+-- `conditionMetSince` cannot express that, so the state row gains a per-tier
+-- met-since map: { [severity]: epochMs }.
+--
+-- NULL on every existing row = pre-feature behaviour (bands without their own
+-- forDurationSec inherit the base trigger's, and the map is rebuilt from the
+-- next tick's reading).
+ALTER TABLE "notification_rule_states" ADD COLUMN "bandMetSince" JSONB;

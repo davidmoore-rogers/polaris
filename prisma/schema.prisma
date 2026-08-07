@@ -3555,6 +3555,14 @@ model NotificationRuleState {
   // Set on fire + every band transition; drives increase(re-notify)/decrease/
   // same detection. NULL for pre-band rules / single-severity alerts.
   firingSeverity    String?
+  // Per-tier "continuously satisfied since" bookkeeping for per-band sustained
+  // durations: { [severity]: epochMs }. Each tier (base + every band) carries
+  // its own `forDurationSec`, so a tier applies only once ITS condition has
+  // held for ITS duration — one shared conditionMetSince can't express that.
+  // Rewritten only when the met-set changes (a tier entered / left), so the
+  // hot path still writes on transitions, not per tick. NULL for non-banded
+  // rules, which keep using conditionMetSince unchanged.
+  bandMetSince      Json?
   updatedAt         DateTime  @updatedAt
 
   @@unique([ruleId, assetId, dimensionKey])

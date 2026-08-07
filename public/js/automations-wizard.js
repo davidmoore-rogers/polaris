@@ -1088,6 +1088,15 @@ async function openAutomationWizard(existing) {
     wireCondDnD(panel, rootSelector, onChange, tgMeta.maxDepth || 3);
   }
 
+  // "Sustained for" is per SEVERITY TIER — the value must hold in that tier for
+  // its own duration before the alert takes that severity. Rendered identically
+  // for the base tier (moved inside the base condition group in multi mode by
+  // injectBaseSeverity) and for every added tier.
+  function durationFieldHtml(attr, mins) {
+    return '<div class="form-group aw-dur" style="margin:0.5rem 0 0">' +
+      '<label style="font-size:0.8rem">Sustained for (minutes)</label>' +
+      '<input type="number" ' + attr + ' min="0" value="' + mins + '" placeholder="0 = fire as soon as the value reaches this level"></div>';
+  }
   function step3Html() {
     var cat = triggerCategoryOf(draft.trigger);
     var typeOpts = TRIGGER_CATEGORIES.map(function (t) {
@@ -1117,7 +1126,7 @@ async function openAutomationWizard(existing) {
       var tree = triggerToTree(tr, kind);
       html += '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Add conditions and combine them with AND/OR groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move them. ' + escapeHtml(tgMeta.anyDimensionNote || "") + '</p>' +
         '<div id="aw-trig-root">' + tgGroupHtml(tree, 0, kind) + '</div>' +
-        '<div class="form-group" style="margin-top:0.5rem"><label>Sustained for (minutes)</label><input type="number" id="tf-duration-min" min="0" value="' + Math.round(((tr.forDurationSec || 0)) / 60) + '" placeholder="0 = fire immediately"></div>';
+        durationFieldHtml('id="tf-duration-min"', Math.round(((tr.forDurationSec || 0)) / 60));
       if (cat === "host") {
         html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">Polaris-host conditions aren’t tied to assets — the device filter from the previous step is ignored.</p>';
       }
@@ -1517,22 +1526,31 @@ async function openAutomationWizard(existing) {
         escSectionHtml() +
       '</div>';
 
-    // Per-severity action sections: with severity bands, each tier gets its
-    // own actions (server: band actions run when the alert ENTERS that band;
-    // an empty band falls back to the base actions). Single mode = one list.
+    // Per-severity action sections: with severity bands, each tier CAN get its
+    // own actions (server: band actions run when the alert ENTERS that band; an
+    // empty band falls back to the base actions). That's opt-in, mirroring the
+    // trigger step's "use multiple severity levels" — off (the default) means
+    // one action list that runs at every severity, which is what most
+    // automations want. Single-severity mode = one list, no checkbox.
     var bands = (bandsApplicable(draft.trigger) && draft.severityBands) || [];
-    var baseLabel = bands.length
+    var perSev = !!bands.length && bandActionsPerSeverityOn();
+    if (bands.length) {
+      html += '<div class="form-group"><label><input type="checkbox" id="aw-band-actions-multi"' + (perSev ? " checked" : "") + '> Use different actions for each severity level</label>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 1.4rem">Leave this off to run the same actions whenever the alert changes severity.</p></div>';
+    }
+    var baseLabel = perSev
       ? 'Actions at <span style="color:' + sevColor(draft.severity) + '">' + escapeHtml(draft.severity) + '</span> (base severity)'
       : "Actions when this fires";
-    html += '<div class="form-group" style="' + (bands.length ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
+    html += '<div class="form-group" style="' + (perSev ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
       '<label style="font-weight:600">' + baseLabel + '</label>' +
-      (bands.length ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These actions also run at higher severities that don’t define their own.</p>' : "") +
+      (perSev ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These actions also run at higher severities that don’t define their own.</p>'
+        : bands.length ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These run at every severity level — each time the alert climbs or eases into a new one.</p>' : "") +
       '<div id="aw-actions"></div>' +
       '<button type="button" class="btn btn-sm btn-secondary" id="aw-add-action" style="margin-top:6px">+ Add action</button>' +
     '</div>';
     bands.forEach(function (b, i) {
       var opPhrase = ((s.comparatorPhrases || {})[b.operator || (draft.trigger && draft.trigger.operator)] || "").toString();
-      html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem">' +
+      html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem' + (perSev ? "" : ";display:none") + '">' +
         '<label style="font-weight:600">Actions at <span style="color:' + sevColor(b.severity) + '">' + escapeHtml(b.severity) + '</span> <span style="font-weight:400;color:var(--color-text-tertiary)">(value ' + escapeHtml(opPhrase || "meets") + ' ' + escapeHtml(String(b.threshold != null ? b.threshold : "?")) + ')</span></label>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">' + escapeHtml((s.bandMeta && s.bandMeta.emptyBandNote) || "Leave empty to run the base actions at this severity.") + '</p>' +
         '<div class="ba-actions"></div>' +
@@ -1553,7 +1571,27 @@ async function openAutomationWizard(existing) {
       (((draft.severityBands || [])[i] || {}).actions || []).forEach(function (a) { addActionRow(bHost, a, true); });
       sec.querySelector(".ba-add").addEventListener("click", function () { addActionRow(bHost, null, true); });
     });
+    var perSevCb = panel.querySelector("#aw-band-actions-multi");
+    if (perSevCb) {
+      perSevCb.addEventListener("change", function () {
+        // Collect first so per-tier rows already typed survive the re-render
+        // (they stay on the draft while the toggle is off and are stripped only
+        // at save, so an accidental un-tick doesn't destroy them).
+        collectStep5();
+        draft.bandActionsPerSeverity = perSevCb.checked;
+        renderStep5();
+      });
+    }
     wireTokenPalette(panel);
+  }
+  /** Whether the per-severity action sections are in play. Explicit once the
+   *  operator touches the toggle; inferred from the record otherwise, so an
+   *  automation authored with per-band actions re-opens showing them. */
+  function bandActionsPerSeverityOn() {
+    if (typeof draft.bandActionsPerSeverity === "boolean") return draft.bandActionsPerSeverity;
+    return (draft.severityBands || []).some(function (b) {
+      return (b.actions && b.actions.length) || (b.escalation && b.escalation.tiers && b.escalation.tiers.length);
+    });
   }
 
   // ── Per-item escalation section (the mandatory card + every action row) ──
@@ -1711,15 +1749,23 @@ async function openAutomationWizard(existing) {
     var root = panel.querySelector("#aw-trig-root > .scg-group");
     if (!root) return;
     var header = root.querySelector(":scope > div"); // header row (holds .scg-op)
-    var btnRow = root.querySelector(":scope > div:last-child"); // +Condition/+Group row
+    var btnRow = root.querySelector(":scope > .scg-btnrow") || root.querySelector(":scope > div:last-child"); // +Condition/+Group row
+    if (btnRow) btnRow.classList.add("scg-btnrow"); // pinned: the duration field moves in below the conditions
     var existingSev = header && header.querySelector(".scg-sev-wrap");
     var existingAdd = btnRow && btnRow.querySelector(".scg-add-sev");
+    // The base tier's "Sustained for" belongs WITH the base tier once every
+    // added tier has its own — otherwise it reads as a rule-wide setting sitting
+    // between the tiers. Moved (not re-created) so its value survives the swap.
+    var durGroup = panel.querySelector("#tf-duration-min");
+    durGroup = durGroup && durGroup.closest(".aw-dur");
     if (!multi) {
       if (existingSev) existingSev.remove();
       if (existingAdd) existingAdd.remove();
+      if (durGroup && root.contains(durGroup)) panel.querySelector("#aw-trigger-fields").appendChild(durGroup);
       root.style.borderLeftColor = "";
       return;
     }
+    if (durGroup && btnRow && !root.contains(durGroup)) root.insertBefore(durGroup, btnRow);
     if (header && !existingSev) {
       var wrap = document.createElement("span");
       wrap.className = "scg-sev-wrap";
@@ -1727,6 +1773,7 @@ async function openAutomationWizard(existing) {
       wrap.innerHTML = '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' + sevSelectHtml("scg-sev", draft.severity || "warning");
       header.insertBefore(wrap, header.firstChild);
       var sel = wrap.querySelector(".scg-sev");
+      sel.value = draft.severity || "warning"; // don't rely on the markup's selected attr
       sel.addEventListener("change", function () {
         draft.severity = sel.value;
         sel.className = "scg-sev sev-select sev-" + sel.value;
@@ -1775,6 +1822,12 @@ async function openAutomationWizard(existing) {
       dimensionFilter: tr.dimensionFilter,
     };
     var panel = document.getElementById("aw-step-3");
+    // Sustained-for is PER TIER: a new tier inherits the base's current value
+    // (so adding one changes nothing until the operator edits it), an existing
+    // one shows its own, and a band saved before per-tier sustain existed shows
+    // the base value it was inheriting.
+    var baseDurMin = Math.round((((draft.trigger || {}).forDurationSec) || 0) / 60);
+    var bandDurMin = band.forDurationSec != null ? Math.round(band.forDurationSec / 60) : baseDurMin;
     var row = document.createElement("div");
     row.className = "aw-band scg-group";
     row.style.cssText = "border:1px solid var(--color-border);border-left:3px solid " + sevColor(sev0) + ";border-radius:6px;padding:0.55rem;margin:4px 0";
@@ -1791,6 +1844,7 @@ async function openAutomationWizard(existing) {
       '</div>' +
       '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
       '<div class="band-cond scg-children">' + tgLeafRowHtml(tierLeaf, kind) + '</div>' +
+      durationFieldHtml('class="band-duration"', bandDurMin) +
       '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>';
     host.appendChild(row);
     // Lock the shared-sampling fields on the tier's condition row — metric,
@@ -1803,6 +1857,7 @@ async function openAutomationWizard(existing) {
     // Per-tier accent + "only increase severity" guard: a tier can't be set at
     // or below the tier before it (or the base).
     var sevSel = row.querySelector(".band-severity");
+    sevSel.value = sev0; // don't rely on the markup's selected attr
     sevSel.addEventListener("change", function () {
       var prev = row.previousElementSibling && row.previousElementSibling.classList.contains("aw-band")
         ? sevRankOf(row.previousElementSibling.querySelector(".band-severity").value)
@@ -2233,6 +2288,8 @@ async function openAutomationWizard(existing) {
     // band DOM rows' stash, so a later step-3 re-collect (collectBands) can't
     // lose them. Sections render in draft.severityBands order, which matches
     // the #aw-bands row order (both come from the same collect).
+    var perSevCb = panel.querySelector("#aw-band-actions-multi");
+    if (perSevCb) draft.bandActionsPerSeverity = perSevCb.checked;
     var bandRows = document.querySelectorAll("#aw-bands > .aw-band");
     panel.querySelectorAll(".aw-band-actions").forEach(function (sec, i) {
       var band = (draft.severityBands || [])[i];
@@ -2260,9 +2317,14 @@ async function openAutomationWizard(existing) {
       // by collectStep5 — so a step-3 re-collect can't strip them. Band-LEVEL
       // escalation isn't offered in the builder (per-action chains are), but
       // an API-authored one round-trips through the same stash.
+      // Per-tier sustained duration — the value must hold in THIS tier for this
+      // long before the alert takes its severity (0 = as soon as it reaches it).
+      var dEl = row.querySelector(".band-duration");
+      var dMins = dEl && dEl.value !== "" ? Number(dEl.value) : 0;
       var band = {
         threshold: leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : null,
         severity: row.querySelector(".band-severity").value,
+        forDurationSec: (isNaN(dMins) || dMins < 0 ? 0 : Math.round(dMins)) * 60,
         actions: row._bandActions || [],
       };
       if (row._bandEscalation) band.escalation = row._bandEscalation;
@@ -2284,6 +2346,19 @@ async function openAutomationWizard(existing) {
     draft.bandNotify = np;
   }
   function bandsApplicable(tr) { return !!tr && (tr.type === "asset_metric" || tr.type === "host_metric"); }
+  /** The bands as saved: per-tier actions + per-tier escalation only when the
+   *  Actions step's per-severity toggle is on. The draft keeps them either way
+   *  so toggling back restores them within the session. */
+  function payloadBands() {
+    var bands = draft.severityBands || null;
+    if (!bands || !bands.length) return null;
+    if (bandActionsPerSeverityOn()) return bands;
+    return bands.map(function (b) {
+      var out = { threshold: b.threshold, severity: b.severity, forDurationSec: b.forDurationSec, actions: [] };
+      if (b.operator) out.operator = b.operator;
+      return out;
+    });
+  }
   function validateAction(a, label) {
     if (a.type === "notify") {
       if (!a.channelId) return label + ": pick a channel.";
@@ -2332,10 +2407,14 @@ async function openAutomationWizard(existing) {
     if (p) return p;
     p = validateActionList(draft.actions, "Action");
     if (p) return p;
-    for (var b = 0; b < (draft.severityBands || []).length; b++) {
-      var band = draft.severityBands[b];
-      p = validateActionList(band.actions, band.severity + " action");
-      if (p) return p;
+    // Per-tier actions are validated only while the toggle is on — off, they're
+    // stripped from the payload, so a half-typed hidden row must not block save.
+    if (bandActionsPerSeverityOn()) {
+      for (var b = 0; b < (draft.severityBands || []).length; b++) {
+        var band = draft.severityBands[b];
+        p = validateActionList(band.actions, band.severity + " action");
+        if (p) return p;
+      }
     }
     return null;
   }
@@ -2375,18 +2454,23 @@ async function openAutomationWizard(existing) {
         : "";
     };
     var actionLines = (draft.actions || []).map(function (a) { return escapeHtml(actionSummary(a) + escSuffix(a)); });
-    (draft.severityBands || []).forEach(function (b) {
-      (b.actions || []).forEach(function (a) {
-        actionLines.push('<span style="color:' + sevColor(b.severity) + '">at ' + escapeHtml(b.severity) + ':</span> ' + escapeHtml(actionSummary(a) + escSuffix(a)));
+    var perSevActions = bandActionsPerSeverityOn();
+    if (perSevActions) {
+      (draft.severityBands || []).forEach(function (b) {
+        (b.actions || []).forEach(function (a) {
+          actionLines.push('<span style="color:' + sevColor(b.severity) + '">at ' + escapeHtml(b.severity) + ':</span> ' + escapeHtml(actionSummary(a) + escSuffix(a)));
+        });
       });
-    });
+    }
     // Escalation = the alert's (rule-level) chain + every per-action chain.
     var chains = [];
     if (draft.escalation && draft.escalation.tiers && draft.escalation.tiers.length) chains.push(draft.escalation);
     (draft.actions || []).forEach(function (a) { if (a.escalation && a.escalation.tiers && a.escalation.tiers.length) chains.push(a.escalation); });
-    (draft.severityBands || []).forEach(function (b) {
-      (b.actions || []).forEach(function (a) { if (a.escalation && a.escalation.tiers && a.escalation.tiers.length) chains.push(a.escalation); });
-    });
+    if (perSevActions) {
+      (draft.severityBands || []).forEach(function (b) {
+        (b.actions || []).forEach(function (a) { if (a.escalation && a.escalation.tiers && a.escalation.tiers.length) chains.push(a.escalation); });
+      });
+    }
     var tierTotal = chains.reduce(function (n, c) { return n + c.tiers.length; }, 0);
     var escLine = chains.length ? chains.length + " chain(s), " + tierTotal + " tier(s)" : "off";
     var msgRow = draft.messageTemplate
@@ -2395,10 +2479,18 @@ async function openAutomationWizard(existing) {
     var bandsRow = "";
     if (bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length) {
       var op = (draft.trigger && draft.trigger.operator) || ">=";
-      var bandLine = draft.severityBands.map(function (b) { return escapeHtml(b.severity + " " + (b.operator || op) + " " + b.threshold); }).join(", ");
+      var baseDur = (draft.trigger && draft.trigger.forDurationSec) || 0;
+      // Each tier states its own sustain — that's the whole point of per-band
+      // durations, so the review line has to show them rather than one number.
+      var sustainOf = function (sec) { return sec > 0 ? " for " + humanDuration(sec) : ""; };
+      var bandLine = [escapeHtml(draft.severity + " " + op + " " + ((draft.trigger || {}).threshold != null ? draft.trigger.threshold : "?") + sustainOf(baseDur))]
+        .concat(draft.severityBands.map(function (b) {
+          return escapeHtml(b.severity + " " + (b.operator || op) + " " + b.threshold + sustainOf(b.forDurationSec != null ? b.forDurationSec : baseDur));
+        })).join(", ");
       var np = draft.bandNotify || {};
       var notifyBits = [np.onIncrease !== false ? "increase" : null, np.onDecrease ? "decrease" : null, np.onResolved !== false ? "resolved" : null].filter(Boolean).join(" + ");
-      bandsRow = '<dt>Severity bands</dt><dd>' + bandLine + ' <span style="color:var(--color-text-tertiary)">— notify on ' + escapeHtml(notifyBits || "none") + '</span></dd>';
+      bandsRow = '<dt>Severity bands</dt><dd>' + bandLine + ' <span style="color:var(--color-text-tertiary)">— notify on ' + escapeHtml(notifyBits || "none") +
+        '; ' + (perSevActions ? "per-severity actions" : "same actions at every severity") + '</span></dd>';
     }
     box.innerHTML = '<dl class="review-grid">' +
       '<dt>Name</dt><dd>' + escapeHtml(draft.name || "…") + ' <span class="badge badge-level-' + (draft.severity || "warning") + '">' + escapeHtml((draft.severity || "warning").toUpperCase()) + '</span>' + (draft.enabled === false ? ' <span class="badge">disabled</span>' : "") + '</dd>' +
@@ -2520,7 +2612,10 @@ async function openAutomationWizard(existing) {
       channels: ["in_app"],
       emailComposition: null, // per-action composition in v2; rule-level field retired by the wizard
       escalation: draft.escalation,
-      severityBands: bandsApplicable(draft.trigger) ? (draft.severityBands || null) : null,
+      // Per-tier actions ride the bands only when the Actions step's
+      // "different actions for each severity level" toggle is on; off, every
+      // band saves bare and the server runs the base actions at every severity.
+      severityBands: bandsApplicable(draft.trigger) ? payloadBands() : null,
       bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
     };
     this.disabled = true;
@@ -2586,5 +2681,10 @@ function _awDraftFromRule(r) {
     escalation: esc ? JSON.parse(JSON.stringify(esc)) : null,
     severityBands: Array.isArray(r.severityBands) && r.severityBands.length ? JSON.parse(JSON.stringify(r.severityBands)) : null,
     bandNotify: r.bandNotify ? JSON.parse(JSON.stringify(r.bandNotify)) : null,
+    // Per-severity actions are opt-in on the Actions step; a stored rule opts in
+    // iff any band actually carries its own actions/escalation.
+    bandActionsPerSeverity: (Array.isArray(r.severityBands) ? r.severityBands : []).some(function (b) {
+      return (b && b.actions && b.actions.length) || (b && b.escalation && b.escalation.tiers && b.escalation.tiers.length);
+    }),
   };
 }
