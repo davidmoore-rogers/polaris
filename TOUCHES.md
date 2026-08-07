@@ -2679,6 +2679,64 @@ Listed alphabetically.
 - Test all SNMP v3 security-level combos (noAuthNoPriv, authNoPriv, authPriv); validate protocol enums.
 - Add a new per-stream credential slot: add it to `CREDENTIAL_STREAMS` so usage + the delete guard cover it (and to the schema on both Asset and MonitorClassOverride). Tests live in tests/unit/credentialUsage.test.ts.
 - Verify REST API baseUrl normalization (trim, remove trailing slash, require http/https scheme).
+- `SshConfig.publicKey` is NOT a secret and must stay out of `SECRET_FIELDS_BY_TYPE.ssh` — see services/windowsSshOnboardingService.ts.
+
+---
+
+## services/sshOnboardingScript.ts
+
+**What it owns:** Pure generation of the two Windows SSH onboarding PowerShell scripts (remediation + detection) an operator pushes to their fleet before Polaris can install the agent over SSH, plus the strict input validators that guard them. No I/O.
+
+**Public API:** `SshOnboardingAccountMode`, `WindowsOnboardingScriptOptions`, `buildWindowsOnboardingScript`, `buildWindowsOnboardingDetectionScript`, `assertValidPublicKey`, `assertValidUsername`, `assertValidServerIp`.
+
+**Cross-service deps:** `utils/errors` (AppError), `utils/cidr` (isValidIpv4 / isValidCidr).
+
+**Used by:**
+- src/services/windowsSshOnboardingService.ts — renders both scripts for `GET /server-settings/agents/windows-ssh/script`, and reuses the validators at config-save time so a bad value is rejected on save rather than on download.
+
+**Invariants:**
+- **Operator input is REJECTED, never escaped.** `username` / `polarisServerIp` / `publicKey` are interpolated into PowerShell an admin then runs FLEET-WIDE as SYSTEM — that is effectively RCE on every Windows endpoint, so the validators are allowlists (`/^[A-Za-z0-9._-]{1,64}$/`, optionally `DOMAIN\user`; a key-type + base64 + conservative-comment regex; an IPv4 address or CIDR). `psLiteral` doubling of `'` is belt-and-braces behind that, not the primary defense.
+- The key-presence predicate (`POLARIS_KEY_PRESENT_FN`) is emitted into BOTH scripts from ONE constant. Detection must never drift from what remediation writes, or the pair oscillates.
+- That predicate matches on the key BODY (algorithm + base64) and ignores the trailing comment, so a comment change does not append a duplicate line.
+- The emitted script APPENDS to `administrators_authorized_keys` and never overwrites it — other keys in that file belong to someone else.
+- ACLs and group lookups use well-known SIDs (`S-1-5-32-544`, `S-1-5-18`), never the localized names "Administrators"/"SYSTEM".
+- `accountMode:"create"` + a `DOMAIN\user` name is a hard error: `New-LocalUser` cannot do it, and emitting a script that fails on every endpoint is worse than refusing at authoring time.
+- An unsupported Windows build exits **0** (with an `unsupported:` marker) from both scripts. Non-zero would loop a detection/remediation pair forever against a device remediation cannot fix.
+- Emitted PowerShell must stay idempotent — it runs on every boot under GPO and every cycle under a Remediation.
+
+**When changing this:**
+- Re-run `tests/unit/sshOnboardingScript.test.ts` (39 cases; injection attempts, both account modes, firewall on/off, predicate sharing).
+- Validate any change to the emitted script with the real parser, not by eye: `[System.Management.Automation.Language.Parser]::ParseFile(...)`. TS template literals and PowerShell both use `$`/backtick, so escaping mistakes are easy and silent.
+- Loosening a validator regex is a security change — re-check `psLiteral` still holds.
+- Avoid `${` in emitted PowerShell (TS template-literal interpolation) and escape any literal backtick.
+
+---
+
+## services/windowsSshOnboardingService.ts
+
+**What it owns:** The "Windows SSH Deployment" workflow on Integrations → Polaris Agent — generating/rotating the ed25519 deployment keypair, owning the Polaris-managed `ssh` Credential that stores it, and the non-secret card config in the `windowsSshOnboarding` Setting.
+
+**Public API:** `WindowsSshOnboardingConfig`, `WindowsSshOnboardingState`, `SaveOnboardingConfigInput`, `OnboardingScriptKind`, `OnboardingScriptResult`, `MANAGED_CREDENTIAL_NAME`, `getOnboardingState`, `saveOnboardingConfig`, `generateKeypair`, `getOnboardingScript`, `sshPublicKeyFingerprint`, `_invalidateCache`.
+
+**Cross-service deps:** `credentialService` (createCredential / getCredential / validateConfig), `sshOnboardingScript`, `settingsStore`, `eventLogService`, `db` (prisma), `ssh2` utils.
+
+**Used by:**
+- src/api/routes/serverSettings.ts — `GET|PUT /server-settings/agents/windows-ssh`, `POST /agents/windows-ssh/generate`, `GET /agents/windows-ssh/script`
+- public/js/agent-ssh-onboarding.js — the card, via `api.serverSettings.agentWindowsSsh*`
+
+**Invariants:**
+- **The private key is never returned by any read path.** Only the public half + `SHA256:` fingerprint leave the service (the Web Push VAPID posture). There is deliberately NO escrow: losing `POLARIS_SECRET_KEY` means regenerate + re-run the script, which is why the generated script is idempotent.
+- `SshConfig.publicKey` must stay OUT of `SECRET_FIELDS_BY_TYPE.ssh`. If it were masked, the onboarding script could not be re-rendered without rotating the key and re-touching every endpoint.
+- Rotation **replaces** the credential config via `validateConfig` + a direct `prisma.credential.update`, NOT `updateCredential`. `mergeConfigPreservingSecrets` reads an empty string for a secret field as "keep the stored value" (that is what lets the edit modal round-trip a mask), so it cannot clear a stale `password` — and `remoteExec` silently prefers `privateKey`, making a leftover password dead config that still reads as a live secret in the UI.
+- The key must be generated BEFORE `createCredential`: `validateSshConfig` requires a password or a private key, so an empty `ssh` credential cannot be created and keyed afterwards.
+- `credential.ssh_keypair_generated` is stamped at **warning** level — rotating locks Polaris out of every endpoint until the script re-runs fleet-wide.
+- A `credentialId` pointing at a row an admin deleted reads as "no keypair yet" (offer Generate), never a 500.
+- Config is validated with the SAME validators the script generator uses, so bad input fails at save time rather than at download time.
+
+**When changing this:**
+- `POST /agents/windows-ssh/generate` must keep BOTH gates: `serverSettingsSystem:fullwrite` AND `credentials:write`. It mints a fleet-wide admin credential; the second gate is not redundant.
+- Import ssh2's `utils` off the DEFAULT export. It is CommonJS and cjs-module-lexer surfaces `Client` but not `utils`, so a named import throws at module load under Node's ESM loader even though Vitest interops it fine.
+- Tests: `tests/unit/windowsSshOnboarding.test.ts` (in-memory prisma double so credentialService's real validation/masking runs).
 
 ---
 

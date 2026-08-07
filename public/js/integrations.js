@@ -404,6 +404,12 @@ document.addEventListener("DOMContentLoaded", function () {
         if (window.PolarisAgentBuild && window.PolarisAgentBuild.init) {
           window.PolarisAgentBuild.init();
         }
+        // Windows SSH deployment card sits below the build card — build the
+        // binary first, then prepare hosts to receive it. Hides itself when
+        // the caller lacks serverSettingsSystem.
+        if (window.PolarisAgentSshOnboarding && window.PolarisAgentSshOnboarding.init) {
+          window.PolarisAgentSshOnboarding.init();
+        }
       }
     });
   });

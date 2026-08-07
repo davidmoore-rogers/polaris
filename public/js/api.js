@@ -822,6 +822,14 @@ const api = {
     agentCertPinsSummary:     () => request("GET",    "/server-settings/agents/cert-pins/summary"),
     agentCertPinBulkAdd:      (pin) => request("POST", "/server-settings/agents/cert-pins/bulk-add", { pin }),
     agentCertPinBulkRemove:   (pin) => request("POST", "/server-settings/agents/cert-pins/bulk-remove", { pin }),
+    // Windows SSH deployment card (Integrations → Polaris Agent). Routes live
+    // under /server-settings/agents/* like the agent-build card's, even though
+    // the UI renders on the Integrations page.
+    agentWindowsSshGet:       () => request("GET",  "/server-settings/agents/windows-ssh"),
+    agentWindowsSshSave:      (cfg) => request("PUT", "/server-settings/agents/windows-ssh", cfg),
+    agentWindowsSshGenerate:  () => request("POST", "/server-settings/agents/windows-ssh/generate"),
+    agentWindowsSshScript:    (kind) =>
+      request("GET", "/server-settings/agents/windows-ssh/script?kind=" + encodeURIComponent(kind || "remediation")),
     // Agent code signing (Azure Trusted Signing) — masked secret config + dry-run test.
     agentSigningGet:          ()    => request("GET",  "/server-settings/agents/signing"),
     agentSigningSet:          (cfg) => request("PUT",  "/server-settings/agents/signing", cfg),

@@ -494,6 +494,26 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 
 ---
 
+## Server-generated keypair (private half never leaves the server)
+
+**What it is:** Polaris mints an asymmetric keypair itself, stores the private half sealed, and hands out only the public half. Better than asking the operator to generate one and paste it in: the private key never exists in a browser, a clipboard, a ticket, or a file on someone's laptop.
+
+**Canonical implementations:** [src/services/windowsSshOnboardingService.ts](src/services/windowsSshOnboardingService.ts) `generateKeypair` (SSH deployment key → `Credential.config`) and [src/services/notificationChannelService.ts](src/services/notificationChannelService.ts) `generateVapidKeys` (Web Push VAPID → `NotificationChannel.config`). Frontend: the confirm-gated Regenerate button — `ch-gen-vapid` in [public/js/automations.js](public/js/automations.js), `wssh-generate` in [public/js/agent-ssh-onboarding.js](public/js/agent-ssh-onboarding.js). Tests: [tests/unit/windowsSshOnboarding.test.ts](tests/unit/windowsSshOnboarding.test.ts).
+
+**Key conventions:**
+- **No read path returns the private half — ever.** Return the public key plus a `<field>Set: true` marker or a fingerprint. Resist a "show it once at generation" affordance: it re-introduces the browser/clipboard/screenshot exposure the pattern exists to remove, in exchange for an escrow copy nobody reliably keeps.
+- **Say the recovery story out loud, in the UI.** There is no escrow, so losing the sealing key (or restoring a backup onto a host with a different `POLARIS_SECRET_KEY`) means regenerate. That is acceptable only if regeneration is cheap — which is why the artifact the public half feeds (an onboarding script, a subscription registration) must be **idempotent and re-runnable**.
+- **The public half is NOT a secret — keep it out of the masking list.** Masking it means you cannot re-render whatever consumes it without rotating the key, which for a fleet-wide key means re-touching every endpoint. (`SshConfig.publicKey` is deliberately absent from `SECRET_FIELDS_BY_TYPE.ssh`.)
+- **Generate BEFORE creating the row when validation demands the secret.** `validateSshConfig` requires a password or a private key, so there is no "create empty, then key it" path.
+- **Rotation replaces the config; it cannot merge.** `mergeConfigPreservingSecrets` treats an empty string for a secret field as "keep the stored value" (that is what lets an edit modal round-trip a mask), so a merge can never CLEAR a now-stale sibling secret. Call `validateConfig` explicitly and write the whole config.
+- **Stamp rotation at `warning` level.** Rotating invalidates every peer that trusts the old key until they are re-provisioned; that belongs in the audit log at a level that stands out.
+- **Confirm-gate the Regenerate button** and spell out the blast radius in the confirm text, not just a hint below it.
+- Verify the generated key round-trips through the SAME parser the consuming path uses (`sshUtils.parseKey` here) and fail loudly at generation rather than shipping a credential that silently never authenticates.
+
+**When adding a new instance:** pick the library's own generator over shelling out (`ssh2`'s `utils.generateKeyPairSync` already emits the OpenSSH format `ssh2.connect` accepts — no conversion, no `ssh-keygen` dependency). Watch CJS interop: ssh2 is CommonJS and cjs-module-lexer surfaces `Client` but **not** `utils`, so `import { utils } from "ssh2"` throws at module load under Node's real ESM loader while passing cleanly under Vitest — import off the default export.
+
+---
+
 ## Prometheus metric instrumentation
 
 **What it is:** Adding a new metric (counter / gauge / histogram) or instrumenting a new code path with an existing one. Single Registry singleton + helper functions per metric — callers never import metric objects directly. Default Node.js metrics from `prom-client.collectDefaultMetrics` are registered alongside Polaris-specific ones, all under one `/metrics` endpoint.

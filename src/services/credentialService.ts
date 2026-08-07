@@ -53,10 +53,22 @@ export interface WinRmConfig {
   useHttps?: boolean;
 }
 
+/**
+ * SSH credential. `privateKey` wins over `password` at every connect site
+ * (remoteExec.withSshClient, monitoringService.probeSsh).
+ *
+ * `publicKey` is the `authorized_keys` one-liner for a Polaris-GENERATED
+ * keypair (windowsSshOnboardingService). It is deliberately NOT a secret:
+ * it must survive `stripSecrets` so the Windows onboarding script can be
+ * re-rendered at any time from the stored credential. Regenerating the key
+ * to recover a public half nobody kept would mean re-touching every endpoint
+ * that trusts the old one.
+ */
 export interface SshConfig {
   username: string;
   password?: string;
   privateKey?: string;
+  publicKey?: string;
   port?: number;
 }
 

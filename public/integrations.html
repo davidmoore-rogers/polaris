@@ -56,6 +56,20 @@
             <p class="empty-state" style="padding:1rem 0">Loading...</p>
           </div>
         </div>
+        <div class="settings-card" id="agent-ssh-onboarding-card">
+          <h4>Windows SSH Deployment</h4>
+          <p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">
+            Installing the agent on Windows over SSH instead of WinRM takes a reusable administrator
+            password off the wire. Polaris generates the deployment keypair, keeps the private half
+            sealed, and produces the script that authorizes the public half on your endpoints
+            &mdash; getting the <code>administrators_authorized_keys</code> path and its ACL right,
+            both of which fail silently when hand-rolled. Deploy the script with Intune, GPO,
+            Configuration Manager, Arc, or an RMM tool.
+          </p>
+          <div id="agent-ssh-onboarding-body">
+            <p class="empty-state" style="padding:1rem 0">Loading...</p>
+          </div>
+        </div>
       </div>
     </main>
   </div>
@@ -63,6 +77,7 @@
   <script src="/js/api.js"></script>
   <script src="/js/app.js"></script>
   <script src="/js/agent-build.js"></script>
+  <script src="/js/agent-ssh-onboarding.js"></script>
   <!-- Discovery rules list + its wizard render inline on the Polaris Agent tab
        (initialized lazily by integrations.js alongside the agent-build card). -->
   <script src="/js/appmap-discovery.js"></script>

@@ -1805,6 +1805,67 @@ router.delete("/branding/logo", maintenanceLimiter, requirePermission("serverSet
   }
 });
 
+// ─── Windows SSH deployment (Integrations → Polaris Agent card) ──────
+//
+// Generates the SSH keypair Polaris uses to install the agent on Windows over
+// OpenSSH, owns the Credential that holds it, and emits the onboarding scripts
+// that authorize the public half across the fleet.
+//
+// These live under /server-settings/agents/* — beside the agent-build routes —
+// even though the card renders on the Integrations page, because that is
+// already the established split for this tab (the agent-build card does
+// exactly the same thing). Client wrappers are api.serverSettings.agentWindowsSsh*.
+
+const WindowsSshConfigSchema = z.object({
+  accountMode:     z.enum(["existing", "create"]).optional(),
+  username:        z.string().max(129).optional(),
+  polarisServerIp: z.string().max(64).optional(),
+});
+
+router.get("/agents/windows-ssh", requirePermission("serverSettingsSystem", "read"), async (_req, res, next) => {
+  try {
+    const { getOnboardingState } = await import("../../services/windowsSshOnboardingService.js");
+    res.json(await getOnboardingState());
+  } catch (err) { next(err); }
+});
+
+router.put("/agents/windows-ssh", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
+  try {
+    const body = WindowsSshConfigSchema.parse(req.body ?? {});
+    const { saveOnboardingConfig } = await import("../../services/windowsSshOnboardingService.js");
+    res.json(await saveOnboardingConfig(body, requestActor(req) || "unknown"));
+  } catch (err) { next(err); }
+});
+
+// Chained gate. serverSettingsSystem:fullwrite matches its sibling agent
+// routes, but this one CREATES AND MUTATES A CREDENTIAL, so it also demands
+// credentials:write — otherwise a custom role with system settings but no
+// credential access could mint a fleet-wide admin key. Same chaining shape as
+// PUT /application-map/discovery (applicationMap:write AND assets:write).
+router.post(
+  "/agents/windows-ssh/generate",
+  requirePermission("serverSettingsSystem", "fullwrite"),
+  requirePermission("credentials", "write"),
+  async (req, res, next) => {
+    try {
+      const { generateKeypair } = await import("../../services/windowsSshOnboardingService.js");
+      res.json(await generateKeypair(requestActor(req) || "unknown"));
+    } catch (err) { next(err); }
+  },
+);
+
+// Returns the script as JSON so the card can preview it inline; the browser
+// turns it into a .ps1 download client-side. 400s (not 404s) when no keypair
+// exists yet — the fix is an operator action on this same card, not a missing
+// resource.
+router.get("/agents/windows-ssh/script", requirePermission("serverSettingsSystem", "read"), async (req, res, next) => {
+  try {
+    const kind = req.query.kind === "detection" ? "detection" : "remediation";
+    const { getOnboardingScript } = await import("../../services/windowsSshOnboardingService.js");
+    res.json(await getOnboardingScript(kind));
+  } catch (err) { next(err); }
+});
+
 // ─── Polaris Agent build routes ──────────────────────────────────────
 //
 // Drives the "Build agent binaries" card on the Maintenance tab. Phase B
