@@ -45,6 +45,8 @@ const ListQuerySchema = z.object({
   // when omitted, matching pre-this-change behavior.
   action: z.string().optional(),
   actionOp: z.string().optional(),
+  resourceName: z.string().optional(),
+  resourceNameOp: z.string().optional(),
   actor: z.string().optional(),
   actorOp: z.string().optional(),
   message: z.string().optional(),
@@ -69,13 +71,15 @@ const ListQuerySchema = z.object({
  * non-nullable field).
  */
 function buildTextFilter(
-  field: "action" | "actor" | "message",
+  field: "action" | "actor" | "message" | "resourceName",
   value: string | undefined,
   op: string | undefined,
 ): Record<string, unknown> | undefined {
-  // `actor` is the one nullable Event text column; action/message compare
-  // against "" only. Shared builder: utils/prismaTextFilter.
-  return buildPrismaTextFilter(field, value, op, { nullable: field === "actor" });
+  // `actor` and `resourceName` are the nullable Event text columns;
+  // action/message compare against "" only. Shared builder:
+  // utils/prismaTextFilter.
+  const nullable = field === "actor" || field === "resourceName";
+  return buildPrismaTextFilter(field, value, op, { nullable });
 }
 
 /** CSV → string[]; empty entries dropped; returns undefined for no value. */
@@ -86,7 +90,8 @@ const router = Router();
 // GET /api/v1/events — list events (newest first by default, paginated).
 //
 // Supports multi-value enum filters on `level` and `resourceType` (CSV),
-// operator-aware text filters on `action` / `actor` / `message` (each takes
+// operator-aware text filters on `action` / `resourceName` / `actor` /
+// `message` (each takes
 // an optional `<field>Op` of contains | not_contains | empty | is_not_empty,
 // defaulting to contains), and a sort whitelist (timestamp | level | action |
 // resourceType | resourceName | actor | message) honored via `sortBy` +
@@ -138,6 +143,7 @@ router.get("/", requirePermission("events", "read"), async (req, res, next) => {
     // backend schema didn't define it) — adding it here is a drive-by fix.
     const textFilters = [
       buildTextFilter("action", q.action, q.actionOp),
+      buildTextFilter("resourceName", q.resourceName, q.resourceNameOp),
       buildTextFilter("actor", q.actor, q.actorOp),
       buildTextFilter("message", q.message, q.messageOp),
     ].filter((f): f is Record<string, unknown> => f !== undefined);

@@ -118,6 +118,7 @@ var _eventsSF = null;
       }
     }
     pushText("action", filters.action);
+    pushText("resourceName", filters.resourceName);
     pushText("actor", filters.actor);
     pushText("message", filters.message);
 
@@ -167,7 +168,7 @@ var _eventsSF = null;
       }
     } catch (err) {
       document.getElementById("events-tbody").innerHTML =
-        '<tr><td colspan="7" class="empty-state">Failed to load events</td></tr>';
+        '<tr><td colspan="8" class="empty-state">Failed to load events</td></tr>';
     }
   }
 
@@ -199,7 +200,7 @@ var _eventsSF = null;
   function renderTable(events) {
     var tbody = document.getElementById("events-tbody");
     if (!events.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No events found</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No events found</td></tr>';
       return;
     }
 
@@ -210,8 +211,10 @@ var _eventsSF = null;
       var levelClass = "badge-level-" + (ev.level || "info");
       var levelLabel = (ev.level || "info").toUpperCase();
 
+      // Resource type and resource name are separate columns so each can be
+      // filtered on its own (type = multi-select, name = text contains).
       var resourceLabel = ev.resourceType || "-";
-      var resourceName = ev.resourceName ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">(' + escapeHtml(ev.resourceName) + ')</span>' : "";
+      var resourceName = ev.resourceName || "-";
 
       var detailBtn = ev.details && ev.details.changes
         ? '<button class="btn btn-secondary btn-sm btn-event-detail" data-event-idx="' + idx + '" style="padding:2px 8px;font-size:0.75rem">Detail</button>'
@@ -221,7 +224,8 @@ var _eventsSF = null;
         '<td style="font-family:var(--font-mono);font-size:0.82rem;white-space:nowrap">' + escapeHtml(timeStr) + '</td>' +
         '<td><span class="badge ' + levelClass + '">' + levelLabel + '</span></td>' +
         '<td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ev.action || "") + '</td>' +
-        '<td>' + escapeHtml(resourceLabel) + resourceName + '</td>' +
+        '<td>' + escapeHtml(resourceLabel) + '</td>' +
+        '<td class="cell-wrap">' + escapeHtml(resourceName) + '</td>' +
         '<td class="cell-wrap">' + escapeHtml(ev.message || "") + '</td>' +
         '<td>' + escapeHtml(ev.actor || "-") + '</td>' +
         '<td>' + detailBtn + '</td>' +
@@ -1447,6 +1451,7 @@ function _getEventFilters() {
     }
   }
   pushText("action", filters.action);
+  pushText("resourceName", filters.resourceName);
   pushText("actor", filters.actor);
   pushText("message", filters.message);
   if (filters.timestamp && filters.timestamp.type === "date") {
