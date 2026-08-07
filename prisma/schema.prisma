@@ -2327,9 +2327,68 @@ model User {
 
   dashboard         UserDashboard?
   pushSubscriptions PushSubscription[]
+  savedTableFilters SavedTableFilter[]
+  tableTabs         UserTableTabs[]
 
   @@index([roleId])
   @@map("users")
+}
+
+// Per-user list-page TABS — the operator's own set of open views on one table
+// (Assets page tab strip). One row per (user, scope); absent row = the default
+// single "All assets" tab, which is materialized client-side and only persisted
+// once the operator actually changes something.
+//
+// Strictly per-user (no sharing, no admin override) and UI-preference only, so
+// this is the UserDashboard pattern, not the SavedTableFilter one: no Event
+// audit, cascade-delete with the user. The DURABLE, shareable artifact is a
+// SavedTableFilter; a tab is a working view, and a tab opened FROM a preset
+// keeps only a reference (savedFilterId/Name) for its label + tooltip — editing
+// the tab never writes back to the preset, which may belong to someone else.
+model UserTableTabs {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scope     String // which table ("assets"); same vocabulary as SavedTableFilter.scope
+  tabs      Json // { version: 1, tabs: [{ id, name, state, savedFilterId?, savedFilterName? }], activeId }
+  updatedAt DateTime @updatedAt
+
+  @@id([userId, scope])
+  @@map("user_table_tabs")
+}
+
+// A named, server-persisted snapshot of one list page's table filter + sort
+// state (Assets page → Filters ▾ → Save current filters). Server-side rather
+// than localStorage precisely because these are shareable: a `public` row is
+// offered to every user who can read the scope, a `private` one only to its
+// owner.
+//
+// `scope` is the table the preset belongs to ("assets" today) and maps to the
+// RBAC function key that gates it — see SAVED_FILTER_SCOPES in
+// services/savedFilterService.ts. `state` is the TableSF prefs shape
+// ({ sfFilters, sortKey, sortDir } — public/js/table-sf.js), validated at the
+// route layer; column widths/visibility deliberately stay per-browser in
+// localStorage since they describe the operator's screen, not the query.
+//
+// ownerId is SetNull rather than Cascade so a shared preset outlives the
+// account that published it (a deleted user's private rows become
+// unreachable — they match no viewer — and are dropped alongside the user by
+// the users DELETE handler). ownerName is a display snapshot for the same
+// reason.
+model SavedTableFilter {
+  id         String   @id @default(uuid())
+  scope      String // which table the preset applies to ("assets")
+  name       String
+  ownerId    String?
+  owner      User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  ownerName  String // username snapshot; survives owner deletion
+  visibility String   @default("private") // "private" | "public"
+  state      Json // { sfFilters, sortKey, sortDir }
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([scope, ownerId, name])
+  @@index([scope, visibility])
+  @@map("saved_table_filters")
 }
 
 // Per-user dashboard layout. One row per user; absent row = "empty

@@ -16,6 +16,12 @@
       <div class="page-header">
         <h2>Assets</h2>
         <div class="page-header-actions">
+          <!-- Saved filter presets (assets-filters.js). The menu body is
+               rendered from the server list on every open. -->
+          <div class="btn-dropdown-wrap">
+            <button class="btn btn-secondary" id="btn-saved-filters" title="Save, load and manage table filter presets">Filters &#9662;</button>
+            <div class="btn-dropdown-menu saved-filters-menu" id="saved-filters-menu"></div>
+          </div>
           <div class="btn-dropdown-wrap">
             <button class="btn btn-secondary" id="btn-import-export">Import / Export &#9662;</button>
             <div class="btn-dropdown-menu" id="import-export-menu">
@@ -40,6 +46,14 @@
           <button class="btn btn-secondary" id="btn-monitoring-settings" data-admin-only title="Asset lifecycle settings + manual monitoring tier + class overrides"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="vertical-align:middle;margin-right:4px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>Settings</button>
           <button class="btn btn-primary" id="btn-add-asset" data-manage-assets>+ Add Asset</button>
         </div>
+      </div>
+
+      <!-- Per-user view tabs (assets-tabs.js). Each tab holds its own filter +
+           sort state; the set is persisted per user at /me/table-tabs. Rendered
+           client-side — the strip is empty until init() resolves. -->
+      <div class="table-tabs" id="assets-tabs">
+        <div class="table-tabs-list" id="assets-tabs-list" role="tablist" aria-label="Asset views"></div>
+        <button type="button" class="table-tab-add" id="assets-tab-add" title="New tab" aria-label="New tab">+</button>
       </div>
 
       <!-- Always-visible selection bar: idle (neutral border) until rows are
@@ -124,7 +138,11 @@
   <script src="/js/table-sf.js"></script>
   <script src="/js/favorites.js"></script>
   <script src="/js/integrations.js"></script>
+  <!-- assets-tabs.js before assets.js: the latter awaits PolarisAssetTabs.init()
+       inside its DOMContentLoaded handler, so the global must already exist. -->
+  <script src="/js/assets-tabs.js"></script>
   <script src="/js/assets.js"></script>
+  <script src="/js/assets-filters.js"></script>
   <script src="/js/assets-compare.js"></script>
   <script src="/js/assets-maintenance.js"></script>
 </body>

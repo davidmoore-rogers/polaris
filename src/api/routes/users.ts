@@ -356,6 +356,11 @@ router.delete("/:id", requirePermission("users", "write"), async (req, res, next
       }
     }
 
+    // Saved table filters are ownerId-SetNull so this user's PUBLIC presets
+    // survive them (other operators are using those). Their private ones would
+    // be orphaned rows nobody can ever see, so drop those first.
+    await prisma.savedTableFilter.deleteMany({ where: { ownerId: id, visibility: "private" } });
+
     await prisma.user.delete({ where: { id } });
     logEvent({
       action: "user.deleted",

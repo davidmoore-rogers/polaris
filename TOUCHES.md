@@ -1761,6 +1761,63 @@ Listed alphabetically.
 
 ---
 
+## services/tableTabsService.ts
+
+**What it owns:** Per-user list-page tabs — the `UserTableTabs` table (one row per `(user, scope)`, holding the whole strip: `{version, tabs[], activeId}`). The operator's private workspace of open views on a table; the shareable artifact is a `SavedTableFilter`.
+
+**Public API:** MAX_TABS, MAX_TAB_NAME_LEN, MAX_TAB_ID_LEN, TableTab, TableTabsLayout, EMPTY_LAYOUT, sanitizeTabs, getTabsForUser, saveTabsForUser.
+
+**Cross-service deps:** `prisma.userTableTabs`, `savedFilterService.sanitizeFilterState` (per-tab state validation).
+
+**Used by:**
+- `src/api/routes/tableTabs.ts` — `GET|PUT /me/table-tabs?scope=…`, gated `read` on the scope's key via `middleware/scopeAccess.ts`.
+- `public/js/assets-tabs.js` — the only frontend consumer, via `api.tableTabs.*`.
+
+**Invariants:**
+- Whole-blob replace per (user, scope): the client owns tab order + which tab is active. No merge, no partial update.
+- Per-tab `state` MUST go through `savedFilterService.sanitizeFilterState` — a tab must never be a way to store a filter shape a preset couldn't.
+- A stale `activeId` is REPAIRED to the first tab, never rejected: the operator may have closed that tab in another window, and 400-ing would throw away the whole layout over a race.
+- Cascades with the user (nothing here is shared) — the opposite of `SavedTableFilter.ownerId`'s SetNull, and deliberately so.
+- `savedFilterId` on a tab is a REFERENCE, not a foreign key: it may dangle (preset deleted, or it was someone else's private one) and is never resolved server-side, because it only labels the tab.
+- Read-level gate on both verbs. Tabs are a view of data the caller can already see, so a readonly operator gets them.
+
+**When changing this:**
+- Adding a per-tab field: extend `TableTab` + `sanitizeTabs` + the route's Zod envelope + the client's serialize/restore in `assets-tabs.js` — all four, or the field silently vanishes on the next save.
+- Adding tabs to another list page: the scope must already exist in `SAVED_FILTER_SCOPES` (see [services/savedFilterService.ts](#servicessavedfilterservicets)); the strip itself is page-level code.
+- Tests: `tests/unit/tableTabsService.test.ts` (envelope validation), `tests/integration/tableTabs.test.ts` (per-user isolation + readonly access + cascade), `tests/unit/assetsTabsDom.test.ts` (the strip).
+
+---
+
+## services/savedFilterService.ts
+
+**What it owns:** Saved table-filter presets — the `SavedTableFilter` table (one row per named preset: `scope` + `name` + owner + `visibility` + the `state` blob). The server-side half of "save the filters I use on this table"; unlike the per-browser `polaris-prefs-assets-<user>` localStorage blob (which holds the LIVE filter state), a preset is named, durable, and optionally shared with everyone.
+
+**Public API:** SAVED_FILTER_SCOPES, MAX_NAME_LEN, MAX_FILTER_KEYS, MAX_FILTER_VALUES, MAX_VALUE_LEN, MAX_PRESETS_PER_USER, SavedFilterVisibility, SavedFilterState, SavedFilterDto, isValidScope, functionKeyForScope, normalizeName, sanitizeFilterState, listSavedFilters, createSavedFilter, updateSavedFilter, deleteSavedFilter, getSavedFilter.
+
+**Cross-service deps:** `prisma.savedTableFilter`, `eventLogService.logEvent`.
+
+**Used by:**
+- `src/api/routes/savedFilters.ts` — the whole `/api/v1/saved-filters` surface. The route resolves the gate PER REQUEST (`functionKeyForScope(scope)` + `ensureRoleSnapshot` + `hasPermission`) because the key depends on the payload, then enforces ownership on PUT/DELETE.
+- `src/api/routes/users.ts` — `DELETE /users/:id` deletes the doomed user's PRIVATE presets before the user row (their public ones survive with `ownerId` NULL).
+- `public/js/assets-filters.js` — the only frontend consumer today (Assets header → Filters ▾), via `api.savedFilters.*` in `public/js/api.js`.
+- `public/js/table-sf.js` — `TableSF.prototype.getPrefs` produces the stored `state`; `applyState` consumes it (wholesale replace, unlike `setPrefs`'s merge).
+
+**Invariants:**
+- **The stored `state` is untrusted input replayed into other operators' browsers.** Every write goes through `sanitizeFilterState`, which accepts only the shapes `table-sf.js` emits and bounds size (60 columns × 200 values × 300 chars). Widening what the table can filter by means widening this in lockstep, or presets silently 400.
+- `scope` must be in `SAVED_FILTER_SCOPES`; each maps to an EXISTING function key. This is the whole authorization model — there is no `savedFilters` RBAC key, so a new scope inherits its page's gate for free.
+- Level split: read = list + own/private writes; `write` = publish or keep public; `fullwrite` = delete someone else's. A readonly operator can keep private presets — that's the point of storing them server-side.
+- Session callers only (`sessionUser` 401s bearer tokens): a preset has an owner, and a token has no user identity.
+- Same `(scope, owner, name)` POST **updates** — the UI's overwrite flow depends on that, and the DB unique index makes a duplicate impossible anyway.
+- `ownerId` is `SET NULL`, never cascade: deleting a user must not yank shared presets out of everyone else's menu. `ownerName` is a display snapshot for exactly that case.
+- Presets store the query only. Column widths / hidden columns stay in `applyTableLayout`'s localStorage — don't fold them in without deciding what a shared preset should do to another operator's screen layout.
+
+**When changing this:**
+- Adding saved filters to another list page: add the scope→key pair in `SAVED_FILTER_SCOPES`, then wire that page's module the way `assets-filters.js` does (`getPrefs` to save, `applyState` + the page's re-fetch entry point to load). No migration, no new function key.
+- Changing the `state` shape means changing `sanitizeFilterState`, `TableSF.getPrefs`/`applyState`, and `_sflDescribeState` in `assets-filters.js` together — the last one is what the operator reads before saving, so a shape it can't describe reads as a blank preview.
+- Tests: `tests/unit/savedFilterService.test.ts` (validators), `tests/integration/savedFilters.test.ts` (RBAC + visibility + ownership + the user-deletion carve-out), `tests/unit/assetsFiltersDom.test.ts` (the menu + save modal).
+
+---
+
 ## services/topologyLayoutService.ts
 
 **What it owns:** Shared Device Map topology layouts — the `TopologyLayout` table (one row per `(siteId, view)`, siteId = the FortiGate Asset the graph is rooted on, `positions` = `{nodeId: {x,y}}` pixel model coords). The server-side half of topology drag persistence; the browser's localStorage layout remains a per-browser fallback.

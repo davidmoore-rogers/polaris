@@ -1524,6 +1524,33 @@ TableSF.prototype.setPrefs = function (p) {
   this._updateIcons();
 };
 
+/**
+ * Replace the live sort + filter state WHOLESALE — the saved-filter-preset
+ * counterpart of setPrefs. The difference matters: setPrefs merges (an absent
+ * sortKey keeps whatever the operator had), while loading a preset must land
+ * on exactly what was saved, so absent members here CLEAR. The state shape is
+ * getPrefs()'s, which is also what the server stores.
+ */
+TableSF.prototype.applyState = function (state) {
+  state = state || {};
+  var filters = (state.sfFilters && typeof state.sfFilters === "object" && !Array.isArray(state.sfFilters))
+    ? state.sfFilters : {};
+  // Deep copy so the caller's cached preset isn't mutated by later edits to
+  // the live filters (restoreFilterUI deletes shape-mismatched entries).
+  this._filters = JSON.parse(JSON.stringify(filters));
+  // Drop a sort key this table no longer has a header for — a preset saved
+  // before a column was removed would otherwise keep sorting by it, and
+  // server-side tables reject an unknown sortBy with a 400 on every load.
+  var sortKey = state.sortKey || null;
+  if (sortKey && this._thead && !this._thead.querySelector('th[data-sf-key="' + sortKey.replace(/"/g, '\\"') + '"]')) {
+    sortKey = null;
+  }
+  this._sortKey = sortKey;
+  this._sortDir = state.sortDir === "desc" ? "desc" : "asc";
+  this.restoreFilterUI();
+  this._updateIcons();
+};
+
 window.PolarisPrefs = {
   /** Persist a page's prefs blob under polaris-prefs-<page>-<username>. */
   save: function (page, username, obj) {

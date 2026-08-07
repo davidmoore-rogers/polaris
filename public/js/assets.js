@@ -455,7 +455,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   if (!document.getElementById("assets-tbody")) return;
   // Server-side mode: never call sf.apply(). Any filter/sort change resets to
   // page 1 and re-fetches with the new state translated into API params.
-  _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; fetchAssetsPage(); _saveAssetsPrefs(); });
+  _assetsSF = new TableSF("assets-tbody", assetsApplyFilterState);
   var assetsTable = document.querySelector("#assets-tbody").closest("table");
   _assetsLayout = setupColumnLayout(assetsTable, {
     onChange: _saveAssetsPrefs,
@@ -500,6 +500,14 @@ document.addEventListener("DOMContentLoaded", async function () {
   await userReady;
   _restoreAssetsPrefs();
   _applyAssetsHashFilters();
+  // View tabs own the filter/sort state once they exist, so the active tab is
+  // applied BEFORE the first fetch — awaited so the page loads once, not once
+  // per state source. A deep-link hash filter (#type=firewall) wins over the
+  // tab's stored filters for this load and is folded into the active tab, which
+  // is the pre-tabs behavior (the link used to overwrite the saved prefs blob).
+  if (window.PolarisAssetTabs) {
+    await window.PolarisAssetTabs.init({ hashSeeded: _assetsHashFiltersApplied });
+  }
   loadAssets();
   document.getElementById("assets-select-all").addEventListener("change", function () {
     var cbs = document.querySelectorAll("#assets-tbody input.row-cb");
@@ -555,9 +563,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   var clearFiltersBtn = document.getElementById("btn-clear-filters");
   if (clearFiltersBtn) clearFiltersBtn.addEventListener("click", function () {
     if (_assetsSF) { _assetsSF.clearFilters(); }
-    _assetsPage = 1;
-    fetchAssetsPage();
-    _saveAssetsPrefs();
+    assetsApplyFilterState();
   });
   // Page-size selector is now rendered inside the pagination row by
   // renderPageControls (onSizeChange) — no standalone #filter-pagesize.
@@ -586,6 +592,22 @@ var ASSET_STATUS_LABELS = {
   decommissioned: "Decommissioned",
 };
 
+// The single "the filter/sort state changed" entry point: back to page 1,
+// re-fetch server-side, persist the per-user prefs blob, and mirror the new
+// state into the active view tab. Wired as TableSF's onChange (operator edits a
+// header control) AND called directly after a PROGRAMMATIC change (Clear
+// filters, loading a saved preset) — assets-filters.js / assets-tabs.js, both
+// loaded after this file.
+//
+// assets-tabs.js guards its own re-entrancy: applying a tab's state calls back
+// through here, and syncFromTable() ignores changes it caused itself.
+function assetsApplyFilterState() {
+  _assetsPage = 1;
+  fetchAssetsPage();
+  _saveAssetsPrefs();
+  if (window.PolarisAssetTabs) window.PolarisAssetTabs.syncFromTable();
+}
+
 // Reads dashboard / global-search deep-link hash params and seeds the
 // TableSF filters BEFORE the first loadAssets call so the initial render is
 // already narrowed.
@@ -597,6 +619,10 @@ var ASSET_STATUS_LABELS = {
 //
 // Both forms can co-occur. The values land in TableSF._filters so the smart
 // filter UI shows them as if the operator had typed them in.
+// True when the deep link actually seeded a filter — assets-tabs.js reads it to
+// keep the link's narrowing instead of overwriting it with the active tab's.
+var _assetsHashFiltersApplied = false;
+
 function _applyAssetsHashFilters() {
   if (!_assetsSF) return;
   var hash = (window.location.hash || "").replace(/^#/, "");
@@ -613,6 +639,7 @@ function _applyAssetsHashFilters() {
     _assetsSF._filters.hostname = params.search;
   }
   if (_assetsSF._filters.assetType || _assetsSF._filters.hostname) {
+    _assetsHashFiltersApplied = true;
     if (typeof _assetsSF.restoreFilterUI === "function") _assetsSF.restoreFilterUI();
     if (typeof _assetsSF._updateIcons === "function") _assetsSF._updateIcons();
   }

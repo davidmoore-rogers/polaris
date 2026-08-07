@@ -38,6 +38,8 @@ import monitorSettingsRouter from "./routes/monitorSettings.js";
 import apiTokensRouter from "./routes/apiTokens.js";
 import dashboardRouter from "./routes/dashboard.js";
 import userDashboardRouter from "./routes/userDashboard.js";
+import savedFiltersRouter from "./routes/savedFilters.js";
+import tableTabsRouter from "./routes/tableTabs.js";
 import { agentsEnrollRouter, agentsRouter, agentsBinaryRouter } from "./routes/agents.js";
 import rolesRouter from "./routes/roles.js";
 import groupMappingsRouter from "./routes/groupMappings.js";
@@ -90,6 +92,11 @@ router.use("/utilization", requirePermission("ipBlocks", "read"), utilizationRou
 // caller's per-function read access instead (denied sections come back empty).
 router.use("/dashboard", dashboardRouter);
 router.use("/me/dashboard", userDashboardRouter);
+// Per-user list-page tabs (Assets page tab strip) — the /me/dashboard sibling.
+router.use("/me/table-tabs", tableTabsRouter);
+// Saved table filters (Assets page → Filters ▾). Gated per-request on the
+// function key that owns the requested scope — see routes/savedFilters.ts.
+router.use("/saved-filters", savedFiltersRouter);
 router.use("/users", requirePermission("users", "read"), usersRouter);
 router.use("/roles", rolesRouter);
 router.use("/group-mappings", requirePermission("users", "fullwrite"), groupMappingsRouter);

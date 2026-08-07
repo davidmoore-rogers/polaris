@@ -1145,6 +1145,183 @@ code {
   background: var(--color-border);
   margin: 4px 0;
 }
+/* ─── List-page view tabs (Assets page tab strip) ──────────────────────────
+   Per-user tabs, each holding its own filter + sort state. Visually a lighter
+   sibling of .page-tabs (which navigates between whole sections) — these sit
+   directly above the table's bulk bar and are editable/closable in place. */
+.table-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 0.75rem;
+  /* A long strip scrolls rather than wrapping — the table below must not jump
+     a row taller when the operator opens one more view. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.table-tabs:empty { display: none; }
+.table-tabs-list { display: flex; align-items: flex-end; gap: 2px; }
+.table-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 220px;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.84rem;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  background: none;
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.table-tab:hover { color: var(--color-text-secondary); background: var(--color-bg-secondary); }
+.table-tab:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+.table-tab.active {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+  background: var(--color-surface);
+}
+.table-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Filters-present marker — the tab's own summary lives in its title tooltip. */
+.table-tab-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+}
+.table-tab-close {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  background: none;
+  border: none;
+  color: var(--color-text-tertiary);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+}
+.table-tab:hover .table-tab-close,
+.table-tab.active .table-tab-close { opacity: 1; }
+.table-tab-close:hover { color: var(--color-danger); }
+/* Inline rename input — sized to the tab so the strip doesn't reflow. */
+.table-tab-input {
+  width: 130px !important;
+  padding: 1px 4px !important;
+  font-size: 0.84rem !important;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-primary) !important;
+  border-radius: var(--radius-sm);
+}
+.table-tab-add {
+  flex: 0 0 auto;
+  margin-bottom: 2px;
+  padding: 0.3rem 0.6rem;
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--color-text-tertiary);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.table-tab-add:hover { color: var(--color-accent); background: var(--color-bg-secondary); }
+
+/* ─── Saved filter presets menu (Assets → Filters ▾) ───────────────────────
+   A dropdown whose list rows carry a trailing delete button, so each row is a
+   flex pair rather than the plain full-width buttons the base menu renders. */
+.saved-filters-menu { min-width: 280px; max-width: 380px; max-height: 60vh; overflow-y: auto; }
+.saved-filters-menu .sfl-row {
+  display: flex;
+  align-items: stretch;
+}
+.saved-filters-menu .sfl-row:hover { background: var(--color-bg-secondary); }
+.saved-filters-menu .sfl-row button { background: none; }
+.saved-filters-menu .sfl-row:hover button { background: none; }
+.saved-filters-menu .sfl-load {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.saved-filters-menu .sfl-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-filters-menu .sfl-badge {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-primary) 18%, transparent);
+  color: var(--color-primary);
+}
+.saved-filters-menu .sfl-owner {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+}
+.saved-filters-menu .sfl-newtab {
+  width: auto !important;
+  flex: 0 0 auto;
+  padding: 0.5rem 0.35rem !important;
+  color: var(--color-text-tertiary);
+  line-height: 0;
+}
+.saved-filters-menu .sfl-newtab:hover { color: var(--color-accent); }
+.saved-filters-menu .sfl-del {
+  width: auto !important;
+  flex: 0 0 auto;
+  padding: 0.5rem 0.7rem !important;
+  color: var(--color-text-tertiary);
+  font-size: 1rem;
+  line-height: 1;
+}
+.saved-filters-menu .sfl-del:hover { color: var(--color-danger); }
+.saved-filters-menu .sfl-empty {
+  padding: 0.5rem 0.85rem;
+  font-size: 0.8rem;
+  color: var(--color-text-tertiary);
+}
+/* Save-preset modal: visibility radios + the "what gets saved" preview. */
+.sfl-vis {
+  display: flex !important;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 400 !important;
+  color: var(--color-text-primary) !important;
+  cursor: pointer;
+}
+.sfl-vis input { width: auto; margin-top: 2px; }
+.sfl-vis-disabled { opacity: 0.6; cursor: not-allowed; }
+.sfl-preview {
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
 /* Variants for menus that live at the bottom/left of the viewport (the asset
    slide-over footer's Export menu): open upward and anchor to the button's
    left edge so the menu stays inside the slide-over. */

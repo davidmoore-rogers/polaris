@@ -450,6 +450,20 @@ const api = {
   assetTypes: {
     list:      ()       => request("GET", "/asset-types"),
   },
+  // Saved table filters (list-page presets). `scope` names the table the
+  // preset belongs to ("assets"); the server gates each scope on the function
+  // key that already owns its page.
+  // Per-user list-page tabs (the /me/dashboard sibling — private, never shared).
+  tableTabs: {
+    get:  (scope)         => request("GET", "/me/table-tabs" + toQuery({ scope })),
+    save: (scope, layout) => request("PUT", "/me/table-tabs" + toQuery({ scope }), layout),
+  },
+  savedFilters: {
+    list:   (scope)   => request("GET",    "/saved-filters" + toQuery({ scope })),
+    create: (body)    => request("POST",   "/saved-filters", body),
+    update: (id, b)   => request("PUT",    `/saved-filters/${id}`, b),
+    delete: (id)      => request("DELETE", `/saved-filters/${id}`),
+  },
   assets: {
     list:      (params) => request("GET", "/assets" + toQuery(params)),
     get:       (id)     => request("GET", `/assets/${id}`),
