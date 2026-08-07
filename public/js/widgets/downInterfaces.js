@@ -97,7 +97,10 @@
   }
 
   function render(el, rows, config) {
-    rows = rows || [];
+    // Gear "Minimum severity": drop rows whose owning asset carries no active
+    // alert at/above the configured tier, before the header count / export /
+    // clip so all three agree.
+    rows = PolarisWidgets.filterByMinSeverity(rows, config);
     // Overall down total on the widget header — same red pill style as the
     // group counts. Pre-clip, so the row-limit doesn't shrink the number.
     PolarisWidgets.setHeaderCount(el, rows.length);
@@ -118,7 +121,11 @@
       ],
       rows: rows,
     });
-    if (!rows.length) { el.innerHTML = '<p class="empty-state">No interfaces or tunnels down</p>'; return; }
+    if (!rows.length) {
+      var empty = PolarisWidgets.minSeverityEmptyText(config) || "No interfaces or tunnels down";
+      el.innerHTML = '<p class="empty-state">' + escapeHtml(empty) + '</p>';
+      return;
+    }
     var groupBy = (config && config.groupBy) || "gate";
     var clipped = PolarisWidgets.clip(rows, config && config.rowLimit);
 
@@ -217,6 +224,8 @@
           onChange(k, k === "rowLimit" ? PolarisWidgets.parseRowLimit(s.value) : s.value);
         });
       });
+      PolarisWidgets.renderMinSeverityConfig(el, config, onChange,
+        "Only rows whose device has an active alert at or above this severity are shown.");
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });

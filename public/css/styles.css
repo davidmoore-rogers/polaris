@@ -4129,6 +4129,14 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   min-width: 0;
   overflow-wrap: anywhere;
 }
+/* Explanatory note under a control (e.g. the Minimum severity filter's
+   "un-alerted rows are hidden" caveat) — muted, tighter than a label. */
+.widget-config-popover .widget-config-hint {
+  margin: 4px 0 0;
+  font-size: 0.76rem;
+  line-height: 1.35;
+  color: var(--color-text-secondary);
+}
 
 /* ── Add-Widgets picker ──────────────────────────────────────────────────
    Translucent overlay (the dashboard shows through, dimmed) docking a panel

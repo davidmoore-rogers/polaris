@@ -47,6 +47,10 @@
   function renderRows(el, rows, opts) {
     opts = opts || {};
     var cfg = opts.config || {};
+    // Gear "Minimum severity": drop rows below the configured alert tier before
+    // anything else looks at the set, so the export and the red guarantee both
+    // operate on the rows the operator asked to see.
+    rows = PolarisWidgets.filterByMinSeverity(rows, cfg);
     // SEVERITY-FIRST: rows whose asset carries an active automation alert sort
     // above unalerted rows (by the alert's severity rank, attached server-side
     // as alertRank), then by value desc within a rank.
@@ -54,9 +58,10 @@
       var d = (b.alertRank || 0) - (a.alertRank || 0);
       return d !== 0 ? d : (b.value || 0) - (a.value || 0);
     });
-    // Header export: the full ranked set (pre threshold/row-limit),
-    // severity-tiered on each asset's active automation alert. The filename
-    // defaults from the widget's data-type (topCpu → polaris-top-cpu-…).
+    // Header export: the full ranked set (pre threshold/row-limit, post the
+    // gear's minimum-severity filter), severity-tiered on each asset's active
+    // automation alert. The filename defaults from the widget's data-type
+    // (topCpu → polaris-top-cpu-…).
     PolarisWidgets.setHeaderExport(el, {
       columns: [
         { header: "Hostname", get: function (r) { return r.hostname || ""; } },
@@ -83,7 +88,10 @@
       shown = PolarisWidgets.clip(sorted, cfg.rowLimit);
     }
     if (!shown.length) {
-      el.innerHTML = '<p class="empty-state">' + escapeHtml(opts.emptyText || "Nothing to show") + '</p>';
+      // A widget emptied by the severity filter says so, rather than reading as
+      // "nothing is wrong".
+      var empty = PolarisWidgets.minSeverityEmptyText(cfg) || opts.emptyText || "Nothing to show";
+      el.innerHTML = '<p class="empty-state">' + escapeHtml(empty) + '</p>';
       return;
     }
     // Percentages scale against a fixed 100; latency scales against the max in
@@ -211,6 +219,9 @@
         }
       });
     });
+    // Shared "Minimum severity" display filter — appended last so it sits
+    // between the per-widget controls and the region/asset-type scope block.
+    PolarisWidgets.renderMinSeverityConfig(el, config, onChange);
   }
 
   window.PolarisTopN = { renderRows: renderRows, renderConfig: renderConfig, pickColor: pickColor };

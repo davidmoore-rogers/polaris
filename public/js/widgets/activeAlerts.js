@@ -2,22 +2,47 @@
  * widgets/activeAlerts.js — recent warning/error events as an alert feed
  * (SolarWinds "Needs Attention"). Each row carries a left severity color bar +
  * a level pill, newest first. Data from /dashboard/noc-summary activeAlerts[].
+ *
+ * Severity filtering rides the shared "Minimum severity" gear control
+ * (config.minSeverity), same as every other severity-carrying widget. These
+ * rows hold the audit-Event level (info/warning/error), which the shared ladder
+ * ranks at informational/warning/critical — so on this widget the notice and
+ * serious tiers behave as informational and critical respectively.
  */
 
 (function () {
   var LEVEL_PILL = { info: "widget-pill-watch", warning: "widget-pill-amber", error: "widget-pill-red" };
   var LEVEL_BAR = { info: "#4fc3f7", warning: "#ffa726", error: "#ef5350" };
+  var RANK = PolarisWidgets.ALERT_SEVERITY_RANK;
+  var DEFAULT_TIER = "warning"; // pre-control default was ["warning","error"]
+
+  function severityOf(r) { return r.severity; }
+
+  // The rank floor to display at. Reads config.minSeverity when present, else
+  // folds a pre-control `severities` checkbox array into its lowest rank (so a
+  // saved ["info","warning","error"] keeps showing info rows) — an unrepresentable
+  // gapped set like ["info","error"] widens to "info and up".
+  function minRankOf(config) {
+    if (config && config.minSeverity) return PolarisWidgets.minSeverityRank(config);
+    if (config && Array.isArray(config.severities) && config.severities.length) {
+      return config.severities.reduce(function (lo, s) {
+        var r = RANK[s] || 0;
+        return r && (lo === 0 || r < lo) ? r : lo;
+      }, 0);
+    }
+    return RANK[DEFAULT_TIER];
+  }
 
   function render(el, rows, config) {
     rows = rows || [];
-    var allowed = (config && Array.isArray(config.severities) && config.severities.length) ? config.severities : ["warning", "error"];
-    var filtered = rows.filter(function (r) { return allowed.indexOf(r.severity) !== -1; });
+    var min = minRankOf(config);
+    var filtered = rows.filter(function (r) { return (RANK[severityOf(r)] || 0) >= min; });
     // Header export: the configured-severity listing pre the 25-row display
     // slice. These rows carry the audit-Event level (info/warning/error) —
     // ranked by the shared ladder, so "Critical only" = error events.
     PolarisWidgets.setHeaderExport(el, {
       filename: "active-alerts",
-      severityOf: function (r) { return r.severity; },
+      severityOf: severityOf,
       columns: [
         { header: "Hostname", get: function (r) { return r.hostname || ""; } },
         { header: "Message", get: function (r) { return r.message || ""; } },
@@ -25,7 +50,11 @@
       ],
       rows: filtered,
     });
-    if (!filtered.length) { el.innerHTML = '<p class="empty-state">No active alerts</p>'; return; }
+    if (!filtered.length) {
+      var empty = rows.length ? PolarisWidgets.minSeverityEmptyText({ minSeverity: PolarisWidgets.severityTierForRank(min) }) : null;
+      el.innerHTML = '<p class="empty-state">' + escapeHtml(empty || "No active alerts") + '</p>';
+      return;
+    }
     el.innerHTML = filtered.slice(0, 25).map(function (r) {
       var sev = r.severity || "info";
       var pillCls = LEVEL_PILL[sev] || "widget-pill-watch";
@@ -48,7 +77,7 @@
     description: "Recent warning/error events needing attention, newest first.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { severities: ["warning", "error"], regionScope: "mine" },
+    defaultConfig: { minSeverity: DEFAULT_TIER, regionScope: "mine" },
     requiredPermission: { key: "events", level: "read" },
 
     fetchData: function (config) {
@@ -68,25 +97,16 @@
       render(el, [
         { id: "a1", hostname: "fgt-branch-12", message: "Monitor: fgt-branch-12 up → down", severity: "warning", raisedAt: new Date(now - 6 * 60000).toISOString() },
         { id: "a2", hostname: null, message: "FortiManager DC discovery aborted", severity: "error", raisedAt: new Date(now - 40 * 60000).toISOString() },
-      ], { severities: ["warning", "error"] });
+      ], { minSeverity: DEFAULT_TIER });
     },
 
     renderConfig: function (el, config, onChange) {
-      var current = new Set((config && config.severities) || ["warning", "error"]);
-      el.innerHTML =
-        '<label>Show severities</label>' +
-        ["info", "warning", "error"].map(function (lv) {
-          return '<label style="display:flex;gap:6px;align-items:center;font-size:0.85rem;margin:3px 0">' +
-            '<input type="checkbox" data-sev="' + lv + '"' + (current.has(lv) ? " checked" : "") + '> ' + escapeHtml(lv) +
-          '</label>';
-        }).join("");
-      el.querySelectorAll("input[data-sev]").forEach(function (cb) {
-        cb.addEventListener("change", function () {
-          if (cb.checked) current.add(cb.getAttribute("data-sev"));
-          else current.delete(cb.getAttribute("data-sev"));
-          onChange("severities", Array.from(current));
-        });
-      });
+      el.innerHTML = "";
+      // Seed the shared control from the effective floor so a pre-control
+      // `severities` config renders as the tier it actually behaves like; the
+      // first change writes `minSeverity` and the legacy key stops mattering.
+      var seed = { minSeverity: PolarisWidgets.severityTierForRank(minRankOf(config)) };
+      PolarisWidgets.renderMinSeverityConfig(el, seed, onChange, "Only events at or above this level are listed.");
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });

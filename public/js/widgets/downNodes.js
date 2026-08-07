@@ -39,6 +39,14 @@
   function render(el, data, config) {
     var nodes = (data && data.nodes) || [];
     var total = (data && data.total != null) ? data.total : nodes.length;
+    // Gear "Minimum severity": narrow to nodes carrying an active alert at or
+    // above the configured tier, before the count / export / clip. With a filter
+    // on, the server's uncapped down total no longer describes what's shown, so
+    // the header pill counts the filtered rows instead.
+    if (PolarisWidgets.minSeverityRank(config)) {
+      nodes = PolarisWidgets.filterByMinSeverity(nodes, config);
+      total = nodes.length;
+    }
     PolarisWidgets.setHeaderCount(el, total);
     // Header export: the full fetched list (pre-clip), severity-tiered on each
     // node's active automation alert (alertSeverity).
@@ -54,7 +62,11 @@
       ],
       rows: nodes,
     });
-    if (!nodes.length) { el.innerHTML = '<p class="empty-state">No nodes down</p>'; return; }
+    if (!nodes.length) {
+      var empty = PolarisWidgets.minSeverityEmptyText(config) || "No nodes down";
+      el.innerHTML = '<p class="empty-state">' + escapeHtml(empty) + '</p>';
+      return;
+    }
     var groupBy = (config && config.groupBy) || "site";
     var clipped = PolarisWidgets.clip(nodes, config && config.rowLimit);
 
@@ -144,6 +156,8 @@
           onChange(k, k === "rowLimit" ? PolarisWidgets.parseRowLimit(s.value) : s.value);
         });
       });
+      PolarisWidgets.renderMinSeverityConfig(el, config, onChange,
+        "Only nodes with an active alert at or above this severity are shown.");
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });

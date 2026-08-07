@@ -253,12 +253,112 @@
     notice: 1, informational: 2, info: 2, warning: 3, serious: 4, error: 5, critical: 5,
   };
 
-  var EXPORT_TIERS = [
+  // The severity ladder as operator-facing tiers, least→most severe. ONE list
+  // feeds both the CSV-export menu and the gear popover's "Minimum severity"
+  // display filter, so the two can never disagree about what "Serious and up"
+  // means. `all` (rank 0) is the no-filter tier — every other tier requires a
+  // row to carry an active alert at least that severe.
+  window.PolarisWidgets.SEVERITY_TIERS = [
     { key: "all", label: "All rows", minRank: 0 },
-    { key: "critical", label: "Critical only", minRank: 5 },
-    { key: "serious", label: "Serious and up", minRank: 4 },
+    { key: "notice", label: "Notice and up", minRank: 1 },
+    { key: "informational", label: "Informational and up", minRank: 2 },
     { key: "warning", label: "Warning and up", minRank: 3 },
+    { key: "serious", label: "Serious and up", minRank: 4 },
+    { key: "critical", label: "Critical only", minRank: 5 },
   ];
+
+  function tierByKey(key) {
+    var tiers = window.PolarisWidgets.SEVERITY_TIERS;
+    for (var i = 0; i < tiers.length; i++) if (tiers[i].key === key) return tiers[i];
+    return tiers[0];
+  }
+
+  // Export menu keeps its four historical tiers, in most-severe-first order.
+  var EXPORT_TIERS = ["all", "critical", "serious", "warning"].map(tierByKey);
+
+  // ─── Shared minimum-severity display filter ──────────────────────────────
+  // `config.minSeverity` holds a SEVERITY_TIERS key ("all" = unset = show
+  // everything). Every widget whose feed attaches an active-alert severity
+  // (Down Nodes, Down Interfaces, the top-N metric widgets, Storage Forecast)
+  // renders the control via renderMinSeverityConfig and filters through
+  // filterByMinSeverity. Filtering happens on the FETCHED set — before the row
+  // limit, the red-guarantee pass, the header count and the CSV export — so
+  // every number the widget shows agrees with what's on screen.
+  //
+  // Filtering client-side is safe because every one of those feeds is sorted
+  // severity-first SERVER-side (severityFirst in nocDashboardService), so the
+  // rows that qualify are the ones that survive the server's row cap.
+  //
+  // Note the semantics an operator gets above "All rows": a row with no active
+  // alert ranks 0, so any real minimum hides un-alerted rows entirely. That's
+  // the point of the control (a down-nodes panel narrowed to what's actually
+  // alerting), and the popover hint says so.
+  window.PolarisWidgets.minSeverityRank = function (config) {
+    if (!config || !config.minSeverity || config.minSeverity === "all") return 0;
+    return tierByKey(config.minSeverity).minRank;
+  };
+
+  // rows → rows at/above the configured tier. severityOf defaults to the
+  // feed-standard row.alertSeverity; the Active Alerts widget passes its own
+  // (audit-Event level). Always returns a new array; no-ops at tier "all".
+  window.PolarisWidgets.filterByMinSeverity = function (rows, config, severityOf) {
+    rows = rows || [];
+    var min = window.PolarisWidgets.minSeverityRank(config);
+    if (!min) return rows.slice();
+    var sevOf = severityOf || function (r) { return r.alertSeverity; };
+    return rows.filter(function (r) {
+      return (window.PolarisWidgets.ALERT_SEVERITY_RANK[sevOf(r)] || 0) >= min;
+    });
+  };
+
+  // Inverse of minSeverityRank: the tier key a numeric rank floor maps to
+  // (largest tier at/below the rank). Used to render pre-existing configs that
+  // stored severity some other way — the Active Alerts widget's legacy
+  // `severities` checkbox array folds into a tier through this.
+  window.PolarisWidgets.severityTierForRank = function (rank) {
+    var tiers = window.PolarisWidgets.SEVERITY_TIERS;
+    var key = tiers[0].key;
+    for (var i = 0; i < tiers.length; i++) if (tiers[i].minRank <= (rank || 0)) key = tiers[i].key;
+    return key;
+  };
+
+  // Empty-state text for a widget emptied BY the severity filter — so the
+  // operator reads "nothing at this severity" instead of "nothing is wrong".
+  // Returns null at tier "all" (caller keeps its own empty text).
+  window.PolarisWidgets.minSeverityEmptyText = function (config) {
+    if (!window.PolarisWidgets.minSeverityRank(config)) return null;
+    // Every tier key past "all" IS the severity name, so one phrasing covers
+    // the whole ladder (critical being the top makes "or above" a no-op there).
+    return "No rows at or above " + tierByKey(config.minSeverity).key + " severity";
+  };
+
+  window.PolarisWidgets.minSeverityOptionsHTML = function (current) {
+    var cur = current || "all";
+    return window.PolarisWidgets.SEVERITY_TIERS.map(function (t) {
+      return '<option value="' + t.key + '"' + (cur === t.key ? " selected" : "") + '>' + escapeHtml(t.label) + '</option>';
+    }).join("");
+  };
+
+  // Append the "Minimum severity" control to a gear popover. Call it after the
+  // widget's own controls and before renderNocFilterConfig, so the popover reads
+  // widget-specific → severity → scope. `hint` overrides the default note.
+  window.PolarisWidgets.renderMinSeverityConfig = function (el, config, onChange, hint) {
+    config = config || {};
+    var cur = config.minSeverity || "all";
+    el.insertAdjacentHTML("beforeend", ''
+      + '<label>Minimum severity</label>'
+      + '<select data-minsev>' + window.PolarisWidgets.minSeverityOptionsHTML(cur) + '</select>'
+      + '<p class="widget-config-hint" data-minsev-hint' + (cur === "all" ? ' style="display:none"' : '') + '>'
+      + escapeHtml(hint || "Only rows with an active alert at or above this severity are shown.")
+      + '</p>');
+    var sel = el.querySelector("[data-minsev]");
+    var note = el.querySelector("[data-minsev-hint]");
+    if (!sel) return;
+    sel.addEventListener("change", function () {
+      if (note) note.style.display = sel.value === "all" ? "none" : "";
+      onChange("minSeverity", sel.value);
+    });
+  };
 
   // downloadCsv is canonical in api.js (loaded on every surface incl. the
   // Dash wallboard) since the 2026-08 audit — the fallback copy is gone.

@@ -28,6 +28,9 @@
 
   function render(el, config, rows) {
     config = config || {};
+    // Gear "Minimum severity": narrow to volumes whose asset carries an active
+    // alert at/above the tier, before the export / horizon filter / clip.
+    rows = PolarisWidgets.filterByMinSeverity(rows, config);
     // Header export: every fetched volume row (pre horizon filter + clip),
     // severity-tiered on the owning asset's active automation alert.
     PolarisWidgets.setHeaderExport(el, {
@@ -54,7 +57,7 @@
     if (isNaN(limitN) || limitN <= 0) limitN = 20;
     var shown = sorted.filter(function (r, i) { return i < limitN || (r.value || 0) <= RED_DAYS; });
     if (!shown.length) {
-      el.innerHTML = '<p class="empty-state">' + escapeHtml(EMPTY) + '</p>';
+      el.innerHTML = '<p class="empty-state">' + escapeHtml(PolarisWidgets.minSeverityEmptyText(config) || EMPTY) + '</p>';
       return;
     }
     el.innerHTML = shown.map(function (r) {
@@ -134,6 +137,8 @@
           else onChange("rowLimit", PolarisWidgets.parseRowLimit(s.value));
         });
       });
+      PolarisWidgets.renderMinSeverityConfig(el, config, onChange,
+        "Only volumes whose device has an active alert at or above this severity are shown.");
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });
