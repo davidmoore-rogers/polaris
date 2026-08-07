@@ -707,6 +707,12 @@ const PERMANENT_502_MESSAGE_FRAGMENTS = [
   "verify mismatch",
   "not visible on read-back",
   "Authentication failed",
+  // HTTP 403 from either transport. An access-profile or trusthost problem
+  // needs an operator on the device; retrying the push until the queue gives
+  // up only buries the reason. Matches both fortigateService's "FortiGate
+  // permission denied (HTTP 403)" and fortimanagerService's "FortiManager
+  // permission denied (HTTP 403)".
+  "permission denied",
 ];
 
 /**

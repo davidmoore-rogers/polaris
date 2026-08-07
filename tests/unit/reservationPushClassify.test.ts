@@ -75,6 +75,17 @@ describe("classifyPushError", () => {
         classifyPushError(new AppError(502, "Authentication failed — check your API token")),
       ).toBe("permanent");
     });
+
+    it("502 HTTP 403 from either transport (access profile / trusthost)", () => {
+      // Needs an operator on the device — retrying until the queue gives up
+      // only buries the reason.
+      expect(
+        classifyPushError(new AppError(502, "FortiGate permission denied (HTTP 403) on /api/v2/cmdb/system.dhcp/server — the API token authenticated, but the api-user's access profile does not permit this endpoint, or the Polaris host is outside its trusthost")),
+      ).toBe("permanent");
+      expect(
+        classifyPushError(new AppError(502, "FortiManager permission denied (HTTP 403) — check the API user's admin profile")),
+      ).toBe("permanent");
+    });
   });
 
   describe("transient", () => {

@@ -154,8 +154,26 @@ export async function fgRequest<T>(
     }
     const res = await fetch(url, init);
 
-    if (res.status === 401 || res.status === 403) {
+    // 401 and 403 are DIFFERENT operator problems and must not share a message.
+    // 401 = the token is wrong. 403 = the token authenticated fine, but FortiOS
+    // refused this endpoint — the api-user's accessprofile doesn't grant the
+    // group the path belongs to (e.g. /monitor/system/status needs System read),
+    // or the caller's source IP is outside the api-user's trusthost. Conflating
+    // them sends operators to re-issue a token that was never the problem, and
+    // it reads as "the API key stopped working" when only ONE endpoint is
+    // refused — the Query API tool keeps working against paths the profile does
+    // allow. fortimanagerService's rpc() has always split these; this is the
+    // FortiGate-side parity fix.
+    if (res.status === 401) {
       throw new AppError(502, "Authentication failed — check your API token");
+    }
+    if (res.status === 403) {
+      throw new AppError(
+        502,
+        `FortiGate permission denied (HTTP 403) on ${path} — the API token authenticated, ` +
+        `but the api-user's access profile does not permit this endpoint, or the Polaris ` +
+        `host is outside its trusthost`,
+      );
     }
     if (res.status === 404) {
       throw new AppError(404, `Endpoint not found: ${path}`);
