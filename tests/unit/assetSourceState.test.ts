@@ -133,3 +133,32 @@ describe("hasAccountStateDisagreement", () => {
     expect(hasAccountStateDisagreement([entraEnabled, vmPoweredOff])).toBe(false);
   });
 });
+
+describe("deriveAssetSourceState — Azure Arc", () => {
+  it("reads a machine's connectivity as a RUNTIME state, not an account one", () => {
+    // A Disconnected Arc agent is a reachability fact; unlike a
+    // directory-disabled account it never decommissions the asset, so it must
+    // not be compared as an "account" reading.
+    const r = deriveAssetSourceState("arc", { status: "Connected" });
+    expect(r.state).toBe("enabled");
+    expect(r.kind).toBe("runtime");
+    expect(r.field).toBe("status");
+  });
+
+  it("maps Disconnected and Expired to disabled", () => {
+    expect(deriveAssetSourceState("arc", { status: "Disconnected" }).state).toBe("disabled");
+    expect(deriveAssetSourceState("arc", { status: "Expired" }).state).toBe("disabled");
+  });
+
+  it("reads a connected cluster from connectivityStatus", () => {
+    const r = deriveAssetSourceState("arc-k8s", { connectivityStatus: "Connected" });
+    expect(r.state).toBe("enabled");
+    expect(r.kind).toBe("runtime");
+    expect(deriveAssetSourceState("arc-k8s", { connectivityStatus: "Offline" }).state).toBe("disabled");
+  });
+
+  it("reports nothing for an unrecognized or absent status", () => {
+    expect(deriveAssetSourceState("arc", { status: "Connecting" }).state).toBe("unknown");
+    expect(deriveAssetSourceState("arc", {}).state).toBe("unknown");
+  });
+});

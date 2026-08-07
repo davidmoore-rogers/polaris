@@ -707,11 +707,30 @@ export function inferArcAssetType(
   m: Pick<DiscoveredArcMachine, "osType" | "osSku" | "osName">,
 ): "workstation" | "server" | "other" {
   const text = [m.osSku, m.osName].filter(Boolean).join(" ");
+  // An explicit server edition wins outright.
   if (SERVER_SKU_RE.test(text)) return "server";
+  // An explicit CLIENT edition is the only reliable "this is a workstation"
+  // signal Arc gives us.
   if (WINDOWS_CLIENT_RE.test(text)) return "workstation";
-  const osType = (m.osType || "").toLowerCase();
+
+  // osType is the authoritative field, but fall back to sniffing the SKU/name
+  // text when an older agent didn't populate it.
+  const osType = (m.osType || "").toLowerCase()
+    || (/windows/i.test(text) ? "windows" : /linux/i.test(text) ? "linux" : "");
+
+  // Absent a client marker, an Arc machine is a SERVER on both platforms.
+  // Arc onboarding is overwhelmingly a server-estate play; client Windows and
+  // Linux desktops are the exception, and when they ARE present the SKU says
+  // so and is caught above.
+  //
+  // This used to default Windows the other way, which silently typed every
+  // Windows host whose osSku was empty as a workstation — Arc frequently
+  // reports only `osName: "windows"` — and that is not cosmetic: assetType
+  // selects the per-class config block, so those machines resolved
+  // workstationMonitor instead of serverMonitor and picked up the wrong
+  // addAsMonitored / agent-deploy / auto-monitor settings.
   if (osType === "linux") return LINUX_DESKTOP_RE.test(text) ? "workstation" : "server";
-  if (osType === "windows") return text ? "workstation" : "other";
+  if (osType === "windows") return "server";
   return "other";
 }
 

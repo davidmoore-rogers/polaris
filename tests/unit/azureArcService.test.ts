@@ -373,9 +373,32 @@ describe("inferArcAssetType", () => {
       .toBe("workstation");
   });
 
-  it("falls back to other when Arc says nothing useful", () => {
+  it("types Windows as a server when no CLIENT marker is present", () => {
+    // Regression: this used to return "workstation" for any Windows machine
+    // whose SKU text lacked "server"/"datacenter". Arc frequently reports only
+    // osName:"windows" with no osSku, so real Server 2019/2022 hosts were
+    // silently typed workstations — which then routed them through
+    // workstationMonitor instead of serverMonitor.
+    expect(inferArcAssetType({ osType: "windows", osSku: null, osName: "windows" })).toBe("server");
+    expect(inferArcAssetType({ osType: "windows", osSku: null, osName: null })).toBe("server");
+    expect(inferArcAssetType({ osType: "windows", osSku: "Standard", osName: "windows" })).toBe("server");
+  });
+
+  it("still types an explicit client SKU as a workstation", () => {
+    expect(inferArcAssetType({ osType: "windows", osSku: "Windows 11 Enterprise", osName: "windows" }))
+      .toBe("workstation");
+    expect(inferArcAssetType({ osType: "windows", osSku: "Windows 10 Pro", osName: "windows" }))
+      .toBe("workstation");
+  });
+
+  it("sniffs osType from the SKU text when an older agent omits it", () => {
+    expect(inferArcAssetType({ osType: null, osSku: null, osName: "Windows" })).toBe("server");
+    expect(inferArcAssetType({ osType: null, osSku: null, osName: "Linux" })).toBe("server");
+  });
+
+  it("falls back to other only when Arc says nothing at all", () => {
     expect(inferArcAssetType({ osType: null, osSku: null, osName: null })).toBe("other");
-    expect(inferArcAssetType({ osType: "windows", osSku: null, osName: null })).toBe("other");
+    expect(inferArcAssetType({ osType: null, osSku: null, osName: "" })).toBe("other");
   });
 });
 
