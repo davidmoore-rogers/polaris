@@ -1859,8 +1859,51 @@ router.get("/agents/windows-ssh/script", requirePermission("serverSettingsSystem
 
 router.get("/agents/script-publish/targets", requirePermission("serverSettingsSystem", "read"), async (_req, res, next) => {
   try {
-    const { listPublishTargets } = await import("../../services/intunePublishService.js");
-    res.json({ intune: await listPublishTargets() });
+    const [{ listPublishTargets: intune }, { listPublishTargets: arc }] = await Promise.all([
+      import("../../services/intunePublishService.js"),
+      import("../../services/arcPublishService.js"),
+    ]);
+    const [intuneTargets, arcTargets] = await Promise.all([intune(), arc()]);
+    res.json({ intune: intuneTargets, arc: arcTargets });
+  } catch (err) { next(err); }
+});
+
+// Arc machine roster for the picker. READ-ONLY — nothing executes here, so it
+// sits at the read gate; the dispatch below is what carries the write gate.
+router.get("/agents/script-publish/arc/machines", requirePermission("serverSettingsSystem", "read"), async (req, res, next) => {
+  try {
+    const integrationId = z.string().uuid().parse(req.query.integrationId);
+    const { listMachines } = await import("../../services/arcPublishService.js");
+    res.json({ machines: await listMachines(integrationId) });
+  } catch (err) { next(err); }
+});
+
+// EXECUTES the onboarding script as root/SYSTEM on the named machines. Same
+// chained fullwrite gate as the Intune publish, and deliberately takes an
+// explicit armIds list — there is no "all machines" affordance, because target
+// selection IS the review gate on a vehicle with no unassigned state.
+router.post(
+  "/agents/script-publish/arc",
+  requirePermission("serverSettingsSystem", "fullwrite"),
+  requirePermission("integrations", "fullwrite"),
+  async (req, res, next) => {
+    try {
+      const { integrationId, armIds } = z.object({
+        integrationId: z.string().uuid(),
+        armIds: z.array(z.string().min(1)).min(1),
+      }).parse(req.body ?? {});
+      const { runOnboardingOnMachines } = await import("../../services/arcPublishService.js");
+      res.json(await runOnboardingOnMachines(integrationId, armIds, requestActor(req) || "unknown"));
+    } catch (err) { next(err); }
+  },
+);
+
+router.get("/agents/script-publish/arc/result", requirePermission("serverSettingsSystem", "read"), async (req, res, next) => {
+  try {
+    const integrationId = z.string().uuid().parse(req.query.integrationId);
+    const armId = z.string().min(1).parse(req.query.armId);
+    const { getMachineResult } = await import("../../services/arcPublishService.js");
+    res.json({ result: await getMachineResult(integrationId, armId) });
   } catch (err) { next(err); }
 });
 

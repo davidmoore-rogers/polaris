@@ -56,22 +56,196 @@
   // integration; a target that hasn't opted in is shown DISABLED with a pointer
   // to the checkbox rather than hidden, or the feature is undiscoverable.
   function publishPaneHtml(hasKey) {
-    // Intune deploys scripts to Windows only; the Linux half is Arc's job.
-    if (_platform !== "windows") return "";
+    // Intune is Windows-only; Arc covers both platforms and is the only
+    // vehicle here that reaches Linux or Windows Server.
+    var intuneBlock = _platform !== "windows" ? "" : (
+      '<h6 style="margin:0.75rem 0 0.25rem 0">Intune</h6>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0 0 0.5rem 0">' +
+        'Uploads the pair above as a <strong>Remediation</strong>. Re-publishing updates the same policy. ' +
+        '<strong>Polaris never assigns it</strong> &mdash; it arrives targeting nothing, and you choose the device ' +
+        'groups in Intune after reading the script.' +
+      '</p>' +
+      '<div id="wssh-publish-targets"><p class="empty-state" style="padding:0.5rem 0;margin:0">Loading&hellip;</p></div>'
+    );
     return (
       '<div style="padding-top:1rem;border-top:1px solid var(--color-border);margin-top:1rem">' +
-        '<h5 style="margin:0 0 0.5rem 0">4. Publish to Intune <span style="font-weight:normal;color:var(--color-text-tertiary)">(optional)</span></h5>' +
-        '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0 0 0.75rem 0">' +
-          'Uploads the pair above as an Intune <strong>Remediation</strong>, so you skip the download-and-paste step. ' +
-          'Re-publishing updates the same policy rather than creating a second one. ' +
-          '<strong>Polaris never assigns it</strong> &mdash; it arrives targeting nothing, and you choose the device ' +
-          'groups in Intune after reading the script.' +
-        '</p>' +
+        '<h5 style="margin:0 0 0.5rem 0">4. Publish <span style="font-weight:normal;color:var(--color-text-tertiary)">(optional)</span></h5>' +
         (hasKey
-          ? '<div id="wssh-publish-targets"><p class="empty-state" style="padding:0.5rem 0;margin:0">Loading&hellip;</p></div>'
+          ? intuneBlock +
+            '<h6 style="margin:1rem 0 0.25rem 0">Azure Arc</h6>' +
+            '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0 0 0.5rem 0">' +
+              'Runs the ' + (_platform === "linux" ? "Linux" : "Windows") + ' script directly on Arc-connected ' +
+              'machines you select &mdash; each machine gets the script matching its OS. ' +
+              '<strong>A run command executes immediately</strong>; there is no unassigned state, so your ' +
+              'selection is the review step.' +
+            '</p>' +
+            '<div id="wssh-arc-targets"><p class="empty-state" style="padding:0.5rem 0;margin:0">Loading&hellip;</p></div>'
           : '<p class="empty-state" style="padding:0.5rem 0;margin:0">Generate a keypair first.</p>') +
       '</div>'
     );
+  }
+
+  // ─── Arc ────────────────────────────────────────────────────────────────
+
+  function renderArcTargets(targets) {
+    var host = el("wssh-arc-targets");
+    if (!host) return;
+    if (!targets || !targets.length) {
+      host.innerHTML = '<p class="empty-state" style="padding:0.5rem 0;margin:0">' +
+        'No Azure Arc integration configured.</p>';
+      return;
+    }
+    host.innerHTML = targets.map(function (t) {
+      return '<div style="display:flex;align-items:center;gap:8px;padding:0.4rem 0">' +
+        '<span style="flex:1">' + escapeHtml(t.integrationName) + '</span>' +
+        (t.enabled
+          ? '<button class="btn btn-sm btn-secondary" data-wssh-arc="' + escapeHtml(t.integrationId) +
+            '" data-wssh-arc-name="' + escapeHtml(t.integrationName) + '">Choose machines&hellip;</button>'
+          : '<span class="hint" style="margin:0">Not enabled &mdash; turn on <em>Allow Polaris to run deployment ' +
+            'scripts</em> on this integration\'s Script Publishing tab.</span>') +
+      '</div>';
+    }).join("");
+    Array.prototype.forEach.call(host.querySelectorAll("[data-wssh-arc]"), function (btn) {
+      btn.addEventListener("click", function () { openArcMachinePicker(btn); });
+    });
+  }
+
+  // Machine picker. Nothing is preselected on purpose — this dispatch executes
+  // as root/SYSTEM, so "select all by default" would make a mis-click a
+  // fleet-wide event.
+  function openArcMachinePicker(btn) {
+    var integrationId = btn.getAttribute("data-wssh-arc");
+    var integrationName = btn.getAttribute("data-wssh-arc-name");
+    btn.disabled = true;
+    api.serverSettings.arcMachines(integrationId)
+      .then(function (r) {
+        var machines = (r && r.machines) || [];
+        openModal(
+          "Run onboarding on Arc machines — " + integrationName,
+          arcPickerBodyHtml(machines),
+          '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+          '<button class="btn btn-primary" id="wssh-arc-run" disabled>Run on 0 machines</button>',
+          { wide: true },
+        );
+        wireArcPicker(integrationId, machines);
+      })
+      .catch(function (err) {
+        showToast((err && err.message) ? err.message : "Could not list Arc machines", "error");
+      })
+      .finally(function () { btn.disabled = false; });
+  }
+
+  function arcPickerBodyHtml(machines) {
+    if (!machines.length) {
+      return '<p class="empty-state">This integration\'s Arc roster is empty, or its filters exclude everything.</p>';
+    }
+    var rows = machines.map(function (m, i) {
+      var connected = String(m.status || "").toLowerCase() === "connected";
+      var os = (m.osType || "").toLowerCase();
+      var unsupported = os !== "windows" && os !== "linux";
+      return '<tr>' +
+        '<td><input type="checkbox" class="wssh-arc-pick" data-armid="' + escapeHtml(m.armId) + '"' +
+          (unsupported ? " disabled" : "") + '></td>' +
+        '<td>' + escapeHtml(m.name) + '</td>' +
+        '<td>' + escapeHtml(m.osType || "—") + '</td>' +
+        '<td>' + escapeHtml(m.resourceGroup || "—") + '</td>' +
+        '<td>' + (connected
+          ? '<span class="badge badge-active">Connected</span>'
+          : '<span class="hint" style="margin:0">' + escapeHtml(m.status || "unknown") + '</span>') + '</td>' +
+      '</tr>';
+    }).join("");
+    return (
+      '<p class="hint" style="color:var(--color-warning,#d98c00);margin:0 0 0.75rem 0">' +
+        'Every machine you tick will run the onboarding script as root/SYSTEM as soon as you confirm. ' +
+        'Machines whose OS Arc does not report are disabled &mdash; Polaris will not guess which script to send.' +
+      '</p>' +
+      '<div class="form-group"><input type="text" id="wssh-arc-filter" placeholder="Filter by name or resource group…"></div>' +
+      '<div style="max-height:22rem;overflow:auto">' +
+        '<table class="data-table"><thead><tr>' +
+          '<th style="width:2rem"><input type="checkbox" id="wssh-arc-all"></th>' +
+          '<th>Machine</th><th>OS</th><th>Resource group</th><th>Status</th>' +
+        '</tr></thead><tbody id="wssh-arc-rows">' + rows + '</tbody></table>' +
+      '</div>'
+    );
+  }
+
+  function wireArcPicker(integrationId, machines) {
+    var runBtn = el("wssh-arc-run");
+    var filter = el("wssh-arc-filter");
+    var all = el("wssh-arc-all");
+
+    function picked() {
+      return Array.prototype.filter.call(
+        document.querySelectorAll(".wssh-arc-pick"),
+        function (c) { return c.checked && !c.disabled; },
+      );
+    }
+    function sync() {
+      var n = picked().length;
+      if (runBtn) {
+        runBtn.disabled = n === 0;
+        runBtn.textContent = "Run on " + n + " machine" + (n === 1 ? "" : "s");
+      }
+    }
+    Array.prototype.forEach.call(document.querySelectorAll(".wssh-arc-pick"), function (c) {
+      c.addEventListener("change", sync);
+    });
+    if (all) {
+      all.addEventListener("change", function () {
+        Array.prototype.forEach.call(document.querySelectorAll(".wssh-arc-pick"), function (c) {
+          // Only rows currently visible under the filter, and never the
+          // disabled unknown-OS ones.
+          if (!c.disabled && c.closest("tr").style.display !== "none") c.checked = all.checked;
+        });
+        sync();
+      });
+    }
+    if (filter) {
+      filter.addEventListener("input", function () {
+        var q = filter.value.trim().toLowerCase();
+        Array.prototype.forEach.call(document.querySelectorAll("#wssh-arc-rows tr"), function (tr) {
+          tr.style.display = !q || tr.textContent.toLowerCase().indexOf(q) !== -1 ? "" : "none";
+        });
+      });
+    }
+    if (runBtn) {
+      runBtn.addEventListener("click", function () {
+        var armIds = picked().map(function (c) { return c.getAttribute("data-armid"); });
+        showConfirm(
+          "Run the onboarding script on " + armIds.length + " Arc machine" + (armIds.length === 1 ? "" : "s") + "?\n\n" +
+          "This executes IMMEDIATELY as root/SYSTEM on each one. There is no unassigned state to review first.\n\n" +
+          "The script authorizes the Polaris deployment key, granting administrative SSH access to those machines."
+        ).then(function (ok) {
+          if (!ok) return;
+          runBtn.disabled = true;
+          runBtn.textContent = "Dispatching…";
+          api.serverSettings.arcRun(integrationId, armIds)
+            .then(function (r) {
+              closeModal();
+              showToast(
+                "Dispatched to " + r.dispatched + " machine(s)" +
+                (r.skipped ? ", " + r.skipped + " skipped" : "") +
+                (r.failed ? ", " + r.failed + " failed" : ""),
+                r.failed ? "error" : "success",
+              );
+            })
+            .catch(function (err) {
+              showToast((err && err.message) ? err.message : "Dispatch failed", "error");
+              runBtn.disabled = false;
+              sync();
+            });
+        });
+      });
+    }
+    sync();
+    void machines;
+  }
+
+  function loadArcTargets() {
+    if (!(_state && _state.publicKey)) return;
+    api.serverSettings.scriptPublishTargets()
+      .then(function (r) { renderArcTargets(r && r.arc); })
+      .catch(function () { /* the Intune loader already surfaces a shared failure */ });
   }
 
   function renderPublishTargets(targets) {
@@ -124,6 +298,7 @@
   }
 
   function loadPublishTargets() {
+    // The Intune block only renders on the Windows tab; Arc renders on both.
     if (_platform !== "windows" || !(_state && _state.publicKey)) return;
     api.serverSettings.scriptPublishTargets()
       .then(function (r) { renderPublishTargets(r && r.intune); })
@@ -393,6 +568,7 @@
     syncModeHint();
     if (_state && _state.publicKey) loadScript(_activeKind);
     loadPublishTargets();
+    loadArcTargets();
     // Independent of the keypair — pins can exist from hand-made credentials
     // that never went through this card.
     loadHostKeys();

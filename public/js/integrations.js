@@ -1003,6 +1003,56 @@ function _readPublishToIntuneToggle() {
   return !!el.checked;
 }
 
+// ─── Script Publishing tab (Azure Arc) ─────────────────────────────────────
+//
+// The Arc twin of the Entra tab, but the warning is stronger and different:
+// an Intune Remediation is inert until assigned, whereas an Arc run command
+// EXECUTES on creation. There is no unassigned state to hand a reviewer, so
+// the tab has to be explicit that enabling this means Polaris can run code as
+// root/SYSTEM on machines you pick.
+function arcScriptPublishingFormHTML(allowRunCommand) {
+  var checked = allowRunCommand === true ? "checked" : "";
+  return '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">Run deployment scripts on Arc machines</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">' +
+        'Lets Polaris run the SSH onboarding script (Integrations &rarr; Polaris Agent &rarr; SSH Deployment) ' +
+        'directly on Arc-connected machines via <strong>Run Command</strong>. This is how Linux and Windows ' +
+        'Server get onboarded &mdash; Intune deploys scripts to neither.' +
+      '</p>' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<input type="checkbox" id="f-allowRunCommand" ' + checked + ' style="width:auto">' +
+        '<label for="f-allowRunCommand" style="margin:0">Allow Polaris to run deployment scripts</label>' +
+      '</div>' +
+      '<div style="background:var(--color-bg-subtle,rgba(127,127,127,0.08));border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem">' +
+        '<p style="margin:0 0 0.4rem 0;font-weight:500;font-size:0.85rem">Required in Azure before this works</p>' +
+        '<ol style="margin:0;padding-left:1.2rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.6">' +
+          '<li>Discovery needs only <strong>Reader</strong>. This additionally needs a role carrying ' +
+            '<code>Microsoft.HybridCompute/machines/runCommands/write</code> &mdash; e.g. ' +
+            '<strong>Azure Connected Machine Resource Administrator</strong>, or a custom role.</li>' +
+          '<li>Assign it to this service principal at the <strong>subscription or resource-group scope</strong> ' +
+            'covering the machines you intend to onboard.</li>' +
+        '</ol>' +
+        '<p style="margin:0.5rem 0 0 0;font-size:0.82rem;color:var(--color-text-secondary)">' +
+          'Note this is an <strong>Azure RBAC role assignment</strong>, not a Graph API permission &mdash; a ' +
+          'different mechanism from the Entra/Intune side, and a common point of confusion.' +
+        '</p>' +
+      '</div>' +
+      '<p class="hint" style="color:var(--color-warning,#d98c00);margin:0">' +
+        '<strong>A run command executes immediately.</strong> Unlike an Intune Remediation there is no unassigned ' +
+        'state to review first &mdash; creating one runs the script as root/SYSTEM on that machine. Polaris will ' +
+        'only ever target machines you explicitly select, and asks for confirmation with the count, but the ' +
+        'selection you make IS the review step. The script grants administrative SSH access to every machine it ' +
+        'runs on.' +
+      '</p>' +
+    '</section>';
+}
+
+function _readAllowRunCommandToggle() {
+  var el = document.getElementById("f-allowRunCommand");
+  if (!el) return undefined;
+  return !!el.checked;
+}
+
 // Read the FortiLink-LLDP-exclusion toggle out of the Monitoring tab's LLDP
 // subtab. Returns undefined when the checkbox didn't render (non-FortiGate/FMG
 // types) so the caller leaves the config field alone.
@@ -4861,6 +4911,11 @@ async function openCreateModal(type) {
         key: "scriptpub", label: "Script Publishing", html: scriptPublishingFormHTML(false),
       });
     }
+    if (isArc) {
+      addNonFortinetTabs.push({
+        key: "scriptpub", label: "Script Publishing", html: arcScriptPublishingFormHTML(false),
+      });
+    }
     body = _intRenderTabbedBody("intg-edit", addNonFortinetTabs);
   } else {
     body = _formHTMLForType(type, {});
@@ -4996,6 +5051,10 @@ async function openCreateModal(type) {
         var publishToIntuneNew = _readPublishToIntuneToggle();
         if (publishToIntuneNew !== undefined) createConfig.publishToIntune = publishToIntuneNew;
       }
+      if (isArc) {
+        var allowRunCommandNew = _readAllowRunCommandToggle();
+        if (allowRunCommandNew !== undefined) createConfig.allowRunCommand = allowRunCommandNew;
+      }
       var input = {
         type: type,
         name: val("f-name"),
@@ -5103,6 +5162,12 @@ async function openEditModal(id) {
         nonFortinetTabs.push({
           key: "scriptpub", label: "Script Publishing",
           html: scriptPublishingFormHTML(config.publishToIntune === true),
+        });
+      }
+      if (isArc) {
+        nonFortinetTabs.push({
+          key: "scriptpub", label: "Script Publishing",
+          html: arcScriptPublishingFormHTML(config.allowRunCommand === true),
         });
       }
       body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
@@ -5544,6 +5609,10 @@ function _wireIntgEditSave(id, intg, formGetter) {
       if (isEntra) {
         var publishToIntuneEdit = _readPublishToIntuneToggle();
         if (publishToIntuneEdit !== undefined) editConfig.publishToIntune = publishToIntuneEdit;
+      }
+      if (isArc) {
+        var allowRunCommandEdit = _readAllowRunCommandToggle();
+        if (allowRunCommandEdit !== undefined) editConfig.allowRunCommand = allowRunCommandEdit;
       }
       if (isAd || isEntra || isWin || isArc) {
         // AD / Entra / Windows Server per-class blocks. Workstations is the

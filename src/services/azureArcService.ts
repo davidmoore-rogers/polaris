@@ -47,6 +47,7 @@
 import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { buildClientCredentialsTokenRequest } from "../utils/entraClientCredentials.js";
+import { mapSettledWithConcurrency } from "../utils/concurrency.js";
 
 // ─── API versions (verify-on-real-tenant) ───────────────────────────────────
 
@@ -362,7 +363,10 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 interface ArmRequestOptions {
-  method?: "GET" | "POST";
+  // PUT is reachable ONLY from dispatchRunCommand at the bottom of this file.
+  // proxyQuery (the operator query console) still allowlists GET plus POST to
+  // Resource Graph alone — widening this union does not widen that.
+  method?: "GET" | "POST" | "PUT";
   body?: unknown;
   signal?: AbortSignal;
   retryOn401?: boolean;
@@ -1556,4 +1560,210 @@ export async function discoverMachines(
   }
 
   return { machines, clusters, subscriptionsQueried: subscriptions.length, usedFallback };
+}
+
+// ─── Run Command (the ONLY ARM write in this file) ──────────────────────────
+//
+// Everything above is read-only, and `proxyQuery` deliberately refuses
+// arbitrary writes so the query console can't become a general-purpose tenant
+// mutation tool. This is the single, narrow exception: dispatching the SSH
+// onboarding script to Arc-connected machines.
+//
+// Exported as a PURPOSE-BUILT function rather than by exporting `armRequest`,
+// so the write surface stays exactly one verb against exactly one resource
+// type. If a second write is ever needed, add a second named function — do not
+// widen this one.
+//
+// THREE THINGS SHAPE THE DESIGN:
+//
+// 1. There is NO inert state. Unlike an Intune Remediation (created unassigned,
+//    doing nothing until a human targets it), a run command EXECUTES on
+//    creation. The review gate is therefore the caller's target selection,
+//    which is why this takes an explicit machine list and never a filter it
+//    expands itself.
+// 2. Arc runs PowerShell on Windows machines and shell on Linux ones, so the
+//    caller supplies both scripts and each machine gets the matching one. A
+//    machine whose OS we cannot determine is SKIPPED, never guessed — guessing
+//    wrong means running a PowerShell script through a shell as root.
+// 3. The PUT is a long-running ARM operation: it returns when the command is
+//    ACCEPTED, not when the script finishes. So this reports DISPATCH, and
+//    `readRunCommandResult` polls a machine afterwards. Blocking on N script
+//    executions inside one HTTP request would time out long before a real
+//    fleet finished.
+
+/**
+ * API version for Microsoft.HybridCompute runCommands — distinct from
+ * ARC_MACHINES_API_VERSION on purpose, since the two resource types version
+ * independently. If Azure rejects it, `extractArmError` surfaces ARM's own
+ * message, which names the versions it does accept.
+ */
+const ARC_RUN_COMMAND_API_VERSION = "2024-07-10";
+
+/** Cap on concurrent ARM writes. ARM throttles per subscription. */
+const ARC_RUN_COMMAND_CONCURRENCY = 4;
+
+export interface ArcRunCommandTarget {
+  armId: string;
+  name: string;
+  subscriptionId: string;
+  resourceGroup: string;
+  /** Azure REGION of the machine resource — required on the runCommand body. */
+  azureRegion: string;
+  /** "windows" | "linux" — selects which script is sent. */
+  osType: string | null;
+  status?: string | null;
+}
+
+export interface ArcRunCommandDispatch {
+  armId: string;
+  name: string;
+  dispatched: boolean;
+  /** Set when the machine was deliberately not attempted. */
+  skipped?: string;
+  error?: string;
+}
+
+export interface ArcRunCommandScripts {
+  windows: string;
+  linux: string;
+}
+
+function runCommandUrl(t: ArcRunCommandTarget, runCommandName: string): string {
+  return (
+    `${ARM_BASE}/subscriptions/${encodeURIComponent(t.subscriptionId)}` +
+    `/resourceGroups/${encodeURIComponent(t.resourceGroup)}` +
+    `/providers/Microsoft.HybridCompute/machines/${encodeURIComponent(t.name)}` +
+    `/runCommands/${encodeURIComponent(runCommandName)}` +
+    `?api-version=${ARC_RUN_COMMAND_API_VERSION}`
+  );
+}
+
+/**
+ * Dispatch a script to each target. Per-item tolerant: one machine's failure
+ * never aborts the batch (the discipline `fillNetworkProfiles` already uses),
+ * so a partially-reachable fleet still gets the machines it can reach.
+ *
+ * Returns one row per target INCLUDING the skipped ones — a caller that only
+ * saw successes could not tell "42 machines onboarded" from "42 attempted, 30
+ * skipped for unknown OS".
+ */
+export async function dispatchRunCommand(
+  config: AzureArcConfig,
+  targets: readonly ArcRunCommandTarget[],
+  scripts: ArcRunCommandScripts,
+  opts: { runCommandName: string; concurrency?: number; signal?: AbortSignal },
+): Promise<ArcRunCommandDispatch[]> {
+  if ((config as any).allowRunCommand !== true) {
+    throw new AppError(
+      400,
+      "Running scripts on Arc machines is not enabled for this integration — turn on " +
+        "the run-script option on its Script Publishing tab first.",
+    );
+  }
+  const limit = Math.max(1, opts.concurrency ?? ARC_RUN_COMMAND_CONCURRENCY);
+
+  const settled = await mapSettledWithConcurrency(
+    targets,
+    limit,
+    async (t): Promise<ArcRunCommandDispatch> => {
+      const os = (t.osType || "").toLowerCase();
+      const script = os === "windows" ? scripts.windows : os === "linux" ? scripts.linux : null;
+      if (!script) {
+        return { armId: t.armId, name: t.name, dispatched: false, skipped: `unknown OS type (${t.osType || "none"})` };
+      }
+      if (!t.azureRegion) {
+        return { armId: t.armId, name: t.name, dispatched: false, skipped: "no Azure region on the machine resource" };
+      }
+      try {
+        await armRequest(config, runCommandUrl(t, opts.runCommandName), {
+          method: "PUT",
+          signal: opts.signal,
+          body: {
+            location: t.azureRegion,
+            properties: {
+              source: { script },
+              // Let ARM own the execution; we report dispatch and poll results
+              // separately rather than holding a request open per machine.
+              asyncExecution: true,
+              timeoutInSeconds: 600,
+            },
+          },
+        });
+        return { armId: t.armId, name: t.name, dispatched: true };
+      } catch (err: any) {
+        return { armId: t.armId, name: t.name, dispatched: false, error: err?.message || "dispatch failed" };
+      }
+    },
+  );
+
+  // A rejection here would be a bug in the mapper above, not a machine failure —
+  // every expected error path already returns a row.
+  return settled.map((r, i) =>
+    r.status === "fulfilled"
+      ? r.value
+      : {
+          armId: targets[i]!.armId,
+          name: targets[i]!.name,
+          dispatched: false,
+          error: String((r.reason as any)?.message ?? r.reason),
+        },
+  );
+}
+
+export interface ArcRunCommandResult {
+  provisioningState: string | null;
+  exitCode: number | null;
+  stdout: string | null;
+  stderr: string | null;
+}
+
+/** Read one machine's run-command outcome. Null when it was never created. */
+export async function readRunCommandResult(
+  config: AzureArcConfig,
+  target: ArcRunCommandTarget,
+  runCommandName: string,
+  signal?: AbortSignal,
+): Promise<ArcRunCommandResult | null> {
+  const url = runCommandUrl(target, runCommandName) + "&$expand=instanceView";
+  let res: any;
+  try {
+    res = await armRequest(config, url, { method: "GET", signal });
+  } catch (err: any) {
+    if (typeof err?.message === "string" && /HTTP 404/.test(err.message)) return null;
+    throw err;
+  }
+  const iv = res?.properties?.instanceView ?? {};
+  return {
+    provisioningState: res?.properties?.provisioningState ?? null,
+    exitCode: typeof iv.exitCode === "number" ? iv.exitCode : null,
+    stdout: typeof iv.output === "string" ? iv.output : null,
+    stderr: typeof iv.error === "string" ? iv.error : null,
+  };
+}
+
+/**
+ * Arc machines eligible as run-command targets. Thin wrapper over the same
+ * roster read discovery uses — the picker needs identity + OS + connection
+ * state, not the enrichment passes.
+ */
+export async function listRunCommandTargets(
+  config: AzureArcConfig,
+  signal?: AbortSignal,
+): Promise<ArcRunCommandTarget[]> {
+  const subscriptions = await resolveSubscriptions(config, signal);
+  if (subscriptions.length === 0) return [];
+  // The two fetchers take different scope shapes — the ARG one wants bare
+  // subscription ids, the per-subscription lister wants the full records.
+  const machines = config.useResourceGraph === false
+    ? await fetchMachinesViaSubscriptionList(config, subscriptions, signal)
+    : await fetchMachinesViaResourceGraph(config, subscriptions.map((s) => s.subscriptionId), signal);
+  return filterArcMachines(machines, config).map((m) => ({
+    armId: m.armId,
+    name: m.name,
+    subscriptionId: m.subscriptionId,
+    resourceGroup: m.resourceGroup,
+    azureRegion: m.azureRegion,
+    osType: m.osType,
+    status: m.status,
+  }));
 }
