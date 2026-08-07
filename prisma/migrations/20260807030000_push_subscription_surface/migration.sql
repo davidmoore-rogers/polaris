@@ -1,0 +1,12 @@
+-- Which Polaris surface enrolled a Web Push subscription: "desktop" | "mobile".
+--
+-- Push notifications deep-link per surface: a subscription enrolled from the
+-- mobile SPA opens /mobile.html#more/alerts, a desktop one /automations.html.
+-- Subscribe time is the only moment we actually know which surface it is —
+-- on Android the installed PWA and the browser share a single push
+-- subscription, so nothing downstream can distinguish them.
+--
+-- Existing rows default to "desktop", which is exactly where they were
+-- enrolled: before this change the only enrollment UI was the button on
+-- /automations.html.
+ALTER TABLE "push_subscriptions" ADD COLUMN "surface" TEXT NOT NULL DEFAULT 'desktop';

@@ -1617,6 +1617,10 @@ table[data-sf-table-id] .sf-label {
   min-width: 140px;
   max-height: 280px;
   overflow-y: auto;
+  /* Don't chain the wheel to the page once the list hits its end — a page
+     scroll closes the popover (the capture-phase scroll handler in
+     table-sf.js), which reads as "the dropdown vanished while I scrolled". */
+  overscroll-behavior: contain;
   text-transform: none;
   letter-spacing: 0;
 }

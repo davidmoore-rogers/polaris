@@ -16,7 +16,8 @@ import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import { CHANNEL_TYPE_META, CHANNEL_TRANSPORT, type ChannelType } from "./notificationTypes.js";
-import { generateVapidKeys } from "./notificationChannels/webPushChannel.js";
+import { generateVapidKeys, sendWebPush } from "./notificationChannels/webPushChannel.js";
+import { pushDeepLinkUrl } from "../utils/notificationTemplate.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
 import { asObject } from "../utils/object.js";
 
@@ -194,4 +195,182 @@ export async function generateWebPushKeys(id: string, actor?: string) {
  *  /push-subscriptions key handoff and the web_push sender. */
 export async function getWebPushChannel(): Promise<ChannelRow | null> {
   return (await prisma.notificationChannel.findFirst({ where: { type: "web_push" } })) as ChannelRow | null;
+}
+
+// ─── Web Push: a server capability, not a destination ────────────────────
+//
+// Every other channel type names somewhere to send TO (an SMTP host, a webhook
+// URL, a Pushbullet account), so it earns a configure-me form. Web Push names
+// nothing: the VAPID keypair is generated, the destination is whichever devices
+// users have enrolled, and WHO gets a given alert is chosen per notify action
+// when an automation is built. So it's modeled as a single on/off capability
+// rather than a channel an operator has to assemble.
+
+const WEB_PUSH_CHANNEL_NAME = "Web Push";
+
+/** VAPID requires a mailto:/https: contact URI. Derive one; the sender also
+ *  has its own fallback, so this is never load-bearing. */
+function defaultVapidSubject(): string {
+  const base = process.env.POLARIS_PUBLIC_URL;
+  if (base && /^https:/i.test(base)) return base.replace(/\/$/, "");
+  return "mailto:polaris@localhost";
+}
+
+export interface WebPushState {
+  /** Turned on AND usable (keys present) — what the UI toggle reflects. */
+  enabled: boolean;
+  /** A channel row exists (may be disabled). */
+  configured: boolean;
+  /** Devices currently enrolled, so the toggle isn't feedback-free. */
+  subscriberCount: number;
+  channelId: string | null;
+}
+
+export async function getWebPushState(): Promise<WebPushState> {
+  const [ch, subscriberCount] = await Promise.all([
+    getWebPushChannel(),
+    prisma.pushSubscription.count(),
+  ]);
+  const cfg = asObject(ch?.config);
+  return {
+    enabled: !!ch?.enabled && !!cfg.publicKey,
+    configured: !!ch,
+    subscriberCount,
+    channelId: ch?.id ?? null,
+  };
+}
+
+/**
+ * Turn Web Push on or off in one call — create the singleton and generate the
+ * keypair on first enable, so the operator never sees channel plumbing.
+ *
+ * Disabling NEVER deletes the row or the keys. Every PushSubscription is signed
+ * against this keypair; dropping it would silently invalidate every enrolled
+ * device and force the whole fleet to re-enroll. Disabled + keys intact means
+ * flipping it back on just works.
+ */
+export async function setWebPushEnabled(enabled: boolean, actor?: string): Promise<WebPushState> {
+  const existing = await getWebPushChannel();
+
+  if (!enabled) {
+    if (existing?.enabled) {
+      await prisma.notificationChannel.update({ where: { id: existing.id }, data: { enabled: false } });
+      await logEvent({
+        action: "notification_channel.updated", resourceType: "notification-channel",
+        resourceId: existing.id, resourceName: existing.name, actor,
+        message: "Web Push disabled (VAPID keypair retained so enrolled devices survive a re-enable)",
+      });
+    }
+    return getWebPushState();
+  }
+
+  let id = existing?.id;
+  if (!existing) {
+    const created = await prisma.notificationChannel.create({
+      data: {
+        name: WEB_PUSH_CHANNEL_NAME,
+        type: "web_push",
+        enabled: true,
+        config: { subject: defaultVapidSubject() } as any,
+        createdBy: actor ?? null,
+      },
+    });
+    id = created.id;
+    await logEvent({
+      action: "notification_channel.created", resourceType: "notification-channel",
+      resourceId: id, resourceName: WEB_PUSH_CHANNEL_NAME, actor, message: "Web Push enabled",
+    });
+  } else if (!existing.enabled) {
+    await prisma.notificationChannel.update({ where: { id: existing.id }, data: { enabled: true } });
+    await logEvent({
+      action: "notification_channel.updated", resourceType: "notification-channel",
+      resourceId: existing.id, resourceName: existing.name, actor, message: "Web Push enabled",
+    });
+  }
+
+  // Generate on first enable, or heal a row that somehow lost its keypair.
+  const cfg = asObject((await getWebPushChannel())?.config);
+  if (!cfg.publicKey || !cfg.privateKey) await generateWebPushKeys(id!, actor);
+
+  return getWebPushState();
+}
+
+/**
+ * Send a test push to ONE user's own enrolled devices.
+ *
+ * Scoped to the caller's own subscriptions on purpose — a "test" that could
+ * notify arbitrary other people is a nuisance vector, not a diagnostic.
+ *
+ * Sends directly rather than queueing a NotificationDelivery, so the operator
+ * gets the real per-device result (including a dead endpoint) instead of a
+ * "queued" shrug. It still uses `pushDeepLinkUrl(surface)` so what lands on the
+ * device is shaped exactly like a production alert. A 404/410 prunes the row,
+ * mirroring what the delivery drain does.
+ */
+export async function sendWebPushTest(userId: string, actor?: string): Promise<{
+  ok: boolean; sent: number; failed: number; pruned: number; message: string;
+}> {
+  const ch = await getWebPushChannel();
+  const cfg = asObject(ch?.config);
+  if (!ch || !ch.enabled || !cfg.publicKey || !cfg.privateKey) {
+    throw new AppError(400, "Web Push is turned off — enable it first.");
+  }
+
+  const subs = await prisma.pushSubscription.findMany({
+    where: { userId },
+    select: { endpoint: true, p256dh: true, auth: true, surface: true },
+  });
+  if (subs.length === 0) {
+    throw new AppError(
+      400,
+      "No push-enabled devices on your account. Turn on push from the sidebar (desktop) or More → Push notifications (mobile), then test again.",
+    );
+  }
+
+  const vapid = {
+    publicKey: String(cfg.publicKey),
+    privateKey: String(cfg.privateKey),
+    subject: typeof cfg.subject === "string" ? cfg.subject : "",
+  };
+
+  let sent = 0, failed = 0, pruned = 0;
+  const errors: string[] = [];
+  for (const s of subs) {
+    try {
+      await sendWebPush(
+        vapid,
+        { endpoint: s.endpoint, p256dh: s.p256dh, auth: s.auth },
+        {
+          title: "Polaris test",
+          body: "Push notifications are working. This is a test.",
+          severity: "info",
+          url: pushDeepLinkUrl(s.surface),
+          notificationId: `test-${Date.now()}`,
+        },
+      );
+      sent++;
+    } catch (err) {
+      const e = err as { message?: string; gone?: boolean };
+      failed++;
+      if (e.gone) {
+        await prisma.pushSubscription.deleteMany({ where: { endpoint: s.endpoint, userId } });
+        pruned++;
+      } else if (e.message) {
+        errors.push(e.message);
+      }
+    }
+  }
+
+  await logEvent({
+    action: "notification_channel.test", resourceType: "notification-channel",
+    resourceId: ch.id, resourceName: ch.name, actor,
+    level: sent > 0 ? "info" : "warning",
+    message: `Web Push test: ${sent} sent, ${failed} failed${pruned ? `, ${pruned} dead subscription(s) pruned` : ""}`,
+  });
+
+  const message = sent > 0
+    ? `Test push sent to ${sent} device${sent === 1 ? "" : "s"}${pruned ? ` (${pruned} dead subscription${pruned === 1 ? "" : "s"} removed)` : ""}.`
+    : `Could not deliver to any device${pruned ? ` — ${pruned} dead subscription${pruned === 1 ? "" : "s"} removed; re-enable push on that device` : ""}.${errors.length ? ` ${errors[0]}` : ""}`;
+
+  return { ok: sent > 0, sent, failed, pruned, message };
 }

@@ -277,15 +277,39 @@ async function openAutomationWizard(existing) {
       return '<option value="' + escapeHtml(c.id) + '"' + (c.id === selId ? " selected" : "") + '>' + escapeHtml(lbl) + '</option>';
     }).join("");
   }
-  function userMultiSelect(selectedIds, cls) {
+  // `forPush` annotates each user with their enrolled device count. Push is
+  // opt-in PER BROWSER, so selecting a user is not the same as being able to
+  // reach them — without this you configure an action that delivers nothing.
+  function userMultiSelect(selectedIds, cls, forPush) {
     var sel = new Set(selectedIds || []);
     var users = _ruleRecipientUsers || [];
     if (!users.length) return '<select multiple class="' + cls + '" size="4" style="width:100%" disabled><option>No users found</option></select>';
     var opts = users.map(function (u) {
       var label = (u.displayName || u.username) + (u.email ? " <" + u.email + ">" : " (no email)");
+      if (forPush) {
+        var n = u.pushDevices || 0;
+        label = (u.displayName || u.username) + (n ? " — " + n + " device" + (n === 1 ? "" : "s") : " — no push device");
+      }
       return '<option value="' + escapeHtml(u.id) + '"' + (sel.has(u.id) ? " selected" : "") + '>' + escapeHtml(label) + '</option>';
     }).join("");
     return '<select multiple class="' + cls + '" size="4" style="width:100%">' + opts + '</select>';
+  }
+
+  /** Warning line under a push recipient picker, or "" when everyone's reachable. */
+  function pushReachWarning(selectedIds) {
+    var users = _ruleRecipientUsers || [];
+    var byId = {};
+    users.forEach(function (u) { byId[u.id] = u; });
+    var chosen = (selectedIds || []).map(function (id) { return byId[id]; }).filter(Boolean);
+    if (!chosen.length) return "";
+    var without = chosen.filter(function (u) { return !(u.pushDevices > 0); });
+    if (!without.length) return "";
+    var names = without.slice(0, 3).map(function (u) { return u.displayName || u.username; }).join(", ");
+    var more = without.length > 3 ? " and " + (without.length - 3) + " more" : "";
+    return '<p class="aw-push-warn" style="font-size:0.78rem;color:var(--color-warning);margin:4px 0 0">' +
+      escapeHtml(without.length + " of " + chosen.length + " selected user" + (chosen.length === 1 ? "" : "s") +
+      " have no push-enabled device (" + names + more + ") — they will receive nothing from this action.") +
+      '</p>';
   }
   function emailSuggestOptions() {
     var seen = {};
@@ -1941,7 +1965,11 @@ async function openAutomationWizard(existing) {
         if (!ch) { fbox.innerHTML = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">Add a channel in the Delivery tab first.</p>'; if (compEl) compEl.style.display = "none"; return; }
         if (compEl) compEl.style.display = isEmailType(ch.type) ? "" : "none";
         if (!isRouted(ch.type)) { fbox.innerHTML = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">Posts to this channel’s configured destination.</p>'; return; }
-        var h = '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Send to user accounts</label>' + userMultiSelect(action.recipientUserIds, "na-users") + '</div>';
+        var isPush = ch.type === "web_push";
+        var h = '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Send to user accounts</label>' +
+          userMultiSelect(action.recipientUserIds, "na-users", isPush) +
+          (isPush ? '<div class="na-push-warn">' + pushReachWarning(action.recipientUserIds) + '</div>' : '') +
+          '</div>';
         if (isEmailType(ch.type)) {
           h += '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">…or custom email addresses (comma-separated)</label><input type="text" class="na-addresses" value="' + escapeHtml((action.addresses || []).join(", ")) + '" placeholder="oncall@example.com"></div>';
         }
@@ -1956,6 +1984,18 @@ async function openAutomationWizard(existing) {
           h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-scope-region" checked> …or users associated with the automation’s region (legacy — routes by the region: tag in the device filter)</label>';
         }
         fbox.innerHTML = h;
+        // Recompute the reachability warning as the operator changes the
+        // selection, rather than only on first paint.
+        if (isPush) {
+          var sel = fbox.querySelector(".na-users");
+          var warnBox = fbox.querySelector(".na-push-warn");
+          if (sel && warnBox) {
+            sel.addEventListener("change", function () {
+              var ids = Array.from(sel.selectedOptions).map(function (o) { return o.value; });
+              warnBox.innerHTML = pushReachWarning(ids);
+            });
+          }
+        }
       };
       box.querySelector(".na-html-enable").addEventListener("change", function () {
         box.querySelector(".na-html").style.display = this.checked ? "block" : "none";

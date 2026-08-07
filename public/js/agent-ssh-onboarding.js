@@ -441,9 +441,7 @@
           "Regenerate the deployment keypair?\n\n" +
           "The current key stops working immediately. Polaris will not be able to reach any Windows endpoint over SSH " +
           "until the onboarding script has re-run everywhere and installed the new key.\n\n" +
-          "This affects BOTH the Windows and Linux credentials — they share one keypair.
-
-" +
+          "This affects BOTH the Windows and Linux credentials — they share one keypair.\n\n" +
           "Agents already installed keep reporting — this only affects installing, upgrading and removing them."
         )
       : Promise.resolve(true);

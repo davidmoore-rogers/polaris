@@ -144,20 +144,47 @@ TableSF.prototype._setup = function () {
     }
   });
 
-  if (!TableSF._docWired) {
-    TableSF._docWired = true;
-    var closeAll = function () {
-      document.querySelectorAll(".sf-multi-popover").forEach(function (p) {
-        p.setAttribute("hidden", "");
-      });
-    };
-    document.addEventListener("click", closeAll);
-    window.addEventListener("scroll", closeAll, true);
-    window.addEventListener("resize", closeAll);
-    document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") closeAll();
+  TableSF._wireDocClose();
+};
+
+// Document-wide "close every open popover" wiring, installed once per page.
+// Popovers are position:fixed, so an ancestor scroll or a resize would leave
+// them floating away from their button — hence the capture-phase scroll close.
+// But a popover has its own overflow-y (max-height), and its INTERNAL scroll
+// must not close it: wheel/scrollbar events whose target is inside a popover
+// are ignored, and a scrollbar drag that starts inside one is ignored on the
+// resulting click too (the mouseup lands outside, so the click targets a
+// common ancestor and would otherwise dismiss the popover mid-drag).
+TableSF._wireDocClose = function () {
+  if (TableSF._docWired) return;
+  TableSF._docWired = true;
+
+  var inPopover = function (node) {
+    return !!(node && node.closest && node.closest(".sf-multi-popover"));
+  };
+  var closeAll = function () {
+    document.querySelectorAll(".sf-multi-popover").forEach(function (p) {
+      p.setAttribute("hidden", "");
     });
-  }
+  };
+  var pressInPopover = false;
+
+  document.addEventListener("mousedown", function (e) {
+    pressInPopover = inPopover(e.target);
+  }, true);
+  document.addEventListener("click", function (e) {
+    var skip = pressInPopover || inPopover(e.target);
+    pressInPopover = false;
+    if (!skip) closeAll();
+  });
+  window.addEventListener("scroll", function (e) {
+    if (inPopover(e.target)) return;
+    closeAll();
+  }, true);
+  window.addEventListener("resize", closeAll);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeAll();
+  });
 };
 
 TableSF.prototype._wireTextFilter = function (th, key) {
@@ -1398,18 +1425,7 @@ function setupColumnLayout(tableEl, options) {
 
   // Reuse the doc-wide popover-close wiring TableSF._setup installs. If no
   // TableSF has been instantiated on the page (e.g. Events), install it here.
-  if (!TableSF._docWired) {
-    TableSF._docWired = true;
-    var closeAll = function () {
-      document.querySelectorAll(".sf-multi-popover").forEach(function (p) { p.setAttribute("hidden", ""); });
-    };
-    document.addEventListener("click", closeAll);
-    window.addEventListener("scroll", closeAll, true);
-    window.addEventListener("resize", closeAll);
-    document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") closeAll();
-    });
-  }
+  TableSF._wireDocClose();
 
   return {
     getPrefs: function () {

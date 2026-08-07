@@ -77,7 +77,14 @@ function _looksLikeDeviceId(tag) {
     if (!btn || !window.polarisPush) return;
     if (!polarisPush.isSupported()) { btn.style.display = "none"; return; }
 
+    // Last painted state, so the click handler can branch WITHOUT awaiting.
+    // Awaiting status() inside the handler (as this used to) burns the click's
+    // transient user activation on a network round trip, and Safari then
+    // refuses the permission prompt — see the ordering comment in push.js.
+    var lastState = null;
+
     function paint(st) {
+      lastState = st;
       if (!st.enabledOnServer) {
         // Server hasn't configured Web Push — keep the control hidden rather
         // than offer a button that can only error.
@@ -94,11 +101,11 @@ function _looksLikeDeviceId(tag) {
     if (!btn._wired) {
       btn._wired = true;
       btn.addEventListener("click", async function () {
+        var wasSubscribed = !!(lastState && lastState.subscribed);
         btn.disabled = true;
         try {
-          var st = await polarisPush.status();
-          if (st.subscribed) { await polarisPush.disable(); showToast("Push notifications disabled", "info"); }
-          else { await polarisPush.enable(); showToast("Push notifications enabled", "success"); }
+          if (wasSubscribed) { await polarisPush.disable(); showToast("Push notifications disabled", "info"); }
+          else { await polarisPush.enable({ surface: "desktop" }); showToast("Push notifications enabled", "success"); }
         } catch (err) {
           showToast(err.message || "Push action failed", "error");
         }
@@ -304,6 +311,7 @@ async function loadChannelsTab() {
   if (!container) return;
   if (!_ruleSchema) { try { _ruleSchema = await api.automations.schema(); } catch (_e) { /* labels degrade to raw type */ } }
   container.innerHTML = '<p class="empty-state">Loading…</p>';
+  loadWebPushCard();
   try {
     var resp = await api.deliveryChannels.list();
     _ruleChannels = (resp && resp.channels) || [];
@@ -311,6 +319,101 @@ async function loadChannelsTab() {
   } catch (err) {
     container.innerHTML = '<p class="empty-state">Error: ' + escapeHtml(err.message || "load failed") + '</p>';
   }
+}
+
+// ─── Web Push card ───────────────────────────────────────────────────────
+// Every other channel names a destination (SMTP host, webhook URL, Pushbullet
+// account) and so earns a form. Web Push names nothing — the keypair is
+// generated, the destinations are whichever devices users enrolled, and WHO
+// gets a given alert is chosen per Notify action when an automation is built.
+// So it's one switch.
+async function loadWebPushCard() {
+  var el = document.getElementById("web-push-card");
+  if (!el) return;
+  try { renderWebPushCard(await api.deliveryChannels.getWebPush()); }
+  catch (_e) { el.innerHTML = ""; }
+}
+
+function renderWebPushCard(state) {
+  var el = document.getElementById("web-push-card");
+  if (!el) return;
+  var canEdit = permAtLeast("automationManagement", "fullwrite");
+  var on = !!(state && state.enabled);
+  var count = (state && state.subscriberCount) || 0;
+
+  // Without this the toggle is feedback-free — an operator can't tell whether
+  // anyone actually receives what they turned on.
+  var devices = count === 0
+    ? '<span style="color:var(--color-text-tertiary)">no devices enrolled yet</span>'
+    : '<strong>' + count + '</strong> device' + (count === 1 ? '' : 's') + ' enrolled';
+
+  el.innerHTML = '<div class="integration-card">' +
+    '<div class="integration-card-header">' +
+      '<div class="integration-card-header-top">' +
+        '<div class="integration-card-title">' +
+          '<span class="integration-type-badge">Web Push</span>' +
+          '<strong>Browser &amp; mobile push</strong>' +
+          (on ? '<span class="integration-status dot-ok">Enabled</span>'
+              : '<span class="integration-status dot-unknown">Disabled</span>') +
+        '</div>' +
+        (canEdit
+          ? '<div class="integration-card-actions">' +
+            (on ? '<button class="btn btn-sm btn-secondary" id="wp-test" title="Send a test push to your own devices">Send test</button> ' : '') +
+            '<label class="toggle-switch" title="' + (on ? 'Turn Web Push off' : 'Turn Web Push on') + '">' +
+            '<input type="checkbox" id="wp-toggle"' + (on ? ' checked' : '') + '>' +
+            '<span class="toggle-slider"></span></label></div>'
+          : '') +
+      '</div>' +
+    '</div>' +
+    '<div class="integration-card-details">' +
+      '<div class="detail-row"><span class="detail-label">Devices</span><span class="detail-value">' + devices + '</span></div>' +
+      '<div class="detail-row"><span class="detail-label">Recipients</span><span class="detail-value">' +
+        'Chosen per automation — add a <strong>Notify</strong> action and pick who receives it' +
+      '</span></div>' +
+    '</div>' +
+  '</div>' +
+  (on && count === 0
+    ? '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin:0.4rem 0 1rem">' +
+      'Users enable push per device from the sidebar (desktop) or More → Push notifications (mobile). ' +
+      'An automation targeting users who haven\'t enrolled delivers nothing.</p>'
+    : '<div style="margin-bottom:1rem"></div>');
+
+  var testBtn = document.getElementById("wp-test");
+  if (testBtn) {
+    testBtn.addEventListener("click", async function () {
+      testBtn.disabled = true;
+      var old = testBtn.textContent;
+      testBtn.textContent = "Sending…";
+      try {
+        var r = await api.deliveryChannels.testWebPush();
+        showToast(r.message || "Test sent", r.ok ? "success" : "error");
+        // A dead subscription may have been pruned — refresh the count.
+        if (r.pruned) loadWebPushCard();
+      } catch (err) {
+        showToast(err.message || "Test failed", "error");
+      }
+      testBtn.disabled = false;
+      testBtn.textContent = old;
+    });
+  }
+
+  var toggle = document.getElementById("wp-toggle");
+  if (!toggle) return;
+  toggle.addEventListener("change", async function () {
+    var want = toggle.checked;
+    toggle.disabled = true;
+    try {
+      var next = await api.deliveryChannels.setWebPush(want);
+      showToast(want ? "Web Push enabled" : "Web Push disabled", want ? "success" : "info");
+      renderWebPushCard(next);
+      // The channel list and the wizard's channel picker both change shape.
+      loadChannelsTab();
+    } catch (err) {
+      showToast(err.message || "Couldn't change Web Push", "error");
+      toggle.checked = !want;
+      toggle.disabled = false;
+    }
+  });
 }
 
 function _chanTypeMeta() { return (_ruleSchema && _ruleSchema.channelTypes) || {}; }
@@ -344,13 +447,17 @@ function channelDetailRows(c) {
   return rows;
 }
 
-function renderChannelsList(channels) {
+function renderChannelsList(allChannels) {
   var container = document.getElementById("channels-list");
   if (!container) return;
   var canEdit = permAtLeast("automationManagement", "fullwrite");
+  // web_push is rendered by its own on/off card above, not as a configurable
+  // destination. It still lives in _ruleChannels so the automation wizard can
+  // select it as a Notify target.
+  var channels = (allChannels || []).filter(function (c) { return c.type !== "web_push"; });
   if (!channels.length) {
     container.innerHTML = '<div class="empty-state-card"><p>No delivery channels configured.</p>' +
-      (canEdit ? '<p style="color:var(--color-text-tertiary);font-size:0.85rem;margin-top:0.5rem">Click “+ Add channel” to add an SMTP / Microsoft 365 email, Pushbullet, Slack, Microsoft Teams, or Web Push destination.</p>' : '') + '</div>';
+      (canEdit ? '<p style="color:var(--color-text-tertiary);font-size:0.85rem;margin-top:0.5rem">Click “+ Add channel” to add an SMTP / Microsoft 365 email, Pushbullet, Slack, or Microsoft Teams destination.</p>' : '') + '</div>';
     return;
   }
   container.innerHTML = channels.map(function (c) {
@@ -432,7 +539,9 @@ var _CHANNEL_TYPE_TITLE = {
 // the Add Integration picker), then open the channel form for that type.
 function showChannelTypePicker() {
   var meta = _chanTypeMeta();
-  var types = Object.keys(meta);
+  // web_push is not offered here — it's a capability toggled on its own card,
+  // with no destination to configure.
+  var types = Object.keys(meta).filter(function (t) { return t !== "web_push"; });
   if (types.length === 0) { showToast("Channel schema not loaded", "error"); return; }
   var cards = types.map(function (t) {
     var title = _CHANNEL_TYPE_TITLE[t] || (meta[t] && meta[t].label) || t;

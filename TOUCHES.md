@@ -1609,17 +1609,20 @@ Listed alphabetically.
 
 **What it owns:** The write path for the `PushSubscription` table — per-user Web Push subscriptions stored by the `/push-subscriptions` routes.
 
-**Public API:** `savePushSubscription({userId, endpoint, p256dh, auth, userAgent})` (upsert by endpoint; re-subscribe re-owns an endpoint that moved to a different user on a shared machine and refreshes the keys), `deletePushSubscription(userId, endpoint)` (owner-scoped deleteMany).
+**Public API:** `savePushSubscription({userId, endpoint, p256dh, auth, userAgent, surface?, oldEndpoint?})` (upsert by endpoint; re-subscribe re-owns an endpoint that moved to a different user on a shared machine and refreshes the keys), `deletePushSubscription(userId, endpoint)` (owner-scoped deleteMany).
 
 **Cross-service deps:** `prisma` only.
 
-**Used by:** `src/api/routes/pushSubscriptions.ts` (POST/DELETE). Readers of the table live elsewhere: `notificationRecipientService` fans deliveries out to a user's endpoints, and the web_push sender prunes rows when an endpoint answers 410/404.
+**Used by:** `src/api/routes/pushSubscriptions.ts` (POST/DELETE). Readers of the table live elsewhere: `notificationRecipientService` fans deliveries out to a user's endpoints (and snapshots `surface` into the delivery `meta`), and the web_push sender prunes rows when an endpoint answers 410/404.
 
 **Invariants:**
 - Delete is scoped to the owning user — one user can never unsubscribe another's endpoint.
+- **`oldEndpoint` lookup AND delete are both scoped to the caller's `userId`.** It's caller-supplied (from the service worker's `pushsubscriptionchange`), so an unscoped query would let a guessed endpoint read another user's `surface` or delete their subscription. Covered by an explicit integration test in `tests/integration/pwaAndPushSurface.test.ts`.
 - Upsert re-owns on endpoint collision by design (shared-machine re-subscribe); don't "fix" it into a 409.
+- `surface` defaults to `"desktop"` only on a genuine create with nothing to inherit. A rotation mints a NEW endpoint, so there is no row to inherit from — that's exactly why `oldEndpoint` exists, and why dropping it would silently demote mobile subscriptions to desktop deep links.
+- The upsert must stay idempotent: `push.js`'s `reconcileSubscription` re-posts the current subscription on EVERY page load as the primary repair for rotated endpoints.
 
-**When changing this:** the endpoint is the business key (`@unique`); anything that changes the stored key fields must stay compatible with what the web_push sender reads at delivery time.
+**When changing this:** the endpoint is the business key (`@unique`); anything that changes the stored key fields must stay compatible with what the web_push sender reads at delivery time. `surface` is consumed by `notificationDeliveryService` via `pushDeepLinkUrl` — adding a surface value means adding a path to `PUSH_DEEP_LINK_PATHS` in `src/utils/notificationTemplate.ts` and a route that serves it.
 
 ---
 
@@ -2611,6 +2614,50 @@ Listed alphabetically.
 - Test fallback PG data directory candidates on RHEL/Windows when `SHOW data_directory` fails (non-superuser app role).
 - When adding a new reason, ALWAYS pick a `family` if it overlaps with any existing reason about the same concern — otherwise both reasons render side-by-side and re-introduce the noise the collapse pass was built to fix. Reasons that are genuinely orthogonal (no overlap) leave `family` undefined.
 - Stick to the `<Subject> <state> (<metric>). <Action>.` wording pattern when adding reasons; the collapse pass concatenates suggestions across family members and the result reads poorly if one reason's suggestion ends mid-sentence or carries the metric inside the action.
+
+---
+
+## services/appIconService.ts
+
+**What it owns:** The PWA home-screen icon set, rasterized from the branding logo with `@resvg/resvg-js` (an SVG canvas of the target size embeds the source bitmap as a `data:` URI). Also owns `ICON_SPECS` — the allowlist `routes/pwa.ts` matches request paths against — and the icon-set version stamp used as the manifest's `?v=` cache-buster and the icon ETag.
+
+**Public API:** `ICON_SPECS`, `findIconSpec`, `renderAppIcon`, `getIconSetVersion`, `resolveBrandingLogoFile`, `__resetIconCacheForTests`
+
+**Cross-service deps:** `brandingService.getBranding` (source logo + defaults), `utils/imageMagic.detectImageMagic` (re-sniff on read), `utils/paths` (`UPLOADS_DIR`, `PUBLIC_DIR`), lazy `@resvg/resvg-js`.
+
+**Used by:** `src/api/routes/pwa.ts` only (`GET /manifest.webmanifest` for the version, `GET /icons/:file` for the bytes).
+
+**Invariants:**
+- **Nothing here throws.** Every failure rung — unresolvable `logoUrl`, path outside `UPLOADS_DIR`, missing file, non-image bytes, WebP, resvg failure — degrades to the shipped `public/logo.png`. A branding mistake must not break the manifest or the icon a push notification renders with.
+- The cache key includes the logo file's **mtime**. The upload route writes a FIXED filename (`custom-logo.png`), so `logoUrl` never changes on re-upload — mtime is the only invalidation signal and is load-bearing.
+- `resolveBrandingLogoFile` takes the **basename** and then asserts the resolved path is still inside `UPLOADS_DIR`. The `branding` Setting row is operator-writable and is the only untrusted input in this service.
+- The `@resvg/resvg-js` import is **lazy** (inside `renderAppIcon`) so a missing per-platform native binding degrades to the raw logo instead of failing module load and taking every route in the process with it.
+- resvg cannot decode an embedded **WebP**, and the branding upload route accepts WebP — that fallback is expected behavior, not an error.
+
+**When changing this:**
+- Adding a variant/size means adding to `ICON_SPECS` (the route allowlist) AND to the manifest's `icons` array in `routes/pwa.ts`. Never let the route accept a caller-supplied size — resvg would allocate an unbounded canvas.
+- The cache is process-local and assumes `POLARIS_ROLE=web` stays single-instance (`deploy/polaris-web.service` is not a templated unit). If web ever becomes multi-replica, this is still correct — just N caches instead of one.
+
+---
+
+## services/brandingService.ts
+
+**What it owns:** The `branding` Setting row — `appName` / `subtitle` / `logoUrl` — plus `BRANDING_DEFAULTS`. Read-side only; the writers stay in the serverSettings routes.
+
+**Public API:** `getBranding`, `BRANDING_DEFAULTS`, the `BrandingSettings` type
+
+**Cross-service deps:** `prisma` (the `Setting` table), `utils/version.getAppVersion` (the `version` field on the response).
+
+**Used by:** `src/api/routes/serverSettings.ts` (`GET|PUT /branding`, `POST|DELETE /branding/logo` — it also **re-exports `getBranding`** so the public `/branding` alias in `src/api/router.ts` keeps working via its dynamic import), `src/api/routes/pwa.ts`, `src/services/appIconService.ts`.
+
+**Invariants:**
+- Extracted from `routes/serverSettings.ts` precisely so services can read branding without importing a route module — do not reintroduce the reverse dependency.
+- `getBranding` never throws on a missing row; it returns defaults.
+- Writers (logo upload/delete, name/subtitle PUT) still live in the route and must keep writing the same three-key shape.
+
+**When changing this:**
+- Adding a branding field means updating the route's PUT schema too — and consider whether it belongs in the PWA manifest (`buildManifest` in `routes/pwa.ts`).
+- Changing `logoUrl` semantics (e.g. non-fixed filenames) breaks `appIconService`'s mtime-based cache key — read that invariant first.
 
 ---
 

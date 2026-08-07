@@ -147,6 +147,24 @@ d("GET /api/v1/events — operator-aware text filters", () => {
     for (const ev of resp.body.events) expect(ev.actor).toBeTruthy();
   });
 
+  it("resourceName filter narrows to one named resource", async () => {
+    await seedEvents();
+    const { agent } = await authedAgent(app);
+    const resp = await agent.get("/api/v1/events?resourceName=beta");
+    expect(resp.status).toBe(200);
+    expect(resp.body.total).toBe(1);
+    expect(resp.body.events[0].resourceName).toBe("beta");
+  });
+
+  it("resourceName empty operator matches the null-name row", async () => {
+    await seedEvents();
+    const { agent } = await authedAgent(app);
+    const resp = await agent.get("/api/v1/events?resourceNameOp=empty");
+    expect(resp.status).toBe(200);
+    expect(resp.body.total).toBe(1);
+    expect(resp.body.events[0].action).toBe("integration.sync");
+  });
+
   it("actor filter is honored (drive-by — silently dropped pre-this-change)", async () => {
     await seedEvents();
     const { agent } = await authedAgent(app);

@@ -13,6 +13,7 @@ import { AppError } from "../../utils/errors.js";
 import { requirePermission } from "../middleware/permissions.js";
 import {
   listChannels, getChannel, getChannelRaw, createChannel, updateChannel, deleteChannel, generateWebPushKeys,
+  getWebPushState, setWebPushEnabled, sendWebPushTest,
 } from "../../services/notificationChannelService.js";
 import { CHANNEL_TYPES, type ChannelType } from "../../services/notificationTypes.js";
 import { sendSmtpEmail, sendM365Email } from "../../services/notificationChannels/emailChannel.js";
@@ -31,6 +32,33 @@ const channelUpdateSchema = channelInputSchema.partial({ type: true });
 
 router.get("/", requirePermission("automationManagement", "read"), async (_req, res, next) => {
   try { res.json({ channels: await listChannels() }); } catch (err) { next(err); }
+});
+
+// Web Push is a server capability, not a destination — one on/off switch
+// instead of a channel form (see the block comment in notificationChannelService).
+// MUST be declared before "/:id" or the literal path is captured as an id.
+router.get("/web-push", requirePermission("automationManagement", "read"), async (_req, res, next) => {
+  try { res.json(await getWebPushState()); } catch (err) { next(err); }
+});
+
+router.put("/web-push", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
+  try {
+    const { enabled } = z.object({ enabled: z.boolean() }).parse(req.body);
+    res.json(await setWebPushEnabled(enabled, req.session?.username));
+  } catch (err) { next(err); }
+});
+
+// Send a real push to the CALLER's own enrolled devices. Every other channel
+// has a Test button; web_push had none, so the only way to check it worked was
+// to build an automation and provoke a trigger. Scoped to the caller's own
+// subscriptions — this must never be a way to notify other people.
+// Declared before "/:id/test" or the literal path is captured as an id.
+router.post("/web-push/test", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
+  try {
+    const userId = req.session?.userId;
+    if (!userId) throw new AppError(401, "Not authenticated");
+    res.json(await sendWebPushTest(userId, req.session?.username));
+  } catch (err) { next(err); }
 });
 
 router.get("/:id", requirePermission("automationManagement", "read"), async (req, res, next) => {

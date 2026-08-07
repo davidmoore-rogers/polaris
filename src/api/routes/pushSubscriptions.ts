@@ -23,6 +23,13 @@ const router = Router();
 const subscribeSchema = z.object({
   endpoint: z.string().url().max(2000),
   keys: z.object({ p256dh: z.string().min(1).max(500), auth: z.string().min(1).max(500) }),
+  // Which surface enrolled: decides the push deep link (mobile SPA vs the
+  // desktop Automations page). Optional so pre-upgrade clients still work.
+  surface: z.enum(["desktop", "mobile"]).optional(),
+  // Sent by sw.js's pushsubscriptionchange handler so the retiring row's
+  // surface carries forward onto the new endpoint. Only honored for rows the
+  // caller already owns.
+  oldEndpoint: z.string().url().max(2000).optional(),
 });
 
 router.get("/key", requirePermission("alerts", "read"), async (_req, res, next) => {
@@ -41,9 +48,9 @@ router.post("/", requirePermission("alerts", "read"), async (req, res, next) => 
   try {
     const userId = req.session?.userId;
     if (!userId) throw new AppError(401, "Not authenticated");
-    const { endpoint, keys } = subscribeSchema.parse(req.body);
+    const { endpoint, keys, surface, oldEndpoint } = subscribeSchema.parse(req.body);
     const userAgent = (req.get("user-agent") ?? "").slice(0, 500) || null;
-    await savePushSubscription({ userId, endpoint, p256dh: keys.p256dh, auth: keys.auth, userAgent });
+    await savePushSubscription({ userId, endpoint, p256dh: keys.p256dh, auth: keys.auth, userAgent, surface, oldEndpoint });
     res.status(204).end();
   } catch (err) {
     next(err);

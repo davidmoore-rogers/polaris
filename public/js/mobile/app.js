@@ -25,6 +25,13 @@ window.PolarisTheme = {
   set: function (theme) {
     document.documentElement.setAttribute("data-theme", theme);
     try { localStorage.setItem("polaris-theme", theme); } catch (e) {}
+    // Keep the installed app's chrome (Android status bar / task switcher)
+    // in step with the theme. --md-surface-cont per theme; the dark value
+    // matches the manifest's theme_color. The manifest colour itself is
+    // frozen at install time and only affects the launch splash, so a
+    // light-mode user still gets a dark splash — cosmetic and unavoidable.
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", theme === "dark" ? "#1d2024" : "#eef0f7");
   },
 };
 
@@ -118,6 +125,28 @@ window.PolarisTheme = {
     renderShell();
     PolarisRouter.onChange(routeChanged);
     if (!window.location.hash) PolarisRouter.go("search", { replace: true });
+    initPushOnce();
+  }
+
+  // Register the service worker once per page load, as soon as we know the
+  // visitor is authenticated. boot() is re-entrant (the offline Retry button,
+  // sign-out, and post-login all call it), hence the guard.
+  //
+  // Registering here rather than lazily from the More tab means (a) Chrome's
+  // installability check sees an ACTIVE service worker whether or not the user
+  // ever opens More, and (b) the push handler is live regardless. It subscribes
+  // to nothing, so there is no permission or privacy consequence.
+  //
+  // reconcileSubscription re-posts an already-granted subscription so a rotated
+  // push endpoint self-heals — see the comment in push.js; this boot-time pass
+  // is the primary rotation repair, not the service worker's event handler.
+  var _pushInitDone = false;
+  function initPushOnce() {
+    if (_pushInitDone || !window.polarisPush) return;
+    _pushInitDone = true;
+    polarisPush.registerSW()
+      .then(function () { return polarisPush.reconcileSubscription("mobile"); })
+      .catch(function () { /* push is optional — never block boot */ });
   }
 
   // ─── Shell ─────────────────────────────────────────────────────────────

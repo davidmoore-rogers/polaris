@@ -3,9 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <!-- Kept in lockstep with the manifest's theme_color; PolarisTheme.set()
+       in js/mobile/app.js also rewrites this so Android's chrome follows the
+       light/dark toggle. -->
   <meta name="theme-color" content="#1d2024">
+  <!-- Installed-app (home screen) metadata. `apple-mobile-web-app-capable` is
+       the legacy iOS spelling, `mobile-web-app-capable` the standardized one;
+       ship both. black-translucent + the viewport-fit=cover above requires the
+       @media (display-mode: standalone) safe-area insets in mobile.css —
+       without them the searchbar slides under the notch. -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Polaris</title>
   <link rel="icon" type="image/png" href="/logo.png">
+  <link rel="apple-touch-icon" href="/icons/app-apple-180.png">
+  <!-- NO crossorigin attribute: a manifest link without one is fetched with
+       credentials omitted, which is exactly why /manifest.webmanifest is
+       unauthenticated. Adding crossorigin="use-credentials" would break it.
+       Deliberately no apple-mobile-web-app-title either — iOS falls back to
+       the manifest's short_name, which is what makes the home-screen label
+       follow operator branding. -->
+  <link rel="manifest" href="/manifest.webmanifest">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -76,7 +95,13 @@
   </div>
 </div>
 
+<!-- FIRST: beforeinstallprompt can fire before the app has booted, and the
+     listener must already be installed to capture it. Same reason dash-mode.js
+     is script #1 on dash.html. No dependencies. -->
+<script src="/js/pwa-install.js"></script>
 <script src="/js/api.js"></script>
+<!-- Must follow api.js — polarisPush calls api.push.*. -->
+<script src="/js/push.js"></script>
 <script src="/js/vendor/html-to-image.min.js"></script>
 <script src="/js/mobile/router.js"></script>
 <script src="/js/auth-flow.js"></script>
