@@ -831,6 +831,12 @@ const api = {
     agentWindowsSshScript:    (kind, platform) =>
       request("GET", "/server-settings/agents/windows-ssh/script?kind=" + encodeURIComponent(kind || "remediation") +
         "&platform=" + encodeURIComponent(platform || "windows")),
+    // Script publishing. The publish call is tracked (it reaches a customer
+    // tenant over the network and can take a few seconds) so it shows in the
+    // cancellable-query tray like the other slow outbound operations.
+    scriptPublishTargets:     () => request("GET", "/server-settings/agents/script-publish/targets"),
+    scriptPublishIntune:      (integrationId) =>
+      trackedRequest("Publishing to Intune", "POST", "/server-settings/agents/script-publish/intune", { integrationId }),
     // Pinned SSH host keys (trust-on-first-use). Deleting one re-opens
     // first-use trust for that host — the recovery path after a rebuild.
     sshHostKeysList:          () => request("GET",    "/server-settings/agents/ssh-host-keys"),

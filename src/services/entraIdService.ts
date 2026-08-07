@@ -15,6 +15,10 @@ import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { normalizeMacOrNull } from "../utils/mac.js";
 import { buildClientCredentialsTokenRequest } from "../utils/entraClientCredentials.js";
+import { sleep } from "../utils/sleep.js";
+// Pure headers→ms backoff policy, shared so the two Azure surfaces cannot
+// diverge on throttle handling. See the note on graphRequest.
+import { throttleDelayMs } from "./azureArcService.js";
 
 export interface EntraIdConfig {
   tenantId: string;
@@ -150,14 +154,60 @@ function invalidateToken(config: EntraIdConfig): void {
   tokenCache.delete(cacheKey(config));
 }
 
-// ─── Graph GET with paging ──────────────────────────────────────────────────
+// ─── Graph request (GET + write verbs) with paging ──────────────────────────
 
-async function graphGet(
+/** Graph's fixed host. Every URL this module builds is asserted against it. */
+export const GRAPH_HOST = "graph.microsoft.com";
+
+const MAX_GRAPH_THROTTLE_RETRIES = 3;
+
+export interface GraphRequestOptions {
+  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  /** JSON-serialized when present; also sets Content-Type. */
+  body?: unknown;
+  signal?: AbortSignal;
+  retryOn401?: boolean;
+  throttleAttempt?: number;
+  /** Return null instead of throwing on 404 (upsert lookups). */
+  allow404?: boolean;
+}
+
+/**
+ * One Graph call. Generalized from the former GET-only `graphGet` so write
+ * verbs (Intune script publishing) share the token cache, the 401
+ * invalidate-and-retry, and the host pinning rather than hand-rolling a second
+ * transport — the repo already carries one hand-rolled Graph POST
+ * (emailChannel.sendM365Email) and a second would be two too many.
+ *
+ * 429 handling is NEW here: reads tolerate a throttle badly enough that the
+ * GET path never grew one, but Graph throttles writes hard, and a failed
+ * publish that silently did nothing is worse than a slow one. The backoff
+ * policy is `throttleDelayMs`, imported from azureArcService rather than
+ * copied — it is a pure headers→ms function and forking it would give the two
+ * Azure surfaces divergent throttle behaviour.
+ * (Direction is admittedly odd for a service→service import; it belongs in a
+ * util. Left as an import to keep this change off azureArcService.ts while a
+ * concurrent branch owns that file.)
+ */
+async function graphRequest(
   config: EntraIdConfig,
   url: string,
-  signal?: AbortSignal,
-  retryOn401 = true,
+  opts: GraphRequestOptions = {},
 ): Promise<any> {
+  const {
+    method = "GET", body, signal,
+    retryOn401 = true, throttleAttempt = 0, allow404 = false,
+  } = opts;
+
+  // Host pinning. `new URL()` alone is not enough — a crafted path can move
+  // the authority — so assert equality after construction. This mirrors
+  // azureArcService's ARM_HOST check; the read-only `proxyQuery` below
+  // predates it and only prefix-checks the path.
+  const parsed = new URL(url);
+  if (parsed.host !== GRAPH_HOST) {
+    throw new AppError(400, `Graph host must be ${GRAPH_HOST}`);
+  }
+
   const token = await getAccessToken(config, signal);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
@@ -166,19 +216,31 @@ async function graphGet(
 
   try {
     const res = await fetch(url, {
-      method: "GET",
+      method,
       headers: {
         "Authorization": `Bearer ${token}`,
         "Accept": "application/json",
         "ConsistencyLevel": "eventual",
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       signal: controller.signal,
     });
 
     if (res.status === 401 && retryOn401) {
       invalidateToken(config);
-      return graphGet(config, url, signal, false);
+      return graphRequest(config, url, { ...opts, retryOn401: false });
     }
+    if (res.status === 429 && throttleAttempt < MAX_GRAPH_THROTTLE_RETRIES) {
+      const delay = throttleDelayMs(res.headers);
+      await sleep(delay);
+      if (signal?.aborted) throw new AppError(502, "Graph request aborted while throttled");
+      return graphRequest(config, url, { ...opts, throttleAttempt: throttleAttempt + 1 });
+    }
+    if (res.status === 429) {
+      throw new AppError(502, "Microsoft Graph throttled the request (429) — retry in a moment.");
+    }
+    if (res.status === 404 && allow404) return null;
     if (res.status === 403) {
       const text = await res.text();
       throw new AppError(502, `Graph API permission denied (403): ${extractGraphError(text)}`);
@@ -187,11 +249,37 @@ async function graphGet(
       const text = await res.text();
       throw new AppError(502, `Graph API HTTP ${res.status}: ${extractGraphError(text)}`);
     }
-    return res.json();
+    // 204 (and any empty body) would blow up res.json().
+    if (res.status === 204) return null;
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener("abort", onExternalAbort);
   }
+}
+
+/** Read-only wrapper — the shape every pre-existing caller uses. */
+async function graphGet(
+  config: EntraIdConfig,
+  url: string,
+  signal?: AbortSignal,
+  retryOn401 = true,
+): Promise<any> {
+  return graphRequest(config, url, { method: "GET", signal, retryOn401 });
+}
+
+/**
+ * Graph transport for other services (intunePublishService). Deliberately
+ * exported as a bound-to-a-config call rather than exposing `graphRequest`
+ * itself, so callers cannot reach a different host or skip the pinning.
+ */
+export async function graphApiRequest(
+  config: EntraIdConfig,
+  url: string,
+  opts: GraphRequestOptions = {},
+): Promise<any> {
+  return graphRequest(config, url, opts);
 }
 
 function extractGraphError(body: string): string {

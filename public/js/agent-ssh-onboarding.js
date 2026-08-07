@@ -44,8 +44,96 @@
       platformTabsHtml() +
       configPaneHtml(s, hasKey) +
       scriptPaneHtml(hasKey) +
+      publishPaneHtml(hasKey) +
       hostKeysPaneHtml()
     );
+  }
+
+  // ─── Publish pane ────────────────────────────────────────────────────────
+  //
+  // Pushes the generated scripts to a delivery vehicle instead of the operator
+  // downloading and uploading them. Each vehicle is opt-in on its own
+  // integration; a target that hasn't opted in is shown DISABLED with a pointer
+  // to the checkbox rather than hidden, or the feature is undiscoverable.
+  function publishPaneHtml(hasKey) {
+    // Intune deploys scripts to Windows only; the Linux half is Arc's job.
+    if (_platform !== "windows") return "";
+    return (
+      '<div style="padding-top:1rem;border-top:1px solid var(--color-border);margin-top:1rem">' +
+        '<h5 style="margin:0 0 0.5rem 0">4. Publish to Intune <span style="font-weight:normal;color:var(--color-text-tertiary)">(optional)</span></h5>' +
+        '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0 0 0.75rem 0">' +
+          'Uploads the pair above as an Intune <strong>Remediation</strong>, so you skip the download-and-paste step. ' +
+          'Re-publishing updates the same policy rather than creating a second one. ' +
+          '<strong>Polaris never assigns it</strong> &mdash; it arrives targeting nothing, and you choose the device ' +
+          'groups in Intune after reading the script.' +
+        '</p>' +
+        (hasKey
+          ? '<div id="wssh-publish-targets"><p class="empty-state" style="padding:0.5rem 0;margin:0">Loading&hellip;</p></div>'
+          : '<p class="empty-state" style="padding:0.5rem 0;margin:0">Generate a keypair first.</p>') +
+      '</div>'
+    );
+  }
+
+  function renderPublishTargets(targets) {
+    var host = el("wssh-publish-targets");
+    if (!host) return;
+    if (!targets || !targets.length) {
+      host.innerHTML = '<p class="empty-state" style="padding:0.5rem 0;margin:0">' +
+        'No Entra ID integration configured. Add one on the Integrations tab to publish to Intune.</p>';
+      return;
+    }
+    host.innerHTML = targets.map(function (t) {
+      return '<div style="display:flex;align-items:center;gap:8px;padding:0.4rem 0">' +
+        '<span style="flex:1">' + escapeHtml(t.integrationName) + '</span>' +
+        (t.enabled
+          ? '<button class="btn btn-sm btn-primary" data-wssh-publish="' + escapeHtml(t.integrationId) +
+            '" data-wssh-publish-name="' + escapeHtml(t.integrationName) + '">Publish to Intune</button>'
+          : '<span class="hint" style="margin:0">Not enabled &mdash; turn on <em>Publish deployment scripts to Intune</em> ' +
+            'on this integration\'s Script Publishing tab.</span>') +
+      '</div>';
+    }).join("");
+
+    Array.prototype.forEach.call(host.querySelectorAll("[data-wssh-publish]"), function (btn) {
+      btn.addEventListener("click", function () { onPublishIntune(btn); });
+    });
+  }
+
+  function onPublishIntune(btn) {
+    var id = btn.getAttribute("data-wssh-publish");
+    var name = btn.getAttribute("data-wssh-publish-name");
+    showConfirm(
+      "Publish the Windows onboarding scripts to Intune via \"" + name + "\"?\n\n" +
+      "This creates (or updates) a Remediation in your tenant. It will NOT be assigned to any device " +
+      "group — you assign it in the Intune console after reviewing the script.\n\n" +
+      "The script grants administrative SSH access to every device it eventually runs on."
+    ).then(function (ok) {
+      if (!ok) return;
+      btn.disabled = true;
+      api.serverSettings.scriptPublishIntune(id)
+        .then(function (r) {
+          showToast(
+            (r.created ? "Created" : "Updated") + " Intune Remediation \"" + r.displayName + "\" (unassigned)",
+            "success",
+          );
+        })
+        .catch(function (err) {
+          showToast((err && err.message) ? err.message : "Publish failed", "error");
+        })
+        .finally(function () { btn.disabled = false; });
+    });
+  }
+
+  function loadPublishTargets() {
+    if (_platform !== "windows" || !(_state && _state.publicKey)) return;
+    api.serverSettings.scriptPublishTargets()
+      .then(function (r) { renderPublishTargets(r && r.intune); })
+      .catch(function (err) {
+        var host = el("wssh-publish-targets");
+        if (host) {
+          host.innerHTML = '<p class="empty-state" style="padding:0.5rem 0;margin:0">Could not load: ' +
+            escapeHtml((err && err.message) || "unknown error") + "</p>";
+        }
+      });
   }
 
   // Pinned SSH host keys. Lives here rather than on the credential form
@@ -304,6 +392,7 @@
     wire();
     syncModeHint();
     if (_state && _state.publicKey) loadScript(_activeKind);
+    loadPublishTargets();
     // Independent of the keypair — pins can exist from hand-made credentials
     // that never went through this card.
     loadHostKeys();

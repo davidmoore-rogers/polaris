@@ -954,6 +954,55 @@ function _readPullSdwanToggle() {
   return !!el.checked;
 }
 
+// ─── Script Publishing tab (Entra ID) ──────────────────────────────────────
+//
+// The one WRITE capability on this integration. Everything else Entra does is
+// read-only discovery, so the tab leads with what the operator has to change
+// in Azure and what it costs them — not with the checkbox.
+function scriptPublishingFormHTML(publishToIntune) {
+  var checked = publishToIntune === true ? "checked" : "";
+  return '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">Publish deployment scripts to Intune</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">' +
+        'Lets Polaris upload the Windows SSH onboarding scripts (Integrations &rarr; Polaris Agent &rarr; ' +
+        'SSH Deployment) to Intune as a <strong>Remediation</strong>, instead of you downloading them and ' +
+        'creating the policy by hand. Re-publishing updates the same policy rather than creating a second one.' +
+      '</p>' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<input type="checkbox" id="f-publishToIntune" ' + checked + ' style="width:auto">' +
+        '<label for="f-publishToIntune" style="margin:0">Allow Polaris to publish scripts to Intune</label>' +
+      '</div>' +
+      '<div style="background:var(--color-bg-subtle,rgba(127,127,127,0.08));border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem">' +
+        '<p style="margin:0 0 0.4rem 0;font-weight:500;font-size:0.85rem">Required in Azure before this works</p>' +
+        '<ol style="margin:0;padding-left:1.2rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.6">' +
+          '<li>Open this app registration in <strong>Entra ID &rarr; App registrations &rarr; API permissions</strong>.</li>' +
+          '<li>Add the <strong>Microsoft Graph &rarr; Application permission</strong> ' +
+            '<code>DeviceManagementConfiguration.ReadWrite.All</code>.</li>' +
+          '<li><strong>Grant admin consent</strong> for the tenant &mdash; application permissions do not work without it.</li>' +
+        '</ol>' +
+        '<p style="margin:0.5rem 0 0 0;font-size:0.82rem;color:var(--color-text-secondary)">' +
+          'Discovery keeps working on the read permissions it already has; this is additive.' +
+        '</p>' +
+      '</div>' +
+      '<p class="hint" style="color:var(--color-warning,#d98c00);margin:0">' +
+        '<strong>What you are granting.</strong> This upgrades the credential from &ldquo;reads your device ' +
+        'inventory&rdquo; to &ldquo;creates device-management policy across the tenant&rdquo;, and an application ' +
+        'permission carries no user context &mdash; it acts tenant-wide. ' +
+        '<strong>Polaris never assigns the policy.</strong> It is uploaded targeting nothing, because the script ' +
+        'grants administrative SSH access to every device it eventually runs on; choosing those devices stays a ' +
+        'human decision you make in the Intune console after reading the script.' +
+      '</p>' +
+    '</section>';
+}
+
+// Returns undefined when the tab didn't render, so saving from another tab
+// leaves the stored value alone (same contract as _readPullSdwanToggle).
+function _readPublishToIntuneToggle() {
+  var el = document.getElementById("f-publishToIntune");
+  if (!el) return undefined;
+  return !!el.checked;
+}
+
 // Read the FortiLink-LLDP-exclusion toggle out of the Monitoring tab's LLDP
 // subtab. Returns undefined when the checkbox didn't render (non-FortiGate/FMG
 // types) so the caller leaves the config field alone.
@@ -4804,6 +4853,14 @@ async function openCreateModal(type) {
         snmpCredentials: addNonFortinetCreds,
       }) },
     ];
+    // Entra only: the SSH-onboarding script publishing opt-in. Registered in
+    // BOTH tab arrays (this one and the edit array) — the two are separate
+    // lists and a tab added to one silently misses the other flow.
+    if (isEntra) {
+      addNonFortinetTabs.push({
+        key: "scriptpub", label: "Script Publishing", html: scriptPublishingFormHTML(false),
+      });
+    }
     body = _intRenderTabbedBody("intg-edit", addNonFortinetTabs);
   } else {
     body = _formHTMLForType(type, {});
@@ -4935,6 +4992,10 @@ async function openCreateModal(type) {
         var excludeFortilinkLldpNew = _readExcludeFortilinkLldpToggle();
         if (excludeFortilinkLldpNew !== undefined) createConfig.excludeFortilinkLldp = excludeFortilinkLldpNew;
       }
+      if (isEntra) {
+        var publishToIntuneNew = _readPublishToIntuneToggle();
+        if (publishToIntuneNew !== undefined) createConfig.publishToIntune = publishToIntuneNew;
+      }
       var input = {
         type: type,
         name: val("f-name"),
@@ -5038,6 +5099,12 @@ async function openEditModal(id) {
           verifyPresence:     config.verifyPresence,
         }) },
       ];
+      if (isEntra) {
+        nonFortinetTabs.push({
+          key: "scriptpub", label: "Script Publishing",
+          html: scriptPublishingFormHTML(config.publishToIntune === true),
+        });
+      }
       body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
     }
     if (isFmgOrFgt) {
@@ -5473,6 +5540,10 @@ function _wireIntgEditSave(id, intg, formGetter) {
         if (sdwanToggle !== undefined) editConfig.pullSdwan = sdwanToggle;
         var excludeFortilinkLldpEdit = _readExcludeFortilinkLldpToggle();
         if (excludeFortilinkLldpEdit !== undefined) editConfig.excludeFortilinkLldp = excludeFortilinkLldpEdit;
+      }
+      if (isEntra) {
+        var publishToIntuneEdit = _readPublishToIntuneToggle();
+        if (publishToIntuneEdit !== undefined) editConfig.publishToIntune = publishToIntuneEdit;
       }
       if (isAd || isEntra || isWin || isArc) {
         // AD / Entra / Windows Server per-class blocks. Workstations is the

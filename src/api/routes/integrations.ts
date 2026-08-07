@@ -635,6 +635,14 @@ const EntraIdConfigSchema = z.object({
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
+  // Opt-in WRITE capability: lets Polaris publish the SSH onboarding scripts
+  // to Intune as a Remediation (intunePublishService). Off by default because
+  // it requires adding the Graph application permission
+  // DeviceManagementConfiguration.ReadWrite.All to this app registration —
+  // upgrading the credential from "reads device inventory" to "creates
+  // device-management policy tenant-wide". Published policies are always left
+  // UNASSIGNED; a human assigns them in Intune after reviewing the script.
+  publishToIntune: z.boolean().optional().default(false),
 });
 
 // Reduced per-class block for classes that can't run the Polaris Agent and
