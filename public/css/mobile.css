@@ -158,6 +158,31 @@ input, select, textarea { font-family: inherit; }
   flex-direction: column;
   background: var(--md-surface);
 }
+
+/* Installed-PWA (home screen) insets.
+ *
+ * In standalone there is no browser chrome, so the shell must reserve the
+ * notch/status bar and the home indicator itself — mobile.html sets
+ * viewport-fit=cover + apple-mobile-web-app-status-bar-style=black-translucent,
+ * which means the app paints edge to edge.
+ *
+ * Padding on .app (the height:100% flex column) shrinks the flex box, so
+ * .app-body (flex:1 1 auto) and the fixed-height navbar both land inside the
+ * safe area. That is also what the overlay rules already assume: the asset
+ * sheet and snackbar anchor at calc(var(--navbar-h) + env(safe-area-inset-
+ * bottom)), i.e. they expect the navbar to sit ABOVE the inset. Without this
+ * block those anchors leave a gap in standalone; with it they line up exactly,
+ * so there is no double offset.
+ *
+ * Scoped to display-mode so layout in a normal browser tab is byte-identical
+ * to before (the browser's own chrome already handles the insets there).
+ */
+@media all and (display-mode: standalone) {
+  .app {
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+}
 .app-body {
   flex: 1 1 auto;
   overflow-y: auto;

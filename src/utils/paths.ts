@@ -29,6 +29,12 @@ export const STATE_DIR = process.env.POLARIS_STATE_DIR
   ? resolve(process.env.POLARIS_STATE_DIR)
   : PROJECT_ROOT;
 
+// Shipped static assets (public/logo.png, mobile.html, sw.js, …). Deliberately
+// derived from PROJECT_ROOT and NOT from STATE_DIR: this is code that ships
+// with the release, not operator state, and it must resolve identically
+// whether we're running from src/ (tsx) or dist/ (built).
+export const PUBLIC_DIR = resolve(PROJECT_ROOT, "public");
+
 export const ENV_FILE = resolve(STATE_DIR, ".env");
 export const SETUP_COMPLETE_MARKER = resolve(STATE_DIR, ".setup-complete");
 export const BACKUP_DIR = resolve(STATE_DIR, "data", "backups");

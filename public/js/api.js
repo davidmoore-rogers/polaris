@@ -801,6 +801,11 @@ const api = {
     delete:      (id)     => request("DELETE", `/delivery-channels/${id}`),
     test:        (id, b)  => request("POST",   `/delivery-channels/${id}/test`, b || {}),
     generateVapid:(id)    => request("POST",   `/delivery-channels/${id}/generate-vapid`),
+    // Web Push is a single on/off capability, not a destination to configure.
+    getWebPush:  ()       => request("GET",    "/delivery-channels/web-push"),
+    setWebPush:  (enabled) => request("PUT",   "/delivery-channels/web-push", { enabled }),
+    // Sends to the CALLER's own enrolled devices only.
+    testWebPush: ()       => request("POST",  "/delivery-channels/web-push/test"),
   },
   serverSettings: {
     // Polaris Agent — Build button + inventory on Maintenance tab.

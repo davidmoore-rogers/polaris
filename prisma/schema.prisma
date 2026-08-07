@@ -3512,6 +3512,14 @@ model PushSubscription {
   p256dh     String   @db.Text
   auth       String
   userAgent  String?
+  // Which Polaris surface enrolled this subscription: "desktop" | "mobile".
+  // Web push notifications deep-link per surface — a push enrolled from the
+  // mobile SPA opens /mobile.html#more/alerts, a desktop one /automations.html.
+  // Recorded at subscribe time because that is the only moment we actually
+  // know (on Android the installed PWA and the browser share one subscription,
+  // so nothing downstream can tell them apart). Snapshotted into the delivery
+  // row's meta by notificationRecipientService.
+  surface    String   @default("desktop")
   createdAt  DateTime @default(now())
   lastSeenAt DateTime @default(now())
 

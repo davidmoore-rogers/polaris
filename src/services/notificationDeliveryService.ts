@@ -20,7 +20,7 @@
 import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { notificationsPageUrl } from "../utils/notificationTemplate.js";
+import { notificationsPageUrl, pushDeepLinkUrl } from "../utils/notificationTemplate.js";
 import { logEvent } from "./eventLogService.js";
 import { type ChannelType } from "./notificationTypes.js";
 import { sendSmtpEmail, sendM365Email, type EmailMessage } from "./notificationChannels/emailChannel.js";
@@ -146,10 +146,15 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promi
     } else if (type === "pushbullet") {
       await sendPushbullet({ accessToken: cfgStr(cfg, "accessToken") }, { title: titleFor(d.notification), body: d.notification.message });
     } else if (type === "web_push") {
+      // Web push gets its OWN url, not the shared `url` the email/chat
+      // transports use: the deep link depends on which surface enrolled the
+      // subscription (snapshotted into meta at fan-out). It also never comes
+      // back null — pushDeepLinkUrl falls back to a relative path when
+      // POLARIS_PUBLIC_URL is unset, which the service worker resolves.
       await sendWebPush(
         { publicKey: cfgStr(cfg, "publicKey"), privateKey: cfgStr(cfg, "privateKey"), subject: cfgStr(cfg, "subject") },
         { endpoint: d.target, p256dh: String(meta.p256dh ?? ""), auth: String(meta.auth ?? "") },
-        { title: titleFor(d.notification), body: d.notification.message, severity: d.notification.severity, url, notificationId: d.notification.id },
+        { title: titleFor(d.notification), body: d.notification.message, severity: d.notification.severity, url: pushDeepLinkUrl(meta.surface), notificationId: d.notification.id },
       );
     } else {
       return { ok: false, error: `unknown channel type "${channel.type}"` };

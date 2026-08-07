@@ -15,17 +15,45 @@ export interface SavePushSubscriptionInput {
   p256dh: string;
   auth: string;
   userAgent: string | null;
+  /** Enrolling surface: "desktop" | "mobile". Defaults to desktop. */
+  surface?: string;
+  /**
+   * Set by the service worker's `pushsubscriptionchange` handler: the endpoint
+   * the browser just rotated away from. A rotation mints a NEW endpoint (so
+   * this is a create, with no row to inherit from), and the SW has no idea
+   * which surface enrolled the original — without this the subscription would
+   * silently demote to desktop deep links.
+   */
+  oldEndpoint?: string | null;
 }
 
 export async function savePushSubscription(input: SavePushSubscriptionInput): Promise<void> {
-  const { userId, endpoint, p256dh, auth, userAgent } = input;
+  const { userId, endpoint, p256dh, auth, userAgent, oldEndpoint } = input;
   const now = new Date();
+
+  let surface = input.surface === "mobile" ? "mobile" : input.surface === "desktop" ? "desktop" : null;
+
+  // Rotation: carry the retiring row's surface forward and retire it. Scoped
+  // to the caller's own rows so one user can never read or delete another's
+  // subscription by guessing an endpoint.
+  if (oldEndpoint && oldEndpoint !== endpoint) {
+    const prev = await prisma.pushSubscription.findFirst({
+      where: { endpoint: oldEndpoint, userId },
+      select: { surface: true },
+    });
+    if (prev) {
+      if (surface === null) surface = prev.surface;
+      await prisma.pushSubscription.deleteMany({ where: { endpoint: oldEndpoint, userId } });
+    }
+  }
+
+  const resolved = surface ?? "desktop";
   await prisma.pushSubscription.upsert({
     where: { endpoint },
-    create: { userId, endpoint, p256dh, auth, userAgent, lastSeenAt: now },
+    create: { userId, endpoint, p256dh, auth, userAgent, surface: resolved, lastSeenAt: now },
     // Re-subscribe may move the endpoint to a different user (shared machine) —
     // re-own it and refresh the keys.
-    update: { userId, p256dh, auth, userAgent, lastSeenAt: now },
+    update: { userId, p256dh, auth, userAgent, surface: resolved, lastSeenAt: now },
   });
 }
 
