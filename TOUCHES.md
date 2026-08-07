@@ -2667,9 +2667,9 @@ Listed alphabetically.
 - src/api/routes/assets.ts — GET /assets/:id/resolve-monitor-setting, fetch credential for asset monitoring setup
 
 **Invariants:**
-- Secret fields (community, authKey, privKey, password, privateKey, apiToken) are masked to "••••••••" on every GET; empty string and mask are treated as "preserve from stored value" on PUT.
+- Secret fields (community, authKey, privKey, password, privateKey, passphrase, apiToken) are masked to "••••••••" on every GET; empty string and mask are treated as "preserve from stored value" on PUT. `publicKey` is deliberately NOT in that list — see services/windowsSshOnboardingService.ts.
 - SNMP v2c requires community; v3 requires username + security level + auth/priv keys per level.
-- SSH requires username + (password OR privateKey); WinRM requires both username + password.
+- SSH requires username + (password OR privateKey); WinRM requires both username + password. An SSH `passphrase` is rejected without a `privateKey` — it unlocks a key and means nothing alone, and catching it at save time beats a connect-time ssh2 parse error the operator has to decode. Both `ssh2.connect` sites attach it ONLY on the key path and only when non-empty.
 - REST API requires baseUrl (http/https only, no trailing slash stored) + apiToken; verifyTls defaults false.
 - Delete fails with 409 when the credential is effectively used or still referenced, via `getCredentialUsage` (NOT a hand-maintained column list). Effective usage covers all 8 per-stream Asset credential slots + the `monitorCredentialId` default, plus class-override and integration-default inheritance; a class/integration reference with no matching asset also 409s (deleting would silently SET NULL it). The FK columns themselves are ON DELETE SET NULL, so this guard is the only thing preventing silent unwiring.
 - Credential-usage resolution is by FK wiring (asset stream → asset default → class-override stream → integration `config.monitorCredentialId`), NOT polling-method type-match — it answers "where is this configured." The eight stream slots (`CREDENTIAL_STREAMS`) are responseTime / cpuMemory / temperature / interfaces / lldp / customWidget / processes / eventLog; storage rides `interfaces`. The manual tier (Setting "manualMonitorSettings") carries no default credential, so manual assets resolve through asset + class tiers only.
@@ -2682,6 +2682,100 @@ Listed alphabetically.
 - Test all SNMP v3 security-level combos (noAuthNoPriv, authNoPriv, authPriv); validate protocol enums.
 - Add a new per-stream credential slot: add it to `CREDENTIAL_STREAMS` so usage + the delete guard cover it (and to the schema on both Asset and MonitorClassOverride). Tests live in tests/unit/credentialUsage.test.ts.
 - Verify REST API baseUrl normalization (trim, remove trailing slash, require http/https scheme).
+- `SshConfig.publicKey` is NOT a secret and must stay out of `SECRET_FIELDS_BY_TYPE.ssh` — see services/windowsSshOnboardingService.ts.
+
+---
+
+## services/sshHostKeyService.ts
+
+**What it owns:** Trust-on-first-use pinning for SSH SERVER host keys — the `SshHostKey` table, the verify/pin decision, the fingerprint + key-type parsers, and the operator list/delete.
+
+**Public API:** `SshHostKeyRecord`, `HostKeyVerdict`, `fingerprintKeyBlob`, `keyTypeFromBlob`, `verifyOrPin`, `listHostKeys`, `deleteHostKey`, `_resetCaches`.
+
+**Cross-service deps:** `db` (prisma), `eventLogService`, `utils/errors`, `utils/logger`.
+
+**Used by:**
+- src/utils/remoteExec.ts — `buildHostVerifier` (dynamic import), which feeds BOTH `ssh2.connect` sites: `withSshClient` (agent install/upgrade/uninstall, agentless process collection) and `monitoringService.probeSsh`
+- src/api/routes/serverSettings.ts — `GET /agents/ssh-host-keys`, `DELETE /agents/ssh-host-keys/:id`
+- public/js/agent-ssh-onboarding.js — the pinned-keys pane
+
+**Invariants:**
+- **Opt-in per credential** (`SshConfig.verifyHostKey`), default OFF. Absent the flag, `buildHostVerifier` returns null and ssh2 behaves exactly as it did pre-2026-08 (accepts any host key). This is the compatibility guarantee that lets the feature ship without breaking installs whose hosts were never pinned — do not flip the default without a fleet-wide pinning plan.
+- **Fails closed.** A verification error rejects the connection. An operator who ticked the box must never get a silently-unverified connection.
+- **A mismatch never overwrites the pin.** Overwriting would defeat the entire mechanism; the operator deletes the pin deliberately.
+- Fingerprints are `SHA256:<base64, unpadded>` — byte-identical to `ssh-keygen -lf` so they can be compared by eye during an incident. Do not add padding or switch to hex.
+- Pins are keyed `(host, port)` and live in their own table, NOT on `Credential.config`: host keys are per-host, one credential spans a fleet.
+- **Hot path.** `withSshClient` runs on the per-minute agentless-processes cadence, so lookups are served from a module-level Map and `lastSeen` writes are throttled hourly. A cache hit that disagrees still re-reads the DB before rejecting — otherwise a just-deleted pin would be a permanent rejection on that process.
+- `keyTypeFromBlob` is display-only and bounds the declared length before slicing; a malformed blob degrades to `"unknown"` rather than failing an otherwise-valid connection.
+- Deleting a pin is audited at **warning** level — it re-opens first-use trust for that host.
+
+**When changing this:**
+- Mock-only tests cannot cover the handshake. Verify against a real `ssh2.Server`: pin → match → swap the server's host key → confirm refusal → delete the pin → confirm re-pin. (Attach an `error` handler to the SERVER-side connection in any such harness; the client drops mid-KEX when it refuses, and the resulting server-side event is otherwise unhandled and crashes the script.)
+- Tests: `tests/unit/sshHostKey.test.ts` (18 cases, incl. the opt-in gate and fail-closed).
+- Any new `ssh2.connect` call site MUST route through `buildHostVerifier`; there are deliberately only two.
+
+---
+
+## services/sshOnboardingScript.ts
+
+**What it owns:** Pure generation of the SSH onboarding scripts an operator pushes to their fleet before Polaris can install the agent over SSH — a remediation + detection pair PER PLATFORM (Windows PowerShell, Linux bash) — plus the strict input validators that guard them. No I/O.
+
+**Public API:** `SshOnboardingAccountMode`, `WindowsOnboardingScriptOptions`, `LinuxOnboardingScriptOptions`, `buildWindowsOnboardingScript`, `buildWindowsOnboardingDetectionScript`, `buildLinuxOnboardingScript`, `buildLinuxOnboardingDetectionScript`, `assertValidPublicKey`, `assertValidUsername`, `assertValidLinuxUsername`, `assertValidServerIp`.
+
+**Cross-service deps:** `utils/errors` (AppError), `utils/cidr` (isValidIpv4 / isValidCidr).
+
+**Used by:**
+- src/services/windowsSshOnboardingService.ts — renders both scripts for `GET /server-settings/agents/windows-ssh/script`, and reuses the validators at config-save time so a bad value is rejected on save rather than on download.
+
+**Invariants:**
+- **Operator input is REJECTED, never escaped.** `username` / `polarisServerIp` / `publicKey` are interpolated into PowerShell an admin then runs FLEET-WIDE as SYSTEM — that is effectively RCE on every Windows endpoint, so the validators are allowlists (`/^[A-Za-z0-9._-]{1,64}$/`, optionally `DOMAIN\user`; a key-type + base64 + conservative-comment regex; an IPv4 address or CIDR). `psLiteral` doubling of `'` is belt-and-braces behind that, not the primary defense.
+- The key-presence predicate (`POLARIS_KEY_PRESENT_FN`) is emitted into BOTH scripts from ONE constant. Detection must never drift from what remediation writes, or the pair oscillates.
+- That predicate matches on the key BODY (algorithm + base64) and ignores the trailing comment, so a comment change does not append a duplicate line.
+- The emitted script APPENDS to `administrators_authorized_keys` and never overwrites it — other keys in that file belong to someone else.
+- ACLs and group lookups use well-known SIDs (`S-1-5-32-544`, `S-1-5-18`), never the localized names "Administrators"/"SYSTEM".
+- `accountMode:"create"` + a `DOMAIN\user` name is a hard error: `New-LocalUser` cannot do it, and emitting a script that fails on every endpoint is worse than refusing at authoring time.
+- An unsupported Windows build exits **0** (with an `unsupported:` marker) from both scripts. Non-zero would loop a detection/remediation pair forever against a device remediation cannot fix.
+- Emitted PowerShell must stay idempotent — it runs on every boot under GPO and every cycle under a Remediation. The same applies to the bash: it runs on every config-management pass.
+- **Linux specifics that are load-bearing, not decoration:** `~/.ssh` 700 + `authorized_keys` 600 + correct ownership (sshd silently refuses otherwise); `restorecon` for the SELinux context on RHEL-family (same silent failure); and the NOPASSWD sudoers drop-in, because the agent installer runs `sudo -n` — key auth alone cannot install an agent, so omitting it would just relocate the manual step.
+- **The sudoers drop-in is validated with `visudo -cf` BEFORE `install`.** A malformed drop-in locks sudo out for EVERY user on the host, which is far worse than a failed onboarding. Never reorder those two steps.
+- The Linux script deliberately does NOT install `openssh-server`: distro-specific package management, and a host you cannot already reach over SSH is not one this script was delivered to.
+- Linux detection checks the account and the drop-in as well as the key (Windows detection checks only the key). Both extra facts are prerequisites the install genuinely fails without, and both are unambiguous here — no localization, no policy guessing.
+- `assertValidLinuxUsername` is STRICTER than the Windows one: POSIX charset, lowercase-leading, ≤32 chars, and an explicit rejection of `DOMAIN\user` with a message saying why. Sharing one validator would either admit a value Linux cannot use or reject a valid Windows one.
+
+**When changing this:**
+- Re-run `tests/unit/sshOnboardingScript.test.ts` (39 cases; injection attempts, both account modes, firewall on/off, predicate sharing).
+- Validate any change to the emitted script with the real parser, not by eye: `[System.Management.Automation.Language.Parser]::ParseFile(...)` for PowerShell, `bash -n` for the shell. TS template literals collide with BOTH — `${` is interpolation and bash uses `${VAR}` constantly, PowerShell uses `$` and backtick — so escaping mistakes are easy and silent.
+- Better still, RUN the Linux script: `podman run --rm -v <dir>:/scripts:ro debian:bookworm-slim bash -c 'apt-get install -y sudo passwd && bash /scripts/polaris-ssh-onboarding.sh'`, twice, and confirm one key line, 700/600/440 modes, a locked password, and that `su - <user> -c "sudo -n id -u"` returns 0.
+- Loosening a validator regex is a security change — re-check `psLiteral` still holds.
+- Avoid `${` in emitted PowerShell (TS template-literal interpolation) and escape any literal backtick.
+
+---
+
+## services/windowsSshOnboardingService.ts
+
+**What it owns:** The "Windows SSH Deployment" workflow on Integrations → Polaris Agent — generating/rotating the ed25519 deployment keypair, owning the Polaris-managed `ssh` Credential that stores it, and the non-secret card config in the `windowsSshOnboarding` Setting.
+
+**Public API:** `WindowsSshOnboardingConfig`, `WindowsSshOnboardingState`, `SaveOnboardingConfigInput`, `OnboardingScriptKind`, `OnboardingScriptResult`, `MANAGED_CREDENTIAL_NAME`, `getOnboardingState`, `saveOnboardingConfig`, `generateKeypair`, `getOnboardingScript`, `sshPublicKeyFingerprint`, `_invalidateCache`.
+
+**Cross-service deps:** `credentialService` (createCredential / getCredential / validateConfig), `sshOnboardingScript`, `settingsStore`, `eventLogService`, `db` (prisma), `ssh2` utils.
+
+**Used by:**
+- src/api/routes/serverSettings.ts — `GET|PUT /server-settings/agents/windows-ssh`, `POST /agents/windows-ssh/generate`, `GET /agents/windows-ssh/script`
+- public/js/agent-ssh-onboarding.js — the card, via `api.serverSettings.agentWindowsSsh*`
+
+**Invariants:**
+- **The private key is never returned by any read path.** Only the public half + `SHA256:` fingerprint leave the service (the Web Push VAPID posture). There is deliberately NO escrow: losing `POLARIS_SECRET_KEY` means regenerate + re-run the script, which is why the generated script is idempotent.
+- `SshConfig.publicKey` must stay OUT of `SECRET_FIELDS_BY_TYPE.ssh`. If it were masked, the onboarding script could not be re-rendered without rotating the key and re-touching every endpoint.
+- Rotation **replaces** the credential config via `validateConfig` + a direct `prisma.credential.update`, NOT `updateCredential`. `mergeConfigPreservingSecrets` reads an empty string for a secret field as "keep the stored value" (that is what lets the edit modal round-trip a mask), so it cannot clear a stale `password` — and `remoteExec` silently prefers `privateKey`, making a leftover password dead config that still reads as a live secret in the UI.
+- The key must be generated BEFORE `createCredential`: `validateSshConfig` requires a password or a private key, so an empty `ssh` credential cannot be created and keyed afterwards.
+- `credential.ssh_keypair_generated` is stamped at **warning** level — rotating locks Polaris out of every endpoint until the script re-runs fleet-wide.
+- A `credentialId` pointing at a row an admin deleted reads as "no keypair yet" (offer Generate), never a 500.
+- Config is validated with the SAME validators the script generator uses, so bad input fails at save time rather than at download time.
+
+**When changing this:**
+- `POST /agents/windows-ssh/generate` must keep BOTH gates: `serverSettingsSystem:fullwrite` AND `credentials:write`. It mints a fleet-wide admin credential; the second gate is not redundant.
+- Import ssh2's `utils` off the DEFAULT export. It is CommonJS and cjs-module-lexer surfaces `Client` but not `utils`, so a named import throws at module load under Node's ESM loader even though Vitest interops it fine.
+- Tests: `tests/unit/windowsSshOnboarding.test.ts` (in-memory prisma double so credentialService's real validation/masking runs).
 
 ---
 

@@ -53,11 +53,39 @@ export interface WinRmConfig {
   useHttps?: boolean;
 }
 
+/**
+ * SSH credential. `privateKey` wins over `password` at every connect site
+ * (remoteExec.withSshClient, monitoringService.probeSsh).
+ *
+ * `publicKey` is the `authorized_keys` one-liner for a Polaris-GENERATED
+ * keypair (windowsSshOnboardingService). It is deliberately NOT a secret:
+ * it must survive `stripSecrets` so the Windows onboarding script can be
+ * re-rendered at any time from the stored credential. Regenerating the key
+ * to recover a public half nobody kept would mean re-touching every endpoint
+ * that trusts the old one.
+ */
 export interface SshConfig {
   username: string;
   password?: string;
   privateKey?: string;
+  publicKey?: string;
+  /**
+   * Unlocks an ENCRYPTED `privateKey`. Only meaningful for an operator-supplied
+   * key from their own escrow — a Polaris-generated deployment key is never
+   * exported, so a passphrase on it would just sit next to the key it protects.
+   * Without this, ssh2 fails at parse with "Encrypted private OpenSSH key
+   * detected, but no passphrase given".
+   */
+  passphrase?: string;
   port?: number;
+  /**
+   * Authenticate the SERVER via trust-on-first-use host-key pinning
+   * (sshHostKeyService). Opt-in, mirroring WinRM's `verifyTls`: absent /
+   * false keeps the pre-2026-08 behavior where ssh2 accepts ANY host key,
+   * so enabling it can't break an install whose hosts were never pinned.
+   * New credentials default it ON in the form.
+   */
+  verifyHostKey?: boolean;
 }
 
 /**
@@ -109,7 +137,7 @@ const MASK = SECRET_MASK;
 const SECRET_FIELDS_BY_TYPE: Record<CredentialType, string[]> = {
   snmp:    ["community", "authKey", "privKey"],
   winrm:   ["password"],
-  ssh:     ["password", "privateKey"],
+  ssh:     ["password", "privateKey", "passphrase"],
   restapi: ["apiToken"],
 };
 
@@ -213,6 +241,14 @@ function validateSshConfig(config: Record<string, unknown>): void {
     if (!Number.isInteger(p) || p < 1 || p > 65535) {
       throw new AppError(400, "SSH port must be between 1 and 65535");
     }
+  }
+  if (config.verifyHostKey !== undefined && typeof config.verifyHostKey !== "boolean") {
+    throw new AppError(400, "SSH verifyHostKey must be a boolean");
+  }
+  // A passphrase unlocks a private key and means nothing without one. Catching
+  // it here beats a connect-time parse error the operator has to decode.
+  if (typeof config.passphrase === "string" && config.passphrase.length > 0 && !hasKey) {
+    throw new AppError(400, "SSH passphrase only applies to a private key — add the key, or clear the passphrase");
   }
 }
 

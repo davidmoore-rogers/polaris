@@ -1283,9 +1283,45 @@ The install status pill flips `pending → uploading → enrolling → active` o
 
 ### Required on the target host
 
-- **Linux / macOS:** SSH reachable from Polaris on port 22 (or whatever the credential's port field specifies); the credential's user must be able to `sudo -n` (passwordless sudo) — the installer creates a systemd unit / launchd plist.
+- **Linux / macOS:** SSH reachable from Polaris on port 22 (or whatever the credential's port field specifies); the credential's user must be able to `sudo -n` (passwordless sudo) — the installer creates a systemd unit / launchd plist. **The SSH Deployment card sets this up for you on Linux** (key + sudoers drop-in) — see below.
 - **Windows (WinRM):** WinRM enabled on port 5986 (HTTPS) or 5985 (HTTP). Run `Enable-PSRemoting -Force` on a fresh host. The credential must have local admin rights — the installer creates a Windows Service under `%ProgramFiles%\Polaris\Agent\`.
-- **Windows (SSH):** OpenSSH Server installed and enabled (`Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0; Start-Service sshd; Set-Service -Name sshd -StartupType Automatic`) and reachable on port 22 (or the credential's port). The credential must have local admin rights. Polaris runs the same PowerShell installer used by the WinRM path — the Windows host pulls the agent binary back from Polaris over HTTPS with cert-pin validation, so outbound HTTPS from the host to Polaris must work during the install.
+- **Windows (SSH):** OpenSSH Server installed and enabled (`Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0; Start-Service sshd; Set-Service -Name sshd -StartupType Automatic`) and reachable on port 22 (or the credential's port). The credential must have local admin rights. Polaris runs the same PowerShell installer used by the WinRM path — the Windows host pulls the agent binary back from Polaris over HTTPS with cert-pin validation, so outbound HTTPS from the host to Polaris must work during the install. **Use the Windows SSH Deployment card to set this up rather than doing it by hand** (see below) — it generates the keypair and the script for you, and gets the two silently-failing details right.
+
+### SSH deployment with key auth (Windows and Linux)
+
+Installing the agent over SSH with a key takes a reusable administrator password off the wire entirely. **Integrations → Polaris Agents → Windows SSH Deployment** automates the setup:
+
+1. **Generate keypair.** Polaris creates an ed25519 pair, keeps the private half sealed in a credential named *Windows SSH (Polaris-managed)*, and shows only the public half + fingerprint. The private key is never displayed or downloadable, and there is **no escrow** — if it is lost (e.g. a backup restored onto a host with a different `POLARIS_SECRET_KEY`), regenerate and re-run the script.
+2. **Set the account, per platform.** Pick the Windows or Linux tab, then either name an existing account or have the script create a dedicated one (Windows: random password; Linux: password locked — either way authentication is by key only). Optionally give the Polaris server's address to scope inbound TCP/22 to it. Polaris keeps one managed credential per platform, both holding the same key: a credential carries a single username, and a Windows `DOMAIN\user` is meaningless on Linux.
+3. **Download the script** and push it to your fleet. It contains no machine-specific values, so the same file runs unchanged everywhere. Windows: run **as SYSTEM with the 64-bit PowerShell host**. Linux: run **as root**. Both are idempotent and safe to re-run.
+4. **Install as normal.** Asset details → Install Agent → choose the **SSH** transport and the managed credential. For bulk deploys, leave the WinRM credential empty — when both are configured, Windows prefers WinRM.
+
+**Why not do this by hand:** every one of these fails *silently* — authentication just stops working, with nothing useful on the client.
+
+- **Windows** OpenSSH ignores `%USERPROFILE%\.ssh\authorized_keys` for anyone in the Administrators group and reads only `%ProgramData%\ssh\administrators_authorized_keys`; and it refuses that file unless it is owned by Administrators/SYSTEM with inheritance disabled.
+- **Linux** sshd refuses a group- or world-writable `~/.ssh`, or an `authorized_keys` owned by the wrong user; and on RHEL-family hosts a hand-created `~/.ssh` carries the wrong SELinux context.
+- **Linux also needs passwordless sudo.** The agent installer runs `sudo -n bash /tmp/polaris-agent-install.sh`, so an SSH key on its own will not install an agent. The generated script writes `/etc/sudoers.d/polaris-agent` and validates it with `visudo -cf` *before* installing it — a malformed drop-in locks sudo out for every user on the host.
+
+The Linux script does **not** install `openssh-server`: that needs distro-specific package management, and a host you cannot already reach over SSH is not one the script was delivered to. It reports and exits instead.
+
+**Deploying it across a fleet:**
+
+| Estate / tooling | Vehicle | Notes |
+|---|---|---|
+| Intune-enrolled Windows 10/11 | **Remediation** (detection + remediation pair) | Preferred. Re-checks on a schedule so reimaged / previously-offline devices self-heal. Devices → Scripts works but runs once per device and never retries. |
+| Domain-joined, no Intune | **GPO startup script** | Computer Config → Policies → Windows Settings → Scripts → Startup. Runs as SYSTEM at boot; re-running every boot is harmless. Reaches servers too. |
+| Configuration Manager | **Configuration Baseline** | Same detection + remediation pair, same self-healing behaviour. |
+| Windows Server | GPO, Configuration Manager, or **Azure Arc** | Intune does not manage traditional Windows Server. The script body is identical — only the delivery differs. |
+| Third-party RMM | Script job | Ordinary PowerShell run as SYSTEM; no adaptation needed. |
+| No management tooling | `Invoke-Command -ComputerName (Get-ADComputer -Filter ...).Name -FilePath .\polaris-ssh-onboarding.ps1` | Uses WinRM once to bootstrap SSH, after which Polaris no longer needs a password on the wire. |
+
+For **Linux**, the equivalents are Ansible (`ansible all -b -m script -a polaris-ssh-onboarding.sh`), any run-as-root script resource in Salt/Chef/Puppet, `cloud-init` `runcmd` so new instances onboard at first boot, or `scp` + `sudo bash polaris-ssh-onboarding.sh` by hand. The detection script gives every one of those a check/apply guard.
+
+Pre-1809 / pre-Server 2019 hosts have no OpenSSH Server capability; both scripts report `unsupported:` and exit 0 there rather than failing forever.
+
+**Rotating the key** invalidates every endpoint at once — Polaris cannot install, upgrade or remove agents until the script has re-run everywhere. Already-installed agents keep reporting normally (they authenticate with their own bearer, not this key).
+
+> The generated scripts create privileged accounts, grant passwordless sudo on Linux, and modify firewall rules across your fleet. Have someone review them before they go into Intune/GPO/Ansible — "Polaris generated it" is not a substitute for that review.
 
 ### Upgrade agents on already-installed hosts
 
