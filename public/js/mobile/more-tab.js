@@ -229,15 +229,26 @@
     renderTopbar: function () { return backTopbar("Add to Home Screen"); },
     render: function (body) {
       var ios = window.PolarisInstall && PolarisInstall.isIos();
-      var steps = ios
-        ? ['Tap the <b>Share</b> button at the bottom of Safari.',
-           'Scroll down and tap <b>Add to Home Screen</b>.',
-           'Tap <b>Add</b>.',
-           'Open Polaris from your home screen — then come back to <b>More → Push notifications</b> to turn alerts on.']
-        : ['Open your browser menu (⋮).',
-           'Tap <b>Install app</b> or <b>Add to Home screen</b>.',
-           'Confirm.',
-           'Open Polaris from your home screen.'];
+      var firefox = window.PolarisInstall && PolarisInstall.isFirefox();
+      var steps;
+      if (ios) {
+        steps = ['Tap the <b>Share</b> button at the bottom of Safari.',
+                 'Scroll down and tap <b>Add to Home Screen</b>.',
+                 'Tap <b>Add</b>.',
+                 'Open Polaris from your home screen — then come back to <b>More → Push notifications</b> to turn alerts on.'];
+      } else if (firefox) {
+        // Firefox can install, it just never implemented beforeinstallprompt,
+        // so there's no button we can offer — only its own menu.
+        steps = ['Open the Firefox menu (⋮).',
+                 'Tap <b>Add to Home screen</b> (older builds) or <b>Install</b>.',
+                 'Confirm.',
+                 'Open Polaris from your home screen.'];
+      } else {
+        steps = ['Open your browser menu (⋮).',
+                 'Tap <b>Install app</b> or <b>Add to Home screen</b>.',
+                 'Confirm.',
+                 'Open Polaris from your home screen.'];
+      }
 
       var html = ''
         + '<div style="padding:24px 20px 8px;">'
@@ -463,28 +474,30 @@
     if (!head || !row || !sub || !window.PolarisInstall) return;
 
     function paint() {
+      // Already installed — nothing to offer.
       if (PolarisInstall.isStandalone()) { head.style.display = "none"; row.style.display = "none"; return; }
-      if (PolarisInstall.isIos()) {
-        head.style.display = ""; row.style.display = "";
-        sub.textContent = "Required for notifications on iPhone";
-        return;
-      }
-      // Android/Chrome: only offer it when a native prompt is actually
-      // available, otherwise the row does nothing when tapped.
-      if (PolarisInstall.canPrompt()) {
-        head.style.display = ""; row.style.display = "";
-        sub.textContent = "Install Polaris on this phone";
-        return;
-      }
-      head.style.display = "none"; row.style.display = "none";
+
+      // Otherwise ALWAYS offer it. `canPrompt()` only tells us whether we can
+      // trigger the install ourselves; a browser without beforeinstallprompt
+      // (Firefox for Android, Safari) can still install from its own menu, so
+      // hiding the row there left those users with no affordance at all.
+      head.style.display = ""; row.style.display = "";
+      sub.textContent = PolarisInstall.isIos()
+        ? "Required for notifications on iPhone"
+        : (PolarisInstall.canPrompt() ? "Install Polaris on this phone" : "How to install on this browser");
     }
 
     row.addEventListener("click", function () {
-      if (PolarisInstall.isIos() || !PolarisInstall.canPrompt()) { PolarisRouter.go("more/install"); return; }
-      PolarisInstall.prompt().then(function (outcome) {
-        if (outcome === "accepted") PolarisTabs.showSnackbar("Polaris added to your home screen");
-        paint();
-      });
+      // Native prompt when the browser gives us one; step-by-step instructions
+      // for every browser that doesn't.
+      if (!PolarisInstall.isIos() && PolarisInstall.canPrompt()) {
+        PolarisInstall.prompt().then(function (outcome) {
+          if (outcome === "accepted") PolarisTabs.showSnackbar("Polaris added to your home screen");
+          paint();
+        });
+        return;
+      }
+      PolarisRouter.go("more/install");
     });
 
     // beforeinstallprompt can land AFTER this tab has painted.

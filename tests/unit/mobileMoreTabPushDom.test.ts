@@ -22,6 +22,7 @@ interface Ctx {
   status: Status;
   supported: boolean;
   ios: boolean;
+  firefox: boolean;
   standalone: boolean;
   canPrompt: boolean;
 }
@@ -31,7 +32,7 @@ const g = globalThis as any;
 async function render(ctx: Partial<Ctx>) {
   const c: Ctx = {
     status: { supported: true, enabledOnServer: true, permission: "default", subscribed: false },
-    supported: true, ios: false, standalone: false, canPrompt: false,
+    supported: true, ios: false, firefox: false, standalone: false, canPrompt: false,
     ...ctx,
   } as Ctx;
 
@@ -51,6 +52,7 @@ async function render(ctx: Partial<Ctx>) {
   g.PolarisTheme = { get: () => "dark", set: vi.fn() };
   g.PolarisInstall = {
     isIos: () => c.ios,
+    isFirefox: () => c.firefox,
     isStandalone: () => c.standalone,
     canPrompt: () => c.canPrompt,
     prompt: vi.fn(async () => { calls.push("install.prompt"); return "accepted"; }),
@@ -169,9 +171,23 @@ describe("install row", () => {
     expect(routed).toContain("more/install");
   });
 
-  it("is hidden on a browser that offers no prompt and isn't iOS", async () => {
-    await render({ canPrompt: false, ios: false });
-    expect(visible(document.getElementById("install-row"))).toBe(false);
+  it("still offers manual steps on a browser with no native prompt", async () => {
+    // Firefox for Android CAN install from its own menu; it just never
+    // implemented beforeinstallprompt. Hiding the row on !canPrompt() left
+    // those users with no affordance at all.
+    const { routed } = await render({ canPrompt: false, ios: false, firefox: true });
+    const r = document.getElementById("install-row")!;
+    expect(visible(r)).toBe(true);
+    r.click();
+    expect(routed).toContain("more/install");
+  });
+
+  it("shows Firefox-specific steps on the install page", async () => {
+    await render({ firefox: true, canPrompt: false });
+    document.body.innerHTML = '<div id="app"><main class="app-body" id="app-body"></main></div>';
+    const body = document.getElementById("app-body")!;
+    await (g.PolarisMoreTab.spec.render(body, { route: { parts: ["install"] }, user: {} }) as any);
+    expect(body.innerHTML).toMatch(/Firefox menu/);
   });
 });
 

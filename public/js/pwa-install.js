@@ -52,6 +52,14 @@
     return false;
   }
 
+  // Firefox never implemented beforeinstallprompt, but Firefox for Android CAN
+  // install from its own menu — so canPrompt() being false must not be read as
+  // "this browser can't install". Callers use this to pick the right manual
+  // instructions instead of hiding the affordance entirely.
+  function isFirefox() {
+    try { return /Firefox\/|FxiOS\//.test(navigator.userAgent || ""); } catch (e) { return false; }
+  }
+
   function isIos() {
     try {
       var ua = navigator.userAgent || "";
@@ -84,6 +92,7 @@
   window.PolarisInstall = {
     isStandalone: isStandalone,
     isIos: isIos,
+    isFirefox: isFirefox,
     canPrompt: canPrompt,
     prompt: prompt,
     onChange: function (fn) { if (typeof fn === "function") listeners.push(fn); },
