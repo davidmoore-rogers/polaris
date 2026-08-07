@@ -239,6 +239,32 @@ describe("classBlockKeyForAssetType — assetType → config block key", () => {
     expect(classBlockKeyForAssetType("server", "vcenter")).toBe("vmMonitor");
     expect(classBlockKeyForAssetType("server", "windowsserver")).toBe("serverMonitor");
     expect(classBlockKeyForAssetType("server", null)).toBe("serverMonitor");
+    // Azure Arc must land on the DIRECTORY branch, not vmMonitor — it reuses
+    // the workstationMonitor / serverMonitor block names verbatim, which is
+    // what lets the raw-SQL sweeps resolve it with no extra CASE arm.
+    expect(classBlockKeyForAssetType("server", "azurearc")).toBe("serverMonitor");
+    expect(classBlockKeyForAssetType("workstation", "azurearc")).toBe("workstationMonitor");
+  });
+
+  it("maps kubernetes_cluster to k8sMonitor, on Azure Arc only", () => {
+    // The one Arc class that is NOT workstation/server shaped, and therefore
+    // the only one that needed its own block key + raw-SQL CASE arm.
+    expect(classBlockKeyForAssetType("kubernetes_cluster", "azurearc")).toBe("k8sMonitor");
+    expect(getAddAsMonitoredFromConfig("azurearc", cfg("k8sMonitor", true), "kubernetes_cluster")).toBe(true);
+    // No other integration type owns connected clusters.
+    expect(getAddAsMonitoredFromConfig("vcenter", cfg("k8sMonitor", true), "kubernetes_cluster")).toBeNull();
+    expect(getAddAsMonitoredFromConfig("entraid", cfg("k8sMonitor", true), "kubernetes_cluster")).toBeNull();
+  });
+
+  it("includes kubernetes_cluster in the auto-monitor asset-type set", () => {
+    expect(AUTO_MONITOR_ASSET_TYPES.has("kubernetes_cluster")).toBe(true);
+  });
+
+  it("reads the directory class blocks on an azurearc integration", () => {
+    expect(getAddAsMonitoredFromConfig("azurearc", cfg("workstationMonitor", true), "workstation")).toBe(true);
+    expect(getAddAsMonitoredFromConfig("azurearc", cfg("serverMonitor", true), "server")).toBe(true);
+    // Arc owns no hypervisor class.
+    expect(getAddAsMonitoredFromConfig("azurearc", cfg("hostMonitor", true), "hypervisor")).toBeNull();
   });
 
   it("returns null for non-participating / nullish asset types", () => {
@@ -250,10 +276,10 @@ describe("classBlockKeyForAssetType — assetType → config block key", () => {
   });
 });
 
-describe("AUTO_MONITOR_ASSET_TYPES — the six participating classes", () => {
-  it("contains exactly firewall/switch/access_point/workstation/server/hypervisor", () => {
+describe("AUTO_MONITOR_ASSET_TYPES — the seven participating classes", () => {
+  it("contains exactly firewall/switch/access_point/workstation/server/hypervisor/kubernetes_cluster", () => {
     expect([...AUTO_MONITOR_ASSET_TYPES].sort()).toEqual(
-      ["access_point", "firewall", "hypervisor", "server", "switch", "workstation"],
+      ["access_point", "firewall", "hypervisor", "kubernetes_cluster", "server", "switch", "workstation"],
     );
   });
 

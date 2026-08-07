@@ -17,6 +17,9 @@
  *   Active Directory  → ICMP, WinRM, SSH, Agent                  (no REST API — AD-bound hosts have no shared API)
  *   Entra ID / Intune → ICMP, WinRM, SSH, Agent                  (same — cloud-managed Windows / mobile)
  *   Windows Server    → ICMP, WinRM, SSH, Agent                  (DHCP discovery surfaces Windows hosts)
+ *   Azure Arc         → ICMP, WinRM, SSH, Agent                  (Arc-enabled servers are ordinary Windows/Linux
+ *                                                                 hosts — the Connected Machine agent is a cloud
+ *                                                                 control-plane link, not a Polaris transport)
  *   vCenter           → ICMP, SNMP, WinRM, SSH, Agent, vCenter   (VMs are guest OSes → the directory-set methods
  *                                                                 apply; ESXi hosts answer SNMP/SSH; "vcenter" is
  *                                                                 the hypervisor-view cpuMemory stream — see below)
@@ -67,6 +70,7 @@ export type AssetSourceKind =
   | "entraid"
   | "windowsserver"
   | "vcenter"
+  | "azurearc"
   | "manual";
 
 const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"];
@@ -85,6 +89,12 @@ const COMPATIBILITY: Readonly<Record<AssetSourceKind, ReadonlySet<PollingMethod>
   activedirectory: new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
   entraid:         new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
   windowsserver:   new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
+  // Arc-enabled machines are ordinary Windows/Linux hosts, so they take the
+  // same set as the directory sources. "vcenter" is included for the same
+  // reason it is there — an Arc machine can also be a vCenter-merged VM, and
+  // in fact the Arc↔vCenter vmUuid cross-link makes that MORE likely, not
+  // less. No rest_api (no shared host API) and no snmp.
+  azurearc:        new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
   // Union across the two vCenter classes: VMs are guest OSes (icmp / winrm /
   // ssh / agent like the directory sources), ESXi hosts answer snmp/ssh, and
   // "vcenter" delivers the hypervisor-view cpuMemory stream for VMs.
@@ -117,6 +127,7 @@ export function assetSourceKindFromIntegrationType(integrationType: string | nul
     case "entraid":         return "entraid";
     case "windowsserver":   return "windowsserver";
     case "vcenter":         return "vcenter";
+    case "azurearc":        return "azurearc";
     default:                return "manual";
   }
 }

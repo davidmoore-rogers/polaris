@@ -3352,7 +3352,8 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   var sourceSupportsAgent = (assetSourceKind === "manual" ||
                              assetSourceKind === "activedirectory" ||
                              assetSourceKind === "entraid" ||
-                             assetSourceKind === "windowsserver");
+                             assetSourceKind === "windowsserver" ||
+                             assetSourceKind === "azurearc");
   var agentInFlight = managedAgent && (
     managedAgent.installStatus === "pending"      ||
     managedAgent.installStatus === "uploading"    ||
@@ -8587,6 +8588,8 @@ function _assetIntegrationLabelWithController(asset, joiner) {
     activedirectory: "Active Directory",
     entraid:         "Entra ID",
     windowsserver:   "Windows Server",
+    vcenter:         "vCenter",
+    azurearc:        "Azure Arc",
   };
   var label = (typeLabels[integration.type] || integration.type) + joiner + integration.name;
   if (asset.assetType !== "switch" && asset.assetType !== "access_point") return label;

@@ -1329,6 +1329,8 @@ function renderIntegrationFailedStatus() {
     if (t === "windowsserver") return "Windows Server";
     if (t === "entraid") return "Entra ID";
     if (t === "activedirectory") return "Active Directory";
+    if (t === "vcenter") return "vCenter";
+    if (t === "azurearc") return "Azure Arc";
     return t || "";
   }
   container.innerHTML =

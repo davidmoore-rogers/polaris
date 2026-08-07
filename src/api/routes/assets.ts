@@ -3759,6 +3759,11 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
     } else if (target.sourceKind === "vcenter-host") {
       assetType = "hypervisor";
       tagSet.add("vcenter");
+    } else if (target.sourceKind === "arc") {
+      // Arc onboarding is overwhelmingly server estate; the next discovery
+      // run refines this via inferArcAssetType if it's actually a client SKU.
+      assetType = "server";
+      tagSet.add("azurearc");
     }
 
     // Manufacturer fallback — projection only gives "Fortinet" for fortinet

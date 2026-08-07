@@ -8,6 +8,9 @@
  * Per-integration matching:
  *   - fortimanager / fortigate: deviceInclude/deviceExclude vs hostname
  *   - entraid:                   deviceInclude/deviceExclude vs hostname (Entra displayName lands in Asset.hostname)
+ *   - azurearc:                  deviceInclude/deviceExclude vs hostname. Its
+ *     resourceGroup/tag filters are deliberately not re-evaluated here — see
+ *     the note at that branch.
  *   - activedirectory:           ouInclude/ouExclude vs the AD AssetSource's
  *     observed.ouPath when supplied; falls back to Asset.learnedLocation for
  *     callers that haven't been threaded through to the source row yet.
@@ -80,8 +83,14 @@ export function assetMatchesIntegrationFilter(
     : {};
   const type = integration.type;
 
-  // FMG / FortiGate / Entra: filter on hostname.
-  if (type === "fortimanager" || type === "fortigate" || type === "entraid") {
+  // FMG / FortiGate / Entra / Azure Arc: filter on hostname.
+  //
+  // Arc note: its resource-group and tag filters are NOT re-evaluated here.
+  // Those match against the Arc source's observed blob, which this helper
+  // isn't threaded with, and the failure mode of skipping them is benign
+  // (a probe-now refresh proceeds on an asset the next sweep might drop),
+  // whereas guessing would block legitimate refreshes.
+  if (type === "fortimanager" || type === "fortigate" || type === "entraid" || type === "azurearc") {
     const include = asStringArray(cfg.deviceInclude);
     const exclude = asStringArray(cfg.deviceExclude);
     const candidate = asset.hostname || "";

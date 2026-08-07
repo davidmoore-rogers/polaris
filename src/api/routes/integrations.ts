@@ -14,6 +14,7 @@ import * as windowsServer from "../../services/windowsServerService.js";
 import * as entraId from "../../services/entraIdService.js";
 import * as activeDirectory from "../../services/activeDirectoryService.js";
 import * as vcenter from "../../services/vcenterService.js";
+import * as azureArc from "../../services/azureArcService.js";
 import { isValidIpAddress, ipInCidr, isPrivateIpv4 } from "../../utils/cidr.js";
 import { isFortinetIntegrationType } from "../../utils/pollingCompatibility.js";
 import { SECRET_MASK, isMaskedSecret } from "../../utils/secretMask.js";
@@ -636,6 +637,72 @@ const EntraIdConfigSchema = z.object({
   verboseLogging: z.boolean().optional().default(false),
 });
 
+// Reduced per-class block for classes that can't run the Polaris Agent and
+// report no interfaces or mounts: no agent deploy, no interface/storage
+// auto-monitor (those pins are agent-fed) — addAsMonitored + streams only.
+// Streams still resolve per the monitor-settings hierarchy.
+//
+// Used by vCenter's ESXi-host class (datastore capacity renders from the
+// current-state VcenterDatastore table, not the storage stream) and by Azure
+// Arc's connected-Kubernetes-cluster class. Declared here, above both config
+// schemas that reference it.
+const VcenterHostClassMonitorSchema = z.object({
+  enabled:        z.boolean().optional().default(true),
+  addAsMonitored: z.boolean().optional().default(false),
+  streams:        ClassStreamsSchema.optional(),
+}).optional().default({ enabled: true, addAsMonitored: false });
+
+// Azure Arc. Like Entra it has no host/port/verifySsl (the endpoint is fixed
+// to management.azure.com) and therefore no .superRefine(refineConfigHost) —
+// which is also why triggerDiscovery needs Arc in its hostless branch.
+// Deliberately reuses workstationMonitor / serverMonitor verbatim so every
+// downstream registry that keys on the BLOCK NAME (monitorOverrideService's
+// raw SQL, classToBlockKey, the auto-monitor class maps) works unchanged.
+const AzureArcConfigSchema = z.object({
+  tenantId:     z.string().optional().default(""),
+  clientId:     z.string().optional().default(""),
+  clientSecret: z.string().optional().default(""),
+  // Resource Graph = one query across every readable subscription. Falls back
+  // to a per-subscription list automatically when ARG is unavailable.
+  useResourceGraph: z.boolean().optional().default(true),
+  // Explicit subscription ids; empty = every subscription the app can see.
+  subscriptionInclude: z.array(z.string()).optional().default([]),
+  // Wildcard filters. Resource group and tags are two INDEPENDENT axes, so
+  // they get their own fields (and their own DOM ids in the modal) rather
+  // than sharing the single deviceInclude/deviceExclude pair.
+  resourceGroupInclude: z.array(z.string()).optional().default([]),
+  resourceGroupExclude: z.array(z.string()).optional().default([]),
+  deviceInclude: z.array(z.string()).optional().default([]),
+  deviceExclude: z.array(z.string()).optional().default([]),
+  // "key=value" / "key=*" lines matched against the Azure resource tags.
+  tagInclude: z.array(z.string()).optional().default([]),
+  tagExclude: z.array(z.string()).optional().default([]),
+  // A Disconnected agent is a reachability statement, not a lifecycle one —
+  // those machines are still assets by default.
+  includeDisconnected: z.boolean().optional().default(true),
+  // ONE EXTRA GET PER MACHINE — opt-in, concurrency-capped, deadline-bounded.
+  fetchNetworkProfile: z.boolean().optional().default(false),
+  // Phase 2/3 enrichment. Each is ONE additional Resource Graph query for the
+  // whole tenant (not per machine) and NEITHER creates assets — both fold into
+  // the owning machine's observed blob. Default off so an existing integration
+  // keeps its current blob shape until an operator opts in.
+  enableVmInstances: z.boolean().optional().default(false),
+  enableSqlServer: z.boolean().optional().default(false),
+  // Phase 4. Unlike the two above, connected clusters DO become assets
+  // (assetType "kubernetes_cluster"), so this one changes the fleet.
+  enableKubernetes: z.boolean().optional().default(false),
+  // Post-sync network-presence verification — see EntraIdConfigSchema note.
+  verifyPresence: z.boolean().optional().default(true),
+  workstationMonitor: WorkstationServerClassMonitorSchema,
+  serverMonitor:      WorkstationServerClassMonitorSchema,
+  // Reduced block for connected Kubernetes clusters: a cluster runs no Polaris
+  // Agent and reports no interfaces or mounts, so it takes the same shape as
+  // vCenter's ESXi-host block — addAsMonitored + streams only.
+  k8sMonitor:         VcenterHostClassMonitorSchema,
+  // Per-integration verbose debug logging.
+  verboseLogging: z.boolean().optional().default(false),
+});
+
 const ActiveDirectoryConfigSchema = z.object({
   host:            z.string().optional().default(""),
   port:            z.number().int().min(1).max(65535).optional().default(636),
@@ -657,17 +724,6 @@ const ActiveDirectoryConfigSchema = z.object({
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
 }).superRefine(refineConfigHost);
-
-// Reduced per-class block for vCenter's ESXi-host class: no agent deploy
-// (the Polaris Agent doesn't run on ESXi) and no interface/storage
-// auto-monitor (those pins are agent-fed). Streams still resolve per the
-// monitor-settings hierarchy; datastore capacity renders from the
-// current-state VcenterDatastore table, not the storage stream.
-const VcenterHostClassMonitorSchema = z.object({
-  enabled:        z.boolean().optional().default(true),
-  addAsMonitored: z.boolean().optional().default(false),
-  streams:        ClassStreamsSchema.optional(),
-}).optional().default({ enabled: true, addAsMonitored: false });
 
 const VcenterConfigSchema = z.object({
   host:      z.string().optional().default(""),
@@ -736,6 +792,14 @@ const CreateIntegrationSchema = z.discriminatedUnion("type", [
     type:         z.literal("vcenter"),
     name:         z.string().min(1, "Name is required"),
     config:       VcenterConfigSchema,
+    enabled:      z.boolean().optional().default(true),
+    autoDiscover: z.boolean().optional().default(true),
+    pollInterval: z.number().int().min(1).max(24).optional().default(12),
+  }),
+  z.object({
+    type:         z.literal("azurearc"),
+    name:         z.string().min(1, "Name is required"),
+    config:       AzureArcConfigSchema,
     enabled:      z.boolean().optional().default(true),
     autoDiscover: z.boolean().optional().default(true),
     pollInterval: z.number().int().min(1).max(24).optional().default(12),
@@ -1233,6 +1297,8 @@ router.post("/:id/test", async (req, res, next) => {
       result = await activeDirectory.testConnection(config as any);
     } else if (integration.type === "vcenter") {
       result = await vcenter.testConnection(config as any);
+    } else if (integration.type === "azurearc") {
+      result = await azureArc.testConnection(config as any);
     } else {
       result = { ok: false, message: `Unknown integration type: ${integration.type}` };
     }
@@ -1455,6 +1521,22 @@ router.post("/:id/query", async (req, res, next) => {
         query:  z.record(z.string()).optional(),
       }).parse(req.body);
       const result = await vcenter.proxyQuery(integration.config as any, method, path, query);
+      sendProxyJson(res, result);
+      return;
+    }
+
+    if (integration.type === "azurearc") {
+      // Azure Resource Manager surface only. proxyQuery pins the host to
+      // management.azure.com, requires an api-version, and allows POST ONLY
+      // to the Resource Graph query endpoint — otherwise the console would
+      // be a general-purpose ARM write tool.
+      const { method, path, query, body } = z.object({
+        method: z.enum(["GET", "POST"]).optional().default("GET"),
+        path:   z.string().min(1),
+        query:  z.record(z.string()).optional(),
+        body:   z.unknown().optional(),
+      }).parse(req.body);
+      const result = await azureArc.proxyQuery(integration.config as any, method, path, query, body);
       sendProxyJson(res, result);
       return;
     }
@@ -1873,6 +1955,9 @@ router.post("/test", async (req, res, next) => {
         if (input.type === "vcenter" && needsRestore(cfg.password)) {
           cfg.password = stored.password;
         }
+        if (input.type === "azurearc" && needsRestore(cfg.clientSecret)) {
+          cfg.clientSecret = stored.clientSecret;
+        }
       }
     }
 
@@ -1888,6 +1973,8 @@ router.post("/test", async (req, res, next) => {
       result = await activeDirectory.testConnection(input.config);
     } else if (input.type === "vcenter") {
       result = await vcenter.testConnection(input.config);
+    } else if (input.type === "azurearc") {
+      result = await azureArc.testConnection(input.config);
     } else {
       result = { ok: false, message: `Unknown integration type: ${(input as any).type}` };
     }

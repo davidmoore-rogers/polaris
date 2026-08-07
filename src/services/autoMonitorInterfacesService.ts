@@ -770,6 +770,7 @@ const INTERFACE_CLASSES_BY_TYPE: Record<string, AutoMonitorClass[]> = {
   entraid:         ["workstation", "server"],
   activedirectory: ["workstation", "server"],
   windowsserver:   ["workstation", "server"],
+  azurearc:        ["workstation", "server"],
   // VMs only — ESXi hosts have no agent-fed interface samples to pin.
   vcenter:         ["virtual_machine"],
 };

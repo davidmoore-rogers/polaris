@@ -114,6 +114,40 @@ describe("bumpLastSeen", () => {
   });
 });
 
+describe("bumpLastSeen — arc evidence source", () => {
+  const T0 = new Date("2026-07-01T00:00:00Z");
+  const T2 = new Date("2026-07-02T00:00:00Z");
+
+  it("is deferred on a monitored asset (probe owns presence)", () => {
+    // An Arc agent happily reaching Azure over a WAN link must not mask a
+    // device that is failing its Polaris probe.
+    const data: Record<string, unknown> = {};
+    expect(bumpLastSeen(data, { lastSeen: T0, monitored: true }, T2, "arc")).toBe(false);
+    expect(data.lastSeen).toBeUndefined();
+  });
+
+  it("advances lastSeen on an unmonitored asset (Connected is a live heartbeat)", () => {
+    // status="Connected" read AT SCRAPE TIME is a live liveness statement,
+    // unlike Entra's lastSyncDateTime or AD's lastLogonTimestamp (stored
+    // historical timestamps, which never write lastSeen at all).
+    const data: Record<string, unknown> = {};
+    expect(bumpLastSeen(data, { lastSeen: T0, monitored: false }, T2, "arc")).toBe(true);
+    expect(data.lastSeen).toEqual(T2);
+    expect(data.lastSeenSource).toBe("arc");
+  });
+
+  it("cannot regress lastSeen with a stale evidence date", () => {
+    // Guards the trap this source invites: properties.lastStatusChange records
+    // when the status last CHANGED, so a machine Connected for 90 days carries
+    // a 90-day-old value. The sync passes RUN TIME, but no-regress is the
+    // backstop if anyone ever wires the wrong field.
+    const data: Record<string, unknown> = {};
+    const stale = new Date("2026-04-01T00:00:00Z");
+    expect(bumpLastSeen(data, { lastSeen: T2, monitored: false }, stale, "arc")).toBe(false);
+    expect("lastSeen" in data).toBe(false);
+  });
+});
+
 describe("bumpLastSeen — vcenter evidence source", () => {
   const T0 = new Date("2026-07-01T00:00:00Z");
   const T2 = new Date("2026-07-02T00:00:00Z");

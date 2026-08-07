@@ -735,7 +735,10 @@ function defaultPollingForSource(
     if (stream === "responseTime") return "icmp";
     return "rest_api";
   }
-  if (source === "activedirectory" || source === "entraid" || source === "windowsserver") {
+  // Azure Arc rides the directory defaults: an Arc-enabled machine is an
+  // ordinary Windows/Linux host, and the Connected Machine agent is a cloud
+  // control-plane link Polaris can't poll through.
+  if (source === "activedirectory" || source === "entraid" || source === "windowsserver" || source === "azurearc") {
     return stream === "responseTime" ? "icmp" : null;
   }
   if (source === "vcenter") {
@@ -763,7 +766,8 @@ async function loadLegacyGlobalAsTier(): Promise<MonitorTierSettings | null> {
  * Picks the per-class streams block on the integration config for the given
  * assetType. FMG / FortiGate route firewall→fortigateMonitor, switch→
  * fortiswitchMonitor, access_point→fortiapMonitor; AD / Entra / Windows
- * Server route workstation→workstationMonitor, server→serverMonitor. Every
+ * Server / Azure Arc route workstation→workstationMonitor, server→
+ * serverMonitor (Arc deliberately reuses the directory block names). Every
  * other (assetType, integration-type) pair returns undefined so the resolver
  * falls back to the flat `monitorSettings` JSON for that asset class.
  */
@@ -781,7 +785,17 @@ function pickClassStreamsBlock(
     const streams = block.streams as Record<string, unknown> | undefined;
     return streams && typeof streams === "object" ? streams : undefined;
   }
-  if (integrationType === "activedirectory" || integrationType === "entraid" || integrationType === "windowsserver") {
+  // Azure Arc clusters are the one Arc class that isn't workstation/server
+  // shaped, so they get their own reduced block (no agent, no interface or
+  // storage auto-monitor) — same posture as vCenter's hostMonitor.
+  if (integrationType === "azurearc" && assetType === "kubernetes_cluster") {
+    const block = cfg.k8sMonitor as Record<string, unknown> | undefined;
+    if (!block) return undefined;
+    const streams = block.streams as Record<string, unknown> | undefined;
+    return streams && typeof streams === "object" ? streams : undefined;
+  }
+  if (integrationType === "activedirectory" || integrationType === "entraid"
+      || integrationType === "windowsserver" || integrationType === "azurearc") {
     let block: Record<string, unknown> | undefined;
     if (assetType === "workstation") block = cfg.workstationMonitor as Record<string, unknown> | undefined;
     else if (assetType === "server")  block = cfg.serverMonitor      as Record<string, unknown> | undefined;

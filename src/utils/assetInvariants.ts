@@ -144,6 +144,7 @@ export type LastSeenSource =
   | "device-inventory"  // FortiGate per-client device inventory (device-reported timestamp)
   | "discovery"         // infra device answered / reported connected during discovery
   | "vcenter"           // vCenter reported the VM powered-on / the ESXi host connected at scrape time
+  | "arc"               // Azure Arc reported status="Connected" at scrape time (a live himds heartbeat)
   | "agent"             // Polaris Agent heartbeat
   | "probe"             // successful monitor probe
   | "ping"              // AD/Entra presence-verification ICMP fallback
@@ -164,7 +165,19 @@ export type LastSeenSource =
 // timestamps, which never write lastSeen at all), but for a monitored VM
 // the probe still owns presence — a powered-on-but-network-dead VM must
 // not read as present.
-const POLLING_DEFERRED_SOURCES = new Set<string>(["discovery", "device-inventory", "dhcp-lease", "vcenter"]);
+// "arc" is deferred for the same reason as "vcenter". Arc's
+// properties.status === "Connected", READ AT DISCOVERY TIME, means the
+// resource provider saw a himds heartbeat recently — a live liveness
+// statement, categorically different from Entra's lastSyncDateTime or AD's
+// lastLogonTimestamp (stored historical timestamps, which is exactly why
+// those never write lastSeen at all). But an agent happily reaching Azure
+// over a WAN link must not mask a device that's failing its Polaris probe,
+// so for a MONITORED asset the probe still owns presence.
+//
+// Note the evidence timestamp is always RUN TIME, never
+// properties.lastStatusChange — that records when the status last CHANGED, so
+// a machine Connected for 90 days carries a 90-day-old value.
+const POLLING_DEFERRED_SOURCES = new Set<string>(["discovery", "device-inventory", "dhcp-lease", "vcenter", "arc"]);
 
 /**
  * Single write path for Asset.lastSeen: advance it to `evidenceAt` (stamping

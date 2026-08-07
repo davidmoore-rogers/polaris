@@ -211,6 +211,7 @@ const BUILT_IN_SEEDS: ReadonlyArray<{ name: string; label: string; description: 
   // by migration 20260722000000 — keep it out of this self-heal list or it
   // comes back on the next boot); only the ESXi host type remains.
   { name: "hypervisor",   label: "Hypervisor",   description: "Virtualization host (ESXi). Parents its VMs in the dependency tree; datastores render on its details view." },
+  { name: "kubernetes_cluster", label: "Kubernetes Cluster", description: "Azure Arc-enabled Kubernetes cluster. Discovered as a single asset; it runs no Polaris Agent and reports no interfaces or storage." },
 ];
 
 export async function seedBuiltInAssetTypes(): Promise<{ inserted: number }> {

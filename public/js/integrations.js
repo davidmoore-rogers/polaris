@@ -39,6 +39,7 @@ var _POLLING_COMPAT = {
   activedirectory: ["icmp", "winrm", "ssh", "disabled", "vcenter"],
   entraid:         ["icmp", "winrm", "ssh", "disabled", "vcenter"],
   windowsserver:   ["icmp", "winrm", "ssh", "disabled", "vcenter"],
+  azurearc:        ["icmp", "winrm", "ssh", "disabled", "vcenter"],
   vcenter:         ["icmp", "snmp", "winrm", "ssh", "disabled", "vcenter"],
   manual:          ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "vcenter"],
 };
@@ -111,6 +112,7 @@ function _polarisSourceLabel(source, opts) {
   if (source === "entraid")         return "Entra ID";
   if (source === "windowsserver")   return "Windows Server";
   if (source === "vcenter")         return "vCenter";
+  if (source === "azurearc")        return "Azure Arc";
   return "Manual";
 }
 
@@ -531,7 +533,7 @@ async function loadIntegrations() {
     var result = await api.integrations.list();
     var integrations = result.integrations || result;
     if (integrations.length === 0) {
-      container.innerHTML = '<div class="empty-state-card"><p>No integrations configured.</p><p style="color:var(--color-text-tertiary);font-size:0.85rem;margin-top:0.5rem">Add a FortiManager, FortiGate, Windows Server, Microsoft Entra ID, or Active Directory connection to get started.</p></div>';
+      container.innerHTML = '<div class="empty-state-card"><p>No integrations configured.</p><p style="color:var(--color-text-tertiary);font-size:0.85rem;margin-top:0.5rem">Add a FortiManager, FortiGate, Windows Server, Microsoft Entra ID, Active Directory, VMware vCenter, or Azure Arc connection to get started.</p></div>';
       return;
     }
     var activeDiscoveries = (window._getServerDiscoveries && window._getServerDiscoveries()) || [];
@@ -545,6 +547,7 @@ async function loadIntegrations() {
         intg.type === "entraid" ? "Entra ID" :
         intg.type === "activedirectory" ? "Active Directory" :
         intg.type === "vcenter" ? "vCenter" :
+        intg.type === "azurearc" ? "Azure Arc" :
         "FortiManager";
 
       function filterRow(baseLabel, include, exclude) {
@@ -577,6 +580,26 @@ async function loadIntegrations() {
           '<div class="detail-row"><span class="detail-label">Intune Sync</span><span class="detail-value">' + (config.enableIntune ? "Enabled" : "Disabled") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Include Disabled</span><span class="detail-value">' + (config.includeDisabled === false ? "No (skipped)" : "Yes (as disabled)") + '</span></div>' +
           filterRow("Devices", config.deviceInclude, config.deviceExclude);
+      } else if (intg.type === "azurearc") {
+        var arcSubs = config.subscriptionInclude || [];
+        var arcExtraList = [];
+        if (config.enableVmInstances) arcExtraList.push("VMware / SCVMM");
+        if (config.enableSqlServer) arcExtraList.push("SQL Server");
+        if (config.enableKubernetes) arcExtraList.push("Kubernetes");
+        var arcExtras = arcExtraList.length > 0 ? arcExtraList.join(", ") : "None";
+        var arcSubsValue = arcSubs.length > 0
+          ? escapeHtml(String(arcSubs.length) + " subscription" + (arcSubs.length === 1 ? "" : "s"))
+          : '<span style="color:var(--color-text-tertiary)">All visible to the app registration</span>';
+        detailRows =
+          '<div class="detail-row"><span class="detail-label">Tenant ID</span><span class="detail-value mono">' + escapeHtml(config.tenantId || "-") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Client ID</span><span class="detail-value mono">' + escapeHtml(config.clientId || "-") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Subscriptions</span><span class="detail-value">' + arcSubsValue + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Query Mode</span><span class="detail-value">' + (config.useResourceGraph === false ? "Per-subscription list" : "Resource Graph") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Include Disconnected</span><span class="detail-value">' + (config.includeDisconnected === false ? "No (skipped)" : "Yes") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Extra Resources</span><span class="detail-value">' + escapeHtml(arcExtras) + '</span></div>' +
+          filterRow("Resource Groups", config.resourceGroupInclude, config.resourceGroupExclude) +
+          filterRow("Machines", config.deviceInclude, config.deviceExclude) +
+          filterRow("Tags", config.tagInclude, config.tagExclude);
       } else if (intg.type === "windowsserver") {
         detailRows =
           '<div class="detail-row"><span class="detail-label">Host</span><span class="detail-value mono">' + escapeHtml(config.host || "-") + ':' + (config.port || defaultPort) + '</span></div>' +
@@ -671,6 +694,7 @@ async function loadIntegrations() {
             (intg.type === "fortimanager" ? '<button class="btn btn-sm btn-secondary" onclick="openApiQueryModal(\'' + intg.id + '\', \'' + escapeHtml(config.adom || 'root') + '\', ' + (config.useProxy !== false ? 'true' : 'false') + ')">Query API</button>' : '') +
             (intg.type === "fortigate" ? '<button class="btn btn-sm btn-secondary" onclick="openFgtApiQueryModal(\'' + intg.id + '\', \'' + escapeHtml(config.vdom || 'root') + '\')">Query API</button>' : '') +
             (intg.type === "entraid" ? '<button class="btn btn-sm btn-secondary" onclick="openEntraApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
+            (intg.type === "azurearc" ? '<button class="btn btn-sm btn-secondary" onclick="openArcApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
             (intg.type === "activedirectory" ? '<button class="btn btn-sm btn-secondary" onclick="openAdApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
             (intg.type === "vcenter" ? '<button class="btn btn-sm btn-secondary" onclick="openVcenterApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
             '<button class="btn btn-sm btn-secondary" onclick="testConnection(\'' + intg.id + '\', this)">Test Connection</button>' +
@@ -1184,6 +1208,17 @@ var _CLASS_SUBTAB_SPECS = {
       { key: "servers",      label: "Servers"      },
     ],
   },
+  azurearc: {
+    primary: "workstations",
+    classes: [
+      { key: "workstations", label: "Workstations" },
+      { key: "servers",      label: "Servers"      },
+      // Phase 4. Renders whether or not the operator enabled cluster
+      // discovery — the class block has to be editable BEFORE the first run
+      // brings clusters in, or addAsMonitored could never be set in advance.
+      { key: "clusters",     label: "Kubernetes"   },
+    ],
+  },
   vcenter: {
     primary: "vms",
     classes: [
@@ -1192,6 +1227,17 @@ var _CLASS_SUBTAB_SPECS = {
     ],
   },
 };
+
+// Integration types whose Workstations/Servers class subtabs carry the FULL
+// card set (agent auto-deploy + interface/storage auto-monitor), as opposed
+// to windowsserver's addAsMonitored-only card. Three separate places used to
+// retype this membership list -- the auto-monitor seed stash, the card
+// renderer, and the addAsMonitored reveal wiring -- and any two of them
+// drifting apart is what produces "the cards render but saved selections
+// don't seed". One predicate, three callers.
+function _isWsSrvRichType(t) {
+  return t === "activedirectory" || t === "entraid" || t === "azurearc";
+}
 
 // Streams rendered inside each class subtab. Each entry names:
 //   pollField   — legacy poll-method field on monitorSettings (driver of the
@@ -1244,6 +1290,8 @@ function _classStreamsBlockFor(klass, opts) {
   // only — the VM assets themselves are typed "server".
   if (klass === "vms"   || klass === "virtual_machine") return streamsOf(opts.vmMonitor);
   if (klass === "hosts" || klass === "hypervisor")      return streamsOf(opts.hostMonitor);
+  // Azure Arc connected clusters (Phase 4) — reduced block, like hosts.
+  if (klass === "clusters" || klass === "kubernetes_cluster") return streamsOf(opts.k8sMonitor);
   return null;
 }
 
@@ -1292,6 +1340,10 @@ function _streamsForClass(klass) {
   var allowEventLog  = isHostClass || klass === "fortigate";
   return _ALL_STREAMS.filter(function (s) {
     if (s.key === "storage" && klass === "fortiap") return false; // FortiAP has no mountable storage
+    // A connected Kubernetes cluster is an API endpoint, not a host: no
+    // mounts to walk. (processes / eventLog are already off — isHostClass
+    // excludes it.)
+    if (s.key === "storage" && klass === "clusters") return false;
     if (s.key === "processes") return allowProcesses;
     if (s.key === "eventLog")  return allowEventLog;
     return true;
@@ -2939,6 +2991,8 @@ function monitorSettingsFormHTML(s, opts) {
   // hostMonitor = reduced — no agent deploy / auto-monitor on ESXi).
   var vmCfg   = opts.vmMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null };
   var hostCfg = opts.hostMonitor || { addAsMonitored: false };
+  // Azure Arc connected clusters — reduced block, same shape as hostCfg.
+  var k8sCfg  = opts.k8sMonitor  || { addAsMonitored: false };
 
   // Stash auto-monitor name seeds for the lazy-loaded checklists.
   function _amonSeedNames(sel) {
@@ -2957,7 +3011,7 @@ function monitorSettingsFormHTML(s, opts) {
     window["__autoMon_seed_f-mon-fortiswitch-amon-"] = _amonSeedNames(fwSwCfg.autoMonitorInterfaces);
     window["__autoMon_seed_f-mon-fortiap-amon-"]     = _amonSeedNames(fwApCfg.autoMonitorInterfaces);
   }
-  if (typeof window !== "undefined" && (integrationType === "activedirectory" || integrationType === "entraid")) {
+  if (typeof window !== "undefined" && _isWsSrvRichType(integrationType)) {
     window["__autoMon_seed_f-mon-workstation-amon-"] = _amonSeedNames(workstationCfg.autoMonitorInterfaces);
     window["__autoMon_seed_f-mon-server-amon-"]      = _amonSeedNames(serverCfg.autoMonitorInterfaces);
     window["__autoMonStor_seed_f-mon-workstation-stor-"] = _storSeedNames(workstationCfg.autoMonitorStorage);
@@ -3070,7 +3124,7 @@ function monitorSettingsFormHTML(s, opts) {
     // addAsMonitored — deploying the agent IS how these devices get monitored).
     // WindowsServer keeps the simple addAsMonitored-only card (no agent deploy
     // / auto-monitor wiring on that path yet).
-    var wsLikeAdEntra = (integrationType === "activedirectory" || integrationType === "entraid");
+    var wsLikeAdEntra = _isWsSrvRichType(integrationType);
     if (klass === "workstations" || klass === "workstation") {
       if (!wsLikeAdEntra) {
         return '<section style="margin-bottom:1.25rem">' + autoMonitoringHeader() +
@@ -3125,6 +3179,13 @@ function monitorSettingsFormHTML(s, opts) {
       return '<section style="margin-bottom:1.25rem">' + autoMonitoringHeader() +
         _classAddAsMonitoredHTML("f-mon-host-", "ESXi host", hostCfg.addAsMonitored === true) + '</section>';
     }
+    // Azure Arc connected Kubernetes clusters — addAsMonitored only. A cluster
+    // runs no Polaris Agent and reports no interfaces or mounts, so it gets the
+    // same reduced card as an ESXi host.
+    if (klass === "clusters" || klass === "kubernetes_cluster") {
+      return '<section style="margin-bottom:1.25rem">' + autoMonitoringHeader() +
+        _classAddAsMonitoredHTML("f-mon-clusters-", "Kubernetes cluster", k8sCfg.addAsMonitored === true) + '</section>';
+    }
     return "";
   }
 
@@ -3174,7 +3235,8 @@ function monitorSettingsFormHTML(s, opts) {
   // probe → single-ping fallback). Stored as config.verifyPresence; read on
   // save by _readVerifyPresenceToggle(). Default ON.
   var verifyPresenceHtml = "";
-  if (integrationType === "activedirectory" || integrationType === "entraid" || integrationType === "vcenter") {
+  if (integrationType === "activedirectory" || integrationType === "entraid"
+      || integrationType === "vcenter" || integrationType === "azurearc") {
     var vpChecked = opts.verifyPresence === false ? "" : "checked";
     verifyPresenceHtml = '<div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin:0 0 1rem 0">' +
         '<input type="checkbox" id="f-verifyPresence" ' + vpChecked + ' style="width:auto;margin-top:3px">' +
@@ -3388,7 +3450,7 @@ function _wireMonitoringTabSubtabs(integrationType) {
       if (c.key === "fortigate"   || c.key === "fortiswitch" || c.key === "fortiap") {
         automonPrefix = "f-mon-" + c.key + "-";
       }
-    } else if (integrationType === "activedirectory" || integrationType === "entraid") {
+    } else if (_isWsSrvRichType(integrationType)) {
       // Spec keys are plural (workstations / servers); DOM ids use singular.
       if (c.key === "workstations") automonPrefix = "f-mon-workstation-";
       else if (c.key === "servers") automonPrefix = "f-mon-server-";
@@ -4340,6 +4402,174 @@ function linesToArray(id) {
   return document.getElementById(id).value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
 }
 
+// Azure Arc General tab.
+//
+// Arc gets a fuller setup block than the other types, on purpose: its two most
+// common misconfigurations both fail SILENTLY. A missing Reader role returns a
+// smaller machine roster rather than a 403 (Resource Graph only ever returns
+// what the principal can already read), and an unregistered
+// Microsoft.HybridCompute provider returns a bare 404. Neither is guessable
+// from the error, so the steps + the two callouts below carry the operator
+// through the Azure-side prerequisites before they hit Test Connection.
+//
+// Arc is also the first type with TWO independent filter axes (resource group
+// AND Azure tags), so it deliberately does NOT reuse the shared
+// f-deviceMode / f-deviceNames pair every single-axis type shares — each axis
+// gets its own ids or the two clobber each other on read.
+function azureArcFormHTML(defaults) {
+  var d = defaults || {};
+  var enabledChecked = d.enabled !== false ? "checked" : "";
+  var autoChecked = d.autoDiscover !== false ? "checked" : "";
+  var argChecked = d.useResourceGraph !== false ? "checked" : "";
+  var inclDisc = d.includeDisconnected !== false;
+  var netProfile = d.fetchNetworkProfile === true;
+  var vmInst = d.enableVmInstances === true;
+  var sqlSrv = d.enableSqlServer === true;
+  var k8s = d.enableKubernetes === true;
+
+  var rgMode = (d.resourceGroupInclude && d.resourceGroupInclude.length > 0) ? "include" : "exclude";
+  var rgNames = rgMode === "include" ? (d.resourceGroupInclude || []) : (d.resourceGroupExclude || []);
+  var devMode = (d.deviceInclude && d.deviceInclude.length > 0) ? "include" : "exclude";
+  var devNames = devMode === "include" ? (d.deviceInclude || []) : (d.deviceExclude || []);
+  var tagMode = (d.tagInclude && d.tagInclude.length > 0) ? "include" : "exclude";
+  var tagLines = tagMode === "include" ? (d.tagInclude || []) : (d.tagExclude || []);
+
+  return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Azure Arc — Production"></div>' +
+    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to <strong style="color:var(--color-text-primary)">Azure Arc</strong> through an Entra app registration using the client-credentials flow against <strong style="color:var(--color-text-primary)">Azure Resource Manager</strong>. Discovers Arc-enabled servers (<code>Microsoft.HybridCompute/machines</code>) as assets — no subnets or reservations. Machines merge with assets already discovered by Entra ID, Active Directory and vCenter. <strong style="color:var(--color-text-primary)">No Microsoft Graph permissions are needed</strong> — this is an ARM-only integration, which is the step most often carried over by mistake from an Entra ID setup.</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Azure Setup</p>' +
+    '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Complete these in the Azure portal before testing the connection:</p>' +
+    '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem;line-height:1.6">' +
+      '<li>Register an application under <strong>Entra ID &rarr; App registrations</strong>, and copy its <strong>Directory (tenant) ID</strong> and <strong>Application (client) ID</strong>.</li>' +
+      '<li>Under <strong>Certificates &amp; secrets &rarr; New client secret</strong>, create a secret and copy the <strong>Value</strong> (not the Secret ID — the Value is shown only once).</li>' +
+      '<li>Assign that app\'s service principal the <strong>Reader</strong> role &mdash; on the management group above your subscriptions for full coverage, or on each subscription individually.</li>' +
+      '<li>Confirm the <strong><code>Microsoft.HybridCompute</code></strong> resource provider is registered in each subscription (<strong>Subscription &rarr; Settings &rarr; Resource providers</strong>).</li>' +
+      '<li>Paste the three values below, then press <strong>Test Connection</strong> — it reports how many subscriptions this app can actually see.</li>' +
+    '</ul>' +
+    calloutHTML("warning", "Partial Reader means a partial roster",
+      "Azure returns only the resources this app is allowed to read, so a missing role assignment yields <em>fewer machines</em> — never an access-denied error. If Test Connection reports fewer subscriptions than you expect, check the Reader assignment first; nothing else will tell you.") +
+    calloutHTML("tip", "Read-only by design",
+      "Polaris never writes to Azure. <strong>Reader</strong> is sufficient for everything this integration does — don't grant anything broader.") +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    '<div class="form-group"><label>Tenant ID *</label><input type="text" id="f-tenantId" value="' + escapeHtml(d.tenantId || "") + '" placeholder="e.g. 00000000-0000-0000-0000-000000000000"><p class="hint">Directory (tenant) ID from Azure portal &gt; Entra ID &gt; Overview</p></div>' +
+    '<div class="form-group"><label>Client ID *</label><input type="text" id="f-clientId" value="' + escapeHtml(d.clientId || "") + '" placeholder="e.g. 00000000-0000-0000-0000-000000000000"><p class="hint">Application (client) ID from App Registrations &gt; Overview</p></div>' +
+    '<div class="form-group"><label>Client Secret *</label><input type="password" id="f-clientSecret" value="' + (d.clientSecretPlaceholder ? "" : escapeHtml(d.clientSecret || "")) + '" placeholder="' + (d.clientSecretPlaceholder || "Secret value") + '"><p class="hint">This is a separate secret from any Entra ID integration — reuse one app registration only if you have granted it both Graph and ARM access.</p></div>' +
+    '<div class="form-group"><label>Subscriptions</label><textarea id="f-subscriptionIds" rows="3" placeholder="One subscription ID per line — e.g.&#10;00000000-0000-0000-0000-000000000000">' + escapeHtml((d.subscriptionInclude || []).join("\n")) + '</textarea><p class="hint">One subscription ID per line; the app needs the <strong>Reader</strong> role on each. Leave empty to discover every subscription the app can see — listing them explicitly keeps each run bounded and predictable.</p></div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-useResourceGraph" ' + argChecked + ' style="width:auto">' +
+      '<label for="f-useResourceGraph" style="margin:0">Query via Azure Resource Graph</label>' +
+    '</div>' +
+    '<p class="hint">One query covers every subscription instead of one call each — much lighter on a large tenant. Polaris falls back to a per-subscription list automatically if Resource Graph is unavailable. Resource Graph is an indexed snapshot that can trail Azure by a minute or two, which does not matter on a multi-hour discovery interval.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-includeDisconnected" ' + (inclDisc ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-includeDisconnected" style="margin:0">Include disconnected machines</label>' +
+    '</div>' +
+    '<p class="hint">A <em>Disconnected</em> or <em>Expired</em> Arc agent means Azure stopped hearing from the host — a reachability signal, not a lifecycle one. Polaris keeps those machines as assets and tags them <code>arc-disconnected</code>; it never decommissions on this signal.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-fetchNetworkProfile" ' + (netProfile ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-fetchNetworkProfile" style="margin:0">Fetch IP addresses for each machine</label>' +
+    '</div>' +
+    '<p class="hint" style="color:var(--color-warning,#d98c00)">Costs <strong>one extra Azure request per machine</strong> — on a large fleet that is thousands of calls per discovery run against a rate-limited API. Polaris caps the concurrency and stops the pass at a deadline (reporting what it skipped), but leave this off unless you actually need Arc-sourced IPs.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enabled" ' + enabledChecked + ' style="width:auto">' +
+      '<label for="f-enabled" style="margin:0">Enabled</label>' +
+    '</div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-autoDiscover" ' + autoChecked + ' style="width:auto">' +
+      '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
+    '</div>' +
+    '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to re-query Azure Resource Manager for Arc machine updates (1–24 hours)</p></div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Additional Arc Resources</p>' +
+    '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Each option below adds <strong>one</strong> extra Azure query per discovery run for the whole tenant &mdash; not one per machine. Neither creates new devices in Polaris; both attach detail to the Arc machines already discovered.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enableVmInstances" ' + (vmInst ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-enableVmInstances" style="margin:0">Collect Arc-enabled VMware / SCVMM placement</label>' +
+    '</div>' +
+    '<p class="hint">Records which virtualization platform each machine runs on, plus its vCenter/SCVMM identifiers. Also improves matching against an existing VMware vCenter integration: the reported <code>instanceUuid</code> is the exact key vCenter discovery uses, so machines merge onto their existing VM record instead of appearing twice.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enableSqlServer" ' + (sqlSrv ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-enableSqlServer" style="margin:0">Collect Arc-enabled SQL Server instances</label>' +
+    '</div>' +
+    '<p class="hint">Attaches each machine\'s SQL Server instances (edition, version, patch level, licence type) to that machine and tags it <code>arc-sql</code>. SQL instances are recorded as detail on the host &mdash; they never become separate devices.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enableKubernetes" ' + (k8s ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-enableKubernetes" style="margin:0">Discover Arc-enabled Kubernetes clusters</label>' +
+    '</div>' +
+    '<p class="hint" style="color:var(--color-warning,#d98c00)">Unlike the two options above, this one <strong>adds devices</strong>: each connected cluster becomes its own asset of type <em>Kubernetes Cluster</em>, with its own subtab on the Monitoring tab. A cluster is monitored as a single endpoint &mdash; no agent, no interfaces, no storage.</p>' +
+    calloutHTML("note", "Requires Resource Graph",
+      "Both options are read through Azure Resource Graph, which is what keeps them to one query each. If <em>Query via Azure Resource Graph</em> above is off &mdash; or Resource Graph is unavailable in your tenant &mdash; the discovery run skips this enrichment and says so in its log rather than falling back to a far more expensive per-machine read.") +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Resource Group Filter</p>' +
+    '<div class="form-group">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-rgMode" style="width:auto">' +
+          '<option value="include"' + (rgMode === "include" ? " selected" : "") + '>Include</option>' +
+          '<option value="exclude"' + (rgMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these resource groups</span>' +
+      '</div>' +
+      '<textarea id="f-rgNames" rows="2" placeholder="One per line — e.g.&#10;rg-prod-*&#10;*-lab">' + escapeHtml(rgNames.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to sync machines in every resource group. Wildcards supported: <code>rg-prod-*</code>, <code>*-lab</code>, <code>*sql*</code></p>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Machine Filter</p>' +
+    '<div class="form-group">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-deviceMode" style="width:auto">' +
+          '<option value="include"' + (devMode === "include" ? " selected" : "") + '>Include</option>' +
+          '<option value="exclude"' + (devMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these machines by name</span>' +
+      '</div>' +
+      '<textarea id="f-deviceNames" rows="2" placeholder="One per line — e.g.&#10;SRV-*&#10;*-lab">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
+      '<p class="hint">Matched against the machine\'s Azure display name. Leave empty to sync every machine.</p>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Tag Filter</p>' +
+    '<div class="form-group">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-tagMode" style="width:auto">' +
+          '<option value="include"' + (tagMode === "include" ? " selected" : "") + '>Include</option>' +
+          '<option value="exclude"' + (tagMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">machines carrying these Azure tags</span>' +
+      '</div>' +
+      '<textarea id="f-tagFilters" rows="2" placeholder="One per line — key=value&#10;e.g. env=prod&#10;managedBy=*">' + escapeHtml(tagLines.join("\n")) + '</textarea>' +
+      '<p class="hint">Each line is <code>key=value</code>; use <code>key=*</code> to match any value of that tag, and wildcards work on the value (<code>env=prod*</code>). <strong>Include</strong> keeps only machines matching at least one line; <strong>Exclude</strong> drops machines matching any. Azure tags are stored on the discovered source record — they are not copied into Polaris tags.</p>' +
+    '</div>' +
+    verboseLoggingFormHTML(d);
+}
+
+function getArcFormConfig() {
+  var rgMode = document.getElementById("f-rgMode").value;
+  var rgNames = linesToArray("f-rgNames");
+  var devMode = document.getElementById("f-deviceMode").value;
+  var devNames = linesToArray("f-deviceNames");
+  var tagMode = document.getElementById("f-tagMode").value;
+  var tagLines = linesToArray("f-tagFilters");
+  return {
+    tenantId: val("f-tenantId"),
+    clientId: val("f-clientId"),
+    clientSecret: val("f-clientSecret"),
+    subscriptionInclude: linesToArray("f-subscriptionIds"),
+    useResourceGraph: document.getElementById("f-useResourceGraph").checked,
+    includeDisconnected: document.getElementById("f-includeDisconnected").checked,
+    fetchNetworkProfile: document.getElementById("f-fetchNetworkProfile").checked,
+    enableVmInstances: document.getElementById("f-enableVmInstances").checked,
+    enableSqlServer: document.getElementById("f-enableSqlServer").checked,
+    enableKubernetes: document.getElementById("f-enableKubernetes").checked,
+    resourceGroupInclude: rgMode === "include" ? rgNames : [],
+    resourceGroupExclude: rgMode === "exclude" ? rgNames : [],
+    deviceInclude: devMode === "include" ? devNames : [],
+    deviceExclude: devMode === "exclude" ? devNames : [],
+    tagInclude: tagMode === "include" ? tagLines : [],
+    tagExclude: tagMode === "exclude" ? tagLines : [],
+    verboseLogging: readVerboseLoggingFromForm(),
+  };
+}
+
 function vcenterFormHTML(defaults) {
   var d = defaults || {};
   var verifyTls = d.verifyTls !== false;
@@ -4431,6 +4661,10 @@ function showTypePicker() {
         '<strong>VMware vCenter</strong>' +
         '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">VMs, ESXi hosts &amp; datastores via REST</span>' +
       '</button>' +
+      '<button class="btn btn-secondary" id="pick-arc" style="padding:1.2rem;font-size:0.95rem;display:flex;flex-direction:column;align-items:center;gap:6px;white-space:normal;text-align:center">' +
+        '<strong>Azure Arc</strong>' +
+        '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">Arc-enabled servers via Azure Resource Manager</span>' +
+      '</button>' +
     '</div>';
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>';
   openModal("Add Integration", body, footer, { wide: true });
@@ -4440,6 +4674,7 @@ function showTypePicker() {
   document.getElementById("pick-entra").addEventListener("click", function () { closeModal(); openCreateModal("entraid"); });
   document.getElementById("pick-ad").addEventListener("click", function () { closeModal(); openCreateModal("activedirectory"); });
   document.getElementById("pick-vc").addEventListener("click", function () { closeModal(); openCreateModal("vcenter"); });
+  document.getElementById("pick-arc").addEventListener("click", function () { closeModal(); openCreateModal("azurearc"); });
 }
 
 function _formHTMLForType(type, defaults) {
@@ -4448,6 +4683,7 @@ function _formHTMLForType(type, defaults) {
   if (type === "entraid") return entraIdFormHTML(defaults);
   if (type === "activedirectory") return activeDirectoryFormHTML(defaults);
   if (type === "vcenter") return vcenterFormHTML(defaults);
+  if (type === "azurearc") return azureArcFormHTML(defaults);
   return fortiManagerFormHTML(defaults);
 }
 
@@ -4457,6 +4693,7 @@ function _formConfigForType(type) {
   if (type === "entraid") return getEntraFormConfig();
   if (type === "activedirectory") return getAdFormConfig();
   if (type === "vcenter") return getVcenterFormConfig();
+  if (type === "azurearc") return getArcFormConfig();
   return getFormConfig();
 }
 
@@ -4484,21 +4721,20 @@ function _titleForType(type, action) {
     type === "entraid" ? "Entra ID" :
     type === "activedirectory" ? "Active Directory" :
     type === "vcenter" ? "vCenter" :
+    type === "azurearc" ? "Azure Arc" :
     "FortiManager";
   return action + " " + product + " Integration";
 }
 
 async function openCreateModal(type) {
   type = type || "fortimanager";
-  var isWin = type === "windowsserver";
-  var isEntra = type === "entraid";
-  var isAd = type === "activedirectory";
   var isFmg = type === "fortimanager";
   var isFgt = type === "fortigate";
   var isAd  = type === "activedirectory";
   var isEntra = type === "entraid";
   var isWin = type === "windowsserver";
   var isVc = type === "vcenter";
+  var isArc = type === "azurearc";
   var title = _titleForType(type, "Add");
   // FMG / FortiGate / AD / Entra / WindowsServer integrations all expose a
   // Monitoring tab. FMG and FortiGate also get the Discovery Defaults
@@ -4547,7 +4783,7 @@ async function openCreateModal(type) {
     // path (`_readFortigateMonitorBlock`) keeps finding them.
     addTabs.push({ key: "geographicLocation", label: "Geographic Location", html: geographicLocationFormHTML(false, false, false, "Latitude", "Longitude", "", type) });
     body = _intRenderTabbedBody("intg-edit", addTabs);
-  } else if (isAd || isEntra || isWin || isVc) {
+  } else if (isAd || isEntra || isWin || isVc || isArc) {
     var addMonSettings = {};
     try {
       var addManual = await api.monitorSettings.getManual();
@@ -4556,7 +4792,7 @@ async function openCreateModal(type) {
     // vCenter VM agent auto-deploy needs the credential list for its
     // SSH/WinRM pickers (same card the AD/Entra classes use).
     var addNonFortinetCreds = [];
-    if (isVc) {
+    if (isVc || isArc || isAd || isEntra) {
       try { var vcCredResp = await api.credentials.list(); addNonFortinetCreds = Array.isArray(vcCredResp) ? vcCredResp : []; } catch (e) { /* pickers just render empty */ }
     }
     var addNonFortinetTabs = [
@@ -4583,10 +4819,10 @@ async function openCreateModal(type) {
     _wireProbeTimeoutWarning();
     _wireCredentialPickerVisibility();
     _populateUploadedMibsInDropdowns();
-  } else if (isAd || isEntra || isWin || isVc) {
+  } else if (isAd || isEntra || isWin || isVc || isArc) {
     _intWireModalTabs("intg-edit");
     _wireMonitoringTabSubtabs(type);
-    if (isAd || isEntra) wireWorkstationServerCards(null);
+    if (isAd || isEntra || isArc) wireWorkstationServerCards(null);
     if (isVc) wireVcenterCards(null);
     _wireProbeTimeoutWarning();
   }
@@ -4598,7 +4834,10 @@ async function openCreateModal(type) {
 
   document.getElementById("btn-test-new").addEventListener("click", async function () {
     var btn = this;
-    if (isEntra) {
+    if (isEntra || isArc) {
+      // Subscriptions deliberately NOT required — empty means "every
+      // subscription this app can see", which is a legitimate config and a
+      // useful first test.
       if (!val("f-tenantId") || !val("f-clientId") || !val("f-clientSecret")) { showToast("Fill in tenant ID, client ID, and client secret first", "error"); return; }
     } else if (isAd) {
       if (!val("f-host") || !val("f-bindDn") || !val("f-bindPassword") || !val("f-baseDn")) { showToast("Fill in host, bind DN, bind password, and base DN first", "error"); return; }
@@ -4653,7 +4892,7 @@ async function openCreateModal(type) {
         if (swBlockNew) createConfig.fortiswitchMonitor = swBlockNew;
         if (apBlockNew) createConfig.fortiapMonitor     = apBlockNew;
       }
-      if (isAd || isEntra || isWin) {
+      if (isAd || isEntra || isWin || isArc) {
         // AD / Entra / Windows Server per-class blocks. Workstations is the
         // primary class subtab (legacy `f-mon-*` IDs); Servers is secondary
         // (namespaced `f-mon-classecho-servers-*`). _CLASS_SUBTAB_SPECS
@@ -4662,6 +4901,13 @@ async function openCreateModal(type) {
         var srvBlockNew = _readWorkstationServerMonitorBlock("f-mon-server-",     { klass: "servers",      isPrimary: false });
         if (wsBlockNew)  createConfig.workstationMonitor = wsBlockNew;
         if (srvBlockNew) createConfig.serverMonitor      = srvBlockNew;
+        if (isArc) {
+          // Reduced cluster block (addAsMonitored + streams only). Read with
+          // the same reader vCenter's ESXi hosts use — Zod strips the extra
+          // null fields the reduced schema doesn't carry.
+          var k8sBlockNew = _readWorkstationServerMonitorBlock("f-mon-clusters-", { klass: "clusters", isPrimary: false });
+          if (k8sBlockNew) createConfig.k8sMonitor = k8sBlockNew;
+        }
         var verifyPresenceNew = _readVerifyPresenceToggle();
         if (verifyPresenceNew !== undefined) createConfig.verifyPresence = verifyPresenceNew;
       }
@@ -4701,7 +4947,7 @@ async function openCreateModal(type) {
       // Save the new integration's tier-3 monitor settings if the Monitoring
       // tab was rendered. Failures here aren't fatal — the integration is
       // already created; operator can edit and resave.
-      if ((isFmg || isFgt || isAd || isEntra || isWin || isVc) && result && result.id) {
+      if ((isFmg || isFgt || isAd || isEntra || isWin || isVc || isArc) && result && result.id) {
         try { await api.monitorSettings.setIntegration(result.id, getMonitorSettingsFromForm()); }
         catch (e) { showToast("Integration created, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
       }
@@ -4744,6 +4990,7 @@ async function openEditModal(id) {
     var isEntra = intg.type === "entraid";
     var isAd = intg.type === "activedirectory";
     var isVc = intg.type === "vcenter";
+    var isArc = intg.type === "azurearc";
     var spec = _intgEditFormSpec(intg, config);
     var body = spec.body;
     var formGetter = spec.formGetter;
@@ -4757,7 +5004,7 @@ async function openEditModal(id) {
     // only. Manual tier + cross-source class overrides live on the Assets
     // page Monitoring Settings modal.
     var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
-    var monCapable = isFmgOrFgt || isAd || isEntra || isWin || isVc;
+    var monCapable = isFmgOrFgt || isAd || isEntra || isWin || isVc || isArc;
     if (!isFmgOrFgt && monCapable) {
       // AD / Entra / WindowsServer / vCenter: wrap the existing flat form as
       // the General tab and add a Monitoring tab alongside it.
@@ -4768,7 +5015,7 @@ async function openEditModal(id) {
       } catch (e) { /* fall back to defaults */ }
       // vCenter's VM agent auto-deploy card needs the credential list.
       var nonFortinetCreds = [];
-      if (isVc) {
+      if (isVc || isArc || isAd || isEntra) {
         try { var vcEditCredResp = await api.credentials.list(); nonFortinetCreds = Array.isArray(vcEditCredResp) ? vcEditCredResp : []; } catch (e) { /* pickers render empty */ }
       }
       var generalTabBody = body;
@@ -4890,10 +5137,10 @@ async function openEditModal(id) {
       _wireProbeTimeoutWarning();
       _wireCredentialPickerVisibility();
       _populateUploadedMibsInDropdowns();
-    } else if (isAd || isEntra || isWin || isVc) {
+    } else if (isAd || isEntra || isWin || isVc || isArc) {
       _intWireModalTabs("intg-edit");
       _wireMonitoringTabSubtabs(intg.type);
-      if (isAd || isEntra) wireWorkstationServerCards(id);
+      if (isAd || isEntra || isArc) wireWorkstationServerCards(id);
       if (isVc) wireVcenterCards(id);
       _wireProbeTimeoutWarning();
     }
@@ -4913,6 +5160,7 @@ function _intgEditFormSpec(intg, config) {
     var isEntra = intg.type === "entraid";
     var isAd = intg.type === "activedirectory";
     var isVc = intg.type === "vcenter";
+    var isArc = intg.type === "azurearc";
     var body, formGetter;
 
     if (isVc) {
@@ -4984,6 +5232,38 @@ function _intgEditFormSpec(intg, config) {
       body = entraIdFormHTML(defaults);
       formGetter = function () {
         var fc = getEntraFormConfig();
+        if (!fc.clientSecret) delete fc.clientSecret;
+        return fc;
+      };
+    } else if (isArc) {
+      var defaults = {
+        name: intg.name,
+        tenantId: config.tenantId,
+        clientId: config.clientId,
+        clientSecret: "",
+        clientSecretPlaceholder: "Leave blank to keep current secret",
+        subscriptionInclude: config.subscriptionInclude || [],
+        useResourceGraph: config.useResourceGraph !== false,
+        includeDisconnected: config.includeDisconnected !== false,
+        fetchNetworkProfile: config.fetchNetworkProfile === true,
+        enableVmInstances: config.enableVmInstances === true,
+        enableSqlServer: config.enableSqlServer === true,
+        enableKubernetes: config.enableKubernetes === true,
+        resourceGroupInclude: config.resourceGroupInclude || [],
+        resourceGroupExclude: config.resourceGroupExclude || [],
+        deviceInclude: config.deviceInclude || [],
+        deviceExclude: config.deviceExclude || [],
+        tagInclude: config.tagInclude || [],
+        tagExclude: config.tagExclude || [],
+        enabled: intg.enabled,
+        autoDiscover: intg.autoDiscover !== false,
+        pollInterval: intg.pollInterval,
+        verboseLogging: config.verboseLogging === true,
+        verboseLoggingEnabledAt: config.verboseLoggingEnabledAt,
+      };
+      body = azureArcFormHTML(defaults);
+      formGetter = function () {
+        var fc = getArcFormConfig();
         if (!fc.clientSecret) delete fc.clientSecret;
         return fc;
       };
@@ -5094,6 +5374,7 @@ function _wireIntgEditTest(id, intg) {
     var isEntra = intg.type === "entraid";
     var isAd = intg.type === "activedirectory";
     var isVc = intg.type === "vcenter";
+    var isArc = intg.type === "azurearc";
     document.getElementById("btn-test-existing").addEventListener("click", async function () {
       var btn = this;
       btn.disabled = true;
@@ -5102,7 +5383,7 @@ function _wireIntgEditTest(id, intg) {
         var formConfig = _formConfigForType(intg.type);
         // Strip blank secrets so the server fills them in from the stored config.
         if (isWin || isVc) { if (!formConfig.password) delete formConfig.password; }
-        else if (isEntra) { if (!formConfig.clientSecret) delete formConfig.clientSecret; }
+        else if (isEntra || isArc) { if (!formConfig.clientSecret) delete formConfig.clientSecret; }
         else if (isAd) { if (!formConfig.bindPassword) delete formConfig.bindPassword; }
         else {
           if (!formConfig.apiToken) delete formConfig.apiToken;
@@ -5147,6 +5428,7 @@ function _wireIntgEditSave(id, intg, formGetter) {
     var isEntra = intg.type === "entraid";
     var isAd = intg.type === "activedirectory";
     var isVc = intg.type === "vcenter";
+    var isArc = intg.type === "azurearc";
     var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
     // Reads the form into an editConfig WITHOUT persisting it. Split from
     // commitSave so the Auto-Monitor capacity-warning confirm can run BEFORE
@@ -5192,7 +5474,7 @@ function _wireIntgEditSave(id, intg, formGetter) {
         var excludeFortilinkLldpEdit = _readExcludeFortilinkLldpToggle();
         if (excludeFortilinkLldpEdit !== undefined) editConfig.excludeFortilinkLldp = excludeFortilinkLldpEdit;
       }
-      if (isAd || isEntra || isWin) {
+      if (isAd || isEntra || isWin || isArc) {
         // AD / Entra / Windows Server per-class blocks. Workstations is the
         // primary class subtab (legacy `f-mon-*` IDs); Servers is secondary
         // (namespaced `f-mon-classecho-servers-*`). Class keys are plural in
@@ -5201,6 +5483,10 @@ function _wireIntgEditSave(id, intg, formGetter) {
         // didn't render — leave existing config alone.
         var wsBlock  = _readWorkstationServerMonitorBlock("f-mon-workstation-", { klass: "workstations", isPrimary: true });
         var srvBlock = _readWorkstationServerMonitorBlock("f-mon-server-",      { klass: "servers",      isPrimary: false });
+        if (isArc) {
+          var k8sBlock = _readWorkstationServerMonitorBlock("f-mon-clusters-", { klass: "clusters", isPrimary: false });
+          if (k8sBlock) editConfig.k8sMonitor = k8sBlock;
+        }
         if (wsBlock)  editConfig.workstationMonitor = wsBlock;
         if (srvBlock) editConfig.serverMonitor      = srvBlock;
         var verifyPresenceEdit = _readVerifyPresenceToggle();
@@ -5235,7 +5521,7 @@ function _wireIntgEditSave(id, intg, formGetter) {
       // Persist the integration-tier monitor settings for any integration
       // type that renders a Monitoring tab. Failures here aren't fatal —
       // the integration update itself already landed.
-      if (isFmgOrFgt || isAd || isEntra || isWin) {
+      if (isFmgOrFgt || isAd || isEntra || isWin || isVc || isArc) {
         try { await api.monitorSettings.setIntegration(id, getMonitorSettingsFromForm()); }
         catch (e) { showToast("Integration updated, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
       }
@@ -6470,6 +6756,128 @@ function openEntraApiQueryModal(id) {
 
   document.getElementById("entra-copy-btn").addEventListener("click", function () {
     var text = document.getElementById("entra-response").textContent;
+    var btn = this;
+    copyTextToClipboard(text).then(function (ok) {
+      if (!ok) { showToast("Copy failed", "error"); return; }
+      btn.textContent = "Copied!";
+      setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+    });
+  });
+}
+
+// ─── Azure Arc / ARM Query modal ────────────────────────────────────────────
+// The operator's only self-service way to answer "why didn't machine X get
+// discovered?" — the backend pins the host to management.azure.com, requires
+// an api-version, and permits POST only to the Resource Graph endpoint.
+
+var _ARC_QUERIES_VERSION = 1;
+var _ARC_PRESET_QUERIES = [
+  {
+    name: "All Arc machines in a subscription",
+    path: "/subscriptions/<subscription-id>/providers/Microsoft.HybridCompute/machines",
+    query: "api-version=2024-07-10",
+  },
+  {
+    name: "Arc machines in one resource group",
+    path: "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.HybridCompute/machines",
+    query: "api-version=2024-07-10",
+  },
+  {
+    name: "Single machine (full detail)",
+    path: "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.HybridCompute/machines/<machine-name>",
+    query: "api-version=2024-07-10",
+  },
+  {
+    name: "Subscriptions this app can see",
+    path: "/subscriptions",
+    query: "api-version=2022-12-01",
+  },
+];
+var _arcQueryStore = _makeSavedQueryStore("polaris-arc-queries", _ARC_QUERIES_VERSION, _ARC_PRESET_QUERIES);
+
+function openArcApiQueryModal(id) {
+  var body =
+    '<div style="margin-bottom:0.75rem">' +
+      '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Saved Queries</p>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<select id="arc-saved-select" style="flex:1"></select>' +
+        '<button class="btn btn-sm btn-secondary" id="arc-load-btn">Load</button>' +
+        '<button class="btn btn-sm btn-danger" id="arc-delete-btn">Delete</button>' +
+      '</div>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:0 0 0.75rem">' +
+    '<div class="form-group">' +
+      '<label>Path <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(GET only — must begin with <code>/subscriptions/</code> or <code>/providers/</code>)</span></label>' +
+      '<input type="text" id="arc-path" value="/subscriptions" placeholder="/subscriptions/&lt;id&gt;/providers/Microsoft.HybridCompute/machines" style="font-family:monospace;font-size:0.85rem">' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Query Parameters <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(one per line — <code>key=value</code>)</span></label>' +
+      '<textarea id="arc-query" rows="4" style="font-family:monospace;font-size:0.82rem" placeholder="api-version=2024-07-10&#10;$top=25">api-version=2022-12-01</textarea>' +
+      '<p class="hint"><code>api-version</code> is <strong>required</strong> on every ARM call — a missing one is rejected before the request leaves Polaris. Host is fixed to <code>management.azure.com</code>.</p>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:0.75rem"><button class="btn btn-primary" id="arc-send">Send</button></div>' +
+    '<div style="display:flex;gap:6px;align-items:center;margin-bottom:0.25rem">' +
+      '<input type="text" id="arc-save-name" placeholder="Name this query to save it…" style="flex:1;font-size:0.85rem">' +
+      '<button class="btn btn-sm btn-secondary" id="arc-save-btn">Save</button>' +
+    '</div>' +
+    '<div id="arc-response-wrap" style="display:none;margin-top:1rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
+        '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
+        '<button class="btn btn-sm btn-secondary" id="arc-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
+      '</div>' +
+      '<pre id="arc-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+    '</div>';
+
+  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
+
+  openModal("Azure Arc / Resource Manager Query", body, footer, { wide: true });
+
+  _wireSavedQueryConsole(_arcQueryStore, "arc",
+    function () {
+      return {
+        path: document.getElementById("arc-path").value.trim(),
+        query: document.getElementById("arc-query").value,
+      };
+    },
+    function (q) {
+      document.getElementById("arc-path").value = q.path || "";
+      document.getElementById("arc-query").value = q.query || "";
+    });
+
+  document.getElementById("arc-send").addEventListener("click", async function () {
+    var btn = this;
+    var path = document.getElementById("arc-path").value.trim();
+    if (!path) { showToast("Enter a path (e.g. /subscriptions)", "error"); return; }
+    var queryRaw = document.getElementById("arc-query").value;
+    var query = {};
+    queryRaw.split("\n").forEach(function (line) {
+      var trimmed = line.trim();
+      if (!trimmed) return;
+      var eq = trimmed.indexOf("=");
+      if (eq < 0) { query[trimmed] = ""; return; }
+      var key = trimmed.slice(0, eq).trim();
+      var value = trimmed.slice(eq + 1).trim();
+      if (key) query[key] = value;
+    });
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+    var responseWrap = document.getElementById("arc-response-wrap");
+    var responsePre = document.getElementById("arc-response");
+    try {
+      var result = await api.integrations.query(id, { method: "GET", path: path, query: query });
+      responseWrap.style.display = "";
+      responsePre.textContent = JSON.stringify(result, null, 2);
+    } catch (err) {
+      responseWrap.style.display = "";
+      responsePre.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Send";
+    }
+  });
+
+  document.getElementById("arc-copy-btn").addEventListener("click", function () {
+    var text = document.getElementById("arc-response").textContent;
     var btn = this;
     copyTextToClipboard(text).then(function (ok) {
       if (!ok) { showToast("Copy failed", "error"); return; }

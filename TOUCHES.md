@@ -518,7 +518,7 @@ build auto-prune + boot-time auto-build are layered on top.
 
 **What it is:** The complete callsite catalogue for adding a new integration type (Palo Alto firewall, future device families). Every new type touches the same ~30 callsites across backend dispatch, frontend modal, polling compatibility, asset projection, and source-default polling. Without this checklist a new type drifts on tab layout, config-blob keys, transport dispatch, and projection priority; with it, every integration feels uniform.
 
-The canonical to mirror for a standalone-device-with-its-own-API type (most common new case) is **standalone FortiGate**. For a manager-that-fronts-many-devices type, mirror **FortiManager**. For asset-only types (no subnets/reservations), mirror **Entra ID / Active Directory** — or **vCenter** when the new type owns multiple asset classes with different capabilities (its `vmMonitor`/`hostMonitor` blocks, `vms`/`hosts` UI subtabs, foreign `AssetDependencyParent.source` value, and warm-cache telemetry polling method are the newest asset-only extensions; vCenter also added per-type entries to `monitorOverrideService`'s block-key maps + both raw-SQL sweeps, `autoMonitorInterfacesService`/`autoMonitorStorageService` class maps, `ClassQuerySchema`/`StorageClassQuerySchema`, `capacityAdvisorService.IntegrationBreakdown`, and the `conflictSourceFor` dispatch in `conflictResolutionService.ts` — walk those too for any multi-class type). See [TEMPLATES.md → Integration type](TEMPLATES.md#integration-type-config--discovery--sync--frontend-modal) for the model-after instruction. This entry is the authoritative checklist.
+The canonical to mirror for a standalone-device-with-its-own-API type (most common new case) is **standalone FortiGate**. For a manager-that-fronts-many-devices type, mirror **FortiManager**. For asset-only types (no subnets/reservations), mirror **Entra ID / Active Directory** — or **Azure Arc** when the new type is a cloud control plane fronting on-prem hosts (it reuses the Workstations/Servers class blocks unchanged, so most registries need no new branch, but it adds a two-axis filter pair and reuses `entraClientCredentials` at a different OAuth scope) — or **vCenter** when the new type owns multiple asset classes with different capabilities (its `vmMonitor`/`hostMonitor` blocks, `vms`/`hosts` UI subtabs, foreign `AssetDependencyParent.source` value, and warm-cache telemetry polling method are the newest asset-only extensions; vCenter also added per-type entries to `monitorOverrideService`'s block-key maps + both raw-SQL sweeps, `autoMonitorInterfacesService`/`autoMonitorStorageService` class maps, `ClassQuerySchema`/`StorageClassQuerySchema`, `capacityAdvisorService.IntegrationBreakdown`, and the `conflictSourceFor` dispatch in `conflictResolutionService.ts` — walk those too for any multi-class type). See [TEMPLATES.md → Integration type](TEMPLATES.md#integration-type-config--discovery--sync--frontend-modal) for the model-after instruction. This entry is the authoritative checklist.
 
 **Writers** (files that need a per-type branch):
 - `src/services/<type>Service.ts` — NEW. Exports `testConnection(config)`, `discoverDhcpSubnets(config, signal?, onProgress?, ...)` returning the shared `DiscoveryResult` shape from `fortimanagerService.ts`, `proxyQuery(config, method, path, query?, body?)` for the manual /query route, and any per-type helpers (e.g. an `xxxRequest()` low-level fetcher used internally).
@@ -547,6 +547,22 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `public/js/integrations.js:type-list picker grid` — NEW button (`pick-<type>`) + its click listener calling `openCreateModal("<type>")`.
 - `public/js/integrations.js:type-label ternaries` — `intg.type === "<type>" ? "<HumanLabel>" : ...` in both places (integrations list + modal title).
 - `public/js/integrations.js:Monitoring tab visibility` — if the new type owns devices that can be monitored as a class (FortiSwitch / FortiAP style), extend `isFmgFgt`. Most new types skip this — only the FMG-FortiGate-managed-device pattern needs the class-level auto-monitor cards.
+- `public/js/integrations.js:_CLASS_SUBTAB_SPECS` — per-type Monitoring class subtab set. `monitorSettingsFormHTML` has a generic single-subtab fallback, so a missing entry degrades quietly rather than erroring.
+- `public/js/integrations.js:_isWsSrvRichType()` — the ONE predicate deciding whether a workstation/server type gets the full card set (agent auto-deploy + interface/storage auto-monitor) or the bare addAsMonitored card. Three callers (auto-monitor seed stash, `headerForClass`, `_wireMonitoringTabSubtabs`' prefix map) share it; they used to be three retyped lists, and any two drifting apart is what produces "the cards render but saved selections don't seed".
+- `public/js/integrations.js:_polarisSourceLabel()` — the source name in every `Inherit (Source <X>: …)` option across the Monitoring tab and the Assets-page override editors. A missing entry silently mislabels every one of them "Manual".
+- `public/js/integrations.js:loadIntegrations()` — the empty-state copy, the type badge, the `detailRows` chain, and the Query-API button.
+- `public/js/integrations.js:verifyPresence gate` — the integration-level presence-verification checkbox (an explicit type list, NOT `_isWsSrvRichType` — its membership genuinely differs: it includes vCenter and excludes Windows Server).
+- `public/js/integrations.js:_intgEditFormSpec()` / `_wireIntgEditTest()` / `_wireIntgEditSave()` — the edit-path defaults blob, the blank-secret strip that makes "leave blank to keep current secret" work, and the class-block + monitor-settings save gates.
+- `public/js/integrations.js:open<Type>ApiQueryModal()` — needed whenever the type has a `/query` branch; it is the operator's only self-service way to answer "why didn't device X get discovered".
+- `public/js/assets.js:sourceSupportsAgent` — gates the **Install Polaris Agent** button on the asset modal. Load-bearing for any type whose story includes agent deploy.
+- `public/js/assets.js:_assetIntegrationLabelWithController()` typeLabels and `public/js/app.js:renderIntegrationFailedStatus()` typeLabel — both fall through to the RAW type string, so a missing entry renders e.g. `azurearc` to the operator.
+- `src/services/presenceVerificationService.ts` — the `sourceKind: { in: [...] }` candidate filter. A new asset-only source kind must be added or the pass finds zero candidates.
+- `src/utils/assetSourceDerivation.ts` — suppress the `manual` fallback for the new type's tag, or the shadow-write extension mints a spurious `manual` source row in the window between `Asset.create` and the explicit source upsert.
+- `src/utils/assetInvariants.ts` — `LastSeenSource` union + `POLLING_DEFERRED_SOURCES`, but ONLY when the new type reports a real-time presence signal (a stored directory timestamp must never write `lastSeen`).
+- `src/services/conflictResolutionService.ts` — `AssetConflictSource`, `conflictSourceFor`, `conflictSourceLabel`, both source-tag blocks, the default-assetType pick, and the observed-blob builder.
+- `src/services/capacityAdvisorService.ts` — `IntegrationBreakdown` field + initializer + the count arm.
+- `tests/unit/pollingCompatibility.test.ts` — the matrix test locks an exact ordered array per source. A new kind MUST be added; without it `assetSourceKindFromIntegrationType` silently resolves to `manual` (the most permissive matrix).
+- `docs/INSTALL.md` — the "Secrets at rest" credential-kind sentence.
 
 **Readers** (files that consume the new type without needing a new code branch):
 - `src/services/discovery/discoveryEngine.ts:syncDhcpSubnets` body — consumes `DiscoveryResult` generically; new types ride it for free if their service returns the exact shape.
@@ -3016,6 +3032,40 @@ Listed alphabetically.
 - Check hybrid-join SID cross-link still tags assets correctly for AD ↔ Entra matching.
 - Validate deviceInclude/deviceExclude wildcard matching against displayName.
 - Confirm syncEntraDevices in integrations.ts creates AssetSource rows with correct sourceKind ("entra"/"intune") based on sources array.
+
+---
+
+## services/azureArcService.ts
+
+**What it owns:** Azure Arc (Arc-enabled servers) discovery via Azure Resource Manager — `Microsoft.HybridCompute/machines`. The Connected Machine agent runs in the guest, so this source carries host truth (running OS SKU, real FQDN, live SMBIOS data, heartbeat status) rather than a directory record.
+
+**Public API:** `testConnection(config)`, `proxyQuery(config, method, path, query?, body?)`, `discoverMachines(config, signal?, onProgress?)`, plus the pure helpers the unit tests drive: `normalizeSubscriptionId`, `buildArcMachinesQuery`, `buildArcVmInstancesQuery`, `buildArcSqlInstancesQuery`, `buildArcClustersQuery`, `normalizeArcCluster`, `buildArcClusterObservedBlob`, `normalizeVmUuid`, `swapVmUuidEndianness`, `parseArmResourceId`, `parentMachineIdFromExtensionId`, `normalizeArcMachine`, `normalizeArcVmInstance`, `normalizeArcSqlInstance`, `extractIpAddresses`, `inferArcAssetType`, `arcStatusIsConnected`, `matchesTagFilter`, `filterArcMachines`, `arcHostnameCandidates`, `buildArcObservedBlob`, `describeAadTokenError`, `extractArmError`, `throttleDelayMs`. Types `AzureArcConfig` / `DiscoveredArcMachine` / `ArcVmInstance` / `ArcSqlInstance` / `ArcDiscoveryResult`.
+
+**Cross-service deps:** `src/utils/entraClientCredentials.ts` (the SAME token-request builder the Graph client uses — only the scope differs, at `https://management.azure.com/.default`; do not fork it), `src/utils/integrationFilter.ts -> matchesWildcard`, `src/utils/errors.ts -> AppError`.
+
+**Used by:** `src/api/routes/integrations.ts` (config schema, `/:id/test`, pre-save `/test`, `/:id/query`), `src/services/discovery/discoveryEngine.ts` (`runPreflightTest`, the dispatch branch, and `syncArcDevices`).
+
+**Invariants:**
+- Token cached per `tenantId:clientId`; invalidated on 401 with exactly one retry. `testConnection` always invalidates first so it exercises the freshly-typed secret.
+- **ONLY GUID-validated subscription ids are interpolated into the Resource Graph query.** Every other filter (resource group, machine name, tags) is applied client-side in `filterArcMachines` specifically so free-form operator wildcards never reach the query language. Do not "optimize" those into KQL without adding escaping and tests.
+- `normalizeVmUuid` REJECTS the all-zero (and all-F) GUID. Some BIOSes report it; if those collapsed onto one map key every such machine would mass-merge into a single asset.
+- `swapVmUuidEndianness` is involutive and BOTH variants must be indexed at match time. Windows, `dmidecode` and VMware disagree about byte-swapping the first three SMBIOS UUID fields, so the same machine can present either form — index one only and every Arc-on-VMware machine silently duplicates instead of merging.
+- ARG and per-subscription rows must normalize IDENTICALLY (`normalizeArcMachine`); a unit test locks this. Drift means the two read paths mint different assets for the same machine.
+- `proxyQuery` is host-pinned to `management.azure.com`, requires an `api-version`, and permits POST only to `/providers/Microsoft.ResourceGraph/resources`.
+- API versions are module-level consts and are **verify-on-real-tenant**, as is the `detectedProperties` bag — its key names vary by Connected Machine agent version, so every read of it is optional-chained and case-tolerant.
+- `fetchNetworkProfile` is ONE GET PER MACHINE: default off, concurrency-capped, deadline-bounded, and it reports what it skipped rather than silently truncating.
+- The extension-resource enrichment (`enableVmInstances` / `enableSqlServer`) is **Resource-Graph-only and creates no assets**. Both fold into the owning machine's record. If you ever add a resource-provider fallback for them, remember why there isn't one: ARG costs one query for the tenant, the RP costs one GET per machine. The two parent links are NOT the same shape — VM instances nest under the machine id, SQL instances point at it via `properties.containerResourceId`.
+- An extension row whose parent machine isn't in this run's result set is ORPHANED, not an error — the machine may simply have been filtered out.
+- Connected Kubernetes clusters (`enableKubernetes`) are the ONE Arc entity that becomes an asset in its own right — `assetType: "kubernetes_cluster"`, `sourceKind: "arc-k8s"`, synced by `syncArcClusters`. Adding that asset type is a THREE-WAY lockstep (migration + `BUILT_IN_ASSET_TYPES` + `BUILT_IN_SEEDS`); `seedBuiltInAssetTypes` skips seeds not in the built-in list, so two-of-three is a silent no-op on fresh volumes and restored backups. `tests/unit/arcAssetTypeLockstep.test.ts` guards it.
+- Because the cluster class is a NEW asset type rather than a reused workstation/server one, it needs a `classBlockKeyForAssetType` arm, an `AddAsMonitoredAssetType` member, a `pickClassStreamsBlock` branch and **all three raw-SQL CASE expressions** in `monitorOverrideService`. That is the whole cost difference between Phase 4 and Phases 1–3.
+
+**When changing this:**
+- A new PROJECTED field needs three things in lockstep: the key in `buildArcObservedBlob`, an `arc` rule in `src/utils/assetProjection.ts` at a justified rank, and the `syncArcDevices` line that copies it out of the projection.
+- A new per-class knob needs `AzureArcConfigSchema` in `src/api/routes/integrations.ts` + the readers in `public/js/integrations.js -> getArcFormConfig()`.
+- Arc reuses the `workstationMonitor` / `serverMonitor` block names DELIBERATELY — most downstream registries key on the block name, not the integration type, which is why `monitorOverrideService`'s raw-SQL CASE expressions and `classToBlockKey` needed no change. Renaming those blocks would fan out across all of them.
+- Field shapes are unverified against a live tenant. Capture a real response, **scrub it to synthetic all-zero GUIDs**, and freeze it as a fixture before trusting any new field.
+
+**Related:** [cross-cutting/integration-type-onboarding](#cross-cuttingintegration-type-onboarding), `services/entraIdService.ts` (the shape this file mirrors), `services/vcenterService.ts` (the vmUuid cross-link counterpart).
 
 ---
 

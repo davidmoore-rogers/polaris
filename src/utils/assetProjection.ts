@@ -68,6 +68,8 @@ export type AssetSourceKind =
   | "polaris-agent"
   | "vcenter-vm"
   | "vcenter-host"
+  | "arc"
+  | "arc-k8s"
   | "manual";
 
 export interface AssetSourceForProjection {
@@ -152,6 +154,18 @@ const HOSTNAME_RULES: FieldRule[] = [
   { sourceKind: "vcenter-vm", pick: (o) => obsString(o, "guestHostname") || obsString(o, "name") },
   // ESXi hosts: the name they were added to vCenter by (usually the FQDN).
   { sourceKind: "vcenter-host", pick: (o) => obsString(o, "name") },
+  // Azure Arc's FQDN — the Connected Machine agent runs IN the guest and
+  // reports the OS's own domain-joined FQDN, refreshed continuously. Ranked
+  // above AD because AD's dnsHostName only updates when the computer object
+  // re-registers (the same argument the OS rules make), and below vCenter to
+  // leave the 2026-07 "vCenter is definitive" decision untouched. Only
+  // reported when it actually contains a dot — arcHostnameCandidates gates
+  // that, so a short name in the adFqdn field can't reach this rule.
+  { sourceKind: "arc", pick: (o) => {
+      const v = obsString(o, "dnsFqdn") || obsString(o, "adFqdn");
+      return v && v.includes(".") ? v : null;
+    }
+  },
   // FQDN from AD wins next — when an AD source has a dnsHostName containing a
   // dot, that's the FQDN form operators search for in DNS / DHCP / logs.
   // Tuned from production shadow-drift logs where ~7k entries per 24h
@@ -170,6 +184,12 @@ const HOSTNAME_RULES: FieldRule[] = [
   // these priorities work correctly in the new model.
   { sourceKind: "intune", pick: (o) => obsString(o, "deviceName") },
   { sourceKind: "entra",  pick: (o) => obsString(o, "displayName") },
+  // Arc short form — the Azure resource displayName (or resource name).
+  // Below the MDM short forms because it's an ARM label that an operator can
+  // rename independently of the machine.
+  { sourceKind: "arc", pick: (o) => obsString(o, "displayName") || obsString(o, "name") },
+  // An Arc-enabled Kubernetes cluster has only its ARM resource name.
+  { sourceKind: "arc-k8s", pick: (o) => obsString(o, "name") },
   // AD non-FQDN fallback — short dnsHostName or cn (NetBIOS).
   { sourceKind: "ad", pick: (o) => obsString(o, "dnsHostName") || obsString(o, "cn") },
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "hostname") },
@@ -191,6 +211,10 @@ const SERIAL_RULES: FieldRule[] = [
   // agent's DynamicUser then gets no value and the projection falls through
   // to Intune.
   { sourceKind: "polaris-agent", pick: (o) => obsString(o, "serialNumber") },
+  // Arc reads SMBIOS in-guest on every agent check-in. Beats Intune, whose
+  // serial is an enrollment-time inventory value that can be stale or empty;
+  // below the Polaris Agent, which reads DMI directly with no cloud hop.
+  { sourceKind: "arc", pick: (o) => obsString(o, "serialNumber") },
   { sourceKind: "intune", pick: (o) => obsString(o, "serialNumber") },
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "serial") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "serial") },
@@ -202,6 +226,17 @@ const MANUFACTURER_RULES: FieldRule[] = [
   // registry — the manufacturer string the firmware itself reports. Run
   // through normalizeManufacturer so it matches the canonical Asset value.
   { sourceKind: "polaris-agent", pick: (o) => {
+      const raw = obsString(o, "manufacturer");
+      return raw ? normalizeManufacturer(raw) : null;
+    }
+  },
+  // Arc's detectedProperties.manufacturer is the firmware string read in the
+  // guest. Same alias normalization as the other rules so the projected value
+  // matches what the Prisma extension canonicalizes onto Asset.manufacturer —
+  // otherwise "VMware, Inc." vs "VMware" fires drift every cycle. Ranked
+  // above vCenter's constant only matters for PHYSICAL hosts; on a VM both
+  // say VMware, so the ordering is a no-op in the common case.
+  { sourceKind: "arc", pick: (o) => {
       const raw = obsString(o, "manufacturer");
       return raw ? normalizeManufacturer(raw) : null;
     }
@@ -242,6 +277,9 @@ const MODEL_RULES: FieldRule[] = [
   // registry. Beats Intune for the same DMI-is-authoritative reason as
   // manufacturer; falls through when DMI is unreadable.
   { sourceKind: "polaris-agent", pick: (o) => obsString(o, "model") },
+  // Arc's detectedProperties.model — the SMBIOS product name. Same reasoning
+  // as manufacturer: only decisive on physical hosts.
+  { sourceKind: "arc", pick: (o) => obsString(o, "model") },
   // Constant for VMs — matches the SMBIOS product name VMware exposes to
   // guests, so the agent (when installed) projects the same value.
   { sourceKind: "vcenter-vm", pick: () => "VMware Virtual Platform" },
@@ -266,6 +304,20 @@ const OS_RULES: FieldRule[] = [
   // a domain-joined client re-registers — which can lag months on
   // long-running servers.
   { sourceKind: "polaris-agent", pick: (o) => obsString(o, "os") },
+  // Arc's osSku carries the exact edition read from the RUNNING OS
+  // ("Windows Server 2022 Datacenter", "Ubuntu 22.04.4 LTS"), refreshed on
+  // every agent check-in. Strictly better than AD's operatingSystem (stale
+  // until the computer object re-registers) and than Tools' guestOsFullName
+  // (the CONFIGURED guest-OS identifier, not necessarily what booted).
+  { sourceKind: "arc", pick: (o) => obsString(o, "osSku") || obsString(o, "osName") },
+  // Constant: a connected cluster has no guest OS of its own. The
+  // distribution (aks / openshift / rancher …) is the operationally useful
+  // half, so fold it in when Arc reports one.
+  { sourceKind: "arc-k8s", pick: (o) => {
+      const dist = obsString(o, "distribution");
+      return dist ? `Kubernetes (${dist})` : "Kubernetes";
+    }
+  },
   // VMware Tools' guest OS full name ("Microsoft Windows Server 2022
   // (64-bit)", "Ubuntu Linux (64-bit)") — the running OS as the hypervisor
   // sees it. Beats AD's edition string because Tools reflects the current
@@ -291,6 +343,9 @@ const OS_VERSION_RULES: FieldRule[] = [
   // actual kernel / OS build (macOS sw_vers, Windows registry).
   // Authoritative for "what version is actually running now."
   { sourceKind: "polaris-agent", pick: (o) => obsString(o, "osVersion") },
+  // Same in-guest, refreshed-continuously argument as the OS rule above.
+  { sourceKind: "arc", pick: (o) => obsString(o, "osVersion") },
+  { sourceKind: "arc-k8s", pick: (o) => obsString(o, "kubernetesVersion") },
   { sourceKind: "intune", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "entra", pick: (o) => obsString(o, "operatingSystemVersion") },
   { sourceKind: "ad", pick: (o) => obsString(o, "operatingSystemVersion") },
@@ -309,6 +364,15 @@ const LEARNED_LOCATION_RULES: FieldRule[] = [
   // duplicate it; we leave learnedLocation = null for firewalls and let
   // the legacy "set when null" rule continue to work.
   { sourceKind: "ad", pick: (o) => obsString(o, "ouPath") },
+  // Arc's resource group — an Azure management/billing container, so it's a
+  // weaker "where does this live" signal than an OU path the organization
+  // chose (and is frequently something like `rg-arc-onboarding`). Still far
+  // better than nothing for cloud-only or non-domain-joined hosts.
+  //
+  // NEVER project the Azure REGION here: it says where the Arc resource
+  // RECORD lives, not where the machine is. It stays in observed.azureRegion.
+  { sourceKind: "arc", pick: (o) => obsString(o, "resourceGroup") },
+  { sourceKind: "arc-k8s", pick: (o) => obsString(o, "resourceGroup") },
   // Infrastructure site labels outrank the endpoint sighting — an adopted
   // switch/AP's controllerFortigate is authoritative; a pre-adoption
   // fortigate-endpoint sighting from some other gate must not relabel it.
@@ -349,6 +413,19 @@ const IP_ADDRESS_RULES: FieldRule[] = [
   // ESXi hosts: DNS-resolved from the host's vCenter name (REST exposes no
   // mgmt IP).
   { sourceKind: "vcenter-host", pick: (o) => obsString(o, "resolvedIp") },
+  // Arc's networkProfile addresses (only populated when the integration's
+  // fetchNetworkProfile toggle is on — it costs one GET per machine). Below
+  // vCenter because Tools reports live guest IPs on a tight cadence while
+  // networkProfile refreshes on the agent's slower interval; above
+  // fortigate-endpoint because a DHCP/ARP binding is a network-side
+  // observation while this is host-side truth.
+  { sourceKind: "arc", pick: (o) => {
+      const list = o?.ipAddresses;
+      if (!Array.isArray(list)) return null;
+      const first = list.find((v) => typeof v === "string" && v.trim() !== "");
+      return typeof first === "string" ? first.trim() : null;
+    }
+  },
   // Endpoint IPs: fortigate-endpoint sees the live DHCP/ARP binding —
   // freshest signal for plain endpoints (which have no infrastructure
   // source, so this rule is effectively first for them). MDM sources
