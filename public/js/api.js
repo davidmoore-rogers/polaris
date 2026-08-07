@@ -828,8 +828,9 @@ const api = {
     agentWindowsSshGet:       () => request("GET",  "/server-settings/agents/windows-ssh"),
     agentWindowsSshSave:      (cfg) => request("PUT", "/server-settings/agents/windows-ssh", cfg),
     agentWindowsSshGenerate:  () => request("POST", "/server-settings/agents/windows-ssh/generate"),
-    agentWindowsSshScript:    (kind) =>
-      request("GET", "/server-settings/agents/windows-ssh/script?kind=" + encodeURIComponent(kind || "remediation")),
+    agentWindowsSshScript:    (kind, platform) =>
+      request("GET", "/server-settings/agents/windows-ssh/script?kind=" + encodeURIComponent(kind || "remediation") +
+        "&platform=" + encodeURIComponent(platform || "windows")),
     // Pinned SSH host keys (trust-on-first-use). Deleting one re-opens
     // first-use trust for that host — the recovery path after a rebuild.
     sshHostKeysList:          () => request("GET",    "/server-settings/agents/ssh-host-keys"),

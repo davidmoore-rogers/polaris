@@ -1817,6 +1817,9 @@ router.delete("/branding/logo", maintenanceLimiter, requirePermission("serverSet
 // exactly the same thing). Client wrappers are api.serverSettings.agentWindowsSsh*.
 
 const WindowsSshConfigSchema = z.object({
+  // Account settings are PER PLATFORM (a Windows DOMAIN\user is meaningless on
+  // Linux); polarisServerIp is shared.
+  platform:        z.enum(["windows", "linux"]).optional(),
   accountMode:     z.enum(["existing", "create"]).optional(),
   username:        z.string().max(129).optional(),
   polarisServerIp: z.string().max(64).optional(),
@@ -1861,8 +1864,9 @@ router.post(
 router.get("/agents/windows-ssh/script", requirePermission("serverSettingsSystem", "read"), async (req, res, next) => {
   try {
     const kind = req.query.kind === "detection" ? "detection" : "remediation";
+    const platform = req.query.platform === "linux" ? "linux" : "windows";
     const { getOnboardingScript } = await import("../../services/windowsSshOnboardingService.js");
-    res.json(await getOnboardingScript(kind));
+    res.json(await getOnboardingScript(platform, kind));
   } catch (err) { next(err); }
 });
 

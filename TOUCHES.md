@@ -2715,9 +2715,9 @@ Listed alphabetically.
 
 ## services/sshOnboardingScript.ts
 
-**What it owns:** Pure generation of the two Windows SSH onboarding PowerShell scripts (remediation + detection) an operator pushes to their fleet before Polaris can install the agent over SSH, plus the strict input validators that guard them. No I/O.
+**What it owns:** Pure generation of the SSH onboarding scripts an operator pushes to their fleet before Polaris can install the agent over SSH — a remediation + detection pair PER PLATFORM (Windows PowerShell, Linux bash) — plus the strict input validators that guard them. No I/O.
 
-**Public API:** `SshOnboardingAccountMode`, `WindowsOnboardingScriptOptions`, `buildWindowsOnboardingScript`, `buildWindowsOnboardingDetectionScript`, `assertValidPublicKey`, `assertValidUsername`, `assertValidServerIp`.
+**Public API:** `SshOnboardingAccountMode`, `WindowsOnboardingScriptOptions`, `LinuxOnboardingScriptOptions`, `buildWindowsOnboardingScript`, `buildWindowsOnboardingDetectionScript`, `buildLinuxOnboardingScript`, `buildLinuxOnboardingDetectionScript`, `assertValidPublicKey`, `assertValidUsername`, `assertValidLinuxUsername`, `assertValidServerIp`.
 
 **Cross-service deps:** `utils/errors` (AppError), `utils/cidr` (isValidIpv4 / isValidCidr).
 
@@ -2732,11 +2732,17 @@ Listed alphabetically.
 - ACLs and group lookups use well-known SIDs (`S-1-5-32-544`, `S-1-5-18`), never the localized names "Administrators"/"SYSTEM".
 - `accountMode:"create"` + a `DOMAIN\user` name is a hard error: `New-LocalUser` cannot do it, and emitting a script that fails on every endpoint is worse than refusing at authoring time.
 - An unsupported Windows build exits **0** (with an `unsupported:` marker) from both scripts. Non-zero would loop a detection/remediation pair forever against a device remediation cannot fix.
-- Emitted PowerShell must stay idempotent — it runs on every boot under GPO and every cycle under a Remediation.
+- Emitted PowerShell must stay idempotent — it runs on every boot under GPO and every cycle under a Remediation. The same applies to the bash: it runs on every config-management pass.
+- **Linux specifics that are load-bearing, not decoration:** `~/.ssh` 700 + `authorized_keys` 600 + correct ownership (sshd silently refuses otherwise); `restorecon` for the SELinux context on RHEL-family (same silent failure); and the NOPASSWD sudoers drop-in, because the agent installer runs `sudo -n` — key auth alone cannot install an agent, so omitting it would just relocate the manual step.
+- **The sudoers drop-in is validated with `visudo -cf` BEFORE `install`.** A malformed drop-in locks sudo out for EVERY user on the host, which is far worse than a failed onboarding. Never reorder those two steps.
+- The Linux script deliberately does NOT install `openssh-server`: distro-specific package management, and a host you cannot already reach over SSH is not one this script was delivered to.
+- Linux detection checks the account and the drop-in as well as the key (Windows detection checks only the key). Both extra facts are prerequisites the install genuinely fails without, and both are unambiguous here — no localization, no policy guessing.
+- `assertValidLinuxUsername` is STRICTER than the Windows one: POSIX charset, lowercase-leading, ≤32 chars, and an explicit rejection of `DOMAIN\user` with a message saying why. Sharing one validator would either admit a value Linux cannot use or reject a valid Windows one.
 
 **When changing this:**
 - Re-run `tests/unit/sshOnboardingScript.test.ts` (39 cases; injection attempts, both account modes, firewall on/off, predicate sharing).
-- Validate any change to the emitted script with the real parser, not by eye: `[System.Management.Automation.Language.Parser]::ParseFile(...)`. TS template literals and PowerShell both use `$`/backtick, so escaping mistakes are easy and silent.
+- Validate any change to the emitted script with the real parser, not by eye: `[System.Management.Automation.Language.Parser]::ParseFile(...)` for PowerShell, `bash -n` for the shell. TS template literals collide with BOTH — `${` is interpolation and bash uses `${VAR}` constantly, PowerShell uses `$` and backtick — so escaping mistakes are easy and silent.
+- Better still, RUN the Linux script: `podman run --rm -v <dir>:/scripts:ro debian:bookworm-slim bash -c 'apt-get install -y sudo passwd && bash /scripts/polaris-ssh-onboarding.sh'`, twice, and confirm one key line, 700/600/440 modes, a locked password, and that `su - <user> -c "sudo -n id -u"` returns 0.
 - Loosening a validator regex is a security change — re-check `psLiteral` still holds.
 - Avoid `${` in emitted PowerShell (TS template-literal interpolation) and escape any literal backtick.
 

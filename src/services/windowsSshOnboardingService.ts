@@ -52,8 +52,11 @@ import {
 import {
   assertValidServerIp,
   assertValidUsername,
+  assertValidLinuxUsername,
   buildWindowsOnboardingScript,
   buildWindowsOnboardingDetectionScript,
+  buildLinuxOnboardingScript,
+  buildLinuxOnboardingDetectionScript,
   type SshOnboardingAccountMode,
 } from "./sshOnboardingScript.js";
 
@@ -62,38 +65,81 @@ const SETTING_KEY = "windowsSshOnboarding";
 /** Short TTL: this is an admin-page read, not a hot path. */
 const SETTING_TTL_MS = 10_000;
 
-/** Name of the Polaris-owned credential. Visible in the credential list and the install pickers. */
-export const MANAGED_CREDENTIAL_NAME = "Windows SSH (Polaris-managed)";
+export type SshOnboardingPlatform = "windows" | "linux";
+export const SSH_ONBOARDING_PLATFORMS: readonly SshOnboardingPlatform[] = ["windows", "linux"];
+
+/**
+ * ONE managed credential PER PLATFORM, both carrying the SAME keypair.
+ *
+ * A Credential holds exactly one username, and the Windows and Linux
+ * deployment accounts genuinely differ in shape — Windows accepts
+ * `DOMAIN\user`, which is meaningless on Linux. Trying to share a single row
+ * would leave one platform unable to log in at all. Two rows with clear names
+ * is the least clever arrangement that makes both install paths work; they
+ * appear in the normal Install Agent / bulk-deploy pickers.
+ */
+export const MANAGED_CREDENTIAL_NAMES: Record<SshOnboardingPlatform, string> = {
+  windows: "Windows SSH (Polaris-managed)",
+  linux: "Linux SSH (Polaris-managed)",
+};
 /** Comment baked into the public key so it is identifiable in authorized_keys. */
 const KEY_COMMENT = "polaris-agent-deploy";
 const DEFAULT_USERNAME = "polaris-agent";
 
-export interface WindowsSshOnboardingConfig {
-  /** Credential this card owns. Null until the first generate. */
-  credentialId: string | null;
+export interface PlatformAccountConfig {
   accountMode: SshOnboardingAccountMode;
   username: string;
-  /** IPv4 address or CIDR; "" means the script leaves the firewall alone. */
+}
+
+export interface WindowsSshOnboardingConfig {
+  /** Managed credential per platform. Null until the first generate. */
+  credentialIds: Record<SshOnboardingPlatform, string | null>;
+  windows: PlatformAccountConfig;
+  linux: PlatformAccountConfig;
+  /** IPv4 address or CIDR; "" means the scripts leave the firewall alone. Shared. */
   polarisServerIp: string;
   /** ISO timestamp of the last keypair generation, for display. */
   generatedAt: string | null;
 }
 
 export interface WindowsSshOnboardingState extends WindowsSshOnboardingConfig {
-  credentialName: string | null;
+  credentialNames: Record<SshOnboardingPlatform, string | null>;
   /** authorized_keys one-liner, or null when no keypair exists yet. */
   publicKey: string | null;
   /** "SHA256:..." — the same form `ssh-keygen -lf` prints, so it can be eyeballed. */
   fingerprint: string | null;
 }
 
+function parsePlatform(raw: unknown, fallbackUsername: string): PlatformAccountConfig {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    accountMode: o.accountMode === "create" ? "create" : "existing",
+    username: typeof o.username === "string" && o.username ? o.username : fallbackUsername,
+  };
+}
+
 function parseConfig(raw: unknown): WindowsSshOnboardingConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const mode = o.accountMode === "create" ? "create" : "existing";
+  const ids = (o.credentialIds && typeof o.credentialIds === "object"
+    ? o.credentialIds
+    : {}) as Record<string, unknown>;
+  const idOf = (k: string) => (typeof ids[k] === "string" && ids[k] ? (ids[k] as string) : null);
+
+  // Fold the pre-Linux flat shape ({credentialId, accountMode, username}) into
+  // the windows slot so an install that already generated a keypair keeps it.
+  const legacyId = typeof o.credentialId === "string" && o.credentialId ? o.credentialId : null;
+  const legacyWindows =
+    o.windows === undefined && (o.accountMode !== undefined || o.username !== undefined)
+      ? { accountMode: o.accountMode, username: o.username }
+      : o.windows;
+
   return {
-    credentialId: typeof o.credentialId === "string" && o.credentialId ? o.credentialId : null,
-    accountMode: mode,
-    username: typeof o.username === "string" && o.username ? o.username : DEFAULT_USERNAME,
+    credentialIds: {
+      windows: idOf("windows") ?? legacyId,
+      linux: idOf("linux"),
+    },
+    windows: parsePlatform(legacyWindows, DEFAULT_USERNAME),
+    linux: parsePlatform(o.linux, DEFAULT_USERNAME),
     polarisServerIp: typeof o.polarisServerIp === "string" ? o.polarisServerIp : "",
     generatedAt: typeof o.generatedAt === "string" && o.generatedAt ? o.generatedAt : null,
   };
@@ -123,17 +169,15 @@ export function sshPublicKeyFingerprint(publicKey: string): string | null {
 }
 
 /**
- * Read the managed credential, tolerating a config that points at a row an
- * admin deleted from the Credentials page. Returns null rather than throwing —
- * the card should render "no keypair yet" and offer Generate, not a 500.
+ * Read a managed credential, tolerating a config that points at a row an admin
+ * deleted from the Credentials page. Returns null rather than throwing — the
+ * card should render "no keypair yet" and offer Generate, not a 500.
  */
-async function loadManagedCredential(
-  cfg: WindowsSshOnboardingConfig,
-): Promise<CredentialRecord | null> {
-  if (!cfg.credentialId) return null;
+async function loadManagedCredential(id: string | null): Promise<CredentialRecord | null> {
+  if (!id) return null;
   try {
     // revealSecrets is NOT set: this path only ever needs the public half.
-    return await getCredential(cfg.credentialId);
+    return await getCredential(id);
   } catch {
     return null;
   }
@@ -141,23 +185,51 @@ async function loadManagedCredential(
 
 export async function getOnboardingState(): Promise<WindowsSshOnboardingState> {
   const cfg = await store.get();
-  const cred = await loadManagedCredential(cfg);
-  const config = (cred?.config ?? {}) as Record<string, unknown>;
+  const [win, lin] = await Promise.all([
+    loadManagedCredential(cfg.credentialIds.windows),
+    loadManagedCredential(cfg.credentialIds.linux),
+  ]);
+  // Either row carries the same public half; prefer whichever exists.
+  const config = ((win ?? lin)?.config ?? {}) as Record<string, unknown>;
   const publicKey = typeof config.publicKey === "string" && config.publicKey ? config.publicKey : null;
   return {
     ...cfg,
-    // A dangling credentialId reads as "not generated yet" so Generate can recover it.
-    credentialId: cred ? cfg.credentialId : null,
-    credentialName: cred?.name ?? null,
+    // A dangling id reads as "not generated yet" so Generate can recover it.
+    credentialIds: {
+      windows: win ? cfg.credentialIds.windows : null,
+      linux: lin ? cfg.credentialIds.linux : null,
+    },
+    credentialNames: { windows: win?.name ?? null, linux: lin?.name ?? null },
     publicKey,
     fingerprint: publicKey ? sshPublicKeyFingerprint(publicKey) : null,
   };
 }
 
 export interface SaveOnboardingConfigInput {
+  platform?: unknown;
   accountMode?: unknown;
   username?: unknown;
   polarisServerIp?: unknown;
+}
+
+function assertPlatform(v: unknown): SshOnboardingPlatform {
+  if (v === "windows" || v === "linux") return v;
+  throw new AppError(400, 'Platform must be "windows" or "linux"');
+}
+
+/**
+ * Validate a username with the rules of the platform it will be written into.
+ * Linux is stricter (no DOMAIN\user, POSIX charset), so sharing one validator
+ * would either let an unusable value through or reject a valid Windows one.
+ */
+function validateUsernameFor(
+  platform: SshOnboardingPlatform,
+  username: string,
+  accountMode: SshOnboardingAccountMode,
+): string {
+  return platform === "linux"
+    ? assertValidLinuxUsername(username)
+    : assertValidUsername(username, accountMode);
 }
 
 export async function saveOnboardingConfig(
@@ -165,42 +237,72 @@ export async function saveOnboardingConfig(
   actor: string,
 ): Promise<WindowsSshOnboardingState> {
   const current = await store.get();
+  const platform = assertPlatform(input.platform ?? "windows");
+  const cur = current[platform];
 
   const accountMode: SshOnboardingAccountMode =
     input.accountMode === undefined
-      ? current.accountMode
+      ? cur.accountMode
       : input.accountMode === "create" || input.accountMode === "existing"
         ? input.accountMode
         : (() => {
             throw new AppError(400, 'Account mode must be "create" or "existing"');
           })();
 
-  const rawUsername = input.username === undefined ? current.username : String(input.username ?? "");
+  const rawUsername = input.username === undefined ? cur.username : String(input.username ?? "");
   // Validated against the SAME rules the script generator enforces, so a bad
   // value is rejected at save time rather than at download time.
-  const username = assertValidUsername(rawUsername, accountMode);
+  const username = validateUsernameFor(platform, rawUsername, accountMode);
   const polarisServerIp = assertValidServerIp(
     input.polarisServerIp === undefined ? current.polarisServerIp : String(input.polarisServerIp ?? ""),
   );
 
-  const next: WindowsSshOnboardingConfig = { ...current, accountMode, username, polarisServerIp };
+  const next: WindowsSshOnboardingConfig = {
+    ...current,
+    [platform]: { accountMode, username },
+    polarisServerIp,
+  };
   const changed =
-    next.accountMode !== current.accountMode ||
-    next.username !== current.username ||
-    next.polarisServerIp !== current.polarisServerIp;
+    accountMode !== cur.accountMode ||
+    username !== cur.username ||
+    polarisServerIp !== current.polarisServerIp;
 
   if (changed) {
     await store.save(next);
+    // Keep the managed credential's username in step with the account the
+    // script provisions — otherwise Polaris would log in as the old one.
+    await syncCredentialUsername(platform, next, actor);
     await logEvent({
       action: "windows_ssh_onboarding.updated",
       resourceType: "setting",
       resourceName: SETTING_KEY,
       actor,
-      message: `Updated Windows SSH deployment settings (account ${accountMode}: ${username})`,
-      details: { accountMode, username, polarisServerIp: polarisServerIp || null },
+      message: `Updated ${platform} SSH deployment settings (account ${accountMode}: ${username})`,
+      details: { platform, accountMode, username, polarisServerIp: polarisServerIp || null },
     });
   }
   return getOnboardingState();
+}
+
+/**
+ * Re-stamp a managed credential's username after a config change. Skipped when
+ * no keypair exists yet (generate will write the current username anyway).
+ */
+async function syncCredentialUsername(
+  platform: SshOnboardingPlatform,
+  cfg: WindowsSshOnboardingConfig,
+  _actor: string,
+): Promise<void> {
+  const id = cfg.credentialIds[platform];
+  if (!id) return;
+  const cred = await loadManagedCredential(id);
+  if (!cred) return;
+  const existing = await getCredential(id, { revealSecrets: true });
+  const conf = (existing.config ?? {}) as Record<string, unknown>;
+  if (conf.username === cfg[platform].username) return;
+  const nextConfig = { ...conf, username: cfg[platform].username };
+  validateConfig("ssh", nextConfig);
+  await prisma.credential.update({ where: { id }, data: { config: nextConfig as never } });
 }
 
 /**
@@ -229,52 +331,61 @@ export async function generateKeypair(actor: string): Promise<WindowsSshOnboardi
     throw new AppError(500, `Generated SSH key failed to parse: ${parsed.message}`);
   }
 
-  const existing = await loadManagedCredential(cfg);
-  const rotating = Boolean(existing);
-  let credentialId: string;
+  // Both platforms get the SAME keypair; only the username differs. Rotation
+  // must touch both or one platform silently keeps trusting a retired key.
+  const credentialIds: Record<SshOnboardingPlatform, string | null> = { windows: null, linux: null };
+  let rotating = false;
 
-  if (existing) {
-    // REPLACE the config rather than merging it. updateCredential() routes
-    // through mergeConfigPreservingSecrets, which treats an empty string for a
-    // secret field as "keep what's stored" — that's what lets the edit modal
-    // round-trip a masked value without wiping it, but it also makes clearing
-    // `password` impossible through that path. A stale password on a
-    // Polaris-managed key credential is dead config that still reads as a live
-    // secret in the UI, and remoteExec silently prefers privateKey anyway.
-    //
-    // So: validate explicitly, then write the whole config. Same shape as the
-    // VAPID precedent in notificationChannelService.generateVapidKeys.
-    const nextConfig = { username: cfg.username, privateKey, publicKey, port: 22 };
-    validateConfig("ssh", nextConfig);
-    await prisma.credential.update({
-      where: { id: existing.id },
-      data: { config: nextConfig as never },
-    });
-    credentialId = existing.id;
-  } else {
-    const created = await createCredential({
-      name: await uniqueCredentialName(),
-      type: "ssh",
-      config: { username: cfg.username, privateKey, publicKey, port: 22 },
-    });
-    credentialId = created.id;
+  for (const platform of SSH_ONBOARDING_PLATFORMS) {
+    const existing = await loadManagedCredential(cfg.credentialIds[platform]);
+    const nextConfig = { username: cfg[platform].username, privateKey, publicKey, port: 22 };
+    if (existing) {
+      rotating = true;
+      // REPLACE the config rather than merging it. updateCredential() routes
+      // through mergeConfigPreservingSecrets, which treats an empty string for
+      // a secret field as "keep what's stored" — that's what lets the edit
+      // modal round-trip a masked value without wiping it, but it also makes
+      // clearing `password` impossible through that path. A stale password on
+      // a Polaris-managed key credential is dead config that still reads as a
+      // live secret in the UI, and remoteExec silently prefers privateKey.
+      //
+      // So: validate explicitly, then write the whole config. Same shape as
+      // the VAPID precedent in notificationChannelService.generateVapidKeys.
+      validateConfig("ssh", nextConfig);
+      await prisma.credential.update({
+        where: { id: existing.id },
+        data: { config: nextConfig as never },
+      });
+      credentialIds[platform] = existing.id;
+    } else {
+      const created = await createCredential({
+        name: await uniqueCredentialName(MANAGED_CREDENTIAL_NAMES[platform]),
+        type: "ssh",
+        config: nextConfig,
+      });
+      credentialIds[platform] = created.id;
+    }
   }
 
-  await store.save({ ...cfg, credentialId, generatedAt: new Date().toISOString() });
+  await store.save({ ...cfg, credentialIds, generatedAt: new Date().toISOString() });
 
   // Warning level on purpose: rotating invalidates every endpoint that trusts
   // the old key until the onboarding script re-runs across the fleet.
   await logEvent({
     action: "credential.ssh_keypair_generated",
     resourceType: "credential",
-    resourceId: credentialId,
-    resourceName: existing?.name ?? MANAGED_CREDENTIAL_NAME,
+    resourceId: credentialIds.windows ?? undefined,
+    resourceName: "SSH deployment keypair",
     actor,
     level: "warning",
     message: rotating
-      ? "Regenerated the Windows SSH deployment keypair — every endpoint must re-run the onboarding script before Polaris can reach it again"
-      : "Generated the Windows SSH deployment keypair",
-    details: { rotated: rotating, fingerprint: sshPublicKeyFingerprint(publicKey) },
+      ? "Regenerated the SSH deployment keypair — every endpoint must re-run its onboarding script before Polaris can reach it again"
+      : "Generated the SSH deployment keypair (Windows + Linux credentials)",
+    details: {
+      rotated: rotating,
+      fingerprint: sshPublicKeyFingerprint(publicKey),
+      credentialIds,
+    },
   });
 
   return getOnboardingState();
@@ -285,15 +396,15 @@ export async function generateKeypair(actor: string): Promise<WindowsSshOnboardi
  * managed name (hand-made, or left behind by an earlier config row that was
  * cleared), suffix rather than 409 the whole generate.
  */
-async function uniqueCredentialName(): Promise<string> {
+async function uniqueCredentialName(base: string): Promise<string> {
   const taken = await prisma.credential.findMany({
-    where: { name: { startsWith: MANAGED_CREDENTIAL_NAME } },
+    where: { name: { startsWith: base } },
     select: { name: true },
   });
   const names = new Set(taken.map((r) => r.name));
-  if (!names.has(MANAGED_CREDENTIAL_NAME)) return MANAGED_CREDENTIAL_NAME;
+  if (!names.has(base)) return base;
   for (let i = 2; i < 100; i++) {
-    const candidate = `${MANAGED_CREDENTIAL_NAME} ${i}`;
+    const candidate = `${base} ${i}`;
     if (!names.has(candidate)) return candidate;
   }
   throw new AppError(409, "Could not allocate a name for the managed SSH credential");
@@ -305,30 +416,57 @@ export interface OnboardingScriptResult {
   script: string;
   filename: string;
   kind: OnboardingScriptKind;
+  platform: SshOnboardingPlatform;
 }
 
-export async function getOnboardingScript(kind: OnboardingScriptKind): Promise<OnboardingScriptResult> {
+export async function getOnboardingScript(
+  platform: SshOnboardingPlatform,
+  kind: OnboardingScriptKind,
+): Promise<OnboardingScriptResult> {
   const state = await getOnboardingState();
   if (!state.publicKey) {
     throw new AppError(400, "Generate the deployment keypair before downloading the onboarding script");
   }
-  if (kind === "detection") {
-    return {
-      kind,
-      filename: "polaris-ssh-onboarding-detect.ps1",
-      script: buildWindowsOnboardingDetectionScript({ publicKey: state.publicKey }),
-    };
+  const acct = state[platform];
+
+  if (platform === "linux") {
+    return kind === "detection"
+      ? {
+          platform, kind,
+          filename: "polaris-ssh-onboarding-detect.sh",
+          script: buildLinuxOnboardingDetectionScript({
+            publicKey: state.publicKey,
+            username: acct.username,
+          }),
+        }
+      : {
+          platform, kind: "remediation",
+          filename: "polaris-ssh-onboarding.sh",
+          script: buildLinuxOnboardingScript({
+            publicKey: state.publicKey,
+            username: acct.username,
+            accountMode: acct.accountMode,
+            polarisServerIp: state.polarisServerIp || undefined,
+          }),
+        };
   }
-  return {
-    kind: "remediation",
-    filename: "polaris-ssh-onboarding.ps1",
-    script: buildWindowsOnboardingScript({
-      publicKey: state.publicKey,
-      username: state.username,
-      accountMode: state.accountMode,
-      polarisServerIp: state.polarisServerIp || undefined,
-    }),
-  };
+
+  return kind === "detection"
+    ? {
+        platform, kind,
+        filename: "polaris-ssh-onboarding-detect.ps1",
+        script: buildWindowsOnboardingDetectionScript({ publicKey: state.publicKey }),
+      }
+    : {
+        platform, kind: "remediation",
+        filename: "polaris-ssh-onboarding.ps1",
+        script: buildWindowsOnboardingScript({
+          publicKey: state.publicKey,
+          username: acct.username,
+          accountMode: acct.accountMode,
+          polarisServerIp: state.polarisServerIp || undefined,
+        }),
+      };
 }
 
 /** Test seam — drop the TTL cache between cases. */

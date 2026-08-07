@@ -1,4 +1,4 @@
-// ─── Windows SSH deployment card ───────────────────────────────────────────
+// ─── SSH deployment card (Windows + Linux) ─────────────────────────────────
 //
 // Standalone module loaded by integrations.html, rendering into
 // #agent-ssh-onboarding-body on the "Polaris Agents" sub-tab. Mounted lazily
@@ -7,13 +7,15 @@
 // What the card does, in the operator's order of operations:
 //   1. Generate the deployment keypair (Polaris keeps the private half sealed
 //      and never shows it; only the public half + fingerprint come back).
-//   2. Configure which Windows account Polaris connects as, and whether the
-//      script should create it.
+//   2. Per platform, configure which account Polaris connects as and whether
+//      the script should create it. Windows and Linux share the keypair but
+//      get their own managed credential, because a Credential holds one
+//      username and a Windows DOMAIN\user is meaningless on Linux.
 //   3. Download the onboarding script — and the detection script that pairs
 //      with it for self-healing fleet rollout.
 //
-// Deliberately delivery-neutral: the generated PowerShell has nothing
-// Intune-specific in it, so the card presents Intune / GPO / SCCM / RMM as
+// Deliberately delivery-neutral: nothing in the generated scripts is
+// Intune- or Ansible-specific, so the card presents the delivery vehicles as
 // equal options rather than assuming one.
 //
 // Dependencies (globals from api.js / app.js):
@@ -24,10 +26,14 @@
   "use strict";
 
   var _state = null;
-  // Cache both scripts per fetch so Copy and Download don't re-hit the server,
-  // and so the preview can toggle instantly between the two.
-  var _scripts = { remediation: null, detection: null };
+  // Cache scripts per (platform, kind) so Copy/Download don't re-hit the
+  // server and the preview toggles instantly.
+  var _scripts = {};
   var _activeKind = "remediation";
+  var _platform = "windows";
+
+  function scriptCacheKey(platform, kind) { return platform + ":" + kind; }
+  function acct() { return (_state && _state[_platform]) || { accountMode: "existing", username: "" }; }
 
   function el(id) { return document.getElementById(id); }
 
@@ -35,6 +41,7 @@
     var hasKey = !!(s && s.publicKey);
     return (
       keypairPaneHtml(s, hasKey) +
+      platformTabsHtml() +
       configPaneHtml(s, hasKey) +
       scriptPaneHtml(hasKey) +
       hostKeysPaneHtml()
@@ -123,12 +130,15 @@
       rows =
         '<div class="detail-row"><span class="detail-label">Fingerprint</span>' +
           '<span class="detail-value mono">' + escapeHtml(s.fingerprint || "—") + '</span></div>' +
-        '<div class="detail-row"><span class="detail-label">Credential</span>' +
-          '<span class="detail-value">' + escapeHtml(s.credentialName || "—") + '</span></div>' +
+        '<div class="detail-row"><span class="detail-label">Credentials</span>' +
+          '<span class="detail-value">' +
+            escapeHtml((s.credentialNames && s.credentialNames.windows) || "—") + '<br>' +
+            escapeHtml((s.credentialNames && s.credentialNames.linux) || "—") +
+          '</span></div>' +
         '<div class="detail-row"><span class="detail-label">Generated</span>' +
           '<span class="detail-value">' + escapeHtml(s.generatedAt ? new Date(s.generatedAt).toLocaleString() : "—") + '</span></div>' +
         '<div class="form-group" style="margin-top:0.75rem">' +
-          '<label>Public key <span style="font-weight:normal;color:var(--color-text-tertiary)">(this is what the script installs on each endpoint)</span></label>' +
+          '<label>Public key <span style="font-weight:normal;color:var(--color-text-tertiary)">(what the scripts install on each host)</span></label>' +
           '<textarea readonly rows="2" class="mono" id="wssh-pubkey" style="width:100%">' + escapeHtml(s.publicKey) + '</textarea>' +
         '</div>';
     }
@@ -151,8 +161,25 @@
     );
   }
 
+  function platformTabsHtml() {
+    function tab(id, label) {
+      return '<button class="btn btn-sm ' + (_platform === id ? "btn-primary" : "btn-secondary") +
+        '" data-wssh-platform="' + id + '">' + label + '</button>';
+    }
+    return (
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:1rem">' +
+        tab("windows", "Windows") + tab("linux", "Linux") +
+        '<span class="hint" style="margin:0 0 0 0.5rem">' +
+          'Both platforms share one keypair; the account differs, so each has its own managed credential.' +
+        '</span>' +
+      '</div>'
+    );
+  }
+
   function configPaneHtml(s, hasKey) {
-    var mode = (s && s.accountMode) || "existing";
+    var a = (s && s[_platform]) || {};
+    var mode = a.accountMode || "existing";
+    var isLinux = _platform === "linux";
     return (
       '<div style="padding-bottom:1rem;border-bottom:1px solid var(--color-border);margin-bottom:1rem">' +
         '<h5 style="margin:0 0 0.5rem 0">2. Windows account</h5>' +
@@ -166,7 +193,7 @@
           '</label>' +
           '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;margin-top:4px">' +
             '<input type="radio" name="wssh-mode" value="create"' + (mode === "create" ? " checked" : "") + '>' +
-            '<span>Create a dedicated local account on each endpoint</span>' +
+            '<span>Create a dedicated local account on each ' + (isLinux ? "host" : "endpoint") + '</span>' +
           '</label>' +
           '<p class="hint" id="wssh-mode-hint"></p>' +
         '</div>' +
@@ -180,6 +207,9 @@
           '<input type="text" id="wssh-serverip" value="' + escapeHtml((s && s.polarisServerIp) || "") + '" placeholder="10.0.0.42 or 10.0.0.0/24">' +
           '<p class="hint">When set, the script scopes inbound TCP/22 to this address. Left blank it does not touch the firewall — restrict port 22 some other way, or every host on the network can reach sshd.</p>' +
         '</div>' +
+        (isLinux
+          ? '<p class="hint" style="color:var(--color-warning,#d98c00)">The sudoers drop-in grants this account passwordless root on every host it is applied to. That is what the agent installer requires; scope the account accordingly and have someone review the script before it goes into your config management.</p>'
+          : '') +
         '<button class="btn btn-secondary" id="wssh-save"' + (hasKey ? "" : " disabled") + '>Save settings</button>' +
       '</div>'
     );
@@ -198,16 +228,18 @@
       '<div>' +
         '<h5 style="margin:0 0 0.5rem 0">3. Onboarding script</h5>' +
         '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0 0 0.75rem 0">' +
-          'Plain PowerShell with no machine-specific values, so the same file runs unchanged on every endpoint. Run it as SYSTEM with the 64-bit PowerShell host. ' +
-          'The <strong>detection</strong> script is optional but recommended: pairing the two (Intune Remediation, SCCM Configuration Baseline) makes rollout self-healing, ' +
-          'because a plain one-shot script never retries on machines that were offline or have since been reimaged.' +
+          (_platform === "linux"
+            ? 'Plain bash with no machine-specific values, so the same file runs unchanged on every host. Run it as <strong>root</strong>; it is idempotent. '
+            : 'Plain PowerShell with no machine-specific values, so the same file runs unchanged on every endpoint. Run it as SYSTEM with the 64-bit PowerShell host. ') +
+          'The <strong>detection</strong> script is optional but recommended: pairing the two makes rollout self-healing, ' +
+          'because a one-shot script never retries on machines that were offline or have since been reimaged.' +
         '</p>' +
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:0.75rem">' +
           '<button class="btn btn-sm btn-secondary" id="wssh-show-remediation">Onboarding script</button>' +
           '<button class="btn btn-sm btn-secondary" id="wssh-show-detection">Detection script</button>' +
           '<span style="flex:1"></span>' +
           '<button class="btn btn-sm btn-secondary" id="wssh-copy">Copy</button>' +
-          '<button class="btn btn-sm btn-primary" id="wssh-download">Download .ps1</button>' +
+          '<button class="btn btn-sm btn-primary" id="wssh-download">Download ' + (_platform === "linux" ? ".sh" : ".ps1") + '</button>' +
         '</div>' +
         '<textarea readonly rows="16" class="mono" id="wssh-script" style="width:100%" placeholder="Loading…"></textarea>' +
         deliveryNoteHtml() +
@@ -220,6 +252,20 @@
   // AD/Entra auto-deploy config has a Servers class. Saying so here is
   // cheaper than a half-onboarded fleet.
   function deliveryNoteHtml() {
+    if (_platform === "linux") {
+      return (
+        '<details style="margin-top:0.75rem">' +
+          '<summary style="cursor:pointer;font-size:0.82rem;color:var(--color-text-secondary)">How to deploy this across a fleet</summary>' +
+          '<div style="font-size:0.82rem;color:var(--color-text-secondary);padding:0.5rem 0 0 0.5rem">' +
+            '<p style="margin:0 0 0.4rem 0"><strong>Ansible</strong> &mdash; <code>ansible all -b -m script -a polaris-ssh-onboarding.sh</code>, or pair it with the detection script for a check/apply split.</p>' +
+            '<p style="margin:0 0 0.4rem 0"><strong>Salt / Chef / Puppet</strong> &mdash; any run-as-root script resource; the detection script gives you an <code>onlyif</code>-style guard.</p>' +
+            '<p style="margin:0 0 0.4rem 0"><strong>cloud-init</strong> &mdash; drop it in <code>runcmd</code> so new instances onboard at first boot.</p>' +
+            '<p style="margin:0 0 0.4rem 0"><strong>No tooling</strong> &mdash; <code>scp</code> it over, then <code>sudo bash polaris-ssh-onboarding.sh</code>.</p>' +
+            '<p style="margin:0"><strong>Not installed by the script:</strong> <code>openssh-server</code>. That needs distro-specific package management, and a host you cannot already reach over SSH is not one this script was delivered to &mdash; it detects and reports instead.</p>' +
+          '</div>' +
+        '</details>'
+      );
+    }
     return (
       '<details style="margin-top:0.75rem">' +
         '<summary style="cursor:pointer;font-size:0.82rem;color:var(--color-text-secondary)">How to deploy this across a fleet</summary>' +
@@ -239,9 +285,16 @@
     var hint = el("wssh-mode-hint");
     if (!hint) return;
     var create = document.querySelector('input[name="wssh-mode"][value="create"]');
-    hint.textContent = (create && create.checked)
-      ? "The script creates the account with a random password it never reports — authentication is by key only — and adds it to the local Administrators group."
-      : "The script only installs the key. It will not create the account or change its group membership.";
+    var isLinux = _platform === "linux";
+    if (create && create.checked) {
+      hint.textContent = isLinux
+        ? "The script creates the account with its password locked — authentication is by key only — and gives it passwordless sudo."
+        : "The script creates the account with a random password it never reports — authentication is by key only — and adds it to the local Administrators group.";
+    } else {
+      hint.textContent = isLinux
+        ? "The script installs the key and the sudoers drop-in, but will not create the account — it fails if the account is missing."
+        : "The script only installs the key. It will not create the account or change its group membership.";
+    }
   }
 
   function render() {
@@ -268,6 +321,19 @@
       function (r) { r.addEventListener("change", syncModeHint); },
     );
 
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-wssh-platform]"),
+      function (b) {
+        b.addEventListener("click", function () {
+          var next = b.getAttribute("data-wssh-platform");
+          if (next === _platform) return;
+          _platform = next;
+          _activeKind = "remediation";
+          render();
+        });
+      },
+    );
+
     var showRem = el("wssh-show-remediation");
     if (showRem) showRem.addEventListener("click", function () { loadScript("remediation"); });
     var showDet = el("wssh-show-detection");
@@ -286,6 +352,9 @@
           "Regenerate the deployment keypair?\n\n" +
           "The current key stops working immediately. Polaris will not be able to reach any Windows endpoint over SSH " +
           "until the onboarding script has re-run everywhere and installed the new key.\n\n" +
+          "This affects BOTH the Windows and Linux credentials — they share one keypair.
+
+" +
           "Agents already installed keep reporting — this only affects installing, upgrading and removing them."
         )
       : Promise.resolve(true);
@@ -297,7 +366,7 @@
       return api.serverSettings.agentWindowsSshGenerate()
         .then(function (s) {
           _state = s;
-          _scripts = { remediation: null, detection: null };
+          _scripts = {};
           showToast(hasKey ? "Keypair regenerated" : "Keypair generated", "success");
           render();
         })
@@ -311,6 +380,7 @@
   function onSave() {
     var modeEl = document.querySelector('input[name="wssh-mode"]:checked');
     var body = {
+      platform: _platform,
       accountMode: modeEl ? modeEl.value : "existing",
       username: (el("wssh-username") || {}).value || "",
       polarisServerIp: (el("wssh-serverip") || {}).value || "",
@@ -321,7 +391,7 @@
       .then(function (s) {
         _state = s;
         // Config feeds the remediation script, so drop the cached copies.
-        _scripts = { remediation: null, detection: null };
+        _scripts = {};
         showToast("Settings saved", "success");
         render();
       })
@@ -339,15 +409,20 @@
     if (remBtn) remBtn.classList.toggle("btn-primary", kind === "remediation");
     if (detBtn) detBtn.classList.toggle("btn-primary", kind === "detection");
 
-    if (_scripts[kind]) {
-      if (ta) ta.value = _scripts[kind].script;
+    var ck = scriptCacheKey(_platform, kind);
+    if (_scripts[ck]) {
+      if (ta) ta.value = _scripts[ck].script;
       return;
     }
     if (ta) ta.value = "Loading…";
-    api.serverSettings.agentWindowsSshScript(kind)
+    var forPlatform = _platform;
+    api.serverSettings.agentWindowsSshScript(kind, forPlatform)
       .then(function (r) {
-        _scripts[kind] = r;
-        if (_activeKind === kind && el("wssh-script")) el("wssh-script").value = r.script;
+        _scripts[ck] = r;
+        // Guard against a platform/kind switch landing mid-flight.
+        if (_activeKind === kind && _platform === forPlatform && el("wssh-script")) {
+          el("wssh-script").value = r.script;
+        }
       })
       .catch(function (err) {
         if (el("wssh-script")) {
@@ -357,7 +432,7 @@
   }
 
   function onCopy() {
-    var cur = _scripts[_activeKind];
+    var cur = _scripts[scriptCacheKey(_platform, _activeKind)];
     if (!cur) return;
     navigator.clipboard.writeText(cur.script)
       .then(function () { showToast("Script copied to clipboard", "success"); })
@@ -365,7 +440,7 @@
   }
 
   function onDownload() {
-    var cur = _scripts[_activeKind];
+    var cur = _scripts[scriptCacheKey(_platform, _activeKind)];
     if (!cur) return;
     // Client-side Blob download: the route returns JSON so the same fetch can
     // feed the inline preview, and there's no second endpoint to gate.

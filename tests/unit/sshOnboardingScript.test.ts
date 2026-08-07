@@ -257,3 +257,171 @@ describe("buildWindowsOnboardingDetectionScript", () => {
     expect(() => buildWindowsOnboardingDetectionScript({ publicKey: "nope" })).toThrow();
   });
 });
+
+// ─── Linux ────────────────────────────────────────────────────────────────
+
+import {
+  buildLinuxOnboardingScript,
+  buildLinuxOnboardingDetectionScript,
+  assertValidLinuxUsername,
+} from "../../src/services/sshOnboardingScript.js";
+
+const LINUX_BASE = {
+  publicKey: PUBLIC_KEY,
+  username: "polaris-agent",
+  accountMode: "existing" as const,
+};
+
+describe("assertValidLinuxUsername", () => {
+  it("accepts a POSIX account name", () => {
+    expect(assertValidLinuxUsername("polaris-agent")).toBe("polaris-agent");
+    expect(assertValidLinuxUsername("_svc1")).toBe("_svc1");
+  });
+
+  it("rejects the Windows DOMAIN-backslash-user form with a pointed message", () => {
+    // Silently accepting it would emit a script that can never work.
+    expect(() => assertValidLinuxUsername("CORP\\svc")).toThrow(/no DOMAIN.user form/i);
+  });
+
+  it("rejects uppercase, over-long and injection-shaped names", () => {
+    expect(() => assertValidLinuxUsername("Polaris")).toThrow();
+    expect(() => assertValidLinuxUsername("a".repeat(33))).toThrow();
+    expect(() => assertValidLinuxUsername("svc; rm -rf /")).toThrow();
+    expect(() => assertValidLinuxUsername("svc$(id)")).toThrow();
+    expect(() => assertValidLinuxUsername("svc'x")).toThrow();
+    expect(() => assertValidLinuxUsername("")).toThrow(/required/i);
+  });
+});
+
+describe("buildLinuxOnboardingScript", () => {
+  it("targets the user's own authorized_keys with the modes sshd demands", () => {
+    const s = buildLinuxOnboardingScript(LINUX_BASE);
+    expect(s).toContain('SSH_DIR="$POLARIS_HOME/.ssh"');
+    expect(s).toContain('chmod 700 "$SSH_DIR"');
+    expect(s).toContain('chmod 600 "$AUTH_KEYS"');
+    expect(s).toContain('chown -R "$POLARIS_USER" "$SSH_DIR"');
+  });
+
+  it("appends the key only when absent, so re-runs don't duplicate", () => {
+    const s = buildLinuxOnboardingScript(LINUX_BASE);
+    expect(s).toContain("if polaris_key_present");
+    expect(s).toContain('>> "$AUTH_KEYS"');
+    // No TRUNCATING redirect anywhere — a single '>' would wipe other people's
+    // keys out of the file. (Matched with a leading non-'>' so the append
+    // itself doesn't trip it.)
+    expect(s).not.toMatch(/[^>]> "\$AUTH_KEYS"/);
+  });
+
+  it("restores the SELinux context when the tool is present", () => {
+    // RHEL: a hand-made ~/.ssh has the wrong context and sshd refuses it,
+    // with nothing useful on the client — same class of silent failure as the
+    // Windows ACL.
+    const s = buildLinuxOnboardingScript(LINUX_BASE);
+    expect(s).toContain("restorecon -R");
+    expect(s).toContain("command -v restorecon");
+  });
+
+  describe("sudoers drop-in", () => {
+    it("writes NOPASSWD for the account", () => {
+      // Key auth alone is not enough: the installer runs `sudo -n`.
+      const s = buildLinuxOnboardingScript(LINUX_BASE);
+      expect(s).toContain("NOPASSWD:ALL");
+      expect(s).toContain("/etc/sudoers.d/polaris-agent");
+    });
+
+    it("VALIDATES with visudo before installing", () => {
+      // A malformed drop-in locks sudo out for every user on the host — far
+      // worse than a failed onboarding.
+      const s = buildLinuxOnboardingScript(LINUX_BASE);
+      const validateAt = s.indexOf("visudo -cf");
+      const installAt = s.indexOf("install -m 0440");
+      expect(validateAt).toBeGreaterThan(-1);
+      expect(installAt).toBeGreaterThan(validateAt);
+      expect(s).toContain("refusing to install it");
+    });
+
+    it("installs 0440 root:root and skips an unchanged file", () => {
+      const s = buildLinuxOnboardingScript(LINUX_BASE);
+      expect(s).toContain("install -m 0440 -o root -g root");
+      expect(s).toContain("cmp -s");
+    });
+  });
+
+  it("creates a password-locked account only in create mode", () => {
+    const created = buildLinuxOnboardingScript({ ...LINUX_BASE, accountMode: "create" });
+    expect(created).toContain("useradd --create-home");
+    expect(created).toContain("passwd --lock");
+
+    const existing = buildLinuxOnboardingScript(LINUX_BASE);
+    expect(existing).not.toContain("useradd");
+    expect(existing).toContain("does not exist on this host");
+  });
+
+  it("requires root and uses strict bash flags", () => {
+    const s = buildLinuxOnboardingScript(LINUX_BASE);
+    expect(s).toContain("set -euo pipefail");
+    expect(s).toContain('if [ "$(id -u)" -ne 0 ]');
+  });
+
+  it("does not try to install openssh-server", () => {
+    // Distro-specific package management is out of scope, and a host you
+    // can't already reach over SSH isn't one this script was delivered to.
+    const s = buildLinuxOnboardingScript(LINUX_BASE);
+    expect(s).not.toMatch(/apt-get install|yum install|dnf install|zypper install/);
+    expect(s).toContain("install openssh-server for this host to be reachable");
+  });
+
+  describe("firewall block", () => {
+    it("handles firewalld and ufw, idempotently", () => {
+      const s = buildLinuxOnboardingScript({ ...LINUX_BASE, polarisServerIp: "10.0.0.42" });
+      expect(s).toContain("firewall-cmd");
+      expect(s).toContain("ufw");
+      expect(s).toContain("--remove-rich-rule"); // removed before added
+      expect(s).toContain("'10.0.0.42'");
+    });
+
+    it("leaves the firewall alone when no address is set", () => {
+      const s = buildLinuxOnboardingScript(LINUX_BASE);
+      expect(s).not.toContain("firewall-cmd");
+      expect(s).toContain("not modified");
+    });
+  });
+
+  it("leaves no placeholder unreplaced and rejects bad input", () => {
+    const s = buildLinuxOnboardingScript({ ...LINUX_BASE, accountMode: "create", polarisServerIp: "10.1.2.3" });
+    expect(s).not.toMatch(/__[A-Z_]+__/);
+    expect(() => buildLinuxOnboardingScript({ ...LINUX_BASE, username: "BAD" })).toThrow();
+    expect(() => buildLinuxOnboardingScript({ ...LINUX_BASE, publicKey: "junk" })).toThrow();
+  });
+});
+
+describe("buildLinuxOnboardingDetectionScript", () => {
+  it("shares the key-presence helpers with the remediation script", () => {
+    const detect = buildLinuxOnboardingDetectionScript({ publicKey: PUBLIC_KEY, username: "polaris-agent" });
+    const remediate = buildLinuxOnboardingScript(LINUX_BASE);
+    const marker = "polaris_key_present() {";
+    const extract = (s: string) => s.slice(s.indexOf("polaris_key_body() {"), s.indexOf("polaris_home_for() {"));
+    expect(detect).toContain(marker);
+    expect(extract(detect)).toBe(extract(remediate));
+  });
+
+  it("checks account, key AND the sudoers drop-in", () => {
+    // Unlike Windows, all three are prerequisites the install genuinely fails
+    // without, and all three are cheaply observable here.
+    const s = buildLinuxOnboardingDetectionScript({ publicKey: PUBLIC_KEY, username: "polaris-agent" });
+    expect(s).toContain("remediate: account");
+    expect(s).toContain("remediate: Polaris key not authorized");
+    expect(s).toContain("remediate: sudoers drop-in missing");
+    expect(s).toContain("ok: Polaris SSH onboarding present");
+  });
+
+  it("does not judge the firewall", () => {
+    const s = buildLinuxOnboardingDetectionScript({ publicKey: PUBLIC_KEY, username: "polaris-agent" });
+    expect(s).not.toContain("firewall-cmd");
+  });
+
+  it("validates both inputs", () => {
+    expect(() => buildLinuxOnboardingDetectionScript({ publicKey: "junk", username: "polaris-agent" })).toThrow();
+    expect(() => buildLinuxOnboardingDetectionScript({ publicKey: PUBLIC_KEY, username: "CORP\svc" })).toThrow();
+  });
+});

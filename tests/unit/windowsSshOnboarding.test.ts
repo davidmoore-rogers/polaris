@@ -85,7 +85,7 @@ import {
   generateKeypair,
   getOnboardingScript,
   sshPublicKeyFingerprint,
-  MANAGED_CREDENTIAL_NAME,
+  MANAGED_CREDENTIAL_NAMES,
   _invalidateCache,
 } from "../../src/services/windowsSshOnboardingService.js";
 import { getCredential, stripSecrets } from "../../src/services/credentialService.js";
@@ -120,9 +120,9 @@ describe("getOnboardingState", () => {
     const s = await getOnboardingState();
     expect(s.publicKey).toBeNull();
     expect(s.fingerprint).toBeNull();
-    expect(s.credentialId).toBeNull();
-    expect(s.accountMode).toBe("existing");
-    expect(s.username).toBe("polaris-agent");
+    expect(s.credentialIds).toEqual({ windows: null, linux: null });
+    expect(s.windows).toEqual({ accountMode: "existing", username: "polaris-agent" });
+    expect(s.linux).toEqual({ accountMode: "existing", username: "polaris-agent" });
   });
 
   it("reads as 'not generated' when the credential was deleted out from under it", async () => {
@@ -131,7 +131,7 @@ describe("getOnboardingState", () => {
     _invalidateCache();
     const s = await getOnboardingState();
     // Must degrade to the Generate path, not 500.
-    expect(s.credentialId).toBeNull();
+    expect(s.credentialIds).toEqual({ windows: null, linux: null });
     expect(s.publicKey).toBeNull();
   });
 });
@@ -140,10 +140,18 @@ describe("generateKeypair", () => {
   it("creates the managed credential with a key ssh2 can connect with", async () => {
     const state = await generateKeypair("tester");
 
-    expect(db.credentials).toHaveLength(1);
+    // One managed credential PER PLATFORM, both carrying the same keypair --
+    // a Credential holds one username and a Windows DOMAIN\user is
+    // meaningless on Linux.
+    expect(db.credentials).toHaveLength(2);
+    expect(db.credentials.map((c) => c.name)).toEqual([
+      MANAGED_CREDENTIAL_NAMES.windows,
+      MANAGED_CREDENTIAL_NAMES.linux,
+    ]);
     const cred = db.credentials[0];
-    expect(cred.name).toBe(MANAGED_CREDENTIAL_NAME);
     expect(cred.type).toBe("ssh");
+    // Same private key in both rows.
+    expect(db.credentials[1].config.privateKey).toBe(cred.config.privateKey);
 
     // The stored private key must round-trip through the same parser the
     // connect path uses, or installs would fail at authentication time.
@@ -175,7 +183,7 @@ describe("generateKeypair", () => {
     expect(gen[0].level).toBe("warning");
     expect(gen[0].details.rotated).toBe(false);
     expect(gen[1].details.rotated).toBe(true);
-    expect(gen[1].message).toMatch(/re-run the onboarding script/i);
+    expect(gen[1].message).toMatch(/re-run its onboarding script/i);
   });
 
   it("rotates in place — same credential row, new key, password cleared", async () => {
@@ -186,8 +194,10 @@ describe("generateKeypair", () => {
 
     const second = await generateKeypair("tester");
 
-    expect(db.credentials).toHaveLength(1);
-    expect(second.credentialId).toBe(first.credentialId);
+    // Rotation reuses the rows rather than minting more.
+    expect(db.credentials).toHaveLength(2);
+    expect(second.credentialIds.windows).toBe(first.credentialIds.windows);
+    expect(second.credentialIds.linux).toBe(first.credentialIds.linux);
     expect(db.credentials[0].config.privateKey).not.toBe(firstKey);
     expect(second.publicKey).not.toBe(first.publicKey);
     // Rotation REPLACES the config rather than merging it. Merging cannot
@@ -200,13 +210,14 @@ describe("generateKeypair", () => {
 
   it("suffixes rather than failing when the managed name is already taken", async () => {
     db.credentials.push({
-      id: "pre-existing", name: MANAGED_CREDENTIAL_NAME, type: "ssh",
+      id: "pre-existing", name: MANAGED_CREDENTIAL_NAMES.windows, type: "ssh",
       config: { username: "someone", password: "pw" },
       createdAt: new Date(), updatedAt: new Date(),
     });
     await generateKeypair("tester");
-    expect(db.credentials).toHaveLength(2);
-    expect(db.credentials[1].name).toBe(`${MANAGED_CREDENTIAL_NAME} 2`);
+    expect(db.credentials).toHaveLength(3); // the squatter + one per platform
+    expect(db.credentials[1].name).toBe(`${MANAGED_CREDENTIAL_NAMES.windows} 2`);
+    expect(db.credentials[2].name).toBe(MANAGED_CREDENTIAL_NAMES.linux);
   });
 });
 
@@ -239,17 +250,25 @@ describe("credential masking", () => {
 describe("saveOnboardingConfig", () => {
   it("persists valid settings and reports them back", async () => {
     const s = await saveOnboardingConfig(
-      { accountMode: "create", username: "svc-polaris", polarisServerIp: "10.0.0.42" },
+      { platform: "windows", accountMode: "create", username: "svc-polaris", polarisServerIp: "10.0.0.42" },
       "tester",
     );
-    expect(s.accountMode).toBe("create");
-    expect(s.username).toBe("svc-polaris");
+    expect(s.windows).toEqual({ accountMode: "create", username: "svc-polaris" });
     expect(s.polarisServerIp).toBe("10.0.0.42");
+    // Per-platform: saving Windows must not disturb Linux.
+    expect(s.linux.username).toBe("polaris-agent");
   });
 
   it("applies the script generator's validation at save time, not download time", async () => {
     await expect(saveOnboardingConfig({ username: "bad;name" }, "t")).rejects.toThrow();
     await expect(saveOnboardingConfig({ polarisServerIp: "nope" }, "t")).rejects.toThrow();
+    // Linux is validated with the STRICTER Linux rules, not the Windows ones.
+    await expect(
+      saveOnboardingConfig({ platform: "linux", username: "CORP\\svc" }, "t"),
+    ).rejects.toThrow(/no DOMAIN.user form/i);
+    await expect(
+      saveOnboardingConfig({ platform: "linux", username: "MixedCase" }, "t"),
+    ).rejects.toThrow();
     // A domain account can't be created locally — catch it here rather than on
     // every endpoint in the fleet.
     await expect(
@@ -267,13 +286,13 @@ describe("saveOnboardingConfig", () => {
 
 describe("getOnboardingScript", () => {
   it("refuses before a keypair exists, pointing at the fix", async () => {
-    await expect(getOnboardingScript("remediation")).rejects.toThrow(/Generate the deployment keypair/i);
+    await expect(getOnboardingScript("windows", "remediation")).rejects.toThrow(/Generate the deployment keypair/i);
   });
 
   it("returns both variants with distinct filenames once keyed", async () => {
     await generateKeypair("tester");
-    const rem = await getOnboardingScript("remediation");
-    const det = await getOnboardingScript("detection");
+    const rem = await getOnboardingScript("windows", "remediation");
+    const det = await getOnboardingScript("windows", "detection");
 
     expect(rem.filename).toBe("polaris-ssh-onboarding.ps1");
     expect(det.filename).toBe("polaris-ssh-onboarding-detect.ps1");
@@ -287,10 +306,10 @@ describe("getOnboardingScript", () => {
   it("reflects saved config in the remediation script", async () => {
     await generateKeypair("tester");
     await saveOnboardingConfig(
-      { accountMode: "create", username: "svc-polaris", polarisServerIp: "10.9.9.9" },
+      { platform: "windows", accountMode: "create", username: "svc-polaris", polarisServerIp: "10.9.9.9" },
       "tester",
     );
-    const { script } = await getOnboardingScript("remediation");
+    const { script } = await getOnboardingScript("windows", "remediation");
     expect(script).toContain("'svc-polaris'");
     expect(script).toContain("New-LocalUser");
     expect(script).toContain("'10.9.9.9'");

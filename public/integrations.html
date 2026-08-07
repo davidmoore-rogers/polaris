@@ -57,14 +57,16 @@
           </div>
         </div>
         <div class="settings-card" id="agent-ssh-onboarding-card">
-          <h4>Windows SSH Deployment</h4>
+          <h4>SSH Deployment</h4>
           <p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">
-            Installing the agent on Windows over SSH instead of WinRM takes a reusable administrator
-            password off the wire. Polaris generates the deployment keypair, keeps the private half
-            sealed, and produces the script that authorizes the public half on your endpoints
-            &mdash; getting the <code>administrators_authorized_keys</code> path and its ACL right,
-            both of which fail silently when hand-rolled. Deploy the script with Intune, GPO,
-            Configuration Manager, Arc, or an RMM tool.
+            Deploying the agent over SSH with a key takes a reusable administrator password off the
+            wire. Polaris generates one keypair, keeps the private half sealed, and produces the
+            onboarding script for each platform &mdash; getting right the details that fail
+            <em>silently</em> when hand-rolled: on Windows the
+            <code>administrators_authorized_keys</code> path and its ACL, on Linux the
+            <code>~/.ssh</code> ownership, SELinux context, and the passwordless-sudo drop-in the
+            agent installer requires. Deploy with Intune, GPO, Configuration Manager, Arc, Ansible,
+            an RMM tool, or by hand.
           </p>
           <div id="agent-ssh-onboarding-body">
             <p class="empty-state" style="padding:1rem 0">Loading...</p>
