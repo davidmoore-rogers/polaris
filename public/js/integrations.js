@@ -579,6 +579,7 @@ async function loadIntegrations() {
         var arcExtraList = [];
         if (config.enableVmInstances) arcExtraList.push("VMware / SCVMM");
         if (config.enableSqlServer) arcExtraList.push("SQL Server");
+        if (config.enableKubernetes) arcExtraList.push("Kubernetes");
         var arcExtras = arcExtraList.length > 0 ? arcExtraList.join(", ") : "None";
         var arcSubsValue = arcSubs.length > 0
           ? escapeHtml(String(arcSubs.length) + " subscription" + (arcSubs.length === 1 ? "" : "s"))
@@ -1206,6 +1207,10 @@ var _CLASS_SUBTAB_SPECS = {
     classes: [
       { key: "workstations", label: "Workstations" },
       { key: "servers",      label: "Servers"      },
+      // Phase 4. Renders whether or not the operator enabled cluster
+      // discovery — the class block has to be editable BEFORE the first run
+      // brings clusters in, or addAsMonitored could never be set in advance.
+      { key: "clusters",     label: "Kubernetes"   },
     ],
   },
   vcenter: {
@@ -1279,6 +1284,8 @@ function _classStreamsBlockFor(klass, opts) {
   // only — the VM assets themselves are typed "server".
   if (klass === "vms"   || klass === "virtual_machine") return streamsOf(opts.vmMonitor);
   if (klass === "hosts" || klass === "hypervisor")      return streamsOf(opts.hostMonitor);
+  // Azure Arc connected clusters (Phase 4) — reduced block, like hosts.
+  if (klass === "clusters" || klass === "kubernetes_cluster") return streamsOf(opts.k8sMonitor);
   return null;
 }
 
@@ -1327,6 +1334,10 @@ function _streamsForClass(klass) {
   var allowEventLog  = isHostClass || klass === "fortigate";
   return _ALL_STREAMS.filter(function (s) {
     if (s.key === "storage" && klass === "fortiap") return false; // FortiAP has no mountable storage
+    // A connected Kubernetes cluster is an API endpoint, not a host: no
+    // mounts to walk. (processes / eventLog are already off — isHostClass
+    // excludes it.)
+    if (s.key === "storage" && klass === "clusters") return false;
     if (s.key === "processes") return allowProcesses;
     if (s.key === "eventLog")  return allowEventLog;
     return true;
@@ -2974,6 +2985,8 @@ function monitorSettingsFormHTML(s, opts) {
   // hostMonitor = reduced — no agent deploy / auto-monitor on ESXi).
   var vmCfg   = opts.vmMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null };
   var hostCfg = opts.hostMonitor || { addAsMonitored: false };
+  // Azure Arc connected clusters — reduced block, same shape as hostCfg.
+  var k8sCfg  = opts.k8sMonitor  || { addAsMonitored: false };
 
   // Stash auto-monitor name seeds for the lazy-loaded checklists.
   function _amonSeedNames(sel) {
@@ -3159,6 +3172,13 @@ function monitorSettingsFormHTML(s, opts) {
     if (klass === "hosts" || klass === "hypervisor") {
       return '<section style="margin-bottom:1.25rem">' + autoMonitoringHeader() +
         _classAddAsMonitoredHTML("f-mon-host-", "ESXi host", hostCfg.addAsMonitored === true) + '</section>';
+    }
+    // Azure Arc connected Kubernetes clusters — addAsMonitored only. A cluster
+    // runs no Polaris Agent and reports no interfaces or mounts, so it gets the
+    // same reduced card as an ESXi host.
+    if (klass === "clusters" || klass === "kubernetes_cluster") {
+      return '<section style="margin-bottom:1.25rem">' + autoMonitoringHeader() +
+        _classAddAsMonitoredHTML("f-mon-clusters-", "Kubernetes cluster", k8sCfg.addAsMonitored === true) + '</section>';
     }
     return "";
   }
@@ -4399,6 +4419,7 @@ function azureArcFormHTML(defaults) {
   var netProfile = d.fetchNetworkProfile === true;
   var vmInst = d.enableVmInstances === true;
   var sqlSrv = d.enableSqlServer === true;
+  var k8s = d.enableKubernetes === true;
 
   var rgMode = (d.resourceGroupInclude && d.resourceGroupInclude.length > 0) ? "include" : "exclude";
   var rgNames = rgMode === "include" ? (d.resourceGroupInclude || []) : (d.resourceGroupExclude || []);
@@ -4466,6 +4487,11 @@ function azureArcFormHTML(defaults) {
       '<label for="f-enableSqlServer" style="margin:0">Collect Arc-enabled SQL Server instances</label>' +
     '</div>' +
     '<p class="hint">Attaches each machine\'s SQL Server instances (edition, version, patch level, licence type) to that machine and tags it <code>arc-sql</code>. SQL instances are recorded as detail on the host &mdash; they never become separate devices.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enableKubernetes" ' + (k8s ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-enableKubernetes" style="margin:0">Discover Arc-enabled Kubernetes clusters</label>' +
+    '</div>' +
+    '<p class="hint" style="color:var(--color-warning,#d98c00)">Unlike the two options above, this one <strong>adds devices</strong>: each connected cluster becomes its own asset of type <em>Kubernetes Cluster</em>, with its own subtab on the Monitoring tab. A cluster is monitored as a single endpoint &mdash; no agent, no interfaces, no storage.</p>' +
     calloutHTML("note", "Requires Resource Graph",
       "Both options are read through Azure Resource Graph, which is what keeps them to one query each. If <em>Query via Azure Resource Graph</em> above is off &mdash; or Resource Graph is unavailable in your tenant &mdash; the discovery run skips this enrichment and says so in its log rather than falling back to a far more expensive per-machine read.") +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
@@ -4527,6 +4553,7 @@ function getArcFormConfig() {
     fetchNetworkProfile: document.getElementById("f-fetchNetworkProfile").checked,
     enableVmInstances: document.getElementById("f-enableVmInstances").checked,
     enableSqlServer: document.getElementById("f-enableSqlServer").checked,
+    enableKubernetes: document.getElementById("f-enableKubernetes").checked,
     resourceGroupInclude: rgMode === "include" ? rgNames : [],
     resourceGroupExclude: rgMode === "exclude" ? rgNames : [],
     deviceInclude: devMode === "include" ? devNames : [],
@@ -4868,6 +4895,13 @@ async function openCreateModal(type) {
         var srvBlockNew = _readWorkstationServerMonitorBlock("f-mon-server-",     { klass: "servers",      isPrimary: false });
         if (wsBlockNew)  createConfig.workstationMonitor = wsBlockNew;
         if (srvBlockNew) createConfig.serverMonitor      = srvBlockNew;
+        if (isArc) {
+          // Reduced cluster block (addAsMonitored + streams only). Read with
+          // the same reader vCenter's ESXi hosts use — Zod strips the extra
+          // null fields the reduced schema doesn't carry.
+          var k8sBlockNew = _readWorkstationServerMonitorBlock("f-mon-clusters-", { klass: "clusters", isPrimary: false });
+          if (k8sBlockNew) createConfig.k8sMonitor = k8sBlockNew;
+        }
         var verifyPresenceNew = _readVerifyPresenceToggle();
         if (verifyPresenceNew !== undefined) createConfig.verifyPresence = verifyPresenceNew;
       }
@@ -5208,6 +5242,7 @@ function _intgEditFormSpec(intg, config) {
         fetchNetworkProfile: config.fetchNetworkProfile === true,
         enableVmInstances: config.enableVmInstances === true,
         enableSqlServer: config.enableSqlServer === true,
+        enableKubernetes: config.enableKubernetes === true,
         resourceGroupInclude: config.resourceGroupInclude || [],
         resourceGroupExclude: config.resourceGroupExclude || [],
         deviceInclude: config.deviceInclude || [],
@@ -5442,6 +5477,10 @@ function _wireIntgEditSave(id, intg, formGetter) {
         // didn't render — leave existing config alone.
         var wsBlock  = _readWorkstationServerMonitorBlock("f-mon-workstation-", { klass: "workstations", isPrimary: true });
         var srvBlock = _readWorkstationServerMonitorBlock("f-mon-server-",      { klass: "servers",      isPrimary: false });
+        if (isArc) {
+          var k8sBlock = _readWorkstationServerMonitorBlock("f-mon-clusters-", { klass: "clusters", isPrimary: false });
+          if (k8sBlock) editConfig.k8sMonitor = k8sBlock;
+        }
         if (wsBlock)  editConfig.workstationMonitor = wsBlock;
         if (srvBlock) editConfig.serverMonitor      = srvBlock;
         var verifyPresenceEdit = _readVerifyPresenceToggle();

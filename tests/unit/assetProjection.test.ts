@@ -553,3 +553,38 @@ describe("projectAssetFromSources — vCenter priority", () => {
     expect(withVcenter.projected.ipAddress).toBe("10.0.0.6");
   });
 });
+
+describe("assetProjection — Azure Arc Kubernetes clusters", () => {
+  it("projects the cluster name, a constant OS, and the k8s version", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("arc-k8s", {
+        name: "prod-cluster",
+        kubernetesVersion: "1.29.4",
+        distribution: "aks_edge",
+        resourceGroup: "rg-k8s",
+      }),
+    ]);
+    expect(projected.hostname).toBe("prod-cluster");
+    expect(projected.os).toBe("Kubernetes (aks_edge)");
+    expect(projected.osVersion).toBe("1.29.4");
+    expect(projected.learnedLocation).toBe("rg-k8s");
+    expect(provenance.os).toBe("arc-k8s");
+  });
+
+  it("falls back to a bare Kubernetes label when no distribution is reported", () => {
+    const { projected } = projectAssetFromSources([
+      src("arc-k8s", { name: "c1", kubernetesVersion: "1.30.0" }),
+    ]);
+    expect(projected.os).toBe("Kubernetes");
+  });
+
+  it("never supplies hardware fields — a cluster has no serial or model", () => {
+    const { projected } = projectAssetFromSources([
+      src("arc-k8s", { name: "c1", kubernetesVersion: "1.30.0" }),
+    ]);
+    expect(projected.serialNumber).toBeNull();
+    expect(projected.manufacturer).toBeNull();
+    expect(projected.model).toBeNull();
+    expect(projected.ipAddress).toBeNull();
+  });
+});

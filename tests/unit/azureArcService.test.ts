@@ -37,6 +37,9 @@ import {
   buildArcSqlInstancesQuery,
   normalizeArcVmInstance,
   normalizeArcSqlInstance,
+  buildArcClustersQuery,
+  normalizeArcCluster,
+  buildArcClusterObservedBlob,
 } from "../../src/services/azureArcService.js";
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -792,5 +795,88 @@ describe("buildArcObservedBlob — Phase 2/3 fields", () => {
     expect(blob.vmInstance.platform).toBe("vmware");
     expect(blob.sqlInstances).toHaveLength(1);
     expect(blob.sqlInstances[0].edition).toBe("Standard");
+  });
+});
+
+// ─── Phase 4: connected Kubernetes clusters ─────────────────────────────────
+
+describe("buildArcClustersQuery", () => {
+  it("targets the connected-cluster type", () => {
+    expect(buildArcClustersQuery()).toContain("microsoft.kubernetes/connectedclusters");
+  });
+
+  it("projects location and tags (a cluster is an asset, not just detail)", () => {
+    const q = buildArcClustersQuery();
+    expect(q).toContain("project id, name, type, location, tags, properties, subscriptionId, resourceGroup");
+  });
+
+  it("scopes to validated subscriptions and drops non-GUIDs", () => {
+    const q = buildArcClustersQuery({ subscriptionIds: [SUB, "'; drop"] });
+    expect(q).toContain(`subscriptionId in~ ('${SUB}')`);
+    expect(q).not.toContain("drop");
+  });
+});
+
+describe("normalizeArcCluster", () => {
+  const CLUSTER_ID = `/subscriptions/${SUB}/resourceGroups/rg-k8s/providers/Microsoft.Kubernetes/connectedClusters/prod-cluster`;
+  const row = {
+    id: CLUSTER_ID,
+    name: "prod-cluster",
+    type: "microsoft.kubernetes/connectedclusters",
+    location: "eastus",
+    tags: { env: "prod" },
+    properties: {
+      kubernetesVersion: "1.29.4",
+      distribution: "aks_edge",
+      infrastructure: "azure_stack_hci",
+      totalNodeCount: 6,
+      totalCoreCount: 48,
+      agentVersion: "1.16.3",
+      connectivityStatus: "Connected",
+      provisioningState: "Succeeded",
+    },
+  };
+
+  it("maps a connected cluster", () => {
+    const c = normalizeArcCluster(row);
+    expect(c?.armId).toBe(CLUSTER_ID.toLowerCase());
+    expect(c?.name).toBe("prod-cluster");
+    expect(c?.subscriptionId).toBe(SUB);
+    expect(c?.resourceGroup).toBe("rg-k8s");
+    expect(c?.kubernetesVersion).toBe("1.29.4");
+    expect(c?.distribution).toBe("aks_edge");
+    expect(c?.totalNodeCount).toBe(6);
+    expect(c?.connectivityStatus).toBe("Connected");
+    expect(c?.tags).toEqual({ env: "prod" });
+  });
+
+  it("derives subscription and resource group from the id when ARG columns are absent", () => {
+    const c = normalizeArcCluster({ ...row, subscriptionId: undefined, resourceGroup: undefined });
+    expect(c?.subscriptionId).toBe(SUB);
+    expect(c?.resourceGroup).toBe("rg-k8s");
+  });
+
+  it("survives a cluster with no properties", () => {
+    const c = normalizeArcCluster({ id: CLUSTER_ID, name: "bare" });
+    expect(c?.kubernetesVersion).toBeNull();
+    expect(c?.totalNodeCount).toBeNull();
+    expect(c?.armId).toBe(CLUSTER_ID.toLowerCase());
+  });
+
+  it("returns null without a usable resource id", () => {
+    expect(normalizeArcCluster({ name: "orphan" })).toBeNull();
+    expect(normalizeArcCluster(null)).toBeNull();
+  });
+
+  it("builds an observed blob the projection rules can read", () => {
+    const c = normalizeArcCluster(row)!;
+    const blob = buildArcClusterObservedBlob(c, new Date("2026-08-07T12:00:00Z"));
+    expect(blob.kind).toBe("arc-k8s");
+    expect(blob.name).toBe("prod-cluster");
+    expect(blob.kubernetesVersion).toBe("1.29.4");
+    expect(blob.resourceGroup).toBe("rg-k8s");
+    // Region is metadata about the RECORD, never a physical location.
+    expect(blob.azureRegion).toBe("eastus");
+    expect(blob).not.toHaveProperty("location");
   });
 });

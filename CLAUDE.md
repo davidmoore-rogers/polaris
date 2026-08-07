@@ -80,8 +80,13 @@ AssetStatus:             active | maintenance | decommissioned | storage | disab
 // `isBuiltIn=true, isProtected=true` registry rows so behavior matches
 // pre-cutover for installs that never add custom types; the vCenter
 // integration added the `hypervisor` built-in the same way (migration
-// 20260709000000 + the seedAssetTypes self-heal). Its `virtual_machine`
-// sibling was retired by migration 20260722000000 — vCenter VMs are typed
+// 20260709000000 + the seedAssetTypes self-heal), and the Azure Arc
+// integration added `kubernetes_cluster` the same way (migration
+// 20260807000000) for Arc-enabled connected clusters — note that
+// registration is a THREE-WAY lockstep: the migration, BUILT_IN_ASSET_TYPES,
+// AND the BUILT_IN_SEEDS entry, because seedBuiltInAssetTypes skips any seed
+// whose name isn't in the built-in list. The `hypervisor` type's
+// `virtual_machine` sibling was retired by migration 20260722000000 — vCenter VMs are typed
 // plain `server` (VM identity lives in Asset.virtualization + the
 // vcenter-vm AssetSource row; the per-class config block kept its
 // vmMonitor name, dispatched by integration type — `server` on a vcenter

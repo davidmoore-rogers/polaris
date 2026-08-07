@@ -96,6 +96,9 @@ export interface AzureArcConfig {
   // into the owning machine's observed blob.
   enableVmInstances?: boolean;
   enableSqlServer?: boolean;
+  // Phase 4. UNLIKE the two above, connected clusters become ASSETS of their
+  // own — this toggle changes the fleet, not just an existing machine's blob.
+  enableKubernetes?: boolean;
 }
 
 /**
@@ -174,8 +177,36 @@ export interface DiscoveredArcMachine {
   sqlInstances: ArcSqlInstance[];
 }
 
+/**
+ * An Arc-enabled Kubernetes cluster (Phase 4).
+ *
+ * The only Arc entity that is NOT just detail on a machine — a connected
+ * cluster becomes its own asset, typed `kubernetes_cluster`. It runs no
+ * Polaris Agent and reports no interfaces or mounts, so its per-class block
+ * is the reduced addAsMonitored+streams shape.
+ */
+export interface DiscoveredArcCluster {
+  /** Lowercased ARM resource id — the AssetSource externalId. */
+  armId: string;
+  name: string;
+  subscriptionId: string;
+  resourceGroup: string;
+  azureRegion: string;
+  kubernetesVersion: string | null;
+  distribution: string | null;
+  infrastructure: string | null;
+  totalNodeCount: number | null;
+  totalCoreCount: number | null;
+  agentVersion: string | null;
+  connectivityStatus: string | null;
+  provisioningState: string | null;
+  tags: Record<string, string>;
+}
+
 export interface ArcDiscoveryResult {
   machines: DiscoveredArcMachine[];
+  /** Phase 4 — empty unless enableKubernetes is on. */
+  clusters: DiscoveredArcCluster[];
   subscriptionsQueried: number;
   /** True when the ARG path failed and the per-subscription list ran instead. */
   usedFallback: boolean;
@@ -864,6 +895,81 @@ export function buildArcSqlInstancesQuery(opts: { subscriptionIds?: string[] } =
   return `Resources | ${clauses.join(" | ")}`;
 }
 
+/** Resource Graph query for Arc-enabled Kubernetes clusters. */
+export function buildArcClustersQuery(opts: { subscriptionIds?: string[] } = {}): string {
+  const subs = (opts.subscriptionIds ?? [])
+    .map(normalizeSubscriptionId)
+    .filter((s): s is string => s !== null);
+  const clauses = ["where type =~ 'microsoft.kubernetes/connectedclusters'"];
+  if (subs.length > 0) {
+    clauses.push(`where subscriptionId in~ (${subs.map((s) => `'${s}'`).join(", ")})`);
+  }
+  clauses.push("project id, name, type, location, tags, properties, subscriptionId, resourceGroup");
+  return `Resources | ${clauses.join(" | ")}`;
+}
+
+/**
+ * Normalize one connected-cluster row. Returns null without a usable ARM id.
+ * Accepts the ARG projection and the resource-provider shape identically, for
+ * the same reason normalizeArcMachine does.
+ */
+export function normalizeArcCluster(raw: any): DiscoveredArcCluster | null {
+  if (!raw || typeof raw !== "object") return null;
+  const armId = str(raw.id)?.toLowerCase() ?? null;
+  if (!armId) return null;
+  const parsed = parseArmResourceId(armId);
+  const p = raw.properties ?? {};
+
+  const tags: Record<string, string> = {};
+  if (raw.tags && typeof raw.tags === "object") {
+    for (const [k, v] of Object.entries(raw.tags)) {
+      if (typeof v === "string") tags[k] = v;
+    }
+  }
+
+  return {
+    armId,
+    name: str(raw.name) ?? parsed?.name ?? "",
+    subscriptionId: str(raw.subscriptionId)?.toLowerCase() ?? parsed?.subscriptionId ?? "",
+    resourceGroup: str(raw.resourceGroup) ?? parsed?.resourceGroup ?? "",
+    azureRegion: str(raw.location) ?? "",
+    kubernetesVersion: str(p.kubernetesVersion),
+    distribution: str(p.distribution),
+    infrastructure: str(p.infrastructure),
+    totalNodeCount: num(p.totalNodeCount),
+    totalCoreCount: num(p.totalCoreCount),
+    agentVersion: str(p.agentVersion),
+    connectivityStatus: str(p.connectivityStatus),
+    provisioningState: str(p.provisioningState),
+    tags,
+  };
+}
+
+/** The `AssetSource.observed` blob for an `arc-k8s` row. */
+export function buildArcClusterObservedBlob(
+  c: DiscoveredArcCluster,
+  syncedAt: Date,
+): Record<string, unknown> {
+  return {
+    kind: "arc-k8s",
+    syncedAt: syncedAt.toISOString(),
+    armId: c.armId,
+    name: c.name,
+    subscriptionId: c.subscriptionId,
+    resourceGroup: c.resourceGroup,
+    azureRegion: c.azureRegion,
+    kubernetesVersion: c.kubernetesVersion,
+    distribution: c.distribution,
+    infrastructure: c.infrastructure,
+    totalNodeCount: c.totalNodeCount,
+    totalCoreCount: c.totalCoreCount,
+    agentVersion: c.agentVersion,
+    connectivityStatus: c.connectivityStatus,
+    provisioningState: c.provisioningState,
+    azureTags: c.tags,
+  };
+}
+
 /**
  * Normalize one Arc-enabled VMware/SCVMM VM-instance row. Returns null when the
  * row carries no resolvable parent machine — without that link there is nothing
@@ -1333,7 +1439,7 @@ export async function discoverMachines(
   if (subscriptions.length === 0) {
     log("discover.arc.subscriptions", "error",
       "Azure Arc: the app registration can't see any subscriptions — check its Reader role assignment");
-    return { machines: [], subscriptionsQueried: 0, usedFallback: false };
+    return { machines: [], clusters: [], subscriptionsQueried: 0, usedFallback: false };
   }
   log("discover.arc.subscriptions", "info",
     `Azure Arc: ${subscriptions.length} subscription(s) in scope`);
@@ -1422,5 +1528,32 @@ export async function discoverMachines(
     }
   }
 
-  return { machines, subscriptionsQueried: subscriptions.length, usedFallback };
+  // 8. Phase 4 — connected Kubernetes clusters. These DO become assets, so
+  //    unlike the phase 2/3 enrichment they're returned as their own list.
+  //    Resource-Graph-only for the same cost reason.
+  const clusters: DiscoveredArcCluster[] = [];
+  if (config.enableKubernetes && !signal?.aborted) {
+    if (usedFallback || !wantsArg) {
+      log("discover.arc.clusters_skipped", "info",
+        "Azure Arc: skipping connected Kubernetes clusters — they need Resource Graph, "
+          + "which this run could not use");
+    } else {
+      try {
+        const rows = await runResourceGraphQuery(
+          config, buildArcClustersQuery({ subscriptionIds: subIds }), subIds, MACHINES_HARD_CAP, signal,
+        );
+        for (const row of rows) {
+          const c = normalizeArcCluster(row);
+          if (c) clusters.push(c);
+        }
+        log("discover.arc.clusters", "info",
+          `Azure Arc: retrieved ${clusters.length} connected Kubernetes cluster(s)`);
+      } catch (err: any) {
+        log("discover.arc.clusters", "error",
+          `Azure Arc: connected-cluster query failed — ${err?.message || "unknown error"}`);
+      }
+    }
+  }
+
+  return { machines, clusters, subscriptionsQueried: subscriptions.length, usedFallback };
 }

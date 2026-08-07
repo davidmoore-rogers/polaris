@@ -69,6 +69,7 @@ export type AssetSourceKind =
   | "vcenter-vm"
   | "vcenter-host"
   | "arc"
+  | "arc-k8s"
   | "manual";
 
 export interface AssetSourceForProjection {
@@ -187,6 +188,8 @@ const HOSTNAME_RULES: FieldRule[] = [
   // Below the MDM short forms because it's an ARM label that an operator can
   // rename independently of the machine.
   { sourceKind: "arc", pick: (o) => obsString(o, "displayName") || obsString(o, "name") },
+  // An Arc-enabled Kubernetes cluster has only its ARM resource name.
+  { sourceKind: "arc-k8s", pick: (o) => obsString(o, "name") },
   // AD non-FQDN fallback — short dnsHostName or cn (NetBIOS).
   { sourceKind: "ad", pick: (o) => obsString(o, "dnsHostName") || obsString(o, "cn") },
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "hostname") },
@@ -307,6 +310,14 @@ const OS_RULES: FieldRule[] = [
   // until the computer object re-registers) and than Tools' guestOsFullName
   // (the CONFIGURED guest-OS identifier, not necessarily what booted).
   { sourceKind: "arc", pick: (o) => obsString(o, "osSku") || obsString(o, "osName") },
+  // Constant: a connected cluster has no guest OS of its own. The
+  // distribution (aks / openshift / rancher …) is the operationally useful
+  // half, so fold it in when Arc reports one.
+  { sourceKind: "arc-k8s", pick: (o) => {
+      const dist = obsString(o, "distribution");
+      return dist ? `Kubernetes (${dist})` : "Kubernetes";
+    }
+  },
   // VMware Tools' guest OS full name ("Microsoft Windows Server 2022
   // (64-bit)", "Ubuntu Linux (64-bit)") — the running OS as the hypervisor
   // sees it. Beats AD's edition string because Tools reflects the current
@@ -334,6 +345,7 @@ const OS_VERSION_RULES: FieldRule[] = [
   { sourceKind: "polaris-agent", pick: (o) => obsString(o, "osVersion") },
   // Same in-guest, refreshed-continuously argument as the OS rule above.
   { sourceKind: "arc", pick: (o) => obsString(o, "osVersion") },
+  { sourceKind: "arc-k8s", pick: (o) => obsString(o, "kubernetesVersion") },
   { sourceKind: "intune", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "entra", pick: (o) => obsString(o, "operatingSystemVersion") },
   { sourceKind: "ad", pick: (o) => obsString(o, "operatingSystemVersion") },
@@ -360,6 +372,7 @@ const LEARNED_LOCATION_RULES: FieldRule[] = [
   // NEVER project the Azure REGION here: it says where the Arc resource
   // RECORD lives, not where the machine is. It stays in observed.azureRegion.
   { sourceKind: "arc", pick: (o) => obsString(o, "resourceGroup") },
+  { sourceKind: "arc-k8s", pick: (o) => obsString(o, "resourceGroup") },
   // Infrastructure site labels outrank the endpoint sighting — an adopted
   // switch/AP's controllerFortigate is authoritative; a pre-adoption
   // fortigate-endpoint sighting from some other gate must not relabel it.

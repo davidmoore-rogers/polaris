@@ -41,6 +41,9 @@ export const BUILT_IN_ASSET_TYPES = [
   "access_point",
   "other",
   "hypervisor",
+  // Azure Arc phase 4 (migration 20260807000000). A connected cluster is the
+  // only Arc entity that isn't just detail on a machine, so it gets a type.
+  "kubernetes_cluster",
 ] as const;
 
 export type BuiltInAssetType = (typeof BUILT_IN_ASSET_TYPES)[number];

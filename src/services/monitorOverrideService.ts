@@ -37,7 +37,8 @@ export type AddAsMonitoredAssetType =
   | "access_point"
   | "workstation"
   | "server"
-  | "hypervisor";
+  | "hypervisor"
+  | "kubernetes_cluster";
 
 const FORTINET_TYPES = new Set(["fortimanager", "fortigate"]);
 const WORKSTATION_SERVER_TYPES = new Set([
@@ -45,12 +46,16 @@ const WORKSTATION_SERVER_TYPES = new Set([
   "entraid",
   "windowsserver",
   // Azure Arc reuses the directory class-block NAMES verbatim
-  // (workstationMonitor / serverMonitor), which is why it needs no entry in
-  // classBlockKeyForAssetType and no change to the raw-SQL CASE expressions
-  // below — those key on the block name, not the integration type.
+  // (workstationMonitor / serverMonitor) for its workstation/server classes,
+  // which is why THOSE need no entry in classBlockKeyForAssetType and no
+  // raw-SQL CASE arm — the SQL keys on the block name, not the integration
+  // type. Its kubernetes_cluster class is the exception: a genuinely new
+  // asset type, so it does carry its own block key and CASE arm.
   "azurearc",
 ]);
 const VCENTER_TYPES = new Set(["vcenter"]);
+// Azure Arc is the only integration that owns connected Kubernetes clusters.
+const ARC_TYPES = new Set(["azurearc"]);
 
 /**
  * Per-class addAsMonitored is read from the integration's config blob at
@@ -64,6 +69,7 @@ const VCENTER_TYPES = new Set(["vcenter"]);
  *   server        → vmMonitor.addAsMonitored             (vcenter — VMs are plain servers;
  *                                                         the class block kept its vm name)
  *   hypervisor    → hostMonitor.addAsMonitored           (vcenter)
+ *   kubernetes_cluster → k8sMonitor.addAsMonitored       (azurearc)
  *
  * Returns null when:
  *  - the asset type doesn't map to a per-class block
@@ -107,6 +113,10 @@ export function getAddAsMonitoredFromConfig(
     case "hypervisor":
       if (!VCENTER_TYPES.has(integrationType)) return null;
       blockKey = "hostMonitor";
+      break;
+    case "kubernetes_cluster":
+      if (!ARC_TYPES.has(integrationType)) return null;
+      blockKey = "k8sMonitor";
       break;
     default:
       return null;
@@ -160,7 +170,7 @@ export function resolveMonitorOverride(input: {
  * and is invisible to the per-class addAsMonitored flag.
  */
 export const AUTO_MONITOR_ASSET_TYPES: ReadonlySet<AddAsMonitoredAssetType> =
-  new Set(["firewall", "switch", "access_point", "workstation", "server", "hypervisor"]);
+  new Set(["firewall", "switch", "access_point", "workstation", "server", "hypervisor", "kubernetes_cluster"]);
 
 /**
  * Maps Asset.assetType to its per-class config block key, when one applies.
@@ -179,6 +189,7 @@ export function classBlockKeyForAssetType(
     case "workstation":  return "workstationMonitor";
     case "server":       return integrationType && VCENTER_TYPES.has(integrationType) ? "vmMonitor" : "serverMonitor";
     case "hypervisor":   return "hostMonitor";
+    case "kubernetes_cluster": return "k8sMonitor";
     default:             return null;
   }
 }
@@ -200,6 +211,7 @@ export function snapshotAddAsMonitoredByAssetType(
     workstation:  getAddAsMonitoredFromConfig(integrationType, integrationConfig, "workstation"),
     server:       getAddAsMonitoredFromConfig(integrationType, integrationConfig, "server"),
     hypervisor:   getAddAsMonitoredFromConfig(integrationType, integrationConfig, "hypervisor"),
+    kubernetes_cluster: getAddAsMonitoredFromConfig(integrationType, integrationConfig, "kubernetes_cluster"),
   };
 }
 
@@ -247,6 +259,7 @@ export async function recomputeMonitorOverrideForAssets(
                                          THEN (i."config" #>> '{vmMonitor,addAsMonitored}')::boolean
                                          ELSE (i."config" #>> '{serverMonitor,addAsMonitored}')::boolean END)
           WHEN 'hypervisor'   THEN (i."config" #>> '{hostMonitor,addAsMonitored}')::boolean
+          WHEN 'kubernetes_cluster' THEN (i."config" #>> '{k8sMonitor,addAsMonitored}')::boolean
           ELSE NULL
         END,
         false
@@ -295,6 +308,7 @@ export async function sweepMonitoredForIntegration(
                                        THEN (i."config" #>> '{vmMonitor,addAsMonitored}')::boolean
                                        ELSE (i."config" #>> '{serverMonitor,addAsMonitored}')::boolean END)
         WHEN 'hypervisor'   THEN (i."config" #>> '{hostMonitor,addAsMonitored}')::boolean
+        WHEN 'kubernetes_cluster' THEN (i."config" #>> '{k8sMonitor,addAsMonitored}')::boolean
       END,
       false
     )
@@ -315,6 +329,7 @@ export async function sweepMonitoredForIntegration(
                                          THEN (i."config" #>> '{vmMonitor,addAsMonitored}')::boolean
                                          ELSE (i."config" #>> '{serverMonitor,addAsMonitored}')::boolean END)
           WHEN 'hypervisor'   THEN (i."config" #>> '{hostMonitor,addAsMonitored}')::boolean
+          WHEN 'kubernetes_cluster' THEN (i."config" #>> '{k8sMonitor,addAsMonitored}')::boolean
         END,
         false
       )

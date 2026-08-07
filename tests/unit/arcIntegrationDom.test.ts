@@ -88,10 +88,10 @@ describe("Azure Arc registries", () => {
     expect(scope._POLLING_COMPAT.azurearc).not.toContain("agent");
   });
 
-  it("declares Workstations + Servers class subtabs", () => {
+  it("declares Workstations + Servers + Kubernetes class subtabs", () => {
     const spec = scope._CLASS_SUBTAB_SPECS.azurearc;
     expect(spec.primary).toBe("workstations");
-    expect(spec.classes.map((c: any) => c.key)).toEqual(["workstations", "servers"]);
+    expect(spec.classes.map((c: any) => c.key)).toEqual(["workstations", "servers", "clusters"]);
   });
 
   it("counts Arc as a rich workstation/server type", () => {
@@ -128,6 +128,16 @@ describe("Azure Arc Monitoring tab", () => {
 
   it("offers the verify-presence toggle", () => {
     expect(render()).toContain('id="f-verifyPresence"');
+  });
+
+  it("gives Kubernetes clusters the REDUCED card — addAsMonitored only", () => {
+    // A cluster runs no agent and reports no interfaces or mounts, so it must
+    // NOT get the workstation/server auto-monitor + agent-deploy cards.
+    const html = render();
+    expect(html).toContain('id="f-mon-clusters-addAsMonitored"');
+    expect(html).not.toContain('id="f-mon-clusters-deploy-');
+    expect(html).not.toContain('id="f-mon-clusters-stor-');
+    expect(html).not.toContain('id="f-mon-clusters-amon-');
   });
 });
 
@@ -252,5 +262,30 @@ describe("Azure Arc form dispatchers", () => {
 
   it("titles the modal Azure Arc", () => {
     expect(scope._titleForType("azurearc", "Add")).toBe("Add Azure Arc Integration");
+  });
+});
+
+describe("Azure Arc extra-resource toggles", () => {
+  it("offers all three opt-in resource toggles", () => {
+    const h = boot().azureArcFormHTML({});
+    expect(h).toContain('id="f-enableVmInstances"');
+    expect(h).toContain('id="f-enableSqlServer"');
+    expect(h).toContain('id="f-enableKubernetes"');
+  });
+
+  it("warns that only the Kubernetes toggle adds devices", () => {
+    // The other two fold into existing machines; this one changes the fleet.
+    expect(boot().azureArcFormHTML({})).toContain("adds devices");
+  });
+
+  it("round-trips the three toggles through the reader", () => {
+    const s = boot();
+    s.document.body.innerHTML = s.azureArcFormHTML({
+      enableVmInstances: true, enableSqlServer: false, enableKubernetes: true,
+    });
+    const cfg = s.getArcFormConfig();
+    expect(cfg.enableVmInstances).toBe(true);
+    expect(cfg.enableSqlServer).toBe(false);
+    expect(cfg.enableKubernetes).toBe(true);
   });
 });

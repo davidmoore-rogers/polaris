@@ -784,6 +784,15 @@ function pickClassStreamsBlock(
     const streams = block.streams as Record<string, unknown> | undefined;
     return streams && typeof streams === "object" ? streams : undefined;
   }
+  // Azure Arc clusters are the one Arc class that isn't workstation/server
+  // shaped, so they get their own reduced block (no agent, no interface or
+  // storage auto-monitor) — same posture as vCenter's hostMonitor.
+  if (integrationType === "azurearc" && assetType === "kubernetes_cluster") {
+    const block = cfg.k8sMonitor as Record<string, unknown> | undefined;
+    if (!block) return undefined;
+    const streams = block.streams as Record<string, unknown> | undefined;
+    return streams && typeof streams === "object" ? streams : undefined;
+  }
   if (integrationType === "activedirectory" || integrationType === "entraid"
       || integrationType === "windowsserver" || integrationType === "azurearc") {
     let block: Record<string, unknown> | undefined;

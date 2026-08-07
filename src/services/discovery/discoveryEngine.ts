@@ -724,6 +724,12 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
         syncTotals.created.push(...r.created);
         syncTotals.updated.push(...r.updated);
         syncTotals.skipped.push(...r.skipped);
+        // Phase 4 — connected Kubernetes clusters become assets of their own.
+        // Empty unless the operator enabled them.
+        const rc = await syncArcClusters(integrationId, integrationName, config, result.clusters, actor);
+        syncTotals.created.push(...rc.created);
+        syncTotals.updated.push(...rc.updated);
+        syncTotals.skipped.push(...rc.skipped);
       }
     } else if (integration.type === "windowsserver") {
       const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
@@ -5951,6 +5957,153 @@ async function buildEntraSyncIndex(
   }
 
   return { assetByEntraDeviceId, assetIdBySid, assetIdsWithEntraSource, assetIdsWithAdSource, assetById, entraDeviceIdByAssetId, directoryActivityByAssetId };
+}
+
+/**
+ * Sync Arc-enabled Kubernetes clusters into assets (Phase 4).
+ *
+ * Clusters are the ONE Arc entity that isn't detail on a machine, so unlike
+ * the VMware/SCVMM and SQL enrichment this creates real assets — typed
+ * `kubernetes_cluster`, a built-in added by migration 20260807000000.
+ *
+ * Much simpler than syncArcDevices: a cluster has no SMBIOS UUID, no MAC and
+ * no guest OS, so the cascade is just arc-k8s AssetSource by ARM id → hostname
+ * collision → create. There is no Conflict path on hostname either — a cluster
+ * name colliding with an existing asset is far more likely to be a genuine
+ * distinct thing than the same device seen twice, so it takes over only when
+ * the existing asset is already a cluster.
+ */
+async function syncArcClusters(
+  integrationId: string,
+  integrationName: string,
+  integrationConfig: Record<string, unknown> | null,
+  clusters: azureArc.DiscoveredArcCluster[],
+  actor?: string,
+): Promise<{ created: string[]; updated: string[]; skipped: string[] }> {
+  const created: string[] = [];
+  const updated: string[] = [];
+  const skipped: string[] = [];
+  if (clusters.length === 0) return { created, updated, skipped };
+
+  const addAs = getAddAsMonitoredFromConfig("azurearc", integrationConfig, "kubernetes_cluster");
+  const syncLog = (level: "info" | "error" | "warning", message: string) => {
+    logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
+  };
+  const now = new Date();
+
+  const sourceRows = await prisma.assetSource.findMany({
+    where: { sourceKind: "arc-k8s" },
+    select: { assetId: true, externalId: true },
+  });
+  const assetIdByArmId = new Map(sourceRows.map((r) => [r.externalId.toLowerCase(), r.assetId]));
+  const knownClusterAssetIds = new Set(sourceRows.map((r) => r.assetId));
+
+  const existingAssets = await prisma.asset.findMany({
+    where: { id: { in: [...knownClusterAssetIds] } },
+    select: {
+      id: true, hostname: true, assetType: true, status: true, monitored: true,
+      monitorOverride: true, tags: true, lastSeen: true, acquiredAt: true,
+      discoveredByIntegrationId: true,
+    },
+  });
+  const assetById = new Map(existingAssets.map((a: any) => [a.id, a]));
+
+  for (const c of clusters) {
+    const label = c.name || c.armId;
+    const connected = (c.connectivityStatus || "").toLowerCase() === "connected";
+    const tags = ["azurearc", "arc-kubernetes", "auto-discovered"];
+    if (c.distribution) tags.push(`arc-k8s-${c.distribution.toLowerCase()}`);
+
+    const observed = azureArc.buildArcClusterObservedBlob(c, now);
+    const { projected } = projectAssetFromSources([
+      { sourceKind: "arc-k8s", inferred: false, observed: observed as Record<string, unknown> },
+    ]);
+
+    const existingId = assetIdByArmId.get(c.armId);
+    const existing = existingId ? assetById.get(existingId) : null;
+
+    try {
+      if (existing) {
+        const before = snapshotMaterialAssetFields(existing);
+        const updateData: Record<string, unknown> = {};
+        if (projected.hostname !== null) updateData.hostname = projected.hostname;
+        if (projected.os !== null) updateData.os = projected.os;
+        if (projected.osVersion !== null) updateData.osVersion = projected.osVersion;
+        if (projected.learnedLocation !== null) updateData.learnedLocation = projected.learnedLocation;
+        // Same posture as the machine path: connectivityStatus is reachability,
+        // never a lifecycle state, so status is left alone entirely.
+        if (existing.assetType === "other") updateData.assetType = "kubernetes_cluster";
+
+        const ownedElsewhere =
+          existing.discoveredByIntegrationId && existing.discoveredByIntegrationId !== integrationId;
+        if (!ownedElsewhere) updateData.discoveredByIntegrationId = integrationId;
+
+        if (connected) bumpLastSeen(updateData, existing, now, "arc");
+        Object.assign(updateData, buildMonitoredSweep(addAs, existing));
+
+        const preserved = ((existing.tags as string[]) || [])
+          .filter((t) => t !== "azurearc" && t !== "auto-discovered" && !t.startsWith("arc-"));
+        updateData.tags = [...preserved, ...tags.filter((t) => !preserved.includes(t))];
+
+        clampAcquiredToLastSeen(updateData, existing);
+        await prisma.asset.update({ where: { id: existing.id }, data: updateData as any });
+        await upsertArcClusterSource(existing.id, integrationId, c, observed, now);
+        logDiscoveryAssetUpdated(before, updateData, existing.id, label, {
+          integrationName, integrationId, sourceKind: "arc-k8s", actor,
+        });
+        updated.push(label);
+        continue;
+      }
+
+      const createData: Record<string, unknown> = {
+        hostname: projected.hostname,
+        assetType: "kubernetes_cluster",
+        status: "active",
+        statusChangedAt: now,
+        statusChangedBy: integrationName,
+        os: projected.os,
+        osVersion: projected.osVersion,
+        learnedLocation: projected.learnedLocation,
+        discoveredByIntegrationId: integrationId,
+        notes: `Auto-discovered from Azure Arc integration "${integrationName}" (connected Kubernetes cluster in ${c.resourceGroup})`,
+        tags,
+      };
+      if (connected) bumpLastSeen(createData, null, now, "arc");
+      Object.assign(createData, buildMonitoredSweep(addAs, { monitored: false, monitorOverride: false }));
+      clampAcquiredToLastSeen(createData);
+
+      const newAsset = await prisma.asset.create({ data: createData as any });
+      await upsertArcClusterSource(newAsset.id, integrationId, c, observed, now);
+      logDiscoveryAssetCreated(newAsset.id, label, {
+        integrationName, integrationId, sourceKind: "arc-k8s", actor,
+      });
+      assetIdByArmId.set(c.armId, newAsset.id);
+      assetById.set(newAsset.id, newAsset);
+      created.push(label);
+    } catch (err: any) {
+      syncLog("error", `Failed to sync Arc Kubernetes cluster ${label}: ${err.message || "Unknown error"}`);
+      skipped.push(`${label} (sync failed)`);
+    }
+  }
+
+  return { created, updated, skipped };
+}
+
+async function upsertArcClusterSource(
+  assetId: string,
+  integrationId: string,
+  c: azureArc.DiscoveredArcCluster,
+  observed: Record<string, unknown>,
+  now: Date,
+): Promise<void> {
+  await prisma.assetSource.upsert({
+    where: { sourceKind_externalId: { sourceKind: "arc-k8s", externalId: c.armId } },
+    create: {
+      assetId, sourceKind: "arc-k8s", externalId: c.armId, integrationId,
+      observed: observed as any, inferred: false, syncedAt: now, firstSeen: now, lastSeen: now,
+    },
+    update: { assetId, integrationId, observed: observed as any, inferred: false, syncedAt: now, lastSeen: now },
+  });
 }
 
 // Tags the Azure Arc discovery auto-assigns each run, so we strip them on

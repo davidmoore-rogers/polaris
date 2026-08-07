@@ -637,6 +637,21 @@ const EntraIdConfigSchema = z.object({
   verboseLogging: z.boolean().optional().default(false),
 });
 
+// Reduced per-class block for classes that can't run the Polaris Agent and
+// report no interfaces or mounts: no agent deploy, no interface/storage
+// auto-monitor (those pins are agent-fed) — addAsMonitored + streams only.
+// Streams still resolve per the monitor-settings hierarchy.
+//
+// Used by vCenter's ESXi-host class (datastore capacity renders from the
+// current-state VcenterDatastore table, not the storage stream) and by Azure
+// Arc's connected-Kubernetes-cluster class. Declared here, above both config
+// schemas that reference it.
+const VcenterHostClassMonitorSchema = z.object({
+  enabled:        z.boolean().optional().default(true),
+  addAsMonitored: z.boolean().optional().default(false),
+  streams:        ClassStreamsSchema.optional(),
+}).optional().default({ enabled: true, addAsMonitored: false });
+
 // Azure Arc. Like Entra it has no host/port/verifySsl (the endpoint is fixed
 // to management.azure.com) and therefore no .superRefine(refineConfigHost) —
 // which is also why triggerDiscovery needs Arc in its hostless branch.
@@ -673,10 +688,17 @@ const AzureArcConfigSchema = z.object({
   // keeps its current blob shape until an operator opts in.
   enableVmInstances: z.boolean().optional().default(false),
   enableSqlServer: z.boolean().optional().default(false),
+  // Phase 4. Unlike the two above, connected clusters DO become assets
+  // (assetType "kubernetes_cluster"), so this one changes the fleet.
+  enableKubernetes: z.boolean().optional().default(false),
   // Post-sync network-presence verification — see EntraIdConfigSchema note.
   verifyPresence: z.boolean().optional().default(true),
   workstationMonitor: WorkstationServerClassMonitorSchema,
   serverMonitor:      WorkstationServerClassMonitorSchema,
+  // Reduced block for connected Kubernetes clusters: a cluster runs no Polaris
+  // Agent and reports no interfaces or mounts, so it takes the same shape as
+  // vCenter's ESXi-host block — addAsMonitored + streams only.
+  k8sMonitor:         VcenterHostClassMonitorSchema,
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
 });
@@ -702,17 +724,6 @@ const ActiveDirectoryConfigSchema = z.object({
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
 }).superRefine(refineConfigHost);
-
-// Reduced per-class block for vCenter's ESXi-host class: no agent deploy
-// (the Polaris Agent doesn't run on ESXi) and no interface/storage
-// auto-monitor (those pins are agent-fed). Streams still resolve per the
-// monitor-settings hierarchy; datastore capacity renders from the
-// current-state VcenterDatastore table, not the storage stream.
-const VcenterHostClassMonitorSchema = z.object({
-  enabled:        z.boolean().optional().default(true),
-  addAsMonitored: z.boolean().optional().default(false),
-  streams:        ClassStreamsSchema.optional(),
-}).optional().default({ enabled: true, addAsMonitored: false });
 
 const VcenterConfigSchema = z.object({
   host:      z.string().optional().default(""),
