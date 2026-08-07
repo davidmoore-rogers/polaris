@@ -84,6 +84,12 @@ import { BACKUP_DIR, UPLOADS_DIR } from "../../utils/paths.js";
 import { maintenanceLimiter } from "../middleware/rateLimits.js";
 import { getAppVersion } from "../../utils/version.js";
 import { isTimescaleAvailable } from "../../services/timescaleService.js";
+import { detectImageMagic } from "../../utils/imageMagic.js";
+import { BRANDING_DEFAULTS, getBranding } from "../../services/brandingService.js";
+import type { BrandingSettings } from "../../services/brandingService.js";
+// Re-exported for the existing importers of this module (src/api/router.ts
+// mounts a public /branding alias via a dynamic import of this file).
+export { getBranding } from "../../services/brandingService.js";
 
 const TAG_COLORS = ["#4fc3f7","#4ade80","#f59e0b","#f472b6","#a78bfa","#fb923c","#38bdf8","#34d399","#e879f9","#facc15","#f87171","#2dd4bf","#818cf8","#c084fc"];
 function randomTagColor() { return TAG_COLORS[Math.floor(Math.random() * TAG_COLORS.length)]; }
@@ -110,13 +116,6 @@ function validatePem(pem: string, filename: string): void {
   } catch {
     throw new AppError(400, isKey ? "File is not a valid PEM private key" : "File is not a valid PEM certificate");
   }
-}
-
-function detectImageMagic(buf: Buffer): ".png" | ".jpg" | ".webp" | null {
-  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return ".png";
-  if (buf.length >= 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return ".jpg";
-  if (buf.length >= 12 && buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP") return ".webp";
-  return null;
 }
 
 const router = Router();
@@ -1684,28 +1683,9 @@ router.get("/updates/history", async (req, res, next) => {
 
 // ─── Branding ─────────────────────────────────────────────────────────────
 
-interface BrandingSettings {
-  appName: string;
-  subtitle: string;
-  logoUrl: string;
-}
-
-const BRANDING_DEFAULTS: BrandingSettings = {
-  appName: "Polaris",
-  subtitle: "Network Management Tool",
-  logoUrl: "/logo.png",
-};
-
-export async function getBranding(): Promise<BrandingSettings & { version: string }> {
-  const row = await prisma.setting.findUnique({ where: { key: "branding" } });
-  const saved = row ? (row.value as Record<string, unknown>) : {};
-  return {
-    appName:  (saved.appName as string)  || BRANDING_DEFAULTS.appName,
-    subtitle: saved.subtitle !== undefined ? (saved.subtitle as string) : BRANDING_DEFAULTS.subtitle,
-    logoUrl:  (saved.logoUrl as string)  || BRANDING_DEFAULTS.logoUrl,
-    version:  APP_VERSION,
-  };
-}
+// BrandingSettings / BRANDING_DEFAULTS / getBranding now live in
+// src/services/brandingService.ts (imported above) so appIconService and the
+// PWA manifest route can read branding without importing this route module.
 
 router.get("/branding", async (_req, res, next) => {
   try {

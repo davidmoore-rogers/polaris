@@ -14,6 +14,7 @@ import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { router } from "./api/router.js";
+import { pwaRouter } from "./api/routes/pwa.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { errorHandler } from "./api/middleware/errorHandler.js";
@@ -562,6 +563,13 @@ app.get("/subnets.html", legacyIpamRedirect());
 app.get("/notifications.html", (_req, res) => {
   res.redirect("/automations.html");
 });
+
+// PWA manifest + home-screen icons for the mobile SPA. Unauthenticated by
+// design (see the header comment in pwa.ts — a <link rel="manifest"> is
+// fetched with credentials omitted, so a gated manifest 401s for everyone).
+// Must precede express.static: the manifest is generated from branding, and
+// the icons are rasterized on demand, so neither is a file on disk.
+app.use(pwaRouter);
 
 // Serve uploaded logos from the state directory. On legacy installs (no
 // POLARIS_STATE_DIR set) this resolves to <project>/public/uploads — the
