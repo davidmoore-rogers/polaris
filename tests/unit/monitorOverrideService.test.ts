@@ -239,6 +239,18 @@ describe("classBlockKeyForAssetType — assetType → config block key", () => {
     expect(classBlockKeyForAssetType("server", "vcenter")).toBe("vmMonitor");
     expect(classBlockKeyForAssetType("server", "windowsserver")).toBe("serverMonitor");
     expect(classBlockKeyForAssetType("server", null)).toBe("serverMonitor");
+    // Azure Arc must land on the DIRECTORY branch, not vmMonitor — it reuses
+    // the workstationMonitor / serverMonitor block names verbatim, which is
+    // what lets the raw-SQL sweeps resolve it with no extra CASE arm.
+    expect(classBlockKeyForAssetType("server", "azurearc")).toBe("serverMonitor");
+    expect(classBlockKeyForAssetType("workstation", "azurearc")).toBe("workstationMonitor");
+  });
+
+  it("reads the directory class blocks on an azurearc integration", () => {
+    expect(getAddAsMonitoredFromConfig("azurearc", cfg("workstationMonitor", true), "workstation")).toBe(true);
+    expect(getAddAsMonitoredFromConfig("azurearc", cfg("serverMonitor", true), "server")).toBe(true);
+    // Arc owns no hypervisor class.
+    expect(getAddAsMonitoredFromConfig("azurearc", cfg("hostMonitor", true), "hypervisor")).toBeNull();
   });
 
   it("returns null for non-participating / nullish asset types", () => {

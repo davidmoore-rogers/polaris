@@ -357,3 +357,21 @@ describe("deriveAssetSources — defensive input handling", () => {
     expect(primary(sources).sourceKind).toBe("entra");
   });
 });
+
+describe("deriveAssetSources — Azure Arc suppression", () => {
+  it("derives NOTHING for an azurearc-tagged asset with no legacy assetTag", () => {
+    // Arc assets are owned by an explicit `arc` AssetSource row that
+    // syncArcDevices upserts right after Asset.create. Without this
+    // suppression the shadow-write extension would mint a spurious `manual`
+    // row in the window between the two — same reasoning as the vCenter case.
+    const asset = makeAsset({ assetTag: null, tags: ["azurearc", "auto-discovered"] });
+    expect(deriveAssetSources(asset)).toEqual([]);
+  });
+
+  it("still derives the legacy source when an assetTag is present", () => {
+    const asset = makeAsset({ assetTag: "entra:dev-1", tags: ["azurearc"] });
+    const sources = deriveAssetSources(asset);
+    expect(sources).toHaveLength(1);
+    expect(primary(sources).sourceKind).toBe("entra");
+  });
+});

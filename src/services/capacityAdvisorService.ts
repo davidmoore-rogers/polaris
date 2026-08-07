@@ -153,6 +153,7 @@ export interface IntegrationBreakdown {
   activedirectory: number;
   windowsserver: number;
   vcenter: number;
+  azurearc: number;
 }
 
 export interface PgRecommendation {
@@ -800,6 +801,7 @@ async function readIntegrationBreakdown(): Promise<IntegrationBreakdown> {
     activedirectory: 0,
     windowsserver: 0,
     vcenter: 0,
+    azurearc: 0,
   };
   for (const r of rows) {
     const cfg = (r.config ?? {}) as Record<string, unknown>;
@@ -821,6 +823,8 @@ async function readIntegrationBreakdown(): Promise<IntegrationBreakdown> {
       out.windowsserver += 1;
     } else if (r.type === "vcenter") {
       out.vcenter += 1;
+    } else if (r.type === "azurearc") {
+      out.azurearc += 1;
     }
   }
   return out;

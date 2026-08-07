@@ -2,10 +2,13 @@
  * src/services/presenceVerificationService.ts
  *
  * Post-discovery network-presence verification for assets discovered by the
- * AD / Entra ID integrations. Directory timestamps (Entra lastSyncDateTime,
- * AD lastLogonTimestamp) are activity signals, not network presence — an
- * Intune sync can come from anywhere on the internet — so they no longer
- * write Asset.lastSeen. This pass establishes presence instead, checking
+ * AD / Entra ID / Azure Arc integrations. Directory timestamps (Entra
+ * lastSyncDateTime, AD lastLogonTimestamp) are activity signals, not network
+ * presence — an Intune sync can come from anywhere on the internet — so they
+ * no longer write Asset.lastSeen. (Arc is the partial exception: its
+ * status="Connected" is a live heartbeat read at scrape time, so the sync
+ * does stamp lastSeen from it, which usually makes step 1 below hit for Arc
+ * assets.) This pass establishes presence instead, checking
  * signals cheapest-first per asset; the first fresh one wins:
  *
  *   1. Already fresh — Asset.lastSeen within the window (e.g. FortiGate
@@ -115,7 +118,11 @@ export async function runPresenceVerification(opts: {
       sources: {
         some: {
           integrationId: opts.integrationId,
-          sourceKind: { in: ["ad", "entra", "intune"] },
+          // "arc" included so Arc-only assets are candidates too. In practice
+          // most of them classify as "fresh" without a ping: the sync already
+          // stamped lastSeen from a Connected heartbeat, which collapses the
+          // ping queue at fleet scale.
+          sourceKind: { in: ["ad", "entra", "intune", "arc"] },
         },
       },
     },

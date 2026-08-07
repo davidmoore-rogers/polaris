@@ -181,6 +181,15 @@ export function deriveAssetSources(asset: AssetSnapshot): DerivedSource[] {
     return [];
   }
 
+  // 3b. Azure Arc assets (tag "azurearc") are owned by an explicit `arc`
+  //     source row written by syncArcDevices — same story as vCenter, no
+  //     legacy assetTag convention to derive from. Suppress the manual
+  //     fallback so the shadow-write can't mint a spurious manual row in the
+  //     window between Asset.create and the explicit arc upsert.
+  if (out.length === 0 && tags.includes("azurearc")) {
+    return [];
+  }
+
   // 4. Manual fallback when no source tag matched.
   if (out.length === 0) {
     out.push({

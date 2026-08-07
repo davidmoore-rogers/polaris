@@ -44,6 +44,11 @@ const WORKSTATION_SERVER_TYPES = new Set([
   "activedirectory",
   "entraid",
   "windowsserver",
+  // Azure Arc reuses the directory class-block NAMES verbatim
+  // (workstationMonitor / serverMonitor), which is why it needs no entry in
+  // classBlockKeyForAssetType and no change to the raw-SQL CASE expressions
+  // below — those key on the block name, not the integration type.
+  "azurearc",
 ]);
 const VCENTER_TYPES = new Set(["vcenter"]);
 
@@ -54,8 +59,8 @@ const VCENTER_TYPES = new Set(["vcenter"]);
  *   firewall      → fortigateMonitor.addAsMonitored      (fortimanager/fortigate)
  *   switch        → fortiswitchMonitor.addAsMonitored    (fortimanager/fortigate)
  *   access_point  → fortiapMonitor.addAsMonitored        (fortimanager/fortigate)
- *   workstation   → workstationMonitor.addAsMonitored    (activedirectory/entraid/windowsserver)
- *   server        → serverMonitor.addAsMonitored         (activedirectory/entraid/windowsserver)
+ *   workstation   → workstationMonitor.addAsMonitored    (activedirectory/entraid/windowsserver/azurearc)
+ *   server        → serverMonitor.addAsMonitored         (activedirectory/entraid/windowsserver/azurearc)
  *   server        → vmMonitor.addAsMonitored             (vcenter — VMs are plain servers;
  *                                                         the class block kept its vm name)
  *   hypervisor    → hostMonitor.addAsMonitored           (vcenter)

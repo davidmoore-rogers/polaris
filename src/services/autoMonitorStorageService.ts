@@ -190,6 +190,7 @@ const STORAGE_CLASSES_BY_TYPE: Record<string, StorageClass[]> = {
   entraid:         ["workstation", "server"],
   activedirectory: ["workstation", "server"],
   windowsserver:   ["workstation", "server"],
+  azurearc:        ["workstation", "server"],
   // VMs only — ESXi datastore capacity is the VcenterDatastore table, not
   // the per-asset storage stream.
   vcenter:         ["virtual_machine"],

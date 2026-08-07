@@ -452,4 +452,104 @@ describe("projectAssetFromSources — vCenter priority", () => {
     expect(projected.ipAddress).toBe("10.0.0.254");
     expect(provenance.ipAddress).toBe("fortigate-firewall");
   });
+  // ─── Azure Arc ────────────────────────────────────────────────────────────
+  // The Connected Machine agent runs IN the guest, so Arc reports the running
+  // OS SKU, the real domain-joined FQDN, and live SMBIOS data. It therefore
+  // sits directly under polaris-agent for hardware/OS facts — but stays BELOW
+  // vCenter for hostname, deliberately leaving the "vCenter is definitive"
+  // decision untouched.
+
+  it("arc dnsFqdn outranks AD dnsHostName for hostname", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("ad", { dnsHostName: "web01.old.corp.local", cn: "WEB01" }),
+      src("arc", { dnsFqdn: "web01.corp.local", displayName: "WEB01" }),
+    ]);
+    expect(projected.hostname).toBe("web01.corp.local");
+    expect(provenance.hostname).toBe("arc");
+  });
+
+  it("arc still loses hostname to vCenter and to the Polaris Agent", () => {
+    const viaVcenter = projectAssetFromSources([
+      src("arc", { dnsFqdn: "web01.corp.local" }),
+      src("vcenter-vm", { guestHostname: "web01.vc.local" }),
+    ]);
+    expect(viaVcenter.projected.hostname).toBe("web01.vc.local");
+
+    const viaAgent = projectAssetFromSources([
+      src("arc", { dnsFqdn: "web01.corp.local" }),
+      src("polaris-agent", { hostname: "web01-agent" }),
+    ]);
+    expect(viaAgent.projected.hostname).toBe("web01-agent");
+  });
+
+  it("a dot-less arc FQDN does not win the FQDN rule", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("ad", { dnsHostName: "web01.corp.local" }),
+      src("arc", { adFqdn: "WEB01", displayName: "WEB01" }),
+    ]);
+    expect(projected.hostname).toBe("web01.corp.local");
+    expect(provenance.hostname).toBe("ad");
+  });
+
+  it("arc osSku beats AD's stale operatingSystem", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("ad", { operatingSystem: "Windows Server 2016 Standard" }),
+      src("arc", { osSku: "Windows Server 2022 Datacenter", osVersion: "10.0.20348" }),
+    ]);
+    expect(projected.os).toBe("Windows Server 2022 Datacenter");
+    expect(provenance.os).toBe("arc");
+    expect(projected.osVersion).toBe("10.0.20348");
+  });
+
+  it("arc serial beats Intune's enrollment-time value", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("intune", { serialNumber: "OLD-ENROLL-123" }),
+      src("arc", { serialNumber: "SMBIOS-999" }),
+    ]);
+    expect(projected.serialNumber).toBe("SMBIOS-999");
+    expect(provenance.serialNumber).toBe("arc");
+  });
+
+  it("the Polaris Agent still outranks arc on every hardware/OS field", () => {
+    const { projected } = projectAssetFromSources([
+      src("arc", { osSku: "Ubuntu 22.04.4 LTS", serialNumber: "ARC-1", manufacturer: "Dell Inc.", model: "ARC-MODEL" }),
+      src("polaris-agent", { os: "Red Hat Enterprise Linux 9.4", serialNumber: "AGENT-1", manufacturer: "HP", model: "AGENT-MODEL" }),
+    ]);
+    expect(projected.os).toBe("Red Hat Enterprise Linux 9.4");
+    expect(projected.serialNumber).toBe("AGENT-1");
+    expect(projected.model).toBe("AGENT-MODEL");
+  });
+
+  it("arc resourceGroup fills learnedLocation but loses to an AD OU path", () => {
+    const withAd = projectAssetFromSources([
+      src("arc", { resourceGroup: "rg-arc-onboarding" }),
+      src("ad", { ouPath: "OU=Servers,DC=corp,DC=local" }),
+    ]);
+    expect(withAd.projected.learnedLocation).toBe("OU=Servers,DC=corp,DC=local");
+
+    const arcOnly = projectAssetFromSources([src("arc", { resourceGroup: "rg-prod" })]);
+    expect(arcOnly.projected.learnedLocation).toBe("rg-prod");
+  });
+
+  it("arc never supplies coordinates, snmpLocation, or an Azure region as a location", () => {
+    const { projected } = projectAssetFromSources([
+      src("arc", { resourceGroup: "rg-prod", azureRegion: "eastus" }),
+    ]);
+    // The region says where the Arc RECORD lives, not where the machine is.
+    expect(projected.learnedLocation).toBe("rg-prod");
+    expect(projected.latitude).toBeNull();
+    expect(projected.longitude).toBeNull();
+    expect(projected.snmpLocation).toBeNull();
+  });
+
+  it("arc ipAddresses fill ipAddress but lose to the live vCenter guest IP", () => {
+    const arcOnly = projectAssetFromSources([src("arc", { ipAddresses: ["10.0.0.5", "fe80::1"] })]);
+    expect(arcOnly.projected.ipAddress).toBe("10.0.0.5");
+
+    const withVcenter = projectAssetFromSources([
+      src("arc", { ipAddresses: ["10.0.0.5"] }),
+      src("vcenter-vm", { guestIp: "10.0.0.6" }),
+    ]);
+    expect(withVcenter.projected.ipAddress).toBe("10.0.0.6");
+  });
 });

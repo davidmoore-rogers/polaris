@@ -20,6 +20,7 @@ import * as windowsServer from "../windowsServerService.js";
 import * as entraId from "../entraIdService.js";
 import * as activeDirectory from "../activeDirectoryService.js";
 import * as vcenter from "../vcenterService.js";
+import * as azureArc from "../azureArcService.js";
 import { ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
 import { normalizeMacsDistinct, macHexKeyOrNull } from "../../utils/mac.js";
 import { isFortinetIntegrationType } from "../../utils/pollingCompatibility.js";
@@ -467,6 +468,7 @@ export async function runPreflightTest(integration: { id: string; type: string; 
   if (integration.type === "entraid") return entraId.testConnection(config as any);
   if (integration.type === "activedirectory") return activeDirectory.testConnection(config as any);
   if (integration.type === "vcenter") return vcenter.testConnection(config as any);
+  if (integration.type === "azurearc") return azureArc.testConnection(config as any);
   return { ok: false, message: `Unknown integration type: ${integration.type}` };
 }
 
@@ -491,7 +493,10 @@ export async function triggerDiscovery(integrationId: string, actor: string, opt
   }
 
   const config = integration.config as Record<string, unknown>;
-  if (integration.type === "entraid") {
+  // Hostless types (Entra ID, Azure Arc) authenticate against a fixed
+  // Microsoft endpoint with an app registration — they carry no `host`, so
+  // they must NOT fall into the else branch below, which demands one.
+  if (integration.type === "entraid" || integration.type === "azurearc") {
     if (!config.tenantId) throw new AppError(400, "Integration has no tenant ID configured");
     if (!config.clientId) throw new AppError(400, "Integration has no client ID configured");
     if (!config.clientSecret) throw new AppError(400, "Integration has no client secret configured");
@@ -556,7 +561,8 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
   const integrationName = integration.name;
   const integrationType = integration.type;
   const label = actor === "auto-discovery" ? "Scheduled" : "Manual";
-  const baseKindLabel = (integration.type === "entraid" || integration.type === "activedirectory" || integration.type === "vcenter") ? "device discovery" : "DHCP discovery";
+  const baseKindLabel = (integration.type === "entraid" || integration.type === "activedirectory"
+    || integration.type === "vcenter" || integration.type === "azurearc") ? "device discovery" : "DHCP discovery";
   // Scoped runs label every start/complete/abort/error Event with the device.
   const kindLabel = scopeDeviceName ? `${baseKindLabel} (device "${scopeDeviceName}")` : baseKindLabel;
 
@@ -709,6 +715,16 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
         syncTotals.updated.push(...r.updated);
         syncTotals.skipped.push(...r.skipped);
       }
+    } else if (integration.type === "azurearc") {
+      // Azure Arc discovery produces assets only — Arc-enabled machines. No
+      // subnets, reservations, or VIPs.
+      const result = await azureArc.discoverMachines(config as any, ac.signal, onProgress);
+      if (!ac.signal.aborted) {
+        const r = await syncArcDevices(integrationId, integrationName, config, result, actor);
+        syncTotals.created.push(...r.created);
+        syncTotals.updated.push(...r.updated);
+        syncTotals.skipped.push(...r.skipped);
+      }
     } else if (integration.type === "windowsserver") {
       const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
       const wsHost = (config as any).host as string;
@@ -814,7 +830,11 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
       }
     }
 
-    const assetsOnly = integration.type === "entraid" || integration.type === "activedirectory" || integration.type === "vcenter";
+    // This one line gates all three post-sync passes below — agent
+    // auto-deploy, interface/storage auto-monitor, and presence verification
+    // — i.e. the entire per-class Monitoring tab for an asset-only type.
+    const assetsOnly = integration.type === "entraid" || integration.type === "activedirectory"
+      || integration.type === "vcenter" || integration.type === "azurearc";
 
     // ── AD/Entra post-sync passes (agent auto-deploy + interface/storage
     // auto-monitor) ──────────────────────────────────────────────────────────
@@ -5931,6 +5951,386 @@ async function buildEntraSyncIndex(
   }
 
   return { assetByEntraDeviceId, assetIdBySid, assetIdsWithEntraSource, assetIdsWithAdSource, assetById, entraDeviceIdByAssetId, directoryActivityByAssetId };
+}
+
+// Tags the Azure Arc discovery auto-assigns each run, so we strip them on
+// update before re-adding the fresh set. Operator tags and other
+// integrations' tags pass through untouched.
+function isArcManagedTag(t: string): boolean {
+  if (t.startsWith("arc-")) return true;
+  return ["azurearc", "auto-discovered"].includes(t);
+}
+
+/**
+ * Sync Arc-enabled machines into assets.
+ *
+ * Mirrors syncEntraDevices' contract — AssetSource upsert FIRST, then
+ * projectAssetFromSources, then exactly ONE Asset.update — but is
+ * deliberately leaner in two ways that matter at 2000 machines:
+ *
+ *   • No macAddressRows hydration. Arc reports no MACs, so the match cascade
+ *     never needs them and the whole-table load stays a tight `select`.
+ *   • Source rows are preloaded ONCE into sourcesByAssetId instead of the
+ *     per-device `assetSource.findMany({ where: { assetId } })` the Entra
+ *     sync does inside its loop (that's one round trip per machine), and
+ *     writes are flushed in chunked $transactions rather than one update per
+ *     machine.
+ *
+ * Match cascade: arc AssetSource by ARM resource id → vmUuid (both endian
+ * variants — see swapVmUuidEndianness) → hostname (FQDN then short, NetBIOS-
+ * truncation tolerant) → Conflict → create.
+ */
+async function syncArcDevices(
+  integrationId: string,
+  integrationName: string,
+  integrationConfig: Record<string, unknown> | null,
+  result: { machines: azureArc.DiscoveredArcMachine[] },
+  actor?: string,
+): Promise<{ created: string[]; updated: string[]; skipped: string[] }> {
+  const workstationAddAs = getAddAsMonitoredFromConfig("azurearc", integrationConfig, "workstation");
+  const serverAddAs      = getAddAsMonitoredFromConfig("azurearc", integrationConfig, "server");
+  const resolveAddAs = (assetType: string): boolean | null =>
+    assetType === "workstation" ? workstationAddAs
+    : assetType === "server"    ? serverAddAs
+    : null;
+  const syncLog = (level: "info" | "error" | "warning", message: string) => {
+    logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
+  };
+  const created: string[] = [];
+  const updated: string[] = [];
+  const skipped: string[] = [];
+  const now = new Date();
+
+  // ── Preload: two queries for the whole fleet ─────────────────────────────
+  const allAssets = await prisma.asset.findMany({
+    select: {
+      id: true, hostname: true, hostnameOverride: true, assetType: true, status: true,
+      monitored: true, monitorOverride: true, acquiredAt: true, lastSeen: true,
+      tags: true, discoveredByIntegrationId: true, dnsName: true, ipAddress: true,
+      os: true, osVersion: true, serialNumber: true, manufacturer: true, model: true,
+      learnedLocation: true, notes: true, assignedTo: true, macAddress: true,
+    },
+  });
+  const allSources = await prisma.assetSource.findMany({
+    select: { assetId: true, sourceKind: true, externalId: true, inferred: true, observed: true },
+  });
+
+  const assetById = new Map<string, any>(allAssets.map((a: any) => [a.id, a]));
+  const sourcesByAssetId = new Map<string, { sourceKind: string; inferred: boolean; observed: Record<string, unknown> | null }[]>();
+  const assetByArmId = new Map<string, any>();
+  const assetIdsWithArcSource = new Set<string>();
+  // vmUuid → asset. Populated from existing arc rows AND from vCenter VM rows
+  // (instanceUuid / biosUuid), each under BOTH endian variants — that pair is
+  // what merges an Arc machine onto its already-discovered vCenter VM instead
+  // of minting a duplicate.
+  const assetByVmUuid = new Map<string, any>();
+  const indexVmUuid = (raw: unknown, asset: any) => {
+    const u = azureArc.normalizeVmUuid(raw);
+    if (!u) return;
+    if (!assetByVmUuid.has(u)) assetByVmUuid.set(u, asset);
+    const swapped = azureArc.swapVmUuidEndianness(u);
+    if (swapped && !assetByVmUuid.has(swapped)) assetByVmUuid.set(swapped, asset);
+  };
+
+  for (const row of allSources) {
+    const list = sourcesByAssetId.get(row.assetId);
+    const entry = { sourceKind: row.sourceKind, inferred: row.inferred, observed: row.observed as Record<string, unknown> | null };
+    if (list) list.push(entry); else sourcesByAssetId.set(row.assetId, [entry]);
+
+    const asset = assetById.get(row.assetId);
+    if (!asset) continue;
+    const obs = (row.observed || {}) as Record<string, unknown>;
+    if (row.sourceKind === "arc") {
+      assetIdsWithArcSource.add(row.assetId);
+      assetByArmId.set(String(row.externalId).toLowerCase(), asset);
+      indexVmUuid(obs.vmUuid, asset);
+    } else if (row.sourceKind === "vcenter-vm") {
+      indexVmUuid(obs.instanceUuid, asset);
+      indexVmUuid(obs.biosUuid, asset);
+    }
+  }
+
+  // Hostname collision maps, split the way the Entra sync splits them: assets
+  // that already carry an arc source (a duplicate-registration signal) vs
+  // everything else (an untagged collision worth a Conflict).
+  const assetByHostnameNoArc = new Map<string, any>();
+  const assetByHostnameArcTagged = new Map<string, any>();
+  for (const a of allAssets as any[]) {
+    if (!a.hostname) continue;
+    if (assetIdsWithArcSource.has(a.id)) indexHostname(assetByHostnameArcTagged, a.hostname, a);
+    else indexHostname(assetByHostnameNoArc, a.hostname, a);
+  }
+
+  // ── Batched writes ───────────────────────────────────────────────────────
+  // At 2000 machines a per-machine update is 2000 sequential round trips.
+  // Chunked $transaction mirrors presenceVerificationService's WRITE_CHUNK.
+  const WRITE_CHUNK = 200;
+  const pendingSourceUpserts: any[] = [];
+  const pendingAssetUpdates: { id: string; data: Record<string, unknown> }[] = [];
+  const flush = async () => {
+    if (pendingSourceUpserts.length > 0) {
+      const batch = pendingSourceUpserts.splice(0, pendingSourceUpserts.length);
+      for (let i = 0; i < batch.length; i += WRITE_CHUNK) {
+        await prisma.$transaction(batch.slice(i, i + WRITE_CHUNK));
+      }
+    }
+    if (pendingAssetUpdates.length > 0) {
+      const batch = pendingAssetUpdates.splice(0, pendingAssetUpdates.length);
+      for (let i = 0; i < batch.length; i += WRITE_CHUNK) {
+        await prisma.$transaction(
+          batch.slice(i, i + WRITE_CHUNK).map((u) => prisma.asset.update({ where: { id: u.id }, data: u.data as any })),
+        );
+      }
+    }
+  };
+
+  const arcSourceUpsert = (assetId: string, m: azureArc.DiscoveredArcMachine, lastSeen: Date) => {
+    const observed = azureArc.buildArcObservedBlob(m, now);
+    return prisma.assetSource.upsert({
+      where: { sourceKind_externalId: { sourceKind: "arc", externalId: m.armId } },
+      create: {
+        assetId, sourceKind: "arc", externalId: m.armId, integrationId,
+        observed: observed as any, inferred: false, syncedAt: now, firstSeen: lastSeen, lastSeen,
+      },
+      update: { assetId, integrationId, observed: observed as any, inferred: false, syncedAt: now, lastSeen },
+    });
+  };
+
+  for (const m of result.machines) {
+    if (!m.armId) {
+      skipped.push(`${m.displayName || "<unnamed>"} (missing ARM resource id)`);
+      continue;
+    }
+
+    const assetType = azureArc.inferArcAssetType(m);
+    const connected = azureArc.arcStatusIsConnected(m.status);
+    const { fqdn, short } = azureArc.arcHostnameCandidates(m);
+    const label = m.displayName || m.name || m.armId;
+
+    // Discovery tags. Azure RESOURCE tags deliberately stay in the observed
+    // blob (observed.azureTags) — mirroring an unbounded stream of cloud tags
+    // into Asset.tags would fight tagAssignmentService's managed sync.
+    const tags = ["azurearc", "auto-discovered"];
+    if (m.status && !connected) tags.push(`arc-${m.status.toLowerCase()}`);
+    if (m.cloudProvider) tags.push(`arc-${m.cloudProvider.toLowerCase()}`);
+
+    // ── Match cascade ──────────────────────────────────────────────────────
+    let existing: any = assetByArmId.get(m.armId) ?? null;
+
+    if (!existing) {
+      const byUuid = (m.vmUuid && assetByVmUuid.get(m.vmUuid))
+        || (m.vmUuidSwapped && assetByVmUuid.get(m.vmUuidSwapped))
+        || null;
+      if (byUuid) {
+        existing = byUuid;
+        // This is the join that merges an Arc machine onto its vCenter VM.
+        // Always audited — a silent takeover here is indistinguishable from
+        // a bug if it ever matches the wrong asset.
+        syncLog("info", `vmUuid cross-link: Arc machine ${label} matched existing asset ${byUuid.hostname || byUuid.id} (taking over)`);
+      }
+    }
+
+    let raisedConflict = false;
+    if (!existing) {
+      const candidates = [fqdn, short].filter((h): h is string => !!h);
+      for (const cand of candidates) {
+        const dupHit = lookupHostname(assetByHostnameArcTagged, cand);
+        if (dupHit) {
+          // Another Arc machine already owns this hostname. An ARM resource
+          // id is stable for the resource's lifetime, so unlike Entra (where
+          // a device genuinely re-registers under a new deviceId) this is a
+          // real operator situation — raise it rather than auto-resolving.
+          await upsertAssetConflict({
+            collisionAssetId: dupHit.asset.id,
+            integrationId,
+            proposedDeviceId: m.armId,
+            proposedAssetFields: buildArcProposedFields(m, assetType, "duplicate-registration", "hostname"),
+            existingAsset: dupHit.asset,
+          }).catch((err: any) => syncLog("warning", `Failed to raise Arc duplicate conflict for ${label}: ${err.message || "Unknown error"}`));
+          skipped.push(`${label} (hostname already held by another Arc machine)`);
+          raisedConflict = true;
+          break;
+        }
+        const hit = lookupHostname(assetByHostnameNoArc, cand);
+        if (hit) {
+          await upsertAssetConflict({
+            collisionAssetId: hit.asset.id,
+            integrationId,
+            proposedDeviceId: m.armId,
+            proposedAssetFields: buildArcProposedFields(m, assetType, "untagged-collision", hit.via),
+            existingAsset: hit.asset,
+          }).catch((err: any) => syncLog("warning", `Failed to raise Arc hostname conflict for ${label}: ${err.message || "Unknown error"}`));
+          skipped.push(`${label} (hostname collides with existing asset)`);
+          raisedConflict = true;
+          break;
+        }
+      }
+    }
+    // A conflict was raised → the operator decides; nothing more to do here.
+    if (raisedConflict) continue;
+
+    // ── Update ─────────────────────────────────────────────────────────────
+    if (existing) {
+      const before = snapshotMaterialAssetFields(existing);
+      const updateData: Record<string, unknown> = {};
+
+      // Source row first, then project over the (cached) full source list with
+      // this run's arc blob spliced in — no re-read needed, we know exactly
+      // what we just wrote.
+      pendingSourceUpserts.push(arcSourceUpsert(existing.id, m, now));
+      const cached = (sourcesByAssetId.get(existing.id) ?? []).filter((s) => s.sourceKind !== "arc");
+      const sourceRows = [
+        ...cached,
+        { sourceKind: "arc", inferred: false, observed: azureArc.buildArcObservedBlob(m, now) as Record<string, unknown> },
+      ];
+      const { projected } = projectAssetFromSources(sourceRows);
+
+      if (projected.hostname !== null) updateData.hostname = projected.hostname;
+      if (projected.os !== null) updateData.os = projected.os;
+      if (projected.osVersion !== null) updateData.osVersion = projected.osVersion;
+      if (projected.serialNumber !== null) updateData.serialNumber = projected.serialNumber;
+      if (projected.manufacturer !== null) updateData.manufacturer = projected.manufacturer;
+      if (projected.model !== null) updateData.model = projected.model;
+      if (projected.learnedLocation !== null) updateData.learnedLocation = projected.learnedLocation;
+      if (projected.ipAddress !== null) updateData.ipAddress = projected.ipAddress;
+
+      // NOTE: this sync deliberately never writes `status`. Unlike Entra's
+      // accountEnabled (a lifecycle fact that maps to `decommissioned`), an
+      // Arc Disconnected/Expired agent is a REACHABILITY fact — mapping it to
+      // a lifecycle state would decommission a whole fleet during an
+      // outbound-proxy outage. `decommissionStaleAssets` already owns
+      // aging-out, and rule 16 keeps maintenance-window assets untouched.
+
+      if (fqdn && !existing.dnsName) updateData.dnsName = fqdn;
+      // Only overwrite assetType if the existing one is "other" — respect
+      // manual recategorization.
+      if (existing.assetType === "other" && assetType !== "other") updateData.assetType = assetType;
+
+      // Ownership: stamp discoveredByIntegrationId unless another integration
+      // already owns this asset. REQUIRED — agentAutoDeployService and both
+      // auto-monitor services scope on it, so without the stamp every
+      // Monitoring-tab class block silently no-ops.
+      const alreadyOwnedByOtherIntegration =
+        existing.discoveredByIntegrationId && existing.discoveredByIntegrationId !== integrationId;
+      if (!alreadyOwnedByOtherIntegration) updateData.discoveredByIntegrationId = integrationId;
+
+      // Presence: a Connected status read AT SCRAPE TIME is a live heartbeat.
+      // The evidence timestamp is RUN TIME, never m.lastStatusChange — that
+      // records when the status last CHANGED, so a machine Connected for 90
+      // days carries a 90-day-old value. Deferred for monitored assets
+      // (business rule 12) so the probe stays authoritative.
+      if (connected) bumpLastSeen(updateData, existing, now, "arc");
+
+      Object.assign(
+        updateData,
+        buildMonitoredSweep(resolveAddAs((updateData.assetType ?? existing.assetType) as string), existing),
+      );
+
+      const preserved = ((existing.tags as string[]) || []).filter((t) => !isArcManagedTag(t));
+      updateData.tags = [...preserved, ...tags.filter((t) => !preserved.includes(t))];
+
+      clampAcquiredToLastSeen(updateData, existing);
+      pendingAssetUpdates.push({ id: existing.id, data: updateData });
+      logDiscoveryAssetUpdated(before, updateData, existing.id, label, {
+        integrationName, integrationId, sourceKind: "arc", actor,
+      });
+      // Keep the in-memory indexes coherent for later machines in this run.
+      assetByArmId.set(m.armId, existing);
+      assetIdsWithArcSource.add(existing.id);
+      indexVmUuid(m.vmUuid, existing);
+      updated.push(label);
+
+      if (pendingAssetUpdates.length >= WRITE_CHUNK) await flush();
+      continue;
+    }
+
+    // ── Create ─────────────────────────────────────────────────────────────
+    try {
+      const synthSources = [{
+        sourceKind: "arc",
+        inferred: false,
+        observed: azureArc.buildArcObservedBlob(m, now) as Record<string, unknown>,
+      }];
+      const { projected } = projectAssetFromSources(synthSources);
+
+      const createData: Record<string, unknown> = {
+        hostname: projected.hostname,
+        dnsName: fqdn,
+        serialNumber: projected.serialNumber,
+        manufacturer: projected.manufacturer,
+        model: projected.model,
+        assetType: assetType === "other" ? "server" : assetType,
+        status: "active",
+        statusChangedAt: now,
+        statusChangedBy: integrationName,
+        os: projected.os,
+        osVersion: projected.osVersion,
+        learnedLocation: projected.learnedLocation,
+        ipAddress: projected.ipAddress,
+        discoveredByIntegrationId: integrationId,
+        // The only discovery-authored notes content (rule 15) — stamped once,
+        // at creation, and never rewritten on update.
+        notes: `Auto-discovered from Azure Arc integration "${integrationName}"${m.resourceGroup ? ` (${m.resourceGroup})` : ""}`,
+        tags,
+      };
+      if (connected) bumpLastSeen(createData, null, now, "arc");
+      Object.assign(createData, buildMonitoredSweep(
+        resolveAddAs(createData.assetType as string),
+        { monitored: false, monitorOverride: false },
+      ));
+      clampAcquiredToLastSeen(createData);
+
+      const newAsset = await prisma.asset.create({ data: createData as any });
+      await arcSourceUpsert(newAsset.id, m, now);
+      logDiscoveryAssetCreated(newAsset.id, label, {
+        integrationName, integrationId, sourceKind: "arc", actor,
+      });
+
+      assetById.set(newAsset.id, newAsset);
+      assetByArmId.set(m.armId, newAsset);
+      assetIdsWithArcSource.add(newAsset.id);
+      indexVmUuid(m.vmUuid, newAsset);
+      if (newAsset.hostname) indexHostname(assetByHostnameArcTagged, newAsset.hostname, newAsset);
+      created.push(label);
+    } catch (err: any) {
+      syncLog("error", `Failed to create asset for Arc machine ${label}: ${err.message || "Unknown error"}`);
+    }
+  }
+
+  await flush();
+  return { created, updated, skipped };
+}
+
+// The proposedAssetFields blob an Arc-raised asset Conflict carries.
+// `sourceType: "azurearc"` is what conflictSourceFor dispatches on, and
+// `deviceId` (the ARM resource id) becomes the AssetSource externalId when
+// the operator accepts or rejects.
+function buildArcProposedFields(
+  m: azureArc.DiscoveredArcMachine,
+  assetType: string,
+  collisionReason: string,
+  matchedVia: string,
+): Record<string, any> {
+  const { fqdn, short } = azureArc.arcHostnameCandidates(m);
+  return {
+    sourceType: "azurearc",
+    deviceId: m.armId,
+    hostname: fqdn || short || m.name,
+    dnsName: fqdn,
+    os: m.osSku || m.osName,
+    osVersion: m.osVersion,
+    manufacturer: m.manufacturer,
+    model: m.model,
+    serialNumber: m.serialNumber,
+    assetType: assetType === "other" ? "server" : assetType,
+    learnedLocation: m.resourceGroup,
+    resourceGroup: m.resourceGroup,
+    subscriptionId: m.subscriptionId,
+    vmUuid: m.vmUuid,
+    arcStatus: m.status,
+    collisionReason,
+    matchedVia,
+  };
 }
 
 async function syncEntraDevices(

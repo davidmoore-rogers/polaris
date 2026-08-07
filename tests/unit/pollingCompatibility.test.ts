@@ -65,6 +65,19 @@ describe("compatibility matrix — locked values per asset source", () => {
     expect(isPollingMethodCompatible("windowsserver", "agent")).toBe(true);
     expect(isPollingMethodCompatible("windowsserver", "vcenter")).toBe(true);
   });
+  it("Azure Arc: same as AD — Arc-enabled machines are ordinary Windows/Linux hosts", () => {
+    // Locked as an exact ordered array: a source kind missing from
+    // COMPATIBILITY silently resolves to "manual" (the most permissive
+    // matrix), which would offer REST API and SNMP on a Windows host.
+    expect(compatibleMethodsFor("azurearc")).toEqual(["winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
+    expect(isPollingMethodCompatible("azurearc", "rest_api")).toBe(false);
+    expect(isPollingMethodCompatible("azurearc", "snmp")).toBe(false);
+    expect(isPollingMethodCompatible("azurearc", "winrm")).toBe(true);
+    expect(isPollingMethodCompatible("azurearc", "agent")).toBe(true);
+    // An Arc machine can also be a vCenter-merged VM — in fact the Arc<->vCenter
+    // vmUuid cross-link makes that MORE likely, not less.
+    expect(isPollingMethodCompatible("azurearc", "vcenter")).toBe(true);
+  });
   it("vCenter: ICMP + SNMP + WinRM + SSH + Agent + vCenter (VMs are guest OSes; ESXi answers SNMP/SSH)", () => {
     expect(compatibleMethodsFor("vcenter")).toEqual(["snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
     expect(isPollingMethodCompatible("vcenter", "rest_api")).toBe(false);
@@ -90,6 +103,7 @@ describe("integrationType -> AssetSourceKind mapping", () => {
     expect(assetSourceKindFromIntegrationType("entraid")).toBe("entraid");
     expect(assetSourceKindFromIntegrationType("windowsserver")).toBe("windowsserver");
     expect(assetSourceKindFromIntegrationType("vcenter")).toBe("vcenter");
+    expect(assetSourceKindFromIntegrationType("azurearc")).toBe("azurearc");
   });
   it("null / undefined / unknown integration types fall back to manual", () => {
     expect(assetSourceKindFromIntegrationType(null)).toBe("manual");

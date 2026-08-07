@@ -67,13 +67,15 @@ function assetTagPrefixFor(proposed: Record<string, any>): string {
 
 // Which discovery source raised this asset conflict. vCenter conflicts carry
 // `sourceType: "vcenter"` in proposedAssetFields (with assetType
-// discriminating VM vs ESXi host); AD/Entra keep the legacy tag-prefix
-// convention via assetTagPrefixFor.
-type AssetConflictSource = "ad" | "entra" | "vcenter-vm" | "vcenter-host";
+// discriminating VM vs ESXi host) and Azure Arc conflicts `sourceType:
+// "azurearc"`; AD/Entra keep the legacy tag-prefix convention via
+// assetTagPrefixFor.
+type AssetConflictSource = "ad" | "entra" | "vcenter-vm" | "vcenter-host" | "arc";
 function conflictSourceFor(proposed: Record<string, any>): AssetConflictSource {
   if (proposed.sourceType === "vcenter") {
     return proposed.assetType === "hypervisor" ? "vcenter-host" : "vcenter-vm";
   }
+  if (proposed.sourceType === "azurearc") return "arc";
   return assetTagPrefixFor(proposed) === AD_ASSET_TAG_PREFIX ? "ad" : "entra";
 }
 
@@ -83,6 +85,7 @@ function conflictSourceLabel(src: AssetConflictSource): string {
     case "entra":        return "Entra device";
     case "vcenter-vm":   return "vCenter VM";
     case "vcenter-host": return "vCenter ESXi host";
+    case "arc":          return "Azure Arc machine";
   }
 }
 
@@ -285,6 +288,7 @@ async function acceptAssetConflict(
   const src = conflictSourceFor(proposed);
   const isAd = src === "ad";
   const isVcenter = src === "vcenter-vm" || src === "vcenter-host";
+  const isArc = src === "arc";
   const sourceLabel = conflictSourceLabel(src);
 
   // Per-field merge. fieldWinners (from POST /:id/merge) overrides the default
@@ -347,8 +351,13 @@ async function acceptAssetConflict(
   // assetTag.
   const sourceTags: string[] = isVcenter
     ? ["vcenter", "auto-discovered"]
+    : isArc ? ["azurearc", "auto-discovered"]
     : isAd ? ["activedirectory", "auto-discovered"] : ["entraid", "auto-discovered"];
-  if (isAd) {
+  if (isArc) {
+    if (proposed.arcStatus && String(proposed.arcStatus).toLowerCase() !== "connected") {
+      sourceTags.push(`arc-${String(proposed.arcStatus).toLowerCase()}`);
+    }
+  } else if (isAd) {
     if (proposed.disabled === true) sourceTags.push("ad-disabled");
   } else if (!isVcenter) {
     if (proposed.trustType) sourceTags.push(String(proposed.trustType).toLowerCase());
@@ -592,6 +601,7 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
   const src = conflictSourceFor(proposed);
   const isAd = src === "ad";
   const isVcenter = src === "vcenter-vm" || src === "vcenter-host";
+  const isArc = src === "arc";
   const sourceLabel = conflictSourceLabel(src);
 
   // Sibling flavour — the proposed device ALREADY has its own asset (its
@@ -628,8 +638,13 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
   // AssetSource row we upsert below.
   const tags: string[] = isVcenter
     ? ["vcenter", "auto-discovered"]
+    : isArc ? ["azurearc", "auto-discovered"]
     : isAd ? ["activedirectory", "auto-discovered"] : ["entraid", "auto-discovered"];
-  if (isAd) {
+  if (isArc) {
+    if (proposed.arcStatus && String(proposed.arcStatus).toLowerCase() !== "connected") {
+      tags.push(`arc-${String(proposed.arcStatus).toLowerCase()}`);
+    }
+  } else if (isAd) {
     if (proposed.disabled === true) tags.push("ad-disabled");
   } else if (!isVcenter) {
     if (proposed.trustType) tags.push(String(proposed.trustType).toLowerCase());
@@ -646,7 +661,10 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
     macAddress: proposed.macAddress || null,
     manufacturer: proposed.manufacturer || null,
     model: proposed.model || null,
-    assetType: proposed.assetType || (isVcenter ? "server" : isAd ? "other" : "workstation"),
+    // Arc defaults to "server": Arc onboarding is overwhelmingly server
+    // estate, and inferArcAssetType normally supplies proposed.assetType
+    // anyway — this is only the fallback when it couldn't decide.
+    assetType: proposed.assetType || (isVcenter || isArc ? "server" : isAd ? "other" : "workstation"),
     status: proposed.status || defaultStatus,
     statusChangedAt: new Date(),
     statusChangedBy: actor ?? "system",
@@ -718,6 +736,26 @@ async function upsertConflictAssetSource(
       accountEnabled: proposed.status !== "disabled" && proposed.status !== "decommissioned",
       trustType: proposed.trustType ?? null,
       onPremisesSecurityIdentifier: proposed.onPremisesSecurityIdentifier ?? null,
+    };
+  } else if (sourceKind === "arc") {
+    // Minimal arc blob — the next discovery run replaces it with the full
+    // buildArcObservedBlob shape. Keys match that shape so the projection
+    // rules read it correctly in the meantime.
+    observed = {
+      kind: "arc",
+      armId: externalId,
+      name: proposed.hostname ?? null,
+      displayName: proposed.hostname ?? null,
+      dnsFqdn: proposed.dnsName ?? null,
+      osSku: proposed.os ?? null,
+      osVersion: proposed.osVersion ?? null,
+      serialNumber: proposed.serialNumber ?? null,
+      manufacturer: proposed.manufacturer ?? null,
+      model: proposed.model ?? null,
+      resourceGroup: proposed.resourceGroup ?? null,
+      subscriptionId: proposed.subscriptionId ?? null,
+      vmUuid: proposed.vmUuid ?? null,
+      status: proposed.arcStatus ?? null,
     };
   } else if (sourceKind === "vcenter-vm") {
     observed = {

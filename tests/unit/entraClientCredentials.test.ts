@@ -23,3 +23,19 @@ describe("buildClientCredentialsTokenRequest", () => {
     expect(body.get("scope")).toBe("https://graph.microsoft.com/.default");
   });
 });
+
+describe("buildClientCredentialsTokenRequest — non-Graph scopes", () => {
+  it("round-trips the Azure Resource Manager scope verbatim", () => {
+    // Azure Arc reuses this helper rather than forking it; only the scope
+    // differs from the Graph caller. This case documents that.
+    const { url, body } = buildClientCredentialsTokenRequest({
+      tenantId: "00000000-0000-0000-0000-000000000000",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      clientSecret: "s",
+      scope: "https://management.azure.com/.default",
+    });
+    expect(url).toContain("/00000000-0000-0000-0000-000000000000/oauth2/v2.0/token");
+    expect(body.get("scope")).toBe("https://management.azure.com/.default");
+    expect(body.get("grant_type")).toBe("client_credentials");
+  });
+});
