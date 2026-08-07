@@ -4741,6 +4741,7 @@ async function openEditModal(id) {
     var spec = _intgEditFormSpec(intg, config);
     var body = spec.body;
     var formGetter = spec.formGetter;
+    var defaults = spec.defaults;
 
     // FMG + FortiGate get the full Monitoring tab (Cadence + Discovery
     // Defaults + Class Overrides). AD / Entra / WindowsServer get the same
@@ -5071,7 +5072,12 @@ function _intgEditFormSpec(intg, config) {
         return fc;
       };
     }
-    return { body: body, formGetter: formGetter };
+    // `defaults` rides along because the FMG / FortiGate branch of the caller
+    // re-renders the General + Filters tabs from it and forwards the blob into
+    // the Monitoring tab as `fmgDefaults`. It was function-local when this spec
+    // was split out of openEditModal, which left those call sites referencing a
+    // free variable — a ReferenceError on every FMG / FortiGate edit.
+    return { body: body, formGetter: formGetter, defaults: defaults };
 }
 
 // Test Connection button — posts the current (unsaved) form config; on an
