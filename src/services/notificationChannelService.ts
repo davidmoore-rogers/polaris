@@ -16,7 +16,8 @@ import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import { CHANNEL_TYPE_META, CHANNEL_TRANSPORT, type ChannelType } from "./notificationTypes.js";
-import { generateVapidKeys } from "./notificationChannels/webPushChannel.js";
+import { generateVapidKeys, sendWebPush } from "./notificationChannels/webPushChannel.js";
+import { pushDeepLinkUrl } from "../utils/notificationTemplate.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
 import { asObject } from "../utils/object.js";
 
@@ -292,4 +293,84 @@ export async function setWebPushEnabled(enabled: boolean, actor?: string): Promi
   if (!cfg.publicKey || !cfg.privateKey) await generateWebPushKeys(id!, actor);
 
   return getWebPushState();
+}
+
+/**
+ * Send a test push to ONE user's own enrolled devices.
+ *
+ * Scoped to the caller's own subscriptions on purpose — a "test" that could
+ * notify arbitrary other people is a nuisance vector, not a diagnostic.
+ *
+ * Sends directly rather than queueing a NotificationDelivery, so the operator
+ * gets the real per-device result (including a dead endpoint) instead of a
+ * "queued" shrug. It still uses `pushDeepLinkUrl(surface)` so what lands on the
+ * device is shaped exactly like a production alert. A 404/410 prunes the row,
+ * mirroring what the delivery drain does.
+ */
+export async function sendWebPushTest(userId: string, actor?: string): Promise<{
+  ok: boolean; sent: number; failed: number; pruned: number; message: string;
+}> {
+  const ch = await getWebPushChannel();
+  const cfg = asObject(ch?.config);
+  if (!ch || !ch.enabled || !cfg.publicKey || !cfg.privateKey) {
+    throw new AppError(400, "Web Push is turned off — enable it first.");
+  }
+
+  const subs = await prisma.pushSubscription.findMany({
+    where: { userId },
+    select: { endpoint: true, p256dh: true, auth: true, surface: true },
+  });
+  if (subs.length === 0) {
+    throw new AppError(
+      400,
+      "No push-enabled devices on your account. Turn on push from the sidebar (desktop) or More → Push notifications (mobile), then test again.",
+    );
+  }
+
+  const vapid = {
+    publicKey: String(cfg.publicKey),
+    privateKey: String(cfg.privateKey),
+    subject: typeof cfg.subject === "string" ? cfg.subject : "",
+  };
+
+  let sent = 0, failed = 0, pruned = 0;
+  const errors: string[] = [];
+  for (const s of subs) {
+    try {
+      await sendWebPush(
+        vapid,
+        { endpoint: s.endpoint, p256dh: s.p256dh, auth: s.auth },
+        {
+          title: "Polaris test",
+          body: "Push notifications are working. This is a test.",
+          severity: "info",
+          url: pushDeepLinkUrl(s.surface),
+          notificationId: `test-${Date.now()}`,
+        },
+      );
+      sent++;
+    } catch (err) {
+      const e = err as { message?: string; gone?: boolean };
+      failed++;
+      if (e.gone) {
+        await prisma.pushSubscription.deleteMany({ where: { endpoint: s.endpoint, userId } });
+        pruned++;
+      } else if (e.message) {
+        errors.push(e.message);
+      }
+    }
+  }
+
+  await logEvent({
+    action: "notification_channel.test", resourceType: "notification-channel",
+    resourceId: ch.id, resourceName: ch.name, actor,
+    level: sent > 0 ? "info" : "warning",
+    message: `Web Push test: ${sent} sent, ${failed} failed${pruned ? `, ${pruned} dead subscription(s) pruned` : ""}`,
+  });
+
+  const message = sent > 0
+    ? `Test push sent to ${sent} device${sent === 1 ? "" : "s"}${pruned ? ` (${pruned} dead subscription${pruned === 1 ? "" : "s"} removed)` : ""}.`
+    : `Could not deliver to any device${pruned ? ` — ${pruned} dead subscription${pruned === 1 ? "" : "s"} removed; re-enable push on that device` : ""}.${errors.length ? ` ${errors[0]}` : ""}`;
+
+  return { ok: sent > 0, sent, failed, pruned, message };
 }

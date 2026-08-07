@@ -228,6 +228,76 @@ d("Web Push as an on/off capability", () => {
   });
 });
 
+d("Web Push self-test", () => {
+  beforeEach(async () => {
+    await prisma.notificationChannel.deleteMany({ where: { type: "web_push" } });
+  });
+
+  it("refuses when Web Push is turned off", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const res = await agent.post("/api/v1/delivery-channels/web-push/test").set("X-CSRF-Token", csrf).expect(400);
+    expect(String(res.body.error)).toMatch(/turned off/i);
+  });
+
+  it("explains itself when the caller has no enrolled device", async () => {
+    // The likeliest real case: an admin enables push, hits Test, and has not
+    // yet turned it on in their own browser. That must be actionable, not a
+    // silent no-op.
+    const { agent, csrf } = await authedAgent(app);
+    await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: true }).expect(200);
+    await prisma.pushSubscription.deleteMany({});
+    const res = await agent.post("/api/v1/delivery-channels/web-push/test").set("X-CSRF-Token", csrf).expect(400);
+    expect(String(res.body.error)).toMatch(/no push-enabled devices/i);
+  });
+
+  it("prunes a dead subscription rather than reporting a bare failure", async () => {
+    // The endpoint below isn't a real push service, so the send fails. What
+    // matters is that a fabricated/expired endpoint doesn't linger forever.
+    const { agent, csrf } = await authedAgent(app);
+    await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: true }).expect(200);
+    await agent.post("/api/v1/push-subscriptions").set("X-CSRF-Token", csrf)
+      .send({ endpoint: EP("dead"), keys: { p256dh: "bm90LWEtcmVhbC1rZXk", auth: "bm90LXJlYWw" }, surface: "desktop" })
+      .expect(204);
+
+    const res = await agent.post("/api/v1/delivery-channels/web-push/test").set("X-CSRF-Token", csrf).expect(200);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.sent).toBe(0);
+    expect(res.body.failed).toBeGreaterThan(0);
+    expect(typeof res.body.message).toBe("string");
+  });
+
+  it("never reaches another user's devices", async () => {
+    // A "test" that can notify arbitrary people is a nuisance vector.
+    const { agent, csrf } = await authedAgent(app);
+    await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: true }).expect(200);
+    await prisma.pushSubscription.deleteMany({});
+    await prisma.pushSubscription.create({
+      data: { userId: otherUserId, endpoint: EP("someone-else"), p256dh: "k", auth: "a", surface: "mobile" },
+    });
+    // Caller owns nothing → 400, and the other user's row is untouched.
+    await agent.post("/api/v1/delivery-channels/web-push/test").set("X-CSRF-Token", csrf).expect(400);
+    expect(await prisma.pushSubscription.findUnique({ where: { endpoint: EP("someone-else") } })).not.toBeNull();
+  });
+});
+
+d("recipient reachability", () => {
+  it("reports each user's enrolled device count so the builder can warn", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    await prisma.pushSubscription.deleteMany({});
+    await agent.post("/api/v1/push-subscriptions").set("X-CSRF-Token", csrf)
+      .send({ endpoint: EP("reach"), keys: { p256dh: "k", auth: "a" }, surface: "desktop" }).expect(204);
+
+    const res = await agent.get("/api/v1/automations/recipient-users").expect(200);
+    const users: any[] = res.body.users ?? res.body;
+    expect(Array.isArray(users)).toBe(true);
+    // Every user carries the field, so the builder can flag the zeroes.
+    for (const u of users) expect(typeof u.pushDevices).toBe("number");
+    const other = users.find((u) => u.id === otherUserId);
+    expect(other?.pushDevices).toBe(0);
+    expect(users.some((u) => u.pushDevices > 0)).toBe(true);
+  });
+});
+
 d("POST /push-subscriptions — surface + rotation", () => {
   it("defaults to desktop and records an explicit mobile surface", async () => {
     const { agent, csrf } = await authedAgent(app);

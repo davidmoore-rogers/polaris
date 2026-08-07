@@ -22,6 +22,7 @@
  */
 
 import { prisma } from "../db.js";
+import { logger } from "../utils/logger.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { resolveTagScopesForUser } from "./regionScopeService.js";
 import { createTtlCache } from "../utils/ttlCache.js";
@@ -153,11 +154,20 @@ export async function resolveRecipientUsersByIds(ids: string[] | undefined): Pro
 }
 
 /** All users for the rule-builder recipient picker (id + name + email). */
-export async function listRecipientUsers(): Promise<{ id: string; username: string; displayName: string | null; email: string | null }[]> {
-  return prisma.user.findMany({
-    select: { id: true, username: true, displayName: true, email: true },
-    orderBy: { username: "asc" },
-  });
+export async function listRecipientUsers(): Promise<{ id: string; username: string; displayName: string | null; email: string | null; pushDevices: number }[]> {
+  // `pushDevices` lets the automation builder warn that a selected recipient
+  // has no push-enabled device. Push is opt-in PER BROWSER, so picking a user
+  // is not the same as being able to reach them — without this the operator
+  // configures a push action that silently delivers nothing.
+  const [users, grouped] = await Promise.all([
+    prisma.user.findMany({
+      select: { id: true, username: true, displayName: true, email: true },
+      orderBy: { username: "asc" },
+    }),
+    prisma.pushSubscription.groupBy({ by: ["userId"], _count: { _all: true } }),
+  ]);
+  const counts = new Map(grouped.map((g) => [g.userId, g._count._all]));
+  return users.map((u) => ({ ...u, pushDevices: counts.get(u.id) ?? 0 }));
 }
 
 /**
@@ -289,14 +299,26 @@ export async function expandDeliveries(
       }
     } else if (transport === "web_push") {
       const users = await usersForTarget(t);
-      if (users.length > 0) {
-        const subs = await prisma.pushSubscription.findMany({
-          where: { userId: { in: users.map((u) => u.id) } },
-          // `surface` rides along so the drain can pick the right deep link
-          // (mobile SPA vs desktop Automations page) without a second query.
-          select: { endpoint: true, p256dh: true, auth: true, surface: true },
-        });
-        for (const s of subs) add(channel.id, "web_push", s.endpoint, { p256dh: s.p256dh, auth: s.auth, surface: s.surface });
+      const subs = users.length
+        ? await prisma.pushSubscription.findMany({
+            where: { userId: { in: users.map((u) => u.id) } },
+            // `surface` rides along so the drain can pick the right deep link
+            // (mobile SPA vs desktop Automations page) without a second query.
+            select: { endpoint: true, p256dh: true, auth: true, surface: true },
+          })
+        : [];
+      for (const s of subs) add(channel.id, "web_push", s.endpoint, { p256dh: s.p256dh, auth: s.auth, surface: s.surface });
+      if (subs.length === 0) {
+        // Push is opt-in per browser, so a perfectly valid-looking automation
+        // can resolve to zero devices and deliver nothing at all. Say so.
+        // logger, not an Event: this runs per notification on the alerting hot
+        // path, and a fleet-wide rule would otherwise flood the audit log.
+        logger.warn(
+          { channelId: channel.id, notificationId, matchedUsers: users.length },
+          users.length === 0
+            ? "web_push target matched no users — nothing delivered"
+            : "web_push target matched users but none have a push-enabled device — nothing delivered",
+        );
       }
     } else {
       // webhook (slack/teams) + pushbullet: one row, fixed destination on the channel.

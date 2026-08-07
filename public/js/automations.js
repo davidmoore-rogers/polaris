@@ -357,8 +357,9 @@ function renderWebPushCard(state) {
               : '<span class="integration-status dot-unknown">Disabled</span>') +
         '</div>' +
         (canEdit
-          ? '<div class="integration-card-actions"><label class="toggle-switch" title="' +
-            (on ? 'Turn Web Push off' : 'Turn Web Push on') + '">' +
+          ? '<div class="integration-card-actions">' +
+            (on ? '<button class="btn btn-sm btn-secondary" id="wp-test" title="Send a test push to your own devices">Send test</button> ' : '') +
+            '<label class="toggle-switch" title="' + (on ? 'Turn Web Push off' : 'Turn Web Push on') + '">' +
             '<input type="checkbox" id="wp-toggle"' + (on ? ' checked' : '') + '>' +
             '<span class="toggle-slider"></span></label></div>'
           : '') +
@@ -376,6 +377,25 @@ function renderWebPushCard(state) {
       'Users enable push per device from the sidebar (desktop) or More → Push notifications (mobile). ' +
       'An automation targeting users who haven\'t enrolled delivers nothing.</p>'
     : '<div style="margin-bottom:1rem"></div>');
+
+  var testBtn = document.getElementById("wp-test");
+  if (testBtn) {
+    testBtn.addEventListener("click", async function () {
+      testBtn.disabled = true;
+      var old = testBtn.textContent;
+      testBtn.textContent = "Sending…";
+      try {
+        var r = await api.deliveryChannels.testWebPush();
+        showToast(r.message || "Test sent", r.ok ? "success" : "error");
+        // A dead subscription may have been pruned — refresh the count.
+        if (r.pruned) loadWebPushCard();
+      } catch (err) {
+        showToast(err.message || "Test failed", "error");
+      }
+      testBtn.disabled = false;
+      testBtn.textContent = old;
+    });
+  }
 
   var toggle = document.getElementById("wp-toggle");
   if (!toggle) return;
