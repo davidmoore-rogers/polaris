@@ -292,9 +292,11 @@ export async function expandDeliveries(
       if (users.length > 0) {
         const subs = await prisma.pushSubscription.findMany({
           where: { userId: { in: users.map((u) => u.id) } },
-          select: { endpoint: true, p256dh: true, auth: true },
+          // `surface` rides along so the drain can pick the right deep link
+          // (mobile SPA vs desktop Automations page) without a second query.
+          select: { endpoint: true, p256dh: true, auth: true, surface: true },
         });
-        for (const s of subs) add(channel.id, "web_push", s.endpoint, { p256dh: s.p256dh, auth: s.auth });
+        for (const s of subs) add(channel.id, "web_push", s.endpoint, { p256dh: s.p256dh, auth: s.auth, surface: s.surface });
       }
     } else {
       // webhook (slack/teams) + pushbullet: one row, fixed destination on the channel.

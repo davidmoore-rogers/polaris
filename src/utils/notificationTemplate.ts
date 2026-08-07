@@ -184,6 +184,31 @@ export function notificationsPageUrl(): string | null {
   return `${base.replace(/\/$/, "")}/automations.html`;
 }
 
+/** Where a push notification should land, per enrolling surface. */
+export const PUSH_DEEP_LINK_PATHS = {
+  desktop: "/automations.html",
+  mobile: "/mobile.html#more/alerts",
+} as const;
+
+export type PushSurface = keyof typeof PUSH_DEEP_LINK_PATHS;
+
+export function normalizePushSurface(value: unknown): PushSurface {
+  return value === "mobile" ? "mobile" : "desktop";
+}
+
+/**
+ * Deep link for a web-push payload. Unlike `notificationsPageUrl` this NEVER
+ * returns null: when POLARIS_PUBLIC_URL is unset we emit a relative path,
+ * which the service worker resolves fine via client.navigate()/openWindow().
+ * That also removes the old failure mode where an unset public URL sent every
+ * push to sw.js's hardcoded desktop fallback regardless of surface.
+ */
+export function pushDeepLinkUrl(surface: unknown): string {
+  const path = PUSH_DEEP_LINK_PATHS[normalizePushSurface(surface)];
+  const base = process.env.POLARIS_PUBLIC_URL;
+  return base ? `${base.replace(/\/$/, "")}${path}` : path;
+}
+
 /** "92m" → "1h 32m"-style elapsed formatting for {escalation.elapsed}. */
 export function formatElapsed(ms: number): string {
   const totalMin = Math.max(0, Math.round(ms / 60_000));
