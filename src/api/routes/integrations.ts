@@ -667,6 +667,12 @@ const AzureArcConfigSchema = z.object({
   includeDisconnected: z.boolean().optional().default(true),
   // ONE EXTRA GET PER MACHINE — opt-in, concurrency-capped, deadline-bounded.
   fetchNetworkProfile: z.boolean().optional().default(false),
+  // Phase 2/3 enrichment. Each is ONE additional Resource Graph query for the
+  // whole tenant (not per machine) and NEITHER creates assets — both fold into
+  // the owning machine's observed blob. Default off so an existing integration
+  // keeps its current blob shape until an operator opts in.
+  enableVmInstances: z.boolean().optional().default(false),
+  enableSqlServer: z.boolean().optional().default(false),
   // Post-sync network-presence verification — see EntraIdConfigSchema note.
   verifyPresence: z.boolean().optional().default(true),
   workstationMonitor: WorkstationServerClassMonitorSchema,

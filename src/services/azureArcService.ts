@@ -53,6 +53,14 @@ import { buildClientCredentialsTokenRequest } from "../utils/entraClientCredenti
 const ARC_MACHINES_API_VERSION = "2024-07-10";
 const SUBSCRIPTIONS_API_VERSION = "2022-12-01";
 const RESOURCE_GRAPH_API_VERSION = "2022-10-01";
+// The Phase 2/3 extension resources (Microsoft.ConnectedVMwarevSphere and
+// Microsoft.ScVmm virtualMachineInstances, Microsoft.AzureArcData
+// sqlServerInstances) carry no api-version constant here on purpose: they are
+// read ONLY through Resource Graph — see attachExtensionResources — which
+// queries the index rather than each resource provider, so one query covers
+// the whole tenant instead of one GET per machine. A direct-read path would
+// need `2023-12-01` / `2023-10-07` / `2023-01-15-preview` respectively (the
+// last is a PREVIEW surface — re-verify before relying on it).
 
 const ARM_HOST = "management.azure.com";
 const ARM_BASE = `https://${ARM_HOST}`;
@@ -83,6 +91,48 @@ export interface AzureArcConfig {
   tagExclude?: string[];
   includeDisconnected?: boolean;   // Default true — a Disconnected agent is still an asset
   fetchNetworkProfile?: boolean;   // Default false — one extra GET per machine
+  // Phase 2/3 enrichment. Each costs ONE additional Resource Graph query for
+  // the whole tenant (not per machine), and neither creates assets — both fold
+  // into the owning machine's observed blob.
+  enableVmInstances?: boolean;
+  enableSqlServer?: boolean;
+}
+
+/**
+ * Arc-enabled VMware / SCVMM placement for a machine (Phase 2).
+ *
+ * These are CHILD EXTENSION RESOURCES of a HybridCompute machine, not
+ * resources in their own right, so they never create an asset — they describe
+ * a machine Phase 1 already discovered.
+ */
+export interface ArcVmInstance {
+  platform: "vmware" | "scvmm";
+  /** The parent HybridCompute machine's ARM id, lowercased. */
+  parentMachineId: string;
+  /** vCenter's instanceUuid — EXACTLY the value vcenterService.pickVmExternalId prefers. */
+  instanceUuid: string | null;
+  biosGuid: string | null;
+  moRefId: string | null;
+  vCenterId: string | null;
+  inventoryItemId: string | null;
+  hostName: string | null;
+  cpuCount: number | null;
+  memoryMB: number | null;
+  folderPath: string | null;
+}
+
+/** An Arc-enabled SQL Server instance running on a machine (Phase 3). */
+export interface ArcSqlInstance {
+  /** The parent HybridCompute machine's ARM id, lowercased. */
+  parentMachineId: string;
+  name: string;
+  instanceName: string | null;
+  edition: string | null;
+  version: string | null;
+  patchLevel: string | null;
+  status: string | null;
+  licenseType: string | null;
+  vCoreCount: number | null;
 }
 
 export interface DiscoveredArcMachine {
@@ -118,6 +168,10 @@ export interface DiscoveredArcMachine {
   parentClusterResourceId: string | null;
   tags: Record<string, string>;
   ipAddresses: string[];                 // Populated only when fetchNetworkProfile is on
+  /** Phase 2 — set only when enableVmInstances is on and the machine is Arc-enabled VMware/SCVMM. */
+  vmInstance: ArcVmInstance | null;
+  /** Phase 3 — set only when enableSqlServer is on; empty for machines with no SQL. */
+  sqlInstances: ArcSqlInstance[];
 }
 
 export interface ArcDiscoveryResult {
@@ -583,6 +637,8 @@ export function normalizeArcMachine(
     parentClusterResourceId: str(p.parentClusterResourceId),
     tags,
     ipAddresses: extractIpAddresses(p.networkProfile),
+    vmInstance: null,
+    sqlInstances: [],
   };
 }
 
@@ -750,6 +806,118 @@ export function buildArcObservedBlob(
     parentClusterResourceId: m.parentClusterResourceId,
     azureTags: m.tags,
     ipAddresses: m.ipAddresses,
+    // Phase 2/3. Null / empty when the toggles are off, so an operator who
+    // never enabled them sees no change in the blob shape.
+    vmInstance: m.vmInstance,
+    sqlInstances: m.sqlInstances,
+  };
+}
+
+
+/**
+ * The parent HybridCompute machine id for a child extension resource.
+ *
+ * An extension resource id nests its own provider path under the parent's:
+ *   /subscriptions/S/resourceGroups/RG/providers/Microsoft.HybridCompute/machines/NAME
+ *     /providers/Microsoft.ConnectedVMwarevSphere/virtualMachineInstances/default
+ *
+ * so the parent is everything before the LAST `/providers/`. Returns null when
+ * the id has no nested provider segment (i.e. it isn't an extension resource)
+ * or the parent doesn't look like a machine.
+ */
+export function parentMachineIdFromExtensionId(id: unknown): string | null {
+  if (typeof id !== "string" || !id) return null;
+  const lower = id.toLowerCase();
+  const cut = lower.lastIndexOf("/providers/");
+  if (cut <= 0) return null;
+  const parent = lower.slice(0, cut);
+  if (!parent.includes("/providers/microsoft.hybridcompute/machines/")) return null;
+  return parent;
+}
+
+/** Resource Graph query for the Arc-enabled VMware + SCVMM VM instances. */
+export function buildArcVmInstancesQuery(opts: { subscriptionIds?: string[] } = {}): string {
+  const subs = (opts.subscriptionIds ?? [])
+    .map(normalizeSubscriptionId)
+    .filter((s): s is string => s !== null);
+  const clauses = [
+    "where type =~ 'microsoft.connectedvmwarevsphere/virtualmachineinstances'"
+      + " or type =~ 'microsoft.scvmm/virtualmachineinstances'",
+  ];
+  if (subs.length > 0) {
+    clauses.push(`where subscriptionId in~ (${subs.map((s) => `'${s}'`).join(", ")})`);
+  }
+  clauses.push("project id, name, type, properties, subscriptionId, resourceGroup");
+  return `Resources | ${clauses.join(" | ")}`;
+}
+
+/** Resource Graph query for Arc-enabled SQL Server instances. */
+export function buildArcSqlInstancesQuery(opts: { subscriptionIds?: string[] } = {}): string {
+  const subs = (opts.subscriptionIds ?? [])
+    .map(normalizeSubscriptionId)
+    .filter((s): s is string => s !== null);
+  const clauses = ["where type =~ 'microsoft.azurearcdata/sqlserverinstances'"];
+  if (subs.length > 0) {
+    clauses.push(`where subscriptionId in~ (${subs.map((s) => `'${s}'`).join(", ")})`);
+  }
+  clauses.push("project id, name, type, properties, subscriptionId, resourceGroup");
+  return `Resources | ${clauses.join(" | ")}`;
+}
+
+/**
+ * Normalize one Arc-enabled VMware/SCVMM VM-instance row. Returns null when the
+ * row carries no resolvable parent machine — without that link there is nothing
+ * to attach it to.
+ */
+export function normalizeArcVmInstance(raw: any): ArcVmInstance | null {
+  if (!raw || typeof raw !== "object") return null;
+  const parentMachineId = parentMachineIdFromExtensionId(raw.id);
+  if (!parentMachineId) return null;
+
+  const p = raw.properties ?? {};
+  const infra = p.infrastructureProfile ?? {};
+  const hw = p.hardwareProfile ?? {};
+  const type = String(raw.type ?? "").toLowerCase();
+  const platform: "vmware" | "scvmm" = type.includes("scvmm") ? "scvmm" : "vmware";
+
+  return {
+    platform,
+    parentMachineId,
+    instanceUuid: normalizeVmUuid(infra.instanceUuid ?? infra.uuid ?? p.uuid),
+    biosGuid: normalizeVmUuid(infra.biosGuid ?? p.biosGuid),
+    moRefId: str(infra.moRefId ?? infra.vmName ?? p.vmName),
+    vCenterId: str(infra.vCenterId ?? p.vmmServerId),
+    inventoryItemId: str(infra.inventoryItemId),
+    hostName: str(p.hostName ?? infra.folderPath),
+    cpuCount: num(hw.numCPUs ?? hw.cpuCount),
+    memoryMB: num(hw.memorySizeMB ?? hw.memoryMB),
+    folderPath: str(infra.folderPath),
+  };
+}
+
+/**
+ * Normalize one Arc-enabled SQL Server instance row. The parent link is
+ * `properties.containerResourceId` (NOT the id path — a SQL instance is a
+ * top-level resource that POINTS AT its machine rather than nesting under it).
+ */
+export function normalizeArcSqlInstance(raw: any): ArcSqlInstance | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw.properties ?? {};
+  const container = str(p.containerResourceId);
+  const parentMachineId = container ? container.toLowerCase() : null;
+  if (!parentMachineId || !parentMachineId.includes("/providers/microsoft.hybridcompute/machines/")) {
+    return null;
+  }
+  return {
+    parentMachineId,
+    name: str(raw.name) ?? "",
+    instanceName: str(p.instanceName),
+    edition: str(p.edition),
+    version: str(p.version),
+    patchLevel: str(p.patchLevel),
+    status: str(p.status),
+    licenseType: str(p.licenseType),
+    vCoreCount: num(p.vCore ?? p.vCoreCount ?? p.cores),
   };
 }
 
@@ -806,12 +974,17 @@ async function resolveSubscriptions(
 
 // ─── Machine enumeration — Resource Graph ───────────────────────────────────
 
-async function fetchMachinesViaResourceGraph(
+/**
+ * Run one Resource Graph query to exhaustion. ARG pages by `$skipToken` in the
+ * request BODY rather than by a URL, so this can't reuse armPage.
+ */
+async function runResourceGraphQuery(
   config: AzureArcConfig,
+  query: string,
   subscriptionIds: string[],
+  cap: number,
   signal?: AbortSignal,
 ): Promise<any[]> {
-  const query = buildArcMachinesQuery({ subscriptionIds });
   const url = `${ARM_BASE}/providers/Microsoft.ResourceGraph/resources?api-version=${RESOURCE_GRAPH_API_VERSION}`;
   const rows: any[] = [];
   let skipToken: string | undefined;
@@ -826,9 +999,93 @@ async function fetchMachinesViaResourceGraph(
     const page: any = await armRequest(config, url, { method: "POST", body, signal });
     if (Array.isArray(page?.data)) rows.push(...page.data);
     skipToken = typeof page?.$skipToken === "string" ? page.$skipToken : undefined;
-  } while (skipToken && rows.length < MACHINES_HARD_CAP);
+  } while (skipToken && rows.length < cap);
 
-  return rows.slice(0, MACHINES_HARD_CAP);
+  return rows.slice(0, cap);
+}
+
+async function fetchMachinesViaResourceGraph(
+  config: AzureArcConfig,
+  subscriptionIds: string[],
+  signal?: AbortSignal,
+): Promise<any[]> {
+  return runResourceGraphQuery(
+    config, buildArcMachinesQuery({ subscriptionIds }), subscriptionIds, MACHINES_HARD_CAP, signal,
+  );
+}
+
+/**
+ * Phase 2/3 enrichment: attach Arc-enabled VMware/SCVMM placement and
+ * Arc-enabled SQL Server instances to the machines already discovered.
+ *
+ * NEITHER CREATES AN ASSET. Both describe a machine the main pass already
+ * found, so they fold into that machine's record (and from there into its
+ * observed blob) rather than into the sync's create path.
+ *
+ * Resource-Graph-only by design: each is ONE query for the whole tenant, where
+ * reading them off the resource provider would be one GET per machine. When the
+ * main pass fell back to the per-subscription list (ARG unavailable), the
+ * enrichment is skipped with a logged line rather than silently degrading to
+ * that per-machine cost.
+ */
+async function attachExtensionResources(
+  config: AzureArcConfig,
+  machines: DiscoveredArcMachine[],
+  subscriptionIds: string[],
+  signal?: AbortSignal,
+  onProgress?: ArcDiscoveryProgressCallback,
+): Promise<void> {
+  const log = onProgress || (() => {});
+  const byArmId = new Map(machines.map((m) => [m.armId, m]));
+
+  if (config.enableVmInstances) {
+    try {
+      const rows = await runResourceGraphQuery(
+        config, buildArcVmInstancesQuery({ subscriptionIds }), subscriptionIds, MACHINES_HARD_CAP, signal,
+      );
+      let attached = 0;
+      let orphaned = 0;
+      for (const row of rows) {
+        const vm = normalizeArcVmInstance(row);
+        if (!vm) { orphaned++; continue; }
+        const machine = byArmId.get(vm.parentMachineId);
+        // A VM instance whose machine this run filtered out is not an error.
+        if (!machine) { orphaned++; continue; }
+        machine.vmInstance = vm;
+        attached++;
+      }
+      log("discover.arc.vm_instances", "info",
+        `Azure Arc: ${attached} machine(s) matched to Arc-enabled VMware/SCVMM placement`
+          + (orphaned > 0 ? ` (${orphaned} row(s) had no in-scope parent machine)` : ""));
+    } catch (err: any) {
+      log("discover.arc.vm_instances", "error",
+        `Azure Arc: VMware/SCVMM instance query failed — ${err?.message || "unknown error"}`);
+    }
+  }
+
+  if (config.enableSqlServer) {
+    try {
+      const rows = await runResourceGraphQuery(
+        config, buildArcSqlInstancesQuery({ subscriptionIds }), subscriptionIds, MACHINES_HARD_CAP, signal,
+      );
+      let attached = 0;
+      let orphaned = 0;
+      for (const row of rows) {
+        const sql = normalizeArcSqlInstance(row);
+        if (!sql) { orphaned++; continue; }
+        const machine = byArmId.get(sql.parentMachineId);
+        if (!machine) { orphaned++; continue; }
+        machine.sqlInstances.push(sql);
+        attached++;
+      }
+      log("discover.arc.sql_instances", "info",
+        `Azure Arc: ${attached} Arc-enabled SQL Server instance(s) attached`
+          + (orphaned > 0 ? ` (${orphaned} row(s) had no in-scope parent machine)` : ""));
+    } catch (err: any) {
+      log("discover.arc.sql_instances", "error",
+        `Azure Arc: SQL Server instance query failed — ${err?.message || "unknown error"}`);
+    }
+  }
 }
 
 // ─── Machine enumeration — per-subscription list (fallback) ─────────────────
@@ -1150,6 +1407,19 @@ export async function discoverMachines(
   // 6. Optional per-machine IP addresses.
   if (config.fetchNetworkProfile && machines.length > 0 && !signal?.aborted) {
     await fillNetworkProfiles(config, machines, signal, onProgress);
+  }
+
+  // 7. Phase 2/3 extension-resource enrichment (one extra query each, no new
+  //    assets). Resource-Graph-only — see attachExtensionResources.
+  const wantsExtensions = config.enableVmInstances || config.enableSqlServer;
+  if (wantsExtensions && machines.length > 0 && !signal?.aborted) {
+    if (usedFallback || !wantsArg) {
+      log("discover.arc.extensions_skipped", "info",
+        "Azure Arc: skipping VMware/SCVMM + SQL enrichment — it needs Resource Graph, "
+          + "which this run could not use");
+    } else {
+      await attachExtensionResources(config, machines, subIds, signal, onProgress);
+    }
   }
 
   return { machines, subscriptionsQueried: subscriptions.length, usedFallback };

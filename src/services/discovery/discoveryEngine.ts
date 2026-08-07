@@ -6113,14 +6113,31 @@ async function syncArcDevices(
     const tags = ["azurearc", "auto-discovered"];
     if (m.status && !connected) tags.push(`arc-${m.status.toLowerCase()}`);
     if (m.cloudProvider) tags.push(`arc-${m.cloudProvider.toLowerCase()}`);
+    // Phase 2/3 — only present when the operator enabled the enrichment.
+    if (m.vmInstance) tags.push(`arc-${m.vmInstance.platform}`);
+    if (m.sqlInstances.length > 0) tags.push("arc-sql");
 
     // ── Match cascade ──────────────────────────────────────────────────────
     let existing: any = assetByArmId.get(m.armId) ?? null;
 
     if (!existing) {
-      const byUuid = (m.vmUuid && assetByVmUuid.get(m.vmUuid))
-        || (m.vmUuidSwapped && assetByVmUuid.get(m.vmUuidSwapped))
-        || null;
+      // UUID candidates, most authoritative first. `vmInstance.instanceUuid`
+      // (Phase 2) leads because it is EXACTLY the value
+      // vcenterService.pickVmExternalId prefers as its externalId — an exact
+      // key match rather than the SMBIOS inference the vmUuid pair relies on.
+      // Each SMBIOS-derived value is tried under both endian variants.
+      const uuidCandidates = [
+        m.vmInstance?.instanceUuid ?? null,
+        m.vmInstance?.biosGuid ?? null,
+        m.vmInstance?.biosGuid ? azureArc.swapVmUuidEndianness(m.vmInstance.biosGuid) : null,
+        m.vmUuid,
+        m.vmUuidSwapped,
+      ].filter((u): u is string => !!u);
+      let byUuid: any = null;
+      for (const u of uuidCandidates) {
+        const hit = assetByVmUuid.get(u);
+        if (hit) { byUuid = hit; break; }
+      }
       if (byUuid) {
         existing = byUuid;
         // This is the join that merges an Arc machine onto its vCenter VM.
@@ -6238,6 +6255,7 @@ async function syncArcDevices(
       assetByArmId.set(m.armId, existing);
       assetIdsWithArcSource.add(existing.id);
       indexVmUuid(m.vmUuid, existing);
+      indexVmUuid(m.vmInstance?.instanceUuid, existing);
       updated.push(label);
 
       if (pendingAssetUpdates.length >= WRITE_CHUNK) await flush();
@@ -6290,6 +6308,7 @@ async function syncArcDevices(
       assetByArmId.set(m.armId, newAsset);
       assetIdsWithArcSource.add(newAsset.id);
       indexVmUuid(m.vmUuid, newAsset);
+      indexVmUuid(m.vmInstance?.instanceUuid, newAsset);
       if (newAsset.hostname) indexHostname(assetByHostnameArcTagged, newAsset.hostname, newAsset);
       created.push(label);
     } catch (err: any) {

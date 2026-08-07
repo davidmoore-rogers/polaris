@@ -576,6 +576,10 @@ async function loadIntegrations() {
           filterRow("Devices", config.deviceInclude, config.deviceExclude);
       } else if (intg.type === "azurearc") {
         var arcSubs = config.subscriptionInclude || [];
+        var arcExtraList = [];
+        if (config.enableVmInstances) arcExtraList.push("VMware / SCVMM");
+        if (config.enableSqlServer) arcExtraList.push("SQL Server");
+        var arcExtras = arcExtraList.length > 0 ? arcExtraList.join(", ") : "None";
         var arcSubsValue = arcSubs.length > 0
           ? escapeHtml(String(arcSubs.length) + " subscription" + (arcSubs.length === 1 ? "" : "s"))
           : '<span style="color:var(--color-text-tertiary)">All visible to the app registration</span>';
@@ -585,6 +589,7 @@ async function loadIntegrations() {
           '<div class="detail-row"><span class="detail-label">Subscriptions</span><span class="detail-value">' + arcSubsValue + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Query Mode</span><span class="detail-value">' + (config.useResourceGraph === false ? "Per-subscription list" : "Resource Graph") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Include Disconnected</span><span class="detail-value">' + (config.includeDisconnected === false ? "No (skipped)" : "Yes") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Extra Resources</span><span class="detail-value">' + escapeHtml(arcExtras) + '</span></div>' +
           filterRow("Resource Groups", config.resourceGroupInclude, config.resourceGroupExclude) +
           filterRow("Machines", config.deviceInclude, config.deviceExclude) +
           filterRow("Tags", config.tagInclude, config.tagExclude);
@@ -4392,6 +4397,8 @@ function azureArcFormHTML(defaults) {
   var argChecked = d.useResourceGraph !== false ? "checked" : "";
   var inclDisc = d.includeDisconnected !== false;
   var netProfile = d.fetchNetworkProfile === true;
+  var vmInst = d.enableVmInstances === true;
+  var sqlSrv = d.enableSqlServer === true;
 
   var rgMode = (d.resourceGroupInclude && d.resourceGroupInclude.length > 0) ? "include" : "exclude";
   var rgNames = rgMode === "include" ? (d.resourceGroupInclude || []) : (d.resourceGroupExclude || []);
@@ -4446,6 +4453,21 @@ function azureArcFormHTML(defaults) {
       '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to re-query Azure Resource Manager for Arc machine updates (1–24 hours)</p></div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Additional Arc Resources</p>' +
+    '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Each option below adds <strong>one</strong> extra Azure query per discovery run for the whole tenant &mdash; not one per machine. Neither creates new devices in Polaris; both attach detail to the Arc machines already discovered.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enableVmInstances" ' + (vmInst ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-enableVmInstances" style="margin:0">Collect Arc-enabled VMware / SCVMM placement</label>' +
+    '</div>' +
+    '<p class="hint">Records which virtualization platform each machine runs on, plus its vCenter/SCVMM identifiers. Also improves matching against an existing VMware vCenter integration: the reported <code>instanceUuid</code> is the exact key vCenter discovery uses, so machines merge onto their existing VM record instead of appearing twice.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enableSqlServer" ' + (sqlSrv ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-enableSqlServer" style="margin:0">Collect Arc-enabled SQL Server instances</label>' +
+    '</div>' +
+    '<p class="hint">Attaches each machine\'s SQL Server instances (edition, version, patch level, licence type) to that machine and tags it <code>arc-sql</code>. SQL instances are recorded as detail on the host &mdash; they never become separate devices.</p>' +
+    calloutHTML("note", "Requires Resource Graph",
+      "Both options are read through Azure Resource Graph, which is what keeps them to one query each. If <em>Query via Azure Resource Graph</em> above is off &mdash; or Resource Graph is unavailable in your tenant &mdash; the discovery run skips this enrichment and says so in its log rather than falling back to a far more expensive per-machine read.") +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Resource Group Filter</p>' +
     '<div class="form-group">' +
@@ -4503,6 +4525,8 @@ function getArcFormConfig() {
     useResourceGraph: document.getElementById("f-useResourceGraph").checked,
     includeDisconnected: document.getElementById("f-includeDisconnected").checked,
     fetchNetworkProfile: document.getElementById("f-fetchNetworkProfile").checked,
+    enableVmInstances: document.getElementById("f-enableVmInstances").checked,
+    enableSqlServer: document.getElementById("f-enableSqlServer").checked,
     resourceGroupInclude: rgMode === "include" ? rgNames : [],
     resourceGroupExclude: rgMode === "exclude" ? rgNames : [],
     deviceInclude: devMode === "include" ? devNames : [],
@@ -5182,6 +5206,8 @@ function _intgEditFormSpec(intg, config) {
         useResourceGraph: config.useResourceGraph !== false,
         includeDisconnected: config.includeDisconnected !== false,
         fetchNetworkProfile: config.fetchNetworkProfile === true,
+        enableVmInstances: config.enableVmInstances === true,
+        enableSqlServer: config.enableSqlServer === true,
         resourceGroupInclude: config.resourceGroupInclude || [],
         resourceGroupExclude: config.resourceGroupExclude || [],
         deviceInclude: config.deviceInclude || [],

@@ -32,6 +32,11 @@ import {
   describeAadTokenError,
   extractArmError,
   throttleDelayMs,
+  parentMachineIdFromExtensionId,
+  buildArcVmInstancesQuery,
+  buildArcSqlInstancesQuery,
+  normalizeArcVmInstance,
+  normalizeArcSqlInstance,
 } from "../../src/services/azureArcService.js";
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -609,5 +614,183 @@ describe("throttleDelayMs", () => {
 
   it("clamps to 60s so a garbled header cannot wedge a run", () => {
     expect(throttleDelayMs(headers({ "retry-after": "99999" }))).toBe(60_000);
+  });
+});
+
+// ─── Phase 2/3: extension resources ─────────────────────────────────────────
+
+describe("parentMachineIdFromExtensionId", () => {
+  const child = ARM_ID + "/providers/Microsoft.ConnectedVMwarevSphere/virtualMachineInstances/default";
+
+  it("returns the owning machine id, lowercased", () => {
+    expect(parentMachineIdFromExtensionId(child)).toBe(ARM_ID.toLowerCase());
+  });
+
+  it("returns null for a plain machine id (no nested provider segment)", () => {
+    expect(parentMachineIdFromExtensionId(ARM_ID)).toBeNull();
+  });
+
+  it("returns null when the parent is not a HybridCompute machine", () => {
+    expect(parentMachineIdFromExtensionId(
+      `/subscriptions/${SUB}/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1`
+        + "/providers/Microsoft.Foo/bars/default",
+    )).toBeNull();
+  });
+
+  it("returns null for junk", () => {
+    expect(parentMachineIdFromExtensionId("")).toBeNull();
+    expect(parentMachineIdFromExtensionId(null)).toBeNull();
+    expect(parentMachineIdFromExtensionId(42)).toBeNull();
+  });
+});
+
+describe("buildArcVmInstancesQuery / buildArcSqlInstancesQuery", () => {
+  it("targets both VMware and SCVMM instance types in one query", () => {
+    const q = buildArcVmInstancesQuery();
+    expect(q).toContain("microsoft.connectedvmwarevsphere/virtualmachineinstances");
+    expect(q).toContain("microsoft.scvmm/virtualmachineinstances");
+  });
+
+  it("targets the Arc SQL instance type", () => {
+    expect(buildArcSqlInstancesQuery()).toContain("microsoft.azurearcdata/sqlserverinstances");
+  });
+
+  it("scopes to validated subscriptions and drops non-GUIDs", () => {
+    // Same injection boundary as the machines query.
+    for (const q of [
+      buildArcVmInstancesQuery({ subscriptionIds: [SUB, "' | project 1 | where '"] }),
+      buildArcSqlInstancesQuery({ subscriptionIds: [SUB, "' | project 1 | where '"] }),
+    ]) {
+      expect(q).toContain(`subscriptionId in~ ('${SUB}')`);
+      expect(q).not.toContain("project 1");
+    }
+  });
+});
+
+describe("normalizeArcVmInstance", () => {
+  const vmwareRow = {
+    id: ARM_ID + "/providers/Microsoft.ConnectedVMwarevSphere/virtualMachineInstances/default",
+    name: "default",
+    type: "microsoft.connectedvmwarevsphere/virtualmachineinstances",
+    properties: {
+      infrastructureProfile: {
+        instanceUuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        biosGuid: "12345678-1234-5678-9abc-def012345678",
+        moRefId: "vm-1234",
+        vCenterId: "/subscriptions/x/vcenters/vc1",
+        inventoryItemId: "inv-1",
+        folderPath: "DC/vm/Prod",
+      },
+      hardwareProfile: { numCPUs: 4, memorySizeMB: 8192 },
+      hostName: "esx01.corp.local",
+    },
+  };
+
+  it("maps a VMware instance and carries the vCenter join key", () => {
+    const vm = normalizeArcVmInstance(vmwareRow);
+    expect(vm?.platform).toBe("vmware");
+    expect(vm?.parentMachineId).toBe(ARM_ID.toLowerCase());
+    // The whole point of Phase 2 for dedupe: instanceUuid is exactly what
+    // vcenterService.pickVmExternalId prefers as its externalId.
+    expect(vm?.instanceUuid).toBe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    expect(vm?.biosGuid).toBe("12345678-1234-5678-9abc-def012345678");
+    expect(vm?.moRefId).toBe("vm-1234");
+    expect(vm?.cpuCount).toBe(4);
+    expect(vm?.memoryMB).toBe(8192);
+  });
+
+  it("detects the SCVMM platform from the resource type", () => {
+    const vm = normalizeArcVmInstance({
+      ...vmwareRow, type: "microsoft.scvmm/virtualmachineinstances",
+    });
+    expect(vm?.platform).toBe("scvmm");
+  });
+
+  it("returns null when the row has no resolvable parent machine", () => {
+    expect(normalizeArcVmInstance({ ...vmwareRow, id: "/nonsense" })).toBeNull();
+    expect(normalizeArcVmInstance(null)).toBeNull();
+  });
+
+  it("survives a row with no profiles at all", () => {
+    const vm = normalizeArcVmInstance({ id: vmwareRow.id, type: vmwareRow.type });
+    expect(vm?.instanceUuid).toBeNull();
+    expect(vm?.cpuCount).toBeNull();
+    expect(vm?.parentMachineId).toBe(ARM_ID.toLowerCase());
+  });
+
+  it("rejects an all-zero instanceUuid rather than indexing it", () => {
+    // Same mass-merge hazard as the SMBIOS vmUuid.
+    const vm = normalizeArcVmInstance({
+      ...vmwareRow,
+      properties: { infrastructureProfile: { instanceUuid: "00000000-0000-0000-0000-000000000000" } },
+    });
+    expect(vm?.instanceUuid).toBeNull();
+  });
+});
+
+describe("normalizeArcSqlInstance", () => {
+  const sqlRow = {
+    id: `/subscriptions/${SUB}/resourceGroups/rg-prod/providers/Microsoft.AzureArcData/sqlServerInstances/WEB01_MSSQLSERVER`,
+    name: "WEB01_MSSQLSERVER",
+    type: "microsoft.azurearcdata/sqlserverinstances",
+    properties: {
+      containerResourceId: ARM_ID,
+      instanceName: "MSSQLSERVER",
+      edition: "Standard",
+      version: "SQL Server 2019",
+      patchLevel: "15.0.4322.2",
+      status: "Connected",
+      licenseType: "Paid",
+      vCore: "8",
+    },
+  };
+
+  it("links to its machine via containerResourceId, not the id path", () => {
+    // A SQL instance is a TOP-LEVEL resource that points at its machine, so
+    // parentMachineIdFromExtensionId would never find it.
+    const sql = normalizeArcSqlInstance(sqlRow);
+    expect(sql?.parentMachineId).toBe(ARM_ID.toLowerCase());
+    expect(sql?.instanceName).toBe("MSSQLSERVER");
+    expect(sql?.edition).toBe("Standard");
+    expect(sql?.version).toBe("SQL Server 2019");
+    expect(sql?.vCoreCount).toBe(8);
+  });
+
+  it("returns null when the container link is missing or not a machine", () => {
+    expect(normalizeArcSqlInstance({ ...sqlRow, properties: {} })).toBeNull();
+    expect(normalizeArcSqlInstance({
+      ...sqlRow,
+      properties: { containerResourceId: `/subscriptions/${SUB}/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1` },
+    })).toBeNull();
+    expect(normalizeArcSqlInstance(null)).toBeNull();
+  });
+});
+
+describe("buildArcObservedBlob — Phase 2/3 fields", () => {
+  it("carries null / empty when the toggles were never enabled", () => {
+    // An operator who never opted in must see no change in the blob shape.
+    const blob = buildArcObservedBlob(norm(RP_ROW), new Date("2026-08-07T12:00:00Z"));
+    expect(blob.vmInstance).toBeNull();
+    expect(blob.sqlInstances).toEqual([]);
+  });
+
+  it("carries the attached extension resources when present", () => {
+    const m = norm(RP_ROW);
+    m.vmInstance = {
+      platform: "vmware",
+      parentMachineId: m.armId,
+      instanceUuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      biosGuid: null, moRefId: "vm-1", vCenterId: null, inventoryItemId: null,
+      hostName: "esx01", cpuCount: 4, memoryMB: 8192, folderPath: null,
+    };
+    m.sqlInstances = [{
+      parentMachineId: m.armId, name: "WEB01_MSSQLSERVER", instanceName: "MSSQLSERVER",
+      edition: "Standard", version: "SQL Server 2019", patchLevel: null,
+      status: "Connected", licenseType: "Paid", vCoreCount: 8,
+    }];
+    const blob = buildArcObservedBlob(m, new Date("2026-08-07T12:00:00Z")) as any;
+    expect(blob.vmInstance.platform).toBe("vmware");
+    expect(blob.sqlInstances).toHaveLength(1);
+    expect(blob.sqlInstances[0].edition).toBe("Standard");
   });
 });

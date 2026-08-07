@@ -2943,7 +2943,7 @@ Listed alphabetically.
 
 **What it owns:** Azure Arc (Arc-enabled servers) discovery via Azure Resource Manager — `Microsoft.HybridCompute/machines`. The Connected Machine agent runs in the guest, so this source carries host truth (running OS SKU, real FQDN, live SMBIOS data, heartbeat status) rather than a directory record.
 
-**Public API:** `testConnection(config)`, `proxyQuery(config, method, path, query?, body?)`, `discoverMachines(config, signal?, onProgress?)`, plus the pure helpers the unit tests drive: `normalizeSubscriptionId`, `buildArcMachinesQuery`, `normalizeVmUuid`, `swapVmUuidEndianness`, `parseArmResourceId`, `normalizeArcMachine`, `extractIpAddresses`, `inferArcAssetType`, `arcStatusIsConnected`, `matchesTagFilter`, `filterArcMachines`, `arcHostnameCandidates`, `buildArcObservedBlob`, `describeAadTokenError`, `extractArmError`, `throttleDelayMs`. Types `AzureArcConfig` / `DiscoveredArcMachine` / `ArcDiscoveryResult`.
+**Public API:** `testConnection(config)`, `proxyQuery(config, method, path, query?, body?)`, `discoverMachines(config, signal?, onProgress?)`, plus the pure helpers the unit tests drive: `normalizeSubscriptionId`, `buildArcMachinesQuery`, `buildArcVmInstancesQuery`, `buildArcSqlInstancesQuery`, `normalizeVmUuid`, `swapVmUuidEndianness`, `parseArmResourceId`, `parentMachineIdFromExtensionId`, `normalizeArcMachine`, `normalizeArcVmInstance`, `normalizeArcSqlInstance`, `extractIpAddresses`, `inferArcAssetType`, `arcStatusIsConnected`, `matchesTagFilter`, `filterArcMachines`, `arcHostnameCandidates`, `buildArcObservedBlob`, `describeAadTokenError`, `extractArmError`, `throttleDelayMs`. Types `AzureArcConfig` / `DiscoveredArcMachine` / `ArcVmInstance` / `ArcSqlInstance` / `ArcDiscoveryResult`.
 
 **Cross-service deps:** `src/utils/entraClientCredentials.ts` (the SAME token-request builder the Graph client uses — only the scope differs, at `https://management.azure.com/.default`; do not fork it), `src/utils/integrationFilter.ts -> matchesWildcard`, `src/utils/errors.ts -> AppError`.
 
@@ -2958,6 +2958,8 @@ Listed alphabetically.
 - `proxyQuery` is host-pinned to `management.azure.com`, requires an `api-version`, and permits POST only to `/providers/Microsoft.ResourceGraph/resources`.
 - API versions are module-level consts and are **verify-on-real-tenant**, as is the `detectedProperties` bag — its key names vary by Connected Machine agent version, so every read of it is optional-chained and case-tolerant.
 - `fetchNetworkProfile` is ONE GET PER MACHINE: default off, concurrency-capped, deadline-bounded, and it reports what it skipped rather than silently truncating.
+- The extension-resource enrichment (`enableVmInstances` / `enableSqlServer`) is **Resource-Graph-only and creates no assets**. Both fold into the owning machine's record. If you ever add a resource-provider fallback for them, remember why there isn't one: ARG costs one query for the tenant, the RP costs one GET per machine. The two parent links are NOT the same shape — VM instances nest under the machine id, SQL instances point at it via `properties.containerResourceId`.
+- An extension row whose parent machine isn't in this run's result set is ORPHANED, not an error — the machine may simply have been filtered out.
 
 **When changing this:**
 - A new PROJECTED field needs three things in lockstep: the key in `buildArcObservedBlob`, an `arc` rule in `src/utils/assetProjection.ts` at a justified rank, and the `syncArcDevices` line that copies it out of the projection.
