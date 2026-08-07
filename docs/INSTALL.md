@@ -1323,6 +1323,37 @@ Pre-1809 / pre-Server 2019 hosts have no OpenSSH Server capability; both scripts
 
 > The generated scripts create privileged accounts, grant passwordless sudo on Linux, and modify firewall rules across your fleet. Have someone review them before they go into Intune/GPO/Ansible — "Polaris generated it" is not a substitute for that review.
 
+### Optional: let Polaris publish the script for you
+
+Downloading the script and pushing it yourself works fine and needs no extra permissions. If you'd rather skip that step, Polaris can deliver it through the two Azure vehicles it already holds credentials for. Both are **off by default**, enabled per integration on its **Script Publishing** tab, because each needs a vendor-side grant that the read-only discovery credential deliberately lacks.
+
+#### Intune (Windows)
+
+Uploads the remediation + detection pair as an Intune **Remediation**.
+
+1. Open the app registration behind your Entra ID integration → **API permissions**.
+2. Add the Microsoft Graph **application** permission `DeviceManagementConfiguration.ReadWrite.All`.
+3. **Grant admin consent** — application permissions do nothing without it.
+4. Tick *Allow Polaris to publish scripts to Intune* on the integration's Script Publishing tab.
+5. Integrations → Polaris Agent → SSH Deployment → **Publish to Intune**.
+
+**Polaris never assigns the policy.** It arrives targeting nothing; you review the script and choose device groups in the Intune console. Re-publishing updates the same policy rather than creating a second one.
+
+Note the permission grade: this takes the credential from "reads your device inventory" to "creates device-management policy across the tenant", and an application permission carries no user context.
+
+#### Azure Arc (Windows **and** Linux)
+
+Runs the script directly on Arc-connected machines via **Run Command**. This is how Linux and Windows Server get onboarded — Intune deploys scripts to neither.
+
+1. Discovery needs only **Reader**. This additionally needs a role carrying `Microsoft.HybridCompute/machines/runCommands/write` — e.g. **Azure Connected Machine Resource Administrator**, or a custom role.
+2. Assign it to the service principal at the **subscription or resource-group scope** covering the machines you intend to onboard. This is an **Azure RBAC role assignment**, not a Graph API permission — a different mechanism from the Intune side, and a common point of confusion.
+3. Tick *Allow Polaris to run deployment scripts* on the Arc integration's Script Publishing tab.
+4. Integrations → Polaris Agent → SSH Deployment → Azure Arc → **Choose machines…**, tick the targets, confirm.
+
+> **A run command executes immediately.** Unlike an Intune Remediation there is no unassigned state to review first — creating one runs the script as root/SYSTEM on that machine. Polaris only ever targets machines you explicitly tick, caps a run at 200, preselects nothing, and disables any machine whose OS Arc doesn't report rather than guessing which script to send. **Your selection is the review step.** Run against one machine first and confirm the outcome before doing a batch.
+
+Each machine gets the script matching its OS. Results appear in the dispatch dialog; Polaris reports *dispatch*, and the script then runs asynchronously on the machine, so outcomes appear a few moments later.
+
 ### Upgrade agents on already-installed hosts
 
 When `agent/VERSION` advances and you build (or auto-build fires), existing installed agents stay on their old binaries until you push the upgrade.

@@ -221,7 +221,11 @@
           runBtn.textContent = "Dispatching…";
           api.serverSettings.arcRun(integrationId, armIds)
             .then(function (r) {
-              closeModal();
+              // Deliberately do NOT close the dialog. Polaris reports
+              // DISPATCH; the script then runs asynchronously on each machine,
+              // so closing here would leave the operator with no way to see
+              // whether it actually worked short of the Azure portal.
+              showArcResults(integrationId, r);
               showToast(
                 "Dispatched to " + r.dispatched + " machine(s)" +
                 (r.skipped ? ", " + r.skipped + " skipped" : "") +
@@ -239,6 +243,87 @@
     }
     sync();
     void machines;
+  }
+
+  // Replace the picker with a per-machine result view. Dispatch is only half
+  // the story — the script runs asynchronously on the machine afterwards, so
+  // the operator needs somewhere to see the exit code without leaving Polaris.
+  function showArcResults(integrationId, r) {
+    var rows = (r.results || []).map(function (m) {
+      var state = m.dispatched
+        ? '<span class="badge badge-active">dispatched</span>'
+        : m.skipped
+          ? '<span class="hint" style="margin:0">skipped &mdash; ' + escapeHtml(m.skipped) + '</span>'
+          : '<span style="color:var(--color-danger)">failed &mdash; ' + escapeHtml(m.error || "unknown") + '</span>';
+      return '<tr data-armid="' + escapeHtml(m.armId) + '">' +
+        '<td>' + escapeHtml(m.name) + '</td>' +
+        '<td>' + state + '</td>' +
+        '<td class="wssh-arc-outcome mono" style="font-size:0.8rem">' +
+          (m.dispatched ? '<span class="hint" style="margin:0">not checked yet</span>' : "&mdash;") +
+        '</td>' +
+      '</tr>';
+    }).join("");
+
+    var body =
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0 0 0.75rem 0">' +
+        'Polaris reports <strong>dispatch</strong> &mdash; Azure then runs the script on each machine ' +
+        'asynchronously, so outcomes appear a few moments later. Check outcomes to read the exit code and output ' +
+        'back from Azure.' +
+      '</p>' +
+      '<div style="max-height:22rem;overflow:auto">' +
+        '<table class="data-table"><thead><tr><th>Machine</th><th>Dispatch</th><th>Outcome</th></tr></thead>' +
+        '<tbody id="wssh-arc-results">' + rows + '</tbody></table>' +
+      '</div>';
+
+    openModal(
+      "Run results",
+      body,
+      '<button class="btn btn-secondary" id="wssh-arc-check">Check outcomes</button>' +
+      '<button class="btn btn-primary" onclick="closeModal()">Done</button>',
+      { wide: true },
+    );
+
+    var check = el("wssh-arc-check");
+    if (check) {
+      check.addEventListener("click", function () {
+        check.disabled = true;
+        check.textContent = "Checking…";
+        var trs = Array.prototype.slice.call(
+          document.querySelectorAll("#wssh-arc-results tr"),
+        ).filter(function (tr) {
+          return tr.querySelector(".wssh-arc-outcome").textContent.indexOf("not checked") !== -1;
+        });
+        // Sequential on purpose: this is an operator-paced read of at most a
+        // couple of hundred rows, and ARM throttles per subscription.
+        var i = 0;
+        (function next() {
+          if (i >= trs.length) {
+            check.disabled = false;
+            check.textContent = "Check outcomes";
+            return;
+          }
+          var tr = trs[i++];
+          var cell = tr.querySelector(".wssh-arc-outcome");
+          api.serverSettings.arcRunResult(integrationId, tr.getAttribute("data-armid"))
+            .then(function (res) {
+              var v = res && res.result;
+              if (!v) { cell.textContent = "no result yet"; return; }
+              var ok = v.exitCode === 0;
+              cell.innerHTML =
+                '<span style="color:var(--color-' + (ok ? "success" : "danger") + ')">' +
+                  escapeHtml(v.provisioningState || "?") +
+                  (v.exitCode === null ? "" : " (exit " + v.exitCode + ")") +
+                '</span>' +
+                (v.stdout ? '<br><span class="hint" style="margin:0">' +
+                  escapeHtml(String(v.stdout).slice(0, 200)) + '</span>' : "");
+            })
+            .catch(function (err) {
+              cell.textContent = (err && err.message) ? err.message : "lookup failed";
+            })
+            .finally(next);
+        })();
+      });
+    }
   }
 
   function loadArcTargets() {
