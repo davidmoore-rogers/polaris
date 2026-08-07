@@ -138,6 +138,79 @@ const NAV_ITEMS = [
   { href: "/users.html",        label: "Users",        icon: "users", adminOnly: true },
 ];
 
+/**
+ * Sidebar "Push notifications" toggle + service-worker registration.
+ *
+ * Gated on alerts:read, which is what the push routes themselves require —
+ * pushSubscriptions.ts states the intent outright ("any viewer may opt into
+ * push"). Previously the only control lived on /automations.html, which is
+ * page-gated automationManagement:read, so a role with alerts but not
+ * automation management could never enroll.
+ *
+ * Registering the worker here (rather than lazily on first toggle) means the
+ * push handler is live on every page for anyone who has already granted
+ * permission, and reconcileSubscription repairs a rotated endpoint.
+ *
+ * The click handler branches off cached state and never awaits before
+ * enable() — awaiting burns the click's transient user activation and Safari
+ * then refuses the permission prompt. See the ordering comment in push.js.
+ */
+function wirePushToggle() {
+  const wrap = document.getElementById("push-toggle-wrap");
+  const btn = document.getElementById("btn-push-toggle");
+  const label = document.getElementById("btn-push-label");
+  if (!wrap || !btn || !label) return;
+  if (!window.polarisPush || !polarisPush.isSupported()) return;
+  if (!permAtLeast("alerts", "read")) return;
+
+  let state = null;
+  let busy = false;
+
+  function paint(st) {
+    state = st;
+    // No Web Push channel configured server-side — hide rather than offer a
+    // control that can only error. Mirrors the Automations page.
+    if (!st || !st.enabledOnServer) { wrap.style.display = "none"; return; }
+    if (st.permission === "denied") {
+      // Sticky: requestPermission() resolves instantly with no UI once denied.
+      wrap.style.display = "";
+      label.textContent = "Push blocked in browser";
+      btn.disabled = true;
+      btn.title = "Notifications are blocked for this site in your browser settings.";
+      return;
+    }
+    wrap.style.display = "";
+    btn.disabled = false;
+    btn.title = "";
+    label.textContent = st.subscribed ? "Disable push" : "Enable push";
+  }
+
+  btn.addEventListener("click", function () {
+    if (busy || !state || state.permission === "denied") return;
+    busy = true;
+    const wasSubscribed = !!state.subscribed;
+    label.textContent = wasSubscribed ? "Disabling…" : "Enabling…";
+
+    const action = wasSubscribed ? polarisPush.disable() : polarisPush.enable({ surface: "desktop" });
+    action.then(function () {
+      if (typeof showToast === "function") {
+        showToast(wasSubscribed ? "Push notifications disabled" : "Push notifications enabled", wasSubscribed ? "info" : "success");
+      }
+    }).catch(function (err) {
+      if (typeof showToast === "function") showToast((err && err.message) || "Push action failed", "error");
+    }).then(function () {
+      busy = false;
+      return polarisPush.status().then(paint).catch(function () {});
+    });
+  });
+
+  polarisPush.registerSW()
+    .then(function () { return polarisPush.reconcileSubscription("desktop"); })
+    .catch(function () { /* push is optional */ });
+
+  polarisPush.status().then(paint).catch(function () { wrap.style.display = "none"; });
+}
+
 const ICONS = {
   grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
@@ -208,6 +281,16 @@ function renderNav() {
       <div style="padding:${(isAdmin() || canManageAssets()) ? '0.25rem' : '0.5rem'} 0.5rem 0;${(isAdmin() || canManageAssets()) ? '' : 'border-top:1px solid var(--color-border-light);'}">
         <button id="btn-theme-toggle" class="theme-toggle">${_getCurrentTheme() === 'dark' ? _sunIcon() : _moonIcon()}<span>${_getCurrentTheme() === 'dark' ? 'Light Mode' : 'Dark Mode'}</span></button>
       </div>
+      <!-- Push enrollment lives here, not only on the Automations page. The
+           push routes gate on alerts:read ("any viewer may opt into push"),
+           but /automations.html is page-gated automationManagement:read — so
+           an alerts-focused role could not enroll at all. The sidebar renders
+           on every page, which also fixes discoverability. Hidden until
+           wirePushToggle() confirms browser support + a configured server
+           channel. -->
+      <div id="push-toggle-wrap" style="display:none;padding:0.25rem 0.5rem 0">
+        <button id="btn-push-toggle" class="theme-toggle">${ICONS.bell || ''}<span id="btn-push-label">Push notifications</span></button>
+      </div>
       <div style="padding:0.25rem 0.5rem 0.75rem">
         <a href="#" id="btn-logout" class="sidebar-bottom-link sidebar-bottom-link-logout">${ICONS.logout}<span>Logout</span></a>
       </div>
@@ -224,6 +307,8 @@ function renderNav() {
     try { await fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() }); } catch (_) {}
     window.location.href = "/login.html";
   });
+
+  wirePushToggle();
 
   // Wire up query status indicator
   _onQueriesChanged = renderQueryStatus;
