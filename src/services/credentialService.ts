@@ -69,6 +69,14 @@ export interface SshConfig {
   password?: string;
   privateKey?: string;
   publicKey?: string;
+  /**
+   * Unlocks an ENCRYPTED `privateKey`. Only meaningful for an operator-supplied
+   * key from their own escrow — a Polaris-generated deployment key is never
+   * exported, so a passphrase on it would just sit next to the key it protects.
+   * Without this, ssh2 fails at parse with "Encrypted private OpenSSH key
+   * detected, but no passphrase given".
+   */
+  passphrase?: string;
   port?: number;
   /**
    * Authenticate the SERVER via trust-on-first-use host-key pinning
@@ -129,7 +137,7 @@ const MASK = SECRET_MASK;
 const SECRET_FIELDS_BY_TYPE: Record<CredentialType, string[]> = {
   snmp:    ["community", "authKey", "privKey"],
   winrm:   ["password"],
-  ssh:     ["password", "privateKey"],
+  ssh:     ["password", "privateKey", "passphrase"],
   restapi: ["apiToken"],
 };
 
@@ -236,6 +244,11 @@ function validateSshConfig(config: Record<string, unknown>): void {
   }
   if (config.verifyHostKey !== undefined && typeof config.verifyHostKey !== "boolean") {
     throw new AppError(400, "SSH verifyHostKey must be a boolean");
+  }
+  // A passphrase unlocks a private key and means nothing without one. Catching
+  // it here beats a connect-time parse error the operator has to decode.
+  if (typeof config.passphrase === "string" && config.passphrase.length > 0 && !hasKey) {
+    throw new AppError(400, "SSH passphrase only applies to a private key — add the key, or clear the passphrase");
   }
 }
 

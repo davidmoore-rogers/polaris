@@ -29,6 +29,7 @@ export function withSshClient<T>(
   const username = String(config.username || "");
   const password = typeof config.password === "string" ? config.password : "";
   const privateKey = typeof config.privateKey === "string" ? config.privateKey : "";
+  const passphrase = typeof config.passphrase === "string" ? config.passphrase : "";
   const port = Number.isFinite(Number(config.port)) ? Number(config.port) : 22;
   if (!username || (!password && !privateKey)) {
     return Promise.reject(new Error("SSH credential is missing username or password/privateKey"));
@@ -55,8 +56,14 @@ export function withSshClient<T>(
     client.on("error", (err) => finish(err));
 
     const opts: any = { host, port, username, readyTimeout: 30_000 };
-    if (privateKey) opts.privateKey = privateKey;
-    else opts.password = password;
+    if (privateKey) {
+      opts.privateKey = privateKey;
+      // Required for an encrypted key; ssh2 otherwise fails at parse with
+      // "Encrypted private OpenSSH key detected, but no passphrase given".
+      if (passphrase) opts.passphrase = passphrase;
+    } else {
+      opts.password = password;
+    }
     // Opt-in server authentication (SshConfig.verifyHostKey). Absent the flag
     // this stays the pre-2026-08 behavior: ssh2 with no hostVerifier accepts
     // ANY host key. See sshHostKeyService for why it's opt-in.

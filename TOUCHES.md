@@ -2664,9 +2664,9 @@ Listed alphabetically.
 - src/api/routes/assets.ts — GET /assets/:id/resolve-monitor-setting, fetch credential for asset monitoring setup
 
 **Invariants:**
-- Secret fields (community, authKey, privKey, password, privateKey, apiToken) are masked to "••••••••" on every GET; empty string and mask are treated as "preserve from stored value" on PUT.
+- Secret fields (community, authKey, privKey, password, privateKey, passphrase, apiToken) are masked to "••••••••" on every GET; empty string and mask are treated as "preserve from stored value" on PUT. `publicKey` is deliberately NOT in that list — see services/windowsSshOnboardingService.ts.
 - SNMP v2c requires community; v3 requires username + security level + auth/priv keys per level.
-- SSH requires username + (password OR privateKey); WinRM requires both username + password.
+- SSH requires username + (password OR privateKey); WinRM requires both username + password. An SSH `passphrase` is rejected without a `privateKey` — it unlocks a key and means nothing alone, and catching it at save time beats a connect-time ssh2 parse error the operator has to decode. Both `ssh2.connect` sites attach it ONLY on the key path and only when non-empty.
 - REST API requires baseUrl (http/https only, no trailing slash stored) + apiToken; verifyTls defaults false.
 - Delete fails with 409 when the credential is effectively used or still referenced, via `getCredentialUsage` (NOT a hand-maintained column list). Effective usage covers all 8 per-stream Asset credential slots + the `monitorCredentialId` default, plus class-override and integration-default inheritance; a class/integration reference with no matching asset also 409s (deleting would silently SET NULL it). The FK columns themselves are ON DELETE SET NULL, so this guard is the only thing preventing silent unwiring.
 - Credential-usage resolution is by FK wiring (asset stream → asset default → class-override stream → integration `config.monitorCredentialId`), NOT polling-method type-match — it answers "where is this configured." The eight stream slots (`CREDENTIAL_STREAMS`) are responseTime / cpuMemory / temperature / interfaces / lldp / customWidget / processes / eventLog; storage rides `interfaces`. The manual tier (Setting "manualMonitorSettings") carries no default credential, so manual assets resolve through asset + class tiers only.
