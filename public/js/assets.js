@@ -4430,7 +4430,6 @@ function _assetGeneralTabHTML(a) {
       viewRow("Type", ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
       viewRow("Status", a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-") +
       authorizationRowHTML(a) +
-      disabledInHTML(a.tags) +
       viewRow("Location", a.location || a.learnedLocation) +
       ((a.latitude != null && a.longitude != null)
         ? viewRow("Coordinates", a.latitude.toFixed(4) + ", " + a.longitude.toFixed(4) + (a.coordSource === "manual" ? " (manual)" : ""), true)
@@ -13381,17 +13380,11 @@ function haTopologyHTML(asset) {
     '<div class="detail-row"><span class="detail-label">HA Peer</span><span class="detail-value mono">' + peerHTML + '</span></div>';
 }
 
-function disabledInHTML(tags) {
-  var t = Array.isArray(tags) ? tags : [];
-  var sources = [];
-  if (t.indexOf("entra-disabled") !== -1) sources.push("Entra ID");
-  if (t.indexOf("ad-disabled") !== -1) sources.push("Active Directory");
-  if (sources.length === 0) return '';
-  var badges = sources.map(function (s) {
-    return '<span style="display:inline-block;padding:1px 8px;border-radius:4px;font-size:0.8rem;background:var(--color-warning-bg,#7c4a00);color:var(--color-warning,#fbbf24);margin-right:4px">' + escapeHtml(s) + '</span>';
-  }).join('');
-  return '<div class="detail-row"><span class="detail-label">Disabled In</span><span class="detail-value">' + badges + '</span></div>';
-}
+// The former "Disabled In" detail row was removed: a directory-disabled
+// account now lands the asset in status="decommissioned" (see the Entra/AD
+// syncs in discoveryEngine.ts), so the Status pill already tells the story.
+// The `ad-disabled` / `entra-disabled` tags are still written and remain
+// filterable on the Assets table for anyone who needs the source breakdown.
 
 function formatMacSource(source) {
   switch (source) {
