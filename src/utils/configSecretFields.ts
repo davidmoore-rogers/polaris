@@ -87,22 +87,49 @@ export function secretJsonFieldFor(model: string): "config" | "value" | null {
 const MAX_WALK_DEPTH = 8;
 
 /**
+ * Depth budget for walking a whole Prisma READ RESULT rather than a lone config
+ * blob. A nested read stacks hops before the blob is even reached — e.g.
+ * findMany array → reservation row → subnet → integration → config → apiToken —
+ * so the blob-sized budget above would truncate before finding anything.
+ */
+export const RESULT_WALK_DEPTH = 16;
+
+/**
+ * Should the walk descend into this object, or is it an opaque value?
+ *
+ * Only PLAIN objects (and arrays, handled by the caller) are structure to walk.
+ * Everything else — Date, Buffer, Prisma's Decimal, class instances — is a leaf.
+ *
+ * This matters because `transformSecretFields` REBUILDS the objects it walks:
+ * descending into a Date would rebuild it as `{}` (a Date has no own enumerable
+ * properties), silently destroying every `createdAt` / `lastSeen` in a result
+ * row. Harmless while the walk only ever saw JSON config blobs; load-bearing now
+ * that it also walks read results to open nested relation payloads.
+ */
+function isWalkable(value: object): boolean {
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
  * Recursively transform every string leaf whose key is a secret key.
  *
  * Returns a NEW structure — never mutates the input, because Prisma args and
  * query results are shared with the caller. Non-objects, numbers, booleans and
- * nulls pass through untouched.
+ * nulls pass through untouched, as do non-plain objects (see `isWalkable`).
  */
 export function transformSecretFields(
   value: unknown,
   transform: (plain: string) => string,
   depth = 0,
+  maxDepth = MAX_WALK_DEPTH,
 ): unknown {
-  if (depth > MAX_WALK_DEPTH) return value;
+  if (depth > maxDepth) return value;
   if (Array.isArray(value)) {
-    return value.map((v) => transformSecretFields(v, transform, depth + 1));
+    return value.map((v) => transformSecretFields(v, transform, depth + 1, maxDepth));
   }
   if (value === null || typeof value !== "object") return value;
+  if (!isWalkable(value)) return value;
 
   const src = value as Record<string, unknown>;
   const out: Record<string, unknown> = {};
@@ -110,8 +137,46 @@ export function transformSecretFields(
     if (typeof v === "string" && SECRET_CONFIG_KEYS.has(k)) {
       out[k] = transform(v);
     } else {
-      out[k] = transformSecretFields(v, transform, depth + 1);
+      out[k] = transformSecretFields(v, transform, depth + 1, maxDepth);
     }
   }
   return out;
+}
+
+/**
+ * Does this structure hold at least one secret-keyed string matching `predicate`?
+ *
+ * A read-only pre-scan for the read path: `transformSecretFields` rebuilds every
+ * object it touches, which is far too much allocation to run over every row of
+ * every query. In practice almost nothing coming back from the database carries a
+ * sealed secret, so this answers "is there anything to do?" without allocating —
+ * `for…in` over a plain object, no `Object.entries` arrays — and the rebuild only
+ * runs on the rare result that actually needs it.
+ */
+export function containsSecretField(
+  value: unknown,
+  predicate: (v: string) => boolean,
+  depth = 0,
+  maxDepth = RESULT_WALK_DEPTH,
+): boolean {
+  if (depth > maxDepth) return false;
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      if (containsSecretField(v, predicate, depth + 1, maxDepth)) return true;
+    }
+    return false;
+  }
+  if (value === null || typeof value !== "object") return false;
+  if (!isWalkable(value)) return false;
+
+  const src = value as Record<string, unknown>;
+  for (const k in src) {
+    const v = src[k];
+    if (typeof v === "string") {
+      if (SECRET_CONFIG_KEYS.has(k) && predicate(v)) return true;
+    } else if (containsSecretField(v, predicate, depth + 1, maxDepth)) {
+      return true;
+    }
+  }
+  return false;
 }

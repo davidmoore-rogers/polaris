@@ -41,8 +41,12 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { normalizeManufacturer } from "./utils/manufacturerNormalize.js";
 import { applyHostnameOverride, applyIpOverride, type IpOverrideOutcome } from "./utils/assetInvariants.js";
 import { deriveAssetSources, type AssetSnapshot } from "./utils/assetSourceDerivation.js";
-import { sealValue, openValue } from "./utils/secretBox.js";
-import { transformSecretFields } from "./utils/configSecretFields.js";
+import { sealValue, openValue, isSealed } from "./utils/secretBox.js";
+import {
+  transformSecretFields,
+  containsSecretField,
+  RESULT_WALK_DEPTH,
+} from "./utils/configSecretFields.js";
 
 // Lazy-resolved to break the import cycle (dnsResolvedReservationService imports
 // `prisma` from this file). The hooks below only invoke the service at runtime,
@@ -405,12 +409,47 @@ function openResultRows(result: unknown, jsonField: "config" | "value"): unknown
   return { ...row, [jsonField]: transformSecretFields(blob, openValue) };
 }
 
-// Hooks are registered PER MODEL rather than via `$allModels.$allOperations`.
-// $allOperations widens every model's result type to `{}` / `any` across the
-// whole generated client (its callback signature is untyped by construction), so
-// the codebase loses Prisma's types wholesale. Per-model hooks keep them, at the
-// cost of this small amount of repetition — the same trade the asset and mibFile
-// hooks below already make.
+/**
+ * Open every sealed secret anywhere in a query RESULT, at any nesting depth.
+ *
+ * The per-model hooks below only fire for TOP-LEVEL operations on their model —
+ * that is how Prisma query extensions work, and it is not configurable. A
+ * relation read pulls the same rows without ever entering them:
+ *
+ *   prisma.asset.findUnique({ include: { monitorCredential: true } })
+ *
+ * runs the `asset` hooks, never the `credential` ones, so `monitorCredential.
+ * config.community` comes back as ciphertext. That is not a corner case here —
+ * it is how the monitor hot path loads every credential it polls with, how
+ * reservation push loads the FortiGate API token, and how description sync loads
+ * its integration. Sealing those columns therefore broke SNMP / WinRM / SSH /
+ * FortiOS polling and DHCP push on the first install that set POLARIS_SECRET_KEY,
+ * while the surfaces that read a credential top-level (the SNMP Walk tab, the
+ * credential Test button, discovery) kept working — which is exactly the shape
+ * the field report had.
+ *
+ * So the open pass runs over the whole result of every operation, on every
+ * model, rather than per-model. Correctness here cannot depend on remembering to
+ * register a model, or on nobody adding an `include` later.
+ *
+ * Cost: a read-only `containsSecretField` pre-scan (no allocation) on each
+ * result, and a rebuild only when something sealed is actually present — which
+ * is never, for the sample and asset queries that dominate the hot loops.
+ *
+ * `openValue` passes plaintext through and never throws, so this stays a no-op
+ * on an un-keyed install and degrades to an empty secret on a key mismatch.
+ */
+function openNestedSecrets<T>(result: T): T {
+  if (!result || typeof result !== "object") return result;
+  if (!containsSecretField(result, isSealed)) return result;
+  return transformSecretFields(result, openValue, 0, RESULT_WALK_DEPTH) as T;
+}
+
+// The remaining hooks below are registered PER MODEL rather than via
+// `$allModels.$allOperations`, because they seal WRITE ARGUMENTS and so have to
+// know which JSON column of which model they are looking at. The read-side open
+// pass is the opposite case — it is a property of the result, not of the model —
+// and is registered once for all models in `secretOpenExtension` below.
 
 type Hook = { args: any; query: (args: any) => Promise<any> };
 
@@ -437,8 +476,29 @@ function secretHooks(jsonField: "config" | "value") {
   };
 }
 
-function _buildClient(base: PrismaClient) {
+/**
+ * The all-models read-side open pass, as its OWN `$extends` layer.
+ *
+ * Kept separate from the per-model extension below so composition is
+ * unambiguous: Prisma runs both layers, rather than leaving it to precedence
+ * rules between `$allModels` and a specific model key inside one extension. The
+ * two overlap only on the four secret-bearing models, where opening twice is a
+ * no-op (`openValue` passes plaintext through).
+ */
+function _applySecretOpen(base: PrismaClient) {
   return base.$extends({
+    query: {
+      $allModels: {
+        async $allOperations({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
+          return openNestedSecrets(await query(args));
+        },
+      },
+    },
+  });
+}
+
+function _buildClient(base: PrismaClient) {
+  return _applySecretOpen(base).$extends({
     query: {
       // Secret-at-rest coverage. Must stay in step with SECRET_BEARING_MODELS /
       // secretJsonFieldFor() in utils/configSecretFields.ts, which is what the
