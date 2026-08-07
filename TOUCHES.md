@@ -1591,17 +1591,20 @@ Listed alphabetically.
 
 **What it owns:** The write path for the `PushSubscription` table — per-user Web Push subscriptions stored by the `/push-subscriptions` routes.
 
-**Public API:** `savePushSubscription({userId, endpoint, p256dh, auth, userAgent})` (upsert by endpoint; re-subscribe re-owns an endpoint that moved to a different user on a shared machine and refreshes the keys), `deletePushSubscription(userId, endpoint)` (owner-scoped deleteMany).
+**Public API:** `savePushSubscription({userId, endpoint, p256dh, auth, userAgent, surface?, oldEndpoint?})` (upsert by endpoint; re-subscribe re-owns an endpoint that moved to a different user on a shared machine and refreshes the keys), `deletePushSubscription(userId, endpoint)` (owner-scoped deleteMany).
 
 **Cross-service deps:** `prisma` only.
 
-**Used by:** `src/api/routes/pushSubscriptions.ts` (POST/DELETE). Readers of the table live elsewhere: `notificationRecipientService` fans deliveries out to a user's endpoints, and the web_push sender prunes rows when an endpoint answers 410/404.
+**Used by:** `src/api/routes/pushSubscriptions.ts` (POST/DELETE). Readers of the table live elsewhere: `notificationRecipientService` fans deliveries out to a user's endpoints (and snapshots `surface` into the delivery `meta`), and the web_push sender prunes rows when an endpoint answers 410/404.
 
 **Invariants:**
 - Delete is scoped to the owning user — one user can never unsubscribe another's endpoint.
+- **`oldEndpoint` lookup AND delete are both scoped to the caller's `userId`.** It's caller-supplied (from the service worker's `pushsubscriptionchange`), so an unscoped query would let a guessed endpoint read another user's `surface` or delete their subscription. Covered by an explicit integration test in `tests/integration/pwaAndPushSurface.test.ts`.
 - Upsert re-owns on endpoint collision by design (shared-machine re-subscribe); don't "fix" it into a 409.
+- `surface` defaults to `"desktop"` only on a genuine create with nothing to inherit. A rotation mints a NEW endpoint, so there is no row to inherit from — that's exactly why `oldEndpoint` exists, and why dropping it would silently demote mobile subscriptions to desktop deep links.
+- The upsert must stay idempotent: `push.js`'s `reconcileSubscription` re-posts the current subscription on EVERY page load as the primary repair for rotated endpoints.
 
-**When changing this:** the endpoint is the business key (`@unique`); anything that changes the stored key fields must stay compatible with what the web_push sender reads at delivery time.
+**When changing this:** the endpoint is the business key (`@unique`); anything that changes the stored key fields must stay compatible with what the web_push sender reads at delivery time. `surface` is consumed by `notificationDeliveryService` via `pushDeepLinkUrl` — adding a surface value means adding a path to `PUSH_DEEP_LINK_PATHS` in `src/utils/notificationTemplate.ts` and a route that serves it.
 
 ---
 
