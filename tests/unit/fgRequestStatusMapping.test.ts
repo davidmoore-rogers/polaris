@@ -36,7 +36,19 @@ describe("fgRequest — HTTP status → operator message", () => {
   it("401 points at the token", async () => {
     mockStatus(401);
     await expect(fgRequest(config as any, "GET", "/api/v2/monitor/system/status"))
-      .rejects.toThrow(/Authentication failed — check your API token/);
+      .rejects.toThrow(/Authentication failed \(HTTP 401\).*check your API token/);
+  });
+
+  it("names the target host on BOTH auth failures", async () => {
+    // Under FMG bypass the host is resolved per-device out of FMG, not typed by
+    // the operator — so an auth error that doesn't say WHERE it connected can't
+    // be acted on. classifyPushError still matches on "Authentication failed".
+    mockStatus(401);
+    await expect(fgRequest(config as any, "GET", "/api/v2/monitor/system/status"))
+      .rejects.toThrow(/10\.0\.0\.1:443/);
+    mockStatus(403);
+    await expect(fgRequest(config as any, "GET", "/api/v2/monitor/system/status"))
+      .rejects.toThrow(/10\.0\.0\.1:443/);
   });
 
   it("403 points at the access profile and trusthost, NOT the token", async () => {

@@ -164,15 +164,26 @@ export async function fgRequest<T>(
     // refused — the Query API tool keeps working against paths the profile does
     // allow. fortimanagerService's rpc() has always split these; this is the
     // FortiGate-side parity fix.
+    // Both messages name the TARGET. Under FMG bypass mode the host is not
+    // something the operator typed — it is resolved per-device out of FMG's
+    // copy of the gate's `system/interface` table (resolveDeviceMgmtIp, keyed
+    // on one fleet-wide mgmtInterface name). So "auth failed" against an
+    // unnamed host is unanswerable: a token that is valid fleet-wide still
+    // fails if the resolved address belongs to a different box than the one
+    // the operator tested by hand — which overlapping RFC1918 branch subnets
+    // make entirely possible. Print the address so that is checkable.
     if (res.status === 401) {
-      throw new AppError(502, "Authentication failed — check your API token");
+      throw new AppError(
+        502,
+        `Authentication failed (HTTP 401) for ${config.host}:${port} — check your API token`,
+      );
     }
     if (res.status === 403) {
       throw new AppError(
         502,
-        `FortiGate permission denied (HTTP 403) on ${path} — the API token authenticated, ` +
-        `but the api-user's access profile does not permit this endpoint, or the Polaris ` +
-        `host is outside its trusthost`,
+        `FortiGate permission denied (HTTP 403) for ${config.host}:${port} on ${path} — the API ` +
+        `token authenticated, but the api-user's access profile does not permit this endpoint, ` +
+        `or the caller is outside its trusthost`,
       );
     }
     if (res.status === 404) {
