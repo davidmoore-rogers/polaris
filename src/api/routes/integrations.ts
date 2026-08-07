@@ -44,6 +44,67 @@ function isMaskedSecretSentinel(value: unknown): boolean {
   return isMaskedSecret(value);
 }
 
+// ─── Query-API per-request credential override ──────────────────────────────
+//
+// The ad-hoc Query API tool may send a FortiGate API token with the request,
+// used for THAT call only. The need is concrete: under FMG bypass mode Polaris
+// stores ONE `fortigateApiToken` for the whole managed fleet, so when a token
+// works on some gates and not others the operator has no way to try a different
+// one without editing the integration — which would repoint discovery, polling
+// and DHCP push at an unproven credential just to run a test.
+//
+// The override is deliberately NOT persisted anywhere: not to the integration,
+// not to Events (the audit line records only THAT an override was used), and
+// not to the browser's saved-query store. It lives for the duration of one
+// request. Callers must never echo it back in a response.
+//
+// Note this widens no privilege: the route already sits behind
+// `integrations:write`, and a caller with that level can rewrite the stored
+// token outright. It only avoids making a destructive edit to run a read.
+const OverrideApiTokenSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(512)
+  // A masked echo from a form must never be sent to a device as a token — the
+  // same trap the stored-secret merge paths guard against.
+  .refine((v) => !isMaskedSecretSentinel(v), "API token override looks like a masked placeholder")
+  .optional();
+
+const OverrideApiUserSchema = z.string().trim().min(1).max(128).optional();
+
+/**
+ * Return the integration config with its FortiGate credentials swapped for the
+ * per-request override, or the config unchanged when no override was supplied.
+ *
+ * The field the token lands in differs by integration type: a standalone
+ * FortiGate authenticates with `apiToken`, while an FMG in bypass mode carries
+ * the per-gate credential as `fortigateApiToken` (its own `apiToken` is the
+ * FortiManager's and is still needed to resolve the device's management IP —
+ * so the FMG branch must not touch it).
+ *
+ * Returns a SHALLOW COPY; the caller's config object is never mutated, since it
+ * came from Prisma and may be shared.
+ */
+function overrideFortigateCreds(
+  config: unknown,
+  apiToken: string | undefined,
+  apiUser: string | undefined,
+  type: "fortigate" | "fortimanager",
+): Record<string, unknown> {
+  const base = (config && typeof config === "object" ? config : {}) as Record<string, unknown>;
+  if (!apiToken && !apiUser) return base;
+  const out = { ...base };
+  if (type === "fortigate") {
+    if (apiToken) out.apiToken = apiToken;
+    if (apiUser) out.apiUser = apiUser;
+  } else {
+    if (apiToken) out.fortigateApiToken = apiToken;
+    if (apiUser) out.fortigateApiUser = apiUser;
+  }
+  return out;
+}
+
 // Safely stringify a proxy-query response, converting v8 string-limit and oversized
 // payloads into a helpful 413 instead of an opaque 500.
 const PROXY_RESPONSE_MAX_BYTES = 25 * 1024 * 1024;
@@ -1293,7 +1354,7 @@ router.post("/:id/query", async (req, res, next) => {
       const mode = (req.body && typeof req.body === "object" && (req.body as any).mode) || "fmg";
 
       if (mode === "fortigate") {
-        const { deviceName, method, path, query, body } = z.object({
+        const { deviceName, method, path, query, body, apiToken, apiUser } = z.object({
           mode: z.literal("fortigate"),
           deviceName: z.string().min(1),
           method: z.enum(["GET", "POST", "PUT", "DELETE"]).optional().default("GET"),
@@ -1303,14 +1364,20 @@ router.post("/:id/query", async (req, res, next) => {
           // description-sync surfaces). Ignored for GET/DELETE — fetch rejects
           // GET bodies outright.
           body: z.unknown().optional(),
+          // Per-request credential override (see overrideFortigateCreds).
+          apiToken: OverrideApiTokenSchema,
+          apiUser: OverrideApiUserSchema,
         }).parse(req.body);
         const effectiveBody = method === "POST" || method === "PUT" ? body : undefined;
         // A non-GET through the ad-hoc tool can mutate device config — audit it.
+        // `usedTokenOverride` records THAT an override was supplied, never its
+        // value: Event details are readable by anyone with events access and are
+        // shipped off-host by the syslog/SFTP archivers.
         if (method !== "GET") {
-          logEvent({ action: "integration.query.write", resourceType: "integration", resourceId: integration.id, resourceName: integration.name, actor: req.session?.username, level: "warning", message: `Ad-hoc ${method} ${path} sent directly to FortiGate "${deviceName}"`, details: { deviceName, method, path, ...(effectiveBody !== undefined ? { body: effectiveBody } : {}) } });
+          logEvent({ action: "integration.query.write", resourceType: "integration", resourceId: integration.id, resourceName: integration.name, actor: req.session?.username, level: "warning", message: `Ad-hoc ${method} ${path} sent directly to FortiGate "${deviceName}"${apiToken ? " (with a per-request API token override)" : ""}`, details: { deviceName, method, path, usedTokenOverride: Boolean(apiToken), ...(effectiveBody !== undefined ? { body: effectiveBody } : {}) } });
         }
         const result = await fortimanager.proxyQueryViaFortigate(
-          integration.config as any,
+          overrideFortigateCreds(integration.config, apiToken, apiUser, "fortimanager") as any,
           deviceName,
           method,
           path,
@@ -1333,19 +1400,25 @@ router.post("/:id/query", async (req, res, next) => {
     }
 
     if (integration.type === "fortigate") {
-      const { method, path, query, body } = z.object({
+      const { method, path, query, body, apiToken, apiUser } = z.object({
         method: z.enum(["GET", "POST", "PUT", "DELETE"]).optional().default("GET"),
         path: z.string().min(1),
         query: z.record(z.string()).optional(),
         // JSON request body for POST/PUT — same semantics as the FMG
         // direct-to-FortiGate mode above.
         body: z.unknown().optional(),
+        // Per-request credential override (see overrideFortigateCreds).
+        apiToken: OverrideApiTokenSchema,
+        apiUser: OverrideApiUserSchema,
       }).parse(req.body);
       const effectiveBody = method === "POST" || method === "PUT" ? body : undefined;
       if (method !== "GET") {
-        logEvent({ action: "integration.query.write", resourceType: "integration", resourceId: integration.id, resourceName: integration.name, actor: req.session?.username, level: "warning", message: `Ad-hoc ${method} ${path} sent to FortiGate`, details: { method, path, ...(effectiveBody !== undefined ? { body: effectiveBody } : {}) } });
+        logEvent({ action: "integration.query.write", resourceType: "integration", resourceId: integration.id, resourceName: integration.name, actor: req.session?.username, level: "warning", message: `Ad-hoc ${method} ${path} sent to FortiGate${apiToken ? " (with a per-request API token override)" : ""}`, details: { method, path, usedTokenOverride: Boolean(apiToken), ...(effectiveBody !== undefined ? { body: effectiveBody } : {}) } });
       }
-      const result = await fortigate.proxyQuery(integration.config as any, method, path, query, effectiveBody);
+      const result = await fortigate.proxyQuery(
+        overrideFortigateCreds(integration.config, apiToken, apiUser, "fortigate") as any,
+        method, path, query, effectiveBody,
+      );
       sendProxyJson(res, result);
       return;
     }

@@ -5885,6 +5885,11 @@ function openApiQueryModal(id, adom, useProxy) {
         '<p class="hint">Name as it appears in FortiManager. Polaris resolves the management IP via FMG, then sends the REST call directly using the integration\'s FortiGate API token.</p>' +
       '</div>' +
       '<div class="form-group">' +
+        '<label>API Token Override <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(optional)</span></label>' +
+        '<input type="password" id="fmg-fgt-token" autocomplete="off" spellcheck="false" placeholder="Leave blank to use the integration\'s stored FortiGate token">' +
+        '<p class="hint">Used for this one request only — never stored on the integration, never written to Events, never kept in saved queries. Use it to test a per-gate token without repointing discovery and polling at it.</p>' +
+      '</div>' +
+      '<div class="form-group">' +
         '<label>Query Parameters <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(one per line — <code>key=value</code>)</span></label>' +
         '<textarea id="fmg-fgt-query" rows="4" style="font-family:monospace;font-size:0.82rem" placeholder="vdom=root&#10;format=mac|ip|hostname">vdom=root</textarea>' +
       '</div>' +
@@ -6003,6 +6008,10 @@ function openApiQueryModal(id, adom, useProxy) {
     var mode = _fmgCurrentMode();
     var entry;
     if (mode === "fortigate") {
+      // NOTE: the API token override is deliberately absent. Saved queries go
+      // to localStorage in the clear — a token must never land there. Keep this
+      // an explicit field list rather than a spread of the form, so a new field
+      // can't be swept in by accident.
       entry = {
         name: name,
         mode: "fortigate",
@@ -6073,6 +6082,11 @@ function openApiQueryModal(id, adom, useProxy) {
         query: query,
       };
       if (bodyJson !== undefined) payload.body = bodyJson;
+      // Per-request credential override. Sent only when typed; deliberately not
+      // persisted anywhere on this side either — it is read straight off the
+      // field at Send time and is absent from the saved-query entry below.
+      var tokenOverride = document.getElementById("fmg-fgt-token").value.trim();
+      if (tokenOverride) payload.apiToken = tokenOverride;
       // Remember the target per integration so reopening the modal doesn't
       // force retyping it. Prefilled on modal open below.
       try { localStorage.setItem("polaris-fmg-query-device-" + id, deviceName); } catch (_) { /* private mode */ }
@@ -6218,6 +6232,11 @@ function openFgtApiQueryModal(id, vdom) {
       '<textarea id="fgt-body" rows="4" style="font-family:monospace;font-size:0.82rem" placeholder=\'{"description": "IDF closet switch"}\'></textarea>' +
       '<p class="hint">Writes hit the live device config and are logged to Events. Leave empty for reads.</p>' +
     '</div>' +
+    '<div class="form-group">' +
+      '<label>API Token Override <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(optional)</span></label>' +
+      '<input type="password" id="fgt-token" autocomplete="off" spellcheck="false" placeholder="Leave blank to use the integration\'s stored API token">' +
+      '<p class="hint">Used for this one request only — never stored on the integration, never written to Events, never kept in saved queries.</p>' +
+    '</div>' +
     '<div style="display:flex;justify-content:flex-end;margin-bottom:0.75rem"><button class="btn btn-primary" id="fgt-send">Send</button></div>' +
     '<div style="display:flex;gap:6px;align-items:center;margin-bottom:0.25rem">' +
       '<input type="text" id="fgt-save-name" placeholder="Name this query to save it…" style="flex:1;font-size:0.85rem">' +
@@ -6286,6 +6305,10 @@ function openFgtApiQueryModal(id, vdom) {
     try {
       var fgtPayload = { method: method, path: path, query: query };
       if (bodyJson !== undefined) fgtPayload.body = bodyJson;
+      // Per-request credential override — read at Send time, never persisted.
+      // The saved-query getter above deliberately omits it (localStorage).
+      var fgtTokenOverride = document.getElementById("fgt-token").value.trim();
+      if (fgtTokenOverride) fgtPayload.apiToken = fgtTokenOverride;
       var result = await api.integrations.query(id, fgtPayload);
       responseWrap.style.display = "";
       responsePre.textContent = JSON.stringify(result, null, 2);
