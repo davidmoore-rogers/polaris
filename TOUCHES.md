@@ -95,6 +95,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **Readers** (files that consume it):
 - `src/utils/assetProjection.ts` — projectAssetFromSources() reads AssetSource rows and applies priority rules to build ProjectedAsset shape
 - `src/api/routes/assets.ts` — Asset read endpoints attach AssetSource rows in the assetSources relation
+- `src/utils/assetSourceState.ts` — `deriveAssetSourceState(sourceKind, observed)` reads the lifecycle field each source kind uses (entra `accountEnabled` / ad `accountDisabled` / vcenter-vm `powerState` / vcenter-host `connectionState`+`powerState` / fortiswitch `connected` / fortiap `status`) and normalizes it to one tri-state reading. Called by `GET /assets/:id/sources` (embedded as `state` per row); rendered by `public/js/assets.js` (`_assetSourceStateBadge` + `_assetSourceStateSummaryHTML`) and `public/js/mobile/asset-detail.js` (`loadSources`)
 - `src/services/projectionDriftService.ts` — Compares projectAssetFromSources() output against Asset field values to detect drift
 - Discovery paths use projectAssetFromSources() output as the source of truth for Asset field writes (Phase 3b.1 cutover pending)
 
@@ -115,6 +116,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **When changing this:**
 - Modify priority rules only if tuned against real drift logs and agreed with operators (don't guess).
 - If adding a new discovery source kind, pair it with an AssetSource upsert in the discovery path AND update deriveAssetSources() rules for backfill coverage.
+- If a source kind's observed blob gains (or renames) a lifecycle field, add the mapping to `deriveAssetSourceState` in `src/utils/assetSourceState.ts` + a case in tests/unit/assetSourceState.test.ts — otherwise the Sources tab silently renders "State not reported" for it. Only map a field that is genuinely an enabled/disabled statement; `unknown` is the honest answer for presence-only evidence, and an admission state ("discovered") is not an outage.
 - Adding a new mergeable Asset scalar field? Add it to `MERGEABLE_FIELDS` in `src/services/assetMergeService.ts` AND the `_mergeCompareFields` list in `public/js/assets.js` (they must stay in sync — the modal and the service agree on what's diffable/winner-pickable).
 - Test shadow-write: create an asset with assetTag, verify AssetSource row exists; update assetTag, verify the row is refreshed.
 - Run projectionDriftService on next discovery cycle and check pino logs for "asset.projection.drift" — should be silent on stable sources.

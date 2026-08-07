@@ -30,6 +30,7 @@ import { manualCoordPatchError } from "../../utils/geo.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
 import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } from "../../services/assetMergeService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
+import { deriveAssetSourceState } from "../../utils/assetSourceState.js";
 import { resolvePendingIpOverrideConflicts } from "../../services/ipOverrideService.js";
 import { shapeMacRows, MAC_ROW_SELECT } from "../../utils/macAddresses.js";
 import { csvParam } from "../../utils/text.js";
@@ -3660,6 +3661,12 @@ router.get("/:id/sources", requirePermission("assets", "read"), async (req, res,
         externalId: r.externalId,
         integration: r.integration ? { id: r.integration.id, name: r.integration.name, type: r.integration.type } : null,
         observed: r.observed,
+        // Normalized enabled/disabled verdict for THIS source — Entra's
+        // `accountEnabled`, AD's inverted `accountDisabled`, vCenter's
+        // powerState/connectionState and the Fortinet connection flags all
+        // collapse to one tri-state so the Sources tab can badge each card
+        // instead of making the operator decode four vocabularies.
+        state: deriveAssetSourceState(r.sourceKind, r.observed),
         inferred: r.inferred,
         syncedAt: r.syncedAt,
         firstSeen: r.firstSeen,

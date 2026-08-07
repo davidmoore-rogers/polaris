@@ -1363,6 +1363,14 @@
       rows.forEach(function (s, i) {
         var label = SOURCE_LABELS[s.sourceKind] || s.sourceKind;
         var bits = [];
+        // Server-derived enabled/disabled verdict for this source (see
+        // src/utils/assetSourceState.ts) — leads the supporting line so the
+        // question "which source is calling this disabled?" is answerable
+        // without opening the desktop UI. Omitted when unreported.
+        if (s.state && s.state.state && s.state.state !== "unknown") {
+          var col = s.state.state === "disabled" ? "var(--md-error)" : "var(--md-success)";
+          bits.push('<span style="color:' + col + ';font-weight:500;">' + escapeHtml(s.state.label) + '</span>');
+        }
         if (s.integration && s.integration.name) bits.push(escapeHtml(s.integration.name));
         if (s.lastSeen) bits.push("seen " + escapeHtml(formatTimeAgo(s.lastSeen)));
         var inferred = s.inferred ? ' <span class="muted" style="font-size:12px;font-weight:400;">· inferred</span>' : '';
