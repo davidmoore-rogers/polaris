@@ -15,7 +15,7 @@ import { BUILT_IN_ASSET_TYPES } from "../../src/utils/assetTypes.js";
 
 const MIGRATION = resolve(
   __dirname,
-  "../../prisma/migrations/20260807000000_arc_kubernetes_asset_type/migration.sql",
+  "../../prisma/migrations/20260807020000_arc_kubernetes_asset_type/migration.sql",
 );
 const SERVICE = resolve(__dirname, "../../src/services/assetTypeService.ts");
 

@@ -5964,7 +5964,7 @@ async function buildEntraSyncIndex(
  *
  * Clusters are the ONE Arc entity that isn't detail on a machine, so unlike
  * the VMware/SCVMM and SQL enrichment this creates real assets — typed
- * `kubernetes_cluster`, a built-in added by migration 20260807000000.
+ * `kubernetes_cluster`, a built-in added by migration 20260807020000.
  *
  * Much simpler than syncArcDevices: a cluster has no SMBIOS UUID, no MAC and
  * no guest OS, so the cascade is just arc-k8s AssetSource by ARM id → hostname
