@@ -6018,7 +6018,11 @@ async function syncEntraDevices(
 
     const assetType = inferAssetTypeFromChassis(dev.chassisType, dev.operatingSystem);
     const disabled = !dev.accountEnabled;
-    const status: "active" | "disabled" = disabled ? "disabled" : "active";
+    // A directory-disabled account IS the asset's lifecycle state — it maps to
+    // `decommissioned`, matching what conflictResolutionService already writes
+    // on an accepted/rejected AD collision. (There is no separate "Disabled In"
+    // detail row any more; the status pill carries the whole signal.)
+    const status: "active" | "decommissioned" = disabled ? "decommissioned" : "active";
 
     // Both Intune MACs (when present), labeled by source so the Asset details
     // panel can show "Intune Wi-Fi" vs "Intune Ethernet" rows. Ethernet first
@@ -6815,7 +6819,9 @@ async function syncActiveDirectoryDevices(
     const displayName = dev.dnsHostName || dev.cn;
     const hostLookupKey = (dev.dnsHostName || dev.cn || "").toLowerCase();
     const assetType = inferAssetTypeFromOs(dev.operatingSystem);
-    const status: "active" | "disabled" = dev.disabled ? "disabled" : "active";
+    // Disabled in AD → `decommissioned` (see the Entra sync above; same rule,
+    // and the same one conflictResolutionService applies on collision accept).
+    const status: "active" | "decommissioned" = dev.disabled ? "decommissioned" : "active";
     // Realm-monitorable hosts (Windows via WinRM, Linux via SSH) get locked to
     // this AD integration so the bind credentials double as the probe
     // credentials, mirroring how FMG owns its discovered firewalls.

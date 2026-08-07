@@ -497,7 +497,13 @@ document.addEventListener("DOMContentLoaded", async function () {
   if (maintBtn) maintBtn.addEventListener("click", function () {
     if (typeof openMaintenanceModal === "function") openMaintenanceModal();
   });
+  // Kicked off before the userReady await so the registry fetch overlaps it,
+  // and awaited before the prefs/hash restore so a saved or deep-linked custom
+  // type has its checkbox to land on (setColumnOptions drops filter values with
+  // no matching option, and the hash guard tests ASSET_TYPE_LABELS).
+  var assetTypesReady = _loadAssetTypeOptions();
   await userReady;
+  await assetTypesReady;
   _restoreAssetsPrefs();
   _applyAssetsHashFilters();
   // View tabs own the filter/sort state once they exist, so the active tab is
@@ -569,6 +575,10 @@ document.addEventListener("DOMContentLoaded", async function () {
   // renderPageControls (onSizeChange) — no standalone #filter-pagesize.
 });
 
+// Short labels for table cells / pills. Seeded with the built-in registry rows;
+// _loadAssetTypeOptions() adds an entry for every operator-added custom type it
+// doesn't already carry (existing keys are never overwritten, so the compact
+// "AP" rendering survives the registry's longer "Access Point" label).
 var ASSET_TYPE_LABELS = {
   server: "Server",
   switch: "Switch",
@@ -580,6 +590,58 @@ var ASSET_TYPE_LABELS = {
   other: "Other",
   hypervisor: "Hypervisor",
 };
+
+// The full asset-type list ({value, label}) used by option lists — the Type
+// column's multi-select filter and the create/edit form's Type select. Seeded
+// with the built-ins so both surfaces work before /asset-types answers (and if
+// it fails); replaced wholesale by the live AssetTypeDef registry, which is
+// what makes operator-added custom types selectable.
+var ASSET_TYPE_OPTIONS = [
+  { value: "server",       label: "Server" },
+  { value: "switch",       label: "Switch" },
+  { value: "router",       label: "Router" },
+  { value: "firewall",     label: "Firewall" },
+  { value: "workstation",  label: "Workstation" },
+  { value: "printer",      label: "Printer" },
+  { value: "access_point", label: "Access Point" },
+  { value: "hypervisor",   label: "Hypervisor" },
+  { value: "other",        label: "Other" },
+];
+
+// Pull the registry and fold it into both maps. Never throws — a failed fetch
+// (401 on a logged-out page, offline) leaves the built-in seed in place.
+async function _loadAssetTypeOptions() {
+  var rows;
+  try {
+    var res = await api.assetTypes.list();
+    rows = Array.isArray(res) ? res : (res && res.types) || [];
+  } catch (err) {
+    return;
+  }
+  if (!Array.isArray(rows) || !rows.length) return;
+  ASSET_TYPE_OPTIONS = rows
+    .filter(function (t) { return t && t.name; })
+    .map(function (t) { return { value: String(t.name), label: String(t.label || t.name) }; });
+  ASSET_TYPE_OPTIONS.forEach(function (o) {
+    if (!ASSET_TYPE_LABELS.hasOwnProperty(o.value)) ASSET_TYPE_LABELS[o.value] = o.label;
+  });
+  if (_assetsSF) _assetsSF.setColumnOptions("assetType", ASSET_TYPE_OPTIONS);
+}
+
+// <option> list for a Type select, built from the registry. `current` is kept
+// as an option even when the registry no longer carries it (a retired type
+// still stamped on an old row), so opening the form can't silently retype the
+// asset; empty/unknown falls back to "other" the way the form always has.
+function assetTypeOptionsHTML(current) {
+  var value = current || "other";
+  var known = ASSET_TYPE_OPTIONS.some(function (o) { return o.value === value; });
+  var opts = ASSET_TYPE_OPTIONS.slice();
+  if (!known) opts.push({ value: value, label: ASSET_TYPE_LABELS[value] || value });
+  return opts.map(function (o) {
+    return '<option value="' + escapeHtml(o.value) + '"' +
+      (o.value === value ? " selected" : "") + '>' + escapeHtml(o.label) + '</option>';
+  }).join("");
+}
 
 // Bulk-bar State dropdown options. quarantined is intentionally omitted —
 // quarantine is set/cleared via the dedicated /assets/bulk-quarantine
@@ -2885,14 +2947,7 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Manufacturer</label><input type="text" id="f-manufacturer" value="' + escapeHtml(d.manufacturer || "") + '" placeholder="e.g. Dell, Cisco, HP"></div>' +
     '<div class="form-group"><label>Model</label><input type="text" id="f-model" value="' + escapeHtml(d.model || "") + '" placeholder="e.g. PowerEdge R740"></div>' +
     '<div class="form-group"><label>Type' + (isAssetTypeLocked(d) ? ' <span style="font-weight:normal;color:var(--color-text-tertiary);font-size:0.75rem">(locked — discovered by integration)</span>' : '') + '</label><select id="f-assetType"' + (isAssetTypeLocked(d) ? ' disabled' : '') + '>' +
-      '<option value="server"' + (d.assetType === "server" ? " selected" : "") + '>Server</option>' +
-      '<option value="switch"' + (d.assetType === "switch" ? " selected" : "") + '>Switch</option>' +
-      '<option value="router"' + (d.assetType === "router" ? " selected" : "") + '>Router</option>' +
-      '<option value="firewall"' + (d.assetType === "firewall" ? " selected" : "") + '>Firewall</option>' +
-      '<option value="workstation"' + (d.assetType === "workstation" ? " selected" : "") + '>Workstation</option>' +
-      '<option value="printer"' + (d.assetType === "printer" ? " selected" : "") + '>Printer</option>' +
-      '<option value="access_point"' + (d.assetType === "access_point" ? " selected" : "") + '>Access Point</option>' +
-      '<option value="other"' + (d.assetType === "other" || !d.assetType ? " selected" : "") + '>Other</option>' +
+      assetTypeOptionsHTML(d.assetType) +
     '</select></div>' +
     '<div class="form-group"><label>Status</label><select id="f-status">' +
       '<option value="storage"' + (d.status === "storage" || !d.status ? " selected" : "") + '>Storage</option>' +
@@ -4107,29 +4162,106 @@ async function openViewModal(id) {
   });
 
   try {
-    // Fetch the asset in parallel with a one-shot manual-tier read used as a
-    // generic auto-refresh cadence fallback. Step 9 will replace this with the
-    // per-asset effective-monitor-settings call so each asset's auto-refresh
-    // matches its resolved tier; for now the manual tier is a "good enough"
-    // default that keeps the schedulers from hard-coding 60s.
-    var fetches = [api.assets.get(id)];
-    if (!_monitorSettingsCache) {
-      fetches.push(api.monitorSettings.getManual().catch(function () { return null; }));
+    // ---- Single parallel fetch wave ------------------------------------
+    // Everything that needs only the asset ID goes out at once alongside the
+    // asset row itself, and the two calls that need the asset's *shape*
+    // (custom widgets keys off manufacturer, SD-WAN off type + integration)
+    // chain off the asset promise so they overlap the wave instead of forming
+    // a round trip behind it. Before 2026-08 this was four sequential
+    // Promise.all barriers — asset, then aux, then SD-WAN, then credentials —
+    // and the panel body painted nothing but "Loading..." until the last one
+    // resolved, which is four RTTs on a WAN link. Failures everywhere fall
+    // through to empty-state so the rest of the modal still works.
+    var assetP = api.assets.get(id);
+
+    // Per-open memo for GET /assets/:id/effective-monitor-settings. Three
+    // consumers want it on every open (the SNMP Walk tab gate below, the
+    // intermittency bar, the stream-source badges) and it used to be fetched
+    // three times per open. Deliberately scoped to this call rather than a
+    // module cache: the sub-panel refreshes (interface / sensor / IPsec /
+    // SD-WAN detail) must keep re-reading it live after a settings change.
+    var _effP = null;
+    function effSettings() {
+      if (!_effP) _effP = api.assets.effectiveMonitorSettings(id);
+      return _effP;
     }
-    // Maintenance windows for the chart band overlays — fetched once per
-    // panel open (90-day lookback covers every chart range incl. 30d +
-    // custom), awaited here so every later chart render can read the cache
-    // synchronously. Best-effort: a failure just means no bands.
-    var maintFetch = _loadMaintWindowsCache(id);
-    var fetched = await Promise.all(fetches);
-    await maintFetch;
-    var a = fetched[0];
-    if (fetched[1]) _monitorSettingsCache = fetched[1];
+
+    // Custom MIB widgets — manufacturer-scoped (no manufacturer means no
+    // ManufacturerProfile and therefore no widgets). Prefetched so the tab is
+    // present + pre-populated on first paint and never flashes-then-vanishes.
+    var customWidgetsP = assetP.then(function (asset) {
+      if (!asset.manufacturer) return null;
+      return api.assets.customWidgets(asset.id).catch(function (err) { console.warn("Failed to load custom widgets", err); return null; });
+    });
+
+    // SD-WAN trio — FortiGate firewalls discovered via FortiManager/FortiGate
+    // with the pullSdwan toggle on. Prefetched for the same reason as Custom
+    // MIB: the tab only shows when the device actually reported data.
+    var sdwanP = assetP.then(function (asset) {
+      var sk = (asset.discoveredByIntegration && asset.discoveredByIntegration.type) || "manual";
+      if (!(asset.monitored && asset.assetType === "firewall" && (sk === "fortimanager" || sk === "fortigate"))) {
+        return { rules: [], links: [], members: [] };
+      }
+      return Promise.all([
+        api.assets.sdwanRules(asset.id).catch(function (err) { console.warn("Failed to load SD-WAN rules", err); return { rules: [] }; }),
+        api.assets.perfSlaLinks(asset.id).catch(function (err) { console.warn("Failed to load SD-WAN perf-SLA links", err); return { links: [] }; }),
+        api.assets.sdwanMembers(asset.id).catch(function (err) { console.warn("Failed to load SD-WAN members", err); return { members: [] }; }),
+      ]).then(function (r) {
+        return {
+          rules:   (r[0] && r[0].rules)   || [],
+          links:   (r[1] && r[1].links)   || [],
+          members: (r[2] && r[2].members) || [],
+        };
+      });
+    });
+
+    var wave = await Promise.all([
+      assetP,
+      // One-shot manual-tier read used as a generic auto-refresh cadence
+      // fallback, cached module-wide after the first open.
+      _monitorSettingsCache ? Promise.resolve(null) : api.monitorSettings.getManual().catch(function () { return null; }),
+      // Maintenance windows for the chart band overlays — fetched once per
+      // panel open (90-day lookback covers every chart range incl. 30d +
+      // custom), awaited here so every later chart render can read the cache
+      // synchronously. Best-effort: a failure just means no bands.
+      _loadMaintWindowsCache(id),
+      api.assets.getSources(id).catch(function (err) { console.warn("Failed to load asset sources", err); return []; }),
+      api.assets.getDependencies(id).catch(function (err) { console.warn("Failed to load asset dependencies", err); return null; }),
+      api.assets.agent(id).catch(function (err) { console.warn("Failed to load managed agent", err); return null; }),
+      api.assets.getSightings(id).catch(function (err) { console.warn("Failed to load asset sightings", err); return []; }),
+      api.assets.getIpHistory(id).catch(function (err) { console.warn("Failed to load asset IP history", err); return []; }),
+      // Effective monitor settings — needed pre-paint only to decide whether
+      // the SNMP Walk tab shows (admin-only), so non-admins skip it here; the
+      // post-paint consumers still share one fetch through effSettings().
+      isAdmin()
+        ? effSettings().catch(function (err) { console.warn("Failed to load effective monitor settings", err); return null; })
+        : Promise.resolve(null),
+      // Credentials — the SNMP Walk tab's picker renders from this cache, so
+      // it has to be warm before that tab's HTML is built. Module-cached, so
+      // this is a no-op after the first open of the session.
+      isAdmin() ? _ensureCredentials() : Promise.resolve(null),
+      customWidgetsP,
+      sdwanP,
+    ]);
+
+    var a = wave[0];
+    if (wave[1]) _monitorSettingsCache = wave[1];
+    var sources             = wave[3] || [];
+    var dependencies        = wave[4];
+    var managedAgent        = wave[5];
+    var sightings           = Array.isArray(wave[6]) ? wave[6] : (wave[6] && wave[6].sightings) || [];
+    var ipHistory           = wave[7] || [];
+    var effMonitorSettings  = wave[8];
+    var customWidgetPayload = wave[10];
+    var sdwanRules   = wave[11].rules;
+    var sdwanLinks   = wave[11].links;
+    var sdwanMembers = wave[11].members;
+
     _currentAssetForRefresh = a;
     var generalHTML = _assetGeneralTabHTML(a);
 
     var monitoringHTML = assetMonitoringViewHTML(a);
-    var agentSubpanelHTML = ""; // filled in after the parallel load below
+    var agentSubpanelHTML = assetAgentSubpanelHTML(a, managedAgent);
     var agentMountHTML = '<div data-shot-section="agent" data-shot-label="Polaris Agent"><div id="asset-agent-panel-mount"></div></div>';
     var systemHTML     = a.monitored
       ? monitoringHTML +
@@ -4142,34 +4274,6 @@ async function openViewModal(id) {
       { key: "general", label: "General", html: generalHTML },
       { key: "system",  label: "System",  html: systemHTML },
     ];
-    // Sources tab + dependency tree block fetched in parallel — both feed
-    // the General-tab area and the Sources tab on first paint. Polaris
-    // Agent install state is fetched alongside on the same parallel pass;
-    // failures everywhere fall through to empty-state so the rest of the
-    // modal still works.
-    var auxResults = await Promise.all([
-      api.assets.getSources(a.id).catch(function (err) { console.warn("Failed to load asset sources", err); return []; }),
-      api.assets.getDependencies(a.id).catch(function (err) { console.warn("Failed to load asset dependencies", err); return null; }),
-      api.assets.agent(a.id).catch(function (err) { console.warn("Failed to load managed agent", err); return null; }),
-      api.assets.getSightings(a.id).catch(function (err) { console.warn("Failed to load asset sightings", err); return []; }),
-      api.assets.getIpHistory(a.id).catch(function (err) { console.warn("Failed to load asset IP history", err); return []; }),
-      a.manufacturer
-        ? api.assets.customWidgets(a.id).catch(function (err) { console.warn("Failed to load custom widgets", err); return null; })
-        : Promise.resolve(null),
-      // Effective monitor settings — only needed to decide whether the SNMP
-      // Walk tab shows (admin-only), so non-admins skip the fetch entirely.
-      isAdmin()
-        ? api.assets.effectiveMonitorSettings(a.id).catch(function (err) { console.warn("Failed to load effective monitor settings", err); return null; })
-        : Promise.resolve(null),
-    ]);
-    var sources         = auxResults[0] || [];
-    var dependencies    = auxResults[1];
-    var managedAgent    = auxResults[2];
-    var sightings       = Array.isArray(auxResults[3]) ? auxResults[3] : (auxResults[3] && auxResults[3].sightings) || [];
-    var ipHistory       = auxResults[4] || [];
-    var customWidgetPayload = auxResults[5];
-    var effMonitorSettings  = auxResults[6];
-    agentSubpanelHTML   = assetAgentSubpanelHTML(a, managedAgent);
     // Stations tab — visible on FortiAPs that have wireless clients
     // reported by the most recent SNMP fapStationTable scrape. The
     // content is loaded async from /system-info so initial render is a
@@ -4179,24 +4283,9 @@ async function openViewModal(id) {
     if (a.assetType === "access_point" && a.monitored) {
       tabs.push({ key: "stations", label: "Stations", html: _assetStationsTabHTML(a) });
     }
-    // SD-WAN tab — FortiGate firewalls discovered via FortiManager/FortiGate
-    // with the pullSdwan toggle on. Shown only when the device actually
-    // reported SD-WAN data (rules or health-check links exist). Fetched here so
-    // the tab is present (and pre-populated) on first paint.
-    var sdwanRules = [];
-    var sdwanLinks = [];
-    var sdwanMembers = [];
-    if (a.monitored && a.assetType === "firewall" &&
-        (function () { var sk = (a.discoveredByIntegration && a.discoveredByIntegration.type) || "manual"; return sk === "fortimanager" || sk === "fortigate"; }())) {
-      var sdwanAux = await Promise.all([
-        api.assets.sdwanRules(a.id).catch(function (err) { console.warn("Failed to load SD-WAN rules", err); return { rules: [] }; }),
-        api.assets.perfSlaLinks(a.id).catch(function (err) { console.warn("Failed to load SD-WAN perf-SLA links", err); return { links: [] }; }),
-        api.assets.sdwanMembers(a.id).catch(function (err) { console.warn("Failed to load SD-WAN members", err); return { members: [] }; }),
-      ]);
-      sdwanRules = (sdwanAux[0] && sdwanAux[0].rules) || [];
-      sdwanLinks = (sdwanAux[1] && sdwanAux[1].links) || [];
-      sdwanMembers = (sdwanAux[2] && sdwanAux[2].members) || [];
-    }
+    // SD-WAN tab — shown only when the device actually reported SD-WAN data
+    // (rules or health-check links exist); the trio was prefetched in the wave
+    // above so the tab is present + pre-populated on first paint.
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) {
       tabs.push({ key: "sdwan", label: "SD-WAN", html: _assetSdwanTabHTML(a, sdwanRules, sdwanLinks, sdwanMembers) });
     }
@@ -4235,7 +4324,7 @@ async function openViewModal(id) {
     // Custom MIB tab — shown only when the asset's manufacturer actually has
     // at least one ManufacturerCustomWidget defined under its
     // ManufacturerProfile. The widget payload is fetched up front in the
-    // parallel auxResults pass (above), so the tab is present + pre-populated
+    // parallel fetch wave (above), so the tab is present + pre-populated
     // on first paint and never flashes-then-vanishes for manufacturers with
     // no custom widgets. Mirrors the SD-WAN tab's prefetch-then-conditional
     // pattern.
@@ -4244,12 +4333,12 @@ async function openViewModal(id) {
     }
     // SNMP Walk tab — admin-only, mirrors the backend gate. Additionally
     // hidden when no monitoring stream resolves to SNMP for this asset
-    // (effective settings prefetched in the auxResults pass above, so the
-    // tab never flashes-then-vanishes — same idiom as Custom MIB). Loads
-    // credentials before render so the picker isn't empty on first paint.
+    // (effective settings prefetched in the wave above, so the tab never
+    // flashes-then-vanishes — same idiom as Custom MIB). Credentials for the
+    // picker rode the same wave, so the cache is warm here — do NOT re-add an
+    // await, it was the fourth serial barrier in front of first paint.
     var showSnmpWalkTab = isAdmin() && _assetUsesSnmpPolling(a, effMonitorSettings);
     if (showSnmpWalkTab) {
-      await _ensureCredentials();
       tabs.push({ key: "snmp", label: "SNMP Walk", html: assetSnmpWalkViewHTML(a) });
     }
     // Sources tab — moved to the end so the operational tabs (Processes /
@@ -4331,8 +4420,10 @@ async function openViewModal(id) {
     }
     if (a.monitored) _loadMonitorHistoryFor(a.id, _getChartRangePref("assetMonitor", "24h"));
     if (a.monitored) _loadSystemTabFor(a.id, _getChartRangePref("assetSystem", "1h"), a);
-    if (a.monitored) _renderIntermittencyBar(a.id);
-    if (a.monitored) _updateStreamSourceBadgesFromEffective(a.id, a);
+    // Both share this open's single effective-monitor-settings fetch (see
+    // effSettings above) rather than issuing one apiece.
+    if (a.monitored) _renderIntermittencyBar(a.id, effSettings());
+    if (a.monitored) _updateStreamSourceBadgesFromEffective(a.id, a, effSettings());
     _wireAssetMonitorActions(a);
     _wireAssetRediscover(a);
     _wireAssetChartRangeControls(a);
@@ -4375,7 +4466,6 @@ function _assetGeneralTabHTML(a) {
       viewRow("Type", ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
       viewRow("Status", a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-") +
       authorizationRowHTML(a) +
-      disabledInHTML(a.tags) +
       viewRow("Location", a.location || a.learnedLocation) +
       ((a.latitude != null && a.longitude != null)
         ? viewRow("Coordinates", a.latitude.toFixed(4) + ", " + a.longitude.toFixed(4) + (a.coordSource === "manual" ? " (manual)" : ""), true)
@@ -8754,7 +8844,12 @@ function _streamSourceBadgeHTML(asset, stream) {
 // badge keeps its sync value. Re-checks data-asset-id on each span so a
 // stale fetch after the modal switched assets doesn't write into the
 // wrong row.
-async function _updateStreamSourceBadgesFromEffective(assetId, asset) {
+// `effP` (optional) is a caller-supplied in-flight effective-monitor-settings
+// promise, used by openViewModal so the panel open costs one fetch instead of
+// three. The sub-panel refreshes (interface / sensor / IPsec / SD-WAN detail)
+// deliberately omit it and re-read live, since they can run after a settings
+// change.
+async function _updateStreamSourceBadgesFromEffective(assetId, asset, effP) {
   if (!assetId || !asset) return;
   // _streamCredential needs the credential cache to resolve a class-override
   // *CredentialId into a name. Without this the badge silently falls through
@@ -8762,7 +8857,7 @@ async function _updateStreamSourceBadgesFromEffective(assetId, asset) {
   // another surface (Server Settings / Monitoring Settings modal).
   if (!_credentialCache.loaded) await _ensureCredentials().catch(function () {});
   var eff;
-  try { eff = await api.assets.effectiveMonitorSettings(assetId); } catch (_) { return; }
+  try { eff = await (effP || api.assets.effectiveMonitorSettings(assetId)); } catch (_) { return; }
   if (!eff || !eff.resolved) return;
   // Cache resolved settings so stale-banner slots can re-evaluate against
   // the class/integration tier; rewrite any slots already in the DOM.
@@ -9006,7 +9101,10 @@ function assetMonitoringViewHTML(a) {
  * auto-refreshed (the sample chart above already auto-refreshes and this
  * mostly serves as an at-a-glance intermittency indicator).
  */
-async function _renderIntermittencyBar(assetId) {
+// `effP` (optional) — same shared-fetch contract as
+// _updateStreamSourceBadgesFromEffective: openViewModal hands over this open's
+// single effective-monitor-settings promise.
+async function _renderIntermittencyBar(assetId, effP) {
   var slot = document.getElementById("asset-intermittency-bar");
   if (!slot || slot.getAttribute("data-asset-id") !== assetId) return;
   // Fetch in parallel: 1h sample stream (trimmed to last 30) + the resolved
@@ -9017,7 +9115,7 @@ async function _renderIntermittencyBar(assetId) {
   try {
     var results = await Promise.all([
       api.assets.monitorHistory(assetId, "1h").catch(function () { return null; }),
-      api.assets.effectiveMonitorSettings(assetId).catch(function () { return null; }),
+      (effP || api.assets.effectiveMonitorSettings(assetId)).catch(function () { return null; }),
     ]);
     allSamples = (results[0] && Array.isArray(results[0].samples)) ? results[0].samples : [];
     if (results[1] && results[1].resolved) {
@@ -13326,17 +13424,11 @@ function haTopologyHTML(asset) {
     '<div class="detail-row"><span class="detail-label">HA Peer</span><span class="detail-value mono">' + peerHTML + '</span></div>';
 }
 
-function disabledInHTML(tags) {
-  var t = Array.isArray(tags) ? tags : [];
-  var sources = [];
-  if (t.indexOf("entra-disabled") !== -1) sources.push("Entra ID");
-  if (t.indexOf("ad-disabled") !== -1) sources.push("Active Directory");
-  if (sources.length === 0) return '';
-  var badges = sources.map(function (s) {
-    return '<span style="display:inline-block;padding:1px 8px;border-radius:4px;font-size:0.8rem;background:var(--color-warning-bg,#7c4a00);color:var(--color-warning,#fbbf24);margin-right:4px">' + escapeHtml(s) + '</span>';
-  }).join('');
-  return '<div class="detail-row"><span class="detail-label">Disabled In</span><span class="detail-value">' + badges + '</span></div>';
-}
+// The former "Disabled In" detail row was removed: a directory-disabled
+// account now lands the asset in status="decommissioned" (see the Entra/AD
+// syncs in discoveryEngine.ts), so the Status pill already tells the story.
+// The `ad-disabled` / `entra-disabled` tags are still written and remain
+// filterable on the Assets table for anyone who needs the source breakdown.
 
 function formatMacSource(source) {
   switch (source) {
@@ -13942,14 +14034,7 @@ async function openImportPdfModal(file) {
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:0.5rem">' +
       '<div><label style="font-size:0.78rem;color:var(--color-text-secondary)">Type</label>' +
         '<select id="pdf-field-assetType" style="font-size:0.82rem;padding:4px 8px;height:30px">' +
-          '<option value="other">Other</option>' +
-          '<option value="server">Server</option>' +
-          '<option value="switch">Switch</option>' +
-          '<option value="router">Router</option>' +
-          '<option value="firewall">Firewall</option>' +
-          '<option value="workstation">Workstation</option>' +
-          '<option value="printer">Printer</option>' +
-          '<option value="access_point">Access Point</option>' +
+          assetTypeOptionsHTML("other") +
         '</select></div>' +
       '<div><label style="font-size:0.78rem;color:var(--color-text-secondary)">Status</label>' +
         '<select id="pdf-field-status" style="font-size:0.82rem;padding:4px 8px;height:30px">' +
@@ -14790,13 +14875,75 @@ var _assetSourceLabels = {
   "fortiswitch":        "FortiSwitch",
   "fortiap":            "FortiAP",
   "fortigate-endpoint": "FortiGate / FortiManager (endpoint)",
+  "vcenter-vm":         "VMware vCenter (VM)",
+  "vcenter-host":       "VMware vCenter (ESXi host)",
+  "polaris-agent":      "Polaris Agent",
   "manual":             "Manual / other",
 };
 
 // Internal fields hidden from the per-source key/value table. `kind` and
 // `syncedAt` are surfaced in the card header instead; raw recovery markers
-// like `recovered` are shown via the inferred badge.
-var _assetSourceHiddenObservedKeys = { kind: 1, syncedAt: 1, recovered: 1 };
+// like `recovered` are shown via the inferred badge. The two account-state
+// booleans are hidden too — the header's state badge renders exactly those,
+// and they're the pair whose opposite polarity ("Account Enabled: No" vs
+// "Account Disabled: Yes") is what made the raw table hard to read across
+// sources.
+var _assetSourceHiddenObservedKeys = {
+  kind: 1, syncedAt: 1, recovered: 1, accountEnabled: 1, accountDisabled: 1,
+};
+
+// Badge treatment per normalized source state (server-derived — see
+// src/utils/assetSourceState.ts). Grey for "not reported" so a source that
+// simply doesn't speak to lifecycle never reads as a problem.
+var _assetSourceStateBadgeClass = {
+  "enabled":  "badge-active",
+  "disabled": "badge-disabled",
+  "unknown":  "badge-unmonitored",
+};
+
+// Header badge answering "does THIS source consider the asset enabled?".
+function _assetSourceStateBadge(state) {
+  if (!state || !state.label) return "";
+  var cls = _assetSourceStateBadgeClass[state.state] || "badge-unmonitored";
+  var tip = state.field
+    ? "This source reports " + state.field + " = " + (state.value === null ? "—" : state.value)
+    : "This source reports no enabled/disabled state for the asset.";
+  return '<span class="badge ' + cls + '" title="' + escapeHtml(tip) + '">' + escapeHtml(state.label) + '</span>';
+}
+
+// One-line roll-up above the source cards: which sources call the asset
+// enabled and which call it disabled. Only rendered when at least one source
+// actually reports a state; account-kind disagreement (one directory says
+// enabled, another says disabled) gets called out explicitly because that's
+// the case that drives the asset's lifecycle status.
+function _assetSourceStateSummaryHTML(sources) {
+  var reported = sources.filter(function (s) { return s.state && s.state.state && s.state.state !== "unknown"; });
+  if (!reported.length) return "";
+
+  var render = function (list) {
+    return list.map(function (s) {
+      var label = _assetSourceLabels[s.sourceKind] || s.sourceKind;
+      return '<span style="white-space:nowrap">' + escapeHtml(label) + ' <span style="color:var(--color-text-secondary)">(' + escapeHtml(s.state.label) + ')</span></span>';
+    }).join(", ");
+  };
+  var enabled  = reported.filter(function (s) { return s.state.state === "enabled"; });
+  var disabled = reported.filter(function (s) { return s.state.state === "disabled"; });
+
+  var lines = [];
+  if (enabled.length)  lines.push('<div><strong style="color:var(--color-success)">Enabled</strong> per ' + render(enabled) + '</div>');
+  if (disabled.length) lines.push('<div><strong style="color:#ef9a9a">Disabled</strong> per ' + render(disabled) + '</div>');
+
+  var accountStates = {};
+  reported.forEach(function (s) { if (s.state.kind === "account") accountStates[s.state.state] = 1; });
+  var conflict = accountStates.enabled && accountStates.disabled
+    ? '<div style="margin-top:0.35rem;color:var(--color-warning)">Directory sources disagree — a disabled account decommissions the asset, so the disabling directory wins on the next discovery run.</div>'
+    : '';
+
+  return '<div class="section-block" style="margin-bottom:1rem;font-size:0.85rem;line-height:1.6">' +
+    '<div class="section-label" style="margin-bottom:0.35rem">Reported state by source</div>' +
+    lines.join("") + conflict +
+  '</div>';
+}
 
 function _humanizeSourceObservedKey(k) {
   // Camel-case → "Title Case With Spaces".
@@ -16710,6 +16857,9 @@ function _assetSourcesTabHTML(sources, assetId, sightings, ipHistory) {
   var sourceCards = sources.map(function (s) {
     var label = _assetSourceLabels[s.sourceKind] || s.sourceKind;
     var badges = [];
+    // Lifecycle verdict first — it's the thing operators scan the card for.
+    var stateBadge = _assetSourceStateBadge(s.state);
+    if (stateBadge) badges.push(stateBadge);
     if (s.inferred) {
       badges.push('<span class="badge badge-maintenance" title="Synthesized by phase-1 backfill from a legacy `ad-guid:` tag breadcrumb. The next real discovery from this source replaces the row with truth.">Inferred</span>');
     }
@@ -16760,7 +16910,9 @@ function _assetSourcesTabHTML(sources, assetId, sightings, ipHistory) {
       '</div>'
     );
   }).join("");
-  return '<div data-shot-section="sources" data-shot-label="Discovery Sources">' + mergeToolbar + sourceCards + '</div>' + historyHTML;
+  return '<div data-shot-section="sources" data-shot-label="Discovery Sources">' +
+    mergeToolbar + _assetSourceStateSummaryHTML(sources) + sourceCards +
+  '</div>' + historyHTML;
 }
 
 // ─── Quarantine tab ─────────────────────────────────────────────────────────
