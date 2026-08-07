@@ -77,7 +77,14 @@ function _looksLikeDeviceId(tag) {
     if (!btn || !window.polarisPush) return;
     if (!polarisPush.isSupported()) { btn.style.display = "none"; return; }
 
+    // Last painted state, so the click handler can branch WITHOUT awaiting.
+    // Awaiting status() inside the handler (as this used to) burns the click's
+    // transient user activation on a network round trip, and Safari then
+    // refuses the permission prompt — see the ordering comment in push.js.
+    var lastState = null;
+
     function paint(st) {
+      lastState = st;
       if (!st.enabledOnServer) {
         // Server hasn't configured Web Push — keep the control hidden rather
         // than offer a button that can only error.
@@ -94,11 +101,11 @@ function _looksLikeDeviceId(tag) {
     if (!btn._wired) {
       btn._wired = true;
       btn.addEventListener("click", async function () {
+        var wasSubscribed = !!(lastState && lastState.subscribed);
         btn.disabled = true;
         try {
-          var st = await polarisPush.status();
-          if (st.subscribed) { await polarisPush.disable(); showToast("Push notifications disabled", "info"); }
-          else { await polarisPush.enable(); showToast("Push notifications enabled", "success"); }
+          if (wasSubscribed) { await polarisPush.disable(); showToast("Push notifications disabled", "info"); }
+          else { await polarisPush.enable({ surface: "desktop" }); showToast("Push notifications enabled", "success"); }
         } catch (err) {
           showToast(err.message || "Push action failed", "error");
         }
