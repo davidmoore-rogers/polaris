@@ -497,7 +497,13 @@ document.addEventListener("DOMContentLoaded", async function () {
   if (maintBtn) maintBtn.addEventListener("click", function () {
     if (typeof openMaintenanceModal === "function") openMaintenanceModal();
   });
+  // Kicked off before the userReady await so the registry fetch overlaps it,
+  // and awaited before the prefs/hash restore so a saved or deep-linked custom
+  // type has its checkbox to land on (setColumnOptions drops filter values with
+  // no matching option, and the hash guard tests ASSET_TYPE_LABELS).
+  var assetTypesReady = _loadAssetTypeOptions();
   await userReady;
+  await assetTypesReady;
   _restoreAssetsPrefs();
   _applyAssetsHashFilters();
   // View tabs own the filter/sort state once they exist, so the active tab is
@@ -569,6 +575,10 @@ document.addEventListener("DOMContentLoaded", async function () {
   // renderPageControls (onSizeChange) — no standalone #filter-pagesize.
 });
 
+// Short labels for table cells / pills. Seeded with the built-in registry rows;
+// _loadAssetTypeOptions() adds an entry for every operator-added custom type it
+// doesn't already carry (existing keys are never overwritten, so the compact
+// "AP" rendering survives the registry's longer "Access Point" label).
 var ASSET_TYPE_LABELS = {
   server: "Server",
   switch: "Switch",
@@ -580,6 +590,58 @@ var ASSET_TYPE_LABELS = {
   other: "Other",
   hypervisor: "Hypervisor",
 };
+
+// The full asset-type list ({value, label}) used by option lists — the Type
+// column's multi-select filter and the create/edit form's Type select. Seeded
+// with the built-ins so both surfaces work before /asset-types answers (and if
+// it fails); replaced wholesale by the live AssetTypeDef registry, which is
+// what makes operator-added custom types selectable.
+var ASSET_TYPE_OPTIONS = [
+  { value: "server",       label: "Server" },
+  { value: "switch",       label: "Switch" },
+  { value: "router",       label: "Router" },
+  { value: "firewall",     label: "Firewall" },
+  { value: "workstation",  label: "Workstation" },
+  { value: "printer",      label: "Printer" },
+  { value: "access_point", label: "Access Point" },
+  { value: "hypervisor",   label: "Hypervisor" },
+  { value: "other",        label: "Other" },
+];
+
+// Pull the registry and fold it into both maps. Never throws — a failed fetch
+// (401 on a logged-out page, offline) leaves the built-in seed in place.
+async function _loadAssetTypeOptions() {
+  var rows;
+  try {
+    var res = await api.assetTypes.list();
+    rows = Array.isArray(res) ? res : (res && res.types) || [];
+  } catch (err) {
+    return;
+  }
+  if (!Array.isArray(rows) || !rows.length) return;
+  ASSET_TYPE_OPTIONS = rows
+    .filter(function (t) { return t && t.name; })
+    .map(function (t) { return { value: String(t.name), label: String(t.label || t.name) }; });
+  ASSET_TYPE_OPTIONS.forEach(function (o) {
+    if (!ASSET_TYPE_LABELS.hasOwnProperty(o.value)) ASSET_TYPE_LABELS[o.value] = o.label;
+  });
+  if (_assetsSF) _assetsSF.setColumnOptions("assetType", ASSET_TYPE_OPTIONS);
+}
+
+// <option> list for a Type select, built from the registry. `current` is kept
+// as an option even when the registry no longer carries it (a retired type
+// still stamped on an old row), so opening the form can't silently retype the
+// asset; empty/unknown falls back to "other" the way the form always has.
+function assetTypeOptionsHTML(current) {
+  var value = current || "other";
+  var known = ASSET_TYPE_OPTIONS.some(function (o) { return o.value === value; });
+  var opts = ASSET_TYPE_OPTIONS.slice();
+  if (!known) opts.push({ value: value, label: ASSET_TYPE_LABELS[value] || value });
+  return opts.map(function (o) {
+    return '<option value="' + escapeHtml(o.value) + '"' +
+      (o.value === value ? " selected" : "") + '>' + escapeHtml(o.label) + '</option>';
+  }).join("");
+}
 
 // Bulk-bar State dropdown options. quarantined is intentionally omitted —
 // quarantine is set/cleared via the dedicated /assets/bulk-quarantine
@@ -2885,14 +2947,7 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Manufacturer</label><input type="text" id="f-manufacturer" value="' + escapeHtml(d.manufacturer || "") + '" placeholder="e.g. Dell, Cisco, HP"></div>' +
     '<div class="form-group"><label>Model</label><input type="text" id="f-model" value="' + escapeHtml(d.model || "") + '" placeholder="e.g. PowerEdge R740"></div>' +
     '<div class="form-group"><label>Type' + (isAssetTypeLocked(d) ? ' <span style="font-weight:normal;color:var(--color-text-tertiary);font-size:0.75rem">(locked — discovered by integration)</span>' : '') + '</label><select id="f-assetType"' + (isAssetTypeLocked(d) ? ' disabled' : '') + '>' +
-      '<option value="server"' + (d.assetType === "server" ? " selected" : "") + '>Server</option>' +
-      '<option value="switch"' + (d.assetType === "switch" ? " selected" : "") + '>Switch</option>' +
-      '<option value="router"' + (d.assetType === "router" ? " selected" : "") + '>Router</option>' +
-      '<option value="firewall"' + (d.assetType === "firewall" ? " selected" : "") + '>Firewall</option>' +
-      '<option value="workstation"' + (d.assetType === "workstation" ? " selected" : "") + '>Workstation</option>' +
-      '<option value="printer"' + (d.assetType === "printer" ? " selected" : "") + '>Printer</option>' +
-      '<option value="access_point"' + (d.assetType === "access_point" ? " selected" : "") + '>Access Point</option>' +
-      '<option value="other"' + (d.assetType === "other" || !d.assetType ? " selected" : "") + '>Other</option>' +
+      assetTypeOptionsHTML(d.assetType) +
     '</select></div>' +
     '<div class="form-group"><label>Status</label><select id="f-status">' +
       '<option value="storage"' + (d.status === "storage" || !d.status ? " selected" : "") + '>Storage</option>' +
@@ -13942,14 +13997,7 @@ async function openImportPdfModal(file) {
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:0.5rem">' +
       '<div><label style="font-size:0.78rem;color:var(--color-text-secondary)">Type</label>' +
         '<select id="pdf-field-assetType" style="font-size:0.82rem;padding:4px 8px;height:30px">' +
-          '<option value="other">Other</option>' +
-          '<option value="server">Server</option>' +
-          '<option value="switch">Switch</option>' +
-          '<option value="router">Router</option>' +
-          '<option value="firewall">Firewall</option>' +
-          '<option value="workstation">Workstation</option>' +
-          '<option value="printer">Printer</option>' +
-          '<option value="access_point">Access Point</option>' +
+          assetTypeOptionsHTML("other") +
         '</select></div>' +
       '<div><label style="font-size:0.78rem;color:var(--color-text-secondary)">Status</label>' +
         '<select id="pdf-field-status" style="font-size:0.82rem;padding:4px 8px;height:30px">' +

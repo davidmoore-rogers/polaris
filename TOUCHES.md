@@ -1164,6 +1164,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 **Assets-specific wrinkles:**
 - `favoriteIds` (CSV from the `polaris-favs-assets-<user>` localStorage set) → a two-bucket query in `assets.ts` floats starred rows to the top of the *whole* result set. The two `count`s + split-window `findMany`s only run when the set is non-empty.
 - `_monitor` is a synthetic column: `monitorClause()` maps each chip (Monitored/Unmonitored/Up/Warning/Down/Recovering/Pending) onto `monitored` + `monitorStatus`; `_server` spans `location`+`learnedLocation`.
+- The Type column is the one **dynamic** multi-select on the page: the `data-sf-options` in `assets.html` is only a pre-fetch seed of the built-in registry rows, replaced at init by `_loadAssetTypeOptions()` → `sf.setColumnOptions("assetType", …)` from `GET /asset-types`, so operator-added custom types are filterable. It's awaited before `_restoreAssetsPrefs()` / `_applyAssetsHashFilters()` — `setColumnOptions` drops saved filter values that have no matching option, and the `#type=` hash guard tests `ASSET_TYPE_LABELS`.
 - Cross-page bulk selection: `_assetsSelected` (id Set) + `_assetsSelectedMeta` (id→{status,assetType}) survive paging because page-nav calls `fetchAssetsPage()` (no clear); only `loadAssets()` (Refresh / post-mutation) clears them.
 - Export: `_fetchAssetsForExport` re-pages from the server for filtered/all; "page" uses the in-memory page.
 
@@ -2224,7 +2225,7 @@ Listed alphabetically.
 
 **Cross-service deps:** `prisma`, `AppError`, `setAssetTypeRegistry` + asset-type validate/normalize helpers + `BUILT_IN_ASSET_TYPES` (utils/assetTypes).
 
-**Used by:** `src/api/routes/assetTypes.ts` (registry CRUD), `src/jobs/seedAssetTypes.ts` (boot seed).
+**Used by:** `src/api/routes/assetTypes.ts` (registry CRUD), `src/jobs/seedAssetTypes.ts` (boot seed). Frontend readers of `GET /asset-types` (`api.assetTypes.list()`): `public/js/assets.js` (`_loadAssetTypeOptions` → `ASSET_TYPE_OPTIONS` + `ASSET_TYPE_LABELS`, which drive the Type column filter, the create/edit + PDF-import Type selects, and the row/bulk type menus), `automations-wizard.js`, `appmap-rules-wizard.js`, `assets-maintenance.js`, `server-settings.js` (tag criteria).
 
 **Invariants:**
 - Built-in rows (`isBuiltIn` + `isProtected`) can't be renamed, edited, or deleted; reserved built-in names are preserved across operator edits.
