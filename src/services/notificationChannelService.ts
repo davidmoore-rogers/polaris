@@ -195,3 +195,101 @@ export async function generateWebPushKeys(id: string, actor?: string) {
 export async function getWebPushChannel(): Promise<ChannelRow | null> {
   return (await prisma.notificationChannel.findFirst({ where: { type: "web_push" } })) as ChannelRow | null;
 }
+
+// ─── Web Push: a server capability, not a destination ────────────────────
+//
+// Every other channel type names somewhere to send TO (an SMTP host, a webhook
+// URL, a Pushbullet account), so it earns a configure-me form. Web Push names
+// nothing: the VAPID keypair is generated, the destination is whichever devices
+// users have enrolled, and WHO gets a given alert is chosen per notify action
+// when an automation is built. So it's modeled as a single on/off capability
+// rather than a channel an operator has to assemble.
+
+const WEB_PUSH_CHANNEL_NAME = "Web Push";
+
+/** VAPID requires a mailto:/https: contact URI. Derive one; the sender also
+ *  has its own fallback, so this is never load-bearing. */
+function defaultVapidSubject(): string {
+  const base = process.env.POLARIS_PUBLIC_URL;
+  if (base && /^https:/i.test(base)) return base.replace(/\/$/, "");
+  return "mailto:polaris@localhost";
+}
+
+export interface WebPushState {
+  /** Turned on AND usable (keys present) — what the UI toggle reflects. */
+  enabled: boolean;
+  /** A channel row exists (may be disabled). */
+  configured: boolean;
+  /** Devices currently enrolled, so the toggle isn't feedback-free. */
+  subscriberCount: number;
+  channelId: string | null;
+}
+
+export async function getWebPushState(): Promise<WebPushState> {
+  const [ch, subscriberCount] = await Promise.all([
+    getWebPushChannel(),
+    prisma.pushSubscription.count(),
+  ]);
+  const cfg = asObject(ch?.config);
+  return {
+    enabled: !!ch?.enabled && !!cfg.publicKey,
+    configured: !!ch,
+    subscriberCount,
+    channelId: ch?.id ?? null,
+  };
+}
+
+/**
+ * Turn Web Push on or off in one call — create the singleton and generate the
+ * keypair on first enable, so the operator never sees channel plumbing.
+ *
+ * Disabling NEVER deletes the row or the keys. Every PushSubscription is signed
+ * against this keypair; dropping it would silently invalidate every enrolled
+ * device and force the whole fleet to re-enroll. Disabled + keys intact means
+ * flipping it back on just works.
+ */
+export async function setWebPushEnabled(enabled: boolean, actor?: string): Promise<WebPushState> {
+  const existing = await getWebPushChannel();
+
+  if (!enabled) {
+    if (existing?.enabled) {
+      await prisma.notificationChannel.update({ where: { id: existing.id }, data: { enabled: false } });
+      await logEvent({
+        action: "notification_channel.updated", resourceType: "notification-channel",
+        resourceId: existing.id, resourceName: existing.name, actor,
+        message: "Web Push disabled (VAPID keypair retained so enrolled devices survive a re-enable)",
+      });
+    }
+    return getWebPushState();
+  }
+
+  let id = existing?.id;
+  if (!existing) {
+    const created = await prisma.notificationChannel.create({
+      data: {
+        name: WEB_PUSH_CHANNEL_NAME,
+        type: "web_push",
+        enabled: true,
+        config: { subject: defaultVapidSubject() } as any,
+        createdBy: actor ?? null,
+      },
+    });
+    id = created.id;
+    await logEvent({
+      action: "notification_channel.created", resourceType: "notification-channel",
+      resourceId: id, resourceName: WEB_PUSH_CHANNEL_NAME, actor, message: "Web Push enabled",
+    });
+  } else if (!existing.enabled) {
+    await prisma.notificationChannel.update({ where: { id: existing.id }, data: { enabled: true } });
+    await logEvent({
+      action: "notification_channel.updated", resourceType: "notification-channel",
+      resourceId: existing.id, resourceName: existing.name, actor, message: "Web Push enabled",
+    });
+  }
+
+  // Generate on first enable, or heal a row that somehow lost its keypair.
+  const cfg = asObject((await getWebPushChannel())?.config);
+  if (!cfg.publicKey || !cfg.privateKey) await generateWebPushKeys(id!, actor);
+
+  return getWebPushState();
+}

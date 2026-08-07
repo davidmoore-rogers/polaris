@@ -60,8 +60,12 @@
            set up like the Integrations page. Rules reference these by id. -->
       <div class="page-tab-panel" id="auto-tab-delivery">
         <p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">
-          Configure where notifications are delivered. Add SMTP / Microsoft 365 email, Pushbullet, Slack, Microsoft Teams, or Web Push channels, then reference them from an automation's <strong>Notify</strong> action. In-app alerts (the Alerts tab) are always on.
+          Configure where notifications are delivered. Add SMTP / Microsoft 365 email, Pushbullet, Slack or Microsoft Teams channels, then reference them from an automation's <strong>Notify</strong> action. In-app alerts (the Alerts tab) are always on.
         </p>
+        <!-- Web Push is a server capability rather than a destination, so it
+             gets a plain on/off card instead of a channel form. Who receives a
+             given push is chosen per Notify action when an automation is built. -->
+        <div id="web-push-card"></div>
         <div id="channels-list"><p class="empty-state">Loading...</p></div>
       </div>
 

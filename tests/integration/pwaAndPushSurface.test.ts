@@ -61,6 +61,7 @@ afterAll(async () => {
   await prisma.pushSubscription.deleteMany({ where: { endpoint: { startsWith: "https://push.example.com/ep/" } } });
   await prisma.user.deleteMany({ where: { username: OTHER_USERNAME } });
   await prisma.setting.deleteMany({ where: { key: "branding" } });
+  await prisma.notificationChannel.deleteMany({ where: { type: "web_push" } });
 });
 
 beforeEach(async () => {
@@ -148,6 +149,82 @@ d("GET /icons/:file", () => {
       const res = await request(app).get(path);
       expect(res.status, path).toBe(404);
     }
+  });
+});
+
+d("Web Push as an on/off capability", () => {
+  beforeEach(async () => {
+    await prisma.notificationChannel.deleteMany({ where: { type: "web_push" } });
+  });
+
+  it("reports not-configured before anything is set up", async () => {
+    const { agent } = await authedAgent(app);
+    const res = await agent.get("/api/v1/delivery-channels/web-push").expect(200);
+    // Proves the literal path isn't swallowed by the "/:id" route below it.
+    expect(res.body).toMatchObject({ enabled: false, configured: false, channelId: null });
+  });
+
+  it("enabling creates the channel AND generates the keypair in one call", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const res = await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf)
+      .send({ enabled: true }).expect(200);
+    expect(res.body).toMatchObject({ enabled: true, configured: true });
+    expect(res.body.channelId).toBeTruthy();
+
+    // The operator never had to think about VAPID; clients can now enroll.
+    const key = await agent.get("/api/v1/push-subscriptions/key").expect(200);
+    expect(key.body.enabled).toBe(true);
+    expect(String(key.body.publicKey).length).toBeGreaterThan(80);
+  });
+
+  it("is idempotent", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const a = await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: true }).expect(200);
+    const b = await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: true }).expect(200);
+    expect(b.body.channelId).toBe(a.body.channelId);
+    expect(await prisma.notificationChannel.count({ where: { type: "web_push" } })).toBe(1);
+  });
+
+  it("disabling KEEPS the keypair so enrolled devices survive a re-enable", async () => {
+    // The load-bearing one: every PushSubscription is signed against this
+    // keypair. Dropping it on disable would silently invalidate every enrolled
+    // device and force the whole fleet to re-enroll.
+    const { agent, csrf } = await authedAgent(app);
+    await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: true }).expect(200);
+    const before = (await agent.get("/api/v1/push-subscriptions/key")).body.publicKey;
+
+    await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: false }).expect(200);
+    // While disabled, clients correctly hide their push controls.
+    expect((await agent.get("/api/v1/push-subscriptions/key")).body.enabled).toBe(false);
+    // The row and its keys are still there.
+    expect(await prisma.notificationChannel.count({ where: { type: "web_push" } })).toBe(1);
+
+    await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: true }).expect(200);
+    expect((await agent.get("/api/v1/push-subscriptions/key")).body.publicKey).toBe(before);
+  });
+
+  it("counts enrolled devices so the toggle isn't feedback-free", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: true }).expect(200);
+    await agent.post("/api/v1/push-subscriptions").set("X-CSRF-Token", csrf)
+      .send({ endpoint: EP("counted"), keys: { p256dh: "k", auth: "a" }, surface: "mobile" }).expect(204);
+
+    const res = await agent.get("/api/v1/delivery-channels/web-push").expect(200);
+    expect(res.body.subscriberCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("rejects a non-boolean body", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: "yes" }).expect(400);
+  });
+
+  it("stays selectable by the automation builder", async () => {
+    // The UI hides it from the channel CARDS, but a Notify action must still be
+    // able to target it — that's how an operator picks who gets a push.
+    const { agent, csrf } = await authedAgent(app);
+    await agent.put("/api/v1/delivery-channels/web-push").set("X-CSRF-Token", csrf).send({ enabled: true }).expect(200);
+    const res = await agent.get("/api/v1/delivery-channels").expect(200);
+    expect(res.body.channels.some((c: any) => c.type === "web_push")).toBe(true);
   });
 });
 
