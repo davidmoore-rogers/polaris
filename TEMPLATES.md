@@ -267,6 +267,7 @@ Per-pattern sections:
 - Pipe raw rows through `sf.apply(rawData)` before rendering — sort + filters are applied there.
 - The `onChange` callback re-runs the row renderer; never mutate `rawData` in place.
 - Multi-select filters store an **array** of values matched case-insensitively against the row value via exact equality.
+- Every filter popover (`.sf-multi-popover` — multi-select, date, text-operator, and the column chooser) is closed by ONE document-wide wiring installed once per page: `TableSF._wireDocClose()`. It closes on outside click / page scroll / resize / Escape — the scroll listener is capture-phase because the popover is `position:fixed` and would otherwise float away from its button. Anything that scrolls or is pressed **inside** a popover is exempt (the list has its own `overflow-y`, and a scrollbar drag releases outside the popover, so its click lands on a common ancestor). Add new popover kinds by giving them the `.sf-multi-popover` class rather than wiring their own close handlers.
 - Status / type / monitored-state pills used as cells should remain plain DOM (not React/components) so `data-sf-key` reads them via the underlying value, not display HTML.
 
 **When adding a new instance:**
