@@ -795,6 +795,37 @@ router.get("/agent-signing-alert", requirePermission("assets", "write"), async (
   }
 });
 
+// GET /api/v1/assets/source-priority — the operator's Sources-column priority
+// (which discovery source's learned location wins) plus the catalogue of what
+// each source contributes, so the drag-and-drop list renders its labels and
+// hints from the server rather than hardcoding them. Before /:id.
+router.get("/source-priority", requirePermission("assets", "read"), async (_req, res, next) => {
+  try {
+    const { getSourcePrioritySettings } = await import("../../services/assetSourcePriorityService.js");
+    res.json(await getSourcePrioritySettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /api/v1/assets/source-priority — reorder / toggle the integration-name
+// prefix. assets:write, matching the other settings on the Assets → Settings
+// modal; the service audits the change with the previous order.
+router.put("/source-priority", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const body = z.object({
+      order: z.array(z.string()).optional(),
+      integrationPrefix: z.boolean().optional(),
+    }).parse(req.body);
+    const { saveSourceLocationPriority, getSourcePrioritySettings } =
+      await import("../../services/assetSourcePriorityService.js");
+    await saveSourceLocationPriority(body, requestActor(req));
+    res.json(await getSourcePrioritySettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PUT /api/v1/assets/ip-history-settings — update retention settings (assets admin)
 router.put("/ip-history-settings", requirePermission("assets", "write"), async (req, res, next) => {
   try {

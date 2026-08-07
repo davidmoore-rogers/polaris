@@ -112,7 +112,14 @@
               <th style="width:130px" data-col-no-resize="true" data-sf-key="status" data-sf-type="string" data-sf-options="active|maintenance|storage|decommissioned|disabled|quarantined">State</th>
               <th style="width:130px" data-col-no-resize="true" data-sf-key="_monitor" data-sf-type="string" data-sf-options="Monitored|Unmonitored|Up|Warning|Recovering|Down|Dep. Down">Status</th>
               <th style="width:160px" data-col-no-resize="true" data-col-id="monitoredVia">Monitored Via</th>
-              <th data-sf-key="_server" data-sf-type="string">Server</th>
+              <!-- "Sources": location || learnedLocation — where this asset was
+                   learned. The data-sf-key stays `_server` on purpose: it's the
+                   id saved presets (SavedTableFilter.state) and per-browser
+                   column prefs are keyed by, so renaming it would silently drop
+                   every operator's saved filter on this column. Which source's
+                   learned location wins is operator-ordered on Assets →
+                   Settings → Sources (Setting `assetSourcePriority`). -->
+              <th data-sf-key="_server" data-sf-type="string">Sources</th>
               <th style="min-width:100px" data-sf-key="description" data-sf-type="string">Description</th>
               <th data-sf-key="assetTag" data-sf-type="string" data-col-default-hidden="true">Asset Tag</th>
               <th data-sf-key="manufacturer" data-sf-type="string" data-col-default-hidden="true">Manufacturer</th>

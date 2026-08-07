@@ -95,7 +95,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **Readers** (files that consume it):
 - `src/utils/assetProjection.ts` — projectAssetFromSources() reads AssetSource rows and applies priority rules to build ProjectedAsset shape
 - `src/api/routes/assets.ts` — Asset read endpoints attach AssetSource rows in the assetSources relation
-- `src/utils/assetSourceState.ts` — `deriveAssetSourceState(sourceKind, observed)` reads the lifecycle field each source kind uses (entra `accountEnabled` / ad `accountDisabled` / vcenter-vm `powerState` / vcenter-host `connectionState`+`powerState` / fortiswitch `connected` / fortiap `status`) and normalizes it to one tri-state reading. Called by `GET /assets/:id/sources` (embedded as `state` per row); rendered by `public/js/assets.js` (`_assetSourceStateBadge` + `_assetSourceStateSummaryHTML`) and `public/js/mobile/asset-detail.js` (`loadSources`)
+- `src/utils/assetSourceState.ts` — `deriveAssetSourceState(sourceKind, observed)` reads the lifecycle field each source kind uses (entra `accountEnabled` / ad `accountDisabled` / vcenter-vm `powerState` / vcenter-host `connectionState`+`powerState` / fortiswitch `connected` / fortiap `status` / arc `status` / arc-k8s `connectivityStatus`) and normalizes it to one tri-state reading. Called by `GET /assets/:id/sources` (embedded as `state` per row); rendered by `public/js/assets.js` (`_assetSourceStateBadge` + `_assetSourceStateSummaryHTML`) and `public/js/mobile/asset-detail.js` (`loadSources`)
 - `src/services/projectionDriftService.ts` — Compares projectAssetFromSources() output against Asset field values to detect drift
 - Discovery paths use projectAssetFromSources() output as the source of truth for Asset field writes (Phase 3b.1 cutover pending)
 
@@ -2282,6 +2282,32 @@ Listed alphabetically.
 - Check infrastructure-asset type list (firewall/switch/access_point) against the `BUILT_IN_ASSET_TYPES` constant in `src/utils/assetTypes.ts` + discovery source-kind tagging. (Custom operator-added AssetTypeDef rows DO NOT receive infrastructure special-casing — they fall through to "other"-like generic behavior.)
 - Verify `getSightingSettings()` Settings key and max-age filter alignment with caller expectations.
 - Review rollback/error-logging in event payload (event action names: asset.quarantine.succeeded/partial/failed/released/unpush.failed).
+
+---
+
+## services/assetSourcePriorityService.ts
+
+**What it owns:** The operator-settable priority behind the assets table's **Sources** column — which discovery source's "where was this learned?" answer wins when an asset is known to several at once. One Setting row (`assetSourcePriority`, `{order[], integrationPrefix}`) over `createSettingStore` with a 30s TTL. The catalogue of who can contribute what is the pure `utils/assetSourceLocation.ts`; this service owns persistence, validation, audit, and installing the order into the projection.
+
+**Public API:** `getSourceLocationPriority()`, `getSourcePrioritySettings()`, `saveSourceLocationPriority(input, actor)`, `refreshProjectionPriority()`, `invalidateSourcePriorityCache()`, `ASSET_SOURCE_PRIORITY_KEY`
+
+**Cross-service deps:** `settingsStore.createSettingStore`, `eventLogService.logEvent`, `utils/assetSourceLocation` (catalogue + normalizer), `utils/assetProjection.setLearnedLocationPriority` (the install seam).
+
+**Used by:** `src/api/routes/assets.ts — GET/PUT /assets/source-priority`, `src/services/discovery/discoveryEngine.ts — refreshProjectionPriority() at the top of runDiscovery`, `src/app.ts — refreshProjectionPriority() once per process in startBackgroundJobs`
+
+**Invariants:**
+- The order feeds `Asset.learnedLocation` through the projection, **not just rendering**. The Sources column, its text filter, its sort, "behind FortiGate X" tag/maintenance criteria and the Device Map's per-site narrowing all read `learnedLocation` — deciding the winner at render time would make the column disagree with everything that filters on it. Never "fix" this by moving the resolution into the list enrichment.
+- **Propagation is pull-based, and must stay that way.** The projection runs inside the DISCOVERY process in the split-role layout, so a web-role write can't push it. `refreshProjectionPriority()` at boot (every role) + at the start of every `runDiscovery` is the whole mechanism; the per-run refresh is also the moment learnedLocation is next written, so nothing is observably stale. Adding a new projection caller in another process means adding a refresh there too.
+- Reordering is **not retroactive** — existing rows re-project on their integration's next discovery run. The UI says so; don't promise otherwise.
+- The READ path self-heals (`normalizeSourceLocationPriority` drops unknown kinds, collapses duplicates, appends missing kinds in default order) while the WRITE path REJECTS unknown/duplicate kinds with a 400. Asymmetric on purpose: a stored row must survive a catalogue change, a client posting a typo must hear about it.
+- `refreshProjectionPriority()` never throws — a DB hiccup leaves the DEFAULT order in force (pre-feature behavior) rather than failing a discovery run.
+- The default order reproduces the pre-feature hardcoded `LEARNED_LOCATION_RULES` for the field contributors; `tests/unit/assetSourceLocation.test.ts` pins that. Changing it silently re-labels every asset in every install on the next run.
+
+**When changing this:**
+- Adding a source kind: add it to `LOCATION_CONTRIBUTORS` in `utils/assetSourceLocation.ts` (the normalizer appends it to every stored order automatically — that's why it goes at the END of the catalogue) and to the `learnedLocation` row of ARCHITECTURE.md's projection priority table. No client change needed; the settings list is server-driven.
+- Adding a **field**-mode contributor: confirm the observed key is actually written by the discovery path that mints the source row. A contributor whose key never appears is a silent no-op.
+- Touching the `integrationPrefix` rendering: it reads `observed.integrationName`, stamped by `buildFortigateEndpointObservedBlob` + `upsertFortinetInfraAssetSource` in `discoveryEngine.ts`. Rows written before that stamp fall back to the bare device name — keep that fallback or pre-upgrade assets render a dangling `:name`.
+- Any change to what a source contributes is a change to `Asset.learnedLocation`: re-check the "behind FortiGate" matchers in `tagAssignmentService` / maintenance criteria (`utils/integrationFilter.ts` reads AD's `ouPath` off learnedLocation as a fallback) and `dashboard.ts`'s per-site narrowing.
 
 ---
 

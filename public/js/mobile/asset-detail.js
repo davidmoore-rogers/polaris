@@ -56,6 +56,10 @@
     "fortiswitch":        "FortiSwitch",
     "fortiap":            "FortiAP",
     "fortigate-endpoint": "FortiGate / FortiManager (endpoint)",
+    "vcenter-vm":         "VMware vCenter (VM)",
+    "vcenter-host":       "VMware vCenter (ESXi host)",
+    "arc":                "Azure Arc",
+    "arc-k8s":            "Azure Arc (Kubernetes)",
     "polaris-agent":      "Polaris Agent",
     "manual":             "Manual / other",
   };

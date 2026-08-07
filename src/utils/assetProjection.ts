@@ -56,6 +56,12 @@
 
 import { normalizeManufacturer } from "./manufacturerNormalize.js";
 import { isValidGeoCoord } from "./geo.js";
+import {
+  contributedLocation,
+  defaultSourceLocationPriority,
+  locationContributor,
+  type SourceLocationPriority,
+} from "./assetSourceLocation.js";
 
 export type AssetSourceKind =
   | "entra"
@@ -355,42 +361,68 @@ const OS_VERSION_RULES: FieldRule[] = [
   { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "osVersion") },
 ];
 
-const LEARNED_LOCATION_RULES: FieldRule[] = [
-  // AD's OU path is the strongest "where does this device live" signal
-  // we have for endpoints. Fortinet infrastructure uses the controller
-  // FortiGate as its location label (matches legacy behavior). Note: for
-  // firewalls themselves, learnedLocation is the firewall's own hostname —
-  // that's already on Asset.hostname so the projection doesn't need to
-  // duplicate it; we leave learnedLocation = null for firewalls and let
-  // the legacy "set when null" rule continue to work.
-  { sourceKind: "ad", pick: (o) => obsString(o, "ouPath") },
-  // Arc's resource group — an Azure management/billing container, so it's a
-  // weaker "where does this live" signal than an OU path the organization
-  // chose (and is frequently something like `rg-arc-onboarding`). Still far
-  // better than nothing for cloud-only or non-domain-joined hosts.
-  //
-  // NEVER project the Azure REGION here: it says where the Arc resource
-  // RECORD lives, not where the machine is. It stays in observed.azureRegion.
-  { sourceKind: "arc", pick: (o) => obsString(o, "resourceGroup") },
-  { sourceKind: "arc-k8s", pick: (o) => obsString(o, "resourceGroup") },
-  // Infrastructure site labels outrank the endpoint sighting — an adopted
-  // switch/AP's controllerFortigate is authoritative; a pre-adoption
-  // fortigate-endpoint sighting from some other gate must not relabel it.
-  { sourceKind: "fortiswitch", pick: (o) => obsString(o, "controllerFortigate") },
-  { sourceKind: "fortiap", pick: (o) => obsString(o, "controllerFortigate") },
-  // fortigate-endpoint learnedLocation — the FortiGate device name acts
-  // as a site label for endpoints with no AD OU (BYO laptops on guest
-  // SSIDs, contractor devices, IoT gear). Suppressed when a
-  // fortigate-firewall source exists: a firewall's site label is itself
-  // (its own hostname, stamped inline by the firewall sync) — the gate
-  // that happened to sight it as a DHCP client pre-adoption is not its
-  // location.
-  {
-    sourceKind: "fortigate-endpoint",
-    pick: (o) => obsString(o, "learnedLocation"),
-    applies: (sources) => !hasSource(sources, "fortigate-firewall"),
-  },
-];
+/**
+ * learnedLocation is the one projected field whose priority order is
+ * OPERATOR-CONFIGURABLE (Assets → Settings → Sources; the Assets table's
+ * "Sources" column reads `location || learnedLocation`). An asset learned from
+ * several sources at once has several competing answers to "where is it?" — an
+ * AD OU path, a controller FortiGate, an Azure Arc onboarding — and which one
+ * an operator wants to read is a site convention, not something Polaris can
+ * decide. So the rule list is BUILT from the priority config rather than
+ * declared here; the catalogue of who can contribute what lives in
+ * utils/assetSourceLocation.ts.
+ *
+ * Notes that survive the move:
+ *   - Firewalls contribute nothing: a firewall's location label is its own
+ *     hostname, already on Asset.hostname, so learnedLocation stays null for
+ *     them and the legacy "set when null" inline rule keeps working.
+ *   - The fortigate-endpoint rule is suppressed when a fortigate-firewall
+ *     source exists, whatever the operator's order says. A firewall's site
+ *     label is itself — the gate that happened to sight it as a DHCP client
+ *     pre-adoption is not its location. That's an invariant, not a preference.
+ */
+function buildLearnedLocationRules(config: SourceLocationPriority): FieldRule[] {
+  return config.order
+    .filter((kind) => locationContributor(kind))
+    .map((kind) => {
+      const rule: FieldRule = {
+        sourceKind: kind as AssetSourceKind,
+        pick: (o) => contributedLocation(kind, o, { integrationPrefix: config.integrationPrefix }),
+      };
+      if (kind === "fortigate-endpoint") {
+        rule.applies = (sources) => !hasSource(sources, "fortigate-firewall");
+      }
+      return rule;
+    });
+}
+
+/**
+ * Process-wide learned-location priority, seeded with the default order and
+ * refreshed from the `assetSourcePriority` Setting by
+ * services/assetSourcePriorityService.refreshProjectionPriority() — at boot and
+ * at the start of every discovery run, which is what propagates an operator's
+ * edit into the split-role discovery process.
+ *
+ * Module state in an otherwise-pure util is a deliberate trade: there are ~25
+ * projectAssetFromSources() call sites across discoveryEngine / routes /
+ * drift detection, and threading a config object through all of them to serve
+ * one field's ordering would be far more invasive than one refresh seam. Tests
+ * and any caller that wants determinism pass `opts.learnedLocation` explicitly
+ * and never observe this value.
+ */
+let activeLocationPriority: SourceLocationPriority = defaultSourceLocationPriority();
+let activeLearnedLocationRules: FieldRule[] = buildLearnedLocationRules(activeLocationPriority);
+
+/** Install the operator's order process-wide. Idempotent; cheap to re-call. */
+export function setLearnedLocationPriority(config: SourceLocationPriority): void {
+  activeLocationPriority = config;
+  activeLearnedLocationRules = buildLearnedLocationRules(config);
+}
+
+/** The order currently in force — for diagnostics / the settings GET. */
+export function getLearnedLocationPriority(): SourceLocationPriority {
+  return activeLocationPriority;
+}
 
 const IP_ADDRESS_RULES: FieldRule[] = [
   // Infrastructure management IP wins. A newly-deployed FortiGate/switch/AP
@@ -527,8 +559,18 @@ function projectField<T extends string | number>(
   return { value: null, source: null };
 }
 
+export interface ProjectionOptions {
+  /**
+   * Override the process-wide learned-location priority for this call. Pass it
+   * whenever the result must be deterministic regardless of what an operator
+   * has configured (tests, previews).
+   */
+  learnedLocation?: SourceLocationPriority;
+}
+
 export function projectAssetFromSources(
   sources: AssetSourceForProjection[],
+  opts?: ProjectionOptions,
 ): ProjectionResult {
   const projected: ProjectedAsset = {
     hostname: null,
@@ -565,7 +607,12 @@ export function projectAssetFromSources(
   apply("model", MODEL_RULES);
   apply("os", OS_RULES);
   apply("osVersion", OS_VERSION_RULES);
-  apply("learnedLocation", LEARNED_LOCATION_RULES);
+  apply(
+    "learnedLocation",
+    opts?.learnedLocation
+      ? buildLearnedLocationRules(opts.learnedLocation)
+      : activeLearnedLocationRules,
+  );
   apply("ipAddress", IP_ADDRESS_RULES);
   apply("latitude", LATITUDE_RULES);
   apply("longitude", LONGITUDE_RULES);

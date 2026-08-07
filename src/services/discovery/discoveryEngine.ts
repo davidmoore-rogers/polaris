@@ -27,6 +27,7 @@ import { isFortinetIntegrationType } from "../../utils/pollingCompatibility.js";
 import { ENTRA_ASSET_TAG_PREFIX, AD_ASSET_TAG_PREFIX, AD_GUID_TAG_PREFIX, SID_TAG_PREFIX } from "../../utils/assetSourceTags.js";
 import type { DiscoveryResult, DiscoveryProgressCallback } from "../fortimanagerService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
+import { refreshProjectionPriority } from "../assetSourcePriorityService.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
 import {
   logEvent,
@@ -571,6 +572,12 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
   // so a broken integration won't reach this point under auto-discovery. A
   // manual trigger still proceeds: the operator chose to force a run, and the
   // discovery error surface is the right place for them to see it fail.
+
+  // Pull the operator's Sources-column priority into this process before any
+  // projection runs. Discovery is a SEPARATE process in the split-role layout,
+  // so this per-run refresh is how a settings edit made in the web role reaches
+  // the code that actually writes Asset.learnedLocation. Never throws.
+  await refreshProjectionPriority();
 
   const runStartedAt = Date.now();
   await markRunStarted(integrationId, new Date(runStartedAt));
@@ -1392,7 +1399,12 @@ async function upsertFortinetInfraAssetSource(
   observed: Record<string, unknown>,
   syncedAt: Date,
   lastSeen: Date,
+  integrationName?: string | null,
 ): Promise<void> {
+  // Which FMG / FortiGate integration manages the controller. Only consumed by
+  // the optional `<integration name>:<fortigate name>` rendering of the Sources
+  // column — see buildFortigateEndpointObservedBlob's note.
+  observed.integrationName = integrationName || null;
   // osVersion "absent ≠ wipe": a managed_ap/managed-switch row can arrive
   // without a usable firmware version (os_version missing mid-rejoin, or a
   // cached-format fallback rejected by isCanonicalFortiapVersion). Keep the
@@ -3174,7 +3186,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           try {
             const syncedAt = new Date(now);
             const observed = buildFortiswitchObservedBlob(sw, syncedAt);
-            await upsertFortinetInfraAssetSource("fortiswitch", existingAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiswitch", existingAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt, integrationName);
           } catch (err: any) {
             syncLog("error", `Failed to upsert fortiswitch AssetSource for ${sw.name}: ${err?.message || "Unknown error"}`);
           }
@@ -3332,7 +3344,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         const newAsset = await prisma.asset.create({ data: createData as any });
         if (sw.serial) {
           try {
-            await upsertFortinetInfraAssetSource("fortiswitch", newAsset.id, integrationId, sw.serial, swObserved, swSyncedAt, swSyncedAt);
+            await upsertFortinetInfraAssetSource("fortiswitch", newAsset.id, integrationId, sw.serial, swObserved, swSyncedAt, swSyncedAt, integrationName);
           } catch (err: any) {
             syncLog("error", `Created FortiSwitch asset ${sw.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
@@ -3474,7 +3486,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           try {
             const syncedAt = new Date(now);
             const observed = buildFortiapObservedBlob(ap, syncedAt);
-            await upsertFortinetInfraAssetSource("fortiap", existingAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiap", existingAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt, integrationName);
           } catch (err: any) {
             syncLog("error", `Failed to upsert fortiap AssetSource for ${ap.name}: ${err?.message || "Unknown error"}`);
           }
@@ -3588,7 +3600,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         });
         if (ap.serial) {
           try {
-            await upsertFortinetInfraAssetSource("fortiap", newAsset.id, integrationId, ap.serial, apObserved, apSyncedAt, apSyncedAt);
+            await upsertFortinetInfraAssetSource("fortiap", newAsset.id, integrationId, ap.serial, apObserved, apSyncedAt, apSyncedAt, integrationName);
           } catch (err: any) {
             syncLog("error", `Created FortiAP asset ${ap.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
@@ -5301,7 +5313,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       async (assetId: string) => {
         const asset = assetIdx.findById(assetId);
         if (!asset || !asset.macAddress) return false;
-        await upsertFortigateEndpointSource(assetId, integrationId, asset, integrationType, asset.lastSeen ?? flushedAt);
+        await upsertFortigateEndpointSource(assetId, integrationId, asset, integrationType, asset.lastSeen ?? flushedAt, integrationName);
         return true;
       },
     );
@@ -7210,7 +7222,11 @@ async function upsertAdAssetSource(
  * (FortiGate doesn't supply a stable per-device ID), so the upsert
  * helper skips assets without one.
  */
-function buildFortigateEndpointObservedBlob(asset: any, integrationType: "fortimanager" | "fortigate" | string): Record<string, unknown> {
+function buildFortigateEndpointObservedBlob(
+  asset: any,
+  integrationType: "fortimanager" | "fortigate" | string,
+  integrationName: string | null,
+): Record<string, unknown> {
   return {
     mac: typeof asset.macAddress === "string" ? asset.macAddress.toUpperCase() : null,
     hostname: asset.hostname ?? null,
@@ -7224,6 +7240,11 @@ function buildFortigateEndpointObservedBlob(asset: any, integrationType: "fortim
     lastSeenSwitch: asset.lastSeenSwitch ?? null,
     lastSeenAp: asset.lastSeenAp ?? null,
     discoveredVia: integrationType, // "fortimanager" | "fortigate"
+    // Which FMG / FortiGate integration sighted it. Only consumed by the
+    // optional `<integration name>:<fortigate name>` rendering of the Sources
+    // column (utils/assetSourceLocation.contributedLocation) — rows written
+    // before this stamp existed simply fall back to the bare device name.
+    integrationName: integrationName || null,
   };
 }
 
@@ -7243,11 +7264,12 @@ async function upsertFortigateEndpointSource(
   asset: any,
   integrationType: string,
   lastSeen: Date,
+  integrationName: string | null,
 ): Promise<void> {
   if (!asset?.macAddress) return;
   const externalId = String(asset.macAddress).trim().toUpperCase();
   if (!externalId) return;
-  const observed = buildFortigateEndpointObservedBlob(asset, integrationType);
+  const observed = buildFortigateEndpointObservedBlob(asset, integrationType, integrationName);
   const now = new Date();
   await prisma.assetSource.upsert({
     where: { sourceKind_externalId: { sourceKind: "fortigate-endpoint", externalId } },
@@ -8017,6 +8039,11 @@ async function syncVcenterDevices(
     const displayName = vm.guestHostname || vm.name || vm.moref;
     const observed = buildVcenterVmObservedBlob(vm, now);
     const hostRow = hostByMoref.get(vm.hostMoref) ?? null;
+    // Placement, mirrored onto the source blob so the Sources column can read
+    // "where does this VM live" without loading Asset.virtualization. The
+    // authoritative copy stays on `virtualization` below.
+    observed.hostName = hostRow?.name ?? null;
+    observed.clusterName = hostRow?.clusterName ?? null;
     const poweredOn = vm.powerState === "POWERED_ON";
     const virtualization = {
       role: "vm",

@@ -700,6 +700,18 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
     catch (err: any) { logger.warn({ err: err?.message, job: path }, "background job import failed"); }
   };
 
+  // Install the operator's Sources-column (learned-location) priority into this
+  // process's projection before anything projects. Every role does this: the
+  // web role projects on the asset-detail + agent-enroll paths, the discovery
+  // role on every sync. Discovery additionally re-reads it per run so a later
+  // edit lands without a restart. Never throws — falls back to the default order.
+  try {
+    const { refreshProjectionPriority } = await import("./services/assetSourcePriorityService.js");
+    await refreshProjectionPriority();
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "asset source priority refresh failed; using default order");
+  }
+
   if (cfg.runsMigrations) {
     // One-shot startup migrations / seeds / backfills — idempotent, marker-keyed.
     for (const p of [
