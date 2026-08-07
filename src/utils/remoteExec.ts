@@ -57,12 +57,45 @@ export function withSshClient<T>(
     const opts: any = { host, port, username, readyTimeout: 30_000 };
     if (privateKey) opts.privateKey = privateKey;
     else opts.password = password;
+    // Opt-in server authentication (SshConfig.verifyHostKey). Absent the flag
+    // this stays the pre-2026-08 behavior: ssh2 with no hostVerifier accepts
+    // ANY host key. See sshHostKeyService for why it's opt-in.
+    const verifier = buildHostVerifier(host, port, config);
+    if (verifier) opts.hostVerifier = verifier;
     try {
       client.connect(opts);
     } catch (err: any) {
       finish(err instanceof Error ? err : new Error(String(err)));
     }
   });
+}
+
+/**
+ * Build the ssh2 `hostVerifier` for a credential config, or null when the
+ * credential hasn't opted in.
+ *
+ * Shared by withSshClient and monitoringService.probeSsh — the two (and only
+ * two) `ssh2.connect` call sites in the tree, which must not drift apart on
+ * whether the server gets authenticated.
+ *
+ * ssh2 hands the callback the RAW key blob (no `hostHash` set), which is what
+ * `fingerprintKeyBlob` needs to produce an `ssh-keygen -lf`-comparable value.
+ * The import is dynamic to keep this leaf util free of a static service edge.
+ */
+export function buildHostVerifier(
+  host: string,
+  port: number,
+  config: Record<string, unknown>,
+): ((key: Buffer, cb: (valid: boolean) => void) => void) | null {
+  if (config.verifyHostKey !== true) return null;
+  return (key: Buffer, cb: (valid: boolean) => void) => {
+    import("../services/sshHostKeyService.js")
+      .then(({ verifyOrPin }) => verifyOrPin(host, port, key))
+      .then((verdict) => cb(verdict.ok))
+      // Fail CLOSED. An operator who ticked "verify" gets a refused connection
+      // on an internal error, never a silently unverified one.
+      .catch(() => cb(false));
+  };
 }
 
 /** Run one command on an open SSH client, killing the channel on timeout. */

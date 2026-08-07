@@ -70,6 +70,14 @@ export interface SshConfig {
   privateKey?: string;
   publicKey?: string;
   port?: number;
+  /**
+   * Authenticate the SERVER via trust-on-first-use host-key pinning
+   * (sshHostKeyService). Opt-in, mirroring WinRM's `verifyTls`: absent /
+   * false keeps the pre-2026-08 behavior where ssh2 accepts ANY host key,
+   * so enabling it can't break an install whose hosts were never pinned.
+   * New credentials default it ON in the form.
+   */
+  verifyHostKey?: boolean;
 }
 
 /**
@@ -225,6 +233,9 @@ function validateSshConfig(config: Record<string, unknown>): void {
     if (!Number.isInteger(p) || p < 1 || p > 65535) {
       throw new AppError(400, "SSH port must be between 1 and 65535");
     }
+  }
+  if (config.verifyHostKey !== undefined && typeof config.verifyHostKey !== "boolean") {
+    throw new AppError(400, "SSH verifyHostKey must be a boolean");
   }
 }
 

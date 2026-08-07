@@ -2683,6 +2683,36 @@ Listed alphabetically.
 
 ---
 
+## services/sshHostKeyService.ts
+
+**What it owns:** Trust-on-first-use pinning for SSH SERVER host keys — the `SshHostKey` table, the verify/pin decision, the fingerprint + key-type parsers, and the operator list/delete.
+
+**Public API:** `SshHostKeyRecord`, `HostKeyVerdict`, `fingerprintKeyBlob`, `keyTypeFromBlob`, `verifyOrPin`, `listHostKeys`, `deleteHostKey`, `_resetCaches`.
+
+**Cross-service deps:** `db` (prisma), `eventLogService`, `utils/errors`, `utils/logger`.
+
+**Used by:**
+- src/utils/remoteExec.ts — `buildHostVerifier` (dynamic import), which feeds BOTH `ssh2.connect` sites: `withSshClient` (agent install/upgrade/uninstall, agentless process collection) and `monitoringService.probeSsh`
+- src/api/routes/serverSettings.ts — `GET /agents/ssh-host-keys`, `DELETE /agents/ssh-host-keys/:id`
+- public/js/agent-ssh-onboarding.js — the pinned-keys pane
+
+**Invariants:**
+- **Opt-in per credential** (`SshConfig.verifyHostKey`), default OFF. Absent the flag, `buildHostVerifier` returns null and ssh2 behaves exactly as it did pre-2026-08 (accepts any host key). This is the compatibility guarantee that lets the feature ship without breaking installs whose hosts were never pinned — do not flip the default without a fleet-wide pinning plan.
+- **Fails closed.** A verification error rejects the connection. An operator who ticked the box must never get a silently-unverified connection.
+- **A mismatch never overwrites the pin.** Overwriting would defeat the entire mechanism; the operator deletes the pin deliberately.
+- Fingerprints are `SHA256:<base64, unpadded>` — byte-identical to `ssh-keygen -lf` so they can be compared by eye during an incident. Do not add padding or switch to hex.
+- Pins are keyed `(host, port)` and live in their own table, NOT on `Credential.config`: host keys are per-host, one credential spans a fleet.
+- **Hot path.** `withSshClient` runs on the per-minute agentless-processes cadence, so lookups are served from a module-level Map and `lastSeen` writes are throttled hourly. A cache hit that disagrees still re-reads the DB before rejecting — otherwise a just-deleted pin would be a permanent rejection on that process.
+- `keyTypeFromBlob` is display-only and bounds the declared length before slicing; a malformed blob degrades to `"unknown"` rather than failing an otherwise-valid connection.
+- Deleting a pin is audited at **warning** level — it re-opens first-use trust for that host.
+
+**When changing this:**
+- Mock-only tests cannot cover the handshake. Verify against a real `ssh2.Server`: pin → match → swap the server's host key → confirm refusal → delete the pin → confirm re-pin. (Attach an `error` handler to the SERVER-side connection in any such harness; the client drops mid-KEX when it refuses, and the resulting server-side event is otherwise unhandled and crashes the script.)
+- Tests: `tests/unit/sshHostKey.test.ts` (18 cases, incl. the opt-in gate and fail-closed).
+- Any new `ssh2.connect` call site MUST route through `buildHostVerifier`; there are deliberately only two.
+
+---
+
 ## services/sshOnboardingScript.ts
 
 **What it owns:** Pure generation of the two Windows SSH onboarding PowerShell scripts (remediation + detection) an operator pushes to their fleet before Polaris can install the agent over SSH, plus the strict input validators that guard them. No I/O.

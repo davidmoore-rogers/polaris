@@ -3634,3 +3634,30 @@ model HostMetricsSample {
   @@index([timestamp])
   @@map("host_metrics_samples")
 }
+
+// Trust-on-first-use pins for SSH SERVER host keys.
+//
+// Polaris passed no `hostVerifier` to ssh2 before this, so every SSH
+// connection — agent install, agentless process collection, the SSH monitor
+// probe — accepted any host key: the server was never authenticated to the
+// client. Host keys are per-HOST but a Credential spans a fleet, so the pins
+// cannot live on Credential.config and need their own table.
+//
+// Opt-in per credential via SshConfig.verifyHostKey, mirroring the WinRM
+// `verifyTls` precedent (2026-06-03 review, H1): default OFF so no existing
+// install breaks, default ON for newly created credentials.
+//
+// Plain table, no Asset FK — a host is often onboarded before it exists as an
+// Asset, and the pin is keyed by the address actually dialed.
+model SshHostKey {
+  id          String   @id @default(uuid())
+  host        String
+  port        Int      @default(22)
+  keyType     String // "ssh-ed25519", "ecdsa-sha2-nistp256", "ssh-rsa", ...
+  fingerprint String // "SHA256:<base64, unpadded>" — same form `ssh-keygen -lf` prints
+  firstSeen   DateTime @default(now())
+  lastSeen    DateTime @default(now())
+
+  @@unique([host, port])
+  @@map("ssh_host_keys")
+}

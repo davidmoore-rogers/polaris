@@ -5844,7 +5844,8 @@ function credSummary(c) {
   }
   if (c.type === "ssh") {
     var auth = (typeof cfg.privateKey === "string" && cfg.privateKey) ? "private key" : "password";
-    return escapeHtml(cfg.username || "") + " · " + auth;
+    return escapeHtml(cfg.username || "") + " · " + auth +
+      (cfg.verifyHostKey === true ? " · host key verified" : "");
   }
   if (c.type === "restapi") {
     var url = cfg.baseUrl || "";
@@ -6175,11 +6176,12 @@ async function openCredentialModal(id, initialState) {
 
   function renderTypeFields() {
     var t = document.getElementById("f-cred-type").value;
-    // New credentials default to verify-ON (2026-06-03 review, H1). Existing
-    // credentials keep their stored config (no verifyTls → checkbox unchecked →
+    // New credentials default to verify-ON (2026-06-03 review, H1; SSH
+    // host-key pinning follows the same shape). Existing credentials keep
+    // their stored config (no verifyTls / verifyHostKey → checkbox unchecked →
     // current no-verify behavior preserved on save). initialState (Back button)
     // always wins so in-flight edits survive.
-    var cfg = formConfig || (isNew ? { verifyTls: true } : {});
+    var cfg = formConfig || (isNew ? { verifyTls: true, verifyHostKey: true } : {});
     var host = document.getElementById("cred-type-fields");
     if (t === "snmp")        host.innerHTML = credSnmpForm(cfg);
     else if (t === "winrm")  host.innerHTML = credWinrmForm(cfg);
@@ -6510,6 +6512,13 @@ function credSshForm(cfg) {
     '</div>' +
     '<div class="form-group"><label>Port</label>' +
       '<input type="number" id="f-ssh-port" value="' + escapeHtml(String(cfg.port || "")) + '" placeholder="22" min="1" max="65535">' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+        '<input type="checkbox" id="f-ssh-verifyhostkey"' + (cfg.verifyHostKey === true ? " checked" : "") + '>' +
+        '<span>Verify the server\'s host key</span>' +
+      '</label>' +
+      '<p class="hint">Recommended. When off, Polaris accepts whatever host key is presented, so anything answering on the target\'s address can impersonate it &mdash; and on an agent install it is handed a script to run as root. On first connection Polaris pins the key it sees and refuses later connections if it changes; if a host is legitimately rebuilt or re-keyed, delete its pin under Integrations &rarr; Polaris Agent &rarr; Windows SSH Deployment.</p>' +
     '</div>'
   );
 }
@@ -6578,6 +6587,7 @@ function readCredentialForm(type) {
     username: document.getElementById("f-ssh-user").value,
     password: document.getElementById("f-ssh-pass").value,
     privateKey: document.getElementById("f-ssh-key").value,
+    verifyHostKey: document.getElementById("f-ssh-verifyhostkey").checked,
   };
   var sp = num(document.getElementById("f-ssh-port").value);
   if (sp !== undefined) s.port = sp;

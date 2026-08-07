@@ -33,6 +33,7 @@ import { URL } from "node:url";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as snmp from "net-snmp";
 import { Client as SshClient } from "ssh2";
+import { buildHostVerifier } from "../utils/remoteExec.js";
 
 import { prisma } from "../db.js";
 import { retryOnDeadlock } from "../utils/dbRetry.js";
@@ -2994,6 +2995,11 @@ async function probeSsh(host: string, config: Record<string, unknown>, start: nu
       };
       if (privateKey) opts.privateKey = privateKey;
       else opts.password = password;
+      // Same opt-in server authentication as remoteExec.withSshClient — these
+      // are the only two ssh2.connect sites and they must not drift apart on
+      // whether the host key is checked. No-op unless verifyHostKey is set.
+      const verifier = buildHostVerifier(host, port, config);
+      if (verifier) opts.hostVerifier = verifier;
       client.connect(opts);
     } catch (err: any) {
       clearTimeout(timer);

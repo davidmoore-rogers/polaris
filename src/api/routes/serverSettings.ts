@@ -1866,6 +1866,25 @@ router.get("/agents/windows-ssh/script", requirePermission("serverSettingsSystem
   } catch (err) { next(err); }
 });
 
+// Pinned SSH host keys (trust-on-first-use). Surfaced on the same card so the
+// documented recovery for a rebuilt host — delete its pin — is where the
+// operator already is. DELETE is fullwrite: forgetting a pin deliberately
+// re-opens first-use trust for that host.
+router.get("/agents/ssh-host-keys", requirePermission("serverSettingsSystem", "read"), async (_req, res, next) => {
+  try {
+    const { listHostKeys } = await import("../../services/sshHostKeyService.js");
+    res.json({ hostKeys: await listHostKeys() });
+  } catch (err) { next(err); }
+});
+
+router.delete("/agents/ssh-host-keys/:id", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
+  try {
+    const { deleteHostKey } = await import("../../services/sshHostKeyService.js");
+    await deleteHostKey(String(req.params.id), requestActor(req) || "unknown");
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 // ─── Polaris Agent build routes ──────────────────────────────────────
 //
 // Drives the "Build agent binaries" card on the Maintenance tab. Phase B

@@ -36,8 +36,85 @@
     return (
       keypairPaneHtml(s, hasKey) +
       configPaneHtml(s, hasKey) +
-      scriptPaneHtml(hasKey)
+      scriptPaneHtml(hasKey) +
+      hostKeysPaneHtml()
     );
+  }
+
+  // Pinned SSH host keys. Lives here rather than on the credential form
+  // because the pins are fleet-wide, not per-credential — and because this is
+  // where an operator lands when an install starts failing after a rebuild.
+  function hostKeysPaneHtml() {
+    return (
+      '<div style="padding-top:1rem;border-top:1px solid var(--color-border);margin-top:1rem">' +
+        '<h5 style="margin:0 0 0.5rem 0">Pinned SSH host keys</h5>' +
+        '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0 0 0.75rem 0">' +
+          'When a credential has <em>Verify the server\'s host key</em> enabled, Polaris records the key each host ' +
+          'presents on first connection and refuses later connections if it changes. If a host was legitimately ' +
+          'rebuilt or re-keyed, delete its pin here &mdash; the next connection will trust and re-pin whatever answers.' +
+        '</p>' +
+        '<div id="wssh-hostkeys"><p class="empty-state" style="padding:0.5rem 0;margin:0">Loading&hellip;</p></div>' +
+      '</div>'
+    );
+  }
+
+  function renderHostKeys(rows) {
+    var host = el("wssh-hostkeys");
+    if (!host) return;
+    if (!rows || !rows.length) {
+      host.innerHTML = '<p class="empty-state" style="padding:0.5rem 0;margin:0">No host keys pinned yet. ' +
+        'Pins appear the first time Polaris connects to a host using a credential with host-key verification on.</p>';
+      return;
+    }
+    var body = rows.map(function (r) {
+      return '<tr>' +
+        '<td class="mono">' + escapeHtml(r.host) + (r.port !== 22 ? ":" + escapeHtml(String(r.port)) : "") + '</td>' +
+        '<td>' + escapeHtml(r.keyType || "—") + '</td>' +
+        '<td class="mono" style="font-size:0.78rem">' + escapeHtml(r.fingerprint) + '</td>' +
+        '<td>' + escapeHtml(r.firstSeen ? new Date(r.firstSeen).toLocaleDateString() : "—") + '</td>' +
+        '<td style="text-align:right"><button class="btn btn-sm btn-secondary" data-wssh-delpin="' + escapeHtml(r.id) +
+          '" data-wssh-pinhost="' + escapeHtml(r.host) + '">Delete</button></td>' +
+      '</tr>';
+    }).join("");
+    host.innerHTML =
+      '<table class="data-table"><thead><tr>' +
+        '<th>Host</th><th>Type</th><th>Fingerprint</th><th>First seen</th><th></th>' +
+      '</tr></thead><tbody>' + body + '</tbody></table>';
+
+    Array.prototype.forEach.call(host.querySelectorAll("[data-wssh-delpin]"), function (btn) {
+      btn.addEventListener("click", function () { onDeletePin(btn); });
+    });
+  }
+
+  function onDeletePin(btn) {
+    var id = btn.getAttribute("data-wssh-delpin");
+    var hostName = btn.getAttribute("data-wssh-pinhost");
+    showConfirm(
+      "Delete the pinned host key for " + hostName + "?\n\n" +
+      "The next connection to this host will trust and pin whatever answers. Only do this if you know the host " +
+      "was legitimately rebuilt or re-keyed — otherwise you would be accepting an impersonator."
+    ).then(function (ok) {
+      if (!ok) return;
+      btn.disabled = true;
+      api.serverSettings.sshHostKeyDelete(id)
+        .then(function () { showToast("Pin deleted", "success"); loadHostKeys(); })
+        .catch(function (err) {
+          showToast((err && err.message) ? err.message : "Could not delete the pin", "error");
+          btn.disabled = false;
+        });
+    });
+  }
+
+  function loadHostKeys() {
+    api.serverSettings.sshHostKeysList()
+      .then(function (r) { renderHostKeys(r && r.hostKeys); })
+      .catch(function (err) {
+        var host = el("wssh-hostkeys");
+        if (host) {
+          host.innerHTML = '<p class="empty-state" style="padding:0.5rem 0;margin:0">Could not load pinned keys: ' +
+            escapeHtml((err && err.message) || "unknown error") + "</p>";
+        }
+      });
   }
 
   function keypairPaneHtml(s, hasKey) {
@@ -174,6 +251,9 @@
     wire();
     syncModeHint();
     if (_state && _state.publicKey) loadScript(_activeKind);
+    // Independent of the keypair — pins can exist from hand-made credentials
+    // that never went through this card.
+    loadHostKeys();
   }
 
   function wire() {

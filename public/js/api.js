@@ -830,6 +830,10 @@ const api = {
     agentWindowsSshGenerate:  () => request("POST", "/server-settings/agents/windows-ssh/generate"),
     agentWindowsSshScript:    (kind) =>
       request("GET", "/server-settings/agents/windows-ssh/script?kind=" + encodeURIComponent(kind || "remediation")),
+    // Pinned SSH host keys (trust-on-first-use). Deleting one re-opens
+    // first-use trust for that host — the recovery path after a rebuild.
+    sshHostKeysList:          () => request("GET",    "/server-settings/agents/ssh-host-keys"),
+    sshHostKeyDelete:         (id) => request("DELETE", "/server-settings/agents/ssh-host-keys/" + encodeURIComponent(id)),
     // Agent code signing (Azure Trusted Signing) — masked secret config + dry-run test.
     agentSigningGet:          ()    => request("GET",  "/server-settings/agents/signing"),
     agentSigningSet:          (cfg) => request("PUT",  "/server-settings/agents/signing", cfg),
