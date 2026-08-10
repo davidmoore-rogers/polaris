@@ -1159,13 +1159,13 @@ function _showMonitorDisableConfirm(anchorEl, onConfirm, maintOpts) {
   });
   if (offerMaintenance) {
     ctl.popover.querySelector(".mcp-maint-enter").addEventListener("click", async function () {
-      var until = ctl.popover.querySelector(".mcp-maint-until").value;
-      if (!until) { showToast("Pick an end date/time", "error"); return; }
+      var check = window.maintValidateAdhocEnd(ctl.popover.querySelector(".mcp-maint-until").value, Date.now());
+      if (!check.ok) { showToast(check.error, "error"); return; }
       var suppressCb = ctl.popover.querySelector(".mcp-maint-suppress");
       var suppress = !suppressCb || suppressCb.checked;
       ctl.close();
       try {
-        await window.maintCreateAdhoc(maintOpts.assetId, maintOpts.hostname, until, { suppressChildren: suppress });
+        await window.maintCreateAdhoc(maintOpts.assetId, maintOpts.hostname, check.value, { suppressChildren: suppress });
         showToast("Maintenance mode active — schedule created");
         if (typeof loadAssets === "function") loadAssets();
       } catch (err) {
@@ -3436,24 +3436,87 @@ function assetMonitoringFormHTML(asset, managedAgent) {
 // maintenanceManagement holders, an ad-hoc "enter maintenance until…" action.
 function assetMaintenanceFormHTML(asset) {
   if (!asset || !asset.id) return "";
-  var canMaint = typeof canManageMaintenance === "function" && canManageMaintenance();
+  // Two independent reasons the ad-hoc control can't be offered, each with
+  // its OWN message — conflating them told admins on the map/dashboard pages
+  // they lacked a permission they had. (1) the RBAC key; (2) assets-maintenance.js,
+  // which every page carrying the asset modal now loads, but rendering the
+  // control without it is how a save reported "maintenance mode active"
+  // while creating nothing.
+  var mayMaint = typeof canManageMaintenance === "function" && canManageMaintenance();
+  var canMaint = mayMaint && typeof window.maintCreateAdhoc === "function";
+  var unmonitored = asset.monitored === false;
   return (
     '<div class="form-group" id="f-maint-wrap">' +
       '<div id="f-maint-info" class="hint" style="margin:0 0 0.5rem">Loading maintenance info…</div>' +
       (canMaint
-        ? '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex-wrap:wrap">' +
+        ? (unmonitored
+            ? '<p class="hint" id="f-maint-unmonitored" style="color:var(--color-warning)">' +
+                'This asset isn’t monitored, so it can’t enter maintenance — there is no polling to pause. ' +
+                'Enable monitoring on the Monitoring tab first.</p>'
+            : "") +
+          '<label for="f-maint-enter" style="display:flex;align-items:center;gap:8px;cursor:pointer;width:fit-content">' +
             '<input type="checkbox" id="f-maint-enter" style="width:auto">' +
             '<span>Enter maintenance mode until</span>' +
-            '<input type="datetime-local" id="f-maint-until" disabled>' +
           '</label>' +
-          '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px" title="Devices behind this asset go into dependency suppression (notifications paused) for the window. Uncheck when they stay reachable and should keep alerting.">' +
-            '<input type="checkbox" id="f-maint-suppress" checked disabled style="width:auto">' +
+          // Deliberately OUTSIDE the label and never `disabled`: a disabled
+          // control inside the label swallowed clicks (so the field looked
+          // dead), and a filled date now speaks for itself — it ticks the
+          // checkbox rather than being ignored at save time.
+          '<div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap">' +
+            '<input type="datetime-local" id="f-maint-until" style="width:auto">' +
+            '<button type="button" class="btn btn-secondary btn-sm" id="f-maint-clear">Clear</button>' +
+          '</div>' +
+          '<div id="f-maint-error" class="hint" style="display:none;color:var(--color-danger);margin-top:4px"></div>' +
+          '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;width:fit-content" title="Devices behind this asset go into dependency suppression (notifications paused) for the window. Uncheck when they stay reachable and should keep alerting.">' +
+            '<input type="checkbox" id="f-maint-suppress" checked style="width:auto">' +
             '<span>Mark dependent devices as down</span>' +
           '</label>' +
-          '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time.</p>'
-        : '<p class="hint">You don’t have permission to change maintenance windows.</p>') +
+          '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time. Both the date AND the time are required.</p>'
+        : mayMaint
+          ? '<p class="hint">Maintenance scheduling isn’t loaded on this page — use Assets &rarr; Maintenance.</p>'
+          : '<p class="hint">You don’t have permission to change maintenance windows.</p>') +
     '</div>'
   );
+}
+
+/**
+ * Read the Maintenance tab's ad-hoc request at save time.
+ *
+ * Returns {requested, until, suppressChildren, error}. `error` is a string the
+ * caller must surface — an operator who ticked the box or typed a date and got
+ * a plain "Asset updated" had no way to tell the request had been dropped, so
+ * every rejection path here is loud.
+ */
+function _readAdhocMaintenanceRequest() {
+  var chk = document.getElementById("f-maint-enter");
+  var untilEl = document.getElementById("f-maint-until");
+  if (!chk || !untilEl) return { requested: false };
+  var raw = String(untilEl.value || "").trim();
+  if (!chk.checked && !raw) return { requested: false };
+  var suppressEl = document.getElementById("f-maint-suppress");
+  var check = typeof window.maintValidateAdhocEnd === "function"
+    ? window.maintValidateAdhocEnd(raw, Date.now())
+    : { ok: !!raw, value: raw, error: "Pick the date and time maintenance should end." };
+  if (!check.ok) return { requested: true, error: check.error };
+  return {
+    requested: true,
+    until: check.value,
+    suppressChildren: !suppressEl || suppressEl.checked,
+  };
+}
+
+/** Show/clear the inline error under the ad-hoc end-time field. */
+function _setMaintFormError(msg) {
+  var el = document.getElementById("f-maint-error");
+  if (!el) return;
+  el.textContent = msg || "";
+  el.style.display = msg ? "" : "none";
+  if (msg) {
+    var untilEl = document.getElementById("f-maint-until");
+    var tabBtn = document.querySelector('#asset-edit-tabs .page-tab[data-tab="maintenance"]');
+    if (tabBtn) tabBtn.click();
+    if (untilEl) untilEl.focus();
+  }
 }
 
 // Maintenance tab of the edit modal: current windows + covering schedules
@@ -3465,15 +3528,36 @@ function _wireMaintenanceEditSection(asset) {
 
   var enterChk = document.getElementById("f-maint-enter");
   var untilEl = document.getElementById("f-maint-until");
-  var suppressEl = document.getElementById("f-maint-suppress");
+  var clearBtn = document.getElementById("f-maint-clear");
   if (enterChk && untilEl) {
+    // Ticking the box seeds a valid default (now + 2h) so the common case is
+    // one click; clearing the box clears the date so the two controls can
+    // never disagree about whether a window was requested.
     enterChk.addEventListener("change", function () {
-      untilEl.disabled = !enterChk.checked;
-      if (suppressEl) suppressEl.disabled = !enterChk.checked;
-      if (enterChk.checked && !untilEl.value && typeof window.maintLocalIso === "function") {
-        untilEl.value = window.maintLocalIso(new Date(Date.now() + 2 * 60 * 60 * 1000));
+      if (enterChk.checked) {
+        if (!untilEl.value && typeof window.maintLocalIso === "function") {
+          untilEl.value = window.maintLocalIso(new Date(Date.now() + 2 * 60 * 60 * 1000));
+        }
+      } else {
+        untilEl.value = "";
       }
+      _setMaintFormError("");
     });
+    // Typing/picking an end time IS the request — the date field no longer
+    // needs the checkbox ticked first to be taken seriously.
+    ["input", "change"].forEach(function (evt) {
+      untilEl.addEventListener(evt, function () {
+        if (untilEl.value) enterChk.checked = true;
+        _setMaintFormError("");
+      });
+    });
+    if (clearBtn) {
+      clearBtn.addEventListener("click", function () {
+        untilEl.value = "";
+        enterChk.checked = false;
+        _setMaintFormError("");
+      });
+    }
   }
 
   api.assets.maintenanceInfo(asset.id).then(function (info) {
@@ -3522,8 +3606,11 @@ function _credentialOptionsForStream(selectedId, credType) {
 }
 
 async function _wireMonitorEditTab(asset) {
-  await _ensureCredentials();
+  // Before the credential fetch, not after: the Maintenance tab is a sibling
+  // panel that's clickable the moment the modal paints, and its listeners
+  // must not wait on an unrelated network round-trip.
   _wireMaintenanceEditSection(asset);
+  await _ensureCredentials();
   var monChk = document.getElementById("f-monitored");
   var intervalEl = document.getElementById("f-monitorInterval");
   var probeTimeoutEl = document.getElementById("f-probeTimeoutMs");
@@ -3907,19 +3994,35 @@ async function openEditModal(id, opts) {
       var btn = this;
       btn.disabled = true;
       try {
-        // Read the Monitoring tab's ad-hoc maintenance request BEFORE the
-        // update (the modal DOM survives, but keep the read close to use).
-        var maintChk = document.getElementById("f-maint-enter");
-        var maintUntil = document.getElementById("f-maint-until");
-        var maintSuppress = document.getElementById("f-maint-suppress");
-        var enterMaint = !!(maintChk && maintChk.checked && maintUntil && maintUntil.value);
+        // Read the Maintenance tab's ad-hoc request BEFORE the update, and
+        // reject an incomplete one up front — a half-filled datetime-local
+        // reads as "" and used to be silently dropped after a successful
+        // save, which is exactly what "it didn't save the maintenance mode"
+        // looked like from the operator's side.
+        var maint = _readAdhocMaintenanceRequest();
+        if (maint.error) { _setMaintFormError(maint.error); throw new Error(maint.error); }
+        _setMaintFormError("");
         await api.assets.update(id, getAssetFormData());
-        if (enterMaint && typeof window.maintCreateAdhoc === "function") {
-          await window.maintCreateAdhoc(id, asset.hostname, maintUntil.value,
-            { suppressChildren: !maintSuppress || maintSuppress.checked });
+        var maintApplied = false;
+        if (maint.requested) {
+          if (typeof window.maintCreateAdhoc !== "function") {
+            throw new Error("Maintenance scheduling isn’t available on this page — use Assets → Maintenance.");
+          }
+          await window.maintCreateAdhoc(id, asset.hostname, maint.until,
+            { suppressChildren: maint.suppressChildren });
+          // The schedule can exist without the asset entering maintenance —
+          // targets are intersected with monitored=true server-side. Say so
+          // rather than claiming a window that isn't open.
+          maintApplied = await api.assets.maintenanceInfo(id)
+            .then(function (info) { return !!(info && info.inMaintenance); })
+            .catch(function () { return true; });
         }
         closeModal();
-        showToast(enterMaint ? "Asset updated — maintenance mode active" : "Asset updated");
+        if (maint.requested && maintApplied) showToast("Asset updated — maintenance mode active");
+        else if (maint.requested) {
+          showToast("Asset updated and schedule created, but the asset did not enter maintenance " +
+            "(only monitored assets can).", "error");
+        } else showToast("Asset updated");
         loadAssets();
       } catch (err) {
         showToast(err.message, "error");
@@ -3954,6 +4057,9 @@ var _assetSystemRefreshTimer  = null;
 var _assetSystemSiCache       = null;
 var _ifaceRefreshTimer        = null;
 var _sensorRefreshTimer       = null;
+// Severity tiers for the open sensor chart, keyed "<assetId>|<sensorName>" so a
+// range change or silent tick reuses them and switching sensors re-asks.
+var _sensorSevTiers           = { key: null, tiers: [] };
 var _ipsecRefreshTimer        = null;
 var _monitorSettingsCache     = null;  // global monitor settings, fetched once per session
 var _currentAssetForRefresh   = null;  // asset object cached so refresh schedulers can read its per-asset intervals
@@ -7265,6 +7371,72 @@ function _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) {
   return out;
 }
 
+// ─── Automation severity shading on charts ─────────────────────────────────
+//
+// A chart's line fades into warning / serious / critical wherever the reading
+// enters a tier of an automation watching THAT metric on THIS asset (severity
+// bands included — business rule 19). The tier ladder is computed SERVER-side by
+// GET /assets/:id/metric-thresholds (same resolveTierLadder the engine runs), so
+// the shading can't disagree with what actually fires; the pure gradient math
+// lives in public/js/chart-severity.js.
+//
+// Contract for a chart that wants shading: fetch tiers into its render opts,
+// then call _severityChartLayer(...) and use the returned {defs, lines, stroke,
+// labels} — `stroke` is the flat accent color when nothing watches the metric,
+// so the un-shaded path is unchanged. Currently wired for the per-sensor chart;
+// CPU / memory / interface charts can opt in the same way.
+
+var _sevChartSeq = 0;
+
+/** Tiers for one (asset, metric, sensor) — best-effort, never blocks a chart. */
+function _loadMetricSeverityTiers(assetId, metric, dim) {
+  if (!assetId || !metric) return Promise.resolve([]);
+  var params = { metric: metric };
+  if (dim && dim.sensorName)  params.sensorName  = dim.sensorName;
+  if (dim && dim.sensorClass) params.sensorClass = dim.sensorClass;
+  return api.assets.metricThresholds(assetId, params)
+    .then(function (res) { return (res && res.tiers) || []; })
+    .catch(function () { return []; }); // no shading rather than no chart
+}
+
+/**
+ * SVG pieces for severity shading over a value domain [minV, maxV].
+ * Returns {defs, lines, stroke, labels}: `defs` holds the vertical user-space
+ * gradient, `lines` the dashed threshold references (draw inside the clipped
+ * series group), `stroke` the paint for the line + dots, `labels` the right-edge
+ * tier captions (draw OUTSIDE the clip so they aren't cut off).
+ */
+function _severityChartLayer(kind, tiers, minV, maxV, geo) {
+  var flat = { defs: "", lines: "", stroke: "var(--color-accent)", labels: "" };
+  var CS = window.PolarisChartSeverity;
+  if (!CS || !tiers || !tiers.length) return flat;
+  var stops = CS.gradientStops(tiers, minV, maxV);
+  if (!stops.length) return flat;
+
+  var id = "sevgrad-" + kind + "-" + (++_sevChartSeq);
+  var y0 = geo.padT, y1 = geo.padT + geo.innerH;
+  var defs =
+    '<defs><linearGradient id="' + id + '" gradientUnits="userSpaceOnUse" x1="0" y1="' + y0 + '" x2="0" y2="' + y1 + '">' +
+      stops.map(function (s) {
+        return '<stop offset="' + (Math.round(s.offset * 10000) / 100) + '%" style="stop-color:' + s.color + '"/>';
+      }).join("") +
+    '</linearGradient></defs>';
+
+  var lines = "", labels = "";
+  CS.visibleTiers(tiers, minV, maxV).forEach(function (t) {
+    var y = geo.yFor(t.threshold);
+    var color = CS.colorOf(t.severity);
+    lines += '<line x1="' + geo.padL + '" y1="' + y + '" x2="' + (geo.W - geo.padR) + '" y2="' + y +
+      '" stroke="' + color + '" stroke-width="1" stroke-dasharray="4,4" opacity="0.55">' +
+      '<title>' + escapeHtml(t.ruleName + " — " + CS.tierLabel(t, geo.unit)) + '</title></line>';
+    // Caption rides just above its line, right-aligned to the plot edge.
+    labels += '<text x="' + (geo.W - geo.padR - 2) + '" y="' + Math.max(geo.padT + 8, y - 3) +
+      '" text-anchor="end" font-size="9" fill="' + color + '" opacity="0.9">' +
+      escapeHtml(CS.tierLabel(t, geo.unit)) + '</text>';
+  });
+  return { defs: defs, lines: lines, stroke: "url(#" + id + ")", labels: labels };
+}
+
 // ─── Per-sensor temperature slide-over ─────────────────────────────────────
 //
 // Sits on top of the asset details panel like the interface and IPsec slide-
@@ -7453,12 +7625,32 @@ async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
       if (sensorTierPart) sensorParts.unshift(sensorTierPart);
       _renderChartStats(stats, samples.length, sensorParts);
     }
-    _renderSensorChart(chartEl, samples, {
+    var chartOpts = {
       since:   data.since,
       until:   data.until,
       subject: sensorName,
       unit:    unit,
-    });
+      tiers:   _sensorSevTiers.key === assetId + "|" + sensorName ? _sensorSevTiers.tiers : [],
+    };
+    _renderSensorChart(chartEl, samples, chartOpts);
+    // Severity tiers for THIS sensor (class included, so a temperature
+    // automation can't shade a fan chart). Fetched once per sensor — thresholds
+    // don't move with the time window — and applied by re-rendering, so the
+    // chart never waits on the lookup.
+    var sevKey = assetId + "|" + sensorName;
+    if (_sensorSevTiers.key !== sevKey) {
+      var sensorClass = (samples[0] && samples[0].sensorClass) ||
+        (data.samples && data.samples[0] && data.samples[0].sensorClass) || "";
+      _sensorSevTiers = { key: sevKey, tiers: [] };
+      _loadMetricSeverityTiers(assetId, "hwSensorValue", { sensorName: sensorName, sensorClass: sensorClass })
+        .then(function (tiers) {
+          if (_sensorSevTiers.key !== sevKey || !tiers.length) return; // panel moved on / nothing watches it
+          _sensorSevTiers = { key: sevKey, tiers: tiers };
+          if (!document.getElementById("sensor-chart")) return;
+          chartOpts.tiers = tiers;
+          _renderSensorChart(chartEl, samples, chartOpts);
+        });
+    }
     // Stash the active selection on the chart so silent ticks / probe-now
     // refetch the same view (canonical convention from TEMPLATES.md).
     if (opts.from && opts.to) {
@@ -7576,17 +7768,27 @@ function _renderSensorChart(container, samples, opts) {
       ' transform="rotate(-90 ' + yLabelX + ' ' + yLabelY + ')">' + escapeHtml(unit ? "Reading (" + unit + ")" : "Reading") + '</text>';
 
   var clipId = _chartClipId("sensor");
+  // Severity shading: the line fades into warning/serious/critical wherever the
+  // reading enters a tier of an automation that watches THIS sensor on THIS
+  // asset (opts.tiers, from GET /assets/:id/metric-thresholds). Falls back to the
+  // flat accent stroke when nothing watches it.
+  var sev = _severityChartLayer("sensor", opts.tiers, minC, maxC, {
+    padL: padL, padT: padT, innerW: innerW, innerH: innerH, W: W, padR: padR, yFor: yFor, unit: unit,
+  });
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      sev.defs +
       labels + ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
-        '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
-        samples.map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.value) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("") +
+        sev.lines +
+        '<polyline points="' + pts + '" fill="none" stroke="' + sev.stroke + '" stroke-width="1.5"/>' +
+        samples.map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.value) + '" r="1.5" fill="' + sev.stroke + '"/>'; }).join("") +
         hits +
       '</g>' +
+      sev.labels +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";
@@ -8340,8 +8542,35 @@ function _renderSystemChart(container, data, asset, si) {
   var xFor = _chartXScale(padL, innerW, t0, t1);
   var yFor = _chartYScale(padT, innerH, yMin, yMax);
 
-  var cpuPts = cpuValues.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
-  var memPts = memValues.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
+  // Missed polls (the telemetry stream has no per-sample success flag — a
+  // failed poll simply leaves no row) render the same way the response-time
+  // and interface charts render theirs: red dots at the baseline flanking each
+  // cadence gap, with both lines fading into red across the gap instead of
+  // bridging it. Markers come from the UNION of the two series' timestamps, so
+  // a transport that reports CPU but not memory reads as a data-availability
+  // difference (memory bridges) rather than an outage on the memory line.
+  var unionTs = Object.keys(cpuValues.concat(memValues).reduce(function (acc, e) {
+    acc[+new Date(e.s.timestamp)] = true;
+    return acc;
+  }, {})).map(Number).sort(function (a, b) { return a - b; });
+  var gapMarkers = _pollGapMarkers(unionTs);
+  var baselineY = padT + innerH;
+  function failAwarePts(list) {
+    if (!list.length) return [];
+    var pts = list.map(function (e) {
+      return { t: +new Date(e.s.timestamp), x: xFor(e.s.timestamp), y: yFor(e.v), ok: true };
+    });
+    gapMarkers.forEach(function (m) { pts.push({ t: m, x: xFor(m), y: baselineY, ok: false }); });
+    pts.sort(function (a, b) { return a.t - b.t; });
+    return pts;
+  }
+  var failDots = gapMarkers.map(function (m) {
+    return '<circle cx="' + xFor(m) + '" cy="' + baselineY + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
+  }).join("");
+  var missHits = gapMarkers.map(function (m) {
+    return '<rect class="chart-hit" x="' + (xFor(m) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
+      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m).toISOString()) + '" data-miss="1"/>';
+  }).join("");
 
   // Build one full-height vertical lane per timestamp so the tooltip fires
   // anywhere in the sample's column — including over a flatlined CPU line at
@@ -8402,19 +8631,27 @@ function _renderSystemChart(container, data, asset, si) {
 
   var chartStaleBanner = _staleBannerHTML(asset && asset.id, asset, "telemetry", si && si.lastTelemetryAt);
   var clipId = _chartClipId("system");
+  var cpuLine = _failureAwareSeriesSVG(failAwarePts(cpuValues), cpuColor, clipId + "-cpu");
+  var memLine = _failureAwareSeriesSVG(failAwarePts(memValues), memColor, clipId + "-mem");
   container.innerHTML =
     chartStaleBanner +
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      '<defs>' + cpuLine.defs + memLine.defs + '</defs>' +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
-        (cpuPts ? '<polyline points="' + cpuPts + '" fill="none" stroke="' + cpuColor + '" stroke-width="1.5"/>' : '') +
-        (memPts ? '<polyline points="' + memPts + '" fill="none" stroke="' + memColor + '" stroke-width="1.5"/>' : '') +
+        cpuLine.segments +
+        memLine.segments +
         cpuValues.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + cpuColor + '"/>'; }).join("") +
         memValues.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + memColor + '"/>'; }).join("") +
+        failDots +
+        // After `hits`, not before: this chart's hit targets are full-height
+        // Voronoi lanes, and a gap sits inside the neighboring sample's lane —
+        // so the narrow missed-poll rect has to paint last to win the hover.
         hits +
+        missHits +
       '</g>' +
       legend +
     '</svg>' + CHART_TOOLTIP_HTML;
@@ -8426,6 +8663,10 @@ function _renderSystemChart(container, data, asset, si) {
 
   _wireChartTooltip(container, function (target) {
     var ts = target.getAttribute("data-ts");
+    if (target.getAttribute("data-miss") === "1") {
+      return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(ts)) + '</div>' +
+        '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+    }
     var cpuRaw = target.getAttribute("data-cpu");
     var memRaw = target.getAttribute("data-mem");
     var mb = target.getAttribute("data-mb");
@@ -9324,19 +9565,25 @@ function _currentMonitorSelection() {
 
 // Amber stale banner above the Response Time chart — same style + wording as
 // every other section's banner ("Last successful update X ago"). The last
-// successful probe is read from the freshly-fetched history (the newest
-// sample with a response), so the banner updates on every load/auto-refresh
-// tick. Custom from/to windows are fixed historical views and say nothing
-// about live freshness, so the banner clears there. When the live window
-// contains samples but no successes at all, the probe has been failing for
-// at least the whole window — say so rather than staying silent.
+// successful probe comes from the payload's `lastSuccessAt` on rollup tiers
+// (7d/30d), because a rollup sample's timestamp is its BUCKET START: the
+// newest daily bucket is up to 24h old the moment it's written, which made a
+// healthy 1-minute probe read as hours stale as soon as the operator switched
+// to 30d. On the detail tier the newest sample with a response is itself the
+// answer, so the series is derived instead — and it also covers the rollup
+// case where the last success predates detail retention (server sends null).
+// Either way the banner updates on every load/auto-refresh tick. Custom
+// from/to windows are fixed historical views and say nothing about live
+// freshness, so the banner clears there. When the live window contains
+// samples but no successes at all, the probe has been failing for at least
+// the whole window — say so rather than staying silent.
 function _updateMonitorStaleBanner(assetId, data, opts) {
   var slot = document.getElementById("asset-monitor-stale");
   if (!slot) return;
   if (opts && opts.from && opts.to) { slot.innerHTML = ""; return; }
   var samples = (data && data.samples) || [];
-  var lastOk = null;
-  for (var i = samples.length - 1; i >= 0; i--) {
+  var lastOk = (data && data.lastSuccessAt) || null;
+  for (var i = samples.length - 1; !lastOk && i >= 0; i--) {
     var s = samples[i];
     var ok = (typeof s.successCount === "number") ? s.successCount > 0 : !!s.success;
     if (ok) { lastOk = s.timestamp; break; }
@@ -14880,6 +15127,8 @@ var _assetSourceLabels = {
   "fortigate-endpoint": "FortiGate / FortiManager (endpoint)",
   "vcenter-vm":         "VMware vCenter (VM)",
   "vcenter-host":       "VMware vCenter (ESXi host)",
+  "arc":                "Azure Arc",
+  "arc-k8s":            "Azure Arc (Kubernetes)",
   "polaris-agent":      "Polaris Agent",
   "manual":             "Manual / other",
 };
@@ -17192,6 +17441,11 @@ var _monsetIntegrations  = [];   // for the source picker on add/edit
 var _monsetOverrides     = [];   // class override rows currently rendered
 var _monsetManualValues  = null; // last-fetched manual-tier settings (or null = not yet seeded)
 var _monsetLifecycle     = { inactivityMonths: 0, historyRetentionDays: 0 }; // Asset Lifecycle section values
+// Sources section: { order, integrationPrefix, contributors[] } from
+// GET /assets/source-priority. `contributors` arrives in the operator's order,
+// so the list renders straight through; dragging rewrites the array in place
+// and Save posts the resulting `order`.
+var _monsetSourcePriority = null;
 
 async function openMonitoringSettingsModal() {
   // Loading shell first so the operator sees instant feedback. Replaced by
@@ -17210,6 +17464,7 @@ async function openMonitoringSettingsModal() {
       _ensureCredentials(),
       api.events.getAssetDecommissionSettings().catch(function () { return null; }),
       api.assets.getHistorySettings().catch(function () { return null; }),
+      api.assets.getSourcePriority().catch(function () { return null; }),
     ]);
     _monsetManualValues = results[0] || Object.assign({}, MON_TIER_DEFAULTS);
     _monsetOverrides    = Array.isArray(results[1]) ? results[1] : [];
@@ -17222,6 +17477,10 @@ async function openMonitoringSettingsModal() {
       inactivityMonths:     Number.isFinite(m) && m >= 0 ? Math.floor(m) : 0,
       historyRetentionDays: Number.isFinite(d) && d >= 0 ? Math.floor(d) : 0,
     };
+    // null (fetch failed / older server) hides the Sources section rather than
+    // rendering an empty list the operator could "save" as an empty order.
+    var sp = results[6];
+    _monsetSourcePriority = (sp && Array.isArray(sp.contributors) && sp.contributors.length) ? sp : null;
   } catch (err) {
     showToast(err.message || "Failed to load settings", "error");
     return;
@@ -17231,10 +17490,11 @@ async function openMonitoringSettingsModal() {
 
 function _monsetRender() {
   var lifecycleBody = _monsetLifecycleSectionHTML(_monsetLifecycle);
+  var sourcesBody   = _monsetSourcesSectionHTML(_monsetSourcePriority);
   var manualBody    = _monsetManualSectionHTML(_monsetManualValues);
   var overridesBody = _monsetOverridesSectionHTML(_monsetOverrides);
   var hr = '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">';
-  var body = lifecycleBody + hr + manualBody + hr + overridesBody;
+  var body = lifecycleBody + (sourcesBody ? hr + sourcesBody : "") + hr + manualBody + hr + overridesBody;
   openModal(
     "Settings",
     body,
@@ -17242,6 +17502,7 @@ function _monsetRender() {
     { wide: true }
   );
   document.getElementById("btn-monset-save-lifecycle").addEventListener("click", _monsetSaveLifecycle);
+  if (sourcesBody) _monsetWireSources();
 
   // Wire the Manual Monitoring stream-subtab tab strip so clicking a stream
   // tab activates its panel. Same shared helper the integration Monitoring
@@ -17312,6 +17573,145 @@ function _monsetLifecycleSectionHTML(v) {
     '</div>' +
     '<button class="btn btn-primary btn-sm" id="btn-monset-save-lifecycle">Save Lifecycle Settings</button>'
   );
+}
+
+// ── Sources section of the merged Settings modal ───────────────────────────
+//
+// The Assets table's "Sources" column shows `location || learnedLocation` —
+// where an asset was learned. An asset known to several discovery sources at
+// once (domain-joined AND Intune-enrolled AND sighted behind a FortiGate) has
+// several competing answers, and which one an operator wants to read is a site
+// convention. This list is that decision: drag to reorder, top wins.
+//
+// Labels + "what this contributes" hints come from the server's catalogue
+// (utils/assetSourceLocation.ts) rather than being duplicated here, so adding a
+// source kind server-side lights it up in this list with no client change.
+function _monsetSourcesSectionHTML(sp) {
+  if (!sp) return "";
+  var rows = sp.contributors.map(function (c, i) {
+    return _monsetSourceRowHTML(c, i);
+  }).join("");
+  return (
+    '<h4 style="margin:0 0 0.35rem">Sources</h4>' +
+    '<p class="hint" style="margin:0 0 0.75rem">The <strong>Sources</strong> column on the assets table shows where a device was learned. ' +
+      'When a device is known to more than one discovery source, the highest source in this list that has something to say wins — ' +
+      'drag to reorder. A device\'s own <strong>Location</strong> field, when an operator has set one, always outranks all of these.</p>' +
+    '<div id="monset-src-list" class="monset-src-list">' + rows + '</div>' +
+    '<label style="display:flex;align-items:flex-start;gap:0.5rem;margin:0.85rem 0 0.25rem;cursor:pointer">' +
+      '<input type="checkbox" id="f-monset-src-prefix"' + (sp.integrationPrefix ? " checked" : "") + ' style="margin-top:0.2rem">' +
+      '<span>Prefix FortiGate names with the integration that manages them' +
+        '<span class="hint" style="display:block">Renders as <code class="mono">FortiManager-Prod:RGI-FW-NASHVILLE</code> instead of ' +
+        '<code class="mono">RGI-FW-NASHVILLE</code>. Useful when several FortiManagers manage gates with overlapping names. ' +
+        'Applies to FortiSwitch, FortiAP and FortiGate-sighted endpoints; devices discovered before this setting existed keep the bare name until their next discovery run.</span>' +
+      '</span>' +
+    '</label>' +
+    '<button class="btn btn-primary btn-sm" id="btn-monset-save-sources" style="margin-top:0.5rem">Save Source Priority</button>' +
+    '<p class="hint" style="margin:0.5rem 0 0">Takes effect on each integration\'s next discovery run — that\'s when a device\'s learned location is rewritten.</p>'
+  );
+}
+
+function _monsetSourceRowHTML(c, i) {
+  return (
+    '<div class="monset-src-row" draggable="true" data-kind="' + escapeHtml(c.kind) + '">' +
+      '<span class="aw-grip" title="Drag to reorder">⠿</span>' +
+      '<span class="monset-src-rank">' + (i + 1) + '</span>' +
+      '<span class="monset-src-body">' +
+        '<span class="monset-src-label">' + escapeHtml(c.label) + '</span>' +
+        '<span class="hint monset-src-desc">' + escapeHtml(c.describe || "") + '</span>' +
+      '</span>' +
+    '</div>'
+  );
+}
+
+// Re-stamp the visible rank numbers after a drop. The DOM order is the source
+// of truth for what Save posts — nothing is mirrored into _monsetSourcePriority
+// until then, so a cancelled edit can't leave the cached copy half-updated.
+function _monsetRenumberSources() {
+  var list = document.getElementById("monset-src-list");
+  if (!list) return;
+  var rows = list.querySelectorAll(".monset-src-row");
+  for (var i = 0; i < rows.length; i++) {
+    var rank = rows[i].querySelector(".monset-src-rank");
+    if (rank) rank.textContent = String(i + 1);
+  }
+}
+
+// Vertical list reorder. Same grip + before/after edge-cue idiom as the column
+// chooser (.sf-col-grip) and the automations condition builder (.aw-grip);
+// simpler than either because this list is flat — no nesting, no drop-into.
+function _monsetWireSources() {
+  var list = document.getElementById("monset-src-list");
+  if (!list) return;
+  var dragEl = null;
+
+  var clearCues = function () {
+    list.querySelectorAll(".aw-drop-before, .aw-drop-after").forEach(function (el) {
+      el.classList.remove("aw-drop-before", "aw-drop-after");
+    });
+  };
+
+  list.addEventListener("dragstart", function (e) {
+    var row = e.target.closest && e.target.closest(".monset-src-row");
+    if (!row || !list.contains(row)) return;
+    dragEl = row;
+    row.classList.add("sf-col-dragging");
+    try { e.dataTransfer.setData("text/plain", ""); e.dataTransfer.effectAllowed = "move"; } catch (_e) {}
+  });
+
+  list.addEventListener("dragover", function (e) {
+    if (!dragEl) return;
+    var over = e.target.closest && e.target.closest(".monset-src-row");
+    if (!over || over === dragEl || !list.contains(over)) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = "move"; } catch (_e) {}
+    var rect = over.getBoundingClientRect();
+    var after = e.clientY > rect.top + rect.height / 2;
+    clearCues();
+    over.classList.add(after ? "aw-drop-after" : "aw-drop-before");
+  });
+
+  list.addEventListener("drop", function (e) {
+    if (!dragEl) return;
+    var over = e.target.closest && e.target.closest(".monset-src-row");
+    if (!over || over === dragEl || !list.contains(over)) return;
+    e.preventDefault();
+    var rect = over.getBoundingClientRect();
+    var after = e.clientY > rect.top + rect.height / 2;
+    over.parentNode.insertBefore(dragEl, after ? over.nextSibling : over);
+    clearCues();
+    _monsetRenumberSources();
+  });
+
+  list.addEventListener("dragend", function () {
+    if (dragEl) dragEl.classList.remove("sf-col-dragging");
+    dragEl = null;
+    clearCues();
+  });
+
+  var saveBtn = document.getElementById("btn-monset-save-sources");
+  if (saveBtn) saveBtn.addEventListener("click", _monsetSaveSources);
+}
+
+async function _monsetSaveSources() {
+  var btn = document.getElementById("btn-monset-save-sources");
+  var list = document.getElementById("monset-src-list");
+  if (!list) return;
+  var order = Array.prototype.map.call(list.querySelectorAll(".monset-src-row"), function (row) {
+    return row.getAttribute("data-kind");
+  });
+  var prefixEl = document.getElementById("f-monset-src-prefix");
+  if (btn) btn.disabled = true;
+  try {
+    _monsetSourcePriority = await api.assets.updateSourcePriority({
+      order: order,
+      integrationPrefix: !!(prefixEl && prefixEl.checked),
+    });
+    showToast("Source priority saved — applies on each integration's next discovery run");
+  } catch (err) {
+    showToast(err.message || "Failed to save source priority", "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function _monsetSaveLifecycle() {

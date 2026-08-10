@@ -38,9 +38,24 @@ function pngDims(buf: Buffer) {
 }
 
 let otherUserId = "";
+/**
+ * Snapshot of any web_push channel that existed before this suite ran.
+ *
+ * These tests must create and delete the singleton to exercise first-enable,
+ * but that keypair is not disposable state: every PushSubscription in the DB is
+ * signed against it, so wiping it permanently kills every enrolled device
+ * (regenerating produces DIFFERENT keys). Running the suite against a dev
+ * database you actually use would silently break push on every browser and
+ * phone you'd enrolled — which is exactly what happened once. Restore it.
+ */
+let preExistingWebPush: { id: string; name: string; enabled: boolean; config: unknown; createdBy: string | null } | null = null;
 
 beforeAll(async () => {
   if (!dbReachable) return;
+  const existing = await prisma.notificationChannel.findFirst({ where: { type: "web_push" } });
+  preExistingWebPush = existing
+    ? { id: existing.id, name: existing.name, enabled: existing.enabled, config: existing.config, createdBy: existing.createdBy }
+    : null;
   await ensureTestUser();
   const role = await prisma.role.findUnique({ where: { name: "admin" } });
   const other = await prisma.user.upsert({
@@ -61,7 +76,21 @@ afterAll(async () => {
   await prisma.pushSubscription.deleteMany({ where: { endpoint: { startsWith: "https://push.example.com/ep/" } } });
   await prisma.user.deleteMany({ where: { username: OTHER_USERNAME } });
   await prisma.setting.deleteMany({ where: { key: "branding" } });
+  // Put the operator's channel back, keypair intact, so a run against a dev DB
+  // doesn't silently invalidate every enrolled device.
   await prisma.notificationChannel.deleteMany({ where: { type: "web_push" } });
+  if (preExistingWebPush) {
+    await prisma.notificationChannel.create({
+      data: {
+        id: preExistingWebPush.id,
+        name: preExistingWebPush.name,
+        type: "web_push",
+        enabled: preExistingWebPush.enabled,
+        config: preExistingWebPush.config as any,
+        createdBy: preExistingWebPush.createdBy,
+      },
+    });
+  }
 });
 
 beforeEach(async () => {

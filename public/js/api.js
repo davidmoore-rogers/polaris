@@ -485,6 +485,9 @@ const api = {
     getIpHistory:         (id)  => request("GET",  `/assets/${id}/ip-history`),
     getHistorySettings:   ()    => request("GET",  "/assets/ip-history-settings"),
     updateHistorySettings:(body) => request("PUT",  "/assets/ip-history-settings", body),
+    // Sources-column priority: which discovery source's learned location wins.
+    getSourcePriority:    ()    => request("GET",  "/assets/source-priority"),
+    updateSourcePriority: (body) => request("PUT",  "/assets/source-priority", body),
     bulkMonitor:          (body) => request("POST", "/assets/bulk-monitor", body),
     monitorHistory:       (id, opts) => {
       // Accepts a range string ("24h") or { range } / { from, to } object.
@@ -609,6 +612,15 @@ const api = {
         qs.push("range=" + encodeURIComponent(opts.range));
       }
       return request("GET", `/assets/${id}/storage-history?` + qs.join("&"));
+    },
+    // Severity thresholds (incl. severity bands) that would fire on this asset's
+    // charted metric — feeds the chart's severity shading.
+    metricThresholds:     (id, opts) => {
+      opts = opts || {};
+      var qs = ["metric=" + encodeURIComponent(opts.metric || "")];
+      if (opts.sensorName)  qs.push("sensorName="  + encodeURIComponent(opts.sensorName));
+      if (opts.sensorClass) qs.push("sensorClass=" + encodeURIComponent(opts.sensorClass));
+      return request("GET", `/assets/${id}/metric-thresholds?` + qs.join("&"));
     },
     hardwareHistory:      (id, opts) => {
       if (typeof opts === "string") opts = { range: opts };
@@ -768,6 +780,11 @@ const api = {
   },
   maintenanceSchedules: {
     list:    ()      => request("GET", "/maintenance-schedules"),
+    // Calendar tab. from/to are LOCAL day strings ("YYYY-MM-DD") and the
+    // occurrences come back as server-local wall-clock strings — never parse
+    // them as instants (see listOccurrences).
+    occurrences: (from, to) =>
+      request("GET", `/maintenance-schedules/occurrences?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
     preview: (body)  => request("POST", "/maintenance-schedules/preview", body),
     create:  (body)  => request("POST", "/maintenance-schedules", body),
     update:  (id, b) => request("PUT", `/maintenance-schedules/${id}`, b),
@@ -778,6 +795,9 @@ const api = {
     schema:  ()        => request("GET", "/automations/schema"),
     recipientUsers: () => request("GET", "/automations/recipient-users"),
     scopeOptions: ()   => request("GET", "/automations/scope-options"),
+    // {metric, dimension, scope} → the values the draft's own devices report
+    // (sensor classes, interfaces, mounts …) for the builder's dimension picker.
+    dimensionValues: (body) => request("POST", "/automations/dimension-values", body),
     preview: (body)    => request("POST", "/automations/preview", body),
     create:  (body)    => request("POST", "/automations", body),
     update:  (id, b)   => request("PUT", `/automations/${id}`, b),

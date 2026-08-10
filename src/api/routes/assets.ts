@@ -50,6 +50,7 @@ import { propagateAfterStatusChange } from "../../services/dependencyTreeService
 import { pickSampleTierForAsset } from "../../services/sampleQueryRouter.js";
 import {
   readMonitorHistory,
+  readLastMonitorSuccessAt,
   readTelemetryHistory,
   readHardwareSensorHistory,
   readInterfaceHistory,
@@ -59,6 +60,7 @@ import {
 } from "../../services/sampleHistoryService.js";
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
+import { getMetricSeverityTiers } from "../../services/notificationRuleService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
 import { getAssetProcessConnections } from "../../services/applicationMapService.js";
 import { recordOperatorPinChanges, type OperatorPinChange } from "../../services/appMapDiscoveryService.js";
@@ -795,6 +797,37 @@ router.get("/agent-signing-alert", requirePermission("assets", "write"), async (
   }
 });
 
+// GET /api/v1/assets/source-priority — the operator's Sources-column priority
+// (which discovery source's learned location wins) plus the catalogue of what
+// each source contributes, so the drag-and-drop list renders its labels and
+// hints from the server rather than hardcoding them. Before /:id.
+router.get("/source-priority", requirePermission("assets", "read"), async (_req, res, next) => {
+  try {
+    const { getSourcePrioritySettings } = await import("../../services/assetSourcePriorityService.js");
+    res.json(await getSourcePrioritySettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /api/v1/assets/source-priority — reorder / toggle the integration-name
+// prefix. assets:write, matching the other settings on the Assets → Settings
+// modal; the service audits the change with the previous order.
+router.put("/source-priority", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const body = z.object({
+      order: z.array(z.string()).optional(),
+      integrationPrefix: z.boolean().optional(),
+    }).parse(req.body);
+    const { saveSourceLocationPriority, getSourcePrioritySettings } =
+      await import("../../services/assetSourcePriorityService.js");
+    await saveSourceLocationPriority(body, requestActor(req));
+    res.json(await getSourcePrioritySettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PUT /api/v1/assets/ip-history-settings — update retention settings (assets admin)
 router.put("/ip-history-settings", requirePermission("assets", "write"), async (req, res, next) => {
   try {
@@ -1084,6 +1117,27 @@ router.get(["/:id/alerts", "/:id/notifications"], requirePermission("assets", "r
   }
 });
 
+// GET /api/v1/assets/:id/metric-thresholds?metric=hwSensorValue&sensorName=&sensorClass=
+// The severity thresholds that would fire on this asset's charted metric, so a
+// detail chart can shade its line with the engine's own numbers (severity bands
+// included) instead of the client re-deriving them. Gated assets:read like
+// every other per-asset chart feed.
+router.get("/:id/metric-thresholds", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const metric = String(req.query.metric || "");
+    if (!metric) throw new AppError(400, "metric is required");
+    const asset = await prisma.asset.findUnique({ where: { id }, select: { id: true } });
+    if (!asset) throw new AppError(404, "Asset not found");
+    const sensorName = req.query.sensorName ? String(req.query.sensorName) : undefined;
+    const sensorClass = req.query.sensorClass ? String(req.query.sensorClass) : undefined;
+    const dimension = sensorName || sensorClass ? { sensorName, sensorClass } : undefined;
+    res.json({ metric, tiers: await getMetricSeverityTiers(id, metric, dimension) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/v1/assets/:id/monitor-history?range=1h|12h|24h|7d|30d OR ?from=ISO&to=ISO
 router.get("/:id/monitor-history", requirePermission("assets", "read"), async (req, res, next) => {
   try {
@@ -1117,12 +1171,20 @@ router.get("/:id/monitor-history", requirePermission("assets", "read"), async (r
     const pick = await pickSampleTierForAsset(id, "assets", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
     const result = await readMonitorHistory(id, since, until, pick.tier, fetchSince);
+    // On a rollup tier every sample timestamp is a bucketStart, so the client
+    // can't measure probe freshness from the series (a daily bucket is up to
+    // 24h "old" the moment it's written). Hand it the real last-success
+    // timestamp from the detail table instead — the stale banner reads this
+    // when present. Detail tier needs no extra query: its own newest
+    // successful sample already is the answer.
+    const lastSuccessAt = pick.tier === "detail" ? null : await readLastMonitorSuccessAt(id, since);
     res.json({
       range: rangeLabel,
       since,
       until,
       tier: pick.tier,
       bucketSeconds: pick.bucketSeconds,
+      lastSuccessAt,
       samples: result.samples,
       stats: result.stats,
     });

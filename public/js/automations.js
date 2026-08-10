@@ -170,8 +170,16 @@ function _looksLikeDeviceId(tag) {
   var _rules = [];
   function loadRules() {
     if (!canManage) return;
-    api.automations.list().then(function (data) {
-      _rules = data.rules || [];
+    // The schema rides along because the Scope cell's tooltip spells the
+    // condition tree out in the builder's own words ("Device type is equal
+    // to…"). It's cached module-wide and shared with the wizard, so this
+    // costs one fetch per page load; a failure only degrades the tooltip to
+    // raw field/operator names, so it never blocks the list.
+    var schemaReady = _ruleSchema
+      ? Promise.resolve()
+      : api.automations.schema().then(function (s) { _ruleSchema = s; }).catch(function () {});
+    Promise.all([api.automations.list(), schemaReady]).then(function (results) {
+      _rules = results[0].rules || [];
       renderRules();
     }).catch(function () {
       document.getElementById("rules-tbody").innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load automations</td></tr>';
@@ -209,6 +217,94 @@ function _looksLikeDeviceId(tag) {
   }
   window._ruleToInput = _ruleToInput;
 
+  // ── Scope-cell hover tooltip ──────────────────────────────────────────────
+  //
+  // The Scope cell is necessarily terse ("custom filter (3 conditions)"), so
+  // the cell's title spells out what the automation actually does: one row for
+  // the filter itself, one for the actions it runs. Native title rather than a
+  // custom popover — same idiom the rest of this page uses, and it survives the
+  // table's column resize / reorder without extra wiring.
+
+  // Human-readable condition tree. Mirrors the wizard's condText, but resolves
+  // its labels from the loaded schema and degrades to raw field/operator names
+  // when the schema fetch failed — a tooltip must never be the thing that
+  // throws while rendering the list.
+  function condTooltipText(g) {
+    var sc = (_ruleSchema && _ruleSchema.scopeCondition) || {};
+    var fields = sc.fields || [];
+    var opLabels = sc.operatorLabels || {};
+    var render = function (node) {
+      var parts = (node.children || []).map(function (c) {
+        if (c.op !== undefined && Array.isArray(c.children)) return "(" + render(c) + ")";
+        var fm = fields.find(function (f) { return f.field === c.field; });
+        return (fm ? fm.label : c.field) + " " + (opLabels[c.operator] || c.operator) + " " + c.value;
+      });
+      if (node.op === "or") return parts.join(" OR ");
+      if (node.op === "none") return "NOT(" + parts.join(" OR ") + ")";
+      if (node.op === "notAll") return "NOT(" + parts.join(" AND ") + ")";
+      return parts.join(" AND ");
+    };
+    return render(g);
+  }
+
+  // What this automation does when it fires. The in-app alert is always first
+  // because it's the one outcome every automation has (the wizard's
+  // non-removable in-app card) — an automation with no configured actions is
+  // not silent, and the tooltip shouldn't imply otherwise. Actions are counted
+  // by type rather than named: channel/script names would need the Delivery +
+  // Scripts caches, which the Automations tab doesn't load.
+  function actionsTooltipText(r) {
+    var counts = {};
+    var tally = function (list) {
+      (list || []).forEach(function (a) {
+        if (!a || !a.type) return;
+        counts[a.type] = (counts[a.type] || 0) + 1;
+      });
+    };
+    tally(r.actions);
+    (r.severityBands || []).forEach(function (b) { tally(b && b.actions); });
+    if (r.bandNotify && r.bandNotify.resolvedMode === "dedicated") tally(r.bandNotify.resolvedActions);
+
+    var labels = { notify: "notification", api_call: "API call", script: "script run" };
+    var parts = ["in-app alert"];
+    Object.keys(counts).forEach(function (type) {
+      var n = counts[type];
+      var label = labels[type] || type;
+      parts.push(n + " " + label + (n === 1 ? "" : "s"));
+    });
+
+    // Escalation spans four places: the rule-level chain, each action's own
+    // chain, and the same pair inside every severity band. Count tiers across
+    // all of them so a tooltip can't under-report how much mail this sends.
+    var tiers = 0;
+    var addChain = function (esc) {
+      if (esc && Array.isArray(esc.tiers)) tiers += esc.tiers.length;
+    };
+    addChain(r.escalation);
+    (r.actions || []).forEach(function (a) { addChain(a && a.escalation); });
+    (r.severityBands || []).forEach(function (b) {
+      addChain(b && b.escalation);
+      ((b && b.actions) || []).forEach(function (a) { addChain(a && a.escalation); });
+    });
+
+    var text = parts.join(" + ");
+    if (tiers) text += " (" + tiers + " escalation tier" + (tiers === 1 ? "" : "s") + ")";
+    return text;
+  }
+
+  function scopeTooltip(r) {
+    var scope = r.scope;
+    var filter;
+    if (scope && scope.condition) filter = condTooltipText(scope.condition) || "(no conditions)";
+    else if (scope && scope.allAssets) filter = "Every asset Polaris knows about.";
+    else filter = scopeSummary(scope);
+    return "Filter: " + filter + "\nActions: " + actionsTooltipText(r);
+  }
+  // Exposed for the unit-test harness (automationsScopeTooltip.test.ts) — the
+  // action tally walks four separate escalation/action locations and silently
+  // under-reporting them is the failure mode worth pinning.
+  window._scopeTooltip = scopeTooltip;
+
   function scopeSummary(scope) {
     if (!scope || typeof scope !== "object") return "-";
     if (scope.allAssets) return "All assets";
@@ -234,6 +330,7 @@ function _looksLikeDeviceId(tag) {
       return Object.assign({}, r, {
         triggerType: r.trigger && r.trigger.type ? r.trigger.type : "",
         scopeSummary: scopeSummary(r.scope),
+        scopeTooltip: scopeTooltip(r),
       });
     });
     if (_rulesSF) data = _rulesSF.apply(data);
@@ -259,7 +356,7 @@ function _looksLikeDeviceId(tag) {
         '<td><span class="badge">' + escapeHtml(r.triggerType) + '</span></td>' +
         '<td><span class="badge badge-level-' + (r.severity || "info") + '">' + (r.severity || "info").toUpperCase() + '</span></td>' +
         '<td>' + enabledCell + '</td>' +
-        '<td style="font-size:0.85rem">' + escapeHtml(r.scopeSummary) + '</td>' +
+        '<td style="font-size:0.85rem" title="' + escapeHtml(r.scopeTooltip) + '">' + escapeHtml(r.scopeSummary) + '</td>' +
         '<td>' + escapeHtml(r.createdBy || "-") + '</td>' +
         '<td>' + actions + '</td>' +
         '</tr>';

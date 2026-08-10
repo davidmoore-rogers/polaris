@@ -27,6 +27,8 @@ import { isFortinetIntegrationType } from "../../utils/pollingCompatibility.js";
 import { ENTRA_ASSET_TAG_PREFIX, AD_ASSET_TAG_PREFIX, AD_GUID_TAG_PREFIX, SID_TAG_PREFIX } from "../../utils/assetSourceTags.js";
 import type { DiscoveryResult, DiscoveryProgressCallback } from "../fortimanagerService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
+import { bareFortinetDeviceName } from "../../utils/assetSourceLocation.js";
+import { refreshProjectionPriority } from "../assetSourcePriorityService.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
 import {
   logEvent,
@@ -572,6 +574,12 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
   // manual trigger still proceeds: the operator chose to force a run, and the
   // discovery error surface is the right place for them to see it fail.
 
+  // Pull the operator's Sources-column priority into this process before any
+  // projection runs. Discovery is a SEPARATE process in the split-role layout,
+  // so this per-run refresh is how a settings edit made in the web role reaches
+  // the code that actually writes Asset.learnedLocation. Never throws.
+  await refreshProjectionPriority();
+
   const runStartedAt = Date.now();
   await markRunStarted(integrationId, new Date(runStartedAt));
   // Scoped runs deliberately do NOT stamp lastDiscoveryAt — the scheduler
@@ -1033,21 +1041,55 @@ interface ProposedReservationData {
   sourceType: string;
 }
 
+/**
+ * Which of hostname / owner / projectRef a conflict should be raised on.
+ *
+ * Default ("differs") — any difference is operator-reviewable. This is the
+ * manual-reservation case: discovery must never overwrite an operator-typed
+ * row, so every divergence gets a card.
+ *
+ * "fill-only" — the existing row's own non-empty values WIN OUTRIGHT and are
+ * never offered for review; only a blank field that the proposal could fill is
+ * worth an operator's time. Used for the VIP ↔ DHCP collision, where the same
+ * IP is both a FortiGate VIP and a DHCP lease/reservation: the VIP is
+ * load-bearing firewall config, so its owner / projectRef take precedence over
+ * whatever the DHCP side reports. Accepting a merge conflict has only ever
+ * filled blanks (see conflictResolutionService's merge mode), so a card whose
+ * fields are all populated offered the operator no decision — just noise on
+ * every VIP that also holds a lease.
+ *
+ * Exported for unit tests; the conflict write itself needs a DB.
+ */
+export function computeConflictFields(
+  proposed: { hostname?: string | null; owner?: string | null; projectRef?: string | null },
+  existing: { hostname?: string | null; owner?: string | null; projectRef?: string | null },
+  mode: "differs" | "fill-only" = "differs",
+): string[] {
+  const isBlank = (v?: string | null): boolean => v == null || v.trim() === "";
+  const fields: Array<"hostname" | "owner" | "projectRef"> = ["hostname", "owner", "projectRef"];
+  return fields.filter((f) => {
+    const p = proposed[f] ?? null;
+    const e = existing[f] ?? null;
+    if (mode === "fill-only") return isBlank(e) && !isBlank(p);
+    return p !== e;
+  });
+}
+
 async function upsertConflict(
   reservationId: string,
   integrationId: string,
   proposed: ProposedReservationData,
   existing: { hostname?: string | null; owner?: string | null; projectRef?: string | null; notes?: string | null },
+  mode: "differs" | "fill-only" = "differs",
 ): Promise<void> {
-  const conflictFields: string[] = [];
-  if ((proposed.hostname ?? null) !== (existing.hostname ?? null)) conflictFields.push("hostname");
-  if ((proposed.owner ?? null) !== (existing.owner ?? null)) conflictFields.push("owner");
-  if ((proposed.projectRef ?? null) !== (existing.projectRef ?? null)) conflictFields.push("projectRef");
+  const conflictFields = computeConflictFields(proposed, existing, mode);
   if (conflictFields.length === 0) {
-    // Values are back in sync — auto-resolve any stale pending conflict on this
+    // Nothing left to review — auto-resolve any stale pending conflict on this
     // reservation that was raised by a previous run when they differed. Without
     // this, a conflict card lingers in the UI showing two identical-looking
-    // values because conflictFields was frozen at upsert time.
+    // values because conflictFields was frozen at upsert time. This is also the
+    // cleanup path for VIP ↔ DHCP cards raised before "fill-only" existed: the
+    // next discovery cycle re-evaluates them and closes them out.
     await prisma.conflict.updateMany({
       where: { reservationId, status: "pending" },
       data: { status: "rejected", resolvedBy: "auto", resolvedAt: new Date() },
@@ -1392,7 +1434,12 @@ async function upsertFortinetInfraAssetSource(
   observed: Record<string, unknown>,
   syncedAt: Date,
   lastSeen: Date,
+  integrationName?: string | null,
 ): Promise<void> {
+  // Which FMG / FortiGate integration manages the controller. Only consumed by
+  // the optional `<integration name>:<fortigate name>` rendering of the Sources
+  // column — see buildFortigateEndpointObservedBlob's note.
+  observed.integrationName = integrationName || null;
   // osVersion "absent ≠ wipe": a managed_ap/managed-switch row can arrive
   // without a usable firmware version (os_version missing mid-rejoin, or a
   // cached-format fallback rejected by isCanonicalFortiapVersion). Keep the
@@ -3174,7 +3221,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           try {
             const syncedAt = new Date(now);
             const observed = buildFortiswitchObservedBlob(sw, syncedAt);
-            await upsertFortinetInfraAssetSource("fortiswitch", existingAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiswitch", existingAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt, integrationName);
           } catch (err: any) {
             syncLog("error", `Failed to upsert fortiswitch AssetSource for ${sw.name}: ${err?.message || "Unknown error"}`);
           }
@@ -3332,7 +3379,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         const newAsset = await prisma.asset.create({ data: createData as any });
         if (sw.serial) {
           try {
-            await upsertFortinetInfraAssetSource("fortiswitch", newAsset.id, integrationId, sw.serial, swObserved, swSyncedAt, swSyncedAt);
+            await upsertFortinetInfraAssetSource("fortiswitch", newAsset.id, integrationId, sw.serial, swObserved, swSyncedAt, swSyncedAt, integrationName);
           } catch (err: any) {
             syncLog("error", `Created FortiSwitch asset ${sw.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
@@ -3474,7 +3521,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           try {
             const syncedAt = new Date(now);
             const observed = buildFortiapObservedBlob(ap, syncedAt);
-            await upsertFortinetInfraAssetSource("fortiap", existingAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiap", existingAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt, integrationName);
           } catch (err: any) {
             syncLog("error", `Failed to upsert fortiap AssetSource for ${ap.name}: ${err?.message || "Unknown error"}`);
           }
@@ -3588,7 +3635,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         });
         if (ap.serial) {
           try {
-            await upsertFortinetInfraAssetSource("fortiap", newAsset.id, integrationId, ap.serial, apObserved, apSyncedAt, apSyncedAt);
+            await upsertFortinetInfraAssetSource("fortiap", newAsset.id, integrationId, ap.serial, apObserved, apSyncedAt, apSyncedAt, integrationName);
           } catch (err: any) {
             syncLog("error", `Created FortiAP asset ${ap.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
@@ -3724,26 +3771,46 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               existingRes.vipInfo = newVipInfo;
             }
           } else if (existingRes.sourceType === "dhcp_reservation" || existingRes.sourceType === "dhcp_lease") {
-            // VIP + DHCP collision: same IP is both a DHCP lease/reservation
-            // AND a VIP external on the FortiGate. Update vipInfo so the
-            // operator sees the VIP badge immediately, then raise a merge
-            // conflict so they can review folding the VIP metadata into
-            // this row. upsertConflict's 30-day re-raise guard prevents
-            // nagging every discovery cycle once resolved.
+            // VIP + DHCP collision (VIP arriving second): same IP is both a
+            // DHCP lease/reservation AND a VIP external on the FortiGate.
+            // Update vipInfo so the operator sees the VIP badge immediately.
+            //
+            // VIP metadata takes precedence over the DHCP side's owner /
+            // projectRef, so the canonical DHCP-discovery placeholders are
+            // overwritten in place rather than offered as a conflict — the
+            // mirror of the Phase 5 VIP-succession path, which overwrites
+            // canonical VIP placeholders when the VIP goes away. Anything
+            // outside that allowlist is operator-owned (or an asset's
+            // assignedTo) and survives untouched. The remaining conflict is
+            // fill-only: it raises a card solely for fields this row left
+            // blank.
             const newVipInfo = { name: vip.name, device: vip.device, extip: vip.extip, role, isVirtualServer: vip.isVirtualServer };
             const cur = existingRes.vipInfo as any;
+            const vipUpdate: Record<string, unknown> = {};
             if (!cur || cur.name !== newVipInfo.name || cur.device !== newVipInfo.device || cur.role !== newVipInfo.role || !!cur.isVirtualServer !== newVipInfo.isVirtualServer) {
+              vipUpdate.vipInfo = newVipInfo;
+            }
+            const isCanonicalDhcpOwner =
+              existingRes.owner === "dhcp-lease" || existingRes.owner === "dhcp-reservation";
+            if (isCanonicalDhcpOwner && existingRes.owner !== proposedOwner) vipUpdate.owner = proposedOwner;
+            if (existingRes.projectRef === projectRefLabel && existingRes.projectRef !== proposedProjectRef) {
+              vipUpdate.projectRef = proposedProjectRef;
+            }
+            if (Object.keys(vipUpdate).length > 0) {
               await prisma.reservation.update({
                 where: { id: existingRes.id },
-                data: { vipInfo: newVipInfo },
+                data: vipUpdate,
               });
-              existingRes.vipInfo = newVipInfo;
+              if (vipUpdate.vipInfo) existingRes.vipInfo = newVipInfo;
+              if (vipUpdate.owner) existingRes.owner = proposedOwner;
+              if (vipUpdate.projectRef) existingRes.projectRef = proposedProjectRef;
             }
             await upsertConflict(
               existingRes.id,
               integrationId,
               { hostname: proposedHostname, owner: proposedOwner, projectRef: proposedProjectRef, notes: proposedNotes, sourceType: "vip" },
               existingRes,
+              "fill-only",
             );
           }
           continue;
@@ -4132,9 +4199,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // VIP + DHCP collision (DHCP arriving second): the FortiGate has a
           // VIP external IP that also shows up as a DHCP lease/reservation.
           // Silent fill of macAddress (technical observation; no operator
-          // decision needed), then raise a merge conflict for the metadata
-          // fold-in review. upsertConflict's 30-day guard prevents re-raise
-          // once the operator resolves.
+          // decision needed), then a FILL-ONLY merge conflict: the VIP row's
+          // own owner / projectRef / hostname are authoritative (VIP is
+          // load-bearing firewall config), so the DHCP side's values are never
+          // offered for review — only a field the VIP row left blank raises a
+          // card. upsertConflict's 30-day guard prevents re-raise once the
+          // operator resolves.
           phase5Stats.pathExistingVipMacFill++;
           if (macNormalized && !existingRes.macAddress) {
             await prisma.reservation.update({
@@ -4149,6 +4219,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             integrationId,
             { hostname: proposedHostname, owner: proposedOwner, projectRef: projectRefLabel, notes: proposedNotes, sourceType: proposedSourceType },
             existingRes,
+            "fill-only",
           );
           phase5Stats.writesUpsertConflict++;
         } else if (
@@ -5301,7 +5372,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       async (assetId: string) => {
         const asset = assetIdx.findById(assetId);
         if (!asset || !asset.macAddress) return false;
-        await upsertFortigateEndpointSource(assetId, integrationId, asset, integrationType, asset.lastSeen ?? flushedAt);
+        await upsertFortigateEndpointSource(assetId, integrationId, asset, integrationType, asset.lastSeen ?? flushedAt, integrationName);
         return true;
       },
     );
@@ -7210,7 +7281,11 @@ async function upsertAdAssetSource(
  * (FortiGate doesn't supply a stable per-device ID), so the upsert
  * helper skips assets without one.
  */
-function buildFortigateEndpointObservedBlob(asset: any, integrationType: "fortimanager" | "fortigate" | string): Record<string, unknown> {
+function buildFortigateEndpointObservedBlob(
+  asset: any,
+  integrationType: "fortimanager" | "fortigate" | string,
+  integrationName: string | null,
+): Record<string, unknown> {
   return {
     mac: typeof asset.macAddress === "string" ? asset.macAddress.toUpperCase() : null,
     hostname: asset.hostname ?? null,
@@ -7220,10 +7295,23 @@ function buildFortigateEndpointObservedBlob(asset: any, integrationType: "fortim
     osVersion: asset.osVersion ?? null,
     hardwareVendor: asset.manufacturer ?? null,
     model: asset.model ?? null,
-    learnedLocation: asset.learnedLocation ?? null,
+    // BARE device name only. `asset.learnedLocation` is the PROJECTION's own
+    // output, so with the Sources card's `integrationPrefix` on it already
+    // reads "<integration>:<gate>" — stamping that verbatim fed the render back
+    // into its own input and the projection prefixed it again next cycle
+    // (prod: a laptop accumulated 32 "FMG1:" segments, 2026-08). See
+    // utils/assetSourceLocation.bareFortinetDeviceName.
+    learnedLocation: typeof asset.learnedLocation === "string" && asset.learnedLocation.trim()
+      ? bareFortinetDeviceName(asset.learnedLocation.trim())
+      : null,
     lastSeenSwitch: asset.lastSeenSwitch ?? null,
     lastSeenAp: asset.lastSeenAp ?? null,
     discoveredVia: integrationType, // "fortimanager" | "fortigate"
+    // Which FMG / FortiGate integration sighted it. Only consumed by the
+    // optional `<integration name>:<fortigate name>` rendering of the Sources
+    // column (utils/assetSourceLocation.contributedLocation) — rows written
+    // before this stamp existed simply fall back to the bare device name.
+    integrationName: integrationName || null,
   };
 }
 
@@ -7243,11 +7331,12 @@ async function upsertFortigateEndpointSource(
   asset: any,
   integrationType: string,
   lastSeen: Date,
+  integrationName: string | null,
 ): Promise<void> {
   if (!asset?.macAddress) return;
   const externalId = String(asset.macAddress).trim().toUpperCase();
   if (!externalId) return;
-  const observed = buildFortigateEndpointObservedBlob(asset, integrationType);
+  const observed = buildFortigateEndpointObservedBlob(asset, integrationType, integrationName);
   const now = new Date();
   await prisma.assetSource.upsert({
     where: { sourceKind_externalId: { sourceKind: "fortigate-endpoint", externalId } },
@@ -8017,6 +8106,11 @@ async function syncVcenterDevices(
     const displayName = vm.guestHostname || vm.name || vm.moref;
     const observed = buildVcenterVmObservedBlob(vm, now);
     const hostRow = hostByMoref.get(vm.hostMoref) ?? null;
+    // Placement, mirrored onto the source blob so the Sources column can read
+    // "where does this VM live" without loading Asset.virtualization. The
+    // authoritative copy stays on `virtualization` below.
+    observed.hostName = hostRow?.name ?? null;
+    observed.clusterName = hostRow?.clusterName ?? null;
     const poweredOn = vm.powerState === "POWERED_ON";
     const virtualization = {
       role: "vm",

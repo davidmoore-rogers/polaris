@@ -32,8 +32,11 @@
   /**
    * el       — widget body
    * rows     — [{ id, hostname, ipAddress, value }]
-   * opts     — { unit:"%"|"ms"|"°C", thresholds, baseColor, emptyText, config, fillTo }
+   * opts     — { unit:"%"|"ms"|"°C", thresholds, baseColor, emptyText, config,
+   *              fillTo, headerSeverityCounts }
    *            config: { rowLimit, threshold }
+   *            headerSeverityCounts: stamp per-severity count pills on the
+   *            widget header title (Highest Temperature). Opt-in per widget.
    *            fillTo: red-guarantee mode (Highest Avg CPU/Memory, Disk, Slowest
    *            Response). The operator's Row limit governs how many rows show
    *            (top-N by value), EXCEPT that every RED row (at/above the top
@@ -58,6 +61,14 @@
       var d = (b.alertRank || 0) - (a.alertRank || 0);
       return d !== 0 ? d : (b.value || 0) - (a.value || 0);
     });
+    // Header severity breakdown (opt-in per widget): one pill per active-alert
+    // severity in the ranked set. Stamped from `sorted` — post the minimum-
+    // severity filter, PRE the row limit / red guarantee, so the numbers match
+    // the export and don't shrink with the visible rows — and before the empty
+    // return below so the pills clear when the set empties. Unalerted rows get
+    // no bucket here: a top-N list's row count is the operator's Row limit, not
+    // a fleet total, so counting the quiet rows would be noise.
+    if (opts.headerSeverityCounts) PolarisWidgets.setHeaderSeverityCounts(el, sorted, { unalerted: "omit" });
     // Header export: the full ranked set (pre threshold/row-limit, post the
     // gear's minimum-severity filter), severity-tiered on each asset's active
     // automation alert. The filename defaults from the widget's data-type

@@ -129,6 +129,27 @@ export function deriveAssetSourceState(
       return NOT_REPORTED;
     }
 
+    case "arc": {
+      // Arc's connectivity status is a RUNTIME statement — it means the
+      // Connected Machine agent is (or isn't) checking in with Azure. It is
+      // deliberately not an "account" reading: unlike a directory-disabled
+      // account, a Disconnected agent is a reachability fact and never
+      // decommissions the asset.
+      const status = str(o.status);
+      if (/^connected$/i.test(status))             return reading("enabled",  "runtime", "Connected",    "status", o.status);
+      if (/^disconnected$/i.test(status))          return reading("disabled", "runtime", "Disconnected", "status", o.status);
+      if (/^expired$/i.test(status))               return reading("disabled", "runtime", "Expired",      "status", o.status);
+      return NOT_REPORTED;
+    }
+
+    case "arc-k8s": {
+      const conn = str(o.connectivityStatus);
+      if (/^connected$/i.test(conn))               return reading("enabled",  "runtime", "Connected",    "connectivityStatus", o.connectivityStatus);
+      if (/^(disconnected|offline)$/i.test(conn))  return reading("disabled", "runtime", "Disconnected", "connectivityStatus", o.connectivityStatus);
+      if (/^expired$/i.test(conn))                 return reading("disabled", "runtime", "Expired",      "connectivityStatus", o.connectivityStatus);
+      return NOT_REPORTED;
+    }
+
     case "fortiswitch": {
       const connected = bool(o.connected);
       if (connected === null) return NOT_REPORTED;

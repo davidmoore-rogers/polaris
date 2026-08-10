@@ -13,6 +13,8 @@
   function render(el, config, rows) {
     PolarisTopN.renderRows(el, rows || [], {
       unit: "°C", thresholds: THRESHOLDS, baseColor: "#4fc3f7", emptyText: EMPTY, config: config || {}, fillTo: 20,
+      // Header pills: how many sensors are alerting at each severity right now.
+      headerSeverityCounts: true,
     });
   }
 

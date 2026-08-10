@@ -28,6 +28,7 @@
 
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
+import { bareFortinetDeviceName } from "../utils/assetSourceLocation.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
 (async () => {
@@ -88,7 +89,12 @@ import { runInstrumentedJob } from "./_metrics.js";
         osVersion: asset.osVersion ?? null,
         hardwareVendor: asset.manufacturer ?? null,
         model: asset.model ?? null,
-        learnedLocation: asset.learnedLocation ?? null,
+        // Bare device name — see buildFortigateEndpointObservedBlob: the Asset
+        // field may already carry the Sources card's "<integration>:" render,
+        // and stamping that back into the blob it projects from compounds it.
+        learnedLocation: asset.learnedLocation
+          ? bareFortinetDeviceName(asset.learnedLocation.trim()) || null
+          : null,
         lastSeenSwitch: asset.lastSeenSwitch ?? null,
         lastSeenAp: asset.lastSeenAp ?? null,
         discoveredVia: integrationType,

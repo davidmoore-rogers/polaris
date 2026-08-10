@@ -13,9 +13,13 @@ import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import { createTtlCache } from "../utils/ttlCache.js";
-import type { RuleScope, Trigger, RuleInput } from "./notificationTypes.js";
+import type { RuleScope, Trigger, RuleInput, Severity, CompositeLeaf, TriggerConditionGroup } from "./notificationTypes.js";
 import {
   isAssetScopedTrigger,
+  isTriggerLeaf,
+  resolveTierLadder,
+  severityRank,
+  hwSensorFilterMatches,
   CHANGE_TYPE_ACTIONS,
   legacyMirrorOfV2,
   normalizeRuleToV2,
@@ -117,6 +121,105 @@ export async function findRulesMatchingAsset(assetId: string) {
     if (!isAssetScopedTrigger(trigger)) return false;
     return scopeMatchesAsset((r.scope ?? {}) as RuleScope, asset);
   });
+}
+
+/** One severity threshold that applies to a charted metric on one asset. */
+export interface MetricSeverityTier {
+  severity: Severity;
+  /** Ordered comparator — ">"/">=" color ABOVE the threshold, "<"/"<=" BELOW. */
+  operator: ">" | ">=" | "<" | "<=";
+  threshold: number;
+  ruleId: string;
+  ruleName: string;
+}
+
+/** Ordered comparators only: an `==`/`!=` trigger has no "worse in this
+ *  direction" reading, so there is nothing to shade on a chart. */
+function orderedOperator(op: string): MetricSeverityTier["operator"] | null {
+  return op === ">" || op === ">=" || op === "<" || op === "<=" ? op : null;
+}
+
+/**
+ * The severity thresholds that would fire on ONE asset's charted metric, so the
+ * asset-detail chart can shade its line with the same numbers the engine
+ * evaluates instead of a second copy of them.
+ *
+ * Sources, per enabled scope-matching automation (`findRulesMatchingAsset`):
+ *  - a numeric single trigger on `metric` → its `resolveTierLadder` (tier 0 =
+ *    the rule's own severity/threshold, plus every severity band on top);
+ *  - a COMPOSITE trigger → each leaf on `metric` at the rule's severity (bands
+ *    aren't valid on composites, so there's no ladder to resolve).
+ *
+ * `dimension` is the concrete thing being charted (a sensor's name + class);
+ * a rule whose dimensionFilter doesn't select it is skipped — shading a fan's
+ * chart with a temperature automation's 35 °C would be a lie. When two
+ * automations set the same severity at different thresholds the MORE SENSITIVE
+ * one wins (lowest for `>=`, highest for `<=`) — that's where that severity
+ * first appears, which is what the shading is showing.
+ *
+ * Deliberately does NOT apply the rule-18 carve-out: precedence decides which
+ * automation NOTIFIES, and a carved-out asset still crosses the same value. The
+ * chart answers "what does this reading mean", not "which rule pages someone".
+ */
+export async function getMetricSeverityTiers(
+  assetId: string,
+  metric: string,
+  dimension?: { sensorName?: string; sensorClass?: string },
+): Promise<MetricSeverityTier[]> {
+  const rules = await findRulesMatchingAsset(assetId);
+  const collected: MetricSeverityTier[] = [];
+
+  for (const row of rules) {
+    const v2 = normalizeRuleToV2(row as Parameters<typeof normalizeRuleToV2>[0]);
+    const trigger = row.trigger as unknown as Trigger;
+    const ruleSeverity = String(row.severity) as Severity;
+    const push = (op: string, threshold: unknown, severity: Severity) => {
+      const operator = orderedOperator(op);
+      if (!operator || typeof threshold !== "number" || !Number.isFinite(threshold)) return;
+      collected.push({ severity, operator, threshold, ruleId: row.id, ruleName: row.name });
+    };
+
+    if (trigger.type === "asset_metric" && trigger.metric === metric) {
+      if (metric === "hwSensorValue" && dimension && !hwSensorFilterMatches(trigger.dimensionFilter, dimension)) continue;
+      for (const tier of resolveTierLadder(trigger.operator, trigger.threshold, ruleSeverity, trigger.forDurationSec ?? 0, v2.severityBands)) {
+        push(tier.operator, tier.threshold, tier.severity as Severity);
+      }
+      continue;
+    }
+
+    if (trigger.type === "composite") {
+      for (const leaf of collectCompositeMetricLeaves(trigger)) {
+        if (leaf.type !== "asset_metric" || leaf.metric !== metric) continue;
+        if (metric === "hwSensorValue" && dimension && !hwSensorFilterMatches(leaf.dimensionFilter, dimension)) continue;
+        push(leaf.operator, leaf.threshold, ruleSeverity);
+      }
+    }
+  }
+
+  // One tier per severity: keep the most sensitive threshold in its direction.
+  const bySeverity = new Map<string, MetricSeverityTier>();
+  for (const t of collected) {
+    const key = `${t.severity}|${t.operator === ">" || t.operator === ">=" ? "up" : "down"}`;
+    const prev = bySeverity.get(key);
+    if (!prev) { bySeverity.set(key, t); continue; }
+    const moreSensitive = key.endsWith("up") ? t.threshold < prev.threshold : t.threshold > prev.threshold;
+    if (moreSensitive) bySeverity.set(key, t);
+  }
+  return Array.from(bySeverity.values()).sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
+}
+
+/** Flatten a composite trigger's tree to its leaves (groups nest ≤3 deep).
+ *  Starts from `children`, NOT the trigger itself: `isTriggerLeaf` is a
+ *  `"type" in node` test and the composite root carries `type: "composite"`, so
+ *  walking from the root would classify the whole tree as one leaf. */
+function collectCompositeMetricLeaves(trigger: Extract<Trigger, { type: "composite" }>): CompositeLeaf[] {
+  const out: CompositeLeaf[] = [];
+  const walk = (node: TriggerConditionGroup | CompositeLeaf): void => {
+    if (isTriggerLeaf(node)) { out.push(node); return; }
+    for (const child of node.children ?? []) walk(child);
+  };
+  for (const child of trigger.children ?? []) walk(child);
+  return out;
 }
 
 /**

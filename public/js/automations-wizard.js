@@ -68,7 +68,8 @@ function makeAutomationSentences(s) {
   var INV_CMP = Object.assign({ ">": "<=", ">=": "<", "<": ">=", "<=": ">", "==": "!=", "!=": "==" }, s.inverseComparators || {});
   var AGG_PHRASE = Object.assign({ latest: "", avg: "avg over", min: "min over", max: "max over" }, s.aggregationPhrases || {});
   var DIM_PHRASE = Object.assign({
-    sensorClass: "for sensors of class {value}", ifNamePattern: "on interfaces matching {value}",
+    sensorClass: "for sensors of class {value}", sensorNamePattern: "on sensors matching {value}",
+    ifNamePattern: "on interfaces matching {value}",
     mountPathPattern: "on mounts matching {value}", healthCheck: "for health check {value}",
     link: "on member {value}", tunnelName: "on tunnel {value}", widgetId: "for widget {value}",
     processNamePattern: "for processes matching {value}",
@@ -176,6 +177,83 @@ function makeAutomationSentences(s) {
 }
 if (typeof window !== "undefined") window.PolarisAutomationSentences = { make: makeAutomationSentences };
 
+// ─── Dimension-value picker (pure rendering; see POST /automations/dimension-values) ───
+// A metric's dimensionFilter used to be free text, so an operator typed a sensor
+// class into a field the server validates as a closed enum (400 on save) or a
+// pattern field that silently matches nothing. These three build the control's
+// options and the operator-facing note from the endpoint's answer — kept
+// module-level and pure so they're unit-testable off window.PolarisAutomationDimensions.
+
+/** Options for a strict (closed-enum) dimension select. A `current` value the
+ *  scoped devices don't report is KEPT and flagged rather than dropped —
+ *  otherwise opening an existing automation for an unrelated edit would quietly
+ *  widen its filter to "any". */
+function awDimOptionsHtml(res, current) {
+  var cur = current == null ? "" : String(current);
+  var vals = (res && res.values) || [];
+  var html = '<option value="">(any)</option>';
+  var seen = false;
+  vals.forEach(function (v) {
+    if (v.value === cur) seen = true;
+    var count = v.assetCount ? " (" + v.assetCount + ")" : "";
+    html += '<option value="' + escapeHtml(v.value) + '"' + (v.value === cur ? " selected" : "") + '>' + escapeHtml(v.value) + count + '</option>';
+  });
+  if (cur && !seen) {
+    html += '<option value="' + escapeHtml(cur) + '" selected>' + escapeHtml(cur) + ' — not currently reported</option>';
+  }
+  return html;
+}
+
+/** Suggestions for a substring-matched dimension (interface, mount path …) —
+ *  a datalist, not a select: a partial like "port" is a legitimate filter. */
+function awDimDatalistHtml(res) {
+  return ((res && res.values) || []).map(function (v) {
+    return '<option value="' + escapeHtml(v.value) + '"></option>';
+  }).join("");
+}
+
+/** Sibling dimension values that narrow another dimension's list on the same
+ *  condition row: sensor NAMES belong to the chosen class, WAN members to the
+ *  chosen health-check. Offering the unnarrowed list would let an operator build
+ *  a filter (class=temperature + name=FAN1) that matches nothing. */
+function awDimNarrow(dim, df) {
+  df = df || {};
+  if (dim === "sensorNamePattern") return df.sensorClass ? { sensorClass: df.sensorClass } : {};
+  if (dim === "link") return df.healthCheck ? { healthCheck: df.healthCheck } : {};
+  return {};
+}
+
+/** The note under the control. Returns `{text, warn}`; warn = the condition as
+ *  written can never match, which is the whole point of asking the devices. */
+function awDimNote(res) {
+  if (!res || res.loading) return { text: "Checking what the selected devices report…", warn: false };
+  if (res.error) return { text: "", warn: false };
+  if (!res.scopedAssets) {
+    return { text: "No devices match the filter on the Devices step yet, so there is nothing to list.", warn: true };
+  }
+  if (!(res.values || []).length) {
+    return {
+      // narrowLabel keeps "reported no hardware sensors" from reading as "none at
+      // all" when it actually means "none of the class you picked".
+      text: "None of the " + res.scopedAssets + " selected device(s) reported any " + res.noun + (res.narrowLabel || "") +
+        " in the last " + res.windowHours + " h — a condition on this dimension would never match.",
+      warn: true,
+    };
+  }
+  var parts = [];
+  if (res.assetsWithData < res.sampledAssets) {
+    parts.push("Reported by " + res.assetsWithData + " of " + res.sampledAssets + " device(s) — the rest report no " + res.noun + ".");
+  }
+  if (res.sampledAssets < res.scopedAssets) {
+    parts.push("Sampled " + res.sampledAssets + " of " + res.scopedAssets + " selected devices.");
+  }
+  return { text: parts.join(" "), warn: false };
+}
+
+if (typeof window !== "undefined") {
+  window.PolarisAutomationDimensions = { optionsHtml: awDimOptionsHtml, datalistHtml: awDimDatalistHtml, note: awDimNote, narrow: awDimNarrow };
+}
+
 async function openAutomationWizard(existing) {
   // ── Load the catalogs the steps render from ────────────────────────────
   if (!_ruleSchema) {
@@ -262,7 +340,26 @@ async function openAutomationWizard(existing) {
       humanDuration = _sent.humanDuration, tgTreePhrase = _sent.tgTreePhrase,
       triggerSentence = _sent.triggerSentence, resetSentence = _sent.resetSentence,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { ifNamePattern: "interface name contains", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", mountPathPattern: "mount path contains", healthCheck: "SD-WAN health-check name", link: "WAN member / link name", tunnelName: "IPsec tunnel name", widgetId: "custom widget id" };
+  var DIM_PLACEHOLDER = { ifNamePattern: "interface name contains", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", sensorNamePattern: "any sensor — or name contains, e.g. CPU ON-DIE", mountPathPattern: "mount path contains", healthCheck: "SD-WAN health-check name", link: "WAN member / link name", tunnelName: "IPsec tunnel name", widgetId: "custom widget id" };
+  // Dimension VALUE pickers. The server says which dimensionFilter fields it can
+  // populate and whether each is a closed enum (`strict` → select-only, e.g.
+  // sensorClass) or a substring match (→ suggestions, typing still allowed);
+  // POST /automations/dimension-values then answers with the values the DRAFT'S
+  // OWN devices report. Empty for a stale server, in which case every dimension
+  // falls back to the plain text input it always was.
+  var DIM_PICKERS = s.dimensionPickers || {};
+  // key "metric|dimension|narrowJson|scopeJson" → {loading:true} | result |
+  // {error:true}. Keyed by scope so re-picking devices on Step 2 re-asks rather
+  // than showing the previous selection's sensors, and by the narrowing so
+  // switching sensor class re-asks for THAT class's sensor names.
+  var _dimValues = {};
+  function dimKeyFor(metric, dim, narrow) {
+    return metric + "|" + dim + "|" + JSON.stringify(narrow || {}) + "|" + JSON.stringify(draft.scope || {});
+  }
+  function dimResult(metric, dim, narrow) {
+    var r = _dimValues[dimKeyFor(metric, dim, narrow)];
+    return r && !r.loading && !r.error ? r : null;
+  }
 
   var channels = _ruleChannels || [];
   var routedTypes = s.recipientRoutedTypes || ["smtp", "oauth_m365", "web_push"];
@@ -936,6 +1033,109 @@ async function openAutomationWizard(existing) {
     if (meta && meta.kind === "number") return '<input type="number" class="tgl-value" value="' + escapeHtml(v) + '" style="width:110px" placeholder="e.g. 3">';
     return '<input type="text" class="tgl-value" value="' + escapeHtml(v) + '" style="width:130px" placeholder="e.g. up / down">';
   }
+  // One dimensionFilter control. A dimension the server can populate renders as
+  // a select (closed enum) or an input + datalist (substring match); anything
+  // else stays the plain text box it always was.
+  var _dimListSeq = 0;
+  function dimControlHtml(d, df, metric) {
+    var value = (df && df[d]) || "";
+    var meta = DIM_PICKERS[d];
+    var plain = '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '" value="' + escapeHtml(value) + '" style="flex:1;min-width:120px">';
+    if (!meta) return plain;
+    var res = dimResult(metric, d, awDimNarrow(d, df));
+    if (meta.strict) {
+      return '<select class="tgl-dim" data-dim="' + d + '" style="flex:1;min-width:150px;font-size:0.8rem" title="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '">' +
+        awDimOptionsHtml(res, value) + '</select>';
+    }
+    var listId = "aw-dimlist-" + d + "-" + (++_dimListSeq);
+    return plain.replace('data-dim="' + d + '"', 'data-dim="' + d + '" list="' + listId + '"') +
+      '<datalist id="' + listId + '">' + awDimDatalistHtml(res) + '</datalist>';
+  }
+  /** The metric a dim control belongs to, read LIVE off its row so switching the
+   *  metric re-asks for that metric's values instead of reusing the old ones. */
+  function dimMetricOf(el) {
+    var row = el.closest(".scr-row");
+    var what = row && row.querySelector(".tgl-what");
+    var v = what ? String(what.value || "") : "";
+    return v.indexOf("m:") === 0 ? v.slice(2) : "";
+  }
+  /** The row's current dimensionFilter, read live off its controls (mirrors
+   *  tgCollectLeaf) — the narrowing input for sibling-dependent lists. */
+  function dimFilterOfRow(row) {
+    var df = {};
+    if (!row) return df;
+    row.querySelectorAll(".tgl-dim").forEach(function (el) {
+      var v = (el.value || "").trim();
+      if (v) df[el.getAttribute("data-dim")] = v;
+    });
+    return df;
+  }
+  function applyDimOptions(el) {
+    var d = el.getAttribute("data-dim");
+    if (!DIM_PICKERS[d]) return;
+    var metric = dimMetricOf(el);
+    var narrow = awDimNarrow(d, dimFilterOfRow(el.closest(".scr-row")));
+    var res = metric ? _dimValues[dimKeyFor(metric, d, narrow)] : null;
+    var note = el.closest(".tgl-line2");
+    note = note && note.querySelector(".tgl-dim-note");
+    if (note) {
+      var n = awDimNote(res);
+      // Two pickers can share one row (SD-WAN health-check + member): a
+      // never-matches warning from either must not be overwritten by the other's
+      // quiet line.
+      if (n.warn || note.getAttribute("data-warn") !== "1") {
+        note.textContent = n.text;
+        note.setAttribute("data-warn", n.warn ? "1" : "0");
+        note.style.color = n.warn ? "var(--color-warning, #d9a441)" : "var(--color-text-tertiary)";
+      }
+    }
+    if (!res || res.loading || res.error) return;
+    var key = dimKeyFor(metric, d, narrow);
+    if (el.getAttribute("data-dim-key") === key) return; // already applied
+    el.setAttribute("data-dim-key", key);
+    var cur = el.value || "";
+    if (el.tagName === "SELECT") {
+      el.innerHTML = awDimOptionsHtml(res, cur);
+      el.value = cur;
+    } else if (el.list) {
+      el.list.innerHTML = awDimDatalistHtml(res);
+    }
+  }
+  /** Fetch (once per metric+dimension+scope) and populate every dim control on
+   *  the panel. Cheap and idempotent once cached, so it's safe to call from the
+   *  panel's change handler as well as after a render. */
+  async function refreshDimOptions(panel) {
+    if (!panel) return;
+    var els = Array.prototype.slice.call(panel.querySelectorAll(".tgl-dim[data-dim]"));
+    if (!els.length) return;
+    var need = {};
+    els.forEach(function (el) {
+      var d = el.getAttribute("data-dim");
+      if (!DIM_PICKERS[d]) return;
+      var metric = dimMetricOf(el);
+      if (!metric) return;
+      var narrow = awDimNarrow(d, dimFilterOfRow(el.closest(".scr-row")));
+      var key = dimKeyFor(metric, d, narrow);
+      if (!_dimValues[key]) need[key] = { metric: metric, dimension: d, narrow: narrow };
+    });
+    var keys = Object.keys(need);
+    keys.forEach(function (k) { _dimValues[k] = { loading: true }; });
+    els.forEach(applyDimOptions); // paints the "checking…" note
+    if (keys.length) {
+      await Promise.all(keys.map(async function (k) {
+        try {
+          _dimValues[k] = await api.automations.dimensionValues({
+            metric: need[k].metric, dimension: need[k].dimension, scope: draft.scope || {}, narrow: need[k].narrow,
+          });
+        } catch (_e) {
+          // Never block authoring on the picker — the control stays usable with
+          // whatever the operator types / already had selected.
+          _dimValues[k] = { error: true };
+        }
+      }));
+      els.forEach(applyDimOptions);
+    }
+  }
   function tgLeafRowHtml(leaf, kind) {
     leaf = leaf || tgDefaultLeaf(kind);
     var isState = leaf.type === "asset_state";
@@ -963,14 +1163,13 @@ async function openAutomationWizard(existing) {
     if (!isState) {
       var dims = kind === "host" ? [] : ((s.metricDimensions && s.metricDimensions[leaf.metric]) || []);
       var df = leaf.dimensionFilter || {};
-      var dimInputs = dims.map(function (d) {
-        return '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '" value="' + escapeHtml(df[d] || "") + '" style="flex:1;min-width:120px">';
-      }).join("");
+      var dimInputs = dims.map(function (d) { return dimControlHtml(d, df, leaf.metric); }).join("");
       line2 =
         '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
           '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + opt(s.aggregations, leaf.aggregation || "latest") + '</select>' +
           '<span>over</span><input type="number" class="tgl-window" value="' + (leaf.windowSec || 0) + '" style="width:70px"><span>sec (0 = latest)</span>' +
           dimInputs +
+          (dims.some(function (d) { return DIM_PICKERS[d]; }) ? '<span class="tgl-dim-note" style="flex-basis:100%;font-size:0.78rem"></span>' : "") +
         '</div>';
     }
     return '<div class="scr-row" style="margin:4px 0;padding:4px;border:1px solid var(--color-border);border-radius:6px">' + line1 + line2 + '</div>';
@@ -1088,6 +1287,15 @@ async function openAutomationWizard(existing) {
     wireCondDnD(panel, rootSelector, onChange, tgMeta.maxDepth || 3);
   }
 
+  // "Sustained for" is per SEVERITY TIER — the value must hold in that tier for
+  // its own duration before the alert takes that severity. Rendered identically
+  // for the base tier (moved inside the base condition group in multi mode by
+  // injectBaseSeverity) and for every added tier.
+  function durationFieldHtml(attr, mins) {
+    return '<div class="form-group aw-dur" style="margin:0.5rem 0 0">' +
+      '<label style="font-size:0.8rem">Sustained for (minutes)</label>' +
+      '<input type="number" ' + attr + ' min="0" value="' + mins + '" placeholder="0 = fire as soon as the value reaches this level"></div>';
+  }
   function step3Html() {
     var cat = triggerCategoryOf(draft.trigger);
     var typeOpts = TRIGGER_CATEGORIES.map(function (t) {
@@ -1117,7 +1325,7 @@ async function openAutomationWizard(existing) {
       var tree = triggerToTree(tr, kind);
       html += '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Add conditions and combine them with AND/OR groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move them. ' + escapeHtml(tgMeta.anyDimensionNote || "") + '</p>' +
         '<div id="aw-trig-root">' + tgGroupHtml(tree, 0, kind) + '</div>' +
-        '<div class="form-group" style="margin-top:0.5rem"><label>Sustained for (minutes)</label><input type="number" id="tf-duration-min" min="0" value="' + Math.round(((tr.forDurationSec || 0)) / 60) + '" placeholder="0 = fire immediately"></div>';
+        durationFieldHtml('id="tf-duration-min"', Math.round(((tr.forDurationSec || 0)) / 60));
       if (cat === "host") {
         html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">Polaris-host conditions aren’t tied to assets — the device filter from the previous step is ignored.</p>';
       }
@@ -1134,6 +1342,7 @@ async function openAutomationWizard(existing) {
     }
     box.innerHTML = html;
     refreshTriggerSentence();
+    refreshDimOptions(panel);
   }
   function wireStep3() {
     var panel = document.getElementById("aw-step-3");
@@ -1159,7 +1368,7 @@ async function openAutomationWizard(existing) {
     // own change handler also calls it — a second render is harmless) and
     // re-syncs the severity mode (single dropdown vs multi tiers + accent).
     panel.addEventListener("input", function () { refreshTriggerSentence(); syncSeverityMode(panel); });
-    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); });
+    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); refreshDimOptions(panel); });
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
     renderTriggerFields();
     syncSeverityMode(panel);
@@ -1397,7 +1606,8 @@ async function openAutomationWizard(existing) {
       // (delegated once per panel; kind follows the trigger).
       wireTgTree(panel, "#aw-reset-root", function () {
         return (draft.trigger && draft.trigger.kind) === "host" ? "host" : "asset";
-      }, refreshResetSentence);
+      }, function () { refreshResetSentence(); refreshDimOptions(panel); });
+      refreshDimOptions(panel);
     }
 
     panel.querySelectorAll('input[name="aw-reset-mode"]').forEach(function (radio) {
@@ -1517,22 +1727,31 @@ async function openAutomationWizard(existing) {
         escSectionHtml() +
       '</div>';
 
-    // Per-severity action sections: with severity bands, each tier gets its
-    // own actions (server: band actions run when the alert ENTERS that band;
-    // an empty band falls back to the base actions). Single mode = one list.
+    // Per-severity action sections: with severity bands, each tier CAN get its
+    // own actions (server: band actions run when the alert ENTERS that band; an
+    // empty band falls back to the base actions). That's opt-in, mirroring the
+    // trigger step's "use multiple severity levels" — off (the default) means
+    // one action list that runs at every severity, which is what most
+    // automations want. Single-severity mode = one list, no checkbox.
     var bands = (bandsApplicable(draft.trigger) && draft.severityBands) || [];
-    var baseLabel = bands.length
+    var perSev = !!bands.length && bandActionsPerSeverityOn();
+    if (bands.length) {
+      html += '<div class="form-group"><label><input type="checkbox" id="aw-band-actions-multi"' + (perSev ? " checked" : "") + '> Use different actions for each severity level</label>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 1.4rem">Leave this off to run the same actions whenever the alert changes severity.</p></div>';
+    }
+    var baseLabel = perSev
       ? 'Actions at <span style="color:' + sevColor(draft.severity) + '">' + escapeHtml(draft.severity) + '</span> (base severity)'
       : "Actions when this fires";
-    html += '<div class="form-group" style="' + (bands.length ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
+    html += '<div class="form-group" style="' + (perSev ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
       '<label style="font-weight:600">' + baseLabel + '</label>' +
-      (bands.length ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These actions also run at higher severities that don’t define their own.</p>' : "") +
+      (perSev ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These actions also run at higher severities that don’t define their own.</p>'
+        : bands.length ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These run at every severity level — each time the alert climbs or eases into a new one.</p>' : "") +
       '<div id="aw-actions"></div>' +
       '<button type="button" class="btn btn-sm btn-secondary" id="aw-add-action" style="margin-top:6px">+ Add action</button>' +
     '</div>';
     bands.forEach(function (b, i) {
       var opPhrase = ((s.comparatorPhrases || {})[b.operator || (draft.trigger && draft.trigger.operator)] || "").toString();
-      html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem">' +
+      html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem' + (perSev ? "" : ";display:none") + '">' +
         '<label style="font-weight:600">Actions at <span style="color:' + sevColor(b.severity) + '">' + escapeHtml(b.severity) + '</span> <span style="font-weight:400;color:var(--color-text-tertiary)">(value ' + escapeHtml(opPhrase || "meets") + ' ' + escapeHtml(String(b.threshold != null ? b.threshold : "?")) + ')</span></label>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">' + escapeHtml((s.bandMeta && s.bandMeta.emptyBandNote) || "Leave empty to run the base actions at this severity.") + '</p>' +
         '<div class="ba-actions"></div>' +
@@ -1553,7 +1772,27 @@ async function openAutomationWizard(existing) {
       (((draft.severityBands || [])[i] || {}).actions || []).forEach(function (a) { addActionRow(bHost, a, true); });
       sec.querySelector(".ba-add").addEventListener("click", function () { addActionRow(bHost, null, true); });
     });
+    var perSevCb = panel.querySelector("#aw-band-actions-multi");
+    if (perSevCb) {
+      perSevCb.addEventListener("change", function () {
+        // Collect first so per-tier rows already typed survive the re-render
+        // (they stay on the draft while the toggle is off and are stripped only
+        // at save, so an accidental un-tick doesn't destroy them).
+        collectStep5();
+        draft.bandActionsPerSeverity = perSevCb.checked;
+        renderStep5();
+      });
+    }
     wireTokenPalette(panel);
+  }
+  /** Whether the per-severity action sections are in play. Explicit once the
+   *  operator touches the toggle; inferred from the record otherwise, so an
+   *  automation authored with per-band actions re-opens showing them. */
+  function bandActionsPerSeverityOn() {
+    if (typeof draft.bandActionsPerSeverity === "boolean") return draft.bandActionsPerSeverity;
+    return (draft.severityBands || []).some(function (b) {
+      return (b.actions && b.actions.length) || (b.escalation && b.escalation.tiers && b.escalation.tiers.length);
+    });
   }
 
   // ── Per-item escalation section (the mandatory card + every action row) ──
@@ -1711,15 +1950,23 @@ async function openAutomationWizard(existing) {
     var root = panel.querySelector("#aw-trig-root > .scg-group");
     if (!root) return;
     var header = root.querySelector(":scope > div"); // header row (holds .scg-op)
-    var btnRow = root.querySelector(":scope > div:last-child"); // +Condition/+Group row
+    var btnRow = root.querySelector(":scope > .scg-btnrow") || root.querySelector(":scope > div:last-child"); // +Condition/+Group row
+    if (btnRow) btnRow.classList.add("scg-btnrow"); // pinned: the duration field moves in below the conditions
     var existingSev = header && header.querySelector(".scg-sev-wrap");
     var existingAdd = btnRow && btnRow.querySelector(".scg-add-sev");
+    // The base tier's "Sustained for" belongs WITH the base tier once every
+    // added tier has its own — otherwise it reads as a rule-wide setting sitting
+    // between the tiers. Moved (not re-created) so its value survives the swap.
+    var durGroup = panel.querySelector("#tf-duration-min");
+    durGroup = durGroup && durGroup.closest(".aw-dur");
     if (!multi) {
       if (existingSev) existingSev.remove();
       if (existingAdd) existingAdd.remove();
+      if (durGroup && root.contains(durGroup)) panel.querySelector("#aw-trigger-fields").appendChild(durGroup);
       root.style.borderLeftColor = "";
       return;
     }
+    if (durGroup && btnRow && !root.contains(durGroup)) root.insertBefore(durGroup, btnRow);
     if (header && !existingSev) {
       var wrap = document.createElement("span");
       wrap.className = "scg-sev-wrap";
@@ -1727,6 +1974,7 @@ async function openAutomationWizard(existing) {
       wrap.innerHTML = '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' + sevSelectHtml("scg-sev", draft.severity || "warning");
       header.insertBefore(wrap, header.firstChild);
       var sel = wrap.querySelector(".scg-sev");
+      sel.value = draft.severity || "warning"; // don't rely on the markup's selected attr
       sel.addEventListener("change", function () {
         draft.severity = sel.value;
         sel.className = "scg-sev sev-select sev-" + sel.value;
@@ -1775,6 +2023,12 @@ async function openAutomationWizard(existing) {
       dimensionFilter: tr.dimensionFilter,
     };
     var panel = document.getElementById("aw-step-3");
+    // Sustained-for is PER TIER: a new tier inherits the base's current value
+    // (so adding one changes nothing until the operator edits it), an existing
+    // one shows its own, and a band saved before per-tier sustain existed shows
+    // the base value it was inheriting.
+    var baseDurMin = Math.round((((draft.trigger || {}).forDurationSec) || 0) / 60);
+    var bandDurMin = band.forDurationSec != null ? Math.round(band.forDurationSec / 60) : baseDurMin;
     var row = document.createElement("div");
     row.className = "aw-band scg-group";
     row.style.cssText = "border:1px solid var(--color-border);border-left:3px solid " + sevColor(sev0) + ";border-radius:6px;padding:0.55rem;margin:4px 0";
@@ -1791,6 +2045,7 @@ async function openAutomationWizard(existing) {
       '</div>' +
       '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
       '<div class="band-cond scg-children">' + tgLeafRowHtml(tierLeaf, kind) + '</div>' +
+      durationFieldHtml('class="band-duration"', bandDurMin) +
       '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>';
     host.appendChild(row);
     // Lock the shared-sampling fields on the tier's condition row — metric,
@@ -1799,10 +2054,12 @@ async function openAutomationWizard(existing) {
     cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-window, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
     var grip = cond.querySelector(".aw-grip"); if (grip) grip.style.display = "none";
     var rmCond = cond.querySelector(".scr-remove"); if (rmCond) rmCond.style.display = "none";
+    refreshDimOptions(panel); // the tier's locked condition row has its own dim control
     row.querySelector(".band-add-sev").addEventListener("click", function () { addBandRow(host, null); syncBandNotify(panel); });
     // Per-tier accent + "only increase severity" guard: a tier can't be set at
     // or below the tier before it (or the base).
     var sevSel = row.querySelector(".band-severity");
+    sevSel.value = sev0; // don't rely on the markup's selected attr
     sevSel.addEventListener("change", function () {
       var prev = row.previousElementSibling && row.previousElementSibling.classList.contains("aw-band")
         ? sevRankOf(row.previousElementSibling.querySelector(".band-severity").value)
@@ -1870,17 +2127,32 @@ async function openAutomationWizard(existing) {
         var carved = m.excludedBy
           ? ' <span style="color:var(--color-warning, #b7791f);font-size:0.75rem">— covered by “' + escapeHtml(m.excludedBy.ruleName) + '”</span>'
           : "";
-        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + carved + '</td></tr>';
+        // Per-dimension metrics evaluate one reading per sensor / interface /
+        // mount, so the same hostname legitimately appears several times —
+        // WHICH sensor is the only thing that tells those rows apart.
+        var dim = m.dimension
+          ? ' <span style="color:var(--color-text-tertiary);font-size:0.78rem">' + escapeHtml(m.dimension) + '</span>'
+          : "";
+        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + dim + carved + '</td></tr>';
       }).join("");
+      // totalEvaluated counts READINGS; totalAssets counts devices. Reporting
+      // the former as "devices" made 8 firewalls with 6 temperature sensors
+      // each read as "48 devices".
+      var devices = res.totalAssets != null ? res.totalAssets : res.totalEvaluated;
+      var countLine = '<strong>' + devices + '</strong> device(s) match the filter right now.';
+      if (res.totalAssets != null && res.totalEvaluated > res.totalAssets) {
+        countLine += ' <span style="color:var(--color-text-tertiary)">This metric is reported per sensor / interface / mount — ' +
+          res.totalEvaluated + ' reading(s) across those ' + res.totalAssets + ' device(s), one row each below.</span>';
+      }
       var spec = res.specificity
         ? '<p style="font-size:0.8rem;margin:0 0 6px">Specificity: <strong>' + escapeHtml(res.specificity.label) + '</strong>' +
           ' <span style="color:var(--color-text-tertiary)">— a more-specific automation watching the same thing takes precedence for the devices it covers.</span></p>'
         : "";
       box.innerHTML = spec +
-        '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> device(s) match the filter right now.</p>' +
+        '<p style="font-size:0.85rem;margin:0 0 4px">' + countLine + '</p>' +
         carveOutWarningHtml(res.carveOut) +
         (names ? '<div class="table-wrapper" style="max-height:220px;overflow:auto"><table><tbody>' + names + '</tbody></table></div>' +
-          (res.totalEvaluated > 100 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 100) + ' more.</p>' : "") : "");
+          (res.totalEvaluated > 100 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 100) + ' more row(s).</p>' : "") : "");
     } catch (err) {
       box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">' + escapeHtml(err.message || "Preview unavailable") + '</p>';
     }
@@ -2233,6 +2505,8 @@ async function openAutomationWizard(existing) {
     // band DOM rows' stash, so a later step-3 re-collect (collectBands) can't
     // lose them. Sections render in draft.severityBands order, which matches
     // the #aw-bands row order (both come from the same collect).
+    var perSevCb = panel.querySelector("#aw-band-actions-multi");
+    if (perSevCb) draft.bandActionsPerSeverity = perSevCb.checked;
     var bandRows = document.querySelectorAll("#aw-bands > .aw-band");
     panel.querySelectorAll(".aw-band-actions").forEach(function (sec, i) {
       var band = (draft.severityBands || [])[i];
@@ -2260,9 +2534,14 @@ async function openAutomationWizard(existing) {
       // by collectStep5 — so a step-3 re-collect can't strip them. Band-LEVEL
       // escalation isn't offered in the builder (per-action chains are), but
       // an API-authored one round-trips through the same stash.
+      // Per-tier sustained duration — the value must hold in THIS tier for this
+      // long before the alert takes its severity (0 = as soon as it reaches it).
+      var dEl = row.querySelector(".band-duration");
+      var dMins = dEl && dEl.value !== "" ? Number(dEl.value) : 0;
       var band = {
         threshold: leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : null,
         severity: row.querySelector(".band-severity").value,
+        forDurationSec: (isNaN(dMins) || dMins < 0 ? 0 : Math.round(dMins)) * 60,
         actions: row._bandActions || [],
       };
       if (row._bandEscalation) band.escalation = row._bandEscalation;
@@ -2284,6 +2563,19 @@ async function openAutomationWizard(existing) {
     draft.bandNotify = np;
   }
   function bandsApplicable(tr) { return !!tr && (tr.type === "asset_metric" || tr.type === "host_metric"); }
+  /** The bands as saved: per-tier actions + per-tier escalation only when the
+   *  Actions step's per-severity toggle is on. The draft keeps them either way
+   *  so toggling back restores them within the session. */
+  function payloadBands() {
+    var bands = draft.severityBands || null;
+    if (!bands || !bands.length) return null;
+    if (bandActionsPerSeverityOn()) return bands;
+    return bands.map(function (b) {
+      var out = { threshold: b.threshold, severity: b.severity, forDurationSec: b.forDurationSec, actions: [] };
+      if (b.operator) out.operator = b.operator;
+      return out;
+    });
+  }
   function validateAction(a, label) {
     if (a.type === "notify") {
       if (!a.channelId) return label + ": pick a channel.";
@@ -2332,10 +2624,14 @@ async function openAutomationWizard(existing) {
     if (p) return p;
     p = validateActionList(draft.actions, "Action");
     if (p) return p;
-    for (var b = 0; b < (draft.severityBands || []).length; b++) {
-      var band = draft.severityBands[b];
-      p = validateActionList(band.actions, band.severity + " action");
-      if (p) return p;
+    // Per-tier actions are validated only while the toggle is on — off, they're
+    // stripped from the payload, so a half-typed hidden row must not block save.
+    if (bandActionsPerSeverityOn()) {
+      for (var b = 0; b < (draft.severityBands || []).length; b++) {
+        var band = draft.severityBands[b];
+        p = validateActionList(band.actions, band.severity + " action");
+        if (p) return p;
+      }
     }
     return null;
   }
@@ -2375,18 +2671,23 @@ async function openAutomationWizard(existing) {
         : "";
     };
     var actionLines = (draft.actions || []).map(function (a) { return escapeHtml(actionSummary(a) + escSuffix(a)); });
-    (draft.severityBands || []).forEach(function (b) {
-      (b.actions || []).forEach(function (a) {
-        actionLines.push('<span style="color:' + sevColor(b.severity) + '">at ' + escapeHtml(b.severity) + ':</span> ' + escapeHtml(actionSummary(a) + escSuffix(a)));
+    var perSevActions = bandActionsPerSeverityOn();
+    if (perSevActions) {
+      (draft.severityBands || []).forEach(function (b) {
+        (b.actions || []).forEach(function (a) {
+          actionLines.push('<span style="color:' + sevColor(b.severity) + '">at ' + escapeHtml(b.severity) + ':</span> ' + escapeHtml(actionSummary(a) + escSuffix(a)));
+        });
       });
-    });
+    }
     // Escalation = the alert's (rule-level) chain + every per-action chain.
     var chains = [];
     if (draft.escalation && draft.escalation.tiers && draft.escalation.tiers.length) chains.push(draft.escalation);
     (draft.actions || []).forEach(function (a) { if (a.escalation && a.escalation.tiers && a.escalation.tiers.length) chains.push(a.escalation); });
-    (draft.severityBands || []).forEach(function (b) {
-      (b.actions || []).forEach(function (a) { if (a.escalation && a.escalation.tiers && a.escalation.tiers.length) chains.push(a.escalation); });
-    });
+    if (perSevActions) {
+      (draft.severityBands || []).forEach(function (b) {
+        (b.actions || []).forEach(function (a) { if (a.escalation && a.escalation.tiers && a.escalation.tiers.length) chains.push(a.escalation); });
+      });
+    }
     var tierTotal = chains.reduce(function (n, c) { return n + c.tiers.length; }, 0);
     var escLine = chains.length ? chains.length + " chain(s), " + tierTotal + " tier(s)" : "off";
     var msgRow = draft.messageTemplate
@@ -2395,10 +2696,18 @@ async function openAutomationWizard(existing) {
     var bandsRow = "";
     if (bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length) {
       var op = (draft.trigger && draft.trigger.operator) || ">=";
-      var bandLine = draft.severityBands.map(function (b) { return escapeHtml(b.severity + " " + (b.operator || op) + " " + b.threshold); }).join(", ");
+      var baseDur = (draft.trigger && draft.trigger.forDurationSec) || 0;
+      // Each tier states its own sustain — that's the whole point of per-band
+      // durations, so the review line has to show them rather than one number.
+      var sustainOf = function (sec) { return sec > 0 ? " for " + humanDuration(sec) : ""; };
+      var bandLine = [escapeHtml(draft.severity + " " + op + " " + ((draft.trigger || {}).threshold != null ? draft.trigger.threshold : "?") + sustainOf(baseDur))]
+        .concat(draft.severityBands.map(function (b) {
+          return escapeHtml(b.severity + " " + (b.operator || op) + " " + b.threshold + sustainOf(b.forDurationSec != null ? b.forDurationSec : baseDur));
+        })).join(", ");
       var np = draft.bandNotify || {};
       var notifyBits = [np.onIncrease !== false ? "increase" : null, np.onDecrease ? "decrease" : null, np.onResolved !== false ? "resolved" : null].filter(Boolean).join(" + ");
-      bandsRow = '<dt>Severity bands</dt><dd>' + bandLine + ' <span style="color:var(--color-text-tertiary)">— notify on ' + escapeHtml(notifyBits || "none") + '</span></dd>';
+      bandsRow = '<dt>Severity bands</dt><dd>' + bandLine + ' <span style="color:var(--color-text-tertiary)">— notify on ' + escapeHtml(notifyBits || "none") +
+        '; ' + (perSevActions ? "per-severity actions" : "same actions at every severity") + '</span></dd>';
     }
     box.innerHTML = '<dl class="review-grid">' +
       '<dt>Name</dt><dd>' + escapeHtml(draft.name || "…") + ' <span class="badge badge-level-' + (draft.severity || "warning") + '">' + escapeHtml((draft.severity || "warning").toUpperCase()) + '</span>' + (draft.enabled === false ? ' <span class="badge">disabled</span>' : "") + '</dd>' +
@@ -2520,7 +2829,10 @@ async function openAutomationWizard(existing) {
       channels: ["in_app"],
       emailComposition: null, // per-action composition in v2; rule-level field retired by the wizard
       escalation: draft.escalation,
-      severityBands: bandsApplicable(draft.trigger) ? (draft.severityBands || null) : null,
+      // Per-tier actions ride the bands only when the Actions step's
+      // "different actions for each severity level" toggle is on; off, every
+      // band saves bare and the server runs the base actions at every severity.
+      severityBands: bandsApplicable(draft.trigger) ? payloadBands() : null,
       bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
     };
     this.disabled = true;
@@ -2586,5 +2898,10 @@ function _awDraftFromRule(r) {
     escalation: esc ? JSON.parse(JSON.stringify(esc)) : null,
     severityBands: Array.isArray(r.severityBands) && r.severityBands.length ? JSON.parse(JSON.stringify(r.severityBands)) : null,
     bandNotify: r.bandNotify ? JSON.parse(JSON.stringify(r.bandNotify)) : null,
+    // Per-severity actions are opt-in on the Actions step; a stored rule opts in
+    // iff any band actually carries its own actions/escalation.
+    bandActionsPerSeverity: (Array.isArray(r.severityBands) ? r.severityBands : []).some(function (b) {
+      return (b && b.actions && b.actions.length) || (b && b.escalation && b.escalation.tiers && b.escalation.tiers.length);
+    }),
   };
 }

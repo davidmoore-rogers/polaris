@@ -214,6 +214,66 @@ describe("projectAssetFromSources — learnedLocation", () => {
     expect(projected.learnedLocation).toBe("fw-jefferson");
   });
 
+  it("operator priority reorders the winner, and an explicit order beats process state", () => {
+    // The whole feature: an asset known to AD, Arc and a FortiGate has three
+    // competing answers to "where is it?" and the operator picks.
+    const sources = [
+      src("ad", { ouPath: "OU=HQ" }),
+      src("arc", { resourceGroup: "rg-prod" }),
+      src("fortigate-endpoint", { learnedLocation: "FW-NASH" }),
+    ];
+    const byDefault = projectAssetFromSources(sources);
+    expect(byDefault.projected.learnedLocation).toBe("OU=HQ");
+
+    const fortinetFirst = projectAssetFromSources(sources, {
+      learnedLocation: {
+        order: ["fortigate-endpoint", "arc", "intune", "entra", "ad"],
+        integrationPrefix: false,
+      },
+    });
+    expect(fortinetFirst.projected.learnedLocation).toBe("FW-NASH");
+    expect(fortinetFirst.provenance.learnedLocation).toBe("fortigate-endpoint");
+
+    const arcFirst = projectAssetFromSources(sources, {
+      learnedLocation: { order: ["arc", "ad"], integrationPrefix: false },
+    });
+    expect(arcFirst.projected.learnedLocation).toBe("Azure Arc");
+  });
+
+  it("integrationPrefix renders <integration>:<fortigate> for Fortinet sources", () => {
+    const sources = [src("fortigate-endpoint", { learnedLocation: "FW-NASH", integrationName: "FMG-Prod" })];
+    expect(projectAssetFromSources(sources, {
+      learnedLocation: { order: ["fortigate-endpoint"], integrationPrefix: true },
+    }).projected.learnedLocation).toBe("FMG-Prod:FW-NASH");
+    expect(projectAssetFromSources(sources, {
+      learnedLocation: { order: ["fortigate-endpoint"], integrationPrefix: false },
+    }).projected.learnedLocation).toBe("FW-NASH");
+  });
+
+  it("a firewall source suppresses the endpoint sighting whatever the operator order says", () => {
+    // Invariant, not a preference: a firewall's site label is its own hostname.
+    // The gate that sighted it as a DHCP client pre-adoption is not its location.
+    const { projected } = projectAssetFromSources(
+      [
+        src("fortigate-firewall", { hostname: "FW-NASH", serial: "FGT001" }),
+        src("fortigate-endpoint", { learnedLocation: "FW-MEMPHIS" }),
+      ],
+      { learnedLocation: { order: ["fortigate-endpoint", "ad"], integrationPrefix: false } },
+    );
+    expect(projected.learnedLocation).toBeNull();
+  });
+
+  it("label-only sources answer when nothing else does", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("entra", { displayName: "WS-01" }),
+      src("intune", { deviceName: "WS-01" }),
+    ]);
+    // Previously null — the Sources column now names who knows the device
+    // rather than sitting blank.
+    expect(projected.learnedLocation).toBe("Microsoft Intune");
+    expect(provenance.learnedLocation).toBe("intune");
+  });
+
   it("FortiGate firewall does NOT project learnedLocation", () => {
     // The firewall's learnedLocation in legacy code is its own hostname,
     // which is already on Asset.hostname — projection deliberately leaves
@@ -520,15 +580,18 @@ describe("projectAssetFromSources — vCenter priority", () => {
     expect(projected.model).toBe("AGENT-MODEL");
   });
 
-  it("arc resourceGroup fills learnedLocation but loses to an AD OU path", () => {
+  it("arc contributes \"Azure Arc\" as its location but loses to an AD OU path", () => {
     const withAd = projectAssetFromSources([
       src("arc", { resourceGroup: "rg-arc-onboarding" }),
       src("ad", { ouPath: "OU=Servers,DC=corp,DC=local" }),
     ]);
     expect(withAd.projected.learnedLocation).toBe("OU=Servers,DC=corp,DC=local");
 
+    // The resource group is a billing/management container whose name says
+    // nothing about where the machine is ("updatemanager", "rg-prod"), so the
+    // column names the source instead. The RG stays on the observed blob.
     const arcOnly = projectAssetFromSources([src("arc", { resourceGroup: "rg-prod" })]);
-    expect(arcOnly.projected.learnedLocation).toBe("rg-prod");
+    expect(arcOnly.projected.learnedLocation).toBe("Azure Arc");
   });
 
   it("arc never supplies coordinates, snmpLocation, or an Azure region as a location", () => {
@@ -536,7 +599,7 @@ describe("projectAssetFromSources — vCenter priority", () => {
       src("arc", { resourceGroup: "rg-prod", azureRegion: "eastus" }),
     ]);
     // The region says where the Arc RECORD lives, not where the machine is.
-    expect(projected.learnedLocation).toBe("rg-prod");
+    expect(projected.learnedLocation).toBe("Azure Arc");
     expect(projected.latitude).toBeNull();
     expect(projected.longitude).toBeNull();
     expect(projected.snmpLocation).toBeNull();
@@ -567,7 +630,9 @@ describe("assetProjection — Azure Arc Kubernetes clusters", () => {
     expect(projected.hostname).toBe("prod-cluster");
     expect(projected.os).toBe("Kubernetes (aks_edge)");
     expect(projected.osVersion).toBe("1.29.4");
-    expect(projected.learnedLocation).toBe("rg-k8s");
+    // Same reasoning as plain Arc: the resource group is a billing container,
+    // so the location column names the source instead.
+    expect(projected.learnedLocation).toBe("Azure Arc (Kubernetes)");
     expect(provenance.os).toBe("arc-k8s");
   });
 

@@ -7,7 +7,14 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { ruleInputSchema, normalizeRuleToV2 } from "../../src/services/notificationTypes.js";
+import {
+  ruleInputSchema,
+  normalizeRuleToV2,
+  resolveTierLadder,
+  updateTierMetSince,
+  sustainedSeverity,
+  tierMetSinceChanged,
+} from "../../src/services/notificationTypes.js";
 import { tierForSeverity, bandNotifyOf } from "../../src/services/notificationEngine.js";
 
 const bandedRule = (over: any = {}) => ({
@@ -78,6 +85,19 @@ describe("ruleInputSchema — severity bands", () => {
     }))).toThrow();
   });
 
+  it("accepts a per-tier sustained duration and leaves it absent when unset", () => {
+    const parsed = ruleInputSchema.parse(bandedRule({
+      trigger: { type: "asset_metric", metric: "probeLossPct", operator: ">", threshold: 5, forDurationSec: 1800 },
+      severityBands: [
+        { threshold: 15, severity: "serious", forDurationSec: 900 },
+        { threshold: 25, severity: "critical", forDurationSec: 0 },
+      ],
+    }));
+    expect(parsed.severityBands![0]).toMatchObject({ forDurationSec: 900 });
+    expect(parsed.severityBands![1]).toMatchObject({ forDurationSec: 0 });
+    expect((ruleInputSchema.parse(bandedRule()).severityBands![0] as any).forDurationSec).toBeUndefined();
+  });
+
   it("applies bandNotify defaults and accepts a resolved policy", () => {
     const parsed = ruleInputSchema.parse(bandedRule({ bandNotify: { onDecrease: true, resolvedMode: "dedicated", resolvedActions: [] } }));
     expect(parsed.bandNotify).toMatchObject({ onIncrease: true, onDecrease: true, onResolved: true, resolvedMode: "dedicated" });
@@ -119,6 +139,122 @@ describe("tierForSeverity", () => {
   });
   it("falls back to tier 0 for an unknown severity", () => {
     expect(tierForSeverity(rule, "notice").actions[0]).toMatchObject({ channelId: "base" });
+  });
+});
+
+// ─── Per-tier sustained durations ───────────────────────────────────────────
+// The scenario throughout: packet loss > 5% for 30 min = warning, > 15% for
+// 15 min = serious, > 25% immediately = critical.
+describe("resolveTierLadder", () => {
+  const bands = [
+    { threshold: 15, severity: "serious" as const, forDurationSec: 900 },
+    { threshold: 25, severity: "critical" as const, forDurationSec: 0 },
+  ];
+  it("puts the base tier first with the trigger's own operator + duration", () => {
+    const ladder = resolveTierLadder(">", 5, "warning", 1800, bands);
+    expect(ladder[0]).toEqual({ threshold: 5, severity: "warning", operator: ">", forDurationSec: 1800 });
+  });
+  it("inherits the base operator + duration for a band that carries neither", () => {
+    const ladder = resolveTierLadder(">", 5, "warning", 1800, [{ threshold: 15, severity: "serious" }]);
+    expect(ladder[1]).toEqual({ threshold: 15, severity: "serious", operator: ">", forDurationSec: 1800 });
+  });
+  it("keeps a band's own operator + duration, including an explicit 0", () => {
+    const ladder = resolveTierLadder(">", 5, "warning", 1800, [{ threshold: 25, severity: "critical", operator: ">=", forDurationSec: 0 }]);
+    expect(ladder[1]).toMatchObject({ operator: ">=", forDurationSec: 0 });
+  });
+});
+
+describe("updateTierMetSince / sustainedSeverity", () => {
+  const tiers = resolveTierLadder(">", 5, "warning", 1800, [
+    { threshold: 15, severity: "serious", forDurationSec: 900 },
+    { threshold: 25, severity: "critical", forDurationSec: 0 },
+  ]);
+  const T0 = 1_000_000_000_000;
+  const min = (n: number) => T0 + n * 60_000;
+
+  it("starts a run per satisfied tier and keeps it while the value holds", () => {
+    const a = updateTierMetSince(null, tiers, 20, T0);
+    expect(a).toEqual({ warning: T0, serious: T0 });
+    const b = updateTierMetSince(a, tiers, 20, min(5));
+    expect(b).toEqual({ warning: T0, serious: T0 }); // continued, not restarted
+  });
+
+  it("holds the alert pending until the tier's OWN duration elapses", () => {
+    let map = updateTierMetSince(null, tiers, 8, T0); // warning band only
+    expect(sustainedSeverity(map, tiers, T0)).toBeNull();
+    expect(sustainedSeverity(map, tiers, min(29))).toBeNull();
+    expect(sustainedSeverity(map, tiers, min(30))).toBe("warning");
+  });
+
+  it("a tier with sustain 0 applies on the first reading", () => {
+    const map = updateTierMetSince(null, tiers, 30, T0);
+    expect(sustainedSeverity(map, tiers, T0)).toBe("critical");
+  });
+
+  it("escalates only once the higher tier has held for its own duration", () => {
+    // 8% from T0 (warning sustains at 30m), climbs to 20% at 40m.
+    let map = updateTierMetSince(null, tiers, 8, T0);
+    map = updateTierMetSince(map, tiers, 20, min(40));
+    expect(sustainedSeverity(map, tiers, min(40))).toBe("warning"); // serious run just started
+    expect(sustainedSeverity(map, tiers, min(54))).toBe("warning");
+    expect(sustainedSeverity(map, tiers, min(55))).toBe("serious"); // +15 min
+  });
+
+  it("does not restart the lower tier's run when the value climbs", () => {
+    let map = updateTierMetSince(null, tiers, 8, T0);
+    map = updateTierMetSince(map, tiers, 20, min(10));
+    expect(map.warning).toBe(T0); // the base run is continuous, so it still fires at 30m
+    expect(sustainedSeverity(map, tiers, min(20))).toBeNull(); // neither tier has served its time
+    // The serious tier hits ITS 15 minutes at min(25) — before the base tier's
+    // 30 — and that's the point: each tier earns its own severity.
+    expect(sustainedSeverity(map, tiers, min(25))).toBe("serious");
+  });
+
+  it("restarts a tier's run after it drops out (flapping never sustains)", () => {
+    let map = updateTierMetSince(null, tiers, 20, T0);
+    map = updateTierMetSince(map, tiers, 8, min(10)); // out of the serious band
+    expect(map.serious).toBeUndefined();
+    map = updateTierMetSince(map, tiers, 20, min(12)); // back in — clock restarts
+    expect(map.serious).toBe(min(12));
+    expect(map.warning).toBe(T0); // but the base run never broke
+    // At min(20) the restarted serious run is 8m old — short of its 15m — while
+    // the unbroken warning run has passed 30m by min(30).
+    expect(sustainedSeverity(map, tiers, min(20))).toBeNull();
+    expect(sustainedSeverity(map, tiers, min(30))).toBe("serious");
+  });
+
+  it("clears every run when the value drops below the base threshold", () => {
+    const map = updateTierMetSince(updateTierMetSince(null, tiers, 30, T0), tiers, 1, min(5));
+    expect(map).toEqual({});
+    expect(sustainedSeverity(map, tiers, min(5))).toBeNull();
+  });
+
+  it("treats a null / NaN reading as no evidence", () => {
+    expect(updateTierMetSince({ warning: T0 }, tiers, null, min(1))).toEqual({});
+    expect(updateTierMetSince({ warning: T0 }, tiers, NaN, min(1))).toEqual({});
+  });
+
+  it("restarts rather than locking out when a stored timestamp is in the future", () => {
+    const map = updateTierMetSince({ warning: min(99) }, tiers, 8, T0);
+    expect(map.warning).toBe(T0);
+  });
+
+  it("de-escalation is immediate — the lower tier's run is already old", () => {
+    let map = updateTierMetSince(null, tiers, 30, T0); // critical (sustain 0)
+    map = updateTierMetSince(map, tiers, 8, min(60)); // back to the warning band
+    expect(sustainedSeverity(map, tiers, min(60))).toBe("warning");
+  });
+});
+
+describe("tierMetSinceChanged", () => {
+  it("is false for equal maps (the engine skips the write)", () => {
+    expect(tierMetSinceChanged({ warning: 1 }, { warning: 1 })).toBe(false);
+    expect(tierMetSinceChanged(null, {})).toBe(false);
+  });
+  it("is true when a tier enters, leaves, or restarts", () => {
+    expect(tierMetSinceChanged({ warning: 1 }, { warning: 1, serious: 2 })).toBe(true);
+    expect(tierMetSinceChanged({ warning: 1, serious: 2 }, { warning: 1 })).toBe(true);
+    expect(tierMetSinceChanged({ serious: 2 }, { serious: 3 })).toBe(true);
   });
 });
 

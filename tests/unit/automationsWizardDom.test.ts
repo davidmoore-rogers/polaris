@@ -200,6 +200,13 @@ describe("automation wizard DOM render", () => {
     expect((doc.querySelector("#aw-band-notify") as unknown as { style: { display: string } }).style.display).toBe("block");
     expect((doc.querySelector("#aw-bn-increase") as unknown as { checked: boolean }).checked).toBe(true);
     expect((doc.querySelector("#aw-bn-decrease") as unknown as { checked: boolean }).checked).toBe(false);
+
+    // "Sustained for" is per TIER: every added tier carries its own input, and
+    // the base tier's moves INSIDE the base condition group so it reads as that
+    // tier's setting rather than a rule-wide one sitting between the tiers.
+    expect(band.querySelector(".band-duration")).toBeTruthy();
+    expect(doc.querySelector("#aw-trig-root .scg-group > .aw-dur #tf-duration-min")).toBeTruthy();
+    (band.querySelector(".band-duration") as unknown as { value: string }).value = "5";
   });
 
   it("step 4 shows the default-checked 'trigger no longer true' checkbox; step 6 lists affected devices", async () => {
@@ -257,6 +264,18 @@ describe("automation wizard DOM render", () => {
     expect((cardEsc.querySelector(".aesc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
     // Band editor is NOT on step 5 (it moved to step 3, with the trigger).
     expect(doc.querySelector("#aw-step-5 #aw-bands-section")).toBeFalsy();
+
+    // Per-severity actions are OPT-IN, mirroring the trigger step's
+    // multi-severity checkbox: off by default, so one action list runs at every
+    // severity and the per-tier sections stay out of the way.
+    const win5 = g.window as InstanceType<typeof Window>;
+    const perSevCb = doc.querySelector("#aw-band-actions-multi") as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
+    expect(perSevCb).toBeTruthy();
+    expect(perSevCb.checked).toBe(false);
+    expect((doc.querySelector("#aw-step-5 .aw-band-actions") as unknown as { style: { display: string } }).style.display).toBe("none");
+    perSevCb.checked = true;
+    perSevCb.dispatchEvent(new win5.Event("change", { bubbles: true }));
+    expect((doc.querySelector("#aw-step-5 .aw-band-actions") as unknown as { style: { display: string } }).style.display).toBe("");
 
     // Multi-severity carries into Actions: a per-severity section per band,
     // whose action rows get their own "Escalate if unhandled" footer.
@@ -326,6 +345,60 @@ describe("automation wizard DOM render", () => {
     expect(p.severityBands[0].actions).toEqual(rule.severityBands[0].actions);
     expect(p.bandNotify).toEqual(rule.bandNotify);
     // And the payload passes the real server-side schema.
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
+  it("per-tier sustain rides the payload; unticking per-severity actions strips them", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    const win = g.window as InstanceType<typeof Window>;
+    const rule = {
+      id: "r-sustain",
+      name: "Packet loss",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 900, operator: ">", threshold: 5, forDurationSec: 1800 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: [
+        { threshold: 15, severity: "serious", forDurationSec: 900, actions: [{ type: "api_call", method: "POST", url: "https://x.example.com/s", timeoutSec: 15 }] },
+        { threshold: 25, severity: "critical", forDurationSec: 0, actions: [] },
+      ],
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" },
+    };
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)(rule);
+    for (let i = 0; i < 4; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(toastErrors).toEqual([]);
+    expect(doc.querySelector("#aw-step-5.visible")).toBeTruthy();
+    // Every tier kept its own "Sustained for" through the step-3 round trip.
+    const durs = Array.from(doc.querySelectorAll("#aw-bands .band-duration")).map((el) => (el as unknown as { value: string }).value);
+    expect(durs).toEqual(["15", "0"]);
+    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("30");
+    // The stored rule carries per-band actions, so the toggle opens ON.
+    const perSevCb = doc.querySelector("#aw-band-actions-multi") as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
+    expect(perSevCb.checked).toBe(true);
+    perSevCb.checked = false;
+    perSevCb.dispatchEvent(new win.Event("change", { bubbles: true }));
+
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const p = savedPayloads[0]! as Record<string, any>;
+    expect(p.trigger.forDurationSec).toBe(1800);
+    expect(p.severityBands.map((b: any) => b.forDurationSec)).toEqual([900, 0]);
+    // Toggle off ⇒ bands save bare and the server runs the base actions at
+    // every severity.
+    expect(p.severityBands[0].actions).toEqual([]);
+    expect(p.severity).toBe("warning");
+    expect(p.severityBands.map((b: any) => b.severity)).toEqual(["serious", "critical"]);
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
   });
 });

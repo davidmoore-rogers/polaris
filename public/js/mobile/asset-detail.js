@@ -56,6 +56,10 @@
     "fortiswitch":        "FortiSwitch",
     "fortiap":            "FortiAP",
     "fortigate-endpoint": "FortiGate / FortiManager (endpoint)",
+    "vcenter-vm":         "VMware vCenter (VM)",
+    "vcenter-host":       "VMware vCenter (ESXi host)",
+    "arc":                "Azure Arc",
+    "arc-k8s":            "Azure Arc (Kubernetes)",
     "polaris-agent":      "Polaris Agent",
     "manual":             "Manual / other",
   };
@@ -652,8 +656,23 @@
 
     api.assets.monitorHistory(id, st.range).then(function (resp) {
       if (_openId !== id || !resp) return;   // bail if a newer asset replaced us
-      var samples = (resp.samples || []).map(function (s) {
-        return { ts: s.timestamp, v: s.responseTimeMs };
+      // Failed polls plot at the baseline in red (ok:false) so an outage reads
+      // as the line diving to zero, matching the desktop response-time chart.
+      // Rollup buckets have no per-sample `success` — they carry
+      // successCount/sampleCount instead, and a partial-loss bucket still plots
+      // its average rather than reading as a total outage.
+      function hasResponse(s) {
+        if (typeof s.successCount === "number") return s.successCount > 0 && typeof s.responseTimeMs === "number";
+        return s.success && typeof s.responseTimeMs === "number";
+      }
+      function isFailure(s) {
+        if (typeof s.successCount === "number") return s.sampleCount > 0 && s.successCount === 0;
+        return !s.success;
+      }
+      var samples = [];
+      (resp.samples || []).forEach(function (s) {
+        if (hasResponse(s)) samples.push({ ts: s.timestamp, v: s.responseTimeMs });
+        else if (isFailure(s)) samples.push({ ts: s.timestamp, v: null, ok: false });
       });
       if (chartHost) {
         chartHost.innerHTML = PolarisCharts.lineChart({
@@ -707,9 +726,12 @@
       }
       if (chartHost) {
         chartHost.innerHTML = PolarisCharts.lineChart({
+          // The telemetry stream carries no per-sample success flag — a failed
+          // poll just leaves no row — so missed polls are inferred from each
+          // series' own cadence and faded to red at the baseline.
           series: [
-            { values: cpuSeries, color: "var(--md-primary)" },
-            { values: memSeries, color: "var(--md-tertiary)" },
+            { values: cpuSeries, color: "var(--md-primary)", gapFade: true },
+            { values: memSeries, color: "var(--md-tertiary)", gapFade: true },
           ],
           height: 120,
           yMin: 0, yMax: 100,

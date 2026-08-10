@@ -127,8 +127,9 @@ async function openMaintenanceModal() {
   _maintEditingId = null;
   _maintEditingAssetIds = [];
   var body = _renderTabbedBody("maint", [
-    { key: "create", label: "Create Schedule", html: _maintEditorHTML() },
-    { key: "list",   label: "Schedules",       html: '<div id="maint-list-body" class="empty-state">Loading…</div>' },
+    { key: "create",   label: "Create Schedule", html: _maintEditorHTML() },
+    { key: "list",     label: "Schedules",       html: '<div id="maint-list-body" class="empty-state">Loading…</div>' },
+    { key: "calendar", label: "Calendar",        html: _maintCalendarHTML() },
   ]);
   openModal(
     "Maintenance",
@@ -138,6 +139,7 @@ async function openMaintenanceModal() {
   );
   _wireModalTabs("maint");
   _maintWireEditor();
+  _maintWireCalendar();
   _maintReloadList();
 }
 
@@ -660,9 +662,15 @@ function _maintTargetsSummary(row) {
   return parts.join(" + ") || "—";
 }
 
+/** Repaint the calendar grid after a write, but only if it's been opened. */
+function _maintCalRefresh() {
+  if (_maintCalRendered) _maintRenderCalendar();
+}
+
 async function _maintReloadList() {
   var el = document.getElementById("maint-list-body");
   if (!el) return;
+  _maintCalRefresh();
   try {
     var res = await api.maintenanceSchedules.list();
     _maintSchedules = res.schedules || [];
@@ -743,7 +751,259 @@ async function _maintReloadList() {
   });
 }
 
+// ─── Tab 3 — calendar ───────────────────────────────────────────────────────
+//
+// A month grid of every schedule's occurrences. Occurrences are expanded
+// SERVER-side (GET /maintenance-schedules/occurrences) and come back as
+// server-local wall-clock strings — the recurrence engine runs on the Polaris
+// server's clock, so re-deriving them here would draw windows on the wrong
+// day for any operator in another timezone. Nothing below parses them as
+// instants: day bucketing is string arithmetic on "YYYY-MM-DD".
+
+var _MAINT_DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+/** Visible month, as {y, m} with m 0-based. Null before the modal opens. */
+var _maintCalMonth = null;
+/** Has the grid been painted at least once? Gates the post-write refresh. */
+var _maintCalRendered = false;
+/** Day keys the operator expanded past the 3-chip fold. */
+var _maintCalExpanded = {};
+
+function _maintDayKey(d) {
+  return d.getFullYear() + "-" + _maintPad(d.getMonth() + 1) + "-" + _maintPad(d.getDate());
+}
+
+/** "YYYY-MM-DD" ± n days, as "YYYY-MM-DD". */
+function _maintShiftDay(dayKey, delta) {
+  var p = dayKey.split("-").map(Number);
+  return _maintDayKey(new Date(p[0], p[1] - 1, p[2] + delta));
+}
+
+/**
+ * The day keys an occurrence paints on. Windows are half-open, so one ending
+ * exactly at midnight (an all-day window, or 22:00 → 00:00) does NOT claim the
+ * following day.
+ */
+function _maintOccurrenceDays(occ) {
+  var startDay = String(occ.start).slice(0, 10);
+  var endDay = String(occ.end).slice(0, 10);
+  if (String(occ.end).slice(11, 16) === "00:00" && endDay > startDay) endDay = _maintShiftDay(endDay, -1);
+  var out = [];
+  var cur = startDay;
+  for (var i = 0; i < 400; i++) {
+    out.push(cur);
+    if (cur >= endDay) break;
+    cur = _maintShiftDay(cur, 1);
+  }
+  return out;
+}
+
+/** Chip label for `occ` as seen on day `dayKey`. */
+function _maintChipTime(occ, dayKey) {
+  var startDay = String(occ.start).slice(0, 10);
+  var startTime = String(occ.start).slice(11, 16);
+  var endTime = String(occ.end).slice(11, 16);
+  var endDay = String(occ.end).slice(0, 10);
+  if (startTime === "00:00" && endTime === "00:00" && endDay > startDay) return "All day";
+  if (dayKey !== startDay) return "→ " + endTime;      // continues from a previous day
+  if (endDay !== startDay) return startTime + " →";     // runs past midnight
+  return startTime + "–" + endTime;
+}
+
+function _maintCalendarHTML() {
+  return (
+    '<div class="maint-cal">' +
+      '<div class="maint-cal-bar">' +
+        '<button type="button" class="btn btn-secondary btn-sm" id="maint-cal-prev" aria-label="Previous month">&lsaquo;</button>' +
+        '<strong id="maint-cal-title" class="maint-cal-title">…</strong>' +
+        '<button type="button" class="btn btn-secondary btn-sm" id="maint-cal-next" aria-label="Next month">&rsaquo;</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" id="maint-cal-today">Today</button>' +
+        '<span class="hint maint-cal-hint">Server local time — click a day to schedule a window, or a window to edit it.</span>' +
+      '</div>' +
+      '<div class="maint-cal-dow">' +
+        _MAINT_DOW.map(function (d) { return "<div>" + d + "</div>"; }).join("") +
+      '</div>' +
+      '<div id="maint-cal-grid" class="maint-cal-grid"><div class="empty-state" style="grid-column:1/-1">Loading…</div></div>' +
+      '<div id="maint-cal-note" class="hint" style="margin-top:6px"></div>' +
+    '</div>'
+  );
+}
+
+function _maintWireCalendar() {
+  var today = new Date();
+  _maintCalMonth = { y: today.getFullYear(), m: today.getMonth() };
+  _maintCalExpanded = {};
+  _maintCalRendered = false;
+
+  document.getElementById("maint-cal-prev").addEventListener("click", function () {
+    _maintCalShift(-1);
+  });
+  document.getElementById("maint-cal-next").addEventListener("click", function () {
+    _maintCalShift(1);
+  });
+  document.getElementById("maint-cal-today").addEventListener("click", function () {
+    var now = new Date();
+    _maintCalMonth = { y: now.getFullYear(), m: now.getMonth() };
+    _maintRenderCalendar();
+  });
+
+  // Lazily render on first activation and refresh on every later one, so the
+  // grid reflects schedules created/edited on the other two tabs.
+  var tabBtn = document.querySelector('#maint-tabs .page-tab[data-tab="calendar"]');
+  if (tabBtn) tabBtn.addEventListener("click", function () { _maintRenderCalendar(); });
+
+  var grid = document.getElementById("maint-cal-grid");
+  grid.addEventListener("click", function (e) {
+    var more = e.target.closest ? e.target.closest(".maint-cal-more") : null;
+    if (more) {
+      _maintCalExpanded[more.getAttribute("data-day")] = true;
+      _maintRenderCalendar();
+      return;
+    }
+    var chip = e.target.closest ? e.target.closest(".maint-cal-chip") : null;
+    if (chip) {
+      _maintCalOpenSchedule(chip.getAttribute("data-schedule-id"));
+      return;
+    }
+    var cell = e.target.closest ? e.target.closest(".maint-cal-day") : null;
+    if (cell) _maintCalNewOnDay(cell.getAttribute("data-day"));
+  });
+}
+
+function _maintCalShift(delta) {
+  var d = new Date(_maintCalMonth.y, _maintCalMonth.m + delta, 1);
+  _maintCalMonth = { y: d.getFullYear(), m: d.getMonth() };
+  _maintCalExpanded = {};
+  _maintRenderCalendar();
+}
+
+/** Open the schedule behind a calendar chip in the editor tab. */
+async function _maintCalOpenSchedule(scheduleId) {
+  var row = _maintSchedules.find(function (s) { return s.id === scheduleId; });
+  if (!row) {
+    // The list tab may not have loaded (or the schedule postdates its load).
+    try {
+      var res = await api.maintenanceSchedules.list();
+      _maintSchedules = res.schedules || [];
+      row = _maintSchedules.find(function (s) { return s.id === scheduleId; });
+    } catch (err) { /* fall through to the toast below */ }
+  }
+  if (!row) { showToast("That schedule no longer exists", "error"); return; }
+  _maintLoadIntoEditor(row);
+}
+
+/**
+ * Click on an empty day → a new one-time window on that date, prefilled and
+ * handed to the editor (which still requires a name + at least one target, so
+ * nothing is created behind the operator's back). Today starts now; any other
+ * day starts at 20:00, the same evening-window default the recurring editor
+ * uses.
+ */
+function _maintCalNewOnDay(dayKey) {
+  _maintResetEditor();
+  var now = new Date();
+  var p = dayKey.split("-").map(Number);
+  var start = _maintDayKey(now) === dayKey
+    ? now
+    : new Date(p[0], p[1] - 1, p[2], 20, 0, 0, 0);
+  document.getElementById("maint-kind-oneshot").checked = true;
+  document.getElementById("maint-kind-recurring").checked = false;
+  document.getElementById("maint-start").value = _maintLocalIso(start);
+  document.getElementById("maint-end").value = _maintLocalIso(new Date(start.getTime() + 2 * 60 * 60 * 1000));
+  _maintSyncScheduleBlocks();
+  var createTab = document.querySelector('#maint-tabs .page-tab[data-tab="create"]');
+  if (createTab) createTab.click();
+  var nameEl = document.getElementById("maint-name");
+  if (nameEl) nameEl.focus();
+}
+
+async function _maintRenderCalendar() {
+  var grid = document.getElementById("maint-cal-grid");
+  var titleEl = document.getElementById("maint-cal-title");
+  var noteEl = document.getElementById("maint-cal-note");
+  if (!grid || !_maintCalMonth) return;
+
+  var first = new Date(_maintCalMonth.y, _maintCalMonth.m, 1);
+  titleEl.textContent = _MAINT_MONTHS[_maintCalMonth.m] + " " + _maintCalMonth.y;
+  // Grid always starts on the Sunday on/before the 1st and runs whole weeks.
+  var gridStart = new Date(_maintCalMonth.y, _maintCalMonth.m, 1 - first.getDay());
+  var daysInMonth = new Date(_maintCalMonth.y, _maintCalMonth.m + 1, 0).getDate();
+  var cells = Math.ceil((first.getDay() + daysInMonth) / 7) * 7;
+  var gridEnd = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + cells - 1);
+
+  _maintCalRendered = true;
+  var byDay = {};
+  try {
+    var res = await api.maintenanceSchedules.occurrences(_maintDayKey(gridStart), _maintDayKey(gridEnd));
+    (res.occurrences || []).forEach(function (occ) {
+      _maintOccurrenceDays(occ).forEach(function (day) {
+        (byDay[day] = byDay[day] || []).push(occ);
+      });
+    });
+    noteEl.textContent = res.truncated
+      ? "Too many windows to show them all this month — some are omitted."
+      : "";
+  } catch (err) {
+    grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">' +
+      escapeHtml(err && err.message ? err.message : "Failed to load the calendar") + "</div>";
+    return;
+  }
+
+  var todayKey = _maintDayKey(new Date());
+  var html = "";
+  for (var i = 0; i < cells; i++) {
+    var d = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + i);
+    var key = _maintDayKey(d);
+    var outside = d.getMonth() !== _maintCalMonth.m;
+    var occs = (byDay[key] || []).slice().sort(function (a, b) {
+      return a.start < b.start ? -1 : a.start > b.start ? 1 : a.name.localeCompare(b.name);
+    });
+    var expanded = !!_maintCalExpanded[key];
+    var shown = expanded ? occs : occs.slice(0, 3);
+    var chips = shown.map(function (occ) {
+      var cls = "maint-cal-chip" + (occ.enabled ? "" : " maint-cal-chip-off") + (occ.adhoc ? " maint-cal-chip-adhoc" : "");
+      var tip = occ.name + "\n" + _maintFmtLocal(occ.start) + " → " + _maintFmtLocal(occ.end) +
+        (occ.enabled ? "" : "\n(disabled)");
+      return '<button type="button" class="' + cls + '" data-schedule-id="' + escapeHtml(occ.scheduleId) + '" title="' + escapeHtml(tip) + '">' +
+        '<span class="maint-cal-chip-time">' + escapeHtml(_maintChipTime(occ, key)) + "</span> " +
+        escapeHtml(occ.name) +
+        "</button>";
+    }).join("");
+    if (!expanded && occs.length > shown.length) {
+      chips += '<button type="button" class="maint-cal-more" data-day="' + key + '">+' +
+        (occs.length - shown.length) + " more</button>";
+    }
+    html += '<div class="maint-cal-day' + (outside ? " maint-cal-day-out" : "") +
+      (key === todayKey ? " maint-cal-day-today" : "") + '" data-day="' + key + '" title="Click to schedule a window on ' + escapeHtml(_maintFmtDate(key)) + '">' +
+      '<div class="maint-cal-daynum">' + d.getDate() + "</div>" +
+      '<div class="maint-cal-chips">' + chips + "</div>" +
+      "</div>";
+  }
+  grid.innerHTML = html;
+}
+
 // ─── Ad-hoc entry (status pill / edit modal) ────────────────────────────────
+
+/**
+ * Validate an ad-hoc "enter maintenance until" value from a datetime-local
+ * field. Returns {ok, value} or {ok:false, error}.
+ *
+ * A datetime-local whose time half is untouched reads as "" — the operator
+ * sees a filled-in date and Polaris sees nothing. Both ad-hoc entry points
+ * (status pill, edit modal) run through this so that case, and an end time
+ * already in the past, are refused with a reason instead of silently dropped.
+ */
+function maintValidateAdhocEnd(value, nowMs) {
+  var raw = String(value == null ? "" : value).trim();
+  if (!raw) return { ok: false, error: "Pick the date AND time maintenance should end." };
+  var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(raw);
+  if (!m) return { ok: false, error: "Enter a full end date and time." };
+  var when = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0);
+  if (isNaN(when.getTime())) return { ok: false, error: "Enter a full end date and time." };
+  if (when.getTime() <= (nowMs == null ? Date.now() : nowMs)) {
+    return { ok: false, error: "The end time must be in the future." };
+  }
+  return { ok: true, value: raw.slice(0, 16) };
+}
 
 /**
  * Create a one-shot single-asset maintenance schedule starting now. The
@@ -774,3 +1034,8 @@ window.openMaintenanceModal = openMaintenanceModal;
 window.maintCreateAdhoc = maintCreateAdhoc;
 window.maintScheduleSummary = maintScheduleSummary;
 window.maintLocalIso = _maintLocalIso;
+window.maintValidateAdhocEnd = maintValidateAdhocEnd;
+// Calendar internals, exported for unit tests (day bucketing is the part with
+// real edge cases: midnight-spanning and all-day windows).
+window._maintOccurrenceDays = _maintOccurrenceDays;
+window._maintChipTime = _maintChipTime;

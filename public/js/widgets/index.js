@@ -221,34 +221,99 @@
     return parseInt(rowLimit, 10) || 0;
   };
 
-  // Stamp (or clear) a count pill on the widget's header title — the same style
-  // the group headers use, so "Down Nodes (Firewall) [4]" reads as the overall
-  // total. `el` is the widget body; resolves the shell header via closest().
-  // No-ops outside a dashboard shell (e.g. the widget library preview renders
-  // without the .dashboard-widget wrapper). Count of 0/null removes the pill.
-  // Re-call on every render tick — updateConfig rewrites the title's
-  // textContent, which drops the pill until the next render re-stamps it.
+  // Stamp (or clear) a row of pills on the widget's header title — the same
+  // style the group headers use, so "Down Nodes (Firewall) [4]" reads as the
+  // overall total. `el` is the widget body; resolves the shell header via
+  // closest(). No-ops outside a dashboard shell (e.g. the widget library
+  // preview renders without the .dashboard-widget wrapper). An empty list
+  // removes the pills. Re-call on every render tick — updateConfig rewrites the
+  // title's textContent, which drops them until the next render re-stamps.
   //
-  // Optional `severity` colors the pill to the highest active alert severity in
-  // the set (see countPillClass) so it agrees with the per-row severity pills
-  // underneath it; omit it to keep the plain red count pill.
-  window.PolarisWidgets.setHeaderCount = function (el, count, severity) {
+  // `pills` is [{ text, className, title? }]; the whole set is re-rendered every
+  // call, so counts AND colors track the current data.
+  window.PolarisWidgets.setHeaderPills = function (el, pills) {
     var article = el && el.closest ? el.closest(".dashboard-widget") : null;
     var title = article ? article.querySelector(".dashboard-widget-title") : null;
     if (!title) return;
-    var pill = title.querySelector(".widget-header-count");
-    if (!count) { if (pill) pill.remove(); return; }
-    if (!pill) {
-      pill = document.createElement("span");
-      pill.style.marginLeft = "8px";
-      title.appendChild(pill);
+    var host = title.querySelector(".widget-header-count");
+    if (!pills || !pills.length) { if (host) host.remove(); return; }
+    if (!host) {
+      host = document.createElement("span");
+      host.className = "widget-header-count";
+      host.style.marginLeft = "8px";
+      host.style.display = "inline-flex";
+      host.style.gap = "4px";
+      host.style.verticalAlign = "middle";
+      title.appendChild(host);
     }
-    // Re-stamped every tick, not just on create — the set's top severity can
-    // change between renders.
-    pill.className = "widget-pill " +
-      (window.PolarisWidgets.alertSeverityPillClass(severity) || "widget-pill-red") +
-      " widget-header-count";
-    pill.textContent = String(count);
+    host.innerHTML = pills.map(function (p) {
+      return '<span class="widget-pill ' + (p.className || "widget-pill-red") + '"' +
+        (p.title ? ' title="' + escapeHtml(p.title) + '"' : "") + '>' +
+        escapeHtml(String(p.text)) + '</span>';
+    }).join("");
+  };
+
+  // Single total pill — optional `severity` colors it to the highest active
+  // alert severity in the set (see countPillClass) so it agrees with the
+  // per-row severity pills underneath it; omit it for the plain red count.
+  window.PolarisWidgets.setHeaderCount = function (el, count, severity) {
+    window.PolarisWidgets.setHeaderPills(el, !count ? [] : [{
+      text: count,
+      className: window.PolarisWidgets.alertSeverityPillClass(severity) || "widget-pill-red",
+    }]);
+  };
+
+  // Per-severity breakdown of a row set's ACTIVE alerts, most-severe first.
+  // Returns [{ severity, count }]; rows carrying no alert are excluded — the
+  // caller decides whether those get a bucket of their own.
+  window.PolarisWidgets.alertSeverityCounts = function (rows, severityOf) {
+    var sevOf = severityOf || function (r) { return r && r.alertSeverity; };
+    var counts = {};
+    (rows || []).forEach(function (r) {
+      var sev = sevOf(r);
+      if (!sev || !window.PolarisWidgets.ALERT_SEVERITY_RANK[sev]) return;
+      counts[sev] = (counts[sev] || 0) + 1;
+    });
+    return Object.keys(counts).map(function (sev) {
+      return { severity: sev, count: counts[sev] };
+    }).sort(function (a, b) {
+      var d = window.PolarisWidgets.ALERT_SEVERITY_RANK[b.severity] - window.PolarisWidgets.ALERT_SEVERITY_RANK[a.severity];
+      return d !== 0 ? d : a.severity.localeCompare(b.severity);
+    });
+  };
+
+  // Header pills as a SEVERITY BREAKDOWN — one pill per active-alert severity
+  // in the set, colored to that severity, most severe first, so the operator
+  // reads "2 critical, 12 serious" off the title instead of one number colored
+  // to the worst of them.
+  //
+  // opts.unalerted decides what happens to rows carrying no active alert:
+  //   "neutral" (default) — a trailing grey pill counts them, so the pills
+  //     still sum to the row total (Down Nodes / Down Interfaces, where the
+  //     total IS the headline). A set with NO alerting row at all keeps the
+  //     plain red total pill rather than greying the whole count out.
+  //   "omit" — dropped entirely (ranked top-N widgets, where the row count is
+  //     just the operator's Row limit and a grey bucket is noise).
+  // opts.severityOf overrides the feed-standard row.alertSeverity.
+  window.PolarisWidgets.setHeaderSeverityCounts = function (el, rows, opts) {
+    opts = opts || {};
+    rows = rows || [];
+    var counts = window.PolarisWidgets.alertSeverityCounts(rows, opts.severityOf);
+    var pills = counts.map(function (c) {
+      return {
+        text: c.count,
+        className: window.PolarisWidgets.alertSeverityPillClass(c.severity) || "widget-pill-watch",
+        title: c.count + " with an active " + c.severity + " alert",
+      };
+    });
+    if (opts.unalerted !== "omit") {
+      if (!pills.length) { window.PolarisWidgets.setHeaderCount(el, rows.length, null); return; }
+      var quiet = rows.length - counts.reduce(function (n, c) { return n + c.count; }, 0);
+      if (quiet > 0) {
+        pills.push({ text: quiet, className: "widget-pill-neutral", title: quiet + " with no active alert" });
+      }
+    }
+    window.PolarisWidgets.setHeaderPills(el, pills);
   };
 
   // ─── Severity-tier CSV export (widget header ⤓ button) ───────────────────

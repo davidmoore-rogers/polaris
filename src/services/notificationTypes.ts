@@ -47,6 +47,9 @@ export interface SeverityTier {
   severity: Severity;
   /** Per-tier comparison operator (falls back to the base trigger's). */
   operator?: Comparator;
+  /** Per-tier sustained duration (falls back to the base trigger's
+   *  forDurationSec). See resolveTierLadder / sustainedSeverity. */
+  forDurationSec?: number;
 }
 
 /**
@@ -97,6 +100,108 @@ export function severityForValue(
   return best;
 }
 
+// ─── Per-tier sustained durations ───────────────────────────────────────────
+// "Sustained for" is per TIER, not per rule: warning may need 30 minutes while
+// critical pages after 5. One shared conditionMetSince can't express that (a
+// value that climbs from warning into critical has been critical for seconds
+// but above the base threshold for half an hour), so the engine keeps a per-tier
+// "continuously satisfied since" map on the state row and resolves the alert's
+// severity from it. The three functions below are the whole decision, kept pure
+// here beside severityForValue so the engine and the tests share them.
+
+/** A tier with its comparison + sustain resolved (no inheritance left). */
+export interface ResolvedTier {
+  threshold: number;
+  severity: Severity;
+  operator: Comparator;
+  forDurationSec: number;
+}
+
+/**
+ * The effective tier ladder `[base, ...bands]` with each tier's operator and
+ * sustained duration resolved. A band inherits the base trigger's operator /
+ * `forDurationSec` when it carries none — which is exactly how rules authored
+ * before per-band sustain existed keep behaving.
+ */
+export function resolveTierLadder(
+  operator: Comparator,
+  baseThreshold: number,
+  baseSeverity: Severity,
+  baseForDurationSec: number,
+  bands: SeverityTier[] | null | undefined,
+): ResolvedTier[] {
+  const base: ResolvedTier = { threshold: baseThreshold, severity: baseSeverity, operator, forDurationSec: Math.max(0, baseForDurationSec || 0) };
+  const rest = (bands ?? []).map((b) => ({
+    threshold: b.threshold,
+    severity: b.severity,
+    operator: b.operator ?? operator,
+    forDurationSec: Math.max(0, b.forDurationSec ?? baseForDurationSec ?? 0),
+  }));
+  return [base, ...rest];
+}
+
+/**
+ * Roll the per-tier met-since map forward for one reading. A tier the value
+ * satisfies KEEPS its existing timestamp (the run continues) or starts one at
+ * `nowMs`; a tier it no longer satisfies drops out, so its next entry restarts
+ * the clock. Severities are unique across the ladder (validateSeverityBands
+ * enforces strictly-increasing tiers), so severity is a safe key.
+ */
+export function updateTierMetSince(
+  prev: Record<string, number> | null | undefined,
+  tiers: ResolvedTier[],
+  value: number | null | undefined,
+  nowMs: number,
+): Record<string, number> {
+  const next: Record<string, number> = {};
+  if (value == null || Number.isNaN(value)) return next;
+  for (const tier of tiers) {
+    if (!numMeets(value, tier.operator, tier.threshold)) continue;
+    const since = prev?.[tier.severity];
+    // A stored timestamp in the future (clock step) restarts rather than
+    // locking the tier out forever.
+    next[tier.severity] = typeof since === "number" && Number.isFinite(since) && since <= nowMs ? since : nowMs;
+  }
+  return next;
+}
+
+/**
+ * The severity the alert should be at: the MOST-SEVERE tier whose own run has
+ * lasted at least its own `forDurationSec`. Null = nothing has sustained yet
+ * (the alert stays pending, or an already-firing alert holds its severity).
+ */
+export function sustainedSeverity(
+  metSince: Record<string, number> | null | undefined,
+  tiers: ResolvedTier[],
+  nowMs: number,
+): Severity | null {
+  let best: Severity | null = null;
+  let bestRank = -1;
+  for (const tier of tiers) {
+    const since = metSince?.[tier.severity];
+    if (typeof since !== "number" || !Number.isFinite(since)) continue;
+    if (nowMs - since < tier.forDurationSec * 1000) continue;
+    const rank = severityRank(tier.severity);
+    if (rank > bestRank) {
+      best = tier.severity;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+/** Whether two met-since maps differ — the engine only writes the state row
+ *  when they do, keeping the hot path transition-write-only. */
+export function tierMetSinceChanged(
+  a: Record<string, number> | null | undefined,
+  b: Record<string, number> | null | undefined,
+): boolean {
+  const ak = Object.keys(a ?? {});
+  const bk = Object.keys(b ?? {});
+  if (ak.length !== bk.length) return true;
+  return ak.some((k) => (a as Record<string, number>)[k] !== (b ?? {})[k]);
+}
+
 // ─── Asset-metric trigger ───────────────────────────────────────────────────
 // Numeric thresholds over the telemetry / sample tables. `dimensionFilter`
 // narrows multi-row streams (interfaces, sensors, mounts, SD-WAN members).
@@ -145,6 +250,12 @@ const dimensionFilterSchema = z
   .object({
     ifNamePattern: z.string().max(200).optional(),
     sensorClass: z.enum(["temperature", "fan", "voltage", "power", "disk", "other"]).optional(),
+    // One NAMED sensor rather than a whole class: a firewall reports a dozen
+    // temperature sensors ("CPU ON-DIE Temperature", "TMP1 External
+    // Temperature", per-PHY dies), and an operator alerting on the CPU die does
+    // not want the PHYs alerting too. Substring-matched like the other
+    // *Pattern dimensions, and ANDs with sensorClass when both are set.
+    sensorNamePattern: z.string().max(200).optional(),
     mountPathPattern: z.string().max(200).optional(),
     healthCheck: z.string().max(200).optional(),
     link: z.string().max(200).optional(),
@@ -861,8 +972,12 @@ export const severityBandSchema = z
     severity: z.enum(SEVERITIES),
     // Per-tier comparison operator (falls back to the trigger's). Tiers share
     // the trigger's sampling — aggregation / window / dimensionFilter — so only
-    // the comparison + threshold + severity vary per tier.
+    // the comparison + threshold + severity + sustain vary per tier.
     operator: z.enum(COMPARATORS).optional(),
+    // Per-tier sustained duration: how long the value must hold IN THIS BAND
+    // before the alert takes this severity. Omitted = inherit the base
+    // trigger's forDurationSec (every pre-feature band); 0 = apply immediately.
+    forDurationSec: z.number().int().min(0).max(86400).optional(),
     actions: z.array(escalatableActionSchema).max(20).default([]),
     // Per-band time escalation (same shape as rule-level; accepts legacy or v2).
     escalation: z.union([escalationSchema, escalationV2Schema]).optional().nullable(),
@@ -1592,8 +1707,31 @@ export const CHANGE_TYPE_META: Record<string, string> = {
 
 // Which dimensionFilter inputs are relevant per asset_metric metric, so the
 // builder only shows the applicable ones.
+/** Case-insensitive substring test used by every `*Pattern` dimension filter.
+ *  An unset needle matches everything (the filter is optional). */
+export function dimensionSubstringMatch(haystack: string | null | undefined, needle?: string | null): boolean {
+  if (!needle) return true;
+  return (haystack ?? "").toLowerCase().includes(needle.toLowerCase());
+}
+
+/**
+ * Does a hwSensorValue dimension filter select this sensor? Shared by the
+ * engine's reading resolver AND the asset chart's severity-tier lookup — the
+ * chart colors a line by the thresholds that would actually fire on it, so a
+ * second, subtly different copy of this predicate would paint a sensor with
+ * bands belonging to some other sensor.
+ */
+export function hwSensorFilterMatches(
+  df: { sensorClass?: string; sensorNamePattern?: string } | null | undefined,
+  sensor: { sensorName?: string | null; sensorClass?: string | null },
+): boolean {
+  if (!df) return true;
+  if (df.sensorClass && df.sensorClass !== (sensor.sensorClass ?? "")) return false;
+  return dimensionSubstringMatch(sensor.sensorName, df.sensorNamePattern);
+}
+
 export const METRIC_DIMENSIONS: Record<string, string[]> = {
-  hwSensorValue: ["sensorClass"],
+  hwSensorValue: ["sensorClass", "sensorNamePattern"],
   storageUsedPct: ["mountPathPattern"],
   storageUsedBytes: ["mountPathPattern"],
   storageDaysUntilFull: ["mountPathPattern"],
@@ -1711,6 +1849,7 @@ export function buildSchemaCatalog() {
       maxBands: 4,
       maxActionsPerBand: 20,
       emptyBandNote: "A severity tier with no actions of its own runs the base actions when entered.",
+      sustainNote: "Each severity level has its own “sustained for”: the value must hold in that band for that long before the alert takes the severity.",
     },
     // Sentence-builder vocabulary (server-owned wording; the wizard renders
     // the live plain-English trigger/reset summary from these).
@@ -1723,6 +1862,7 @@ export function buildSchemaCatalog() {
     aggregationPhrases: { latest: "", avg: "avg over", min: "min over", max: "max over" },
     dimensionPhrases: {
       sensorClass: "for sensors of class {value}",
+      sensorNamePattern: "on sensors matching {value}",
       ifNamePattern: "on interfaces matching {value}",
       mountPathPattern: "on mounts matching {value}",
       healthCheck: "for health check {value}",
