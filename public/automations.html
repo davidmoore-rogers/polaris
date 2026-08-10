@@ -22,6 +22,7 @@
           <button class="btn btn-primary" id="btn-new-rule" style="display:none">+ New automation</button>
           <button class="btn btn-primary" id="btn-add-channel" style="display:none">+ Add channel</button>
           <button class="btn btn-primary" id="btn-add-script" style="display:none">+ Add script</button>
+          <button class="btn btn-primary" id="btn-add-contact" style="display:none">+ Add contact</button>
           <button class="btn btn-secondary" id="btn-enable-push" style="display:none" title="Receive alerts as desktop/mobile push">Enable push</button>
           <button class="btn btn-secondary" id="btn-refresh">Refresh</button>
         </div>
@@ -31,6 +32,7 @@
         <button type="button" class="page-tab active" data-tab="manage" id="auto-tab-manage-btn" style="display:none">Automations</button>
         <button type="button" class="page-tab" data-tab="delivery" id="auto-tab-delivery-btn" style="display:none">Delivery</button>
         <button type="button" class="page-tab" data-tab="scripts" id="auto-tab-scripts-btn" style="display:none">Scripts</button>
+        <button type="button" class="page-tab" data-tab="contacts" id="auto-tab-contacts-btn" style="display:none">Address Book</button>
       </div>
 
       <!-- ─── Manage tab ───────────────────────────────────────────────── -->
@@ -79,6 +81,18 @@
         </p>
         <div id="scripts-list"><p class="empty-state">Loading...</p></div>
       </div>
+
+      <!-- ─── Address Book tab ──────────────────────────────────────────────
+           Named email addresses alerts can route to, each optionally owning a
+           set of devices. Gated by the ownership-dimensioned contacts key:
+           read browses, write adds + curates your own rows. The recipient
+           picker in the automation wizard renders this same list. -->
+      <div class="page-tab-panel" id="auto-tab-contacts">
+        <p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">
+          Email addresses Polaris can send alerts to, whether or not the recipient has a Polaris account — a distribution list, an on-call rotation, a vendor NOC. Give an entry a <strong>device filter</strong> and an automation's <strong>Notify</strong> action can route to “the contacts responsible for the triggering device” instead of a hand-picked list.
+        </p>
+        <div id="contacts-list"><p class="empty-state">Loading...</p></div>
+      </div>
     </main>
   </div>
 
@@ -101,6 +115,7 @@
   <script src="/js/assets-maintenance.js"></script>
   <script src="/js/push.js"></script>
   <script src="/js/automations.js"></script>
+  <script src="/js/automations-address-book.js"></script>
   <script src="/js/automations-wizard.js"></script>
 </body>
 </html>

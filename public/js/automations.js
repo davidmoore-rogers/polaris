@@ -38,12 +38,18 @@ function _looksLikeDeviceId(tag) {
   var canEditRules = false;
   var canReadScripts = false;
   var canEditScripts = false;
+  var canReadContacts = false;
+  var canEditContacts = false;
 
   function applyPermGatedUI() {
     canManage = permAtLeast("automationManagement", "read");
     canEditRules = permAtLeast("automationManagement", "fullwrite");
     canReadScripts = permAtLeast("automationScripts", "read");
     canEditScripts = permAtLeast("automationScripts", "fullwrite");
+    canReadContacts = permAtLeast("contacts", "read");
+    // "write" is enough to add — the ownership dimension decides which rows a
+    // caller may then edit or delete, row by row, in the list renderer.
+    canEditContacts = permAtLeast("contacts", "write");
 
     var mb = document.getElementById("auto-tab-manage-btn");
     if (mb) mb.style.display = canManage ? "" : "none";
@@ -51,6 +57,8 @@ function _looksLikeDeviceId(tag) {
     if (db) db.style.display = canManage ? "" : "none";
     var sb = document.getElementById("auto-tab-scripts-btn");
     if (sb) sb.style.display = canReadScripts ? "" : "none";
+    var cb = document.getElementById("auto-tab-contacts-btn");
+    if (cb) cb.style.display = canReadContacts ? "" : "none";
     var activeKey = (document.querySelector("#auto-tabs .page-tab.active") || {}).getAttribute
       ? document.querySelector("#auto-tabs .page-tab.active").getAttribute("data-tab") : "manage";
     var nr = document.getElementById("btn-new-rule");
@@ -67,6 +75,14 @@ function _looksLikeDeviceId(tag) {
     if (asBtn) {
       asBtn.style.display = canEditScripts && activeKey === "scripts" ? "" : "none";
       if (canEditScripts && !asBtn._wired) { asBtn._wired = true; asBtn.addEventListener("click", function () { openScriptModal(null); }); }
+    }
+    var acBtn2 = document.getElementById("btn-add-contact");
+    if (acBtn2) {
+      acBtn2.style.display = canEditContacts && activeKey === "contacts" ? "" : "none";
+      if (canEditContacts && !acBtn2._wired) {
+        acBtn2._wired = true;
+        acBtn2.addEventListener("click", function () { window.PolarisAddressBook.openEditor(null); });
+      }
     }
   }
 
@@ -130,9 +146,12 @@ function _looksLikeDeviceId(tag) {
       if (acBtn && canEditRules) acBtn.style.display = key === "delivery" ? "" : "none";
       var asBtn2 = document.getElementById("btn-add-script");
       if (asBtn2 && canEditScripts) asBtn2.style.display = key === "scripts" ? "" : "none";
+      var acBtn3 = document.getElementById("btn-add-contact");
+      if (acBtn3 && canEditContacts) acBtn3.style.display = key === "contacts" ? "" : "none";
       if (key === "manage" && !_rulesSF) initRulesTab();
       if (key === "delivery") loadChannelsTab();
       if (key === "scripts") loadScriptsTab();
+      if (key === "contacts") window.PolarisAddressBook.renderTab();
     });
   });
 
@@ -141,6 +160,7 @@ function _looksLikeDeviceId(tag) {
     var key = active ? active.getAttribute("data-tab") : "manage";
     if (key === "delivery") loadChannelsTab();
     else if (key === "scripts") loadScriptsTab();
+    else if (key === "contacts") window.PolarisAddressBook.renderTab();
     else loadRules();
   });
 

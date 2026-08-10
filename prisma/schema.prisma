@@ -3570,6 +3570,36 @@ model NotificationRuleState {
   @@map("notification_rule_states")
 }
 
+// An address-book entry: a named email address Polaris can route alerts to,
+// independent of whether the person holds a Polaris account. Two jobs:
+//
+//   1. A durable label for an address an operator would otherwise retype into
+//      every automation ("noc-oncall@…" → "NOC On-Call rotation").
+//   2. Device ownership — `assetCriteria` (tagAssignmentService vocabulary)
+//      unioned with the explicit `assetIds` pins says WHICH DEVICES this
+//      contact is responsible for, exactly the MaintenanceSchedule target
+//      shape. A notify action with `recipientAssetContacts` resolves the
+//      contacts covering the TRIGGERING asset at fire time, so "email whoever
+//      owns this box" needs no per-rule recipient list.
+//
+// Matching at fire time runs `assetMatchesCriteria` against the single
+// triggering asset (never a fleet scan) — see contactService.
+// `createdBy` drives the ownership gate on the `contacts` function key:
+// write = manage your own rows, fullwrite = manage anyone's.
+model Contact {
+  id            String   @id @default(uuid())
+  email         String   @unique // normalized: trimmed + lower-cased on write
+  name          String?
+  description   String?
+  assetCriteria Json? // tagAssignmentService criteria shape; null = pins only
+  assetIds      String[] @default([]) // explicit pins, unioned with criteria matches
+  createdBy     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("contacts")
+}
+
 // Operator-defined maintenance window definition. Targets = the union of the
 // criteria matches (tagAssignmentService criteria vocabulary — hostname /
 // subnet-CIDR / model / manufacturer / os / assetType; `status` rules are

@@ -813,6 +813,15 @@ const api = {
     runs:    (params)=> request("GET", "/automations/scripts/runs" + toQuery(params)),
     run:     (id)    => request("GET", `/automations/scripts/runs/${id}`),
   },
+  contacts: {
+    list:    ()      => request("GET", "/contacts"),
+    // Unified recipient typeahead: Polaris users ∪ address-book contacts.
+    search:  (q)     => request("GET", "/contacts/search" + toQuery({ q })),
+    preview: (body)  => request("POST", "/contacts/preview", body),
+    create:  (body)  => request("POST", "/contacts", body),
+    update:  (id, b) => request("PUT", `/contacts/${id}`, b),
+    delete:  (id)    => request("DELETE", `/contacts/${id}`),
+  },
   deliveryChannels: {
     list:        ()       => request("GET",    "/delivery-channels"),
     get:         (id)     => request("GET",    `/delivery-channels/${id}`),

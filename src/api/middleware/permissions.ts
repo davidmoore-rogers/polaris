@@ -62,8 +62,8 @@ export interface FunctionKeyDef {
   label: string;
   description: string;
   // Functions where the "write" level applies an ownership filter
-  // (createdBy === username) and "fullwrite" bypasses it. Currently
-  // only subnets + reservations behave this way.
+  // (createdBy === username) and "fullwrite" bypasses it — subnets,
+  // reservations, and address-book contacts.
   hasOwnershipDimension?: boolean;
 }
 
@@ -92,6 +92,7 @@ export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "automationManagement", label: "Automations", description: "Create / edit / delete automations + delivery channels. Full Read-Write = automation CRUD." },
   { key: "automationScripts", label: "Automation Scripts", description: "Script registry CRUD + attaching script actions to automations. Full Read-Write is remote-code-execution as the service account on the Polaris host and on agent-managed assets — grant only to admins." },
   { key: "maintenanceManagement", label: "Maintenance Schedules", description: "Create / edit / delete maintenance windows that pause monitoring + notifications on matched assets, including the per-asset \"enter maintenance mode\" action." },
+  { key: "contacts", label: "Address Book", description: "Named email addresses alerts can route to, each optionally owning a set of devices. Read = browse; Read-Write = add + edit/delete own only; Full Read-Write = edit/delete any.", hasOwnershipDimension: true },
   { key: "staleReservations", label: "Stale Reservations", description: "Snooze / ignore / un-ignore stale DHCP reservation alerts + the threshold setting." },
   { key: "apiTokens", label: "API Tokens", description: "Long-lived bearer tokens for external callers (SIEM quarantine, etc.)." },
   { key: "users", label: "Users", description: "User CRUD + role assignment + TOTP reset." },

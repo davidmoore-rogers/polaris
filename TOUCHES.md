@@ -1440,6 +1440,27 @@ Listed alphabetically.
 1. Adding a dimension → walk the lockstep list above, then add a `DIMENSION_SOURCES` entry + a case to `tests/unit/automationDimensionValues.test.ts`.
 2. Changing the window/caps → re-reason at 100 AND 2000 assets (default scope is every asset) and update the numbers quoted in ARCHITECTURE.md.
 3. New sibling narrowing → extend `DimensionNarrow`, the route's `narrow` schema, AND the client's `awDimNarrow`, or the client will keep asking for the unnarrowed list.
+## services/contactService.ts
+
+**What it owns:** The address book — `Contact` CRUD, the unified recipient search that backs both the address-book picker and the wizard's typeahead, and the fire-time "who is responsible for this device?" lookup.
+
+**Public API:** `listContacts`/`getContact`/`createContact`/`updateContact`/`deleteContact`, `normalizeContactEmail`, `previewContactAssets`, `searchAddressBook`, `resolveContactsForAsset`/`resolveContactEmailsForAsset`, `bumpContactCache`.
+
+**Cross-service deps:** `prisma`, `eventLogService` (`logEvent`), `tagAssignmentService` (`normalizeCriteria`, `resolveMatchingAssetIds`, `assetMatchesCriteria`, `collectCidrs`, `cidrsContainingIp`, `SINGLE_ASSET_CANDIDATE_SELECT`), `notificationRecipientService` (`listRecipientUsers`), `utils/ttlCache`.
+
+**Used by:** `src/api/routes/contacts.ts` (CRUD + search + preview), `public/js/automations-address-book.js` (both surfaces).
+
+**Readers of the state it writes:** the Automations → Address Book tab, the automation wizard's recipient picker.
+
+**Invariants:**
+- **`email` is stored trimmed + lower-cased.** The unique index is what enforces one row per address, and lower-casing at the boundary is what makes it case-insensitive. It also has to match `resolveEmailRecipients`' normalized set, or a contact address would dedupe inconsistently against a user's.
+- **`resolveContactsForAsset` must never scan the fleet.** It is on the alert path. A pin match is a plain id comparison with NO asset load; criteria are evaluated against the ONE triggering asset with `assetMatchesCriteria`; CIDR containment is a single round-trip across all contacts' CIDRs combined, and skipped entirely when nobody filters by subnet. If you add a criteria field that needs another relation, extend `SINGLE_ASSET_CANDIDATE_SELECT` in `tagAssignmentService` — do not add a query per contact.
+- Targets are the UNION of criteria matches and explicit pins, and — unlike `MaintenanceSchedule` — are deliberately **not** intersected with `monitored: true`. An unmonitored device still has an owner, and event/change automations fire on it.
+- `searchAddressBook` dedupes with the **user winning over the contact** on the same address: a `User.id` survives the person changing address, a stored contact string does not.
+- Every write calls `bumpContactCache()`. The 30s TTL is what keeps the fire-time path off the table; a write that skips the bump leaves alerts routing on stale ownership for up to 30s.
+- Ownership is enforced at the ROUTE (`requireOwnership` + `assertOwnership`), not here — this service is level-agnostic apart from stamping `createdBy` on create.
+
+**When changing this:** Adding a field means threading it through the Zod shape in `routes/contacts.ts`, `ContactInput`, the editor in `public/js/automations-address-book.js` (collect + fill), and the tests. If you change the criteria vocabulary, it is `tagAssignmentService`'s — shared with maintenance schedules and the app-map discovery rules, so change it there and check all three.
 
 ---
 

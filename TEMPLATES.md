@@ -147,6 +147,25 @@ Per-pattern sections:
 
 ---
 
+## Stacked modal (a second dialog over an open one)
+
+**What it is:** A dialog opened while another modal is already open — a confirm, a review step, or a whole sub-editor — that must leave the first one's DOM intact underneath.
+
+**Why it can't be `openModal`:** `openModal` creates and then reuses ONE shared `#modal-overlay`, overwriting its `.modal-body` / `.modal-footer` innerHTML on every call. Calling it from inside an open modal therefore **destroys that modal's form DOM**, losing whatever the operator had typed. The wizard entry above flags the same trap from the other direction.
+
+**Canonical implementations:** `showConfirm(message)` in `public/js/app.js` (the smallest complete instance — read this one first); `_showMergeReviewModal(survivor, fieldWinners)` in `public/js/assets.js` (a full review dialog, but it drops the focus trap and focus restore — don't copy that part); `buildOverlay(z, title, body, footer, onClose, wide)` in `public/js/automations-address-book.js` (the reusable extraction: two surfaces — the address-book picker and its editor — share it).
+
+**Key conventions:**
+- Build a **standalone** `div.modal-overlay` with an inline `z-index`, append it to `document.body`, and remove it on close. Same inner DOM shape as a normal modal (`.modal > .modal-header/.modal-body/.modal-footer`) so all the shared CSS applies.
+- Layer rungs: **1300** for a confirm/picker over a base modal, **1320** when a third layer must sit over the second (the address-book editor over its picker). Equal z-index resolves by DOM order — an overlay appended later paints on top — which is what lets `showConfirm` (1300) work from inside a 1300 picker.
+- Close teardown: remove `.open`, delete the node on `transitionend`, and keep a `setTimeout(…, 400)` fallback so reduced-motion (no transition event) can't leak the node.
+- **Restore focus and trap Tab** — `_trapFocus(dialog, onEscape)` + stash `document.activeElement` before open and refocus it after. `showConfirm` does both; `_showMergeReviewModal` does neither, which is an omission rather than a variation.
+- Resolve a Promise from the close path so the caller can `await` the layer and branch on the result (`null`/`false` = dismissed).
+
+**When adding a new instance:** reuse `buildOverlay` if you're on the Automations page; otherwise copy `showConfirm`'s ~40 lines and add your own body/footer. Never call `openModal` from inside an open modal unless you deliberately want a replace-and-reopen flow — for that, follow `openImportPdfModal._reopen` in `assets.js`.
+
+---
+
 ## Wizard (stepper modal)
 
 **What it is:** A multi-step builder inside a modal — numbered stepper header, one `.step-panel` per step, per-step validation on Next, free navigation back to visited steps. Use when a creation flow has genuinely ordered parts (identity → scope → conditions → outcome); use plain `.page-tabs` when sections are peers with no ordering.
@@ -174,7 +193,7 @@ Per-pattern sections:
 
 **Key conventions:**
 - DOM shape: `<div class="blocking-overlay"><div class="blocking-overlay-card">…</div></div>` appended to `document.body`.
-- Z-index `2100` — the documented top of the layering scheme (modal 1000 < slideover 1075 < sf-multi-popover 1200 < toast 2000 < blocking-overlay 2100). Do NOT hand-pick a magic number like `9999`; if you need to sit above the blocking overlay, extend the scheme in `styles.css` and update both lists.
+- Z-index `2100` — the documented top of the layering scheme (modal 1000 < slideover 1050 < modal-above-slideover 1075 < sf-multi-popover 1200 < stacked modal 1300 (see "Stacked modal") < address-book editor 1320 < toast 2000 < blocking-overlay 2100). Do NOT hand-pick a magic number like `9999`; if you need to sit above the blocking overlay, extend the scheme in `styles.css` and update both lists.
 - All visual styling lives in the two CSS classes — the JS sets `className` and inner HTML only, no inline `position/inset/background/z-index`.
 - Removed by reloading the page (the restart poller calls `location.reload()` once the server answers) rather than an explicit close.
 

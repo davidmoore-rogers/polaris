@@ -314,6 +314,21 @@ type CandidateAsset = Prisma.AssetGetPayload<{ select: typeof CANDIDATE_SELECT }
 };
 
 /**
+ * CANDIDATE_SELECT plus EVERY relation extra — for single-asset predicate paths
+ * (one asset vs. many criteria), where computing the union of each criteria's
+ * field needs costs more than the joins do at n=1. Exported so other services
+ * that evaluate criteria against one asset (contactService) select exactly what
+ * the matcher reads instead of hand-maintaining a parallel list.
+ */
+export const SINGLE_ASSET_CANDIDATE_SELECT = {
+  ...CANDIDATE_SELECT,
+  discoveredByIntegrationId: true,
+  sources: { select: { integrationId: true } },
+  learnedLocation: true,
+  fortigateSightings: { select: { fortigateDevice: true } },
+} satisfies Prisma.AssetSelect;
+
+/**
  * CANDIDATE_SELECT plus the relation extras the criteria actually need.
  * Conditional so the bulk reconcile path doesn't join sources/sightings for
  * every asset when no rule references them (2000-asset scale rule).
@@ -367,7 +382,23 @@ async function cidrContainmentMap(
   return out;
 }
 
-function collectCidrs(criteria: TagCriteria): string[] {
+/**
+ * The subset of `cidrs` that contain `ip` — the `matchedCidrs` argument
+ * `assetMatchesCriteria` expects. One inet round-trip, and none at all when the
+ * criteria carry no subnet rules (the common case), so a single-asset match
+ * costs zero extra queries unless someone actually filtered by subnet.
+ */
+export async function cidrsContainingIp(
+  ip: string | null,
+  cidrs: string[],
+): Promise<Set<string>> {
+  if (!ip || cidrs.length === 0) return new Set<string>();
+  const map = await cidrContainmentMap([ip], cidrs);
+  return map.get(ip) ?? new Set<string>();
+}
+
+/** Every CIDR referenced by the criteria's subnet rules. */
+export function collectCidrs(criteria: TagCriteria): string[] {
   const cidrs: string[] = [];
   for (const rule of criteria.rules) if (isSubnetRule(rule)) cidrs.push(...rule.cidrs);
   return cidrs;
@@ -594,13 +625,7 @@ export async function reconcileTagsForAsset(assetId: string): Promise<TagReconci
   // union of every managed tag's field needs (trivial cost at n=1).
   const asset: CandidateAsset | null = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: {
-      ...CANDIDATE_SELECT,
-      discoveredByIntegrationId: true,
-      sources: { select: { integrationId: true } },
-      learnedLocation: true,
-      fortigateSightings: { select: { fortigateDevice: true } },
-    },
+    select: SINGLE_ASSET_CANDIDATE_SELECT,
   }) as CandidateAsset | null;
   if (!asset) return { added: 0, removed: 0 };
 
