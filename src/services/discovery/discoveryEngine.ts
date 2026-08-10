@@ -27,6 +27,7 @@ import { isFortinetIntegrationType } from "../../utils/pollingCompatibility.js";
 import { ENTRA_ASSET_TAG_PREFIX, AD_ASSET_TAG_PREFIX, AD_GUID_TAG_PREFIX, SID_TAG_PREFIX } from "../../utils/assetSourceTags.js";
 import type { DiscoveryResult, DiscoveryProgressCallback } from "../fortimanagerService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
+import { bareFortinetDeviceName } from "../../utils/assetSourceLocation.js";
 import { refreshProjectionPriority } from "../assetSourcePriorityService.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
 import {
@@ -7294,7 +7295,15 @@ function buildFortigateEndpointObservedBlob(
     osVersion: asset.osVersion ?? null,
     hardwareVendor: asset.manufacturer ?? null,
     model: asset.model ?? null,
-    learnedLocation: asset.learnedLocation ?? null,
+    // BARE device name only. `asset.learnedLocation` is the PROJECTION's own
+    // output, so with the Sources card's `integrationPrefix` on it already
+    // reads "<integration>:<gate>" — stamping that verbatim fed the render back
+    // into its own input and the projection prefixed it again next cycle
+    // (prod: a laptop accumulated 32 "FMG1:" segments, 2026-08). See
+    // utils/assetSourceLocation.bareFortinetDeviceName.
+    learnedLocation: typeof asset.learnedLocation === "string" && asset.learnedLocation.trim()
+      ? bareFortinetDeviceName(asset.learnedLocation.trim())
+      : null,
     lastSeenSwitch: asset.lastSeenSwitch ?? null,
     lastSeenAp: asset.lastSeenAp ?? null,
     discoveredVia: integrationType, // "fortimanager" | "fortigate"

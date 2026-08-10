@@ -197,6 +197,30 @@ export function normalizeSourceLocationPriority(raw: unknown): SourceLocationPri
   return { order, integrationPrefix: src.integrationPrefix === true };
 }
 
+/**
+ * Strip any `<integration>:` prefixes that leaked back onto a Fortinet device
+ * name, returning the bare name.
+ *
+ * A FortiGate / FortiManager device name can't contain a colon, so everything
+ * before the LAST one is rendering, not identity. The strip exists because the
+ * `fortigate-endpoint` observed blob is stamped FROM `Asset.learnedLocation`
+ * (discoveryEngine's buildFortigateEndpointObservedBlob) — which is the
+ * projection's own OUTPUT. With `integrationPrefix` on, that read-back made the
+ * projection non-idempotent: every discovery cycle prefixed the already-
+ * prefixed value, growing `FMG1:FMG1:…:SWITCH-1` by one segment per run until
+ * an operator noticed (prod, 2026-08).
+ *
+ * Both ends are fixed — the blob now stores the bare name — but this strip
+ * stays as the read-side backstop: it heals rows already polluted, and it means
+ * no future writer that stamps a rendered location into a source blob can
+ * restart the growth.
+ */
+export function bareFortinetDeviceName(value: string): string {
+  const idx = value.lastIndexOf(":");
+  if (idx < 0) return value;
+  return value.slice(idx + 1).trim() || value.trim();
+}
+
 /** Trimmed string at `key`, or null for anything else / empty. */
 function observedString(observed: Record<string, unknown> | null, key: string): string | null {
   if (!observed) return null;
@@ -228,6 +252,11 @@ export function contributedLocation(
     if (value) break;
   }
   if (!value) return null;
+
+  // Always bare the device name first — with the prefix OFF a polluted blob
+  // would otherwise render its accumulated prefixes verbatim, and with it ON
+  // the prefix would be appended to them.
+  if (contributor.fortinetDevice) value = bareFortinetDeviceName(value);
 
   if (opts?.integrationPrefix && contributor.fortinetDevice) {
     const integrationName = observedString(observed, "integrationName");

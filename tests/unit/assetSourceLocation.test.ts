@@ -6,6 +6,7 @@ import {
   locationContributor,
   normalizeSourceLocationPriority,
   contributedLocation,
+  bareFortinetDeviceName,
 } from "../../src/utils/assetSourceLocation.js";
 
 describe("assetSourceLocation — catalogue", () => {
@@ -129,5 +130,50 @@ describe("assetSourceLocation — contributedLocation", () => {
   it("never prefixes a non-Fortinet contributor", () => {
     expect(contributedLocation("ad", { ouPath: "OU=Laptops", integrationName: "CORP-AD" }, { integrationPrefix: true }))
       .toBe("OU=Laptops");
+  });
+
+  it("is idempotent under repeated prefixing — the prod runaway-prefix bug", () => {
+    // The fortigate-endpoint blob is stamped FROM Asset.learnedLocation, which
+    // is this function's own OUTPUT. Feeding a prefixed value back in must
+    // produce the SAME string, not a longer one, or every discovery cycle adds
+    // a segment (prod hit 32 of them before it was noticed).
+    const observed = { learnedLocation: "FMG-Prod:FW-NASH", integrationName: "FMG-Prod" };
+    const once = contributedLocation("fortigate-endpoint", observed, { integrationPrefix: true });
+    expect(once).toBe("FMG-Prod:FW-NASH");
+    expect(contributedLocation("fortigate-endpoint", { ...observed, learnedLocation: once! }, { integrationPrefix: true }))
+      .toBe("FMG-Prod:FW-NASH");
+  });
+
+  it("heals an already-polluted blob, prefix on or off", () => {
+    const polluted = "FMG-Prod:".repeat(32) + "FW-NASH";
+    expect(contributedLocation("fortigate-endpoint", { learnedLocation: polluted, integrationName: "FMG-Prod" }, { integrationPrefix: true }))
+      .toBe("FMG-Prod:FW-NASH");
+    // Prefix off must not render the accumulated segments verbatim either —
+    // turning the toggle back off is an operator's first instinct.
+    expect(contributedLocation("fortigate-endpoint", { learnedLocation: polluted, integrationName: "FMG-Prod" }))
+      .toBe("FW-NASH");
+    // Renaming the integration mid-pollution still bares the device name,
+    // because the strip keys on the colon, not on the stored name.
+    expect(contributedLocation("fortiap", { controllerFortigate: polluted, integrationName: "FMG-New" }, { integrationPrefix: true }))
+      .toBe("FMG-New:FW-NASH");
+  });
+
+  it("leaves colon-bearing non-Fortinet values alone", () => {
+    // The strip is scoped to fortinetDevice contributors — a vSphere cluster or
+    // an OU path is free to contain a colon.
+    expect(contributedLocation("vcenter-vm", { clusterName: "DC:Prod-Cluster" })).toBe("DC:Prod-Cluster");
+  });
+});
+
+describe("assetSourceLocation — bareFortinetDeviceName", () => {
+  it("returns the last segment, or the value when there's no colon", () => {
+    expect(bareFortinetDeviceName("FW-NASH")).toBe("FW-NASH");
+    expect(bareFortinetDeviceName("FMG-Prod:FW-NASH")).toBe("FW-NASH");
+    expect(bareFortinetDeviceName("A:B:C:FW-NASH")).toBe("FW-NASH");
+  });
+
+  it("falls back to the whole value rather than emptying it", () => {
+    // A trailing colon is malformed input, not a reason to lose the name.
+    expect(bareFortinetDeviceName("FMG-Prod:")).toBe("FMG-Prod:");
   });
 });
