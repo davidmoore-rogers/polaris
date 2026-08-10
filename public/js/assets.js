@@ -3436,12 +3436,14 @@ function assetMonitoringFormHTML(asset, managedAgent) {
 // maintenanceManagement holders, an ad-hoc "enter maintenance until…" action.
 function assetMaintenanceFormHTML(asset) {
   if (!asset || !asset.id) return "";
-  // The ad-hoc control needs BOTH the permission and assets-maintenance.js
-  // (only loaded on assets.html — the asset modal also opens from the map /
-  // dashboard / appmap pages). Rendering it without the helper is how a save
-  // used to report "maintenance mode active" while creating nothing.
-  var canMaint = typeof canManageMaintenance === "function" && canManageMaintenance() &&
-    typeof window.maintCreateAdhoc === "function";
+  // Two independent reasons the ad-hoc control can't be offered, each with
+  // its OWN message — conflating them told admins on the map/dashboard pages
+  // they lacked a permission they had. (1) the RBAC key; (2) assets-maintenance.js,
+  // which every page carrying the asset modal now loads, but rendering the
+  // control without it is how a save reported "maintenance mode active"
+  // while creating nothing.
+  var mayMaint = typeof canManageMaintenance === "function" && canManageMaintenance();
+  var canMaint = mayMaint && typeof window.maintCreateAdhoc === "function";
   var unmonitored = asset.monitored === false;
   return (
     '<div class="form-group" id="f-maint-wrap">' +
@@ -3470,7 +3472,9 @@ function assetMaintenanceFormHTML(asset) {
             '<span>Mark dependent devices as down</span>' +
           '</label>' +
           '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time. Both the date AND the time are required.</p>'
-        : '<p class="hint">You don’t have permission to change maintenance windows.</p>') +
+        : mayMaint
+          ? '<p class="hint">Maintenance scheduling isn’t loaded on this page — use Assets &rarr; Maintenance.</p>'
+          : '<p class="hint">You don’t have permission to change maintenance windows.</p>') +
     '</div>'
   );
 }
