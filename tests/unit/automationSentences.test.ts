@@ -12,8 +12,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import vm from "node:vm";
 
+interface Ladder { severity?: string; severityBands?: Array<Record<string, unknown>> | null }
+
 let make: (s: Record<string, unknown>) => {
-  triggerSentence: (tr: Record<string, unknown> | null) => string;
+  triggerSentence: (tr: Record<string, unknown> | null, opts?: Ladder) => string;
   resetSentence: (reset: Record<string, unknown> | null, tr: Record<string, unknown> | null, cooldownSec?: number) => string;
   humanDuration: (sec: number) => string;
   leafUnit: (metric: string, df?: Record<string, string>) => string;
@@ -123,6 +125,62 @@ describe("makeAutomationSentences", () => {
     expect(s.isTriggerScoped({ type: "composite", kind: "host" })).toBe(false);
     expect(s.isTriggerScoped({ type: "host_metric" })).toBe(false);
     expect(s.isTriggerScoped({ type: "asset_metric" })).toBe(true);
+  });
+
+  it("names the severity when one is passed, and nothing when it isn't", () => {
+    const s = make(SCHEMA as never);
+    const tr = { type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 80 };
+    // Callers that only want the condition (the pre-bands rendering) are unchanged.
+    expect(s.triggerSentence(tr)).toBe("When <strong>CPU usage is at or above 80 %</strong>.");
+    expect(s.triggerSentence(tr, { severity: "warning" }))
+      .toBe("When <strong>CPU usage is at or above 80 %</strong> — <strong>warning</strong>.");
+  });
+
+  it("spells out every severity band, not just the base tier", () => {
+    const s = make(SCHEMA as never);
+    const out = s.triggerSentence(
+      { type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 80, forDurationSec: 1800 },
+      {
+        severity: "warning",
+        severityBands: [
+          { severity: "serious", threshold: 90 },
+          { severity: "critical", threshold: 95, forDurationSec: 300 },
+        ],
+      },
+    );
+    expect(out).toContain("sustained for <strong>30 minutes</strong>");
+    expect(out).toContain("<strong>warning</strong> at this level");
+    // A band inheriting the base sustain says nothing about duration…
+    expect(out).toContain("<strong>serious</strong> at or above 90 %,");
+    // …one that overrides it spells its own out.
+    expect(out).toContain("<strong>critical</strong> at or above 95 % for 5 minutes");
+  });
+
+  it("a band may override the comparator, and a 0-second band reads as immediate", () => {
+    const s = make(SCHEMA as never);
+    const out = s.triggerSentence(
+      { type: "asset_metric", metric: "hwSensorValue", operator: ">", threshold: 65, forDurationSec: 600, dimensionFilter: { sensorClass: "temperature" } },
+      { severity: "notice", severityBands: [{ severity: "critical", operator: ">=", threshold: 90, forDurationSec: 0 }] },
+    );
+    expect(out).toContain("<strong>critical</strong> at or above 90 °C immediately");
+  });
+
+  it("ignores bands on a trigger type that can't carry them", () => {
+    const s = make(SCHEMA as never);
+    const out = s.triggerSentence(
+      { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
+      { severity: "critical", severityBands: [{ severity: "serious", threshold: 5 }] },
+    );
+    expect(out).toBe("When <strong>Monitor status equals down</strong> — <strong>critical</strong>.");
+  });
+
+  it("appends the ladder to a composite trigger too", () => {
+    const s = make(SCHEMA as never);
+    const out = s.triggerSentence(
+      { type: "composite", kind: "asset", op: "and", children: [{ type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 }] },
+      { severity: "serious" },
+    );
+    expect(out.endsWith("— <strong>serious</strong>.")).toBe(true);
   });
 
   it("escapes operator-controlled strings in the HTML sentence", () => {

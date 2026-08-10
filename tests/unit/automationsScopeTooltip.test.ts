@@ -30,6 +30,11 @@ beforeAll(() => {
   g.showConfirm = async () => false;
   g.permAtLeast = () => false;
   g.api = {};
+  // The builder catalogs live in automations-wizard.js (which the page loads
+  // alongside this file); null is the pre-fetch state, and the tooltip's
+  // documented fallback is raw field/operator names — which is what the
+  // expectations below pin.
+  g._ruleSchema = null;
   const src = readFileSync(resolve(__dirname, "../../public/js/automations.js"), "utf8");
   (0, eval)(src);
   scopeTooltip = (win as unknown as { _scopeTooltip: typeof scopeTooltip })._scopeTooltip;

@@ -1526,10 +1526,11 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **Cross-service deps:** `prisma`, `eventLogService.logEvent`, `notificationTypes` (incl. `resolveTierLadder` + `hwSensorFilterMatches`, shared with the engine).
 
-**Used by:** `notificationService` (asset tab), `notificationEngine` (preview scope), `notificationChangeEvents` (subscription gate), `src/api/routes/notificationRules.ts` (CRUD), `src/api/routes/assets.ts` (`GET /:id/metric-thresholds` → the asset charts' severity shading).
+**Used by:** `notificationService` (asset tab — its `matchingRules` are rendered as trigger SENTENCES and opened in the edit wizard by `public/js/assets.js`, so they must stay full v2 rows), `notificationEngine` (preview scope), `notificationChangeEvents` (subscription gate), `src/api/routes/notificationRules.ts` (CRUD), `src/api/routes/assets.ts` (`GET /:id/metric-thresholds` → the asset charts' severity shading).
 
 **Invariants:**
 - `scopeMatchesAsset`: AND across provided dimensions, OR within each list; `allAssets` short-circuits true; no dimensions + not allAssets ⇒ matches nothing.
+- **Every rule that leaves this service goes out through `withV2`** — `listRules`/`getRule` always did, and `findRulesMatchingAsset` joined them in 2026-08 when the asset-details Alerts tab started opening those rows in the edit wizard: a pre-v2 row handed to the builder with NULL `reset`/`actions` opens with its actions missing and SAVES them away. Any new read path that a UI can edit from must do the same.
 - Every rule write calls `bumpChangeSubscriptions()` so the persist* detectors pick up new/removed change subscriptions.
 - **No path may strand an active alert under a rule the engine no longer evaluates.** `updateRule` clears active alerts + deletes state rows on trigger-identity change (`system:rule-edited`) AND on enabled→disabled (`system:rule-disabled`); `deleteRule` clears active alerts (`system:rule-deleted`) BEFORE the delete (the cascade drops the state rows and `ruleId` goes NULL, after which nothing can auto-clear). Soft-clear only — history survives.
 

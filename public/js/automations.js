@@ -17,24 +17,13 @@ var _rulesLayout = null;
 // server-side mode.
 var _rulesPageSize = 25;
 var _rulesPage = 1;
-var _ruleSchema = null;
-var _ruleTagList = null;  // cached distinct asset tags for the scope picker
-var _ruleAssetTypes = null; // cached asset-type registry (finite set) for the scope picker
-var _ruleChannels = null; // cached configured delivery channels (rule-builder picker)
-var _ruleRecipientUsers = null; // cached users for the recipient picker
 
-// A tag value that looks like a machine identifier — an Entra/Intune GUID
-// (8-4-4-4-12 hex, possibly with a prefix like "prev-entra:<guid>") or a long
-// bare hex object id. Filtered out of the rule-builder tag pickers (scope +
-// recipient tags) so device IDs don't flood them. Human tags
-// (region:Atlanta, firewall:fgt-1, prod) never match.
-function _looksLikeDeviceId(tag) {
-  if (!tag) return false;
-  var t = String(tag);
-  if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(t)) return true; // GUID anywhere in the value
-  if (/^[0-9a-f]{24,}$/i.test(t)) return true; // long bare hex object id
-  return false;
-}
+// The builder catalogs (_ruleSchema / _ruleTagList / _ruleAssetTypes /
+// _ruleChannels / _ruleRecipientUsers) and _looksLikeDeviceId now live at the
+// top of automations-wizard.js — the wizard is their primary owner, and keeping
+// them there lets a page load the wizard WITHOUT this file (the asset-details
+// Alerts tab opens the edit modal that way). This file only reads them, always
+// from inside a handler, so wizard-file load order stays a non-issue.
 
 (function () {
   // Permissions resolve asynchronously via /auth/me (userReady). Computing

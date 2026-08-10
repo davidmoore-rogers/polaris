@@ -22,16 +22,39 @@
  * Mechanics: shared stepper CSS from styles.css (see TEMPLATES.md → "Wizard
  * (stepper modal)"); free navigation to visited steps (all steps unlocked in
  * edit mode); one module-scope draft (`_aw`, rule-shape v2) collected on every
- * navigation, hard-validated only on Next/Save. Loaded AFTER automations.js —
- * reuses its module-scope caches (_ruleSchema, _ruleTagList, _ruleAssetTypes,
- * _ruleChannels, _ruleRecipientUsers) and _looksLikeDeviceId.
+ * navigation, hard-validated only on Next/Save.
+ *
+ * STANDALONE: this file owns the builder catalogs below and lazily fetches
+ * every one of them, so a page can load it WITHOUT automations.js and still
+ * open the edit modal — which is exactly what the asset-details Alerts tab
+ * does. automations.js reads the same caches (always from inside a handler, so
+ * script order doesn't matter) and the post-save list refresh goes through an
+ * optional `window._reloadRules` hook rather than a hard dependency.
  */
-
-/* global _ruleSchema, _ruleTagList, _ruleAssetTypes, _ruleChannels,
-          _ruleRecipientUsers, _looksLikeDeviceId */
 
 var _awScripts = null;      // AutomationScript registry (null = not loadable — no automationScripts read)
 var _awDraftStash = null;   // in-memory draft stash (never persisted — may contain addresses)
+
+// Builder catalogs, cached for the page's lifetime and shared with
+// automations.js (which uses _ruleSchema for its list labels + scope tooltip).
+var _ruleSchema = null;
+var _ruleTagList = null;  // cached distinct asset tags for the scope picker
+var _ruleAssetTypes = null; // cached asset-type registry (finite set) for the scope picker
+var _ruleChannels = null; // cached configured delivery channels (rule-builder picker)
+var _ruleRecipientUsers = null; // cached users for the recipient picker
+
+// A tag value that looks like a machine identifier — an Entra/Intune GUID
+// (8-4-4-4-12 hex, possibly with a prefix like "prev-entra:<guid>") or a long
+// bare hex object id. Filtered out of the rule-builder tag pickers (scope +
+// recipient tags) so device IDs don't flood them. Human tags
+// (region:Atlanta, firewall:fgt-1, prod) never match.
+function _looksLikeDeviceId(tag) {
+  if (!tag) return false;
+  var t = String(tag);
+  if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(t)) return true; // GUID anywhere in the value
+  if (/^[0-9a-f]{24,}$/i.test(t)) return true; // long bare hex object id
+  return false;
+}
 
 // ─── Recipient pill ⇄ payload (pure; exported for tests) ───
 // The Notify action's To/Cc/Bcc token fields store a pill as
@@ -162,13 +185,55 @@ function makeAutomationSentences(s) {
     });
     return parts.join(node.op === "or" ? " OR " : " AND ");
   }
-  function triggerSentence(tr) {
+  /**
+   * The severity ladder tail: what the condition actually RAISES.
+   *
+   * Severity bands stack higher tiers on the same trigger (business rule 19) —
+   * each band re-compares the metric with its own threshold, optionally its own
+   * operator and its own sustained-for, and carries its own severity. The
+   * sentence described tier 0 only, so a banded automation read as "at or above
+   * 65 °C" while it actually escalates at 80 and 90; spell the whole ladder out.
+   *
+   * `opts.severity` is the base tier. Pass it (with or without bands) to have
+   * the sentence name what fires; omit `opts` entirely for the bare condition
+   * sentence the wizard rendered before bands existed.
+   */
+  function severityLadderPhrase(tr, opts) {
+    var sev = opts && opts.severity;
+    if (!sev) return "";
+    // Bands are numeric-metric-only server-side; ignore any that ride along on
+    // another trigger type rather than describing a threshold that can't exist.
+    var banded = tr && (tr.type === "asset_metric" || tr.type === "host_metric");
+    var bands = (banded && opts.severityBands ? opts.severityBands : []).filter(function (b) { return b && b.severity; });
+    if (!bands.length) return " — <strong>" + escapeHtml(sev) + "</strong>";
+    var baseDur = tr.forDurationSec || 0;
+    var unit = leafUnit(tr.metric, tr.dimensionFilter); unit = unit ? " " + unit : "";
+    var parts = ["<strong>" + escapeHtml(sev) + "</strong> at this level"];
+    bands.forEach(function (b) {
+      var op = b.operator || tr.operator;
+      var thr = b.threshold == null || isNaN(b.threshold) ? "…" : b.threshold;
+      // "serious at or above 90 %" — the tier name is the subject here, so the
+      // comparator drops its leading "is" ("is at or above" reads as a verb
+      // phrase about the metric, which the base clause already supplied).
+      var cmp = String(CMP_PHRASE[op] || op).replace(/^is /, "");
+      var p = "<strong>" + escapeHtml(b.severity) + "</strong> " + escapeHtml(cmp) + " " +
+        escapeHtml(String(thr)) + escapeHtml(unit);
+      // A band inherits the base sustained-for unless it sets its own — print
+      // only the deviation, so the common (inherited) case stays readable.
+      var dur = b.forDurationSec == null ? baseDur : b.forDurationSec;
+      if (dur !== baseDur) p += dur > 0 ? " for " + humanDuration(dur) : " immediately";
+      parts.push(p);
+    });
+    return " — " + parts.join(", ");
+  }
+  function triggerSentence(tr, opts) {
     if (!tr || !tr.type) return "…";
     var out;
+    var tail = severityLadderPhrase(tr, opts);
     if (tr.type === "composite") {
       out = "When <strong>" + escapeHtml(tgTreePhrase({ op: tr.op, children: tr.children || [] }) || "…") + "</strong>";
       if (tr.forDurationSec > 0) out += ", sustained for <strong>" + humanDuration(tr.forDurationSec) + "</strong>";
-      return out + ".";
+      return out + tail + ".";
     }
     if (tr.type === "asset_metric" || tr.type === "host_metric") {
       var subject = tr.type === "host_metric" ? "the Polaris host's " + metricLabel(tr.metric) : metricLabel(tr.metric);
@@ -195,7 +260,7 @@ function makeAutomationSentences(s) {
     if ((tr.type === "asset_metric" || tr.type === "host_metric" || tr.type === "asset_state") && tr.forDurationSec > 0) {
       out += ", sustained for <strong>" + humanDuration(tr.forDurationSec) + "</strong>";
     }
-    return out + ".";
+    return out + tail + ".";
   }
   function resetSentence(reset, tr, cooldownSec) {
     var out;
@@ -229,7 +294,7 @@ function makeAutomationSentences(s) {
     metricLabel: metricLabel, metricUnit: metricUnit, leafUnit: leafUnit,
     fieldLabel: fieldLabel, changeLabel: changeLabel, humanDuration: humanDuration,
     tgLeafPhrase: tgLeafPhrase, tgTreePhrase: tgTreePhrase,
-    triggerSentence: triggerSentence, resetSentence: resetSentence,
+    triggerSentence: triggerSentence, severityLadderPhrase: severityLadderPhrase, resetSentence: resetSentence,
     CMP_PHRASE: CMP_PHRASE, INV_CMP: INV_CMP, AGG_PHRASE: AGG_PHRASE, DIM_PHRASE: DIM_PHRASE,
   };
 }
@@ -1627,7 +1692,15 @@ async function openAutomationWizard(existing) {
     var el = document.getElementById("aw-trigger-sentence");
     if (!el) return;
     collectStep3();
-    el.innerHTML = triggerSentence(draft.trigger);
+    el.innerHTML = triggerSentence(draft.trigger, draftLadder());
+  }
+  /** What the sentence needs to name every severity this trigger can raise —
+   *  the base tier plus each band, so the summary doesn't stop at tier 0. */
+  function draftLadder() {
+    return {
+      severity: draft.severity,
+      severityBands: bandsApplicable(draft.trigger) ? draft.severityBands : null,
+    };
   }
   async function runTriggerPreview() {
     var box = document.getElementById("aw-trigger-preview");
@@ -3341,7 +3414,7 @@ async function openAutomationWizard(existing) {
     box.innerHTML = '<dl class="review-grid">' +
       '<dt>Name</dt><dd>' + escapeHtml(draft.name || "…") + ' <span class="badge badge-level-' + (draft.severity || "warning") + '">' + escapeHtml((draft.severity || "warning").toUpperCase()) + '</span>' + (draft.enabled === false ? ' <span class="badge">disabled</span>' : "") + '</dd>' +
       '<dt>Devices</dt><dd>' + escapeHtml(scopeSummaryText(draft.scope)) + '</dd>' +
-      '<dt>Trigger</dt><dd>' + triggerSentence(draft.trigger) + '</dd>' +
+      '<dt>Trigger</dt><dd>' + triggerSentence(draft.trigger, draftLadder()) + '</dd>' +
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
       msgRow +
       '<dt>Actions</dt><dd>' + (actionLines.length ? actionLines.join("<br>") : '<span style="color:var(--color-text-tertiary)">in-app alert only</span>') + '</dd>' +

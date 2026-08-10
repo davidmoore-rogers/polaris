@@ -16600,12 +16600,36 @@ function _assetNotificationsTabHTML() {
     '</tr></thead><tbody id="asset-notif-active-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>' +
     '<h4 style="margin:1rem 0 0.5rem">Automations that can trigger for this asset</h4>' +
     '<div class="table-wrapper"><table><thead><tr>' +
-      '<th style="width:200px">Name</th><th style="width:130px">Trigger</th><th style="width:90px">Severity</th><th>Scope</th>' +
-    '</tr></thead><tbody id="asset-notif-rules-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>' +
+      '<th style="width:200px">Name</th><th>Trigger</th><th style="width:180px">Scope</th>' +
+    '</tr></thead><tbody id="asset-notif-rules-tbody"><tr><td colspan="3" class="empty-state">Loading…</td></tr></tbody></table></div>' +
   '</div>';
 }
 
+// The automation sentence builder, resolved once per page load: the wizard's
+// pure factory (automations-wizard.js) over GET /automations/schema, so the
+// Trigger column reads in exactly the words the edit modal's own summary uses
+// and can't drift from it. Resolves to null — and the column falls back to the
+// bare trigger-type badge — when the wizard file isn't loaded or the viewer
+// can't read the automation schema (the tab itself only needs alerts:read).
+var _assetRuleSentencesP = null;
+function _assetRuleSentences() {
+  if (_assetRuleSentencesP) return _assetRuleSentencesP;
+  var factory = window.PolarisAutomationSentences;
+  if (!factory || !permAtLeast("automationManagement", "read")) {
+    _assetRuleSentencesP = Promise.resolve(null);
+    return _assetRuleSentencesP;
+  }
+  // Share the wizard's own schema cache in both directions, so opening the
+  // edit modal from this tab costs no second fetch.
+  var schema = window._ruleSchema
+    ? Promise.resolve(window._ruleSchema)
+    : api.automations.schema().then(function (s) { window._ruleSchema = s; return s; });
+  _assetRuleSentencesP = schema.then(function (s) { return factory.make(s); }).catch(function () { return null; });
+  return _assetRuleSentencesP;
+}
+
 function _loadAssetNotificationsTab(assetId) {
+  var sentencesReady = _assetRuleSentences();
   api.assets.alerts(assetId).then(function (data) {
     var active = (data && data.active) || [];
     var rules = (data && data.matchingRules) || [];
@@ -16620,19 +16644,68 @@ function _loadAssetNotificationsTab(assetId) {
       }).join("") : '<tr><td colspan="4" class="empty-state">No active alerts</td></tr>';
     }
     var rTbody = document.getElementById("asset-notif-rules-tbody");
-    if (rTbody) {
-      rTbody.innerHTML = rules.length ? rules.map(function (r) {
-        var tt = (r.trigger && r.trigger.type) || "";
-        var scope = r.scope && r.scope.allAssets ? "All assets"
-          : (r.scope && ((r.scope.assetTypes || []).concat(r.scope.tags || []).join(", "))) || "—";
-        return '<tr><td>' + escapeHtml(r.name) + '</td><td><span class="badge">' + escapeHtml(tt) + '</span></td>' +
-          '<td><span class="badge badge-level-' + (r.severity || "info") + '">' + (r.severity || "info").toUpperCase() + '</span></td>' +
-          '<td style="font-size:0.85rem">' + escapeHtml(scope) + '</td></tr>';
-      }).join("") : '<tr><td colspan="4" class="empty-state">No automations currently match this asset</td></tr>';
-    }
+    if (!rTbody) return;
+    // The sentence builder may still be loading its schema; the rules render
+    // once it settles (it never rejects — it resolves null instead).
+    sentencesReady.then(function (sent) {
+      _renderAssetRuleRows(rTbody, rules, sent, assetId);
+    });
   }).catch(function () {
     var aTbody = document.getElementById("asset-notif-active-tbody");
     if (aTbody) aTbody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load</td></tr>';
+    var rTbody = document.getElementById("asset-notif-rules-tbody");
+    if (rTbody) rTbody.innerHTML = '<tr><td colspan="3" class="empty-state">Failed to load</td></tr>';
+  });
+}
+
+function _renderAssetRuleRows(rTbody, rules, sent, assetId) {
+  // Clicking an automation's name opens the same edit modal the Automations
+  // page uses — offered only to operators who could actually save it (the
+  // wizard is an editor, not a viewer).
+  var canEdit = typeof openAutomationWizard === "function" && permAtLeast("automationManagement", "fullwrite");
+  rTbody.innerHTML = rules.length ? rules.map(function (r, i) {
+    var scope = r.scope && r.scope.allAssets ? "All assets"
+      : (r.scope && ((r.scope.assetTypes || []).concat(r.scope.tags || []).join(", "))) || "—";
+    // Trigger column: the plain-English summary from the top of the edit
+    // modal, severity ladder included — a banded automation names every tier
+    // it can raise, not just the first. Falls back to the raw trigger-type
+    // badge when the sentence builder isn't available.
+    var trig = sent
+      ? sent.triggerSentence(r.trigger, { severity: r.severity, severityBands: r.severityBands })
+      : '<span class="badge">' + escapeHtml((r.trigger && r.trigger.type) || "") + '</span>';
+    var name = canEdit
+      ? '<a href="#" class="asset-notif-rule-edit" data-rule-idx="' + i + '" title="Edit this automation" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(r.name) + '</a>'
+      : escapeHtml(r.name);
+    return '<tr><td>' + name + '</td>' +
+      '<td style="font-size:0.85rem">' + trig + '</td>' +
+      '<td style="font-size:0.85rem">' + escapeHtml(scope) + '</td></tr>';
+  }).join("") : '<tr><td colspan="3" class="empty-state">No automations currently match this asset</td></tr>';
+  if (!canEdit) return;
+  rTbody.querySelectorAll(".asset-notif-rule-edit").forEach(function (a) {
+    a.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      var rule = rules[parseInt(a.getAttribute("data-rule-idx"), 10)];
+      if (!rule) return;
+      // Saving refreshes the Automations page list through this optional hook;
+      // wrapping it is how this tab picks up the edit. The wrapper is one-shot
+      // (it restores on the first fire) and unwraps any stale copy of itself
+      // first — open-then-cancel leaves one installed, and chaining them would
+      // reload the tab once per cancelled attempt. automations.html loads
+      // assets.js too, so the page's own reloader must survive either way.
+      var prevReload = window._reloadRules;
+      while (prevReload && prevReload._assetAlertsPrev !== undefined) prevReload = prevReload._assetAlertsPrev;
+      var hook = function () {
+        window._reloadRules = prevReload;
+        if (prevReload) prevReload();
+        if (document.getElementById("asset-notif-rules-tbody")) _loadAssetNotificationsTab(assetId);
+      };
+      hook._assetAlertsPrev = prevReload || null;
+      window._reloadRules = hook;
+      openAutomationWizard(rule).catch(function (err) {
+        window._reloadRules = prevReload;
+        showToast((err && err.message) || "Failed to open the automation wizard", "error");
+      });
+    });
   });
 }
 

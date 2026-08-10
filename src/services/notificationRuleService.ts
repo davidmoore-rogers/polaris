@@ -102,8 +102,13 @@ export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean 
 
 /**
  * Enabled, asset-scoped rules whose scope matches the given asset. Backs the
- * asset-details Notifications tab's "rules that could trigger for this asset"
+ * asset-details Alerts tab's "automations that can trigger for this asset"
  * table. One findMany + in-memory filter (rule counts are small).
+ *
+ * Rows go out through `withV2` like every other read path: clicking a name in
+ * that table opens the SAME edit wizard the Automations page uses, and a
+ * pre-v2 row handed over with NULL reset/actions would open with its actions
+ * missing and save them away.
  */
 export async function findRulesMatchingAsset(assetId: string) {
   const asset = await prisma.asset.findUnique({
@@ -117,11 +122,13 @@ export async function findRulesMatchingAsset(assetId: string) {
     orderBy: { name: "asc" },
   });
 
-  return rules.filter((r) => {
-    const trigger = r.trigger as unknown as Trigger;
-    if (!isAssetScopedTrigger(trigger)) return false;
-    return scopeMatchesAsset((r.scope ?? {}) as RuleScope, asset);
-  });
+  return rules
+    .filter((r) => {
+      const trigger = r.trigger as unknown as Trigger;
+      if (!isAssetScopedTrigger(trigger)) return false;
+      return scopeMatchesAsset((r.scope ?? {}) as RuleScope, asset);
+    })
+    .map(withV2);
 }
 
 /** One severity threshold that applies to a charted metric on one asset. */
