@@ -771,6 +771,11 @@ const api = {
   },
   maintenanceSchedules: {
     list:    ()      => request("GET", "/maintenance-schedules"),
+    // Calendar tab. from/to are LOCAL day strings ("YYYY-MM-DD") and the
+    // occurrences come back as server-local wall-clock strings — never parse
+    // them as instants (see listOccurrences).
+    occurrences: (from, to) =>
+      request("GET", `/maintenance-schedules/occurrences?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
     preview: (body)  => request("POST", "/maintenance-schedules/preview", body),
     create:  (body)  => request("POST", "/maintenance-schedules", body),
     update:  (id, b) => request("PUT", `/maintenance-schedules/${id}`, b),

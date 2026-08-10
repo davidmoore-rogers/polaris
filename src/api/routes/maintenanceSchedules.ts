@@ -3,7 +3,10 @@
  * (Assets page → Maintenance modal).
  *
  * Mounted at /api/v1/maintenance-schedules.
- *   GET  /         maintenanceManagement:read       (list)
+ *   GET  /              maintenanceManagement:read  (list)
+ *   GET  /occurrences   maintenanceManagement:read  (calendar tab — every
+ *                  schedule's occurrences expanded over a ?from/?to day range,
+ *                  returned as server-local wall-clock strings)
  *   POST /preview  maintenanceManagement:fullwrite  (dry-run the target filter
  *                  → capped device list + total; only monitored assets)
  *   POST / PUT/:id / DELETE/:id   maintenanceManagement:fullwrite  (CRUD)
@@ -25,6 +28,7 @@ import {
   updateSchedule,
   deleteSchedule,
   previewTargets,
+  listOccurrences,
 } from "../../services/maintenanceScheduleService.js";
 
 const scheduleInputSchema = z.object({
@@ -38,6 +42,9 @@ const scheduleInputSchema = z.object({
   suppressChildren: z.boolean().optional(),
 });
 
+const localDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected a local date like 2026-07-12");
+const occurrencesQuerySchema = z.object({ from: localDay, to: localDay });
+
 const previewInputSchema = z.object({
   criteria: z.unknown().optional(),
   assetIds: z.array(z.string()).max(500).optional(),
@@ -48,6 +55,16 @@ export const maintenanceSchedulesRouter = Router();
 maintenanceSchedulesRouter.get("/", requirePermission("maintenanceManagement", "read"), async (_req, res, next) => {
   try {
     res.json({ schedules: await listSchedules() });
+  } catch (err) { next(err); }
+});
+
+// Calendar tab: every schedule's occurrences over a day range, expanded
+// server-side (the recurrence engine is server-local wall-clock — see
+// listOccurrences). Read-level: it exposes nothing the list doesn't.
+maintenanceSchedulesRouter.get("/occurrences", requirePermission("maintenanceManagement", "read"), async (req, res, next) => {
+  try {
+    const q = occurrencesQuerySchema.parse(req.query);
+    res.json(await listOccurrences(q));
   } catch (err) { next(err); }
 });
 

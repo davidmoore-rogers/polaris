@@ -4794,3 +4794,99 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .monset-src-body { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
 .monset-src-label { font-size: 0.85rem; font-weight: 500; }
 .monset-src-desc { font-size: 0.75rem; margin: 0; }
+
+/* ─── Maintenance calendar (Assets → Maintenance → Calendar tab) ───────────────
+   Month grid of every schedule's occurrences. Occurrence times are SERVER-local
+   wall-clock strings expanded by the API (see listOccurrences) — nothing here
+   converts them, so the grid reads the same for every operator regardless of
+   their own timezone. Day cells are click targets (new one-time window) and the
+   chips inside them are their own click targets (edit that schedule). */
+.maint-cal-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+  flex-wrap: wrap;
+}
+.maint-cal-title { min-width: 9rem; text-align: center; font-size: 0.95rem; }
+.maint-cal-hint { margin-left: auto; }
+.maint-cal-dow,
+.maint-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+.maint-cal-dow {
+  margin-bottom: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.maint-cal-dow > div { padding: 0 0.25rem; }
+.maint-cal-day {
+  min-height: 92px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  cursor: pointer;
+  overflow: hidden;
+}
+.maint-cal-day:hover { border-color: var(--color-accent); }
+.maint-cal-day-out { opacity: 0.45; }
+.maint-cal-day-today { border-color: var(--color-accent); box-shadow: inset 0 0 0 1px var(--color-accent); }
+.maint-cal-daynum {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-bottom: 2px;
+}
+.maint-cal-chips { display: flex; flex-direction: column; gap: 2px; }
+.maint-cal-chip,
+.maint-cal-more {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-size: 0.7rem;
+  line-height: 1.25;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.maint-cal-chip {
+  background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  color: var(--color-text-primary);
+  border-left: 3px solid var(--color-accent);
+}
+.maint-cal-chip:hover { background: color-mix(in srgb, var(--color-accent) 38%, transparent); }
+.maint-cal-chip-time { color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+/* Ad-hoc ("enter maintenance until…") windows read differently from planned
+   ones — they're single-asset artifacts that delete themselves when spent. */
+.maint-cal-chip-adhoc {
+  background: color-mix(in srgb, var(--color-sev-serious) 20%, transparent);
+  border-left-color: var(--color-sev-serious);
+}
+.maint-cal-chip-adhoc:hover { background: color-mix(in srgb, var(--color-sev-serious) 34%, transparent); }
+.maint-cal-chip-off {
+  background: var(--color-bg-tertiary);
+  border-left-color: var(--color-deprecated);
+  color: var(--color-text-tertiary);
+  text-decoration: line-through;
+}
+.maint-cal-more {
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+.maint-cal-more:hover { color: var(--color-accent); }
+@media (max-width: 820px) {
+  .maint-cal-day { min-height: 70px; }
+  .maint-cal-hint { display: none; }
+}

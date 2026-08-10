@@ -144,6 +144,15 @@ function parseLocalDate(s: string): Date {
   return new Date(y, mo - 1, d, 0, 0, 0, 0);
 }
 
+/**
+ * Public form of parseLocalDate for callers that hold an operator-supplied
+ * day string ("YYYY-MM-DD"): the calendar range endpoints. Server-local
+ * midnight, matching how every other time in this module is interpreted.
+ */
+export function parseLocalDay(s: string): Date {
+  return parseLocalDate(s);
+}
+
 function daysInMonth(year: number, monthIndex: number): number {
   return new Date(year, monthIndex + 1, 0).getDate();
 }
@@ -242,6 +251,51 @@ const NEXT_WINDOW_SCAN_DAYS = 731;
  * schedule will never be active again (oneshot passed / activeUntil elapsed /
  * nothing within the two-year scan horizon). Powers UI summaries.
  */
+// Day-scan cap for expandOccurrences. The calendar's month grid asks for 42
+// days and its "whole year" reach is 366, so 400 bounds the loop without
+// truncating any range the UI can request (the route caps the span too).
+const EXPAND_MAX_DAYS = 400;
+
+/**
+ * Every occurrence OVERLAPPING the half-open range [rangeStart, rangeEnd) —
+ * what the Maintenance modal's calendar tab paints. Expansion happens
+ * server-side precisely because occurrences are SERVER-LOCAL wall-clock: a
+ * browser in another timezone re-deriving them from the recurrence blob would
+ * draw windows on the wrong days.
+ *
+ * The scan starts one day BEFORE the range so a midnight-spanning occurrence
+ * (22:00 → 02:00) whose start day sits outside the range still shows up on the
+ * day it bleeds into. `maxOccurrences` bounds an all-day daily schedule over a
+ * long range; hitting it truncates rather than throws (the caller's range is
+ * already capped, so this is a backstop, not a paging contract).
+ */
+export function expandOccurrences(
+  schedule: MaintenanceScheduleShape,
+  rangeStart: Date,
+  rangeEnd: Date,
+  maxOccurrences = 500,
+): MaintenanceOccurrence[] {
+  if (rangeEnd.getTime() <= rangeStart.getTime() || maxOccurrences <= 0) return [];
+  if (schedule.kind === "oneshot") {
+    const start = parseLocalDateTime(schedule.startAt);
+    const end = parseLocalDateTime(schedule.endAt);
+    return end.getTime() > rangeStart.getTime() && start.getTime() < rangeEnd.getTime()
+      ? [{ start, end }]
+      : [];
+  }
+  const out: MaintenanceOccurrence[] = [];
+  let day = addDays(startOfDay(rangeStart), -1);
+  for (let i = 0; i <= EXPAND_MAX_DAYS && day.getTime() < rangeEnd.getTime(); i++) {
+    const occ = occurrenceStartingOn(schedule, day);
+    if (occ && occ.end.getTime() > rangeStart.getTime() && occ.start.getTime() < rangeEnd.getTime()) {
+      out.push(occ);
+      if (out.length >= maxOccurrences) break;
+    }
+    day = addDays(day, 1);
+  }
+  return out;
+}
+
 export function nextWindow(schedule: MaintenanceScheduleShape, date: Date): MaintenanceOccurrence | null {
   if (schedule.kind === "oneshot") {
     const start = parseLocalDateTime(schedule.startAt);

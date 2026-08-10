@@ -1159,13 +1159,13 @@ function _showMonitorDisableConfirm(anchorEl, onConfirm, maintOpts) {
   });
   if (offerMaintenance) {
     ctl.popover.querySelector(".mcp-maint-enter").addEventListener("click", async function () {
-      var until = ctl.popover.querySelector(".mcp-maint-until").value;
-      if (!until) { showToast("Pick an end date/time", "error"); return; }
+      var check = window.maintValidateAdhocEnd(ctl.popover.querySelector(".mcp-maint-until").value, Date.now());
+      if (!check.ok) { showToast(check.error, "error"); return; }
       var suppressCb = ctl.popover.querySelector(".mcp-maint-suppress");
       var suppress = !suppressCb || suppressCb.checked;
       ctl.close();
       try {
-        await window.maintCreateAdhoc(maintOpts.assetId, maintOpts.hostname, until, { suppressChildren: suppress });
+        await window.maintCreateAdhoc(maintOpts.assetId, maintOpts.hostname, check.value, { suppressChildren: suppress });
         showToast("Maintenance mode active — schedule created");
         if (typeof loadAssets === "function") loadAssets();
       } catch (err) {
@@ -3436,24 +3436,83 @@ function assetMonitoringFormHTML(asset, managedAgent) {
 // maintenanceManagement holders, an ad-hoc "enter maintenance until…" action.
 function assetMaintenanceFormHTML(asset) {
   if (!asset || !asset.id) return "";
-  var canMaint = typeof canManageMaintenance === "function" && canManageMaintenance();
+  // The ad-hoc control needs BOTH the permission and assets-maintenance.js
+  // (only loaded on assets.html — the asset modal also opens from the map /
+  // dashboard / appmap pages). Rendering it without the helper is how a save
+  // used to report "maintenance mode active" while creating nothing.
+  var canMaint = typeof canManageMaintenance === "function" && canManageMaintenance() &&
+    typeof window.maintCreateAdhoc === "function";
+  var unmonitored = asset.monitored === false;
   return (
     '<div class="form-group" id="f-maint-wrap">' +
       '<div id="f-maint-info" class="hint" style="margin:0 0 0.5rem">Loading maintenance info…</div>' +
       (canMaint
-        ? '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex-wrap:wrap">' +
+        ? (unmonitored
+            ? '<p class="hint" id="f-maint-unmonitored" style="color:var(--color-warning)">' +
+                'This asset isn’t monitored, so it can’t enter maintenance — there is no polling to pause. ' +
+                'Enable monitoring on the Monitoring tab first.</p>'
+            : "") +
+          '<label for="f-maint-enter" style="display:flex;align-items:center;gap:8px;cursor:pointer;width:fit-content">' +
             '<input type="checkbox" id="f-maint-enter" style="width:auto">' +
             '<span>Enter maintenance mode until</span>' +
-            '<input type="datetime-local" id="f-maint-until" disabled>' +
           '</label>' +
-          '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px" title="Devices behind this asset go into dependency suppression (notifications paused) for the window. Uncheck when they stay reachable and should keep alerting.">' +
-            '<input type="checkbox" id="f-maint-suppress" checked disabled style="width:auto">' +
+          // Deliberately OUTSIDE the label and never `disabled`: a disabled
+          // control inside the label swallowed clicks (so the field looked
+          // dead), and a filled date now speaks for itself — it ticks the
+          // checkbox rather than being ignored at save time.
+          '<div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap">' +
+            '<input type="datetime-local" id="f-maint-until" style="width:auto">' +
+            '<button type="button" class="btn btn-secondary btn-sm" id="f-maint-clear">Clear</button>' +
+          '</div>' +
+          '<div id="f-maint-error" class="hint" style="display:none;color:var(--color-danger);margin-top:4px"></div>' +
+          '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;width:fit-content" title="Devices behind this asset go into dependency suppression (notifications paused) for the window. Uncheck when they stay reachable and should keep alerting.">' +
+            '<input type="checkbox" id="f-maint-suppress" checked style="width:auto">' +
             '<span>Mark dependent devices as down</span>' +
           '</label>' +
-          '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time.</p>'
+          '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time. Both the date AND the time are required.</p>'
         : '<p class="hint">You don’t have permission to change maintenance windows.</p>') +
     '</div>'
   );
+}
+
+/**
+ * Read the Maintenance tab's ad-hoc request at save time.
+ *
+ * Returns {requested, until, suppressChildren, error}. `error` is a string the
+ * caller must surface — an operator who ticked the box or typed a date and got
+ * a plain "Asset updated" had no way to tell the request had been dropped, so
+ * every rejection path here is loud.
+ */
+function _readAdhocMaintenanceRequest() {
+  var chk = document.getElementById("f-maint-enter");
+  var untilEl = document.getElementById("f-maint-until");
+  if (!chk || !untilEl) return { requested: false };
+  var raw = String(untilEl.value || "").trim();
+  if (!chk.checked && !raw) return { requested: false };
+  var suppressEl = document.getElementById("f-maint-suppress");
+  var check = typeof window.maintValidateAdhocEnd === "function"
+    ? window.maintValidateAdhocEnd(raw, Date.now())
+    : { ok: !!raw, value: raw, error: "Pick the date and time maintenance should end." };
+  if (!check.ok) return { requested: true, error: check.error };
+  return {
+    requested: true,
+    until: check.value,
+    suppressChildren: !suppressEl || suppressEl.checked,
+  };
+}
+
+/** Show/clear the inline error under the ad-hoc end-time field. */
+function _setMaintFormError(msg) {
+  var el = document.getElementById("f-maint-error");
+  if (!el) return;
+  el.textContent = msg || "";
+  el.style.display = msg ? "" : "none";
+  if (msg) {
+    var untilEl = document.getElementById("f-maint-until");
+    var tabBtn = document.querySelector('#asset-edit-tabs .page-tab[data-tab="maintenance"]');
+    if (tabBtn) tabBtn.click();
+    if (untilEl) untilEl.focus();
+  }
 }
 
 // Maintenance tab of the edit modal: current windows + covering schedules
@@ -3465,15 +3524,36 @@ function _wireMaintenanceEditSection(asset) {
 
   var enterChk = document.getElementById("f-maint-enter");
   var untilEl = document.getElementById("f-maint-until");
-  var suppressEl = document.getElementById("f-maint-suppress");
+  var clearBtn = document.getElementById("f-maint-clear");
   if (enterChk && untilEl) {
+    // Ticking the box seeds a valid default (now + 2h) so the common case is
+    // one click; clearing the box clears the date so the two controls can
+    // never disagree about whether a window was requested.
     enterChk.addEventListener("change", function () {
-      untilEl.disabled = !enterChk.checked;
-      if (suppressEl) suppressEl.disabled = !enterChk.checked;
-      if (enterChk.checked && !untilEl.value && typeof window.maintLocalIso === "function") {
-        untilEl.value = window.maintLocalIso(new Date(Date.now() + 2 * 60 * 60 * 1000));
+      if (enterChk.checked) {
+        if (!untilEl.value && typeof window.maintLocalIso === "function") {
+          untilEl.value = window.maintLocalIso(new Date(Date.now() + 2 * 60 * 60 * 1000));
+        }
+      } else {
+        untilEl.value = "";
       }
+      _setMaintFormError("");
     });
+    // Typing/picking an end time IS the request — the date field no longer
+    // needs the checkbox ticked first to be taken seriously.
+    ["input", "change"].forEach(function (evt) {
+      untilEl.addEventListener(evt, function () {
+        if (untilEl.value) enterChk.checked = true;
+        _setMaintFormError("");
+      });
+    });
+    if (clearBtn) {
+      clearBtn.addEventListener("click", function () {
+        untilEl.value = "";
+        enterChk.checked = false;
+        _setMaintFormError("");
+      });
+    }
   }
 
   api.assets.maintenanceInfo(asset.id).then(function (info) {
@@ -3522,8 +3602,11 @@ function _credentialOptionsForStream(selectedId, credType) {
 }
 
 async function _wireMonitorEditTab(asset) {
-  await _ensureCredentials();
+  // Before the credential fetch, not after: the Maintenance tab is a sibling
+  // panel that's clickable the moment the modal paints, and its listeners
+  // must not wait on an unrelated network round-trip.
   _wireMaintenanceEditSection(asset);
+  await _ensureCredentials();
   var monChk = document.getElementById("f-monitored");
   var intervalEl = document.getElementById("f-monitorInterval");
   var probeTimeoutEl = document.getElementById("f-probeTimeoutMs");
@@ -3907,19 +3990,35 @@ async function openEditModal(id, opts) {
       var btn = this;
       btn.disabled = true;
       try {
-        // Read the Monitoring tab's ad-hoc maintenance request BEFORE the
-        // update (the modal DOM survives, but keep the read close to use).
-        var maintChk = document.getElementById("f-maint-enter");
-        var maintUntil = document.getElementById("f-maint-until");
-        var maintSuppress = document.getElementById("f-maint-suppress");
-        var enterMaint = !!(maintChk && maintChk.checked && maintUntil && maintUntil.value);
+        // Read the Maintenance tab's ad-hoc request BEFORE the update, and
+        // reject an incomplete one up front — a half-filled datetime-local
+        // reads as "" and used to be silently dropped after a successful
+        // save, which is exactly what "it didn't save the maintenance mode"
+        // looked like from the operator's side.
+        var maint = _readAdhocMaintenanceRequest();
+        if (maint.error) { _setMaintFormError(maint.error); throw new Error(maint.error); }
+        _setMaintFormError("");
         await api.assets.update(id, getAssetFormData());
-        if (enterMaint && typeof window.maintCreateAdhoc === "function") {
-          await window.maintCreateAdhoc(id, asset.hostname, maintUntil.value,
-            { suppressChildren: !maintSuppress || maintSuppress.checked });
+        var maintApplied = false;
+        if (maint.requested) {
+          if (typeof window.maintCreateAdhoc !== "function") {
+            throw new Error("Maintenance scheduling isn’t available on this page — use Assets → Maintenance.");
+          }
+          await window.maintCreateAdhoc(id, asset.hostname, maint.until,
+            { suppressChildren: maint.suppressChildren });
+          // The schedule can exist without the asset entering maintenance —
+          // targets are intersected with monitored=true server-side. Say so
+          // rather than claiming a window that isn't open.
+          maintApplied = await api.assets.maintenanceInfo(id)
+            .then(function (info) { return !!(info && info.inMaintenance); })
+            .catch(function () { return true; });
         }
         closeModal();
-        showToast(enterMaint ? "Asset updated — maintenance mode active" : "Asset updated");
+        if (maint.requested && maintApplied) showToast("Asset updated — maintenance mode active");
+        else if (maint.requested) {
+          showToast("Asset updated and schedule created, but the asset did not enter maintenance " +
+            "(only monitored assets can).", "error");
+        } else showToast("Asset updated");
         loadAssets();
       } catch (err) {
         showToast(err.message, "error");

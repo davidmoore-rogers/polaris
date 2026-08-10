@@ -52,6 +52,9 @@ import {
   isInWindow,
   currentWindow,
   nextWindow,
+  expandOccurrences,
+  formatLocalIsoMinute,
+  parseLocalDay,
   type MaintenanceScheduleShape,
 } from "../utils/maintenanceRecurrence.js";
 
@@ -220,6 +223,81 @@ export async function previewTargets(input: {
       id, hostname, ipAddress, model, manufacturer,
     })),
   };
+}
+
+// ─── Calendar occurrences ────────────────────────────────────────────────────
+
+/** Widest range the calendar may ask for in one call (a year plus slack). */
+const MAX_OCCURRENCE_RANGE_DAYS = 400;
+/** Per-response occurrence cap — a daily all-day schedule over a year is 366. */
+const MAX_OCCURRENCES = 2000;
+
+export interface MaintenanceOccurrenceRow {
+  scheduleId: string;
+  name: string;
+  enabled: boolean;
+  kind: "oneshot" | "recurring";
+  /** Single-asset one-shot with no criteria — the pill / edit-modal artifact. */
+  adhoc: boolean;
+  /** SERVER-LOCAL wall clock "YYYY-MM-DDTHH:MM" — never a UTC instant. */
+  start: string;
+  end: string;
+}
+
+/**
+ * Expand every schedule's occurrences across [from, to] for the Maintenance
+ * modal's calendar tab. `from`/`to` are local day strings ("YYYY-MM-DD"),
+ * inclusive of `to` (the range end is `to` + 1 day at midnight).
+ *
+ * Times come back as local-ISO minute strings rather than instants: the
+ * recurrence engine is server-local wall-clock, so handing the browser a UTC
+ * Date would have it re-render windows in ITS timezone and paint them on the
+ * wrong day for any operator not sitting in the server's zone.
+ */
+export async function listOccurrences(input: {
+  from: string;
+  to: string;
+}): Promise<{ from: string; to: string; occurrences: MaintenanceOccurrenceRow[]; truncated: boolean }> {
+  const rangeStart = parseLocalDay(input.from);
+  const rangeEndDay = parseLocalDay(input.to);
+  if (!Number.isFinite(rangeStart.getTime()) || !Number.isFinite(rangeEndDay.getTime())) {
+    throw new AppError(400, "from and to must be local dates (YYYY-MM-DD)");
+  }
+  if (rangeEndDay.getTime() < rangeStart.getTime()) {
+    throw new AppError(400, "to must not be before from");
+  }
+  const spanDays = Math.round((rangeEndDay.getTime() - rangeStart.getTime()) / 86_400_000);
+  if (spanDays > MAX_OCCURRENCE_RANGE_DAYS) {
+    throw new AppError(400, `Range too wide (max ${MAX_OCCURRENCE_RANGE_DAYS} days)`);
+  }
+  // Exclusive end = midnight after the last requested day.
+  const rangeEnd = new Date(
+    rangeEndDay.getFullYear(), rangeEndDay.getMonth(), rangeEndDay.getDate() + 1, 0, 0, 0, 0,
+  );
+
+  const schedules = await prisma.maintenanceSchedule.findMany({ orderBy: { name: "asc" } });
+  const occurrences: MaintenanceOccurrenceRow[] = [];
+  let truncated = false;
+  for (const s of schedules) {
+    const shape = parseStoredShape(s);
+    if (!shape) continue;
+    const remaining = MAX_OCCURRENCES - occurrences.length;
+    if (remaining <= 0) { truncated = true; break; }
+    const occs = expandOccurrences(shape, rangeStart, rangeEnd, remaining);
+    for (const occ of occs) {
+      occurrences.push({
+        scheduleId: s.id,
+        name: s.name,
+        enabled: s.enabled,
+        kind: shape.kind,
+        adhoc: isAdhocShape(s, shape),
+        start: formatLocalIsoMinute(occ.start),
+        end: formatLocalIsoMinute(occ.end),
+      });
+    }
+  }
+  occurrences.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : a.name.localeCompare(b.name)));
+  return { from: input.from, to: input.to, occurrences, truncated };
 }
 
 // ─── Schedule CRUD ───────────────────────────────────────────────────────────

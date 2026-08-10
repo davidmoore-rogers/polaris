@@ -18,6 +18,8 @@ import {
   isInWindow,
   currentWindow,
   nextWindow,
+  expandOccurrences,
+  parseLocalDay,
   type MaintenanceScheduleShape,
 } from "../../src/utils/maintenanceRecurrence.js";
 
@@ -237,5 +239,74 @@ describe("resolveStartNow", () => {
 describe("formatLocalIsoMinute", () => {
   it("zero-pads and truncates to the minute", () => {
     expect(formatLocalIsoMinute(new Date(2026, 0, 5, 8, 7, 59))).toBe("2026-01-05T08:07");
+  });
+});
+
+// ─── expandOccurrences (calendar tab) ───────────────────────────────────────
+
+describe("expandOccurrences", () => {
+  /** Compact "MM-DD HH:MM→MM-DD HH:MM" rendering so expectations stay readable. */
+  const stamp = (d: Date) => formatLocalIsoMinute(d).slice(5).replace("T", " ");
+  const render = (occs: Array<{ start: Date; end: Date }>) =>
+    occs.map(o => `${stamp(o.start)}→${stamp(o.end)}`);
+
+  it("returns a one-shot only when it overlaps the range", () => {
+    const s = oneshot("2026-07-12T22:00", "2026-07-13T02:00");
+    expect(expandOccurrences(s, at(2026, 7, 12), at(2026, 7, 14))).toHaveLength(1);
+    // Half-open on both sides: a window ending exactly at the range start is out…
+    expect(expandOccurrences(s, at(2026, 7, 13, 2), at(2026, 7, 14))).toHaveLength(0);
+    // …and one starting exactly at the range end is out too.
+    expect(expandOccurrences(s, at(2026, 7, 10), at(2026, 7, 12, 22))).toHaveLength(0);
+  });
+
+  it("expands a daily time range across the requested days", () => {
+    const s = recurring({ freq: "daily", startTime: "20:00", endTime: "22:00" });
+    expect(render(expandOccurrences(s, at(2026, 7, 1), at(2026, 7, 4)))).toEqual([
+      "07-01 20:00→07-01 22:00",
+      "07-02 20:00→07-02 22:00",
+      "07-03 20:00→07-03 22:00",
+    ]);
+  });
+
+  it("includes a midnight-spanning occurrence that STARTED before the range", () => {
+    // 22:00 → 02:00 daily: the window bleeding into the range's first morning
+    // starts the previous day, which a naive from-the-range-start scan misses.
+    const s = recurring({ freq: "daily", startTime: "22:00", endTime: "02:00" });
+    const occs = expandOccurrences(s, at(2026, 7, 2), at(2026, 7, 3));
+    expect(render(occs)).toEqual([
+      "07-01 22:00→07-02 02:00",
+      "07-02 22:00→07-03 02:00",
+    ]);
+  });
+
+  it("emits all-day occurrences as [midnight, next midnight)", () => {
+    const s = recurring({ freq: "weekly", daysOfWeek: [6] }); // Saturdays
+    expect(render(expandOccurrences(s, at(2026, 7, 1), at(2026, 7, 15)))).toEqual([
+      "07-04 00:00→07-05 00:00",
+      "07-11 00:00→07-12 00:00",
+    ]);
+  });
+
+  it("honors activeFrom/activeUntil bounds", () => {
+    const s = recurring({
+      freq: "daily", startTime: "01:00", endTime: "02:00",
+      activeFrom: "2026-07-03", activeUntil: "2026-07-04",
+    });
+    expect(render(expandOccurrences(s, at(2026, 7, 1), at(2026, 7, 10)))).toEqual([
+      "07-03 01:00→07-03 02:00",
+      "07-04 01:00→07-04 02:00",
+    ]);
+  });
+
+  it("truncates at maxOccurrences and returns nothing for an inverted range", () => {
+    const s = recurring({ freq: "daily", startTime: "01:00", endTime: "02:00" });
+    expect(expandOccurrences(s, at(2026, 7, 1), at(2026, 7, 30), 5)).toHaveLength(5);
+    expect(expandOccurrences(s, at(2026, 7, 30), at(2026, 7, 1))).toHaveLength(0);
+  });
+});
+
+describe("parseLocalDay", () => {
+  it("parses a day string as server-local midnight", () => {
+    expect(parseLocalDay("2026-07-12").getTime()).toBe(at(2026, 7, 12).getTime());
   });
 });

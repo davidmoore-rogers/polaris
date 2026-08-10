@@ -209,6 +209,7 @@ import {
   operatorReleaseAsset,
   releaseAssetsForDecommission,
   previewTargets,
+  listOccurrences,
 } from "../../src/services/maintenanceScheduleService.js";
 import { logEventsBatch } from "../../src/services/eventLogService.js";
 import { resolveMatchingAssetIds } from "../../src/services/tagAssignmentService.js";
@@ -684,5 +685,49 @@ describe("previewTargets", () => {
     expect(res.total).toBe(60); // unmonitored excluded
     expect(res.assets).toHaveLength(50); // cap
     expect(res.assets[0].hostname).toBe("HOST-00"); // hostname-sorted
+  });
+});
+
+describe("listOccurrences (calendar tab)", () => {
+  it("expands every schedule over the range, sorted, as server-local strings", async () => {
+    h.db.schedules.push(schedule("s1", ACTIVE_ONESHOT, { name: "One-time" }));
+    h.db.schedules.push(schedule("s2", DAILY, { name: "Nightly" }));
+
+    const res = await listOccurrences({ from: "2026-07-10", to: "2026-07-11" });
+
+    expect(res.truncated).toBe(false);
+    expect(res.occurrences.map((o) => `${o.name} ${o.start}→${o.end}`)).toEqual([
+      "Nightly 2026-07-10T11:00→2026-07-10T14:00",
+      "One-time 2026-07-10T11:00→2026-07-10T14:00",
+      "Nightly 2026-07-11T11:00→2026-07-11T14:00",
+    ]);
+  });
+
+  it("includes the whole `to` day (range end is that day's midnight boundary)", async () => {
+    h.db.schedules.push(schedule("s1", DAILY));
+    const res = await listOccurrences({ from: "2026-07-11", to: "2026-07-11" });
+    expect(res.occurrences).toHaveLength(1);
+    expect(res.occurrences[0].start).toBe("2026-07-11T11:00");
+  });
+
+  it("flags the single-asset one-shot artifacts so the grid can style them", async () => {
+    h.db.schedules.push(schedule("s1", ACTIVE_ONESHOT, { name: "Ad-hoc — A1", assetIds: ["a1"] }));
+    h.db.schedules.push(schedule("s2", ACTIVE_ONESHOT, { name: "Planned", assetIds: ["a1", "a2"] }));
+    const res = await listOccurrences({ from: "2026-07-10", to: "2026-07-10" });
+    expect(res.occurrences.find((o) => o.name === "Ad-hoc — A1")!.adhoc).toBe(true);
+    expect(res.occurrences.find((o) => o.name === "Planned")!.adhoc).toBe(false);
+  });
+
+  it("skips a schedule whose stored shape is unparseable rather than failing the month", async () => {
+    h.db.schedules.push(schedule("bad", { version: 1, kind: "nonsense" }));
+    h.db.schedules.push(schedule("good", DAILY));
+    const res = await listOccurrences({ from: "2026-07-10", to: "2026-07-10" });
+    expect(res.occurrences).toHaveLength(1);
+    expect(res.occurrences[0].scheduleId).toBe("good");
+  });
+
+  it("rejects an inverted or over-wide range", async () => {
+    await expect(listOccurrences({ from: "2026-07-10", to: "2026-07-09" })).rejects.toThrow(/not be before/);
+    await expect(listOccurrences({ from: "2026-01-01", to: "2027-12-31" })).rejects.toThrow(/too wide/i);
   });
 });
