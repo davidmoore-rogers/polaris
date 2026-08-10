@@ -39,6 +39,7 @@ import {
 import { getConfiguredResolver } from "../dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../ouiService.js";
 import { clampAcquiredToLastSeen, bumpLastSeen } from "../../utils/assetInvariants.js";
+import { normalizeHardwareSerial, indexUniqueBy } from "../../utils/hardwareIdentity.js";
 import { recordSample, getBaselines, type Baseline } from "../discoveryDurationService.js";
 import { evaluateAutoAbort, clearAutoAbortState } from "../discoveryAutoAbortService.js";
 import { publishDiscoveryJob } from "../queueService.js";
@@ -6256,6 +6257,20 @@ async function syncArcDevices(
     if (swapped && !assetByVmUuid.has(swapped)) assetByVmUuid.set(swapped, asset);
   };
 
+  // SMBIOS serials reported by the POLARIS AGENT — the bridge that lets an
+  // Arc machine merge onto an asset some other integration discovered.
+  //
+  // AD carries no hardware identity whatsoever and Arc carries no MAC, so an
+  // AD-discovered server and an Arc machine share nothing definitive. The
+  // agent runs ON the host, reads the same SMBIOS serial Arc reports, and
+  // stamps it on whatever asset it was installed on — so matching Arc's
+  // serial against the agent's ties the two together.
+  //
+  // Only `polaris-agent` seeds this. Intune also reports a serial, but it's
+  // an enrollment-time inventory value that can be stale or belong to a
+  // replaced chassis; the agent's is read from the running host.
+  const serialCandidates: { key: string | null; value: any; id: string }[] = [];
+
   for (const row of allSources) {
     const list = sourcesByAssetId.get(row.assetId);
     const entry = { sourceKind: row.sourceKind, inferred: row.inferred, observed: row.observed as Record<string, unknown> | null };
@@ -6264,6 +6279,13 @@ async function syncArcDevices(
     const asset = assetById.get(row.assetId);
     if (!asset) continue;
     const obs = (row.observed || {}) as Record<string, unknown>;
+    if (row.sourceKind === "polaris-agent") {
+      serialCandidates.push({
+        key: normalizeHardwareSerial(obs.serialNumber),
+        value: asset,
+        id: asset.id,
+      });
+    }
     if (row.sourceKind === "arc") {
       assetIdsWithArcSource.add(row.assetId);
       assetByArmId.set(String(row.externalId).toLowerCase(), asset);
@@ -6283,6 +6305,20 @@ async function syncArcDevices(
     if (!a.hostname) continue;
     if (assetIdsWithArcSource.has(a.id)) indexHostname(assetByHostnameArcTagged, a.hostname, a);
     else indexHostname(assetByHostnameNoArc, a.hostname, a);
+  }
+
+  // Uniqueness guard, not just normalization. `normalizeHardwareSerial`
+  // rejects vendor placeholders, but it CANNOT reject our own agent's
+  // Windows fallback: when SystemSerialNumber is empty the agent reports
+  // `SystemSKU`, a MODEL sku shared by every machine of that model, and
+  // that's a perfectly well-formed string. So any serial claimed by two
+  // different assets is discarded — a key that's ambiguous in the data is
+  // not an identity, whatever it looks like. Without this, one empty-serial
+  // model line would collapse into a single asset.
+  const { index: assetBySerial, ambiguous: ambiguousSerials } = indexUniqueBy(serialCandidates);
+  if (ambiguousSerials.size > 0) {
+    syncLog("info", `Serial match: ignoring ${ambiguousSerials.size} hardware serial(s) reported by more than one asset `
+      + "(vendor placeholder or model SKU — not a usable identity)");
   }
 
   // ── Batched writes ───────────────────────────────────────────────────────
@@ -6372,6 +6408,33 @@ async function syncArcDevices(
     }
 
     let raisedConflict = false;
+    // Serial match — the Polaris Agent bridge. Ranked BELOW vmUuid (an exact
+    // key the hypervisor and Arc both mint) and ABOVE hostname (a heuristic
+    // that collides and changes). A hit here is host-truth on both sides:
+    // the agent read the serial off the running machine and Arc read the same
+    // SMBIOS field, so this is a definitive identity, not a guess.
+    if (!existing) {
+      const serialKey = normalizeHardwareSerial(m.serialNumber);
+      const serialHit = serialKey ? assetBySerial.get(serialKey) : null;
+      // Refuse the match when the candidate ALREADY carries an Arc source: it
+      // belongs to a different Arc machine (this one didn't match by ARM id,
+      // or it would never have reached the serial step). Two Arc machines
+      // sharing a serial means cloned hardware, not one device — attaching a
+      // second arc source to the same asset would quietly fuse them. Fall
+      // through to the hostname/Conflict path so a human decides.
+      const bySerial = serialHit && !assetIdsWithArcSource.has(serialHit.id) ? serialHit : null;
+      if (serialHit && !bySerial) {
+        syncLog("warning", `Serial cross-link declined for Arc machine ${label}: asset `
+          + `${serialHit.hostname || serialHit.id} already has a different Arc machine attached `
+          + "(duplicate hardware serial — likely a cloned VM)");
+      }
+      if (bySerial) {
+        existing = bySerial;
+        syncLog("info", `Serial cross-link: Arc machine ${label} matched existing asset `
+          + `${bySerial.hostname || bySerial.id} on hardware serial (taking over)`);
+      }
+    }
+
     if (!existing) {
       const candidates = [fqdn, short].filter((h): h is string => !!h);
       for (const cand of candidates) {
