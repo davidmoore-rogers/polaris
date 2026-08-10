@@ -252,7 +252,7 @@ Windows Server DHCP via WinRM (PowerShell remoting, port 5985 HTTP or 5986 HTTPS
 ### Microsoft Entra ID / Intune
 Microsoft Graph via OAuth2 client credentials. Produces **assets only**.
 
-- **Entra ID** (always) — hostname, OS, OS version, trust type, compliance, last sign-in. Requires `Device.Read.All` (application, admin-consented).
+- **Entra ID** (always) — hostname, OS, OS version, trust type, compliance, last sign-in. Requires `Device.Read.All` (application, admin-consented). Add `User.Read.All` + `Group.Read.All` + `OrgContact.Read.All` (or `Directory.Read.All`) **only** if you enable address-book directory search — an opt-in, live lookup that stores nothing.
 - **Intune** (toggle) — serial, MAC (Wi-Fi + Ethernet, both stored), manufacturer, model, primary user, compliance state. Merged onto Entra devices via `azureADDeviceId ↔ deviceId`. Requires `DeviceManagementManagedDevices.Read.All`.
 
 ### Active Directory (on-premise)

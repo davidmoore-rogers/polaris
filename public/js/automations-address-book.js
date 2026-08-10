@@ -529,7 +529,8 @@
 
       async function load(term) {
         try {
-          entries = (await api.contacts.search(term || "")).entries || [];
+          // `true` = also search the organization's directory (live, not stored).
+          entries = (await api.contacts.search(term || "", true)).entries || [];
         } catch (err) {
           q("#ab-pick-results").innerHTML = '<p class="empty-state">' +
             escapeHtml((err && err.message) || "Search failed") + "</p>";

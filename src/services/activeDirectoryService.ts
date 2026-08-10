@@ -13,7 +13,7 @@
 import { type Entry, type SearchOptions } from "ldapts";
 import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
-import { withBoundLdapClient, decodeObjectGuid, formatLdapError } from "./ldapClient.js";
+import { withBoundLdapClient, decodeObjectGuid, formatLdapError, escapeLdapFilterValue } from "./ldapClient.js";
 
 export interface ActiveDirectoryConfig {
   host: string;
@@ -83,6 +83,85 @@ export async function testConnection(config: ActiveDirectoryConfig): Promise<{
   } catch (err: any) {
     return { ok: false, message: formatLdapError(err) };
   }
+}
+
+// ─── Directory (GAL) search ─────────────────────────────────────────────────
+//
+// The address book's live lookup into on-prem AD. Discovery is otherwise
+// hard-filtered to computer objects — this is the first PEOPLE query here, and
+// nothing it returns is persisted; only an address an operator picks becomes a
+// rule recipient or a saved Contact. Gated per-integration by
+// `enableDirectorySearch`, since the bind account needs read access to user /
+// group / contact objects that a computers-only deployment may not have granted.
+//
+// The attribute plumbing (mail, escaping, bind) is already proven by
+// ldapAuthService, which reads `mail` on every LDAP login.
+
+/** One directory hit, normalized to the address-book entry shape. */
+export interface DirectoryHit {
+  id: string;
+  email: string;
+  name: string | null;
+  description: string | null;
+  kind: "person" | "group";
+}
+
+function firstStr(v: unknown): string | null {
+  if (Array.isArray(v)) return v.length ? String(v[0]) : null;
+  if (v == null) return null;
+  const s = String(v);
+  return s === "" ? null : s;
+}
+
+/**
+ * Search users, mail-enabled groups and contacts under the configured base DN.
+ * One search rather than three: AD can OR the object classes in a single
+ * filter, and `(mail=*)` drops anything that can't receive email anyway.
+ */
+export async function searchDirectoryAd(
+  config: ActiveDirectoryConfig,
+  query: string,
+  limit = 25,
+): Promise<DirectoryHit[]> {
+  const raw = query.trim();
+  if (raw.length < 2) return [];
+  if (!config.baseDn) return [];
+  const q = escapeLdapFilterValue(raw);
+
+  const filter =
+    "(&(mail=*)" +
+      "(|(objectClass=user)(objectClass=group)(objectClass=contact))" +
+      `(|(cn=*${q}*)(mail=*${q}*)(displayName=*${q}*)(sAMAccountName=*${q}*))` +
+    ")";
+
+  return withBoundLdapClient(config, undefined, async (client) => {
+    const { searchEntries } = await client.search(config.baseDn, {
+      scope: (config.searchScope as SearchOptions["scope"]) || "sub",
+      filter,
+      attributes: ["cn", "displayName", "mail", "description", "department", "title", "objectClass", "objectGUID"],
+      sizeLimit: Math.min(Math.max(limit, 1), 100),
+      timeLimit: 15,
+    });
+
+    const out: DirectoryHit[] = [];
+    for (const e of searchEntries) {
+      const mail = firstStr((e as any).mail);
+      if (!mail) continue;
+      const classes = ([] as string[]).concat((e as any).objectClass ?? []).map((c) => String(c).toLowerCase());
+      const isGroup = classes.includes("group");
+      const bits = [firstStr((e as any).title), firstStr((e as any).department)].filter(Boolean);
+      out.push({
+        // objectGUID is the stable identity, but it's a Buffer; the DN is
+        // already unique and human-readable, and nothing persists this id.
+        id: String(e.dn),
+        email: mail,
+        name: firstStr((e as any).displayName) ?? firstStr((e as any).cn),
+        description: firstStr((e as any).description) || bits.join(" — ") || (isGroup ? "Distribution list" : null),
+        kind: isGroup ? "group" : "person",
+      });
+    }
+    return out.slice(0, limit);
+  });
 }
 
 // ─── Manual query (UI tool) ─────────────────────────────────────────────────

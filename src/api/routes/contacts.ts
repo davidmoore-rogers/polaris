@@ -23,6 +23,8 @@ import { z } from "zod";
 import { assertOwnership, requireOwnership, requirePermission } from "../middleware/permissions.js";
 import { requestActor } from "../middleware/auth.js";
 import { AppError } from "../../utils/errors.js";
+import { contactSearchLimiter } from "../middleware/rateLimits.js";
+import { directorySearchAvailable } from "../../services/directorySearchService.js";
 import {
   createContact,
   deleteContact,
@@ -56,11 +58,18 @@ contactsRouter.get("/", requirePermission("contacts", "read"), async (_req, res,
   } catch (err) { next(err); }
 });
 
-contactsRouter.get("/search", requirePermission("contacts", "read"), async (req, res, next) => {
+// `directory=1` additionally queries the opted-in AD / Entra integrations
+// (live, nothing persisted). Rate-limited because that path proxies an external
+// API from operator keystrokes.
+contactsRouter.get("/search", contactSearchLimiter, requirePermission("contacts", "read"), async (req, res, next) => {
   try {
     const q = typeof req.query.q === "string" ? req.query.q : "";
-    const entries = await searchAddressBook(q, { callerUsername: req.session?.username ?? null });
-    res.json({ entries });
+    const wantDirectory = req.query.directory === "1" || req.query.directory === "true";
+    const entries = await searchAddressBook(q, {
+      callerUsername: req.session?.username ?? null,
+      includeDirectory: wantDirectory,
+    });
+    res.json({ entries, directoryAvailable: await directorySearchAvailable() });
   } catch (err) { next(err); }
 });
 

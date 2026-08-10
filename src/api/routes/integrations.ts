@@ -631,6 +631,11 @@ const EntraIdConfigSchema = z.object({
   // no longer write it. Default ON (read-only against the targets); see
   // src/services/presenceVerificationService.ts.
   verifyPresence: z.boolean().optional().default(true),
+  // Address-book GAL search (live typeahead; nothing is persisted). Default
+  // OFF because it needs directory-read permissions this integration has never
+  // required — without them every keystroke would 403. See
+  // src/services/directorySearchService.ts.
+  enableDirectorySearch: z.boolean().optional().default(false),
   workstationMonitor: WorkstationServerClassMonitorSchema,
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
@@ -719,6 +724,11 @@ const ActiveDirectoryConfigSchema = z.object({
   includeDisabled: z.boolean().optional().default(true),
   // Post-sync network-presence verification — see EntraIdConfigSchema note.
   verifyPresence:  z.boolean().optional().default(true),
+  // Address-book GAL search (live typeahead; nothing is persisted). Default
+  // OFF because it needs directory-read permissions this integration has never
+  // required — without them every keystroke would 403. See
+  // src/services/directorySearchService.ts.
+  enableDirectorySearch: z.boolean().optional().default(false),
   workstationMonitor: WorkstationServerClassMonitorSchema,
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.

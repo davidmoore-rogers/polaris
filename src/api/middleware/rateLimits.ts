@@ -98,3 +98,17 @@ export const dashWeatherLimiter = makeRateLimiter({
   max: 4000,
   message: "Rate limit exceeded — retry shortly.",
 });
+
+/**
+ * Address-book recipient search. Session-gated and cheap while it stays local,
+ * but with directory search on it PROXIES AN EXTERNAL API (Microsoft Graph / a
+ * domain controller) from operator keystrokes, so a stuck key or a scripted
+ * caller could hammer the tenant. The client debounces ~250 ms with a 2-char
+ * minimum and the service caches identical queries for 60s, so a real operator
+ * lands nowhere near this ceiling.
+ */
+export const contactSearchLimiter = makeRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 600,
+  message: "Too many recipient searches — please slow down.",
+});

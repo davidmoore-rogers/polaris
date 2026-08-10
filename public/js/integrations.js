@@ -972,6 +972,15 @@ function _readVerifyPresenceToggle() {
   return !!el.checked;
 }
 
+// Read the address-book directory-search toggle (AD/Entra Monitoring tab).
+// undefined when the checkbox didn't render, so the caller leaves the config
+// field alone for other integration types.
+function _readDirectorySearchToggle() {
+  var el = document.getElementById("f-enableDirectorySearch");
+  if (!el) return undefined;
+  return !!el.checked;
+}
+
 // Quarantine Push tab body. Renders the master toggle plus transport-mode
 // guidance. When enabled, quarantining an asset pushes MAC-based
 // address-group entries to every FortiGate sighted by this integration.
@@ -3247,12 +3256,32 @@ function monitorSettingsFormHTML(s, opts) {
       '</div>';
   }
 
+  // Address-book GAL search (AD / Entra only — vCenter and Arc have no
+  // directory of people). Default OFF: it needs directory-read permissions the
+  // device-discovery integration has never required, so enabling it without the
+  // grant makes every recipient keystroke 403.
+  var directorySearchHtml = "";
+  if (integrationType === "activedirectory" || integrationType === "entraid") {
+    var dsChecked = opts.enableDirectorySearch === true ? "checked" : "";
+    var dsPerms = integrationType === "entraid"
+      ? "Requires the Graph application permissions <strong>User.Read.All</strong>, <strong>Group.Read.All</strong> and <strong>OrgContact.Read.All</strong> (or <strong>Directory.Read.All</strong>), admin-consented on the app registration — device discovery alone does not grant them."
+      : "Requires the bind account to have read access to user, group and contact objects under the base DN — device discovery only reads computer objects.";
+    directorySearchHtml = '<div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin:0 0 1rem 0">' +
+        '<input type="checkbox" id="f-enableDirectorySearch" ' + dsChecked + ' style="width:auto;margin-top:3px">' +
+        '<div>' +
+          '<label for="f-enableDirectorySearch" style="margin:0">Search this directory from the address book</label>' +
+          '<p class="hint" style="margin:0.15rem 0 0 0">Lets the automation recipient picker look up people, distribution lists and org contacts in this directory as an operator types. Results are <strong>live and never stored</strong> — only an address someone actually picks is saved. ' + dsPerms + '</p>' +
+        '</div>' +
+      '</div>';
+  }
+
   return '<section>' +
       '<p class="hint" style="margin:0 0 0.85rem 0;color:var(--color-text-tertiary)">' +
         "Per-class polling, cadences, and credentials for assets discovered by this integration. " +
         "A class override (Assets page → Monitoring Settings) or a per-asset override on the asset itself takes priority." +
       '</p>' +
       verifyPresenceHtml +
+      directorySearchHtml +
       _intRenderTabbedBody("intg-mon-class", classTabs) +
     '</section>';
 }
@@ -4257,7 +4286,7 @@ function entraIdFormHTML(defaults) {
   var enabledChecked = d.enabled !== false ? "checked" : "";
   var autoChecked = d.autoDiscover !== false ? "checked" : "";
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Corporate Entra ID"></div>' +
-    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to <strong style="color:var(--color-text-primary)">Microsoft Entra ID</strong> (Azure AD) via an app registration with client-credentials flow. Requires <strong style="color:var(--color-text-primary)">Device.Read.All</strong> (application); add <strong style="color:var(--color-text-primary)">DeviceManagementManagedDevices.Read.All</strong> if Intune sync is enabled. Grant admin consent in the Azure portal.</div>' +
+    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to <strong style="color:var(--color-text-primary)">Microsoft Entra ID</strong> (Azure AD) via an app registration with client-credentials flow. Requires <strong style="color:var(--color-text-primary)">Device.Read.All</strong> (application); add <strong style="color:var(--color-text-primary)">DeviceManagementManagedDevices.Read.All</strong> if Intune sync is enabled, and <strong style="color:var(--color-text-primary)">User.Read.All</strong> + <strong style="color:var(--color-text-primary)">Group.Read.All</strong> + <strong style="color:var(--color-text-primary)">OrgContact.Read.All</strong> (or <strong style="color:var(--color-text-primary)">Directory.Read.All</strong>) if you enable address-book directory search on the Monitoring tab. Grant admin consent in the Azure portal.</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
     '<div class="form-group"><label>Tenant ID *</label><input type="text" id="f-tenantId" value="' + escapeHtml(d.tenantId || "") + '" placeholder="e.g. 00000000-0000-0000-0000-000000000000"><p class="hint">Directory (tenant) ID from Azure portal &gt; Entra ID &gt; Overview</p></div>' +
@@ -4910,6 +4939,8 @@ async function openCreateModal(type) {
         }
         var verifyPresenceNew = _readVerifyPresenceToggle();
         if (verifyPresenceNew !== undefined) createConfig.verifyPresence = verifyPresenceNew;
+        var dirSearchNew = _readDirectorySearchToggle();
+        if (dirSearchNew !== undefined) createConfig.enableDirectorySearch = dirSearchNew;
       }
       if (isVc) {
         // vCenter per-class blocks: VMs primary (full workstation-style
@@ -5036,6 +5067,7 @@ async function openEditModal(id) {
           vmMonitor:          config.vmMonitor          || null,
           hostMonitor:        config.hostMonitor        || null,
           verifyPresence:     config.verifyPresence,
+          enableDirectorySearch: config.enableDirectorySearch,
         }) },
       ];
       body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
@@ -5491,6 +5523,8 @@ function _wireIntgEditSave(id, intg, formGetter) {
         if (srvBlock) editConfig.serverMonitor      = srvBlock;
         var verifyPresenceEdit = _readVerifyPresenceToggle();
         if (verifyPresenceEdit !== undefined) editConfig.verifyPresence = verifyPresenceEdit;
+        var dirSearchEdit = _readDirectorySearchToggle();
+        if (dirSearchEdit !== undefined) editConfig.enableDirectorySearch = dirSearchEdit;
       }
       if (isVc) {
         // vCenter per-class blocks: VMs primary. The host block's extra

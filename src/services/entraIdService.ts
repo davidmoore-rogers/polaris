@@ -223,6 +223,95 @@ async function graphPage(
   return results.slice(0, hardCap);
 }
 
+// ─── Directory (GAL) search ─────────────────────────────────────────────────
+//
+// The address book's live lookup into the organization's directory. NOTHING is
+// persisted — results exist for the duration of one typeahead; only an address
+// an operator actually picks becomes a rule recipient or a saved Contact.
+//
+// This is the ONLY people-facing query in the integration, which otherwise
+// reads /devices + /deviceManagement/managedDevices. It therefore needs Graph
+// application permissions the integration has never requested — User.Read.All,
+// Group.Read.All and OrgContact.Read.All (or Directory.Read.All covering all
+// three) — which is why it is gated behind the per-integration
+// `enableDirectorySearch` opt-in: without the grant every keystroke would 403.
+
+/** One directory hit, normalized to the address-book entry shape. */
+export interface DirectoryHit {
+  id: string;
+  email: string;
+  name: string | null;
+  description: string | null;
+  kind: "person" | "group";
+}
+
+function escapeSearchTerm(q: string): string {
+  // $search values are double-quoted phrases; a stray quote or backslash would
+  // break the expression, so drop them rather than trying to escape.
+  return q.replace(/["\\]/g, "").trim();
+}
+
+/**
+ * Search people, mail-enabled groups (distribution lists) and org contacts.
+ * The three queries run in parallel and degrade independently — a tenant that
+ * granted User.Read.All but not Group.Read.All still gets people rather than an
+ * error.
+ *
+ * VERIFY ON A REAL TENANT: the `$search` + `$filter` + `$count=true`
+ * combination on /groups is the shape most likely to need adjusting (Graph
+ * requires ConsistencyLevel: eventual for it, which graphGet always sends).
+ */
+export async function searchDirectoryEntra(
+  config: EntraIdConfig,
+  query: string,
+  limit = 25,
+  signal?: AbortSignal,
+): Promise<DirectoryHit[]> {
+  const q = escapeSearchTerm(query);
+  if (q.length < 2) return [];
+  const enc = encodeURIComponent(`"displayName:${q}" OR "mail:${q}"`);
+
+  const [users, groups, contacts] = await Promise.all([
+    graphPage(
+      config,
+      `https://graph.microsoft.com/v1.0/users?$search=${enc}&$select=id,displayName,mail,userPrincipalName,jobTitle,department&$top=${limit}`,
+      limit,
+      signal,
+    ).catch(() => [] as any[]),
+    graphPage(
+      config,
+      `https://graph.microsoft.com/v1.0/groups?$search=${enc}&$filter=mailEnabled%20eq%20true&$count=true&$select=id,displayName,mail,description&$top=${limit}`,
+      limit,
+      signal,
+    ).catch(() => [] as any[]),
+    graphPage(
+      config,
+      `https://graph.microsoft.com/v1.0/contacts?$search=${enc}&$select=id,displayName,mail,companyName&$top=${limit}`,
+      limit,
+      signal,
+    ).catch(() => [] as any[]),
+  ]);
+
+  const out: DirectoryHit[] = [];
+  for (const u of users) {
+    // A mailbox-less account (a service principal, an unlicensed user) can't
+    // receive email, so it isn't a recipient. UPN is NOT a fallback: it often
+    // isn't a routable address.
+    if (!u?.mail) continue;
+    const bits = [u.jobTitle, u.department].filter(Boolean);
+    out.push({ id: String(u.id), email: String(u.mail), name: u.displayName ?? null, description: bits.join(" — ") || null, kind: "person" });
+  }
+  for (const g of groups) {
+    if (!g?.mail) continue;
+    out.push({ id: String(g.id), email: String(g.mail), name: g.displayName ?? null, description: g.description || "Distribution list", kind: "group" });
+  }
+  for (const c of contacts) {
+    if (!c?.mail) continue;
+    out.push({ id: String(c.id), email: String(c.mail), name: c.displayName ?? null, description: c.companyName || "Org contact", kind: "person" });
+  }
+  return out.slice(0, limit);
+}
+
 // ─── Connection test ────────────────────────────────────────────────────────
 
 export async function testConnection(config: EntraIdConfig): Promise<{

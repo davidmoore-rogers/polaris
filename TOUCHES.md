@@ -1471,6 +1471,29 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/directorySearchService.ts
+
+**What it owns:** The address book's live lookup into the organization's directory (GAL) — fanning one typeahead query across every opted-in AD / Entra integration and merging the hits.
+
+**Public API:** `searchDirectory(query, limit)`, `directorySearchAvailable()`, `bumpDirectoryCache()`, `MIN_DIRECTORY_QUERY`, `DirectorySearchEntry`.
+
+**Cross-service deps:** `prisma` (integration rows only), `entraIdService.searchDirectoryEntra`, `activeDirectoryService.searchDirectoryAd`, `utils/ttlCache`, `utils/logger`.
+
+**Used by:** `contactService.searchAddressBook` (when `includeDirectory`), which is reached from `GET /contacts/search?directory=1`.
+
+**Readers of the state it writes:** none — it writes nothing.
+
+**Invariants:**
+- **Nothing is persisted, ever.** Results exist for one request plus a 60s cache; only an address an operator actually picks becomes a rule recipient or a saved `Contact`. Do not "improve" this into a periodic sync without a deliberate decision: a sync lands the whole employee roster (names, addresses, titles, departments) in the Polaris DB with its own retention, backup and audit-exposure surface.
+- **Query strings and results never reach an Event or a log message.** `Event.details` is readable by anyone with events access and is shipped off-host by the syslog/SFTP archivers; a search term naming a person must not go there. The per-integration failure log deliberately carries only the integration id and type.
+- **Opt-in per integration** (`config.enableDirectorySearch`, default false). Both backends need permissions device discovery never required — Graph `User.Read.All` + `Group.Read.All` + `OrgContact.Read.All` (or `Directory.Read.All`), and an AD bind that can read user/group/contact objects. Without the grant every keystroke 403s, so the gate keeps a broken typeahead off installs that haven't set it up. Granting them is a **tenant-admin decision and needs human review** — it widens what Polaris can read from the directory.
+- **Failures degrade, they don't propagate.** `Promise.allSettled` per integration, and `searchAddressBook` wraps the whole call — a directory outage must still leave the local users ∪ contacts typeahead working.
+- Minimum query length 2 (`MIN_DIRECTORY_QUERY`); the client debounces ~250 ms and the route is rate-limited (`contactSearchLimiter`). All three exist because this is the only keystroke-driven path in Polaris that proxies an external API.
+
+**When changing this:** adding a backend means a `search<Backend>` export returning `DirectoryHit[]` plus a branch in the fan-out and its own opt-in flag — keep the failure isolation. The Entra `/groups` query combines `$search` + `$filter` + `$count=true`, which is the shape most likely to need adjusting against a real tenant; it's flagged in the source.
+
+---
+
 ## services/notificationRuleService.ts
 
 **What it owns:** Notification RULE logic — scope matching, the "rules matching this asset" lookup, rule CRUD, and the change-type subscription cache that gates the persist* change-detectors.

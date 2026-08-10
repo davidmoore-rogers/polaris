@@ -818,7 +818,9 @@ const api = {
   contacts: {
     list:    ()      => request("GET", "/contacts"),
     // Unified recipient typeahead: Polaris users ∪ address-book contacts.
-    search:  (q)     => request("GET", "/contacts/search" + toQuery({ q })),
+    // `directory` additionally queries the opted-in AD/Entra integrations
+    // (live lookup, nothing persisted).
+    search:  (q, directory) => request("GET", "/contacts/search" + toQuery({ q, directory: directory ? 1 : undefined })),
     preview: (body)  => request("POST", "/contacts/preview", body),
     create:  (body)  => request("POST", "/contacts", body),
     update:  (id, b) => request("PUT", `/contacts/${id}`, b),

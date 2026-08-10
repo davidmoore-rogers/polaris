@@ -2470,7 +2470,7 @@ async function openAutomationWizard(existing) {
         clearTimeout(suggestTimer);
         if (q.length < 2 || !canReadContacts()) { closeSuggest(); return; }
         suggestTimer = setTimeout(function () {
-          api.contacts.search(q).then(function (r) {
+          api.contacts.search(q, true).then(function (r) {
             // Ignore a response that lost the race with newer typing.
             if (input.value.trim() !== q) return;
             openSuggest((r && r.entries) || []);

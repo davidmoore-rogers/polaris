@@ -41,6 +41,8 @@ import {
 } from "./tagAssignmentService.js";
 import { listRecipientUsers } from "./notificationRecipientService.js";
 import { logEvent } from "./eventLogService.js";
+import { logger } from "../utils/logger.js";
+import { MIN_DIRECTORY_QUERY, searchDirectory } from "./directorySearchService.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -354,7 +356,7 @@ export async function resolveContactEmailsForAsset(assetId: string): Promise<str
  */
 export async function searchAddressBook(
   query: string,
-  opts: { limit?: number; callerUsername?: string | null } = {},
+  opts: { limit?: number; callerUsername?: string | null; includeDirectory?: boolean } = {},
 ): Promise<AddressBookEntry[]> {
   const limit = opts.limit ?? 50;
   const q = String(query ?? "").trim().toLowerCase();
@@ -383,6 +385,27 @@ export async function searchAddressBook(
       kind: "person",
       owned: !!opts.callerUsername && c.createdBy === opts.callerUsername,
     });
+  }
+
+  // Directory (GAL) hits rank BELOW the local sources: a Polaris account or a
+  // curated contact is the entry an operator meant, and the directory is the
+  // long tail. Live only — nothing here is persisted (see directorySearchService).
+  if (opts.includeDirectory && q.length >= MIN_DIRECTORY_QUERY) {
+    try {
+      for (const d of await searchDirectory(q, limit)) {
+        entries.push({
+          source: d.source,
+          id: d.id,
+          email: d.email,
+          name: d.name,
+          description: d.description,
+          kind: d.kind,
+        });
+      }
+    } catch (err) {
+      // A directory outage must not break the local typeahead.
+      logger.warn({ err }, "Directory search failed; returning local address-book results only");
+    }
   }
 
   const seen = new Set<string>();
