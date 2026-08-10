@@ -1040,21 +1040,55 @@ interface ProposedReservationData {
   sourceType: string;
 }
 
+/**
+ * Which of hostname / owner / projectRef a conflict should be raised on.
+ *
+ * Default ("differs") — any difference is operator-reviewable. This is the
+ * manual-reservation case: discovery must never overwrite an operator-typed
+ * row, so every divergence gets a card.
+ *
+ * "fill-only" — the existing row's own non-empty values WIN OUTRIGHT and are
+ * never offered for review; only a blank field that the proposal could fill is
+ * worth an operator's time. Used for the VIP ↔ DHCP collision, where the same
+ * IP is both a FortiGate VIP and a DHCP lease/reservation: the VIP is
+ * load-bearing firewall config, so its owner / projectRef take precedence over
+ * whatever the DHCP side reports. Accepting a merge conflict has only ever
+ * filled blanks (see conflictResolutionService's merge mode), so a card whose
+ * fields are all populated offered the operator no decision — just noise on
+ * every VIP that also holds a lease.
+ *
+ * Exported for unit tests; the conflict write itself needs a DB.
+ */
+export function computeConflictFields(
+  proposed: { hostname?: string | null; owner?: string | null; projectRef?: string | null },
+  existing: { hostname?: string | null; owner?: string | null; projectRef?: string | null },
+  mode: "differs" | "fill-only" = "differs",
+): string[] {
+  const isBlank = (v?: string | null): boolean => v == null || v.trim() === "";
+  const fields: Array<"hostname" | "owner" | "projectRef"> = ["hostname", "owner", "projectRef"];
+  return fields.filter((f) => {
+    const p = proposed[f] ?? null;
+    const e = existing[f] ?? null;
+    if (mode === "fill-only") return isBlank(e) && !isBlank(p);
+    return p !== e;
+  });
+}
+
 async function upsertConflict(
   reservationId: string,
   integrationId: string,
   proposed: ProposedReservationData,
   existing: { hostname?: string | null; owner?: string | null; projectRef?: string | null; notes?: string | null },
+  mode: "differs" | "fill-only" = "differs",
 ): Promise<void> {
-  const conflictFields: string[] = [];
-  if ((proposed.hostname ?? null) !== (existing.hostname ?? null)) conflictFields.push("hostname");
-  if ((proposed.owner ?? null) !== (existing.owner ?? null)) conflictFields.push("owner");
-  if ((proposed.projectRef ?? null) !== (existing.projectRef ?? null)) conflictFields.push("projectRef");
+  const conflictFields = computeConflictFields(proposed, existing, mode);
   if (conflictFields.length === 0) {
-    // Values are back in sync — auto-resolve any stale pending conflict on this
+    // Nothing left to review — auto-resolve any stale pending conflict on this
     // reservation that was raised by a previous run when they differed. Without
     // this, a conflict card lingers in the UI showing two identical-looking
-    // values because conflictFields was frozen at upsert time.
+    // values because conflictFields was frozen at upsert time. This is also the
+    // cleanup path for VIP ↔ DHCP cards raised before "fill-only" existed: the
+    // next discovery cycle re-evaluates them and closes them out.
     await prisma.conflict.updateMany({
       where: { reservationId, status: "pending" },
       data: { status: "rejected", resolvedBy: "auto", resolvedAt: new Date() },
@@ -3736,26 +3770,46 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               existingRes.vipInfo = newVipInfo;
             }
           } else if (existingRes.sourceType === "dhcp_reservation" || existingRes.sourceType === "dhcp_lease") {
-            // VIP + DHCP collision: same IP is both a DHCP lease/reservation
-            // AND a VIP external on the FortiGate. Update vipInfo so the
-            // operator sees the VIP badge immediately, then raise a merge
-            // conflict so they can review folding the VIP metadata into
-            // this row. upsertConflict's 30-day re-raise guard prevents
-            // nagging every discovery cycle once resolved.
+            // VIP + DHCP collision (VIP arriving second): same IP is both a
+            // DHCP lease/reservation AND a VIP external on the FortiGate.
+            // Update vipInfo so the operator sees the VIP badge immediately.
+            //
+            // VIP metadata takes precedence over the DHCP side's owner /
+            // projectRef, so the canonical DHCP-discovery placeholders are
+            // overwritten in place rather than offered as a conflict — the
+            // mirror of the Phase 5 VIP-succession path, which overwrites
+            // canonical VIP placeholders when the VIP goes away. Anything
+            // outside that allowlist is operator-owned (or an asset's
+            // assignedTo) and survives untouched. The remaining conflict is
+            // fill-only: it raises a card solely for fields this row left
+            // blank.
             const newVipInfo = { name: vip.name, device: vip.device, extip: vip.extip, role, isVirtualServer: vip.isVirtualServer };
             const cur = existingRes.vipInfo as any;
+            const vipUpdate: Record<string, unknown> = {};
             if (!cur || cur.name !== newVipInfo.name || cur.device !== newVipInfo.device || cur.role !== newVipInfo.role || !!cur.isVirtualServer !== newVipInfo.isVirtualServer) {
+              vipUpdate.vipInfo = newVipInfo;
+            }
+            const isCanonicalDhcpOwner =
+              existingRes.owner === "dhcp-lease" || existingRes.owner === "dhcp-reservation";
+            if (isCanonicalDhcpOwner && existingRes.owner !== proposedOwner) vipUpdate.owner = proposedOwner;
+            if (existingRes.projectRef === projectRefLabel && existingRes.projectRef !== proposedProjectRef) {
+              vipUpdate.projectRef = proposedProjectRef;
+            }
+            if (Object.keys(vipUpdate).length > 0) {
               await prisma.reservation.update({
                 where: { id: existingRes.id },
-                data: { vipInfo: newVipInfo },
+                data: vipUpdate,
               });
-              existingRes.vipInfo = newVipInfo;
+              if (vipUpdate.vipInfo) existingRes.vipInfo = newVipInfo;
+              if (vipUpdate.owner) existingRes.owner = proposedOwner;
+              if (vipUpdate.projectRef) existingRes.projectRef = proposedProjectRef;
             }
             await upsertConflict(
               existingRes.id,
               integrationId,
               { hostname: proposedHostname, owner: proposedOwner, projectRef: proposedProjectRef, notes: proposedNotes, sourceType: "vip" },
               existingRes,
+              "fill-only",
             );
           }
           continue;
@@ -4144,9 +4198,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // VIP + DHCP collision (DHCP arriving second): the FortiGate has a
           // VIP external IP that also shows up as a DHCP lease/reservation.
           // Silent fill of macAddress (technical observation; no operator
-          // decision needed), then raise a merge conflict for the metadata
-          // fold-in review. upsertConflict's 30-day guard prevents re-raise
-          // once the operator resolves.
+          // decision needed), then a FILL-ONLY merge conflict: the VIP row's
+          // own owner / projectRef / hostname are authoritative (VIP is
+          // load-bearing firewall config), so the DHCP side's values are never
+          // offered for review — only a field the VIP row left blank raises a
+          // card. upsertConflict's 30-day guard prevents re-raise once the
+          // operator resolves.
           phase5Stats.pathExistingVipMacFill++;
           if (macNormalized && !existingRes.macAddress) {
             await prisma.reservation.update({
@@ -4161,6 +4218,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             integrationId,
             { hostname: proposedHostname, owner: proposedOwner, projectRef: projectRefLabel, notes: proposedNotes, sourceType: proposedSourceType },
             existingRes,
+            "fill-only",
           );
           phase5Stats.writesUpsertConflict++;
         } else if (
