@@ -755,6 +755,15 @@ export const deliveryTargetSchema = z.object({
   recipientScopeRegion: z.boolean().optional(), // users whose region tags match the rule's scope region tag(s)
   recipientDeviceRegion: z.boolean().optional(), // users whose region tags match the TRIGGERING asset's region: tag(s)
   recipientAssetContacts: z.boolean().optional(), // address-book contacts owning the TRIGGERING asset (email only)
+  // Broadcast modes — web_push only (rejected on other channel types at rule
+  // save). recipientAllUsers = every user account; recipientAllRegions = every
+  // user carrying at least one region tag; recipientRegions = users in the
+  // NAMED regions. Names are stored BARE ("Atlanta"), matching how
+  // User/Role/GroupMapping.regionTags are stored — the `region:` prefix only
+  // exists on ASSET tags.
+  recipientAllUsers: z.boolean().optional(),
+  recipientAllRegions: z.boolean().optional(),
+  recipientRegions: z.array(z.string().max(100)).max(200).optional(),
   recipientTags: z.array(z.string().max(100)).max(200).optional(), // legacy tag-routing (kept for back-compat)
 });
 
@@ -874,6 +883,11 @@ export const notifyActionSchema = z
     // Email transports only: a contact is an address, not an account, so there
     // is no push subscription to reach.
     recipientAssetContacts: z.boolean().optional(),
+    // Broadcast modes — see deliveryTargetSchema. web_push only; validated at
+    // rule save so the model can never hold a state the builder won't render.
+    recipientAllUsers: z.boolean().optional(),
+    recipientAllRegions: z.boolean().optional(),
+    recipientRegions: z.array(z.string().max(100)).max(200).optional(),
     recipientTags: z.array(z.string().max(100)).max(200).optional(),
     // Per-action email composition override; falls back to the rule-level
     // emailComposition, then the pre-feature defaults. Email transports only.
@@ -1239,6 +1253,9 @@ export function targetsToNotifyActions(
     ...(t.recipientScopeRegion !== undefined ? { recipientScopeRegion: t.recipientScopeRegion } : {}),
     ...(t.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: t.recipientDeviceRegion } : {}),
     ...(t.recipientAssetContacts !== undefined ? { recipientAssetContacts: t.recipientAssetContacts } : {}),
+    ...(t.recipientAllUsers !== undefined ? { recipientAllUsers: t.recipientAllUsers } : {}),
+    ...(t.recipientAllRegions !== undefined ? { recipientAllRegions: t.recipientAllRegions } : {}),
+    ...(t.recipientRegions?.length ? { recipientRegions: t.recipientRegions } : {}),
     ...(t.recipientTags?.length ? { recipientTags: t.recipientTags } : {}),
     emailComposition: emailComposition ?? null,
   }));
@@ -1257,6 +1274,9 @@ export function actionsToTargets(actions: AutomationAction[]): DeliveryTarget[] 
       ...(a.recipientScopeRegion !== undefined ? { recipientScopeRegion: a.recipientScopeRegion } : {}),
       ...(a.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: a.recipientDeviceRegion } : {}),
       ...(a.recipientAssetContacts !== undefined ? { recipientAssetContacts: a.recipientAssetContacts } : {}),
+      ...(a.recipientAllUsers !== undefined ? { recipientAllUsers: a.recipientAllUsers } : {}),
+      ...(a.recipientAllRegions !== undefined ? { recipientAllRegions: a.recipientAllRegions } : {}),
+      ...(a.recipientRegions?.length ? { recipientRegions: a.recipientRegions } : {}),
       ...(a.recipientTags?.length ? { recipientTags: a.recipientTags } : {}),
     }));
 }

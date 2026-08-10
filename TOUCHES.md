@@ -1454,6 +1454,11 @@ Listed alphabetically.
 
 **Import-cycle note:** `contactService` imports `notificationRecipientService` for `listRecipientUsers`, so the delivery expander must NOT import `contactService` back. `expandDeliveries` therefore takes the resolved `assetContactEmails` as an option and `automationActionService` does the lookup — the same shape as the region tags it already receives. Keep it that way.
 
+**Two tag namespaces in the recipient index (`notificationRecipientService`).** `IndexedUser` carries BOTH `matchSet` (region ∪ other tags, flattened) and `regionSet` (region tags only). They are not interchangeable:
+- `resolveRecipientUsers` (legacy free-form `recipientTags`) and `recipientDeviceRegion` / `recipientScopeRegion` use **`matchSet`** — changing that would alter delivery for existing rules.
+- `resolveUsersByRegions` / `resolveUsersInAnyRegion` (the push broadcast modes, where an operator picks a region BY NAME from the map-region catalogue) use **`regionSet`**. A user whose unrelated *other* tag happens to read "Atlanta" must not receive Atlanta's alerts, which is exactly what the flattened set would do.
+Also note the two storage conventions: user/role/group `regionTags` are stored **bare** ("Atlanta"), asset tags carry the **`region:` prefix**. `normalizeNeedle` strips the prefix, so either form may be passed in — but store bare names in `recipientRegions`.
+
 **Invariants:**
 - **`email` is stored trimmed + lower-cased.** The unique index is what enforces one row per address, and lower-casing at the boundary is what makes it case-insensitive. It also has to match `resolveEmailRecipients`' normalized set, or a contact address would dedupe inconsistently against a user's.
 - **`resolveContactsForAsset` must never scan the fleet.** It is on the alert path. A pin match is a plain id comparison with NO asset load; criteria are evaluated against the ONE triggering asset with `assetMatchesCriteria`; CIDR containment is a single round-trip across all contacts' CIDRs combined, and skipped entirely when nobody filters by subnet. If you add a criteria field that needs another relation, extend `SINGLE_ASSET_CANDIDATE_SELECT` in `tagAssignmentService` — do not add a query per contact.

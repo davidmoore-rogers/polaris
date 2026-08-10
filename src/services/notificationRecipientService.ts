@@ -84,6 +84,15 @@ export interface RecipientUser {
 interface IndexedUser extends RecipientUser {
   /** Lower-cased, region-prefix-stripped union of effective region+other tags. */
   matchSet: Set<string>;
+  /**
+   * Effective REGION tags only, lower-cased. Separate from matchSet because
+   * that one flattens region ∪ other into one namespace — tolerable for the
+   * legacy free-form `recipientTags`, but wrong once an operator explicitly
+   * picks a *region*: a user whose unrelated "other" tag happened to read
+   * "Atlanta" would receive Atlanta's alerts. recipientRegions /
+   * recipientAllRegions match on this; recipientTags keeps matchSet.
+   */
+  regionSet: Set<string>;
 }
 
 // ─── User tag index (short-TTL cache) ───────────────────────────────────────
@@ -121,10 +130,14 @@ function loadUserIndex(): Promise<IndexedUser[]> {
   for (const u of users) {
     const scopes = await resolveTagScopesForUser(u);
     const matchSet = new Set<string>();
-    for (const t of [...scopes.regionTags.effective, ...scopes.otherTags.effective]) {
-      matchSet.add(normalizeNeedle(t));
+    const regionSet = new Set<string>();
+    for (const t of scopes.regionTags.effective) {
+      const n = normalizeNeedle(t);
+      matchSet.add(n);
+      regionSet.add(n);
     }
-    index.push({ id: u.id, email: u.email, displayName: u.displayName, matchSet });
+    for (const t of scopes.otherTags.effective) matchSet.add(normalizeNeedle(t));
+    index.push({ id: u.id, email: u.email, displayName: u.displayName, matchSet, regionSet });
   }
   return index;
   });
@@ -143,6 +156,45 @@ export async function resolveRecipientUsers(recipientTags: string[] | undefined)
   return index
     .filter((u) => needles.some((n) => u.matchSet.has(n)))
     .map(({ id, email, displayName }) => ({ id, email, displayName }));
+}
+
+/**
+ * Users in the NAMED regions — matched against region tags ONLY, unlike
+ * resolveRecipientUsers, which searches the flattened region ∪ other set. Once
+ * an operator picks a region by name from the map-region catalogue, matching a
+ * same-named "other" tag would deliver to the wrong people.
+ *
+ * Names are compared bare + lower-cased, so a caller may pass either
+ * "Atlanta" (how User.regionTags stores it) or "region:Atlanta" (how ASSET tags
+ * store it) — normalizeNeedle strips the prefix either way.
+ */
+export async function resolveUsersByRegions(regions: string[] | undefined): Promise<RecipientUser[]> {
+  if (!regions || regions.length === 0) return [];
+  const needles = regions.map(normalizeNeedle).filter(Boolean);
+  if (needles.length === 0) return [];
+  const index = await loadUserIndex();
+  return index
+    .filter((u) => needles.some((n) => u.regionSet.has(n)))
+    .map(({ id, email, displayName }) => ({ id, email, displayName }));
+}
+
+/**
+ * Every user carrying at least one region tag ("all user regions"). A user with
+ * no region at all is deliberately NOT included — they belong to no region, so
+ * a region-wide broadcast doesn't cover them; recipientAllUsers is the control
+ * for "literally everyone".
+ */
+export async function resolveUsersInAnyRegion(): Promise<RecipientUser[]> {
+  const index = await loadUserIndex();
+  return index
+    .filter((u) => u.regionSet.size > 0)
+    .map(({ id, email, displayName }) => ({ id, email, displayName }));
+}
+
+/** Every user account — the explicit broadcast opt-in (recipientAllUsers). */
+export async function resolveAllUsers(): Promise<RecipientUser[]> {
+  const index = await loadUserIndex();
+  return index.map(({ id, email, displayName }) => ({ id, email, displayName }));
 }
 
 /** Specific users by id (the rule's "individual user accounts" recipients). */
@@ -268,6 +320,11 @@ export async function expandDeliveries(
   const usersForTarget = async (t: DeliveryTarget): Promise<RecipientUser[]> => {
     const map = new Map<string, RecipientUser>();
     const addUsers = (us: RecipientUser[]) => us.forEach((u) => map.set(u.id, u));
+    // Broadcast modes first — recipientAllUsers subsumes every other source, so
+    // resolving it short-circuits the rest rather than unioning redundantly.
+    if (t.recipientAllUsers) return await resolveAllUsers();
+    if (t.recipientAllRegions) addUsers(await resolveUsersInAnyRegion());
+    if (t.recipientRegions?.length) addUsers(await resolveUsersByRegions(t.recipientRegions));
     if (t.recipientUserIds?.length) addUsers(await resolveRecipientUsersByIds(t.recipientUserIds));
     if (t.recipientDeviceRegion && assetRegionTags?.length) addUsers(await resolveRecipientUsers(assetRegionTags));
     if (t.recipientScopeRegion && scopeRegionTags?.length) addUsers(await resolveRecipientUsers(scopeRegionTags));

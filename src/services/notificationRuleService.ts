@@ -28,6 +28,7 @@ import {
   evaluateScopeCondition,
 } from "./notificationTypes.js";
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
+import { listRegions } from "./mapRegionService.js";
 import { ipInCidr } from "../utils/cidr.js";
 import { scopeCidrOf, type ScopeConditionAsset } from "./notificationTypes.js";
 
@@ -231,8 +232,9 @@ export async function listScopeOptions(): Promise<{
   manufacturers: string[];
   models: string[];
   subnets: { id: string; name: string; cidr: string }[];
+  regions: string[];
 }> {
-  const [mfrRows, modelRows, subnets] = await Promise.all([
+  const [mfrRows, modelRows, subnets, regions] = await Promise.all([
     prisma.asset.findMany({
       select: { manufacturer: true },
       distinct: ["manufacturer"],
@@ -250,11 +252,20 @@ export async function listScopeOptions(): Promise<{
       where: { status: { not: "deprecated" } },
       orderBy: { cidr: "asc" },
     }),
+    // The map-region catalogue rides THIS payload rather than being fetched
+    // from GET /map/regions, which is gated `mapRegions:read` — an operator who
+    // can build an automation may not hold that key, and the region picker
+    // would silently degrade to free text. This endpoint is already behind
+    // automationManagement:read, which the wizard has by definition.
+    listRegions().catch(() => []),
   ]);
   return {
     manufacturers: mfrRows.map((r) => r.manufacturer).filter((m): m is string => !!m && m.trim() !== ""),
     models: modelRows.map((r) => r.model).filter((m): m is string => !!m && m.trim() !== ""),
     subnets,
+    // Bare names — how User/Role/GroupMapping.regionTags store them. The
+    // `region:` prefix exists only on ASSET tags.
+    regions: regions.map((r) => r.name).filter((n) => !!n && n.trim() !== "").sort(),
   };
 }
 
@@ -320,11 +331,17 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
   // resolved actions — so a new action location can't escape these checks.
   const all = allRuleActionRefs(input);
 
-  const notifyRefs: { label: string; channelId: string }[] = [];
+  const notifyRefs: { label: string; channelId: string; broadcast: boolean }[] = [];
   const scriptRefs: { label: string; scriptId: string; runOn: string }[] = [];
   for (const { action, label } of all) {
     if (action.type === "notify") {
-      notifyRefs.push({ label, channelId: action.channelId });
+      notifyRefs.push({
+        label,
+        channelId: action.channelId,
+        // The three broadcast modes are Web-Push-only; flagged here so the
+        // channel-type check below can reject them without a second walk.
+        broadcast: !!(action.recipientAllUsers || action.recipientAllRegions || action.recipientRegions?.length),
+      });
     } else if (action.type === "api_call") {
       let host = "";
       try {
@@ -360,12 +377,21 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
   if (channelIds.length === 0) return;
   const channels = await prisma.notificationChannel.findMany({
     where: { id: { in: channelIds } },
-    select: { id: true },
+    select: { id: true, type: true },
   });
-  const known = new Set(channels.map((c) => c.id));
+  const known = new Map(channels.map((c) => [c.id, c.type]));
   for (const ref of notifyRefs) {
     if (!known.has(ref.channelId)) {
       throw new AppError(400, `${ref.label}: references a delivery channel that no longer exists`);
+    }
+    // Keep the stored shape renderable: the builder only offers the broadcast
+    // modes on Web Push, so a rule holding them on an email/chat channel would
+    // be a state no UI can show or edit back out.
+    if (ref.broadcast && known.get(ref.channelId) !== "web_push") {
+      throw new AppError(
+        400,
+        `${ref.label}: "all users" / region broadcast is only available on a Web Push channel — pick recipients explicitly for email and chat channels`,
+      );
     }
   }
 }
