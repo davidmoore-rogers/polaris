@@ -4057,6 +4057,9 @@ var _assetSystemRefreshTimer  = null;
 var _assetSystemSiCache       = null;
 var _ifaceRefreshTimer        = null;
 var _sensorRefreshTimer       = null;
+// Severity tiers for the open sensor chart, keyed "<assetId>|<sensorName>" so a
+// range change or silent tick reuses them and switching sensors re-asks.
+var _sensorSevTiers           = { key: null, tiers: [] };
 var _ipsecRefreshTimer        = null;
 var _monitorSettingsCache     = null;  // global monitor settings, fetched once per session
 var _currentAssetForRefresh   = null;  // asset object cached so refresh schedulers can read its per-asset intervals
@@ -7368,6 +7371,72 @@ function _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) {
   return out;
 }
 
+// ─── Automation severity shading on charts ─────────────────────────────────
+//
+// A chart's line fades into warning / serious / critical wherever the reading
+// enters a tier of an automation watching THAT metric on THIS asset (severity
+// bands included — business rule 19). The tier ladder is computed SERVER-side by
+// GET /assets/:id/metric-thresholds (same resolveTierLadder the engine runs), so
+// the shading can't disagree with what actually fires; the pure gradient math
+// lives in public/js/chart-severity.js.
+//
+// Contract for a chart that wants shading: fetch tiers into its render opts,
+// then call _severityChartLayer(...) and use the returned {defs, lines, stroke,
+// labels} — `stroke` is the flat accent color when nothing watches the metric,
+// so the un-shaded path is unchanged. Currently wired for the per-sensor chart;
+// CPU / memory / interface charts can opt in the same way.
+
+var _sevChartSeq = 0;
+
+/** Tiers for one (asset, metric, sensor) — best-effort, never blocks a chart. */
+function _loadMetricSeverityTiers(assetId, metric, dim) {
+  if (!assetId || !metric) return Promise.resolve([]);
+  var params = { metric: metric };
+  if (dim && dim.sensorName)  params.sensorName  = dim.sensorName;
+  if (dim && dim.sensorClass) params.sensorClass = dim.sensorClass;
+  return api.assets.metricThresholds(assetId, params)
+    .then(function (res) { return (res && res.tiers) || []; })
+    .catch(function () { return []; }); // no shading rather than no chart
+}
+
+/**
+ * SVG pieces for severity shading over a value domain [minV, maxV].
+ * Returns {defs, lines, stroke, labels}: `defs` holds the vertical user-space
+ * gradient, `lines` the dashed threshold references (draw inside the clipped
+ * series group), `stroke` the paint for the line + dots, `labels` the right-edge
+ * tier captions (draw OUTSIDE the clip so they aren't cut off).
+ */
+function _severityChartLayer(kind, tiers, minV, maxV, geo) {
+  var flat = { defs: "", lines: "", stroke: "var(--color-accent)", labels: "" };
+  var CS = window.PolarisChartSeverity;
+  if (!CS || !tiers || !tiers.length) return flat;
+  var stops = CS.gradientStops(tiers, minV, maxV);
+  if (!stops.length) return flat;
+
+  var id = "sevgrad-" + kind + "-" + (++_sevChartSeq);
+  var y0 = geo.padT, y1 = geo.padT + geo.innerH;
+  var defs =
+    '<defs><linearGradient id="' + id + '" gradientUnits="userSpaceOnUse" x1="0" y1="' + y0 + '" x2="0" y2="' + y1 + '">' +
+      stops.map(function (s) {
+        return '<stop offset="' + (Math.round(s.offset * 10000) / 100) + '%" style="stop-color:' + s.color + '"/>';
+      }).join("") +
+    '</linearGradient></defs>';
+
+  var lines = "", labels = "";
+  CS.visibleTiers(tiers, minV, maxV).forEach(function (t) {
+    var y = geo.yFor(t.threshold);
+    var color = CS.colorOf(t.severity);
+    lines += '<line x1="' + geo.padL + '" y1="' + y + '" x2="' + (geo.W - geo.padR) + '" y2="' + y +
+      '" stroke="' + color + '" stroke-width="1" stroke-dasharray="4,4" opacity="0.55">' +
+      '<title>' + escapeHtml(t.ruleName + " — " + CS.tierLabel(t, geo.unit)) + '</title></line>';
+    // Caption rides just above its line, right-aligned to the plot edge.
+    labels += '<text x="' + (geo.W - geo.padR - 2) + '" y="' + Math.max(geo.padT + 8, y - 3) +
+      '" text-anchor="end" font-size="9" fill="' + color + '" opacity="0.9">' +
+      escapeHtml(CS.tierLabel(t, geo.unit)) + '</text>';
+  });
+  return { defs: defs, lines: lines, stroke: "url(#" + id + ")", labels: labels };
+}
+
 // ─── Per-sensor temperature slide-over ─────────────────────────────────────
 //
 // Sits on top of the asset details panel like the interface and IPsec slide-
@@ -7556,12 +7625,32 @@ async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
       if (sensorTierPart) sensorParts.unshift(sensorTierPart);
       _renderChartStats(stats, samples.length, sensorParts);
     }
-    _renderSensorChart(chartEl, samples, {
+    var chartOpts = {
       since:   data.since,
       until:   data.until,
       subject: sensorName,
       unit:    unit,
-    });
+      tiers:   _sensorSevTiers.key === assetId + "|" + sensorName ? _sensorSevTiers.tiers : [],
+    };
+    _renderSensorChart(chartEl, samples, chartOpts);
+    // Severity tiers for THIS sensor (class included, so a temperature
+    // automation can't shade a fan chart). Fetched once per sensor — thresholds
+    // don't move with the time window — and applied by re-rendering, so the
+    // chart never waits on the lookup.
+    var sevKey = assetId + "|" + sensorName;
+    if (_sensorSevTiers.key !== sevKey) {
+      var sensorClass = (samples[0] && samples[0].sensorClass) ||
+        (data.samples && data.samples[0] && data.samples[0].sensorClass) || "";
+      _sensorSevTiers = { key: sevKey, tiers: [] };
+      _loadMetricSeverityTiers(assetId, "hwSensorValue", { sensorName: sensorName, sensorClass: sensorClass })
+        .then(function (tiers) {
+          if (_sensorSevTiers.key !== sevKey || !tiers.length) return; // panel moved on / nothing watches it
+          _sensorSevTiers = { key: sevKey, tiers: tiers };
+          if (!document.getElementById("sensor-chart")) return;
+          chartOpts.tiers = tiers;
+          _renderSensorChart(chartEl, samples, chartOpts);
+        });
+    }
     // Stash the active selection on the chart so silent ticks / probe-now
     // refetch the same view (canonical convention from TEMPLATES.md).
     if (opts.from && opts.to) {
@@ -7679,17 +7768,27 @@ function _renderSensorChart(container, samples, opts) {
       ' transform="rotate(-90 ' + yLabelX + ' ' + yLabelY + ')">' + escapeHtml(unit ? "Reading (" + unit + ")" : "Reading") + '</text>';
 
   var clipId = _chartClipId("sensor");
+  // Severity shading: the line fades into warning/serious/critical wherever the
+  // reading enters a tier of an automation that watches THIS sensor on THIS
+  // asset (opts.tiers, from GET /assets/:id/metric-thresholds). Falls back to the
+  // flat accent stroke when nothing watches it.
+  var sev = _severityChartLayer("sensor", opts.tiers, minC, maxC, {
+    padL: padL, padT: padT, innerW: innerW, innerH: innerH, W: W, padR: padR, yFor: yFor, unit: unit,
+  });
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      sev.defs +
       labels + ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
-        '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
-        samples.map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.value) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("") +
+        sev.lines +
+        '<polyline points="' + pts + '" fill="none" stroke="' + sev.stroke + '" stroke-width="1.5"/>' +
+        samples.map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.value) + '" r="1.5" fill="' + sev.stroke + '"/>'; }).join("") +
         hits +
       '</g>' +
+      sev.labels +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";

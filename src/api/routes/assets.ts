@@ -59,6 +59,7 @@ import {
 } from "../../services/sampleHistoryService.js";
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
+import { getMetricSeverityTiers } from "../../services/notificationRuleService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
 import { getAssetProcessConnections } from "../../services/applicationMapService.js";
 import { recordOperatorPinChanges, type OperatorPinChange } from "../../services/appMapDiscoveryService.js";
@@ -1110,6 +1111,27 @@ router.get(["/:id/alerts", "/:id/notifications"], requirePermission("assets", "r
     const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string }, select: { id: true } });
     if (!asset) throw new AppError(404, "Asset not found");
     res.json(await getAssetNotifications(req.params.id as string));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/assets/:id/metric-thresholds?metric=hwSensorValue&sensorName=&sensorClass=
+// The severity thresholds that would fire on this asset's charted metric, so a
+// detail chart can shade its line with the engine's own numbers (severity bands
+// included) instead of the client re-deriving them. Gated assets:read like
+// every other per-asset chart feed.
+router.get("/:id/metric-thresholds", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const metric = String(req.query.metric || "");
+    if (!metric) throw new AppError(400, "metric is required");
+    const asset = await prisma.asset.findUnique({ where: { id }, select: { id: true } });
+    if (!asset) throw new AppError(404, "Asset not found");
+    const sensorName = req.query.sensorName ? String(req.query.sensorName) : undefined;
+    const sensorClass = req.query.sensorClass ? String(req.query.sensorClass) : undefined;
+    const dimension = sensorName || sensorClass ? { sensorName, sensorClass } : undefined;
+    res.json({ metric, tiers: await getMetricSeverityTiers(id, metric, dimension) });
   } catch (err) {
     next(err);
   }

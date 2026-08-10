@@ -1447,18 +1447,20 @@ Listed alphabetically.
 
 **What it owns:** Notification RULE logic — scope matching, the "rules matching this asset" lookup, rule CRUD, and the change-type subscription cache that gates the persist* change-detectors.
 
-**Public API:** `scopeMatchesAsset`, `findRulesMatchingAsset`, `listRules`/`getRule`/`createRule`/`updateRule`/`deleteRule`, `isChangeActionSubscribed`/`getSubscribedChangeActions`/`bumpChangeSubscriptions`, `ScopeAsset`.
+**Public API:** `scopeMatchesAsset`, `findRulesMatchingAsset`, `getMetricSeverityTiers`, `listRules`/`getRule`/`createRule`/`updateRule`/`deleteRule`, `isChangeActionSubscribed`/`getSubscribedChangeActions`/`bumpChangeSubscriptions`, `ScopeAsset`, `MetricSeverityTier`.
 
 **Cross-service deps:** `prisma`, `eventLogService.logEvent`, `notificationTypes` (incl. `resolveTierLadder` + `hwSensorFilterMatches`, shared with the engine).
 
-**Used by:** `notificationService` (asset tab), `notificationEngine` (preview scope), `notificationChangeEvents` (subscription gate), `src/api/routes/notificationRules.ts` (CRUD).
+**Used by:** `notificationService` (asset tab), `notificationEngine` (preview scope), `notificationChangeEvents` (subscription gate), `src/api/routes/notificationRules.ts` (CRUD), `src/api/routes/assets.ts` (`GET /:id/metric-thresholds` → the asset charts' severity shading).
 
 **Invariants:**
 - `scopeMatchesAsset`: AND across provided dimensions, OR within each list; `allAssets` short-circuits true; no dimensions + not allAssets ⇒ matches nothing.
 - Every rule write calls `bumpChangeSubscriptions()` so the persist* detectors pick up new/removed change subscriptions.
 - **No path may strand an active alert under a rule the engine no longer evaluates.** `updateRule` clears active alerts + deletes state rows on trigger-identity change (`system:rule-edited`) AND on enabled→disabled (`system:rule-disabled`); `deleteRule` clears active alerts (`system:rule-deleted`) BEFORE the delete (the cascade drops the state rows and `ruleId` goes NULL, after which nothing can auto-clear). Soft-clear only — history survives.
 
-**When changing this:** The subscription cache has a 60s TTL fallback; a write must bump it so change emission turns on/off promptly. Any new way to take a rule out of evaluation (new enabled-like flag, archive state) needs the same active-alert cleanup.
+- `getMetricSeverityTiers` must derive thresholds through the SAME primitives the engine evaluates — `resolveTierLadder` for the band ladder, `hwSensorFilterMatches` for dimension selection. It feeds a CHART that claims to show what an automation would do, so a private re-derivation here would draw a line that disagrees with the alerts. It deliberately skips the rule-18 carve-out: precedence decides which automation notifies, while the reading crosses the same value either way.
+
+**When changing this:** The subscription cache has a 60s TTL fallback; a write must bump it so change emission turns on/off promptly. Any new way to take a rule out of evaluation (new enabled-like flag, archive state) needs the same active-alert cleanup. A new numeric asset metric worth shading on a chart needs nothing here (the ladder is metric-agnostic) — but a new DIMENSION filter does: add its predicate beside `hwSensorFilterMatches` in notificationTypes, use it in BOTH the engine's resolver and `getMetricSeverityTiers`, and thread the identifying fields through the `/metric-thresholds` query.
 
 ---
 
