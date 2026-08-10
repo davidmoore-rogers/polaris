@@ -1418,13 +1418,38 @@ Listed alphabetically.
 
 ---
 
+## services/notificationDimensionService.ts
+
+**What it owns** — nothing persistent. Read-only lookup answering "what do THESE devices actually report for this metric dimension?" for the automation builder's dimensionFilter pickers.
+
+**Public API** — `listDimensionValues(metric, dimension, scope, narrow?)`, `dimensionPickerMeta()` (merged into `GET /automations/schema` as `dimensionPickers`), `foldValuePairs` (pure, unit-tested).
+
+**Readers / callers** — `api/routes/notificationRules.ts` only (`POST /automations/dimension-values` + the `/schema` merge). Client consumer: `public/js/automations-wizard.js` (`dimControlHtml` / `refreshDimOptions`, pure helpers on `window.PolarisAutomationDimensions`).
+
+**Depends on** — `notificationEngine.loadScopeAssetIds` (the SAME `loadScopeAssets` the evaluation tick uses — deliberate, so the picker can never offer a value from a device the automation wouldn't evaluate) and `notificationTypes.METRIC_DIMENSIONS` (which dimensions a metric takes; a mismatch is a 400, never a silent empty list that reads as "no sensors").
+
+**Invariants**
+
+- **`DIMENSION_SOURCES` keys and the `dimensionFilterSchema` fields are a LOCKSTEP PAIR.** Adding a dimensionFilter field means: the Zod field, `METRIC_DIMENSIONS`, `dimensionPhrases` (server) + `DIM_PHRASE`/`DIM_PLACEHOLDER` (client), the engine's reading resolver (the filter is only real if something applies it), and a `DIMENSION_SOURCES` entry — otherwise the input silently stays free text.
+- **`strict` must mirror the Zod shape.** `strict: true` renders a select; making a dimension a closed enum server-side without flipping this leaves the UI offering a text box the server now rejects, and vice-versa a select over a substring field would forbid legitimate partials.
+- **Bounded queries only.** This is interactive and runs against hypertables: keep the window + asset cap, and keep the aggregation Postgres-side (GROUP BY, never fetch-then-count-in-JS). `sampledAssets < scopedAssets` MUST be reported so the UI can disclose a partial list.
+- **An empty result is a load-bearing answer**, not an error — it renders as "these devices report no <noun>, this condition would never match". Which is why the widened retry exists, and why `narrowLabel` ships with it: "no hardware sensors" must not be shown when the truth is "none of the class you picked".
+
+**When changing this**
+
+1. Adding a dimension → walk the lockstep list above, then add a `DIMENSION_SOURCES` entry + a case to `tests/unit/automationDimensionValues.test.ts`.
+2. Changing the window/caps → re-reason at 100 AND 2000 assets (default scope is every asset) and update the numbers quoted in ARCHITECTURE.md.
+3. New sibling narrowing → extend `DimensionNarrow`, the route's `narrow` schema, AND the client's `awDimNarrow`, or the client will keep asking for the unnarrowed list.
+
+---
+
 ## services/notificationRuleService.ts
 
 **What it owns:** Notification RULE logic — scope matching, the "rules matching this asset" lookup, rule CRUD, and the change-type subscription cache that gates the persist* change-detectors.
 
 **Public API:** `scopeMatchesAsset`, `findRulesMatchingAsset`, `listRules`/`getRule`/`createRule`/`updateRule`/`deleteRule`, `isChangeActionSubscribed`/`getSubscribedChangeActions`/`bumpChangeSubscriptions`, `ScopeAsset`.
 
-**Cross-service deps:** `prisma`, `eventLogService.logEvent`, `notificationTypes`.
+**Cross-service deps:** `prisma`, `eventLogService.logEvent`, `notificationTypes` (incl. `resolveTierLadder` + `hwSensorFilterMatches`, shared with the engine).
 
 **Used by:** `notificationService` (asset tab), `notificationEngine` (preview scope), `notificationChangeEvents` (subscription gate), `src/api/routes/notificationRules.ts` (CRUD).
 

@@ -52,6 +52,7 @@ import {
   sustainedSeverity,
   tierMetSinceChanged,
   CHANGE_TYPE_ACTIONS,
+  hwSensorFilterMatches,
   METRIC_META,
   FIELD_META,
   isTriggerLeaf,
@@ -226,6 +227,15 @@ async function loadScopeAssets(scope: RuleScope): Promise<ScopeAssetRow[]> {
   return rows;
 }
 
+/** The asset ids a rule scope resolves to, for surfaces that need the scope's
+ *  DEVICE SET without the reading machinery around it (the builder's
+ *  dimension-value picker asks "what do these devices actually report?").
+ *  Shares loadScopeAssets so the picker can't disagree with what the engine
+ *  would evaluate. */
+export async function loadScopeAssetIds(scope: RuleScope): Promise<string[]> {
+  return (await loadScopeAssets(scope)).map((a) => a.id);
+}
+
 /**
  * Assets that must not trigger notifications right now:
  *  - status="maintenance" — inside a maintenance window (maintenanceScheduler);
@@ -339,7 +349,12 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
     }
     case "hwSensorValue": {
       const rows = await prisma.assetHardwareSensorSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since }, ...(df.sensorClass ? { sensorClass: df.sensorClass } : {}) }, select: { assetId: true, timestamp: true, sensorName: true, sensorClass: true, value: true } });
-      return reduceReadings(rows, index, (r) => r.sensorName, (r) => `${r.sensorName} (${r.sensorClass})`, (r) => r.value ?? null, agg);
+      // sensorNamePattern narrows to ONE named sensor (or a family of them) —
+      // ANDed with the class filter above (already applied in SQL), substring-
+      // matched like the other *Pattern dimensions. Uses the shared predicate so
+      // the asset chart's tier lookup can't drift from what actually fires.
+      const filtered = df.sensorNamePattern ? rows.filter((r) => hwSensorFilterMatches(df, r)) : rows;
+      return reduceReadings(filtered, index, (r) => r.sensorName, (r) => `${r.sensorName} (${r.sensorClass})`, (r) => r.value ?? null, agg);
     }
     case "storageUsedBytes": case "storageUsedPct": {
       const rows = await prisma.assetStorageSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, select: { assetId: true, timestamp: true, mountPath: true, usedBytes: true, totalBytes: true } });
@@ -1875,6 +1890,12 @@ export interface PreviewResult {
   supported: boolean;
   note?: string;
   totalEvaluated: number;
+  /** DISTINCT devices behind `totalEvaluated`. A per-dimension metric yields one
+   *  reading per sensor / interface / mount, so a fleet of 8 firewalls with 6
+   *  temperature sensors each evaluates 48 readings across 8 devices — the
+   *  wizard must not report that as "48 devices". Absent for host-only drafts
+   *  (no asset scope) and for the unsupported event/change note. */
+  totalAssets?: number;
   matches: PreviewMatch[];
   /** Rendered sample of the composed email (first match), when the draft has emailComposition. */
   emailPreview?: { subject: string; text: string; html?: string };
@@ -2008,6 +2029,7 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
     return {
       supported: true,
       totalEvaluated: assets.length,
+      totalAssets: assets.length,
       matches: assets.slice(0, 200).map((a) => ({
         assetId: a.id,
         hostname: a.hostname,
@@ -2077,6 +2099,11 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
   return {
     supported: true,
     totalEvaluated: readings.length,
+    // Per-dimension metrics fan out to several readings per device; the device
+    // count is what the wizard headlines. Host drafts have no asset scope.
+    ...(trigger.type === "host_metric"
+      ? {}
+      : { totalAssets: new Set(readings.map((r) => r.assetId).filter(Boolean)).size }),
     matches: matches.slice(0, 200),
     emailPreview,
     ...(carveOut.carvedOut || carveOut.carvesFrom ? { carveOut } : {}),
@@ -2134,5 +2161,12 @@ async function previewCompositeRule(trigger: CompositeTrigger, input: PreviewRul
     emailPreview = await renderPreviewEmail(draft, input.emailComposition, sample, compositeFireInfo(outcome));
   }
 
-  return { supported: true, totalEvaluated: evaluated, matches: matches.slice(0, 200), emailPreview };
+  // Composite drafts already evaluate ONE row per asset, so the two counts agree.
+  return {
+    supported: true,
+    totalEvaluated: evaluated,
+    ...(trigger.kind === "host" ? {} : { totalAssets: evaluated }),
+    matches: matches.slice(0, 200),
+    emailPreview,
+  };
 }

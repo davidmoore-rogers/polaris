@@ -795,6 +795,9 @@ const api = {
     list:    ()      => request("GET", "/automations/scripts"),
     get:     (id)    => request("GET", `/automations/scripts/${id}`),
     create:  (body)  => request("POST", "/automations/scripts", body),
+    // {metric, dimension, scope} → the values the draft's own devices report
+    // (sensor classes, interfaces, mounts …) for the builder's dimension picker.
+    dimensionValues: (body) => request("POST", "/automations/dimension-values", body),
     update:  (id, b) => request("PUT", `/automations/scripts/${id}`, b),
     delete:  (id)    => request("DELETE", `/automations/scripts/${id}`),
     testRun: (id, b) => request("POST", `/automations/scripts/${id}/test-run`, b || {}),

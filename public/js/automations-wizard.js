@@ -68,7 +68,8 @@ function makeAutomationSentences(s) {
   var INV_CMP = Object.assign({ ">": "<=", ">=": "<", "<": ">=", "<=": ">", "==": "!=", "!=": "==" }, s.inverseComparators || {});
   var AGG_PHRASE = Object.assign({ latest: "", avg: "avg over", min: "min over", max: "max over" }, s.aggregationPhrases || {});
   var DIM_PHRASE = Object.assign({
-    sensorClass: "for sensors of class {value}", ifNamePattern: "on interfaces matching {value}",
+    sensorClass: "for sensors of class {value}", sensorNamePattern: "on sensors matching {value}",
+    ifNamePattern: "on interfaces matching {value}",
     mountPathPattern: "on mounts matching {value}", healthCheck: "for health check {value}",
     link: "on member {value}", tunnelName: "on tunnel {value}", widgetId: "for widget {value}",
     processNamePattern: "for processes matching {value}",
@@ -176,6 +177,83 @@ function makeAutomationSentences(s) {
 }
 if (typeof window !== "undefined") window.PolarisAutomationSentences = { make: makeAutomationSentences };
 
+// ─── Dimension-value picker (pure rendering; see POST /automations/dimension-values) ───
+// A metric's dimensionFilter used to be free text, so an operator typed a sensor
+// class into a field the server validates as a closed enum (400 on save) or a
+// pattern field that silently matches nothing. These three build the control's
+// options and the operator-facing note from the endpoint's answer — kept
+// module-level and pure so they're unit-testable off window.PolarisAutomationDimensions.
+
+/** Options for a strict (closed-enum) dimension select. A `current` value the
+ *  scoped devices don't report is KEPT and flagged rather than dropped —
+ *  otherwise opening an existing automation for an unrelated edit would quietly
+ *  widen its filter to "any". */
+function awDimOptionsHtml(res, current) {
+  var cur = current == null ? "" : String(current);
+  var vals = (res && res.values) || [];
+  var html = '<option value="">(any)</option>';
+  var seen = false;
+  vals.forEach(function (v) {
+    if (v.value === cur) seen = true;
+    var count = v.assetCount ? " (" + v.assetCount + ")" : "";
+    html += '<option value="' + escapeHtml(v.value) + '"' + (v.value === cur ? " selected" : "") + '>' + escapeHtml(v.value) + count + '</option>';
+  });
+  if (cur && !seen) {
+    html += '<option value="' + escapeHtml(cur) + '" selected>' + escapeHtml(cur) + ' — not currently reported</option>';
+  }
+  return html;
+}
+
+/** Suggestions for a substring-matched dimension (interface, mount path …) —
+ *  a datalist, not a select: a partial like "port" is a legitimate filter. */
+function awDimDatalistHtml(res) {
+  return ((res && res.values) || []).map(function (v) {
+    return '<option value="' + escapeHtml(v.value) + '"></option>';
+  }).join("");
+}
+
+/** Sibling dimension values that narrow another dimension's list on the same
+ *  condition row: sensor NAMES belong to the chosen class, WAN members to the
+ *  chosen health-check. Offering the unnarrowed list would let an operator build
+ *  a filter (class=temperature + name=FAN1) that matches nothing. */
+function awDimNarrow(dim, df) {
+  df = df || {};
+  if (dim === "sensorNamePattern") return df.sensorClass ? { sensorClass: df.sensorClass } : {};
+  if (dim === "link") return df.healthCheck ? { healthCheck: df.healthCheck } : {};
+  return {};
+}
+
+/** The note under the control. Returns `{text, warn}`; warn = the condition as
+ *  written can never match, which is the whole point of asking the devices. */
+function awDimNote(res) {
+  if (!res || res.loading) return { text: "Checking what the selected devices report…", warn: false };
+  if (res.error) return { text: "", warn: false };
+  if (!res.scopedAssets) {
+    return { text: "No devices match the filter on the Devices step yet, so there is nothing to list.", warn: true };
+  }
+  if (!(res.values || []).length) {
+    return {
+      // narrowLabel keeps "reported no hardware sensors" from reading as "none at
+      // all" when it actually means "none of the class you picked".
+      text: "None of the " + res.scopedAssets + " selected device(s) reported any " + res.noun + (res.narrowLabel || "") +
+        " in the last " + res.windowHours + " h — a condition on this dimension would never match.",
+      warn: true,
+    };
+  }
+  var parts = [];
+  if (res.assetsWithData < res.sampledAssets) {
+    parts.push("Reported by " + res.assetsWithData + " of " + res.sampledAssets + " device(s) — the rest report no " + res.noun + ".");
+  }
+  if (res.sampledAssets < res.scopedAssets) {
+    parts.push("Sampled " + res.sampledAssets + " of " + res.scopedAssets + " selected devices.");
+  }
+  return { text: parts.join(" "), warn: false };
+}
+
+if (typeof window !== "undefined") {
+  window.PolarisAutomationDimensions = { optionsHtml: awDimOptionsHtml, datalistHtml: awDimDatalistHtml, note: awDimNote, narrow: awDimNarrow };
+}
+
 async function openAutomationWizard(existing) {
   // ── Load the catalogs the steps render from ────────────────────────────
   if (!_ruleSchema) {
@@ -262,7 +340,26 @@ async function openAutomationWizard(existing) {
       humanDuration = _sent.humanDuration, tgTreePhrase = _sent.tgTreePhrase,
       triggerSentence = _sent.triggerSentence, resetSentence = _sent.resetSentence,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { ifNamePattern: "interface name contains", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", mountPathPattern: "mount path contains", healthCheck: "SD-WAN health-check name", link: "WAN member / link name", tunnelName: "IPsec tunnel name", widgetId: "custom widget id" };
+  var DIM_PLACEHOLDER = { ifNamePattern: "interface name contains", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", sensorNamePattern: "any sensor — or name contains, e.g. CPU ON-DIE", mountPathPattern: "mount path contains", healthCheck: "SD-WAN health-check name", link: "WAN member / link name", tunnelName: "IPsec tunnel name", widgetId: "custom widget id" };
+  // Dimension VALUE pickers. The server says which dimensionFilter fields it can
+  // populate and whether each is a closed enum (`strict` → select-only, e.g.
+  // sensorClass) or a substring match (→ suggestions, typing still allowed);
+  // POST /automations/dimension-values then answers with the values the DRAFT'S
+  // OWN devices report. Empty for a stale server, in which case every dimension
+  // falls back to the plain text input it always was.
+  var DIM_PICKERS = s.dimensionPickers || {};
+  // key "metric|dimension|narrowJson|scopeJson" → {loading:true} | result |
+  // {error:true}. Keyed by scope so re-picking devices on Step 2 re-asks rather
+  // than showing the previous selection's sensors, and by the narrowing so
+  // switching sensor class re-asks for THAT class's sensor names.
+  var _dimValues = {};
+  function dimKeyFor(metric, dim, narrow) {
+    return metric + "|" + dim + "|" + JSON.stringify(narrow || {}) + "|" + JSON.stringify(draft.scope || {});
+  }
+  function dimResult(metric, dim, narrow) {
+    var r = _dimValues[dimKeyFor(metric, dim, narrow)];
+    return r && !r.loading && !r.error ? r : null;
+  }
 
   var channels = _ruleChannels || [];
   var routedTypes = s.recipientRoutedTypes || ["smtp", "oauth_m365", "web_push"];
@@ -936,6 +1033,109 @@ async function openAutomationWizard(existing) {
     if (meta && meta.kind === "number") return '<input type="number" class="tgl-value" value="' + escapeHtml(v) + '" style="width:110px" placeholder="e.g. 3">';
     return '<input type="text" class="tgl-value" value="' + escapeHtml(v) + '" style="width:130px" placeholder="e.g. up / down">';
   }
+  // One dimensionFilter control. A dimension the server can populate renders as
+  // a select (closed enum) or an input + datalist (substring match); anything
+  // else stays the plain text box it always was.
+  var _dimListSeq = 0;
+  function dimControlHtml(d, df, metric) {
+    var value = (df && df[d]) || "";
+    var meta = DIM_PICKERS[d];
+    var plain = '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '" value="' + escapeHtml(value) + '" style="flex:1;min-width:120px">';
+    if (!meta) return plain;
+    var res = dimResult(metric, d, awDimNarrow(d, df));
+    if (meta.strict) {
+      return '<select class="tgl-dim" data-dim="' + d + '" style="flex:1;min-width:150px;font-size:0.8rem" title="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '">' +
+        awDimOptionsHtml(res, value) + '</select>';
+    }
+    var listId = "aw-dimlist-" + d + "-" + (++_dimListSeq);
+    return plain.replace('data-dim="' + d + '"', 'data-dim="' + d + '" list="' + listId + '"') +
+      '<datalist id="' + listId + '">' + awDimDatalistHtml(res) + '</datalist>';
+  }
+  /** The metric a dim control belongs to, read LIVE off its row so switching the
+   *  metric re-asks for that metric's values instead of reusing the old ones. */
+  function dimMetricOf(el) {
+    var row = el.closest(".scr-row");
+    var what = row && row.querySelector(".tgl-what");
+    var v = what ? String(what.value || "") : "";
+    return v.indexOf("m:") === 0 ? v.slice(2) : "";
+  }
+  /** The row's current dimensionFilter, read live off its controls (mirrors
+   *  tgCollectLeaf) — the narrowing input for sibling-dependent lists. */
+  function dimFilterOfRow(row) {
+    var df = {};
+    if (!row) return df;
+    row.querySelectorAll(".tgl-dim").forEach(function (el) {
+      var v = (el.value || "").trim();
+      if (v) df[el.getAttribute("data-dim")] = v;
+    });
+    return df;
+  }
+  function applyDimOptions(el) {
+    var d = el.getAttribute("data-dim");
+    if (!DIM_PICKERS[d]) return;
+    var metric = dimMetricOf(el);
+    var narrow = awDimNarrow(d, dimFilterOfRow(el.closest(".scr-row")));
+    var res = metric ? _dimValues[dimKeyFor(metric, d, narrow)] : null;
+    var note = el.closest(".tgl-line2");
+    note = note && note.querySelector(".tgl-dim-note");
+    if (note) {
+      var n = awDimNote(res);
+      // Two pickers can share one row (SD-WAN health-check + member): a
+      // never-matches warning from either must not be overwritten by the other's
+      // quiet line.
+      if (n.warn || note.getAttribute("data-warn") !== "1") {
+        note.textContent = n.text;
+        note.setAttribute("data-warn", n.warn ? "1" : "0");
+        note.style.color = n.warn ? "var(--color-warning, #d9a441)" : "var(--color-text-tertiary)";
+      }
+    }
+    if (!res || res.loading || res.error) return;
+    var key = dimKeyFor(metric, d, narrow);
+    if (el.getAttribute("data-dim-key") === key) return; // already applied
+    el.setAttribute("data-dim-key", key);
+    var cur = el.value || "";
+    if (el.tagName === "SELECT") {
+      el.innerHTML = awDimOptionsHtml(res, cur);
+      el.value = cur;
+    } else if (el.list) {
+      el.list.innerHTML = awDimDatalistHtml(res);
+    }
+  }
+  /** Fetch (once per metric+dimension+scope) and populate every dim control on
+   *  the panel. Cheap and idempotent once cached, so it's safe to call from the
+   *  panel's change handler as well as after a render. */
+  async function refreshDimOptions(panel) {
+    if (!panel) return;
+    var els = Array.prototype.slice.call(panel.querySelectorAll(".tgl-dim[data-dim]"));
+    if (!els.length) return;
+    var need = {};
+    els.forEach(function (el) {
+      var d = el.getAttribute("data-dim");
+      if (!DIM_PICKERS[d]) return;
+      var metric = dimMetricOf(el);
+      if (!metric) return;
+      var narrow = awDimNarrow(d, dimFilterOfRow(el.closest(".scr-row")));
+      var key = dimKeyFor(metric, d, narrow);
+      if (!_dimValues[key]) need[key] = { metric: metric, dimension: d, narrow: narrow };
+    });
+    var keys = Object.keys(need);
+    keys.forEach(function (k) { _dimValues[k] = { loading: true }; });
+    els.forEach(applyDimOptions); // paints the "checking…" note
+    if (keys.length) {
+      await Promise.all(keys.map(async function (k) {
+        try {
+          _dimValues[k] = await api.automations.dimensionValues({
+            metric: need[k].metric, dimension: need[k].dimension, scope: draft.scope || {}, narrow: need[k].narrow,
+          });
+        } catch (_e) {
+          // Never block authoring on the picker — the control stays usable with
+          // whatever the operator types / already had selected.
+          _dimValues[k] = { error: true };
+        }
+      }));
+      els.forEach(applyDimOptions);
+    }
+  }
   function tgLeafRowHtml(leaf, kind) {
     leaf = leaf || tgDefaultLeaf(kind);
     var isState = leaf.type === "asset_state";
@@ -963,14 +1163,13 @@ async function openAutomationWizard(existing) {
     if (!isState) {
       var dims = kind === "host" ? [] : ((s.metricDimensions && s.metricDimensions[leaf.metric]) || []);
       var df = leaf.dimensionFilter || {};
-      var dimInputs = dims.map(function (d) {
-        return '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '" value="' + escapeHtml(df[d] || "") + '" style="flex:1;min-width:120px">';
-      }).join("");
+      var dimInputs = dims.map(function (d) { return dimControlHtml(d, df, leaf.metric); }).join("");
       line2 =
         '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
           '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + opt(s.aggregations, leaf.aggregation || "latest") + '</select>' +
           '<span>over</span><input type="number" class="tgl-window" value="' + (leaf.windowSec || 0) + '" style="width:70px"><span>sec (0 = latest)</span>' +
           dimInputs +
+          (dims.some(function (d) { return DIM_PICKERS[d]; }) ? '<span class="tgl-dim-note" style="flex-basis:100%;font-size:0.78rem"></span>' : "") +
         '</div>';
     }
     return '<div class="scr-row" style="margin:4px 0;padding:4px;border:1px solid var(--color-border);border-radius:6px">' + line1 + line2 + '</div>';
@@ -1143,6 +1342,7 @@ async function openAutomationWizard(existing) {
     }
     box.innerHTML = html;
     refreshTriggerSentence();
+    refreshDimOptions(panel);
   }
   function wireStep3() {
     var panel = document.getElementById("aw-step-3");
@@ -1168,7 +1368,7 @@ async function openAutomationWizard(existing) {
     // own change handler also calls it — a second render is harmless) and
     // re-syncs the severity mode (single dropdown vs multi tiers + accent).
     panel.addEventListener("input", function () { refreshTriggerSentence(); syncSeverityMode(panel); });
-    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); });
+    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); refreshDimOptions(panel); });
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
     renderTriggerFields();
     syncSeverityMode(panel);
@@ -1406,7 +1606,8 @@ async function openAutomationWizard(existing) {
       // (delegated once per panel; kind follows the trigger).
       wireTgTree(panel, "#aw-reset-root", function () {
         return (draft.trigger && draft.trigger.kind) === "host" ? "host" : "asset";
-      }, refreshResetSentence);
+      }, function () { refreshResetSentence(); refreshDimOptions(panel); });
+      refreshDimOptions(panel);
     }
 
     panel.querySelectorAll('input[name="aw-reset-mode"]').forEach(function (radio) {
@@ -1853,6 +2054,7 @@ async function openAutomationWizard(existing) {
     cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-window, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
     var grip = cond.querySelector(".aw-grip"); if (grip) grip.style.display = "none";
     var rmCond = cond.querySelector(".scr-remove"); if (rmCond) rmCond.style.display = "none";
+    refreshDimOptions(panel); // the tier's locked condition row has its own dim control
     row.querySelector(".band-add-sev").addEventListener("click", function () { addBandRow(host, null); syncBandNotify(panel); });
     // Per-tier accent + "only increase severity" guard: a tier can't be set at
     // or below the tier before it (or the base).
@@ -1925,17 +2127,32 @@ async function openAutomationWizard(existing) {
         var carved = m.excludedBy
           ? ' <span style="color:var(--color-warning, #b7791f);font-size:0.75rem">— covered by “' + escapeHtml(m.excludedBy.ruleName) + '”</span>'
           : "";
-        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + carved + '</td></tr>';
+        // Per-dimension metrics evaluate one reading per sensor / interface /
+        // mount, so the same hostname legitimately appears several times —
+        // WHICH sensor is the only thing that tells those rows apart.
+        var dim = m.dimension
+          ? ' <span style="color:var(--color-text-tertiary);font-size:0.78rem">' + escapeHtml(m.dimension) + '</span>'
+          : "";
+        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + dim + carved + '</td></tr>';
       }).join("");
+      // totalEvaluated counts READINGS; totalAssets counts devices. Reporting
+      // the former as "devices" made 8 firewalls with 6 temperature sensors
+      // each read as "48 devices".
+      var devices = res.totalAssets != null ? res.totalAssets : res.totalEvaluated;
+      var countLine = '<strong>' + devices + '</strong> device(s) match the filter right now.';
+      if (res.totalAssets != null && res.totalEvaluated > res.totalAssets) {
+        countLine += ' <span style="color:var(--color-text-tertiary)">This metric is reported per sensor / interface / mount — ' +
+          res.totalEvaluated + ' reading(s) across those ' + res.totalAssets + ' device(s), one row each below.</span>';
+      }
       var spec = res.specificity
         ? '<p style="font-size:0.8rem;margin:0 0 6px">Specificity: <strong>' + escapeHtml(res.specificity.label) + '</strong>' +
           ' <span style="color:var(--color-text-tertiary)">— a more-specific automation watching the same thing takes precedence for the devices it covers.</span></p>'
         : "";
       box.innerHTML = spec +
-        '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> device(s) match the filter right now.</p>' +
+        '<p style="font-size:0.85rem;margin:0 0 4px">' + countLine + '</p>' +
         carveOutWarningHtml(res.carveOut) +
         (names ? '<div class="table-wrapper" style="max-height:220px;overflow:auto"><table><tbody>' + names + '</tbody></table></div>' +
-          (res.totalEvaluated > 100 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 100) + ' more.</p>' : "") : "");
+          (res.totalEvaluated > 100 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 100) + ' more row(s).</p>' : "") : "");
     } catch (err) {
       box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">' + escapeHtml(err.message || "Preview unavailable") + '</p>';
     }

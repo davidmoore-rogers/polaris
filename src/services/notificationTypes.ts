@@ -250,6 +250,12 @@ const dimensionFilterSchema = z
   .object({
     ifNamePattern: z.string().max(200).optional(),
     sensorClass: z.enum(["temperature", "fan", "voltage", "power", "disk", "other"]).optional(),
+    // One NAMED sensor rather than a whole class: a firewall reports a dozen
+    // temperature sensors ("CPU ON-DIE Temperature", "TMP1 External
+    // Temperature", per-PHY dies), and an operator alerting on the CPU die does
+    // not want the PHYs alerting too. Substring-matched like the other
+    // *Pattern dimensions, and ANDs with sensorClass when both are set.
+    sensorNamePattern: z.string().max(200).optional(),
     mountPathPattern: z.string().max(200).optional(),
     healthCheck: z.string().max(200).optional(),
     link: z.string().max(200).optional(),
@@ -1701,8 +1707,31 @@ export const CHANGE_TYPE_META: Record<string, string> = {
 
 // Which dimensionFilter inputs are relevant per asset_metric metric, so the
 // builder only shows the applicable ones.
+/** Case-insensitive substring test used by every `*Pattern` dimension filter.
+ *  An unset needle matches everything (the filter is optional). */
+export function dimensionSubstringMatch(haystack: string | null | undefined, needle?: string | null): boolean {
+  if (!needle) return true;
+  return (haystack ?? "").toLowerCase().includes(needle.toLowerCase());
+}
+
+/**
+ * Does a hwSensorValue dimension filter select this sensor? Shared by the
+ * engine's reading resolver AND the asset chart's severity-tier lookup — the
+ * chart colors a line by the thresholds that would actually fire on it, so a
+ * second, subtly different copy of this predicate would paint a sensor with
+ * bands belonging to some other sensor.
+ */
+export function hwSensorFilterMatches(
+  df: { sensorClass?: string; sensorNamePattern?: string } | null | undefined,
+  sensor: { sensorName?: string | null; sensorClass?: string | null },
+): boolean {
+  if (!df) return true;
+  if (df.sensorClass && df.sensorClass !== (sensor.sensorClass ?? "")) return false;
+  return dimensionSubstringMatch(sensor.sensorName, df.sensorNamePattern);
+}
+
 export const METRIC_DIMENSIONS: Record<string, string[]> = {
-  hwSensorValue: ["sensorClass"],
+  hwSensorValue: ["sensorClass", "sensorNamePattern"],
   storageUsedPct: ["mountPathPattern"],
   storageUsedBytes: ["mountPathPattern"],
   storageDaysUntilFull: ["mountPathPattern"],
@@ -1833,6 +1862,7 @@ export function buildSchemaCatalog() {
     aggregationPhrases: { latest: "", avg: "avg over", min: "min over", max: "max over" },
     dimensionPhrases: {
       sensorClass: "for sensors of class {value}",
+      sensorNamePattern: "on sensors matching {value}",
       ifNamePattern: "on interfaces matching {value}",
       mountPathPattern: "on mounts matching {value}",
       healthCheck: "for health check {value}",

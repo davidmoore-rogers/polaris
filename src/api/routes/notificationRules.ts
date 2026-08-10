@@ -4,6 +4,8 @@
  * Mounted at /api/v1/notification-rules.
  *   GET  /         automationManagement:read       (list)
  *   GET  /schema   automationManagement:read       (builder vocabulary)
+ *   POST /dimension-values  automationManagement:read  (values the draft's
+ *        devices report for a metric dimension — the sensor-class picker)
  *   POST /preview  automationManagement:fullwrite  (dry-run a draft)
  *   POST / PUT/:id / DELETE/:id   automationManagement:fullwrite  (CRUD)
  *
@@ -13,11 +15,13 @@
 
 import { Router } from "express";
 import type { Request } from "express";
+import { z } from "zod";
 import { requirePermission, hasPermission } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
-import { ruleInputSchema, previewInputSchema, buildSchemaCatalog, allRuleActionRefs, type RuleInput } from "../../services/notificationTypes.js";
+import { ruleInputSchema, previewInputSchema, buildSchemaCatalog, allRuleActionRefs, scopeSchema, type RuleInput } from "../../services/notificationTypes.js";
 import { listRules, createRule, updateRule, deleteRule, listScopeOptions } from "../../services/notificationRuleService.js";
 import { previewRule } from "../../services/notificationEngine.js";
+import { listDimensionValues, dimensionPickerMeta } from "../../services/notificationDimensionService.js";
 import { listRecipientUsers } from "../../services/notificationRecipientService.js";
 
 export const notificationRulesRouter = Router();
@@ -29,9 +33,12 @@ notificationRulesRouter.get("/", requirePermission("automationManagement", "read
 });
 
 // Static path BEFORE any "/:id" so it isn't captured as an id.
+// `dimensionPickers` is merged in here rather than inside buildSchemaCatalog so
+// notificationTypes doesn't have to import the dimension service (which imports
+// the engine, which imports notificationTypes — a cycle).
 notificationRulesRouter.get("/schema", requirePermission("automationManagement", "read"), async (_req, res, next) => {
   try {
-    res.json(buildSchemaCatalog());
+    res.json({ ...buildSchemaCatalog(), dimensionPickers: dimensionPickerMeta() });
   } catch (err) { next(err); }
 });
 
@@ -59,6 +66,36 @@ notificationRulesRouter.post("/preview", requirePermission("automationManagement
   try {
     const input = previewInputSchema.parse(req.body);
     res.json(await previewRule(input));
+  } catch (err) { next(err); }
+});
+
+/**
+ * Values the draft's OWN devices currently report for one metric dimension, so
+ * the builder can offer a picker instead of a free-text box an operator has to
+ * spell exactly (sensorClass is a closed enum server-side — a typo 400s; the
+ * pattern dimensions silently match nothing, which is worse). Read-level like
+ * /scope-options: it's an option list for the same surface.
+ *
+ * POST (not GET) because the body carries the draft's whole scope — including a
+ * condition tree — which doesn't belong in a query string.
+ */
+const dimensionValuesSchema = z.object({
+  metric: z.string().min(1).max(100),
+  dimension: z.string().min(1).max(100),
+  scope: scopeSchema.default({}),
+  // Sibling dimension values already set on the same condition row — narrows the
+  // list (sensor NAMES for the chosen class, WAN members for the chosen
+  // health-check) so the picker can't offer a value that matches nothing.
+  narrow: z.object({
+    sensorClass: z.string().max(100).optional(),
+    healthCheck: z.string().max(200).optional(),
+  }).optional(),
+});
+
+notificationRulesRouter.post("/dimension-values", requirePermission("automationManagement", "read"), async (req, res, next) => {
+  try {
+    const { metric, dimension, scope, narrow } = dimensionValuesSchema.parse(req.body);
+    res.json(await listDimensionValues(metric, dimension, scope, narrow ?? {}));
   } catch (err) { next(err); }
 });
 
