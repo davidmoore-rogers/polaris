@@ -144,7 +144,10 @@ describe("ruleInputSchema", () => {
     });
     expect(parsed.severity).toBe("warning");
     expect(parsed.reset).toEqual({ mode: "manual" }); // v2 canonical output
-    expect(parsed.actions).toEqual([]);
+    // A body with no actions array still audits: the Event was implicit before
+    // it became an action, so omitting it can't silently turn auditing off.
+    // An EXPLICIT `actions: []` is respected — that's the opt-out.
+    expect(parsed.actions).toEqual([{ type: "event" }]);
     expect(parsed.channels).toEqual(["in_app"]);
     // trigger defaults
     expect((parsed.trigger as any).aggregation).toBe("latest");

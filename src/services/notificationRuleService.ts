@@ -352,9 +352,10 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
       if (isBlockedOutboundHost(host)) {
         throw new AppError(400, `${label}: api_call host "${host}" is blocked (loopback/link-local/metadata addresses are not allowed)`);
       }
-    } else {
+    } else if (action.type === "script") {
       scriptRefs.push({ label, scriptId: action.scriptId, runOn: action.runOn });
     }
+    // `event` references nothing — no channel, script or URL to validate.
   }
 
   if (scriptRefs.length > 0) {

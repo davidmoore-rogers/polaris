@@ -118,6 +118,12 @@ export async function executeActions(
       } else if (action.type === "api_call") {
         await enqueueApiCall(notificationId, action, ctx, exec);
         executed++;
+      } else if (action.type === "event") {
+        // No-op HERE. The audit Event is written by the engine's fire path
+        // (which owns the severity + resourceId), not by the action executor;
+        // this action's presence is what gates it. Counting it as executed
+        // would also mislead the escalation sweep, which reads `executed` to
+        // decide whether a tier actually delivered anything.
       } else {
         // script — enqueue an AutomationScriptRun; the runAutomationScripts
         // job (server) or the agent command queue (agent) executes it. Args

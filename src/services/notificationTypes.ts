@@ -930,10 +930,26 @@ export const scriptActionSchema = z
   })
   .strict();
 
+// Write the `notification.triggered` audit Event on every fire. Present by
+// default (a migration appended it to every pre-existing rule, and the legacy
+// normalizer injects it) so nothing silently stops auditing; removing it is an
+// explicit operator choice for a noisy automation.
+//
+// This does NOT govern the in-app Alert. The Notification row is structural —
+// every NotificationDelivery hangs off its id, as do the escalation sweep,
+// acknowledge/clear and the rule state machine — so a notify/api_call action
+// could not exist without it. Only the audit Event is optional.
+export const eventActionSchema = z
+  .object({
+    type: z.literal("event"),
+  })
+  .strict();
+
 export const actionSchema = z.discriminatedUnion("type", [
   notifyActionSchema,
   apiCallActionSchema,
   scriptActionSchema,
+  eventActionSchema,
 ]);
 
 // Escalation v2: tiers of ACTIONS (any type), superseding the email-only tier
@@ -977,6 +993,9 @@ export const escalatableActionSchema = z.discriminatedUnion("type", [
   notifyActionEscalatableSchema,
   apiCallActionEscalatableSchema,
   scriptActionEscalatableSchema,
+  // No per-action escalation: an audit Event is instantaneous, so there is
+  // nothing to chase if it goes "unhandled".
+  eventActionSchema,
 ]);
 export type EscalatableAction = z.infer<typeof escalatableActionSchema>;
 
@@ -1304,6 +1323,8 @@ function normalizeRuleInputCore(raw: Omit<RuleInputRaw, "trigger">): Omit<RuleIn
     severity: raw.severity,
     scope: raw.scope,
     reset: normalizeReset(raw.reset, raw.clearBehavior, raw.clearAfterSec),
+    // Legacy body (targets, no actions) folded forward. The audit-Event action
+    // is added by withEventAction() at the call sites, which know the trigger.
     actions: raw.actions ?? targetsToNotifyActions(raw.targets, raw.emailComposition ?? null),
     cooldownSec: raw.cooldownSec ?? null,
     messageTemplate: raw.messageTemplate ?? null,
@@ -1426,8 +1447,32 @@ function validateRuleV2(
   }
 }
 
+/**
+ * Re-add the audit-Event action to a body that arrived WITHOUT an actions array
+ * — a legacy shape, or a minimal API create. Before the Event became an action
+ * such a rule still wrote `notification.triggered`, so omitting it here would
+ * silently drop auditing for those callers.
+ *
+ * An EXPLICIT `actions: []` is respected (`??` only fires on undefined), which
+ * is how an API caller opts out. Skipped for event/change triggers, matching
+ * migration 20260810120000_event_action: the event tail writes no Events, so
+ * the action would be dead weight the builder then warns about.
+ */
+function withEventAction<T extends { actions: EscalatableAction[] }>(
+  core: T,
+  rawActions: unknown,
+  trigger: unknown,
+): T {
+  if (rawActions !== undefined) return core;
+  if (isEventDrivenTrigger(trigger)) return core;
+  return { ...core, actions: [...core.actions, { type: "event" as const }] };
+}
+
 export const ruleInputSchema = ruleInputBaseSchema
-  .transform((raw): RuleInput => ({ trigger: collapseCompositeTrigger(raw.trigger), ...normalizeRuleInputCore(raw) }))
+  .transform((raw): RuleInput => ({
+    trigger: collapseCompositeTrigger(raw.trigger),
+    ...withEventAction(normalizeRuleInputCore(raw), raw.actions, raw.trigger),
+  }))
   .superRefine(validateRuleV2);
 
 // Preview accepts partial drafts: name defaulted, trigger optional (a
@@ -1442,7 +1487,7 @@ export const previewInputSchema = ruleInputBaseSchema
   .transform((raw): PreviewRuleInput => ({
     trigger: raw.trigger ? collapseCompositeTrigger(raw.trigger) : undefined,
     id: raw.id,
-    ...normalizeRuleInputCore(raw),
+    ...withEventAction(normalizeRuleInputCore(raw), raw.actions, raw.trigger),
   }))
   .superRefine(validateRuleV2);
 
@@ -1511,9 +1556,18 @@ export function normalizeEscalationToV2(escalation: unknown): EscalationV2Config
  * backups). Every reader — engine, escalation sweep, routes — goes through
  * this so v1 and v2 rows behave identically.
  */
+/** event/change triggers — the engine's event tail writes no audit Events. */
+function isEventDrivenTrigger(trigger: unknown): boolean {
+  const t = (trigger as { type?: string } | null | undefined)?.type;
+  return t === "event" || t === "change";
+}
+
 export function normalizeRuleToV2(row: {
   clearBehavior?: string | null;
   clearAfterSec?: number | null;
+  /** Read only to decide whether the injected audit-Event action belongs —
+   *  the event tail writes no Events, so an event/change rule must not get one. */
+  trigger?: unknown;
   targets?: unknown;
   emailComposition?: unknown;
   escalation?: unknown;
@@ -1540,8 +1594,14 @@ export function normalizeRuleToV2(row: {
       .filter((r): r is { success: true; data: EscalatableAction } => r.success)
       .map((r) => r.data);
   } else {
+    // Pre-v2 row (or a restored pre-upgrade backup): fold legacy targets
+    // forward and re-add the audit Event the engine now gates on, so an
+    // un-migrated row keeps behaving exactly as it did. Mirrors migration
+    // 20260810120000_event_action, carve-out included — an event/change
+    // automation is driven BY Events and the tail writes none.
     const targets = Array.isArray(row.targets) ? (row.targets as DeliveryTarget[]) : [];
-    actions = targetsToNotifyActions(targets, emailComposition);
+    actions = targetsToNotifyActions(targets, emailComposition) as EscalatableAction[];
+    if (!isEventDrivenTrigger(row.trigger)) actions = [...actions, { type: "event" as const }];
   }
 
   const bands = Array.isArray(row.severityBands)
@@ -1575,6 +1635,16 @@ export interface RuleActionCarrier {
   bandNotify?: BandNotify | null;
 }
 
+/**
+ * An action's own escalation chain, or undefined for types that can't carry
+ * one. `event` has no `escalation` key at all (an audit Event is instantaneous
+ * — nothing to chase if it goes unhandled), so the discriminated union makes a
+ * bare `a.escalation` a type error. This is the single place that narrows.
+ */
+function actionEscalation(a: EscalatableAction): unknown {
+  return "escalation" in a ? a.escalation : undefined;
+}
+
 export interface RuleActionRef {
   action: AutomationAction;
   /** Human label for save-time validation errors ("Action 2 escalation tier 1: …"). */
@@ -1591,7 +1661,7 @@ export function allRuleActionRefs(rule: RuleActionCarrier): RuleActionRef[] {
   const addActions = (list: EscalatableAction[] | null | undefined, prefix: string) => {
     (list ?? []).forEach((a, i) => {
       out.push({ action: a, label: `${prefix} ${i + 1}` });
-      addTiers(a.escalation, `${prefix} ${i + 1}`);
+      addTiers(actionEscalation(a), `${prefix} ${i + 1}`);
     });
   };
   addActions(rule.actions, "Action");
@@ -1610,8 +1680,8 @@ export function allRuleActionRefs(rule: RuleActionCarrier): RuleActionRef[] {
 export function ruleHasAnyEscalation(rule: RuleActionCarrier): boolean {
   const has = (esc: unknown) => (normalizeEscalationToV2(esc)?.tiers.length ?? 0) > 0;
   if (has(rule.escalation)) return true;
-  if ((rule.actions ?? []).some((a) => has(a.escalation))) return true;
-  return (rule.severityBands ?? []).some((b) => has(b.escalation) || (b.actions ?? []).some((a) => has(a.escalation)));
+  if ((rule.actions ?? []).some((a) => has(actionEscalation(a)))) return true;
+  return (rule.severityBands ?? []).some((b) => has(b.escalation) || (b.actions ?? []).some((a) => has(actionEscalation(a))));
 }
 
 /** One due-sweepable escalation chain: the rule/band-LEVEL chain (key "") or a
@@ -1654,7 +1724,7 @@ export function escalationChainsForSeverity(
   const chains: EscalationChain[] = [];
   if (levelEsc?.tiers.length) chains.push({ key: "", escalation: levelEsc });
   effActions.forEach((a, i) => {
-    const esc = normalizeEscalationToV2(a.escalation);
+    const esc = normalizeEscalationToV2(actionEscalation(a));
     if (esc?.tiers.length) chains.push({ key: `a${i}`, escalation: esc });
   });
   return chains;
@@ -1856,6 +1926,7 @@ export function buildSchemaCatalog() {
       { type: "notify", label: "Send a notification", requires: "channels", permission: null },
       { type: "api_call", label: "Call an API (HTTP request)", requires: null, permission: null },
       { type: "script", label: "Run a script", requires: "scripts", permission: "automationScripts" },
+      { type: "event", label: "Create an Event", requires: null, permission: null },
     ],
     apiCallMeta: {
       allowedMethods: API_CALL_METHODS,

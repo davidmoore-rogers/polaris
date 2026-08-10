@@ -611,7 +611,9 @@ function ruleWantsAssetDetail(rule: DbRule): boolean {
       ? [a.emailComposition?.subjectTemplate, a.emailComposition?.bodyTextTemplate, a.emailComposition?.bodyHtmlTemplate]
       : a.type === "api_call"
         ? [a.bodyTemplate]
-        : [a.argsTemplate];
+        : a.type === "script"
+          ? [a.argsTemplate]
+          : []; // event — no templates of its own
   const actionTemplates = allRuleActionRefs(rule).flatMap((r) => templatesOf(r.action));
   return (
     ruleWantsContext(rule) ||
@@ -1446,16 +1448,27 @@ async function fire(
     update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null, recoveredSince: null, firingSeverity: severity, bandMetSince: metSinceJson(bandMetSince) },
   });
   await enqueueAlertActions(notif.id, actions, ctx, rule, reading);
-  await logEvent({
-    action: "notification.triggered",
-    resourceType: "notification",
-    resourceId: notif.id,
-    resourceName: rule.name,
-    actor: "system:notification-engine",
-    level: severityLevel(severity),
-    message: notif.message,
-    details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey, severity },
-  });
+  // The audit Event is an ACTION now — present by default, removable for a
+  // deliberately noisy automation. The in-app alert above is not: every
+  // NotificationDelivery hangs off notif.id, as do the escalation sweep,
+  // acknowledge/clear and the state machine.
+  if (wantsEventAction(actions)) {
+    await logEvent({
+      action: "notification.triggered",
+      resourceType: "notification",
+      resourceId: notif.id,
+      resourceName: rule.name,
+      actor: "system:notification-engine",
+      level: severityLevel(severity),
+      message: notif.message,
+      details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey, severity },
+    });
+  }
+}
+
+/** Does this severity's effective action list ask for the audit Event? */
+function wantsEventAction(actions: AutomationAction[] | null | undefined): boolean {
+  return (actions ?? []).some((a) => a.type === "event");
 }
 
 /** A firing alert crossed into a different band. Update its severity + message,

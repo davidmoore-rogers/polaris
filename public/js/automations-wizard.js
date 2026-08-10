@@ -364,7 +364,9 @@ async function openAutomationWizard(existing) {
       trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: null, forDurationSec: 0 },
       reset: null, // defaulted per trigger type on Step-4 entry
       cooldownSec: null, messageTemplate: null,
-      actions: [], escalation: null,
+      // The audit Event is an action now, present by default — a new
+      // automation behaves like every existing one until someone removes it.
+      actions: [{ type: "event" }], escalation: null,
     };
   }
   _awDraftStash = null;
@@ -1812,6 +1814,7 @@ async function openAutomationWizard(existing) {
       var sc = scriptById(a.scriptId);
       return "Run " + (sc ? sc.name : "…") + " on " + (a.runOn || "server");
     }
+    if (a.type === "event") return "Write an audit Event";
     return a.type;
   }
   function renderStep5() {
@@ -1823,10 +1826,14 @@ async function openAutomationWizard(existing) {
     // Sibling of #aw-actions, so collectActionsFrom's :scope > .aw-action
     // never picks it up.
     var isEC = draft.trigger && (draft.trigger.type === "event" || draft.trigger.type === "change");
-    var cardTitle = isEC ? "Create an in-app alert (always happens)" : "Create an event + in-app alert (always happens)";
+    // The in-app alert is genuinely unremovable, unlike the audit Event next to
+    // it: every delivery row hangs off the Notification id, as do the
+    // escalation sweep, acknowledge/clear and the rule state machine. The Event
+    // moved out to a removable "Create an Event" action in the list below.
+    var cardTitle = "Create an in-app alert (always happens)";
     var cardHelp = isEC
-      ? "Every fire creates an in-app alert (the Alerts tab). This is built in and can’t be removed. The message template below customizes the alert text — {value} is the source event’s own message; leave blank for the default."
-      : "Every fire writes an audit Event and creates an in-app alert (the Alerts tab). This is built in and can’t be removed. The message template below customizes what both say; leave blank for the default.";
+      ? "Every fire creates an in-app alert (the Alerts tab). This is built in and can’t be removed — notifications, API calls and scripts all hang off it. The message template below customizes the alert text — {value} is the source event’s own message; leave blank for the default."
+      : "Every fire creates an in-app alert (the Alerts tab). This is built in and can’t be removed — notifications, API calls and scripts all hang off it. The message template below customizes what the alert and the audit Event say; leave blank for the default.";
     var html = '<h3 style="margin:0 0 0.25rem">What should happen?</h3>' +
       '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 0.75rem">Notifications route through Delivery-tab channels; API calls POST to your systems; scripts run on the Polaris server or the triggering asset’s agent.</p>' +
       '<div class="form-group" id="aw-inapp-card" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
@@ -2312,14 +2319,31 @@ async function openAutomationWizard(existing) {
         '<button type="button" class="btn btn-sm btn-danger aw-action-remove">Remove</button>' +
       '</div>' +
       '<div class="aw-action-fields"></div>' +
-      (escalatable ? escSectionHtml() : "");
+      // An audit Event is instantaneous, so there is nothing to chase if it
+      // goes "unhandled" — and the server schema gives `event` no escalation
+      // key at all, so rendering the footer would produce an unsavable action.
+      (escalatable && action.type !== "event" ? escSectionHtml() : "");
     host.appendChild(row);
+    // Set the value explicitly rather than trusting the `selected` attribute
+    // written via innerHTML: the collector reads .value, and relying on
+    // attribute reflection makes the row's type environment-dependent (it is
+    // not honored by happy-dom for a non-first option).
+    row.querySelector(".aw-action-type").value = action.type;
     row.querySelector(".aw-action-remove").addEventListener("click", function () { row.remove(); });
     row.querySelector(".aw-action-type").addEventListener("change", function () {
-      renderActionFields(row, { type: row.querySelector(".aw-action-type").value });
+      // Switching TO/FROM event changes whether the escalation footer belongs,
+      // so rebuild the row rather than just its fields.
+      var next = row.querySelector(".aw-action-type").value;
+      var esc = collectEscSection(row.querySelector(":scope > .aw-esc-sec"));
+      var host2 = row.parentNode;
+      var anchor = row.nextSibling;
+      row.remove();
+      addActionRow(host2, next === "event" ? { type: "event" } : { type: next, escalation: esc }, escalatable);
+      // addActionRow appends; move the rebuilt row back to where it was.
+      if (anchor) host2.insertBefore(host2.lastChild, anchor);
     });
     renderActionFields(row, action);
-    if (escalatable) wireEscSection(row.querySelector(":scope > .aw-esc-sec"), action.escalation || null);
+    if (escalatable && action.type !== "event") wireEscSection(row.querySelector(":scope > .aw-esc-sec"), action.escalation || null);
   }
   // ─── Recipient token fields (To / Cc / Bcc) ────────────────────────────
   //
@@ -2823,6 +2847,15 @@ async function openAutomationWizard(existing) {
       };
       box.querySelector(".sa-script").addEventListener("change", syncScriptBits);
       syncScriptBits();
+    } else if (t === "event") {
+      // Nothing to configure — the severity, message and resource all come from
+      // the fire. The note earns its place because the two trigger families
+      // behave differently: an event/change automation is DRIVEN by Events, so
+      // the engine deliberately writes none of its own (that would loop).
+      var ecTrigger = draft.trigger && (draft.trigger.type === "event" || draft.trigger.type === "change");
+      box.innerHTML = ecTrigger
+        ? '<p style="font-size:0.82rem;color:var(--color-warning,#d97706);margin:0">This automation is triggered BY Events, so it deliberately writes none of its own — an audit Event here would feed back into the trigger. Remove this action; it has no effect.</p>'
+        : '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0">Writes a <strong>notification.triggered</strong> audit Event on every fire, at the alert’s severity, carrying the message from the card above. Visible on the Events tab and forwarded by syslog / SFTP archival. Remove it for a deliberately noisy automation — the in-app alert is unaffected.</p>';
     }
   }
   function apiHeaderRowHtml(k, v) {
@@ -2934,6 +2967,8 @@ async function openAutomationWizard(existing) {
       if (to !== "" && !isNaN(Number(to))) a3.timeoutSec = Number(to);
       return a3;
     }
+    // The audit Event carries no configuration — its presence IS the setting.
+    if (t === "event") return { type: "event" };
     return null;
   }
   function collectActionsFrom(host) {

@@ -228,14 +228,29 @@ describe("automation wizard DOM render", () => {
     expect(doc.querySelector("#aw-summary")).toBeFalsy(); // summary moved to step 6
 
     // The mandatory in-app card leads the Actions step: not an .aw-action row
-    // (so it can't be collected/removed), carries the moved message template,
-    // and names the audit event for metric/state triggers.
+    // (so it can't be collected/removed) and carries the moved message
+    // template. It covers the ALERT only — every delivery row, the escalation
+    // sweep and acknowledge/clear key on Notification.id, so it genuinely
+    // can't be removed. The audit Event moved OUT to a removable
+    // "Create an Event" action in the list below.
     const inapp = doc.querySelector("#aw-step-5 #aw-inapp-card")!;
     expect(inapp).toBeTruthy();
     expect(inapp.classList.contains("aw-action")).toBe(false);
     expect(inapp.querySelector("#aw-msg")).toBeTruthy();
-    expect(inapp.textContent).toContain("event + in-app alert");
+    expect(inapp.textContent).toContain("in-app alert (always happens)");
+    expect(inapp.textContent).not.toContain("event + in-app alert");
     expect(inapp.querySelector(".aw-action-remove")).toBeFalsy();
+
+    // ...and the Event IS a removable action row, present by default.
+    const eventRow = Array.from(doc.querySelectorAll("#aw-step-5 .aw-action")).find(
+      (r) => (r.querySelector(".aw-action-type") as HTMLSelectElement | null)?.value === "event",
+    );
+    expect(eventRow).toBeTruthy();
+    expect(eventRow!.querySelector(".aw-action-remove")).toBeTruthy();
+    expect(eventRow!.textContent).toContain("notification.triggered");
+    // An audit Event is instantaneous — no chain to chase, and the server
+    // schema gives it no escalation key.
+    expect(eventRow!.querySelector(":scope > .aw-esc-sec")).toBeFalsy();
 
     // Escalation is PER ITEM now: the mandatory card hosts the alert's
     // (rule-level) chain, each action row hosts its own. The old bottom
@@ -287,9 +302,12 @@ describe("automation wizard DOM render", () => {
     const bandAction = bandSec.querySelector(".ba-actions .aw-action")!;
     expect(bandAction).toBeTruthy();
     expect(bandAction.querySelector(".aw-esc-sec .aesc-add")).toBeTruthy(); // per-action chain
-    // Top-level action rows are escalatable too.
+    // Top-level action rows are escalatable too. Take the LAST row — the one
+    // just added: the first is the default audit-Event action, which
+    // deliberately has no escalation footer.
     (doc.querySelector("#aw-add-action") as unknown as { click: () => void }).click();
-    const baseAction = doc.querySelector("#aw-actions .aw-action")!;
+    const baseRows = doc.querySelectorAll("#aw-actions .aw-action");
+    const baseAction = baseRows[baseRows.length - 1]!;
     expect(baseAction.querySelector(".aw-esc-sec .aesc-add")).toBeTruthy();
     // Remove both again so step-5 validation (notify needs a recipient) passes.
     (bandAction.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
