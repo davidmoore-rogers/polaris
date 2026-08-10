@@ -256,7 +256,7 @@ Microsoft Graph via OAuth2 client credentials. Produces **assets only**.
 - **Intune** (toggle) — serial, MAC (Wi-Fi + Ethernet, both stored), manufacturer, model, primary user, compliance state. Merged onto Entra devices via `azureADDeviceId ↔ deviceId`. Requires `DeviceManagementManagedDevices.Read.All`.
 
 ### Active Directory (on-premise)
-A domain controller via LDAP / LDAPS simple bind, read-only domain user. Produces **assets only** — computer objects under a configured base DN, mapping hostname, DNS name, OS / OS version, OU path, `whenCreated`, `lastLogonTimestamp`, and description. Disabled accounts can be imported as `decommissioned` or skipped. Wildcard OU include/exclude filters.
+A domain controller via LDAP / LDAPS simple bind, read-only domain user. Produces **assets only** — computer objects under a configured base DN, mapping hostname, DNS name, OS / OS version, OU path, `whenCreated`, `lastLogonTimestamp`, and description. Disabled accounts can be imported as `decommissioned` or skipped. Wildcard OU include/exclude filters. Discovery reads **computer objects only**; the bind account needs read access to user, group and contact objects as well **only** if you enable address-book directory search — an opt-in, live lookup that stores nothing.
 
 ### VMware vCenter
 A vCenter server (7.0U2+) over the vSphere Automation REST API, with two narrow SOAP calls for what REST doesn't expose. Produces **assets only** — virtual machines, ESXi hosts, and a current-state datastore inventory. VMs link to their running host, gain a vMotion-safe host dependency (one edge per cluster member, so suppression only fires when the whole cluster is dark), and can take per-minute CPU/RAM from the hypervisor's batched quickStats without an in-guest agent.
