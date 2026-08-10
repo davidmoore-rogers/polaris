@@ -101,10 +101,11 @@
     // alert at/above the configured tier, before the header count / export /
     // clip so all three agree.
     rows = PolarisWidgets.filterByMinSeverity(rows, config);
-    // Overall down total on the widget header — same pill style as the group
-    // counts, colored to the most severe active alert in the set. Pre-clip, so
-    // the row-limit doesn't shrink the number.
-    PolarisWidgets.setHeaderCount(el, rows.length, PolarisWidgets.maxAlertSeverity(rows));
+    // Header severity breakdown — one pill per active-alert severity in the set
+    // (most severe first, colored to that severity), plus a trailing grey pill
+    // for the rows carrying no alert, so the pills still sum to the down total.
+    // Pre-clip, so the row-limit doesn't shrink the numbers.
+    PolarisWidgets.setHeaderSeverityCounts(el, rows);
     // Header export: the merged interface + tunnel list (pre-clip),
     // severity-tiered on the owning asset's active automation alert.
     PolarisWidgets.setHeaderExport(el, {
