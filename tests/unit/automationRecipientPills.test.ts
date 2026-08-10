@@ -21,10 +21,10 @@ import { resolve } from "node:path";
 import vm from "node:vm";
 
 type Pill = { kind: string; value: string; label: string; unknown?: boolean };
-type Recipients = { recipientUserIds?: string[]; addresses?: string[] };
+type Recipients = { recipientUserIds?: string[]; addresses?: string[]; recipientRoles?: string[] };
 
 let pillsToRecipients: (p: Pill[]) => Recipients;
-let recipientsToPills: (r: Recipients | null | undefined, users: unknown[]) => Pill[];
+let recipientsToPills: (r: Recipients | null | undefined, users: unknown[], roles?: unknown[]) => Pill[];
 
 beforeAll(() => {
   const src = readFileSync(resolve(__dirname, "../../public/js/automations-wizard.js"), "utf8");
@@ -131,5 +131,51 @@ describe("round trip", () => {
   it("a Cc set carrying both halves round-trips (the shape the old UI could not produce)", () => {
     const cc: Recipients = { recipientUserIds: ["u1"], addresses: ["ops@example.com"] };
     expect(pillsToRecipients(recipientsToPills(cc, USERS))).toEqual(cc);
+  });
+});
+
+// ─── Role pills ─────────────────────────────────────────────────────────────
+// "Notify the NOC role" is a third pill kind. Stored by ID so a rename keeps
+// routing, and a DELETED role survives as an unknown pill rather than
+// disappearing on the next save.
+const ROLES = [
+  { id: "r-noc", name: "NOC" },
+  { id: "r-admin", name: "Admin" },
+];
+
+describe("role pills", () => {
+  it("maps to recipientRoles, separate from users and addresses", () => {
+    expect(pillsToRecipients([
+      { kind: "role", value: "r-noc", label: "NOC" },
+      { kind: "user", value: "u1", label: "Jane" },
+      { kind: "address", value: "a@b.co", label: "a@b.co" },
+    ])).toEqual({ recipientUserIds: ["u1"], addresses: ["a@b.co"], recipientRoles: ["r-noc"] });
+  });
+
+  it("dedupes repeated roles", () => {
+    expect(pillsToRecipients([
+      { kind: "role", value: "r-noc", label: "NOC" },
+      { kind: "role", value: "r-noc", label: "NOC" },
+    ])).toEqual({ recipientRoles: ["r-noc"] });
+  });
+
+  it("labels a stored role from the catalogue", () => {
+    const out = recipientsToPills({ recipientRoles: ["r-noc"] }, USERS, ROLES);
+    expect(out).toEqual([{ kind: "role", value: "r-noc", label: "NOC", unknown: false }]);
+  });
+
+  it("KEEPS a deleted role, flagged unknown", () => {
+    const out = recipientsToPills({ recipientRoles: ["r-gone"] }, USERS, ROLES);
+    expect(out[0]).toMatchObject({ kind: "role", value: "r-gone", unknown: true });
+    expect(out[0].label).toMatch(/unknown role/i);
+  });
+
+  it("round-trips all three kinds together", () => {
+    const before: Recipients = {
+      recipientRoles: ["r-noc"],
+      recipientUserIds: ["u1"],
+      addresses: ["noc@example.com"],
+    };
+    expect(pillsToRecipients(recipientsToPills(before, USERS, ROLES))).toEqual(before);
   });
 });

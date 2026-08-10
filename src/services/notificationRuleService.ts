@@ -233,8 +233,9 @@ export async function listScopeOptions(): Promise<{
   models: string[];
   subnets: { id: string; name: string; cidr: string }[];
   regions: string[];
+  roles: { id: string; name: string }[];
 }> {
-  const [mfrRows, modelRows, subnets, regions] = await Promise.all([
+  const [mfrRows, modelRows, subnets, regions, roles] = await Promise.all([
     prisma.asset.findMany({
       select: { manufacturer: true },
       distinct: ["manufacturer"],
@@ -258,6 +259,11 @@ export async function listScopeOptions(): Promise<{
     // would silently degrade to free text. This endpoint is already behind
     // automationManagement:read, which the wizard has by definition.
     listRegions().catch(() => []),
+    // Roles for the recipient picker's role tokens. Ids, not names: a rename
+    // must never silently reroute an automation. Rides this payload for the
+    // same reason regions do — GET /roles is gated `roles:read`, which an
+    // automation editor may not hold.
+    prisma.role.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }).catch(() => []),
   ]);
   return {
     manufacturers: mfrRows.map((r) => r.manufacturer).filter((m): m is string => !!m && m.trim() !== ""),
@@ -266,6 +272,7 @@ export async function listScopeOptions(): Promise<{
     // Bare names — how User/Role/GroupMapping.regionTags store them. The
     // `region:` prefix exists only on ASSET tags.
     regions: regions.map((r) => r.name).filter((n) => !!n && n.trim() !== "").sort(),
+    roles,
   };
 }
 

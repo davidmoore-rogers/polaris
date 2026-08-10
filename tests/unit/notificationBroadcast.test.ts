@@ -14,11 +14,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const userRows = [
-  { id: "u-atl", email: "atl@example.com", displayName: "Atlanta Op", regionTags: ["Atlanta"], otherTags: [], ssoGroups: [], authProvider: "local", role: null },
-  { id: "u-nash", email: "nash@example.com", displayName: "Nashville Op", regionTags: ["Nashville"], otherTags: [], ssoGroups: [], authProvider: "local", role: null },
+  { id: "u-atl", email: "atl@example.com", displayName: "Atlanta Op", regionTags: ["Atlanta"], otherTags: [], ssoGroups: [], authProvider: "local", roleId: "r-noc", role: null },
+  { id: "u-nash", email: "nash@example.com", displayName: "Nashville Op", regionTags: ["Nashville"], otherTags: [], ssoGroups: [], authProvider: "local", roleId: "r-noc", role: null },
   // The trap: "Atlanta" as an OTHER tag, not a region.
-  { id: "u-trap", email: "trap@example.com", displayName: "Vendor", regionTags: [], otherTags: ["Atlanta"], ssoGroups: [], authProvider: "local", role: null },
-  { id: "u-none", email: "none@example.com", displayName: "No Region", regionTags: [], otherTags: [], ssoGroups: [], authProvider: "local", role: null },
+  { id: "u-trap", email: "trap@example.com", displayName: "Vendor", regionTags: [], otherTags: ["Atlanta"], ssoGroups: [], authProvider: "local", roleId: "r-ro", role: null },
+  { id: "u-none", email: "none@example.com", displayName: "No Region", regionTags: [], otherTags: [], ssoGroups: [], authProvider: "local", roleId: "r-admin", role: null },
 ];
 
 const createdRows: Record<string, unknown>[] = [];
@@ -60,6 +60,7 @@ import {
   resolveUsersByRegions,
   resolveUsersInAnyRegion,
   resolveRecipientUsers,
+  resolveUsersByRoles,
 } from "../../src/services/notificationRecipientService.js";
 
 beforeEach(() => {
@@ -153,5 +154,44 @@ describe("expandDeliveries broadcast modes", () => {
       {},
     );
     expect(createdRows.map((r) => r.target).sort()).toEqual(["https://push/u-atl", "https://push/u-none"]);
+  });
+});
+
+// ─── Role recipients ────────────────────────────────────────────────────────
+// "Notify the NOC role" routes to whoever holds that role right now, so a
+// staffing change needs no automation edit. Matched by role ID, never name — a
+// rename must not silently reroute an alert.
+describe("resolveUsersByRoles", () => {
+  it("returns every user holding the role", async () => {
+    expect(emails(await resolveUsersByRoles(["r-noc"]))).toEqual(["atl@example.com", "nash@example.com"]);
+  });
+
+  it("unions across several roles, deduped by user", async () => {
+    expect(emails(await resolveUsersByRoles(["r-noc", "r-admin"])))
+      .toEqual(["atl@example.com", "nash@example.com", "none@example.com"]);
+  });
+
+  it("routes to nobody for an empty or unknown role list", async () => {
+    expect(await resolveUsersByRoles([])).toEqual([]);
+    expect(await resolveUsersByRoles(undefined)).toEqual([]);
+    expect(await resolveUsersByRoles(["r-deleted"])).toEqual([]);
+  });
+
+  it("reaches them through expandDeliveries, unioned with picked users", async () => {
+    await expandDeliveries(
+      "n1",
+      [{ channelId: "c-push", recipientRoles: ["r-admin"], recipientUserIds: ["u-atl"] }] as never,
+      {},
+    );
+    expect(createdRows.map((r) => r.target).sort()).toEqual(["https://push/u-atl", "https://push/u-none"]);
+  });
+
+  it("does not double-count a user picked both individually and by role", async () => {
+    await expandDeliveries(
+      "n1",
+      [{ channelId: "c-push", recipientRoles: ["r-admin"], recipientUserIds: ["u-none"] }] as never,
+      {},
+    );
+    expect(createdRows).toHaveLength(1);
   });
 });

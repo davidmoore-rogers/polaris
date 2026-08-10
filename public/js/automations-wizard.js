@@ -42,10 +42,11 @@ var _awDraftStash = null;   // in-memory draft stash (never persisted — may co
 
 /** Pills → the payload halves. Order preserved, duplicates dropped. */
 function pillsToRecipients(pills) {
-  var userIds = [], addresses = [];
+  var userIds = [], addresses = [], roles = [];
   (pills || []).forEach(function (p) {
     if (!p || !p.value) return;
     if (p.kind === "user") { if (userIds.indexOf(p.value) === -1) userIds.push(p.value); }
+    else if (p.kind === "role") { if (roles.indexOf(p.value) === -1) roles.push(p.value); }
     else {
       var a = String(p.value).trim().toLowerCase();
       if (a && addresses.indexOf(a) === -1) addresses.push(a);
@@ -54,16 +55,25 @@ function pillsToRecipients(pills) {
   var out = {};
   if (userIds.length) out.recipientUserIds = userIds;
   if (addresses.length) out.addresses = addresses;
+  if (roles.length) out.recipientRoles = roles;
   return out;
 }
 
 /** The payload halves → pills. A user id with no matching account is KEPT as an
  *  "unknown" pill rather than silently dropped on the next save — losing a
  *  recipient because their account was renamed is worse than showing a stub. */
-function recipientsToPills(rec, users) {
+function recipientsToPills(rec, users, roles) {
   var byId = {};
   (users || []).forEach(function (u) { byId[u.id] = u; });
+  var roleById = {};
+  (roles || []).forEach(function (r) { roleById[r.id] = r; });
   var out = [];
+  ((rec && rec.recipientRoles) || []).forEach(function (id) {
+    // Roles are stored by ID, so a renamed role keeps routing; a DELETED one
+    // survives as an unknown pill rather than vanishing on the next save.
+    var r = roleById[id];
+    out.push({ kind: "role", value: id, label: r ? r.name : "(unknown role)", unknown: !r });
+  });
   ((rec && rec.recipientUserIds) || []).forEach(function (id) {
     var u = byId[id];
     out.push({ kind: "user", value: id, label: u ? (u.displayName || u.username) : "(unknown user)", unknown: !u });
@@ -485,6 +495,38 @@ async function openAutomationWizard(existing) {
       known.map(function (r) { return chip(r, false); }).join("") +
       orphans.map(function (r) { return chip(r, true); }).join("") +
       "</div>";
+  }
+
+  /**
+   * Role chips for the push recipient block. Ids in the DOM, names on screen —
+   * a rename must not reroute an automation.
+   */
+  function rolePickerHtml(selected) {
+    var sel = {};
+    (selected || []).forEach(function (id) { sel[id] = true; });
+    var known = awRoles();
+    if (!known.length) return '<p class="hint" style="margin:2px 0">No roles found.</p>';
+    var chips = known.map(function (r) {
+      var on = !!sel[r.id];
+      return '<button type="button" class="tag-chip na-role-chip" data-role="' + escapeHtml(r.id) + '" ' +
+        'data-selected="' + (on ? "1" : "0") + '" title="' + escapeHtml(r.name) + '" ' +
+        'style="cursor:pointer' + (on ? "" : ";opacity:.55") + '">' + escapeHtml(r.name) + "</button>";
+    }).join("");
+    // A role the automation targets that no longer exists still shows, so it
+    // can be seen and removed rather than silently dropped.
+    var orphans = (selected || []).filter(function (id) { return !known.some(function (r) { return r.id === id; }); });
+    var orphanChips = orphans.map(function (id) {
+      return '<button type="button" class="tag-chip na-role-chip na-unknown" data-role="' + escapeHtml(id) + '" ' +
+        'data-selected="1" title="This role no longer exists" style="cursor:pointer">(unknown role)</button>';
+    }).join("");
+    return '<div class="na-role-picker tag-chip-list" style="margin:2px 0">' + chips + orphanChips + "</div>";
+  }
+
+  function collectRoles(box) {
+    if (!box) return [];
+    return Array.from(box.querySelectorAll('.na-role-chip[data-selected="1"]'))
+      .map(function (el) { return el.getAttribute("data-role"); })
+      .filter(Boolean);
   }
 
   function collectRegions(box) {
@@ -2357,6 +2399,21 @@ async function openAutomationWizard(existing) {
 
   var _awContactEmails = null; // Set of lower-cased addresses already in the book
 
+  /** Role catalogue for the recipient tokens (from /automations/scope-options). */
+  function awRoles() { return (_awScopeOptions && _awScopeOptions.roles) || []; }
+
+  /**
+   * Roles matching the typed fragment, as suggestion entries. Local — the role
+   * list is small, already loaded with the wizard, and doesn't belong in
+   * /contacts/search, which is the ADDRESS book.
+   */
+  function roleSuggestions(q) {
+    var needle = String(q || "").toLowerCase();
+    return awRoles()
+      .filter(function (r) { return r.name.toLowerCase().indexOf(needle) !== -1; })
+      .map(function (r) { return { source: "role", id: r.id, email: "", name: r.name, description: "Every user with this role" }; });
+  }
+
   function canReadContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "read"); }
   function canAddContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "write"); }
 
@@ -2364,13 +2421,18 @@ async function openAutomationWizard(existing) {
     var cls = "tag-chip" + (p.unknown ? " na-unknown" : "");
     var title = p.kind === "user"
       ? (p.unknown ? "This user account no longer exists" : "Polaris user account")
-      : p.value;
+      : p.kind === "role"
+        ? (p.unknown ? "This role no longer exists" : "Every user holding this role")
+        : p.value;
     // The save affordance only makes sense for a typed address that isn't
     // already in the book, and only for someone who may add one.
     var showSave = p.kind === "address" && canAddContacts() &&
       _awContactEmails && !_awContactEmails.has(String(p.value).toLowerCase());
     return '<span class="' + cls + '" draggable="true" data-kind="' + escapeHtml(p.kind) + '" ' +
-        'data-value="' + escapeHtml(p.value) + '" title="' + escapeHtml(title) + '">' +
+        'data-value="' + escapeHtml(p.value) + '" data-label="' + escapeHtml(p.label) + '" ' +
+        (p.unknown ? 'data-unknown="1" ' : "") +
+        'title="' + escapeHtml(title) + '">' +
+      (p.kind === "role" ? '<span style="opacity:.6;font-size:.85em">role:</span> ' : "") +
       escapeHtml(p.label) +
       (showSave
         ? '<button type="button" class="na-chip-save" data-na-save title="Save to address book" aria-label="Save to address book">&plus;</button>'
@@ -2401,8 +2463,11 @@ async function openAutomationWizard(existing) {
       return {
         kind: el.getAttribute("data-kind"),
         value: el.getAttribute("data-value"),
-        label: el.textContent.replace(/[+×]\s*$/g, "").trim(),
-        unknown: el.classList.contains("na-unknown"),
+        // From the attribute, not textContent: the chip also renders a "role:"
+        // qualifier and the ×/+ buttons, which a text scrape would fold into
+        // the label and then re-render on the next drag.
+        label: el.getAttribute("data-label") || "",
+        unknown: el.hasAttribute("data-unknown"),
       };
     });
   }
@@ -2459,8 +2524,9 @@ async function openAutomationWizard(existing) {
         }
         sugg.innerHTML = items.map(function (e, i) {
           var badge = e.source === "user" ? "user" : e.source === "contact" ? "contact" : e.source;
-          return '<div class="aw-suggest-item" data-i="' + i + '" title="' + escapeHtml(e.email) + '">' +
-            escapeHtml((e.name ? e.name + " — " : "") + e.email) +
+          var label = e.email ? (e.name ? e.name + " — " + e.email : e.email) : (e.name || "");
+          return '<div class="aw-suggest-item" data-i="' + i + '" title="' + escapeHtml(e.email || e.description || "") + '">' +
+            escapeHtml(label) +
             ' <span style="opacity:.6;font-size:.85em">' + escapeHtml(badge) + "</span></div>";
         }).join("");
         sugg.classList.add("open");
@@ -2468,8 +2534,10 @@ async function openAutomationWizard(existing) {
         paint();
       }
       function entryToPill(e) {
-        // A Polaris account becomes a USER pill — the id survives the person
-        // changing address, the raw string doesn't.
+        // A Polaris account becomes a USER pill and a role a ROLE pill — both
+        // keyed by id, which survives a rename; only a bare address is stored
+        // as the string itself.
+        if (e.source === "role") return { kind: "role", value: e.id, label: e.name };
         return e.source === "user"
           ? { kind: "user", value: e.id, label: e.name || e.email }
           : { kind: "address", value: e.email, label: e.name ? e.name + " <" + e.email + ">" : e.email };
@@ -2492,13 +2560,19 @@ async function openAutomationWizard(existing) {
       input.addEventListener("input", function () {
         var q = input.value.trim();
         clearTimeout(suggestTimer);
-        if (q.length < 2 || !canReadContacts()) { closeSuggest(); return; }
+        if (q.length < 2) { closeSuggest(); return; }
+        // Roles resolve LOCALLY and show immediately — they're already loaded,
+        // so the list shouldn't wait on a network round trip (or disappear when
+        // the caller lacks contacts:read).
+        var roles = roleSuggestions(q);
+        if (!canReadContacts()) { openSuggest(roles); return; }
+        openSuggest(roles);
         suggestTimer = setTimeout(function () {
           api.contacts.search(q, true).then(function (r) {
             // Ignore a response that lost the race with newer typing.
             if (input.value.trim() !== q) return;
-            openSuggest((r && r.entries) || []);
-          }).catch(function () { closeSuggest(); });
+            openSuggest(roles.concat((r && r.entries) || []));
+          }).catch(function () { /* keep the role matches already shown */ });
         }, 250);
       });
       input.addEventListener("keydown", function (ev) {
@@ -2603,8 +2677,8 @@ async function openAutomationWizard(existing) {
       var p = {
         kind: _naDragEl.getAttribute("data-kind"),
         value: _naDragEl.getAttribute("data-value"),
-        label: _naDragEl.textContent.replace(/[+×]\s*$/g, "").trim(),
-        unknown: _naDragEl.classList.contains("na-unknown"),
+        label: _naDragEl.getAttribute("data-label") || "",
+        unknown: _naDragEl.hasAttribute("data-unknown"),
       };
       var moved = addPill(box, p);
       _naDragEl.remove();       // a move, not a copy — remove either way, since
@@ -2655,9 +2729,9 @@ async function openAutomationWizard(existing) {
           // email…" disclosure, which is where they used to hide.
           var comp0 = action.emailComposition || {};
           h = '<div class="na-recips">' +
-            recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers), canReadContacts()) +
-            recipBoxHtml("cc", "Cc", recipientsToPills(comp0.cc, _ruleRecipientUsers), false) +
-            recipBoxHtml("bcc", "Bcc", recipientsToPills(comp0.bcc, _ruleRecipientUsers), false) +
+            recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers, awRoles()), canReadContacts()) +
+            recipBoxHtml("cc", "Cc", recipientsToPills(comp0.cc, _ruleRecipientUsers, awRoles()), false) +
+            recipBoxHtml("bcc", "Bcc", recipientsToPills(comp0.bcc, _ruleRecipientUsers, awRoles()), false) +
             "</div>" +
             '<p class="hint" style="margin:0 0 6px">Anything in Cc or Bcc sends <strong>one</strong> message with the full To list visible, instead of a separate email per recipient.</p>';
         } else {
@@ -2680,6 +2754,8 @@ async function openAutomationWizard(existing) {
               '<label style="font-size:0.8rem">Send to user accounts</label>' +
               userMultiSelect(action.recipientUserIds, "na-users", isPush) +
               '<div class="na-push-warn">' + pushReachWarning(action.recipientUserIds) + "</div>" +
+              '<label style="font-size:0.8rem;margin-top:6px;display:block">…or everyone with a role</label>' +
+              rolePickerHtml(action.recipientRoles) +
             "</div>" +
             '<label style="display:block;font-size:0.8rem;margin:6px 0 4px"><input type="checkbox" class="na-all-regions"' +
               (allRegions ? " checked" : "") + (allUsers ? " disabled" : "") +
@@ -2760,7 +2836,7 @@ async function openAutomationWizard(existing) {
           allRegionsEl.addEventListener("change", syncPush);
           // Region chips toggle in place (the users.js picker idiom).
           fbox.addEventListener("click", function (ev) {
-            var chip = ev.target.closest && ev.target.closest(".na-region-chip");
+            var chip = ev.target.closest && ev.target.closest(".na-region-chip, .na-role-chip");
             if (!chip) return;
             var on = chip.getAttribute("data-selected") === "1";
             chip.setAttribute("data-selected", on ? "0" : "1");
@@ -2893,6 +2969,7 @@ async function openAutomationWizard(existing) {
         var to = pillsToRecipients(pillsOf(toBox));
         if (to.recipientUserIds) a.recipientUserIds = to.recipientUserIds;
         if (to.addresses) a.addresses = to.addresses;
+        if (to.recipientRoles) a.recipientRoles = to.recipientRoles;
       }
       // Push broadcast modes. "All users" subsumes everything, so the narrower
       // pickers aren't collected under it — persisting a stale user list the UI
@@ -2912,6 +2989,8 @@ async function openAutomationWizard(existing) {
           var uids = Array.from(userSel.selectedOptions).map(function (o) { return o.value; }).filter(Boolean);
           if (uids.length) a.recipientUserIds = uids;
         }
+        var pushRoles = collectRoles(box);
+        if (pushRoles.length) a.recipientRoles = pushRoles;
       }
       var devRegEl = box.querySelector(".na-device-region");
       if (devRegEl && devRegEl.checked) a.recipientDeviceRegion = true;
@@ -3119,7 +3198,8 @@ async function openAutomationWizard(existing) {
       if (!a.channelId) return label + ": pick a channel.";
       var ch = chanById(a.channelId);
       if (ch && isRouted(ch.type)) {
-        var hasTo = (a.recipientUserIds && a.recipientUserIds.length) || (a.addresses && a.addresses.length);
+        var hasTo = (a.recipientUserIds && a.recipientUserIds.length) || (a.addresses && a.addresses.length) ||
+          (a.recipientRoles && a.recipientRoles.length);
         var hasRecip = hasTo || a.recipientDeviceRegion || a.recipientScopeRegion || a.recipientAssetContacts ||
           a.recipientAllUsers || a.recipientAllRegions || (a.recipientRegions && a.recipientRegions.length);
         if (!hasRecip) return label + " (" + ch.name + "): choose at least one recipient.";

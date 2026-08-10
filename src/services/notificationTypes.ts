@@ -755,6 +755,10 @@ export const deliveryTargetSchema = z.object({
   recipientScopeRegion: z.boolean().optional(), // users whose region tags match the rule's scope region tag(s)
   recipientDeviceRegion: z.boolean().optional(), // users whose region tags match the TRIGGERING asset's region: tag(s)
   recipientAssetContacts: z.boolean().optional(), // address-book contacts owning the TRIGGERING asset (email only)
+  // Every user holding one of these ROLES. Stored as role IDS, not names: a
+  // role can be renamed, and User.roleId / ApiToken / GroupMapping all key on
+  // the id already. Resolves to users, so it works on email AND web_push.
+  recipientRoles: z.array(z.string().max(100)).max(50).optional(),
   // Broadcast modes — web_push only (rejected on other channel types at rule
   // save). recipientAllUsers = every user account; recipientAllRegions = every
   // user carrying at least one region tag; recipientRegions = users in the
@@ -780,6 +784,7 @@ const emailRecipientsSchema = z
   .object({
     recipientUserIds: z.array(z.string().max(100)).max(500).optional(), // Polaris users → their emails
     addresses: z.array(z.string().email().max(320)).max(100).optional(), // custom email addresses
+    recipientRoles: z.array(z.string().max(100)).max(50).optional(), // Role IDS → every user holding them
   })
   .strict();
 
@@ -883,6 +888,8 @@ export const notifyActionSchema = z
     // Email transports only: a contact is an address, not an account, so there
     // is no push subscription to reach.
     recipientAssetContacts: z.boolean().optional(),
+    // Every user holding one of these ROLES (role ids — see deliveryTargetSchema).
+    recipientRoles: z.array(z.string().max(100)).max(50).optional(),
     // Broadcast modes — see deliveryTargetSchema. web_push only; validated at
     // rule save so the model can never hold a state the builder won't render.
     recipientAllUsers: z.boolean().optional(),
@@ -1272,6 +1279,7 @@ export function targetsToNotifyActions(
     ...(t.recipientScopeRegion !== undefined ? { recipientScopeRegion: t.recipientScopeRegion } : {}),
     ...(t.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: t.recipientDeviceRegion } : {}),
     ...(t.recipientAssetContacts !== undefined ? { recipientAssetContacts: t.recipientAssetContacts } : {}),
+    ...(t.recipientRoles?.length ? { recipientRoles: t.recipientRoles } : {}),
     ...(t.recipientAllUsers !== undefined ? { recipientAllUsers: t.recipientAllUsers } : {}),
     ...(t.recipientAllRegions !== undefined ? { recipientAllRegions: t.recipientAllRegions } : {}),
     ...(t.recipientRegions?.length ? { recipientRegions: t.recipientRegions } : {}),
@@ -1293,6 +1301,7 @@ export function actionsToTargets(actions: AutomationAction[]): DeliveryTarget[] 
       ...(a.recipientScopeRegion !== undefined ? { recipientScopeRegion: a.recipientScopeRegion } : {}),
       ...(a.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: a.recipientDeviceRegion } : {}),
       ...(a.recipientAssetContacts !== undefined ? { recipientAssetContacts: a.recipientAssetContacts } : {}),
+      ...(a.recipientRoles?.length ? { recipientRoles: a.recipientRoles } : {}),
       ...(a.recipientAllUsers !== undefined ? { recipientAllUsers: a.recipientAllUsers } : {}),
       ...(a.recipientAllRegions !== undefined ? { recipientAllRegions: a.recipientAllRegions } : {}),
       ...(a.recipientRegions?.length ? { recipientRegions: a.recipientRegions } : {}),

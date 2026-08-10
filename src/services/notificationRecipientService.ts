@@ -93,6 +93,8 @@ interface IndexedUser extends RecipientUser {
    * recipientAllRegions match on this; recipientTags keeps matchSet.
    */
   regionSet: Set<string>;
+  /** The user's Role id — recipientRoles routes by it. */
+  roleId: string;
 }
 
 // ─── User tag index (short-TTL cache) ───────────────────────────────────────
@@ -122,6 +124,7 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       otherTags: true,
       ssoGroups: true,
       authProvider: true,
+      roleId: true,
       role: { select: { regionTags: true, otherTags: true } },
     },
   });
@@ -137,7 +140,7 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       regionSet.add(n);
     }
     for (const t of scopes.otherTags.effective) matchSet.add(normalizeNeedle(t));
-    index.push({ id: u.id, email: u.email, displayName: u.displayName, matchSet, regionSet });
+    index.push({ id: u.id, email: u.email, displayName: u.displayName, matchSet, regionSet, roleId: u.roleId });
   }
   return index;
   });
@@ -191,6 +194,24 @@ export async function resolveUsersInAnyRegion(): Promise<RecipientUser[]> {
     .map(({ id, email, displayName }) => ({ id, email, displayName }));
 }
 
+/**
+ * Users holding one of the given ROLES. Matched on role ID, not name: a role
+ * can be renamed, and User.roleId / ApiToken / GroupMapping already key on the
+ * id — so a rename never silently reroutes an automation's recipients.
+ *
+ * Resolves to users, so this works on email AND web_push alike, unlike
+ * recipientAssetContacts (an address with no account behind it).
+ */
+export async function resolveUsersByRoles(roleIds: string[] | undefined): Promise<RecipientUser[]> {
+  if (!roleIds || roleIds.length === 0) return [];
+  const want = new Set(roleIds.filter(Boolean));
+  if (want.size === 0) return [];
+  const index = await loadUserIndex();
+  return index
+    .filter((u) => want.has(u.roleId))
+    .map(({ id, email, displayName }) => ({ id, email, displayName }));
+}
+
 /** Every user account — the explicit broadcast opt-in (recipientAllUsers). */
 export async function resolveAllUsers(): Promise<RecipientUser[]> {
   const index = await loadUserIndex();
@@ -232,6 +253,11 @@ export async function resolveEmailRecipients(r: EmailRecipients | null | undefin
   const out = new Set<string>();
   for (const a of r.addresses ?? []) if (a.trim()) out.add(a.trim().toLowerCase());
   for (const u of await resolveRecipientUsersByIds(r.recipientUserIds)) {
+    if (u.email) out.add(u.email.trim().toLowerCase());
+  }
+  // Roles are resolvable in Cc/Bcc too — the token fields treat a role pill the
+  // same wherever it's dropped, so the wire shape has to as well.
+  for (const u of await resolveUsersByRoles(r.recipientRoles)) {
     if (u.email) out.add(u.email.trim().toLowerCase());
   }
   return Array.from(out);
@@ -325,6 +351,7 @@ export async function expandDeliveries(
     if (t.recipientAllUsers) return await resolveAllUsers();
     if (t.recipientAllRegions) addUsers(await resolveUsersInAnyRegion());
     if (t.recipientRegions?.length) addUsers(await resolveUsersByRegions(t.recipientRegions));
+    if (t.recipientRoles?.length) addUsers(await resolveUsersByRoles(t.recipientRoles));
     if (t.recipientUserIds?.length) addUsers(await resolveRecipientUsersByIds(t.recipientUserIds));
     if (t.recipientDeviceRegion && assetRegionTags?.length) addUsers(await resolveRecipientUsers(assetRegionTags));
     if (t.recipientScopeRegion && scopeRegionTags?.length) addUsers(await resolveRecipientUsers(scopeRegionTags));
