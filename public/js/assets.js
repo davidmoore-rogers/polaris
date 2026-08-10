@@ -4587,6 +4587,7 @@ function _assetGeneralTabHTML(a) {
       viewRow("Last Seen AP", a.lastSeenAp) +
       '<div class="detail-row"><span class="detail-label">Last Seen Firewall</span><span class="detail-value" id="asset-last-fw-' + escapeHtml(a.id) + '">-</span></div>' +
       '<div id="asset-mclag-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
+      '<div id="asset-contacts-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
       associatedUsersViewHTML(a.associatedUsers) +
       lastSeenRowHTML(a) +
       '<div id="asset-dir-activity-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
@@ -4684,6 +4685,29 @@ function _mountAssetViewAsyncSections(a, dependencies, sources, sightings, manag
         mclagMount.innerHTML = html;
         _wireDependencyTreeLinks(mclagMount);
       }).catch(function (err) { console.warn("Failed to load MCLAG peers", err); });
+    }
+    // Contacts row (General tab) — the address-book entries responsible for
+    // this device, so an operator can see who an automation would email without
+    // opening the Address Book and re-deriving the filters. Read-only, and the
+    // row stays absent when nobody owns the device (most won't). Needs
+    // contacts:read on top of assets:read, so a 403 just leaves it off.
+    var contactsMount = document.getElementById("asset-contacts-mount-" + a.id);
+    if (contactsMount && permAtLeast("contacts", "read")) {
+      api.assets.contacts(a.id).then(function (res) {
+        var cs = (res && res.contacts) || [];
+        if (!cs.length) return;
+        contactsMount.innerHTML = cs.map(function (c) {
+          var label = c.name ? c.name + " <" + c.email + ">" : c.email;
+          // "pinned" vs "filter" — an operator chasing an unexpected recipient
+          // needs to know whether someone chose this device or a rule matched it.
+          var via = c.via === "pinned" ? "pinned" : "matched by filter";
+          return '<div class="detail-row"><span class="detail-label">Contact</span><span class="detail-value">' +
+            '<a href="mailto:' + escapeHtml(c.email) + '">' + escapeHtml(label) + "</a>" +
+            ' <span style="color:var(--color-text-secondary)">(' + escapeHtml(via) + ")</span>" +
+            (c.description ? '<br><span style="color:var(--color-text-tertiary);font-size:0.85em">' + escapeHtml(c.description) + "</span>" : "") +
+            "</span></div>";
+        }).join("");
+      }).catch(function (err) { console.warn("Failed to load asset contacts", err); });
     }
     // Virtualization section (General tab) — vCenter VMs show their running
     // host (clickable), cluster, power state, Tools status, vCPU/RAM,

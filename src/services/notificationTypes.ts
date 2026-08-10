@@ -754,6 +754,7 @@ export const deliveryTargetSchema = z.object({
   addresses: z.array(z.string().email().max(320)).max(100).optional(), // custom email addresses (email channels)
   recipientScopeRegion: z.boolean().optional(), // users whose region tags match the rule's scope region tag(s)
   recipientDeviceRegion: z.boolean().optional(), // users whose region tags match the TRIGGERING asset's region: tag(s)
+  recipientAssetContacts: z.boolean().optional(), // address-book contacts owning the TRIGGERING asset (email only)
   recipientTags: z.array(z.string().max(100)).max(200).optional(), // legacy tag-routing (kept for back-compat)
 });
 
@@ -866,6 +867,13 @@ export const notifyActionSchema = z
     // scope). The engine threads the asset's stripped region snapshot into
     // the expander (Notification.regionTags on the escalation sweep).
     recipientDeviceRegion: z.boolean().optional(),
+    // Route to the address-book contacts RESPONSIBLE for the triggering asset
+    // (Contact.assetCriteria ∪ Contact.assetIds). Same union semantics as
+    // recipientDeviceRegion and works with any device filter — the difference
+    // is that ownership is stated once on the contact instead of per rule.
+    // Email transports only: a contact is an address, not an account, so there
+    // is no push subscription to reach.
+    recipientAssetContacts: z.boolean().optional(),
     recipientTags: z.array(z.string().max(100)).max(200).optional(),
     // Per-action email composition override; falls back to the rule-level
     // emailComposition, then the pre-feature defaults. Email transports only.
@@ -1230,6 +1238,7 @@ export function targetsToNotifyActions(
     ...(t.addresses?.length ? { addresses: t.addresses } : {}),
     ...(t.recipientScopeRegion !== undefined ? { recipientScopeRegion: t.recipientScopeRegion } : {}),
     ...(t.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: t.recipientDeviceRegion } : {}),
+    ...(t.recipientAssetContacts !== undefined ? { recipientAssetContacts: t.recipientAssetContacts } : {}),
     ...(t.recipientTags?.length ? { recipientTags: t.recipientTags } : {}),
     emailComposition: emailComposition ?? null,
   }));
@@ -1247,6 +1256,7 @@ export function actionsToTargets(actions: AutomationAction[]): DeliveryTarget[] 
       ...(a.addresses?.length ? { addresses: a.addresses } : {}),
       ...(a.recipientScopeRegion !== undefined ? { recipientScopeRegion: a.recipientScopeRegion } : {}),
       ...(a.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: a.recipientDeviceRegion } : {}),
+      ...(a.recipientAssetContacts !== undefined ? { recipientAssetContacts: a.recipientAssetContacts } : {}),
       ...(a.recipientTags?.length ? { recipientTags: a.recipientTags } : {}),
     }));
 }

@@ -33,6 +33,54 @@
 var _awScripts = null;      // AutomationScript registry (null = not loadable — no automationScripts read)
 var _awDraftStash = null;   // in-memory draft stash (never persisted — may contain addresses)
 
+// ─── Recipient pill ⇄ payload (pure; exported for tests) ───
+// The Notify action's To/Cc/Bcc token fields store a pill as
+// {kind:"user"|"address", value, label}; the wire shape splits that into
+// recipientUserIds + addresses. Both halves live at module scope, closed over
+// nothing, so tests/unit/automationRecipientPills.test.ts can pull them off
+// window.PolarisAutomationRecipients (the PolarisAutomationSentences idiom).
+
+/** Pills → the payload halves. Order preserved, duplicates dropped. */
+function pillsToRecipients(pills) {
+  var userIds = [], addresses = [];
+  (pills || []).forEach(function (p) {
+    if (!p || !p.value) return;
+    if (p.kind === "user") { if (userIds.indexOf(p.value) === -1) userIds.push(p.value); }
+    else {
+      var a = String(p.value).trim().toLowerCase();
+      if (a && addresses.indexOf(a) === -1) addresses.push(a);
+    }
+  });
+  var out = {};
+  if (userIds.length) out.recipientUserIds = userIds;
+  if (addresses.length) out.addresses = addresses;
+  return out;
+}
+
+/** The payload halves → pills. A user id with no matching account is KEPT as an
+ *  "unknown" pill rather than silently dropped on the next save — losing a
+ *  recipient because their account was renamed is worse than showing a stub. */
+function recipientsToPills(rec, users) {
+  var byId = {};
+  (users || []).forEach(function (u) { byId[u.id] = u; });
+  var out = [];
+  ((rec && rec.recipientUserIds) || []).forEach(function (id) {
+    var u = byId[id];
+    out.push({ kind: "user", value: id, label: u ? (u.displayName || u.username) : "(unknown user)", unknown: !u });
+  });
+  ((rec && rec.addresses) || []).forEach(function (a) {
+    out.push({ kind: "address", value: a, label: a });
+  });
+  return out;
+}
+
+if (typeof window !== "undefined") {
+  window.PolarisAutomationRecipients = {
+    pillsToRecipients: pillsToRecipients,
+    recipientsToPills: recipientsToPills,
+  };
+}
+
 // ─── Sentence builder (pure; factory over the /schema payload) ───
 // Everything the live wizard sentence + summary rendering needs, closed over
 // only the schema `s` — no draft/DOM state — so it is unit-testable
@@ -280,6 +328,17 @@ async function openAutomationWizard(existing) {
     try { var _ru = await api.automations.recipientUsers(); _ruleRecipientUsers = (_ru && _ru.users) || []; }
     catch (_e) { _ruleRecipientUsers = []; }
   }
+  // Which addresses are already in the address book — decides whether a typed
+  // address pill offers "save to address book". Refreshed per open (cheap) and
+  // skipped entirely without the contacts key, which also hides the affordance.
+  if (permAtLeast("contacts", "read")) {
+    try {
+      var _cl = await api.contacts.list();
+      _awContactEmails = new Set(((_cl && _cl.contacts) || []).map(function (c) { return String(c.email).toLowerCase(); }));
+    } catch (_e) { _awContactEmails = null; }
+  } else {
+    _awContactEmails = null;
+  }
   // Script registry — readable only with the automationScripts key; a 403
   // hides the script action type rather than erroring the wizard.
   if (_awScripts === null && permAtLeast("automationScripts", "read")) {
@@ -408,14 +467,6 @@ async function openAutomationWizard(existing) {
       " have no push-enabled device (" + names + more + ") — they will receive nothing from this action.") +
       '</p>';
   }
-  function emailSuggestOptions() {
-    var seen = {};
-    return (_ruleRecipientUsers || [])
-      .map(function (u) { return u.email; })
-      .filter(function (e) { if (!e || seen[e]) return false; seen[e] = 1; return true; })
-      .map(function (e) { return '<option value="' + escapeHtml(e) + '">'; })
-      .join("");
-  }
   function tokenPaletteHtml(id) {
     var vars = s.templateVariables || [];
     if (!vars.length) return "";
@@ -424,7 +475,6 @@ async function openAutomationWizard(existing) {
     }).join("");
     return '<details id="' + id + '" style="margin:2px 0 6px"><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Insert variable…</summary><div style="margin-top:4px">' + chips + '</div></details>';
   }
-  function csvOf(val) { return String(val || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
   function scriptById(id) { return (_awScripts || []).find(function (x) { return x.id === id; }); }
 
   // Which action types the picker offers: catalog-driven, script additionally
@@ -492,8 +542,9 @@ async function openAutomationWizard(existing) {
     '<div class="step-panel" id="aw-step-3">' + step3Html() + '</div>' +
     '<div class="step-panel" id="aw-step-4"></div>' + // rendered on entry (depends on trigger type)
     '<div class="step-panel" id="aw-step-5"></div>' + // rendered on entry (actions/escalation)
-    '<div class="step-panel" id="aw-step-6"></div>' + // rendered on entry (summary + affected devices)
-    '<datalist id="notif-email-suggest">' + emailSuggestOptions() + '</datalist>';
+    // The notif-email-suggest datalist went with the Cc/Bcc text inputs it fed —
+    // the recipient fields now use the .aw-suggest typeahead over /contacts/search.
+    '<div class="step-panel" id="aw-step-6"></div>'; // rendered on entry (summary + affected devices)
 
   var footer =
     '<button class="btn btn-secondary" id="aw-cancel">Cancel</button>' +
@@ -2207,6 +2258,278 @@ async function openAutomationWizard(existing) {
     renderActionFields(row, action);
     if (escalatable) wireEscSection(row.querySelector(":scope > .aw-esc-sec"), action.escalation || null);
   }
+  // ─── Recipient token fields (To / Cc / Bcc) ────────────────────────────
+  //
+  // Email channels get three token boxes instead of the old multi-select +
+  // comma-separated address input. A pill is {kind:"user"|"address", value,
+  // label} and nothing more; DOM order IS the model, so collecting is a walk.
+  //
+  // The server model already accepted user ids in cc/bcc (emailRecipientsSchema
+  // carries recipientUserIds alongside addresses) — the old UI just never
+  // produced them, so this is a client-side mapping change with no schema work.
+
+  var _awContactEmails = null; // Set of lower-cased addresses already in the book
+
+  function canReadContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "read"); }
+  function canAddContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "write"); }
+
+  function pillHtml(p) {
+    var cls = "tag-chip" + (p.unknown ? " na-unknown" : "");
+    var title = p.kind === "user"
+      ? (p.unknown ? "This user account no longer exists" : "Polaris user account")
+      : p.value;
+    // The save affordance only makes sense for a typed address that isn't
+    // already in the book, and only for someone who may add one.
+    var showSave = p.kind === "address" && canAddContacts() &&
+      _awContactEmails && !_awContactEmails.has(String(p.value).toLowerCase());
+    return '<span class="' + cls + '" draggable="true" data-kind="' + escapeHtml(p.kind) + '" ' +
+        'data-value="' + escapeHtml(p.value) + '" title="' + escapeHtml(title) + '">' +
+      escapeHtml(p.label) +
+      (showSave
+        ? '<button type="button" class="na-chip-save" data-na-save title="Save to address book" aria-label="Save to address book">&plus;</button>'
+        : "") +
+      '<button type="button" class="tag-chip-delete" data-na-del aria-label="Remove recipient">&times;</button>' +
+    "</span>";
+  }
+
+  function recipBoxHtml(field, label, pills, withBook) {
+    var placeholder = field === "to" ? "Type a name or address…" : "";
+    return '<div class="na-recip-row">' +
+      '<label class="na-recip-label">' + escapeHtml(label) + "</label>" +
+      '<div class="na-recip-box" data-field="' + field + '">' +
+        (pills || []).map(pillHtml).join("") +
+        '<input type="text" class="na-recip-input" autocomplete="off" spellcheck="false" ' +
+               'placeholder="' + escapeHtml(placeholder) + '" aria-label="Add a ' + escapeHtml(label) + ' recipient">' +
+        '<div class="aw-suggest"></div>' +
+      "</div>" +
+      (withBook
+        ? '<button type="button" class="btn btn-secondary btn-sm na-book" title="Open the address book">Address book</button>'
+        : "") +
+    "</div>";
+  }
+
+  /** Read a box's pills back out of the DOM. */
+  function pillsOf(box) {
+    return Array.from(box.querySelectorAll(":scope > .tag-chip")).map(function (el) {
+      return {
+        kind: el.getAttribute("data-kind"),
+        value: el.getAttribute("data-value"),
+        label: el.textContent.replace(/[+×]\s*$/g, "").trim(),
+        unknown: el.classList.contains("na-unknown"),
+      };
+    });
+  }
+
+  function addPill(box, p) {
+    if (!p || !p.value) return false;
+    var dup = pillsOf(box).some(function (x) {
+      return x.kind === p.kind && String(x.value).toLowerCase() === String(p.value).toLowerCase();
+    });
+    if (dup) return false;
+    box.querySelector(".na-recip-input").insertAdjacentHTML("beforebegin", pillHtml(p));
+    return true;
+  }
+
+  var EMAIL_RE = /^[^\s@]+@[^\s@.]+\.[^\s@]+$/;
+
+  // Module-scope drag state. dataTransfer.getData is unreadable during
+  // dragover, so the payload rides here and the MIME type is what dragover
+  // filters on (the dashboard cross-container pattern, not the reorder one).
+  var _naDragEl = null;
+  var _naDragCue = null;
+  function naClearDrag() {
+    if (_naDragCue) { _naDragCue.classList.remove("aw-drop-into"); _naDragCue = null; }
+    if (_naDragEl) { _naDragEl.classList.remove("na-dragging"); _naDragEl = null; }
+  }
+
+  /**
+   * Wire one action's three boxes: typeahead, keyboard, removal, the save-to-
+   * book affordance, the address-book button, and drag between the boxes.
+   * `host` is the .na-recips wrapper — DnD is scoped to it, so a pill can never
+   * jump into a different Notify action's fields.
+   */
+  function wireRecipBoxes(host, onChange) {
+    var suggestTimer = null;
+
+    host.querySelectorAll(".na-recip-box").forEach(function (box) {
+      var input = box.querySelector(".na-recip-input");
+      var sugg = box.querySelector(".aw-suggest");
+      var items = [];
+      var idx = -1;
+
+      function closeSuggest() { sugg.classList.remove("open"); sugg.innerHTML = ""; items = []; idx = -1; }
+      function paint() {
+        Array.from(sugg.children).forEach(function (el, i) { el.classList.toggle("active", i === idx); });
+        if (idx >= 0 && sugg.children[idx]) sugg.children[idx].scrollIntoView({ block: "nearest" });
+      }
+      function openSuggest(entries) {
+        items = entries || [];
+        if (!items.length) {
+          sugg.innerHTML = '<div class="aw-suggest-empty">No match — type a full address and press Enter.</div>';
+          sugg.classList.add("open");
+          idx = -1;
+          return;
+        }
+        sugg.innerHTML = items.map(function (e, i) {
+          var badge = e.source === "user" ? "user" : e.source === "contact" ? "contact" : e.source;
+          return '<div class="aw-suggest-item" data-i="' + i + '" title="' + escapeHtml(e.email) + '">' +
+            escapeHtml((e.name ? e.name + " — " : "") + e.email) +
+            ' <span style="opacity:.6;font-size:.85em">' + escapeHtml(badge) + "</span></div>";
+        }).join("");
+        sugg.classList.add("open");
+        idx = 0;
+        paint();
+      }
+      function entryToPill(e) {
+        // A Polaris account becomes a USER pill — the id survives the person
+        // changing address, the raw string doesn't.
+        return e.source === "user"
+          ? { kind: "user", value: e.id, label: e.name || e.email }
+          : { kind: "address", value: e.email, label: e.name ? e.name + " <" + e.email + ">" : e.email };
+      }
+      function commit() {
+        if (idx >= 0 && items[idx]) {
+          if (addPill(box, entryToPill(items[idx]))) onChange();
+          input.value = "";
+          closeSuggest();
+          return;
+        }
+        var raw = input.value.trim();
+        if (!raw) return;
+        if (!EMAIL_RE.test(raw)) { showToast('"' + raw + '" is not a valid email address', "error"); return; }
+        if (addPill(box, { kind: "address", value: raw.toLowerCase(), label: raw.toLowerCase() })) onChange();
+        input.value = "";
+        closeSuggest();
+      }
+
+      input.addEventListener("input", function () {
+        var q = input.value.trim();
+        clearTimeout(suggestTimer);
+        if (q.length < 2 || !canReadContacts()) { closeSuggest(); return; }
+        suggestTimer = setTimeout(function () {
+          api.contacts.search(q).then(function (r) {
+            // Ignore a response that lost the race with newer typing.
+            if (input.value.trim() !== q) return;
+            openSuggest((r && r.entries) || []);
+          }).catch(function () { closeSuggest(); });
+        }, 250);
+      });
+      input.addEventListener("keydown", function (ev) {
+        if (ev.key === "ArrowDown") { ev.preventDefault(); if (items.length) { idx = (idx + 1) % items.length; paint(); } }
+        else if (ev.key === "ArrowUp") { ev.preventDefault(); if (items.length) { idx = (idx - 1 + items.length) % items.length; paint(); } }
+        else if (ev.key === "Enter") { ev.preventDefault(); commit(); }
+        else if (ev.key === "," || ev.key === ";") { ev.preventDefault(); commit(); }
+        else if (ev.key === "Escape") {
+          // stopPropagation so the wizard modal doesn't close behind us.
+          if (sugg.classList.contains("open")) { ev.stopPropagation(); closeSuggest(); }
+        } else if (ev.key === "Backspace" && !input.value) {
+          var ps = box.querySelectorAll(":scope > .tag-chip");
+          if (ps.length) { ps[ps.length - 1].remove(); onChange(); }
+        }
+      });
+      input.addEventListener("blur", function () { setTimeout(closeSuggest, 150); });
+      // mousedown + preventDefault keeps focus in the input so the blur-close
+      // above doesn't race the tap.
+      sugg.addEventListener("mousedown", function (ev) {
+        var it = ev.target.closest && ev.target.closest(".aw-suggest-item");
+        if (!it) return;
+        ev.preventDefault();
+        idx = Number(it.getAttribute("data-i"));
+        commit();
+      });
+      // Clicking the box's padding should focus the field — it reads as one control.
+      box.addEventListener("mousedown", function (ev) { if (ev.target === box) { ev.preventDefault(); input.focus(); } });
+    });
+
+    // Pill removal + save-to-book, delegated across all three boxes.
+    host.addEventListener("click", async function (ev) {
+      var del = ev.target.closest && ev.target.closest("[data-na-del]");
+      if (del) { del.closest(".tag-chip").remove(); onChange(); return; }
+
+      var save = ev.target.closest && ev.target.closest("[data-na-save]");
+      if (save) {
+        var chip = save.closest(".tag-chip");
+        var email = chip.getAttribute("data-value");
+        save.disabled = true;
+        try {
+          await api.contacts.create({ email: email });
+          if (_awContactEmails) _awContactEmails.add(String(email).toLowerCase());
+          save.remove();
+          showToast("Saved to the address book", "success");
+        } catch (err) {
+          showToast((err && err.message) || "Could not save to the address book", "error");
+          save.disabled = false;
+        }
+        return;
+      }
+
+      var book = ev.target.closest && ev.target.closest(".na-book");
+      if (book) {
+        var res = await window.PolarisAddressBook.openPicker({ field: "to" });
+        if (!res) return;
+        var dest = host.querySelector('.na-recip-box[data-field="' + res.field + '"]');
+        if (!dest) return;
+        var added = 0;
+        res.entries.forEach(function (e) {
+          if (addPill(dest, e.source === "user"
+            ? { kind: "user", value: e.id, label: e.name || e.email }
+            : { kind: "address", value: e.email, label: e.name ? e.name + " <" + e.email + ">" : e.email })) added++;
+        });
+        if (added) onChange();
+      }
+    });
+
+    // ── Drag a pill between To / Cc / Bcc ──
+    // Cross-container MOVE, so the dashboard-canvas pattern: a custom MIME type
+    // makes the drag identifiable during dragover, and the element itself is
+    // stashed module-side because getData is unreadable there.
+    host.addEventListener("dragstart", function (ev) {
+      var chip = ev.target.closest && ev.target.closest(".na-recip-box > .tag-chip");
+      if (!chip) return;
+      _naDragEl = chip;
+      chip.classList.add("na-dragging");
+      try {
+        ev.dataTransfer.setData("application/x-polaris-recipient", "1");
+        ev.dataTransfer.setData("text/plain", chip.getAttribute("data-value") || "");
+        ev.dataTransfer.effectAllowed = "move";
+      } catch (_) { /* older browsers */ }
+    });
+    host.addEventListener("dragover", function (ev) {
+      var types = ev.dataTransfer && ev.dataTransfer.types;
+      if (!types || Array.prototype.indexOf.call(types, "application/x-polaris-recipient") === -1) return;
+      var box = ev.target.closest && ev.target.closest(".na-recip-box");
+      // Scoped to THIS action's fields — a pill must not jump between two
+      // Notify actions, whose recipients are unrelated.
+      if (!box || !host.contains(box) || !_naDragEl || _naDragEl.parentNode === box) return;
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = "move";
+      if (_naDragCue !== box) {
+        if (_naDragCue) _naDragCue.classList.remove("aw-drop-into");
+        _naDragCue = box;
+        box.classList.add("aw-drop-into");
+      }
+    });
+    host.addEventListener("drop", function (ev) {
+      var box = ev.target.closest && ev.target.closest(".na-recip-box");
+      if (!box || !_naDragEl || _naDragEl.parentNode === box) { naClearDrag(); return; }
+      ev.preventDefault();
+      var p = {
+        kind: _naDragEl.getAttribute("data-kind"),
+        value: _naDragEl.getAttribute("data-value"),
+        label: _naDragEl.textContent.replace(/[+×]\s*$/g, "").trim(),
+        unknown: _naDragEl.classList.contains("na-unknown"),
+      };
+      var moved = addPill(box, p);
+      _naDragEl.remove();       // a move, not a copy — remove either way, since
+      naClearDrag();            // a duplicate in the destination means it's there
+      if (moved) onChange();
+    });
+    host.addEventListener("dragend", naClearDrag);
+    host.addEventListener("dragleave", function (ev) {
+      if (_naDragCue && ev.target === _naDragCue) { _naDragCue.classList.remove("aw-drop-into"); _naDragCue = null; }
+    });
+  }
+
   function renderActionFields(row, action) {
     var box = row.querySelector(".aw-action-fields");
     var t = action.type;
@@ -2219,11 +2542,11 @@ async function openAutomationWizard(existing) {
           '<select class="na-channel" style="flex:1">' + channelOptions(action.channelId) + '</select>' +
         '</div>' +
         '<div class="na-fields"></div>' +
-        '<details class="na-comp"' + (comp ? " open" : "") + '><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Customize the email (subject / Cc / Bcc / body)…</summary>' +
+        // Cc/Bcc were promoted OUT of this disclosure into first-class token
+        // fields above; what's left is genuinely about composing the message.
+        '<details class="na-comp"' + (comp && (comp.subjectTemplate || comp.bodyTextTemplate || comp.bodyHtmlTemplate) ? " open" : "") + '><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Customize the email (subject / body)…</summary>' +
           '<div style="margin-top:6px">' +
             '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject</label><input type="text" class="na-subject tpl-field" value="' + escapeHtml((comp && comp.subjectTemplate) || "") + '" placeholder="[{severity.upper}] {asset} — {metric} = {value}"></div>' +
-            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc (comma-separated)</label><input type="text" class="na-cc" list="notif-email-suggest" autocomplete="off" value="' + escapeHtml(((comp && comp.cc && comp.cc.addresses) || []).join(", ")) + '"></div>' +
-            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc (comma-separated)</label><input type="text" class="na-bcc" list="notif-email-suggest" autocomplete="off" value="' + escapeHtml(((comp && comp.bcc && comp.bcc.addresses) || []).join(", ")) + '"></div>' +
             '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body (plain text)</label><textarea class="na-body tpl-field" rows="4" style="width:100%">' + escapeHtml((comp && comp.bodyTextTemplate) || "") + '</textarea></div>' +
             '<label style="font-size:0.8rem;display:block"><input type="checkbox" class="na-html-enable"' + (comp && comp.bodyHtmlTemplate ? " checked" : "") + '> Add HTML body (values are HTML-escaped)</label>' +
             '<textarea class="na-html tpl-field" rows="4" style="width:100%;display:' + (comp && comp.bodyHtmlTemplate ? "block" : "none") + ';margin-top:4px">' + escapeHtml((comp && comp.bodyHtmlTemplate) || "") + '</textarea>' +
@@ -2238,17 +2561,37 @@ async function openAutomationWizard(existing) {
         if (compEl) compEl.style.display = isEmailType(ch.type) ? "" : "none";
         if (!isRouted(ch.type)) { fbox.innerHTML = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">Posts to this channel’s configured destination.</p>'; return; }
         var isPush = ch.type === "web_push";
-        var h = '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Send to user accounts</label>' +
-          userMultiSelect(action.recipientUserIds, "na-users", isPush) +
-          (isPush ? '<div class="na-push-warn">' + pushReachWarning(action.recipientUserIds) + '</div>' : '') +
-          '</div>';
+        var h;
         if (isEmailType(ch.type)) {
-          h += '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">…or custom email addresses (comma-separated)</label><input type="text" class="na-addresses" value="' + escapeHtml((action.addresses || []).join(", ")) + '" placeholder="oncall@example.com"></div>';
+          // Email gets proper To / Cc / Bcc token fields. Cc/Bcc live here as
+          // first-class recipients rather than inside the "Customize the
+          // email…" disclosure, which is where they used to hide.
+          var comp0 = action.emailComposition || {};
+          h = '<div class="na-recips">' +
+            recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers), canReadContacts()) +
+            recipBoxHtml("cc", "Cc", recipientsToPills(comp0.cc, _ruleRecipientUsers), false) +
+            recipBoxHtml("bcc", "Bcc", recipientsToPills(comp0.bcc, _ruleRecipientUsers), false) +
+            "</div>" +
+            '<p class="hint" style="margin:0 0 6px">Anything in Cc or Bcc sends <strong>one</strong> message with the full To list visible, instead of a separate email per recipient.</p>';
+        } else {
+          // Push keeps the account picker: its device-count annotations and the
+          // reachability warning are load-bearing, and To/Cc/Bcc are meaningless
+          // for a push endpoint.
+          h = '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Send to user accounts</label>' +
+            userMultiSelect(action.recipientUserIds, "na-users", isPush) +
+            (isPush ? '<div class="na-push-warn">' + pushReachWarning(action.recipientUserIds) + '</div>' : '') +
+            '</div>';
         }
         // Device-region routing: match users' region tags against the
         // TRIGGERING asset's own region: tag(s) at fire time — works with any
         // device filter (no region: tag needed on the scope).
         h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-device-region"' + (action.recipientDeviceRegion ? " checked" : "") + '> …or users associated with the triggering device’s region (its region: tag)</label>';
+        // Address-book ownership: the contacts whose device filter covers the
+        // triggering asset. Email only — a contact is an address, not an
+        // account, so there is no push endpoint behind it.
+        if (isEmailType(ch.type)) {
+          h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-asset-contacts"' + (action.recipientAssetContacts ? " checked" : "") + '> …or the contacts responsible for the triggering device (Address Book)</label>';
+        }
         // Legacy scope-region routing (replaced by device-region in the
         // builder): rendered ONLY when the edited action already carries it,
         // so editing an old rule can't silently drop the recipients.
@@ -2256,6 +2599,13 @@ async function openAutomationWizard(existing) {
           h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-scope-region" checked> …or users associated with the automation’s region (legacy — routes by the region: tag in the device filter)</label>';
         }
         fbox.innerHTML = h;
+        var recips = fbox.querySelector(".na-recips");
+        if (recips) {
+          wireRecipBoxes(recips, function () {
+            row.querySelector(".aw-action-summary").textContent =
+              actionSummary(collectActionCore("notify", box) || { type: "notify", channelId: ch.id });
+          });
+        }
         // Recompute the reachability warning as the operator changes the
         // selection, rather than only on first paint.
         if (isPush) {
@@ -2377,15 +2727,22 @@ async function openAutomationWizard(existing) {
       var chSel = box.querySelector(".na-channel");
       if (!chSel || !chSel.value) return null;
       var a = { type: "notify", channelId: chSel.value };
+      // Email channels: To pills. Push: the account multi-select.
+      var toBox = box.querySelector('.na-recip-box[data-field="to"]');
+      if (toBox) {
+        var to = pillsToRecipients(pillsOf(toBox));
+        if (to.recipientUserIds) a.recipientUserIds = to.recipientUserIds;
+        if (to.addresses) a.addresses = to.addresses;
+      }
       var userSel = box.querySelector(".na-users");
       if (userSel && !userSel.disabled) {
         var uids = Array.from(userSel.selectedOptions).map(function (o) { return o.value; }).filter(Boolean);
         if (uids.length) a.recipientUserIds = uids;
       }
-      var addrEl = box.querySelector(".na-addresses");
-      if (addrEl) { var addrs = csvOf(addrEl.value); if (addrs.length) a.addresses = addrs; }
       var devRegEl = box.querySelector(".na-device-region");
       if (devRegEl && devRegEl.checked) a.recipientDeviceRegion = true;
+      var acEl = box.querySelector(".na-asset-contacts");
+      if (acEl && acEl.checked) a.recipientAssetContacts = true;
       // Legacy scope-region checkbox renders only on actions that already
       // carried the flag — unchecking it drops the flag deliberately.
       var regEl = box.querySelector(".na-scope-region");
@@ -2398,8 +2755,13 @@ async function openAutomationWizard(existing) {
         var bodyTxt = (box.querySelector(".na-body") || {}).value || ""; if (bodyTxt.trim()) c.bodyTextTemplate = bodyTxt;
         var htmlOn = box.querySelector(".na-html-enable");
         if (htmlOn && htmlOn.checked) { var h = (box.querySelector(".na-html") || {}).value || ""; if (h.trim()) c.bodyHtmlTemplate = h; }
-        var cc = csvOf((box.querySelector(".na-cc") || {}).value); if (cc.length) c.cc = { addresses: cc };
-        var bcc = csvOf((box.querySelector(".na-bcc") || {}).value); if (bcc.length) c.bcc = { addresses: bcc };
+        // Cc/Bcc ride emailComposition (unchanged storage), but now carry user
+        // ids as well as raw addresses — emailRecipientsSchema always allowed
+        // both; only the old UI couldn't produce them.
+        var ccBox = box.querySelector('.na-recip-box[data-field="cc"]');
+        var bccBox = box.querySelector('.na-recip-box[data-field="bcc"]');
+        if (ccBox) { var ccR = pillsToRecipients(pillsOf(ccBox)); if (Object.keys(ccR).length) c.cc = ccR; }
+        if (bccBox) { var bccR = pillsToRecipients(pillsOf(bccBox)); if (Object.keys(bccR).length) c.bcc = bccR; }
         if (Object.keys(c).length) a.emailComposition = c;
       }
       return a;
@@ -2581,8 +2943,18 @@ async function openAutomationWizard(existing) {
       if (!a.channelId) return label + ": pick a channel.";
       var ch = chanById(a.channelId);
       if (ch && isRouted(ch.type)) {
-        var hasRecip = (a.recipientUserIds && a.recipientUserIds.length) || (a.addresses && a.addresses.length) || a.recipientDeviceRegion || a.recipientScopeRegion;
+        var hasTo = (a.recipientUserIds && a.recipientUserIds.length) || (a.addresses && a.addresses.length);
+        var hasRecip = hasTo || a.recipientDeviceRegion || a.recipientScopeRegion || a.recipientAssetContacts;
         if (!hasRecip) return label + " (" + ch.name + "): choose at least one recipient.";
+        // A Cc/Bcc-only action silently sends NOTHING: expandDeliveries skips a
+        // target whose resolved To list is empty (Graph rejects an empty To).
+        // Catch it here rather than let it look configured and never deliver.
+        var comp = a.emailComposition;
+        var hasCcBcc = !!(comp && ((comp.cc && (comp.cc.addresses || comp.cc.recipientUserIds)) ||
+                                   (comp.bcc && (comp.bcc.addresses || comp.bcc.recipientUserIds))));
+        if (hasCcBcc && !hasTo && !a.recipientDeviceRegion && !a.recipientScopeRegion && !a.recipientAssetContacts) {
+          return label + " (" + ch.name + "): add a To recipient — a Cc/Bcc-only email is never sent.";
+        }
       }
     } else if (a.type === "api_call") {
       if (!a.url) return label + ": enter the URL.";

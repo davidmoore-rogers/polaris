@@ -40,6 +40,8 @@ import {
   type ComposedEmail,
 } from "./notificationRecipientService.js";
 import { requestScriptRun } from "./automationScriptService.js";
+import { resolveContactEmailsForAsset } from "./contactService.js";
+import { logger } from "../utils/logger.js";
 import {
   actionsToTargets,
   type AutomationAction,
@@ -80,6 +82,27 @@ export async function executeActions(
 ): Promise<{ executed: number; failed: number }> {
   let executed = 0;
   let failed = 0;
+
+  // Address-book contacts owning the triggering asset. Resolved AT MOST ONCE
+  // per fire and only when an action actually asks for them — several notify
+  // actions on one rule share the answer, and a rule that never opts in pays
+  // nothing. Resolution lives here rather than in expandDeliveries because
+  // contactService imports notificationRecipientService (listRecipientUsers),
+  // so the expander reaching back for contacts would close an import cycle.
+  let contactEmails: string[] | undefined;
+  const assetContactEmails = async (): Promise<string[]> => {
+    if (contactEmails) return contactEmails;
+    if (!exec.assetId) return (contactEmails = []);
+    try {
+      contactEmails = await resolveContactEmailsForAsset(exec.assetId);
+    } catch (err) {
+      // A failed contact lookup must not lose the rest of the recipients.
+      logger.warn({ err, assetId: exec.assetId }, "Failed to resolve asset contacts for notify action");
+      contactEmails = [];
+    }
+    return contactEmails;
+  };
+
   for (const [index, action] of actions.entries()) {
     try {
       if (action.type === "notify") {
@@ -87,6 +110,7 @@ export async function executeActions(
         const rows = await expandDeliveries(notificationId, actionsToTargets([action]), {
           scopeRegionTags: exec.scopeRegionTags,
           assetRegionTags: exec.assetRegionTags,
+          ...(action.recipientAssetContacts ? { assetContactEmails: await assetContactEmails() } : {}),
           composedEmail: composed,
           escalation: exec.escalation,
         });

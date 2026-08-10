@@ -62,6 +62,7 @@ import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
 import { getMetricSeverityTiers } from "../../services/notificationRuleService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
+import { resolveContactsForAsset } from "../../services/contactService.js";
 import { getAssetProcessConnections } from "../../services/applicationMapService.js";
 import { recordOperatorPinChanges, type OperatorPinChange } from "../../services/appMapDiscoveryService.js";
 import {
@@ -1577,6 +1578,33 @@ router.get("/:id/maintenance-info", requirePermission("assets", "read"), async (
     res.json(await getAssetMaintenanceInfo(req.params.id as string));
   } catch (err) { next(err); }
 });
+
+// GET /assets/:id/contacts — the address-book entries RESPONSIBLE for this
+// device (Contact.assetCriteria ∪ Contact.assetIds), for the slide-over's
+// Contacts row. Chained gate: reading it exposes address-book content, so the
+// caller needs `contacts:read` on top of `assets:read`.
+router.get(
+  "/:id/contacts",
+  requirePermission("assets", "read"),
+  requirePermission("contacts", "read"),
+  async (req, res, next) => {
+    try {
+      const contacts = await resolveContactsForAsset(req.params.id as string);
+      res.json({
+        contacts: contacts.map((c) => ({
+          id: c.id,
+          email: c.email,
+          name: c.name,
+          description: c.description,
+          // Why this contact matched — a pin is an operator decision, a filter
+          // match is a rule, and an operator chasing an unexpected recipient
+          // needs to know which.
+          via: c.assetIds.includes(req.params.id as string) ? "pinned" : "filter",
+        })),
+      });
+    } catch (err) { next(err); }
+  },
+);
 
 // GET /assets/:id/telemetry-history?range=...|from=...&to=... — CPU+memory time series
 router.get("/:id/telemetry-history", requirePermission("assets", "read"), async (req, res, next) => {

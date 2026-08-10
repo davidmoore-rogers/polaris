@@ -476,6 +476,8 @@ const api = {
     import:    (rows, dryRun) => request("POST", "/assets/import", { rows, dryRun }),
     importPdf: (assets, dryRun) => request("POST", "/assets/import-pdf", { assets, dryRun }),
     alerts:    (id)     => request("GET", `/assets/${id}/alerts`),
+    // Address-book entries responsible for this device (needs contacts:read).
+    contacts:  (id)     => request("GET", `/assets/${id}/contacts`),
     tags:      ()       => request("GET", "/assets/tags"),
     dnsLookup: (id)     => request("POST", `/assets/${id}/dns-lookup`),
     forwardLookup: (id) => request("POST", `/assets/${id}/forward-lookup`),

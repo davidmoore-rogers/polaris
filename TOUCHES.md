@@ -1448,9 +1448,11 @@ Listed alphabetically.
 
 **Cross-service deps:** `prisma`, `eventLogService` (`logEvent`), `tagAssignmentService` (`normalizeCriteria`, `resolveMatchingAssetIds`, `assetMatchesCriteria`, `collectCidrs`, `cidrsContainingIp`, `SINGLE_ASSET_CANDIDATE_SELECT`), `notificationRecipientService` (`listRecipientUsers`), `utils/ttlCache`.
 
-**Used by:** `src/api/routes/contacts.ts` (CRUD + search + preview), `public/js/automations-address-book.js` (both surfaces).
+**Used by:** `src/api/routes/contacts.ts` (CRUD + search + preview), `src/api/routes/assets.ts` (`GET /assets/:id/contacts`), `src/services/automationActionService.ts` (`resolveContactEmailsForAsset` on the fire path, for `recipientAssetContacts`), `public/js/automations-address-book.js` (both surfaces), `public/js/automations-wizard.js` (the recipient typeahead + the save-to-book affordance).
 
-**Readers of the state it writes:** the Automations → Address Book tab, the automation wizard's recipient picker.
+**Readers of the state it writes:** the Automations → Address Book tab, the automation wizard's recipient fields, the asset slide-over's General-tab Contacts rows, and every alert whose notify action sets `recipientAssetContacts`.
+
+**Import-cycle note:** `contactService` imports `notificationRecipientService` for `listRecipientUsers`, so the delivery expander must NOT import `contactService` back. `expandDeliveries` therefore takes the resolved `assetContactEmails` as an option and `automationActionService` does the lookup — the same shape as the region tags it already receives. Keep it that way.
 
 **Invariants:**
 - **`email` is stored trimmed + lower-cased.** The unique index is what enforces one row per address, and lower-casing at the boundary is what makes it case-insensitive. It also has to match `resolveEmailRecipients`' normalized set, or a contact address would dedupe inconsistently against a user's.

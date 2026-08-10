@@ -4766,6 +4766,63 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .aw-drop-after { box-shadow: inset 0 -3px 0 0 var(--color-accent); }
 .aw-drop-into { box-shadow: inset 0 0 0 2px var(--color-accent); border-radius: 6px; }
 
+/* Notify-action recipient fields (To / Cc / Bcc token boxes).
+   Pills reuse the shared .tag-chip primitive; only the containers are new.
+   The suggestion dropdown reuses .aw-combo / .aw-suggest from above. */
+.na-recips { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.na-recip-row { display: flex; align-items: flex-start; gap: 8px; }
+.na-recip-label {
+  flex: 0 0 34px;
+  padding-top: 6px;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+/* position:relative anchors the .aw-suggest dropdown; min-height keeps an empty
+   box the same height as a filled one so the three rows don't jitter. */
+.na-recip-box {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 3px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-input, var(--color-bg-secondary));
+}
+.na-recip-box:focus-within { border-color: var(--color-accent); }
+.na-recip-box.aw-drop-into { border-color: transparent; }
+/* Borderless inline input — the BOX is the visual control, not the field. */
+.na-recip-input {
+  flex: 1 1 120px;
+  min-width: 90px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 3px 2px;
+}
+.na-recip-box .tag-chip { cursor: grab; }
+.na-recip-box .tag-chip:active { cursor: grabbing; }
+.na-recip-box .tag-chip.na-dragging { opacity: 0.5; }
+/* Unknown user id (a recipient whose account was deleted) — kept visible and
+   removable rather than silently dropped on the next save. */
+.na-recip-box .tag-chip.na-unknown { border-style: dashed; opacity: 0.75; }
+.na-chip-save {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.55;
+  padding: 0 2px;
+  font-size: 0.95em;
+  line-height: 1;
+}
+.na-chip-save:hover { opacity: 1; }
+
 /* Assets → Settings → Sources: drag-to-reorder learned-location priority list.
    Reuses .aw-grip + the .aw-drop-before/after edge cues + .sf-col-dragging. */
 .monset-src-list {

@@ -219,6 +219,13 @@ export interface ExpandDeliveriesOptions {
   /** The TRIGGERING asset's region tags — stripped snapshot (regionSnapshot /
    *  Notification.regionTags) — for recipientDeviceRegion routing. */
   assetRegionTags?: string[];
+  /** Addresses of the address-book contacts RESPONSIBLE for the triggering
+   *  asset, for recipientAssetContacts routing. Resolved by the CALLER
+   *  (automationActionService → contactService.resolveContactEmailsForAsset)
+   *  and passed in, exactly like the region tags above — contactService already
+   *  imports this module for listRecipientUsers, so resolving it here would
+   *  close an import cycle. */
+  assetContactEmails?: string[];
   composedEmail?: ComposedEmail;
   /** Escalation provenance (tier/attempt) — stamped into every row's meta so
    *  the View tab's "Escalated" marker and audits can attribute the send. */
@@ -230,7 +237,7 @@ export async function expandDeliveries(
   targets: DeliveryTarget[] | undefined,
   opts: ExpandDeliveriesOptions = {},
 ): Promise<number> {
-  const { scopeRegionTags, assetRegionTags, composedEmail, escalation } = opts;
+  const { scopeRegionTags, assetRegionTags, assetContactEmails, composedEmail, escalation } = opts;
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -281,6 +288,12 @@ export async function expandDeliveries(
       const addresses = new Set<string>();
       for (const a of t.addresses ?? []) addresses.add(a.trim().toLowerCase()); // custom emails
       for (const u of await usersForTarget(t)) if (u.email) addresses.add(u.email.trim().toLowerCase());
+      // Address-book contacts owning the triggering asset. Email-only: a
+      // contact is an address, not an account, so there's no push endpoint to
+      // reach — the web_push branch below deliberately ignores this flag.
+      if (t.recipientAssetContacts) {
+        for (const a of assetContactEmails ?? []) addresses.add(a.trim().toLowerCase());
+      }
       if (composedEmail) {
         const to = Array.from(addresses);
         if (to.length === 0) continue; // no recipients = no send (Graph rejects empty To)
