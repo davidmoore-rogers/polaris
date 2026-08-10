@@ -9565,19 +9565,25 @@ function _currentMonitorSelection() {
 
 // Amber stale banner above the Response Time chart — same style + wording as
 // every other section's banner ("Last successful update X ago"). The last
-// successful probe is read from the freshly-fetched history (the newest
-// sample with a response), so the banner updates on every load/auto-refresh
-// tick. Custom from/to windows are fixed historical views and say nothing
-// about live freshness, so the banner clears there. When the live window
-// contains samples but no successes at all, the probe has been failing for
-// at least the whole window — say so rather than staying silent.
+// successful probe comes from the payload's `lastSuccessAt` on rollup tiers
+// (7d/30d), because a rollup sample's timestamp is its BUCKET START: the
+// newest daily bucket is up to 24h old the moment it's written, which made a
+// healthy 1-minute probe read as hours stale as soon as the operator switched
+// to 30d. On the detail tier the newest sample with a response is itself the
+// answer, so the series is derived instead — and it also covers the rollup
+// case where the last success predates detail retention (server sends null).
+// Either way the banner updates on every load/auto-refresh tick. Custom
+// from/to windows are fixed historical views and say nothing about live
+// freshness, so the banner clears there. When the live window contains
+// samples but no successes at all, the probe has been failing for at least
+// the whole window — say so rather than staying silent.
 function _updateMonitorStaleBanner(assetId, data, opts) {
   var slot = document.getElementById("asset-monitor-stale");
   if (!slot) return;
   if (opts && opts.from && opts.to) { slot.innerHTML = ""; return; }
   var samples = (data && data.samples) || [];
-  var lastOk = null;
-  for (var i = samples.length - 1; i >= 0; i--) {
+  var lastOk = (data && data.lastSuccessAt) || null;
+  for (var i = samples.length - 1; !lastOk && i >= 0; i--) {
     var s = samples[i];
     var ok = (typeof s.successCount === "number") ? s.successCount > 0 : !!s.success;
     if (ok) { lastOk = s.timestamp; break; }

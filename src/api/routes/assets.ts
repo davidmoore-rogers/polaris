@@ -50,6 +50,7 @@ import { propagateAfterStatusChange } from "../../services/dependencyTreeService
 import { pickSampleTierForAsset } from "../../services/sampleQueryRouter.js";
 import {
   readMonitorHistory,
+  readLastMonitorSuccessAt,
   readTelemetryHistory,
   readHardwareSensorHistory,
   readInterfaceHistory,
@@ -1170,12 +1171,20 @@ router.get("/:id/monitor-history", requirePermission("assets", "read"), async (r
     const pick = await pickSampleTierForAsset(id, "assets", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
     const result = await readMonitorHistory(id, since, until, pick.tier, fetchSince);
+    // On a rollup tier every sample timestamp is a bucketStart, so the client
+    // can't measure probe freshness from the series (a daily bucket is up to
+    // 24h "old" the moment it's written). Hand it the real last-success
+    // timestamp from the detail table instead — the stale banner reads this
+    // when present. Detail tier needs no extra query: its own newest
+    // successful sample already is the answer.
+    const lastSuccessAt = pick.tier === "detail" ? null : await readLastMonitorSuccessAt(id, since);
     res.json({
       range: rangeLabel,
       since,
       until,
       tier: pick.tier,
       bucketSeconds: pick.bucketSeconds,
+      lastSuccessAt,
       samples: result.samples,
       stats: result.stats,
     });

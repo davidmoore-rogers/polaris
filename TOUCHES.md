@@ -4305,7 +4305,7 @@ Listed alphabetically.
 
 **What it owns:** Tier-aware readers for the asset chart-history endpoints (monitor, telemetry, hardware sensors, storage, interfaces, IPsec, perf-SLA) — returns serialized rows + stats matching the chart renderers, with overflow-boundary points for unbroken polylines. (SD-WAN rules are current-state — read directly from `prisma.assetSdwanRule` in the route, no history reader here.) Also the merge-comparison **polling-history summary** (`readPollingHistorySummary`): oldest/newest sample + stitched non-double-counting sample count across the monitor + telemetry streams' three tiers, served by `GET /assets/:id/polling-history`.
 
-**Public API:** `readMonitorHistory`, `readTelemetryHistory`, `readHardwareSensorHistory`, `readStorageHistory`, `readInterfaceHistory`, `readIpsecHistory`, `readPerfSlaHistory`, `readSdwanMembers`, `readPollingHistorySummary`
+**Public API:** `readMonitorHistory`, `readLastMonitorSuccessAt`, `readTelemetryHistory`, `readHardwareSensorHistory`, `readStorageHistory`, `readInterfaceHistory`, `readIpsecHistory`, `readPerfSlaHistory`, `readSdwanMembers`, `readPollingHistorySummary`
 
 **Cross-service deps:** `sampleQueryRouter` (`SampleTier`), `prisma`.
 
@@ -4314,6 +4314,7 @@ Listed alphabetically.
 **Invariants:**
 - Detail tier reads the source tables; hourly/daily tiers read rollups and translate aggregate columns back to source field names so renderers consume both shapes.
 - Counter tables (interface, ipsec) return values for client/rollup rate computation; gauge tables return avg/min/max; BigInt coerced to number with a safe-integer cap; the fetch-since window can extend past `since` for chart continuity while stats stay within the visible range.
+- A rollup row's `timestamp` IS its `bucketStart`, so no consumer may read data *freshness* off a rollup series (a daily bucket is up to 24h old when written, and the daily rollup only runs at 02:30 UTC). `readLastMonitorSuccessAt` exists for exactly that: the response-time chart's stale banner reads it (surfaced as `lastSuccessAt` on `monitor-history`, rollup tiers only) instead of the newest sample's timestamp, which otherwise made a healthy 1-minute probe read "Last successful update 17h ago" on the 30d range.
 
 **When changing this:**
 - Rollup schema changes require matching SQL in `sampleRollupService`; a new stream needs schema + a tier-aware reader + rollup SQL + router support.

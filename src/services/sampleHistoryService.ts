@@ -178,6 +178,31 @@ export async function readMonitorHistory(
   };
 }
 
+/**
+ * Timestamp of the newest SUCCESSFUL probe at or after `since`, read from the
+ * detail table regardless of which tier the chart itself is rendering.
+ *
+ * The chart's stale banner ("Last successful update X ago") can't be derived
+ * from a rollup sample: a rollup row's `timestamp` is its `bucketStart`, so on
+ * the daily tier the newest point is up to 24h "old" by construction (and the
+ * daily rollup itself only runs once a day at 02:30 UTC, so today's bucket
+ * covers only the first hours of the UTC day). Measuring freshness off that
+ * makes a perfectly healthy 1-minute probe look 17h stale the moment the
+ * operator switches to 30d. Detail samples carry real timestamps, so ask them.
+ *
+ * Returns null when the detail tier holds no success in the window — either
+ * the probe has genuinely been failing that long, or the last success predates
+ * detail retention. Callers fall back to the rollup-derived value there.
+ */
+export async function readLastMonitorSuccessAt(assetId: string, since: Date): Promise<Date | null> {
+  const row = await prisma.assetMonitorSample.findFirst({
+    where: { assetId, success: true, timestamp: { gte: since } },
+    orderBy: { timestamp: "desc" },
+    select: { timestamp: true },
+  });
+  return row?.timestamp ?? null;
+}
+
 // ─── Telemetry history (CPU + memory) ────────────────────────────────────────
 
 export interface TelemetryHistoryRow {
