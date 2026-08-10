@@ -8340,8 +8340,35 @@ function _renderSystemChart(container, data, asset, si) {
   var xFor = _chartXScale(padL, innerW, t0, t1);
   var yFor = _chartYScale(padT, innerH, yMin, yMax);
 
-  var cpuPts = cpuValues.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
-  var memPts = memValues.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
+  // Missed polls (the telemetry stream has no per-sample success flag — a
+  // failed poll simply leaves no row) render the same way the response-time
+  // and interface charts render theirs: red dots at the baseline flanking each
+  // cadence gap, with both lines fading into red across the gap instead of
+  // bridging it. Markers come from the UNION of the two series' timestamps, so
+  // a transport that reports CPU but not memory reads as a data-availability
+  // difference (memory bridges) rather than an outage on the memory line.
+  var unionTs = Object.keys(cpuValues.concat(memValues).reduce(function (acc, e) {
+    acc[+new Date(e.s.timestamp)] = true;
+    return acc;
+  }, {})).map(Number).sort(function (a, b) { return a - b; });
+  var gapMarkers = _pollGapMarkers(unionTs);
+  var baselineY = padT + innerH;
+  function failAwarePts(list) {
+    if (!list.length) return [];
+    var pts = list.map(function (e) {
+      return { t: +new Date(e.s.timestamp), x: xFor(e.s.timestamp), y: yFor(e.v), ok: true };
+    });
+    gapMarkers.forEach(function (m) { pts.push({ t: m, x: xFor(m), y: baselineY, ok: false }); });
+    pts.sort(function (a, b) { return a.t - b.t; });
+    return pts;
+  }
+  var failDots = gapMarkers.map(function (m) {
+    return '<circle cx="' + xFor(m) + '" cy="' + baselineY + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
+  }).join("");
+  var missHits = gapMarkers.map(function (m) {
+    return '<rect class="chart-hit" x="' + (xFor(m) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
+      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m).toISOString()) + '" data-miss="1"/>';
+  }).join("");
 
   // Build one full-height vertical lane per timestamp so the tooltip fires
   // anywhere in the sample's column — including over a flatlined CPU line at
@@ -8402,19 +8429,27 @@ function _renderSystemChart(container, data, asset, si) {
 
   var chartStaleBanner = _staleBannerHTML(asset && asset.id, asset, "telemetry", si && si.lastTelemetryAt);
   var clipId = _chartClipId("system");
+  var cpuLine = _failureAwareSeriesSVG(failAwarePts(cpuValues), cpuColor, clipId + "-cpu");
+  var memLine = _failureAwareSeriesSVG(failAwarePts(memValues), memColor, clipId + "-mem");
   container.innerHTML =
     chartStaleBanner +
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      '<defs>' + cpuLine.defs + memLine.defs + '</defs>' +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
-        (cpuPts ? '<polyline points="' + cpuPts + '" fill="none" stroke="' + cpuColor + '" stroke-width="1.5"/>' : '') +
-        (memPts ? '<polyline points="' + memPts + '" fill="none" stroke="' + memColor + '" stroke-width="1.5"/>' : '') +
+        cpuLine.segments +
+        memLine.segments +
         cpuValues.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + cpuColor + '"/>'; }).join("") +
         memValues.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + memColor + '"/>'; }).join("") +
+        failDots +
+        // After `hits`, not before: this chart's hit targets are full-height
+        // Voronoi lanes, and a gap sits inside the neighboring sample's lane —
+        // so the narrow missed-poll rect has to paint last to win the hover.
         hits +
+        missHits +
       '</g>' +
       legend +
     '</svg>' + CHART_TOOLTIP_HTML;
@@ -8426,6 +8461,10 @@ function _renderSystemChart(container, data, asset, si) {
 
   _wireChartTooltip(container, function (target) {
     var ts = target.getAttribute("data-ts");
+    if (target.getAttribute("data-miss") === "1") {
+      return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(ts)) + '</div>' +
+        '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+    }
     var cpuRaw = target.getAttribute("data-cpu");
     var memRaw = target.getAttribute("data-mem");
     var mb = target.getAttribute("data-mb");
