@@ -1424,7 +1424,7 @@ Listed alphabetically.
 
 **Public API** — `listDimensionValues(metric, dimension, scope, narrow?)`, `dimensionPickerMeta()` (merged into `GET /automations/schema` as `dimensionPickers`), `foldValuePairs` (pure, unit-tested).
 
-**Readers / callers** — `api/routes/notificationRules.ts` only (`POST /automations/dimension-values` + the `/schema` merge). Client consumer: `public/js/automations-wizard.js` (`dimControlHtml` / `refreshDimOptions`, pure helpers on `window.PolarisAutomationDimensions`).
+**Readers / callers** — `api/routes/notificationRules.ts` only (`POST /automations/dimension-values` + the `/schema` merge). Client consumer: `public/js/automations-wizard.js` (`dimControlHtml` / `refreshDimOptions` / `wireDimCombo`, pure helpers on `window.PolarisAutomationDimensions` — `optionsHtml` for strict enums, `suggestHtml` + `matchCue` + `substringMatch` for the `.aw-combo-dim` combobox, `note`, `narrow`). `substringMatch` MIRRORS `notificationTypes.dimensionSubstringMatch`: if the engine's pattern matching changes, the cue starts lying about whether a filter will fire.
 
 **Depends on** — `notificationEngine.loadScopeAssetIds` (the SAME `loadScopeAssets` the evaluation tick uses — deliberate, so the picker can never offer a value from a device the automation wouldn't evaluate) and `notificationTypes.METRIC_DIMENSIONS` (which dimensions a metric takes; a mismatch is a 400, never a silent empty list that reads as "no sensors").
 

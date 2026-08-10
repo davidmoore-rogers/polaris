@@ -327,12 +327,70 @@ function awDimOptionsHtml(res, current) {
   return html;
 }
 
-/** Suggestions for a substring-matched dimension (interface, mount path …) —
- *  a datalist, not a select: a partial like "port" is a legitimate filter. */
-function awDimDatalistHtml(res) {
-  return ((res && res.values) || []).map(function (v) {
-    return '<option value="' + escapeHtml(v.value) + '"></option>';
+/** Case-insensitive substring test — a byte-for-byte mirror of the server's
+ *  `dimensionSubstringMatch`, which is what actually selects readings. The
+ *  suggestion list and the match cue below both hang off it, so a value the cue
+ *  calls a match is one the engine will match too. */
+function awDimSubstringMatch(value, query) {
+  if (!query) return true;
+  return String(value == null ? "" : value).toLowerCase().indexOf(String(query).toLowerCase()) !== -1;
+}
+
+/** Values a typed pattern selects out of what the scoped devices report. */
+function awDimHits(res, query) {
+  return ((res && res.values) || []).filter(function (v) { return awDimSubstringMatch(v.value, query); });
+}
+
+var AW_DIM_SUGGEST_CAP = 60;
+
+/** Suggestion rows for a substring-matched dimension (sensor name, interface,
+ *  mount path …), filtered by what's typed so far. This is a real combobox, not
+ *  a `<datalist>`: the native control opens inconsistently on click, matches by
+ *  prefix in some browsers, and — the reason it was replaced — gave an operator
+ *  no way to tell a real sensor name from a typo, since a pattern dimension
+ *  accepts free text by design. Item markup matches `.aw-suggest-item` so the
+ *  Devices-step CSS and keyboard handling carry over. */
+function awDimSuggestHtml(res, query) {
+  if (!res || res.loading) return '<div class="aw-suggest-empty">Checking what the selected devices report…</div>';
+  if (res.error) return '<div class="aw-suggest-empty">Couldn’t load the reported values — typing a pattern still works.</div>';
+  var noun = res.noun || "values";
+  if (!(res.values || []).length) {
+    return '<div class="aw-suggest-empty">The selected devices report no ' + escapeHtml(noun + (res.narrowLabel || "")) + '.</div>';
+  }
+  var q = String(query == null ? "" : query).trim();
+  var hits = awDimHits(res, q);
+  if (!hits.length) {
+    return '<div class="aw-suggest-empty">None of the ' + res.values.length + ' reported ' + escapeHtml(noun) +
+      ' contain “' + escapeHtml(q) + '”.</div>';
+  }
+  var html = hits.slice(0, AW_DIM_SUGGEST_CAP).map(function (v) {
+    var count = v.assetCount ? ' <span style="color:var(--color-text-tertiary)">(' + v.assetCount + ')</span>' : "";
+    return '<div class="aw-suggest-item" data-val="' + escapeHtml(v.value) + '" title="' + escapeHtml(v.value) + '">' +
+      escapeHtml(v.value) + count + '</div>';
   }).join("");
+  if (hits.length > AW_DIM_SUGGEST_CAP) {
+    html += '<div class="aw-suggest-empty">+' + (hits.length - AW_DIM_SUGGEST_CAP) + ' more — keep typing to narrow.</div>';
+  }
+  return html;
+}
+
+/** The cue beside the input: does what's typed actually select anything the
+ *  scoped devices report? A pattern dimension can't be validated closed (a
+ *  partial like "CPU" is a legitimate filter over several sensors), so the
+ *  answer is shown rather than enforced — including the case that matters, a
+ *  typo that quietly matches nothing and would never fire. */
+function awDimMatchCue(res, value) {
+  var q = String(value == null ? "" : value).trim();
+  if (!q || !res || res.loading || res.error || !(res.values || []).length) return { text: "", warn: false };
+  var noun = res.noun || "values";
+  var hits = awDimHits(res, q);
+  if (!hits.length) {
+    return { text: "✕ matches none of the " + res.values.length + " reported " + noun + " — this condition would never fire", warn: true };
+  }
+  if (hits.length === 1 && hits[0].value.toLowerCase() === q.toLowerCase()) {
+    return { text: "✓ exact match", warn: false };
+  }
+  return { text: "✓ matches " + hits.length + " of " + res.values.length + " reported " + noun, warn: false };
 }
 
 /** Sibling dimension values that narrow another dimension's list on the same
@@ -374,7 +432,10 @@ function awDimNote(res) {
 }
 
 if (typeof window !== "undefined") {
-  window.PolarisAutomationDimensions = { optionsHtml: awDimOptionsHtml, datalistHtml: awDimDatalistHtml, note: awDimNote, narrow: awDimNarrow };
+  window.PolarisAutomationDimensions = {
+    optionsHtml: awDimOptionsHtml, suggestHtml: awDimSuggestHtml, matchCue: awDimMatchCue,
+    substringMatch: awDimSubstringMatch, note: awDimNote, narrow: awDimNarrow,
+  };
 }
 
 async function openAutomationWizard(existing) {
@@ -476,7 +537,7 @@ async function openAutomationWizard(existing) {
       humanDuration = _sent.humanDuration, tgTreePhrase = _sent.tgTreePhrase,
       triggerSentence = _sent.triggerSentence, resetSentence = _sent.resetSentence,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { ifNamePattern: "interface name contains", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", sensorNamePattern: "any sensor — or name contains, e.g. CPU ON-DIE", mountPathPattern: "mount path contains", healthCheck: "SD-WAN health-check name", link: "WAN member / link name", tunnelName: "IPsec tunnel name", widgetId: "custom widget id" };
+  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
   // populate and whether each is a closed enum (`strict` → select-only, e.g.
   // sensorClass) or a substring match (→ suggestions, typing still allowed);
@@ -1257,22 +1318,29 @@ async function openAutomationWizard(existing) {
     return '<input type="text" class="tgl-value" value="' + escapeHtml(v) + '" style="width:130px" placeholder="e.g. up / down">';
   }
   // One dimensionFilter control. A dimension the server can populate renders as
-  // a select (closed enum) or an input + datalist (substring match); anything
-  // else stays the plain text box it always was.
-  var _dimListSeq = 0;
+  // a select (closed enum) or a COMBOBOX (substring match — click to pick one of
+  // the values the scoped devices report, or type a pattern); anything else stays
+  // the plain text box it always was.
   function dimControlHtml(d, df, metric) {
     var value = (df && df[d]) || "";
     var meta = DIM_PICKERS[d];
-    var plain = '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '" value="' + escapeHtml(value) + '" style="flex:1;min-width:120px">';
-    if (!meta) return plain;
+    var placeholder = escapeHtml(DIM_PLACEHOLDER[d] || d);
+    if (!meta) {
+      return '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + placeholder + '" value="' + escapeHtml(value) + '" style="flex:1;min-width:120px">';
+    }
     var res = dimResult(metric, d, awDimNarrow(d, df));
     if (meta.strict) {
-      return '<select class="tgl-dim" data-dim="' + d + '" style="flex:1;min-width:150px;font-size:0.8rem" title="' + escapeHtml(DIM_PLACEHOLDER[d] || d) + '">' +
+      return '<select class="tgl-dim" data-dim="' + d + '" style="flex:1;min-width:150px;font-size:0.8rem" title="' + placeholder + '">' +
         awDimOptionsHtml(res, value) + '</select>';
     }
-    var listId = "aw-dimlist-" + d + "-" + (++_dimListSeq);
-    return plain.replace('data-dim="' + d + '"', 'data-dim="' + d + '" list="' + listId + '"') +
-      '<datalist id="' + listId + '">' + awDimDatalistHtml(res) + '</datalist>';
+    // Combobox + a cue that says whether the typed pattern selects anything —
+    // the whole point being that a sensor name is not guessable, so the field
+    // has to offer the fleet's own names and confirm what's in it.
+    return '<span class="aw-combo aw-combo-dim" style="flex:1;min-width:160px">' +
+        '<input type="text" class="tgl-dim" data-dim="' + d + '" autocomplete="off" placeholder="' + placeholder + '" value="' + escapeHtml(value) + '">' +
+        '<div class="aw-suggest"></div>' +
+      '</span>' +
+      '<span class="tgl-dim-cue" style="font-size:0.75rem;white-space:nowrap"></span>';
   }
   /** The metric a dim control belongs to, read LIVE off its row so switching the
    *  metric re-asks for that metric's values instead of reusing the old ones. */
@@ -1293,12 +1361,39 @@ async function openAutomationWizard(existing) {
     });
     return df;
   }
+  /** The dimension-value result for a control, read live off its row (metric +
+   *  sibling narrowing), or null before it's been asked for. */
+  function dimResultOf(el) {
+    var d = el.getAttribute("data-dim");
+    var metric = dimMetricOf(el);
+    if (!metric) return null;
+    return _dimValues[dimKeyFor(metric, d, awDimNarrow(d, dimFilterOfRow(el.closest(".scr-row"))))] || null;
+  }
+  function dimSuggestOf(el) {
+    var combo = el.closest && el.closest(".aw-combo");
+    return combo ? combo.querySelector(".aw-suggest") : null;
+  }
+  /** Paint the per-input match cue ("✓ matches 2 of 14 reported hardware
+   *  sensors" / "✕ matches none …"). */
+  function paintDimCue(el, res) {
+    var combo = el.closest && el.closest(".aw-combo");
+    var cue = combo && combo.nextElementSibling;
+    if (!cue || !cue.classList || !cue.classList.contains("tgl-dim-cue")) return;
+    var c = awDimMatchCue(res, el.value);
+    cue.textContent = c.text;
+    cue.style.color = c.warn ? "var(--color-warning, #d9a441)" : "var(--color-success, #3ba55d)";
+  }
   function applyDimOptions(el) {
     var d = el.getAttribute("data-dim");
     if (!DIM_PICKERS[d]) return;
     var metric = dimMetricOf(el);
     var narrow = awDimNarrow(d, dimFilterOfRow(el.closest(".scr-row")));
     var res = metric ? _dimValues[dimKeyFor(metric, d, narrow)] : null;
+    // Cue + any open suggestion list track the LATEST result and value, so the
+    // loading→loaded transition fills them in without the operator re-clicking.
+    paintDimCue(el, res);
+    var sug = dimSuggestOf(el);
+    if (sug && sug.classList.contains("open")) sug.innerHTML = awDimSuggestHtml(res, el.value);
     var note = el.closest(".tgl-line2");
     note = note && note.querySelector(".tgl-dim-note");
     if (note) {
@@ -1320,9 +1415,92 @@ async function openAutomationWizard(existing) {
     if (el.tagName === "SELECT") {
       el.innerHTML = awDimOptionsHtml(res, cur);
       el.value = cur;
-    } else if (el.list) {
-      el.list.innerHTML = awDimDatalistHtml(res);
     }
+  }
+  /** Fire input+change on a control the code just filled in, so the handlers
+   *  that already exist (trigger sentence, unit chip, sibling narrowing, the
+   *  match cue) do the follow-up work. Built from the element's OWN window: a
+   *  DOM implementation rejects an Event constructed by another realm's
+   *  constructor, which is what the happy-dom wizard tests run in. */
+  function fireInputChange(el) {
+    var view = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+    el.dispatchEvent(new view.Event("input", { bubbles: true }));
+    el.dispatchEvent(new view.Event("change", { bubbles: true }));
+  }
+  /** Combobox behaviour for the substring dimension inputs, mirroring the
+   *  Devices-step value combo: focus/click opens everything the scoped devices
+   *  report, typing filters it, ArrowUp/Down + Enter pick, Esc closes. Delegated
+   *  once per panel (guarded) so tier rows and re-rendered condition rows are
+   *  covered without re-binding — a panel's innerHTML being replaced doesn't
+   *  drop panel-level listeners. */
+  function wireDimCombo(panel) {
+    if (!panel || panel._dimComboWired) return;
+    panel._dimComboWired = true;
+    var isDim = function (t) {
+      return t && t.tagName === "INPUT" && t.classList && t.classList.contains("tgl-dim") && t.closest(".aw-combo-dim");
+    };
+    var open = function (input) {
+      var sug = dimSuggestOf(input);
+      if (!sug || input.disabled) return;
+      sug.innerHTML = awDimSuggestHtml(dimResultOf(input), input.value);
+      sug.classList.add("open");
+    };
+    panel.addEventListener("focusin", function (e) { if (isDim(e.target)) open(e.target); });
+    panel.addEventListener("click", function (e) { if (isDim(e.target)) open(e.target); });
+    panel.addEventListener("input", function (e) {
+      if (!isDim(e.target)) return;
+      open(e.target); // refilter as they type
+      paintDimCue(e.target, dimResultOf(e.target));
+    });
+    panel.addEventListener("focusout", function (e) {
+      var input = e.target;
+      if (!isDim(input)) return;
+      // Delay so a mousedown on a suggestion (which fires before blur
+      // completes) still lands.
+      setTimeout(function () {
+        var sug = dimSuggestOf(input);
+        if (sug && !sug.contains(document.activeElement)) scCloseSuggest(sug);
+      }, 150);
+    });
+    panel.addEventListener("mousedown", function (e) {
+      var item = e.target.closest && e.target.closest(".aw-suggest-item");
+      if (!item) return;
+      var combo = item.closest(".aw-combo-dim");
+      var input = combo && combo.querySelector("input.tgl-dim");
+      if (!input) return;
+      e.preventDefault(); // keep focus on the input
+      input.value = item.getAttribute("data-val");
+      // Notify first, close second — the input event reopens the list, so
+      // closing before it would leave the picked-and-still-open state.
+      fireInputChange(input);
+      scCloseSuggest(dimSuggestOf(input));
+    });
+    panel.addEventListener("keydown", function (e) {
+      var input = e.target;
+      if (!isDim(input)) return;
+      var sug = dimSuggestOf(input);
+      var isOpen = sug && sug.classList.contains("open");
+      if (e.key === "Escape") {
+        if (isOpen) { scCloseSuggest(sug); e.stopPropagation(); } // keep the modal open
+        return;
+      }
+      if (!isOpen) return;
+      var items = Array.prototype.slice.call(sug.querySelectorAll(".aw-suggest-item"));
+      if (!items.length) return;
+      var idx = items.findIndex(function (i) { return i.classList.contains("active"); });
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        var next = e.key === "ArrowDown" ? Math.min(idx + 1, items.length - 1) : Math.max(idx - 1, 0);
+        items.forEach(function (i) { i.classList.remove("active"); });
+        items[next].classList.add("active");
+        if (items[next].scrollIntoView) items[next].scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter" && idx >= 0) {
+        e.preventDefault();
+        input.value = items[idx].getAttribute("data-val");
+        fireInputChange(input);
+        scCloseSuggest(dimSuggestOf(input)); // after, for the same reason as the click path
+      }
+    });
   }
   /** Fetch (once per metric+dimension+scope) and populate every dim control on
    *  the panel. Cheap and idempotent once cached, so it's safe to call from the
@@ -1331,6 +1509,7 @@ async function openAutomationWizard(existing) {
     if (!panel) return;
     var els = Array.prototype.slice.call(panel.querySelectorAll(".tgl-dim[data-dim]"));
     if (!els.length) return;
+    wireDimCombo(panel); // every panel that renders dim controls comes through here
     var need = {};
     els.forEach(function (el) {
       var d = el.getAttribute("data-dim");

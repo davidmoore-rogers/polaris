@@ -34,7 +34,8 @@ interface DimResult {
 }
 
 let optionsHtml: (res: DimResult | null, current: string) => string;
-let datalistHtml: (res: DimResult | null) => string;
+let suggestHtml: (res: DimResult | null | { loading: true } | { error: true }, query: string) => string;
+let matchCue: (res: DimResult | null | { loading: true } | { error: true }, value: string) => { text: string; warn: boolean };
 let note: (res: DimResult | null | { loading: true } | { error: true }) => { text: string; warn: boolean };
 let narrow: (dim: string, df: Record<string, string> | null) => Record<string, string>;
 
@@ -52,7 +53,7 @@ beforeAll(() => {
   sandbox.window.document = sandbox.document;
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox);
-  ({ optionsHtml, datalistHtml, note, narrow } = sandbox.window.PolarisAutomationDimensions);
+  ({ optionsHtml, suggestHtml, matchCue, note, narrow } = sandbox.window.PolarisAutomationDimensions);
 });
 
 const result = (over: Partial<DimResult> = {}): DimResult => ({
@@ -127,10 +128,94 @@ describe("dimension picker options", () => {
     expect(optionsHtml(null, "temperature")).toContain('value="temperature" selected');
   });
 
-  it("builds datalist suggestions for substring dimensions", () => {
-    expect(datalistHtml(result({ values: [{ value: "port1", assetCount: 3 }] })))
-      .toBe('<option value="port1"></option>');
-    expect(datalistHtml(null)).toBe("");
+});
+
+describe("dimension picker suggestions (substring dimensions)", () => {
+  const sensors = result({
+    values: [
+      { value: "CPU ON-DIE Temperature", assetCount: 12 },
+      { value: "CPU Fan", assetCount: 12 },
+      { value: "DTS CPU0", assetCount: 4 },
+    ],
+  });
+
+  it("lists every reported value with its device count when nothing is typed", () => {
+    const html = suggestHtml(sensors, "");
+    expect(html).toContain('data-val="CPU ON-DIE Temperature"');
+    expect(html).toContain('data-val="CPU Fan"');
+    expect(html).toContain('data-val="DTS CPU0"');
+    expect(html).toContain("(12)");
+  });
+
+  it("filters case-insensitively by SUBSTRING, matching what the engine does", () => {
+    // "fan" is mid-string in "CPU Fan" — a prefix-matching datalist showed nothing.
+    const html = suggestHtml(sensors, "fan");
+    expect(html).toContain('data-val="CPU Fan"');
+    expect(html).not.toContain('data-val="DTS CPU0"');
+  });
+
+  it("says so when a typo matches none of the reported values", () => {
+    const html = suggestHtml(sensors, "cpu-temp");
+    expect(html).toContain("None of the 3 reported hardware sensors");
+    expect(html).toContain("cpu-temp");
+    expect(html).not.toContain("aw-suggest-item");
+  });
+
+  it("names the empty slice when the devices report nothing (narrowed or not)", () => {
+    expect(suggestHtml(result({ values: [], narrowLabel: " of class fan" }), ""))
+      .toContain("no hardware sensors of class fan");
+  });
+
+  it("stays usable while loading and on error", () => {
+    expect(suggestHtml({ loading: true }, "")).toContain("Checking");
+    expect(suggestHtml({ error: true }, "")).toContain("still works");
+    expect(suggestHtml(null, "")).toContain("Checking");
+  });
+
+  it("caps the list and says how much was withheld", () => {
+    const many = result({
+      values: Array.from({ length: 75 }, (_, i) => ({ value: "sensor" + i, assetCount: 1 })),
+    });
+    const html = suggestHtml(many, "");
+    expect((html.match(/aw-suggest-item/g) || []).length).toBe(60);
+    expect(html).toContain("+15 more");
+  });
+});
+
+describe("dimension picker match cue", () => {
+  const sensors = result({
+    values: [
+      { value: "CPU ON-DIE Temperature", assetCount: 12 },
+      { value: "CPU Fan", assetCount: 12 },
+    ],
+  });
+
+  it("WARNS that a pattern matching nothing would never fire", () => {
+    // The reason the cue exists: a pattern dimension accepts free text, so a
+    // typo saves cleanly and then silently never matches a reading.
+    const c = matchCue(sensors, "CPU ON DIE");
+    expect(c.warn).toBe(true);
+    expect(c.text).toContain("matches none of the 2 reported hardware sensors");
+    expect(c.text).toContain("never fire");
+  });
+
+  it("confirms an exact pick", () => {
+    expect(matchCue(sensors, "CPU ON-DIE Temperature")).toEqual({ text: "✓ exact match", warn: false });
+  });
+
+  it("counts how many a partial pattern selects", () => {
+    const c = matchCue(sensors, "cpu");
+    expect(c.warn).toBe(false);
+    expect(c.text).toBe("✓ matches 2 of 2 reported hardware sensors");
+  });
+
+  it("stays silent with an empty filter, while loading, on error, and with no data", () => {
+    expect(matchCue(sensors, "").text).toBe("");
+    expect(matchCue(sensors, "   ").text).toBe("");
+    expect(matchCue({ loading: true }, "CPU").text).toBe("");
+    expect(matchCue({ error: true }, "CPU").text).toBe("");
+    expect(matchCue(result({ values: [] }), "CPU").text).toBe("");
+    expect(matchCue(null, "CPU").text).toBe("");
   });
 });
 

@@ -4750,6 +4750,27 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .aw-suggest-item { padding: 5px 9px; font-size: 0.82rem; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .aw-suggest-item:hover, .aw-suggest-item.active { background: var(--color-bg-secondary); }
 .aw-suggest-empty { padding: 5px 9px; font-size: 0.78rem; color: var(--color-text-tertiary); }
+/* Dimension-value combobox (sensor name / interface / mount …): a chevron so the
+   field reads as a picker rather than a free-text box — it accepts both, and the
+   values it offers (a sensor name like "CPU ON-DIE Temperature") aren't guessable. */
+.aw-combo-dim::after {
+  content: "\25BE";
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  pointer-events: none;
+}
+.aw-combo-dim > input { padding-right: 18px; }
+/* The dim controls share a cramped row, but the values are long ("CPU ON-DIE
+   Temperature") — let the dropdown outgrow its input rather than ellipsis
+   everything into ambiguity. */
+.aw-combo-dim .aw-suggest { min-width: 260px; }
+/* Severity-tier rows lock the shared sampling fields by disabling the input —
+   the chevron has to read as locked too. */
+.aw-combo-dim:has(> input:disabled)::after { opacity: 0.55; }
 
 /* Condition-builder drag handles + drop cues (wizard devices/trigger/reset trees) */
 .aw-grip {

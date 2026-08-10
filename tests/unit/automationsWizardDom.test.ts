@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Window } from "happy-dom";
 import { buildSchemaCatalog, ruleInputSchema } from "../../src/services/notificationTypes.js";
+import { dimensionPickerMeta } from "../../src/services/notificationDimensionService.js";
 
 vi.mock("../../src/db.js", () => ({ prisma: {} }));
 
@@ -50,7 +51,10 @@ beforeAll(() => {
     automations: {
       update: async (_id: string, payload: unknown) => { savedPayloads.push(payload as Record<string, unknown>); return { rule: {} }; },
       create: async (payload: unknown) => { savedPayloads.push(payload as Record<string, unknown>); return { rule: {} }; },
-      schema: async () => buildSchemaCatalog(),
+      // Exactly what GET /automations/schema answers — dimensionPickers is
+      // merged in at the route, not by buildSchemaCatalog, and without it every
+      // dimension control falls back to a plain text box.
+      schema: async () => ({ ...buildSchemaCatalog(), dimensionPickers: dimensionPickerMeta() }),
       recipientUsers: async () => ({ users: [{ id: "u1", username: "op", displayName: "Op", email: "op@x.com" }] }),
       scopeOptions: async () => ({
         manufacturers: ["Fortinet Inc."],
@@ -58,6 +62,21 @@ beforeAll(() => {
         subnets: [{ id: "s1", name: "Mgmt", cidr: "10.20.0.0/24" }],
       }),
       preview: async () => ({ supported: true, totalEvaluated: 3, matches: [] }),
+      dimensionValues: async (body: { dimension: string }) => ({
+        values: body.dimension === "sensorClass"
+          ? [{ value: "temperature", assetCount: 2 }, { value: "fan", assetCount: 2 }]
+          : [
+              { value: "CPU ON-DIE Temperature", assetCount: 2 },
+              { value: "CPU Fan", assetCount: 2 },
+              { value: "DTS CPU0", assetCount: 1 },
+            ],
+        noun: body.dimension === "sensorClass" ? "hardware sensor classes" : "hardware sensors",
+        narrowLabel: "",
+        scopedAssets: 2,
+        sampledAssets: 2,
+        assetsWithData: 2,
+        windowHours: 3,
+      }),
     },
     assets: { tags: async () => ({ tags: ["region:Atlanta", "prod"] }) },
     assetTypes: { list: async () => ({ types: [{ name: "server", label: "Server" }, { name: "switch", label: "Switch" }] }) },
@@ -417,6 +436,110 @@ describe("automation wizard DOM render", () => {
     expect(p.severityBands[0].actions).toEqual([]);
     expect(p.severity).toBe("warning");
     expect(p.severityBands.map((b: any) => b.severity)).toEqual(["serious", "critical"]);
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
+  it("sensor-name filter is a picker: offers the fleet's own sensor names, filters as you type, and flags one nothing reports", async () => {
+    // A sensor name ("CPU ON-DIE Temperature") is not guessable, and the
+    // dimension is a substring PATTERN the server can't reject — so a typo used
+    // to save cleanly and then never match a reading. The control has to both
+    // offer what the scoped devices report and say whether what's typed hits.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    const win = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-sensor",
+      name: "Hot sensor",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: {
+        type: "asset_metric", metric: "hwSensorValue", aggregation: "latest", windowSec: 0,
+        operator: ">=", threshold: 70, dimensionFilter: { sensorClass: "temperature" },
+      },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: null,
+      bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 30)); // dimension-values fetch settles
+
+    // Sensor CLASS is a closed enum → a select of what's reported, device counts
+    // included. Sensor NAME is the pattern → a combobox, not a bare text box.
+    const cls = doc.querySelector('#aw-trig-root select.tgl-dim[data-dim="sensorClass"]') as unknown as { value: string; textContent: string };
+    expect(cls.value).toBe("temperature");
+    expect(cls.textContent).toContain("temperature (2)");
+    const combo = doc.querySelector("#aw-trig-root .aw-combo-dim")!;
+    const input = combo.querySelector('input.tgl-dim[data-dim="sensorNamePattern"]') as unknown as
+      { value: string; click: () => void; dispatchEvent: (e: unknown) => void };
+    expect(input).toBeTruthy();
+    const cue = () => (combo.nextElementSibling as unknown as { textContent: string }).textContent;
+    const items = () => Array.from(combo.querySelectorAll(".aw-suggest.open .aw-suggest-item"));
+
+    // Click opens the full list of sensors the selected devices actually report.
+    input.click();
+    expect(items().map((i) => i.textContent!.trim())).toEqual([
+      "CPU ON-DIE Temperature (2)", "CPU Fan (2)", "DTS CPU0 (1)",
+    ]);
+
+    // Typing filters by SUBSTRING (mid-string "fan" — a datalist's prefix match
+    // showed nothing) and the cue says how much it selects.
+    input.value = "fan";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    expect(items().map((i) => i.textContent!.trim())).toEqual(["CPU Fan (2)"]);
+    expect(cue()).toBe("✓ matches 1 of 3 reported hardware sensors");
+
+    // A plausible-but-wrong name is called out rather than silently accepted.
+    input.value = "CPU ON DIE";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    expect(items()).toHaveLength(0);
+    expect(combo.querySelector(".aw-suggest.open .aw-suggest-empty")!.textContent).toContain("None of the 3 reported hardware sensors");
+    expect(cue()).toContain("never fire");
+
+    // Picking a suggestion fills the input exactly and confirms the pick.
+    input.value = "on-die";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    items()[0]!.dispatchEvent(new win.MouseEvent("mousedown", { bubbles: true }));
+    expect(input.value).toBe("CPU ON-DIE Temperature");
+    expect(combo.querySelector(".aw-suggest.open")).toBeFalsy(); // closed after pick
+    expect(cue()).toBe("✓ exact match");
+    expect(toastErrors).toEqual([]);
+
+    // Keyboard: ArrowDown highlights, Enter picks, Escape closes without
+    // touching the value (and must not bubble out and close the modal).
+    input.value = "cpu";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    input.dispatchEvent(new win.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    input.dispatchEvent(new win.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(combo.querySelector(".aw-suggest-item.active")!.getAttribute("data-val")).toBe("CPU Fan");
+    input.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(input.value).toBe("CPU Fan");
+    expect(combo.querySelector(".aw-suggest.open")).toBeFalsy();
+    input.click();
+    input.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(combo.querySelector(".aw-suggest.open")).toBeFalsy();
+    expect(input.value).toBe("CPU Fan");
+    expect(doc.querySelector(".modal")).toBeTruthy();
+
+    // Back to the exact sensor for the save assertion below.
+    input.value = "CPU ON-DIE Temperature";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    input.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    // …and the picked value is what saves.
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    const p = savedPayloads[0]! as Record<string, any>;
+    expect(p.trigger.dimensionFilter).toEqual({ sensorClass: "temperature", sensorNamePattern: "CPU ON-DIE Temperature" });
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
   });
 });
