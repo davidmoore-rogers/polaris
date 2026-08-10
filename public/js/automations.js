@@ -11,6 +11,12 @@
 
 var _rulesSF = null;
 var _rulesLayout = null;
+// Client-side paging: the list endpoint returns every rule (a fleet has
+// tens, not thousands), so TableSF filters/sorts the full set and the page
+// slice happens here. Mirrors blocks.js rather than the assets/events
+// server-side mode.
+var _rulesPageSize = 25;
+var _rulesPage = 1;
 var _ruleSchema = null;
 var _ruleTagList = null;  // cached distinct asset tags for the scope picker
 var _ruleAssetTypes = null; // cached asset-type registry (finite set) for the scope picker
@@ -178,12 +184,41 @@ function _looksLikeDeviceId(tag) {
   setupPushButton();
 
   // ═══════════════════════════════ Manage tab ═════════════════════════════
+  // Persisted per user, same shape and key convention as every other list
+  // page (see events.js / blocks.js): TableSF's filter+sort state, the column
+  // layout (widths + hidden columns), and the page size in one blob.
+  function _saveRulesPrefs() {
+    if (typeof currentUsername === "undefined") return;
+    PolarisPrefs.save("automations", currentUsername, Object.assign(
+      { pageSize: _rulesPageSize, layout: _rulesLayout ? _rulesLayout.getPrefs() : null },
+      _rulesSF ? _rulesSF.getPrefs() : {},
+    ));
+  }
+
+  function _restoreRulesPrefs() {
+    if (typeof currentUsername === "undefined") return;
+    var p = PolarisPrefs.load("automations", currentUsername);
+    if (!p) return;
+    if (p.pageSize) _rulesPageSize = p.pageSize;
+    if (_rulesLayout && p.layout) _rulesLayout.setPrefs(p.layout);
+    if (_rulesSF) _rulesSF.setPrefs(p);
+  }
+
   function initRulesTab() {
     var rulesTable = document.querySelector("#rules-tbody").closest("table");
     // TableSF first, then setupColumnLayout (so resize handles survive — TableSF
     // rewrites th innerHTML).
-    _rulesSF = new TableSF("rules-tbody", function () { renderRules(); });
-    _rulesLayout = setupColumnLayout(rulesTable, { onChange: function () {} });
+    _rulesSF = new TableSF("rules-tbody", function () {
+      // A filter/sort change can shrink the result set past the current page —
+      // go back to page 1 rather than leaving the operator on an empty one.
+      _rulesPage = 1;
+      renderRules();
+      _saveRulesPrefs();
+    });
+    _rulesLayout = setupColumnLayout(rulesTable, { onChange: _saveRulesPrefs });
+    // Restore BEFORE the first render so the initial paint already carries the
+    // operator's sort, filters, widths and page size.
+    _restoreRulesPrefs();
     loadRules();
   }
 
@@ -356,9 +391,30 @@ function _looksLikeDeviceId(tag) {
     if (_rulesSF) data = _rulesSF.apply(data);
     if (!data.length) {
       tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No automations yet' + (canEditRules ? ' — click "+ New automation" to create one.' : "") + '</td></tr>';
+      clearPageControls("rules-pagination");
       return;
     }
-    tbody.innerHTML = data.map(function (r) {
+
+    // Clamp before slicing: deleting the last row of the final page (or a
+    // filter narrowing the set) can leave _rulesPage past the end.
+    var totalPages = Math.max(1, Math.ceil(data.length / _rulesPageSize));
+    if (_rulesPage > totalPages) _rulesPage = totalPages;
+    var pageStart = (_rulesPage - 1) * _rulesPageSize;
+    var pageRows = data.slice(pageStart, pageStart + _rulesPageSize);
+
+    renderPageControls("rules-pagination", data.length, _rulesPageSize, _rulesPage,
+      function (p) {
+        _rulesPage = p;
+        renderRules();
+      },
+      function (size) {
+        _rulesPageSize = size;
+        _rulesPage = 1;
+        renderRules();
+        _saveRulesPrefs();
+      });
+
+    tbody.innerHTML = pageRows.map(function (r) {
       var actions = "";
       if (canEditRules) {
         actions = '<button class="btn btn-sm btn-secondary rule-edit" data-id="' + r.id + '">Edit</button> ' +

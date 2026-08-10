@@ -37,7 +37,14 @@
 
       <!-- ─── Manage tab ───────────────────────────────────────────────── -->
       <div class="page-tab-panel active" id="auto-tab-manage">
-        <div class="table-wrapper">
+        <!-- Paginated list controls row (TEMPLATES.md). renderPageControls
+             fills both #rules-pagination-top and #rules-pagination; the "Show N"
+             selector renders in the -top row only. -->
+        <div id="rules-pagination-top" style="display:flex;align-items:center;gap:12px;justify-content:center"></div>
+        <!-- .table-wrapper-sticky: the header row freezes and scrolling happens
+             INSIDE the wrapper. sizeStickyTableWrappers() in app.js height-bounds
+             it to the viewport and is already hooked into renderPageControls. -->
+        <div class="table-wrapper table-wrapper-sticky">
           <table>
             <thead>
               <tr>
@@ -55,6 +62,7 @@
             </tbody>
           </table>
         </div>
+        <div class="pagination" id="rules-pagination" style="display:flex;align-items:center;gap:12px;justify-content:center;padding:1rem 0"></div>
       </div>
 
       <!-- ─── Delivery tab ─────────────────────────────────────────────────
