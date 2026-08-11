@@ -4593,9 +4593,15 @@ function _assetGeneralTabHTML(a) {
       viewRow("Assigned To", a.assignedTo) +
       viewRow("OS / Firmware", a.osVersion || a.os) +
       haTopologyHTML(a) +
-      viewRow("Last Seen Switch", a.lastSeenSwitch) +
-      viewRow("Last Seen AP", a.lastSeenAp) +
-      '<div class="detail-row"><span class="detail-label">Last Seen Firewall</span><span class="detail-value" id="asset-last-fw-' + escapeHtml(a.id) + '">-</span></div>' +
+      // Upstream-sighting rows name what the asset is connected BEHIND, so they
+      // say nothing about a firewall — a FortiGate is the thing doing the
+      // sighting, not the thing sighted. Hidden entirely for assetType
+      // "firewall" rather than left showing three "-" rows.
+      (a.assetType === "firewall"
+        ? ""
+        : viewRow("Last Seen Switch", a.lastSeenSwitch) +
+          viewRow("Last Seen AP", a.lastSeenAp) +
+          '<div class="detail-row"><span class="detail-label">Last Seen Firewall</span><span class="detail-value" id="asset-last-fw-' + escapeHtml(a.id) + '">-</span></div>') +
       '<div id="asset-mclag-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
       '<div id="asset-contacts-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
       associatedUsersViewHTML(a.associatedUsers) +
