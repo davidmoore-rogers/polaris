@@ -1815,6 +1815,9 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
       hardwareSensors: hardwareSensors.map((s) => ({
         timestamp:   s.timestamp,
         sensorName:  s.sensorName,
+        // Display-only: the interface an index-named sensor sits on, rendered in
+        // parentheses beside the name. Never a substitute for sensorName.
+        ifName:      s.ifName ?? null,
         sensorClass: s.sensorClass,
         value:       s.value,
         unit:        s.unit,

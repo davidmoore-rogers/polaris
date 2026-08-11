@@ -1308,6 +1308,16 @@ model AssetHardwareSensorSample {
   value       Float?
   unit        String?
   alarmStatus String?
+  // DISPLAY-ONLY correlated interface name for sensors the device names by bare
+  // entPhysicalIndex (`sensor-18`) — on FortiSwitchOS those indexes are ifIndex,
+  // so the row is the optical module in the interface at that ifIndex. Resolved
+  // from the same device's IF-MIB walk (`resolveSensorIfName`) and rendered in
+  // parentheses beside the sensor name. Never folded into `sensorName`: that
+  // string is the automation dimension + chart/rollup series key. Null on every
+  // device-named sensor and on non-Fortinet gear (see resolveSensorIfName for
+  // why the index↔ifIndex equivalence isn't portable). Rollup tiers skip it —
+  // current-state metadata, not an aggregate.
+  ifName      String?
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])

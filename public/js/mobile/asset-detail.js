@@ -839,7 +839,9 @@
         + '<div class="list-item two-line" style="padding-left:16px;padding-right:16px;">'
         + '  <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-temp"/></svg></span>'
         + '  <div class="content">'
-        + '    <div class="headline">' + escapeHtml(t.sensorName || "sensor") + '</div>'
+        // Index-named sensors ("sensor-18") carry the interface the collector
+        // correlated them to — show it so the row means something on a phone too.
+        + '    <div class="headline">' + escapeHtml((t.sensorName || "sensor") + (t.ifName ? " (" + t.ifName + ")" : "")) + '</div>'
         + '    <div class="supporting">' + escapeHtml(statsLine) + '</div>'
         + '  </div>'
         + '  <span class="trailing mono" style="font-weight:600;">' + escapeHtml(current) + '</span>'

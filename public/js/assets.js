@@ -6837,6 +6837,17 @@ function _hwReadingText(s) {
   var v = Math.round(s.value * 1000) / 1000;
   return s.unit ? (v + " " + s.unit) : String(v);
 }
+// Sensors a device names by bare physical index ("sensor-18") carry the
+// interface the collector correlated them to. Render it in parentheses so the
+// row reads as "the optical module in that port/trunk" instead of an opaque
+// number — the name itself stays the sensor's real key (it's what automations
+// and the history chart match on), so the suffix is muted, not part of the link.
+function _hwIfaceSuffixHTML(s) {
+  if (!s || !s.ifName) return "";
+  return ' <span style="color:var(--color-text-tertiary)" title="IF-MIB interface at the same index as this sensor' +
+    ' — FortiSwitch numbers its physical sensors by ifIndex, so this is the optical module' +
+    ' in that interface.">(' + escapeHtml(s.ifName) + ')</span>';
+}
 function _hwStatusCell(s) {
   if (s.alarmStatus === "alarm") {
     return '<span style="color:var(--color-danger,#e5484d);font-weight:600">⚠ alarm</span>';
@@ -6882,7 +6893,10 @@ function _renderTemperatures(container, si, asset) {
     return;
   }
   var rowFor = function (s) {
-    var name = '<a href="#" class="asset-temp-link" data-name="' + escapeHtml(s.sensorName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(s.sensorName) + '</a>';
+    var name = '<a href="#" class="asset-temp-link" data-name="' + escapeHtml(s.sensorName) + '"' +
+      ' data-ifname="' + escapeHtml(s.ifName || "") + '"' +
+      ' style="color:var(--color-accent);text-decoration:none">' + escapeHtml(s.sensorName) + '</a>' +
+      _hwIfaceSuffixHTML(s);
     return '<tr>' +
       '<td>' + name + '</td>' +
       '<td>' + escapeHtml(_hwClassLabel(s.sensorClass)) + '</td>' +
@@ -6932,7 +6946,7 @@ function _renderTemperatures(container, si, asset) {
   container.querySelectorAll(".asset-temp-link").forEach(function (link) {
     link.addEventListener("click", function (e) {
       e.preventDefault();
-      openSensorDetailPanel(asset, link.getAttribute("data-name"));
+      openSensorDetailPanel(asset, link.getAttribute("data-name"), link.getAttribute("data-ifname"));
     });
   });
 }
@@ -7500,14 +7514,17 @@ function closeSensorPanel() {
   if (_sensorRefreshTimer) { clearTimeout(_sensorRefreshTimer); _sensorRefreshTimer = null; }
 }
 
-async function openSensorDetailPanel(asset, sensorName) {
+// `ifName` (optional) is the correlated interface for index-named sensors — it
+// only labels the panel; every history query still keys on sensorName.
+async function openSensorDetailPanel(asset, sensorName, ifName) {
   if (!asset || !sensorName) return;
+  var sensorTitle = sensorName + (ifName ? " (" + ifName + ")" : "");
   _ensureSensorPanelDOM();
   var titleEl  = document.getElementById("sensor-panel-title");
   var metaEl   = document.getElementById("sensor-panel-meta");
   var bodyEl   = document.getElementById("sensor-panel-body");
   var footerEl = document.getElementById("sensor-panel-footer");
-  titleEl.textContent = "Sensor — " + sensorName;
+  titleEl.textContent = "Sensor — " + sensorTitle;
   metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
   bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Loading…</p>';
   footerEl.innerHTML =
@@ -7541,7 +7558,7 @@ async function openSensorDetailPanel(asset, sensorName) {
     '<div style="padding:1rem 1.25rem">' +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
         '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
-          '<h4 style="margin:0">' + escapeHtml(sensorName) + '</h4>' +
+          '<h4 style="margin:0">' + escapeHtml(sensorTitle) + '</h4>' +
           sensorBadge +
         '</div>' +
         '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +

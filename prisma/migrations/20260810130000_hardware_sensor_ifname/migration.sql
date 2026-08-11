@@ -1,0 +1,17 @@
+-- Correlated interface name on AssetHardwareSensorSample (detail tier only).
+--
+-- FortiSwitchOS publishes ENTITY-SENSOR-MIB rows with an EMPTY ENTITY-MIB
+-- entPhysicalDescr, so the SNMP collector names them `sensor-<entPhysicalIndex>`
+-- — opaque to an operator. Those indexes are the device's ifIndex values, so
+-- `sensor-18` is the sensor on the interface at ifIndex 18 (in practice the SFP
+-- module in that port, or in a member of the trunk that owns it). The collector
+-- resolves the name from the same device's IF-MIB walk and stores it here for
+-- display: the Hardware Sensors table renders `sensor-18 (2FPTY25006868-0)`.
+--
+-- DISPLAY-ONLY. `sensorName` stays the index-based key because it is the
+-- automation dimension + the chart/rollup series key, so a failed IF-MIB walk
+-- can never split a sensor's history into a second series.
+--
+-- Rollup tables intentionally skip this column — it's current-state metadata,
+-- not something the hourly/daily aggregate shape applies to.
+ALTER TABLE "asset_hardware_sensor_samples" ADD COLUMN "ifName" TEXT;
