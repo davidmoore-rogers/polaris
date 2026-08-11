@@ -1734,6 +1734,13 @@ function _togglePanelLock(type) {
   _syncAllLockButtons(type);
 }
 
+// Read-only accessor for page code that has to honor the lock beyond the
+// backdrop-click rule — e.g. the asset slide-over's Edit button, which
+// normally closes the panel before opening the edit modal and must not when
+// the operator has pinned the panel open.
+function isPanelLocked(type) { return !!_panelLock[type]; }
+window.isPanelLocked = isPanelLocked;
+
 function _lockBtnSvg(locked) {
   var attrs = 'width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
   var body = locked

@@ -4024,6 +4024,10 @@ async function openEditModal(id, opts) {
             "(only monitored assets can).", "error");
         } else showToast("Asset updated");
         loadAssets();
+        // The details panel can still be open behind this modal (locked
+        // slide-over, or the monitoring-pill path that never closes it) —
+        // re-render it so it doesn't sit on the pre-save values.
+        if (_isCurrentAsset(id)) openViewModal(id);
       } catch (err) {
         showToast(err.message, "error");
       } finally {
@@ -4521,7 +4525,13 @@ async function openViewModal(id) {
     var editBtn = document.getElementById("btn-asset-panel-edit-btn");
     if (editBtn) {
       editBtn.addEventListener("click", function () {
-        closeAssetPanel();
+        // A locked slide-over stays pinned open — the edit modal stacks over it
+        // (openModal's .above-slideover), same as the monitoring-pill path that
+        // already opens the modal without closing the panel. The save handler
+        // refreshes the panel behind it so it can't show pre-save values.
+        if (!(typeof isPanelLocked === "function" && isPanelLocked("slideover"))) {
+          closeAssetPanel();
+        }
         openEditModal(a.id);
       });
     }

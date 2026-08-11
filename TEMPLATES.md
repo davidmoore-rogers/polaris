@@ -221,7 +221,7 @@ Per-pattern sections:
     .slideover-footer
   ```
 - Width persistence: call `initSlideoverResize(panelEl, "polaris.panel.width.<name>")` from `public/js/app.js`. Each surface uses its own localStorage key.
-- Backdrop click closes (target equality check on `.slideover-overlay`).
+- Backdrop click closes (target equality check on `.slideover-overlay`) — unless the per-user panel lock is on, which a capture-phase handler in app.js blocks generically for every slide-over. Any OTHER affordance that closes the panel to open something else (the asset panel's Edit button) must check `isPanelLocked("slideover")` itself and skip the close: a locked panel is one the operator pinned, and `openModal` already stacks the modal over it via `.above-slideover`. Pair that with re-rendering the panel after the modal's save, or it sits on pre-save values.
 - Open animation: append/build, then `requestAnimationFrame(() => overlay.classList.add("open"))` on the next frame to trigger the CSS transition.
 - Auto-refresh timers (e.g. monitor chart, system tab) gate on `_isOverlayOpen("<panel-overlay>")` and `_isCurrentAsset(id)` — close cancels pending ticks via `_clearAssetRefreshTimers()` so a closed panel never fires API requests.
 - Nested slide-overs (interface / storage / sensor / IPsec drilldowns) layer on top of the asset panel and only the topmost closes on the close button — see the interface slide-over pattern in assets.js for the layering rules.
