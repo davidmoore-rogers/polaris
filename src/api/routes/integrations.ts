@@ -490,6 +490,17 @@ const FortiManagerConfigSchema = z.object({
   // unannounced sweep of every reserved IP is IDS-visible, so operators must
   // opt in. Mirrored on FortiGateConfigSchema for parity.
   arpPresenceSweep: z.boolean().optional().default(false),
+  // Auto-reserve discovered Fortinet infrastructure. When true, each discovery
+  // cycle writes a real MAC→IP `reserved-address` entry on the owning FortiGate
+  // for managed FortiSwitches / FortiAPs that currently hold their address by
+  // dynamic lease — pinning an address the device is ALREADY using, so the
+  // pool's occupancy doesn't change. Requires pushReservations (the transport
+  // gate) and is ignored without it. Default off, and deliberately so: every
+  // other DHCP write Polaris makes is an operator acting on one IP, whereas this
+  // one runs on a schedule across a fleet. Bounded per cycle, MAC taken only
+  // from the gate's own lease table, verified by read-back. Mirrored on
+  // FortiGateConfigSchema for parity. See business rule 23.
+  autoReserveFortinetInfra: z.boolean().optional().default(false),
   // Description sync (Polaris-primary). When true, operator descriptions in
   // Polaris are written back to the devices this integration discovered —
   // interface comments (AssetInterfaceOverride) to FortiGate system/interface
@@ -552,6 +563,10 @@ const FortiGateConfigSchema = z.object({
   // ARP presence sweep — see FortiManagerConfigSchema.arpPresenceSweep for
   // shape + semantics. Default off.
   arpPresenceSweep: z.boolean().optional().default(false),
+  // Auto-reserve discovered Fortinet infrastructure — see
+  // FortiManagerConfigSchema.autoReserveFortinetInfra for shape + semantics.
+  // Requires pushReservations. Default off.
+  autoReserveFortinetInfra: z.boolean().optional().default(false),
   // Description sync (Polaris-primary) — see FortiManagerConfigSchema
   // .syncDescriptions for shape + semantics. Default off.
   syncDescriptions: z.boolean().optional().default(false),

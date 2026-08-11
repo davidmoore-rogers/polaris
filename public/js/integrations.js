@@ -846,9 +846,14 @@ function calloutHTML(variant, title, bodyHtml) {
 // its own Stale Detection section at the bottom of the tab (stored in
 // integration.config.arpPresenceSweep, read on save by
 // _readArpPresenceSweepToggle()).
-function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep) {
+function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep, autoReserveFortinetInfra) {
   var checked = pushReservations === true ? "checked" : "";
   var arpChecked = arpPresenceSweep === true ? "checked" : "";
+  // Meaningless without the transport gate above it, so it renders nested and
+  // disabled until that box is ticked. The server re-checks anyway — the client
+  // state is a convenience, not the enforcement.
+  var autoChecked = autoReserveFortinetInfra === true ? "checked" : "";
+  var autoDisabled = pushReservations === true ? "" : " disabled";
   var modeLabel = (useProxy === false)
     ? "Direct to each FortiGate"
     : "Proxy through FortiManager to each FortiGate";
@@ -859,13 +864,25 @@ function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep) {
       '<h4 style="margin:0 0 0.25rem 0">DHCP Push</h4>' +
       '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">When enabled, two DHCP writes flow from Polaris back to the originating FortiGate on subnets discovered by this integration.</p>' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
-        '<input type="checkbox" id="f-pushReservations" ' + checked + ' style="width:auto">' +
+        '<input type="checkbox" id="f-pushReservations" ' + checked + ' onchange="syncAutoReserveInfraEnabled()" style="width:auto">' +
         '<label for="f-pushReservations" style="margin:0">Write Polaris DHCP changes back to FortiGate</label>' +
       '</div>' +
       '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
         '<li><strong>Reservation create.</strong> Every manual IP reservation is written to the FortiGate at create time as a <code>reserved-address</code> entry. The Polaris reservation only commits if the device write succeeds and the entry verifies on read-back; any failure aborts the create.</li>' +
         '<li><strong>DHCP lease revoke.</strong> Freeing a discovered <code>dhcp_lease</code> row tells the FortiGate to forget the current lease via <code>release-lease</code>. Best-effort &mdash; a device-side failure is logged as a warning but does not block the Polaris release. The same client can still DHCP-acquire the IP back on its next request; this is "expire now," not a block.</li>' +
       '</ul>' +
+      '<div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin:1rem 0 0.5rem;padding-left:1.2rem;border-left:2px solid var(--color-border)">' +
+        '<input type="checkbox" id="f-autoReserveFortinetInfra" ' + autoChecked + autoDisabled + ' style="width:auto;margin-top:3px">' +
+        '<label for="f-autoReserveFortinetInfra" style="margin:0">Also reserve discovered FortiSwitch and FortiAP addresses on their gate' +
+          (pushReservations === true ? '' : ' <span style="color:var(--color-text-tertiary)">(requires the setting above)</span>') +
+        '</label>' +
+      '</div>' +
+      '<ul class="hint" style="margin:0.25rem 0 0 2.4rem;padding:0">' +
+        '<li><strong>What it does.</strong> Each discovery cycle, managed FortiSwitches and FortiAPs that hold their address by dynamic lease get a real <code>reserved-address</code> entry written on their own FortiGate, pinning the address they already use. Nothing else is touched: only devices this integration discovered, only where Polaris learned the MAC from the gate\'s own lease table, and only addresses the device is already holding &mdash; so the DHCP pool\'s occupancy does not change.</li>' +
+        '<li><strong>Paced, not a fan-out.</strong> A bounded number of entries are written per discovery cycle and the rest are picked up on later cycles. Each write is verified by reading it back, and a device that refuses is left alone and logged rather than retried into the ground.</li>' +
+        '<li><strong>Reversible.</strong> Decommissioning or deleting a switch/AP removes its entry from the gate. Turning this off stops new entries; it does not remove ones already written &mdash; release those reservations to do that.</li>' +
+      '</ul>' +
+      calloutHTML("warning", "This writes DHCP configuration automatically", "Every other Polaris DHCP write is something an operator asked for on a specific IP. This one runs on a schedule across the fleet. Enable it on one integration and check the result on a single gate before relying on it, and have someone who owns the network sign off &mdash; particularly for FortiLink pools, which the FortiGate manages itself.") +
     '</section>' +
     '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
     '<section style="margin-bottom:1.5rem">' +
@@ -918,6 +935,31 @@ function _readArpPresenceSweepToggle() {
 function _readPushReservationsToggle() {
   var el = document.getElementById("f-pushReservations");
   if (!el) return undefined;
+  return !!el.checked;
+}
+
+// Enable/disable the nested auto-reserve checkbox as the DHCP-push master is
+// toggled. Global because it's wired as an inline onchange (the modal builds its
+// tabs as HTML strings, and this file is a classic script — same idiom as the
+// inline onclick="closeModal()" used by every modal footer). Unticking the
+// master also clears the child so the disabled state and the value agree.
+function syncAutoReserveInfraEnabled() {
+  var master = document.getElementById("f-pushReservations");
+  var child = document.getElementById("f-autoReserveFortinetInfra");
+  if (!master || !child) return;
+  child.disabled = !master.checked;
+  if (!master.checked) child.checked = false;
+}
+
+// Read the auto-reserve toggle out of the DHCP Push tab. Returns undefined when
+// the tab didn't render. Forced false when the DHCP-push master is off, so an
+// operator who unticks the parent can't leave a stale true behind in config —
+// the server also refuses to act on it in that state.
+function _readAutoReserveInfraToggle() {
+  var el = document.getElementById("f-autoReserveFortinetInfra");
+  if (!el) return undefined;
+  var master = document.getElementById("f-pushReservations");
+  if (master && !master.checked) return false;
   return !!el.checked;
 }
 
@@ -4800,7 +4842,7 @@ async function openCreateModal(type) {
     // helpers labels the active mode for FMG; standalone FortiGate ignores it
     // and always uses direct REST with the integration's own credentials —
     // pass true so the FMG copy doesn't render an irrelevant "direct" warning.
-    addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true, false) });
+    addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true, false, false) });
     addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
     // Description Sync tab (FMG + standalone FortiGate). Default off.
     addTabs.push({ key: "description-sync", label: "Description Sync", html: descriptionSyncFormHTML(false, true) });
@@ -4957,6 +4999,8 @@ async function openCreateModal(type) {
         if (pushToggleNew !== undefined) createConfig.pushReservations = pushToggleNew;
         var arpSweepToggleNew = _readArpPresenceSweepToggle();
         if (arpSweepToggleNew !== undefined) createConfig.arpPresenceSweep = arpSweepToggleNew;
+        var autoReserveInfraNew = _readAutoReserveInfraToggle();
+        if (autoReserveInfraNew !== undefined) createConfig.autoReserveFortinetInfra = autoReserveInfraNew;
         var quarantinePushToggleNew = _readPushQuarantineToggle();
         if (quarantinePushToggleNew !== undefined) createConfig.pushQuarantine = quarantinePushToggleNew;
         var syncDescriptionsNew = _readSyncDescriptionsToggle();
@@ -5119,7 +5163,7 @@ async function openEditModal(id) {
         editTabs.push({
           key: "push",
           label: "DHCP Push",
-          html: reservationPushFormHTML(config.pushReservations === true, pushUseProxy, config.arpPresenceSweep === true),
+          html: reservationPushFormHTML(config.pushReservations === true, pushUseProxy, config.arpPresenceSweep === true, config.autoReserveFortinetInfra === true),
         });
         editTabs.push({
           key: "quarantine-push",
@@ -5497,6 +5541,8 @@ function _wireIntgEditSave(id, intg, formGetter) {
         if (pushToggle !== undefined) editConfig.pushReservations = pushToggle;
         var arpSweepToggle = _readArpPresenceSweepToggle();
         if (arpSweepToggle !== undefined) editConfig.arpPresenceSweep = arpSweepToggle;
+        var autoReserveInfraEdit = _readAutoReserveInfraToggle();
+        if (autoReserveInfraEdit !== undefined) editConfig.autoReserveFortinetInfra = autoReserveInfraEdit;
         var quarantinePushToggle = _readPushQuarantineToggle();
         if (quarantinePushToggle !== undefined) editConfig.pushQuarantine = quarantinePushToggle;
         var syncDescriptionsEdit = _readSyncDescriptionsToggle();

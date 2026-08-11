@@ -79,6 +79,7 @@ import { runDescriptionSyncForIntegration } from "../descriptionSyncService.js";
 import { reconcileMapRegions } from "../mapRegionService.js";
 import { releaseAssetsForDecommission } from "../maintenanceScheduleService.js";
 import { releaseInfraReservationsForAssets } from "../reservationService.js";
+import { runInfraReservationPush } from "../infraReservationPushService.js";
 import { reconcileAllTags } from "../tagAssignmentService.js";
 import * as sightings from "../assetSightingService.js";
 import { quarantineAsset, verifyAssetQuarantine } from "../assetQuarantineService.js";
@@ -891,6 +892,23 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
             logEvent({ action: "integration.presence_verification.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `Presence verification failed for "${integrationName}": ${err?.message || "Unknown error"}` });
           });
       }
+    }
+
+    // ── Fortinet post-sync pass: auto-reserve managed switch/AP addresses ────
+    // Opt-in (config.pushReservations + config.autoReserveFortinetInfra), and
+    // deliberately AFTER the sync: it acts on `dhcpBinding`, which the Phase 5
+    // infra branch has just refreshed, so a device that stopped leasing is no
+    // longer a candidate by the time this runs. Wrapped like the other post-sync
+    // passes — a device-write failure must not poison the run's accounting.
+    if (!assetsOnly && !ac.signal.aborted) {
+      await runInfraReservationPush({
+        integrationId,
+        integrationName,
+        actor,
+        signal: ac.signal,
+      }).catch((err: any) => {
+        logEvent({ action: "reservation.infra.auto_push.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `Auto-reserve of managed device addresses failed for "${integrationName}": ${err?.message || "Unknown error"}` });
+      });
     }
 
     if (ac.signal.aborted) {

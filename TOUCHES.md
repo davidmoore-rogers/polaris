@@ -849,6 +849,9 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/services/reservationService.ts:releaseInfraReservationsForAssets` — the device-lifecycle release. Resolves reservations from the asset's `ipAddress`, judges each with the pure `shouldReleaseInfraReservation` (scope + ownership), and delegates to `releaseReservation` so unpush + lease-expiry + audit all come for free. Bounded at `INFRA_RELEASE_CEILING` (100) per invocation with `deferred` reported; never throws.
 - `src/services/reservationService.ts:reconcileOrphanedInfraReservations` — the backstop sweep behind `jobs/reconcileInfraReservations.ts`; verdict per row from the pure `classifyOrphanInfraRow`.
 - Call sites (all pass ONLY switch/access_point ids): `discoveryEngine.ts` Phase 2a controller cascade + Phase 2b stale-infra sweep; `api/routes/assets.ts` `DELETE /:id`, `DELETE /` (bulk), and the `applyAssetUpdateSideEffects` operator-decommission branch; `jobs/decommissionStaleAssets.ts`.
+- `src/services/infraReservationPushService.ts` — the OPT-IN auto-push (`config.pushReservations` AND `config.autoReserveFortinetInfra`, both required, `integrationPushEnabled` re-checked server-side). Post-sync pass in `runDiscovery`, deliberately after the Phase 5 branch that refreshes `dhcpBinding`. Eligibility is the pure `isInfraPushCandidate`; on success it stamps the push pointers + `dhcpBinding="reservation"`, on a PERMANENT failure it stamps `pushStatus="failed_permanent"` + `pushError` (which both removes the row from the candidate set and surfaces the device's own message in the IP panel), and on a transient failure it leaves the row for the next cycle.
+- `src/api/routes/integrations.ts` — `autoReserveFortinetInfra` on BOTH `FortiManagerConfigSchema` and `FortiGateConfigSchema` (parity).
+- `public/js/integrations.js` — the nested checkbox in `reservationPushFormHTML` (+ `_readAutoReserveInfraToggle` at the create/edit collect sites, and `syncAutoReserveInfraEnabled` as an inline onchange so the child enables/disables with its parent).
 
 **Readers** (files that consume it):
 - `src/services/subnetService.ts` (`toReservationDto`) — surfaces `dhcpBinding` on the IP-panel payload.
@@ -868,9 +871,13 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - "No longer discovered" is NOT a release trigger. An offline AP stays in its controller's CMDB roster, and business rule 16 already establishes that roster absence is config truth rather than reachability — the release hangs off the existing decommission decision so one bad FMG query can't strip a fleet's worth of bindings.
 - The orphan reconcile releases a PUSHED row only on an explicitly decommissioned device. "No asset found" is a transient discovery state as often as it is a real orphan, and acting on it would write to a live gate.
 
+- The auto-push writes DHCP config to production devices on a SCHEDULE, which nothing else in Polaris does. It stays double-gated, bounded per cycle (`RUN_CEILING`), MAC-from-lease-only, read-back-verified, and never retries a row that already carries push state. Loosening any one of those needs a deliberate decision, not a refactor.
+- The auto-push only ever pins an address the device is ALREADY holding by lease, so it cannot change pool occupancy. If it is ever extended to claim free addresses, the pool-capacity question that was deferred (Polaris has no `dhcpStart`/`dhcpEnd` and no subnet-utilization alerting) has to be answered first.
+
 **Change checklist:**
 - [ ] Adding a source type that discovery auto-creates for a device? Decide whether it needs a binding fact too, and whether `INFRA_SOURCE_TYPES` should grow.
 - [ ] Adding a path that decommissions or deletes a switch/AP? Call `releaseInfraReservationsForAssets` from it — the reconcile will converge it eventually, but only after up to 6 hours.
+- [ ] Touching the auto-push? Re-read the SAFETY block at the top of `infraReservationPushService.ts` first; every clause there is load-bearing.
 - [ ] Touching the Phase 5 existing-row chain? Keep the infra branch BEFORE the fall-through `continue`, and keep exactly one path counter per processed entry.
 - [ ] Widening the takeover set? Change `isSupersedableByCreate` only, then mirror it in both client predicates.
 
