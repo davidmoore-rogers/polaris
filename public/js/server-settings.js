@@ -7871,7 +7871,7 @@ function wireManufacturerProfileControls() {
       var key = "metric:" + tr.getAttribute("data-profile-id") + ":" + tr.getAttribute("data-metric-key");
       _mfgEditMibSelections[key] = target.value || "";
       if (target.value) _ensureMibSymbols(target.value);
-      renderIdentificationTab();
+      _mfgRerenderPreserving(target);
       return;
     }
     if (target.classList.contains("mfg-edit-override-mib")) {
@@ -7879,7 +7879,7 @@ function wireManufacturerProfileControls() {
       if (!tr2) return;
       _mfgEditMibSelections["override:" + tr2.getAttribute("data-override-id")] = target.value || "";
       if (target.value) _ensureMibSymbols(target.value);
-      renderIdentificationTab();
+      _mfgRerenderPreserving(target);
       return;
     }
     if (target.classList.contains("mfg-new-override-mib")) {
@@ -7887,7 +7887,7 @@ function wireManufacturerProfileControls() {
       if (!tr3) return;
       _mfgEditMibSelections["new:" + tr3.getAttribute("data-profile-id") + ":" + tr3.getAttribute("data-metric-key")] = target.value || "";
       if (target.value) _ensureMibSymbols(target.value);
-      renderIdentificationTab();
+      _mfgRerenderPreserving(target);
       return;
     }
     // Type selectors — flipping scalar / double_scalar / table re-renders
@@ -7898,21 +7898,21 @@ function wireManufacturerProfileControls() {
       var trType = target.closest("tr");
       if (!trType) return;
       _mfgEditTypeSelections["metric:" + trType.getAttribute("data-profile-id") + ":" + trType.getAttribute("data-metric-key")] = target.value;
-      renderIdentificationTab();
+      _mfgRerenderPreserving(target);
       return;
     }
     if (target.classList.contains("mfg-edit-override-type")) {
       var trTypeOv = target.closest("tr");
       if (!trTypeOv) return;
       _mfgEditTypeSelections["override:" + trTypeOv.getAttribute("data-override-id")] = target.value;
-      renderIdentificationTab();
+      _mfgRerenderPreserving(target);
       return;
     }
     if (target.classList.contains("mfg-new-override-type")) {
       var trTypeNew = target.closest("tr");
       if (!trTypeNew) return;
       _mfgEditTypeSelections["new:" + trTypeNew.getAttribute("data-profile-id") + ":" + trTypeNew.getAttribute("data-metric-key")] = target.value;
-      renderIdentificationTab();
+      _mfgRerenderPreserving(target);
       return;
     }
     // ─── Widget MIB / Type / WidgetType selects ───────────────────────
@@ -7940,21 +7940,21 @@ function wireManufacturerProfileControls() {
       var keyWM = _widgetCardKey(cardWM);
       _mfgWidgetEditMib[keyWM] = target.value || "";
       if (target.value) _ensureMibSymbols(target.value);
-      renderIdentificationTab();
+      _mfgRerenderPreserving(target);
       return;
     }
     if (target.classList.contains("mfg-widget-type")) {
       var cardWT = target.closest(".mfg-widget-edit-card, .mfg-widget-add-card");
       if (!cardWT) return;
       _mfgWidgetEditType[_widgetCardKey(cardWT)] = target.value;
-      renderIdentificationTab();
+      _mfgRerenderPreserving(target);
       return;
     }
     if (target.classList.contains("mfg-widget-widgettype")) {
       var cardWWT = target.closest(".mfg-widget-edit-card, .mfg-widget-add-card");
       if (!cardWWT) return;
       _mfgWidgetEditWidgetType[_widgetCardKey(cardWWT)] = target.value;
-      renderIdentificationTab();
+      _mfgRerenderPreserving(target);
       return;
     }
   });
@@ -7967,6 +7967,93 @@ function _widgetCardKey(cardEl) {
     return "widget:" + cardEl.getAttribute("data-widget-id");
   }
   return "new-widget:" + cardEl.getAttribute("data-profile-id");
+}
+
+// ─── Preserving typed input across a chained-select re-render ───────────────
+//
+// The MIB / symbol-type / widget-type selects are chained: changing one changes
+// what the dependent controls offer (Symbol comes from the MIB, the sub-form
+// from the widget type), so each handler re-renders. But the re-render rebuilds
+// every row and card from STORED state, and the only things carried across were
+// the three selects themselves — so an operator who typed a Name and then
+// picked a MIB watched the Name vanish. Every field was affected, on the metric
+// rows and override rows as much as the widget card.
+//
+// Rather than a shadow store per field (nine handlers × a growing set of
+// fields), snapshot the editing container's live control values, re-render, then
+// write them back. Keyed on the same identity the handlers already use, so the
+// values can't land in a different row. A `<select>` whose options changed drops
+// a value the new list doesn't offer — which is what should happen to a Symbol
+// after its MIB is swapped.
+
+/** The editing container an element belongs to (widget card or table row). */
+function _mfgEditContainerOf(el) {
+  if (!el || !el.closest) return null;
+  return el.closest(".mfg-widget-edit-card, .mfg-widget-add-card, tr");
+}
+
+/** Stable identity for a container, matching the handlers' shadow-store keys so
+ *  a snapshot is restored into the same row it came from. */
+function _mfgEditContainerKey(container) {
+  if (!container) return "";
+  if (container.classList.contains("mfg-widget-edit-card") ||
+      container.classList.contains("mfg-widget-add-card")) {
+    return _widgetCardKey(container);
+  }
+  var ovr = container.getAttribute("data-override-id");
+  if (ovr) return "override:" + ovr;
+  var pid = container.getAttribute("data-profile-id");
+  var mk = container.getAttribute("data-metric-key");
+  if (!pid || !mk) return "";
+  // A metric row and the "add override" row beneath it share profile+metricKey;
+  // the controls each one owns are what tell them apart.
+  var isNew = !!container.querySelector(".mfg-new-override-mib, .mfg-new-override-type, .mfg-new-override-symbol");
+  return (isNew ? "new:" : "metric:") + pid + ":" + mk;
+}
+
+/** The field's snapshot key — its own `mfg-*` class, which is unique per
+ *  control within a container. */
+function _mfgFieldKey(el) {
+  var cls = (el.className || "").split(/\s+/);
+  for (var i = 0; i < cls.length; i++) {
+    if (cls[i].indexOf("mfg-") === 0) return cls[i];
+  }
+  return "";
+}
+
+function _mfgSnapshotFields(container) {
+  var vals = {};
+  if (!container) return vals;
+  container.querySelectorAll("input, select, textarea").forEach(function (el) {
+    var key = _mfgFieldKey(el);
+    if (!key) return;
+    vals[key] = (el.type === "checkbox" || el.type === "radio") ? el.checked : el.value;
+  });
+  return vals;
+}
+
+/**
+ * Re-render the Identification tab without losing what the operator has typed
+ * into the row/card that triggered it. Use this instead of a bare
+ * renderIdentificationTab() from any chained-control handler.
+ */
+function _mfgRerenderPreserving(el) {
+  var container = _mfgEditContainerOf(el);
+  var key = _mfgEditContainerKey(container);
+  var vals = _mfgSnapshotFields(container);
+  renderIdentificationTab();
+  if (!key || !Object.keys(vals).length) return;
+  var candidates = document.querySelectorAll(".mfg-widget-edit-card, .mfg-widget-add-card, tr[data-metric-key], tr[data-override-id]");
+  for (var i = 0; i < candidates.length; i++) {
+    if (_mfgEditContainerKey(candidates[i]) !== key) continue;
+    candidates[i].querySelectorAll("input, select, textarea").forEach(function (field) {
+      var fk = _mfgFieldKey(field);
+      if (!fk || !(fk in vals)) return;
+      if (field.type === "checkbox" || field.type === "radio") { field.checked = !!vals[fk]; return; }
+      field.value = vals[fk];
+    });
+    return;
+  }
 }
 
 // ─── "+ Add Manufacturer" typeahead ────────────────────────────────────────
