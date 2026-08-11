@@ -1094,6 +1094,10 @@ function applyBranding(b, skipCache) {
   if (!skipCache) {
     try { localStorage.setItem("polaris-branding", JSON.stringify(b)); } catch (_) {}
   }
+  // Hardware-sensor display unit rides the branding payload — hand it to the
+  // converter now so a changed preference (or a first load with no cached
+  // branding) takes effect on this page without a reload.
+  if (window.PolarisTempUnit) window.PolarisTempUnit.setFromBranding(b);
 
   // Update sidebar logo + name
   var sidebarLogo = document.querySelector(".sidebar-logo");

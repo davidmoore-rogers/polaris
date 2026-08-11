@@ -822,19 +822,28 @@
       if (s.value > b.max) b.max = Number(s.value);
     });
 
+    // Display-only °C→°F (install-wide `branding.temperatureUnit`). Gated on the
+    // ROW's stored unit, so a fan's RPM stays RPM. Converting the aggregate is
+    // safe: the transform is affine, so min/avg/max convert the same either way.
+    var TU = window.PolarisTempUnit;
+    var conv  = function (v, u) { return TU ? TU.convertReading(v, u) : v; };
+    var uOf   = function (u) { return TU ? TU.displayUnit(u) : u; };
+
     var html = "";
     sensors.forEach(function (t, i) {
       var b = byName[t.sensorName];
-      var unitSuffix = t.unit ? " " + t.unit : "";
+      var displayUnit = uOf(t.unit);
+      var unitSuffix = displayUnit ? " " + displayUnit : "";
       var statsLine;
       if (b && b.n > 0) {
         var avg = b.sum / b.n;
-        statsLine = "1h · min " + fmtNum(b.min) + " · avg " + fmtNum(avg) + " · max " + fmtNum(b.max) + unitSuffix;
+        statsLine = "1h · min " + fmtNum(conv(b.min, t.unit)) + " · avg " + fmtNum(conv(avg, t.unit)) +
+          " · max " + fmtNum(conv(b.max, t.unit)) + unitSuffix;
       } else {
         statsLine = "no 1h history";
       }
       if (t.alarmStatus === "alarm") statsLine = "⚠ alarm · " + statsLine;
-      var current = (t.value != null) ? fmtNum(t.value) + unitSuffix : "—";
+      var current = (t.value != null) ? fmtNum(conv(t.value, t.unit)) + unitSuffix : "—";
       html += ''
         + '<div class="list-item two-line" style="padding-left:16px;padding-right:16px;">'
         + '  <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-temp"/></svg></span>'

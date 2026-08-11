@@ -85,7 +85,7 @@ import { maintenanceLimiter } from "../middleware/rateLimits.js";
 import { getAppVersion } from "../../utils/version.js";
 import { isTimescaleAvailable } from "../../services/timescaleService.js";
 import { detectImageMagic } from "../../utils/imageMagic.js";
-import { BRANDING_DEFAULTS, getBranding } from "../../services/brandingService.js";
+import { BRANDING_DEFAULTS, getBranding, normalizeTemperatureUnit } from "../../services/brandingService.js";
 import type { BrandingSettings } from "../../services/brandingService.js";
 // Re-exported for the existing importers of this module (src/api/router.ts
 // mounts a public /branding alias via a dynamic import of this file).
@@ -1702,6 +1702,9 @@ router.put("/branding", requirePermission("serverSettingsSystem", "fullwrite"), 
       appName:  (req.body.appName  ?? current.appName).trim()  || BRANDING_DEFAULTS.appName,
       subtitle: (req.body.subtitle ?? current.subtitle).trim(),
       logoUrl:  current.logoUrl,
+      // Display-only temperature unit (see brandingService). Anything but "f"
+      // normalizes to Celsius, so a malformed body can't wedge the setting.
+      temperatureUnit: normalizeTemperatureUnit(req.body.temperatureUnit ?? current.temperatureUnit),
     };
     await prisma.setting.upsert({
       where:  { key: "branding" },
@@ -1714,7 +1717,7 @@ router.put("/branding", requirePermission("serverSettingsSystem", "fullwrite"), 
       resourceType: "setting",
       resourceName: "branding",
       actor: req.session?.username,
-      message: `Branding updated: appName="${updated.appName}", subtitle="${updated.subtitle}"`,
+      message: `Branding updated: appName="${updated.appName}", subtitle="${updated.subtitle}", temperatureUnit=${updated.temperatureUnit}`,
     });
     res.json({ ...updated, version: APP_VERSION });
   } catch (err) {
@@ -1737,7 +1740,12 @@ router.post("/branding/logo", maintenanceLimiter, requirePermission("serverSetti
     const logoUrl = `/uploads/${filename}`;
 
     const current = await getBranding();
-    const updated: BrandingSettings = { appName: current.appName, subtitle: current.subtitle, logoUrl };
+    // Carry every non-logo field forward — this route replaces the whole row, so
+    // omitting one silently resets it (e.g. an operator's °F preference).
+    const updated: BrandingSettings = {
+      appName: current.appName, subtitle: current.subtitle, logoUrl,
+      temperatureUnit: current.temperatureUnit,
+    };
     await prisma.setting.upsert({
       where:  { key: "branding" },
       update: { value: updated as any },
@@ -1765,7 +1773,10 @@ router.delete("/branding/logo", maintenanceLimiter, requirePermission("serverSet
       const oldPath = join(LOGO_DIR, current.logoUrl.replace("/uploads/", ""));
       if (existsSync(oldPath)) unlinkSync(oldPath);
     }
-    const updated: BrandingSettings = { appName: current.appName, subtitle: current.subtitle, logoUrl: BRANDING_DEFAULTS.logoUrl };
+    const updated: BrandingSettings = {
+      appName: current.appName, subtitle: current.subtitle, logoUrl: BRANDING_DEFAULTS.logoUrl,
+      temperatureUnit: current.temperatureUnit,
+    };
     await prisma.setting.upsert({
       where:  { key: "branding" },
       update: { value: updated as any },

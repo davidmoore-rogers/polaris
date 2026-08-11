@@ -65,6 +65,9 @@ function isAdmin() { return false; }
 async function applyDashBranding() {
   try {
     var b = await api.serverSettings.getBranding();
+    // The wallboard has no user identity, so the install-wide branding payload is
+    // also how the temperature widget learns whether to render °C or °F.
+    if (window.PolarisTempUnit) window.PolarisTempUnit.setFromBranding(b);
     var name = (b && b.appName) || "Polaris";
     document.title = name + " — Dash";
     var h = document.getElementById("dash-title");

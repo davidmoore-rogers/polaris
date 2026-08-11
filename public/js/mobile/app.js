@@ -62,6 +62,11 @@ window.PolarisTheme = {
     app.dataset.tab = "";
     app.innerHTML = '<div class="loading-screen"><div class="spinner"></div></div>';
 
+    // Branding carries the hardware-sensor display unit (°C/°F). Fire-and-forget
+    // so it never delays the first paint — the sensor list reads the cached value
+    // and a changed preference lands on the next boot at the latest.
+    if (window.PolarisAuthFlow) { void PolarisAuthFlow.fetchBranding(); }
+
     var user = null;
     var bootError = null;
     try {

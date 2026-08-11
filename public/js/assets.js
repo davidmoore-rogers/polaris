@@ -6833,9 +6833,15 @@ function _hwClassLabel(cls) {
 }
 function _hwReadingText(s) {
   if (typeof s.value !== "number" || !isFinite(s.value)) return "—";
+  // Convert for display only when the install asked for °F AND this row is a
+  // Celsius reading — the same table carries fan RPM and voltage rails, which
+  // must pass through untouched (PolarisTempUnit gates on the row's own unit).
+  var TU = window.PolarisTempUnit;
+  var raw  = TU ? TU.convertReading(s.value, s.unit) : s.value;
+  var unit = TU ? TU.displayUnit(s.unit) : s.unit;
   // Trim trailing zeros for a clean decimal; append the unit when present.
-  var v = Math.round(s.value * 1000) / 1000;
-  return s.unit ? (v + " " + s.unit) : String(v);
+  var v = Math.round(raw * 1000) / 1000;
+  return unit ? (v + " " + unit) : String(v);
 }
 // Sensors a device names by bare physical index ("sensor-18") carry the
 // interface the collector correlated them to. Render it in parentheses so the
@@ -7653,25 +7659,49 @@ async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
   try {
     var data = await api.assets.hardwareHistory(assetId, opts);
     var samples = (data.samples || []).filter(function (s) { return typeof s.value === "number"; });
-    var unit = (samples[0] && samples[0].unit) || (data.samples && data.samples[0] && data.samples[0].unit) || "";
+    var rawUnit = (samples[0] && samples[0].unit) || (data.samples && data.samples[0] && data.samples[0].unit) || "";
+    // Display-only °F: convert the series, the stats, and the automation
+    // thresholds together (they all arrive in °C) so the chart can't disagree
+    // with itself. A fan/voltage sensor's series is left exactly as stored.
+    var TU = window.PolarisTempUnit;
+    var toF = !!(TU && TU.isFahrenheit() && TU.isCelsiusUnit(rawUnit));
+    var unit = TU ? TU.displayUnit(rawUnit) : rawUnit;
+    if (toF) {
+      samples = samples.map(function (s) {
+        var c = {}; for (var k in s) if (Object.prototype.hasOwnProperty.call(s, k)) c[k] = s[k];
+        c.value = TU.convertCelsius(s.value);
+        return c;
+      });
+    }
+    var conv = function (v) { return toF ? TU.convertCelsius(v) : v; };
     var unitSuffix = unit ? " " + unit : "";
     if (stats) {
       var st = data.stats || {};
       var sensorParts = [
-        { label: "Avg", value: typeof st.avgValue === "number" ? _hwFmtNum(st.avgValue) + unitSuffix : "—" },
-        { label: "Min", value: typeof st.minValue === "number" ? _hwFmtNum(st.minValue) + unitSuffix : "—" },
-        { label: "Max", value: typeof st.maxValue === "number" ? _hwFmtNum(st.maxValue) + unitSuffix : "—" },
+        { label: "Avg", value: typeof st.avgValue === "number" ? _hwFmtNum(conv(st.avgValue)) + unitSuffix : "—" },
+        { label: "Min", value: typeof st.minValue === "number" ? _hwFmtNum(conv(st.minValue)) + unitSuffix : "—" },
+        { label: "Max", value: typeof st.maxValue === "number" ? _hwFmtNum(conv(st.maxValue)) + unitSuffix : "—" },
       ];
       var sensorTierPart = _tierStatsPart(data);
       if (sensorTierPart) sensorParts.unshift(sensorTierPart);
       _renderChartStats(stats, samples.length, sensorParts);
     }
+    // Thresholds come from the engine in °C; shift them with the series or the
+    // dashed reference lines would sit at the wrong height on an °F chart.
+    var convTiers = function (tiers) {
+      if (!toF || !tiers || !tiers.length) return tiers || [];
+      return tiers.map(function (t) {
+        var c = {}; for (var k in t) if (Object.prototype.hasOwnProperty.call(t, k)) c[k] = t[k];
+        c.threshold = TU.convertCelsius(t.threshold);
+        return c;
+      });
+    };
     var chartOpts = {
       since:   data.since,
       until:   data.until,
       subject: sensorName,
       unit:    unit,
-      tiers:   _sensorSevTiers.key === assetId + "|" + sensorName ? _sensorSevTiers.tiers : [],
+      tiers:   convTiers(_sensorSevTiers.key === assetId + "|" + sensorName ? _sensorSevTiers.tiers : []),
     };
     _renderSensorChart(chartEl, samples, chartOpts);
     // Severity tiers for THIS sensor (class included, so a temperature
@@ -7688,7 +7718,7 @@ async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
           if (_sensorSevTiers.key !== sevKey || !tiers.length) return; // panel moved on / nothing watches it
           _sensorSevTiers = { key: sevKey, tiers: tiers };
           if (!document.getElementById("sensor-chart")) return;
-          chartOpts.tiers = tiers;
+          chartOpts.tiers = convTiers(tiers);
           _renderSensorChart(chartEl, samples, chartOpts);
         });
     }
@@ -7736,7 +7766,10 @@ function _hwFmtNum(v) {
 function _renderSensorChart(container, samples, opts) {
   opts = opts || {};
   var unit = opts.unit || "";
-  var unitTickSuffix = unit ? (unit === "°C" ? "°C" : " " + unit) : "";
+  // Degree units hug the number ("41°C"); RPM / V get a space. Checking the
+  // degree sign rather than "°C" exactly keeps °F (display-unit preference)
+  // formatted the same way.
+  var unitTickSuffix = unit ? (unit.charAt(0) === "°" ? unit : " " + unit) : "";
   if (samples.length === 0) {
     container.textContent = "No samples in this range yet.";
     return;

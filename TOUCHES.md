@@ -2774,9 +2774,9 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ## services/brandingService.ts
 
-**What it owns:** The `branding` Setting row — `appName` / `subtitle` / `logoUrl` — plus `BRANDING_DEFAULTS`. Read-side only; the writers stay in the serverSettings routes.
+**What it owns:** The `branding` Setting row — `appName` / `subtitle` / `logoUrl` / `temperatureUnit` — plus `BRANDING_DEFAULTS` and `normalizeTemperatureUnit`. Read-side only; the writers stay in the serverSettings routes.
 
-**Public API:** `getBranding`, `BRANDING_DEFAULTS`, the `BrandingSettings` type
+**Public API:** `getBranding`, `BRANDING_DEFAULTS`, `normalizeTemperatureUnit`, the `BrandingSettings` + `TemperatureUnit` types
 
 **Cross-service deps:** `prisma` (the `Setting` table), `utils/version.getAppVersion` (the `version` field on the response).
 
@@ -2785,7 +2785,8 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 **Invariants:**
 - Extracted from `routes/serverSettings.ts` precisely so services can read branding without importing a route module — do not reintroduce the reverse dependency.
 - `getBranding` never throws on a missing row; it returns defaults.
-- Writers (logo upload/delete, name/subtitle PUT) still live in the route and must keep writing the same three-key shape.
+- Writers (logo upload/delete, name/subtitle PUT) still live in the route and each **replaces the whole row**, so a writer that omits a field silently resets it — the logo upload/delete routes carry `temperatureUnit` forward for exactly that reason (the typechecker caught it when the field was added; keep every `BrandingSettings` field non-optional so it keeps catching it).
+- **`temperatureUnit` is DISPLAY-ONLY and rides this row deliberately.** Hardware-sensor samples are always stored, rolled up, and alerted on in Celsius (`SENSOR_CLASS_UNITS`); the frontends convert at render through `public/js/temp-unit.js` (`window.PolarisTempUnit`, unit-tested in `tests/unit/tempUnit.test.ts`). Branding is the only presentation channel every surface already has: the `/branding` alias is unauthenticated, `applyBranding` in app.js mirrors the payload into `localStorage["polaris-branding"]` (which is what lets the converter be SYNCHRONOUS for the sync string-building renderers), `PolarisAuthFlow.fetchBranding` primes the same cache for the mobile SPA, and the Dash wallboard — no user identity, so a per-user preference could never reach it — serves the same route. Readers that must convert TOGETHER or a chart contradicts itself: `_hwReadingText` (the Hardware Sensors table), `_loadSensorHistoryFor` (series + stats + the °C automation thresholds behind the severity shading), the mobile asset sheet's sensor list, and `widgets/temperature.js` (rows AND its 80/65 °C color breakpoints). Conversion is gated on each reading's OWN stored unit, never its class, so fan RPM and voltage rails pass through untouched. Never plumb it into the automation builder or any threshold input — those stay °C.
 
 **When changing this:**
 - Adding a branding field means updating the route's PUT schema too — and consider whether it belongs in the PWA manifest (`buildManifest` in `routes/pwa.ts`).

@@ -1,9 +1,14 @@
 /**
  * widgets/temperature.js — hottest hardware temperature sensors, PER SENSOR
- * (one row per (asset, sensor name), latest reading, always °C). Thin wrapper
- * over the shared _topnBar renderer; data from /dashboard/noc-summary
+ * (one row per (asset, sensor name), latest reading, always stored in °C). Thin
+ * wrapper over the shared _topnBar renderer; data from /dashboard/noc-summary
  * temperature[]. Like Highest CPU/Memory/Disk the Row limit governs the top-N
  * shown and every red row (≥80 °C) always shows even past the limit.
+ *
+ * The install can render Fahrenheit (`branding.temperatureUnit`, display-only).
+ * Rows AND the color breakpoints convert together — shifting the values while
+ * leaving the thresholds in °C would paint every sensor red — and the ranking
+ * is unaffected, the conversion being monotonic.
  */
 
 (function () {
@@ -11,8 +16,21 @@
   var EMPTY = "No temperature telemetry";
 
   function render(el, config, rows) {
-    PolarisTopN.renderRows(el, rows || [], {
-      unit: "°C", thresholds: THRESHOLDS, baseColor: "#4fc3f7", emptyText: EMPTY, config: config || {}, fillTo: 20,
+    var TU = window.PolarisTempUnit;
+    var toF = !!(TU && TU.isFahrenheit());
+    var shown = rows || [];
+    var thresholds = THRESHOLDS;
+    if (toF) {
+      shown = shown.map(function (r) {
+        var c = {}; for (var k in r) if (Object.prototype.hasOwnProperty.call(r, k)) c[k] = r[k];
+        c.value = TU.convertCelsius(r.value);
+        return c;
+      });
+      thresholds = THRESHOLDS.map(function (t) { return { over: TU.convertCelsius(t.over), color: t.color }; });
+    }
+    PolarisTopN.renderRows(el, shown, {
+      unit: TU ? TU.celsiusLabel() : "°C",
+      thresholds: thresholds, baseColor: "#4fc3f7", emptyText: EMPTY, config: config || {}, fillTo: 20,
       // Header pills: how many sensors are alerting at each severity right now.
       headerSeverityCounts: true,
     });

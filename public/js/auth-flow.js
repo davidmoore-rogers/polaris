@@ -43,11 +43,19 @@
       return { ok: true };
     },
 
-    /** GET /server-settings/branding → branding object, or null (best-effort). */
+    /** GET /server-settings/branding → branding object, or null (best-effort).
+     *  Mirrors the payload into the same localStorage key applyBranding uses and
+     *  hands the hardware-sensor display unit to the converter — the mobile SPA
+     *  and the login screen have no applyBranding, so without this a phone that
+     *  never opens the desktop UI would render Celsius whatever the install set. */
     fetchBranding: async function () {
       try {
         var res = await fetch("/api/v1/server-settings/branding");
-        return res.ok ? await res.json() : null;
+        if (!res.ok) return null;
+        var b = await res.json();
+        try { localStorage.setItem("polaris-branding", JSON.stringify(b)); } catch (_) {}
+        if (window.PolarisTempUnit) window.PolarisTempUnit.setFromBranding(b);
+        return b;
       } catch (_) {
         return null;
       }

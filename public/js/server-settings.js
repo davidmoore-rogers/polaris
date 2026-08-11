@@ -3525,6 +3525,9 @@ async function loadCustomizationTab() {
 function renderCustomizationTab() {
   var container = document.getElementById("tab-customization");
   var isCustomLogo = _brandingData.logoUrl && _brandingData.logoUrl !== "/logo.png";
+  // Pre-feature payloads carry no temperatureUnit — treat anything but "f" as °C,
+  // matching normalizeTemperatureUnit server-side.
+  var tempUnit = _brandingData.temperatureUnit === "f" ? "f" : "c";
 
   container.innerHTML =
     '<div class="settings-cards-row">' +
@@ -3568,10 +3571,29 @@ function renderCustomizationTab() {
         '</div>' +
       '</div>' +
     '</div>' +
+    '<div class="settings-card">' +
+      '<h4>Display Units</h4>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+        'Hardware-sensor temperatures are always collected, stored, and alerted on in Celsius. ' +
+        'This changes only how they are <strong>displayed</strong> — the asset Hardware Sensors table and ' +
+        'sensor charts, the mobile app, the Highest Temperature widget, and the Dash wallboard. ' +
+        'Automation thresholds are unaffected and stay in °C.' +
+      '</p>' +
+      '<div class="form-group"><label>Temperature</label>' +
+        '<select id="f-brand-tempunit">' +
+          '<option value="c"' + (tempUnit === "c" ? ' selected' : '') + '>Celsius (°C)</option>' +
+          '<option value="f"' + (tempUnit === "f" ? ' selected' : '') + '>Fahrenheit (°F)</option>' +
+        '</select>' +
+        '<p class="hint">Applies to every operator and to the unauthenticated wallboard.</p>' +
+      '</div>' +
+      '<button class="btn btn-primary" id="btn-tempunit-save">Save</button>' +
+    '</div>' +
     '</div>';
 
-  // Wire save button
+  // Wire save buttons — both cards PUT the whole branding payload, so either
+  // one persists whatever the operator changed on this tab.
   document.getElementById("btn-brand-save").addEventListener("click", saveBranding);
+  document.getElementById("btn-tempunit-save").addEventListener("click", saveBranding);
 
   // Wire logo upload
   wireUploadArea("logo-upload-area", "logo-file-input", uploadLogo);
@@ -3585,11 +3607,15 @@ function renderCustomizationTab() {
 
 async function saveBranding() {
   var btn = document.getElementById("btn-brand-save");
+  var unitBtn = document.getElementById("btn-tempunit-save");
   btn.disabled = true;
+  if (unitBtn) unitBtn.disabled = true;
   try {
+    var unitEl = document.getElementById("f-brand-tempunit");
     var data = {
       appName: document.getElementById("f-brand-appname").value.trim(),
       subtitle: document.getElementById("f-brand-subtitle").value.trim(),
+      temperatureUnit: unitEl ? unitEl.value : undefined,
     };
     _brandingData = await api.serverSettings.updateBranding(data);
     applyBranding(_brandingData);
@@ -3598,6 +3624,7 @@ async function saveBranding() {
     showToast(err.message, "error");
   } finally {
     btn.disabled = false;
+    if (unitBtn) unitBtn.disabled = false;
   }
 }
 
