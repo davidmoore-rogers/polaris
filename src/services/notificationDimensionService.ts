@@ -31,6 +31,7 @@ import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { METRIC_DIMENSIONS, type RuleScope } from "./notificationTypes.js";
 import { loadScopeAssetIds } from "./notificationEngine.js";
+import { listStateProbes } from "./manufacturerProfileService.js";
 
 /** Lookback for "currently reported". Long enough to catch any realistic
  *  telemetry cadence (minutes; an hourly cadence still lands ≥3 samples),
@@ -52,6 +53,13 @@ const MAX_VALUES = 300;
 export interface DimensionValueOption {
   value: string;
   assetCount: number;
+  /**
+   * Operator-facing name when the stored value isn't one — a state probe's
+   * dimension value is its registry UUID, which no operator recognizes, so the
+   * picker shows this and stores `value`. Absent on every device-reported
+   * dimension, where the value IS the name.
+   */
+  label?: string;
 }
 
 export interface DimensionValuesResult {
@@ -89,6 +97,7 @@ type ValuePair = { value: string | null; assetId: string };
 export interface DimensionNarrow {
   sensorClass?: string;
   healthCheck?: string;
+  stateProbeId?: string;
 }
 
 interface DimensionSource {
@@ -100,6 +109,10 @@ interface DimensionSource {
   /** Human tail describing the narrowing that was applied ("of class temperature"),
    *  so the empty-state message says WHICH slice came back empty. */
   narrowLabel?: (narrow: DimensionNarrow) => string;
+  /** Builds a value→display-name lookup, for dimensions whose stored value is an
+   *  opaque id. Called once per request (not per value) so the implementation can
+   *  index a registry up front. */
+  labelOf?: () => (value: string) => string | undefined;
 }
 
 /**
@@ -112,8 +125,10 @@ interface DimensionSource {
  * Keep the two in lockstep: making a dimension an enum server-side without
  * flipping this leaves the UI offering a box that now rejects free text.
  *
- * `widgetId` is deliberately absent: its values are opaque registry UUIDs, not
- * something an operator recognizes in a list, and it stays a plain input.
+ * `widgetId` (customWidgetValue's numeric-widget dimension) is deliberately
+ * absent: it stays a plain input. `stateProbeId` IS here despite also being an
+ * opaque UUID, because it carries a `labelOf` that resolves the probe's name out
+ * of the registry — the picker shows the name and stores the id.
  */
 const DIMENSION_SOURCES: Record<string, DimensionSource> = {
   sensorClass: {
@@ -192,6 +207,44 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
         where: { assetId: { in: ids }, timestamp: { gte: since } },
       })).map((r) => ({ value: r.tunnelName, assetId: r.assetId })),
   },
+  // Which state probe (Manufacturer Profile → state widget). Strict: the stored
+  // value is a registry id matched exactly by the engine, not a pattern, so free
+  // text here could only ever be a typo that matches nothing. Values are UUIDs,
+  // so `labelOf` supplies the probe name for display — see listStateProbes.
+  stateProbeId: {
+    noun: "state probes",
+    strict: true,
+    labelOf: () => {
+      const byId = new Map(listStateProbes().map((p) => [p.id, `${p.name} (${p.manufacturer})`]));
+      return (value: string) => byId.get(value);
+    },
+    pairs: async (ids, since) =>
+      (await prisma.assetStateSample.groupBy({
+        by: ["probeId", "assetId"],
+        where: { assetId: { in: ids }, timestamp: { gte: since } },
+      })).map((r) => ({ value: r.probeId, assetId: r.assetId })),
+  },
+  // Individual rows of a state probe ("PSU 2", "CPU ON-DIE Temperature"),
+  // narrowed to the probe the row already filters on — offering every probe's
+  // rows would let an operator build probe+row combinations that match nothing.
+  stateRowPattern: {
+    noun: "state probe rows",
+    strict: false,
+    narrowLabel: (n) => {
+      if (!n.stateProbeId) return "";
+      const probe = listStateProbes().find((p) => p.id === n.stateProbeId);
+      return probe ? ` for probe ${probe.name}` : "";
+    },
+    pairs: async (ids, since, narrow) =>
+      (await prisma.assetStateSample.groupBy({
+        by: ["rowLabel", "assetId"],
+        where: {
+          assetId: { in: ids },
+          timestamp: { gte: since },
+          ...(narrow.stateProbeId ? { probeId: narrow.stateProbeId } : {}),
+        },
+      })).map((r) => ({ value: r.rowLabel, assetId: r.assetId })),
+  },
 };
 
 /** Dimensions this service can populate — the wizard reads it off /schema so it
@@ -205,8 +258,13 @@ export function dimensionPickerMeta(): Record<string, { strict: boolean; noun: s
 }
 
 /** Fold (value, assetId) pairs into per-value device counts, most-reported
- *  first then alphabetical. Pure — unit-tested. */
-export function foldValuePairs(pairs: ValuePair[]): { values: DimensionValueOption[]; assetsWithData: number } {
+ *  first then alphabetical. `labelOf` names values that aren't self-describing
+ *  (a state probe's UUID); sorting still keys on the stored value so the order
+ *  is stable whether or not labels resolve. Pure — unit-tested. */
+export function foldValuePairs(
+  pairs: ValuePair[],
+  labelOf?: (value: string) => string | undefined,
+): { values: DimensionValueOption[]; assetsWithData: number } {
   const byValue = new Map<string, Set<string>>();
   const assets = new Set<string>();
   for (const p of pairs) {
@@ -216,7 +274,10 @@ export function foldValuePairs(pairs: ValuePair[]): { values: DimensionValueOpti
     if (!set) { set = new Set(); byValue.set(p.value, set); }
     set.add(p.assetId);
   }
-  const values = Array.from(byValue, ([value, set]) => ({ value, assetCount: set.size }))
+  const values = Array.from(byValue, ([value, set]) => {
+    const label = labelOf?.(value);
+    return label ? { value, assetCount: set.size, label } : { value, assetCount: set.size };
+  })
     .sort((a, b) => b.assetCount - a.assetCount || a.value.localeCompare(b.value))
     .slice(0, MAX_VALUES);
   return { values, assetsWithData: assets.size };
@@ -259,8 +320,11 @@ export async function listDimensionValues(
     return { ...base, values: [], sampledAssets: 0, assetsWithData: 0, windowHours: RECENT_WINDOW_HOURS };
   }
 
+  // Built once per request, not per value.
+  const labelOf = source.labelOf?.();
+
   const ids = sorted.slice(0, ASSET_SAMPLE_CAP);
-  const recent = foldValuePairs(await source.pairs(ids, hoursAgo(RECENT_WINDOW_HOURS), narrow));
+  const recent = foldValuePairs(await source.pairs(ids, hoursAgo(RECENT_WINDOW_HOURS), narrow), labelOf);
   if (recent.values.length > 0) {
     return { ...base, ...recent, sampledAssets: ids.length, windowHours: RECENT_WINDOW_HOURS };
   }
@@ -269,7 +333,7 @@ export async function listDimensionValues(
   // devices have none, so a slow cadence or a paused poller doesn't read as
   // "unsupported hardware".
   const fallbackIds = ids.slice(0, FALLBACK_ASSET_CAP);
-  const older = foldValuePairs(await source.pairs(fallbackIds, hoursAgo(FALLBACK_WINDOW_HOURS), narrow));
+  const older = foldValuePairs(await source.pairs(fallbackIds, hoursAgo(FALLBACK_WINDOW_HOURS), narrow), labelOf);
   return {
     ...base,
     ...older,

@@ -41,6 +41,7 @@ Per-pattern sections:
 - [Prometheus metric instrumentation](#prometheus-metric-instrumentation)
 - [High-volume append-only time-series writes (batch-flush buffer)](#high-volume-append-only-time-series-writes-batch-flush-buffer)
 - [Tiered time-series rollups (hourly + daily aggregates over detail samples)](#tiered-time-series-rollups-hourly--daily-aggregates-over-detail-samples)
+- [Operator-declared value mapping → normalized sample → alertable dimension](#operator-declared-value-mapping--normalized-sample--alertable-dimension)
 - [Per-integration verbose debug logging](#per-integration-verbose-debug-logging)
 - [Permission-gated route + dynamic-role function key](#permission-gated-route--dynamic-role-function-key)
 - [Operator-customizable widget surface](#operator-customizable-widget-surface)
@@ -642,6 +643,34 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - Update `DEFAULT_DETAIL_DAYS` / `DEFAULT_HOURLY_DAYS` / `DEFAULT_DAILY_DAYS` in `sampleRetentionService.ts`.
 - The migration job `consolidateSampleRetention.ts` reads these constants for fresh-install seeding; no separate update.
 - Existing installs are unaffected — their stored `Setting("sampleRetention")` keeps whatever the operator set.
+
+---
+
+## Operator-declared value mapping → normalized sample → alertable dimension
+
+**What it is:** A device publishes something whose NUMBER is meaningless without vendor knowledge — a status enum, an alarm bit, a present/absent flag. Rather than teaching Polaris every vendor's convention (or making the operator encode it as a threshold and hope), the operator DECLARES the mapping once at config time, the collector applies it and stores the already-normalized result, and everything downstream compares normalized values only. Use this whenever "what does 2 mean here?" is a per-vendor question.
+
+**Canonical implementation:** **state probes** — a `ManufacturerCustomWidget` with `widgetType="state"`.
+- Pure mapping + evaluation: `src/utils/stateProbes.ts` (`StateMap`, `evaluateStateMap`, `joinStateRows`, `normalizeStateMap`, `validateStateMap`, `describeStateMap`) — dependency-free, fully unit-tested in `tests/unit/stateProbes.test.ts`.
+- Declaration: `ManufacturerCustomWidget.stateMap` + `labelSymbol` (nullable), validated on write by `stateFieldsForWrite` in `manufacturerProfileService.ts`, authored on Server Settings → Identification (`_widgetStateOptionsForm` in `public/js/server-settings.js`).
+- Collection: the state branch of `collectAndRecordCustomWidgets` (`monitoringService.ts`) → `AssetStateSample` (0/1 rows).
+- Consumption: the `customStateValue` asset_metric (`notificationTypes` + `notificationEngine`), the builder's probe/row pickers (`notificationDimensionService`), and the Custom MIB tab's per-row pills (`_renderCustomWidgetState` in `public/js/assets.js`).
+
+**Key conventions:**
+- **Declare the mapping, don't infer it.** The mode set exists because real MIBs disagree: `nonzero` (plain alarm bit) / `zero` (inverted health register) / `equals` / `notEquals` (SNMPv2 TruthValue, where `true(1)` is the GOOD state) / `gte` / `lte`. Comparisons are numeric when both sides parse as numbers and case-insensitive strings otherwise, so ONE declaration covers an agent answering `2` and one answering `"alarm"`.
+- **"Unreadable" is a third outcome, and it must not collapse into the healthy one.** `evaluateStateMap` returns `0 | 1 | null`; the collector DROPS nulls rather than storing 0. Storing 0 would be a positive claim of health that clears a live alert — and on a probe whose interesting state is the false one, would fire a brand-new alert about hardware that isn't present. The row simply stops being reported and the engine's vanished-dimension sweep owns it. (Mirror rule downstream: `Number.isFinite`, never `|| null`, in the engine's `valueFn`.)
+- **Store normalized, keep the raw for forensics.** `AssetStateSample.value` is the boolean the engine compares; `rawValue` carries what the device actually said, surfaced only as a tooltip. When a mapping looks wrong the raw value is the thing you need, but it is not what an operator reads day to day.
+- **A per-row stream needs a stable key AND a human label, and they are different columns.** `rowKey` (the OID index) is what the engine keys firing state on; `rowLabel` (resolved from a sibling `labelSymbol` walk joined on that same index) is what the operator filters and reads. Splitting them is what lets a row be renamed without clearing one alert and opening another — and a table whose rows are only identifiable by an index that shifts per model is barely alertable at all.
+- **Normalize on READ too.** `shapeWidget` passes the stored map through `normalizeStateMap` (which never throws) rather than trusting it, so a row written before a mode existed — or hand-edited in SQL — degrades to a usable mapping instead of throwing once per scrape on the telemetry hot path. Validation strictness belongs on the authoring path (`validateStateMap` → 400).
+- **Cap the fan-out loudly.** A table probe pointed at too broad a subtree costs a DB row per scrape AND an engine firing-state row per element; `MAX_STATE_ROWS_PER_PROBE` truncates at 500 with a warn-level log naming the probe, because a probe silently dropping rows looks exactly like a healthy one.
+- **A boolean metric rides the existing threshold machine, but must not inherit its numeric UI.** `customStateValue` lives in `ASSET_METRICS` and saves as a plain `== 1` comparison — the engine's debounce / sustain / reset / per-dimension state all work unchanged, and a third trigger type would have meant a second copy of them. `BOOLEAN_METRICS` / `isBooleanMetric` is then the single test every numeric-only surface checks: severity bands (server-rejected + hidden), hysteresis, unit hints, chart threshold shading.
+- **Render the operator's words, never the digit.** The two labels travel with the probe (`/automations/schema.stateProbes`) so the value control, the trigger sentence, the preview table, and the asset tab all say "Alarm" / "OK". Every one of them falls back to generic "true/false" when the probe can't be resolved (deleted profile, stale schema) rather than printing a UUID or throwing.
+
+**When adding another declared-mapping stream:**
+- Put the decision table in a dependency-free util with the tri-state return, and unit-test the null cases FIRST — they are the ones that cause silent wrong alerting rather than a visible crash.
+- Decide early whether the alerting dimension is the device or a sub-row. If it's a sub-row, give it real columns in its own table (indexed `(assetId, <probeId>, timestamp)`) rather than a JSON array on an existing sample table: the engine reads it every 60s and the builder needs a `GROUP BY` for its picker.
+- A boolean stream gets NO rollup companions — an average over 0/1 is a duty cycle, not a state. Register it in `STANDALONE_SAMPLE_TABLES` and prune it on an umbrella window (see "Tiered time-series rollups" for the tiered alternative).
+- Mirror any mode-set change into the client's label/needs-values tables (`STATE_MODE_LABELS`, `STATE_MODES_WITH_VALUES`, `_stateMapSummary` in `public/js/server-settings.js`).
 
 ---
 

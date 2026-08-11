@@ -7166,6 +7166,10 @@ function _customMibTabHTML(payload) {
 }
 
 function _renderCustomWidgetBody(w) {
+  // State probes carry their readings in `stateRows`, not `latest` (their 0/1
+  // samples live in their own table) — checked before the no-sample guard so a
+  // probe with rows renders even though `latest` is always null for one.
+  if (w.widgetType === "state") return _renderCustomWidgetState(w);
   if (!w.latest) {
     return '<p class="empty-state" style="padding:0.5rem 0;margin:0">No sample yet.</p>';
   }
@@ -7173,6 +7177,41 @@ function _renderCustomWidgetBody(w) {
   if (w.widgetType === "line")  return _renderCustomWidgetLine(w);
   if (w.widgetType === "table") return _renderCustomWidgetTable(w);
   return '<p class="empty-state" style="padding:0.5rem 0;margin:0">Unknown widgetType: ' + escapeHtml(w.widgetType) + '</p>';
+}
+
+/**
+ * A state probe: one pill per row, using the probe's OWN labels and colouring
+ * the side the operator called the problem. The raw device value rides a
+ * tooltip — when a mapping looks wrong, the raw value is the thing you need,
+ * but it isn't what an operator reads day to day.
+ */
+function _renderCustomWidgetState(w) {
+  var rows = w.stateRows || [];
+  if (!rows.length) {
+    return '<p class="empty-state" style="padding:0.5rem 0;margin:0">No state reported yet.</p>';
+  }
+  var map = w.stateMap || {};
+  var trueLabel = map.trueLabel || "true";
+  var falseLabel = map.falseLabel || "false";
+  var trueIsProblem = map.trueIsProblem !== false;
+  var probleml = rows.filter(function (r) { return (r.value === 1) === trueIsProblem; }).length;
+  var head = '<div style="font-size:0.78rem;color:' + (probleml ? "var(--color-danger)" : "var(--color-text-tertiary)") + ';margin-bottom:6px">' +
+    (probleml
+      ? escapeHtml(String(probleml)) + ' of ' + rows.length + ' ' + escapeHtml(rows.length === 1 ? "row" : "rows") + ' in ' + escapeHtml(trueIsProblem ? trueLabel : falseLabel)
+      : 'All ' + rows.length + ' ' + escapeHtml(rows.length === 1 ? "row" : "rows") + ' ' + escapeHtml(trueIsProblem ? falseLabel : trueLabel)) +
+    '</div>';
+  var body = rows.map(function (r) {
+    var isProblem = (r.value === 1) === trueIsProblem;
+    var label = r.value === 1 ? trueLabel : falseLabel;
+    var color = isProblem ? "var(--color-danger)" : "var(--color-success,#3ba55d)";
+    var title = r.rawValue != null && r.rawValue !== "" ? "Device reported: " + r.rawValue : "";
+    return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0;border-top:1px solid var(--color-border)"' +
+        (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' +
+      '<span style="font-size:0.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(r.rowLabel) + '</span>' +
+      '<span style="font-size:0.76rem;font-weight:600;color:' + color + ';white-space:nowrap">' + escapeHtml(label) + '</span>' +
+    '</div>';
+  }).join("");
+  return head + body;
 }
 
 function _renderCustomWidgetGauge(w) {

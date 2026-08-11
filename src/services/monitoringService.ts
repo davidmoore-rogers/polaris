@@ -115,6 +115,7 @@ import {
   resolveSensorIfName,
   syntheticSensorIndex,
 } from "../utils/hardwareSensors.js";
+import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
   type PollingMethod,
@@ -8843,6 +8844,9 @@ export async function runTelemetryFor(assetId: string, labels: WorkItemLabels): 
 // customWidgetCredential / customWidgetTimeoutMs settings; when polling
 // resolves to "disabled" the pass is silently skipped so the
 // Asset.lastCustomWidgetAt stays stale (the tab surfaces a banner).
+/** Per-probe row cap — see the truncation warning in the state branch below. */
+const MAX_STATE_ROWS_PER_PROBE = 500;
+
 async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
@@ -8909,12 +8913,71 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
   const timeoutMs = asset.customWidgetTimeoutMs ?? effective.cpuMemoryTimeoutMs;
 
   const samples: Array<{ widgetId: string; kind: "scalar" | "table"; value: any }> = [];
+  // State probes (widgetType "state") normalize to 0/1 and land in their own
+  // table — see the branch below.
+  const stateRows: Array<{
+    probeId: string; rowKey: string; rowLabel: string; value: number; rawValue: string | null;
+  }> = [];
   try {
     await withSnmpSession(host, snmpCfg, async (session) => {
       for (const w of widgets) {
         try {
           const oid = resolveOidSync(w.symbol, scope);
           if (!oid) continue;
+          if (w.widgetType === "state" && w.stateMap) {
+            // ── State probe ───────────────────────────────────────────────
+            // Same walk as a numeric widget; the difference is that each
+            // reading is mapped through the probe's DECLARED true/false rule
+            // (utils/stateProbes) at scrape time rather than being compared to
+            // a threshold later. Storing the boolean means the engine never has
+            // to know a vendor's polarity — and an operator editing the mapping
+            // fixes every future reading in one place.
+            const values = await snmpWalk(session, oid);
+            // Row names come from a sibling column of the same table, joined on
+            // the shared OID index. Without it the rows are only nameable by
+            // bare index, which differs per model.
+            let labels: Map<string, unknown> | null = null;
+            if (w.type === "table" && w.labelSymbol) {
+              const labelOid = resolveOidSync(w.labelSymbol, scope);
+              if (labelOid) {
+                try {
+                  const walked = await snmpWalk(session, labelOid);
+                  labels = new Map<string, unknown>();
+                  for (const [suffix, v] of walked.entries()) labels.set(suffix, snmpVbToString(v));
+                } catch (err) {
+                  // A missing name column must not cost us the alarm state.
+                  logger.debug({ err, assetId, widgetId: w.id, symbol: w.labelSymbol }, "State probe label walk failed");
+                  labels = null;
+                }
+              }
+            }
+            const rows = joinStateRows(values, labels, w.stateMap);
+            // A scalar probe is one device-wide flag: take the first readable
+            // row and drop the index, so its dimension key stays "" and the
+            // alert reads as being about the device.
+            let kept = w.type === "scalar" ? rows.slice(0, 1) : rows;
+            // Backstop against an operator pointing a probe at a huge subtree
+            // (every row becomes a per-scrape DB row AND a firing-state row in
+            // the engine). Loudly truncated rather than silently — a probe
+            // that's quietly dropping rows would look like a healthy one.
+            if (kept.length > MAX_STATE_ROWS_PER_PROBE) {
+              logger.warn(
+                { assetId, widgetId: w.id, symbol: w.symbol, rows: kept.length, cap: MAX_STATE_ROWS_PER_PROBE },
+                "State probe returned more rows than the cap — truncating; narrow the probe's symbol to a single column",
+              );
+              kept = kept.slice(0, MAX_STATE_ROWS_PER_PROBE);
+            }
+            for (const r of kept) {
+              stateRows.push({
+                probeId:  w.id,
+                rowKey:   w.type === "scalar" ? "" : r.rowKey,
+                rowLabel: w.type === "scalar" ? w.name : r.rowLabel,
+                value:    r.value,
+                rawValue: r.raw || null,
+              });
+            }
+            continue;
+          }
           if (w.type === "scalar") {
             // Scalar: walk one OID, take first/only value as a number.
             const rows = await snmpWalk(session, oid);
@@ -8954,17 +9017,31 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
     return;
   }
 
-  if (samples.length === 0) return;
+  if (samples.length === 0 && stateRows.length === 0) return;
   try {
     await prisma.$transaction([
-      prisma.assetCustomWidgetSample.createMany({
-        data: samples.map((s) => ({
-          assetId,
-          widgetId: s.widgetId,
-          kind:     s.kind,
-          value:    s.value as any,
-        })),
-      }),
+      ...(samples.length
+        ? [prisma.assetCustomWidgetSample.createMany({
+            data: samples.map((s) => ({
+              assetId,
+              widgetId: s.widgetId,
+              kind:     s.kind,
+              value:    s.value as any,
+            })),
+          })]
+        : []),
+      ...(stateRows.length
+        ? [prisma.assetStateSample.createMany({
+            data: stateRows.map((s) => ({
+              assetId,
+              probeId:  s.probeId,
+              rowKey:   s.rowKey,
+              rowLabel: s.rowLabel,
+              value:    s.value,
+              rawValue: s.rawValue,
+            })),
+          })]
+        : []),
       prisma.asset.update({
         where: { id: assetId },
         data:  { lastCustomWidgetAt: new Date() },
@@ -9978,7 +10055,7 @@ export async function pruneSystemInfoSamples(): Promise<number> {
   const r = await getSampleRetention();
   const [
     iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily,
-    psDetail, psHourly, psDaily, lldp, customWidget, processLog, processConn,
+    psDetail, psHourly, psDaily, lldp, customWidget, stateProbe, processLog, processConn,
   ] = await Promise.all([
     // interfaces — detail is selection-aware (selected=configured, unselected=24h)
     pruneSelectionAwareDetail((w) => prisma.assetInterfaceSample.deleteMany({ where: w as any }), r.interfaces.detail, "asset_interface_samples"),
@@ -10007,6 +10084,9 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     // tiers). Prune on the same interfaces detail umbrella window as LLDP via
     // the compression-safe drop_chunks + residue path.
     pruneTierByDays((w) => prisma.assetCustomWidgetSample.deleteMany({ where: w as any }), r.interfaces.detail, "timestamp", "asset_custom_widget_samples"),
+    // State-probe samples ride the same standalone-hypertable path and the same
+    // system-info umbrella window — they're collected by the same pass.
+    pruneTierByDays((w) => prisma.assetStateSample.deleteMany({ where: w as any }), r.interfaces.detail, "timestamp", "asset_state_samples"),
     // Process logs are a standalone detail-only hypertable (no rollups) — prune
     // on the process entity's detail window via the same compression-safe path.
     pruneTierByDays((w) => prisma.assetProcessLogSample.deleteMany({ where: w as any }), r.process.detail, "timestamp", "asset_process_log_samples"),
@@ -10018,7 +10098,7 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     pruneProcessConnections(),
   ]);
   return iDetail + iHourly + iDaily + sDetail + sHourly + sDaily + ipDetail + ipHourly + ipDaily
-    + psDetail + psHourly + psDaily + lldp + customWidget + processLog + processConn;
+    + psDetail + psHourly + psDaily + lldp + customWidget + stateProbe + processLog + processConn;
 }
 
 async function pruneLldpNeighbors(days: number): Promise<number> {

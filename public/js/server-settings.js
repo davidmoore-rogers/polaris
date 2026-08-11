@@ -7094,8 +7094,25 @@ function renderProfileDetail(detail) {
 // fields per row here would force wrapping that breaks scan-ability.
 // Each card has a compact view mode and an inline-expanded edit mode.
 
-var WIDGET_TYPE_LABELS = { gauge: "Gauge", line: "Line chart", table: "Table" };
-var WIDGET_TYPE_ORDER  = ["gauge", "line", "table"];
+var WIDGET_TYPE_LABELS = { gauge: "Gauge", line: "Line chart", table: "Table", state: "State (0/1)" };
+var WIDGET_TYPE_ORDER  = ["gauge", "line", "table", "state"];
+
+// ─── State probes (widgetType "state") ──────────────────────────────────
+// A status-shaped OID rather than a gauge: an alarm bit, a PSU present flag, a
+// fan-tray OK register. The operator declares how a reading becomes true so
+// Polaris never has to guess a vendor's polarity (SNMPv2 TruthValue is
+// true(1)/false(2), plenty of enums use 2 for the bad state, some agents answer
+// strings). Mirrors STATE_MAP_MODES in src/utils/stateProbes.ts — keep in step.
+var STATE_MODE_LABELS = {
+  nonzero:   "value is not 0  (plain alarm bit)",
+  zero:      "value is 0  (inverted / health register)",
+  equals:    "value is one of…",
+  notEquals: "value is anything EXCEPT…",
+  gte:       "value is ≥ …",
+  lte:       "value is ≤ …",
+};
+var STATE_MODE_ORDER = ["nonzero", "zero", "equals", "notEquals", "gte", "lte"];
+var STATE_MODES_WITH_VALUES = ["equals", "notEquals", "gte", "lte"];
 
 function renderWidgetSection(detail) {
   var widgets = (detail.widgets || []).slice().sort(function (a, b) {
@@ -7150,9 +7167,29 @@ function renderWidgetCard(profileId, w, manufacturer) {
       '<span><b>Symbol:</b> <code style="font-size:0.78rem">' + escapeHtml(w.symbol) + '</code> <span style="color:var(--color-text-tertiary)">(' + escapeHtml(w.type) + ')</span></span>' +
       '<span><b>Model:</b> ' + modelLabel + '</span>' +
       '<span><b>Transform:</b> ' + transformLabel_ + '</span>' +
-      (optsLabel ? '<span style="grid-column:1/-1"><b>Display:</b> ' + optsLabel + '</span>' : '') +
+      (w.widgetType === "state"
+        ? '<span style="grid-column:1/-1"><b>State:</b> ' + escapeHtml(_stateMapSummary(w.stateMap)) +
+          (w.labelSymbol ? ' · rows named by <code style="font-size:0.78rem">' + escapeHtml(w.labelSymbol) + '</code>' : '') + '</span>'
+        : (optsLabel ? '<span style="grid-column:1/-1"><b>Display:</b> ' + optsLabel + '</span>' : '')) +
     '</div>' +
   '</div>';
+}
+
+/** Plain-English mapping summary for the probe card — mirrors describeStateMap
+ *  in src/utils/stateProbes.ts. */
+function _stateMapSummary(m) {
+  if (!m) return "no mapping";
+  var t = m.trueLabel || "Alarm";
+  var f = m.falseLabel || "OK";
+  var vals = Array.isArray(m.values) ? m.values.join(", ") : "";
+  switch (m.mode) {
+    case "zero":      return t + " when the value is 0, " + f + " otherwise";
+    case "equals":    return t + " when the value is " + vals + ", " + f + " otherwise";
+    case "notEquals": return f + " when the value is " + vals + ", " + t + " otherwise";
+    case "gte":       return t + " when the value is " + vals + " or more, " + f + " below that";
+    case "lte":       return t + " when the value is " + vals + " or less, " + f + " above that";
+    default:          return t + " when the value is not 0, " + f + " when it is 0";
+  }
 }
 
 function renderWidgetEditCard(profileId, w, manufacturer) {
@@ -7174,6 +7211,8 @@ function renderWidgetEditCard(profileId, w, manufacturer) {
     symbolValue:      w.symbol || "",
     transformValue:   w.transform,
     displayOptions:   w.displayOptions || {},
+    stateMap:         w.stateMap || null,
+    labelSymbol:      w.labelSymbol || "",
     manufacturer:     manufacturer,
     saveBtnClass:     "mfg-widget-save",
     cancelBtnClass:   "mfg-widget-cancel",
@@ -7200,6 +7239,8 @@ function renderAddWidgetCard(profileId, manufacturer) {
     symbolValue:      "",
     transformValue:   null,
     displayOptions:   {},
+    stateMap:         null,
+    labelSymbol:      "",
     manufacturer:     manufacturer,
     saveBtnClass:     "mfg-widget-add-save",
     cancelBtnClass:   "mfg-widget-add-cancel",
@@ -7238,12 +7279,58 @@ function _renderWidgetFormCard(o) {
       _widgetFormField("Order",
         '<input type="number" class="mfg-widget-order" value="' + escapeHtml(String(o.orderValue)) + '" min="0" step="1" style="width:100%;font-size:0.82rem">') +
     '</div>' +
+    // A state probe's second block is its true/false mapping, not display
+    // options — the mapping is what makes the probe alertable, so it takes the
+    // prominent slot rather than hiding behind a gauge's min/max.
     '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--color-border)">' +
-      '<div style="font-size:0.78rem;font-weight:600;margin-bottom:6px">Display options</div>' +
-      _widgetDisplayOptionsForm(o.widgetTypeSelected, o.displayOptions) +
+      (o.widgetTypeSelected === "state"
+        ? '<div style="font-size:0.78rem;font-weight:600;margin-bottom:6px">State mapping</div>' +
+          _widgetStateOptionsForm(o.stateMap, o.labelSymbol, o.typeSelected)
+        : '<div style="font-size:0.78rem;font-weight:600;margin-bottom:6px">Display options</div>' +
+          _widgetDisplayOptionsForm(o.widgetTypeSelected, o.displayOptions)) +
     '</div>' +
   '</div>';
   return html;
+}
+
+/**
+ * The state-probe mapping sub-form. Everything here is operator-declared because
+ * no part of it can be inferred from the MIB: which raw values mean "bad", what
+ * to call the two states, which side is the interesting one, and (for a table)
+ * which sibling column names the rows.
+ */
+function _widgetStateOptionsForm(stateMap, labelSymbol, symbolType) {
+  var m = stateMap || {};
+  var mode = m.mode || "nonzero";
+  var values = Array.isArray(m.values) ? m.values.join(", ") : "";
+  var needsValues = STATE_MODES_WITH_VALUES.indexOf(mode) !== -1;
+  var modeOpts = STATE_MODE_ORDER.map(function (k) {
+    return '<option value="' + k + '"' + (mode === k ? " selected" : "") + '>' + escapeHtml(STATE_MODE_LABELS[k]) + '</option>';
+  }).join("");
+  return '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px">' +
+    _widgetFormField("True when",
+      '<select class="mfg-widget-statemode" style="width:100%;font-size:0.82rem">' + modeOpts + '</select>') +
+    _widgetFormField("Comparison value(s)",
+      '<input type="text" class="mfg-widget-statevalues" value="' + escapeHtml(values) + '" placeholder="comma-separated, e.g. 2, alarm" style="width:100%;font-size:0.82rem"' +
+        (needsValues ? "" : " disabled") + '>') +
+    _widgetFormField("Label for the true state",
+      '<input type="text" class="mfg-widget-statetrue" value="' + escapeHtml(m.trueLabel || "Alarm") + '" maxlength="32" placeholder="Alarm" style="width:100%;font-size:0.82rem">') +
+    _widgetFormField("Label for the false state",
+      '<input type="text" class="mfg-widget-statefalse" value="' + escapeHtml(m.falseLabel || "OK") + '" maxlength="32" placeholder="OK" style="width:100%;font-size:0.82rem">') +
+    _widgetFormField("Row-name symbol (optional, tables)",
+      '<input type="text" class="mfg-widget-labelsymbol" value="' + escapeHtml(labelSymbol || "") + '" placeholder="e.g. fgHwSensorEntName" style="width:100%;font-size:0.82rem"' +
+        (symbolType === "table" ? "" : " disabled") + '>') +
+    '<label style="display:flex;align-items:center;gap:6px;font-size:0.74rem;color:var(--color-text-secondary)">' +
+      '<input type="checkbox" class="mfg-widget-stateproblem"' + (m.trueIsProblem === false ? "" : " checked") + '>' +
+      '<span>The true state is the problem</span>' +
+    '</label>' +
+  '</div>' +
+  '<p style="font-size:0.74rem;color:var(--color-text-tertiary);margin:8px 0 0">' +
+    'Readings are stored as 0/1 using this mapping, so an automation can alert on the state directly. ' +
+    'A table probe produces one independent flag per row — give it a row-name symbol from the same table ' +
+    '(joined on the OID index) or rows will only be identifiable by index, which differs per model. ' +
+    'A value the mapping can\'t compare is recorded as no reading rather than as healthy.' +
+  '</p>';
 }
 
 function _widgetFormField(label, controlHTML) {
@@ -7836,6 +7923,17 @@ function wireManufacturerProfileControls() {
     // before falling through to the metric handlers above… actually
     // the widget-card classes are unique (mfg-widget-mib etc.) so this
     // is straight-through.
+    // State-probe mode: only some modes take comparison values. Toggled IN PLACE
+    // rather than through renderIdentificationTab() — a re-render rebuilds the
+    // card from the stored widget, which would discard whatever the operator has
+    // typed into the other mapping fields.
+    if (target.classList.contains("mfg-widget-statemode")) {
+      var cardSM = target.closest(".mfg-widget-edit-card, .mfg-widget-add-card");
+      if (!cardSM) return;
+      var valsEl = cardSM.querySelector(".mfg-widget-statevalues");
+      if (valsEl) valsEl.disabled = STATE_MODES_WITH_VALUES.indexOf(target.value) === -1;
+      return;
+    }
     if (target.classList.contains("mfg-widget-mib")) {
       var cardWM = target.closest(".mfg-widget-edit-card, .mfg-widget-add-card");
       if (!cardWM) return;
@@ -8300,7 +8398,7 @@ function _readWidgetFormPayload(scope) {
   if (!symbol.trim()) { showToast("Symbol is required", "error");                       return null; }
 
   var displayOptions = _readWidgetDisplayOptions(scope, widgetType);
-  return {
+  var payload = {
     name:           name.trim(),
     symbol:         symbol.trim(),
     mibId:          mibSplit.mibId,
@@ -8311,6 +8409,30 @@ function _readWidgetFormPayload(scope) {
     order:          Number(orderRaw) || 0,
     modelPattern:   modelPattern.trim() ? modelPattern.trim() : null,
   };
+  if (widgetType === "state") {
+    var mode      = (scope.querySelector(".mfg-widget-statemode")    || {}).value || "nonzero";
+    var valuesRaw = (scope.querySelector(".mfg-widget-statevalues")  || {}).value || "";
+    var trueLabel = (scope.querySelector(".mfg-widget-statetrue")    || {}).value || "";
+    var falseLabel= (scope.querySelector(".mfg-widget-statefalse")   || {}).value || "";
+    var labelSym  = (scope.querySelector(".mfg-widget-labelsymbol")  || {}).value || "";
+    var problemEl = scope.querySelector(".mfg-widget-stateproblem");
+    var values = valuesRaw.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v !== ""; });
+    // Caught here as well as server-side: a probe whose comparison set is empty
+    // would evaluate every reading to false and look healthy forever.
+    if (STATE_MODES_WITH_VALUES.indexOf(mode) !== -1 && values.length === 0) {
+      showToast("That state mode needs at least one comparison value", "error");
+      return null;
+    }
+    payload.stateMap = {
+      mode: mode,
+      values: values,
+      trueLabel: trueLabel.trim() || "Alarm",
+      falseLabel: falseLabel.trim() || "OK",
+      trueIsProblem: problemEl ? !!problemEl.checked : true,
+    };
+    payload.labelSymbol = typeSel === "table" && labelSym.trim() ? labelSym.trim() : null;
+  }
+  return payload;
 }
 
 async function saveNewWidget(scope) {

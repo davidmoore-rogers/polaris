@@ -20,6 +20,11 @@ import {
 } from "../utils/symbolTransforms.js";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
+import {
+  normalizeStateMap,
+  validateStateMap,
+  type StateMap,
+} from "../utils/stateProbes.js";
 
 export type MetricKey =
   | "cpu"
@@ -97,11 +102,15 @@ export interface CustomWidgetRow {
   symbol:         string;
   mibId:          string;
   type:           "scalar" | "table";
-  widgetType:     "gauge" | "line" | "table";
+  widgetType:     "gauge" | "line" | "table" | "state";
   transform:      TransformKind | null;
   displayOptions: Record<string, unknown>;
   order:          number;
   modelPattern:   string | null;
+  /** Normalized state-probe mapping; null on gauge/line/table widgets. */
+  stateMap:       StateMap | null;
+  /** Sibling symbol supplying table-row names (state probes only). */
+  labelSymbol:    string | null;
 }
 
 export interface ProfileSummary {
@@ -143,14 +152,37 @@ function asMetricRowType(value: unknown): MetricRowType {
 // Custom widgets still only support scalar/table — double_scalar applies to
 // metric rows where the resolver knows how to combine the two readings; the
 // widget renderer doesn't.
-function asWidgetType(value: unknown): "gauge" | "line" | "table" {
-  if (value === "gauge" || value === "line" || value === "table") return value;
-  throw new AppError(400, "Invalid widgetType — expected gauge | line | table");
+//
+// "state" is the 0/1 probe (see src/utils/stateProbes.ts): same walk, but the
+// reading is mapped to a boolean at scrape time and lands in AssetStateSample
+// instead of AssetCustomWidgetSample, which is what makes it alertable per row.
+function asWidgetType(value: unknown): "gauge" | "line" | "table" | "state" {
+  if (value === "gauge" || value === "line" || value === "table" || value === "state") return value;
+  throw new AppError(400, "Invalid widgetType — expected gauge | line | table | state");
 }
 
 function asWidgetSymbolType(value: unknown): "scalar" | "table" {
   if (value === "scalar" || value === "table") return value;
   throw new AppError(400, "Invalid widget symbol type — expected 'scalar' or 'table'");
+}
+
+/**
+ * State-probe fields for a write. Only meaningful on `widgetType === "state"`;
+ * the mapping is REQUIRED there, since a state probe with no mapping has no
+ * definition of true and would silently record nothing. Non-state widgets are
+ * normalized to nulls so flipping a widget's type can't leave a stale mapping
+ * behind that a later type flip would resurrect.
+ */
+function stateFieldsForWrite(
+  widgetType: "gauge" | "line" | "table" | "state",
+  stateMap: unknown,
+  labelSymbol: unknown,
+): { stateMap: StateMap | null; labelSymbol: string | null } {
+  if (widgetType !== "state") return { stateMap: null, labelSymbol: null };
+  const reason = validateStateMap(stateMap ?? {});
+  if (reason) throw new AppError(400, reason);
+  const label = typeof labelSymbol === "string" ? labelSymbol.trim() : "";
+  return { stateMap: normalizeStateMap(stateMap ?? {}), labelSymbol: label || null };
 }
 
 // For scalar / table types `transform` is a unary TransformKind (or null).
@@ -271,18 +303,9 @@ function shapeProfile(row: any): ProfileFull {
       order:        o.order,
     })),
   }));
-  const widgets: CustomWidgetRow[] = (row.widgets || []).map((w: any) => ({
-    id:             w.id,
-    name:           w.name,
-    symbol:         w.symbol,
-    mibId:          w.mibId,
-    type:           asWidgetSymbolType(w.type),
-    widgetType:     asWidgetType(w.widgetType),
-    transform:      w.transform && isTransformKind(w.transform) ? (w.transform as TransformKind) : null,
-    displayOptions: (w.displayOptions ?? {}) as Record<string, unknown>,
-    order:          w.order,
-    modelPattern:   w.modelPattern ?? null,
-  }));
+  // Same shaping as the write paths return (state fields included) — one
+  // function so the cached read and a just-written row can't disagree.
+  const widgets: CustomWidgetRow[] = (row.widgets || []).map((w: any) => shapeWidget(w));
   return {
     id:           row.id,
     manufacturer: row.manufacturer,
@@ -320,6 +343,45 @@ export function getProfileFor(manufacturer: string | null | undefined): ProfileF
   const canonical = normalizeManufacturer(manufacturer);
   if (!canonical) return null;
   return profileCache.get(canonical.toLowerCase()) ?? null;
+}
+
+/** One state probe, flattened out of its profile. */
+export interface StateProbeSummary {
+  id:           string;
+  name:         string;
+  manufacturer: string;
+  /** "table" = one boolean per walked row; "scalar" = one per device. */
+  type:         "scalar" | "table";
+  modelPattern: string | null;
+  stateMap:     StateMap;
+}
+
+/**
+ * Every state probe defined across all manufacturer profiles, for the
+ * automation builder. Reads the in-memory profile cache — a probe id is an
+ * opaque UUID on a sample row, so the builder needs this to offer NAMES, and
+ * the stored automation needs it to render "…is Alarm" rather than "…== 1".
+ *
+ * Returns [] before the cache warms (the boot order that leaves it cold also
+ * means no probe has produced a sample yet). Sorted for a stable picker.
+ */
+export function listStateProbes(): StateProbeSummary[] {
+  const out: StateProbeSummary[] = [];
+  for (const profile of profileCache.values()) {
+    for (const w of profile.widgets) {
+      if (w.widgetType !== "state" || !w.stateMap) continue;
+      out.push({
+        id:           w.id,
+        name:         w.name,
+        manufacturer: profile.manufacturer,
+        type:         w.type,
+        modelPattern: w.modelPattern,
+        stateMap:     w.stateMap,
+      });
+    }
+  }
+  return out.sort((a, b) =>
+    a.manufacturer.localeCompare(b.manufacturer) || a.name.localeCompare(b.name));
 }
 
 export async function listProfiles(): Promise<ProfileSummary[]> {
@@ -757,6 +819,8 @@ export async function createWidget(
     displayOptions?: Record<string, unknown>;
     order?:         number;
     modelPattern?:  string | null;
+    stateMap?:      unknown;
+    labelSymbol?:   string | null;
     createdBy?:     string | null;
   },
 ): Promise<CustomWidgetRow> {
@@ -766,6 +830,8 @@ export async function createWidget(
   if (input.modelPattern) {
     assertValidModelPattern(input.modelPattern);
   }
+  const widgetType = asWidgetType(input.widgetType);
+  const state = stateFieldsForWrite(widgetType, input.stateMap, input.labelSymbol);
   const created = await (prisma as any).manufacturerCustomWidget.create({
     data: {
       profileId,
@@ -773,11 +839,13 @@ export async function createWidget(
       symbol:         input.symbol.trim(),
       mibId:          input.mibId,
       type:           asWidgetSymbolType(input.type ?? "scalar"),
-      widgetType:     asWidgetType(input.widgetType),
+      widgetType,
       transform:      asTransformForType(input.transform ?? null, "scalar") as TransformKind | null,
       displayOptions: input.displayOptions ?? {},
       order:          Number.isFinite(input.order) ? Number(input.order) : 0,
       modelPattern:   input.modelPattern ?? null,
+      stateMap:       state.stateMap as any,
+      labelSymbol:    state.labelSymbol,
       createdBy:      input.createdBy ?? null,
     },
   });
@@ -798,12 +866,36 @@ export async function updateWidget(
     displayOptions?: Record<string, unknown>;
     order?:         number;
     modelPattern?:  string | null;
+    stateMap?:      unknown;
+    labelSymbol?:   string | null;
   },
 ): Promise<CustomWidgetRow> {
   const existing = await (prisma as any).manufacturerCustomWidget.findUnique({ where: { id: widgetId } });
   if (!existing) throw new AppError(404, "Widget not found");
   if (input.modelPattern) {
     assertValidModelPattern(input.modelPattern);
+  }
+  // The state fields are decided from the EFFECTIVE type (posted, else stored),
+  // so a partial edit that doesn't mention widgetType keeps a probe's mapping,
+  // and one that flips a probe to a gauge clears it rather than leaving a stale
+  // mapping for a later flip back to resurrect.
+  const effectiveType = asWidgetType(input.widgetType ?? existing.widgetType);
+  let stateWrite: { stateMap?: any; labelSymbol?: string | null };
+  if (effectiveType !== "state") {
+    stateWrite = { stateMap: null, labelSymbol: null };
+  } else if (input.stateMap !== undefined || !existing.stateMap) {
+    // Provided, or the widget is becoming a probe and needs a mapping to exist.
+    const state = stateFieldsForWrite(effectiveType, input.stateMap ?? existing.stateMap ?? {}, input.labelSymbol);
+    stateWrite = {
+      stateMap:    state.stateMap as any,
+      labelSymbol: input.labelSymbol === undefined ? undefined : state.labelSymbol,
+    };
+  } else {
+    stateWrite = {
+      labelSymbol: input.labelSymbol === undefined
+        ? undefined
+        : ((input.labelSymbol ?? "").trim() || null),
+    };
   }
   const updated = await (prisma as any).manufacturerCustomWidget.update({
     where: { id: widgetId },
@@ -817,6 +909,7 @@ export async function updateWidget(
       displayOptions: input.displayOptions === undefined ? undefined : (input.displayOptions ?? {}),
       order:          input.order === undefined          ? undefined : Number(input.order),
       modelPattern:   input.modelPattern === undefined   ? undefined : (input.modelPattern ?? null),
+      ...stateWrite,
     },
   });
   await touchProfile(existing.profileId);
@@ -841,17 +934,23 @@ export async function deleteProfile(profileId: string): Promise<void> {
 }
 
 function shapeWidget(w: any): CustomWidgetRow {
+  const widgetType = asWidgetType(w.widgetType);
   return {
     id:             w.id,
     name:           w.name,
     symbol:         w.symbol,
     mibId:          w.mibId,
     type:           asWidgetSymbolType(w.type),
-    widgetType:     asWidgetType(w.widgetType),
+    widgetType,
     transform:      w.transform && isTransformKind(w.transform) ? (w.transform as TransformKind) : null,
     displayOptions: (w.displayOptions ?? {}) as Record<string, unknown>,
     order:          w.order,
     modelPattern:   w.modelPattern ?? null,
+    // Read through normalizeStateMap rather than trusted verbatim: a probe row
+    // written before a mode was added (or hand-edited in SQL) still yields a
+    // usable mapping instead of throwing on the telemetry hot path.
+    stateMap:       widgetType === "state" ? normalizeStateMap(w.stateMap ?? {}) : null,
+    labelSymbol:    widgetType === "state" ? (w.labelSymbol ?? null) : null,
   };
 }
 

@@ -387,7 +387,40 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
     }
     case "customWidgetValue": {
       const rows = await prisma.assetCustomWidgetSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since }, kind: "scalar", ...(df.widgetId ? { widgetId: df.widgetId } : {}) }, select: { assetId: true, timestamp: true, widgetId: true, value: true } });
-      return reduceReadings(rows, index, (r) => r.widgetId, (r) => r.widgetId, (r) => (typeof r.value === "number" ? r.value : Number(r.value)) || null, agg);
+      // `|| null` here would map a legitimate reading of 0 to "no reading",
+      // which silently breaks both directions of any rule about zero: a
+      // "== 0" / "<= 0" condition could never fire, and an auto-reset rule
+      // could never clear because the recovery value is the one being dropped.
+      // Only genuinely non-numeric JSON becomes null.
+      return reduceReadings(rows, index, (r) => r.widgetId, (r) => r.widgetId, (r) => {
+        const n = typeof r.value === "number" ? r.value : Number(r.value);
+        return Number.isFinite(n) ? n : null;
+      }, agg);
+    }
+    case "customStateValue": {
+      // 0/1 state-probe readings (utils/stateProbes). One dimension per probe
+      // ROW, so every sensor / PSU / fan tray carries its own firing state and
+      // its own alert — keyed on rowKey (the stable OID index) while the LABEL
+      // is what the operator filters and reads, so renaming a row keeps its
+      // alert. probeId is an exact match (a registry key), the row pattern is
+      // substring-matched like every other *Pattern dimension.
+      const rows = await prisma.assetStateSample.findMany({
+        where: {
+          assetId: { in: ids },
+          timestamp: { gte: since },
+          ...(df.stateProbeId ? { probeId: df.stateProbeId } : {}),
+        },
+        select: { assetId: true, timestamp: true, probeId: true, rowKey: true, rowLabel: true, value: true },
+      });
+      const filtered = df.stateRowPattern ? rows.filter((r) => substringMatch(r.rowLabel, df.stateRowPattern)) : rows;
+      return reduceReadings(
+        filtered,
+        index,
+        (r) => `${r.probeId}|${r.rowKey}`,
+        (r) => r.rowLabel,
+        (r) => (r.value === 0 || r.value === 1 ? r.value : null),
+        agg,
+      );
     }
     case "ifInBps": case "ifOutBps": case "ifInErrorRate": case "ifOutErrorRate": {
       const col = trigger.metric === "ifInBps" ? "inOctets" : trigger.metric === "ifOutBps" ? "outOctets" : trigger.metric === "ifInErrorRate" ? "inErrors" : "outErrors";

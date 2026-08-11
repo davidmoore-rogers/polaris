@@ -101,6 +101,19 @@ describe("foldValuePairs", () => {
     ]);
     expect(values.map((v) => v.value)).toEqual(["temperature", "fan", "power", "voltage"]);
   });
+
+  it("names values that aren't self-describing (a state probe's registry id)", () => {
+    const { values } = foldValuePairs(
+      [{ value: "uuid-1", assetId: "a" }, { value: "uuid-2", assetId: "b" }],
+      (v) => (v === "uuid-1" ? "Hardware sensor alarm (Fortinet)" : undefined),
+    );
+    // Labelled where resolvable, and an unresolvable id keeps working as a bare
+    // value rather than disappearing from the picker.
+    expect(values).toEqual([
+      { value: "uuid-1", assetCount: 1, label: "Hardware sensor alarm (Fortinet)" },
+      { value: "uuid-2", assetCount: 1 },
+    ]);
+  });
 });
 
 describe("dimension picker options", () => {
@@ -126,6 +139,15 @@ describe("dimension picker options", () => {
 
   it("still preserves the stored value with no data loaded", () => {
     expect(optionsHtml(null, "temperature")).toContain('value="temperature" selected');
+  });
+
+  it("shows a label instead of the value when the option carries one", () => {
+    // The state-probe case: the operator picks a NAME, the rule stores the id.
+    const html = optionsHtml(result({
+      values: [{ value: "uuid-1", assetCount: 4, label: "Hardware sensor alarm" } as never],
+    }), "uuid-1");
+    expect(html).toContain('<option value="uuid-1" selected>Hardware sensor alarm (4)</option>');
+    expect(html).not.toContain(">uuid-1 (4)<");
   });
 
 });
@@ -269,6 +291,13 @@ describe("sibling narrowing", () => {
 
   it("narrows SD-WAN members by the chosen health check", () => {
     expect(narrow("link", { healthCheck: "Internet" })).toEqual({ healthCheck: "Internet" });
+  });
+
+  it("narrows state-probe ROWS by the chosen probe", () => {
+    // "PSU 2" is not a row of the fan-tray probe — offering every probe's rows
+    // would invite a probe+row pair that matches nothing.
+    expect(narrow("stateRowPattern", { stateProbeId: "p1" })).toEqual({ stateProbeId: "p1" });
+    expect(narrow("stateRowPattern", {})).toEqual({});
   });
 
   it("does not narrow when the sibling is unset, or for independent dimensions", () => {

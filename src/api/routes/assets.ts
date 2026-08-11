@@ -2068,6 +2068,42 @@ router.get("/:id/custom-widgets", requirePermission("assets", "read"), async (re
       byWidget.set(s.widgetId, arr);
     }
 
+    // State probes keep their 0/1 readings in asset_state_samples, one row per
+    // probe row. The tab wants the CURRENT state of each row, so take the recent
+    // rows newest-first and keep the first sighting of each (probeId, rowKey) —
+    // one scrape writes a probe's whole row set at one timestamp, so the take cap
+    // below covers several full snapshots even for a probe at the row cap.
+    const stateProbeIds = applicableWidgets.filter((w) => w.widgetType === "state").map((w) => w.id);
+    const latestState = new Map<string, Array<{ rowKey: string; rowLabel: string; value: number; rawValue: string | null; timestamp: Date }>>();
+    if (stateProbeIds.length > 0) {
+      const rows = await prisma.assetStateSample.findMany({
+        where:   { assetId: id, probeId: { in: stateProbeIds } },
+        orderBy: { timestamp: "desc" },
+        take:    2000,
+        select:  { probeId: true, rowKey: true, rowLabel: true, value: true, rawValue: true, timestamp: true },
+      });
+      const seen = new Set<string>();
+      for (const r of rows) {
+        const key = `${r.probeId}|${r.rowKey}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const arr = latestState.get(r.probeId) ?? [];
+        arr.push({ rowKey: r.rowKey, rowLabel: r.rowLabel, value: r.value, rawValue: r.rawValue, timestamp: r.timestamp });
+        latestState.set(r.probeId, arr);
+      }
+      // Problem rows first, then by name — an operator opening the tab is looking
+      // for what's wrong, and a 60-row sensor table shouldn't need scanning.
+      for (const [probeId, arr] of latestState) {
+        const probe = applicableWidgets.find((w) => w.id === probeId);
+        const trueIsProblem = probe?.stateMap?.trueIsProblem !== false;
+        arr.sort((a, b) => {
+          const pa = (a.value === 1) === trueIsProblem ? 0 : 1;
+          const pb = (b.value === 1) === trueIsProblem ? 0 : 1;
+          return pa - pb || a.rowLabel.localeCompare(b.rowLabel);
+        });
+      }
+    }
+
     return res.json({
       manufacturer:    asset.manufacturer,
       profileId:       profile.id,
@@ -2090,6 +2126,10 @@ router.get("/:id/custom-widgets", requirePermission("assets", "read"), async (re
           modelPattern:   w.modelPattern,
           samples:        window,
           latest:         window.length ? window[window.length - 1] : null,
+          // State probes only: the mapping (for labels/colour) + current rows.
+          stateMap:       w.stateMap,
+          labelSymbol:    w.labelSymbol,
+          stateRows:      w.widgetType === "state" ? (latestState.get(w.id) ?? []) : undefined,
         };
       }),
     });

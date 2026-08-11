@@ -84,6 +84,97 @@ describe("makeAutomationSentences", () => {
     expect(s.leafUnit("cpuPct", {})).toBe("%");
   });
 
+  // ── State (0/1) probes ────────────────────────────────────────────────
+  // A state metric's threshold is 0 or 1, which is unreadable as a sentence.
+  // These pin that every surface says "is Alarm" using the probe's own labels.
+  const STATE_SCHEMA = {
+    ...SCHEMA,
+    metricMeta: { ...SCHEMA.metricMeta, customStateValue: { label: "Device state flag (0/1)", unit: "" } },
+    booleanMetrics: ["customStateValue"],
+    stateProbes: [{
+      id: "p1", name: "Hardware sensor alarm", manufacturer: "Fortinet", type: "table",
+      stateMap: { mode: "nonzero", values: [], trueLabel: "Alarm", falseLabel: "OK", trueIsProblem: true },
+    }, {
+      id: "p2", name: "PSU present", manufacturer: "Fortinet", type: "table",
+      stateMap: { mode: "nonzero", values: [], trueLabel: "Present", falseLabel: "Missing", trueIsProblem: false },
+    }],
+  };
+
+  it("renders a state trigger with the probe's name and its own state label", () => {
+    const s = make(STATE_SCHEMA as never);
+    const out = s.triggerSentence({
+      type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+      aggregation: "latest", windowSec: 0,
+      dimensionFilter: { stateProbeId: "p1", stateRowPattern: "TMP1" },
+      forDurationSec: 300,
+    }, { severity: "critical" });
+    expect(out).toContain("Hardware sensor alarm is Alarm");
+    expect(out).toContain("on rows matching TMP1");
+    expect(out).toContain("sustained for <strong>5 minutes</strong>");
+    expect(out).toContain("critical");
+    // The raw 1 never appears, and the probe id is the subject rather than a
+    // "for probe <uuid>" dimension clause.
+    expect(out).not.toContain("equals 1");
+    expect(out).not.toContain("p1");
+  });
+
+  it("uses the second label for a threshold of 0, and 'is not' for !=", () => {
+    const s = make(STATE_SCHEMA as never);
+    const df = { stateProbeId: "p2" };
+    expect(s.triggerSentence({
+      type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 0,
+      aggregation: "latest", windowSec: 0, dimensionFilter: df,
+    })).toContain("PSU present is Missing");
+    expect(s.triggerSentence({
+      type: "asset_metric", metric: "customStateValue", operator: "!=", threshold: 1,
+      aggregation: "latest", windowSec: 0, dimensionFilter: df,
+    })).toContain("PSU present is not Present");
+  });
+
+  it("words a windowed aggregation as what it asks of the window", () => {
+    const s = make(STATE_SCHEMA as never);
+    const base = {
+      type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+      dimensionFilter: { stateProbeId: "p1" }, windowSec: 900,
+    };
+    expect(s.triggerSentence({ ...base, aggregation: "max" })).toContain("at any point in the last 15 minutes");
+    expect(s.triggerSentence({ ...base, aggregation: "min" })).toContain("throughout the last 15 minutes");
+  });
+
+  it("falls back to generic wording when the probe can't be resolved", () => {
+    // A probe deleted (or a schema fetched before it was defined) must still
+    // render a readable sentence rather than blowing up or printing a UUID.
+    const s = make(STATE_SCHEMA as never);
+    const out = s.triggerSentence({
+      type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+      aggregation: "latest", windowSec: 0, dimensionFilter: { stateProbeId: "gone" },
+    });
+    expect(out).toContain("Device state flag (0/1) is true");
+  });
+
+  it("ignores severity bands on a state metric — a ladder over two values is meaningless", () => {
+    const s = make(STATE_SCHEMA as never);
+    const out = s.triggerSentence({
+      type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+      aggregation: "latest", windowSec: 0, dimensionFilter: { stateProbeId: "p1" },
+    }, { severity: "warning", severityBands: [{ threshold: 1, severity: "critical" }] });
+    expect(out).toContain("warning");
+    expect(out).not.toContain("critical");
+  });
+
+  it("offers no clear threshold on a state metric's reset sentence", () => {
+    const s = make(STATE_SCHEMA as never);
+    const tr = {
+      type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+      dimensionFilter: { stateProbeId: "p1" },
+    };
+    // clearThreshold rides along (a hand-written rule could carry one); the
+    // sentence must not claim a dead band a flag can't have.
+    const out = s.resetSentence({ mode: "auto", clearThreshold: 0 }, tr);
+    expect(out).toContain("the condition is no longer met");
+    expect(out).not.toContain("0</strong>");
+  });
+
   it("renders composite trees with AND/OR joins and parenthesized sub-groups", () => {
     const s = make(SCHEMA as never);
     const out = s.triggerSentence({

@@ -23,6 +23,7 @@ import { listRules, createRule, updateRule, deleteRule, listScopeOptions } from 
 import { previewRule } from "../../services/notificationEngine.js";
 import { listDimensionValues, dimensionPickerMeta } from "../../services/notificationDimensionService.js";
 import { listRecipientUsers } from "../../services/notificationRecipientService.js";
+import { listStateProbes } from "../../services/manufacturerProfileService.js";
 
 export const notificationRulesRouter = Router();
 
@@ -36,9 +37,17 @@ notificationRulesRouter.get("/", requirePermission("automationManagement", "read
 // `dimensionPickers` is merged in here rather than inside buildSchemaCatalog so
 // notificationTypes doesn't have to import the dimension service (which imports
 // the engine, which imports notificationTypes — a cycle).
+// `stateProbes` rides along for the same reason: the builder needs each state
+// probe's NAME (its dimension value is a registry UUID) and its two state LABELS
+// ("Alarm" / "OK"), so the 0/1 value control and the trigger sentence read in the
+// operator's own words instead of "== 1". Sourced from the profile cache.
 notificationRulesRouter.get("/schema", requirePermission("automationManagement", "read"), async (_req, res, next) => {
   try {
-    res.json({ ...buildSchemaCatalog(), dimensionPickers: dimensionPickerMeta() });
+    res.json({
+      ...buildSchemaCatalog(),
+      dimensionPickers: dimensionPickerMeta(),
+      stateProbes: listStateProbes(),
+    });
   } catch (err) { next(err); }
 });
 
@@ -89,6 +98,9 @@ const dimensionValuesSchema = z.object({
   narrow: z.object({
     sensorClass: z.string().max(100).optional(),
     healthCheck: z.string().max(200).optional(),
+    // State-probe rows belong to one probe (the row list for "PSU alarm" is not
+    // the row list for "fan tray OK").
+    stateProbeId: z.string().max(200).optional(),
   }).optional(),
 });
 

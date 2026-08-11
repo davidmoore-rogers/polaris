@@ -77,7 +77,8 @@
  *     recomputes from authoritative topology data)
  *
  * NOT cascade-deleted (no FK anymore — migration 20260615000000): every
- * AssetXxxSample / *Hourly / *Daily time-series + AssetCustomWidgetSample.
+ * AssetXxxSample / *Hourly / *Daily time-series + AssetCustomWidgetSample +
+ * AssetStateSample.
  * Those tables are TimescaleDB hypertables; a cascade DELETE matching rows in a
  * compressed chunk would decompress it into multi-GB of un-truncatable heap
  * bloat (prod incident 2026-06-08). The ghost's sample rows are simply left

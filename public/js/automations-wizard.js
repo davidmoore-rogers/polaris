@@ -144,6 +144,55 @@ function makeAutomationSentences(s) {
   function fieldLabel(f) { var x = s.fieldMeta && s.fieldMeta[f]; return x ? x.label : f; }
   function changeLabel(c) { return (s.changeTypeMeta && s.changeTypeMeta[c]) || c; }
 
+  // ── State (0/1) metrics ────────────────────────────────────────────────
+  // A state metric's reading is a flag, so its threshold is 0 or 1 and the
+  // number is meaningless to read back: the automation is about "Alarm", not
+  // about "== 1". The probe registry (schema.stateProbes) carries each probe's
+  // name and its two labels, so every surface renders the operator's own words.
+  function isBooleanMetric(m) {
+    return !!m && (s.booleanMetrics || []).indexOf(m) !== -1;
+  }
+  function stateProbeOf(id) {
+    if (!id) return null;
+    var list = s.stateProbes || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+  /** The probe's map, or the generic true/false fallback when the probe can't be
+   *  resolved (deleted profile, or a schema fetched before it was defined). */
+  function stateMapOf(df) {
+    var p = stateProbeOf(df && df.stateProbeId);
+    var m = p && p.stateMap;
+    return {
+      trueLabel: (m && m.trueLabel) || "true",
+      falseLabel: (m && m.falseLabel) || "false",
+      trueIsProblem: !m || m.trueIsProblem !== false,
+      name: p ? p.name : "",
+    };
+  }
+  /** "Alarm" / "OK" for a 0/1 threshold. */
+  function stateValueLabel(df, threshold) {
+    var t = Number(threshold);
+    if (t !== 0 && t !== 1) return "…";
+    var m = stateMapOf(df);
+    return t === 1 ? m.trueLabel : m.falseLabel;
+  }
+  /** The clause for a boolean leaf: "PSU alarm is Alarm on rows matching PSU 2".
+   *  The probe NAME is the subject (so stateProbeId isn't repeated as a
+   *  dimension), and the aggregation reads as "at any point in" / "throughout"
+   *  rather than min/max of a flag. */
+  function stateLeafClause(leaf) {
+    var df = leaf.dimensionFilter || {};
+    var m = stateMapOf(df);
+    var subject = m.name || metricLabel(leaf.metric);
+    var verb = leaf.operator === "!=" ? "is not" : "is";
+    var out = subject + " " + verb + " " + stateValueLabel(df, leaf.threshold);
+    if (leaf.windowSec > 0 && leaf.aggregation === "max") out += " at any point in the last " + humanDuration(leaf.windowSec);
+    else if (leaf.windowSec > 0 && leaf.aggregation === "min") out += " throughout the last " + humanDuration(leaf.windowSec);
+    if (df.stateRowPattern) out += " on rows matching " + df.stateRowPattern;
+    return out;
+  }
+
   // ── Sentence builder ───────────────────────────────────────────────────
   var CMP_PHRASE = Object.assign({ ">": "is above", ">=": "is at or above", "<": "is below", "<=": "is at or below", "==": "equals", "!=": "is not" }, s.comparatorPhrases || {});
   var INV_CMP = Object.assign({ ">": "<=", ">=": "<", "<": ">=", "<=": ">", "==": "!=", "!=": "==" }, s.inverseComparators || {});
@@ -167,6 +216,7 @@ function makeAutomationSentences(s) {
     if (leaf.type === "asset_state") {
       return fieldLabel(leaf.field) + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + String(leaf.value == null || leaf.value === "" ? "…" : leaf.value);
     }
+    if (isBooleanMetric(leaf.metric)) return stateLeafClause(leaf);
     var unit = leafUnit(leaf.metric, leaf.dimensionFilter); unit = unit ? " " + unit : "";
     var agg = leaf.aggregation && leaf.aggregation !== "latest" && leaf.windowSec
       ? " (" + (AGG_PHRASE[leaf.aggregation] || leaf.aggregation) + " " + humanDuration(leaf.windowSec) + ")" : "";
@@ -202,8 +252,10 @@ function makeAutomationSentences(s) {
     var sev = opts && opts.severity;
     if (!sev) return "";
     // Bands are numeric-metric-only server-side; ignore any that ride along on
-    // another trigger type rather than describing a threshold that can't exist.
-    var banded = tr && (tr.type === "asset_metric" || tr.type === "host_metric");
+    // another trigger type (or on a 0/1 state metric, where a threshold ladder
+    // over two values means nothing) rather than describing a threshold that
+    // can't exist.
+    var banded = tr && (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
     var bands = (banded && opts.severityBands ? opts.severityBands : []).filter(function (b) { return b && b.severity; });
     if (!bands.length) return " — <strong>" + escapeHtml(sev) + "</strong>";
     var baseDur = tr.forDurationSec || 0;
@@ -232,6 +284,11 @@ function makeAutomationSentences(s) {
     var tail = severityLadderPhrase(tr, opts);
     if (tr.type === "composite") {
       out = "When <strong>" + escapeHtml(tgTreePhrase({ op: tr.op, children: tr.children || [] }) || "…") + "</strong>";
+      if (tr.forDurationSec > 0) out += ", sustained for <strong>" + humanDuration(tr.forDurationSec) + "</strong>";
+      return out + tail + ".";
+    }
+    if (tr.type === "asset_metric" && isBooleanMetric(tr.metric)) {
+      out = "When <strong>" + escapeHtml(stateLeafClause(tr)) + "</strong>";
       if (tr.forDurationSec > 0) out += ", sustained for <strong>" + humanDuration(tr.forDurationSec) + "</strong>";
       return out + tail + ".";
     }
@@ -274,7 +331,9 @@ function makeAutomationSentences(s) {
       if (reset.sustainSec > 0) out += " and stays that way for <strong>" + humanDuration(reset.sustainSec) + "</strong>";
       out += ".";
     } else {
-      var numeric = tr && (tr.type === "asset_metric" || tr.type === "host_metric");
+      // A 0/1 metric has no dead band to sit in, so a clear threshold on one is
+      // meaningless — it resets when the flag flips back.
+      var numeric = tr && (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
       if (numeric && reset.clearThreshold != null && !isNaN(reset.clearThreshold)) {
         var invOp = INV_CMP[tr.operator] || "<";
         var unit = leafUnit(tr.metric, tr.dimensionFilter); unit = unit ? " " + unit : "";
@@ -292,6 +351,8 @@ function makeAutomationSentences(s) {
   return {
     findType: findType, isTriggerScoped: isTriggerScoped,
     metricLabel: metricLabel, metricUnit: metricUnit, leafUnit: leafUnit,
+    isBooleanMetric: isBooleanMetric, stateProbeOf: stateProbeOf, stateMapOf: stateMapOf,
+    stateValueLabel: stateValueLabel, stateLeafClause: stateLeafClause,
     fieldLabel: fieldLabel, changeLabel: changeLabel, humanDuration: humanDuration,
     tgLeafPhrase: tgLeafPhrase, tgTreePhrase: tgTreePhrase,
     triggerSentence: triggerSentence, severityLadderPhrase: severityLadderPhrase, resetSentence: resetSentence,
@@ -319,7 +380,9 @@ function awDimOptionsHtml(res, current) {
   vals.forEach(function (v) {
     if (v.value === cur) seen = true;
     var count = v.assetCount ? " (" + v.assetCount + ")" : "";
-    html += '<option value="' + escapeHtml(v.value) + '"' + (v.value === cur ? " selected" : "") + '>' + escapeHtml(v.value) + count + '</option>';
+    // `label` is present when the stored value isn't human-readable (a state
+    // probe's registry UUID): show the name, keep storing the id.
+    html += '<option value="' + escapeHtml(v.value) + '"' + (v.value === cur ? " selected" : "") + '>' + escapeHtml(v.label || v.value) + count + '</option>';
   });
   if (cur && !seen) {
     html += '<option value="' + escapeHtml(cur) + '" selected>' + escapeHtml(cur) + ' — not currently reported</option>';
@@ -401,6 +464,10 @@ function awDimNarrow(dim, df) {
   df = df || {};
   if (dim === "sensorNamePattern") return df.sensorClass ? { sensorClass: df.sensorClass } : {};
   if (dim === "link") return df.healthCheck ? { healthCheck: df.healthCheck } : {};
+  // A state probe's rows belong to that probe — "PSU 2" is not a row of the
+  // fan-tray probe, so offering every probe's rows would invite a combination
+  // that matches nothing.
+  if (dim === "stateRowPattern") return df.stateProbeId ? { stateProbeId: df.stateProbeId } : {};
   return {};
 }
 
@@ -536,8 +603,9 @@ async function openAutomationWizard(existing) {
       fieldLabel = _sent.fieldLabel, changeLabel = _sent.changeLabel,
       humanDuration = _sent.humanDuration, tgTreePhrase = _sent.tgTreePhrase,
       triggerSentence = _sent.triggerSentence, resetSentence = _sent.resetSentence,
+      isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id" };
+  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
   // populate and whether each is a closed enum (`strict` → select-only, e.g.
   // sensorClass) or a substring match (→ suggestions, typing still allowed);
@@ -1317,6 +1385,26 @@ async function openAutomationWizard(existing) {
     if (meta && meta.kind === "number") return '<input type="number" class="tgl-value" value="' + escapeHtml(v) + '" style="width:110px" placeholder="e.g. 3">';
     return '<input type="text" class="tgl-value" value="' + escapeHtml(v) + '" style="width:130px" placeholder="e.g. up / down">';
   }
+  /**
+   * The value control for a 0/1 state metric: the probe's OWN two labels
+   * ("Alarm" / "OK"), not a number box. It carries `.tgl-threshold` so
+   * tgCollectLeaf reads it like any other threshold and the saved trigger stays a
+   * plain numeric comparison — the engine needs no boolean special case, and a
+   * rule saved here still opens correctly in a client that predates this control.
+   * Labels come from the row's chosen probe, so changing the probe relabels it
+   * (see the stateProbeId branch in wireTgTree's change handler).
+   */
+  function tgStateFlagControl(leaf) {
+    var m = stateMapOf(leaf.dimensionFilter || {});
+    var t = Number(leaf.threshold);
+    // Default to the state the operator called the interesting one, which is
+    // what they're almost always alerting on.
+    var sel = (t === 0 || t === 1) ? String(t) : (m.trueIsProblem ? "1" : "0");
+    return '<select class="tgl-threshold tgl-flag" style="width:auto;min-width:110px" title="Which state fires the alert">' +
+      '<option value="1"' + (sel === "1" ? " selected" : "") + '>' + escapeHtml(m.trueLabel) + '</option>' +
+      '<option value="0"' + (sel === "0" ? " selected" : "") + '>' + escapeHtml(m.falseLabel) + '</option>' +
+    '</select>';
+  }
   // One dimensionFilter control. A dimension the server can populate renders as
   // a select (closed enum) or a COMBOBOX (substring match — click to pick one of
   // the values the scoped devices report, or type a pattern); anything else stays
@@ -1541,24 +1629,32 @@ async function openAutomationWizard(existing) {
   function tgLeafRowHtml(leaf, kind) {
     leaf = leaf || tgDefaultLeaf(kind);
     var isState = leaf.type === "asset_state";
+    // A 0/1 state metric: equality only, and the value is a state name.
+    var isFlag = !isState && isBooleanMetric(leaf.metric);
     var what = isState ? "f:" + leaf.field : "m:" + leaf.metric;
     // Unit chip sits beside the threshold value it qualifies (read-only —
     // never part of the input). hwSensorValue resolves it from the typed
     // sensor class; "sensor unit" is the unresolved placeholder.
     var unit = "";
-    if (!isState) {
+    if (!isState && !isFlag) {
       unit = leafUnit(leaf.metric, leaf.dimensionFilter || {});
       if (!unit && metricUnit(leaf.metric) === "(sensor unit)") unit = "sensor unit";
+    }
+    var valueControl;
+    if (isState) valueControl = tgStateValueControl(leaf.field, leaf.value);
+    else if (isFlag) valueControl = tgStateFlagControl(leaf);
+    else {
+      valueControl = '<input type="number" step="any" class="tgl-threshold" value="' + (leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : "") + '" placeholder="value" style="width:110px">' +
+        (unit ? '<span class="tgl-unit" style="font-size:0.8rem;color:var(--color-text-tertiary);white-space:nowrap">' + escapeHtml(unit) + '</span>' : "");
     }
     var line1 =
       '<div style="display:flex;gap:6px;align-items:center">' +
         '<span class="aw-grip" draggable="true" title="Drag to move">&#x2842;</span>' +
         '<select class="tgl-what" style="flex:1;min-width:0">' + tgWhatOptions(kind, what) + '</select>' +
-        '<select class="tgl-op" style="width:64px">' + opt(s.comparators, leaf.operator || (isState ? "==" : ">=")) + '</select>' +
-        (isState
-          ? tgStateValueControl(leaf.field, leaf.value)
-          : '<input type="number" step="any" class="tgl-threshold" value="' + (leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : "") + '" placeholder="value" style="width:110px">' +
-            (unit ? '<span class="tgl-unit" style="font-size:0.8rem;color:var(--color-text-tertiary);white-space:nowrap">' + escapeHtml(unit) + '</span>' : "")) +
+        // Ordered comparators can't apply to a flag, so the operator select
+        // offers only is / is-not rather than letting an operator write ">= 1".
+        '<select class="tgl-op" style="width:64px">' + opt(isFlag ? ["==", "!="] : s.comparators, leaf.operator || (isState || isFlag ? "==" : ">=")) + '</select>' +
+        valueControl +
         '<button type="button" class="btn btn-sm btn-danger scr-remove" title="Remove condition">&times;</button>' +
       '</div>';
     var line2 = "";
@@ -1566,9 +1662,17 @@ async function openAutomationWizard(existing) {
       var dims = kind === "host" ? [] : ((s.metricDimensions && s.metricDimensions[leaf.metric]) || []);
       var df = leaf.dimensionFilter || {};
       var dimInputs = dims.map(function (d) { return dimControlHtml(d, df, leaf.metric); }).join("");
+      // Averaging a flag would produce a duty cycle rather than a state, so a
+      // flag's aggregation is limited to the three that mean something, worded as
+      // what they actually ask of the window.
+      var aggControl = isFlag
+        ? '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + optLabeled(["latest", "max", "min"], leaf.aggregation || "latest", function (v) {
+            return v === "latest" ? "current state" : v === "max" ? "at any point in" : "throughout";
+          }) + '</select>'
+        : '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + opt(s.aggregations, leaf.aggregation || "latest") + '</select>';
       line2 =
         '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
-          '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + opt(s.aggregations, leaf.aggregation || "latest") + '</select>' +
+          aggControl +
           '<span>over</span><input type="number" class="tgl-window" value="' + (leaf.windowSec || 0) + '" style="width:70px"><span>sec (0 = latest)</span>' +
           dimInputs +
           (dims.some(function (d) { return DIM_PICKERS[d]; }) ? '<span class="tgl-dim-note" style="flex-basis:100%;font-size:0.78rem"></span>' : "") +
@@ -1679,10 +1783,26 @@ async function openAutomationWizard(existing) {
         // What changed: re-render the row with the new leaf's default fields.
         var row = t.closest(".scr-row");
         var what = t.value;
-        var leaf = what.indexOf("f:") === 0
-          ? { type: "asset_state", field: what.slice(2), operator: "==", value: "" }
-          : { type: kindFn() === "host" ? "host_metric" : "asset_metric", metric: what.slice(2), aggregation: "latest", windowSec: 0, operator: ">=", threshold: null };
+        var metric = what.slice(2);
+        var leaf;
+        if (what.indexOf("f:") === 0) {
+          leaf = { type: "asset_state", field: metric, operator: "==", value: "" };
+        } else if (isBooleanMetric(metric)) {
+          // A flag defaults to "is <the interesting state>" — an ordered
+          // comparator and an empty threshold would be invalid here.
+          leaf = { type: "asset_metric", metric: metric, aggregation: "latest", windowSec: 0, operator: "==", threshold: null };
+        } else {
+          leaf = { type: kindFn() === "host" ? "host_metric" : "asset_metric", metric: metric, aggregation: "latest", windowSec: 0, operator: ">=", threshold: null };
+        }
         row.outerHTML = tgLeafRowHtml(leaf, kindFn());
+      } else if (t.classList.contains("tgl-dim") && t.getAttribute("data-dim") === "stateProbeId") {
+        // The value control shows the CHOSEN probe's labels ("Alarm" / "OK"), so
+        // picking a different probe has to relabel it — otherwise the row would
+        // read with the previous probe's words. Re-rendered from the row's own
+        // collected leaf so nothing else typed on it is lost; the panel-level
+        // change handler re-applies the loaded dimension option lists after this.
+        var prow = t.closest(".scr-row");
+        if (prow) prow.outerHTML = tgLeafRowHtml(tgCollectLeaf(prow, kindFn()), kindFn());
       }
       onChange();
     });
@@ -1891,6 +2011,16 @@ async function openAutomationWizard(existing) {
       if (!res.supported) { box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">' + escapeHtml(res.note || "Not previewable.") + '</p>'; return; }
       var meeting = (res.matches || []).filter(function (m) { return m.meets; });
       var composite = (res.matches || []).some(function (m) { return Array.isArray(m.leaves); });
+      // A state probe's reading is 0/1; show the probe's own word for it, since a
+      // column of bare 1s and 0s is exactly what this framework exists to avoid.
+      var tr0 = draft.trigger || {};
+      var flagPreview = tr0.type === "asset_metric" && isBooleanMetric(tr0.metric);
+      function previewValue(v) {
+        if (v == null) return "n/a";
+        if (!flagPreview) return String(v);
+        var m2 = stateMapOf(tr0.dimensionFilter || {});
+        return Number(v) === 1 ? m2.trueLabel : Number(v) === 0 ? m2.falseLabel : String(v);
+      }
       var rowsHtml = (res.matches || []).slice(0, 20).map(function (m) {
         var statusCell = m.meets ? '<span style="color:var(--color-danger)">would fire</span>' : m.inDeadBand ? '<span style="color:var(--color-warning,#d97706)">dead band</span>' : '<span style="color:var(--color-text-tertiary)">no</span>';
         if (composite) {
@@ -1903,7 +2033,7 @@ async function openAutomationWizard(existing) {
           }).join("<br>");
           return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "host") + '</td><td style="font-size:0.78rem">' + leafLines + '</td><td>' + statusCell + '</td></tr>';
         }
-        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "host") + '</td><td>' + escapeHtml(m.dimension || "") + '</td><td>' + escapeHtml(m.value == null ? "n/a" : String(m.value)) + '</td><td>' + statusCell + '</td></tr>';
+        return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "host") + '</td><td>' + escapeHtml(m.dimension || "") + '</td><td>' + escapeHtml(previewValue(m.value)) + '</td><td>' + statusCell + '</td></tr>';
       }).join("");
       var headHtml = composite
         ? '<tr><th>Asset</th><th>Conditions</th><th>Status</th></tr>'
@@ -1942,7 +2072,10 @@ async function openAutomationWizard(existing) {
     var reset = draft.reset;
     var isEC = tr.type === "event" || tr.type === "change";
     var isComposite = tr.type === "composite";
-    var numeric = tr.type === "asset_metric" || tr.type === "host_metric";
+    // A 0/1 flag has no dead band between "firing" and "clear", so the
+    // hysteresis control below would be meaningless on one — it resets when the
+    // flag flips back. (resetSentence makes the same exclusion.)
+    var numeric = (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
     var cooldownHtml = '<div class="form-group" style="margin-top:0.75rem"><label>Re-notify cooldown (minutes, optional)</label><input type="number" id="aw-cooldown-min" min="0" value="' + (draft.cooldownSec != null ? Math.round(draft.cooldownSec / 60) : "") + '" placeholder="blank = suppress repeats while active"></div>';
 
     if (isEC) {
@@ -3431,7 +3564,11 @@ async function openAutomationWizard(existing) {
     }
     draft.bandNotify = np;
   }
-  function bandsApplicable(tr) { return !!tr && (tr.type === "asset_metric" || tr.type === "host_metric"); }
+  // A 0/1 state metric is excluded: severity bands are a threshold ladder, and a
+  // flag has only two values (the server rejects them too — validateSeverityBands).
+  function bandsApplicable(tr) {
+    return !!tr && (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
+  }
   /** The bands as saved: per-tier actions + per-tier escalation only when the
    *  Actions step's per-severity toggle is on. The draft keeps them either way
    *  so toggling back restores them within the session. */

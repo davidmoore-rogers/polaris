@@ -85,6 +85,33 @@ describe("ruleInputSchema — severity bands", () => {
     }))).toThrow();
   });
 
+  it("rejects bands on a 0/1 state metric, naming the metric rather than the operator", () => {
+    // A flag has two values, so a threshold ladder can't mean anything. The
+    // message has to point at the metric: an operator who wrote ">= 1" on a
+    // state probe would otherwise be told to pick an ordered comparator and try
+    // again with the same broken idea.
+    expect(() => ruleInputSchema.parse(bandedRule({
+      trigger: {
+        type: "asset_metric", metric: "customStateValue", operator: ">=", threshold: 1,
+        dimensionFilter: { stateProbeId: "p1" },
+      },
+    }))).toThrow(/0\/1 state metric/);
+  });
+
+  it("accepts an unbanded state-metric rule", () => {
+    const parsed = ruleInputSchema.parse(bandedRule({
+      trigger: {
+        type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+        dimensionFilter: { stateProbeId: "p1", stateRowPattern: "PSU" },
+      },
+      severityBands: undefined,
+    }));
+    expect(parsed.trigger).toMatchObject({
+      metric: "customStateValue", operator: "==", threshold: 1,
+      dimensionFilter: { stateProbeId: "p1", stateRowPattern: "PSU" },
+    });
+  });
+
   it("accepts a per-tier sustained duration and leaves it absent when unset", () => {
     const parsed = ruleInputSchema.parse(bandedRule({
       trigger: { type: "asset_metric", metric: "probeLossPct", operator: ">", threshold: 5, forDurationSec: 1800 },

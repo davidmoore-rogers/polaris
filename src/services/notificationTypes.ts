@@ -210,8 +210,27 @@ export const ASSET_METRICS = [
   "hwSensorValue", "storageUsedPct", "storageUsedBytes", "storageDaysUntilFull",
   "ifInErrorRate", "ifOutErrorRate", "ifInBps", "ifOutBps",
   "sdwanLatencyMs", "sdwanJitterMs", "sdwanPacketLoss", "ipsecThroughputBps",
-  "customWidgetValue",
+  "customWidgetValue", "customStateValue",
 ] as const;
+
+/**
+ * Metrics whose readings are BOOLEAN (0/1) rather than a magnitude — see
+ * AssetStateSample / utils/stateProbes. They live in ASSET_METRICS because the
+ * engine's whole threshold/debounce/reset machine already does exactly the right
+ * thing on a 0/1 value compared with "==", and duplicating that as a third
+ * trigger type would mean a second copy of hysteresis, sustained-duration and
+ * per-dimension state.
+ *
+ * What they must NOT get is the numeric surfaces: severity bands (a strictly
+ * increasing threshold ladder over two possible values is meaningless), the
+ * chart's threshold shading, and the value/unit hints. Everything that offers
+ * those checks this set rather than testing metric names inline.
+ */
+export const BOOLEAN_METRICS = ["customStateValue"] as const;
+
+export function isBooleanMetric(metric: string | null | undefined): boolean {
+  return !!metric && (BOOLEAN_METRICS as readonly string[]).includes(metric);
+}
 
 // ─── Asset-state trigger ────────────────────────────────────────────────────
 // Current Asset (or current-state child row) field conditions.
@@ -262,6 +281,15 @@ const dimensionFilterSchema = z
     tunnelName: z.string().max(200).optional(),
     widgetId: z.string().max(200).optional(),
     processNamePattern: z.string().max(200).optional(),
+    // ── State probes (customStateValue) ──────────────────────────────────
+    // Which probe (a ManufacturerCustomWidget id — an exact match, since it's a
+    // registry key rather than a device-reported string) and which of its rows.
+    stateProbeId: z.string().max(200).optional(),
+    // Substring-matched against the row's resolved LABEL, like every other
+    // *Pattern dimension: blank = every row the probe reports, each alerting on
+    // its own. Matching on the label rather than the OID index is the point of
+    // resolving labels at all — an operator knows "PSU 2", not ".14".
+    stateRowPattern: z.string().max(200).optional(),
   })
   .strict()
   .optional();
@@ -1360,6 +1388,15 @@ function validateSeverityBands(
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands"], message: "severity bands apply only to numeric metric triggers (asset metric / Polaris host)" });
     return;
   }
+  // A boolean metric has exactly two possible values, so a "strictly increasing
+  // threshold ladder" over it can't mean anything — caught explicitly (rather
+  // than falling through to the ordered-operator message below) because an
+  // operator who wrote `>= 1` on a state flag needs to be told the metric is the
+  // problem, not the comparator.
+  if (t.type === "asset_metric" && isBooleanMetric(t.metric)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands"], message: "severity bands don't apply to a 0/1 state metric — it has only two values; use separate automations for different severities" });
+    return;
+  }
   if (t.operator === "==" || t.operator === "!=") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["severityBands"], message: "severity bands need an ordered operator (>, >=, <, <=)" });
     return;
@@ -1782,6 +1819,11 @@ export const METRIC_META: Record<string, { label: string; unit: string }> = {
   sdwanPacketLoss: { label: "SD-WAN packet loss", unit: "%" },
   ipsecThroughputBps: { label: "IPsec throughput", unit: "bps" },
   customWidgetValue: { label: "Custom widget value", unit: "" },
+  // 0/1 reading from an operator-defined state probe (Manufacturer Profile →
+  // state widget). Compared with "==" against 1 (the probe's true state) or 0;
+  // the builder renders the probe's own labels ("Alarm" / "OK") instead of the
+  // numbers, and there's no unit because there's no magnitude.
+  customStateValue: { label: "Device state flag (0/1)", unit: "" },
   // host_metric
   memUsedPct: { label: "Memory utilization", unit: "%" },
   loadAvg1: { label: "Load average (1m)", unit: "" },
@@ -1853,6 +1895,7 @@ export const METRIC_DIMENSIONS: Record<string, string[]> = {
   sdwanPacketLoss: ["healthCheck", "link"],
   ipsecThroughputBps: ["tunnelName"],
   customWidgetValue: ["widgetId"],
+  customStateValue: ["stateProbeId", "stateRowPattern"],
 };
 
 /**
@@ -1874,6 +1917,10 @@ export function buildSchemaCatalog() {
     fieldMeta: FIELD_META,
     changeTypeMeta: CHANGE_TYPE_META,
     metricDimensions: METRIC_DIMENSIONS,
+    // Metrics whose reading is a 0/1 flag, so the builder renders a state picker
+    // instead of a threshold box and hides the numeric-only surfaces (severity
+    // bands, hysteresis, unit hints).
+    booleanMetrics: BOOLEAN_METRICS,
     // hwSensorValue's unit depends on the sensor class in the dimension filter
     // (metricMeta carries the "(sensor unit)" placeholder). Class → display
     // unit, sourced from the same map the sample classifier writes with.
@@ -1980,6 +2027,10 @@ export function buildSchemaCatalog() {
       tunnelName: "on tunnel {value}",
       widgetId: "for widget {value}",
       processNamePattern: "for processes matching {value}",
+      // The probe id is resolved to its NAME by the wizard before the phrase is
+      // rendered (a UUID in a sentence is noise); this is the fallback wording.
+      stateProbeId: "for probe {value}",
+      stateRowPattern: "on rows matching {value}",
     },
     // ── Scope condition-tree vocabulary (the device-filter builder) ────────
     scopeCondition: {

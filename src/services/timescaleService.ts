@@ -63,12 +63,18 @@ export const ROLLUP_TABLES = [
  * tiered detail→hourly→daily rollup model (no rollup companions, not a
  * RETENTION_ENTITY). They get hypertable conversion + compression + drop_chunks
  * pruning like the others, but their retention rides an umbrella window rather
- * than a per-entity tier. `asset_custom_widget_samples` is the only member:
- * one row per ManufacturerCustomWidget probe, pruned on the system-info
- * umbrella window by pruneSystemInfoSamples.
+ * than a per-entity tier. `asset_custom_widget_samples` (one row per
+ * ManufacturerCustomWidget probe) and `asset_state_samples` (one 0/1 row per
+ * state probe row) are both pruned on the system-info umbrella window by
+ * pruneSystemInfoSamples; the log tables ride the process window.
+ *
+ * `asset_state_samples` has no rollup companions on purpose: averaging a boolean
+ * yields a duty cycle rather than a state, so there is nothing meaningful for
+ * the rollup writer to compute.
  */
 export const STANDALONE_SAMPLE_TABLES = [
   "asset_custom_widget_samples",
+  "asset_state_samples",
   "asset_process_log_samples",
   "asset_service_log_samples",
 ] as const;

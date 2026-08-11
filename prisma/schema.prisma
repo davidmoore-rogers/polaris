@@ -194,6 +194,23 @@ model Reservation {
   staleSnoozedUntil DateTime?
   staleIgnored      Boolean   @default(false)
 
+  // How the FortiGate actually hands this address out, kept SEPARATE from
+  // sourceType on purpose. sourceType answers "who owns this IP" (a managed
+  // FortiSwitch/FortiAP, a VIP, an operator); dhcpBinding answers "does the
+  // gate have a MAC→IP binding for it". Conflating the two is what made a
+  // FortiLink-leased AP render as an authoritative reservation while the gate
+  // reported "Not Reserved" — the row was authoritative about ownership and
+  // silent about binding.
+  //   null           — unknown / not applicable (nothing observed it in DHCP)
+  //   "lease"        — the gate leases it dynamically; no reserved-address entry
+  //   "reservation"  — a real MAC→IP reserved-address entry exists on the gate
+  // Written by the Phase 5 DHCP pass for fortiswitch/fortinap rows (the only
+  // source types whose binding state was previously undiscoverable). A "lease"
+  // row is takeover-able by an operator Reserve exactly like a dhcp_lease row;
+  // "reservation" and null still 409. Deliberately NOT paired with expiresAt on
+  // these rows — that would hand them to expireReservations and churn them.
+  dhcpBinding String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1777,6 +1794,47 @@ model AssetCustomWidgetSample {
   @@map("asset_custom_widget_samples")
 }
 
+// Time-series for STATE PROBES — the 0/1 sibling of AssetCustomWidgetSample.
+// One row per (asset, probe, table row) per scrape, already normalized to a
+// boolean by the probe's declared stateMap (src/utils/stateProbes.ts).
+//
+// Why its own table rather than another `kind` on AssetCustomWidgetSample: the
+// interesting dimension here is the table ROW (one sensor, one PSU), each of
+// which alerts independently and needs its own firing state. Real columns make
+// that an indexed `(assetId, probeId, timestamp)` read for the engine and a
+// plain GROUP BY for the builder's row picker, instead of unpacking a JSON array
+// per sample on every 60s tick. Values are pre-normalized so the engine only
+// ever compares 0 or 1 and cannot be wrong about a vendor's polarity.
+//
+// `value` is 0 or 1 and NEVER null — an unreadable or absent row is DROPPED by
+// the collector, because 0 is a positive claim of health that would clear an
+// active alert (see evaluateStateMap's contract). Detail-only, no rollups
+// (averaging a boolean is meaningless); managed as a STANDALONE TimescaleDB
+// hypertable and pruned on the system-info umbrella window. No FK to Asset —
+// the hypertable cascade-DELETE invariant (migration 20260615000000).
+model AssetStateSample {
+  id        String   @default(uuid())
+  assetId   String
+  timestamp DateTime @default(now())
+  probeId   String   // ManufacturerCustomWidget.id; NOT an FK, same rationale as
+                     // AssetCustomWidgetSample.widgetId
+  // OID index suffix the row came from ("" for a scalar probe). The STABLE
+  // identity — it's what the engine keys firing state on, so a row keeps its
+  // alert across a label change.
+  rowKey    String
+  // Resolved display name (from the probe's labelSymbol walk), falling back to
+  // rowKey. Snapshotted per sample so an alert can name the row.
+  rowLabel  String
+  value     Int      // 0 | 1
+  rawValue  String?  // what the device actually returned, for the asset tab
+
+  @@id([id, timestamp])
+  @@index([assetId, timestamp])
+  @@index([assetId, probeId, timestamp])
+  @@index([probeId])
+  @@map("asset_state_samples")
+}
+
 // Per-mountpoint storage snapshot, written alongside interface samples.
 model AssetStorageSample {
   id         String   @default(uuid())
@@ -2802,11 +2860,26 @@ model ManufacturerCustomWidget {
   mibId          String
   mib            MibFile  @relation("ManufacturerCustomWidgetMib", fields: [mibId], references: [id])
   type           String   @default("scalar") // "scalar" | "table" (auto-detected; operator can override)
-  widgetType     String   // "gauge" | "line" | "table"
+  widgetType     String   // "gauge" | "line" | "table" | "state"
   transform      String?
   displayOptions Json     @default("{}")
   order          Int      @default(0)
   modelPattern   String?  // optional per-model gating
+  // ── State probes (widgetType = "state") ───────────────────────────────────
+  // A status-shaped OID (alarm bit, PSU present, fan-tray OK) rather than a
+  // gauge. `stateMap` declares how a raw reading becomes true/false and what to
+  // call each side — see src/utils/stateProbes.ts, which is the single source of
+  // truth for the evaluation. The mapping is DECLARED rather than assumed
+  // because vendors disagree on polarity (TruthValue's true(1)/false(2) inverts
+  // a plain alarm bit) and some publish strings, so "value >= 1" is wrong about
+  // as often as it's right. Null on gauge/line/table widgets.
+  stateMap       Json?
+  // Optional sibling MIB symbol supplying each table row's NAME, joined to the
+  // value walk on the shared OID index suffix (fgHwSensorEntName beside
+  // fgHwSensorEntAlarm). Without it a table probe's rows are only nameable by
+  // bare index, which differs per model — so an alert would read "row .14 is in
+  // Alarm". Ignored on scalar probes.
+  labelSymbol    String?
   createdBy      String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
