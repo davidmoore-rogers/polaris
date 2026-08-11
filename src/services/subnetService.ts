@@ -784,6 +784,11 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
     macAddress: r.macAddress,
     status: r.status,
     sourceType: r.sourceType,
+    // How the gate hands the address out, orthogonal to sourceType (which says
+    // who owns it). The panel needs it to tell a managed AP/switch row the gate
+    // merely LEASES — offer Reserve, label it as a lease — from one backed by a
+    // real MAC→IP binding, which stays authoritative.
+    dhcpBinding: r.dhcpBinding,
     notes: r.notes,
     expiresAt: r.expiresAt,
     createdBy: r.createdBy,

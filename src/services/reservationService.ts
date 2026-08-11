@@ -6,6 +6,7 @@ import type { ReservationStatus } from "../generated/prisma/client.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { ipInCidr, isValidIpAddress, enumerateSubnetIps, detectIpVersion } from "../utils/cidr.js";
+import { isLeaseBackedInfraRow } from "../utils/infraDhcpBinding.js";
 import {
   pushReservation,
   unpushReservation,
@@ -189,27 +190,63 @@ async function releaseSupersededDhcpLeaseAt(
   ipAddress: string,
   actor: string | null,
 ): Promise<void> {
-  const lease = await prisma.reservation.findFirst({
+  const row = await prisma.reservation.findFirst({
     where: {
       subnetId,
       ipAddress,
       status: "active",
-      sourceType: "dhcp_lease" as any,
+      OR: [
+        { sourceType: "dhcp_lease" as any },
+        // Lease-backed managed FortiSwitch/FortiAP rows are superseded the same
+        // way. Note what releaseReservation does NOT do for one of these: it has
+        // no push pointers and its sourceType isn't dhcp_reservation, so neither
+        // unpush branch fires, and the gate-side lease-expiry branch keys on
+        // dhcp_lease so that doesn't either. The release is therefore a pure DB
+        // release + audit Event — which is the semantic we want. Expiring the
+        // AP's lease here would bounce its management address, whereas the
+        // operator's intent in reserving it is "same address, now bound".
+        { sourceType: { in: ["fortiswitch", "fortinap"] as any }, dhcpBinding: "lease" },
+      ],
     },
     select: { id: true },
   });
-  if (!lease) return;
-  await releaseReservation(lease.id, actor ?? undefined);
+  if (!row) return;
+  await releaseReservation(row.id, actor ?? undefined);
+}
+
+/**
+ * Is an active row at the target IP something a create may silently take over?
+ *
+ * The observational set: `dns_resolved` fallback markers, observed `dhcp_lease`
+ * rows, and — added with `Reservation.dhcpBinding` — a managed
+ * FortiSwitch/FortiAP row the gate only LEASES. That last case is what made a
+ * FortiLink-addressed AP unreservable: Phase 3 records every managed device's
+ * address as an authoritative fortiswitch/fortinap row even when the address came
+ * out of the lease table, so the row asserted ownership while the FortiGate
+ * reported "Not Reserved" and this check refused the create.
+ *
+ * An infra row whose dhcpBinding is `"reservation"` (a real MAC→IP binding
+ * exists) or NULL (never observed in DHCP — a static address, or not currently
+ * leasing) still 409s. Guessing "free" from an absence of evidence would hand an
+ * operator an address a device is actively using.
+ *
+ * Single source of truth for both halves of the takeover: this predicate gates
+ * the 409, and releaseSupersededDhcpLeaseAt releases whatever it admits.
+ */
+function isSupersedableByCreate(row: {
+  sourceType: string;
+  dhcpBinding?: string | null;
+}): boolean {
+  if (row.sourceType === "dns_resolved" || row.sourceType === "dhcp_lease") return true;
+  return isLeaseBackedInfraRow(row);
 }
 
 // Phase 2 of the create flow: validate the requested target and 409 on
-// collision. dns_resolved rows are observational fallback markers and
-// dhcp_lease rows are observed device leases — neither is a reservation a
-// user "owns". A manual create at the same IP is an explicit operator claim
-// that should take over silently, so both are excluded from the collision
-// check here and released inline by the persist phase before the transaction
-// commits. dhcp_reservation / vip / interface / fortiswitch / fortinap /
-// manual rows are authoritative and still 409.
+// collision. See isSupersedableByCreate above for which rows a create may take
+// over silently — they're excluded from the collision check here and released
+// inline by the persist phase before the transaction commits. dhcp_reservation /
+// vip / interface / manual rows, and infra rows that aren't lease-backed, are
+// authoritative and still 409.
 async function assertReservationTargetAvailable(
   input: CreateReservationInput,
   subnet: { cidr: string },
@@ -224,15 +261,18 @@ async function assertReservationTargetAvailable(
         `IP ${input.ipAddress} is not within subnet ${subnet.cidr}`
       );
 
+    // Fetched WITHOUT a sourceType filter and judged in code: the takeover set
+    // is no longer expressible as one `NOT in` list, because whether a
+    // fortiswitch/fortinap row is claimable depends on its dhcpBinding.
     const existing = await prisma.reservation.findFirst({
       where: {
         subnetId: input.subnetId,
         ipAddress: input.ipAddress,
         status: "active",
-        NOT: { sourceType: { in: ["dns_resolved", "dhcp_lease"] as any } },
       },
+      select: { id: true, sourceType: true, dhcpBinding: true },
     });
-    if (existing)
+    if (existing && !isSupersedableByCreate(existing))
       throw new AppError(
         409,
         `IP ${input.ipAddress} is already actively reserved (reservation: ${existing.id})`

@@ -233,6 +233,21 @@ function _renderPanelHeader(data) {
   }
 }
 
+// A managed FortiSwitch/FortiAP row whose address the gate only LEASES — no
+// MAC→IP reserved-address entry exists on the device. Discovery creates a
+// fortiswitch/fortinap row for every managed device, including ones whose
+// address it read out of the lease table, so without this distinction those rows
+// rendered as authoritative reservations while the FortiGate's own DHCP page
+// said "Not Reserved". `dhcpBinding === "reservation"` (a real binding) and null
+// (never observed in DHCP — static, or not currently leasing) both stay
+// authoritative; server-side `isSupersedableByCreate` draws the same line, so
+// offering Reserve here can't produce a 409.
+function _isLeaseBackedInfra(r) {
+  if (!r || r.status !== "active") return false;
+  if (r.sourceType !== "fortiswitch" && r.sourceType !== "fortinap") return false;
+  return r.dhcpBinding === "lease";
+}
+
 function _renderIpList(data) {
   var body = document.getElementById("ip-panel-body");
 
@@ -307,6 +322,15 @@ function _renderIpList(data) {
       dotClass = "ip-dot-dhcp-lease";
       statusLabel = "DNS Resolved";
       statusTooltip = "Auto-discovered from asset inventory; no DHCP record exists yet.";
+    } else if (_isLeaseBackedInfra(r)) {
+      // Same dot as a lease, because that's what the address is.
+      dotClass = "ip-dot-dhcp-lease";
+      statusLabel = r.sourceType === "fortinap" ? "FortiAP (lease)" : "FortiSwitch (lease)";
+      statusTooltip = "This address is held by a managed "
+        + (r.sourceType === "fortinap" ? "FortiAP" : "FortiSwitch")
+        + " via a dynamic DHCP lease — the FortiGate has no MAC-to-IP reservation for it, "
+        + "so it reports the address as \"Not Reserved\". Reserve to claim it in Polaris"
+        + (pushEligible ? " and write the reservation to the gate." : ".");
     } else if (r && r.status === "active") {
       dotClass = "ip-dot-active";
       statusLabel = "Active";
@@ -410,6 +434,16 @@ function _renderIpList(data) {
         ? '<button class="btn btn-sm ' + reserveBtnClass + ' ip-dns-reserve-btn" data-ip="' + escapeHtml(ip.address) + '" data-mac="' + escapeHtml(macRaw || "") + '" data-hostname="' + escapeHtml(r.hostname || "") + '" title="' + reserveTitle + '">Reserve</button>'
         : '';
       actions = dnsReserveBtn + assetBtn + editBtn;
+    } else if (_isLeaseBackedInfra(r)) {
+      // Reserve reuses the lease take-over button — same server path, which
+      // releases this row and creates the operator's claim in its place.
+      // No Release, for the dns_resolved reason: discovery re-creates the row
+      // for the managed device on the next cycle, so the action would look like
+      // it failed. Edit remains for hostname/owner/notes metadata.
+      var infraReserveBtn = canReserveIps()
+        ? '<button class="btn btn-sm ' + reserveBtnClass + ' ip-lease-reserve-btn" data-ip="' + escapeHtml(ip.address) + '" data-rid="' + escapeHtml(r.id) + '" data-mac="' + escapeHtml(macRaw || "") + '" data-hostname="' + escapeHtml(r.hostname || "") + '" title="' + reserveTitle + '">Reserve</button>'
+        : '';
+      actions = infraReserveBtn + assetBtn + editBtn;
     } else if (r && r.status === "active") {
       actions = retryBtn + freeBtn + assetBtn + editBtn;
     } else if (r && r.status === "expired") {
@@ -947,10 +981,30 @@ function _openLeaseReserveModal(subnetId, ipAddress, leaseId, prefillMac, prefil
     ? 'Required &mdash; this network is configured to push reservations to FortiGate "' + escapeHtml(fortigateDevice) + '". DHCP reservations are MAC&rarr;IP.'
     : 'Optional unless this network\'s integration pushes reservations to a FortiGate.';
 
+  // Same modal serves plain DHCP leases and lease-backed managed FortiAP/
+  // FortiSwitch rows; the sentence explaining what's about to be superseded
+  // differs, since the latter isn't an anonymous client lease and discovery will
+  // re-create its device row on the next cycle.
+  var infraRow = null;
+  if (_ipPanelData && Array.isArray(_ipPanelData.ips)) {
+    for (var ii = 0; ii < _ipPanelData.ips.length; ii++) {
+      if (_ipPanelData.ips[ii].address === ipAddress) {
+        if (_isLeaseBackedInfra(_ipPanelData.ips[ii].reservation)) infraRow = _ipPanelData.ips[ii].reservation;
+        break;
+      }
+    }
+  }
+  var supersedeHint = infraRow
+    ? 'This address is currently held by a managed '
+      + (infraRow.sourceType === "fortinap" ? "FortiAP" : "FortiSwitch")
+      + ' via a dynamic lease. That discovered row will be replaced with your reservation; '
+      + 'the device keeps its current lease either way.'
+    : 'The existing DHCP lease will be released and replaced with a manual reservation.';
+
   var body =
     '<div class="form-group"><label>Network</label><input type="text" value="' + subnetLabel + '" disabled></div>' +
     '<div class="form-group"><label>IP Address</label><input type="text" value="' + escapeHtml(ipAddress) + '" disabled></div>' +
-    '<p class="hint" style="margin-bottom:12px">The existing DHCP lease will be released and replaced with a manual reservation.</p>' +
+    '<p class="hint" style="margin-bottom:12px">' + supersedeHint + '</p>' +
     '<div class="form-group"><label>Hostname</label><input type="text" id="f-hostname" value="' + escapeHtml(prefillHostname || "") + '" placeholder="e.g. web-server-01"></div>' +
     _macFieldMarkup(macLabel, macHint, ' value="' + escapeHtml(prefillMac || "") + '"') +
     '<div class="form-group"><label>Owner</label><input type="text" id="f-owner" placeholder="e.g. platform-team"></div>' +

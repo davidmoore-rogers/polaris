@@ -23,6 +23,11 @@ import * as vcenter from "../vcenterService.js";
 import * as azureArc from "../azureArcService.js";
 import { ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
 import { normalizeMacsDistinct, macHexKeyOrNull } from "../../utils/mac.js";
+import {
+  isInfraSourceType,
+  decideInfraDhcpBinding,
+  reservationBelongsToInfraDevice,
+} from "../../utils/infraDhcpBinding.js";
 import { isFortinetIntegrationType } from "../../utils/pollingCompatibility.js";
 import { ENTRA_ASSET_TAG_PREFIX, AD_ASSET_TAG_PREFIX, AD_GUID_TAG_PREFIX, SID_TAG_PREFIX } from "../../utils/assetSourceTags.js";
 import type { DiscoveryResult, DiscoveryProgressCallback } from "../fortimanagerService.js";
@@ -3405,7 +3410,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         const key = reservationKey(matchingSubnet.id, sw.ipAddress);
         const existingRes = activeResMap.get(key);
         if (existingRes) {
-          if (existingRes.sourceType === "manual") {
+          // A manual row at this switch's own address is only a conflict when it
+          // belongs to something ELSE. Once an operator reserves a managed
+          // switch's lease-backed IP (which is the point of making those rows
+          // takeover-able), this is exactly what the next cycle finds — so
+          // without the identity check the first effect of that feature would be
+          // a conflict card per reserved switch, re-raised as the 30-day
+          // upsertConflict guard aged out.
+          if (
+            existingRes.sourceType === "manual" &&
+            !reservationBelongsToInfraDevice(existingRes, { mac: normalizedSwMac, name: sw.name })
+          ) {
             await upsertConflict(existingRes.id, integrationId, { hostname: sw.name || null, owner: "network-team", projectRef: projectRefLabel, notes: swNotes, sourceType: "fortiswitch" }, existingRes);
           }
         } else {
@@ -3677,7 +3692,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         const key = reservationKey(matchingSubnet.id, resolvedIp);
         const existingRes = activeResMap.get(key);
         if (existingRes) {
-          if (existingRes.sourceType === "manual") {
+          // Same identity check as the FortiSwitch path above — an operator's
+          // reservation for THIS AP is not a conflict with this AP.
+          if (
+            existingRes.sourceType === "manual" &&
+            !reservationBelongsToInfraDevice(existingRes, { mac: normalizedMac, name: ap.name })
+          ) {
             await upsertConflict(existingRes.id, integrationId, { hostname: ap.name || null, owner: "network-team", projectRef: projectRefLabel, notes: `FortiAP managed by FortiGate ${ap.device}`, sourceType: "fortinap" }, existingRes);
           }
         } else {
@@ -3934,6 +3954,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     pathExistingVipMacFill: 0,
     pathExistingPendingAdopt: 0,
     pathExistingPendingCollide: 0,
+    // infraBinding* = an existing fortiswitch/fortinap row (Phase 3a/3b created
+    // it for a managed switch/AP) that this DHCP entry tells us the binding
+    // state of. Before these two existed the source types matched NO branch and
+    // fell through with no counter at all, which is why the "path-* counters sum
+    // to entriesTotal" property below was quietly false for every managed
+    // switch/AP on the gate.
+    pathExistingInfraBindingChange: 0,
+    pathExistingInfraNoChange: 0,
     pathNewCreate: 0,
     pathNewCreateAfterRetry: 0,
     pathNewCreateFailed: 0,
@@ -4276,6 +4304,44 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           } else {
             phase5Stats.pathExistingDhcpNoChange++;
           }
+        } else if (isInfraSourceType(existingRes.sourceType)) {
+          // Managed FortiSwitch/FortiAP row (Phase 3a/3b created it, and the IP
+          // it claimed may have come from this very lease table via the hostname
+          // fallback). Phase 5 is the ONLY pass that can see whether the gate
+          // leases this address or genuinely reserves it, and before this branch
+          // existed it dropped that fact on the floor every cycle — leaving a
+          // row that reads authoritative in Polaris while the FortiGate's DHCP
+          // page says "Not Reserved", with no Reserve action to fix it.
+          //
+          // sourceType is deliberately NOT flipped: it answers "who owns this
+          // IP" and is still correct. Only the orthogonal binding fact is
+          // recorded. See utils/infraDhcpBinding.ts for why expiresAt is never
+          // stamped here and why the MAC comes from the lease entry only.
+          const patch = decideInfraDhcpBinding(existingRes, entry);
+          if (patch) {
+            const update: Record<string, unknown> = {};
+            if (patch.dhcpBinding) update.dhcpBinding = patch.dhcpBinding;
+            if (patch.macAddress) update.macAddress = patch.macAddress;
+            if (patch.lastSeenLeased) {
+              update.lastSeenLeased = new Date();
+              update.staleNotifiedAt = null;
+              update.staleSnoozedUntil = null;
+            }
+            phase5Stats.pathExistingInfraBindingChange++;
+            await prisma.reservation.update({
+              where: { id: existingRes.id },
+              data: update,
+            });
+            phase5Stats.writesReservationUpdate++;
+            if (patch.dhcpBinding) existingRes.dhcpBinding = patch.dhcpBinding;
+            if (patch.macAddress) existingRes.macAddress = patch.macAddress;
+          } else {
+            // Steady state — the overwhelmingly common case once a fleet has
+            // been through one cycle. No write: this runs per DHCP entry per
+            // cycle and at 2000 assets an unconditional update here would be
+            // the same mistake the bulked staleness bump above exists to avoid.
+            phase5Stats.pathExistingInfraNoChange++;
+          }
         }
         continue;
       }
@@ -4410,6 +4476,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       `polarisEcho=${phase5Stats.pathExistingManualPolarisEcho}, manualConflict=${phase5Stats.pathExistingManualConflictOnly}, ` +
       `vipSucc=${phase5Stats.pathExistingVipSuccession}, vipMacFill=${phase5Stats.pathExistingVipMacFill}, ` +
       `pendingAdopt=${phase5Stats.pathExistingPendingAdopt}, pendingCollide=${phase5Stats.pathExistingPendingCollide}, ` +
+      `infraBinding=${phase5Stats.pathExistingInfraBindingChange}, infraNoChange=${phase5Stats.pathExistingInfraNoChange}, ` +
       `newCreate=${phase5Stats.pathNewCreate}, newCreateRetry=${phase5Stats.pathNewCreateAfterRetry}, ` +
       `newCreateFail=${phase5Stats.pathNewCreateFailed}, skipNoIp=${phase5Stats.skippedNoIp}, ` +
       `skipNoSubnet=${phase5Stats.skippedNoSubnet}, skipCollision=${phase5Stats.skippedCollision})`,

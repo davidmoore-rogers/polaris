@@ -837,6 +837,36 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ---
 
+## cross-cutting/fortinet-infra-dhcp-binding
+
+**What it is:** `Reservation.dhcpBinding` (`null` | `"lease"` | `"reservation"`) — whether the FortiGate actually has a MAC→IP reserved-address entry for an address, held SEPARATE from `sourceType` (which says who owns it). Exists because Phase 3a/3b create a `fortiswitch`/`fortinap` reservation for every managed switch/AP — including ones whose address they read out of the gate's own lease table via the `dhcpByHostname` fallback — so a dynamically-leased AP presented as an authoritative reservation with no Reserve action while the gate reported it `Not Reserved`. See business rule 23.
+
+**Writers** (files that mutate or emit this state):
+- `src/utils/infraDhcpBinding.ts` — the pure decisions: `decideInfraDhcpBinding` (patch-or-null), `isLeaseBackedInfraRow` (claimable?), `reservationBelongsToInfraDevice` (is this row this device's?), `isInfraSourceType`. No Prisma, no device I/O; fully unit-tested in `tests/unit/infraDhcpBinding.test.ts`.
+- `src/services/discovery/discoveryEngine.ts` (`syncDhcpSubnets`, Phase 5 infra branch) — the ONLY writer of `dhcpBinding`. Applies `decideInfraDhcpBinding`'s patch to an existing fortiswitch/fortinap row, writing only when it returns non-null, and counts `pathExistingInfraBindingChange` / `pathExistingInfraNoChange` (before this branch the source types matched nothing and fell through with no counter, so the phase summary's "path-* counters sum to entriesTotal" was false for every managed switch/AP).
+- `src/services/discovery/discoveryEngine.ts` (Phase 3a/3b) — gates the `manual`-row conflict raise on `!reservationBelongsToInfraDevice(...)`, so an operator's own reservation for an AP isn't reported as colliding with that AP.
+- `src/services/reservationService.ts` — `isSupersedableByCreate` admits lease-backed infra rows; `releaseSupersededDhcpLeaseAt` releases whichever row it admitted.
+
+**Readers** (files that consume it):
+- `src/services/subnetService.ts` (`toReservationDto`) — surfaces `dhcpBinding` on the IP-panel payload.
+- `public/js/ip-panel.js` (`_isLeaseBackedInfra`) — "FortiAP (lease)" / "FortiSwitch (lease)" pill + tooltip, the Reserve button (reusing `ip-lease-reserve-btn`), and the supersede wording in `_openLeaseReserveModal`.
+- `public/js/mobile/subnet-detail.js` — same predicate inline for the mobile row actions.
+
+**Invariants:**
+- `sourceType` is NEVER flipped by this branch. Ownership is a separate fact, and Phase 5b's sweep exclusion + Phase 2b decommission semantics both key on it.
+- `expiresAt` is NEVER stamped on an infra row. A lease carries an expiry; stamping it hands the row to `expireReservations`, which would expire a live AP's row on the gate's lease clock and let discovery re-create it — churn plus windows where the device reads as unreserved.
+- `macAddress` is fill-only and comes from the DHCP entry, never from `ap.baseMac` / `sw.baseMac`. Only the MAC the gate saw requesting the address can be bound by a future MAC→IP push; a base MAC that isn't the DHCP client MAC yields an entry that looks correct on both sides and never binds.
+- `null` is NOT "free". It means no DHCP data has ever been observed for the address (a statically-addressed AP, or one not currently leasing), and such rows stay authoritative.
+- Releasing a lease-backed infra row must stay a pure DB release. It has no push pointers and its `sourceType` isn't `dhcp_reservation`, so neither unpush branch fires, and the gate-lease-expiry branch keys on `dhcp_lease` — claiming an AP's address must not bounce its lease.
+- The client predicates in `ip-panel.js` / `mobile/subnet-detail.js` must stay in lockstep with `isSupersedableByCreate`; a Reserve button the server would 409 is worse than no button.
+
+**Change checklist:**
+- [ ] Adding a source type that discovery auto-creates for a device? Decide whether it needs a binding fact too, and whether `INFRA_SOURCE_TYPES` should grow.
+- [ ] Touching the Phase 5 existing-row chain? Keep the infra branch BEFORE the fall-through `continue`, and keep exactly one path counter per processed entry.
+- [ ] Widening the takeover set? Change `isSupersedableByCreate` only, then mirror it in both client predicates.
+
+---
+
 ## cross-cutting/dns-resolved-reservations
 
 **What it is:** Auto-created Reservation rows with `sourceType="dns_resolved"` + `createdBy="system:dns-resolved"` for every Asset whose primary `ipAddress` falls inside a non-deprecated Subnet and isn't already covered by an authoritative reservation. Closes the gap where an AD / Entra / Intune / manually-typed asset's IP is invisible in the Networks IP panel and could be handed out twice. Observational only — never pushes to FortiGates, never raises Conflict rows, silently defers to manual / dhcp_* / interface_ip / vip / fortinet rows.
@@ -847,7 +877,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/jobs/reconcileDnsResolvedReservations.ts` — 30-min tick + 30s post-boot kick. Sweeps every asset with `ipAddress != null` in batches of 25 via Promise.all.
 - `src/services/discovery/discoveryEngine.ts` (`syncDhcpSubnets`) — `activeResMap` construction EXCLUDES `sourceType="dns_resolved"` rows so discovery treats the IP as free; the five `prisma.reservation.create` callsites (fortiswitch / fortinap / vip / interface_ip / dhcp_*) each call `releaseDnsResolvedAt(subnetId, ip)` inline before creating. The Phase 5 dhcp_* callsite additionally wraps its create in a P2002-aware retry: a fire-and-forget reconcile queued from an earlier asset write can insert a fresh dns_resolved row between the inline release and the create, so on P2002 the code refetches the colliding active row and — if it's dns_resolved — `prisma.reservation.delete` the row and retries the create once. Other sourceTypes on the collider are treated as genuine concurrent-write collisions (concurrent integration, manual reservation typed during sync) and logged + skipped.
 - `src/api/routes/integrations.ts` (`registerFortinetHost`) — findFirst excludes dns_resolved + same inline release before create.
-- `src/services/reservationService.ts` (`createReservation`) — manual create's existing-active-reservation check excludes BOTH `dns_resolved` AND `dhcp_lease` (an observed lease is not a user-owned reservation); calls `releaseDnsResolvedAt` AND `releaseSupersededDhcpLeaseAt` inline before the `$transaction`. `releaseSupersededDhcpLeaseAt` finds the active `dhcp_lease` at the IP and **delegates to `releaseReservation`**, so the device-side lease expiry on push-enabled subnets (`releaseDhcpLease`), the released-slot dedup, and the audit Event all match the old client `release+create` flow exactly — only the route ownership gate is dropped. This is what makes the IP-panel "Reserve" take-over of a lease a plain create gated only on `reservations:write` — the client no longer issues a separate ownership-gated DELETE of the lease (desktop `_openLeaseReserveModal` + mobile reserve sheet in `subnet-detail.js`).
+- `src/services/reservationService.ts` (`createReservation`) — manual create's existing-active-reservation check excludes `dns_resolved`, `dhcp_lease`, AND lease-backed `fortiswitch`/`fortinap` rows (`dhcpBinding === "lease"`; see cross-cutting/fortinet-infra-dhcp-binding). The three-way takeover set has ONE definition — `isSupersedableByCreate` — read by both the 409 check and `releaseSupersededDhcpLeaseAt`; because the infra half depends on a column value rather than the source type alone, the check fetches the row and judges it in code instead of filtering with `NOT in`. Calls `releaseDnsResolvedAt` AND `releaseSupersededDhcpLeaseAt` inline before the `$transaction`. `releaseSupersededDhcpLeaseAt` finds the active `dhcp_lease` at the IP and **delegates to `releaseReservation`**, so the device-side lease expiry on push-enabled subnets (`releaseDhcpLease`), the released-slot dedup, and the audit Event all match the old client `release+create` flow exactly — only the route ownership gate is dropped. This is what makes the IP-panel "Reserve" take-over of a lease a plain create gated only on `reservations:write` — the client no longer issues a separate ownership-gated DELETE of the lease (desktop `_openLeaseReserveModal` + mobile reserve sheet in `subnet-detail.js`).
 
 **Readers** (files that consume it):
 - `public/js/ip-panel.js` — recognizes `r.sourceType === "dns_resolved"` to render a distinct "DNS Resolved" status pill and tooltip. The Reserve/Release/Edit button gating is unchanged — `createdBy === "system:dns-resolved"` doesn't match any user, so non-admin operators see view-only.

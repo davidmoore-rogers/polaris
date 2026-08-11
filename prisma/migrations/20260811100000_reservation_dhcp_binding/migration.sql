@@ -1,0 +1,21 @@
+-- How the FortiGate hands a reserved address out, kept separate from sourceType.
+--
+-- sourceType answers "who owns this IP" (a managed FortiSwitch/FortiAP, a VIP, an
+-- operator). It does NOT say whether the gate has a MAC→IP binding for it. Phase
+-- 3a/3b create fortiswitch/fortinap rows for every managed switch/AP — including
+-- ones whose address came from the DHCP lease table via the hostname fallback —
+-- and Phase 5 had no branch for those source types, so the lease-vs-reservation
+-- fact was discovered and then discarded on every cycle. The result: a
+-- FortiLink-leased AP rendered as an authoritative reservation (no Reserve
+-- button, plain "Active" pill) while the FortiGate reported "Not Reserved".
+--
+--   NULL          — unknown / not applicable; nothing observed it in DHCP
+--   'lease'       — leased dynamically; no reserved-address entry on the gate
+--   'reservation' — a real MAC→IP reserved-address entry exists on the gate
+--
+-- NULL for existing rows is correct: their binding state genuinely has not been
+-- observed yet. Rows whose IP still appears in a gate's DHCP data self-heal on
+-- the next discovery cycle via the new Phase 5 branch; rows that never appear
+-- there (an AP on a static address, or one no longer leasing) stay NULL and keep
+-- today's authoritative behavior.
+ALTER TABLE "reservations" ADD COLUMN "dhcpBinding" TEXT;

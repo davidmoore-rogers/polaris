@@ -273,15 +273,26 @@
 
     var buttons = [];
     var isLease = r.sourceType === "dhcp_lease";
-    if (isLease && canCreate) {
+    // A managed FortiSwitch/FortiAP row the gate only LEASES (no MAC→IP
+    // reserved-address entry) is claimable exactly like a lease — the desktop IP
+    // panel and the server's isSupersedableByCreate draw the same line. Rows
+    // with dhcpBinding "reservation" or null stay authoritative.
+    var isLeaseBackedInfra = (r.sourceType === "fortiswitch" || r.sourceType === "fortinap")
+      && r.dhcpBinding === "lease";
+    if ((isLease || isLeaseBackedInfra) && canCreate) {
       var reserveCls = pushEligible ? "btn-success" : "btn-filled";
       var reserveTitle = pushEligible ? "Reserve on Gate" : "Reserve in Polaris";
       buttons.push('<button class="btn ' + reserveCls + '" data-act="reserve" data-ip="' + escapeHtml(ip.address) + '" title="' + reserveTitle + '">Reserve</button>');
     }
     if (canModify) {
       buttons.push('<button class="btn btn-tonal" data-act="edit" data-ip="' + escapeHtml(ip.address) + '">Edit</button>');
-      var freeLabel = isLease ? "Revoke" : "Release";
-      buttons.push('<button class="btn btn-error" data-act="free" data-ip="' + escapeHtml(ip.address) + '">' + freeLabel + '</button>');
+      // No Release for infra rows, matching the desktop panel: discovery
+      // re-creates the managed device's row next cycle, so it reads as a
+      // no-op.
+      if (!isLeaseBackedInfra) {
+        var freeLabel = isLease ? "Revoke" : "Release";
+        buttons.push('<button class="btn btn-error" data-act="free" data-ip="' + escapeHtml(ip.address) + '">' + freeLabel + '</button>');
+      }
     }
     if (ip.assetId) {
       buttons.push('<button class="btn btn-text" data-act="open-asset" data-asset="' + escapeHtml(ip.assetId) + '">Open asset</button>');
