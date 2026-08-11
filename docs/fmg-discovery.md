@@ -198,6 +198,19 @@ FMG Integration Discovery
 │        direct mode: write via per-FortiGate REST API
 │        verify on read-back; FAIL the create if device write didn't land
 │
+├─ Auto-reserve managed switches/APs (writeback — autoReserveFortinetInfra
+│   toggle, requires pushReservations)
+│   managed FortiSwitch / FortiAP discovered by this integration
+│   AND currently ACTIVE
+│   AND its address is held by a dynamic lease, not an existing reservation
+│   AND Polaris learned the MAC from the gate's own lease table
+│   AND the row has never been pushed before
+│     →  same write path as above, pinning an address the device already
+│        holds (pool occupancy is unchanged)
+│        ≤25 per integration per cycle; the rest wait for later cycles
+│        permanent refusal → recorded on the row, never retried
+│        decommission / delete the device → the entry is removed again
+│
 ├─ Quarantine push (writeback — pushQuarantine toggle)
 │   asset.quarantine action
 │   AND pushQuarantine === true on integration
@@ -236,6 +249,7 @@ FMG Integration Discovery
 | `fortigateMonitor.addAsMonitored` | `false` | New FGs land monitored. Existing FGs unaffected. |
 | `forti{switch,ap}Monitor.{enabled, addAsMonitored, snmpCredentialId}` | all `false` / `null` | 4-way grid above; operator-override preservation on existing rows. |
 | `pushReservations` / `pushQuarantine` | both `false` | Writeback toggles; off by default. |
+| `autoReserveFortinetInfra` | `false` | Writes a real MAC→IP reserved-address entry for managed FortiSwitches/FortiAPs that hold their address by dynamic lease — the FortiLink case, where the gate otherwise reports the address "Not Reserved". Requires `pushReservations` and is ignored without it. Pins addresses the devices already hold, so the pool's occupancy doesn't change. Unlike every other DHCP write, this one runs on a schedule rather than on an operator action: it is bounded per cycle, uses only the MAC the gate saw requesting the address, verifies each write by read-back, and never re-attempts a row a gate has refused. Turning it off stops new entries but does not remove existing ones — release those reservations to do that. Confirm the behaviour on one gate before enabling fleet-wide. |
 | `syncDescriptions` | `false` | Description writeback (Polaris-primary). Polaris descriptions overwrite the device; device values are only imported where Polaris has none. Needs the same Manage Device Configurations RW (proxy mode) / per-FG REST write access (direct mode) as DHCP push. Enable only once Polaris is where your team edits descriptions — device-side edits get reverted. |
 
 ## Re-discovering a single FortiGate
