@@ -78,6 +78,7 @@ import { collectManagementAccess, type DeviceAccessGroup } from "../fortinetMana
 import { runDescriptionSyncForIntegration } from "../descriptionSyncService.js";
 import { reconcileMapRegions } from "../mapRegionService.js";
 import { releaseAssetsForDecommission } from "../maintenanceScheduleService.js";
+import { releaseInfraReservationsForAssets } from "../reservationService.js";
 import { reconcileAllTags } from "../tagAssignmentService.js";
 import * as sightings from "../assetSightingService.js";
 import { quarantineAsset, verifyAssetQuarantine } from "../assetQuarantineService.js";
@@ -2305,6 +2306,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           where: { id: { in: cascadeIds } },
           data: { status: "decommissioned", statusChangedAt: new Date(now), statusChangedBy: integrationLabel },
         });
+        // Give back the addresses. Runs BEFORE the status flip would matter but
+        // AFTER it for ordering safety: the helper reads asset ipAddress only,
+        // so a decommissioned row is still resolvable. Never throws.
+        await releaseInfraReservationsForAssets(cascadeIds, {
+          reason: "controller FortiGate decommissioned",
+          actor,
+        });
       }
     }
   }
@@ -2381,6 +2389,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       await prisma.asset.updateMany({
         where: { id: { in: staleIds } },
         data: { status: "decommissioned", statusChangedAt: new Date(now), statusChangedBy: integrationLabel },
+      });
+      // The device is gone from its controller's inventory — deletion at source,
+      // which business rule 16 already treats as config truth. Give the address
+      // back rather than leaving it claimed (or, once auto-push exists, leaving a
+      // real MAC→IP binding orphaned on the gate). Never throws.
+      await releaseInfraReservationsForAssets(staleIds, {
+        reason: "no longer reported by its controller",
+        actor,
       });
     }
   }

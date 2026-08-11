@@ -22,11 +22,15 @@
 import { describe, it, expect } from "vitest";
 import {
   INFRA_SOURCE_TYPES,
+  classifyOrphanInfraRow,
   decideInfraDhcpBinding,
   isInfraSourceType,
   isLeaseBackedInfraRow,
   reservationBelongsToInfraDevice,
+  shouldReleaseInfraReservation,
   type InfraDhcpEntry,
+  type InfraReleaseCandidate,
+  type InfraReleaseDevice,
   type InfraReservationRow,
 } from "../../src/utils/infraDhcpBinding.js";
 
@@ -172,5 +176,90 @@ describe("reservationBelongsToInfraDevice", () => {
 
   it("is false for a missing row", () => {
     expect(reservationBelongsToInfraDevice(null, { mac: "48:3A:02:90:1B:68", name: "AP-1" })).toBe(false);
+  });
+});
+
+describe("shouldReleaseInfraReservation", () => {
+  const ap: InfraReleaseDevice = {
+    mac: "48:3A:02:90:1B:68",
+    name: "APPOMATTOX-108F-3",
+    integrationId: "int-fmg",
+    controllerFortigate: "APPOMATTOX-101F-1",
+  };
+  function row(over: Partial<InfraReleaseCandidate> = {}): InfraReleaseCandidate {
+    return { sourceType: "fortinap", subnetDiscoveredBy: "int-fmg", subnetFortigateDevice: "APPOMATTOX-101F-1", ...over };
+  }
+
+  it("releases the device's own infra row", () => {
+    expect(shouldReleaseInfraReservation(ap, row())).toBe(true);
+    expect(shouldReleaseInfraReservation(ap, row({ sourceType: "fortiswitch" }))).toBe(true);
+  });
+
+  it("never releases an operator's manual reservation at the address", () => {
+    // The device going away says nothing about a reservation a person typed.
+    expect(shouldReleaseInfraReservation(ap, row({ sourceType: "manual" }))).toBe(false);
+    expect(shouldReleaseInfraReservation(ap, row({ sourceType: "dhcp_reservation" }))).toBe(false);
+    expect(shouldReleaseInfraReservation(ap, row({ sourceType: "vip" }))).toBe(false);
+  });
+
+  it("releases a Polaris-pushed row that belongs to this device", () => {
+    const pushed = row({ sourceType: "manual", pushedToId: "int-fmg", macAddress: "48:3a:02:90:1b:68" });
+    expect(shouldReleaseInfraReservation(ap, pushed)).toBe(true);
+  });
+
+  it("leaves a pushed row for a DIFFERENT device alone", () => {
+    const other = row({ sourceType: "manual", pushedToId: "int-fmg", macAddress: "AA:BB:CC:DD:EE:FF", hostname: "printer-3" });
+    expect(shouldReleaseInfraReservation(ap, other)).toBe(false);
+  });
+
+  it("refuses to cross integrations", () => {
+    // RFC1918 repeats: the same address behind another integration's gate is a
+    // different address.
+    expect(shouldReleaseInfraReservation(ap, row({ subnetDiscoveredBy: "int-other" }))).toBe(false);
+  });
+
+  it("refuses to cross FortiGates within one integration", () => {
+    expect(shouldReleaseInfraReservation(ap, row({ subnetFortigateDevice: "SOMEWHERE-ELSE-1" }))).toBe(false);
+  });
+
+  it("compares FortiGate names case-insensitively", () => {
+    expect(shouldReleaseInfraReservation(ap, row({ subnetFortigateDevice: "appomattox-101f-1" }))).toBe(true);
+  });
+
+  it("does not treat an unknown scope on either side as a mismatch", () => {
+    // An unknown must not block a legitimate release — but it must not be the
+    // thing that authorizes one either, which is why ownership is still checked.
+    expect(shouldReleaseInfraReservation(ap, row({ subnetDiscoveredBy: null, subnetFortigateDevice: null }))).toBe(true);
+    expect(shouldReleaseInfraReservation({ ...ap, integrationId: null, controllerFortigate: null }, row())).toBe(true);
+    expect(shouldReleaseInfraReservation(
+      { integrationId: null, controllerFortigate: null },
+      row({ sourceType: "manual", subnetDiscoveredBy: null, subnetFortigateDevice: null }),
+    )).toBe(false);
+  });
+});
+
+describe("classifyOrphanInfraRow", () => {
+  it("releases when every device holding the address is decommissioned", () => {
+    expect(classifyOrphanInfraRow({}, ["decommissioned"])).toBe("release");
+    expect(classifyOrphanInfraRow({ pushedToId: "int-1" }, ["decommissioned", "decommissioned"])).toBe("release");
+  });
+
+  it("keeps the row while any holder is still alive", () => {
+    expect(classifyOrphanInfraRow({}, ["active"])).toBe("keep");
+    expect(classifyOrphanInfraRow({}, ["decommissioned", "active"])).toBe("keep");
+    expect(classifyOrphanInfraRow({}, ["maintenance"])).toBe("keep");
+  });
+
+  it("releases an unpushed row with no device at all", () => {
+    expect(classifyOrphanInfraRow({}, [])).toBe("release");
+    expect(classifyOrphanInfraRow({ pushedToId: null }, [])).toBe("release");
+  });
+
+  it("SKIPS a pushed row with no device — the weak signal must not write to a gate", () => {
+    // "No asset found" is also what a transient discovery state looks like.
+    // Releasing a pushed row would delete a reserved-address entry on a live
+    // FortiGate on the strength of that; a decommissioned asset is the only
+    // evidence strong enough for a device write.
+    expect(classifyOrphanInfraRow({ pushedToId: "int-1" }, [])).toBe("skip");
   });
 });

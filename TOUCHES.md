@@ -846,6 +846,9 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/services/discovery/discoveryEngine.ts` (`syncDhcpSubnets`, Phase 5 infra branch) — the ONLY writer of `dhcpBinding`. Applies `decideInfraDhcpBinding`'s patch to an existing fortiswitch/fortinap row, writing only when it returns non-null, and counts `pathExistingInfraBindingChange` / `pathExistingInfraNoChange` (before this branch the source types matched nothing and fell through with no counter, so the phase summary's "path-* counters sum to entriesTotal" was false for every managed switch/AP).
 - `src/services/discovery/discoveryEngine.ts` (Phase 3a/3b) — gates the `manual`-row conflict raise on `!reservationBelongsToInfraDevice(...)`, so an operator's own reservation for an AP isn't reported as colliding with that AP.
 - `src/services/reservationService.ts` — `isSupersedableByCreate` admits lease-backed infra rows; `releaseSupersededDhcpLeaseAt` releases whichever row it admitted.
+- `src/services/reservationService.ts:releaseInfraReservationsForAssets` — the device-lifecycle release. Resolves reservations from the asset's `ipAddress`, judges each with the pure `shouldReleaseInfraReservation` (scope + ownership), and delegates to `releaseReservation` so unpush + lease-expiry + audit all come for free. Bounded at `INFRA_RELEASE_CEILING` (100) per invocation with `deferred` reported; never throws.
+- `src/services/reservationService.ts:reconcileOrphanedInfraReservations` — the backstop sweep behind `jobs/reconcileInfraReservations.ts`; verdict per row from the pure `classifyOrphanInfraRow`.
+- Call sites (all pass ONLY switch/access_point ids): `discoveryEngine.ts` Phase 2a controller cascade + Phase 2b stale-infra sweep; `api/routes/assets.ts` `DELETE /:id`, `DELETE /` (bulk), and the `applyAssetUpdateSideEffects` operator-decommission branch; `jobs/decommissionStaleAssets.ts`.
 
 **Readers** (files that consume it):
 - `src/services/subnetService.ts` (`toReservationDto`) — surfaces `dhcpBinding` on the IP-panel payload.
@@ -860,8 +863,14 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - Releasing a lease-backed infra row must stay a pure DB release. It has no push pointers and its `sourceType` isn't `dhcp_reservation`, so neither unpush branch fires, and the gate-lease-expiry branch keys on `dhcp_lease` — claiming an AP's address must not bounce its lease.
 - The client predicates in `ip-panel.js` / `mobile/subnet-detail.js` must stay in lockstep with `isSupersedableByCreate`; a Reserve button the server would 409 is worse than no button.
 
+- Both delete routes must release BEFORE `prisma.asset.delete`. The release resolves the reservation from the asset's `ipAddress`, which is unreadable once the row is gone.
+- Release call sites filter to `switch`/`access_point` themselves. The helper's ownership predicate would also match a Polaris-pushed reservation on a server, and a status change or delete on an ordinary host must not quietly unpush an operator's binding.
+- "No longer discovered" is NOT a release trigger. An offline AP stays in its controller's CMDB roster, and business rule 16 already establishes that roster absence is config truth rather than reachability — the release hangs off the existing decommission decision so one bad FMG query can't strip a fleet's worth of bindings.
+- The orphan reconcile releases a PUSHED row only on an explicitly decommissioned device. "No asset found" is a transient discovery state as often as it is a real orphan, and acting on it would write to a live gate.
+
 **Change checklist:**
 - [ ] Adding a source type that discovery auto-creates for a device? Decide whether it needs a binding fact too, and whether `INFRA_SOURCE_TYPES` should grow.
+- [ ] Adding a path that decommissions or deletes a switch/AP? Call `releaseInfraReservationsForAssets` from it — the reconcile will converge it eventually, but only after up to 6 hours.
 - [ ] Touching the Phase 5 existing-row chain? Keep the infra branch BEFORE the fall-through `continue`, and keep exactly one path counter per processed entry.
 - [ ] Widening the takeover set? Change `isSupersedableByCreate` only, then mirror it in both client predicates.
 

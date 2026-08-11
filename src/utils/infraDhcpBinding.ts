@@ -128,6 +128,85 @@ export function decideInfraDhcpBinding(
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
+/** Case-insensitive equality that treats blank/absent as "unknown", not a match. */
+function sameName(a: string | null | undefined, b: string | null | undefined): boolean {
+  return !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+export interface InfraReleaseDevice {
+  mac?: string | null;
+  name?: string | null;
+  /** Asset.discoveredByIntegrationId */
+  integrationId?: string | null;
+  /** fortinetTopology.controllerFortigate */
+  controllerFortigate?: string | null;
+}
+
+export interface InfraReleaseCandidate {
+  sourceType: string;
+  macAddress?: string | null;
+  hostname?: string | null;
+  pushedToId?: string | null;
+  /** Subnet.discoveredBy */
+  subnetDiscoveredBy?: string | null;
+  /** Subnet.fortigateDevice */
+  subnetFortigateDevice?: string | null;
+}
+
+/**
+ * May a device going away release this reservation, found at its address?
+ *
+ * Reservations are matched by IP, and RFC1918 space repeats behind different
+ * gates — business rule 17 already scopes ARP presence evidence per (device, ip)
+ * for exactly this reason. So two scope tests run first, each skipped when either
+ * side doesn't know its own answer (an unknown must not silently authorize a
+ * release): the row's subnet must belong to the asset's integration, and when
+ * both name a FortiGate those must agree.
+ *
+ * Then ownership: a fortiswitch/fortinap row is ours by construction, and a
+ * Polaris-PUSHED row counts when `reservationBelongsToInfraDevice` ties it to
+ * this device. Everything else — above all an operator's own manual reservation
+ * at the address — survives the device's removal.
+ */
+export function shouldReleaseInfraReservation(
+  device: InfraReleaseDevice,
+  row: InfraReleaseCandidate,
+): boolean {
+  if (
+    device.integrationId && row.subnetDiscoveredBy &&
+    device.integrationId !== row.subnetDiscoveredBy
+  ) return false;
+
+  if (
+    device.controllerFortigate && row.subnetFortigateDevice &&
+    !sameName(device.controllerFortigate, row.subnetFortigateDevice)
+  ) return false;
+
+  if (isInfraSourceType(row.sourceType)) return true;
+  return !!row.pushedToId && reservationBelongsToInfraDevice(row, { mac: device.mac, name: device.name });
+}
+
+/**
+ * What the orphan reconcile should do with an infra row, given the managed
+ * devices (if any) currently holding its address within the same integration.
+ *
+ * Asymmetric on purpose, because the two signals cost differently when wrong:
+ *   • every matching device decommissioned → "release". Someone already judged
+ *     the device gone.
+ *   • no matching device at all → "release" only for a row Polaris never pushed.
+ *     That signal is weak (a transient discovery state, or an asset create that
+ *     failed after its reservation landed) and a false positive on a pushed row
+ *     would mean an unnecessary WRITE to a production gate. A Polaris-local row
+ *     released in error costs nothing — discovery re-creates it next cycle.
+ */
+export function classifyOrphanInfraRow(
+  row: { pushedToId?: string | null },
+  matchingDeviceStatuses: string[],
+): "release" | "skip" | "keep" {
+  if (matchingDeviceStatuses.length === 0) return row.pushedToId ? "skip" : "release";
+  return matchingDeviceStatuses.every((s) => s === "decommissioned") ? "release" : "keep";
+}
+
 /**
  * Does an existing reservation at a managed device's IP belong to that device?
  *

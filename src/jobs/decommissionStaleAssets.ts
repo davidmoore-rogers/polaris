@@ -20,6 +20,7 @@ import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { getAssetDecommissionSettings } from "../services/eventArchiveService.js";
 import { logEvent } from "../services/eventLogService.js";
+import { releaseInfraReservationsForAssets } from "../services/reservationService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
 const INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -51,7 +52,7 @@ async function decommissionStaleAssets(): Promise<void> {
           },
         },
       },
-      select: { id: true, hostname: true, ipAddress: true },
+      select: { id: true, hostname: true, ipAddress: true, assetType: true },
     });
 
     if (stale.length === 0) return;
@@ -61,6 +62,21 @@ async function decommissionStaleAssets(): Promise<void> {
       where: { id: { in: ids } },
       data: { status: "decommissioned", statusChangedAt: new Date(), statusChangedBy: "system" },
     });
+
+    // A managed FortiSwitch/FortiAP aged out of the fleet gives its address
+    // back, matching the discovery-side sweeps. Scoped to the two infra types:
+    // this job is time-based rather than evidence-based, so it is the least
+    // certain of the release triggers and gets the narrowest reach. Bounded and
+    // never-throwing inside; a leftover is picked up on the next daily tick.
+    const infraIds = stale
+      .filter((a) => a.assetType === "switch" || a.assetType === "access_point")
+      .map((a) => a.id);
+    if (infraIds.length > 0) {
+      await releaseInfraReservationsForAssets(infraIds, {
+        reason: `auto-decommissioned after ${inactivityMonths} month(s) of inactivity`,
+        actor: "system",
+      });
+    }
 
     logger.info(
       { count: result.count, inactivityMonths },

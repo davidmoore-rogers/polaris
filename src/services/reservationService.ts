@@ -6,7 +6,13 @@ import type { ReservationStatus } from "../generated/prisma/client.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { ipInCidr, isValidIpAddress, enumerateSubnetIps, detectIpVersion } from "../utils/cidr.js";
-import { isLeaseBackedInfraRow } from "../utils/infraDhcpBinding.js";
+import {
+  isLeaseBackedInfraRow,
+  shouldReleaseInfraReservation,
+  classifyOrphanInfraRow,
+} from "../utils/infraDhcpBinding.js";
+import { mapSettledWithConcurrency } from "../utils/concurrency.js";
+import { logger } from "../utils/logger.js";
 import {
   pushReservation,
   unpushReservation,
@@ -1021,6 +1027,293 @@ export async function releaseReservation(id: string, actor?: string) {
     message: `Reservation released`,
   });
   return releasedRow;
+}
+
+// ─── Managed-infra reservation release (device lifecycle) ─────────────────────
+
+/**
+ * Release the reservations a set of managed FortiSwitches / FortiAPs hold,
+ * because those devices are being decommissioned or deleted.
+ *
+ * Why this exists: Phase 3a/3b create a reservation for every managed switch/AP,
+ * but NOTHING in the device lifecycle ever released one. Phase 2a's controller
+ * cascade and Phase 2b's stale-infra sweep flip asset status only
+ * (`releaseAssetsForDecommission` is maintenance-window bookkeeping, not
+ * reservations), and the asset DELETE routes don't either — so a removed AP left
+ * its address claimed forever. That is merely untidy while the rows are
+ * Polaris-local; once a reservation is PUSHED to a gate it becomes a real
+ * orphaned MAC→IP binding, which is why this has to exist before any auto-push
+ * feature does.
+ *
+ * Everything device-side is already handled by `releaseReservation`: it deletes
+ * the CMDB reserved-address entry (pinned ids, or resolved-by-IP for a
+ * discovered row when writeback is on) and expires the lease, both best-effort
+ * with `reservation.unpush.failed` / `reservation.lease_release.*` Events when
+ * the gate can't be reached. For a plain Polaris-local infra row neither branch
+ * fires and the release is pure DB.
+ *
+ * Three guardrails, each covering a way this could take something that isn't its
+ * to take:
+ *   • Scope. Reservations are matched by IP, and RFC1918 space repeats behind
+ *     different gates. When both sides know their integration the row's subnet
+ *     must belong to the asset's, and when both sides name a FortiGate those
+ *     must agree too (the same per-(device, ip) scoping business rule 17 applies
+ *     to ARP evidence).
+ *   • Ownership. Only a fortiswitch/fortinap row, or a Polaris-PUSHED row that
+ *     `reservationBelongsToInfraDevice` ties to this device. An operator's own
+ *     manual reservation at the address is never released by a device going away.
+ *   • Bounding. `releaseReservation` can perform device I/O per row, and a
+ *     controller cascade can cover hundreds of APs. Work is capped per
+ *     invocation and the remainder is reported as `deferred` for the next pass —
+ *     the release is idempotent (a released row stops matching), so retrying
+ *     costs nothing. Never fans out over a whole fleet at once.
+ *
+ * Never throws: a decommission must not fail because a gate was unreachable.
+ */
+export interface InfraReservationReleaseResult {
+  released: number;
+  /** Eligible but over the per-invocation cap; picked up next time. */
+  deferred: number;
+  /** A row existed at the address but belongs to something else. */
+  skipped: number;
+  failed: number;
+}
+
+/** Per-invocation release cap. Sized like the discovery-side paced passes. */
+const INFRA_RELEASE_CEILING = 100;
+
+export async function releaseInfraReservationsForAssets(
+  assetIds: string[],
+  opts: { reason: string; actor?: string | null; limit?: number },
+): Promise<InfraReservationReleaseResult> {
+  // The whole body is guarded, not just the per-row releases: callers are
+  // decommission paths mid-phase (discovery Phase 2a/2b) and delete routes, and
+  // "the address wasn't given back" must never escalate into "the decommission
+  // failed". A lost pass is picked up by reconcileInfraReservations.
+  try {
+    return await releaseInfraReservationsForAssetsInner(assetIds, opts);
+  } catch (err) {
+    logger.warn({ err, reason: opts.reason, assetCount: assetIds.length },
+      "releaseInfraReservationsForAssets failed; the orphan reconcile will retry");
+    return { released: 0, deferred: 0, skipped: 0, failed: 0 };
+  }
+}
+
+async function releaseInfraReservationsForAssetsInner(
+  assetIds: string[],
+  opts: { reason: string; actor?: string | null; limit?: number },
+): Promise<InfraReservationReleaseResult> {
+  const out: InfraReservationReleaseResult = { released: 0, deferred: 0, skipped: 0, failed: 0 };
+  if (assetIds.length === 0) return out;
+
+  const assets = await prisma.asset.findMany({
+    where: { id: { in: assetIds }, ipAddress: { not: null } },
+    select: {
+      id: true, hostname: true, ipAddress: true, macAddress: true,
+      discoveredByIntegrationId: true, fortinetTopology: true,
+    },
+  });
+  if (assets.length === 0) return out;
+
+  const ips = Array.from(new Set(assets.map((a) => a.ipAddress!).filter(Boolean)));
+  const candidates = await prisma.reservation.findMany({
+    where: { ipAddress: { in: ips }, status: "active" },
+    select: {
+      id: true, ipAddress: true, sourceType: true, macAddress: true, hostname: true,
+      pushedToId: true, dhcpBinding: true,
+      subnet: { select: { discoveredBy: true, fortigateDevice: true } },
+    },
+  });
+  if (candidates.length === 0) return out;
+
+  const byIp = new Map<string, typeof candidates>();
+  for (const c of candidates) {
+    if (!c.ipAddress) continue;
+    const list = byIp.get(c.ipAddress) || [];
+    list.push(c);
+    byIp.set(c.ipAddress, list);
+  }
+
+  const targets: { id: string; ip: string }[] = [];
+  for (const asset of assets) {
+    const topo = (asset.fortinetTopology as Record<string, unknown> | null) || null;
+    const device = {
+      mac: asset.macAddress,
+      name: asset.hostname,
+      integrationId: asset.discoveredByIntegrationId,
+      controllerFortigate: (topo?.controllerFortigate as string | undefined) || null,
+    };
+    for (const row of byIp.get(asset.ipAddress!) || []) {
+      // Scope + ownership both live in the pure predicate (unit-tested).
+      const release = shouldReleaseInfraReservation(device, {
+        sourceType: row.sourceType,
+        macAddress: row.macAddress,
+        hostname: row.hostname,
+        pushedToId: row.pushedToId,
+        subnetDiscoveredBy: row.subnet.discoveredBy,
+        subnetFortigateDevice: row.subnet.fortigateDevice,
+      });
+      if (!release) { out.skipped++; continue; }
+
+      targets.push({ id: row.id, ip: row.ipAddress! });
+    }
+  }
+  if (targets.length === 0) return out;
+
+  const cap = opts.limit ?? INFRA_RELEASE_CEILING;
+  const batch = targets.slice(0, cap);
+  out.deferred = targets.length - batch.length;
+
+  const results = await mapSettledWithConcurrency(batch, 4, async (t) =>
+    releaseReservation(t.id, opts.actor ?? undefined),
+  );
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") { out.released++; return; }
+    out.failed++;
+    // Best-effort by design: a gate that refused the unpush already logged its
+    // own warning Event, and the asset's decommission must still proceed.
+    logger.warn(
+      { reservationId: batch[i].id, ip: batch[i].ip, reason: opts.reason, err: (r as PromiseRejectedResult).reason },
+      "releaseInfraReservationsForAssets: release failed",
+    );
+  });
+
+  if (out.released > 0 || out.failed > 0) {
+    // One summary row rather than a second per-row Event: releaseReservation
+    // already writes `reservation.released` per row, and this carries the thing
+    // that row can't — WHY the address was given up.
+    void logEvent({
+      action: "reservation.infra.released",
+      resourceType: "reservation",
+      actor: opts.actor ?? undefined,
+      level: out.failed > 0 ? "warning" : "info",
+      message: `Released ${out.released} managed-device reservation(s) — ${opts.reason}`
+        + (out.failed > 0 ? `; ${out.failed} failed` : "")
+        + (out.deferred > 0 ? `; ${out.deferred} deferred to the next pass` : ""),
+      details: {
+        reason: opts.reason,
+        released: out.released,
+        failed: out.failed,
+        deferred: out.deferred,
+        skipped: out.skipped,
+        ips: batch.slice(0, 25).map((t) => t.ip),
+      },
+    });
+  }
+  return out;
+}
+
+/**
+ * Safety net for managed-infra reservations whose device is gone.
+ *
+ * The lifecycle hooks above cover every path we know about, but they all run at
+ * the moment the device goes away — so a decommission that happens while the
+ * FortiGate is unreachable, a code path added later that forgets to call them,
+ * or rows created before this feature existed all leak a claimed address (and,
+ * once auto-push lands, a real MAC→IP binding on the gate). This sweep is the
+ * backstop that converges those.
+ *
+ * Deliberately asymmetric about how much evidence each action needs, because the
+ * two cases carry different costs:
+ *   • Asset explicitly `decommissioned` → release, including a pushed row. The
+ *     operator or a discovery sweep already made that judgement.
+ *   • NO asset found at the address → release ONLY when the row was never pushed.
+ *     "No asset" is the weaker signal (a transient discovery state, an asset
+ *     create that failed after its reservation landed) and a false positive on a
+ *     pushed row would mean an unnecessary WRITE to the gate. A Polaris-local row
+ *     released in error costs nothing — the next discovery cycle re-creates it.
+ *
+ * Never releases a reservation that isn't a fortiswitch/fortinap row: an
+ * operator's manual reservation for a device not yet in inventory is a normal,
+ * intentional state and must survive forever.
+ */
+export async function reconcileOrphanedInfraReservations(
+  opts: { limit?: number } = {},
+): Promise<InfraReservationReleaseResult> {
+  const out: InfraReservationReleaseResult = { released: 0, deferred: 0, skipped: 0, failed: 0 };
+
+  const rows = await prisma.reservation.findMany({
+    where: { status: "active", sourceType: { in: ["fortiswitch", "fortinap"] as any } },
+    select: {
+      id: true, ipAddress: true, hostname: true, pushedToId: true,
+      subnet: { select: { discoveredBy: true } },
+    },
+  });
+  if (rows.length === 0) return out;
+
+  const ips = Array.from(new Set(rows.map((r) => r.ipAddress).filter((ip): ip is string => !!ip)));
+  if (ips.length === 0) return out;
+
+  const assets = await prisma.asset.findMany({
+    where: { ipAddress: { in: ips }, assetType: { in: ["switch", "access_point"] } },
+    select: { id: true, ipAddress: true, status: true, discoveredByIntegrationId: true },
+  });
+  const assetsByIp = new Map<string, typeof assets>();
+  for (const a of assets) {
+    if (!a.ipAddress) continue;
+    const list = assetsByIp.get(a.ipAddress) || [];
+    list.push(a);
+    assetsByIp.set(a.ipAddress, list);
+  }
+
+  const orphans: { id: string; ip: string; why: string }[] = [];
+  for (const row of rows) {
+    if (!row.ipAddress) continue;
+    // Same integration scoping as the release helper — overlapping RFC1918
+    // space behind different gates must not cross-match.
+    const matches = (assetsByIp.get(row.ipAddress) || []).filter(
+      (a) =>
+        !a.discoveredByIntegrationId ||
+        !row.subnet.discoveredBy ||
+        a.discoveredByIntegrationId === row.subnet.discoveredBy,
+    );
+    const verdict = classifyOrphanInfraRow(row, matches.map((a) => a.status));
+    if (verdict === "keep") continue;
+    if (verdict === "skip") { out.skipped++; continue; }
+    orphans.push({
+      id: row.id,
+      ip: row.ipAddress,
+      why: matches.length === 0 ? "no managed device holds this address" : "its managed device is decommissioned",
+    });
+  }
+  if (orphans.length === 0) return out;
+
+  const cap = opts.limit ?? INFRA_RELEASE_CEILING;
+  const batch = orphans.slice(0, cap);
+  out.deferred = orphans.length - batch.length;
+
+  const results = await mapSettledWithConcurrency(batch, 4, async (o) =>
+    releaseReservation(o.id, "system:infra-reservation-reconcile"),
+  );
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") { out.released++; return; }
+    out.failed++;
+    logger.warn(
+      { reservationId: batch[i].id, ip: batch[i].ip, err: (r as PromiseRejectedResult).reason },
+      "reconcileOrphanedInfraReservations: release failed",
+    );
+  });
+
+  if (out.released > 0 || out.failed > 0) {
+    void logEvent({
+      action: "reservation.infra.released",
+      resourceType: "reservation",
+      actor: "system:infra-reservation-reconcile",
+      level: out.failed > 0 ? "warning" : "info",
+      message: `Reconcile released ${out.released} orphaned managed-device reservation(s)`
+        + (out.failed > 0 ? `; ${out.failed} failed` : "")
+        + (out.deferred > 0 ? `; ${out.deferred} deferred to the next pass` : ""),
+      details: {
+        reason: "orphan-reconcile",
+        released: out.released,
+        failed: out.failed,
+        deferred: out.deferred,
+        skipped: out.skipped,
+        sample: batch.slice(0, 25).map((o) => ({ ip: o.ip, why: o.why })),
+      },
+    });
+  }
+  return out;
 }
 
 // ─── Next Available IP ────────────────────────────────────────────────────────

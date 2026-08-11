@@ -63,6 +63,7 @@ import { getAssetNotifications } from "../../services/notificationService.js";
 import { getMetricSeverityTiers } from "../../services/notificationRuleService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
 import { resolveContactsForAsset } from "../../services/contactService.js";
+import { releaseInfraReservationsForAssets } from "../../services/reservationService.js";
 import { getAssetProcessConnections } from "../../services/applicationMapService.js";
 import { recordOperatorPinChanges, type OperatorPinChange } from "../../services/appMapDiscoveryService.js";
 import {
@@ -2960,6 +2961,21 @@ async function applyAssetUpdateSideEffects(
   if (input.monitored !== undefined || input.assetType !== undefined) {
     await recomputeMonitorOverrideForAssets(prisma, [id]);
   }
+  // An operator decommissioning a managed FortiSwitch/FortiAP gives its address
+  // back, same as the discovery-side sweeps do. Scoped to the two infra types on
+  // purpose: a server carrying an operator-pushed reservation is not something a
+  // status change should quietly unpush. Post-write so it reads the row's
+  // committed state; never throws.
+  if (
+    input.status === "decommissioned" &&
+    existing.status !== "decommissioned" &&
+    (asset.assetType === "switch" || asset.assetType === "access_point")
+  ) {
+    await releaseInfraReservationsForAssets([id], {
+      reason: "decommissioned by operator",
+      actor,
+    });
+  }
   // Unmapping a process removes its accumulated connection rows immediately —
   // the Application Map must not keep drawing edges for up to the retention
   // window after the operator opted the process out.
@@ -3635,6 +3651,15 @@ router.delete("/", requirePermission("assets", "write"), async (req, res, next) 
       const more = quarantined.length > 5 ? ` (+${quarantined.length - 5} more)` : "";
       throw new AppError(409, `Cannot delete quarantined asset(s): ${names.join(", ")}${more}. Release the quarantine first.`);
     }
+    // Same as the single delete: release before the rows go away, and only for
+    // the managed-infra types.
+    const infraIds = (await prisma.asset.findMany({
+      where: { id: { in: ids as string[] }, assetType: { in: ["switch", "access_point"] } },
+      select: { id: true },
+    })).map((a) => a.id);
+    if (infraIds.length > 0) {
+      await releaseInfraReservationsForAssets(infraIds, { reason: "asset deleted", actor: requestActor(req) });
+    }
     const { count } = await prisma.asset.deleteMany({ where: { id: { in: ids as string[] } } });
     logEvent({ action: "asset.bulk_deleted", resourceType: "asset", actor: requestActor(req), message: `Bulk deleted ${count} asset(s)` });
     res.json({ deleted: count });
@@ -3651,6 +3676,11 @@ router.delete("/:id", requirePermission("assets", "write"), async (req, res, nex
     if (!existing) throw new AppError(404, "Asset not found");
     if (existing.status === "quarantined") {
       throw new AppError(409, `Cannot delete quarantined asset "${existing.hostname || existing.ipAddress || id}". Release the quarantine first.`);
+    }
+    // Give the address back BEFORE the row goes away — the release resolves the
+    // reservation from the asset's ipAddress, which is unreadable once deleted.
+    if (existing.assetType === "switch" || existing.assetType === "access_point") {
+      await releaseInfraReservationsForAssets([id], { reason: "asset deleted", actor: requestActor(req) });
     }
     await prisma.asset.delete({ where: { id } });
     logEvent({ action: "asset.deleted", resourceType: "asset", resourceId: id, resourceName: existing.hostname || existing.ipAddress || undefined, actor: requestActor(req), message: `Asset "${existing.hostname || existing.ipAddress || "unknown"}" deleted` });
