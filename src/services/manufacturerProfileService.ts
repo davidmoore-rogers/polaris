@@ -355,6 +355,107 @@ export async function listProfiles(): Promise<ProfileSummary[]> {
   });
 }
 
+/**
+ * Typeahead source for the "+ Add Manufacturer" box: every manufacturer name
+ * Polaris already knows about, so the operator picks the spelling the rest of
+ * the system uses instead of minting a near-duplicate ("Aruba Networks" vs
+ * "Aruba") that `getProfileFor` would then never resolve.
+ *
+ * Three contributors, merged case-insensitively and each value run through
+ * `normalizeManufacturer` so what's offered is exactly what `createProfile`
+ * would store:
+ *   - `asset`  — distinct `Asset.manufacturer` (carries a device count).
+ *   - `alias`  — `ManufacturerAlias.canonical`, the operator's own canonical
+ *                spellings from MAC & Vendor Identification.
+ *   - `oui`    — the `manufacturer` on each static OUI override, same card.
+ * The raw IEEE OUI database is deliberately NOT a contributor: ~35k legal
+ * names ("Cisco Systems, Inc.") is neither shippable to the browser nor the
+ * canonical form profiles key on.
+ *
+ * Manufacturers that already have a profile are dropped — creating one 409s,
+ * so offering it is noise. Distinct/groupBy queries only; cheap at 2000 assets.
+ */
+export async function listManufacturerSuggestions(): Promise<ManufacturerSuggestion[]> {
+  const { getOuiOverrides } = await import("./ouiService.js");
+  const [assetRows, aliasRows, overrides, profiles] = await Promise.all([
+    prisma.asset.groupBy({
+      by: ["manufacturer"],
+      where: { manufacturer: { not: null } },
+      _count: { _all: true },
+    }),
+    prisma.manufacturerAlias.findMany({
+      select: { canonical: true },
+      distinct: ["canonical"],
+    }),
+    getOuiOverrides().catch(() => []),
+    (prisma as any).manufacturerProfile.findMany({ select: { manufacturer: true } }),
+  ]);
+
+  return mergeManufacturerSuggestions({
+    assets:   assetRows.map((r) => ({ manufacturer: r.manufacturer, count: r._count?._all ?? 0 })),
+    aliases:  aliasRows.map((r) => r.canonical),
+    oui:      overrides.map((o) => o.manufacturer),
+    existing: (profiles as { manufacturer: string }[]).map((p) => p.manufacturer),
+  });
+}
+
+export type ManufacturerSuggestionSource = "asset" | "alias" | "oui";
+
+export interface ManufacturerSuggestion {
+  value:      string;
+  sources:    ManufacturerSuggestionSource[];
+  assetCount: number;
+}
+
+/**
+ * Pure merge behind `listManufacturerSuggestions` — separated so the dedupe,
+ * exclusion and ordering rules are unit-testable without a database.
+ *
+ * Every value is canonicalized through `normalizeManufacturer` (so "Aruba
+ * Networks" and "Aruba" collapse to one row rather than offering both), keyed
+ * case-insensitively, and dropped if a profile already claims it. Ordering is
+ * device-count desc then alphabetical.
+ */
+export function mergeManufacturerSuggestions(input: {
+  assets:   { manufacturer: string | null; count: number }[];
+  aliases:  string[];
+  oui:      string[];
+  existing: string[];
+}): ManufacturerSuggestion[] {
+  const taken = new Set<string>(
+    input.existing
+      .map((m) => normalizeManufacturer(m ?? null)?.toLowerCase())
+      .filter((m): m is string => !!m),
+  );
+
+  // key = lowercased canonical; first spelling seen wins as the display value.
+  const merged = new Map<
+    string,
+    { value: string; sources: Set<ManufacturerSuggestionSource>; assetCount: number }
+  >();
+  const add = (raw: string | null, source: ManufacturerSuggestionSource, count = 0): void => {
+    const canonical = normalizeManufacturer(raw ?? null);
+    if (!canonical) return;
+    const key = canonical.toLowerCase();
+    if (taken.has(key)) return;
+    const entry = merged.get(key)
+      ?? { value: canonical, sources: new Set<ManufacturerSuggestionSource>(), assetCount: 0 };
+    entry.sources.add(source);
+    entry.assetCount += count;
+    merged.set(key, entry);
+  };
+
+  for (const r of input.assets) add(r.manufacturer, "asset", r.count);
+  for (const a of input.aliases) add(a, "alias");
+  for (const o of input.oui) add(o, "oui");
+
+  return Array.from(merged.values())
+    .map((e) => ({ value: e.value, sources: Array.from(e.sources), assetCount: e.assetCount }))
+    // Most-used first, then alphabetical — the vendor with 400 devices is far
+    // likelier to be what the operator is typing than an alias-only entry.
+    .sort((a, b) => b.assetCount - a.assetCount || a.value.localeCompare(b.value));
+}
+
 export async function getProfile(id: string): Promise<ProfileFull | null> {
   const row = await (prisma as any).manufacturerProfile.findUnique({
     where: { id },

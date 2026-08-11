@@ -3647,9 +3647,9 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** CRUD + cached resolver for the editable per-manufacturer telemetry profiles (metric rows, per-metric overrides, custom widgets). A synchronous `getProfileFor` serves the hot probe path after a boot warm-up.
 
-**Public API:** `MetricKey`, `MetricRowType`, `MetricOverrideRow`, `MetricRow`, `CustomWidgetRow`, `ProfileSummary`, `ProfileFull`, `refreshProfileCache`, `getProfileFor`, `listProfiles`, `getProfile`, `createProfile`, `updateMetricRow`, `createOverride`, `updateOverride`, `deleteOverride`, `createWidget`, `updateWidget`, `deleteWidget`, `deleteProfile`, `STD_MIB_KEYS`, `METRIC_KEYS`
+**Public API:** `MetricKey`, `MetricRowType`, `MetricOverrideRow`, `MetricRow`, `CustomWidgetRow`, `ProfileSummary`, `ProfileFull`, `ManufacturerSuggestion`, `ManufacturerSuggestionSource`, `refreshProfileCache`, `getProfileFor`, `listProfiles`, `listManufacturerSuggestions`, `mergeManufacturerSuggestions`, `getProfile`, `createProfile`, `updateMetricRow`, `createOverride`, `updateOverride`, `deleteOverride`, `createWidget`, `updateWidget`, `deleteWidget`, `deleteProfile`, `STD_MIB_KEYS`, `METRIC_KEYS`
 
-**Cross-service deps:** `prisma`, `normalizeManufacturer`, transform/combiner-kind guards, `AppError`, `logger`.
+**Cross-service deps:** `prisma`, `normalizeManufacturer`, transform/combiner-kind guards, `AppError`, `logger`, `ouiService.getOuiOverrides` (dynamic import, suggestions only).
 
 **Used by:** `src/api/routes/manufacturerProfiles.ts` (full CRUD), `src/api/routes/assets.ts` (profile read), `src/services/monitoringService.ts` (metric resolver), `src/jobs/seedManufacturerProfiles.ts` + `src/jobs/backfillManufacturerProfileMemoryComposition.ts`.
 
@@ -3660,6 +3660,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **When changing this:**
 - `touchProfile` (updatedAt bump) is best-effort and must not fail the operation.
+- `listManufacturerSuggestions` is the "+ Add Manufacturer" typeahead and must offer only values `createProfile` would actually store — every contributor goes through `normalizeManufacturer` and profiles that already exist are excluded. Adding a contributor means adding it to `mergeManufacturerSuggestions` (the pure half, unit-tested) and to `_MFG_SUGGEST_SOURCE_LABELS` in `public/js/server-settings.js` so the dropdown can say where a value came from. The raw IEEE OUI database is deliberately NOT a contributor (~35k legal names, none of them canonical).
 
 ---
 

@@ -17,7 +17,7 @@ import { requirePermission } from "../middleware/permissions.js";
 import {
   listProfiles, getProfile, createProfile, deleteProfile,
   updateMetricRow, createOverride, updateOverride, deleteOverride,
-  createWidget, updateWidget, deleteWidget,
+  createWidget, updateWidget, deleteWidget, listManufacturerSuggestions,
 } from "../../services/manufacturerProfileService.js";
 import {
   TRANSFORM_KINDS,
@@ -48,6 +48,14 @@ router.get("/", requirePermission("manufacturerProfiles", "read"), handle(async 
     transforms: TRANSFORM_KINDS.map((k) => ({ kind: k, label: TRANSFORM_LABELS[k] })),
     combiners:  COMBINER_KINDS.map((k) => ({ kind: k, label: COMBINER_LABELS[k] })),
   });
+}));
+
+// GET /suggestions — typeahead values for the "+ Add Manufacturer" box:
+// manufacturers already present on assets + the canonical spellings from MAC &
+// Vendor Identification (aliases + OUI overrides), minus the ones that already
+// have a profile. Declared BEFORE /:id so the literal path isn't captured.
+router.get("/suggestions", requirePermission("manufacturerProfiles", "read"), handle(async (_req, res) => {
+  send(res, { suggestions: await listManufacturerSuggestions() });
 }));
 
 // GET /:id — full profile (metrics + overrides + custom widgets).

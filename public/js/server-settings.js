@@ -3687,6 +3687,12 @@ var _mfgProfileDetail = {};         // profileId → full profile (lazy)
 var _mfgProfileExpanded = {};       // profileId → bool
 var _mfgProfileMetricEdit = {};     // composite key "id:metricKey" → bool (edit-in-progress)
 var _mfgProfileOverrideEdit = {};   // overrideId → bool (edit-in-progress on a per-model override row)
+// Typeahead values for the "+ Add Manufacturer" box. Lazy — fetched on first
+// focus of the input rather than with the tab payload, since the card renders
+// on two tabs and most visits never touch the add box. Invalidated after a
+// create so the new profile drops out of its own suggestion list.
+var _mfgSuggestions = null;         // [{ value, sources[], assetCount }] | null
+var _mfgSuggestionsPromise = null;  // in-flight fetch (coalesces rapid focus)
 // MIB symbol cache for the chained MIB → Symbol pickers. Lazily populated
 // by `_ensureMibSymbols(mibId)` when an operator selects a MIB; results
 // are kept across re-renders so the symbol dropdown is instant on second
@@ -6928,8 +6934,15 @@ function manufacturerProfilesCardHTML() {
     html += '</div>';
   }
 
+  // Free-text box with a suggestion dropdown (the .aw-combo idiom, not a
+  // <datalist> — most browsers won't open one on click). Any custom name is
+  // still accepted; the list only steers toward spellings Polaris already
+  // uses, so a new profile actually resolves for the assets that carry it.
   html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-    '<input type="text" id="f-mfg-profile-add-name" placeholder="Manufacturer (e.g. Aruba)" style="flex:1;max-width:280px">' +
+    '<span class="aw-combo aw-combo-dim" style="flex:1;max-width:280px">' +
+      '<input type="text" id="f-mfg-profile-add-name" autocomplete="off" placeholder="Manufacturer (e.g. Aruba)">' +
+      '<div class="aw-suggest" id="mfg-profile-add-suggest"></div>' +
+    '</span>' +
     '<button class="btn btn-primary" id="btn-add-mfg-profile">+ Add Manufacturer</button>' +
   '</div>';
 
@@ -7663,6 +7676,8 @@ function wireManufacturerProfileControls() {
   var addBtn = document.getElementById("btn-add-mfg-profile");
   if (addBtn) addBtn.addEventListener("click", addManufacturerProfile);
 
+  wireManufacturerSuggestCombo();
+
   var list = document.getElementById("mfg-profiles-list");
   if (!list) return;
 
@@ -7856,6 +7871,137 @@ function _widgetCardKey(cardEl) {
   return "new-widget:" + cardEl.getAttribute("data-profile-id");
 }
 
+// ─── "+ Add Manufacturer" typeahead ────────────────────────────────────────
+// The box stays free text — any custom vendor is accepted. The dropdown only
+// offers what Polaris already knows (asset manufacturers + the alias/OUI
+// canonicals from MAC & Vendor Identification) so a profile is far likelier to
+// be spelled the way `getProfileFor` resolves it. Same open-on-click combobox
+// the automations wizard uses; `<datalist>` is deliberately avoided (most
+// browsers won't open one on click).
+
+var _MFG_SUGGEST_SOURCE_LABELS = { asset: "in inventory", alias: "alias", oui: "OUI override" };
+
+function _mfgSuggestEls() {
+  var input = document.getElementById("f-mfg-profile-add-name");
+  var box = document.getElementById("mfg-profile-add-suggest");
+  return input && box ? { input: input, box: box } : null;
+}
+
+function _closeMfgSuggest(box) {
+  if (box) { box.classList.remove("open"); box.innerHTML = ""; }
+}
+
+// Fetch-once, coalesced. A failure closes the dropdown silently — suggestions
+// are an aid, and the operator can always type the name.
+function _ensureMfgSuggestions() {
+  if (_mfgSuggestions) return Promise.resolve(_mfgSuggestions);
+  if (!_mfgSuggestionsPromise) {
+    _mfgSuggestionsPromise = api.serverSettings.listManufacturerSuggestions()
+      .then(function (resp) {
+        _mfgSuggestions = (resp && resp.suggestions) || [];
+        return _mfgSuggestions;
+      })
+      .catch(function () { _mfgSuggestions = []; return _mfgSuggestions; })
+      .finally(function () { _mfgSuggestionsPromise = null; });
+  }
+  return _mfgSuggestionsPromise;
+}
+
+function _renderMfgSuggest(input, box, rows) {
+  var q = (input.value || "").trim().toLowerCase();
+  // Prefix matches first, then interior — typing "ar" should offer "Aruba"
+  // before "Hikari". An exact match is dropped: nothing left to complete.
+  var matches = rows.filter(function (r) {
+    var v = r.value.toLowerCase();
+    return (!q || v.indexOf(q) !== -1) && v !== q;
+  });
+  if (q) {
+    matches.sort(function (a, b) {
+      var ap = a.value.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+      var bp = b.value.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+      return ap - bp;
+    });
+  }
+  matches = matches.slice(0, 50);
+  if (!matches.length) {
+    box.innerHTML = '<div class="aw-suggest-empty">' +
+      (q ? "No known manufacturer matches — press Add to create it anyway."
+         : "No suggestions yet — every known manufacturer already has a profile.") +
+      '</div>';
+    box.classList.add("open");
+    return;
+  }
+  box.innerHTML = matches.map(function (r) {
+    var hints = (r.sources || []).map(function (s) {
+      return s === "asset" && r.assetCount
+        ? r.assetCount + " device" + (r.assetCount === 1 ? "" : "s")
+        : (_MFG_SUGGEST_SOURCE_LABELS[s] || s);
+    });
+    return '<div class="aw-suggest-item" data-val="' + escapeHtml(r.value) + '">' +
+      escapeHtml(r.value) +
+      (hints.length ? ' <span style="color:var(--color-text-tertiary)">· ' + escapeHtml(hints.join(" · ")) + '</span>' : "") +
+    '</div>';
+  }).join("");
+  box.classList.add("open");
+}
+
+function _openMfgSuggest() {
+  var els = _mfgSuggestEls();
+  if (!els) return;
+  _ensureMfgSuggestions().then(function (rows) {
+    // The card re-renders freely; bail if this input is no longer the live one.
+    var live = _mfgSuggestEls();
+    if (!live || live.input !== els.input || document.activeElement !== live.input) return;
+    _renderMfgSuggest(live.input, live.box, rows);
+  });
+}
+
+function wireManufacturerSuggestCombo() {
+  var els = _mfgSuggestEls();
+  if (!els) return;
+  var input = els.input, box = els.box;
+
+  input.addEventListener("focus", _openMfgSuggest);
+  input.addEventListener("click", _openMfgSuggest);
+  input.addEventListener("input", function () {
+    if (_mfgSuggestions) _renderMfgSuggest(input, box, _mfgSuggestions);
+    else _openMfgSuggest();
+  });
+  input.addEventListener("blur", function () {
+    // Delay so a mousedown on an item (which fires before blur completes) lands.
+    setTimeout(function () { _closeMfgSuggest(box); }, 150);
+  });
+  box.addEventListener("mousedown", function (e) {
+    var item = e.target.closest && e.target.closest(".aw-suggest-item");
+    if (!item) return;
+    e.preventDefault(); // keep focus on the input
+    input.value = item.getAttribute("data-val");
+    _closeMfgSuggest(box);
+  });
+  input.addEventListener("keydown", function (e) {
+    var open = box.classList.contains("open");
+    if (e.key === "Escape") { if (open) { _closeMfgSuggest(box); e.stopPropagation(); } return; }
+    if (e.key === "Enter" && !open) { addManufacturerProfile(); return; }
+    if (!open) return;
+    var items = Array.prototype.slice.call(box.querySelectorAll(".aw-suggest-item"));
+    var idx = items.findIndex(function (i) { return i.classList.contains("active"); });
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (!items.length) return;
+      e.preventDefault();
+      var next = e.key === "ArrowDown" ? Math.min(idx + 1, items.length - 1) : Math.max(idx - 1, 0);
+      items.forEach(function (i) { i.classList.remove("active"); });
+      items[next].classList.add("active");
+      if (items[next].scrollIntoView) items[next].scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      // A highlighted suggestion completes the box; otherwise Enter submits
+      // whatever was typed, so a custom name never needs a mouse.
+      if (idx >= 0) { input.value = items[idx].getAttribute("data-val"); _closeMfgSuggest(box); }
+      else { _closeMfgSuggest(box); addManufacturerProfile(); }
+    }
+  });
+}
+
 async function addManufacturerProfile() {
   var input = document.getElementById("f-mfg-profile-add-name");
   var name = input && input.value ? input.value.trim() : "";
@@ -7877,6 +8023,8 @@ async function addManufacturerProfile() {
       _mfgProfileExpanded[resp.profile.id] = true;
     }
     input.value = "";
+    // The name just used now has a profile, so it must drop out of the list.
+    _mfgSuggestions = null;
     showToast("Manufacturer profile added");
     renderIdentificationTab();
   } catch (err) {
@@ -7894,6 +8042,8 @@ async function deleteManufacturerProfile(id) {
     _mfgProfiles = _mfgProfiles.filter(function (p) { return p.id !== id; });
     delete _mfgProfileDetail[id];
     delete _mfgProfileExpanded[id];
+    // Freed up — the manufacturer is suggestable again.
+    _mfgSuggestions = null;
     showToast("Profile deleted");
     renderIdentificationTab();
   } catch (err) {

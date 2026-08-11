@@ -1033,6 +1033,9 @@ const api = {
     // writes admin-only. The monitoring path doesn't consume these rows yet
     // — the resolver swap lands in a follow-up.
     listManufacturerProfiles:    ()      => request("GET",    "/server-settings/manufacturer-profiles"),
+    // Typeahead for the add box — asset manufacturers + alias/OUI-override
+    // canonicals, minus the ones that already have a profile.
+    listManufacturerSuggestions: ()      => request("GET",    "/server-settings/manufacturer-profiles/suggestions"),
     getManufacturerProfile:      (id)    => request("GET",    `/server-settings/manufacturer-profiles/${encodeURIComponent(id)}`),
     createManufacturerProfile:   (body)  => request("POST",   "/server-settings/manufacturer-profiles", body),
     deleteManufacturerProfile:   (id)    => request("DELETE", `/server-settings/manufacturer-profiles/${encodeURIComponent(id)}`),
