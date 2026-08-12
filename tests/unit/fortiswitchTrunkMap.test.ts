@@ -1,0 +1,95 @@
+import { describe, it, expect } from "vitest";
+import {
+  matchTrunkPeer,
+  parseTrunkPortMap,
+} from "../../src/utils/fortiswitchTrunkMap.js";
+
+// Verbatim from a FortiSwitch-124E-FPOE running v7.6.6.
+const REAL = "8EF5920008350-0: port23 ::8EPTQ21000800-0: port27 ::GT61FTK21005819: port24 ::";
+
+// The same site's inventory, as Polaris stores it.
+const SERIALS = new Map<string, string>([
+  ["S108EPTQ21000800", "asset-108e-1"],
+  ["S108EF5920008350", "asset-108e-2"],
+  ["S124EFTQ22002569", "asset-124e-1"],
+  ["FGT61FTK21005819", "asset-fortigate"],
+]);
+
+describe("parseTrunkPortMap", () => {
+  it("parses the real device string", () => {
+    expect(parseTrunkPortMap(REAL)).toEqual([
+      { trunkName: "8EF5920008350-0", localPort: "port23", peerSerialTail: "8EF5920008350" },
+      { trunkName: "8EPTQ21000800-0", localPort: "port27", peerSerialTail: "8EPTQ21000800" },
+      { trunkName: "GT61FTK21005819", localPort: "port24", peerSerialTail: "GT61FTK21005819" },
+    ]);
+  });
+
+  // A FortiGate trunk carries no -N suffix, so the tail is the whole name.
+  it("leaves a suffix-less trunk name intact", () => {
+    const [e] = parseTrunkPortMap("GT61FTK21005819: port24 ::");
+    expect(e.peerSerialTail).toBe("GT61FTK21005819");
+  });
+
+  // Only -0 has been seen in the field; the pattern is general so a future
+  // member index cannot silently break matching.
+  it("strips any trailing member index, not just -0", () => {
+    expect(parseTrunkPortMap("ABC123-1: port5 ::")[0].peerSerialTail).toBe("ABC123");
+    expect(parseTrunkPortMap("ABC123-12: port5 ::")[0].peerSerialTail).toBe("ABC123");
+  });
+
+  it("returns nothing for an empty or absent string", () => {
+    expect(parseTrunkPortMap("")).toEqual([]);
+    expect(parseTrunkPortMap(null)).toEqual([]);
+    expect(parseTrunkPortMap("   ")).toEqual([]);
+  });
+
+  // Undocumented vendor string: survive it, don't trust it.
+  it("skips malformed chunks instead of failing the scrape", () => {
+    const out = parseTrunkPortMap("GOOD-0: port1 ::garbage-no-colon:: :: BAD-0:  ::GOOD2-0: port2");
+    expect(out.map((e) => e.localPort)).toEqual(["port1", "port2"]);
+  });
+
+  it("deduplicates repeated pairs", () => {
+    expect(parseTrunkPortMap("A-0: port1 ::A-0: port1 ::")).toHaveLength(1);
+  });
+});
+
+describe("matchTrunkPeer", () => {
+  // The 15-char left-truncation means the stored serial is LONGER than the
+  // trunk name, so the match has to be a suffix test rather than equality.
+  it("resolves each real trunk to the right device", () => {
+    const entries = parseTrunkPortMap(REAL);
+    expect(matchTrunkPeer(entries[0].peerSerialTail, SERIALS)).toBe("asset-108e-2");
+    expect(matchTrunkPeer(entries[1].peerSerialTail, SERIALS)).toBe("asset-108e-1");
+    expect(matchTrunkPeer(entries[2].peerSerialTail, SERIALS)).toBe("asset-fortigate");
+  });
+
+  it("is case-insensitive", () => {
+    expect(matchTrunkPeer("8ef5920008350", SERIALS)).toBe("asset-108e-2");
+  });
+
+  it("returns null when no serial ends with the tail", () => {
+    expect(matchTrunkPeer("NOSUCHSERIAL", SERIALS)).toBeNull();
+    expect(matchTrunkPeer("", SERIALS)).toBeNull();
+  });
+
+  // The guard that matters. Attaching a trunk to the wrong device would draw
+  // the wrong edge on the map and, if it ever gated alerting, silence the
+  // wrong port — so an ambiguous tail resolves to nothing.
+  it("refuses an ambiguous tail rather than picking one", () => {
+    const ambiguous = new Map<string, string>([
+      ["S108EF5920008350", "asset-a"],
+      ["S999EF5920008350", "asset-b"],
+    ]);
+    expect(matchTrunkPeer("8350", ambiguous)).toBeNull();
+    expect(matchTrunkPeer("EF5920008350", ambiguous)).toBeNull();
+  });
+
+  it("is not confused by the same asset appearing under two serials", () => {
+    const dual = new Map<string, string>([
+      ["S108EF5920008350", "asset-a"],
+      ["ALTF5920008350", "asset-a"],
+    ]);
+    expect(matchTrunkPeer("F5920008350", dual)).toBe("asset-a");
+  });
+});
