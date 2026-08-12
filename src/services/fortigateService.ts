@@ -611,7 +611,7 @@ async function fgtChainInventory(ctx: FgtChainCtx): Promise<void> {
 
 // Chain C: managed FortiSwitches (3d) → FortiAPs (3e) → AP→switch-port map (3e.5), serial intra-chain.
 async function fgtChainSwitchesAps(ctx: FgtChainCtx): Promise<void> {
-  const { config, queryBase, signal, log, deviceName, deviceHostname, fortiSwitches, fortiAps, switchMacTable, flags } = ctx;
+  const { config, queryBase, signal, log, deviceName, deviceHostname, deviceSerial, fortiSwitches, fortiAps, switchMacTable, flags } = ctx;
       // Step 3d: Managed FortiSwitches
       try {
         const swResults = await fgRequest<any[]>(config, "GET", "/api/v2/monitor/switch-controller/managed-switch/status", {
@@ -632,6 +632,7 @@ async function fgtChainSwitchesAps(ctx: FgtChainCtx): Promise<void> {
         const cmdbMeta = cmdbMetaBySerial.get((sw.serial || "").toUpperCase());
         fortiSwitches.push({
           device: deviceName,
+          deviceSerial: deviceSerial || "",
           name: sw["switch-id"] || "",
           serial: sw.serial || "",
           ipAddress: sw.connecting_from || "",
@@ -674,6 +675,7 @@ async function fgtChainSwitchesAps(ctx: FgtChainCtx): Promise<void> {
         const parsed = parseFortiapMonitorRow(ap as Record<string, unknown>);
         fortiAps.push({
           device: deviceName,
+          deviceSerial: deviceSerial || "",
           ...parsed,
           description: descriptionBySerial.get((parsed.serial || "").toUpperCase()) ?? null,
         });

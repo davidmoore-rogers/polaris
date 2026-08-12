@@ -1050,6 +1050,17 @@ export interface DiscoveredInventoryDevice {
 
 export interface DiscoveredFortiSwitch {
   device: string;       // FortiGate controller name
+  // Serial of the controller FortiGate (FMG device-list `serial` / the
+  // standalone gate's own serial). The DEFINITIVE controller identity: FMG's
+  // device NAME is operator-assigned inside FMG and routinely differs from the
+  // gate's configured `system global hostname`, which is what lands on
+  // Asset.hostname — so name-based parent resolution silently drops the edge on
+  // any install where the two diverge (prod 2026-08-12: dependency suppression,
+  // Device Map site membership, region assignment and interface auto-monitor all
+  // failed for one gate's switches). Stamped onto
+  // fortinetTopology.controllerSerial; consumers resolve serial-first and fall
+  // back to the name. Optional because a pre-upgrade cached row may lack it.
+  deviceSerial?: string;
   name: string;         // switch-id
   serial: string;
   ipAddress: string;    // connecting_from
@@ -1086,6 +1097,9 @@ export interface DiscoveredFortiSwitch {
 
 export interface DiscoveredFortiAP {
   device: string;      // FortiGate controller name
+  // Serial of the controller FortiGate — the definitive controller identity.
+  // See DiscoveredFortiSwitch.deviceSerial for why the name isn't.
+  deviceSerial?: string;
   name: string;
   serial: string;
   model: string;
@@ -1909,7 +1923,7 @@ async function fmgStepInventory(ctx: FmgDeviceCtx): Promise<void> {
 
 // Step 3c: managed FortiSwitches (live status + CMDB uplink/description join). Offline gates skip.
 async function fmgStepSwitches(ctx: FmgDeviceCtx): Promise<void> {
-  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, localSwitches, flags } = ctx;
+  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, localDevice, localSwitches, flags } = ctx;
     // Step 3c: Managed FortiSwitches (live status). Skipped for offline gates —
     // this whole block, including the nested /sys/proxy/json CMDB-uplink read,
     // requires the device to be reachable. The native CMDB switch roster in
@@ -1985,6 +1999,7 @@ async function fmgStepSwitches(ctx: FmgDeviceCtx): Promise<void> {
         for (const sw of switchResults) {
           localSwitches.push({
             device: deviceName,
+            deviceSerial: localDevice.serial || "",
             name: sw["switch-id"] || "",
             serial: sw.serial || "",
             ipAddress: sw.connecting_from || "",
@@ -2048,7 +2063,7 @@ async function fmgStepSwitchCmdbRoster(ctx: FmgDeviceCtx): Promise<void> {
 
 // Step 3d: managed FortiAPs (live status). Offline gates skip.
 async function fmgStepAps(ctx: FmgDeviceCtx): Promise<void> {
-  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, localAps, flags } = ctx;
+  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, localDevice, localAps, flags } = ctx;
     // Step 3d: Managed FortiAPs (live status). Skipped for offline gates; the
     // native CMDB AP roster in Step 3d.4 below still runs offline.
   if (offline) return;
@@ -2084,7 +2099,7 @@ async function fmgStepAps(ctx: FmgDeviceCtx): Promise<void> {
           // Shared parser — same shape across FMG proxy and standalone
           // FortiGate REST paths. See utils/fortiapMonitorRow.ts.
           const parsed = parseFortiapMonitorRow(ap as Record<string, unknown>);
-          localAps.push({ device: deviceName, ...parsed });
+          localAps.push({ device: deviceName, deviceSerial: localDevice.serial || "", ...parsed });
           apCount++;
         }
         log("discover.fortiaps", "info", `${deviceName}: Found ${apCount} managed FortiAP(s)`, deviceName);

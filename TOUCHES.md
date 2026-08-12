@@ -27,7 +27,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 ## Sections
 
-- [Cross-cutting concerns](#cross-cutting-concerns) (19)
+- [Cross-cutting concerns](#cross-cutting-concerns) (29)
 - [Per-service touches](#per-service-touches) — alphabetical; covers the highest-traffic of the 65 services in `src/services/` (not every service has a section)
 
 ---
@@ -1005,7 +1005,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **Invariants:**
 - Suppression follows the **confirmed-down** edge only. propagateAfterStatusChange() is called only from the up/down guard in recordProbeResult — NOT from the monitor.status_changed Event emission (which also logs the →warning edge). Warning / recovering flapping logs an event but does NOT propagate.
-- "All-down" multi-parent: an asset with N effective parents suppresses iff every parent is down or itself dependencySuppressed. Empty parent set = never suppressed.
+- "All-down" multi-parent: an asset with N effective parents suppresses iff every parent is down or itself dependencySuppressed. Empty parent set = never suppressed. **This is why a broken parent lookup is invisible-but-total**: a child that resolves no parent doesn't fail loudly, it just never suppresses — which is how the FMG-device-name/hostname split (see cross-cutting/fortinet-parent-key-resolution) showed up as "a FortiGate in maintenance leaves its switches reading Down" rather than as an error anywhere.
 - Override resolution: if any source="override" row exists for an asset, those are the effective parents (computed rows ignored). Empty override set = explicit "no parents" pin (asset opts out entirely).
 - Unmonitored parents are transparent — the suppression walk skips them and continues to their grandparents. A monitored ancestor must say "down" before suppression can fire.
 - recomputeDependencyTree only touches source="computed" rows for in-scope assets; out-of-scope rows and source="override" rows are never deleted.
@@ -1020,6 +1020,40 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - Smoke-test on dev: pick a live FortiGate, set monitorStatus="down" via direct DB write, wait one reconciler tick (≤60s); confirm child switches/APs flip to dependencySuppressed and emit monitor.dependency_suppressed Events.
 - If the topology endpoint refactor lands: hit /api/v1/map/sites/:id/topology before/after; edge sets must match (same FG→switch / switch→AP edges) modulo the new dependencySuppressed flag on each node.
 - Watch for cycles introduced by override edits: the override endpoint must reject inputs that would form a cycle (BFS-back-walk validation).
+- Parent resolution from discovery stamps goes through `utils/fortinetParentKey.ts` — never re-hand-roll a `byHostname` map here. See cross-cutting/fortinet-parent-key-resolution.
+
+---
+
+## cross-cutting/fortinet-parent-key-resolution
+
+**What it is:** the one resolution order for "which Asset is this FortiSwitch/FortiAP's parent?", in `src/utils/fortinetParentKey.ts` (pure, `tests/unit/fortinetParentKey.test.ts`).
+
+`Asset.fortinetTopology.controllerFortigate` holds **FortiManager's device name**, assigned inside FMG. A firewall's `Asset.hostname` is projected from the **gate's own configured hostname** (`device.hostname || device.name`, `buildFortigateFirewallObservedBlob`). Nothing makes those equal, and every consumer used to compare one to the other. On an install where an operator named the FMG device differently, every switch/AP behind that gate resolved to NO parent — silently, since "no parent" is a legitimate state (prod 2026-08-12: dependency suppression never fired so a gate in a maintenance window left its switches reading plain "Down"; the Device Map drew the gate with no children; region membership, region subnet propagation and FortiLink interface auto-monitor all skipped them).
+
+**Resolution order** (`resolveInfraParentAsset`, case-insensitive):
+1. `controllerSerial` → `Asset.serialNumber`. Definitive; stamped by discovery from 2026-08 (`DiscoveredFortiSwitch/FortiAP.deviceSerial` → the topology stamp + observed blob).
+2. `controllerFortigate` → the candidate's OWN `fortinetTopology.deviceName`. Like-for-like (both are FMG's name for the gate) and **correct on pre-fix rows**, which is what makes the fix work without waiting for a re-discovery.
+3. `controllerFortigate` → `Asset.hostname`. The historical match; still correct wherever FMG's name and the gate's hostname agree. Never remove it.
+4. The stamped name as a **serial** — a FortiSwitch's `switch-id` IS its serial, and that's what an AP's LLDP table reports as `parentSwitch`, while the switch's hostname may be an operator label.
+
+**Two classes of `controllerFortigate` consumer — do not mix them:**
+- **Asset identity** (route through this util): `dependencyTreeService`, `topologyGraphService.buildSiteTopology`, `routes/map.ts` topology search, `peerInferredLldpService`, `autoMonitorInterfacesService.loadInferredLldpByAsset`, `mapRegionService.computeMembership`, `connectionPathService.resolveTopologyFallback`.
+- **FMG/FortiOS API addressing** (must keep using the device NAME — never "fix" these): `monitoringService`'s parent-FortiGate polling (4 sites), the discovery decommission sweeps comparing against the FMG roster, `utils/infraDhcpBinding` (name-to-name against `Subnet.fortigateDevice`), `descriptionSyncService`'s transport grouping (already correctly keys the firewall side on `deviceName`), and the Sources column (`utils/assetSourceLocation`, business rule 22 — showing the FMG name is deliberate).
+
+**Helpers:** `buildInfraParentIndex` / `resolveInfraParentAsset` (in-memory, for a pass that already loaded the inventory) · `readControllerStamp` / `readParentSwitchStamp` / `readFirewallDeviceName` (defensive JSON reads) · `controllerStampWhereOr` (children of one gate, Prisma JSON-path OR) · `topologyStampWhereOr` (one stamp key vs. several identities) · `parentAssetWhereOr` (the reverse — the gate named by one child stamp) · `controllerIdentityKeys` (plain string list, for in-memory compares and `Subnet.fortigateDevice` `in:` lookups).
+
+**Invariants:**
+- `null` from the resolver means **no parent**, never an error — an unadopted switch, a gate another integration hasn't discovered yet, and a genuine orphan all land there.
+- `expectedType` is load-bearing: a switch's controller must be a `firewall`, an AP's `parentSwitch` a `switch`. Without it a name collision builds an edge to the wrong device.
+- `parentAssetWhereOr` deliberately over-fetches; resolve precedence in memory afterwards. `findFirst` with an OR gives no control over which match returns.
+- `Subnet.fortigateDevice` holds the device NAME, not a hostname — anything joining it to a firewall Asset needs `controllerIdentityKeys`, not `hostname`.
+- The Prisma query builders are case-EXACT while the in-memory resolver is case-insensitive. A stamp differing only in case resolves in one and not the other.
+
+**When changing this:**
+- Adding a consumer: use the helpers; never hand-roll a `byHostname` map off `controllerFortigate` again. Decide first which of the two consumer classes you're in.
+- Adding a stamp writer: FMG and standalone FortiGate both, per cross-cutting/fmg-fortigate-parity-surfaces — `fortimanagerService.fmgStepSwitches`/`fmgStepAps` (from `ctx.localDevice.serial`) and `fortigateService`'s switch/AP pushes (from `ctx.deviceSerial`), then `discoveryEngine`'s `swTopology`/`apTopology` stamps AND `buildFortiswitchObservedBlob`/`buildFortiapObservedBlob`.
+- Existing rows gain `controllerSerial` only on their integration's next discovery run — deliberately no backfill job, because step 2 already resolves them. Don't "optimize" step 2 or 3 away.
+- HA: the FMG device record's serial is the cluster's (the primary member's); each member Asset carries its own serial, so a `controllerSerial` match lands on the primary and the standby is handled by the existing `isHaStandby` rule in `evaluateSuppression`.
 
 ---
 
@@ -1908,7 +1942,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **When changing this:**
 - If the tag prefix or category constants change, also update CLAUDE.md "Map Regions" section + the assets edit modal's tag picker label conventions.
-- Membership logic depends on `Asset.fortinetTopology.controllerFortigate` matching firewall hostnames; if discovery ever stops setting that field, the cascade silently breaks. Add a coverage test if discovery topology shape evolves.
+- Membership resolves each in-polygon firewall to its `controllerIdentityKeys` (serial + `fortinetTopology.deviceName` + hostname, `utils/fortinetParentKey.ts`) and matches infra children on `controllerSerial` first, then `controllerFortigate` against any of those keys. It previously compared `controllerFortigate` to the hostname ALONE — which is the one key that is NOT it, since children stamp FortiManager's device NAME — so on installs where the two differ NO switch/AP inherited its gate's region. The same keys feed the `Subnet.fortigateDevice` lookup for subnet propagation (that column also holds the device name, so the hostname-only comparison meant no server/workstation inherited a region either). If discovery ever stops setting those fields, the cascade silently breaks.
 - Polygon antimeridian crossings are documented out-of-scope; if Polaris ever supports global polygons, audit `pointInPolygon` for that case.
 
 ---
@@ -3985,13 +4019,13 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - Never writes the `AssetLldpNeighbor` table; rows exist only in the HTTP response body.
 - Synthesized rows always carry `source: "peer-inferred"` so callers + the UI can distinguish them.
 - Three synthesis branches:
-  - Asset is `switch` → APs where `fortinetTopology.parentSwitch === self.hostname`; emit on the AP's `parentPort`.
-  - Asset is `firewall` → switches where `fortinetTopology.controllerFortigate === self.hostname`; emit on the switch's `uplinkInterface` (FortiGate-side interface name from `fgt_peer_intf_name`).
+  - Asset is `switch` → APs whose `fortinetTopology.parentSwitch` matches self's hostname OR serial (`topologyStampWhereOr`); emit on the AP's `parentPort`. An AP stamps parentSwitch from its LLDP table, which reports the switch-id (= the serial) while the hostname may be an operator label.
+  - Asset is `firewall` → switches selected by `controllerStampWhereOr` (serial / self's `fortinetTopology.deviceName` / hostname — see `utils/fortinetParentKey.ts`); emit on the switch's `uplinkInterface` (FortiGate-side interface name from `fgt_peer_intf_name`). Matching `controllerFortigate` against the hostname alone found nothing on installs whose FMG device name differs from the gate's configured hostname.
   - Asset is `access_point` → if `self.fortinetTopology.parentSwitch` + `uplinkInterface` both set, resolve the switch by hostname and emit on the AP's local port normalized via `normalizeFortiapInterfaceName` against the AP's known SNMP ifNames (prefers `eth0` form when present so the inferred row lines up with the System tab's interface table).
 - Direct-attached FortiAPs (controllerFortigate set, no parentSwitch) are intentionally skipped — `uplinkInterface` on an AP is the AP's own port, not the FortiGate's, so we can't pin the row to a FortiGate interface.
-- Skip on missing data: empty self hostname → return []; missing `parentPort` / `uplinkInterface` on the peer side → skip that row.
+- Skip on missing data: self has neither hostname nor serial → return []; missing `parentPort` / `uplinkInterface` on the peer side → skip that row.
 - Dedup rule (applied by callers via `dedupeInferredNeighbors`): drop inferred row when a real LLDP row exists on the same `(localIfName, matchedAssetId)`. Real LLDP wins. A real row with no `matchedAsset.id` does NOT suppress inferred rows. **Aggregate-aware:** when callers pass an `aggregateParentByMember` map (member ifName → parent aggregate ifName, built by `aggregateMembershipMap(interfaces)`), a real row learned on an aggregate's *member* port also suppresses an inferred row emitted on the *aggregate* itself — the FortiLink case, where the FortiGate→FortiSwitch uplink is synthesized on `fortilink` but the real LLDP lands on physical member `a`. The map includes only members whose parent's `ifType === "aggregate"` (VLAN sub-interfaces, which also carry `ifParent`, are excluded).
-- Hostname comparison is case-exact (Prisma `path: ["..."], equals: ...`) — matches what `connectionPathService` does. FortiOS-sourced hostnames are consistent across the surfaces Polaris discovers.
+- Comparisons are case-exact (Prisma `path: ["..."], equals: ...`) — matches what `connectionPathService` does. FortiOS-sourced names are consistent across the surfaces Polaris discovers; the fix for the FMG-name/hostname split was to compare the RIGHT keys, not to loosen the comparison. The in-memory resolver (`resolveInfraParentAsset`) is case-INSENSITIVE, so a stamp that these queries miss on case can still resolve there — keep that difference in mind when adding a consumer.
 - `firstSeen` and `lastSeen` are stamped at request time — they're not persistent state, just shaped to match the real-row contract.
 
 **When changing this:**

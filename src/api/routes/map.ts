@@ -26,6 +26,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
+import { controllerStampWhereOr, readFirewallDeviceName } from "../../utils/fortinetParentKey.js";
 import {
   buildSiteTopology,
   monitorStatusToHealth,
@@ -174,16 +175,23 @@ router.get("/sites/:id/topology/search", async (req, res, next) => {
 
     const fg = await prisma.asset.findFirst({
       where: { id, status: { notIn: EXCLUDED_LIFECYCLE_STATUSES } },
-      select: { id: true, hostname: true, assetType: true },
+      select: { id: true, hostname: true, serialNumber: true, assetType: true, fortinetTopology: true },
     });
     if (!fg || fg.assetType !== "firewall") throw new AppError(404, "FortiGate not found");
 
-    const fgHostname = fg.hostname || "";
-    const siblingSwitches = fgHostname
+    // Match children by serial / FMG device name / hostname — hostname alone
+    // misses every install whose FMG device name differs from the gate's
+    // configured hostname. See utils/fortinetParentKey.ts.
+    const controllerKeyOr = controllerStampWhereOr({
+      hostname: fg.hostname,
+      serialNumber: fg.serialNumber,
+      deviceName: readFirewallDeviceName(fg.fortinetTopology),
+    });
+    const siblingSwitches = controllerKeyOr.length > 0
       ? await prisma.asset.findMany({
           where: {
             assetType: "switch",
-            fortinetTopology: { path: ["controllerFortigate"], equals: fgHostname },
+            AND: [{ OR: controllerKeyOr }],
             status: { notIn: EXCLUDED_LIFECYCLE_STATUSES },
           },
           select: { id: true, hostname: true },

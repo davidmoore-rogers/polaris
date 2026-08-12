@@ -37,6 +37,11 @@
 import { prisma } from "../db.js";
 import { normalizeFortiapInterfaceName } from "../utils/fortiapInterfaceAlias.js";
 import { inferDirectAttachments, type MatchedFdbEntry } from "../utils/macForwarding.js";
+import {
+  controllerStampWhereOr,
+  topologyStampWhereOr,
+  readFirewallDeviceName,
+} from "../utils/fortinetParentKey.js";
 
 interface FortinetTopology {
   role?: string;
@@ -86,19 +91,25 @@ const PEER_SELECT = {
 export async function buildInferredNeighborsForAsset(assetId: string): Promise<InferredLldpNeighbor[]> {
   const self = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: { id: true, hostname: true, assetType: true, fortinetTopology: true },
+    select: { id: true, hostname: true, serialNumber: true, assetType: true, fortinetTopology: true },
   });
-  if (!self || !self.hostname) return [];
+  // Either identity is enough to find peers — the stamps below are matched
+  // serial-first with the name as fallback (utils/fortinetParentKey.ts), so a
+  // hostname-less asset with a serial is no longer a dead end.
+  if (!self || (!self.hostname && !self.serialNumber)) return [];
   const selfFt = (self.fortinetTopology as FortinetTopology | null) ?? null;
 
   const now = new Date();
   const inferred: InferredLldpNeighbor[] = [];
 
   if (self.assetType === "switch") {
+    // An AP stamps parentSwitch from its own LLDP table, which reports the
+    // switch's system name — usually the switch-id (= the serial), while
+    // Asset.hostname may be an operator label. Match either.
     const aps = await prisma.asset.findMany({
       where: {
         assetType: "access_point",
-        fortinetTopology: { path: ["parentSwitch"], equals: self.hostname },
+        AND: [{ OR: topologyStampWhereOr("parentSwitch", [self.hostname, self.serialNumber]) }],
       },
       select: PEER_SELECT,
     });
@@ -132,7 +143,11 @@ export async function buildInferredNeighborsForAsset(assetId: string): Promise<I
     const switches = await prisma.asset.findMany({
       where: {
         assetType: "switch",
-        fortinetTopology: { path: ["controllerFortigate"], equals: self.hostname },
+        AND: [{ OR: controllerStampWhereOr({
+          hostname: self.hostname,
+          serialNumber: self.serialNumber,
+          deviceName: readFirewallDeviceName(self.fortinetTopology),
+        }) }],
       },
       select: PEER_SELECT,
     });

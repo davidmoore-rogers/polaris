@@ -54,6 +54,101 @@ describe("buildDependencyEdgesFromInputs", () => {
     ]);
   });
 
+  // ── FMG device name ≠ gate hostname (prod 2026-08-12) ────────────────────
+  //
+  // A switch stamps `controllerFortigate` with FortiManager's DEVICE NAME. The
+  // firewall's Asset.hostname is projected from the gate's own configured
+  // hostname. When an operator names the FMG device differently the two never
+  // matched, the switch got NO parent, and — since suppression requires at least
+  // one effective parent — it could never enter dependency-down: a FortiGate in
+  // a maintenance window left its switches reading plain "Down".
+  it("resolves the controller by serial when the FMG device name differs from the gate hostname", () => {
+    const assets: DepAsset[] = [
+      { id: "fg1", hostname: "fg-edge-01.corp", serialNumber: "FG100F0001", assetType: "firewall", fortinetTopology: null },
+      {
+        id: "sw1",
+        hostname: "S248EPTF0001",
+        serialNumber: "S248EPTF0001",
+        assetType: "switch",
+        fortinetTopology: { role: "fortiswitch", controllerFortigate: "SITE-01-FW", controllerSerial: "FG100F0001" },
+      },
+    ];
+    expect(buildDependencyEdgesFromInputs(assets, [], [])).toEqual([
+      { childAssetId: "sw1", parentAssetId: "fg1", detectedVia: "controller" },
+    ]);
+  });
+
+  it("resolves the controller via the gate's own FMG device-name stamp with no controllerSerial", () => {
+    // Pre-fix rows carry no `controllerSerial` until their integration
+    // re-discovers, so the edge has to come back from data already on disk.
+    const assets: DepAsset[] = [
+      {
+        id: "fg1",
+        hostname: "fg-edge-01.corp",
+        serialNumber: "FG100F0001",
+        assetType: "firewall",
+        fortinetTopology: { role: "fortigate", deviceName: "SITE-01-FW" },
+      },
+      {
+        id: "sw1",
+        hostname: "S248EPTF0001",
+        serialNumber: "S248EPTF0001",
+        assetType: "switch",
+        fortinetTopology: { role: "fortiswitch", controllerFortigate: "SITE-01-FW" },
+      },
+    ];
+    expect(buildDependencyEdgesFromInputs(assets, [], [])).toEqual([
+      { childAssetId: "sw1", parentAssetId: "fg1", detectedVia: "controller" },
+    ]);
+  });
+
+  it("does not treat the AP's real uplink switch as bridged when the switch hostname is an operator label", () => {
+    // The AP stamps parentSwitch from LLDP, which reports the switch-id (=
+    // serial). Comparing that to Asset.hostname alone failed for a renamed
+    // switch and INVERTED the topology: the switch was classified as bridged
+    // behind the AP, losing its FortiLink edge to the FortiGate. Here the AP's
+    // parentSwitch names the serial while the switch's hostname is a label —
+    // the switch must still hang off the firewall.
+    const assets: DepAsset[] = [
+      { id: "fg1", hostname: "FG-EDGE-01", serialNumber: "FG100F0001", assetType: "firewall", fortinetTopology: null },
+      {
+        id: "sw1",
+        hostname: "IDF-2-ACCESS",
+        serialNumber: "S248EPTF0001",
+        assetType: "switch",
+        fortinetTopology: { role: "fortiswitch", controllerFortigate: "FG-EDGE-01" },
+      },
+      {
+        id: "ap1",
+        hostname: "FAP-IDF2",
+        serialNumber: "FP231F0001",
+        assetType: "access_point",
+        fortinetTopology: { role: "fortiap", parentSwitch: "S248EPTF0001" },
+      },
+    ];
+    const edges = buildDependencyEdgesFromInputs(assets, [], []);
+    expect(edges).toEqual(expect.arrayContaining([
+      { childAssetId: "sw1", parentAssetId: "fg1", detectedVia: "controller" },
+      { childAssetId: "ap1", parentAssetId: "sw1", detectedVia: "controller" },
+    ]));
+  });
+
+  it("still emits no edge when the controller genuinely is not in the inventory", () => {
+    // Absence of a parent must stay absence — the serial fallbacks must not
+    // invent an edge to some other gate.
+    const assets: DepAsset[] = [
+      { id: "fg1", hostname: "FG-OTHER", serialNumber: "FG100F9999", assetType: "firewall", fortinetTopology: null },
+      {
+        id: "sw1",
+        hostname: "FS-CORE-01",
+        serialNumber: "S248EPTF0001",
+        assetType: "switch",
+        fortinetTopology: { role: "fortiswitch", controllerFortigate: "NOT-DISCOVERED", controllerSerial: "FG100F0001" },
+      },
+    ];
+    expect(buildDependencyEdgesFromInputs(assets, [], [])).toEqual([]);
+  });
+
   it("makes a mesh leaf AP depend on its root AP, not the controller-resolved switch", () => {
     const assets = [
       fg("fg1", "FG-EDGE-01"),
