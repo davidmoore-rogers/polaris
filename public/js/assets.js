@@ -6185,37 +6185,23 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
   // column. A FortiGate, a server, or a switch polled over REST would
   // otherwise show a dash on every row for a feature it never reports.
   var showPoeCol = rows.some(function (r) { return r.poeStatus != null; });
-  // "Inactive" = no traffic ever observed (both cumulative counters are
-  // null or zero). User-set rule: ports with any non-zero in/out count
-  // are always shown regardless of admin/oper status; everything else
-  // gets hidden behind a "Show N inactive interfaces" expander so a
-  // 48-port switch with 6 active ports isn't a wall of zeros. Aggregate
-  // members, VLAN sub-interfaces, loopbacks, etc. follow the same rule.
-  // Exception: an interface selected for monitoring (pinned in
-  // monitoredInterfaces — aggregates, member ports, anything) is never
-  // auto-hidden — the operator explicitly wants eyes on it, so it stays
-  // visible even before any traffic has been observed. Mirrors the IPsec
-  // tunnel exemption below.
-  function isInactive(iface) {
-    if (monitored.has(iface.ifName)) return false;
-    var hasIn  = iface.inOctets  != null && iface.inOctets  > 0;
-    var hasOut = iface.outOctets != null && iface.outOctets > 0;
-    return !hasIn && !hasOut;
-  }
-  // Same rule for IPsec tunnel rows: no phase-2 traffic ever observed →
-  // hidden behind the expander with the inactive interfaces. Covers dead
-  // tunnels synthesized from CMDB (null counters) and idle down tunnels,
-  // while any tunnel actually passing traffic always shows. Exception: a
-  // tunnel selected for monitoring (pinned in monitoredIpsecTunnels) is
-  // never auto-hidden — the operator explicitly wants eyes on it, so it
-  // stays visible even before any data has been collected.
-  function isInactiveTunnel(tn) {
-    if (monitoredTunnels.has(tn.tunnelName)) return false;
-    var hasIn  = tn.incomingBytes != null && tn.incomingBytes > 0;
-    var hasOut = tn.outgoingBytes != null && tn.outgoingBytes > 0;
-    return !hasIn && !hasOut;
-  }
+  // Every interface and tunnel renders (2026-08). Traffic-less rows used to
+  // ship hidden behind a "Show N inactive interfaces" expander so a 48-port
+  // switch with 6 live ports wasn't a wall of zeros — but "no counters yet" is
+  // a poor proxy for "not interesting" (an admin-shut port the operator is
+  // hunting for, a link that just came up, a dead tunnel that should be up),
+  // and the expander was a bespoke control answering exactly one question.
+  // Per-column sort + inline filter — TableSF, the same control every other
+  // list table in Polaris carries — answers that one and the rest: sort In/Out
+  // descending for the busy ports, filter Status for what's up, filter Native
+  // VLAN for a segment. The nesting + collapse tree stays as the DEFAULT view;
+  // the table flattens the moment a sort or a filter is active (renderBody).
   var COLS = 11 + (showVlanCols ? 2 : 0) + (showPoeCol ? 1 : 0);
+  // Per-user, per-asset collapsed parents. Read HERE rather than in the wiring
+  // phase because every row build has to bake the current state into its own
+  // markup: a sort/filter re-render replaces the whole tbody, so a post-hoc
+  // DOM fix-up would be undone on the operator's next keystroke.
+  var collapsed = _getCollapsedIfaces(asset && asset.id);
   // Group LLDP neighbors by local interface so the row builder can stamp the
   // first neighbor's label inline. Most ports only ever see one neighbor; a
   // "+N" badge appears when more are present and the slide-over enumerates them.
@@ -6228,20 +6214,20 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
+  // Plain status label — also the Status column's sort/filter value, so the
+  // pill an operator reads and the value their filter matches can't diverge.
+  function statusLabelOf(i) {
+    if (i.adminStatus && String(i.adminStatus).toLowerCase() === "down") return "admin shut";
+    if (i.operStatus) return String(i.operStatus).toLowerCase();
+    if (i.adminStatus) return String(i.adminStatus).toLowerCase();
+    return "";
+  }
+
   function statusCell(i) {
-    var statusLabel, statusKind;
-    if (i.adminStatus && String(i.adminStatus).toLowerCase() === "down") {
-      statusLabel = "admin shut"; statusKind = "decommissioned";
-    } else if (i.operStatus) {
-      statusLabel = String(i.operStatus).toLowerCase();
-      statusKind = statusLabel === "up" ? "active" : "decommissioned";
-    } else if (i.adminStatus) {
-      statusLabel = String(i.adminStatus).toLowerCase();
-      statusKind = statusLabel === "up" ? "active" : "decommissioned";
-    }
-    return statusLabel
-      ? '<span class="status-pill status-pill-' + statusKind + '">' + escapeHtml(statusLabel) + '</span>'
-      : '—';
+    var statusLabel = statusLabelOf(i);
+    if (!statusLabel) return "—";
+    var statusKind = (statusLabel === "up") ? "active" : "decommissioned";
+    return '<span class="status-pill status-pill-' + statusKind + '">' + escapeHtml(statusLabel) + '</span>';
   }
 
   function typeBadge(iface, isChild) {
@@ -6273,12 +6259,13 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
   // the class is meaningless without knowing power is actually flowing.
   // The class is a BUDGET bracket, not a measurement: RFC 3621 defines no
   // per-port wattage object, so there is no wattage to show here.
+  var POE_LABELS = { disabled: "Disabled", searching: "Searching", delivering: "Delivering",
+                     fault: "Fault", test: "Test", "other-fault": "Fault (other)" };
   function poeCellHTML(iface) {
     if (!showPoeCol) return "";
     var st = iface.poeStatus;
     if (!st) return '<td class="mono">—</td>';
-    var LABEL = { disabled: "Disabled", searching: "Searching", delivering: "Delivering",
-                  fault: "Fault", test: "Test", "other-fault": "Fault (other)" };
+    var LABEL = POE_LABELS;
     var color = (st === "fault" || st === "other-fault") ? "var(--color-danger,#dc2626)"
       : st === "delivering" ? "var(--color-success,#16a34a)"
       : "var(--color-text-secondary)";
@@ -6334,7 +6321,9 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
 
     var prefix = "", padStyle = "";
     if (opts.isParent) {
-      prefix = '<button class="iface-expand-toggle" data-parent="' + escapeHtml(iface.ifName) + '" style="background:none;border:none;cursor:pointer;color:var(--color-text-secondary);padding:0 3px 0 0;font-size:0.75rem;vertical-align:middle;line-height:1" title="Collapse children">▼</button>';
+      var isCollapsed = collapsed.has(iface.ifName);
+      prefix = '<button class="iface-expand-toggle" data-parent="' + escapeHtml(iface.ifName) + '" style="background:none;border:none;cursor:pointer;color:var(--color-text-secondary);padding:0 3px 0 0;font-size:0.75rem;vertical-align:middle;line-height:1" title="' +
+        (isCollapsed ? "Expand children" : "Collapse children") + '">' + (isCollapsed ? "▶" : "▼") + '</button>';
     }
     if (opts.isChild) {
       padStyle = "padding-left:1.4rem;";
@@ -6348,10 +6337,13 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     var subtitle = aliasOverride
       ? '<span style="display:block;font-size:0.7rem;opacity:0.6;font-weight:normal">' + escapeHtml(iface.ifName) + '</span>'
       : '';
+    // In flat (sorted/filtered) mode a member port has no parent row above it to
+    // indent under, so the "Member" badge is what still identifies it as one.
+    var badgeAsChild = opts.isChild || (opts.flat && !!iface.ifParent);
     var nameCell =
       '<td class="mono" style="' + padStyle + '" title="' + escapeHtml(iface.ifName) + '">' + prefix +
       '<a href="#" class="asset-iface-link" data-ifname="' + escapeHtml(iface.ifName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(label) + '</a>' +
-      typeBadge(iface, opts.isChild) +
+      typeBadge(iface, badgeAsChild) +
       subtitle +
       '</td>';
 
@@ -6359,16 +6351,13 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     var errs  = ((iface.inErrors != null && iface.inErrors > 0) || (iface.outErrors != null && iface.outErrors > 0))
       ? ((iface.inErrors || 0) + " / " + (iface.outErrors || 0))
       : "0 / 0";
-    // Combine child + inactive classes. Inactive rows ship with inline
-    // display:none; the expander toggle clears the inline style (and
-    // re-applies it if the row's parent is collapsed when re-hiding).
-    var classes = [];
-    if (opts.isChild) classes.push("iface-child");
-    var inactive = isInactive(iface);
-    if (inactive) classes.push("iface-inactive");
-    var rowAttrs = classes.length > 0 ? ' class="' + classes.join(" ") + '"' : "";
-    if (opts.isChild) rowAttrs += ' data-parent="' + escapeHtml(opts.parentName) + '"';
-    if (inactive) rowAttrs += ' style="display:none"';
+    // A nested row carries its parent's name so the expand/collapse toggle can
+    // find it, and ships hidden when that parent is currently collapsed.
+    var rowAttrs = "";
+    if (opts.isChild) {
+      rowAttrs = ' class="iface-child" data-parent="' + escapeHtml(opts.parentName) + '"';
+      if (collapsed.has(opts.parentName)) rowAttrs += ' style="display:none"';
+    }
     var neighborCell = '<td>' + _lldpNeighborInlineCell(lldpByIf[iface.ifName] || []) + '</td>';
 
     return "<tr" + rowAttrs + ">" +
@@ -6428,16 +6417,13 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
                  : tn.status === "dynamic" ? "storage"
                  : "maintenance";
     var statusPill = '<span class="status-pill status-pill-' + pillKind + '">' + escapeHtml(tn.status) + "</span>";
-    // Combine child + inactive classes, mirroring buildRow: a tunnel with no
-    // traffic ships hidden (inline display:none) and participates in the
-    // "Show N inactive interfaces" expander alongside regular interfaces.
-    var classes = [];
-    if (opts.collapseGroupName) classes.push("iface-child");
-    var inactive = isInactiveTunnel(tn);
-    if (inactive) classes.push("iface-inactive");
-    var rowAttr = classes.length > 0 ? ' class="' + classes.join(" ") + '"' : "";
-    if (opts.collapseGroupName) rowAttr += ' data-parent="' + escapeHtml(opts.collapseGroupName) + '"';
-    if (inactive) rowAttr += ' style="display:none"';
+    // Mirrors buildRow: a nested tunnel rides its top-level parent's collapse
+    // toggle, and ships hidden when that parent is currently collapsed.
+    var rowAttr = "";
+    if (opts.collapseGroupName) {
+      rowAttr = ' class="iface-child" data-parent="' + escapeHtml(opts.collapseGroupName) + '"';
+      if (collapsed.has(opts.collapseGroupName)) rowAttr += ' style="display:none"';
+    }
     // VLAN columns (when present) sit between MAC and In. IPsec tunnels
     // don't carry per-port VLAN config, so emit empty placeholders so the
     // column count stays consistent across every row in the table.
@@ -6497,11 +6483,11 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
   Object.keys(tunnelMap).forEach(function (k) { tunnelMap[k].sort(_byTunnelName); });
   orphanTunnels.sort(_byTunnelName);
 
-  // Render an interface plus its VLAN/aggregate children plus any IPsec
-  // tunnels nested at either level. Tunnel rows reuse the iface-child class
-  // and the top-level's data-parent so they collapse together with the
-  // existing toggle handler.
-  function renderCluster(iface) {
+  // Push an interface plus its VLAN/aggregate children plus any IPsec tunnels
+  // nested at either level onto `entries`, in reading order. Nested tunnel rows
+  // reuse the iface-child class and the top-level's data-parent so they
+  // collapse together with the existing toggle handler.
+  function pushCluster(entries, group, iface) {
     var kids = childMap[iface.ifName] || [];
     var directTunnels = tunnelMap[iface.ifName] || [];
     var nestedTunnelsCount = directTunnels.length;
@@ -6510,17 +6496,89 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     });
     var hasNested = kids.length > 0 || nestedTunnelsCount > 0;
     var collapseGroup = iface.ifName;
-    var out = buildRow(iface, { isParent: hasNested });
+    entries.push(_ifaceEntry(iface, group, { isParent: hasNested }));
     kids.forEach(function (child) {
-      out += buildRow(child, { isChild: true, parentName: collapseGroup });
+      entries.push(_ifaceEntry(child, group, { isChild: true, parentName: collapseGroup }));
       (tunnelMap[child.ifName] || []).forEach(function (tn) {
-        out += buildTunnelRow(tn, { collapseGroupName: collapseGroup, depth: 2 });
+        entries.push(_tunnelEntry(tn, group, { collapseGroupName: collapseGroup, depth: 2 }));
       });
     });
     directTunnels.forEach(function (tn) {
-      out += buildTunnelRow(tn, { collapseGroupName: collapseGroup, depth: 1 });
+      entries.push(_tunnelEntry(tn, group, { collapseGroupName: collapseGroup, depth: 1 }));
     });
-    return out;
+  }
+
+  // ── row model ──────────────────────────────────────────────────────────────
+  // One entry per rendered row. It carries the raw record, the tree placement
+  // the default view nests it with, and the flat comparable fields TableSF
+  // sorts + filters on. A sortable table needs its rows as DATA, not only as
+  // HTML — and the tree order the entries are built in doubles as the "natural"
+  // order a filtered-but-unsorted view falls back to.
+  //
+  // Each field is named for the column's EXISTING data-col-id, because
+  // setupColumnLayout derives a column's persistence id from data-sf-key first
+  // and data-col-id only as a fallback — keeping the two identical is what lets
+  // already-saved column widths / hidden columns / drag order keep applying
+  // instead of being orphaned by the day this table became sortable.
+  //
+  // `ifname` is an ARRAY on purpose: TableSF joins array values with a space for
+  // both comparison and matching, so an aliased port sorts by the label the
+  // operator reads while staying findable by its real ifName.
+  function taggedVlanText(iface) {
+    if (iface.trunksAllVlans === true) return "all";
+    var tagged = Array.isArray(iface.taggedVlans) ? iface.taggedVlans : [];
+    return tagged.join(", ");   // full list, not the cell's "+N more" summary
+  }
+  function neighborText(ifName) {
+    var ns = lldpByIf[ifName] || [];
+    if (ns.length === 0) return "";
+    var n = ns[0];
+    var label = (n.systemName && String(n.systemName).trim()) || n.chassisId || n.managementIp || "neighbor";
+    var port = n.portId || n.portDescription || "";
+    return port ? (label + " / " + port) : label;
+  }
+  function _ifaceEntry(iface, group, tree) {
+    var alias = (iface.alias && iface.alias.trim()) ? iface.alias.trim() : "";
+    var errIn = iface.inErrors != null ? Number(iface.inErrors) : 0;
+    var errOut = iface.outErrors != null ? Number(iface.outErrors) : 0;
+    return {
+      kind: "iface", raw: iface, group: group, tree: tree,
+      ifname: (alias && alias !== iface.ifName) ? [alias, iface.ifName] : [iface.ifName],
+      status: statusLabelOf(iface),
+      speed: iface.speedBps != null ? Number(iface.speedBps) : null,
+      ip: iface.ipAddress || "",
+      addressing: iface.addressingMode ? String(iface.addressingMode).toLowerCase() : "",
+      mac: iface.macAddress || "",
+      "native-vlan": iface.nativeVlan != null ? Number(iface.nativeVlan) : null,
+      "tagged-vlans": taggedVlanText(iface),
+      poe: iface.poeStatus || "",
+      "in": iface.inOctets != null ? Number(iface.inOctets) : null,
+      out: iface.outOctets != null ? Number(iface.outOctets) : null,
+      errors: (iface.inErrors != null || iface.outErrors != null) ? (errIn + errOut) : null,
+      neighbor: neighborText(iface.ifName),
+    };
+  }
+  // A tunnel occupies the same columns as an interface but reports far fewer of
+  // them (see buildTunnelRow's placeholders). Every field it can't answer is
+  // null/"" so it sorts and filters as ABSENT rather than as zero — a tunnel
+  // must not turn up under "PoE: fault" or sort as the slowest link.
+  function _tunnelEntry(tn, group, tree) {
+    return {
+      kind: "tunnel", raw: tn, group: group, tree: tree,
+      ifname: [tn.tunnelName],
+      status: tn.status || "",
+      speed: null,
+      ip: tn.remoteGateway || "",     // the IP column's value for a tunnel row
+      addressing: "",
+      mac: "",
+      "native-vlan": null,
+      "tagged-vlans": "",
+      poe: "",
+      "in": tn.incomingBytes != null ? Number(tn.incomingBytes) : null,
+      out: tn.outgoingBytes != null ? Number(tn.outgoingBytes) : null,
+      errors: null,
+      neighbor: "",
+    };
   }
 
   // Top-level: no ifParent set
@@ -6544,90 +6602,178 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     return r.ifType && r.ifType !== "physical" && r.ifType !== "aggregate";
   });
 
-  // ── render ─────────────────────────────────────────────────────────────────
-  var html = "";
-
-  if (ifaceGroup.length > 0) {
-    html += sectionRow("Interfaces", ifaceGroup.length);
-    ifaceGroup.forEach(function (iface) { html += renderCluster(iface); });
-  }
-
-  if (otherGroup.length > 0) {
-    html += sectionRow("Other Interfaces", otherGroup.length);
-    otherGroup.forEach(function (iface) { html += renderCluster(iface); });
-  }
-
+  // ── entries, in tree order ─────────────────────────────────────────────────
+  var GROUP_LABELS = { iface: "Interfaces", other: "Other Interfaces", orphan: "IPsec Tunnels (unbound)" };
+  // Section counts stay TOP-LEVEL counts (what they always were): "Interfaces
+  // (24)" means 24 ports, not 24 rows including their members and tunnels.
+  var groupCounts = { iface: ifaceGroup.length, other: otherGroup.length, orphan: orphanTunnels.length };
+  var entries = [];
+  ifaceGroup.forEach(function (iface) { pushCluster(entries, "iface", iface); });
+  otherGroup.forEach(function (iface) { pushCluster(entries, "other", iface); });
   // Tunnels with no resolvable parent interface (CMDB unreachable, parent
   // filtered out, etc.) get their own section so they're not lost.
-  if (orphanTunnels.length > 0) {
-    html += sectionRow("IPsec Tunnels (unbound)", orphanTunnels.length);
-    orphanTunnels.forEach(function (tn) { html += buildTunnelRow(tn, { depth: 0 }); });
+  orphanTunnels.forEach(function (tn) { entries.push(_tunnelEntry(tn, "orphan", { depth: 0 })); });
+
+  // ── render ─────────────────────────────────────────────────────────────────
+  // Two modes. Default: the nested tree with its section headers, exactly as
+  // before. Sorted or filtered: flat — no section headers, no indentation, no
+  // expand toggles, because a row's position no longer says anything about its
+  // parentage and half a tree (a matching member port whose aggregate filtered
+  // out) is worse than an honest list. Only the tbody is rewritten, so TableSF's
+  // rebuilt header row and applyTableLayout's widths/handles survive.
+  function renderTreeBody(list) {
+    var out = "";
+    var lastGroup = null;
+    list.forEach(function (e) {
+      if (e.group !== lastGroup) {
+        out += sectionRow(GROUP_LABELS[e.group], groupCounts[e.group]);
+        lastGroup = e.group;
+      }
+      out += (e.kind === "tunnel") ? buildTunnelRow(e.raw, e.tree) : buildRow(e.raw, e.tree);
+    });
+    return out;
+  }
+  function renderFlatBody(list) {
+    return list.map(function (e) {
+      return (e.kind === "tunnel") ? buildTunnelRow(e.raw, { depth: 0 }) : buildRow(e.raw, { flat: true });
+    }).join("");
+  }
+  var sf = null;
+  var afterRender = [];   // hooks the wiring phase adds (select-all resync)
+  function renderBody() {
+    var tbody = container.querySelector("#asset-iface-tbody");
+    if (!tbody) return;
+    var st = sf ? sf.getPrefs() : null;
+    var active = !!(st && (st.sortKey || Object.keys(st.sfFilters || {}).length > 0));
+    var list = sf ? sf.apply(entries) : entries;
+    if (!active) {
+      tbody.innerHTML = renderTreeBody(list);
+    } else if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="' + COLS + '" class="empty-state">No interfaces match the current filters.</td></tr>';
+    } else {
+      tbody.innerHTML = renderFlatBody(list);
+    }
+    afterRender.forEach(function (fn) { fn(); });
   }
 
-  // Per-table inactive count drives the trailing toggle row. Counts
-  // interface rows AND IPsec tunnel rows (both carry .iface-inactive when
-  // traffic-less); section header rows are never counted.
-  var inactiveCount = rows.filter(isInactive).length + tunnelsAll.filter(isInactiveTunnel).length;
-  var inactiveRow = inactiveCount > 0
-    ? '<tr id="iface-inactive-toggle-row"><td colspan="' + COLS + '" style="padding:0.45rem 0.6rem;text-align:center;background:transparent;border-top:1px solid var(--color-border)">' +
-        '<button type="button" id="iface-inactive-toggle" style="background:none;border:none;color:var(--color-text-secondary);font-size:0.78rem;cursor:pointer;padding:0;text-decoration:underline" title="Inactive = no in/out traffic counters">' +
-          '▶ Show ' + inactiveCount + ' inactive interface' + (inactiveCount === 1 ? '' : 's') + ' (no traffic)' +
-        '</button>' +
-      '</td></tr>'
-    : "";
   var vlanHeader = showVlanCols
-    ? '<th data-col-id="native-vlan" title="Untagged PVID on the FortiSwitch port">Native VLAN</th>' +
-      '<th data-col-id="tagged-vlans" title="Tagged VLAN set on the FortiSwitch port (allowed-vlans − untagged-vlans). \"all\" indicates `set allowed-vlans all`.">Tagged VLANs</th>'
+    ? '<th data-col-id="native-vlan" data-sf-key="native-vlan" data-sf-type="number" title="Untagged PVID on the FortiSwitch port">Native VLAN</th>' +
+      '<th data-col-id="tagged-vlans" data-sf-key="tagged-vlans" data-sf-type="string" title="Tagged VLAN set on the FortiSwitch port (allowed-vlans − untagged-vlans). \"all\" indicates `set allowed-vlans all`. Filtering matches the full set, including VLANs the cell summarizes as \"+N more\".">Tagged VLANs</th>'
     : "";
   var poeHeader = showPoeCol
-    ? '<th data-col-id="poe" title="Power over Ethernet: detection status and the negotiated power CLASS (a budget bracket, e.g. class3 = up to 12.95 W at the powered device). POWER-ETHERNET-MIB defines no per-port wattage, so no draw is shown. SNMP only.">PoE</th>'
+    ? '<th data-col-id="poe" data-sf-key="poe" data-sf-options="" title="Power over Ethernet: detection status and the negotiated power CLASS (a budget bracket, e.g. class3 = up to 12.95 W at the powered device). POWER-ETHERNET-MIB defines no per-port wattage, so no draw is shown. SNMP only.">PoE</th>'
     : "";
   container.innerHTML = staleBanner +
     '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>full-history retention</strong>. Unselected interfaces are kept for 24&nbsp;h only.</p>' +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
       '<th title="Pin this interface for fast-cadence polling + full-history retention (unselected interfaces are kept 24h)" style="width:32px" data-col-id="poll" data-col-required="true">' +
-        '<input type="checkbox" id="iface-poll-all" title="Select / de-select all interfaces and tunnels for fast-cadence polling (includes hidden inactive rows)"' + (canEdit ? '' : ' disabled') + '>' +
+        '<input type="checkbox" id="iface-poll-all" title="Select / de-select every listed interface and tunnel for fast-cadence polling (rows hidden by a filter keep their current setting)"' + (canEdit ? '' : ' disabled') + '>' +
       '</th>' +
-      '<th data-col-id="ifname" data-col-required="true">Interface</th>' +
-      '<th data-col-id="status">Status</th>' +
-      '<th data-col-id="speed">Speed</th>' +
-      '<th data-col-id="ip">IP</th>' +
-      '<th data-col-id="addressing" title="L3 addressing mode — FortiOS only (CMDB system/interface mode). DHCP, Static, or PPPoE; other sources show —">Addressing</th>' +
-      '<th data-col-id="mac">MAC</th>' +
+      '<th data-col-id="ifname" data-col-required="true" data-sf-key="ifname" data-sf-type="string">Interface</th>' +
+      '<th data-col-id="status" data-sf-key="status" data-sf-options="">Status</th>' +
+      '<th data-col-id="speed" data-sf-key="speed" data-sf-type="number" data-sf-nofilter>Speed</th>' +
+      '<th data-col-id="ip" data-sf-key="ip" data-sf-type="ip">IP</th>' +
+      '<th data-col-id="addressing" data-sf-key="addressing" data-sf-options="dhcp=DHCP|static=Static|pppoe=PPPoE" title="L3 addressing mode — FortiOS only (CMDB system/interface mode). DHCP, Static, or PPPoE; other sources show —">Addressing</th>' +
+      '<th data-col-id="mac" data-sf-key="mac" data-sf-type="string">MAC</th>' +
       vlanHeader +
       poeHeader +
-      '<th data-col-id="in">In</th>' +
-      '<th data-col-id="out">Out</th>' +
-      '<th data-col-id="errors">Errors (in/out)</th>' +
-      '<th title="LLDP neighbor seen on this interface" data-col-id="neighbor">Neighbor</th>' +
-    '</tr></thead><tbody>' + html + inactiveRow + "</tbody></table></div>";
+      '<th data-col-id="in" data-sf-key="in" data-sf-type="number" data-sf-nofilter>In</th>' +
+      '<th data-col-id="out" data-sf-key="out" data-sf-type="number" data-sf-nofilter>Out</th>' +
+      '<th data-col-id="errors" data-sf-key="errors" data-sf-type="number" data-sf-nofilter>Errors (in/out)</th>' +
+      '<th title="LLDP neighbor seen on this interface" data-col-id="neighbor" data-sf-key="neighbor" data-sf-type="string">Neighbor</th>' +
+    '</tr></thead><tbody id="asset-iface-tbody"></tbody></table></div>';
+
+  // Sort + filter state is per user AND per device class (a switch's filters
+  // are meaningless on a firewall), keyed the same way the column layout is.
+  // It has to be persisted rather than held in a closure: the System tab
+  // rebuilds this whole container on every refresh tick, so anything living
+  // only in memory would be wiped mid-investigation.
+  var ifaceTypeKey = _assetTableTypeKey("asset-interfaces", asset);
+  if (typeof TableSF !== "undefined") {
+    sf = new TableSF("asset-iface-tbody", function () {
+      PolarisPrefs.save(ifaceTypeKey, currentUsername, sf.getPrefs());
+      renderBody();
+    });
+    // Status and PoE offer only what this device actually reports — the value
+    // sets are device-dependent (a tunnel reports "dynamic", a FortiSwitch port
+    // reports "searching") and a checkbox that can never match is noise.
+    sf.setColumnOptions("status", _distinctSorted(entries.map(function (e) { return e.status; })));
+    if (showPoeCol) {
+      sf.setColumnOptions("poe", _distinctSorted(entries.map(function (e) { return e.poe; }))
+        .map(function (v) { return { value: v, label: POE_LABELS[v] || v }; }));
+    }
+    // Restore, minus any state pointing at a column THIS device doesn't render
+    // (PoE and the two VLAN columns appear only when something reports them).
+    // A stale filter on an absent column would match nothing, with no visible
+    // control to clear it; applyState drops an unknown sortKey for us.
+    var savedSf = PolarisPrefs.load(ifaceTypeKey, currentUsername);
+    if (savedSf) {
+      var presentKeys = {};
+      container.querySelectorAll("thead th[data-sf-key]").forEach(function (th) {
+        presentKeys[th.getAttribute("data-sf-key")] = true;
+      });
+      var keptFilters = {};
+      Object.keys(savedSf.sfFilters || {}).forEach(function (k) {
+        if (presentKeys[k]) keptFilters[k] = savedSf.sfFilters[k];
+      });
+      sf.applyState({ sortKey: savedSf.sortKey, sortDir: savedSf.sortDir, sfFilters: keptFilters });
+    }
+  }
+  renderBody();
   if (typeof applyTableLayout === "function") {
     // Per device-type persistence — FortiGate, FortiSwitch, FortiAP, and
     // generic endpoints have very different interface tables (aggregate
     // names + IPsec rows on firewalls; dozens of `port1..portN` on switches;
     // 2-3 short names on APs) so operators want independent column widths
-    // per class. See _assetTableTypeKey.
-    var ifaceTypeKey = _assetTableTypeKey("asset-interfaces", asset);
+    // per class. See _assetTableTypeKey. Runs AFTER TableSF (which rebuilds
+    // each sortable th's innerHTML and would wipe the resize handles).
     applyTableLayout(container.querySelector("table"), ifaceTypeKey, {
       onScreenshot: function (t) { _screenshotTableEl(t, "Interfaces", { hiddenNoun: "interface" }); },
     });
   }
-  return { monitored: monitored, monitoredTunnels: monitoredTunnels, canEdit: canEdit, inactiveCount: inactiveCount };
+  return {
+    monitored: monitored, monitoredTunnels: monitoredTunnels, canEdit: canEdit,
+    collapsed: collapsed, afterRender: afterRender,
+  };
 }
 
-// Wire the built table: select-all + per-row pin toggles (PUTs), collapse
-// state, show-inactive toggle, and the interface / tunnel / LLDP-neighbor
-// drill-down links.
+/** Distinct, non-empty, alphabetically sorted values — multi-select options. */
+function _distinctSorted(values) {
+  var seen = {};
+  var out = [];
+  (values || []).forEach(function (v) {
+    if (!v || seen[v]) return;
+    seen[v] = true;
+    out.push(v);
+  });
+  return out.sort();
+}
+
+// Wire the built table: select-all + per-row pin toggles (PUTs), the
+// expand/collapse tree, and the interface / tunnel / LLDP-neighbor drill-down
+// links.
+//
+// Every row-level handler is DELEGATED off the tbody rather than bound per
+// element: a sort or filter rewrites the tbody wholesale, so per-row listeners
+// would be dropped on the operator's first keystroke. `state.monitored` /
+// `state.monitoredTunnels` are mutated IN PLACE for the same reason — the row
+// builder closes over those Sets to decide which boxes render checked, so
+// rebinding a local would leave a re-render showing stale pins.
 function _wireInterfacesTable(container, si, asset, rows, state) {
   var monitored        = state.monitored;
   var monitoredTunnels = state.monitoredTunnels;
   var canEdit          = state.canEdit;
-  var inactiveCount    = state.inactiveCount;
+  var collapsed        = state.collapsed;
+  var assetId          = asset && asset.id;
+  var tbody            = container.querySelector("#asset-iface-tbody");
+  function replaceSet(set, next) {
+    set.clear();
+    next.forEach(function (v) { set.add(v); });
+  }
+
   // Header select-all checkbox — mirrors the aggregate state of every Poll 1m
-  // checkbox in the table (interfaces AND nested IPsec tunnels, hidden
-  // inactive/collapsed rows included): checked = all pinned, indeterminate =
-  // some. Toggling writes the complete pin set in ONE PUT (both fields
-  // together when tunnel rows exist); unchecking clears both pin lists.
+  // checkbox currently in the table (interfaces AND nested IPsec tunnels,
+  // collapsed rows included): checked = all pinned, indeterminate = some.
   var ifaceAllCb = container.querySelector("#iface-poll-all");
   function syncIfaceAllCb() {
     if (!ifaceAllCb) return;
@@ -6638,33 +6784,43 @@ function _wireInterfacesTable(container, si, asset, rows, state) {
     ifaceAllCb.indeterminate = on > 0 && on < boxes.length;
   }
   syncIfaceAllCb();
+  if (state.afterRender) state.afterRender.push(syncIfaceAllCb);
   if (canEdit && asset && ifaceAllCb) {
     ifaceAllCb.addEventListener("change", async function () {
       var on = ifaceAllCb.checked;
       var ifaceBoxes  = container.querySelectorAll(".asset-iface-toggle");
       var tunnelBoxes = container.querySelectorAll(".asset-ipsec-toggle");
-      var nextIf = new Set();
-      var nextTn = new Set();
-      if (on) {
-        ifaceBoxes.forEach(function (b) { nextIf.add(b.getAttribute("data-ifname")); });
-        tunnelBoxes.forEach(function (b) { nextTn.add(b.getAttribute("data-name")); });
-      }
+      // Select-all covers the LISTED rows and leaves everything else pinned as
+      // it was — with a filter active the operator can't see the rest, and
+      // silently un-pinning an interface they aren't looking at would stop its
+      // fast-cadence polling (and drop it to 24h retention) invisibly. With no
+      // filter, every row is listed, so this is the old whole-table behavior.
+      var nextIf = new Set(monitored);
+      ifaceBoxes.forEach(function (b) {
+        var n = b.getAttribute("data-ifname");
+        if (on) nextIf.add(n); else nextIf.delete(n);
+      });
+      var nextTn = new Set(monitoredTunnels);
+      tunnelBoxes.forEach(function (b) {
+        var n = b.getAttribute("data-name");
+        if (on) nextTn.add(n); else nextTn.delete(n);
+      });
       var patch = { monitoredInterfaces: Array.from(nextIf) };
       if (tunnelBoxes.length > 0) patch.monitoredIpsecTunnels = Array.from(nextTn);
       ifaceAllCb.disabled = true;
       try {
         await api.assets.update(asset.id, patch);
-        monitored = nextIf;
+        replaceSet(monitored, nextIf);
         if (si)    si.monitoredInterfaces    = Array.from(nextIf);
         if (asset) asset.monitoredInterfaces = Array.from(nextIf);
         if (tunnelBoxes.length > 0) {
-          monitoredTunnels = nextTn;
+          replaceSet(monitoredTunnels, nextTn);
           if (si)    si.monitoredIpsecTunnels    = Array.from(nextTn);
           if (asset) asset.monitoredIpsecTunnels = Array.from(nextTn);
         }
         ifaceBoxes.forEach(function (b) { b.checked = on; });
         tunnelBoxes.forEach(function (b) { b.checked = on; });
-        showToast(on ? "Fast-polling every interface" : "Stopped fast-polling all interfaces");
+        showToast(on ? "Fast-polling every listed interface" : "Stopped fast-polling the listed interfaces");
       } catch (err) {
         showToast(err.message || "Failed to update", "error");
       } finally {
@@ -6674,151 +6830,96 @@ function _wireInterfacesTable(container, si, asset, rows, state) {
     });
   }
 
-  // Restore per-user, per-asset collapsed state for nested rows.
-  var assetId = asset && asset.id;
-  var collapsed = _getCollapsedIfaces(assetId);
-  collapsed.forEach(function (parentName) {
-    var btn = container.querySelector('.iface-expand-toggle[data-parent="' + (window.CSS && CSS.escape ? CSS.escape(parentName) : parentName) + '"]');
-    if (btn) {
-      btn.textContent = "▶";
-      btn.title = "Expand children";
+  if (!tbody) return;
+
+  // Poll 1m checkboxes — interface rows write monitoredInterfaces, nested
+  // tunnel rows write monitoredIpsecTunnels. One delegated handler for both.
+  tbody.addEventListener("change", async function (e) {
+    var cb = e.target;
+    if (!cb || !cb.classList) return;
+    var isIface = cb.classList.contains("asset-iface-toggle");
+    var isTunnel = cb.classList.contains("asset-ipsec-toggle");
+    if (!isIface && !isTunnel) return;
+    if (!canEdit || !asset) return;
+    var name = cb.getAttribute(isIface ? "data-ifname" : "data-name");
+    var set = isIface ? monitored : monitoredTunnels;
+    var next = new Set(set);
+    if (cb.checked) next.add(name); else next.delete(name);
+    var patch = {};
+    patch[isIface ? "monitoredInterfaces" : "monitoredIpsecTunnels"] = Array.from(next);
+    cb.disabled = true;
+    try {
+      await api.assets.update(asset.id, patch);
+      replaceSet(set, next);
+      if (isIface) {
+        if (si) si.monitoredInterfaces = Array.from(next);
+        if (asset) asset.monitoredInterfaces = Array.from(next);
+      } else {
+        if (si) si.monitoredIpsecTunnels = Array.from(next);
+        if (asset) asset.monitoredIpsecTunnels = Array.from(next);
+      }
+      showToast(cb.checked ? ("Polling " + name + " every minute") : ("Stopped fast-polling " + name));
+    } catch (err) {
+      cb.checked = !cb.checked;
+      showToast(err.message || "Failed to update", "error");
+    } finally {
+      cb.disabled = false;
+      syncIfaceAllCb();
     }
-    container.querySelectorAll(".iface-child").forEach(function (row) {
-      if (row.getAttribute("data-parent") === parentName) row.style.display = "none";
-    });
   });
 
-  // Show-inactive toggle. Ephemeral per modal open — operators flip this
-  // during an investigation and the table re-builds on every refresh tick
-  // anyway, so persistence would mostly create friction. When ON, inactive
-  // rows reveal except for ones whose parent is currently collapsed (the
-  // collapse-state always wins because the operator just hid that group).
-  var showInactive = false;
-  function syncInactiveRows() {
-    container.querySelectorAll(".iface-inactive").forEach(function (row) {
-      if (showInactive) {
-        var parent = row.getAttribute("data-parent");
-        row.style.display = (parent && collapsed.has(parent)) ? "none" : "";
-      } else {
-        row.style.display = "none";
-      }
-    });
-  }
-  var inactiveBtn = container.querySelector("#iface-inactive-toggle");
-  if (inactiveBtn) {
-    inactiveBtn.addEventListener("click", function () {
-      showInactive = !showInactive;
-      inactiveBtn.textContent = showInactive
-        ? "▼ Hide " + inactiveCount + " inactive interface" + (inactiveCount === 1 ? "" : "s")
-        : "▶ Show " + inactiveCount + " inactive interface" + (inactiveCount === 1 ? "" : "s") + " (no traffic)";
-      syncInactiveRows();
-    });
-  }
+  tbody.addEventListener("click", function (e) {
+    var t = e.target;
+    if (!t || !t.closest) return;
 
-  // Expand / collapse aggregate and physical-with-children rows. When
-  // expanding, inactive children stay hidden unless show-inactive is on —
-  // otherwise the operator's "show only active" preference would silently
-  // break every time they click a parent's toggle.
-  container.querySelectorAll(".iface-expand-toggle").forEach(function (btn) {
-    btn.addEventListener("click", function (e) {
+    // Expand / collapse an aggregate (or a physical port carrying VLANs /
+    // tunnels). Only present in the default tree view — a sorted or filtered
+    // table renders flat, so there's nothing to collapse.
+    var tog = t.closest(".iface-expand-toggle");
+    if (tog) {
       e.stopPropagation();
-      var parentName = btn.getAttribute("data-parent");
-      var expanded = btn.textContent.trim() === "▼";
-      btn.textContent = expanded ? "▶" : "▼";
-      btn.title = expanded ? "Expand children" : "Collapse children";
+      var parentName = tog.getAttribute("data-parent");
+      var expanded = tog.textContent.trim() === "▼";
+      tog.textContent = expanded ? "▶" : "▼";
+      tog.title = expanded ? "Expand children" : "Collapse children";
       container.querySelectorAll(".iface-child").forEach(function (row) {
         if (row.getAttribute("data-parent") !== parentName) return;
-        if (expanded) {
-          row.style.display = "none";
-        } else {
-          var rowInactive = row.classList.contains("iface-inactive");
-          row.style.display = (rowInactive && !showInactive) ? "none" : "";
-        }
+        row.style.display = expanded ? "none" : "";
       });
       if (expanded) collapsed.add(parentName); else collapsed.delete(parentName);
       _setCollapsedIfaces(assetId, collapsed);
-    });
-  });
+      return;
+    }
 
-  // Poll 1m checkbox — writes monitoredInterfaces; works for top-level and child rows alike
-  if (canEdit && asset) {
-    container.querySelectorAll(".asset-iface-toggle").forEach(function (cb) {
-      cb.addEventListener("change", async function () {
-        var name = cb.getAttribute("data-ifname");
-        var current = new Set(monitored);
-        if (cb.checked) current.add(name); else current.delete(name);
-        cb.disabled = true;
-        try {
-          await api.assets.update(asset.id, { monitoredInterfaces: Array.from(current) });
-          monitored = current;
-          if (si) si.monitoredInterfaces = Array.from(current);
-          if (asset) asset.monitoredInterfaces = Array.from(current);
-          showToast(cb.checked ? ("Polling " + name + " every minute") : ("Stopped fast-polling " + name));
-        } catch (err) {
-          cb.checked = !cb.checked;
-          showToast(err.message || "Failed to update", "error");
-        } finally {
-          cb.disabled = false;
-          syncIfaceAllCb();
-        }
-      });
-    });
-  }
-
-  // Interface name click — opens per-interface history panel. Pass the
-  // already-loaded row through so the slide-over can surface current-state
-  // fields (VLAN config in particular) that the interface-history endpoint
-  // doesn't carry.
-  container.querySelectorAll(".asset-iface-link").forEach(function (link) {
-    link.addEventListener("click", function (e) {
+    // Interface name click — opens the per-interface history panel. The
+    // already-loaded row rides along so the slide-over can surface
+    // current-state fields (VLAN config in particular) that the
+    // interface-history endpoint doesn't carry.
+    var ifLink = t.closest(".asset-iface-link");
+    if (ifLink) {
       e.preventDefault();
-      var ifn = link.getAttribute("data-ifname");
+      var ifn = ifLink.getAttribute("data-ifname");
       var row = rows.find(function (r) { return r.ifName === ifn; }) || null;
       openInterfaceDetailPanel(asset, ifn, row);
-    });
-  });
+      return;
+    }
 
-  // Poll 1m checkbox for nested tunnel rows — writes monitoredIpsecTunnels
-  if (canEdit && asset) {
-    container.querySelectorAll(".asset-ipsec-toggle").forEach(function (cb) {
-      cb.addEventListener("change", async function () {
-        var name = cb.getAttribute("data-name");
-        var current = new Set(monitoredTunnels);
-        if (cb.checked) current.add(name); else current.delete(name);
-        cb.disabled = true;
-        try {
-          await api.assets.update(asset.id, { monitoredIpsecTunnels: Array.from(current) });
-          monitoredTunnels = current;
-          if (si)    si.monitoredIpsecTunnels    = Array.from(current);
-          if (asset) asset.monitoredIpsecTunnels = Array.from(current);
-          showToast(cb.checked ? ("Polling " + name + " every minute") : ("Stopped fast-polling " + name));
-        } catch (err) {
-          cb.checked = !cb.checked;
-          showToast(err.message || "Failed to update", "error");
-        } finally {
-          cb.disabled = false;
-          syncIfaceAllCb();
-        }
-      });
-    });
-  }
-
-  // Tunnel name click — opens per-tunnel history panel
-  container.querySelectorAll(".asset-ipsec-link").forEach(function (link) {
-    link.addEventListener("click", function (e) {
+    // Tunnel name click — opens the per-tunnel history panel.
+    var tnLink = t.closest(".asset-ipsec-link");
+    if (tnLink) {
       e.preventDefault();
-      openIpsecTunnelDetailPanel(asset, link.getAttribute("data-name"));
-    });
-  });
+      openIpsecTunnelDetailPanel(asset, tnLink.getAttribute("data-name"));
+      return;
+    }
 
-  // Neighbor link click — open the matched asset's view modal so the operator
-  // can pivot from one device to its LLDP peer in one click.
-  container.querySelectorAll(".asset-lldp-link").forEach(function (link) {
-    link.addEventListener("click", function (e) {
+    // Neighbor link click — open the matched asset's view modal so the operator
+    // can pivot from one device to its LLDP peer in one click.
+    var lldpLink = t.closest(".asset-lldp-link");
+    if (lldpLink) {
       e.preventDefault();
-      var id = link.getAttribute("data-asset-id");
+      var id = lldpLink.getAttribute("data-asset-id");
       if (id) openViewModal(id);
-    });
+    }
   });
 }
 
@@ -13118,7 +13219,7 @@ function _collectShotSections(panel) {
     if (!hasContent) continue;
     var hasHiddenIfaceSub = false;
     if (el.getAttribute("data-shot-sub") === "hiddenIfaces") {
-      var rows = el.querySelectorAll(".iface-inactive,.iface-child");
+      var rows = el.querySelectorAll(".iface-child");
       for (var r = 0; r < rows.length; r++) {
         if (rows[r].style.display === "none") { hasHiddenIfaceSub = true; break; }
       }
@@ -13224,17 +13325,16 @@ async function _captureWithChoicesInner(asset, choices) {
   if (choices.hiddenIfaces) {
     var ifaceWrap = document.querySelector('#asset-view-tab-system [data-shot-section="interfaces"]');
     if (ifaceWrap && !excl.has(ifaceWrap)) {
-      var rows = ifaceWrap.querySelectorAll(".iface-inactive,.iface-child");
+      // Hidden interface rows are the children of a collapsed aggregate / port
+      // (traffic-less rows are no longer hidden at all — the table filters
+      // instead). Reveal them for the capture; restored in the finally.
+      var rows = ifaceWrap.querySelectorAll(".iface-child");
       for (i = 0; i < rows.length; i++) {
         if (rows[i].style.display === "none") {
           revealed.push(rows[i]);
           rows[i].style.display = "";
         }
       }
-      // The "Show N inactive interfaces" button row would contradict the
-      // now-visible rows — drop it from the capture.
-      var toggleRow = document.getElementById("iface-inactive-toggle-row");
-      if (toggleRow) excl.add(toggleRow);
     }
   }
 
@@ -13452,8 +13552,8 @@ function _screenshotTableEl(tableEl, label, opts) {
     if (visMask[i]) headers.push((th.innerText || th.textContent || '').trim());
   });
   var rows = [];
-  // Count data rows the operator has hidden (inactive-interface toggle off, or a
-  // collapsed parent). They're left out of the image but we note their count so
+  // Count data rows the operator has hidden (the children of a collapsed
+  // parent). They're left out of the image but we note their count so
   // the screenshot can't be mistaken for the full set — reveal them, then re-shoot.
   var hiddenCount = 0;
   tableEl.querySelectorAll('tbody > tr').forEach(function (tr) {
