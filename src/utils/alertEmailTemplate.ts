@@ -43,11 +43,15 @@ export const DEFAULT_ALERT_TEXT = [
   "Switch:     {asset.connectedSwitch}",
   "AP:         {asset.connectedAp}",
   "Location:   {asset.location}",
+  "Event:      {event.action}",
+  "Resource:   {event.resource}",
+  "Triggered by: {event.actor}",
   "Severity:   {severity}",
   "Raised:     {time}",
   "",
   "{chart.trigger}",
   "{chart.sensor}",
+  "{chart.probeLoss}",
   "{chart.cpu}",
   "{chart.memory}",
   "{chart.responseTime}",
@@ -85,6 +89,13 @@ export const DEFAULT_ALERT_HTML = [
   '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Connected AP</td><td style="padding:3px 0">{asset.connectedAp}</td></tr>',
   '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Location</td><td style="padding:3px 0">{asset.location}</td></tr>',
   '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Model</td><td style="padding:3px 0">{asset.manufacturer} {asset.model}</td></tr>',
+  // Event-path rows. An event automation usually fires on something that is
+  // NOT a device (an integration, a user, the host), so the asset rows above
+  // prune away and these are the only facts the reader gets. They prune away
+  // in turn on a metric alert, which has no event behind it.
+  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Event</td><td style="padding:3px 0">{event.action}</td></tr>',
+  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">{event.resourceType}</td><td style="padding:3px 0">{event.resource}</td></tr>',
+  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Triggered by</td><td style="padding:3px 0">{event.actor}</td></tr>',
   '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Automation</td><td style="padding:3px 0">{rule}</td></tr>',
   '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Raised</td><td style="padding:3px 0">{time}</td></tr>',
   "</table>",
@@ -97,6 +108,7 @@ export const DEFAULT_ALERT_HTML = [
   '<div style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#6b7280;font-weight:700;margin-bottom:2px">Last hour</div>',
   "{chart.trigger}",
   "{chart.sensor}",
+  "{chart.probeLoss}",
   "{chart.cpu}",
   "{chart.memory}",
   "{chart.responseTime}",

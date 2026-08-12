@@ -133,12 +133,21 @@ describe("chart ordering follows the trigger", () => {
     // An ALARM automation charts the sensor's VALUE — the reading is the part
     // a human can act on.
     expect(chartTokenForMetric("hwSensorAlarm")).toBe("chart.sensor");
+    expect(chartTokenForMetric("probeLossPct")).toBe("chart.probeLoss");
+  });
+
+  it("charts a DOWN device's probes — the one alert with no metric behind it", () => {
+    // "Asset down" is asset_state, not asset_metric, so nothing used to point
+    // it at a chart. Response time is the picture: the climb before the device
+    // stopped answering. (When every probe failed there is no latency to plot
+    // and the loss chart, which is in the body unconditionally, carries it.)
+    expect(chartTokenForMetric("monitorStatus")).toBe("chart.responseTime");
+    expect(chartTokenForMetric("consecutiveFailures")).toBe("chart.responseTime");
   });
 
   it("has no chart for metrics that don't have one yet", () => {
     // The trigger token renders away and the generic charts still tell the
     // device's story.
-    expect(chartTokenForMetric("probeLossPct")).toBeNull();
     expect(chartTokenForMetric("storageUsedPct")).toBeNull();
     expect(chartTokenForMetric(null)).toBeNull();
   });

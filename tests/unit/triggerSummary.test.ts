@@ -106,6 +106,41 @@ describe("triggerSummary", () => {
       .toBe("CPU utilization");
   });
 
+  it("names a device-state field the way the builder does, not by its column name", () => {
+    // "Asset down" is the most-sent alert in the product and its subject line
+    // used to read "monitorStatus is down".
+    expect(triggerSummary({ trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" } }))
+      .toBe("Monitor status is down");
+    expect(triggerSummary({
+      trigger: { type: "asset_state", field: "ifOperStatus", operator: "==", value: "down" },
+      dimensionLabel: "port3",
+    })).toBe("Interface oper status on port3 is down");
+  });
+
+  it("prefers the reading over the configured value for a state trigger", () => {
+    // What the device actually reports is the news; the configured value is
+    // only the fallback for a preview with no reading behind it.
+    expect(triggerSummary({
+      trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
+      value: "unreachable",
+    })).toBe("Monitor status is unreachable");
+  });
+
+  it("names the real event instead of restating the pattern", () => {
+    // The pattern is what the operator configured; the action + resource is
+    // what actually happened, and it's the only identity an event alert has.
+    expect(triggerSummary({
+      trigger: { type: "event", actionPattern: "integration.discover.*" },
+      eventAction: "integration.discover.error",
+      eventResource: "FMG-Nashville",
+    })).toBe("integration.discover.error on FMG-Nashville");
+    // No resource behind it — still the concrete action, not the pattern.
+    expect(triggerSummary({
+      trigger: { type: "event", actionPattern: "integration.discover.*" },
+      eventAction: "integration.discover.error",
+    })).toBe("integration.discover.error");
+  });
+
   it("has something to say for every trigger type", () => {
     expect(triggerSummary({ trigger: { type: "event", actionPattern: "asset.updated" } }))
       .toContain("asset.updated");

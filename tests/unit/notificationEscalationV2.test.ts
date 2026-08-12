@@ -150,10 +150,14 @@ describe("legacy email-tier output parity", () => {
     // name renders blank and the dangling separator is trimmed rather than
     // mailed as "sw-core-1 — {rule}". The tier prefix still leads.
     expect(db.deliveries[0].meta.subject).toBe("[ESCALATION 1] [WARNING] sw-core-1");
-    // Default body = the shared rich alert template: the message leads, and
-    // the acknowledge token survives compose (it is filled per recipient).
+    // Default body = the shared rich alert template: the message leads.
     expect(db.deliveries[0].meta.text).toContain("cpu hot");
-    expect(db.deliveries[0].meta.text).toContain("Acknowledge:");
+    // This tier mails a RAW ADDRESS, which earns no acknowledge token — only a
+    // configured Polaris user can acknowledge. So the whole Acknowledge line
+    // is stripped rather than mailed as a label with nothing behind it, and
+    // certainly not as the literal "{ack}".
+    expect(db.deliveries[0].meta.text).not.toContain("Acknowledge:");
+    expect(db.deliveries[0].meta.text).not.toContain("{ack}");
   });
 
   it("tier subject-only override keeps the RULE body (per-field merge) and tier cc", async () => {

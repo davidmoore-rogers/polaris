@@ -1557,7 +1557,11 @@ async function fire(
       dimension: reading.dimKey || null,
       // Which metric fired — the email leads with the chart that explains THIS
       // alert (alertChartService.chartTokenForMetric).
-      metric: rule.trigger.type === "asset_metric" || rule.trigger.type === "host_metric" ? rule.trigger.metric : null,
+      metric: rule.trigger.type === "asset_metric" || rule.trigger.type === "host_metric"
+        ? rule.trigger.metric
+        // A state alert fires on a FIELD; same column, same purpose — it is
+        // what the email leads with (monitorStatus → the probe history).
+        : rule.trigger.type === "asset_state" ? rule.trigger.field : null,
       ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}),
     },
   });
@@ -1953,6 +1957,23 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         ruleName: c.rule.name,
         ruleDescription: c.rule.description,
         assetDetail: detail,
+        // The EVENT's own identity. Most event automations fire on things that
+        // aren't assets at all (an integration, a user, the host), so the
+        // device facts prune away and this is the only thing the email can say
+        // about what happened. Composed at fire time — the Event row is in
+        // hand here and gone by delivery.
+        event: {
+          action: ev.action,
+          level: ev.level,
+          resourceType: ev.resourceType,
+          resourceName: ev.resourceName,
+          actor: ev.actor,
+        },
+        triggerSummary: triggerSummary({
+          trigger: c.rule.trigger as never,
+          eventAction: ev.action,
+          eventResource: ev.resourceName ?? ev.resourceType ?? null,
+        }),
       });
       const tmpl = c.rule.messageTemplate;
       const message = tmpl && tmpl.trim()

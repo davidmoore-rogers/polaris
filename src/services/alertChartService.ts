@@ -37,7 +37,7 @@ import type { InlineAttachment } from "./notificationChannels/emailChannel.js";
  * email for is the first one they see. A chart emitted through it is skipped
  * when its own token comes up later, so the body never repeats one.
  */
-export const CHART_TOKENS = ["chart.trigger", "chart.sensor", "chart.cpu", "chart.memory", "chart.responseTime"] as const;
+export const CHART_TOKENS = ["chart.trigger", "chart.sensor", "chart.probeLoss", "chart.cpu", "chart.memory", "chart.responseTime"] as const;
 export type ChartToken = (typeof CHART_TOKENS)[number];
 
 /** The metric an automation triggers on → the chart that explains it. */
@@ -53,10 +53,19 @@ export function chartTokenForMetric(metric: string | null | undefined): ChartTok
       return "chart.memory";
     case "responseTimeMs":
       return "chart.responseTime";
+    case "probeLossPct":
+      return "chart.probeLoss";
+    // asset_state FIELDS land here too — Notification.metric records whatever
+    // fired, and for a state alert that is the field. A device that stopped
+    // answering is best explained by its probe history: the latency climbing,
+    // then the gap where the answers stop.
+    case "monitorStatus":
+    case "consecutiveFailures":
+      return "chart.responseTime";
     default:
-      // probeLossPct, storage, interface counters, SD-WAN … have no chart of
-      // their own yet, so the trigger token renders away and the generic
-      // charts below it still tell the device's story.
+      // Storage, interface counters, SD-WAN … have no chart of their own yet,
+      // so the trigger token renders away and the generic charts below it
+      // still tell the device's story.
       return null;
   }
 }
@@ -89,6 +98,7 @@ const META: Record<ChartToken, { label: string; unit: string; color: string; per
   "chart.cpu": { label: "CPU", unit: "%", color: "#2563eb", percent: true },
   "chart.memory": { label: "Memory", unit: "%", color: "#7c3aed", percent: true },
   "chart.responseTime": { label: "Response time", unit: " ms", color: "#0891b2", percent: false },
+  "chart.probeLoss": { label: "Packet loss", unit: "%", color: "#dc2626", percent: true },
 };
 
 /** Even-ish downsample that always keeps the newest point (the alerting one). */
@@ -234,6 +244,40 @@ async function loadResponseTimes(assetId: string, since: Date): Promise<SparkPoi
   return thin(rows.map((r) => ({ t: r.timestamp.getTime(), v: r.responseTimeMs! })));
 }
 
+/** Bucket width for the packet-loss series — 30 points across the hour. */
+const LOSS_BUCKET_MS = 2 * 60 * 1000;
+
+/**
+ * Probe loss as a percentage over time: failed probes / total probes per
+ * bucket, the same ratio the engine's `probeLossPct` metric and the dashboard
+ * widget compute, just windowed for a chart instead of collapsed to one number.
+ *
+ * Bucketed in JS rather than SQL because an hour of one asset's probes is ~120
+ * rows — a grouped query would cost more to write than it saves, and this
+ * keeps the loader shaped like its neighbours. Empty buckets are skipped
+ * rather than plotted as 0%: no probes is not the same as no loss.
+ */
+async function loadProbeLoss(assetId: string, since: Date): Promise<SparkPoint[]> {
+  const rows = await prisma.assetMonitorSample.findMany({
+    where: { assetId, timestamp: { gte: since } },
+    orderBy: { timestamp: "asc" },
+    select: { timestamp: true, success: true },
+  });
+  const buckets = new Map<number, { total: number; failed: number }>();
+  for (const r of rows) {
+    const key = Math.floor(r.timestamp.getTime() / LOSS_BUCKET_MS) * LOSS_BUCKET_MS;
+    const b = buckets.get(key) ?? { total: 0, failed: 0 };
+    b.total++;
+    if (!r.success) b.failed++;
+    buckets.set(key, b);
+  }
+  return thin(
+    Array.from(buckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([t, b]) => ({ t, v: Math.round((b.failed / b.total) * 1000) / 10 })),
+  );
+}
+
 async function rasterize(svg: string): Promise<Buffer | null> {
   try {
     // Lazy import: resvg resolves a per-platform native binding, and an alert
@@ -298,6 +342,7 @@ export async function buildAlertCharts(
   let cpu: SparkPoint[] = [];
   let mem: SparkPoint[] = [];
   let rt: SparkPoint[] = [];
+  let loss: SparkPoint[] = [];
   let sensor: SensorSeries = { points: [], alarmSpans: [], unit: "", sensorClass: null };
   try {
     const needTelemetry = wanted.has("chart.cpu") || wanted.has("chart.memory");
@@ -306,17 +351,19 @@ export async function buildAlertCharts(
     const displayUnit = wanted.has("chart.sensor")
       ? await getBranding().then((b) => b.temperatureUnit).catch(() => "c" as const)
       : ("c" as const);
-    const [tel, rtRows, sensorRows] = await Promise.all([
+    const [tel, rtRows, sensorRows, lossRows] = await Promise.all([
       needTelemetry ? loadTelemetry(assetId, since) : Promise.resolve({ cpu: [], mem: [] }),
       wanted.has("chart.responseTime") ? loadResponseTimes(assetId, since) : Promise.resolve([]),
       wanted.has("chart.sensor")
         ? loadSensorSeries(assetId, opts!.sensorName!, since, displayUnit)
         : Promise.resolve(sensor),
+      wanted.has("chart.probeLoss") ? loadProbeLoss(assetId, since) : Promise.resolve([]),
     ]);
     cpu = tel.cpu;
     mem = tel.mem;
     rt = rtRows;
     sensor = sensorRows;
+    loss = lossRows;
   } catch (err) {
     logger.warn({ err: (err as Error)?.message, assetId }, "alert chart sample load failed — sending without charts");
   }
@@ -326,6 +373,7 @@ export async function buildAlertCharts(
     // above and is filled in from that token's result at the end.
     "chart.trigger": [],
     "chart.sensor": sensor.points,
+    "chart.probeLoss": loss,
     "chart.cpu": cpu,
     "chart.memory": mem,
     "chart.responseTime": rt,

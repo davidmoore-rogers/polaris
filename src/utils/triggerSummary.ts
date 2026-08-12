@@ -20,7 +20,7 @@
  * should read the same phrase in the email it sends.
  */
 
-import { METRIC_META } from "../services/notificationTypes.js";
+import { METRIC_META, FIELD_META, CHANGE_TYPE_META } from "../services/notificationTypes.js";
 
 /** "5 minutes" / "1 hour" / "45 seconds" — mirrors the wizard's humanDuration. */
 export function humanDuration(sec: number | null | undefined): string {
@@ -62,6 +62,8 @@ export interface SummarizableTrigger {
   windowSec?: number;
   operator?: string;
   threshold?: number | string | boolean | null;
+  /** asset_state triggers compare against `value`, not `threshold`. */
+  value?: number | string | boolean | null;
   dimensionFilter?: Record<string, string | undefined> | null;
   changeType?: string;
   actionPattern?: string;
@@ -115,6 +117,10 @@ export interface TriggerSummaryParts {
   dimensionLabel?: string | null;
   /** A hardware sensor's own unit, when the reading came from one. */
   sensorUnit?: string | null;
+  /** Event path: the action that actually fired, not the rule's glob. */
+  eventAction?: string | null;
+  /** Event path: what it happened TO (resource name, else its type). */
+  eventResource?: string | null;
 }
 
 /**
@@ -127,17 +133,31 @@ export interface TriggerSummaryParts {
 export function triggerSummary(parts: TriggerSummaryParts): string {
   const { trigger } = parts;
   if (trigger.type === "event") {
-    return `An audit event matching ${trigger.actionPattern ?? "…"} occurred`;
+    // Name what actually happened, not the rule's glob: "integration.discover
+    // .error on FMG-PROD" beats "An audit event matching
+    // integration.discover.* occurred", which is a restatement of the
+    // automation rather than of the event.
+    const action = parts.eventAction ?? trigger.actionPattern ?? "an audit event";
+    const on = parts.eventResource ? ` on ${parts.eventResource}` : "";
+    return `${action}${on}`;
   }
   if (trigger.type === "change") {
-    return `${trigger.changeType ?? "A change"} was detected`;
+    const label = (trigger.changeType ? CHANGE_TYPE_META[trigger.changeType] : null) ?? trigger.changeType ?? "A change";
+    return `${label} was detected`;
   }
   if (trigger.type === "composite") {
     return "Several conditions were met together";
   }
   if (trigger.type === "asset_state") {
-    const v = formatValue(parts.value);
-    return v ? `${trigger.field ?? "State"} is ${v}` : `${trigger.field ?? "State"} changed`;
+    // The builder's own label, not the column name: "Monitor status is down",
+    // never "monitorStatus is down". FIELD_META is what the wizard renders
+    // from, so the two read alike.
+    const label = (trigger.field ? FIELD_META[trigger.field]?.label : null) ?? trigger.field ?? "State";
+    const on = parts.dimensionLabel ? ` on ${parts.dimensionLabel}` : "";
+    // The READING when we have one; the configured value otherwise (a test on
+    // a device with nothing reported still reads as a sentence).
+    const v = formatValue(parts.value) ?? formatValue(trigger.value ?? null);
+    return v ? `${label}${on} is ${v}` : `${label}${on} changed`;
   }
 
   const subject = triggerSubject(trigger, parts.dimensionLabel);

@@ -60,6 +60,11 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{asset.connectedSwitch}", label: "Connected switch", description: "Switch/port the device was last seen on, e.g. FS-248E-01/port15", group: "asset" },
   { token: "{asset.connectedAp}", label: "Connected AP", description: "Access point the device was last seen on", group: "asset" },
   { token: "{trigger.summary}", label: "What fired", description: "The trigger in the builder's own words, with the observed value — e.g. \"Response time (median over 5 minutes) is 760 ms\"", group: "notification" },
+  { token: "{event.action}", label: "Event action", description: "Event-triggered alerts: the audit action that fired (e.g. integration.discover.error)", group: "notification" },
+  { token: "{event.resource}", label: "Event resource", description: "Event-triggered alerts: what it happened to — the integration, user or device name", group: "notification" },
+  { token: "{event.resourceType}", label: "Event resource type", description: "Event-triggered alerts: the kind of thing it happened to (integration / asset / user …)", group: "notification" },
+  { token: "{event.actor}", label: "Event actor", description: "Event-triggered alerts: who or what caused it (an operator, or a system: actor)", group: "notification" },
+  { token: "{event.level}", label: "Event level", description: "Event-triggered alerts: the audit level of the source event (info / warning / error)", group: "notification" },
   { token: "{rule}", label: "Rule name", description: "Name of the triggering rule", group: "rule" },
   { token: "{rule.description}", label: "Rule description", description: "Description of the triggering rule", group: "rule" },
   { token: "{asset.ip}", label: "Asset IP", description: "Primary IP address", group: "asset" },
@@ -130,6 +135,19 @@ export interface TemplateContextParts {
   ruleDescription?: string | null;
   /** "Response time (median over 5 minutes) is 760 ms" — utils/triggerSummary. */
   triggerSummary?: string;
+  /**
+   * Event-path alerts: the source Event's own identity. Most event automations
+   * fire on things that are NOT assets (an integration, a user, the host),
+   * where the device facts prune away and this is the only thing the body can
+   * say about what happened.
+   */
+  event?: {
+    action?: string | null;
+    level?: string | null;
+    resourceType?: string | null;
+    resourceName?: string | null;
+    actor?: string | null;
+  } | null;
   assetDetail?: AssetTemplateDetail | null;
   escalationTier?: number;
   escalationElapsed?: string;
@@ -162,6 +180,11 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "rule": str(parts.ruleName),
     "rule.description": str(parts.ruleDescription),
     "trigger.summary": str(parts.triggerSummary),
+    "event.action": str(parts.event?.action),
+    "event.level": str(parts.event?.level),
+    "event.resource": str(parts.event?.resourceName),
+    "event.resourceType": str(parts.event?.resourceType),
+    "event.actor": str(parts.event?.actor),
     "asset.ip": str(a?.ipAddress),
     "asset.mac": str(a?.macAddress),
     "asset.type": str(a?.assetType),
@@ -195,14 +218,20 @@ const TOKEN_RE = /\{([a-zA-Z][\w.]*)\}/g;
  *
  * The renderer must leave these alone no matter what `unknown` says, or the
  * later pass finds nothing to substitute.
+ *
+ * The chart half is matched by PREFIX rather than by an enumerated list. An
+ * enumerated one was wrong within a week: `{chart.trigger}` shipped in the
+ * default body, wasn't added here, and was silently blanked at compose time —
+ * the token vanished before the delivery pass that fills it, so the chart the
+ * alert is actually about never led the email. A prefix can't drift, and this
+ * file is a pure util that must not import the chart service (which pulls in
+ * Prisma) just to enumerate its own tokens.
  */
-export const DEFERRED_TOKENS: ReadonlySet<string> = new Set([
-  "ack",
-  "chart.sensor",
-  "chart.cpu",
-  "chart.memory",
-  "chart.responseTime",
-]);
+const DEFERRED_TOKEN_NAMES: ReadonlySet<string> = new Set(["ack"]);
+
+export function isDeferredToken(name: string): boolean {
+  return DEFERRED_TOKEN_NAMES.has(name) || name.startsWith("chart.");
+}
 
 /**
  * Render a template against a context map. Single regex pass — substituted
@@ -219,7 +248,7 @@ export function renderNotificationTemplate(
     if (!(name in ctx)) {
       // A deferred token is filled by a LATER pass — blanking it here would
       // leave that pass nothing to find.
-      if (DEFERRED_TOKENS.has(name)) return match;
+      if (isDeferredToken(name)) return match;
       // Operator templates keep an unknown token literal so a typo is visible
       // in the delivered message. Polaris's OWN default body passes
       // unknown:"blank": a context assembled before a token existed (an

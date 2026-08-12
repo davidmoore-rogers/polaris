@@ -610,46 +610,50 @@ async function stampAckTokens(
 ): Promise<void> {
   const wanted = new Map<string, { userId: string; channel: AckChannel }>();
   for (const a of rowAck) if (a) wanted.set(`${a.userId}|${a.channel}`, a);
-  if (wanted.size === 0) return;
 
+  // Deliberately NOT an early return when nothing is minted: an automation
+  // whose only recipients are raw addresses or address-book contacts earns no
+  // token at all, and returning here would mail them the literal "{ack}". The
+  // strip pass below is what has to run in that case.
   const reqs = Array.from(wanted.values()).map((w) => ({ notificationId, ...w }));
-  const minted = await mintAckTokens(reqs);
+  const minted = wanted.size > 0 ? await mintAckTokens(reqs) : [];
   const tokenFor = new Map(minted.map((m) => [`${m.userId}|${m.channel}`, m.raw]));
 
+  applyAckToRows(rows, rowAck, tokenFor);
+}
+
+/**
+ * Write each row's minted token into its meta and resolve the deferred `{ack}`
+ * in composed bodies — filling it for a row that earned a token, blanking it
+ * for one that didn't.
+ *
+ * Pure and exported for the tests because the blank half is the half that
+ * breaks quietly: it only runs for recipients who can't acknowledge (raw
+ * addresses, address-book contacts), so a mistake there mails a literal
+ * "{ack}" to exactly the people least equipped to report it.
+ */
+export function applyAckToRows(
+  rows: Prisma.NotificationDeliveryCreateManyInput[],
+  rowAck: Array<{ userId: string; channel: AckChannel } | null>,
+  tokenFor: Map<string, string>,
+): void {
   rows.forEach((row, i) => {
     const want = rowAck[i];
-    if (!want) return;
-    const token = tokenFor.get(`${want.userId}|${want.channel}`);
-    if (!token) return;
+    const token = want ? tokenFor.get(`${want.userId}|${want.channel}`) ?? null : null;
     const meta = (row.meta && typeof row.meta === "object" ? { ...(row.meta as Record<string, unknown>) } : {}) as Record<string, unknown>;
-    meta.ack = { token, userId: want.userId };
+    if (want && token) meta.ack = { token, userId: want.userId };
+
     if (meta.composed) {
       // The body was rendered before recipients were known, so {ack} is still
-      // sitting in it literally. Fill it now for this one recipient, then
-      // re-prune: the fill can leave an "Acknowledge:" line or row with
-      // nothing after it.
-      const url = ackUrlForEmail(token);
+      // sitting in it literally. Resolve it now for this one recipient, then
+      // re-prune: filling OR blanking can leave an "Acknowledge:" line (or an
+      // href="" button) with nothing behind it.
+      const url = token ? ackUrlForEmail(token) : null;
       if (typeof meta.subject === "string") meta.subject = substituteAckToken(meta.subject, url);
       if (typeof meta.text === "string") meta.text = pruneEmptyTextLines(substituteAckToken(meta.text, url));
       if (typeof meta.html === "string") meta.html = pruneDeadLinks(pruneEmptyRows(substituteAckToken(meta.html, url, { html: true })));
     }
     row.meta = meta as Prisma.InputJsonValue;
-  });
-
-  // A composed row that did NOT earn a token still carries the literal {ack}.
-  // Strip it rather than mailing "{ack}" to a contact who could never use it.
-  rows.forEach((row, i) => {
-    if (rowAck[i]) return;
-    const meta = row.meta as Record<string, unknown> | undefined;
-    if (!meta || !meta.composed) return;
-    const next = { ...meta };
-    if (typeof next.subject === "string") next.subject = substituteAckToken(next.subject, null);
-    // Pruning after the blank fill is what removes the whole "Acknowledge:"
-    // line for a recipient who can't acknowledge — rather than mailing them a
-    // label with nothing after it.
-    if (typeof next.text === "string") next.text = pruneEmptyTextLines(substituteAckToken(next.text, null));
-    if (typeof next.html === "string") next.html = pruneDeadLinks(pruneEmptyRows(substituteAckToken(next.html, null, { html: true })));
-    row.meta = next as Prisma.InputJsonValue;
   });
 }
 

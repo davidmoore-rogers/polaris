@@ -13,6 +13,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import {
   buildAddressOwnerMap,
   composedAckRecipient,
+  applyAckToRows,
 } from "../../src/services/notificationRecipientService.js";
 import {
   ackUrlForEmail,
@@ -150,6 +151,44 @@ describe("{ack} is deferred, not contextual", () => {
   it("escapes the URL when filling an HTML body", () => {
     const out = substituteAckToken('<a href="{ack}">Ack</a>', "https://x/ack/a&b", { html: true });
     expect(out).toBe('<a href="https://x/ack/a&amp;b">Ack</a>');
+  });
+});
+
+describe("applyAckToRows", () => {
+  const composedRow = () => ({
+    notificationId: "n1",
+    transport: "email",
+    target: "someone@example.test",
+    status: "pending",
+    meta: { composed: true, to: ["someone@example.test"], subject: "alert", text: "Device sw-1\nAcknowledge: {ack}" },
+  }) as never;
+
+  it("fills the link for a row that earned a token", () => {
+    const rows = [composedRow()];
+    applyAckToRows(rows, [{ userId: "u1", channel: "email" }], new Map([["u1|email", "polaris_ack_abc"]]));
+    const meta = (rows[0] as { meta: Record<string, unknown> }).meta;
+    expect(meta.ack).toEqual({ token: "polaris_ack_abc", userId: "u1" });
+    expect(String(meta.text)).toContain("/ack/polaris_ack_abc");
+  });
+
+  it("strips the literal token when NOTHING was minted for the whole fan-out", () => {
+    // The regression: an automation whose only recipients are typed addresses
+    // or contacts mints zero tokens. Short-circuiting on "nothing to mint"
+    // mailed them the raw "{ack}".
+    const rows = [composedRow()];
+    applyAckToRows(rows, [null], new Map());
+    const meta = (rows[0] as { meta: Record<string, unknown> }).meta;
+    expect(String(meta.text)).not.toContain("{ack}");
+    // The label goes with it — "Acknowledge:" followed by nothing reads broken.
+    expect(String(meta.text)).not.toContain("Acknowledge:");
+    expect(meta.ack).toBeUndefined();
+  });
+
+  it("resolves per row: a user gets a link, the contact beside them gets none", () => {
+    const rows = [composedRow(), composedRow()];
+    applyAckToRows(rows, [{ userId: "u1", channel: "email" }, null], new Map([["u1|email", "polaris_ack_xyz"]]));
+    expect(String((rows[0] as { meta: Record<string, unknown> }).meta.text)).toContain("/ack/polaris_ack_xyz");
+    expect(String((rows[1] as { meta: Record<string, unknown> }).meta.text)).not.toContain("ack");
   });
 });
 

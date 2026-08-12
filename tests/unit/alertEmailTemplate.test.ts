@@ -16,7 +16,7 @@ import {
   DEFAULT_ALERT_HTML,
   DEFAULT_ALERT_TEXT,
 } from "../../src/utils/alertEmailTemplate.js";
-import { substituteChartTokens, chartTokensIn, attachmentsFor, type RenderedChart, type ChartToken } from "../../src/services/alertChartService.js";
+import { substituteChartTokens, chartTokensIn, attachmentsFor, CHART_TOKENS, type RenderedChart, type ChartToken } from "../../src/services/alertChartService.js";
 import { renderNotificationTemplate, buildTemplateContext } from "../../src/utils/notificationTemplate.js";
 
 const CTX = buildTemplateContext({
@@ -58,7 +58,10 @@ describe("the default alert email is a template, not string building", () => {
     // when the notification carries no sensor dimension), so the template
     // needs no conditional and the operator can move or delete it like any
     // other token.
-    const all = new Set(["chart.trigger", "chart.sensor", "chart.cpu", "chart.memory", "chart.responseTime"]);
+    // Read from the implementation: the body is supposed to ask for the whole
+    // catalogue, so a newly added chart that nobody wired into the template is
+    // the failure this pins — not a list to keep in step by hand.
+    const all = new Set<string>(CHART_TOKENS);
     expect(chartTokensIn(DEFAULT_ALERT_HTML)).toEqual(all);
     expect(chartTokensIn(DEFAULT_ALERT_TEXT)).toEqual(all);
   });

@@ -15,8 +15,10 @@ import {
   escapeHtml,
   templateNeedsAsset,
   formatElapsed,
+  isDeferredToken,
   type TemplateContextParts,
 } from "../../src/utils/notificationTemplate.js";
+import { DEFAULT_ALERT_TEXT, DEFAULT_ALERT_HTML, DEFAULT_ALERT_SUBJECT } from "../../src/utils/alertEmailTemplate.js";
 
 const FULL_PARTS: TemplateContextParts = {
   asset: "fw-atl-01",
@@ -51,6 +53,15 @@ const FULL_PARTS: TemplateContextParts = {
     tags: ["prod", "region:Atlanta"],
   },
   triggerSummary: "Response time (median over 5 minutes) is 760 ms",
+  // An event-triggered alert usually fires on something that isn't a device,
+  // so these are the only identifying facts its email gets.
+  event: {
+    action: "integration.discover.error",
+    level: "error",
+    resourceType: "integration",
+    resourceName: "FMG-Nashville",
+    actor: "system:scheduler",
+  },
   escalationTier: 2,
   escalationElapsed: "1h 30m",
 };
@@ -66,8 +77,13 @@ const FULL_PARTS: TemplateContextParts = {
  *  - `{chart.*}` are inline images built at DELIVERY time from the last hour of
  *    samples (alertChartService), so an escalation email at T+90min charts the
  *    last hour as of sending rather than re-rendering a frozen snapshot.
+ *
+ * The set is read from the implementation rather than restated here. A local
+ * copy is what let the bug through the first time: this file listed
+ * {chart.trigger} while the renderer's own list didn't, so the test passed and
+ * production blanked the token before the pass that fills it ever ran.
  */
-const DEFERRED_TOKENS = new Set(["{ack}", "{chart.trigger}", "{chart.sensor}", "{chart.cpu}", "{chart.memory}", "{chart.responseTime}"]);
+const DEFERRED_TOKENS = new Set(TEMPLATE_VARIABLES.map((v) => v.token).filter((t) => isDeferredToken(t.slice(1, -1))));
 const CONTEXT_TOKENS = TEMPLATE_VARIABLES.filter((v) => !DEFERRED_TOKENS.has(v.token));
 
 // {asset.link} is only a URL when the install has a public URL to build one
@@ -97,6 +113,32 @@ describe("buildTemplateContext", () => {
       expect(ctx, `${token} must not be a context key`).not.toHaveProperty([name]);
       expect(renderNotificationTemplate(token, ctx)).toBe(token);
     }
+  });
+
+  it("leaves every deferred token in the DEFAULT body intact through a blank render", () => {
+    // The regression that motivated the prefix rule. Polaris's own default body
+    // renders with unknown:"blank" (so a pre-upgrade templateCtx can't leak
+    // "{rule}" into a subject), which means a deferred token the renderer
+    // doesn't recognize is DELETED here — silently, and only in production,
+    // since the delivery pass then finds nothing to substitute.
+    const ctx = buildTemplateContext(FULL_PARTS);
+    for (const body of [DEFAULT_ALERT_SUBJECT, DEFAULT_ALERT_TEXT, DEFAULT_ALERT_HTML]) {
+      const rendered = renderNotificationTemplate(body, ctx, { unknown: "blank" });
+      for (const [, name] of body.matchAll(/\{([a-zA-Z][\w.]*)\}/g)) {
+        if (!isDeferredToken(name!)) continue;
+        expect(rendered, `{${name}} was blanked before its delivery-time pass`).toContain(`{${name}}`);
+      }
+    }
+  });
+
+  it("defers any chart token by prefix, including ones not yet invented", () => {
+    expect(isDeferredToken("chart.trigger")).toBe(true);
+    expect(isDeferredToken("chart.probeLoss")).toBe(true);
+    expect(isDeferredToken("chart.somethingWeAddNextYear")).toBe(true);
+    expect(isDeferredToken("ack")).toBe(true);
+    expect(isDeferredToken("asset")).toBe(false);
+    // Not a chart token — the prefix is "chart.", not "chart".
+    expect(isDeferredToken("charter")).toBe(false);
   });
 
   it("renders every cataloged context token to a non-empty value with full parts", () => {

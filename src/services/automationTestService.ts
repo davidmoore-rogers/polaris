@@ -203,7 +203,9 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
   // operator the very thing they're testing. Pick a real sensor the chosen
   // device reports that the draft's own filter would match.
   const dimension = reading?.dimensionKey ?? null;
-  const metric = rule.trigger && (rule.trigger.type === "asset_metric" || rule.trigger.type === "host_metric") ? rule.trigger.metric : null;
+  const metric = rule.trigger && (rule.trigger.type === "asset_metric" || rule.trigger.type === "host_metric")
+    ? rule.trigger.metric
+    : rule.trigger && rule.trigger.type === "asset_state" ? rule.trigger.field : null;
   // A sensor value is stated in the install's display unit, matching the chart
   // below it — see sensorReadingDisplay.
   const sensorShown = metric === "hwSensorValue" && asset && dimension
