@@ -7504,8 +7504,12 @@ var STD_MIB_LABELS = {
   "std:entity":         "ENTITY-MIB (RFC 4133)",
   "std:entity-sensor":  "ENTITY-SENSOR-MIB (RFC 3433)",
   "std:lldp":           "LLDP-MIB (IEEE 802.1AB)",
+  "std:poe":            "PoE — POWER-ETHERNET-MIB (RFC 3621)",
+  "std:bridge":         "Bridge — MAC forwarding + STP (RFC 4188)",
+  "std:q-bridge":       "Bridge — VLAN-aware forwarding (RFC 4363)",
+  "std:rstp":           "Rapid Spanning Tree (RFC 4318)",
 };
-var STD_MIB_ORDER = ["std:system", "std:interfaces", "std:if-ext", "std:host-resources", "std:entity", "std:entity-sensor", "std:lldp"];
+var STD_MIB_ORDER = ["std:system", "std:interfaces", "std:if-ext", "std:host-resources", "std:entity", "std:entity-sensor", "std:lldp", "std:poe", "std:bridge", "std:q-bridge", "std:rstp"];
 
 // Splits a single dropdown value into the {mibId, mibStdKey} pair the
 // backend expects. The dropdown carries one combined string ("" = built-in

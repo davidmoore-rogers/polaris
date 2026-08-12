@@ -72,6 +72,18 @@ export const BUILT_IN_OIDS: Record<string, string> = {
   iso8802: "1.0.8802",
   ieee802dot1: "1.0.8802.1",
   ieee802dot1mibs: "1.0.8802.1.1",
+  // BRIDGE-MIB (RFC 4188) anchors, for the same reason.
+  //
+  // stdMibLibrary resolves each bundled module INDEPENDENTLY against this seed
+  // — there is deliberately no cross-MIB visibility — so a module that anchors
+  // on a symbol IMPORTed from BRIDGE-MIB cannot see it even when BRIDGE-MIB is
+  // bundled right alongside. Measured against the real files: without these,
+  // Q-BRIDGE-MIB resolves 0 of 129 assignments (its whole tree hangs off
+  // `dot1dBridge`) and RSTP-MIB 9 of 19 (`dot1dStp`). Values read off
+  // BRIDGE-MIB itself: `dot1dBridge ::= { mib-2 17 }`, `dot1dStp ::=
+  // { dot1dBridge 2 }`.
+  dot1dBridge: "1.3.6.1.2.1.17",
+  dot1dStp: "1.3.6.1.2.1.17.2",
   // Cisco
   cisco: "1.3.6.1.4.1.9",
   ciscoMgmt: "1.3.6.1.4.1.9.9",

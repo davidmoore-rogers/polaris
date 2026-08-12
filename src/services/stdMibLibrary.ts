@@ -2,7 +2,7 @@
  * src/services/stdMibLibrary.ts — built-in standard MIB browse/walk support.
  *
  * Mirrors the upload-MIB pathway (mibService.parseMibStructured +
- * oidRegistry.resolveSymbolsForMib) for the seven canonical RFC/IEEE
+ * oidRegistry.resolveSymbolsForMib) for the eleven canonical RFC/IEEE
  * modules bundled under [stdMibs/](./stdMibs/). The SNMP Walk tab on the
  * asset details modal consumes this surface via two routes in
  * [../api/routes/mibs.ts](../api/routes/mibs.ts):
@@ -12,8 +12,17 @@
  *
  * Standard MIBs are immutable at runtime — we parse + resolve each one
  * lazily on first request and cache the result module-level. The
- * resolver runs against `BUILT_IN_OIDS` only (no DB MIB layering); std
- * MIBs root at well-known SMI anchors already present in the seed.
+ * resolver runs against `BUILT_IN_OIDS` only (no DB MIB layering, and no
+ * cross-MIB visibility between bundled modules either).
+ *
+ * That last part is a real constraint when ADDING a module: a MIB whose
+ * root is IMPORTed from a sibling cannot see it here even though the
+ * sibling ships in the same directory. Q-BRIDGE-MIB anchors on BRIDGE-MIB's
+ * `dot1dBridge` and RSTP-MIB on its `dot1dStp`, so both resolve to nothing
+ * (0 of 129 and 9 of 19 assignments respectively) until those anchors are
+ * seeded into `BUILT_IN_OIDS`. Whenever a new std MIB is added, check its
+ * IMPORTS for symbols used as OID parents and seed them — the smoke script
+ * catches it, but only if it carries expectations for the new module.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -53,6 +62,10 @@ export const STD_MIBS: readonly StdMibDef[] = [
   { key: "std:entity",         label: "ENTITY-MIB (RFC 4133)",                  moduleName: "ENTITY-MIB",       rootOid: "1.3.6.1.2.1.47", filename: "ENTITY-MIB.txt" },
   { key: "std:entity-sensor",  label: "ENTITY-SENSOR-MIB (RFC 3433)",           moduleName: "ENTITY-SENSOR-MIB", rootOid: "1.3.6.1.2.1.99", filename: "ENTITY-SENSOR-MIB.txt" },
   { key: "std:lldp",           label: "LLDP-MIB (IEEE 802.1AB)",                moduleName: "LLDP-MIB",         rootOid: "1.0.8802.1.1.2", filename: "LLDP-MIB.txt" },
+  { key: "std:poe",            label: "PoE — POWER-ETHERNET-MIB (RFC 3621)",    moduleName: "POWER-ETHERNET-MIB", rootOid: "1.3.6.1.2.1.105", filename: "POWER-ETHERNET-MIB.txt" },
+  { key: "std:bridge",         label: "Bridge — MAC forwarding + STP (RFC 4188)", moduleName: "BRIDGE-MIB",     rootOid: "1.3.6.1.2.1.17", filename: "BRIDGE-MIB.txt" },
+  { key: "std:q-bridge",       label: "Bridge — VLAN-aware forwarding (RFC 4363)", moduleName: "Q-BRIDGE-MIB",  rootOid: "1.3.6.1.2.1.17.7", filename: "Q-BRIDGE-MIB.txt" },
+  { key: "std:rstp",           label: "Rapid Spanning Tree (RFC 4318)",         moduleName: "RSTP-MIB",         rootOid: "1.3.6.1.2.1.134", filename: "RSTP-MIB.txt" },
 ];
 
 const STD_MIBS_DIR = join(dirname(fileURLToPath(import.meta.url)), "stdMibs");

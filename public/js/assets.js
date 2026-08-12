@@ -14697,6 +14697,10 @@ var _SNMP_STANDARD_MIBS = [
   { id: "std:entity",         label: "ENTITY-MIB (RFC 4133)",          oid: "1.3.6.1.2.1.47"         },
   { id: "std:entity-sensor",  label: "ENTITY-SENSOR-MIB (RFC 3433)",   oid: "1.3.6.1.2.1.99"         },
   { id: "std:lldp",           label: "LLDP-MIB (IEEE 802.1AB)",        oid: "1.0.8802.1.1.2"         },
+  { id: "std:poe",            label: "PoE — POWER-ETHERNET-MIB (RFC 3621)", oid: "1.3.6.1.2.1.105"   },
+  { id: "std:bridge",         label: "Bridge — MAC forwarding + STP (RFC 4188)", oid: "1.3.6.1.2.1.17" },
+  { id: "std:q-bridge",       label: "Bridge — VLAN-aware forwarding (RFC 4363)", oid: "1.3.6.1.2.1.17.7" },
+  { id: "std:rstp",           label: "Rapid Spanning Tree (RFC 4318)", oid: "1.3.6.1.2.1.134"        },
 ];
 
 function _snmpCredentialOptions(selectedId) {
