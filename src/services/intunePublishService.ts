@@ -61,14 +61,25 @@ const GRAPH_BASES = [
   "https://graph.microsoft.com/beta",
 ] as const;
 
-let resolvedBase: string | null = null;
+/**
+ * Probe result PER TENANT. Which API version serves `deviceHealthScripts` is a
+ * property of the tenant, not of this process, so a single module-level string
+ * would let the first tenant probed decide for every other one — an install
+ * with two Entra integrations (prod + test tenant, or post-acquisition pair)
+ * would publish against whichever base the other tenant happened to answer on
+ * and fail confusingly. Keyed by tenantId; unbounded growth isn't a concern
+ * since the key space is "Entra integrations an operator configured".
+ */
+const resolvedBaseByTenant = new Map<string, string>();
 
 export function _resetResolvedBase(): void {
-  resolvedBase = null;
+  resolvedBaseByTenant.clear();
 }
 
 async function resolveGraphBase(config: EntraIdConfig): Promise<string> {
-  if (resolvedBase) return resolvedBase;
+  const tenantKey = config.tenantId || "";
+  const cached = resolvedBaseByTenant.get(tenantKey);
+  if (cached) return cached;
   let lastErr: unknown = null;
   for (const base of GRAPH_BASES) {
     try {
@@ -78,15 +89,15 @@ async function resolveGraphBase(config: EntraIdConfig): Promise<string> {
         { method: "GET", allow404: true },
       );
       if (res !== null) {
-        resolvedBase = base;
-        logger.info({ base }, "Intune deviceHealthScripts resolved");
+        resolvedBaseByTenant.set(tenantKey, base);
+        logger.info({ base, tenantId: tenantKey }, "Intune deviceHealthScripts resolved");
         return base;
       }
       // null === 404 → this API version does not serve the endpoint.
     } catch (err: any) {
       // 403 = endpoint exists, permission missing. That is THIS base.
       if (typeof err?.message === "string" && err.message.includes("permission denied")) {
-        resolvedBase = base;
+        resolvedBaseByTenant.set(tenantKey, base);
         return base;
       }
       lastErr = err;

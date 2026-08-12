@@ -2948,6 +2948,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - Upsert is by `displayName`, so **renaming `INTUNE_POLICY_NAME` strands the published policy** and the next publish creates a second one.
 - The version probe treats **404 as "wrong API version, try the next"** and **403 as "this version exists, permission missing"**. Falling through on a 403 would report the wrong problem and publish to the wrong base. It depends on `graphApiRequest`'s 403 message wording — the graphRequest test pins that string.
 - Opt-in per integration (`publishToIntune`); refuses with a message naming the checkbox, and reaches the tenant zero times when off.
+- **The version-probe cache is keyed by `tenantId`, never process-global.** Which API version serves `deviceHealthScripts` is a property of the TENANT, so one shared string would let the first tenant probed decide for every other one — an install with two Entra integrations (prod + test, or a post-acquisition pair) would publish against the wrong base and fail confusingly. `resolvedBaseByTenant` + `_resetResolvedBase()` (test seam, clears all); two tests pin it — a second tenant gets its own probe, and a repeat publish to the SAME tenant re-probes zero times.
 
 **When changing this:**
 - Tests: `tests/unit/intunePublish.test.ts` (18) + `tests/unit/graphRequest.test.ts` (11, the transport).

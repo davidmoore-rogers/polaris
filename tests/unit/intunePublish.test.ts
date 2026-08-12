@@ -264,6 +264,46 @@ describe("v1.0 / beta probe", () => {
     await expect(publishOnboardingScripts(db.integrations[0].id, "t"))
       .rejects.toThrow(/DeviceManagementConfiguration.ReadWrite.All/);
   });
+
+  it("caches the probe PER TENANT, so a second tenant is probed on its own", async () => {
+    // Which API version serves deviceHealthScripts is a tenant property. A
+    // process-global cache would let the first tenant decide for the second —
+    // an install with a prod + test tenant would publish against the wrong
+    // base and fail confusingly.
+    seedEnabledIntegration({
+      id: "11111111-1111-1111-1111-111111111111",
+      config: { tenantId: "tenant-beta", clientId: "c", clientSecret: "s", publishToIntune: true },
+    });
+    seedEnabledIntegration({
+      id: "22222222-2222-2222-2222-222222222222",
+      name: "Other Entra",
+      config: { tenantId: "tenant-v1", clientId: "c", clientSecret: "s", publishToIntune: true },
+    });
+    // First tenant only answers on beta; the second answers on v1.0.
+    let betaTenant = true;
+    graphResponder = (url, opts) => {
+      if (opts.allow404) {
+        if (betaTenant) return url.startsWith(V1) ? null : { value: [] };
+        return { value: [] };
+      }
+      return opts.method === "POST" ? { id: "p" } : { value: [] };
+    };
+    const first = await publishOnboardingScripts("11111111-1111-1111-1111-111111111111", "tester");
+    expect(first.graphBase).toBe("https://graph.microsoft.com/beta");
+
+    betaTenant = false;
+    const second = await publishOnboardingScripts("22222222-2222-2222-2222-222222222222", "tester");
+    expect(second.graphBase).toBe("https://graph.microsoft.com/v1.0");
+  });
+
+  it("reuses the cached base for repeat publishes to the SAME tenant", async () => {
+    seedEnabledIntegration();
+    graphResponder = (url, opts) => (opts.method === "POST" ? { id: "p" } : { value: [] });
+    await publishOnboardingScripts(db.integrations[0].id, "tester");
+    const probesAfterFirst = graphCalls.filter((c) => c.url.endsWith("$top=1")).length;
+    await publishOnboardingScripts(db.integrations[0].id, "tester");
+    expect(graphCalls.filter((c) => c.url.endsWith("$top=1")).length).toBe(probesAfterFirst);
+  });
 });
 
 // ─── Audit + targets ──────────────────────────────────────────────────────
