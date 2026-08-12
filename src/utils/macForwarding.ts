@@ -36,9 +36,11 @@ export function fdbStatusLabel(raw: number | null | undefined): string {
  *
  * `invalid(2)` is an aged-out entry the agent has not reaped yet — storing it
  * would put MACs on ports they have already left. `learned(3)` is a real
- * endpoint sighting and `self(4)` is the switch's own address, which is
- * precisely what identifies a peer switch across a trunk; `mgmt(5)` is a
- * configured static entry and is equally real.
+ * endpoint sighting; `mgmt(5)` is a configured static entry and is equally
+ * real. `self(4)` is the REPORTING BRIDGE'S OWN address — it is kept for
+ * completeness but says nothing about what is reachable through a port, so
+ * every count and inference here excludes it. (A peer switch shows up in this
+ * table as a `learned` entry on the port facing it, not as `self`.)
  */
 export function fdbStatusIsUsable(status: string): boolean {
   return status === "learned" || status === "self" || status === "mgmt";
@@ -135,4 +137,58 @@ export function macCountsByPort(entries: readonly FdbEntry[]): Map<string, numbe
     out.set(e.ifName, (out.get(e.ifName) ?? 0) + 1);
   }
   return out;
+}
+
+/** A forwarding-database row that has been matched to an Asset. */
+export interface MatchedFdbEntry extends FdbEntry {
+  matchedAssetId: string | null;
+}
+
+export interface DirectAttachment {
+  ifName: string;
+  assetId: string;
+}
+
+/**
+ * Ports whose forwarding database shows exactly ONE learned MAC, matched to a
+ * known asset — i.e. a device plugged straight into that port.
+ *
+ * This is the only inference this module draws, and the restriction is
+ * deliberate. "Which devices are reachable through this port" is answered by
+ * every row; "which device IS this port" is answered only when there is one
+ * candidate. On a multi-MAC uplink the same data says the far end is a switch
+ * with a whole network behind it, and picking any single MAC from that set
+ * would be a guess dressed as a fact.
+ *
+ * Known limits, all of which push toward under-claiming rather than over-:
+ *
+ *   - An IP phone with a PC daisy-chained behind it puts two MACs on one access
+ *     port, so that port yields nothing. Correct: the port is not one device.
+ *   - A port facing a switch that currently has one client behind it looks
+ *     identical to an access port. Distinguishing them needs the far end's own
+ *     table (bidirectional confirmation), which is a follow-on once there is
+ *     real fleet data to validate against.
+ *   - A stale entry that has not aged out can name a device that has moved.
+ *     The FDB is refreshed wholesale each scrape, so this self-corrects.
+ *
+ * `self` and `mgmt` rows are excluded: the former is the bridge's own address,
+ * the latter a configured static entry rather than an observed sighting.
+ */
+export function inferDirectAttachments(entries: readonly MatchedFdbEntry[]): DirectAttachment[] {
+  const byPort = new Map<string, MatchedFdbEntry[]>();
+  for (const e of entries) {
+    if (e.status !== "learned" || !e.ifName) continue;
+    const list = byPort.get(e.ifName);
+    if (list) list.push(e);
+    else byPort.set(e.ifName, [e]);
+  }
+
+  const out: DirectAttachment[] = [];
+  for (const [ifName, rows] of byPort.entries()) {
+    if (rows.length !== 1) continue;
+    const assetId = rows[0].matchedAssetId;
+    if (!assetId) continue;
+    out.push({ ifName, assetId });
+  }
+  return out.sort((a, b) => a.ifName.localeCompare(b.ifName));
 }
