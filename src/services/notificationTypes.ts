@@ -22,7 +22,7 @@ export const SEVERITIES = ["notice", "informational", "warning", "serious", "cri
 export const EVENT_LEVELS = ["info", "warning", "error"] as const;
 export const CLEAR_BEHAVIORS = ["manual", "auto", "timed"] as const;
 export const COMPARATORS = [">", ">=", "<", "<=", "==", "!="] as const;
-export const AGGREGATIONS = ["latest", "avg", "min", "max"] as const;
+export const AGGREGATIONS = ["latest", "avg", "median", "min", "max"] as const;
 
 export type Severity = (typeof SEVERITIES)[number];
 export type Comparator = (typeof COMPARATORS)[number];
@@ -2039,7 +2039,7 @@ export function buildSchemaCatalog() {
       "==": "equals", "!=": "is not",
     },
     inverseComparators: { ">": "<=", ">=": "<", "<": ">=", "<=": ">", "==": "!=", "!=": "==" },
-    aggregationPhrases: { latest: "", avg: "avg over", min: "min over", max: "max over" },
+    aggregationPhrases: { latest: "", avg: "avg over", median: "median over", min: "min over", max: "max over" },
     dimensionPhrases: {
       sensorClass: "for sensors of class {value}",
       sensorNamePattern: "on sensors matching {value}",
