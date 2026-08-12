@@ -1322,9 +1322,10 @@ code {
   color: var(--color-text-secondary);
 }
 
-/* Variants for menus that live at the bottom/left of the viewport (the asset
-   slide-over footer's Export menu): open upward and anchor to the button's
-   left edge so the menu stays inside the slide-over. */
+/* Variants for menus that live at the bottom or left edge of a container (the
+   asset slide-over footer's Export / SSH menus open upward): drop-up opens
+   above the button; anchor-left pins the menu to the button's left edge for
+   buttons sitting near a container's left edge. */
 .btn-dropdown-menu.drop-up { top: auto; bottom: calc(100% + 4px); }
 .btn-dropdown-menu.anchor-left { left: 0; right: auto; }
 
