@@ -1693,11 +1693,34 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - With a `composedEmail` (rule has emailComposition), each email target gets ONE row (`target` = joined To list, `meta` = {composed, to, cc, bcc, subject, text, html?}); empty To skips the target. Cc/Bcc dedupe: To wins over Cc, Bcc drops anything visible in To/Cc. Without it, the legacy one-row-per-address fan-out is byte-identical.
 - `meta` carries rendered content + recipient addresses only — never channel secrets.
 - In-app delivery is never a `NotificationDelivery` row — it's the `Notification` itself.
+- ACK LINKS: an email row earns `meta.ack` only when its address maps to a Polaris USER who holds `alerts:write` (`buildAddressOwnerMap` — user beats a typed/contact entry for the same address, ties break on lowest id since `User.email` is nullable and not unique). A COMPOSED email (one shared body) earns one only when exactly one To address is owned and cc/bcc are both empty (`composedAckRecipient`) — otherwise a cc'd contact could acknowledge as the To user.
+- The `{ack}` token is filled HERE, per recipient, not by `buildTemplateContext` — the context is built once per fire and snapshotted onto `Notification.templateCtx` for everyone to share, so a context key would render it empty before recipients were even known. A composed row that earns no token has `{ack}` stripped rather than mailed literally.
 
 **When changing this:** keep the tag-match semantics aligned with `scopeMatchesAsset` and `regionScopeService` so rule scope and recipient routing read tags the same way. Bump the user-tag index cache (`bumpRecipientIndex`) if a user/role/group-mapping write must take effect immediately.
 
 ---
 
+## services/notificationAckService.ts
+
+**What it owns:** Every read and write of `NotificationAckToken` — the single-use one-click acknowledge links carried in alert emails and behind the web-push Acknowledge button.
+
+**Public API:** `mintAckTokens(reqs[])` (batched createMany at delivery fan-out), `inspectAckToken(raw)` (non-mutating — backs the inert GET), `redeemAckToken(raw, note?)`, `userCanAcknowledge(userId)`, the pure `classifyAckToken(token, notif, canAck, now)`, `pruneAckTokens(now?)`.
+
+**Cross-service deps:** `notificationService.acknowledgeNotifications` (the acknowledgement itself — never a private write path), `eventLogService.logEvent`, `api/middleware/permissions.permissionOf` + `rankMeets`, `utils/ackToken` (pure format/digest).
+
+**Used by:** `src/services/notificationRecipientService.ts` (mints during `expandDeliveries`), `src/api/routes/ack.ts` (inspect/redeem), `src/jobs/deliverNotifications.ts` (hourly prune).
+
+**Invariants:**
+- A token is minted ONLY for a recipient who is a configured Polaris user holding `alerts:write`, and redemption RE-CHECKS that live — a role downgrade must invalidate links already sitting in mailboxes. Address-book contacts and typed addresses never get one: there would be no account to record as the acknowledger.
+- Only the digest is stored. The raw token exists in the delivered message and in `NotificationDelivery.meta.ack` (which no API echoes) — so a token can never be re-derived or re-sent, which is why each send mints fresh rather than reusing.
+- `classifyAckToken` reports `already` ahead of `used` / `expired` / `forbidden`: if the alert is acknowledged, the clicker's intent is satisfied and reporting a failure would be a lie.
+- Redemption is single-use but never errors on a second click — it reports who acknowledged and when.
+- An UNKNOWN token writes no Event (scanner- and attacker-reachable, and Events have 7-day retention); a token Polaris really issued that then fails writes `notification.ack_link.rejected` at warning.
+- Minting is batched. It runs on the alert fan-out path, so a per-recipient create — or an argon2 hash per recipient — would put seconds of latency into every large alert.
+
+**When changing this:** the acknowledgement must keep going through `acknowledgeNotifications` (it owns the Event + the already-acknowledged skip). If you add a new mint site, mint through `mintAckTokens` so the batching and the alerts:write filter stay in one place.
+
+---
 ## services/notificationDeliveryService.ts
 
 **What it owns:** Draining pending `NotificationDelivery` rows and dispatching each to its channel.

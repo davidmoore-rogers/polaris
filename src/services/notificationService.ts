@@ -97,11 +97,24 @@ export async function listNotifications(params: ListParams) {
   return { notifications: rows, total, limit, offset };
 }
 
+/** How an acknowledgement reached us — audit detail only, never a gate. */
+export type AckSource = "ui" | "ack_link" | "web_push_action";
+
 /**
  * Acknowledge a batch of notifications, stamping a shared optional note.
  * Skips rows already acknowledged. One updateMany; one audit Event.
+ *
+ * `acknowledgedBy` stays the plain actor string the Alerts surfaces render;
+ * provenance rides the Event's details instead, so an emailed one-click
+ * acknowledgement is distinguishable in the audit log without changing what
+ * every existing reader of the column sees.
  */
-export async function acknowledgeNotifications(ids: string[], actor: string, note?: string): Promise<number> {
+export async function acknowledgeNotifications(
+  ids: string[],
+  actor: string,
+  note?: string,
+  opts?: { source?: AckSource },
+): Promise<number> {
   if (!Array.isArray(ids) || ids.length === 0) {
     throw new AppError(400, "No notification ids provided");
   }
@@ -120,7 +133,7 @@ export async function acknowledgeNotifications(ids: string[], actor: string, not
     resourceType: "notification",
     actor,
     message: `Acknowledged ${res.count} notification${res.count === 1 ? "" : "s"}`,
-    details: { ids, count: res.count, hasNote: trimmed.length > 0 },
+    details: { ids, count: res.count, hasNote: trimmed.length > 0, source: opts?.source ?? "ui" },
   });
   return res.count;
 }

@@ -15,6 +15,8 @@ import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { router } from "./api/router.js";
 import { pwaRouter } from "./api/routes/pwa.js";
+import { ackRouter } from "./api/routes/ack.js";
+import { ackLinkLimiter } from "./api/middleware/rateLimits.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { errorHandler } from "./api/middleware/errorHandler.js";
@@ -324,6 +326,16 @@ app.use(compression());
 // ─── Body parsing with size limits ───────────────────────────────────────────
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false, limit: "1mb" })); // SAML callback posts form-encoded
+
+// ─── One-click acknowledge links ─────────────────────────────────────────────
+// Mounted deliberately HERE — after body parsing, before session/CSRF. The
+// token in the URL is the whole credential, so there is no cookie to protect;
+// more importantly csrfMiddleware stamps req.session.csrfToken on every
+// request carrying a session, which dirties an uninitialized session and makes
+// connect-pg-simple persist a row. Below the session mount, every Outlook Safe
+// Links / Proofpoint scan of an emailed ack link would mint a session row
+// without bound. Up here it cannot. See api/routes/ack.ts.
+app.use("/ack", ackLinkLimiter, ackRouter);
 
 // ─── Session ─────────────────────────────────────────────────────────────────
 const PgStore = pgSession(session);

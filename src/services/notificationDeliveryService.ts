@@ -20,7 +20,8 @@
 import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { notificationsPageUrl, pushDeepLinkUrl } from "../utils/notificationTemplate.js";
+import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail } from "../utils/notificationTemplate.js";
+import { ackUrlFromMeta } from "./notificationRecipientService.js";
 import { logEvent } from "./eventLogService.js";
 import { type ChannelType } from "./notificationTypes.js";
 import { sendSmtpEmail, sendM365Email, type EmailMessage } from "./notificationChannels/emailChannel.js";
@@ -89,7 +90,27 @@ function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, url: str
       html: typeof meta.html === "string" && meta.html ? meta.html : undefined,
     };
   }
-  return { to: d.target, subject: titleFor(d.notification), text: d.notification.message + (url ? `\n\nView: ${url}` : "") };
+  return {
+    to: d.target,
+    subject: titleFor(d.notification),
+    text: appendAckLine(d.notification.message + (url ? `\n\nView: ${url}` : ""), ackUrlFromEmailMeta(meta)),
+  };
+}
+
+/**
+ * The acknowledge URL for an email row, or null when this recipient didn't
+ * earn one (an address-book contact, a typed address, or an install with no
+ * POLARIS_PUBLIC_URL — see notificationRecipientService.buildAddressOwnerMap).
+ */
+export function ackUrlFromEmailMeta(meta: Record<string, unknown>): string | null {
+  const ack = meta.ack && typeof meta.ack === "object" ? (meta.ack as Record<string, unknown>) : null;
+  return typeof ack?.token === "string" ? ackUrlForEmail(ack.token) : null;
+}
+
+/** Append the one-click acknowledge line to a plain-text body. Pure. */
+export function appendAckLine(text: string, ackUrl: string | null): string {
+  if (!ackUrl) return text;
+  return `${text}\n\nAcknowledge this alert: ${ackUrl}`;
 }
 
 async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promise<{ ok: true } | { ok: false; error: string; gone?: boolean }> {
@@ -154,7 +175,16 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promi
       await sendWebPush(
         { publicKey: cfgStr(cfg, "publicKey"), privateKey: cfgStr(cfg, "privateKey"), subject: cfgStr(cfg, "subject") },
         { endpoint: d.target, p256dh: String(meta.p256dh ?? ""), auth: String(meta.auth ?? "") },
-        { title: titleFor(d.notification), body: d.notification.message, severity: d.notification.severity, url: pushDeepLinkUrl(meta.surface), notificationId: d.notification.id },
+        {
+          title: titleFor(d.notification),
+          body: d.notification.message,
+          severity: d.notification.severity,
+          url: pushDeepLinkUrl(meta.surface),
+          notificationId: d.notification.id,
+          // Present only for a recipient who may acknowledge; sw.js renders
+          // the Acknowledge action button iff it arrives.
+          ackUrl: ackUrlFromMeta(meta),
+        },
       );
     } else {
       return { ok: false, error: `unknown channel type "${channel.type}"` };

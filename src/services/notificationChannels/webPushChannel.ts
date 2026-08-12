@@ -32,6 +32,12 @@ export interface WebPushPayload {
   severity: string;
   url: string | null;
   notificationId: string;
+  /**
+   * One-click acknowledge URL for THIS recipient, or null/absent when they
+   * can't acknowledge. sw.js renders the "Acknowledge" action button only when
+   * it arrives, so an unentitled recipient simply gets the plain notification.
+   */
+  ackUrl?: string | null;
 }
 
 export interface WebPushError extends Error {

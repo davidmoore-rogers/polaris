@@ -2400,6 +2400,7 @@ model User {
   pushSubscriptions PushSubscription[]
   savedTableFilters SavedTableFilter[]
   tableTabs         UserTableTabs[]
+  ackTokens         NotificationAckToken[]
 
   @@index([roleId])
   @@map("users")
@@ -3522,12 +3523,52 @@ model Notification {
   // lastSentAt, count } } }. Written by the escalateNotifications sweep.
   escalationState Json?
 
+  // Raised by the automation wizard's "Test delivery" buttons rather than by a
+  // real trigger. Always carries ruleId = null (a real ruleId would put it in
+  // the escalation sweep's candidate set and start paging people), so this
+  // column is the only way to tell a test alert from a rule-less one.
+  testRun Boolean @default(false)
+
   deliveries NotificationDelivery[]
+  ackTokens  NotificationAckToken[]
 
   @@index([assetId])
   @@index([cleared, acknowledged])
   @@index([triggeredAt])
   @@map("notifications")
+}
+
+// A single-use, opaque one-click acknowledge link, minted per (notification,
+// user recipient) at delivery fan-out and delivered inside the alert email /
+// web-push payload. Only recipients who are configured Polaris users holding
+// alerts:write get one — an address-book contact is an address, not an
+// account, so there is nobody to attribute the acknowledgement to.
+//
+// The digest is SHA-256, NOT the argon2id + indexed-prefix walk ApiToken and
+// the agent tokens use: those hash operator-visible secrets of unknown
+// entropy, whereas this token is 24 bytes we mint ourselves (192 bits — no
+// dictionary for a work factor to slow down), and minting runs on the alert
+// fan-out path where argon2's ~50ms/row would cost seconds of blocked CPU per
+// large alert. A plain digest also makes redemption one indexed findUnique
+// instead of a candidate walk, which is why there is no prefix column here.
+model NotificationAckToken {
+  id             String       @id @default(uuid())
+  // base64url(sha256(raw)). The raw token exists only in the delivered
+  // message and in NotificationDelivery.meta.ack — never in this table.
+  tokenHash      String       @unique
+  notificationId String
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // "email" | "web_push" — provenance for the acknowledged Event's details.
+  channel        String
+  expiresAt      DateTime
+  usedAt         DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([notificationId])
+  @@index([expiresAt])
+  @@map("notification_ack_tokens")
 }
 
 // One row per (notification, channel, concrete recipient) for outbound

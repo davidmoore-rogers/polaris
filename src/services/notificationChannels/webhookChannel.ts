@@ -13,6 +13,7 @@
 
 import { AppError } from "../../utils/errors.js";
 import { assertOutboundHostAllowed } from "../../utils/netGuard.js";
+import { severityHex } from "../../utils/severityStyle.js";
 
 export type WebhookKind = "generic" | "slack" | "teams";
 
@@ -25,12 +26,8 @@ export interface WebhookPayload {
   triggeredAt: string;
 }
 
-const SEVERITY_COLOR: Record<string, string> = {
-  // current notification severities
-  notice: "6b7280", informational: "2563eb", warning: "d97706", serious: "ea580c", critical: "dc2626",
-  // legacy audit-event levels (pre-migration rows / event payloads)
-  info: "2563eb", error: "dc2626",
-};
+// Severity → colour moved to utils/severityStyle.ts when the alert email and
+// the public acknowledge page needed the same map.
 
 export function formatBody(kind: WebhookKind, p: WebhookPayload): unknown {
   if (kind === "slack") {
@@ -41,7 +38,7 @@ export function formatBody(kind: WebhookKind, p: WebhookPayload): unknown {
     return {
       "@type": "MessageCard",
       "@context": "https://schema.org/extensions",
-      themeColor: SEVERITY_COLOR[p.severity] ?? "808080",
+      themeColor: severityHex(p.severity),
       summary: p.title,
       title: p.title,
       text: p.message,
