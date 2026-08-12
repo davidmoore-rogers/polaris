@@ -68,7 +68,7 @@ export interface InferredLldpNeighbor {
    * "mac-inferred" is derived from the switch's own forwarding database and
    * therefore covers links no Fortinet topology stamp describes.
    */
-  source: "peer-inferred" | "mac-inferred";
+  source: "peer-inferred" | "mac-inferred" | "trunk-mapped";
   firstSeen: Date;
   lastSeen: Date;
   matchedAsset: {
@@ -222,6 +222,50 @@ export async function buildInferredNeighborsForAsset(assetId: string): Promise<I
             hostname: sw.hostname,
             ipAddress: sw.ipAddress,
             assetType: sw.assetType,
+          },
+        });
+      }
+    }
+  }
+
+  // Trunk-derived adjacencies. Strongest of the three: the switch NAMES its
+  // peer by serial, so this is device-stated rather than inferred -- hence
+  // "trunk-mapped" and not "-inferred". It also covers precisely the FortiLink
+  // switch<->switch and switch<->FortiGate links LLDP does not republish in
+  // managed mode, which is the gap this service exists for.
+  if (self.assetType === "switch") {
+    const trunks = await prisma.assetTrunkMember.findMany({
+      where: { assetId, matchedAssetId: { not: null } },
+      select: { localPort: true, matchedAssetId: true },
+    });
+    if (trunks.length > 0) {
+      const peers = await prisma.asset.findMany({
+        where: { id: { in: trunks.map((t) => t.matchedAssetId!) } },
+        select: PEER_SELECT,
+      });
+      const peerById = new Map(peers.map((p) => [p.id, p]));
+      for (const t of trunks) {
+        const peer = peerById.get(t.matchedAssetId!);
+        if (!peer) continue;
+        inferred.push({
+          localIfName: t.localPort,
+          chassisIdSubtype: null,
+          chassisId: null,
+          portIdSubtype: null,
+          portId: null,
+          portDescription: null,
+          systemName: peer.hostname,
+          systemDescription: "Trunk reported by the switch (peer identified by serial)",
+          managementIp: peer.ipAddress,
+          capabilities: [],
+          source: "trunk-mapped",
+          firstSeen: now,
+          lastSeen: now,
+          matchedAsset: {
+            id: peer.id,
+            hostname: peer.hostname,
+            ipAddress: peer.ipAddress,
+            assetType: peer.assetType,
           },
         });
       }

@@ -17,6 +17,7 @@ import {
   entityTypeColumnTrusted,
   normalizeFgAlarmStatus,
   normalizeRestAlarmStatus,
+  pseOperStatusToAlarm,
   unitsDisplayLooksOptical,
   SENSOR_CLASS_UNITS,
 } from "../../src/utils/hardwareSensors.js";
@@ -290,5 +291,37 @@ describe("entityPhysicalIsInventory", () => {
     // A module with nothing identifying it is scaffolding too.
     expect(entityPhysicalIsInventory({ entClass: "module", isFru: false })).toBe(false);
     expect(entityPhysicalIsInventory({ entClass: "module", isFru: false, serialNum: "  " })).toBe(false);
+  });
+});
+
+describe("pseOperStatusToAlarm", () => {
+  it("maps a failed PSE to an alarm", () => {
+    expect(pseOperStatusToAlarm(3)).toBe("alarm"); // faulty
+  });
+
+  it("maps a delivering PSE to ok so a cleared fault resolves", () => {
+    expect(pseOperStatusToAlarm(1)).toBe("ok");
+  });
+
+  // Same discipline as ENTITY-SENSOR's unavailable(2): PoE switched off is a
+  // configuration choice, and alarming on it would fire on every switch where
+  // an operator has deliberately disabled PoE.
+  it("treats an off PSE as no claim, NOT as a fault", () => {
+    expect(pseOperStatusToAlarm(2)).toBeNull();
+  });
+
+  it("returns null when the device reported no status", () => {
+    expect(pseOperStatusToAlarm(null)).toBeNull();
+    expect(pseOperStatusToAlarm(undefined)).toBeNull();
+  });
+});
+
+describe("SENSOR_CLASS_UNITS — poe", () => {
+  // Unit-level PoE is watts; `power` is deliberately unit-less because it also
+  // carries Fortinet's status-shaped PSU rows, so mixing them would make the
+  // wizard's per-class unit hint wrong for both.
+  it("gives the poe class watts, leaving power unit-less", () => {
+    expect(SENSOR_CLASS_UNITS.poe).toBe("W");
+    expect(SENSOR_CLASS_UNITS.power).toBeNull();
   });
 });

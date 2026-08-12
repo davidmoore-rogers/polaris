@@ -20,6 +20,7 @@ export type HardwareSensorClass =
   | "voltage"
   | "current"
   | "optical"
+  | "poe"
   | "power"
   | "disk"
   | "other";
@@ -48,6 +49,14 @@ export const SENSOR_CLASS_UNITS: Record<HardwareSensorClass, string | null> = {
   // differs (dBm vs none) and because "which optic is going dark" is the thing
   // an operator wants to scope an automation to — sensorClass IS that filter.
   optical:     "dBm",
+  // Unit-level PoE from pethMainPseTable — the switch's power budget and what
+  // it is actually delivering. Its own class rather than `power`, whose
+  // canonical unit is deliberately null because that class also carries
+  // Fortinet's status-shaped PSU rows; mixing real watts in would make the
+  // wizard's per-class unit hint wrong for both. It is also the dimension an
+  // operator scopes to when the question is "is this switch running out of
+  // PoE budget".
+  poe:         "W",
   power:       null,
   disk:        "°C",
   other:       null,
@@ -183,6 +192,24 @@ export function classifyEntitySensor(opts: {
   if (byName.sensorClass !== "other") return byName;
 
   return cls(byType ?? "other");
+}
+
+/**
+ * `pethMainPseOperStatus` (RFC 3621) → the stored alarm string.
+ *
+ * `on(1)` the PSE is delivering, `off(2)` it is switched off, `faulty(3)` it
+ * has failed.
+ *
+ * `off(2)` maps to NULL, not "alarm", for the same reason ENTITY-SENSOR's
+ * `unavailable(2)` does: a PSE an operator has turned off is a configuration
+ * choice, and alarming on it would fire on every switch where PoE is
+ * deliberately disabled. Only `faulty(3)` is a failure.
+ */
+export function pseOperStatusToAlarm(oper: number | null | undefined): string | null {
+  if (oper == null) return null;
+  if (oper === 1) return "ok";
+  if (oper === 3) return "alarm";
+  return null; // off(2), and anything undefined by the RFC
 }
 
 /**

@@ -115,10 +115,12 @@ import {
   classifyEntitySensor,
   entityOperStatusToAlarm,
   entityTypeColumnTrusted,
+  pseOperStatusToAlarm,
 } from "../utils/hardwareSensors.js";
 import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
 import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
 import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, parseFdbIndex, type FdbEntry } from "../utils/macForwarding.js";
+import { matchTrunkPeer, parseTrunkPortMap, type TrunkPortEntry } from "../utils/fortiswitchTrunkMap.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
@@ -3335,6 +3337,10 @@ export interface SystemInfoSample {
    * a bridge that currently has nothing in its table.
    */
   macTable?: FdbEntry[];
+  /**
+   * FortiSwitch trunk -> local-port map. Same undefined/[] contract.
+   */
+  trunkMembers?: TrunkPortEntry[];
   ipsecTunnels?: IpsecTunnelSample[];
   /**
    * SD-WAN Performance SLA health-check readings. `undefined` means the
@@ -5306,6 +5312,19 @@ const OID = {
   entPhysicalMfgName:     "1.3.6.1.2.1.47.1.1.1.1.12",
   entPhysicalModelName:   "1.3.6.1.2.1.47.1.1.1.1.13",
   entPhysicalIsFRU:       "1.3.6.1.2.1.47.1.1.1.1.16",
+  // POWER-ETHERNET-MIB pethMainPseTable (RFC 3621) - the UNIT-level PSE:
+  // nominal budget, what is actually being delivered, and the PSE's own
+  // health bit. Indexed by pethMainPseGroupIndex (one group on a standalone
+  // switch, several on a stack/chassis). Note the extra pethMainPseObjects
+  // level in the chain: pethObjects(.1) -> .3 -> Table(.1) -> Entry(.1).
+  // FortiSwitch trunk -> physical port map. A single OctetString, NOT a table,
+  // hence the trailing .0. Undocumented vendor object; see
+  // utils/fortiswitchTrunkMap.ts for the format and why matching is a suffix
+  // test rather than a reconstruction.
+  fsTrunkPortMap:              "1.3.6.1.4.1.12356.106.3.1.1.0",
+  pethMainPsePower:            "1.3.6.1.2.1.105.1.3.1.1.2",
+  pethMainPseOperStatus:       "1.3.6.1.2.1.105.1.3.1.1.3",
+  pethMainPseConsumptionPower: "1.3.6.1.2.1.105.1.3.1.1.4",
   entPhySensorType:       "1.3.6.1.2.1.99.1.1.1.1",
   entPhySensorScale:      "1.3.6.1.2.1.99.1.1.1.2",
   entPhySensorPrecision:  "1.3.6.1.2.1.99.1.1.1.3",
@@ -6031,7 +6050,73 @@ function snmpMultiGet(session: any, oids: string[]): Promise<Map<string, unknown
   });
 }
 
+/**
+ * Unit-level PoE from pethMainPseTable, as hardware-sensor rows.
+ *
+ * Emitted as sensors rather than given their own table because that is exactly
+ * what they are - per-device readings with a name and a unit - and it means
+ * charts, rollups, retention and BOTH automation metrics work with no new
+ * code: `hwSensorValue` for "budget nearly exhausted" and `hwSensorAlarm` for
+ * the PSE's own faulty bit.
+ *
+ * `pethMainPseUsageThreshold` is deliberately not collected: it is a
+ * configured threshold, not a reading, and storing config as a time series
+ * would just be a flat line.
+ *
+ * Rows are suffixed with the group index only when a device reports more than
+ * one PSE, so a standalone switch gets stable, clean sensor names - the name
+ * is the automation dimension and the rollup series key, so it must not churn.
+ */
+async function collectPoePseSnmp(session: any): Promise<HardwareSensorSample[]> {
+  const [powers, consumptions, statuses] = await Promise.all([
+    snmpWalk(session, OID.pethMainPsePower).catch(() => new Map()),
+    snmpWalk(session, OID.pethMainPseConsumptionPower).catch(() => new Map()),
+    snmpWalk(session, OID.pethMainPseOperStatus).catch(() => new Map()),
+  ]);
+  const indexes = new Set<string>([...powers.keys(), ...consumptions.keys(), ...statuses.keys()]);
+  if (indexes.size === 0) return [];
+
+  const multi = indexes.size > 1;
+  const out: HardwareSensorSample[] = [];
+  for (const idx of indexes) {
+    const suffix = multi ? ` (PSE ${idx})` : "";
+    const alarmStatus = pseOperStatusToAlarm(snmpVbToNumber(statuses.get(idx)));
+    const budget = snmpVbToNumber(powers.get(idx));
+    const used   = snmpVbToNumber(consumptions.get(idx));
+    // The alarm rides the consumption row so a PSE fault surfaces on the
+    // reading an operator actually watches, rather than on a static budget.
+    if (used != null) {
+      out.push({ sensorName: `PoE Power Consumption${suffix}`, sensorClass: "poe", value: used, unit: "W", alarmStatus });
+    }
+    if (budget != null) {
+      out.push({ sensorName: `PoE Power Budget${suffix}`, sensorClass: "poe", value: budget, unit: "W", alarmStatus: null });
+    }
+  }
+  return out;
+}
+
+/**
+ * Hardware sensors, plus unit-level PoE appended for any device that has a PSE.
+ *
+ * The append lives in a wrapper because the core collector has three separate
+ * return paths (Fortinet table / ENTITY-SENSOR / vendor scalar) and PoE is
+ * orthogonal to which of them produced the sensor rows - a FortiSwitch takes
+ * the ENTITY-SENSOR path and still has a PSE.
+ */
 async function collectHardwareSensorsSnmp(
+  session: any,
+  manufacturer?: string | null,
+  profile?: VendorTelemetryProfile | null,
+  scope?: { manufacturer?: string | null; model?: string | null },
+): Promise<HardwareSensorSample[]> {
+  const [sensors, pse] = await Promise.all([
+    collectHardwareSensorsSnmpCore(session, manufacturer, profile, scope),
+    collectPoePseSnmp(session).catch(() => [] as HardwareSensorSample[]),
+  ]);
+  return pse.length > 0 ? [...sensors, ...pse] : sensors;
+}
+
+async function collectHardwareSensorsSnmpCore(
   session: any,
   manufacturer?: string | null,
   profile?: VendorTelemetryProfile | null,
@@ -6430,6 +6515,50 @@ async function collectMacTableSnmp(
  * uses: at a few thousand rows per switch a per-row lookup would dominate the
  * write.
  */
+/**
+ * Full-replace an asset's trunk membership. Delete-replace like its siblings.
+ *
+ * Peer resolution is a SUFFIX match against asset serials, uniqueness-guarded:
+ * an ambiguous tail stores NULL rather than attaching the trunk to the wrong
+ * device. `firstSeen` survives a re-scrape so "this trunk has been on port23
+ * since..." holds across the replace.
+ */
+async function persistTrunkMembers(assetId: string, rows: TrunkPortEntry[]): Promise<void> {
+  const now = new Date();
+  const [existing, serialRows] = await Promise.all([
+    prisma.assetTrunkMember.findMany({
+      where: { assetId },
+      select: { trunkName: true, localPort: true, firstSeen: true },
+    }),
+    // Only assets that HAVE a serial can be matched; the suffix test is over
+    // this map, so keeping it tight keeps the scan small.
+    prisma.asset.findMany({
+      where: { serialNumber: { not: null } },
+      select: { id: true, serialNumber: true },
+    }),
+  ]);
+  const prior = new Map(existing.map((e) => [`${e.trunkName}|${e.localPort}`, e.firstSeen]));
+  const serialToAssetId = new Map<string, string>();
+  for (const a of serialRows) if (a.serialNumber) serialToAssetId.set(a.serialNumber, a.id);
+
+  await prisma.$transaction([
+    prisma.assetTrunkMember.deleteMany({ where: { assetId } }),
+    ...(rows.length > 0
+      ? [prisma.assetTrunkMember.createMany({
+          data: rows.map((r) => ({
+            assetId,
+            trunkName:      r.trunkName,
+            localPort:      r.localPort,
+            peerSerialTail: r.peerSerialTail,
+            matchedAssetId: matchTrunkPeer(r.peerSerialTail, serialToAssetId),
+            firstSeen: prior.get(`${r.trunkName}|${r.localPort}`) ?? now,
+            lastSeen:  now,
+          })),
+        })]
+      : []),
+  ]);
+}
+
 async function persistMacTable(assetId: string, rows: FdbEntry[]): Promise<void> {
   const index = await buildLldpAssetMatchIndex();
   const now = new Date();
@@ -6567,6 +6696,7 @@ async function collectSystemInfoSnmp(
     const interfaces: InterfaceSample[] = [];
     let physicalEntities: PhysicalEntitySample[] | undefined;
     let macTable: FdbEntry[] | undefined;
+    let trunkMembers: TrunkPortEntry[] | undefined;
     const endIfaces = startPhase("systeminfo.snmp.interfaces_walk");
     try {
       const [
@@ -6661,6 +6791,12 @@ async function collectSystemInfoSnmp(
       // walk that can run to thousands of rows, so the cost is not spent.
       if (opts.assetType === "switch") {
         macTable = await collectMacTableSnmp(session, poeIfNames).catch(() => undefined);
+        // Trunk map: one scalar GET, so it costs nothing next to the FDB walk.
+        // Undefined (not []) when the device doesn't publish the object at all,
+        // so a non-Fortinet switch preserves rather than wipes.
+        const trunkRaw = await snmpGetScalar(session, OID.fsTrunkPortMap).catch(() => null);
+        const trunkStr = snmpVbToString(trunkRaw);
+        trunkMembers = trunkStr ? parseTrunkPortMap(trunkStr) : undefined;
       }
     } catch { /* fall through */ }
     endIfaces({ interfaces: interfaces.length });
@@ -6699,6 +6835,7 @@ async function collectSystemInfoSnmp(
       storage,
       physicalEntities,
       macTable,
+      trunkMembers,
       lldpNeighbors,
       lldpSource: opts.includeLldp !== false ? "snmp" : undefined,
       wirelessStations,
@@ -7630,6 +7767,14 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     const endMac = startPhase("systeminfo.persist.mac_table");
     await persistMacTable(assetId, d.macTable);
     endMac({ entries: d.macTable.length });
+    stopWrite();
+  }
+  // Trunk membership. Same undefined/[] contract.
+  if (Array.isArray(d.trunkMembers)) {
+    const stopWrite = startSampleWriteTimer("asset_trunk_members");
+    const endTrunk = startPhase("systeminfo.persist.trunk_members");
+    await persistTrunkMembers(assetId, d.trunkMembers);
+    endTrunk({ trunks: d.trunkMembers.length });
     stopWrite();
   }
   // Wireless stations (FortiAP only). Same undefined/[] semantics as LLDP —
