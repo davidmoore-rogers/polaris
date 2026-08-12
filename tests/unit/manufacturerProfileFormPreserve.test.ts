@@ -24,8 +24,12 @@ interface Sandbox {
   document: Document;
   renderIdentificationTab: () => void;
   _mfgRerenderPreserving: (el: Element) => void;
+  _mfgRerenderPreservingAll: () => void;
   _mfgEditContainerKey: (el: Element | null) => string;
   _mfgFieldKey: (el: Element) => string;
+  _ensureMibSymbols: (mibId: string) => void;
+  _mfgMibSymbolsCache: Record<string, unknown>;
+  api: { serverSettings?: { getMibStructure: (id: string) => Promise<unknown> } };
 }
 
 let win: Window;
@@ -175,5 +179,61 @@ describe("_mfgRerenderPreserving", () => {
     sb._mfgRerenderPreserving(type);
 
     expect((sb.document.querySelector(".mfg-edit-symbol") as HTMLInputElement).value).toBe("ssCpuRawUser");
+  });
+});
+
+// ─── The ASYNC re-render ───────────────────────────────────────────────────
+//
+// Picking a MIB does two things: the handler re-renders synchronously (covered
+// above) AND `_ensureMibSymbols` fetches that MIB's symbol list, re-rendering
+// again when it resolves. The second render arrives after the first one's
+// restore, from a callback holding no element — so while the tests above passed,
+// prod still lost the Name: it came back, then vanished a few hundred ms later
+// on every FIRST pick of a MIB (a warm cache short-circuits the fetch, which is
+// why it looked intermittent). These pin the callback's own preservation.
+
+describe("_ensureMibSymbols re-render", () => {
+  it("keeps typed input when the symbol fetch resolves and re-renders", async () => {
+    setBody(addCardHtml("p1", "Connected clients", ["oldSymbol"], "oldSymbol"));
+    (sb.document.querySelector(".mfg-widget-model") as HTMLInputElement).value = "FortiAP-231F";
+    // Fresh cache = the fetch actually runs, which is the reported case.
+    sb._mfgMibSymbolsCache = {};
+    sb.api.serverSettings = {
+      getMibStructure: async () => ({ symbols: [{ name: "newSymbol" }], tables: [] }),
+    };
+    // The re-render rebuilds from stored state, as the real renderer does.
+    sb.renderIdentificationTab = () => setBody(addCardHtml("p1", "", ["newSymbol"], ""));
+
+    sb._ensureMibSymbols("mib-b");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect((sb.document.querySelector(".mfg-widget-name") as HTMLInputElement).value).toBe("Connected clients");
+    expect((sb.document.querySelector(".mfg-widget-model") as HTMLInputElement).value).toBe("FortiAP-231F");
+  });
+
+  it("keeps typed input even when the fetch FAILS", async () => {
+    setBody(addCardHtml("p1", "Connected clients", ["oldSymbol"], "oldSymbol"));
+    sb._mfgMibSymbolsCache = {};
+    sb.api.serverSettings = { getMibStructure: async () => { throw new Error("boom"); } };
+    sb.renderIdentificationTab = () => setBody(addCardHtml("p1", "", [], ""));
+
+    sb._ensureMibSymbols("mib-b");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect((sb.document.querySelector(".mfg-widget-name") as HTMLInputElement).value).toBe("Connected clients");
+  });
+
+  it("restores every open editor, since the callback has no triggering element", async () => {
+    setBody(addCardHtml("p1", "First", ["a"], "a") + addCardHtml("p2", "Second", ["a"], "a"));
+    sb._mfgMibSymbolsCache = {};
+    sb.api.serverSettings = { getMibStructure: async () => ({ symbols: [], tables: [] }) };
+    sb.renderIdentificationTab = () => setBody(addCardHtml("p1", "", ["a"], "") + addCardHtml("p2", "", ["a"], ""));
+
+    sb._ensureMibSymbols("mib-a");
+    await new Promise((r) => setTimeout(r, 0));
+
+    const names = sb.document.querySelectorAll(".mfg-widget-name");
+    expect((names[0] as HTMLInputElement).value).toBe("First");
+    expect((names[1] as HTMLInputElement).value).toBe("Second");
   });
 });

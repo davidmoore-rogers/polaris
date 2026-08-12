@@ -7669,11 +7669,13 @@ function _ensureMibSymbols(mibId) {
     tables  = Array.from(new Set(tables)).sort(function (a, b) { return a.localeCompare(b); });
     scalars = Array.from(new Set(scalars)).sort(function (a, b) { return a.localeCompare(b); });
     _mfgMibSymbolsCache[mibId] = { loading: false, scalars: scalars, tables: tables };
-    renderIdentificationTab();
+    // Preserving, not bare: this lands after the picking handler's own restore,
+    // so a bare re-render re-erases everything the operator typed.
+    _mfgRerenderPreservingAll();
   }).catch(function (err) {
     _mfgMibSymbolsCache[mibId] = { loading: false, scalars: [], tables: [] };
     showToast(err.message || "Failed to load MIB symbols", "error");
-    renderIdentificationTab();
+    _mfgRerenderPreservingAll();
   });
 }
 
@@ -8043,17 +8045,58 @@ function _mfgRerenderPreserving(el) {
   var vals = _mfgSnapshotFields(container);
   renderIdentificationTab();
   if (!key || !Object.keys(vals).length) return;
-  var candidates = document.querySelectorAll(".mfg-widget-edit-card, .mfg-widget-add-card, tr[data-metric-key], tr[data-override-id]");
-  for (var i = 0; i < candidates.length; i++) {
-    if (_mfgEditContainerKey(candidates[i]) !== key) continue;
-    candidates[i].querySelectorAll("input, select, textarea").forEach(function (field) {
-      var fk = _mfgFieldKey(field);
-      if (!fk || !(fk in vals)) return;
-      if (field.type === "checkbox" || field.type === "radio") { field.checked = !!vals[fk]; return; }
-      field.value = vals[fk];
+  var snap = {};
+  snap[key] = vals;
+  _mfgRestoreEditors(snap);
+}
+
+/** Every open editing container's live values, keyed by container identity. */
+function _mfgSnapshotAllEditors() {
+  var snap = {};
+  document.querySelectorAll(".mfg-widget-edit-card, .mfg-widget-add-card, tr[data-metric-key], tr[data-override-id]")
+    .forEach(function (c) {
+      var key = _mfgEditContainerKey(c);
+      if (!key) return;
+      var vals = _mfgSnapshotFields(c);
+      if (Object.keys(vals).length) snap[key] = vals;
     });
-    return;
-  }
+  return snap;
+}
+
+/** Write a snapshot back into whichever containers now carry those keys. */
+function _mfgRestoreEditors(snap) {
+  if (!snap) return;
+  document.querySelectorAll(".mfg-widget-edit-card, .mfg-widget-add-card, tr[data-metric-key], tr[data-override-id]")
+    .forEach(function (c) {
+      var vals = snap[_mfgEditContainerKey(c)];
+      if (!vals) return;
+      c.querySelectorAll("input, select, textarea").forEach(function (field) {
+        var fk = _mfgFieldKey(field);
+        if (!fk || !(fk in vals)) return;
+        if (field.type === "checkbox" || field.type === "radio") { field.checked = !!vals[fk]; return; }
+        // A <select> whose options changed drops a value the new list doesn't
+        // offer — which is what should happen to a Symbol after a MIB swap.
+        field.value = vals[fk];
+      });
+    });
+}
+
+/**
+ * Re-render preserving EVERY open editor, for a re-render with no triggering
+ * element to key from — specifically the ASYNCHRONOUS one.
+ *
+ * `_mfgRerenderPreserving` above fixes the re-render a chained select performs
+ * synchronously, but picking a MIB also kicks off `_ensureMibSymbols`, whose
+ * fetch re-renders again when it resolves. That second render lands AFTER the
+ * restore, from a callback that never saw the element, so on a cache miss — i.e.
+ * every first pick of a MIB, the reported case — the operator watched the Name
+ * come back and then vanish again a few hundred ms later. Snapshotting all open
+ * editors is what lets a callback with no context put them back.
+ */
+function _mfgRerenderPreservingAll() {
+  var snap = _mfgSnapshotAllEditors();
+  renderIdentificationTab();
+  _mfgRestoreEditors(snap);
 }
 
 // ─── "+ Add Manufacturer" typeahead ────────────────────────────────────────
