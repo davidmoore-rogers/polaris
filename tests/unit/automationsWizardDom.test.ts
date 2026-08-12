@@ -482,6 +482,69 @@ describe("automation wizard DOM render", () => {
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
   });
 
+  it("changing the base condition's sampling re-mirrors onto every existing severity tier", async () => {
+    // Tiers SHARE the base's metric / aggregation / dimension filters (business
+    // rule 19) — collectBands takes only their operator + threshold. A tier left
+    // displaying the sampling it was created with told the operator the change
+    // hadn't applied, and deleting + re-adding every tier was the only way to
+    // make the display agree with what would actually be saved.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    const win = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-resample",
+      name: "Packet loss",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 300 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: [
+        { threshold: 15, severity: "serious", forDurationSec: 300, actions: [] },
+        { threshold: 25, severity: "critical", operator: ">=", forDurationSec: 60, actions: [] },
+      ],
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" },
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
+    const bandAggs = () =>
+      Array.from(doc.querySelectorAll("#aw-bands .band-cond .tgl-agg")).map((el) => (el as unknown as { value: string }).value);
+    expect(bandAggs()).toEqual(["latest", "latest"]);
+
+    // Base latest → median: every tier follows, and each keeps its own value +
+    // its own operator override (only the SAMPLING is shared).
+    const agg = doc.querySelector("#aw-trig-root .tgl-agg") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    agg.value = "median";
+    agg.dispatchEvent(new win.Event("change", { bubbles: true }));
+    expect(bandAggs()).toEqual(["median", "median"]);
+    expect(Array.from(doc.querySelectorAll("#aw-bands .band-cond .tgl-threshold")).map((el) => (el as unknown as { value: string }).value))
+      .toEqual(["15", "25"]);
+    expect(Array.from(doc.querySelectorAll("#aw-bands .band-cond .tgl-op")).map((el) => (el as unknown as { value: string }).value))
+      .toEqual([">", ">="]);
+    // Still locked after the re-render — a tier's sampling isn't editable.
+    expect((doc.querySelector("#aw-bands .band-cond .tgl-agg") as unknown as { disabled: boolean }).disabled).toBe(true);
+    expect((doc.querySelector("#aw-bands .band-cond .tgl-what") as unknown as { disabled: boolean }).disabled).toBe(true);
+
+    // The metric follows too (the same lie, one control over).
+    const what = doc.querySelector("#aw-trig-root .tgl-what") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    what.value = "m:cpuPct";
+    what.dispatchEvent(new win.Event("change", { bubbles: true }));
+    expect(Array.from(doc.querySelectorAll("#aw-bands .band-cond .tgl-what")).map((el) => (el as unknown as { value: string }).value))
+      .toEqual(["m:cpuPct", "m:cpuPct"]);
+    // Re-rendering a row from a metric swap resets the base's own aggregation to
+    // `latest`; the tiers mirror that too rather than keeping a stale median.
+    expect(bandAggs()).toEqual(["latest", "latest"]);
+    expect(toastErrors).toEqual([]);
+  });
+
   it("sensor-name filter is a picker: offers the fleet's own sensor names, filters as you type, and flags one nothing reports", async () => {
     // A sensor name ("CPU ON-DIE Temperature") is not guessable, and the
     // dimension is a substring PATTERN the server can't reject — so a typo used
