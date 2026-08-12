@@ -71,6 +71,7 @@ import { computeStorageForecast } from "./storageForecastService.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
 import { executeActions, type ActionExecContext } from "./automationActionService.js";
 import { queryProbeLossRatios } from "./probeLossQuery.js";
+import { alarmStatusToFlag } from "../utils/hardwareSensors.js";
 import {
   buildTemplateContext,
   renderNotificationTemplate,
@@ -355,6 +356,36 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
       // the asset chart's tier lookup can't drift from what actually fires.
       const filtered = df.sensorNamePattern ? rows.filter((r) => hwSensorFilterMatches(df, r)) : rows;
       return reduceReadings(filtered, index, (r) => r.sensorName, (r) => `${r.sensorName} (${r.sensorClass})`, (r) => r.value ?? null, agg);
+    }
+    case "hwSensorAlarm": {
+      // The device's OWN alarm bit, read off the column the hardware-sensor
+      // collectors already populate — no extra walk, no operator configuration,
+      // and it works on every transport that fills it (FortiOS REST sensor-info
+      // and the SNMP fgHwSensorTable alike). Same per-sensor dimension and the
+      // same dimensionFilter predicate as hwSensorValue, so a rule can target one
+      // named sensor or a whole class.
+      const rows = await prisma.assetHardwareSensorSample.findMany({
+        where: {
+          assetId: { in: ids },
+          timestamp: { gte: since },
+          ...(df.sensorClass ? { sensorClass: df.sensorClass } : {}),
+          // Sources that publish no alarm bit (ENTITY-SENSOR-MIB, the FortiAP
+          // controller path) leave this NULL. Excluded in SQL so those sensors
+          // produce no readings at all rather than being mapped to a value —
+          // see alarmStatusToFlag's contract.
+          alarmStatus: { not: null },
+        },
+        select: { assetId: true, timestamp: true, sensorName: true, sensorClass: true, alarmStatus: true },
+      });
+      const filtered = df.sensorNamePattern ? rows.filter((r) => hwSensorFilterMatches(df, r)) : rows;
+      return reduceReadings(
+        filtered,
+        index,
+        (r) => r.sensorName,
+        (r) => `${r.sensorName} (${r.sensorClass})`,
+        (r) => alarmStatusToFlag(r.alarmStatus),
+        agg,
+      );
     }
     case "storageUsedBytes": case "storageUsedPct": {
       const rows = await prisma.assetStorageSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, select: { assetId: true, timestamp: true, mountPath: true, usedBytes: true, totalBytes: true } });

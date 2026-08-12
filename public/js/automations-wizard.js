@@ -160,36 +160,62 @@ function makeAutomationSentences(s) {
   }
   /** The probe's map, or the generic true/false fallback when the probe can't be
    *  resolved (deleted profile, or a schema fetched before it was defined). */
-  function stateMapOf(df) {
+  /**
+   * The two state names for a boolean leaf, in the operator's own words.
+   *
+   * Two sources, most-specific first: a `customStateValue` row names its chosen
+   * PROBE's labels (per-probe, from the registry), and any other boolean metric
+   * falls back to the metric-wide labels the server declares
+   * (`booleanMetricLabels`, e.g. hwSensorAlarm → Alarm / OK). Generic
+   * "true"/"false" is the last resort — a probe that no longer resolves, or a
+   * schema fetched before a metric's labels existed.
+   */
+  function stateMapOf(metric, df) {
     var p = stateProbeOf(df && df.stateProbeId);
     var m = p && p.stateMap;
+    if (m) {
+      return {
+        trueLabel: m.trueLabel || "true",
+        falseLabel: m.falseLabel || "false",
+        trueIsProblem: m.trueIsProblem !== false,
+        name: p.name || "",
+      };
+    }
+    var byMetric = (s.booleanMetricLabels || {})[metric];
     return {
-      trueLabel: (m && m.trueLabel) || "true",
-      falseLabel: (m && m.falseLabel) || "false",
-      trueIsProblem: !m || m.trueIsProblem !== false,
-      name: p ? p.name : "",
+      trueLabel: (byMetric && byMetric.trueLabel) || "true",
+      falseLabel: (byMetric && byMetric.falseLabel) || "false",
+      trueIsProblem: !byMetric || byMetric.trueIsProblem !== false,
+      name: "",
     };
   }
   /** "Alarm" / "OK" for a 0/1 threshold. */
-  function stateValueLabel(df, threshold) {
+  function stateValueLabel(metric, df, threshold) {
     var t = Number(threshold);
     if (t !== 0 && t !== 1) return "…";
-    var m = stateMapOf(df);
+    var m = stateMapOf(metric, df);
     return t === 1 ? m.trueLabel : m.falseLabel;
   }
-  /** The clause for a boolean leaf: "PSU alarm is Alarm on rows matching PSU 2".
-   *  The probe NAME is the subject (so stateProbeId isn't repeated as a
-   *  dimension), and the aggregation reads as "at any point in" / "throughout"
-   *  rather than min/max of a flag. */
+  /** The clause for a boolean leaf: "PSU alarm is Alarm on rows matching PSU 2",
+   *  or "Hardware sensor alarm is Alarm on sensors matching TMP1". A resolved
+   *  probe NAME becomes the subject (so stateProbeId isn't also repeated as a
+   *  dimension clause); every other dimension renders through the shared
+   *  DIM_PHRASE table exactly as it does on a numeric leaf. The aggregation reads
+   *  as "at any point in" / "throughout" rather than min/max of a flag. */
   function stateLeafClause(leaf) {
     var df = leaf.dimensionFilter || {};
-    var m = stateMapOf(df);
+    var m = stateMapOf(leaf.metric, df);
     var subject = m.name || metricLabel(leaf.metric);
     var verb = leaf.operator === "!=" ? "is not" : "is";
-    var out = subject + " " + verb + " " + stateValueLabel(df, leaf.threshold);
+    var out = subject + " " + verb + " " + stateValueLabel(leaf.metric, df, leaf.threshold);
     if (leaf.windowSec > 0 && leaf.aggregation === "max") out += " at any point in the last " + humanDuration(leaf.windowSec);
     else if (leaf.windowSec > 0 && leaf.aggregation === "min") out += " throughout the last " + humanDuration(leaf.windowSec);
-    if (df.stateRowPattern) out += " on rows matching " + df.stateRowPattern;
+    Object.keys(df).forEach(function (k) {
+      // The probe is the subject when it resolved to a name; an unresolved one
+      // still shows as a clause so the filter is never invisible.
+      if (k === "stateProbeId" && m.name) return;
+      if (df[k]) out += " " + (DIM_PHRASE[k] || k + " = {value}").replace("{value}", df[k]);
+    });
     return out;
   }
 
@@ -203,6 +229,10 @@ function makeAutomationSentences(s) {
     mountPathPattern: "on mounts matching {value}", healthCheck: "for health check {value}",
     link: "on member {value}", tunnelName: "on tunnel {value}", widgetId: "for widget {value}",
     processNamePattern: "for processes matching {value}",
+    // Mirrors the server's dimensionPhrases. Present as built-in fallbacks too so
+    // the factory reads correctly against a partial /schema payload, the same as
+    // every other dimension above.
+    stateProbeId: "for probe {value}", stateRowPattern: "on rows matching {value}",
   }, s.dimensionPhrases || {});
 
   function humanDuration(sec) {
@@ -1395,7 +1425,7 @@ async function openAutomationWizard(existing) {
    * (see the stateProbeId branch in wireTgTree's change handler).
    */
   function tgStateFlagControl(leaf) {
-    var m = stateMapOf(leaf.dimensionFilter || {});
+    var m = stateMapOf(leaf.metric, leaf.dimensionFilter || {});
     var t = Number(leaf.threshold);
     // Default to the state the operator called the interesting one, which is
     // what they're almost always alerting on.
@@ -2018,7 +2048,7 @@ async function openAutomationWizard(existing) {
       function previewValue(v) {
         if (v == null) return "n/a";
         if (!flagPreview) return String(v);
-        var m2 = stateMapOf(tr0.dimensionFilter || {});
+        var m2 = stateMapOf(tr0.metric, tr0.dimensionFilter || {});
         return Number(v) === 1 ? m2.trueLabel : Number(v) === 0 ? m2.falseLabel : String(v);
       }
       var rowsHtml = (res.matches || []).slice(0, 20).map(function (m) {

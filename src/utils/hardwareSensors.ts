@@ -136,6 +136,33 @@ export function normalizeFgAlarmStatus(raw: number | null | undefined): string |
  * Normalize a FortiOS REST sensor-info alarm field (boolean / 0|1 / string)
  * into the stored alarm string. Returns null when absent.
  */
+/**
+ * `AssetHardwareSensorSample.alarmStatus` → the 0/1 an automation compares.
+ *
+ * The column is written exclusively by the two normalizers here, so its domain
+ * is exactly `"ok" | "alarm" | null` — but this reads defensively because it
+ * also runs over rows written before those normalizers existed.
+ *
+ * **null means "no reading", and that is load-bearing.** Only the FortiOS REST
+ * `sensor-info` and SNMP `fgHwSensorTable` collectors populate the column; the
+ * ENTITY-SENSOR-MIB walk and the FortiAP-controller path leave it NULL because
+ * those sources publish no alarm bit. Mapping that absence to 0 would be a
+ * positive claim of health: it would clear a live alert, and it would make every
+ * non-Fortinet sensor in the fleet look actively verified-healthy when nothing
+ * ever checked. The engine drops nulls, so those sensors simply produce no
+ * readings for this metric.
+ */
+export function alarmStatusToFlag(raw: string | null | undefined): 0 | 1 | null {
+  if (raw == null) return null;
+  const s = raw.trim().toLowerCase();
+  if (s === "") return null;
+  if (s === "ok") return 0;
+  if (s === "alarm") return 1;
+  // An unrecognized non-empty status is a claim that something is off-nominal,
+  // not an absence of data — treat it as the alarm side rather than dropping it.
+  return 1;
+}
+
 export function normalizeRestAlarmStatus(raw: unknown): string | null {
   if (raw == null) return null;
   if (typeof raw === "boolean") return raw ? "alarm" : "ok";

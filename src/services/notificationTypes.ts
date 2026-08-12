@@ -207,7 +207,7 @@ export function tierMetSinceChanged(
 // narrows multi-row streams (interfaces, sensors, mounts, SD-WAN members).
 export const ASSET_METRICS = [
   "cpuPct", "memPct", "memUsedBytes", "sessionCount", "responseTimeMs", "uptimeSec", "probeLossPct",
-  "hwSensorValue", "storageUsedPct", "storageUsedBytes", "storageDaysUntilFull",
+  "hwSensorValue", "hwSensorAlarm", "storageUsedPct", "storageUsedBytes", "storageDaysUntilFull",
   "ifInErrorRate", "ifOutErrorRate", "ifInBps", "ifOutBps",
   "sdwanLatencyMs", "sdwanJitterMs", "sdwanPacketLoss", "ipsecThroughputBps",
   "customWidgetValue", "customStateValue",
@@ -226,11 +226,23 @@ export const ASSET_METRICS = [
  * chart's threshold shading, and the value/unit hints. Everything that offers
  * those checks this set rather than testing metric names inline.
  */
-export const BOOLEAN_METRICS = ["customStateValue"] as const;
+export const BOOLEAN_METRICS = ["customStateValue", "hwSensorAlarm"] as const;
 
 export function isBooleanMetric(metric: string | null | undefined): boolean {
   return !!metric && (BOOLEAN_METRICS as readonly string[]).includes(metric);
 }
+
+/**
+ * Operator-facing names for a boolean metric's two states, so the builder can
+ * render "is Alarm" instead of "== 1" and the sentence reads in the device's own
+ * terms. `customStateValue` is absent on purpose: its labels are per-probe and
+ * come from the probe registry (`/schema.stateProbes`), which is strictly better
+ * information than a metric-wide default. `trueIsProblem` picks the value the
+ * builder pre-selects.
+ */
+export const BOOLEAN_METRIC_LABELS: Record<string, { trueLabel: string; falseLabel: string; trueIsProblem: boolean }> = {
+  hwSensorAlarm: { trueLabel: "Alarm", falseLabel: "OK", trueIsProblem: true },
+};
 
 // ─── Asset-state trigger ────────────────────────────────────────────────────
 // Current Asset (or current-state child row) field conditions.
@@ -1804,6 +1816,13 @@ export const METRIC_META: Record<string, { label: string; unit: string }> = {
   // reading — they're the asset-down condition, not packet loss.
   probeLossPct: { label: "Packet loss (probe)", unit: "%" },
   hwSensorValue: { label: "Hardware sensor value", unit: "(sensor unit)" },
+  // The device's OWN alarm bit for the sensor, not a threshold Polaris
+  // invents — `AssetHardwareSensorSample.alarmStatus`, already collected by the
+  // FortiOS REST sensor-info and SNMP fgHwSensorTable paths and shown as the
+  // System tab's STATUS column. Alerting on it beats a threshold on the reading:
+  // the device knows its own per-model limits, and for a fan tray or a PSU the
+  // health is IN this bit rather than in any comparable number.
+  hwSensorAlarm: { label: "Hardware sensor alarm", unit: "" },
   storageUsedPct: { label: "Storage used", unit: "%" },
   storageUsedBytes: { label: "Storage used", unit: "bytes" },
   // Forecast metric: projected days until each growing filesystem fills
@@ -1883,6 +1902,7 @@ export function hwSensorFilterMatches(
 
 export const METRIC_DIMENSIONS: Record<string, string[]> = {
   hwSensorValue: ["sensorClass", "sensorNamePattern"],
+  hwSensorAlarm: ["sensorClass", "sensorNamePattern"],
   storageUsedPct: ["mountPathPattern"],
   storageUsedBytes: ["mountPathPattern"],
   storageDaysUntilFull: ["mountPathPattern"],
@@ -1921,6 +1941,9 @@ export function buildSchemaCatalog() {
     // instead of a threshold box and hides the numeric-only surfaces (severity
     // bands, hysteresis, unit hints).
     booleanMetrics: BOOLEAN_METRICS,
+    // Per-metric state names, so a boolean metric with no probe behind it still
+    // renders "is Alarm" rather than "is true".
+    booleanMetricLabels: BOOLEAN_METRIC_LABELS,
     // hwSensorValue's unit depends on the sensor class in the dimension filter
     // (metricMeta carries the "(sensor unit)" placeholder). Class → display
     // unit, sourced from the same map the sample classifier writes with.

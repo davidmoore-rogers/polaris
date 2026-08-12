@@ -96,6 +96,28 @@ describe("ruleInputSchema — severity bands", () => {
         dimensionFilter: { stateProbeId: "p1" },
       },
     }))).toThrow(/0\/1 state metric/);
+    // Same guard covers the probeless boolean metric — it's driven by
+    // BOOLEAN_METRICS, not by a per-metric special case.
+    expect(() => ruleInputSchema.parse(bandedRule({
+      trigger: {
+        type: "asset_metric", metric: "hwSensorAlarm", operator: ">=", threshold: 1,
+        dimensionFilter: { sensorClass: "power" },
+      },
+    }))).toThrow(/0\/1 state metric/);
+  });
+
+  it("accepts an unbanded hwSensorAlarm rule with the shared sensor dimensions", () => {
+    const parsed = ruleInputSchema.parse(bandedRule({
+      trigger: {
+        type: "asset_metric", metric: "hwSensorAlarm", operator: "==", threshold: 1,
+        dimensionFilter: { sensorClass: "temperature", sensorNamePattern: "CPU ON-DIE" },
+      },
+      severityBands: undefined,
+    }));
+    expect(parsed.trigger).toMatchObject({
+      metric: "hwSensorAlarm", operator: "==", threshold: 1,
+      dimensionFilter: { sensorClass: "temperature", sensorNamePattern: "CPU ON-DIE" },
+    });
   });
 
   it("accepts an unbanded state-metric rule", () => {

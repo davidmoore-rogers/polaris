@@ -175,6 +175,65 @@ describe("makeAutomationSentences", () => {
     expect(out).not.toContain("0</strong>");
   });
 
+  it("names a probeless boolean metric's states from the metric-wide labels", () => {
+    // hwSensorAlarm has no probe behind it — its labels come from the server's
+    // booleanMetricLabels, and its dimensions render like any numeric metric's.
+    const s = make({
+      ...STATE_SCHEMA,
+      metricMeta: { ...STATE_SCHEMA.metricMeta, hwSensorAlarm: { label: "Hardware sensor alarm", unit: "" } },
+      booleanMetrics: ["customStateValue", "hwSensorAlarm"],
+      booleanMetricLabels: { hwSensorAlarm: { trueLabel: "Alarm", falseLabel: "OK", trueIsProblem: true } },
+    } as never);
+    const out = s.triggerSentence({
+      type: "asset_metric", metric: "hwSensorAlarm", operator: "==", threshold: 1,
+      aggregation: "latest", windowSec: 0,
+      dimensionFilter: { sensorClass: "temperature", sensorNamePattern: "CPU ON-DIE" },
+      forDurationSec: 600,
+    }, { severity: "critical" });
+    expect(out).toContain("Hardware sensor alarm is Alarm");
+    expect(out).toContain("for sensors of class temperature");
+    expect(out).toContain("on sensors matching CPU ON-DIE");
+    expect(out).toContain("sustained for <strong>10 minutes</strong>");
+    expect(out).not.toContain("equals 1");
+  });
+
+  it("uses the false label for a 0 threshold on a probeless boolean metric", () => {
+    const s = make({
+      ...STATE_SCHEMA,
+      metricMeta: { ...STATE_SCHEMA.metricMeta, hwSensorAlarm: { label: "Hardware sensor alarm", unit: "" } },
+      booleanMetrics: ["customStateValue", "hwSensorAlarm"],
+      booleanMetricLabels: { hwSensorAlarm: { trueLabel: "Alarm", falseLabel: "OK", trueIsProblem: true } },
+    } as never);
+    expect(s.triggerSentence({
+      type: "asset_metric", metric: "hwSensorAlarm", operator: "==", threshold: 0,
+      aggregation: "latest", windowSec: 0,
+    })).toContain("Hardware sensor alarm is OK");
+  });
+
+  it("falls back to true/false when a boolean metric has no declared labels", () => {
+    const s = make({
+      ...STATE_SCHEMA,
+      metricMeta: { ...STATE_SCHEMA.metricMeta, hwSensorAlarm: { label: "Hardware sensor alarm", unit: "" } },
+      booleanMetrics: ["customStateValue", "hwSensorAlarm"],
+      // booleanMetricLabels deliberately absent — an older /schema payload.
+    } as never);
+    expect(s.triggerSentence({
+      type: "asset_metric", metric: "hwSensorAlarm", operator: "==", threshold: 1,
+      aggregation: "latest", windowSec: 0,
+    })).toContain("Hardware sensor alarm is true");
+  });
+
+  it("still renders an unresolved state probe's filter as a clause, not silently", () => {
+    // The probe id can't be resolved to a name, so it must appear as a dimension
+    // clause rather than vanishing — an invisible filter is worse than an ugly one.
+    const s = make(STATE_SCHEMA as never);
+    const out = s.triggerSentence({
+      type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+      aggregation: "latest", windowSec: 0, dimensionFilter: { stateProbeId: "gone" },
+    });
+    expect(out).toContain("for probe gone");
+  });
+
   it("renders composite trees with AND/OR joins and parenthesized sub-groups", () => {
     const s = make(SCHEMA as never);
     const out = s.triggerSentence({

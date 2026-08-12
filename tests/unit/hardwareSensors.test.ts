@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  alarmStatusToFlag,
   classifyHardwareSensor,
   normalizeFgAlarmStatus,
   normalizeRestAlarmStatus,
@@ -120,6 +121,46 @@ describe("normalizeFgAlarmStatus", () => {
     expect(normalizeFgAlarmStatus(1)).toBe("alarm");
     expect(normalizeFgAlarmStatus(null)).toBeNull();
     expect(normalizeFgAlarmStatus(undefined)).toBeNull();
+  });
+});
+
+describe("alarmStatusToFlag", () => {
+  it("maps the stored tri-state to the 0/1 an automation compares", () => {
+    expect(alarmStatusToFlag("ok")).toBe(0);
+    expect(alarmStatusToFlag("alarm")).toBe(1);
+    // Case/padding tolerance: the column is written by the normalizers above, but
+    // rows predating them are read defensively.
+    expect(alarmStatusToFlag(" ALARM ")).toBe(1);
+    expect(alarmStatusToFlag("OK")).toBe(0);
+  });
+
+  it("returns null — never 0 — when no alarm bit was reported", () => {
+    // The ENTITY-SENSOR-MIB walk and the FortiAP-controller path leave the column
+    // NULL because those sources publish no alarm bit. Mapping that to 0 would
+    // assert health nothing ever checked, clearing live alerts and making every
+    // non-Fortinet sensor look verified-healthy.
+    expect(alarmStatusToFlag(null)).toBeNull();
+    expect(alarmStatusToFlag(undefined)).toBeNull();
+    expect(alarmStatusToFlag("")).toBeNull();
+    expect(alarmStatusToFlag("   ")).toBeNull();
+  });
+
+  it("treats an unrecognized status as the alarm side, not as missing data", () => {
+    // A non-empty status Polaris doesn't recognize is still a claim that
+    // something is off-nominal; dropping it would go silent on a real fault.
+    expect(alarmStatusToFlag("degraded")).toBe(1);
+  });
+
+  it("round-trips whatever the two normalizers can produce", () => {
+    for (const raw of [0, 1, 7]) {
+      expect(alarmStatusToFlag(normalizeFgAlarmStatus(raw))).toBe(raw === 0 ? 0 : 1);
+    }
+    for (const raw of [true, false, "normal", "critical", "0"]) {
+      const expected = normalizeRestAlarmStatus(raw) === "alarm" ? 1 : 0;
+      expect(alarmStatusToFlag(normalizeRestAlarmStatus(raw))).toBe(expected);
+    }
+    // …and an unreportable reading stays unreportable end to end.
+    expect(alarmStatusToFlag(normalizeRestAlarmStatus(null))).toBeNull();
   });
 });
 
