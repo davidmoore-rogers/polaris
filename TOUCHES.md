@@ -1700,6 +1700,27 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/alertChartService.ts
+
+**What it owns:** The last-hour CPU / memory / response-time charts embedded in an alert email — sample query, SVG render, PNG rasterization, and token substitution.
+
+**Public API:** `buildAlertCharts(assetId, tokens, {now?, thresholds?})`, `chartTokensIn(...templates)`, `substituteChartTokens(body, charts, {html})`, `attachmentsFor(charts, body)`, `CHART_TOKENS`, `CHART_WINDOW_MS`.
+
+**Cross-service deps:** `utils/sparklineSvg` (pure geometry), `@resvg/resvg-js` (lazy import — the same rasterizer appIconService uses), Prisma reads of `AssetTelemetrySample` + `AssetMonitorSample`.
+
+**Used by:** `src/services/notificationDeliveryService.ts` (the only caller — `emailMessageFor` on composed email rows).
+
+**Invariants:**
+- Charts are built at DELIVERY time, never at fire time. The engine's fire path is transition-guarded and hot; the drain is a queue. It also means an escalation email at T+90min charts the last hour AS OF SENDING rather than re-rendering the frozen fire-time context.
+- Response time plots SUCCESSFUL probes only. A failed probe has no response time, and plotting it as 0 would draw a fast device instead of an unreachable one.
+- Memory uses `memPct` when the source reports a percentage (FortiOS) and `memUsedBytes/memTotalBytes` when it reports bytes (SNMP HOST-RESOURCES, WMI) — the same COALESCE the dashboard memory widget uses.
+- Percentage charts pin the axis to 0–100 so two alerts about the same device are comparable; a self-scaling axis would render a quiet 2–4% hour as a dramatic climb.
+- EVERY failure degrades to the text summary and never throws: no samples, an unreadable asset, or a missing native resvg binding must not stop the alert from sending.
+- Plotted points are capped (`MAX_POINTS`) with the newest always kept — the alerting sample is the one that must survive downsampling.
+
+**When changing this:** the `{chart.*}` tokens are DEFERRED — they must stay out of `buildTemplateContext` and out of `Notification.templateCtx` (see utils/notificationTemplate's `DEFERRED_TOKENS`), or the substitution here finds nothing. If you add a chart, add its token in three places: `CHART_TOKENS`, `TEMPLATE_VARIABLES`, and `DEFERRED_TOKENS`.
+
+---
 ## services/notificationAckService.ts
 
 **What it owns:** Every read and write of `NotificationAckToken` — the single-use one-click acknowledge links carried in alert emails and behind the web-push Acknowledge button.

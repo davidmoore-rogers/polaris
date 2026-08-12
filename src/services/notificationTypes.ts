@@ -12,6 +12,7 @@
 import { z } from "zod";
 import { isValidCidr, isValidIpAddress, ipInCidr } from "../utils/cidr.js";
 import { TEMPLATE_VARIABLES } from "../utils/notificationTemplate.js";
+import { defaultAlertEmailTemplate } from "../utils/alertEmailTemplate.js";
 import { SENSOR_CLASS_UNITS } from "../utils/hardwareSensors.js";
 
 // Notification severity (rule.severity → notification.severity). Ordered
@@ -1951,6 +1952,11 @@ export function buildSchemaCatalog() {
     channelTypes: CHANNEL_TYPE_META,
     recipientRoutedTypes: RECIPIENT_ROUTED_TYPES,
     templateVariables: TEMPLATE_VARIABLES,
+    // The default alert email, verbatim. The wizard prefills a new Notify
+    // action with these strings so the operator sees — and can edit — exactly
+    // what Polaris will send; a rule that leaves them alone renders through
+    // the same template server-side (buildComposedEmail).
+    defaultEmailTemplate: defaultAlertEmailTemplate(),
     triggerTypes: [
       { type: "asset_metric", label: "Asset metric threshold", scoped: true, metrics: ASSET_METRICS },
       { type: "asset_state", label: "Asset state", scoped: true, fields: ASSET_STATE_FIELDS },

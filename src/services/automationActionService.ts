@@ -189,8 +189,14 @@ function composeForNotify(
   ctx: Record<string, string>,
 ): ComposedEmail | undefined {
   if (!exec.escalation) {
-    const comp = actionComp ?? exec.ruleEmailComposition ?? null;
-    return comp ? buildComposedEmail(comp, ctx) : undefined;
+    // ALWAYS compose. Before the rich default body this returned undefined
+    // when nobody had customized anything, dropping those alerts onto the
+    // legacy "message + View:" path — which is exactly the sparse email this
+    // replaced. buildComposedEmail fills each blank piece from the shared
+    // default template, so an automation with no composition gets the same
+    // body as one that customized only the subject.
+    const comp = actionComp ?? exec.ruleEmailComposition ?? {};
+    return buildComposedEmail(comp, ctx);
   }
   const rule = exec.ruleEmailComposition;
   const merged: EmailComposition = {

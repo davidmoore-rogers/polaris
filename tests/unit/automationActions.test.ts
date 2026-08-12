@@ -85,9 +85,19 @@ describe("executeActions", () => {
     expect(secondCall[2].composedEmail.subject).toBe("rule-level sw-core-1");
   });
 
-  it("notify without any composition sends the legacy per-address shape (no composed email)", async () => {
+  it("notify without any composition still composes — from the shared default alert body", async () => {
+    // This used to pass composedEmail: undefined, dropping such alerts onto
+    // the legacy "message + View:" path — exactly the sparse two-line email
+    // the rich default replaced. Every notify composes now; blank pieces fall
+    // back to the default template inside buildComposedEmail.
     await executeActions("n1", [{ type: "notify", channelId: "c1" }], CTX, {});
-    expect((expandDeliveriesMock.mock.calls[0] as any[])[2].composedEmail).toBeUndefined();
+    const composed = (expandDeliveriesMock.mock.calls[0] as any[])[2].composedEmail;
+    expect(composed).toBeDefined();
+    expect(composed.subject).toContain("sw-core-1");
+    expect(composed.text).toContain("hot"); // the message still leads
+    // Deferred tokens survive compose: filled per recipient / per delivery.
+    expect(composed.text).toContain("{ack}");
+    expect(composed.html).toContain("Acknowledge alert");
   });
 
   it("api_call: creates a NULL-channel delivery row with the body rendered at fire time", async () => {

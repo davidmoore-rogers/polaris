@@ -55,13 +55,18 @@ const FULL_PARTS: TemplateContextParts = {
 };
 
 /**
- * `{ack}` is the one cataloged token with NO context key, by design: its value
- * is per-RECIPIENT (a single-use token bound to one user), while the context is
- * built once per fire and snapshotted onto Notification.templateCtx for every
- * recipient to share. It is filled by substituteAckToken() at delivery
- * expansion — which only works because unknown tokens survive the render.
+ * Tokens with NO context key, by design — they are filled later, and both rely
+ * on unknown tokens surviving the render:
+ *
+ *  - `{ack}` is per-RECIPIENT (a single-use token bound to one user) while the
+ *    context is built once per fire and snapshotted onto
+ *    Notification.templateCtx for every recipient to share. Filled by
+ *    substituteAckToken() at delivery expansion.
+ *  - `{chart.*}` are inline images built at DELIVERY time from the last hour of
+ *    samples (alertChartService), so an escalation email at T+90min charts the
+ *    last hour as of sending rather than re-rendering a frozen snapshot.
  */
-const DEFERRED_TOKENS = new Set(["{ack}"]);
+const DEFERRED_TOKENS = new Set(["{ack}", "{chart.cpu}", "{chart.memory}", "{chart.responseTime}"]);
 const CONTEXT_TOKENS = TEMPLATE_VARIABLES.filter((v) => !DEFERRED_TOKENS.has(v.token));
 
 // {asset.link} is only a URL when the install has a public URL to build one

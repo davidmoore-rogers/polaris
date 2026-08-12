@@ -662,6 +662,17 @@ async function openAutomationWizard(existing) {
   function chanTypeLabel(type) { return (s.channelTypes && s.channelTypes[type] && s.channelTypes[type].label) || type; }
   function isRouted(type) { return routedTypes.indexOf(type) !== -1; }
   function isEmailType(type) { return type === "smtp" || type === "oauth_m365"; }
+  // The default alert email, straight from the server (the SAME strings
+  // buildComposedEmail falls back to). A new Notify action shows them so the
+  // operator edits what actually gets sent; a stored action shows what it
+  // saved, including a deliberately blanked field.
+  function defaultEmailTemplate() {
+    return s.defaultEmailTemplate || { subjectTemplate: "", bodyTextTemplate: "", bodyHtmlTemplate: "" };
+  }
+  function compValue(comp, key) {
+    if (comp && typeof comp[key] === "string") return comp[key];
+    return defaultEmailTemplate()[key] || "";
+  }
   function channelOptions(selId) {
     if (channels.length === 0) return '<option value="">No channels configured</option>';
     return channels.map(function (c) {
@@ -3120,12 +3131,21 @@ async function openAutomationWizard(existing) {
         '<div class="na-fields"></div>' +
         // Cc/Bcc were promoted OUT of this disclosure into first-class token
         // fields above; what's left is genuinely about composing the message.
+        // The template fields are PREFILLED with the default alert email
+        // (schema.defaultEmailTemplate — the same strings the server renders
+        // when they're blank), so the operator reads and edits exactly what
+        // will be sent instead of guessing at a hidden default. A stored
+        // action keeps whatever it saved.
         '<details class="na-comp"' + (comp && (comp.subjectTemplate || comp.bodyTextTemplate || comp.bodyHtmlTemplate) ? " open" : "") + '><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Customize the email (subject / body)…</summary>' +
           '<div style="margin-top:6px">' +
-            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject</label><input type="text" class="na-subject tpl-field" value="' + escapeHtml((comp && comp.subjectTemplate) || "") + '" placeholder="[{severity.upper}] {asset} — {metric} = {value}"></div>' +
-            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body (plain text)</label><textarea class="na-body tpl-field" rows="4" style="width:100%">' + escapeHtml((comp && comp.bodyTextTemplate) || "") + '</textarea></div>' +
-            '<label style="font-size:0.8rem;display:block"><input type="checkbox" class="na-html-enable"' + (comp && comp.bodyHtmlTemplate ? " checked" : "") + '> Add HTML body (values are HTML-escaped)</label>' +
-            '<textarea class="na-html tpl-field" rows="4" style="width:100%;display:' + (comp && comp.bodyHtmlTemplate ? "block" : "none") + ';margin-top:4px">' + escapeHtml((comp && comp.bodyHtmlTemplate) || "") + '</textarea>' +
+            '<p class="hint" style="margin:0 0 6px">This is the email Polaris sends. Edit it freely — ' +
+              '<code>{ack}</code> becomes the recipient’s one-click acknowledge link, <code>{asset.link}</code> opens the device, and ' +
+              '<code>{chart.cpu}</code> / <code>{chart.memory}</code> / <code>{chart.responseTime}</code> embed the last hour as charts. ' +
+              '<button type="button" class="na-comp-reset" style="background:none;border:0;padding:0;color:var(--color-primary);cursor:pointer;font:inherit;text-decoration:underline">Reset to the default</button></p>' +
+            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject</label><input type="text" class="na-subject tpl-field" value="' + escapeHtml(compValue(comp, "subjectTemplate")) + '" placeholder="[{severity.upper}] {asset} — {metric} = {value}"></div>' +
+            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body (plain text)</label><textarea class="na-body tpl-field" rows="8" style="width:100%">' + escapeHtml(compValue(comp, "bodyTextTemplate")) + '</textarea></div>' +
+            '<label style="font-size:0.8rem;display:block"><input type="checkbox" class="na-html-enable"' + (compValue(comp, "bodyHtmlTemplate") ? " checked" : "") + '> Send an HTML body (values are HTML-escaped)</label>' +
+            '<textarea class="na-html tpl-field" rows="10" style="width:100%;display:' + (compValue(comp, "bodyHtmlTemplate") ? "block" : "none") + ';margin-top:4px">' + escapeHtml(compValue(comp, "bodyHtmlTemplate")) + '</textarea>' +
           '</div>' +
         '</details>';
       box.innerHTML = html;
@@ -3264,6 +3284,18 @@ async function openAutomationWizard(existing) {
       box.querySelector(".na-html-enable").addEventListener("change", function () {
         box.querySelector(".na-html").style.display = this.checked ? "block" : "none";
       });
+      var compReset = box.querySelector(".na-comp-reset");
+      if (compReset) {
+        compReset.addEventListener("click", function () {
+          var d = defaultEmailTemplate();
+          box.querySelector(".na-subject").value = d.subjectTemplate || "";
+          box.querySelector(".na-body").value = d.bodyTextTemplate || "";
+          box.querySelector(".na-html").value = d.bodyHtmlTemplate || "";
+          var en = box.querySelector(".na-html-enable");
+          en.checked = !!d.bodyHtmlTemplate;
+          box.querySelector(".na-html").style.display = en.checked ? "block" : "none";
+        });
+      }
       row.querySelector(".na-channel").addEventListener("change", function () {
         row.querySelector(".aw-action-summary").textContent = actionSummary({ type: "notify", channelId: row.querySelector(".na-channel").value });
         renderRecipients();

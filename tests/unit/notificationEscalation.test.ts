@@ -61,11 +61,17 @@ describe("buildComposedEmail", () => {
     ruleName: "High CPU",
   });
 
-  it("defaults: [SEV] asset subject + message-with-View-link body, no HTML", () => {
+  it("defaults to the shared rich alert body — the same text the wizard prefills", () => {
+    // Was "[SEV] asset" + message + a View: link to the automations page. The
+    // default is now the full device email (alertEmailTemplate), so an
+    // automation that customizes nothing still tells the reader which device,
+    // where it hangs, and how to acknowledge.
     const c = buildComposedEmail({}, ctx);
-    expect(c.subject).toBe("[CRITICAL] fw-atl-01");
-    expect(c.text).toBe("High CPU: fw-atl-01\n\nView: https://polaris.example.com/notifications.html");
-    expect(c.html).toBeUndefined();
+    expect(c.subject).toBe("[CRITICAL] fw-atl-01 — High CPU");
+    expect(c.text).toContain("High CPU: fw-atl-01"); // the message still leads
+    expect(c.text).toContain("Acknowledge:");
+    expect(c.html).toContain("Acknowledge alert");
+    expect(c.html).toContain("fw-atl-01");
   });
 
   it("renders subject/text templates and HTML with escaped values", () => {
@@ -88,8 +94,27 @@ describe("buildComposedEmail", () => {
     expect(c.bcc).toEqual({ recipientUserIds: ["u1"] });
   });
 
-  it("omits the View footer when there is no link", () => {
-    const c = buildComposedEmail({}, { ...ctx, link: "" });
-    expect(c.text).toBe("High CPU: fw-atl-01");
+  it("drops the rows whose value is empty rather than mailing blank cells", () => {
+    // Every {asset.*} token renders "" when the field is unset, so a device
+    // Polaris knows little about must not produce a table of empty labels.
+    const c = buildComposedEmail({}, ctx); // ctx carries no assetDetail at all
+    expect(c.text).not.toMatch(/^(Switch|AP|IP):\s*$/m);
+    expect(c.html).not.toContain("Connected AP");
+    expect(c.html).toContain("High CPU: fw-atl-01");
+  });
+
+  it("never leaks a literal token from OUR default when the context predates it", () => {
+    // An escalation re-renders from a stored Notification.templateCtx, which
+    // may have been built before a token existed. Operator templates keep an
+    // unknown token visible (a typo should be); ours renders blank.
+    const stale = { asset: "fw-atl-01", severity: "critical", "severity.upper": "CRITICAL", message: "m" };
+    const c = buildComposedEmail({}, stale);
+    expect(c.subject).toBe("[CRITICAL] fw-atl-01"); // trailing " — {rule}" gone, not printed
+    expect(c.text).not.toContain("{rule}");
+    expect(c.html).not.toContain("{rule}");
+    // The DEFERRED tokens must survive: they're filled per recipient at fan-out
+    // ({ack}) and per delivery at send time ({chart.*}).
+    expect(c.text).toContain("{ack}");
+    expect(c.text).toContain("{chart.cpu}");
   });
 });

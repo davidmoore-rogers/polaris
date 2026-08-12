@@ -33,6 +33,7 @@ import {
   ackUrlForEmail,
   ackUrlForPush,
 } from "../utils/notificationTemplate.js";
+import { defaultAlertEmailTemplate, pruneDeadLinks, pruneEmptyRows, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
 import { mintAckTokens, type AckChannel } from "./notificationAckService.js";
 import { permissionOf, rankMeets, type AccessLevel } from "../api/middleware/permissions.js";
 import {
@@ -61,25 +62,51 @@ export interface ComposedEmail {
 
 /**
  * Render the composed outbound email for a composition config from a built
- * context. Unset pieces fall back to the pre-feature defaults (subject
- * `[SEV] asset`, text = message + View link). HTML body only when the
- * operator provided one — interpolated values are HTML-escaped there. cc/bcc
- * pass through unresolved (resolved at expansion time). Lives here (not the
- * engine) so the action-execution layer can compose without a circular
- * import; the engine re-exports it for its historical consumers.
+ * context. Any piece the operator left blank falls back to the shared DEFAULT
+ * alert template (alertEmailTemplate.ts) — the same strings the automation
+ * wizard prefills into a new Notify action, so what Polaris sends and what the
+ * operator can edit are one text. cc/bcc pass through unresolved (resolved at
+ * expansion time). Lives here (not the engine) so the action-execution layer
+ * can compose without a circular import; the engine re-exports it.
+ *
+ * Empty rows are pruned AFTER rendering: every {asset.*} token renders "" when
+ * the field is unset, so a device with no AP and no model would otherwise mail
+ * a table of blank cells.
  */
 export function buildComposedEmail(comp: EmailComposition, ctx: Record<string, string>): ComposedEmail {
-  const link = ctx["link"] || "";
-  const subject = comp.subjectTemplate && comp.subjectTemplate.trim()
-    ? renderNotificationTemplate(comp.subjectTemplate, ctx)
-    : `[${ctx["severity.upper"] || "NOTIFICATION"}] ${ctx["asset"] || "Polaris notification"}`;
-  const text = comp.bodyTextTemplate && comp.bodyTextTemplate.trim()
-    ? renderNotificationTemplate(comp.bodyTextTemplate, ctx)
-    : (ctx["message"] || "") + (link ? `\n\nView: ${link}` : "");
-  const html = comp.bodyHtmlTemplate && comp.bodyHtmlTemplate.trim()
-    ? renderNotificationTemplate(comp.bodyHtmlTemplate, ctx, { html: true })
-    : undefined;
-  return { subject, text, html, cc: comp.cc ?? undefined, bcc: comp.bcc ?? undefined };
+  const def = defaultAlertEmailTemplate();
+  const own = (tpl: string | null | undefined) => !!tpl?.trim();
+  // Our own default renders unknown tokens blank; an operator's template keeps
+  // them literal, so their typo stays visible instead of vanishing.
+  const optsFor = (operatorAuthored: boolean, html?: boolean) =>
+    ({ ...(html ? { html: true } : {}), ...(operatorAuthored ? {} : { unknown: "blank" as const }) });
+
+  const subject = renderNotificationTemplate(
+    own(comp.subjectTemplate) ? comp.subjectTemplate! : def.subjectTemplate,
+    ctx,
+    optsFor(own(comp.subjectTemplate)),
+  );
+  const text = renderNotificationTemplate(
+    own(comp.bodyTextTemplate) ? comp.bodyTextTemplate! : def.bodyTextTemplate,
+    ctx,
+    optsFor(own(comp.bodyTextTemplate)),
+  );
+  const html = renderNotificationTemplate(
+    own(comp.bodyHtmlTemplate) ? comp.bodyHtmlTemplate! : def.bodyHtmlTemplate,
+    ctx,
+    optsFor(own(comp.bodyHtmlTemplate), true),
+  );
+  return {
+    // A blank token can leave a dangling separator ("host — "); tidy the tail
+    // rather than making the subject template conditional.
+    subject: subject.replace(/[\s—\-–:|]+$/u, "").trim(),
+    text: pruneEmptyTextLines(text),
+    // Dead links are pruned again after the per-recipient {ack} fill, since
+    // that is when a recipient without a link gets an empty href.
+    html: pruneDeadLinks(pruneEmptyRows(html)),
+    cc: comp.cc ?? undefined,
+    bcc: comp.bcc ?? undefined,
+  };
 }
 
 export interface RecipientUser {
@@ -598,11 +625,13 @@ async function stampAckTokens(
     meta.ack = { token, userId: want.userId };
     if (meta.composed) {
       // The body was rendered before recipients were known, so {ack} is still
-      // sitting in it literally. Fill it now for this one recipient.
+      // sitting in it literally. Fill it now for this one recipient, then
+      // re-prune: the fill can leave an "Acknowledge:" line or row with
+      // nothing after it.
       const url = ackUrlForEmail(token);
       if (typeof meta.subject === "string") meta.subject = substituteAckToken(meta.subject, url);
-      if (typeof meta.text === "string") meta.text = substituteAckToken(meta.text, url);
-      if (typeof meta.html === "string") meta.html = substituteAckToken(meta.html, url, { html: true });
+      if (typeof meta.text === "string") meta.text = pruneEmptyTextLines(substituteAckToken(meta.text, url));
+      if (typeof meta.html === "string") meta.html = pruneDeadLinks(pruneEmptyRows(substituteAckToken(meta.html, url, { html: true })));
     }
     row.meta = meta as Prisma.InputJsonValue;
   });
@@ -615,8 +644,11 @@ async function stampAckTokens(
     if (!meta || !meta.composed) return;
     const next = { ...meta };
     if (typeof next.subject === "string") next.subject = substituteAckToken(next.subject, null);
-    if (typeof next.text === "string") next.text = substituteAckToken(next.text, null);
-    if (typeof next.html === "string") next.html = substituteAckToken(next.html, null, { html: true });
+    // Pruning after the blank fill is what removes the whole "Acknowledge:"
+    // line for a recipient who can't acknowledge — rather than mailing them a
+    // label with nothing after it.
+    if (typeof next.text === "string") next.text = pruneEmptyTextLines(substituteAckToken(next.text, null));
+    if (typeof next.html === "string") next.html = pruneDeadLinks(pruneEmptyRows(substituteAckToken(next.html, null, { html: true })));
     row.meta = next as Prisma.InputJsonValue;
   });
 }

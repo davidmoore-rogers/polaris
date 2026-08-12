@@ -15,6 +15,8 @@
  * has since been deleted.
  */
 
+import { severityCss } from "./severityStyle.js";
+
 export interface TemplateVariable {
   token: string;
   label: string;
@@ -46,6 +48,10 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{message}", label: "Message", description: "The rendered in-app notification message", group: "notification" },
   { token: "{severity}", label: "Severity", description: "Rule severity (e.g. warning)", group: "notification" },
   { token: "{severity.upper}", label: "SEVERITY", description: "Rule severity upper-cased (e.g. WARNING)", group: "notification" },
+  { token: "{severity.color}", label: "Severity color", description: "Hex colour for this severity (e.g. #d97706) — for styling an HTML email", group: "notification" },
+  { token: "{chart.cpu}", label: "CPU chart", description: "Last hour of CPU as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
+  { token: "{chart.memory}", label: "Memory chart", description: "Last hour of memory as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
+  { token: "{chart.responseTime}", label: "Response-time chart", description: "Last hour of probe response time as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
   { token: "{time}", label: "Time", description: "Trigger time (ISO-8601)", group: "notification" },
   { token: "{link}", label: "Link", description: "Notifications page URL (empty if POLARIS_PUBLIC_URL unset)", group: "notification" },
   { token: "{ack}", label: "Acknowledge link", description: "One-click acknowledge URL — resolved per recipient at send time. Empty for address-book/typed recipients (only Polaris users can acknowledge) and when POLARIS_PUBLIC_URL is unset", group: "notification" },
@@ -146,6 +152,7 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "message": str(parts.message),
     "severity": severity,
     "severity.upper": severity.toUpperCase(),
+    "severity.color": severityCss(severity),
     "time": time,
     "link": str(parts.link),
     "rule": str(parts.ruleName),
@@ -176,6 +183,22 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
 const TOKEN_RE = /\{([a-zA-Z][\w.]*)\}/g;
 
 /**
+ * Tokens that are deliberately NOT in buildTemplateContext because they are
+ * resolved after the context exists:
+ *   - `ack` is per-RECIPIENT (notificationRecipientService, at fan-out)
+ *   - `chart.*` are per-DELIVERY inline images (alertChartService, at send)
+ *
+ * The renderer must leave these alone no matter what `unknown` says, or the
+ * later pass finds nothing to substitute.
+ */
+export const DEFERRED_TOKENS: ReadonlySet<string> = new Set([
+  "ack",
+  "chart.cpu",
+  "chart.memory",
+  "chart.responseTime",
+]);
+
+/**
  * Render a template against a context map. Single regex pass — substituted
  * values are never re-interpolated (a value containing "{threshold}" stays
  * literal). Unknown tokens are left as-is. With opts.html, interpolated
@@ -184,10 +207,20 @@ const TOKEN_RE = /\{([a-zA-Z][\w.]*)\}/g;
 export function renderNotificationTemplate(
   template: string,
   ctx: Record<string, string>,
-  opts?: { html?: boolean },
+  opts?: { html?: boolean; unknown?: "keep" | "blank" },
 ): string {
   return template.replace(TOKEN_RE, (match, name: string) => {
-    if (!(name in ctx)) return match;
+    if (!(name in ctx)) {
+      // A deferred token is filled by a LATER pass — blanking it here would
+      // leave that pass nothing to find.
+      if (DEFERRED_TOKENS.has(name)) return match;
+      // Operator templates keep an unknown token literal so a typo is visible
+      // in the delivered message. Polaris's OWN default body passes
+      // unknown:"blank": a context assembled before a token existed (an
+      // escalation re-rendering a pre-upgrade Notification.templateCtx) must
+      // not leak "{rule}" into a subject line.
+      return opts?.unknown === "blank" ? "" : match;
+    }
     const v = ctx[name];
     return opts?.html ? escapeHtml(v) : v;
   });

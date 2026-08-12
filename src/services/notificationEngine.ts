@@ -678,8 +678,18 @@ function ruleWantsAssetDetail(rule: DbRule): boolean {
         : a.type === "script"
           ? [a.argsTemplate]
           : []; // event — no templates of its own
-  const actionTemplates = allRuleActionRefs(rule).flatMap((r) => templatesOf(r.action));
+  const refs = allRuleActionRefs(rule);
+  const actionTemplates = refs.flatMap((r) => templatesOf(r.action));
+  // Any notify action can end up on an email channel, and the DEFAULT alert
+  // body quotes the device (IP, connected switch/AP, location, model) without
+  // the operator typing a single {asset.*} token — so template-sniffing alone
+  // would mail blank facts for every automation that never customized
+  // anything. Channel types aren't visible here, so this deliberately
+  // over-fetches for a push- or chat-only rule: the lookup is per FIRE (which
+  // is transition-guarded and rare) and served from the per-tick cache.
+  const hasNotify = refs.some((r) => r.action.type === "notify");
   return (
+    hasNotify ||
     ruleWantsContext(rule) ||
     templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...actionTemplates])
   );
@@ -1846,10 +1856,15 @@ function detailsMatch(details: unknown, match: Record<string, string | number | 
 // escalation / {asset.*} tokens) and the event-tail's tag reads, so a batch
 // touching the same asset fetches once. Cleared each evaluate tick.
 const ASSET_DETAIL_SELECT = {
+  // `id` backs {asset.link}; lastSeenSwitch/lastSeenAp back
+  // {asset.connectedSwitch}/{asset.connectedAp} — precomputed scalars on the
+  // asset row (discovery + persistWirelessStations maintain them), so the
+  // alert email can say WHERE the device hangs for the cost of nothing.
+  id: true,
   hostname: true, ipAddress: true, macAddress: true, assetType: true, status: true,
   location: true, learnedLocation: true, manufacturer: true, model: true,
   serialNumber: true, os: true, osVersion: true, department: true, assignedTo: true,
-  tags: true, dependencySuppressed: true,
+  tags: true, dependencySuppressed: true, lastSeenSwitch: true, lastSeenAp: true,
 } as const;
 
 type AssetDetailRow = AssetTemplateDetail & { hostname: string | null; status: string; tags: string[]; dependencySuppressed: boolean };
@@ -2167,10 +2182,13 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
   // Rendered sample of the composed email against the best reading (first
   // matching, else first evaluated) — templates only, no recipient resolution.
   let emailPreview: PreviewResult["emailPreview"];
-  if (input.emailComposition && readings.length > 0) {
+  // Composition or not: every email notify action now renders through the
+  // shared default template, so a draft that customized nothing still has a
+  // real email worth previewing.
+  if (readings.length > 0) {
     const draft = draftRuleForPreview(input, trigger);
     const sample = readings.find((r) => readingMeets(trigger, r.value)) ?? readings[0];
-    emailPreview = await renderPreviewEmail(draft, input.emailComposition, sample);
+    emailPreview = await renderPreviewEmail(draft, input.emailComposition ?? {}, sample);
   }
 
   return {

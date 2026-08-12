@@ -22,6 +22,7 @@ import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail } from "../utils/notificationTemplate.js";
 import { ackUrlFromMeta } from "./notificationRecipientService.js";
+import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor } from "./alertChartService.js";
 import { logEvent } from "./eventLogService.js";
 import { type ChannelType } from "./notificationTypes.js";
 import { sendSmtpEmail, sendM365Email, type EmailMessage } from "./notificationChannels/emailChannel.js";
@@ -52,6 +53,7 @@ interface DeliveryRow {
     id: string;
     message: string;
     severity: string;
+    assetId: string | null;
     assetHostname: string | null;
     triggeredAt: Date;
   };
@@ -77,17 +79,37 @@ function asStringArray(v: unknown): string[] {
  * pre-rendered snapshot; legacy rows (including pre-upgrade pending rows) get
  * the byte-identical default subject/body.
  */
-function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, url: string | null): EmailMessage | { error: string } {
+async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, url: string | null): Promise<EmailMessage | { error: string }> {
   if (meta.composed === true) {
     const to = asStringArray(meta.to);
     if (to.length === 0) return { error: "composed email delivery has no To recipients" };
+    let text = typeof meta.text === "string" ? meta.text : d.notification.message;
+    let html = typeof meta.html === "string" && meta.html ? meta.html : undefined;
+
+    // Charts are built HERE, not at fire time: the drain is a queue off the
+    // engine's hot path, and an escalation email at T+90min then shows the
+    // last hour as of sending rather than re-rendering a frozen snapshot.
+    let attachments: EmailMessage["attachments"];
+    const wanted = chartTokensIn(text, html);
+    if (wanted.size > 0) {
+      const charts = d.notification.assetId
+        ? await buildAlertCharts(d.notification.assetId, wanted)
+        : new Map();
+      text = substituteChartTokens(text, charts, { html: false });
+      if (html) {
+        html = substituteChartTokens(html, charts, { html: true });
+        attachments = attachmentsFor(charts, html);
+      }
+    }
+
     return {
       to,
       cc: asStringArray(meta.cc),
       bcc: asStringArray(meta.bcc),
       subject: typeof meta.subject === "string" && meta.subject ? meta.subject : titleFor(d.notification),
-      text: typeof meta.text === "string" ? meta.text : d.notification.message,
-      html: typeof meta.html === "string" && meta.html ? meta.html : undefined,
+      text,
+      html,
+      ...(attachments?.length ? { attachments } : {}),
     };
   }
   return {
@@ -140,7 +162,7 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promi
   const type = channel.type as ChannelType;
   try {
     if (type === "smtp" || type === "oauth_m365") {
-      const msg = emailMessageFor(d, meta, url);
+      const msg = await emailMessageFor(d, meta, url);
       if ("error" in msg) return { ok: false, error: msg.error };
       if (type === "smtp") {
         await sendSmtpEmail(
@@ -209,7 +231,9 @@ export async function drainPendingDeliveries(): Promise<{ processed: number; sen
       target: true,
       meta: true,
       attempts: true,
-      notification: { select: { id: true, message: true, severity: true, assetHostname: true, triggeredAt: true } },
+      // assetId is what the last-hour charts query against — the hostname is a
+      // fire-time snapshot and can't be joined back to sample rows.
+      notification: { select: { id: true, message: true, severity: true, assetId: true, assetHostname: true, triggeredAt: true } },
     },
   })) as DeliveryRow[];
 
