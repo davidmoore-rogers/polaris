@@ -1441,12 +1441,16 @@ code {
    boundary and scrolls away with the body — repaint it as a box-shadow that
    travels with the sticky cells. */
 .table-wrapper-sticky { overflow: auto; }
-/* Slide-over variant (asset-details Services tab): same sticky thead +
-   internal scroll, but the wrapper is height-bounded to the slide-over
-   body's visible bottom by _sizeAssetSvcTableWrapper() in assets.js —
-   NOT by the viewport-relative sizeStickyTableWrappers(), whose triggers
-   (assets-list re-renders) fire while the panel tab is display:none and
-   would stamp garbage heights. */
+/* Slide-over variant (asset-details Services + System-tab Interfaces tables):
+   same sticky thead + internal scroll, but height-bounded by a per-table sizer
+   in assets.js — NOT by the viewport-relative sizeStickyTableWrappers(), whose
+   triggers (assets-list re-renders) fire while the panel tab is display:none
+   and would stamp garbage heights. Two sizers because the two tables sit
+   differently in their tab: _sizeAssetSvcTableWrapper() measures to the
+   slide-over body's visible bottom (that table IS its tab), while
+   _sizeAssetIfaceTableWrapper() takes a fraction of the body's height (the
+   Interfaces table sits mid-tab, so a distance-to-bottom bound would change on
+   every panel scroll). */
 .table-wrapper-panel-sticky { overflow: auto; }
 /* Modal variant (Application Map → Discovery): same sticky thead + internal
    scroll, but SELF-BOUNDING — the caller sets its own max-height, so there is

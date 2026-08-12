@@ -43,6 +43,8 @@ const FN_NAMES = [
   "_setCollapsedIfaces",
   "_lldpNeighborInlineCell",
   "_distinctSorted",
+  "_distinctVlanOptions",
+  "_sizeAssetIfaceTableWrapper",
   "_renderInterfacesTable",
   "_buildInterfacesTableDOM",
   "_wireInterfacesTable",
@@ -65,8 +67,11 @@ function makeSi() {
         ipAddress: null, macAddress: null, inOctets: null, outOctets: null,
         poeStatus: "fault", nativeVlan: 20, taggedVlans: ["30", "40"] },
       { ifName: "port3", ifType: "physical", adminStatus: "down", operStatus: "down",
-        poeStatus: "searching", nativeVlan: 10 },
-      { ifName: "lag1", ifType: "aggregate", adminStatus: "up", operStatus: "up", inOctets: 5000, outOctets: 4000 },
+        poeStatus: "searching", nativeVlan: 10, trunksAllVlans: true },
+      // 100 / 200 are here to pin NUMERIC option ordering: alphabetically they
+      // sort between 10 and 30. taggedVlans as raw numbers covers the coercion.
+      { ifName: "lag1", ifType: "aggregate", adminStatus: "up", operStatus: "up", inOctets: 5000, outOctets: 4000,
+        nativeVlan: 100, taggedVlans: [200, 30] },
       { ifName: "port9", ifType: "physical", ifParent: "lag1", adminStatus: "up", operStatus: "up", inOctets: 2500 },
       { ifName: "vlan50", ifType: "vlan", vlanId: 50, adminStatus: "up", operStatus: "up", ipAddress: "10.9.9.1" },
     ],
@@ -181,6 +186,23 @@ describe("default (tree) view", () => {
     expect(opts("poe")).toEqual(["Delivering", "Fault", "Searching"]);
     expect(opts("status")).toEqual(["admin shut", "down", "up"]);
   });
+
+  it("offers the reported VLAN ids as pickable options, ordered numerically", () => {
+    const opts = (key: string) =>
+      Array.from(doc.querySelectorAll(`th[data-sf-key="${key}"] .sf-multi-option`))
+        .map((l) => l.textContent!.trim());
+    // A VLAN is an id out of a closed set the switch just reported, so both
+    // columns filter by picking rather than typing — and 100 sorting after 20
+    // is the point of _distinctVlanOptions over _distinctSorted.
+    expect(opts("native-vlan")).toEqual(["10", "20", "100"]);
+    expect(opts("tagged-vlans")).toEqual(["30", "40", "200", "all (trunk)"]);
+  });
+
+  it("freezes the header by height-bounding the wrapper's own scroll", () => {
+    const w = doc.getElementById("asset-iface-wrapper")!;
+    expect(w.classList.contains("table-wrapper-panel-sticky")).toBe(true);
+    expect(parseInt((w as any).style.maxHeight, 10)).toBeGreaterThanOrEqual(300);
+  });
 });
 
 describe("sorting", () => {
@@ -225,6 +247,20 @@ describe("filtering", () => {
     checkboxFilter("poe", "fault", true);
     expect(names()).toEqual(["port2"]);
   });
+
+  it("selects every port carrying one tagged VLAN out of its full set", () => {
+    // The row value is the whole set, not the cell's "+N more" summary, so
+    // picking 30 finds it wherever it sits in a trunk's list. port3 trunks ALL
+    // VLANs and deliberately does NOT match — the device enumerated none.
+    checkboxFilter("tagged-vlans", "30", true);
+    expect(names().sort()).toEqual(["lag1", "port2"]);
+  });
+
+  it("selects ports by native VLAN without matching a longer id", () => {
+    // The old free-text filter matched substrings: "10" also selected 100.
+    checkboxFilter("native-vlan", "10", true);
+    expect(names().sort()).toEqual(["port1", "port3"]);
+  });
 });
 
 describe("re-render safety", () => {
@@ -252,6 +288,17 @@ describe("re-render safety", () => {
     expect(saved.sfFilters.ifname).toBe("port");
     render();   // a refresh tick rebuilds the whole container
     expect(names().sort()).toEqual(["port1", "port2", "port3", "port9"]);
+  });
+
+  it("drops a VLAN filter saved as free text before the column became a picker", () => {
+    // Upgrade path: both VLAN columns used to render text inputs, so installs
+    // carry saved string filters under these keys. Left in place, a string
+    // filters by substring ("10" also selecting 100) through a control that can
+    // no longer display or clear it.
+    g.localStorage.setItem(PREFS_KEY, JSON.stringify({ sortKey: null, sortDir: "asc", sfFilters: { "native-vlan": "10" } }));
+    render();
+    expect(names()).toHaveLength(8);
+    expect(doc.querySelector('th[data-sf-key="native-vlan"] .sf-multi-button')!.textContent).toBe("All");
   });
 
   it("keeps a collapsed parent collapsed across a rebuild", () => {

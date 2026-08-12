@@ -6524,10 +6524,17 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
   // `ifname` is an ARRAY on purpose: TableSF joins array values with a space for
   // both comparison and matching, so an aliased port sorts by the label the
   // operator reads while staying findable by its real ifName.
-  function taggedVlanText(iface) {
-    if (iface.trunksAllVlans === true) return "all";
+  // The Tagged VLAN column's filter+sort value: the full set as an ARRAY, not
+  // the cell's "+N more" summary and not a joined string. TableSF matches a
+  // multi-select selection against each element of an array row value, so the
+  // array is what lets "Tagged VLANs: 30" select the ports carrying VLAN 30
+  // out of a 40-VLAN trunk list. A trunk-all port reports the single "all"
+  // sentinel, matching what its cell renders — filtering by a specific VLAN
+  // deliberately does not select it, since the device never enumerated one.
+  function taggedVlanList(iface) {
+    if (iface.trunksAllVlans === true) return ["all"];
     var tagged = Array.isArray(iface.taggedVlans) ? iface.taggedVlans : [];
-    return tagged.join(", ");   // full list, not the cell's "+N more" summary
+    return tagged.map(function (v) { return String(v); });
   }
   function neighborText(ifName) {
     var ns = lldpByIf[ifName] || [];
@@ -6550,7 +6557,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       addressing: iface.addressingMode ? String(iface.addressingMode).toLowerCase() : "",
       mac: iface.macAddress || "",
       "native-vlan": iface.nativeVlan != null ? Number(iface.nativeVlan) : null,
-      "tagged-vlans": taggedVlanText(iface),
+      "tagged-vlans": taggedVlanList(iface),
       poe: iface.poeStatus || "",
       "in": iface.inOctets != null ? Number(iface.inOctets) : null,
       out: iface.outOctets != null ? Number(iface.outOctets) : null,
@@ -6572,7 +6579,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       addressing: "",
       mac: "",
       "native-vlan": null,
-      "tagged-vlans": "",
+      "tagged-vlans": [],
       poe: "",
       "in": tn.incomingBytes != null ? Number(tn.incomingBytes) : null,
       out: tn.outgoingBytes != null ? Number(tn.outgoingBytes) : null,
@@ -6656,16 +6663,23 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     afterRender.forEach(function (fn) { fn(); });
   }
 
+  // Both VLAN columns filter through a multi-select of the VLAN ids this device
+  // actually reports (data-sf-options="" + setColumnOptions below), not a
+  // free-text box: a VLAN is an identifier out of a closed set the switch just
+  // told us, so there is nothing for an operator to type that isn't already
+  // pickable — and typing "10" into a substring filter also matched 100, 110
+  // and 210. data-sf-type is still what sorting reads, so Native VLAN keeps its
+  // numeric ordering.
   var vlanHeader = showVlanCols
-    ? '<th data-col-id="native-vlan" data-sf-key="native-vlan" data-sf-type="number" title="Untagged PVID on the FortiSwitch port">Native VLAN</th>' +
-      '<th data-col-id="tagged-vlans" data-sf-key="tagged-vlans" data-sf-type="string" title="Tagged VLAN set on the FortiSwitch port (allowed-vlans − untagged-vlans). \"all\" indicates `set allowed-vlans all`. Filtering matches the full set, including VLANs the cell summarizes as \"+N more\".">Tagged VLANs</th>'
+    ? '<th data-col-id="native-vlan" data-sf-key="native-vlan" data-sf-type="number" data-sf-options="" title="Untagged PVID on the FortiSwitch port">Native VLAN</th>' +
+      '<th data-col-id="tagged-vlans" data-sf-key="tagged-vlans" data-sf-type="string" data-sf-options="" title="Tagged VLAN set on the FortiSwitch port (allowed-vlans − untagged-vlans). \"all\" indicates `set allowed-vlans all`. Filtering matches the full set, including VLANs the cell summarizes as \"+N more\".">Tagged VLANs</th>'
     : "";
   var poeHeader = showPoeCol
     ? '<th data-col-id="poe" data-sf-key="poe" data-sf-options="" title="Power over Ethernet: detection status and the negotiated power CLASS (a budget bracket, e.g. class3 = up to 12.95 W at the powered device). POWER-ETHERNET-MIB defines no per-port wattage, so no draw is shown. SNMP only.">PoE</th>'
     : "";
   container.innerHTML = staleBanner +
     '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>full-history retention</strong>. Unselected interfaces are kept for 24&nbsp;h only.</p>' +
-    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+    '<div class="table-wrapper table-wrapper-panel-sticky" id="asset-iface-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
       '<th title="Pin this interface for fast-cadence polling + full-history retention (unselected interfaces are kept 24h)" style="width:32px" data-col-id="poll" data-col-required="true">' +
         '<input type="checkbox" id="iface-poll-all" title="Select / de-select every listed interface and tunnel for fast-cadence polling (rows hidden by a filter keep their current setting)"' + (canEdit ? '' : ' disabled') + '>' +
       '</th>' +
@@ -6702,6 +6716,19 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       sf.setColumnOptions("poe", _distinctSorted(entries.map(function (e) { return e.poe; }))
         .map(function (v) { return { value: v, label: POE_LABELS[v] || v }; }));
     }
+    // Same rule for the two VLAN columns, per column rather than pooled: a
+    // VLAN offered under Native that no port carries untagged (or under Tagged
+    // that no port trunks) is an option that can only ever match nothing.
+    if (showVlanCols) {
+      sf.setColumnOptions("native-vlan", _distinctVlanOptions(entries.map(function (e) { return e["native-vlan"]; })));
+      var taggedSeen = [];
+      entries.forEach(function (e) {
+        var t = e["tagged-vlans"];
+        if (Array.isArray(t)) taggedSeen = taggedSeen.concat(t);
+        else if (t) taggedSeen.push(t);
+      });
+      sf.setColumnOptions("tagged-vlans", _distinctVlanOptions(taggedSeen));
+    }
     // Restore, minus any state pointing at a column THIS device doesn't render
     // (PoE and the two VLAN columns appear only when something reports them).
     // A stale filter on an absent column would match nothing, with no visible
@@ -6731,11 +6758,62 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       onScreenshot: function (t) { _screenshotTableEl(t, "Interfaces", { hiddenNoun: "interface" }); },
     });
   }
+  _sizeAssetIfaceTableWrapper();
   return {
     monitored: monitored, monitoredTunnels: monitoredTunnels, canEdit: canEdit,
     collapsed: collapsed, afterRender: afterRender,
   };
 }
+
+/**
+ * Distinct VLAN ids as multi-select options, ordered NUMERICALLY with any
+ * non-numeric sentinel (the Tagged column's "all") last. _distinctSorted can't
+ * be reused here: its alphabetical sort lists 100 and 1000 between 10 and 20,
+ * which reads as a broken list in a column whose every value is a number.
+ */
+function _distinctVlanOptions(values) {
+  var seen = {};
+  var nums = [];
+  var others = [];
+  (values || []).forEach(function (v) {
+    if (v == null || v === "") return;
+    var s = String(v);
+    if (seen[s]) return;
+    seen[s] = true;
+    if (/^\d+$/.test(s)) nums.push(s);
+    else others.push(s);
+  });
+  nums.sort(function (a, b) { return Number(a) - Number(b); });
+  others.sort();
+  return nums.concat(others).map(function (s) {
+    return { value: s, label: (s === "all") ? "all (trunk)" : s };
+  });
+}
+
+/**
+ * Height-bound the interfaces table's wrapper so its header freezes and the
+ * rows scroll INSIDE it (.table-wrapper-panel-sticky pins thead to the
+ * wrapper's top edge) — on a 48-port switch the column labels, and the sort +
+ * filter controls that live in them, otherwise scroll away immediately.
+ *
+ * The bound is a fraction of the SLIDE-OVER BODY's height, deliberately not the
+ * wrapper's own distance to that body's bottom the way _sizeAssetSvcTableWrapper
+ * measures. Two reasons: this table sits MID-TAB (storage, sensors, LLDP and
+ * physical-entity sections follow it), so a distance-to-bottom bound would
+ * measure a different value every time the operator scrolls the panel; and
+ * measuring only the panel body works while the System tab is still
+ * display:none, which is the state the table is first built in (the panel opens
+ * on General) and there is no per-tab hook to re-size from.
+ */
+function _sizeAssetIfaceTableWrapper() {
+  var w = document.getElementById("asset-iface-wrapper");
+  if (!w) return;
+  var body = document.getElementById("asset-panel-body");
+  var avail = (body && body.clientHeight) || (typeof window !== "undefined" ? window.innerHeight : 0) || 0;
+  if (!avail) return;
+  w.style.maxHeight = Math.max(300, Math.round(avail * 0.72)) + "px";
+}
+window.addEventListener("resize", _sizeAssetIfaceTableWrapper);
 
 /** Distinct, non-empty, alphabetically sorted values — multi-select options. */
 function _distinctSorted(values) {
