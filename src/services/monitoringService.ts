@@ -112,8 +112,6 @@ import {
   classifyHardwareSensor,
   normalizeFgAlarmStatus,
   normalizeRestAlarmStatus,
-  resolveSensorIfName,
-  syntheticSensorIndex,
 } from "../utils/hardwareSensors.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
@@ -3179,8 +3177,6 @@ export interface StorageSample {
  *  is the device-reported health ("ok" / "alarm") when available. */
 export interface HardwareSensorSample {
   sensorName:  string;
-  /** Display-only correlated interface for index-named sensors — see resolveSensorIfName. */
-  ifName?:     string | null;
   sensorClass: string;
   value:       number | null;
   unit:        string | null;
@@ -3587,9 +3583,7 @@ async function collectHardwareSensorsViaSnmpSession(
   const profile = pickVendorProfileMerged(profileManufacturer, profileOs, profileModel);
   const scope   = { manufacturer, model };
   return await withSnmpSession(host, config, async (session) => {
-    // `host` doubles as the ifIndex→name cache key for the synthetic-sensor
-    // annotation — one map per target, shared across credentials.
-    return await collectHardwareSensorsSnmp(session, manufacturer, profile, scope, host);
+    return await collectHardwareSensorsSnmp(session, manufacturer, profile, scope);
   }, timeoutMs);
 }
 
@@ -5972,7 +5966,6 @@ async function collectHardwareSensorsSnmp(
   manufacturer?: string | null,
   profile?: VendorTelemetryProfile | null,
   scope?: { manufacturer?: string | null; model?: string | null },
-  host?: string | null,
 ): Promise<HardwareSensorSample[]> {
   // 1. FORTINET-FORTIGATE-MIB fgHwSensorTable is the comprehensive source on
   //    FortiGates (temperature + fan + voltage + power + disk + alarm), so
@@ -6026,10 +6019,7 @@ async function collectHardwareSensorsSnmp(
       alarmStatus: null,
     });
   }
-  if (out.length > 0) {
-    await annotateSyntheticSensorIfNames(session, out, manufacturer, host);
-    return out;
-  }
+  if (out.length > 0) return out;
 
   // 3. Profile-driven scalar symbol. Used by vendors whose hardware publishes a
   //    single Celsius scalar rather than a sensor table — currently the FortiAP
@@ -6085,79 +6075,6 @@ async function collectHardwareSensorsFortinetSnmp(session: any): Promise<Hardwar
     });
   }
   return out;
-}
-
-// ── Synthetic-sensor → interface annotation ─────────────────────────────────
-//
-// A device that publishes entPhySensorTable rows but leaves entPhysicalDescr
-// empty gets named by bare index above (`sensor-18`), which tells an operator
-// nothing. On FortiSwitchOS those indexes ARE ifIndex, so we look the interface
-// up in the same device's IF-MIB and hang the name off the row for display —
-// `sensor-18 (2FPTY25006868-0)` reads as "the optical module in that trunk"
-// instead of an opaque number. `sensorName` is deliberately left alone: it's the
-// automation dimension and the chart/rollup series key, so folding the interface
-// into it would split a sensor's history the first tick an IF-MIB walk failed.
-//
-// Cached per SNMP target: interface names change only on a config edit, while
-// hardware sensors are scraped on the telemetry cadence — re-walking ifName +
-// ifDescr every tick would add two full-table walks per switch per tick across
-// the fleet (~400 rows apiece on an FS-112D).
-const IFNAME_CACHE_TTL_MS = 15 * 60_000;
-const IFNAME_CACHE_MAX    = 2000;
-const ifNameByIndexCache  = new Map<string, { at: number; names: Map<string, string> }>();
-
-async function ifNameByIndexCached(session: any, cacheKey: string | null): Promise<Map<string, string>> {
-  const now = Date.now();
-  if (cacheKey) {
-    const hit = ifNameByIndexCache.get(cacheKey);
-    if (hit && now - hit.at < IFNAME_CACHE_TTL_MS) return hit.names;
-  }
-  const [names, descrs] = await Promise.all([
-    snmpWalk(session, OID.ifName).catch(() => new Map()),
-    snmpWalk(session, OID.ifDescr).catch(() => new Map()),
-  ]);
-  const out = new Map<string, string>();
-  for (const idx of new Set<string>([...names.keys(), ...descrs.keys()])) {
-    // Same ifName-then-ifDescr precedence as the interfaces collector, so the
-    // annotation reads identically to the System tab's Interfaces table.
-    const name = (snmpVbToString(names.get(idx)) || snmpVbToString(descrs.get(idx))).trim();
-    if (name) out.set(idx, name);
-  }
-  if (cacheKey && out.size > 0) {
-    if (ifNameByIndexCache.size >= IFNAME_CACHE_MAX) {
-      for (const [k, v] of ifNameByIndexCache) {
-        if (now - v.at >= IFNAME_CACHE_TTL_MS) ifNameByIndexCache.delete(k);
-      }
-      // Still full = every entry is live; drop the lot rather than grow without
-      // bound (worst case is one extra IF-MIB walk per target next tick).
-      if (ifNameByIndexCache.size >= IFNAME_CACHE_MAX) ifNameByIndexCache.clear();
-    }
-    ifNameByIndexCache.set(cacheKey, { at: now, names: out });
-  }
-  return out;
-}
-
-/**
- * Stamp `ifName` on index-named sensor rows, in place.
- *
- * Fortinet-only: equating entPhysicalIndex with ifIndex is a FortiSwitchOS
- * property, not an RFC 4133 guarantee, so on third-party gear the same math
- * could label a PSU sensor with an unrelated port name. Widen the vendor gate
- * only with a walk from a real device of that make in hand. Best-effort
- * throughout — a failed IF-MIB walk leaves the rows exactly as collected.
- */
-async function annotateSyntheticSensorIfNames(
-  session: any,
-  rows: HardwareSensorSample[],
-  manufacturer?: string | null,
-  host?: string | null,
-): Promise<void> {
-  if (!manufacturer || !/fortinet/i.test(manufacturer)) return;
-  const pending = rows.filter((r) => syntheticSensorIndex(r.sensorName) != null);
-  if (pending.length === 0) return;
-  const byIndex = await ifNameByIndexCached(session, host ?? null).catch(() => new Map<string, string>());
-  if (byIndex.size === 0) return;
-  for (const r of pending) r.ifName = resolveSensorIfName(r.sensorName, byIndex);
 }
 
 // Apply ENTITY-SENSOR-MIB scale + precision to a raw integer reading. Scale is
@@ -6982,7 +6899,6 @@ export async function recordHardwareSensorResult(assetId: string, result: Collec
         assetId,
         timestamp:   now,
         sensorName:  s.sensorName,
-        ifName:      s.ifName ?? null,
         sensorClass: s.sensorClass,
         value:       s.value,
         unit:        s.unit,

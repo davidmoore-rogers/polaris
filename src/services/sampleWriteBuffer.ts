@@ -81,9 +81,6 @@ export interface HardwareSensorSampleRow {
   value: number | null;
   unit: string | null;
   alarmStatus: string | null;
-  /** Display-only interface correlated to an index-named sensor (SNMP path only;
-   *  the agent and FortiOS REST paths report device-named sensors). */
-  ifName?: string | null;
 }
 
 /** Selection cadence for system-info samples (interface / storage / ipsec).
