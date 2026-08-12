@@ -29,6 +29,23 @@ function res(status: number, body: unknown = {}, headers: Record<string, string>
 }
 const TOKEN_OK = res(200, { access_token: "tok", expires_in: 3600 });
 
+/**
+ * Is this the AAD token fetch rather than an ARM call? Compares the parsed
+ * HOST, not a substring of the URL — a substring test also matches a URL that
+ * merely carries the login host in its path or query, which is exactly the
+ * confusion `js/incomplete-url-substring-sanitization` flags. It is only a
+ * test double here, but the routing has to be unambiguous for the assertions
+ * below to mean anything.
+ */
+const AAD_LOGIN_HOST = "login.microsoftonline.com";
+function isTokenUrl(u: unknown): boolean {
+  try {
+    return new URL(String(u)).host === AAD_LOGIN_HOST;
+  } catch {
+    return false;
+  }
+}
+
 let fetchMock: ReturnType<typeof vi.fn>;
 let cfgSeq = 0;
 let CONFIG: any;
@@ -36,7 +53,7 @@ let CONFIG: any;
 /** Requests that were NOT the token fetch, in call order. */
 function armCalls() {
   return fetchMock.mock.calls
-    .filter(([u]) => !String(u).includes("login.microsoftonline.com"))
+    .filter(([u]) => !isTokenUrl(u))
     .map(([url, init]) => ({ url: String(url), init }));
 }
 
@@ -44,7 +61,7 @@ beforeEach(() => {
   // Fresh clientId per test: azureArcService caches tokens per tenant:client.
   CONFIG = { tenantId: "t", clientId: `c${++cfgSeq}`, clientSecret: "s", allowRunCommand: true };
   fetchMock = vi.fn(async (url: string) =>
-    String(url).includes("login.microsoftonline.com") ? TOKEN_OK : res(201, { id: "rc" }),
+    isTokenUrl(url) ? TOKEN_OK : res(201, { id: "rc" }),
   );
   vi.stubGlobal("fetch", fetchMock);
 });
@@ -131,7 +148,7 @@ describe("request shape", () => {
 describe("partial failure", () => {
   it("keeps going after one machine fails and reports every target", async () => {
     fetchMock.mockImplementation(async (url: string) => {
-      if (String(url).includes("login.microsoftonline.com")) return TOKEN_OK;
+      if (isTokenUrl(url)) return TOKEN_OK;
       if (String(url).includes("/machines/bad/")) return res(403, { error: { message: "denied" } });
       return res(201, { id: "rc" });
     });

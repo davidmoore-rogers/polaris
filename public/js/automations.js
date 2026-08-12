@@ -419,7 +419,7 @@ var _rulesPage = 1;
       return '<tr>' +
         '<td>' + escapeHtml(r.name) + '</td>' +
         '<td><span class="badge">' + escapeHtml(r.triggerType) + '</span></td>' +
-        '<td><span class="badge badge-level-' + (r.severity || "info") + '">' + (r.severity || "info").toUpperCase() + '</span></td>' +
+        '<td><span class="badge badge-level-' + escapeHtml(r.severity || "info") + '">' + escapeHtml((r.severity || "info").toUpperCase()) + '</span></td>' +
         '<td>' + enabledCell + '</td>' +
         '<td style="font-size:0.85rem" title="' + escapeHtml(r.scopeTooltip) + '">' + escapeHtml(r.scopeSummary) + '</td>' +
         '<td>' + escapeHtml(r.createdBy || "-") + '</td>' +

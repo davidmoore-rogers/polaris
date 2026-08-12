@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 import {
   compileWildcard,
   compilePattern,
+  MAX_PATTERN_LENGTH,
   resolvePinnedInterfaces,
   splitPinsByProvenance,
   coerceLegacySelection,
@@ -61,6 +62,24 @@ describe("compilePattern", () => {
     const r = compilePattern("wan*", false);
     expect(r.test("wan1")).toBe(true);
     expect(r.test("xwan1")).toBe(false);
+  });
+
+  it("rejects a pattern past the length cap on both paths", () => {
+    // Every consumer matches short strings (ifNames, mounts, hostnames), so
+    // the cap bounds what one stored value can cost without touching any
+    // pattern an operator would actually write. Rejected at COMPILE, which is
+    // called from the route's validation — a 400 at save, not a throw inside a
+    // discovery run.
+    const tooLong = "a".repeat(MAX_PATTERN_LENGTH + 1);
+    expect(() => compilePattern(tooLong, true)).toThrow(/exceeds/);
+    expect(() => compilePattern(tooLong, false)).toThrow(/exceeds/);
+    expect(() => compileWildcard(tooLong)).toThrow(/exceeds/);
+  });
+
+  it("accepts a pattern exactly at the cap", () => {
+    const atCap = "a".repeat(MAX_PATTERN_LENGTH);
+    expect(() => compilePattern(atCap, true)).not.toThrow();
+    expect(() => compilePattern(atCap, false)).not.toThrow();
   });
 
   it("regex=true returns the raw regex anchor-free", () => {

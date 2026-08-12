@@ -1541,6 +1541,23 @@ TableSF.prototype.setPrefs = function (p) {
 };
 
 /**
+ * Does this table have a header for `key`? Compares each th's attribute VALUE
+ * rather than interpolating the key into a selector string: a sortKey arrives
+ * from a stored preset (and a public preset is authored by another operator),
+ * so it is arbitrary text. Escaping only the double quote left the backslash
+ * live — `foo\` produced `[data-sf-key="foo\"]`, whose trailing escape swallows
+ * the closing quote and lets the rest of the key be read as selector syntax.
+ * There is nothing to escape if no selector is built.
+ */
+TableSF.prototype._hasSortableColumn = function (key) {
+  var ths = this._thead ? this._thead.querySelectorAll("th[data-sf-key]") : [];
+  for (var i = 0; i < ths.length; i++) {
+    if (ths[i].getAttribute("data-sf-key") === key) return true;
+  }
+  return false;
+};
+
+/**
  * Replace the live sort + filter state WHOLESALE — the saved-filter-preset
  * counterpart of setPrefs. The difference matters: setPrefs merges (an absent
  * sortKey keeps whatever the operator had), while loading a preset must land
@@ -1558,7 +1575,7 @@ TableSF.prototype.applyState = function (state) {
   // before a column was removed would otherwise keep sorting by it, and
   // server-side tables reject an unknown sortBy with a 400 on every load.
   var sortKey = state.sortKey || null;
-  if (sortKey && this._thead && !this._thead.querySelector('th[data-sf-key="' + sortKey.replace(/"/g, '\\"') + '"]')) {
+  if (sortKey && this._thead && !this._hasSortableColumn(sortKey)) {
     sortKey = null;
   }
   this._sortKey = sortKey;

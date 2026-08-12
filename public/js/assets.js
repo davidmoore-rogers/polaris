@@ -17013,7 +17013,7 @@ function _loadAssetNotificationsTab(assetId) {
           ack = '<span style="color:var(--color-text-tertiary)">—</span>';
         }
         return '<tr><td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ts) + '</td>' +
-          '<td><span class="badge badge-level-' + (n.severity || "info") + '">' + (n.severity || "info").toUpperCase() + '</span></td>' +
+          '<td><span class="badge badge-level-' + escapeHtml(n.severity || "info") + '">' + escapeHtml((n.severity || "info").toUpperCase()) + '</span></td>' +
           '<td>' + escapeHtml(n.message || "") + '</td><td>' + ack + '</td></tr>';
       }).join("") : '<tr><td colspan="4" class="empty-state">No active alerts</td></tr>';
       aTbody.querySelectorAll(".asset-alert-ack").forEach(function (btn) {
@@ -17145,8 +17145,8 @@ function _renderAssetEventRow(ev, idx) {
   var ts = new Date(ev.timestamp);
   var timeStr = formatShortDateTime(ts);
 
-  var levelClass = "badge-level-" + (ev.level || "info");
-  var levelLabel = (ev.level || "info").toUpperCase();
+  var levelClass = "badge-level-" + escapeHtml(ev.level || "info");
+  var levelLabel = escapeHtml((ev.level || "info").toUpperCase());
 
   var resourceLabel = ev.resourceType || "-";
   var resourceName = ev.resourceName ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">(' + escapeHtml(ev.resourceName) + ')</span>' : "";

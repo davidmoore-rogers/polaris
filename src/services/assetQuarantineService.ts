@@ -66,7 +66,9 @@ interface FortiOsQuarantineTarget {
 // Shared with every other FortiOS write pathway: buildTransportForIntegration
 // / callFortiOs / normalizeMac are imported from reservationPushService (the
 // Transport surface's home). This file carried byte-identical private copies
-// until 2026-08 — audit finding, audit-reports/audit-2026-08-04.html.
+// until 2026-08, when the 2026-08-04 production-readiness audit called it out.
+// (The report itself is a generated artifact and is no longer tracked — see
+// .gitignore — so this records the finding rather than pointing at a path.)
 
 // ─── Helpers ───────────────────────────────────────────────────────────
 

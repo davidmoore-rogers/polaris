@@ -41,6 +41,22 @@ function res(status: number, body: unknown = {}, headers: Record<string, string>
 
 const TOKEN_OK = res(200, { access_token: "tok", expires_in: 3600 });
 
+/**
+ * Is this the AAD token fetch rather than a Graph call? Compares the parsed
+ * HOST rather than testing the URL for a substring — a substring also matches
+ * a URL that merely carries the login host in its path or query, which is what
+ * `js/incomplete-url-substring-sanitization` flags. Test-double routing only,
+ * but it has to be unambiguous for the call-count assertions to mean anything.
+ */
+const AAD_LOGIN_HOST = "login.microsoftonline.com";
+function isTokenUrl(u: unknown): boolean {
+  try {
+    return new URL(String(u)).host === AAD_LOGIN_HOST;
+  } catch {
+    return false;
+  }
+}
+
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -64,8 +80,11 @@ const runAll = <T,>(p: Promise<T>): Promise<T> => p;
 
 describe("host pinning", () => {
   it("refuses a URL on another host before doing anything", async () => {
+    // Literal substring, not `new RegExp(...GRAPH_HOST...)` — the host's dots
+    // would be regex wildcards, so the assertion would also pass against a
+    // message naming some other host.
     await expect(graphApiRequest(CONFIG, "https://evil.example/v1.0/x")).rejects.toThrow(
-      new RegExp(`Graph host must be ${GRAPH_HOST}`),
+      `Graph host must be ${GRAPH_HOST}`,
     );
     // Rejected before a token was even requested.
     expect(fetchMock).not.toHaveBeenCalled();
@@ -124,7 +143,7 @@ describe("429 throttling", () => {
 
   it("gives up with an actionable message after the retry cap", async () => {
     fetchMock.mockImplementation(async (url: string) =>
-      String(url).includes("login.microsoftonline.com") ? TOKEN_OK : res(429, "nope", { "retry-after": RETRY_AFTER_FAST }),
+      isTokenUrl(url) ? TOKEN_OK : res(429, "nope", { "retry-after": RETRY_AFTER_FAST }),
     );
     await expect(runAll(graphApiRequest(CONFIG, URL_OK, { method: "POST", body: {} })))
       .rejects.toThrow(/throttled the request \(429\)/);
@@ -140,14 +159,13 @@ describe("401 handling", () => {
       .mockResolvedValueOnce(res(200, { ok: true }));
 
     await expect(runAll(graphApiRequest(CONFIG, URL_OK))).resolves.toEqual({ ok: true });
-    const tokenFetches = fetchMock.mock.calls
-      .filter(([u]) => String(u).includes("login.microsoftonline.com")).length;
+    const tokenFetches = fetchMock.mock.calls.filter(([u]) => isTokenUrl(u)).length;
     expect(tokenFetches).toBe(2);
   });
 
   it("does not loop forever on a persistent 401", async () => {
     fetchMock.mockImplementation(async (url: string) =>
-      String(url).includes("login.microsoftonline.com") ? TOKEN_OK : res(401, "still bad"),
+      isTokenUrl(url) ? TOKEN_OK : res(401, "still bad"),
     );
     await expect(runAll(graphApiRequest(CONFIG, URL_OK))).rejects.toThrow(/HTTP 401/);
   });
