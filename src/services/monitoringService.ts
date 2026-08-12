@@ -120,6 +120,7 @@ import {
 } from "../utils/hardwareSensors.js";
 import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
 import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
+import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, parseFdbIndex, type FdbEntry } from "../utils/macForwarding.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
@@ -3332,6 +3333,12 @@ export interface SystemInfoSample {
    * queried and reported no FRUs, which the persist layer treats as "wipe".
    */
   physicalEntities?: PhysicalEntitySample[];
+  /**
+   * Switch MAC forwarding database. Same undefined/[] contract: undefined
+   * means not collected or the device answers no FDB table at all, `[]` means
+   * a bridge that currently has nothing in its table.
+   */
+  macTable?: FdbEntry[];
   ipsecTunnels?: IpsecTunnelSample[];
   /**
    * SD-WAN Performance SLA health-check readings. `undefined` means the
@@ -5289,6 +5296,14 @@ const OID = {
   // ENTITY-MIB entPhysicalTable inventory columns (RFC 4133). Walked on the
   // heavy cadence only — a transceiver's serial changes when someone swaps it,
   // not on a poll interval.
+  // BRIDGE-MIB / Q-BRIDGE-MIB forwarding database (RFC 4188 / 4363).
+  // dot1dBasePortIfIndex is the basePort -> ifIndex join BOTH FDB tables need:
+  // dot1qTpFdbPort and dot1dTpFdbPort report a dot1dBasePort, never an ifIndex.
+  dot1dBasePortIfIndex:   "1.3.6.1.2.1.17.1.4.1.2",
+  dot1qTpFdbPort:         "1.3.6.1.2.1.17.7.1.2.2.1.2",
+  dot1qTpFdbStatus:       "1.3.6.1.2.1.17.7.1.2.2.1.3",
+  dot1dTpFdbPort:         "1.3.6.1.2.1.17.4.3.1.2",
+  dot1dTpFdbStatus:       "1.3.6.1.2.1.17.4.3.1.3",
   entPhysicalClass:       "1.3.6.1.2.1.47.1.1.1.1.5",
   entPhysicalName:        "1.3.6.1.2.1.47.1.1.1.1.7",
   entPhysicalHardwareRev: "1.3.6.1.2.1.47.1.1.1.1.8",
@@ -6412,6 +6427,123 @@ async function persistPhysicalEntities(assetId: string, rows: PhysicalEntitySamp
   ]);
 }
 
+/**
+ * Cap per asset. A single 48-port access switch routinely holds a few thousand
+ * FDB entries; a distribution switch can hold tens of thousands. The cap keeps
+ * one device from dominating a scrape and the table, and truncation is WARNED
+ * rather than silent because a partial table makes the per-port MAC counts --
+ * and therefore any uplink inference drawn from them -- quietly wrong.
+ */
+const MAC_TABLE_ROW_CAP = 4000;
+
+/**
+ * Walk the switch forwarding database.
+ *
+ * Prefers Q-BRIDGE-MIB `dot1qTpFdbTable`, which a VLAN-aware switch populates
+ * and which carries the VLAN in its index; falls back to BRIDGE-MIB
+ * `dot1dTpFdbTable` for switches that only answer the older table (those rows
+ * have no VLAN dimension at all, hence a null vlanId rather than a guess).
+ *
+ * Returns undefined when the device answers neither table, so the caller can
+ * distinguish "not a bridge" from "a bridge with an empty table" — the same
+ * undefined-preserves / []-wipes contract LLDP uses.
+ */
+async function collectMacTableSnmp(
+  session: any,
+  ifNameByIndex: ReadonlyMap<string, string>,
+): Promise<FdbEntry[] | undefined> {
+  // The basePort -> ifIndex join both tables depend on. Without it every MAC
+  // would be attributed to whatever interface sits at that ifIndex, which is
+  // reliably wrong wherever the two numbering schemes differ.
+  const basePortWalk = await snmpWalk(session, OID.dot1dBasePortIfIndex).catch(() => new Map());
+  const basePortToIfIndex = new Map<string, number>();
+  for (const [basePort, vb] of basePortWalk.entries()) {
+    const idx = snmpVbToNumber(vb);
+    if (idx != null) basePortToIfIndex.set(basePort, idx);
+  }
+  const ifNameByBasePort = basePortToIfName(basePortToIfIndex, ifNameByIndex);
+
+  let ports = await snmpWalk(session, OID.dot1qTpFdbPort).catch(() => new Map());
+  let statuses = await snmpWalk(session, OID.dot1qTpFdbStatus).catch(() => new Map());
+  if (ports.size === 0) {
+    ports = await snmpWalk(session, OID.dot1dTpFdbPort).catch(() => new Map());
+    statuses = await snmpWalk(session, OID.dot1dTpFdbStatus).catch(() => new Map());
+  }
+  if (ports.size === 0) return undefined;
+
+  const out: FdbEntry[] = [];
+  const seen = new Set<string>();
+  let dropped = 0;
+  for (const [suffix, portVb] of ports.entries()) {
+    const parsed = parseFdbIndex(suffix);
+    if (!parsed) continue;
+    const status = fdbStatusLabel(snmpVbToNumber(statuses.get(suffix)));
+    if (!fdbStatusIsUsable(status)) continue;
+
+    // The unique key is (asset, mac, vlan) and NULLs compare distinct in a
+    // Postgres unique index, so de-duplicate here rather than relying on it.
+    const key = `${parsed.macAddress}|${parsed.fdbId ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (out.length >= MAC_TABLE_ROW_CAP) { dropped++; continue; }
+    const basePort = snmpVbToNumber(portVb);
+    out.push({
+      macAddress: parsed.macAddress,
+      vlanId:     parsed.fdbId,
+      basePort:   basePort ?? null,
+      // Null when the join failed; basePort is retained above so the entry is
+      // still identifiable instead of appearing to belong to no port.
+      ifName:     basePort != null ? (ifNameByBasePort.get(basePort) ?? null) : null,
+      status,
+    });
+  }
+  if (dropped > 0) {
+    logger.warn({ dropped, cap: MAC_TABLE_ROW_CAP }, "MAC forwarding table truncated");
+  }
+  return out;
+}
+
+/**
+ * Full-replace an asset's forwarding database. Delete-replace, like
+ * persistLldpNeighbors — an FDB entry ages out on the switch in minutes, so
+ * there is no history worth keeping.
+ *
+ * `matchedAssetId` resolves through the SAME cached MAC index LLDP matching
+ * uses: at a few thousand rows per switch a per-row lookup would dominate the
+ * write.
+ */
+async function persistMacTable(assetId: string, rows: FdbEntry[]): Promise<void> {
+  const index = await buildLldpAssetMatchIndex();
+  const now = new Date();
+  const existing = await prisma.assetMacTableEntry.findMany({
+    where: { assetId },
+    select: { macAddress: true, vlanId: true, firstSeen: true },
+  });
+  const prior = new Map(existing.map((e) => [`${e.macAddress}|${e.vlanId ?? ""}`, e.firstSeen]));
+
+  await prisma.$transaction([
+    prisma.assetMacTableEntry.deleteMany({ where: { assetId } }),
+    ...(rows.length > 0
+      ? [prisma.assetMacTableEntry.createMany({
+          data: rows.map((r) => ({
+            assetId,
+            macAddress: r.macAddress,
+            vlanId:     r.vlanId,
+            basePort:   r.basePort,
+            ifName:     r.ifName,
+            status:     r.status,
+            matchedAssetId: index.byMac.get(r.macAddress) ?? null,
+            // Preserved so "this device has been on this switch since..." holds
+            // across the delete-replace.
+            firstSeen: prior.get(`${r.macAddress}|${r.vlanId ?? ""}`) ?? now,
+            lastSeen:  now,
+          })),
+        })]
+      : []),
+  ]);
+}
+
 async function collectSystemInfoSnmp(
   host: string,
   config: Record<string, unknown>,
@@ -6517,6 +6649,7 @@ async function collectSystemInfoSnmp(
     // to the legacy 32-bit columns.
     const interfaces: InterfaceSample[] = [];
     let physicalEntities: PhysicalEntitySample[] | undefined;
+    let macTable: FdbEntry[] | undefined;
     const endIfaces = startPhase("systeminfo.snmp.interfaces_walk");
     try {
       const [
@@ -6605,6 +6738,13 @@ async function collectSystemInfoSnmp(
       // module's serial changes on a swap, not on a poll.
       physicalEntities = await collectPhysicalEntitiesSnmp(session, poeIfNames, opts.manufacturer)
         .catch(() => undefined);
+
+      // Forwarding database — switch-class only. Every bridge answers this
+      // table, but a server or firewall would return nothing useful for a
+      // walk that can run to thousands of rows, so the cost is not spent.
+      if (opts.assetType === "switch") {
+        macTable = await collectMacTableSnmp(session, poeIfNames).catch(() => undefined);
+      }
     } catch { /* fall through */ }
     endIfaces({ interfaces: interfaces.length });
 
@@ -6641,6 +6781,7 @@ async function collectSystemInfoSnmp(
       interfaces,
       storage,
       physicalEntities,
+      macTable,
       lldpNeighbors,
       lldpSource: opts.includeLldp !== false ? "snmp" : undefined,
       wirelessStations,
@@ -7565,6 +7706,14 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     const endEnt = startPhase("systeminfo.persist.physical_entities");
     await persistPhysicalEntities(assetId, d.physicalEntities);
     endEnt({ entities: d.physicalEntities.length });
+    stopWrite();
+  }
+  // Forwarding database. Same undefined/[] contract again.
+  if (Array.isArray(d.macTable)) {
+    const stopWrite = startSampleWriteTimer("asset_mac_table_entries");
+    const endMac = startPhase("systeminfo.persist.mac_table");
+    await persistMacTable(assetId, d.macTable);
+    endMac({ entries: d.macTable.length });
     stopWrite();
   }
   // Wireless stations (FortiAP only). Same undefined/[] semantics as LLDP —

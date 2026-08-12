@@ -1,0 +1,138 @@
+/**
+ * src/utils/macForwarding.ts
+ *
+ * Decoding for the switch MAC forwarding database (the CAM table), from
+ * Q-BRIDGE-MIB `dot1qTpFdbTable` (RFC 4363) and BRIDGE-MIB `dot1dTpFdbTable`
+ * (RFC 4188).
+ *
+ * Two things make this fiddly enough to be worth isolating and testing:
+ *
+ *   1. **The MAC is in the OID index, not a column.** Both tables index by the
+ *      address itself as six decimal sub-identifiers — `dot1qTpFdbTable` after
+ *      a leading FDB id, `dot1dTpFdbTable` alone. There is no "macAddress"
+ *      column to read.
+ *   2. **The port value is a dot1dBasePort, not an ifIndex.** Unlike PoE, the
+ *      join is defined by the MIB (`dot1dBasePortIfIndex`), so it is reliable —
+ *      but it must actually be performed, and forgetting it silently attributes
+ *      every MAC to the wrong interface.
+ *
+ * Dependency-free so the whole decision table unit-tests directly.
+ */
+
+/** `dot1dTpFdbStatus` / `dot1qTpFdbStatus`. */
+export function fdbStatusLabel(raw: number | null | undefined): string {
+  switch (raw) {
+    case 1:  return "other";
+    case 2:  return "invalid";
+    case 3:  return "learned";
+    case 4:  return "self";
+    case 5:  return "mgmt";
+    default: return "other";
+  }
+}
+
+/**
+ * Statuses worth storing.
+ *
+ * `invalid(2)` is an aged-out entry the agent has not reaped yet — storing it
+ * would put MACs on ports they have already left. `learned(3)` is a real
+ * endpoint sighting and `self(4)` is the switch's own address, which is
+ * precisely what identifies a peer switch across a trunk; `mgmt(5)` is a
+ * configured static entry and is equally real.
+ */
+export function fdbStatusIsUsable(status: string): boolean {
+  return status === "learned" || status === "self" || status === "mgmt";
+}
+
+/**
+ * Decode a MAC from six decimal OID sub-identifiers into colon-uppercase.
+ * Returns null when the parts are not six valid octets.
+ */
+export function macFromOidParts(parts: readonly string[]): string | null {
+  if (parts.length !== 6) return null;
+  const octets: string[] = [];
+  for (const p of parts) {
+    const n = Number(p);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+    octets.push(n.toString(16).toUpperCase().padStart(2, "0"));
+  }
+  return octets.join(":");
+}
+
+export interface FdbIndex {
+  /** dot1qFdbId — the VLAN/filtering-database id. null on the BRIDGE-MIB table. */
+  fdbId: number | null;
+  macAddress: string;
+}
+
+/**
+ * Parse a walk suffix from either FDB table.
+ *
+ * `dot1qTpFdbTable` is INDEX { dot1qFdbId, dot1qTpFdbAddress } → 7 components.
+ * `dot1dTpFdbTable` is INDEX { dot1dTpFdbAddress } → 6 components.
+ *
+ * The component COUNT is what distinguishes them, which is why the caller does
+ * not need to tell us which table a row came from.
+ */
+export function parseFdbIndex(suffix: string): FdbIndex | null {
+  const parts = suffix.split(".").filter((p) => p !== "");
+  if (parts.length === 7) {
+    const fdbId = Number(parts[0]);
+    const mac = macFromOidParts(parts.slice(1));
+    if (!Number.isInteger(fdbId) || !mac) return null;
+    return { fdbId, macAddress: mac };
+  }
+  if (parts.length === 6) {
+    const mac = macFromOidParts(parts);
+    return mac ? { fdbId: null, macAddress: mac } : null;
+  }
+  return null;
+}
+
+/**
+ * Build dot1dBasePort → ifName by composing the two maps the scrape already
+ * has: `dot1dBasePortIfIndex` (basePort → ifIndex) and the IF-MIB walk
+ * (ifIndex → name).
+ *
+ * A basePort whose ifIndex is unknown is omitted rather than guessed; the
+ * caller keeps the raw basePort on the row so the entry stays visible.
+ */
+export function basePortToIfName(
+  basePortToIfIndex: ReadonlyMap<string, number>,
+  ifNameByIndex: ReadonlyMap<string, string>,
+): Map<number, string> {
+  const out = new Map<number, string>();
+  for (const [basePortRaw, ifIndex] of basePortToIfIndex.entries()) {
+    const basePort = Number(basePortRaw);
+    if (!Number.isInteger(basePort)) continue;
+    const name = ifNameByIndex.get(String(ifIndex));
+    if (name) out.set(basePort, name);
+  }
+  return out;
+}
+
+/** One decoded forwarding-database entry, before asset matching. */
+export interface FdbEntry {
+  macAddress: string;
+  vlanId: number | null;
+  basePort: number | null;
+  ifName: string | null;
+  status: string;
+}
+
+/**
+ * Per-port MAC counts — the single number that separates an access port (one
+ * endpoint) from an uplink or trunk (many), and the basis of any topology
+ * inference drawn from this table.
+ *
+ * Counts `learned` entries only: a port's own `self` address says nothing about
+ * what is reachable through it.
+ */
+export function macCountsByPort(entries: readonly FdbEntry[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const e of entries) {
+    if (e.status !== "learned" || !e.ifName) continue;
+    out.set(e.ifName, (out.get(e.ifName) ?? 0) + 1);
+  }
+  return out;
+}

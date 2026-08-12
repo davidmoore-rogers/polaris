@@ -953,6 +953,8 @@ model Asset {
   // the back-link for the switch on the far end of each ICL leg.
   mclagPeers             AssetMclagPeer[]         @relation("AssetMclagPeers")
   physicalEntities       AssetPhysicalEntity[]    @relation("AssetPhysicalEntities")
+  macTableEntries        AssetMacTableEntry[]     @relation("AssetMacTableEntries")
+  macTableMatches        AssetMacTableEntry[]     @relation("AssetMacTableMatch")
   mclagPeerMatches       AssetMclagPeer[]         @relation("AssetMclagPeerMatch")
   mibFiles               MibFile[]                @relation("MibFilesOnAsset")
   sources                AssetSource[]
@@ -1784,6 +1786,60 @@ model AssetPhysicalEntity {
   @@index([assetId])
   @@index([assetId, entClass])
   @@map("asset_physical_entities")
+}
+
+// Layer-2 MAC forwarding database (the switch's CAM table), from Q-BRIDGE-MIB
+// dot1qTpFdbTable (RFC 4363, VLAN-aware) with a BRIDGE-MIB dot1dTpFdbTable
+// fallback (RFC 4188) for switches that only answer the older table.
+//
+// CURRENT-STATE, delete-replaced per scrape -- the AssetLldpNeighbor pattern.
+// An FDB entry ages out on the switch in minutes; storing history would be a
+// firehose answering a question ("which port was this MAC on an hour ago")
+// that the switch itself cannot answer either.
+//
+// Both source tables report a **dot1dBasePort**, NOT an ifIndex. The join runs
+// through dot1dBasePortIfIndex and then the scrape's own ifIndex->ifName map;
+// unlike the PoE correlation this join is defined by the MIB and reliable.
+// `basePort` is kept alongside `ifName` so an unresolved row is still visible
+// rather than silently dropped.
+//
+// Rows are capped per asset (a single access switch can hold thousands) with a
+// loud truncation warning -- a partial table that looks complete would make the
+// per-port MAC counts, and therefore any uplink inference drawn from them, wrong.
+model AssetMacTableEntry {
+  id      String @id @default(uuid())
+  assetId String
+  asset   Asset  @relation("AssetMacTableEntries", fields: [assetId], references: [id], onDelete: Cascade)
+
+  /// Normalized colon-uppercase (AA:BB:CC:DD:EE:FF), matching AssetWirelessStation.
+  macAddress String
+  /// dot1qFdbId / VLAN the entry was learned in. NULL on the BRIDGE-MIB fallback,
+  /// which has no VLAN dimension at all.
+  vlanId     Int?
+  /// dot1dBasePort as reported. Retained so a row whose ifIndex join failed is
+  /// still identifiable instead of appearing to belong to no port.
+  basePort   Int?
+  /// Resolved interface name. NULL when the basePort->ifIndex->ifName join failed.
+  ifName     String?
+  /// dot1dTpFdbStatus: "learned" | "self" | "mgmt" | "invalid" | "other".
+  /// The distinction matters: only `learned` is a real endpoint sighting, and
+  /// `self` is the switch's own address, which is what identifies a peer switch.
+  status     String
+
+  /// Resolved from the MAC against the asset inventory, via the same cached
+  /// index LLDP matching uses.
+  matchedAssetId String?
+  matchedAsset   Asset?  @relation("AssetMacTableMatch", fields: [matchedAssetId], references: [id], onDelete: SetNull)
+
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
+
+  @@unique([assetId, macAddress, vlanId])
+  @@index([assetId])
+  @@index([assetId, ifName])
+  @@index([macAddress])
+  @@index([matchedAssetId])
+  @@map("asset_mac_table_entries")
 }
 
 // Wireless stations connected to a FortiAP. Populated from SNMP

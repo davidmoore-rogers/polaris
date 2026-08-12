@@ -4400,6 +4400,12 @@ async function openViewModal(id) {
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) {
       tabs.push({ key: "sdwan", label: "SD-WAN", html: _assetSdwanTabHTML(a, sdwanRules, sdwanLinks, sdwanMembers) });
     }
+    // MAC Table tab — the switch's layer-2 forwarding database. Switch-class
+    // only, mirroring where the collector spends the walk; lazy-loaded on
+    // first click since it can carry a few thousand rows.
+    if (a.assetType === "switch") {
+      tabs.push({ key: "mactable", label: "MAC Table", html: _assetMacTableTabHTML(a.id) });
+    }
     // Services tab — merged unit + process inventory. Shows systemd units /
     // Windows services by default; an "Include processes" checkbox folds the
     // current-state process inventory into the same table. Lazy-loaded on first
@@ -4512,6 +4518,7 @@ async function openViewModal(id) {
     if (showSnmpWalkTab) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
+    if (a.assetType === "switch") _wireAssetMacTableTab(a.id);
     if (!isInfraProc) _wireAssetServicesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     if (permAtLeast("alerts", "read")) _loadAssetNotificationsTab(a.id);
@@ -18467,5 +18474,91 @@ async function bulkSetMonitoring(monitored) {
     showToast(err.message, "error");
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+
+// ─── MAC Table tab ─────────────────────────────────────────────────────────
+//
+// The switch's layer-2 forwarding database. Two views of the same fetch: the
+// per-port MAC counts (which distinguish an access port from an uplink at a
+// glance) and the entry list itself.
+
+function _assetMacTableTabHTML(assetId) {
+  return '<div id="asset-mactable-mount-' + escapeHtml(assetId) + '">' +
+    '<span class="empty-state">Loading…</span></div>';
+}
+
+function _wireAssetMacTableTab(assetId) {
+  var btn = document.querySelector('#asset-view-tabs .page-tab[data-tab="mactable"]');
+  if (!btn) return;
+  var loaded = false;
+  btn.addEventListener("click", function () {
+    if (loaded) return;
+    loaded = true;
+    _loadAssetMacTable(assetId);
+  });
+}
+
+async function _loadAssetMacTable(assetId) {
+  var mount = document.getElementById("asset-mactable-mount-" + assetId);
+  if (!mount) return;
+  try {
+    var data = await api.request("GET", "/assets/" + encodeURIComponent(assetId) + "/mac-table");
+    var entries = (data && data.entries) || [];
+    var counts = (data && data.portCounts) || {};
+    if (entries.length === 0) {
+      mount.innerHTML = '<span class="empty-state">No forwarding-database entries. ' +
+        'This is collected over SNMP on the system-info cadence; a switch polled ' +
+        'via its parent FortiGate reports none.</span>';
+      return;
+    }
+
+    // Uplink/access summary first — it is the reading of this table that
+    // matters most, and it is a single number per port.
+    var portRows = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
+    var summary = portRows.length === 0 ? "" :
+      '<h4 style="margin:0 0 0.4rem">MACs per port</h4>' +
+      '<div class="table-wrapper" style="margin-bottom:1rem;max-height:220px;overflow:auto">' +
+      '<table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+        '<th>Interface</th><th>Learned MACs</th><th>Reads as</th>' +
+      '</tr></thead><tbody>' +
+      portRows.map(function (p) {
+        var n = counts[p];
+        // One learned MAC is a directly-attached endpoint; many means the port
+        // faces other switches. This is a HINT, not a claim — a port with an
+        // IP phone and a PC behind it also shows two.
+        var reads = n === 1 ? "access port (one device)" : "uplink / trunk (" + n + " devices behind it)";
+        return '<tr><td class="mono">' + escapeHtml(p) + '</td>' +
+          '<td class="mono">' + n + '</td>' +
+          '<td style="color:var(--color-text-secondary)">' + escapeHtml(reads) + '</td></tr>';
+      }).join("") +
+      '</tbody></table></div>';
+
+    var dash = '<span style="color:var(--color-text-secondary)">—</span>';
+    mount.innerHTML = summary +
+      '<h4 style="margin:0 0 0.4rem">Forwarding database <span style="font-weight:400;color:var(--color-text-secondary)">(' + entries.length + ' entries)</span></h4>' +
+      '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+        '<th>MAC</th><th>VLAN</th><th>Interface</th><th>Status</th><th>Device</th>' +
+      '</tr></thead><tbody>' +
+      entries.map(function (e) {
+        var dev = e.matchedAsset
+          ? '<a href="#" class="asset-link" data-asset-id="' + escapeHtml(e.matchedAsset.id) + '">' +
+              escapeHtml(e.matchedAsset.hostname || e.matchedAsset.ipAddress || e.matchedAsset.id) + '</a>'
+          : dash;
+        return '<tr>' +
+          '<td class="mono">' + escapeHtml(e.macAddress) + '</td>' +
+          '<td class="mono">' + (e.vlanId != null ? e.vlanId : dash) + '</td>' +
+          // basePort is shown when the ifIndex join failed, so the entry stays
+          // identifiable rather than looking like it belongs to no port.
+          '<td class="mono">' + (e.ifName ? escapeHtml(e.ifName)
+            : (e.basePort != null ? '<span style="color:var(--color-text-secondary)">base port ' + e.basePort + '</span>' : dash)) + '</td>' +
+          '<td>' + escapeHtml(e.status) + '</td>' +
+          '<td>' + dev + '</td>' +
+        '</tr>';
+      }).join("") +
+      '</tbody></table></div>';
+  } catch (err) {
+    mount.innerHTML = '<span class="empty-state">Error: ' + escapeHtml(err.message || "failed to load") + '</span>';
   }
 }
