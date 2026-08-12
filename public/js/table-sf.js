@@ -401,11 +401,58 @@ TableSF.prototype.setColumnOptions = function (key, options) {
   this._updateMultiButtonLabel(th);
 };
 
+/**
+ * Nearest ancestor that makes a position:fixed descendant lay out against
+ * ITSELF instead of the viewport — transform / perspective / filter /
+ * backdrop-filter / will-change of those / contain all establish one (CSS
+ * Position, "containing block"). Returns null when there is none, which is the
+ * case on every ordinary list page.
+ *
+ * This exists because `.slideover` carries `transform: translateX(…)` for its
+ * slide animation and `.modal` a `translateY(…)` — and a transform still
+ * establishes the containing block at its identity value, so it applies while
+ * the panel sits fully open at translateX(0). Every filter popover inside the
+ * asset-details slide-over was therefore offset by the panel's own left edge and
+ * landed roughly half a screen right of its button (vertically correct, since
+ * the panel's top is 0). The gear's column chooser never showed the bug because
+ * it appends itself to <body>; these popovers can't — they live inside their
+ * <th>, which is where setColumnOptions / restoreFilterUI /
+ * _updateMultiButtonLabel all go looking for them — so the offset is subtracted
+ * here instead.
+ */
+TableSF._fixedHost = function (el) {
+  var n = el && el.parentElement;
+  while (n && n !== document.body && n !== document.documentElement) {
+    var cs = getComputedStyle(n);
+    if ((cs.transform && cs.transform !== "none") ||
+        (cs.perspective && cs.perspective !== "none") ||
+        (cs.filter && cs.filter !== "none") ||
+        (cs.backdropFilter && cs.backdropFilter !== "none") ||
+        /transform|perspective|filter/.test(cs.willChange || "") ||
+        /paint|layout|strict|content/.test(cs.contain || "")) {
+      return n;
+    }
+    n = n.parentElement;
+  }
+  return null;
+};
+
 TableSF.prototype._positionPopover = function (btn, pop) {
   var r = btn.getBoundingClientRect();
+  var top  = r.bottom + 2;
+  var left = r.left;
+  var host = TableSF._fixedHost(pop);
+  if (host) {
+    // The containing block is the host's PADDING box, so its border comes off
+    // too (.slideover has a 1px left border).
+    var hr  = host.getBoundingClientRect();
+    var hcs = getComputedStyle(host);
+    top  -= hr.top  + (parseFloat(hcs.borderTopWidth)  || 0);
+    left -= hr.left + (parseFloat(hcs.borderLeftWidth) || 0);
+  }
   pop.style.position = "fixed";
-  pop.style.top  = (r.bottom + 2) + "px";
-  pop.style.left = r.left + "px";
+  pop.style.top  = top + "px";
+  pop.style.left = left + "px";
   pop.style.minWidth = r.width + "px";
 };
 

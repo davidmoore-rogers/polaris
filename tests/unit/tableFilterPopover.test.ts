@@ -32,7 +32,7 @@ const TABLE_HTML = `
 let win: Window;
 let doc: Window["document"];
 
-function setup() {
+function setup(insideTransformedHost = false) {
   win = new Window();
   doc = win.document;
   g.window = win;
@@ -42,7 +42,7 @@ function setup() {
   g.escapeHtml = (s: unknown) =>
     String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-  doc.body.innerHTML = TABLE_HTML;
+  doc.body.innerHTML = insideTransformedHost ? `<div id="host">${TABLE_HTML}</div>` : TABLE_HTML;
   const src = readFileSync(resolve(__dirname, "../../public/js/table-sf.js"), "utf8");
   (0, eval)(src);
   return new (g as any).TableSF("tb", () => {});
@@ -104,5 +104,51 @@ describe("filter popover close wiring", () => {
     openPopover();
     fire("keydown", doc, { key: "Escape" });
     expect(isOpen()).toBe(false);
+  });
+});
+
+/**
+ * The popover is position:fixed, which is laid out against the viewport ONLY
+ * while no ancestor establishes a containing block for it. `.slideover` (asset
+ * details) and `.modal` both carry a transform for their open animation, and a
+ * transform establishes one even at its identity value — so every filter
+ * popover in the asset-details panel used to land roughly half a screen to the
+ * right of its button, vertically correct because the panel's top is 0.
+ */
+describe("filter popover positioning", () => {
+  const BTN = { left: 985, bottom: 120, width: 60 };
+
+  function stubRect(el: any, rect: Record<string, number>): void {
+    el.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 0, right: 0, width: 0, height: 0, ...rect });
+  }
+  function popStyle(): { top: string; left: string } {
+    const p = popover() as any;
+    return { top: p.style.top, left: p.style.left };
+  }
+
+  it("uses raw viewport coordinates on an ordinary page", () => {
+    stubRect(doc.querySelector(".sf-multi-button"), BTN);
+    openPopover();
+    expect(popStyle()).toEqual({ top: "122px", left: "985px" });
+  });
+
+  it("subtracts a transformed ancestor's padding-box origin", () => {
+    setup(true);
+    const host: any = doc.getElementById("host");
+    stubRect(host, { left: 880, top: 0 });
+    stubRect(doc.querySelector(".sf-multi-button"), BTN);
+    // happy-dom has no layout engine, so the transform + border that make this
+    // element a containing block are reported rather than computed.
+    const real = g.getComputedStyle;
+    g.getComputedStyle = (el: Element) => (el === host
+      ? { transform: "matrix(1, 0, 0, 1, 0, 0)", borderTopWidth: "0px", borderLeftWidth: "1px" }
+      : real(el));
+    try {
+      openPopover();
+      // 985 − 880 − 1px border, NOT 985: the button sits 104px into the panel.
+      expect(popStyle()).toEqual({ top: "122px", left: "104px" });
+    } finally {
+      g.getComputedStyle = real;
+    }
   });
 });
