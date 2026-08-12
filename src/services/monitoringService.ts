@@ -115,6 +115,7 @@ import {
   classifyEntitySensor,
   entityOperStatusToAlarm,
   entityTypeColumnTrusted,
+  pseOperStatusToAlarm,
 } from "../utils/hardwareSensors.js";
 import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
 import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
@@ -5306,6 +5307,14 @@ const OID = {
   entPhysicalMfgName:     "1.3.6.1.2.1.47.1.1.1.1.12",
   entPhysicalModelName:   "1.3.6.1.2.1.47.1.1.1.1.13",
   entPhysicalIsFRU:       "1.3.6.1.2.1.47.1.1.1.1.16",
+  // POWER-ETHERNET-MIB pethMainPseTable (RFC 3621) - the UNIT-level PSE:
+  // nominal budget, what is actually being delivered, and the PSE's own
+  // health bit. Indexed by pethMainPseGroupIndex (one group on a standalone
+  // switch, several on a stack/chassis). Note the extra pethMainPseObjects
+  // level in the chain: pethObjects(.1) -> .3 -> Table(.1) -> Entry(.1).
+  pethMainPsePower:            "1.3.6.1.2.1.105.1.3.1.1.2",
+  pethMainPseOperStatus:       "1.3.6.1.2.1.105.1.3.1.1.3",
+  pethMainPseConsumptionPower: "1.3.6.1.2.1.105.1.3.1.1.4",
   entPhySensorType:       "1.3.6.1.2.1.99.1.1.1.1",
   entPhySensorScale:      "1.3.6.1.2.1.99.1.1.1.2",
   entPhySensorPrecision:  "1.3.6.1.2.1.99.1.1.1.3",
@@ -6031,7 +6040,73 @@ function snmpMultiGet(session: any, oids: string[]): Promise<Map<string, unknown
   });
 }
 
+/**
+ * Unit-level PoE from pethMainPseTable, as hardware-sensor rows.
+ *
+ * Emitted as sensors rather than given their own table because that is exactly
+ * what they are - per-device readings with a name and a unit - and it means
+ * charts, rollups, retention and BOTH automation metrics work with no new
+ * code: `hwSensorValue` for "budget nearly exhausted" and `hwSensorAlarm` for
+ * the PSE's own faulty bit.
+ *
+ * `pethMainPseUsageThreshold` is deliberately not collected: it is a
+ * configured threshold, not a reading, and storing config as a time series
+ * would just be a flat line.
+ *
+ * Rows are suffixed with the group index only when a device reports more than
+ * one PSE, so a standalone switch gets stable, clean sensor names - the name
+ * is the automation dimension and the rollup series key, so it must not churn.
+ */
+async function collectPoePseSnmp(session: any): Promise<HardwareSensorSample[]> {
+  const [powers, consumptions, statuses] = await Promise.all([
+    snmpWalk(session, OID.pethMainPsePower).catch(() => new Map()),
+    snmpWalk(session, OID.pethMainPseConsumptionPower).catch(() => new Map()),
+    snmpWalk(session, OID.pethMainPseOperStatus).catch(() => new Map()),
+  ]);
+  const indexes = new Set<string>([...powers.keys(), ...consumptions.keys(), ...statuses.keys()]);
+  if (indexes.size === 0) return [];
+
+  const multi = indexes.size > 1;
+  const out: HardwareSensorSample[] = [];
+  for (const idx of indexes) {
+    const suffix = multi ? ` (PSE ${idx})` : "";
+    const alarmStatus = pseOperStatusToAlarm(snmpVbToNumber(statuses.get(idx)));
+    const budget = snmpVbToNumber(powers.get(idx));
+    const used   = snmpVbToNumber(consumptions.get(idx));
+    // The alarm rides the consumption row so a PSE fault surfaces on the
+    // reading an operator actually watches, rather than on a static budget.
+    if (used != null) {
+      out.push({ sensorName: `PoE Power Consumption${suffix}`, sensorClass: "poe", value: used, unit: "W", alarmStatus });
+    }
+    if (budget != null) {
+      out.push({ sensorName: `PoE Power Budget${suffix}`, sensorClass: "poe", value: budget, unit: "W", alarmStatus: null });
+    }
+  }
+  return out;
+}
+
+/**
+ * Hardware sensors, plus unit-level PoE appended for any device that has a PSE.
+ *
+ * The append lives in a wrapper because the core collector has three separate
+ * return paths (Fortinet table / ENTITY-SENSOR / vendor scalar) and PoE is
+ * orthogonal to which of them produced the sensor rows - a FortiSwitch takes
+ * the ENTITY-SENSOR path and still has a PSE.
+ */
 async function collectHardwareSensorsSnmp(
+  session: any,
+  manufacturer?: string | null,
+  profile?: VendorTelemetryProfile | null,
+  scope?: { manufacturer?: string | null; model?: string | null },
+): Promise<HardwareSensorSample[]> {
+  const [sensors, pse] = await Promise.all([
+    collectHardwareSensorsSnmpCore(session, manufacturer, profile, scope),
+    collectPoePseSnmp(session).catch(() => [] as HardwareSensorSample[]),
+  ]);
+  return pse.length > 0 ? [...sensors, ...pse] : sensors;
+}
+
+async function collectHardwareSensorsSnmpCore(
   session: any,
   manufacturer?: string | null,
   profile?: VendorTelemetryProfile | null,

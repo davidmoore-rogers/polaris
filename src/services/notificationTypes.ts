@@ -286,7 +286,7 @@ const dimensionFilterSchema = z
     // src/utils/hardwareSensors.ts. A class missing here is unselectable in the
     // wizard even once samples carry it, which is what makes "alert on optics"
     // impossible to author.
-    sensorClass: z.enum(["temperature", "fan", "voltage", "current", "optical", "power", "disk", "other"]).optional(),
+    sensorClass: z.enum(["temperature", "fan", "voltage", "current", "optical", "poe", "power", "disk", "other"]).optional(),
     // One NAMED sensor rather than a whole class: a firewall reports a dozen
     // temperature sensors ("CPU ON-DIE Temperature", "TMP1 External
     // Temperature", per-PHY dies), and an operator alerting on the CPU die does

@@ -635,7 +635,7 @@ async function openAutomationWizard(existing) {
       triggerSentence = _sent.triggerSentence, resetSentence = _sent.resetSentence,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / current / optical / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
+  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
   // populate and whether each is a closed enum (`strict` → select-only, e.g.
   // sensorClass) or a substring match (→ suggestions, typing still allowed);

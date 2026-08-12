@@ -6976,6 +6976,7 @@ function _hwClassLabel(cls) {
     case "voltage":     return "Voltage";
     case "current":     return "Current";
     case "optical":     return "Optical";
+    case "poe":         return "PoE";
     case "power":       return "Power";
     case "disk":        return "Disk";
     default:            return "Other";
