@@ -42,6 +42,15 @@ export interface SparklineOptions {
   /** Window start/end in epoch ms, so the x-axis is the WINDOW, not the data. */
   from?: number;
   to?: number;
+  /**
+   * Spans (epoch ms) to shade red behind the plot — where a hardware sensor's
+   * own alarm bit was set. An alarm-triggered alert charts the sensor's VALUE,
+   * and this is what ties the two together: it shows whether the device raised
+   * its alarm because the reading moved, or while the reading sat still (a
+   * failed fan reads 0 RPM either way, but a PSU can alarm at a value that
+   * never changes).
+   */
+  alarmSpans?: Array<{ from: number; to: number }>;
 }
 
 const W = 520;
@@ -162,6 +171,18 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
     })
     .join("");
 
+  // Alarm bands sit BEHIND everything (drawn first) so the line stays readable
+  // over them. Clamped to the plot, and a zero-width span still gets ~2px so a
+  // single alarming sample is visible rather than invisible.
+  const alarmBands = (opts.alarmSpans ?? [])
+    .map((s) => {
+      const x1 = Math.max(PAD_L, Math.min(x(s.from), PAD_L + plotW));
+      const x2 = Math.max(PAD_L, Math.min(x(s.to), PAD_L + plotW));
+      const w = Math.max(2, x2 - x1);
+      return `<rect x="${x1.toFixed(1)}" y="${PAD_T}" width="${w.toFixed(1)}" height="${plotH}" fill="#dc2626" fill-opacity="0.13"/>`;
+    })
+    .join("");
+
   const pts = points.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`);
   const line = `<polyline fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${pts.join(" ")}"/>`;
   const area =
@@ -187,5 +208,5 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
     `<text x="${PAD_L}" y="${height - 5}" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">-60 min</text>` +
     `<text x="${width - PAD_R}" y="${height - 5}" text-anchor="end" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">now</text>`;
 
-  return head + grid + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;
+  return head + alarmBands + grid + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;
 }

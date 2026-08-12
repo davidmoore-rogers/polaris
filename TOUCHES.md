@@ -1774,6 +1774,11 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - EVERY failure degrades to the text summary and never throws: no samples, an unreadable asset, or a missing native resvg binding must not stop the alert from sending.
 - Plotted points are capped (`MAX_POINTS`) with the newest always kept — the alerting sample is the one that must survive downsampling.
 
+- The SENSOR chart is keyed on `Notification.dimension` (the engine's dimensionKey, which for both hwSensorValue and hwSensorAlarm is the bare sensor name) and is SKIPPED entirely without one — no query, and the token renders away rather than drawing an empty box on the ~all alerts that are not about a sensor.
+- An ALARM automation charts the sensor VALUE, with the device's own alarm periods shaded: the bit says something is wrong, the value says whether it climbed, dropped, or never moved.
+- Sensor values are converted for DISPLAY only (C→F per the branding setting), gated on each reading's own stored unit and never on its class — a fan's RPM and a rail's volts pass through. `sensorReadingDisplay` exists so the SENTENCE above the chart uses the same unit as the chart itself.
+- `chart.trigger` is an ALIAS resolved from `Notification.metric` via `chartTokenForMetric`; substitution tracks emitted cids so the chart it drew is not drawn again by its own token later in the body.
+
 **When changing this:** the `{chart.*}` tokens are DEFERRED — they must stay out of `buildTemplateContext` and out of `Notification.templateCtx` (see utils/notificationTemplate's `DEFERRED_TOKENS`), or the substitution here finds nothing. If you add a chart, add its token in three places: `CHART_TOKENS`, `TEMPLATE_VARIABLES`, and `DEFERRED_TOKENS`.
 
 ---

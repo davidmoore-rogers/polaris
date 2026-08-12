@@ -49,6 +49,7 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{severity}", label: "Severity", description: "Rule severity (e.g. warning)", group: "notification" },
   { token: "{severity.upper}", label: "SEVERITY", description: "Rule severity upper-cased (e.g. WARNING)", group: "notification" },
   { token: "{severity.color}", label: "Severity color", description: "Hex colour for this severity (e.g. #d97706) — for styling an HTML email", group: "notification" },
+  { token: "{chart.sensor}", label: "Sensor chart", description: "Last hour of the HARDWARE SENSOR this alert fired on, with the device's own alarm periods shaded — inline chart (HTML) or a now/avg/peak line (plain text). Renders away entirely unless the automation triggers on a hardware sensor's value or its alarm", group: "notification" },
   { token: "{chart.cpu}", label: "CPU chart", description: "Last hour of CPU as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
   { token: "{chart.memory}", label: "Memory chart", description: "Last hour of memory as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
   { token: "{chart.responseTime}", label: "Response-time chart", description: "Last hour of probe response time as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
@@ -58,6 +59,7 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{asset.link}", label: "Open asset", description: "URL that opens this device in Polaris (empty if POLARIS_PUBLIC_URL unset)", group: "asset" },
   { token: "{asset.connectedSwitch}", label: "Connected switch", description: "Switch/port the device was last seen on, e.g. FS-248E-01/port15", group: "asset" },
   { token: "{asset.connectedAp}", label: "Connected AP", description: "Access point the device was last seen on", group: "asset" },
+  { token: "{trigger.summary}", label: "What fired", description: "The trigger in the builder's own words, with the observed value — e.g. \"Response time (median over 5 minutes) is 760 ms\"", group: "notification" },
   { token: "{rule}", label: "Rule name", description: "Name of the triggering rule", group: "rule" },
   { token: "{rule.description}", label: "Rule description", description: "Description of the triggering rule", group: "rule" },
   { token: "{asset.ip}", label: "Asset IP", description: "Primary IP address", group: "asset" },
@@ -126,6 +128,8 @@ export interface TemplateContextParts {
   link?: string | null;
   ruleName?: string;
   ruleDescription?: string | null;
+  /** "Response time (median over 5 minutes) is 760 ms" — utils/triggerSummary. */
+  triggerSummary?: string;
   assetDetail?: AssetTemplateDetail | null;
   escalationTier?: number;
   escalationElapsed?: string;
@@ -157,6 +161,7 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "link": str(parts.link),
     "rule": str(parts.ruleName),
     "rule.description": str(parts.ruleDescription),
+    "trigger.summary": str(parts.triggerSummary),
     "asset.ip": str(a?.ipAddress),
     "asset.mac": str(a?.macAddress),
     "asset.type": str(a?.assetType),
@@ -193,6 +198,7 @@ const TOKEN_RE = /\{([a-zA-Z][\w.]*)\}/g;
  */
 export const DEFERRED_TOKENS: ReadonlySet<string> = new Set([
   "ack",
+  "chart.sensor",
   "chart.cpu",
   "chart.memory",
   "chart.responseTime",

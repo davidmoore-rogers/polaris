@@ -34,6 +34,8 @@ export const DEFAULT_ALERT_SUBJECT = "[{severity.upper}] {asset} — {rule}";
  * rather than hidden behind anchors.
  */
 export const DEFAULT_ALERT_TEXT = [
+  "{severity.upper}: {trigger.summary}",
+  "",
   "{message}",
   "",
   "Device:     {asset}",
@@ -44,6 +46,8 @@ export const DEFAULT_ALERT_TEXT = [
   "Severity:   {severity}",
   "Raised:     {time}",
   "",
+  "{chart.trigger}",
+  "{chart.sensor}",
   "{chart.cpu}",
   "{chart.memory}",
   "{chart.responseTime}",
@@ -66,7 +70,12 @@ export const DEFAULT_ALERT_HTML = [
   '<tr><td style="padding:18px 22px 6px">',
   '<div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:{severity.color};font-weight:700">{severity} alert</div>',
   '<div style="font-size:19px;font-weight:600;color:#1f2430;margin-top:4px">{asset}</div>',
-  '<div style="font-size:15px;color:#374151;margin-top:8px">{message}</div>',
+  // What fired, in the builder's own words, with the reading in it. This leads
+  // because "Response time (median over 5 minutes) is 760 ms" is the sentence
+  // the operator wrote the automation in — the raw message underneath it reads
+  // like a log line.
+  '<div style="font-size:16px;font-weight:600;color:{severity.color};margin-top:8px">{trigger.summary}</div>',
+  '<div style="font-size:14px;color:#6b7280;margin-top:4px">{message}</div>',
   "</td></tr>",
   // Facts
   '<tr><td style="padding:10px 22px 0">',
@@ -80,9 +89,14 @@ export const DEFAULT_ALERT_HTML = [
   '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Raised</td><td style="padding:3px 0">{time}</td></tr>',
   "</table>",
   "</td></tr>",
-  // Charts — the last hour of the three metrics that explain most alerts.
+  // Charts — the last hour of the metrics that explain most alerts. The sensor
+  // chart leads because when it renders at all, it IS what the alert is about:
+  // a hardware-sensor automation (value or alarm) charts the sensor it fired
+  // on. It renders away entirely for every other kind of alert.
   '<tr><td style="padding:14px 22px 0">',
   '<div style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#6b7280;font-weight:700;margin-bottom:2px">Last hour</div>',
+  "{chart.trigger}",
+  "{chart.sensor}",
   "{chart.cpu}",
   "{chart.memory}",
   "{chart.responseTime}",

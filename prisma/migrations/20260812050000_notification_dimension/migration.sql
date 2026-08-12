@@ -1,0 +1,20 @@
+-- Which sub-asset dimension an alert is about, snapshotted on the alert row.
+--
+-- The engine already keys its state machine per dimension
+-- (NotificationRuleState.dimensionKey — for a hardware-sensor automation that
+-- is the bare sensor name, e.g. "CPU ON-DIE Temperature"), but the alert row
+-- itself never recorded it. The message text mentions it in passing and the
+-- template context carries it only when the rule happens to have
+-- emailComposition or an escalation chain.
+--
+-- The alert EMAIL is rendered at delivery time, minutes after the reading that
+-- caused it is out of scope, so anything that wants to say something about the
+-- triggering dimension has to read it off the notification. That is what the
+-- last-hour hardware-sensor chart needs: without this column it could not tell
+-- which of a firewall's dozen temperature sensors the alert was raised for,
+-- and would have to guess or plot nothing.
+--
+-- NULL for whole-device alerts, for composite triggers (which deliberately
+-- fire per ASSET at dimensionKey "") and for event/change rules, which have no
+-- dimension at all.
+ALTER TABLE "notifications" ADD COLUMN "dimension" TEXT;

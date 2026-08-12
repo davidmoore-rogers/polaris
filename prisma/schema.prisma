@@ -3668,6 +3668,20 @@ model Notification {
   // column is the only way to tell a test alert from a rule-less one.
   testRun Boolean @default(false)
 
+  // The sub-asset dimension this alert is ABOUT, exactly as the engine keyed
+  // its state row (NotificationRuleState.dimensionKey): a hardware sensor's
+  // name, an interface, a mount, a tunnel. NULL for whole-device alerts,
+  // composites (which fire per asset at dimensionKey "") and event/change
+  // rules. Persisted because the alert email is rendered at DELIVERY time,
+  // long after the reading is gone — without it the sensor chart could not
+  // know which of a firewall's dozen sensors the alert was raised for.
+  dimension String?
+
+  // The metric that fired ("responseTimeMs", "hwSensorValue", …). Read at
+  // DELIVERY time so the chart explaining THIS alert leads the email — the
+  // body is rendered long after the rule that produced it was in hand.
+  metric    String?
+
   deliveries NotificationDelivery[]
   ackTokens  NotificationAckToken[]
 

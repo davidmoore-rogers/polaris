@@ -52,9 +52,20 @@ describe("the default alert email is a template, not string building", () => {
     expect(DEFAULT_ALERT_TEXT).toContain("{asset.link}");
   });
 
-  it("asks for all three last-hour charts", () => {
-    expect(chartTokensIn(DEFAULT_ALERT_HTML)).toEqual(new Set(["chart.cpu", "chart.memory", "chart.responseTime"]));
-    expect(chartTokensIn(DEFAULT_ALERT_TEXT)).toEqual(new Set(["chart.cpu", "chart.memory", "chart.responseTime"]));
+  it("asks for every last-hour chart, sensor included", () => {
+    // The sensor chart is requested unconditionally; it renders away for the
+    // alerts that aren't about a hardware sensor (buildAlertCharts drops it
+    // when the notification carries no sensor dimension), so the template
+    // needs no conditional and the operator can move or delete it like any
+    // other token.
+    const all = new Set(["chart.trigger", "chart.sensor", "chart.cpu", "chart.memory", "chart.responseTime"]);
+    expect(chartTokensIn(DEFAULT_ALERT_HTML)).toEqual(all);
+    expect(chartTokensIn(DEFAULT_ALERT_TEXT)).toEqual(all);
+  });
+
+  it("leads the charts with the sensor — when it renders, it IS what fired", () => {
+    expect(DEFAULT_ALERT_HTML.indexOf("{chart.sensor}")).toBeLessThan(DEFAULT_ALERT_HTML.indexOf("{chart.cpu}"));
+    expect(DEFAULT_ALERT_TEXT.indexOf("{chart.sensor}")).toBeLessThan(DEFAULT_ALERT_TEXT.indexOf("{chart.cpu}"));
   });
 
   it("survives every mail client's rendering quirks: tables, inline styles, no remote assets", () => {
@@ -122,10 +133,13 @@ describe("pruneEmptyTextLines", () => {
 });
 
 describe("substituteChartTokens", () => {
-  const chart = (token: ChartToken, withPng: boolean): RenderedChart => ({
+  // hasData and attachment are DIFFERENT facts: "the device reported nothing"
+  // vs "it reported, but the rasterizer failed". The first is dropped from the
+  // email, the second still prints its numbers.
+  const chart = (token: ChartToken, withPng: boolean, hasData = true): RenderedChart => ({
     token,
     cid: `polaris-${token.replace(".", "-")}@polaris`,
-    hasData: withPng,
+    hasData,
     summary: "CPU (last hour): now 62%, avg 40%, peak 97%",
     attachment: withPng
       ? { cid: `polaris-${token.replace(".", "-")}@polaris`, filename: "c.png", contentType: "image/png", content: Buffer.from("x") }

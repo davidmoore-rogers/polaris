@@ -1,0 +1,15 @@
+-- Which metric an alert fired on, snapshotted on the alert row.
+--
+-- Sibling of `dimension` (added by the previous migration) and there for the
+-- same reason: the alert EMAIL is rendered at delivery time, after the rule and
+-- the reading are both out of hand. Without the metric the body cannot know
+-- which of its charts explains this alert, so a "slow response time"
+-- automation led with CPU and buried the response-time graph underneath it.
+--
+-- Reading it back is what resolves the `{chart.trigger}` token in the default
+-- email template: it renders whichever chart matches the metric, and the
+-- specific token for that same chart later in the body is skipped so the graph
+-- never appears twice.
+--
+-- NULL for event/change rules and composites, which fire on no single metric.
+ALTER TABLE "notifications" ADD COLUMN "metric" TEXT;

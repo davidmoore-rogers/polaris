@@ -55,6 +55,11 @@ interface DeliveryRow {
     severity: string;
     assetId: string | null;
     assetHostname: string | null;
+    /** The sub-asset dimension this alert is about — for a hardware-sensor
+     *  automation, the sensor name whose last hour the email charts. */
+    dimension: string | null;
+    /** The metric that fired — puts its chart first in the body. */
+    metric: string | null;
     triggeredAt: Date;
   };
 }
@@ -93,7 +98,7 @@ async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, ur
     const wanted = chartTokensIn(text, html);
     if (wanted.size > 0) {
       const charts = d.notification.assetId
-        ? await buildAlertCharts(d.notification.assetId, wanted)
+        ? await buildAlertCharts(d.notification.assetId, wanted, { sensorName: d.notification.dimension, metric: d.notification.metric })
         : new Map();
       text = substituteChartTokens(text, charts, { html: false });
       if (html) {
@@ -246,7 +251,7 @@ export async function drainPendingDeliveries(
       attempts: true,
       // assetId is what the last-hour charts query against — the hostname is a
       // fire-time snapshot and can't be joined back to sample rows.
-      notification: { select: { id: true, message: true, severity: true, assetId: true, assetHostname: true, triggeredAt: true } },
+      notification: { select: { id: true, message: true, severity: true, assetId: true, assetHostname: true, dimension: true, metric: true, triggeredAt: true } },
     },
   })) as DeliveryRow[];
 

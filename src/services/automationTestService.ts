@@ -30,10 +30,13 @@ import { logEvent } from "./eventLogService.js";
 import { logger } from "../utils/logger.js";
 import { executeActions } from "./automationActionService.js";
 import { drainPendingDeliveries } from "./notificationDeliveryService.js";
+import { sensorReadingDisplay } from "./alertChartService.js";
 import { buildTemplateContext } from "../utils/notificationTemplate.js";
 import { scopeRegionTagsOf } from "./notificationRecipientService.js";
 import type { AutomationAction, PreviewRuleInput, Severity } from "./notificationTypes.js";
 import { allRuleActionRefs } from "./notificationTypes.js";
+import { previewRule } from "./notificationEngine.js";
+import { triggerSummary } from "../utils/triggerSummary.js";
 
 export type TestMode = "self" | "recipients";
 export type TestTarget = "delivery" | "event";
@@ -105,6 +108,55 @@ export function selectTestActions(
   };
 }
 
+/**
+ * For a hardware-sensor draft, the sensor a test alert should be "about".
+ *
+ * Picks a sensor the device has actually reported in the last day AND that the
+ * draft's own dimensionFilter would match — the same predicate the engine uses
+ * (`hwSensorFilterMatches`), so the test can't chart a sensor the real
+ * automation would never fire on. Null for every other trigger, which is what
+ * makes the sensor chart render away in an ordinary test email.
+ */
+export interface TestReading {
+  assetId: string | null;
+  dimensionKey: string | null;
+  dimensionLabel: string | null;
+  value: number | string | boolean | null;
+}
+
+/**
+ * A REAL current reading for the draft, so a test email says what a real one
+ * would: which device, which sensor/interface/mount, and what the value is.
+ *
+ * This runs the engine's own `previewRule` — the same dry-run the wizard's
+ * "Test against current data" uses — rather than re-deriving per-metric
+ * queries here. Its matches come back sorted meets-first, so a test prefers a
+ * device that would actually fire, and falls back to any device reporting the
+ * metric at all. Null for event/change/composite drafts, which have no single
+ * reading to quote.
+ */
+async function resolveTestReading(rule: PreviewRuleInput): Promise<TestReading | null> {
+  const t = rule.trigger;
+  if (!t || (t.type !== "asset_metric" && t.type !== "host_metric" && t.type !== "asset_state")) return null;
+  try {
+    const preview = await previewRule(rule);
+    if (!preview.supported) return null;
+    const best = preview.matches.find((m) => m.assetId) ?? preview.matches[0];
+    if (!best) return null;
+    return {
+      assetId: best.assetId,
+      dimensionKey: best.dimensionKey ?? null,
+      dimensionLabel: best.dimension || null,
+      value: best.value,
+    };
+  } catch (err) {
+    // A test must still send when the dry-run can't resolve — it just won't be
+    // able to quote a number.
+    logger.warn({ err: (err as Error)?.message }, "test delivery: preview lookup failed");
+    return null;
+  }
+}
+
 /** The alert body a test produces — clearly a test, in the message itself. */
 function testMessage(ruleName: string, hostname: string | null): string {
   return `[TEST] ${ruleName || "Automation"} — delivery test${hostname ? ` for ${hostname}` : ""}`;
@@ -135,12 +187,28 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
     serialNumber: true, os: true, osVersion: true, department: true, assignedTo: true,
     lastSeenSwitch: true, lastSeenAp: true,
   } as const;
-  const asset = args.assetId
-    ? await prisma.asset.findUnique({ where: { id: args.assetId }, select: detailSelect })
+  // Prefer the device the draft would actually fire on: the test email then
+  // carries a real value and the real sensor/interface, rather than the
+  // alphabetically-first monitored asset that may report neither.
+  const reading = await resolveTestReading(rule);
+  const preferredId = args.assetId ?? reading?.assetId ?? null;
+  const asset = preferredId
+    ? await prisma.asset.findUnique({ where: { id: preferredId }, select: detailSelect })
     : await prisma.asset.findFirst({ where: { monitored: true }, select: detailSelect, orderBy: { hostname: "asc" } });
 
   const severity: Severity = rule.severity ?? "warning";
   const message = testMessage(rule.name, asset?.hostname ?? null);
+  // A hardware-sensor automation's email charts the sensor it fired on, so a
+  // TEST of one has to name a sensor too — otherwise the button can't show the
+  // operator the very thing they're testing. Pick a real sensor the chosen
+  // device reports that the draft's own filter would match.
+  const dimension = reading?.dimensionKey ?? null;
+  const metric = rule.trigger && (rule.trigger.type === "asset_metric" || rule.trigger.type === "host_metric") ? rule.trigger.metric : null;
+  // A sensor value is stated in the install's display unit, matching the chart
+  // below it — see sensorReadingDisplay.
+  const sensorShown = metric === "hwSensorValue" && asset && dimension
+    ? await sensorReadingDisplay(asset.id, dimension, reading?.value ?? null)
+    : null;
 
   const notif = await prisma.notification.create({
     data: {
@@ -153,6 +221,8 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
       severity,
       message,
       regionTags: [],
+      dimension,
+      metric,
     },
     select: { id: true },
   });
@@ -197,8 +267,18 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
     ruleName: rule.name,
     ruleDescription: rule.description ?? null,
     message,
-    metric: "test",
-    value: "—",
+    metric: metric ?? "test",
+    value: reading?.value == null ? "" : String(reading.value),
+    dimension: reading?.dimensionLabel ?? "",
+    // The same sentence a real fire produces, with the CURRENT reading in it —
+    // otherwise a test is the one email that can't say what the automation is
+    // actually about.
+    triggerSummary: triggerSummary({
+      trigger: rule.trigger as never,
+      value: sensorShown?.value ?? reading?.value ?? null,
+      dimensionLabel: reading?.dimensionLabel ?? null,
+      sensorUnit: sensorShown?.unit ?? null,
+    }),
     assetDetail: asset ? { ...asset, status: String(asset.status) } : null,
   });
 

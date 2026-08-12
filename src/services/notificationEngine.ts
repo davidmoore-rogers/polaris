@@ -26,6 +26,8 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { logEvent } from "./eventLogService.js";
+import { triggerSummary } from "../utils/triggerSummary.js";
+import { sensorReadingDisplay } from "./alertChartService.js";
 import { REGION_TAG_PREFIX } from "./notificationService.js";
 import {
   type Trigger,
@@ -641,6 +643,14 @@ function readingContextParts(rule: DbRule, reading: Reading, now: Date, composit
     link: notificationsPageUrl(),
     ruleName: rule.name,
     ruleDescription: rule.description,
+    // "Response time (median over 5 minutes) is 760 ms" — the wizard's own
+    // "When should it fire?" wording with the observed value in it, so the
+    // alert email says what the number means instead of "responseTimeMs = 760".
+    triggerSummary: triggerSummary({
+      trigger: trigger as never,
+      value: reading.value,
+      dimensionLabel: reading.dimLabel || null,
+    }),
   };
   if (trigger.type === "composite") {
     // No single metric/value/threshold exists — {metric} carries the
@@ -1527,6 +1537,9 @@ async function fire(
   const parts = readingContextParts(rule, reading, now, composite);
   parts.severity = severity; // band-resolved severity for the {severity} token
   const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
+  // State a sensor reading in the install's display unit, so the sentence
+  // agrees with the chart drawn underneath it in the email.
+  await applySensorUnitToSummary(rule, reading, ctx);
   const message = renderMessage(rule, reading, ctx);
   ctx["message"] = message;
   const notif = await prisma.notification.create({
@@ -1537,6 +1550,14 @@ async function fire(
       severity,
       message,
       regionTags: regionSnapshot(reading.tags),
+      // The dimension this alert is ABOUT — the same key the state row uses.
+      // For a hardware-sensor automation that's the bare sensor name, which is
+      // what lets the alert email chart THAT sensor at delivery time, long
+      // after this reading is gone. "" for whole-device and composite fires.
+      dimension: reading.dimKey || null,
+      // Which metric fired — the email leads with the chart that explains THIS
+      // alert (alertChartService.chartTokenForMetric).
+      metric: rule.trigger.type === "asset_metric" || rule.trigger.type === "host_metric" ? rule.trigger.metric : null,
       ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}),
     },
   });
@@ -1590,6 +1611,9 @@ async function applyBandTransition(
   const parts = readingContextParts(rule, reading, now);
   parts.severity = newSeverity;
   const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
+  // State a sensor reading in the install's display unit, so the sentence
+  // agrees with the chart drawn underneath it in the email.
+  await applySensorUnitToSummary(rule, reading, ctx);
   const message = renderMessage(rule, reading, ctx);
   ctx["message"] = message;
 
@@ -1692,6 +1716,34 @@ async function fireReset(
   const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
   ctx["message"] = `Resolved: ${rule.name} — ${ctx["asset"] || reading.hostname || "device"} ${reason}`;
   await enqueueAlertActions(st.notificationId, actions, ctx, rule, reading);
+}
+
+/**
+ * Re-render `{trigger.summary}` for a hardware-sensor reading with the sensor's
+ * own unit, converted to the install's display unit. Sensor readings are the
+ * one metric whose unit isn't knowable from the metric alone (a "hardware
+ * sensor value" is °C on one row and RPM on the next), and the email states the
+ * value right above a chart that already converts.
+ *
+ * Best-effort: any failure leaves the unit-less sentence the context already
+ * has.
+ */
+async function applySensorUnitToSummary(
+  rule: DbRule,
+  reading: Reading,
+  ctx: Record<string, string>,
+): Promise<void> {
+  const t = rule.trigger;
+  if (t.type !== "asset_metric" || t.metric !== "hwSensorValue") return;
+  if (!reading.assetId || !reading.dimKey) return;
+  const shown = await sensorReadingDisplay(reading.assetId, reading.dimKey, reading.value);
+  ctx["trigger.summary"] = triggerSummary({
+    trigger: t as never,
+    value: shown.value,
+    dimensionLabel: reading.dimLabel || null,
+    sensorUnit: shown.unit,
+  });
+  if (shown.value !== null && shown.value !== undefined) ctx["value"] = String(shown.value);
 }
 
 async function recover(
@@ -2043,7 +2095,12 @@ export async function evaluateAllNotificationRules(): Promise<void> {
 export interface PreviewMatch {
   assetId: string | null;
   hostname: string | null;
+  /** Display label, e.g. "CPU ON-DIE Temperature (temperature)". */
   dimension: string;
+  /** The RAW dimension key the engine keys state on (a bare sensor name, an
+   *  interface, a mount) — usable as a query argument without parsing the
+   *  label apart. */
+  dimensionKey?: string;
   value: number | string | boolean | null;
   meets: boolean;
   /** Hysteresis view (only when the draft has reset.mode=auto + clearThreshold):
@@ -2263,7 +2320,7 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
   const showHysteresis = input.reset.mode === "auto" && input.reset.clearThreshold != null;
   const matches: PreviewMatch[] = readings.map((r) => {
     const meets = readingMeets(trigger, r.value);
-    const base: PreviewMatch = { assetId: r.assetId || null, hostname: r.hostname, dimension: r.dimLabel, value: r.value, meets };
+    const base: PreviewMatch = { assetId: r.assetId || null, hostname: r.hostname, dimension: r.dimLabel, dimensionKey: r.dimKey, value: r.value, meets };
     if (banded) base.severity = bandSevOf(r.value);
     if (showHysteresis) {
       const wouldClear = recoveredMeets(trigger, input.reset, r.value);

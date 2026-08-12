@@ -50,6 +50,7 @@ const FULL_PARTS: TemplateContextParts = {
     assignedTo: "netops",
     tags: ["prod", "region:Atlanta"],
   },
+  triggerSummary: "Response time (median over 5 minutes) is 760 ms",
   escalationTier: 2,
   escalationElapsed: "1h 30m",
 };
@@ -66,7 +67,7 @@ const FULL_PARTS: TemplateContextParts = {
  *    samples (alertChartService), so an escalation email at T+90min charts the
  *    last hour as of sending rather than re-rendering a frozen snapshot.
  */
-const DEFERRED_TOKENS = new Set(["{ack}", "{chart.cpu}", "{chart.memory}", "{chart.responseTime}"]);
+const DEFERRED_TOKENS = new Set(["{ack}", "{chart.trigger}", "{chart.sensor}", "{chart.cpu}", "{chart.memory}", "{chart.responseTime}"]);
 const CONTEXT_TOKENS = TEMPLATE_VARIABLES.filter((v) => !DEFERRED_TOKENS.has(v.token));
 
 // {asset.link} is only a URL when the install has a public URL to build one

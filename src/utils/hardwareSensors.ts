@@ -251,6 +251,47 @@ export function alarmStatusToFlag(raw: string | null | undefined): 0 | 1 | null 
   return 1;
 }
 
+/**
+ * Is this stored unit string a Celsius reading we're allowed to convert for
+ * display? Mirrors `isCelsiusUnit` in public/js/temp-unit.js — the two must
+ * agree, or a sensor reads 71 °F in the browser and 21.7 °C in the alert email
+ * about it.
+ *
+ * Gated on the reading's OWN unit, never on its class: a fan's RPM and a rail's
+ * volts flow through untouched, and a row whose unit the device didn't report
+ * is left alone rather than guessed at.
+ */
+export function isCelsiusUnit(unit: string | null | undefined): boolean {
+  return typeof unit === "string" && /^\s*(?:°\s*)?c\s*$/i.test(unit);
+}
+
+/**
+ * Display-only C→F for a server-rendered surface (today: the last-hour sensor
+ * chart in an alert email). Storage, rollups and automation THRESHOLDS stay
+ * Celsius — this converts at render, exactly like the browser does. Do not
+ * reach for the Manufacturer-Profiles `celsius_to_fahrenheit` transform for
+ * this: that rewrites stored values and would silently re-point every
+ * temperature automation's threshold.
+ */
+export function convertSensorForDisplay(
+  value: number | null | undefined,
+  storedUnit: string | null | undefined,
+  displayUnit: "c" | "f",
+): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (displayUnit !== "f" || !isCelsiusUnit(storedUnit)) return value;
+  return value * 9 / 5 + 32;
+}
+
+/** The unit LABEL to render for a stored unit — swapped only for Celsius. */
+export function sensorDisplayUnit(
+  storedUnit: string | null | undefined,
+  displayUnit: "c" | "f",
+): string {
+  if (!isCelsiusUnit(storedUnit)) return storedUnit ?? "";
+  return displayUnit === "f" ? "°F" : "°C";
+}
+
 export function normalizeRestAlarmStatus(raw: unknown): string | null {
   if (raw == null) return null;
   if (typeof raw === "boolean") return raw ? "alarm" : "ok";
