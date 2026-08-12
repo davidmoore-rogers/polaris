@@ -655,6 +655,14 @@ const EntraIdConfigSchema = z.object({
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
+  // Opt-in WRITE capability: lets Polaris publish the SSH onboarding scripts
+  // to Intune as a Remediation (intunePublishService). Off by default because
+  // it requires adding the Graph application permission
+  // DeviceManagementConfiguration.ReadWrite.All to this app registration —
+  // upgrading the credential from "reads device inventory" to "creates
+  // device-management policy tenant-wide". Published policies are always left
+  // UNASSIGNED; a human assigns them in Intune after reviewing the script.
+  publishToIntune: z.boolean().optional().default(false),
 });
 
 // Reduced per-class block for classes that can't run the Polaris Agent and
@@ -697,6 +705,15 @@ const AzureArcConfigSchema = z.object({
   // "key=value" / "key=*" lines matched against the Azure resource tags.
   tagInclude: z.array(z.string()).optional().default([]),
   tagExclude: z.array(z.string()).optional().default([]),
+  // Opt-in WRITE capability: lets Polaris dispatch the SSH onboarding script
+  // to Arc machines via Run Command (arcPublishService). Off by default —
+  // discovery needs only the Reader role, while this needs one carrying
+  // Microsoft.HybridCompute/machines/runCommands/write, assigned at a
+  // subscription or resource-group scope. That is an Azure RBAC ROLE
+  // ASSIGNMENT, not a Graph API permission like the Intune side. Unlike an
+  // Intune Remediation there is no unassigned state: a run command EXECUTES
+  // on creation, so the review gate is the operator's target selection.
+  allowRunCommand: z.boolean().optional().default(false),
   // A Disconnected agent is a reachability statement, not a lifecycle one —
   // those machines are still assets by default.
   includeDisconnected: z.boolean().optional().default(true),

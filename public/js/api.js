@@ -869,6 +869,23 @@ const api = {
     agentWindowsSshScript:    (kind, platform) =>
       request("GET", "/server-settings/agents/windows-ssh/script?kind=" + encodeURIComponent(kind || "remediation") +
         "&platform=" + encodeURIComponent(platform || "windows")),
+    // Script publishing. The publish call is tracked (it reaches a customer
+    // tenant over the network and can take a few seconds) so it shows in the
+    // cancellable-query tray like the other slow outbound operations.
+    scriptPublishTargets:     () => request("GET", "/server-settings/agents/script-publish/targets"),
+    scriptPublishIntune:      (integrationId) =>
+      trackedRequest("Publishing to Intune", "POST", "/server-settings/agents/script-publish/intune", { integrationId }),
+    // Arc: listing is read-only; arcRun EXECUTES the script on the named
+    // machines, which is why it takes an explicit id list and never a filter.
+    arcMachines:              (integrationId) =>
+      trackedRequest("Listing Arc machines", "GET",
+        "/server-settings/agents/script-publish/arc/machines?integrationId=" + encodeURIComponent(integrationId)),
+    arcRun:                   (integrationId, armIds) =>
+      trackedRequest("Running on Arc machines", "POST", "/server-settings/agents/script-publish/arc",
+        { integrationId, armIds }),
+    arcRunResult:             (integrationId, armId) =>
+      request("GET", "/server-settings/agents/script-publish/arc/result?integrationId=" +
+        encodeURIComponent(integrationId) + "&armId=" + encodeURIComponent(armId)),
     // Pinned SSH host keys (trust-on-first-use). Deleting one re-opens
     // first-use trust for that host — the recovery path after a rebuild.
     sshHostKeysList:          () => request("GET",    "/server-settings/agents/ssh-host-keys"),

@@ -2931,6 +2931,57 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/intunePublishService.ts
+
+**What it owns:** Publishing the Windows SSH onboarding pair to Intune as a Remediation (`deviceHealthScript`), and the Graph API-version probe that finds where the tenant serves that collection.
+
+**Public API:** `INTUNE_POLICY_NAME`, `IntunePublishTarget`, `IntunePublishResult`, `listPublishTargets`, `publishOnboardingScripts`, `_resetResolvedBase`.
+
+**Cross-service deps:** `entraIdService.graphApiRequest`, `windowsSshOnboardingService.getOnboardingScript`, `eventLogService`, `db` (prisma).
+
+**Used by:**
+- src/api/routes/serverSettings.ts — `GET /agents/script-publish/targets`, `POST /agents/script-publish/intune`
+- public/js/agent-ssh-onboarding.js — the Publish pane
+
+**Invariants:**
+- **NEVER calls `/assign`.** Assignment is the human review gate for a script that grants fleet-wide administrative SSH. Two tests (create AND update paths) assert no request URL contains `/assign` or `assignments`. Adding one is a product decision with a security review attached, not a missing feature.
+- Upsert is by `displayName`, so **renaming `INTUNE_POLICY_NAME` strands the published policy** and the next publish creates a second one.
+- The version probe treats **404 as "wrong API version, try the next"** and **403 as "this version exists, permission missing"**. Falling through on a 403 would report the wrong problem and publish to the wrong base. It depends on `graphApiRequest`'s 403 message wording — the graphRequest test pins that string.
+- Opt-in per integration (`publishToIntune`); refuses with a message naming the checkbox, and reaches the tenant zero times when off.
+
+**When changing this:**
+- Tests: `tests/unit/intunePublish.test.ts` (18) + `tests/unit/graphRequest.test.ts` (11, the transport).
+- Route gate is chained at **fullwrite on BOTH** `serverSettingsSystem` and `integrations` — `integrations:write` is the blanket gate on that whole router and must not confer tenant writes.
+
+---
+
+## services/arcPublishService.ts
+
+**What it owns:** Running the SSH onboarding script on Azure Arc machines — target listing, roster re-resolution, dispatch orchestration and the batch audit. The ARM write itself lives in `azureArcService.dispatchRunCommand`.
+
+**Public API:** `ARC_RUN_COMMAND_NAME`, `ArcPublishTarget`, `ArcPublishResult`, `listPublishTargets`, `listMachines`, `runOnboardingOnMachines`, `getMachineResult`.
+
+**Cross-service deps:** `azureArcService` (`dispatchRunCommand` / `listRunCommandTargets` / `readRunCommandResult`), `windowsSshOnboardingService.getOnboardingScript`, `eventLogService`, `db` (prisma).
+
+**Used by:**
+- src/api/routes/serverSettings.ts — `/agents/script-publish/arc{,/machines,/result}`
+- public/js/agent-ssh-onboarding.js — the Publish pane's Arc machine picker
+
+**Invariants:**
+- **Arc has NO inert state.** A run command executes on creation, so unlike Intune there is nothing to hand a reviewer after the fact. The review gate is the operator's explicit selection — never add an "all machines" or filter-expanding affordance to this path.
+- **ARM ids are re-resolved against the live roster**, case-insensitively. The subscription / resourceGroup / region that reach ARM must come from Azure, not from a request body a caller could point elsewhere. Ids not in the roster are dropped and recorded in the audit `unknownArmIds`.
+- Capped at 200 targets per call, so a slip in the picker cannot become a fleet-wide event.
+- **Both platform scripts are sent**; `dispatchRunCommand` routes per `osType` and SKIPS an undeterminable OS rather than guessing — guessing wrong runs PowerShell through a shell as root.
+- Per-item tolerant: one machine's failure never aborts the batch, and the result reports dispatched / skipped / failed separately (a successes-only view cannot distinguish "42 onboarded" from "42 attempted, 30 skipped").
+- **One warning-level Event per batch**, not per machine — 200 targets would bury the Events page.
+- Opt-in per integration (`allowRunCommand`), enforced in BOTH this service and `dispatchRunCommand` itself, so the low-level write is safe even if a future caller forgets.
+
+**When changing this:**
+- Tests: `tests/unit/arcPublish.test.ts` (13, orchestration) + `tests/unit/arcRunCommand.test.ts` (10, the ARM write — OS routing, skips, partial failure). The second exists because the first mocks `dispatchRunCommand`, which is where the safety-critical logic lives.
+- The required Azure grant is an **RBAC role assignment** (`Microsoft.HybridCompute/machines/runCommands/write`), NOT a Graph permission. `README.md`'s "Reader is sufficient" guidance is now conditional.
+
+---
+
 ## services/sshHostKeyService.ts
 
 **What it owns:** Trust-on-first-use pinning for SSH SERVER host keys — the `SshHostKey` table, the verify/pin decision, the fingerprint + key-type parsers, and the operator list/delete.
