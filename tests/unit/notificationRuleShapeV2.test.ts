@@ -656,16 +656,21 @@ describe("allRuleActionRefs / ruleHasAnyEscalation / escalationChainsForSeverity
       { threshold: 90, severity: "serious", actions: [] },
     ],
     bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" as const, resolvedActions: [{ type: "notify" as const, channelId: "resolved-1" }] },
+    resetActions: [{ type: "notify" as const, channelId: "reset-1" }],
   };
 
-  it("allRuleActionRefs walks all seven action locations", () => {
+  it("allRuleActionRefs walks all EIGHT action locations", () => {
     const ids = allRuleActionRefs(rule as never).map((r) =>
       r.action.type === "notify" ? r.action.channelId : r.action.type,
     );
     expect(ids).toEqual(expect.arrayContaining([
       "base-1", "base-1-esc", "api_call", "rule-esc", "band-1", "band-1-esc", "band-esc", "resolved-1",
+      // resetActions is the eighth location. Missing it here would let a
+      // script action on a recovery slip past the automationScripts gate, and
+      // hide an {asset.*} template from ruleWantsAssetDetail.
+      "reset-1",
     ]));
-    expect(ids).toHaveLength(8);
+    expect(ids).toHaveLength(9);
   });
 
   it("ruleHasAnyEscalation sees chains at every level (and none when absent)", () => {

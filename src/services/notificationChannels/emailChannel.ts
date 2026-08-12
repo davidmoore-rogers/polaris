@@ -14,6 +14,19 @@
 import nodemailer from "nodemailer";
 import { AppError } from "../../utils/errors.js";
 
+/**
+ * An image referenced from the HTML body as `cid:<cid>` — the last-hour charts
+ * in an alert email. Inline attachment rather than a hosted URL because a
+ * hosted image would need an unauthenticated endpoint, and rather than a
+ * data: URI because Gmail and Outlook both drop those.
+ */
+export interface InlineAttachment {
+  cid: string;
+  filename: string;
+  contentType: string;
+  content: Buffer;
+}
+
 export interface EmailMessage {
   /** Single address (legacy per-address fan-out) or full To list (composed sends). */
   to: string | string[];
@@ -22,6 +35,7 @@ export interface EmailMessage {
   subject: string;
   text: string;
   html?: string;
+  attachments?: InlineAttachment[];
 }
 
 export interface SmtpConfig {
@@ -58,6 +72,11 @@ export async function sendSmtpEmail(cfg: SmtpConfig, msg: EmailMessage): Promise
       subject: msg.subject,
       text: msg.text,
       html: msg.html,
+      // `cid` makes nodemailer emit Content-ID + inline disposition, which is
+      // what lets the HTML body reference it as src="cid:…".
+      attachments: msg.attachments?.length
+        ? msg.attachments.map((a) => ({ filename: a.filename, cid: a.cid, contentType: a.contentType, content: a.content }))
+        : undefined,
     });
   } catch (err: any) {
     // Surface the real reason (connection refused, auth failed, TLS, timeout)
@@ -118,6 +137,21 @@ export function buildGraphMessage(msg: EmailMessage): Record<string, unknown> {
     toRecipients: toList.map(rcpt),
     ...(msg.cc?.length ? { ccRecipients: msg.cc.map(rcpt) } : {}),
     ...(msg.bcc?.length ? { bccRecipients: msg.bcc.map(rcpt) } : {}),
+    // Graph's inline images: isInline + contentId, referenced from the HTML
+    // body as cid:<contentId>. Only attached alongside an HTML body — a
+    // text-only Graph message would deliver them as visible file attachments.
+    ...(msg.attachments?.length && msg.html
+      ? {
+          attachments: msg.attachments.map((a) => ({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            name: a.filename,
+            contentType: a.contentType,
+            contentBytes: a.content.toString("base64"),
+            isInline: true,
+            contentId: a.cid,
+          })),
+        }
+      : {}),
   };
 }
 

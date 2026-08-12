@@ -15,7 +15,7 @@ const SRC = readFileSync(join(process.cwd(), "public", "sw.js"), "utf-8");
 
 const ORIGIN = "https://polaris.example.com";
 
-function makeSelf(opts?: { clients?: any[]; cookie?: string | null }) {
+function makeSelf(opts?: { clients?: any[]; cookie?: string | null; fetchFails?: "status" | "throw" }) {
   const handlers: Record<string, (e: any) => void> = {};
   const shown: Array<{ title: string; options: any }> = [];
   const navigated: Array<{ from: string; to: string }> = [];
@@ -46,6 +46,10 @@ function makeSelf(opts?: { clients?: any[]; cookie?: string | null }) {
     cookieStore: opts?.cookie === null ? undefined : { get: vi.fn(async () => ({ value: opts?.cookie ?? "csrf-token-value" })) },
     fetch: vi.fn(async (url: string, init: any) => {
       fetches.push({ url, init });
+      // The acknowledge path must survive both failure shapes: a refusal the
+      // server answered (expired/spent/forbidden token) and no answer at all.
+      if (opts?.fetchFails === "throw") throw new Error("offline");
+      if (opts?.fetchFails === "status") return { ok: false, status: 410, json: async () => ({ ok: false, state: "used" }) };
       return { ok: true, json: async () => ({ enabled: true, publicKey: "dGVzdC12YXBpZC1rZXk" }) };
     }),
   };
@@ -69,10 +73,10 @@ describe("push handler", () => {
   it("shows a branded notification and never references the missing favicon", async () => {
     const h = makeSelf();
     await fire(h.handlers, "push", {
-      data: { json: () => ({ title: "[ERROR] gw-01", body: "CPU 98%", url: ORIGIN + "/mobile.html#more/alerts", severity: "error", notificationId: "n1" }) },
+      data: { json: () => ({ title: "[CRITICAL] gw-01", body: "CPU 98%", url: ORIGIN + "/mobile.html#more/alerts", severity: "critical", notificationId: "n1" }) },
     });
     expect(h.shown).toHaveLength(1);
-    expect(h.shown[0].title).toBe("[ERROR] gw-01");
+    expect(h.shown[0].title).toBe("[CRITICAL] gw-01");
     expect(h.shown[0].options.icon).toBe("/icons/app-192.png");
     // /favicon.ico does not exist in this repo — referencing it is what made
     // every notification render with the browser's default glyph.
@@ -81,6 +85,23 @@ describe("push handler", () => {
     expect(h.shown[0].options.badge).toBeUndefined();
     expect(h.shown[0].options.requireInteraction).toBe(true);
     expect(h.shown[0].options.tag).toBe("n1");
+  });
+
+  it("keeps only serious/critical on screen — the old check read a severity the server never sends", async () => {
+    // SEVERITIES is a closed enum (notice/informational/warning/serious/
+    // critical). sw.js compared against "error", so requireInteraction was
+    // dead code and NO alert was ever sticky.
+    const loud = makeSelf();
+    await fire(loud.handlers, "push", { data: { json: () => ({ title: "t", severity: "serious" }) } });
+    expect(loud.shown[0].options.requireInteraction).toBe(true);
+
+    const quiet = makeSelf();
+    await fire(quiet.handlers, "push", { data: { json: () => ({ title: "t", severity: "warning" }) } });
+    expect(quiet.shown[0].options.requireInteraction).toBe(false);
+
+    const legacy = makeSelf();
+    await fire(legacy.handlers, "push", { data: { json: () => ({ title: "t", severity: "error" }) } });
+    expect(legacy.shown[0].options.requireInteraction).toBe(false);
   });
 
   it("survives a non-JSON payload", async () => {
@@ -137,6 +158,74 @@ describe("notificationclick", () => {
       notification: { close: vi.fn(), data: { url: "/mobile.html#more/alerts" } },
     });
     expect(h.opened).toEqual(["/mobile.html#more/alerts"]);
+  });
+});
+
+describe("acknowledge action", () => {
+  const ACK = ORIGIN + "/ack/polaris_ack_tok";
+  const ackNotification = (over?: any) => ({
+    close: vi.fn(),
+    data: { url: ORIGIN + "/automations.html", ackUrl: ACK, notificationId: "n1", ...over },
+  });
+
+  it("offers the button only when the recipient got a link", async () => {
+    const withLink = makeSelf();
+    await fire(withLink.handlers, "push", { data: { json: () => ({ title: "t", ackUrl: ACK, notificationId: "n1" }) } });
+    expect(withLink.shown[0].options.actions).toEqual([{ action: "ack", title: "Acknowledge" }]);
+    expect(withLink.shown[0].options.data.ackUrl).toBe(ACK);
+
+    // A contact / typed address / unentitled user gets no token, so no button.
+    const without = makeSelf();
+    await fire(without.handlers, "push", { data: { json: () => ({ title: "t", notificationId: "n1" }) } });
+    expect(without.shown[0].options.actions).toBeUndefined();
+    expect(without.shown[0].options.data.ackUrl).toBeNull();
+  });
+
+  it("POSTs the token with no cookie and no CSRF header, then confirms in place", async () => {
+    const h = makeSelf({ clients: [ORIGIN + "/index.html"] });
+    await fire(h.handlers, "notificationclick", { action: "ack", notification: ackNotification() });
+
+    const post = h.fetches.find((f) => f.init && f.init.method === "POST");
+    expect(post!.url).toBe(ACK);
+    // The token IS the credential — sending the session cookie would drag the
+    // request under CSRF for no benefit.
+    expect(post!.init.credentials).toBe("omit");
+    expect(post!.init.headers["X-CSRF-Token"]).toBeUndefined();
+    expect(post!.init.headers.Accept).toBe("application/json");
+
+    // Replaces the alert in the tray (same tag) instead of opening the app.
+    expect(h.shown).toHaveLength(1);
+    expect(h.shown[0].title).toBe("Acknowledged");
+    expect(h.shown[0].options.tag).toBe("n1");
+    expect(h.shown[0].options.silent).toBe(true);
+    expect(h.navigated).toHaveLength(0);
+    expect(h.opened).toHaveLength(0);
+  });
+
+  it("hands a refused or unreachable acknowledge to the app instead of swallowing it", async () => {
+    for (const mode of ["status", "throw"] as const) {
+      const h = makeSelf({ clients: [], fetchFails: mode });
+      await fire(h.handlers, "notificationclick", { action: "ack", notification: ackNotification() });
+      expect(h.shown, `mode ${mode}`).toHaveLength(0);
+      expect(h.opened, `mode ${mode}`).toEqual([ORIGIN + "/automations.html"]);
+    }
+  });
+
+  it("never forwards the POST to another origin", async () => {
+    const h = makeSelf({ clients: [] });
+    await fire(h.handlers, "notificationclick", {
+      action: "ack",
+      notification: ackNotification({ ackUrl: "https://evil.example.net/ack/x" }),
+    });
+    expect(h.fetches).toHaveLength(0);
+    expect(h.opened).toEqual([ORIGIN + "/automations.html"]);
+  });
+
+  it("still just opens the app on a plain body tap, link or no link", async () => {
+    const h = makeSelf({ clients: [] });
+    await fire(h.handlers, "notificationclick", { notification: ackNotification() });
+    expect(h.fetches).toHaveLength(0);
+    expect(h.opened).toEqual([ORIGIN + "/automations.html"]);
   });
 });
 

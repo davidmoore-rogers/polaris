@@ -24,6 +24,7 @@ import { previewRule } from "../../services/notificationEngine.js";
 import { listDimensionValues, dimensionPickerMeta } from "../../services/notificationDimensionService.js";
 import { listRecipientUsers } from "../../services/notificationRecipientService.js";
 import { listStateProbes } from "../../services/manufacturerProfileService.js";
+import { runTestDelivery } from "../../services/automationTestService.js";
 
 export const notificationRulesRouter = Router();
 
@@ -75,6 +76,41 @@ notificationRulesRouter.post("/preview", requirePermission("automationManagement
   try {
     const input = previewInputSchema.parse(req.body);
     res.json(await previewRule(input));
+  } catch (err) { next(err); }
+});
+
+/**
+ * Fire ONE action of a draft for real, so an operator can see the delivery
+ * work before saving. Creates a genuine (test-flagged) alert and dispatches
+ * immediately — see automationTestService for the three safety properties
+ * (ruleId always null, notify-only, self-mode recipient rewrite).
+ *
+ * Session callers only: "send to me" resolves the CALLER, and a bearer token
+ * has no user to be.
+ */
+const testDeliverySchema = z.object({
+  rule: previewInputSchema,
+  path: z.object({ index: z.number().int().min(0).max(199) }),
+  mode: z.enum(["self", "recipients"]).default("self"),
+  target: z.enum(["delivery", "event"]).default("delivery"),
+  assetId: z.string().max(100).optional(),
+});
+
+notificationRulesRouter.post("/test-delivery", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
+  try {
+    const userId = req.session?.userId;
+    const username = req.session?.username;
+    if (!userId || !username) throw new AppError(401, "Sign in to send a test");
+    const body = testDeliverySchema.parse(req.body);
+    res.json(await runTestDelivery({
+      rule: body.rule,
+      path: body.path,
+      mode: body.mode,
+      target: body.target,
+      assetId: body.assetId,
+      actorUserId: userId,
+      actorUsername: username,
+    }));
   } catch (err) { next(err); }
 });
 

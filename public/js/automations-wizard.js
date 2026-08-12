@@ -639,7 +639,7 @@ async function openAutomationWizard(existing) {
       triggerSentence = _sent.triggerSentence, resetSentence = _sent.resetSentence,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
+  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / current / optical / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
   // populate and whether each is a closed enum (`strict` → select-only, e.g.
   // sensorClass) or a substring match (→ suggestions, typing still allowed);
@@ -666,6 +666,17 @@ async function openAutomationWizard(existing) {
   function chanTypeLabel(type) { return (s.channelTypes && s.channelTypes[type] && s.channelTypes[type].label) || type; }
   function isRouted(type) { return routedTypes.indexOf(type) !== -1; }
   function isEmailType(type) { return type === "smtp" || type === "oauth_m365"; }
+  // The default alert email, straight from the server (the SAME strings
+  // buildComposedEmail falls back to). A new Notify action shows them so the
+  // operator edits what actually gets sent; a stored action shows what it
+  // saved, including a deliberately blanked field.
+  function defaultEmailTemplate() {
+    return s.defaultEmailTemplate || { subjectTemplate: "", bodyTextTemplate: "", bodyHtmlTemplate: "" };
+  }
+  function compValue(comp, key) {
+    if (comp && typeof comp[key] === "string") return comp[key];
+    return defaultEmailTemplate()[key] || "";
+  }
   function channelOptions(selId) {
     if (channels.length === 0) return '<option value="">No channels configured</option>';
     return channels.map(function (c) {
@@ -1965,7 +1976,10 @@ async function openAutomationWizard(existing) {
     // own change handler also calls it — a second render is harmless) and
     // re-syncs the severity mode (single dropdown vs multi tiers + accent).
     panel.addEventListener("input", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncDurationRequirement(panel); });
-    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); refreshDimOptions(panel); syncDurationRequirement(panel); });
+    // syncBandsToBase runs AFTER syncSeverityMode so tiers built lazily on this
+    // same event (first tick of the multi-severity checkbox, from a draft that
+    // predates in-progress edits to the base condition) are corrected at once.
+    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncBandsToBase(panel); refreshDimOptions(panel); syncDurationRequirement(panel); });
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
     renderTriggerFields();
     syncSeverityMode(panel);
@@ -2423,6 +2437,34 @@ async function openAutomationWizard(existing) {
         '<button type="button" class="btn btn-sm btn-secondary ba-add" style="margin-top:6px">+ Add action</button>' +
       '</div>';
     });
+    // ── When this resets ────────────────────────────────────────────────
+    // Every clear path today writes cleared/clearedBy and nothing else, so
+    // "tell the NOC it came back" wasn't expressible. The list starts mirroring
+    // the trigger's Notify actions (see mirroredResetActions) so the recovery
+    // reaches the same people without configuring them twice.
+    // The toggle is its OWN state, not "is the list non-empty": a re-render
+    // between an operator ticking it and adding a row would otherwise silently
+    // untick it. On a new automation it starts on (the list seeds from the
+    // trigger's notify actions); a stored rule reflects what it saved.
+    if (draft.resetOn === undefined) {
+      draft.resetOn = draft.resetActions === undefined
+        ? true
+        : !!(draft.resetActions && draft.resetActions.length);
+    }
+    var resetOn = draft.resetOn;
+    html += '<div class="form-group" id="aw-reset-card" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem;margin-top:0.5rem">' +
+      '<label style="font-weight:600;margin:0 0 4px;display:block">' +
+        '<input type="checkbox" id="aw-reset-actions-on"' + (resetOn ? " checked" : "") + '> When this resets' +
+      '</label>' +
+      '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">' +
+        'Runs when the alert ends — it recovered, its timer ran out, or someone cleared it. ' +
+        '<span id="aw-reset-mirror-note"></span></p>' +
+      '<div id="aw-reset-wrap"' + (resetOn ? "" : ' style="display:none"') + '>' +
+        '<div id="aw-reset-actions"></div>' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="aw-reset-add" style="margin-top:6px">+ Add action</button>' +
+      '</div>' +
+    '</div>';
+
     panel.innerHTML = html;
 
     // Mandatory-card escalation = the rule-level chain.
@@ -2430,13 +2472,47 @@ async function openAutomationWizard(existing) {
 
     var host = panel.querySelector("#aw-actions");
     (draft.actions || []).forEach(function (a) { addActionRow(host, a, true); });
-    panel.querySelector("#aw-add-action").addEventListener("click", function () { addActionRow(host, null, true); });
+    panel.querySelector("#aw-add-action").addEventListener("click", function () {
+      addActionRow(host, null, true);
+      syncResetMirror(panel);
+    });
+    // The reset list follows the trigger list as it is BUILT: picking a channel
+    // on a new Notify action, or removing one, re-derives the mirrored rows.
+    // Delegated so it covers rows added later. Timeout lets the row's own
+    // handlers (and its removal) settle first.
+    host.addEventListener("change", function () { setTimeout(function () { syncResetMirror(panel); }, 0); });
+    host.addEventListener("click", function (e) {
+      if (e.target && e.target.classList && e.target.classList.contains("aw-action-remove")) {
+        setTimeout(function () { syncResetMirror(panel); }, 0);
+      }
+    });
 
     panel.querySelectorAll(".aw-band-actions").forEach(function (sec, i) {
       var bHost = sec.querySelector(".ba-actions");
       (((draft.severityBands || [])[i] || {}).actions || []).forEach(function (a) { addActionRow(bHost, a, true); });
       sec.querySelector(".ba-add").addEventListener("click", function () { addActionRow(bHost, null, true); });
     });
+    // Reset list: hydrate, then keep it following the trigger actions.
+    var resetHost = panel.querySelector("#aw-reset-actions");
+    var resetSeed = draft.resetActions === undefined
+      ? mirroredResetActions(draft.actions, [])            // brand-new automation
+      : (draft.resetActions || []);                         // stored, or explicitly off
+    renderResetRows(panel, resetSeed);
+    panel.querySelector("#aw-reset-add").addEventListener("click", function () {
+      addActionRow(resetHost, null);
+      refreshMirrorNote(panel);
+    });
+    panel.querySelector("#aw-reset-actions-on").addEventListener("change", function () {
+      draft.resetOn = this.checked;
+      panel.querySelector("#aw-reset-wrap").style.display = this.checked ? "" : "none";
+      // Turning it back on re-seeds from the trigger rather than leaving the
+      // operator with an empty list they have to rebuild by hand.
+      if (this.checked && !resetHost.querySelector(".aw-action")) {
+        renderResetRows(panel, mirroredResetActions(collectActionsFrom(host), []));
+      }
+      refreshMirrorNote(panel);
+    });
+
     var perSevCb = panel.querySelector("#aw-band-actions-multi");
     if (perSevCb) {
       perSevCb.addEventListener("change", function () {
@@ -2672,6 +2748,66 @@ async function openAutomationWizard(existing) {
     var sevs = s.severities || [];
     return sevs[Math.min(maxRank + 1, sevs.length - 1)] || sevs[sevs.length - 1];
   }
+  /** What a tier SHARES with the base condition (business rule 19): metric,
+   *  aggregation, dimension filters. Only these are mirrored — a tier's own
+   *  operator / threshold / sustained-for are its own. */
+  function bandSampleSig(leaf) {
+    return [leaf.type, leaf.metric, leaf.aggregation || "latest", JSON.stringify(leaf.dimensionFilter || {})].join("|");
+  }
+  /** Render + lock a tier's condition row. The shared-sampling controls (metric,
+   *  aggregation, dimensions) come from the BASE condition and are disabled, so
+   *  only the operator + value are the tier's own. (The window isn't a row
+   *  control any more; tiers take the base's.) */
+  function renderBandCond(row, panel, leaf, kind) {
+    var cond = row.querySelector(".band-cond");
+    cond.innerHTML = tgLeafRowHtml(leaf, kind);
+    // Set the select values rather than relying on the markup's `selected`
+    // attribute (the sevSel / scg-sev precedent) — this row is re-rendered in
+    // place as the base condition changes, and a mirrored control silently
+    // falling back to its first option would defeat the mirroring.
+    var setVal = function (q, v) { var el = cond.querySelector(q); if (el && v != null && v !== "") el.value = v; };
+    setVal(".tgl-what", "m:" + leaf.metric);
+    setVal(".tgl-agg", leaf.aggregation || "latest");
+    setVal(".tgl-op", leaf.operator);
+    var df = leaf.dimensionFilter || {};
+    cond.querySelectorAll(".tgl-dim").forEach(function (el) { el.value = df[el.getAttribute("data-dim")] || ""; });
+    cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
+    var grip = cond.querySelector(".aw-grip"); if (grip) grip.style.display = "none";
+    var rmCond = cond.querySelector(".scr-remove"); if (rmCond) rmCond.style.display = "none";
+    row._sampleSig = bandSampleSig(leaf);
+    refreshDimOptions(panel); // the tier's locked condition row has its own dim control
+  }
+  /**
+   * Re-mirror the base condition's sampling onto every tier whenever it changes.
+   * Tiers share metric / aggregation / dimensionFilter by definition — collectBands
+   * takes only their operator + threshold — so a tier still displaying the sampling
+   * it was CREATED with is a lie the operator can otherwise only fix by deleting and
+   * re-adding the tier. Signature-guarded, so an edit to a tier's own operator or
+   * value (which fires the same delegated change event) never re-renders it out
+   * from under the cursor.
+   */
+  function syncBandsToBase(panel) {
+    var host = panel.querySelector("#aw-bands");
+    if (!host || !host.querySelector(".aw-band")) return;
+    var rows = panel.querySelectorAll("#aw-trig-root .scr-row");
+    if (rows.length !== 1) return; // bands only apply to a single-metric trigger
+    var kind = panel.querySelector("#aw-trigger-type").value === "host" ? "host" : "asset";
+    var base = tgCollectLeaf(rows[0], kind);
+    if (base.type === "asset_state") return;
+    var sig = bandSampleSig(base);
+    host.querySelectorAll(":scope > .aw-band").forEach(function (row) {
+      if (row._sampleSig === sig) return;
+      var cur = row.querySelector(".band-cond .scr-row");
+      var prev = cur ? tgCollectLeaf(cur, kind) : {};
+      renderBandCond(row, panel, {
+        type: base.type, metric: base.metric, aggregation: base.aggregation, windowSec: 0,
+        dimensionFilter: base.dimensionFilter,
+        // The tier keeps its own comparison — only the sampling is shared.
+        operator: prev.operator || base.operator,
+        threshold: prev.threshold != null && !isNaN(prev.threshold) ? prev.threshold : null,
+      }, kind);
+    });
+  }
   function addBandRow(host, band) {
     if (host.querySelectorAll(".aw-band").length >= 4 && !band) { showToast("At most 4 additional severities", "info"); return null; }
     band = band || { threshold: "", severity: nextTierSeverity(host), actions: [] };
@@ -2709,18 +2845,11 @@ async function openAutomationWizard(existing) {
         '<button type="button" class="btn btn-sm btn-danger band-remove" title="Remove severity" style="margin-left:auto">&times;</button>' +
       '</div>' +
       '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
-      '<div class="band-cond scg-children">' + tgLeafRowHtml(tierLeaf, kind) + '</div>' +
+      '<div class="band-cond scg-children"></div>' +
       durationFieldHtml('class="band-duration"', bandDurMin) +
       '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>';
     host.appendChild(row);
-    // Lock the shared-sampling fields on the tier's condition row — metric,
-    // aggregation, dimensions — so only operator + value are editable. (The
-    // window isn't a row control any more; tiers take the base's.)
-    var cond = row.querySelector(".band-cond");
-    cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
-    var grip = cond.querySelector(".aw-grip"); if (grip) grip.style.display = "none";
-    var rmCond = cond.querySelector(".scr-remove"); if (rmCond) rmCond.style.display = "none";
-    refreshDimOptions(panel); // the tier's locked condition row has its own dim control
+    renderBandCond(row, panel, tierLeaf, kind);
     row.querySelector(".band-add-sev").addEventListener("click", function () { addBandRow(host, null); syncBandNotify(panel); });
     // Per-tier accent + "only increase severity" guard: a tier can't be set at
     // or below the tier before it (or the base).
@@ -2770,9 +2899,216 @@ async function openAutomationWizard(existing) {
       '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
         '<label style="font-weight:600;margin:0 0 6px;display:block">Devices this automation affects</label>' +
         '<div id="aw-affected"><p style="color:var(--color-text-tertiary);font-size:0.85rem">Checking…</p></div>' +
-      '</div>';
+      '</div>' +
+      // Test delivery — omitted entirely (not disabled) without fullwrite, the
+      // way the Delivery tab drops its buttons: the endpoint would 403 anyway.
+      (permAtLeast("automationManagement", "fullwrite")
+        ? '<div class="form-group" id="aw-test-delivery" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
+            '<label style="font-weight:600;margin:0 0 6px;display:block">Test delivery</label>' +
+            '<div id="aw-test-body"></div>' +
+          '</div>'
+        : "");
     renderSummary();
     renderAffectedDevices();
+    if (permAtLeast("automationManagement", "fullwrite")) renderTestDelivery();
+  }
+
+  /**
+   * Distinct testable targets for the draft, deduped by channel. PURE apart
+   * from reading the channel catalogue: walks the same locations the server's
+   * allRuleActionRefs does, so the `index` sent back addresses the same action.
+   *
+   * `api_call` and `script` are deliberately absent — the server refuses to run
+   * them from a test button (an api_call would open a real ticket; a script is
+   * RCE-by-button), so offering them would be a lie.
+   */
+  function testDeliveryTargets() {
+    var out = [];
+    var seen = {};
+    var idx = -1;
+    var perSev = bandActionsPerSeverityOn();
+    var push = function (action, where) {
+      idx++;
+      if (action.type === "event") {
+        if (!seen["event"]) { seen["event"] = true; out.push({ key: "event", kind: "event", index: idx, label: "Write a test Event", detail: "", usedIn: [where] }); }
+        else out.push(null);
+        return;
+      }
+      if (action.type !== "notify" || !action.channelId) return;
+      var ch = chanById(action.channelId);
+      if (!ch) return;
+      var key = "ch:" + ch.id;
+      if (seen[key]) {
+        // Same channel again (a band, an escalation tier): note where, don't
+        // offer a second button for the same destination.
+        var prior = out.find(function (t) { return t && t.key === key; });
+        if (prior && prior.usedIn.indexOf(where) === -1) prior.usedIn.push(where);
+        return;
+      }
+      seen[key] = true;
+      var kind = ch.type === "web_push" ? "push" : isEmailType(ch.type) ? "email" : "webhook";
+      out.push({
+        key: key, kind: kind, index: idx, channel: ch, action: action, usedIn: [where],
+        label: kind === "push" ? "Send test push" : kind === "email" ? "Send test email" : "Send test message",
+        detail: ch.name + " — " + chanTypeLabel(ch.type),
+      });
+    };
+    // Walk order MUST match allRuleActionRefs: actions (+ their tiers), rule
+    // tiers, band actions (+ tiers), band tiers, resolved actions, reset actions.
+    var walkTiers = function (esc, where) {
+      ((esc && esc.tiers) || []).forEach(function (t) { (t.actions || []).forEach(function (a) { push(a, where); }); });
+    };
+    (draft.actions || []).forEach(function (a) { push(a, "actions"); walkTiers(a.escalation, "escalation"); });
+    walkTiers(draft.escalation, "escalation");
+    (perSev ? (draft.severityBands || []) : []).forEach(function (b) {
+      (b.actions || []).forEach(function (a) { push(a, "at " + b.severity); walkTiers(a.escalation, "escalation"); });
+      walkTiers(b.escalation, "escalation");
+    });
+    ((draft.bandNotify && draft.bandNotify.resolvedActions) || []).forEach(function (a) { push(a, "resolved"); });
+    (draft.resetActions || []).forEach(function (a) { push(a, "reset"); });
+    return out.filter(Boolean);
+  }
+
+  var _awTestBusy = false;
+
+  function renderTestDelivery() {
+    var box = document.getElementById("aw-test-body");
+    if (!box) return;
+    var targets = testDeliveryTargets();
+    if (targets.length === 0) {
+      box.innerHTML = '<p class="hint" style="margin:0">This automation only creates an in-app alert — there’s nothing to send. ' +
+        'Add a <strong>Notify</strong> or <strong>Create an Event</strong> action on the previous step to test delivery.</p>';
+      return;
+    }
+    var me = (_ruleRecipientUsers || []).find(function (u) { return u.username === (typeof currentUsername !== "undefined" ? currentUsername : ""); });
+    var selfDesc = me
+      ? [me.email || "no email on your account", (me.pushDevices || 0) + " push device" + ((me.pushDevices || 0) === 1 ? "" : "s")].join(" · ")
+      : "your account";
+    box.innerHTML =
+      '<p class="hint" style="margin:0 0 8px">Each test creates a <strong>real alert</strong> (flagged as a test) and delivers it through that one action immediately.</p>' +
+      '<div id="aw-test-mode" style="margin:0 0 8px">' +
+        '<label style="display:block;font-size:0.85rem"><input type="radio" name="aw-test-to" value="self" checked> Send to me only ' +
+          '<span style="color:var(--color-text-tertiary)">— ' + escapeHtml(selfDesc) + '</span></label>' +
+        '<label style="display:block;font-size:0.85rem"><input type="radio" name="aw-test-to" value="recipients"> Send to this automation’s real recipients</label>' +
+        '<div id="aw-test-real-warn" style="display:none;border:1px solid var(--color-danger);border-radius:6px;padding:0.5rem 0.6rem;margin:6px 0 0">' +
+          '<p style="margin:0;font-size:0.82rem"><strong>This sends to real people.</strong> Every recipient the action targets receives an alert email or message now.</p>' +
+        '</div>' +
+      '</div>' +
+      '<div id="aw-test-buttons">' + targets.map(function (t) {
+        return '<div class="awtd-row" style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">' +
+          '<button type="button" class="btn btn-sm btn-secondary awtd-btn" data-key="' + escapeHtml(t.key) + '">' + escapeHtml(t.label) + '</button>' +
+          '<span style="font-size:0.8rem">' + escapeHtml(t.detail) +
+            (t.usedIn.length > 1 || t.usedIn[0] !== "actions"
+              ? ' <span style="color:var(--color-text-tertiary)">— used by: ' + escapeHtml(t.usedIn.join(", ")) + '</span>'
+              : "") +
+          '</span>' +
+          '<div class="awtd-out" data-key="' + escapeHtml(t.key) + '" style="flex-basis:100%;font-size:0.78rem;margin:0"></div>' +
+        '</div>';
+      }).join("") + '</div>';
+
+    box.querySelectorAll('input[name="aw-test-to"]').forEach(function (r) {
+      r.addEventListener("change", function () {
+        box.querySelector("#aw-test-real-warn").style.display = r.value === "recipients" && r.checked ? "" : "none";
+        syncTestButtons(box, targets);
+      });
+    });
+    box.querySelectorAll(".awtd-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var t = targets.find(function (x) { return x.key === btn.dataset.key; });
+        if (t) runDeliveryTest(t, btn, box);
+      });
+    });
+    syncTestButtons(box, targets);
+  }
+
+  /** Disable what the chosen mode can't honour, and say why. */
+  function syncTestButtons(box, targets) {
+    var mode = (box.querySelector('input[name="aw-test-to"]:checked') || {}).value || "self";
+    var me = (_ruleRecipientUsers || []).find(function (u) { return u.username === (typeof currentUsername !== "undefined" ? currentUsername : ""); });
+    targets.forEach(function (t) {
+      var btn = box.querySelector('.awtd-btn[data-key="' + t.key + '"]');
+      var out = box.querySelector('.awtd-out[data-key="' + t.key + '"]');
+      if (!btn) return;
+      var why = "";
+      if (mode === "self") {
+        // A webhook/chat channel has exactly ONE destination — there is no
+        // private version of a Teams post.
+        if (t.kind === "webhook") why = "Posts to this channel’s configured destination — switch to real recipients to test it.";
+        else if (t.kind === "email" && me && !me.email) why = "Your account has no email address.";
+        else if (t.kind === "push" && me && !me.pushDevices) why = "You have no push-enabled device — turn push on from the sidebar, then reopen this step.";
+      }
+      if (t.channel && t.channel.enabled === false) why = "This channel is disabled — it won’t deliver until you enable it on the Delivery tab.";
+      btn.disabled = !!why || _awTestBusy;
+      if (out && why) out.innerHTML = '<span style="color:var(--color-text-tertiary)">' + escapeHtml(why) + "</span>";
+      else if (out && out.dataset.result !== "1") out.innerHTML = "";
+    });
+  }
+
+  async function runDeliveryTest(target, btn, box) {
+    if (_awTestBusy) return;
+    var mode = (box.querySelector('input[name="aw-test-to"]:checked') || {}).value || "self";
+    if (mode === "recipients" && target.kind !== "event") {
+      var okToSend = await showConfirm(
+        'Send a REAL test through "' + (target.channel ? target.channel.name : "this channel") + '" to its configured recipients?\n\n' +
+        "Everyone the action targets receives it now.",
+      );
+      if (!okToSend) return;
+    }
+    // One at a time: every press mints a real alert.
+    _awTestBusy = true;
+    var old = btn.textContent;
+    btn.textContent = "Sending…";
+    box.querySelectorAll(".awtd-btn").forEach(function (b) { b.disabled = true; });
+    var out = box.querySelector('.awtd-out[data-key="' + target.key + '"]');
+    var stamp = new Date().toLocaleTimeString();
+    try {
+      var r = await api.automations.testDelivery({
+        rule: testDeliveryPayload(),
+        path: { index: target.index },
+        mode: mode,
+        target: target.kind === "event" ? "event" : "delivery",
+      });
+      showToast(r.message || "Test sent", r.ok ? "success" : "error");
+      if (out) {
+        out.dataset.result = "1";
+        out.innerHTML = '<strong style="color:var(--color-' + (r.ok ? "success" : "danger") + ')">' + (r.ok ? "✓" : "✗") + "</strong> " +
+          escapeHtml(r.message || "") + ' <span style="color:var(--color-text-tertiary)">· ' + escapeHtml(stamp) + "</span>" +
+          (r.ackLinks && r.ackLinks.minted
+            ? '<br><span style="color:var(--color-text-tertiary)">The Acknowledge link in it will clear the test alert.</span>'
+            : r.ackLinks && r.ackLinks.reason
+              ? '<br><span style="color:var(--color-text-tertiary)">No acknowledge link: ' + escapeHtml(r.ackLinks.reason) + "</span>"
+              : "");
+      }
+    } catch (err) {
+      showToast(err.message || "Test failed", "error");
+      if (out) {
+        out.dataset.result = "1";
+        out.innerHTML = '<strong style="color:var(--color-danger)">✗</strong> ' + escapeHtml(err.message || "failed") +
+          ' <span style="color:var(--color-text-tertiary)">· ' + escapeHtml(stamp) + "</span>";
+      }
+    }
+    _awTestBusy = false;
+    btn.textContent = old;
+    syncTestButtons(box, testDeliveryTargets());
+  }
+
+  /** The DRAFT as the test endpoint wants it — what's on screen, not what's saved. */
+  function testDeliveryPayload() {
+    return {
+      name: draft.name || "Untitled automation",
+      description: draft.description,
+      severity: draft.severity,
+      trigger: draft.trigger,
+      scope: isTriggerScoped(draft.trigger) ? draft.scope : {},
+      reset: draft.reset,
+      actions: draft.actions,
+      cooldownSec: draft.cooldownSec,
+      messageTemplate: draft.messageTemplate,
+      escalation: draft.escalation,
+      severityBands: bandsApplicable(draft.trigger) ? payloadBands() : null,
+      bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
+      resetActions: draft.resetActions && draft.resetActions.length ? stripMirrorMarks(draft.resetActions) : null,
+    };
   }
   async function renderAffectedDevices() {
     var box = document.getElementById("aw-affected");
@@ -3208,12 +3544,21 @@ async function openAutomationWizard(existing) {
         '<div class="na-fields"></div>' +
         // Cc/Bcc were promoted OUT of this disclosure into first-class token
         // fields above; what's left is genuinely about composing the message.
+        // The template fields are PREFILLED with the default alert email
+        // (schema.defaultEmailTemplate — the same strings the server renders
+        // when they're blank), so the operator reads and edits exactly what
+        // will be sent instead of guessing at a hidden default. A stored
+        // action keeps whatever it saved.
         '<details class="na-comp"' + (comp && (comp.subjectTemplate || comp.bodyTextTemplate || comp.bodyHtmlTemplate) ? " open" : "") + '><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Customize the email (subject / body)…</summary>' +
           '<div style="margin-top:6px">' +
-            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject</label><input type="text" class="na-subject tpl-field" value="' + escapeHtml((comp && comp.subjectTemplate) || "") + '" placeholder="[{severity.upper}] {asset} — {metric} = {value}"></div>' +
-            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body (plain text)</label><textarea class="na-body tpl-field" rows="4" style="width:100%">' + escapeHtml((comp && comp.bodyTextTemplate) || "") + '</textarea></div>' +
-            '<label style="font-size:0.8rem;display:block"><input type="checkbox" class="na-html-enable"' + (comp && comp.bodyHtmlTemplate ? " checked" : "") + '> Add HTML body (values are HTML-escaped)</label>' +
-            '<textarea class="na-html tpl-field" rows="4" style="width:100%;display:' + (comp && comp.bodyHtmlTemplate ? "block" : "none") + ';margin-top:4px">' + escapeHtml((comp && comp.bodyHtmlTemplate) || "") + '</textarea>' +
+            '<p class="hint" style="margin:0 0 6px">This is the email Polaris sends. Edit it freely — ' +
+              '<code>{ack}</code> becomes the recipient’s one-click acknowledge link, <code>{asset.link}</code> opens the device, and ' +
+              '<code>{chart.cpu}</code> / <code>{chart.memory}</code> / <code>{chart.responseTime}</code> embed the last hour as charts. ' +
+              '<button type="button" class="na-comp-reset" style="background:none;border:0;padding:0;color:var(--color-primary);cursor:pointer;font:inherit;text-decoration:underline">Reset to the default</button></p>' +
+            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject</label><input type="text" class="na-subject tpl-field" value="' + escapeHtml(compValue(comp, "subjectTemplate")) + '" placeholder="[{severity.upper}] {asset} — {metric} = {value}"></div>' +
+            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body (plain text)</label><textarea class="na-body tpl-field" rows="8" style="width:100%">' + escapeHtml(compValue(comp, "bodyTextTemplate")) + '</textarea></div>' +
+            '<label style="font-size:0.8rem;display:block"><input type="checkbox" class="na-html-enable"' + (compValue(comp, "bodyHtmlTemplate") ? " checked" : "") + '> Send an HTML body (values are HTML-escaped)</label>' +
+            '<textarea class="na-html tpl-field" rows="10" style="width:100%;display:' + (compValue(comp, "bodyHtmlTemplate") ? "block" : "none") + ';margin-top:4px">' + escapeHtml(compValue(comp, "bodyHtmlTemplate")) + '</textarea>' +
           '</div>' +
         '</details>';
       box.innerHTML = html;
@@ -3352,6 +3697,18 @@ async function openAutomationWizard(existing) {
       box.querySelector(".na-html-enable").addEventListener("change", function () {
         box.querySelector(".na-html").style.display = this.checked ? "block" : "none";
       });
+      var compReset = box.querySelector(".na-comp-reset");
+      if (compReset) {
+        compReset.addEventListener("click", function () {
+          var d = defaultEmailTemplate();
+          box.querySelector(".na-subject").value = d.subjectTemplate || "";
+          box.querySelector(".na-body").value = d.bodyTextTemplate || "";
+          box.querySelector(".na-html").value = d.bodyHtmlTemplate || "";
+          var en = box.querySelector(".na-html-enable");
+          en.checked = !!d.bodyHtmlTemplate;
+          box.querySelector(".na-html").style.display = en.checked ? "block" : "none";
+        });
+      }
       row.querySelector(".na-channel").addEventListener("change", function () {
         row.querySelector(".aw-action-summary").textContent = actionSummary({ type: "notify", channelId: row.querySelector(".na-channel").value });
         renderRecipients();
@@ -3557,9 +3914,23 @@ async function openAutomationWizard(existing) {
     var out = [];
     host.querySelectorAll(":scope > .aw-action").forEach(function (row) {
       var a = collectAction(row);
-      if (a) out.push(a);
+      if (!a) return;
+      // `_mirrorOf` marks a reset row still following its trigger action. It's
+      // wizard bookkeeping, never part of the saved rule (the server schema is
+      // .strict() and would reject it).
+      if (row._mirrorOf) a._mirrorOf = row._mirrorOf;
+      out.push(a);
     });
     return out;
+  }
+
+  /** Strip the wizard-only markers before the payload leaves the browser. */
+  function stripMirrorMarks(actions) {
+    return (actions || []).map(function (a) {
+      var copy = JSON.parse(JSON.stringify(a));
+      delete copy._mirrorOf;
+      return copy;
+    });
   }
 
   // Escalation tier row — afterMin/repeat controls + a nested action list.
@@ -3634,6 +4005,92 @@ async function openAutomationWizard(existing) {
       band.actions = collectActionsFrom(sec.querySelector(".ba-actions"));
       if (bandRows[i]) bandRows[i]._bandActions = band.actions;
     });
+    var resetHost = panel.querySelector("#aw-reset-actions");
+    if (resetHost) {
+      var resetToggle = panel.querySelector("#aw-reset-actions-on");
+      if (resetToggle) draft.resetOn = resetToggle.checked;
+      draft.resetActions = draft.resetOn === false ? null : collectActionsFrom(resetHost);
+      if (draft.resetActions && draft.resetActions.length === 0) draft.resetActions = null;
+    }
+  }
+
+  /**
+   * The reset list mirrors the trigger's NOTIFY actions as they're created:
+   * add a Notify on the left and the same channel + recipients appear on the
+   * right, so "tell the same people it came back" costs nothing.
+   *
+   * A mirrored row is marked (_mirrorOf, client-only — stripped by
+   * collectActionsFrom like the band stash) and DETACHES the moment the
+   * operator edits or deletes it. Rows that are still attached follow later
+   * changes; an edited one never gets overwritten.
+   */
+  /** (Re)draw the reset rows, tagging the mirrored ones so they keep tracking. */
+  function renderResetRows(panel, actions) {
+    var host = panel.querySelector("#aw-reset-actions");
+    if (!host) return;
+    host.innerHTML = "";
+    (actions || []).forEach(function (a) {
+      addActionRow(host, a);
+      var row = host.lastElementChild;
+      if (row && a._mirrorOf) {
+        row._mirrorOf = a._mirrorOf;
+        // Any edit inside a mirrored row detaches it: from here it is the
+        // operator's, and a later trigger change must not overwrite it.
+        row.addEventListener("input", function () { detachMirror(row, panel); }, true);
+        row.addEventListener("change", function () { detachMirror(row, panel); }, true);
+        var rm = row.querySelector(".aw-action-remove");
+        if (rm) rm.addEventListener("click", function () { setTimeout(function () { refreshMirrorNote(panel); }, 0); });
+      }
+    });
+    refreshMirrorNote(panel);
+  }
+
+  function detachMirror(row, panel) {
+    if (!row._mirrorOf) return;
+    row._mirrorOf = null;
+    refreshMirrorNote(panel);
+  }
+
+  /** Re-mirror after the TRIGGER action list changes (add / remove / channel). */
+  function syncResetMirror(panel) {
+    var host = panel.querySelector("#aw-reset-actions");
+    var on = panel.querySelector("#aw-reset-actions-on");
+    if (!host || !on || !on.checked) return;
+    var current = collectActionsFrom(host);
+    // Rows the operator has touched are kept verbatim; the rest re-derive.
+    renderResetRows(panel, mirroredResetActions(collectActionsFrom(panel.querySelector("#aw-actions")), current));
+  }
+
+  function refreshMirrorNote(panel) {
+    var note = panel.querySelector("#aw-reset-mirror-note");
+    var host = panel.querySelector("#aw-reset-actions");
+    if (!note || !host) return;
+    var rows = Array.from(host.querySelectorAll(":scope > .aw-action"));
+    var mirrored = rows.filter(function (r) { return !!r._mirrorOf; }).length;
+    if (rows.length === 0) {
+      note.textContent = "Nothing here yet — add an action, or add a Notify above and it will appear here.";
+    } else if (mirrored === rows.length) {
+      note.textContent = "Following your notify actions above.";
+    } else if (mirrored === 0) {
+      note.textContent = "Edited — no longer following your notify actions.";
+    } else {
+      note.textContent = mirrored + " of " + rows.length + " still following your notify actions.";
+    }
+  }
+
+  function mirroredResetActions(triggerActions, existing) {
+    var notifies = (triggerActions || []).filter(function (a) { return a.type === "notify" && a.channelId; });
+    var kept = (existing || []).filter(function (a) { return !a._mirrorOf; });
+    var stillMirrored = notifies.map(function (a) {
+      var clone = JSON.parse(JSON.stringify(a));
+      // An escalation chases an UNHANDLED alert — meaningless on a recovery,
+      // and the server rejects it (reset actions are plain, not escalatable).
+      delete clone.escalation;
+      clone._mirrorOf = a.channelId;
+      return clone;
+    });
+    // Operator-authored rows keep their place after the mirrored ones.
+    return stillMirrored.concat(kept);
   }
   // Severity tiers + notify policy — collected only in multi-severity mode
   // (a single numeric metric). Single mode clears them.
@@ -3829,6 +4286,9 @@ async function openAutomationWizard(existing) {
     var msgRow = draft.messageTemplate
       ? '<dt>Message</dt><dd><code style="font-size:0.8rem">' + escapeHtml(draft.messageTemplate) + '</code></dd>'
       : "";
+    var resetRow = (draft.resetActions && draft.resetActions.length)
+      ? '<dt>When it resets</dt><dd>' + draft.resetActions.map(function (a) { return escapeHtml(actionSummary(a)); }).join("<br>") + '</dd>'
+      : '<dt>When it resets</dt><dd><span style="color:var(--color-text-tertiary)">nothing — the alert just clears</span></dd>';
     var bandsRow = "";
     if (bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length) {
       var op = (draft.trigger && draft.trigger.operator) || ">=";
@@ -3852,6 +4312,7 @@ async function openAutomationWizard(existing) {
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
       msgRow +
       '<dt>Actions</dt><dd>' + (actionLines.length ? actionLines.join("<br>") : '<span style="color:var(--color-text-tertiary)">in-app alert only</span>') + '</dd>' +
+      resetRow +
       bandsRow +
       '<dt>Escalation</dt><dd>' + escapeHtml(escLine) + '</dd>' +
     '</dl>';
@@ -3970,6 +4431,9 @@ async function openAutomationWizard(existing) {
       // band saves bare and the server runs the base actions at every severity.
       severityBands: bandsApplicable(draft.trigger) ? payloadBands() : null,
       bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
+      // Reset actions: the wizard's mirror markers are wizard-only, and the
+      // server schema is strict.
+      resetActions: draft.resetActions && draft.resetActions.length ? stripMirrorMarks(draft.resetActions) : null,
     };
     this.disabled = true;
     try {
@@ -4034,6 +4498,9 @@ function _awDraftFromRule(r) {
     escalation: esc ? JSON.parse(JSON.stringify(esc)) : null,
     severityBands: Array.isArray(r.severityBands) && r.severityBands.length ? JSON.parse(JSON.stringify(r.severityBands)) : null,
     bandNotify: r.bandNotify ? JSON.parse(JSON.stringify(r.bandNotify)) : null,
+    // undefined (never set) vs null (deliberately off) matters: a NEW draft
+    // seeds its reset list from the trigger, a stored rule shows what it saved.
+    resetActions: Array.isArray(r.resetActions) && r.resetActions.length ? JSON.parse(JSON.stringify(r.resetActions)) : null,
     // Per-severity actions are opt-in on the Actions step; a stored rule opts in
     // iff any band actually carries its own actions/escalation.
     bandActionsPerSeverity: (Array.isArray(r.severityBands) ? r.severityBands : []).some(function (b) {

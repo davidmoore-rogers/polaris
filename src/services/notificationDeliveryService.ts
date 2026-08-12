@@ -20,7 +20,9 @@
 import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { notificationsPageUrl, pushDeepLinkUrl } from "../utils/notificationTemplate.js";
+import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail } from "../utils/notificationTemplate.js";
+import { ackUrlFromMeta } from "./notificationRecipientService.js";
+import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor } from "./alertChartService.js";
 import { logEvent } from "./eventLogService.js";
 import { type ChannelType } from "./notificationTypes.js";
 import { sendSmtpEmail, sendM365Email, type EmailMessage } from "./notificationChannels/emailChannel.js";
@@ -51,6 +53,7 @@ interface DeliveryRow {
     id: string;
     message: string;
     severity: string;
+    assetId: string | null;
     assetHostname: string | null;
     triggeredAt: Date;
   };
@@ -76,20 +79,60 @@ function asStringArray(v: unknown): string[] {
  * pre-rendered snapshot; legacy rows (including pre-upgrade pending rows) get
  * the byte-identical default subject/body.
  */
-function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, url: string | null): EmailMessage | { error: string } {
+async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, url: string | null): Promise<EmailMessage | { error: string }> {
   if (meta.composed === true) {
     const to = asStringArray(meta.to);
     if (to.length === 0) return { error: "composed email delivery has no To recipients" };
+    let text = typeof meta.text === "string" ? meta.text : d.notification.message;
+    let html = typeof meta.html === "string" && meta.html ? meta.html : undefined;
+
+    // Charts are built HERE, not at fire time: the drain is a queue off the
+    // engine's hot path, and an escalation email at T+90min then shows the
+    // last hour as of sending rather than re-rendering a frozen snapshot.
+    let attachments: EmailMessage["attachments"];
+    const wanted = chartTokensIn(text, html);
+    if (wanted.size > 0) {
+      const charts = d.notification.assetId
+        ? await buildAlertCharts(d.notification.assetId, wanted)
+        : new Map();
+      text = substituteChartTokens(text, charts, { html: false });
+      if (html) {
+        html = substituteChartTokens(html, charts, { html: true });
+        attachments = attachmentsFor(charts, html);
+      }
+    }
+
     return {
       to,
       cc: asStringArray(meta.cc),
       bcc: asStringArray(meta.bcc),
       subject: typeof meta.subject === "string" && meta.subject ? meta.subject : titleFor(d.notification),
-      text: typeof meta.text === "string" ? meta.text : d.notification.message,
-      html: typeof meta.html === "string" && meta.html ? meta.html : undefined,
+      text,
+      html,
+      ...(attachments?.length ? { attachments } : {}),
     };
   }
-  return { to: d.target, subject: titleFor(d.notification), text: d.notification.message + (url ? `\n\nView: ${url}` : "") };
+  return {
+    to: d.target,
+    subject: titleFor(d.notification),
+    text: appendAckLine(d.notification.message + (url ? `\n\nView: ${url}` : ""), ackUrlFromEmailMeta(meta)),
+  };
+}
+
+/**
+ * The acknowledge URL for an email row, or null when this recipient didn't
+ * earn one (an address-book contact, a typed address, or an install with no
+ * POLARIS_PUBLIC_URL — see notificationRecipientService.buildAddressOwnerMap).
+ */
+export function ackUrlFromEmailMeta(meta: Record<string, unknown>): string | null {
+  const ack = meta.ack && typeof meta.ack === "object" ? (meta.ack as Record<string, unknown>) : null;
+  return typeof ack?.token === "string" ? ackUrlForEmail(ack.token) : null;
+}
+
+/** Append the one-click acknowledge line to a plain-text body. Pure. */
+export function appendAckLine(text: string, ackUrl: string | null): string {
+  if (!ackUrl) return text;
+  return `${text}\n\nAcknowledge this alert: ${ackUrl}`;
 }
 
 async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promise<{ ok: true } | { ok: false; error: string; gone?: boolean }> {
@@ -119,7 +162,7 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promi
   const type = channel.type as ChannelType;
   try {
     if (type === "smtp" || type === "oauth_m365") {
-      const msg = emailMessageFor(d, meta, url);
+      const msg = await emailMessageFor(d, meta, url);
       if ("error" in msg) return { ok: false, error: msg.error };
       if (type === "smtp") {
         await sendSmtpEmail(
@@ -154,7 +197,16 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promi
       await sendWebPush(
         { publicKey: cfgStr(cfg, "publicKey"), privateKey: cfgStr(cfg, "privateKey"), subject: cfgStr(cfg, "subject") },
         { endpoint: d.target, p256dh: String(meta.p256dh ?? ""), auth: String(meta.auth ?? "") },
-        { title: titleFor(d.notification), body: d.notification.message, severity: d.notification.severity, url: pushDeepLinkUrl(meta.surface), notificationId: d.notification.id },
+        {
+          title: titleFor(d.notification),
+          body: d.notification.message,
+          severity: d.notification.severity,
+          url: pushDeepLinkUrl(meta.surface),
+          notificationId: d.notification.id,
+          // Present only for a recipient who may acknowledge; sw.js renders
+          // the Acknowledge action button iff it arrives.
+          ackUrl: ackUrlFromMeta(meta),
+        },
       );
     } else {
       return { ok: false, error: `unknown channel type "${channel.type}"` };
@@ -167,9 +219,22 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promi
 }
 
 /** One drain pass. Returns counts. */
-export async function drainPendingDeliveries(): Promise<{ processed: number; sent: number; failed: number }> {
+/**
+ * @param opts.notificationId Drain only ONE alert's rows. The wizard's test
+ * buttons use this to dispatch immediately instead of waiting up to 15s for
+ * the tick — extending the drain rather than cloning it, because this function
+ * owns retries, permanent-fail classification, dead-push pruning and the
+ * summary Event. The job itself calls it with no arguments, unchanged.
+ */
+export async function drainPendingDeliveries(
+  opts: { notificationId?: string } = {},
+): Promise<{ processed: number; sent: number; failed: number }> {
   const rows = (await prisma.notificationDelivery.findMany({
-    where: { status: "pending", attempts: { lt: MAX_ATTEMPTS } },
+    where: {
+      status: "pending",
+      attempts: { lt: MAX_ATTEMPTS },
+      ...(opts.notificationId ? { notificationId: opts.notificationId } : {}),
+    },
     orderBy: { createdAt: "asc" },
     take: BATCH_SIZE,
     select: {
@@ -179,7 +244,9 @@ export async function drainPendingDeliveries(): Promise<{ processed: number; sen
       target: true,
       meta: true,
       attempts: true,
-      notification: { select: { id: true, message: true, severity: true, assetHostname: true, triggeredAt: true } },
+      // assetId is what the last-hour charts query against — the hostname is a
+      // fire-time snapshot and can't be joined back to sample rows.
+      notification: { select: { id: true, message: true, severity: true, assetId: true, assetHostname: true, triggeredAt: true } },
     },
   })) as DeliveryRow[];
 

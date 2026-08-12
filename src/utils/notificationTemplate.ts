@@ -15,6 +15,8 @@
  * has since been deleted.
  */
 
+import { severityCss } from "./severityStyle.js";
+
 export interface TemplateVariable {
   token: string;
   label: string;
@@ -27,6 +29,14 @@ export interface TemplateVariable {
  * via buildSchemaCatalog().templateVariables. Adding a token requires a
  * matching key in buildTemplateContext() (and, for asset-sourced tokens, the
  * asset-detail select in notificationEngine).
+ *
+ * ONE DELIBERATE EXCEPTION: `{ack}` has NO key in buildTemplateContext. Its
+ * value is per-RECIPIENT (a single-use token bound to one user), while the
+ * context is built once per fire and snapshotted onto Notification.templateCtx
+ * — shared by every recipient and persisted. Giving it a context key would
+ * render it to "" at compose time and leave nothing for the later pass to
+ * substitute. It is filled instead by substituteAckToken() during delivery
+ * expansion, which works precisely because unknown tokens are left literal.
  */
 export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{asset}", label: "Asset", description: "Asset hostname (or id / \"host\")", group: "notification" },
@@ -38,8 +48,16 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{message}", label: "Message", description: "The rendered in-app notification message", group: "notification" },
   { token: "{severity}", label: "Severity", description: "Rule severity (e.g. warning)", group: "notification" },
   { token: "{severity.upper}", label: "SEVERITY", description: "Rule severity upper-cased (e.g. WARNING)", group: "notification" },
+  { token: "{severity.color}", label: "Severity color", description: "Hex colour for this severity (e.g. #d97706) — for styling an HTML email", group: "notification" },
+  { token: "{chart.cpu}", label: "CPU chart", description: "Last hour of CPU as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
+  { token: "{chart.memory}", label: "Memory chart", description: "Last hour of memory as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
+  { token: "{chart.responseTime}", label: "Response-time chart", description: "Last hour of probe response time as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
   { token: "{time}", label: "Time", description: "Trigger time (ISO-8601)", group: "notification" },
   { token: "{link}", label: "Link", description: "Notifications page URL (empty if POLARIS_PUBLIC_URL unset)", group: "notification" },
+  { token: "{ack}", label: "Acknowledge link", description: "One-click acknowledge URL — resolved per recipient at send time. Empty for address-book/typed recipients (only Polaris users can acknowledge) and when POLARIS_PUBLIC_URL is unset", group: "notification" },
+  { token: "{asset.link}", label: "Open asset", description: "URL that opens this device in Polaris (empty if POLARIS_PUBLIC_URL unset)", group: "asset" },
+  { token: "{asset.connectedSwitch}", label: "Connected switch", description: "Switch/port the device was last seen on, e.g. FS-248E-01/port15", group: "asset" },
+  { token: "{asset.connectedAp}", label: "Connected AP", description: "Access point the device was last seen on", group: "asset" },
   { token: "{rule}", label: "Rule name", description: "Name of the triggering rule", group: "rule" },
   { token: "{rule.description}", label: "Rule description", description: "Description of the triggering rule", group: "rule" },
   { token: "{asset.ip}", label: "Asset IP", description: "Primary IP address", group: "asset" },
@@ -71,8 +89,14 @@ export function escapeHtml(s: string): string {
 
 /** Asset fields the template context draws on (subset of the Asset row). */
 export interface AssetTemplateDetail {
+  /** Needed for {asset.link}; the rest are rendered directly. */
+  id?: string | null;
   ipAddress?: string | null;
   macAddress?: string | null;
+  /** "<switch>/port<N>" — where the device was last seen wired. */
+  lastSeenSwitch?: string | null;
+  /** The AP the device was last seen associated with. */
+  lastSeenAp?: string | null;
   assetType?: string | null;
   status?: string | null;
   location?: string | null;
@@ -128,6 +152,7 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "message": str(parts.message),
     "severity": severity,
     "severity.upper": severity.toUpperCase(),
+    "severity.color": severityCss(severity),
     "time": time,
     "link": str(parts.link),
     "rule": str(parts.ruleName),
@@ -145,12 +170,33 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "asset.department": str(a?.department),
     "asset.assignedTo": str(a?.assignedTo),
     "asset.tags": (a?.tags ?? []).join(", "),
+    "asset.connectedSwitch": str(a?.lastSeenSwitch),
+    "asset.connectedAp": str(a?.lastSeenAp),
+    "asset.link": a?.id ? (assetPageUrl(a.id) ?? "") : "",
+    // NOTE: no "ack" key — see the TEMPLATE_VARIABLES comment. It is
+    // substituted per recipient at delivery-expansion time.
     "escalation.tier": parts.escalationTier !== undefined ? String(parts.escalationTier) : "",
     "escalation.elapsed": str(parts.escalationElapsed),
   };
 }
 
 const TOKEN_RE = /\{([a-zA-Z][\w.]*)\}/g;
+
+/**
+ * Tokens that are deliberately NOT in buildTemplateContext because they are
+ * resolved after the context exists:
+ *   - `ack` is per-RECIPIENT (notificationRecipientService, at fan-out)
+ *   - `chart.*` are per-DELIVERY inline images (alertChartService, at send)
+ *
+ * The renderer must leave these alone no matter what `unknown` says, or the
+ * later pass finds nothing to substitute.
+ */
+export const DEFERRED_TOKENS: ReadonlySet<string> = new Set([
+  "ack",
+  "chart.cpu",
+  "chart.memory",
+  "chart.responseTime",
+]);
 
 /**
  * Render a template against a context map. Single regex pass — substituted
@@ -161,10 +207,20 @@ const TOKEN_RE = /\{([a-zA-Z][\w.]*)\}/g;
 export function renderNotificationTemplate(
   template: string,
   ctx: Record<string, string>,
-  opts?: { html?: boolean },
+  opts?: { html?: boolean; unknown?: "keep" | "blank" },
 ): string {
   return template.replace(TOKEN_RE, (match, name: string) => {
-    if (!(name in ctx)) return match;
+    if (!(name in ctx)) {
+      // A deferred token is filled by a LATER pass — blanking it here would
+      // leave that pass nothing to find.
+      if (DEFERRED_TOKENS.has(name)) return match;
+      // Operator templates keep an unknown token literal so a typo is visible
+      // in the delivered message. Polaris's OWN default body passes
+      // unknown:"blank": a context assembled before a token existed (an
+      // escalation re-rendering a pre-upgrade Notification.templateCtx) must
+      // not leak "{rule}" into a subject line.
+      return opts?.unknown === "blank" ? "" : match;
+    }
     const v = ctx[name];
     return opts?.html ? escapeHtml(v) : v;
   });
@@ -182,6 +238,60 @@ export function notificationsPageUrl(): string | null {
   const base = process.env.POLARIS_PUBLIC_URL;
   if (!base) return null;
   return `${base.replace(/\/$/, "")}/automations.html`;
+}
+
+/**
+ * URL that opens ONE device in Polaris — the hash form app.js's
+ * processSearchHash already understands, so an emailed link lands on the
+ * asset's slide-over rather than a list the reader has to search.
+ * Null when POLARIS_PUBLIC_URL is unset (a relative URL is useless in mail).
+ */
+export function assetPageUrl(assetId: string | null | undefined): string | null {
+  const base = process.env.POLARIS_PUBLIC_URL;
+  if (!base || !assetId) return null;
+  return `${base.replace(/\/$/, "")}/assets.html#view=asset:${encodeURIComponent(assetId)}`;
+}
+
+/**
+ * One-click acknowledge URL for an EMAIL recipient. Null without a public URL,
+ * mirroring notificationsPageUrl: a relative link in a mail client resolves
+ * against nothing.
+ */
+export function ackUrlForEmail(token: string): string | null {
+  const base = process.env.POLARIS_PUBLIC_URL;
+  if (!base) return null;
+  return `${base.replace(/\/$/, "")}/ack/${encodeURIComponent(token)}`;
+}
+
+/**
+ * Same link for a WEB PUSH payload. Never null — like pushDeepLinkUrl it falls
+ * back to a relative path, which the service worker resolves against its own
+ * origin, so push acknowledgement keeps working on installs that never set a
+ * public URL.
+ */
+export function ackUrlForPush(token: string): string {
+  const base = process.env.POLARIS_PUBLIC_URL;
+  const path = `/ack/${encodeURIComponent(token)}`;
+  return base ? `${base.replace(/\/$/, "")}${path}` : path;
+}
+
+const ACK_TOKEN_RE = /\{ack\}/g;
+
+/**
+ * Fill the deferred `{ack}` token once the recipient is known. Called at
+ * delivery expansion, not at compose time — see the TEMPLATE_VARIABLES note.
+ * A null url (recipient can't acknowledge, or no public URL) renders empty, so
+ * a template that mentions {ack} degrades to a body without a link rather than
+ * showing the literal token to a contact who could never use it.
+ */
+export function substituteAckToken(
+  text: string,
+  url: string | null,
+  opts?: { html?: boolean },
+): string {
+  if (!text) return text;
+  const value = url ?? "";
+  return text.replace(ACK_TOKEN_RE, opts?.html ? escapeHtml(value) : value);
 }
 
 /** Where a push notification should land, per enrolling surface. */

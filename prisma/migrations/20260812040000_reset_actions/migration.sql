@@ -1,0 +1,19 @@
+-- Actions that run when an alert ENDS.
+--
+-- Until now an automation could only act when it fired. Every clear path in
+-- the engine — auto reset, hysteresis recovery, timed reset, a custom reset
+-- condition — writes cleared/clearedBy/clearedAt and nothing else, and the
+-- only thing resembling a recovery action was bandNotify.resolvedActions,
+-- which exists solely for severity-band rules. "Tell the NOC it came back"
+-- was not expressible.
+--
+-- Plain actions (notify | api_call | script | event), never escalatable: an
+-- escalation chases an alert nobody handled, and there is nothing to chase
+-- about a recovery. Same reason resolvedActions are bare.
+--
+-- NULL is the pre-feature behaviour and stays that way on every existing row:
+-- reset stays silent until an operator edits the automation. The wizard seeds
+-- the list from the trigger's notify actions as they are created, so NEW
+-- automations tell the same people it recovered without anyone configuring it
+-- twice — but nothing retroactively starts emailing about old rules.
+ALTER TABLE "notification_rules" ADD COLUMN "resetActions" JSONB;

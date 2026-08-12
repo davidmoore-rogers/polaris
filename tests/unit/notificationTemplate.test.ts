@@ -7,7 +7,7 @@
  * (escapeHtml / templateNeedsAsset / formatElapsed).
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   TEMPLATE_VARIABLES,
   buildTemplateContext,
@@ -32,8 +32,11 @@ const FULL_PARTS: TemplateContextParts = {
   ruleName: "High CPU",
   ruleDescription: "Fires on sustained CPU",
   assetDetail: {
+    id: "asset-1",
     ipAddress: "10.1.1.1",
     macAddress: "AA:BB:CC:DD:EE:FF",
+    lastSeenSwitch: "FS-248E-01/port15",
+    lastSeenAp: "FAP-431F-02",
     assetType: "firewall",
     status: "active",
     location: "Atlanta DC",
@@ -51,18 +54,53 @@ const FULL_PARTS: TemplateContextParts = {
   escalationElapsed: "1h 30m",
 };
 
+/**
+ * Tokens with NO context key, by design — they are filled later, and both rely
+ * on unknown tokens surviving the render:
+ *
+ *  - `{ack}` is per-RECIPIENT (a single-use token bound to one user) while the
+ *    context is built once per fire and snapshotted onto
+ *    Notification.templateCtx for every recipient to share. Filled by
+ *    substituteAckToken() at delivery expansion.
+ *  - `{chart.*}` are inline images built at DELIVERY time from the last hour of
+ *    samples (alertChartService), so an escalation email at T+90min charts the
+ *    last hour as of sending rather than re-rendering a frozen snapshot.
+ */
+const DEFERRED_TOKENS = new Set(["{ack}", "{chart.cpu}", "{chart.memory}", "{chart.responseTime}"]);
+const CONTEXT_TOKENS = TEMPLATE_VARIABLES.filter((v) => !DEFERRED_TOKENS.has(v.token));
+
+// {asset.link} is only a URL when the install has a public URL to build one
+// from — the same rule {link} follows.
+const PREV_PUBLIC_URL = process.env.POLARIS_PUBLIC_URL;
+beforeAll(() => { process.env.POLARIS_PUBLIC_URL = "https://polaris.example.com"; });
+afterAll(() => {
+  if (PREV_PUBLIC_URL === undefined) delete process.env.POLARIS_PUBLIC_URL;
+  else process.env.POLARIS_PUBLIC_URL = PREV_PUBLIC_URL;
+});
+
 describe("buildTemplateContext", () => {
-  it("provides a context key for every cataloged token", () => {
+  it("provides a context key for every cataloged token except the deferred ones", () => {
     const ctx = buildTemplateContext(FULL_PARTS);
-    for (const v of TEMPLATE_VARIABLES) {
+    for (const v of CONTEXT_TOKENS) {
       const name = v.token.slice(1, -1); // strip { }
       expect(ctx, `missing context key for ${v.token}`).toHaveProperty([name]);
     }
   });
 
-  it("renders every cataloged token to a non-empty value with full parts", () => {
+  it("keeps the deferred tokens OUT of the context", () => {
     const ctx = buildTemplateContext(FULL_PARTS);
-    for (const v of TEMPLATE_VARIABLES) {
+    for (const token of DEFERRED_TOKENS) {
+      const name = token.slice(1, -1);
+      // A context key here would render the token to "" at compose time and
+      // leave the per-recipient substitution nothing to fill.
+      expect(ctx, `${token} must not be a context key`).not.toHaveProperty([name]);
+      expect(renderNotificationTemplate(token, ctx)).toBe(token);
+    }
+  });
+
+  it("renders every cataloged context token to a non-empty value with full parts", () => {
+    const ctx = buildTemplateContext(FULL_PARTS);
+    for (const v of CONTEXT_TOKENS) {
       expect(renderNotificationTemplate(v.token, ctx), `${v.token} rendered empty`).not.toBe("");
       expect(renderNotificationTemplate(v.token, ctx)).not.toBe(v.token);
     }

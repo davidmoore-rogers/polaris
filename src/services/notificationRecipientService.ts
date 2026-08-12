@@ -27,7 +27,15 @@ import type { Prisma } from "../generated/prisma/client.js";
 import { resolveTagScopesForUser } from "./regionScopeService.js";
 import { createTtlCache } from "../utils/ttlCache.js";
 import { stripRegionPrefix } from "./notificationService.js";
-import { renderNotificationTemplate } from "../utils/notificationTemplate.js";
+import {
+  renderNotificationTemplate,
+  substituteAckToken,
+  ackUrlForEmail,
+  ackUrlForPush,
+} from "../utils/notificationTemplate.js";
+import { defaultAlertEmailTemplate, pruneDeadLinks, pruneEmptyRows, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
+import { mintAckTokens, type AckChannel } from "./notificationAckService.js";
+import { permissionOf, rankMeets, type AccessLevel } from "../api/middleware/permissions.js";
 import {
   type DeliveryTarget,
   type ChannelType,
@@ -54,25 +62,51 @@ export interface ComposedEmail {
 
 /**
  * Render the composed outbound email for a composition config from a built
- * context. Unset pieces fall back to the pre-feature defaults (subject
- * `[SEV] asset`, text = message + View link). HTML body only when the
- * operator provided one — interpolated values are HTML-escaped there. cc/bcc
- * pass through unresolved (resolved at expansion time). Lives here (not the
- * engine) so the action-execution layer can compose without a circular
- * import; the engine re-exports it for its historical consumers.
+ * context. Any piece the operator left blank falls back to the shared DEFAULT
+ * alert template (alertEmailTemplate.ts) — the same strings the automation
+ * wizard prefills into a new Notify action, so what Polaris sends and what the
+ * operator can edit are one text. cc/bcc pass through unresolved (resolved at
+ * expansion time). Lives here (not the engine) so the action-execution layer
+ * can compose without a circular import; the engine re-exports it.
+ *
+ * Empty rows are pruned AFTER rendering: every {asset.*} token renders "" when
+ * the field is unset, so a device with no AP and no model would otherwise mail
+ * a table of blank cells.
  */
 export function buildComposedEmail(comp: EmailComposition, ctx: Record<string, string>): ComposedEmail {
-  const link = ctx["link"] || "";
-  const subject = comp.subjectTemplate && comp.subjectTemplate.trim()
-    ? renderNotificationTemplate(comp.subjectTemplate, ctx)
-    : `[${ctx["severity.upper"] || "NOTIFICATION"}] ${ctx["asset"] || "Polaris notification"}`;
-  const text = comp.bodyTextTemplate && comp.bodyTextTemplate.trim()
-    ? renderNotificationTemplate(comp.bodyTextTemplate, ctx)
-    : (ctx["message"] || "") + (link ? `\n\nView: ${link}` : "");
-  const html = comp.bodyHtmlTemplate && comp.bodyHtmlTemplate.trim()
-    ? renderNotificationTemplate(comp.bodyHtmlTemplate, ctx, { html: true })
-    : undefined;
-  return { subject, text, html, cc: comp.cc ?? undefined, bcc: comp.bcc ?? undefined };
+  const def = defaultAlertEmailTemplate();
+  const own = (tpl: string | null | undefined) => !!tpl?.trim();
+  // Our own default renders unknown tokens blank; an operator's template keeps
+  // them literal, so their typo stays visible instead of vanishing.
+  const optsFor = (operatorAuthored: boolean, html?: boolean) =>
+    ({ ...(html ? { html: true } : {}), ...(operatorAuthored ? {} : { unknown: "blank" as const }) });
+
+  const subject = renderNotificationTemplate(
+    own(comp.subjectTemplate) ? comp.subjectTemplate! : def.subjectTemplate,
+    ctx,
+    optsFor(own(comp.subjectTemplate)),
+  );
+  const text = renderNotificationTemplate(
+    own(comp.bodyTextTemplate) ? comp.bodyTextTemplate! : def.bodyTextTemplate,
+    ctx,
+    optsFor(own(comp.bodyTextTemplate)),
+  );
+  const html = renderNotificationTemplate(
+    own(comp.bodyHtmlTemplate) ? comp.bodyHtmlTemplate! : def.bodyHtmlTemplate,
+    ctx,
+    optsFor(own(comp.bodyHtmlTemplate), true),
+  );
+  return {
+    // A blank token can leave a dangling separator ("host — "); tidy the tail
+    // rather than making the subject template conditional.
+    subject: subject.replace(/[\s—\-–:|]+$/u, "").trim(),
+    text: pruneEmptyTextLines(text),
+    // Dead links are pruned again after the per-recipient {ack} fill, since
+    // that is when a recipient without a link gets an empty href.
+    html: pruneDeadLinks(pruneEmptyRows(html)),
+    cc: comp.cc ?? undefined,
+    bcc: comp.bcc ?? undefined,
+  };
 }
 
 export interface RecipientUser {
@@ -95,6 +129,14 @@ interface IndexedUser extends RecipientUser {
   regionSet: Set<string>;
   /** The user's Role id — recipientRoles routes by it. */
   roleId: string;
+  /**
+   * Does this user's role grant alerts:write? Decides whether they get a
+   * one-click acknowledge link. Resolved inside this 30s-cached index — one
+   * extra role read per cache window rather than one per notification —
+   * because the alternative is mailing an Acknowledge button to someone the
+   * API can only 403.
+   */
+  canAckAlerts: boolean;
 }
 
 // ─── User tag index (short-TTL cache) ───────────────────────────────────────
@@ -125,7 +167,7 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       ssoGroups: true,
       authProvider: true,
       roleId: true,
-      role: { select: { regionTags: true, otherTags: true } },
+      role: { select: { regionTags: true, otherTags: true, permissions: true } },
     },
   });
 
@@ -140,10 +182,31 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       regionSet.add(n);
     }
     for (const t of scopes.otherTags.effective) matchSet.add(normalizeNeedle(t));
-    index.push({ id: u.id, email: u.email, displayName: u.displayName, matchSet, regionSet, roleId: u.roleId });
+    const perms = (u.role?.permissions ?? {}) as Record<string, AccessLevel | undefined>;
+    index.push({
+      id: u.id,
+      email: u.email,
+      displayName: u.displayName,
+      matchSet,
+      regionSet,
+      roleId: u.roleId,
+      canAckAlerts: rankMeets(permissionOf(perms, "alerts"), "write"),
+    });
   }
   return index;
   });
+}
+
+/**
+ * Which of these user ids may acknowledge an alert right now. Reads the same
+ * cached index the recipient resolvers use, so asking costs nothing extra on
+ * the fan-out path.
+ */
+export async function ackCapableUserIds(ids: Iterable<string>): Promise<Set<string>> {
+  const want = new Set(ids);
+  if (want.size === 0) return new Set();
+  const index = await loadUserIndex();
+  return new Set(index.filter((u) => want.has(u.id) && u.canAckAlerts).map((u) => u.id));
 }
 
 /**
@@ -291,6 +354,65 @@ export function dedupeEmailRecipients(to: string[], cc: string[], bcc: string[])
  * Disabled or missing channels are skipped. Best-effort: returns the number of
  * rows created.
  */
+/**
+ * Merge the three address sources into ONE ordered map of address → the
+ * Polaris user who owns it (null for an address nobody signs in with).
+ *
+ * Ownership decides who gets a one-click acknowledge link: only a configured
+ * user can be recorded as the acknowledger, so an address-book contact or a
+ * typed address gets the mail without one. A user-sourced entry WINS over a
+ * typed/contact entry for the same address — typing your colleague's own
+ * address should not strip their link — and two users sharing an address
+ * (User.email is nullable and NOT unique) tie-break on the lowest id so the
+ * choice is stable across sends.
+ *
+ * Insertion order reproduces the pre-feature Set: typed addresses, then users,
+ * then contacts. Re-setting an existing key keeps its original position, so a
+ * composed email's To line reads exactly as it did before.
+ */
+export function buildAddressOwnerMap(
+  users: RecipientUser[],
+  typed: string[] | undefined,
+  contacts: string[] | undefined,
+): Map<string, RecipientUser | null> {
+  const norm = (a: string) => a.trim().toLowerCase();
+  const out = new Map<string, RecipientUser | null>();
+  for (const a of typed ?? []) if (a.trim()) out.set(norm(a), null);
+  for (const u of users) {
+    if (!u.email) continue;
+    const key = norm(u.email);
+    const held = out.get(key);
+    // Lowest id wins so repeated sends pick the same person.
+    if (held && held.id <= u.id) continue;
+    out.set(key, u);
+  }
+  for (const a of contacts ?? []) {
+    const key = norm(a);
+    if (a.trim() && !out.has(key)) out.set(key, null);
+  }
+  return out;
+}
+
+/**
+ * Who — if anyone — may carry the acknowledge link in a COMPOSED email (one
+ * message, one shared body, a joined To list).
+ *
+ * A shared body can only carry a link when exactly one person will read it:
+ * the token records who acknowledged, and a cc'd contact clicking a link
+ * addressed to someone else would file the acknowledgement under that user's
+ * name. Hence: exactly one To address, owned by a user, with no Cc and no Bcc.
+ * Anything else gets the message with `{ack}` rendered empty.
+ */
+export function composedAckRecipient(
+  to: string[],
+  cc: string[],
+  bcc: string[],
+  owners: Map<string, RecipientUser | null>,
+): RecipientUser | null {
+  if (to.length !== 1 || cc.length > 0 || bcc.length > 0) return null;
+  return owners.get(to[0]!) ?? null;
+}
+
 export interface ExpandDeliveriesOptions {
   /** `region:` tags mined from the RULE's scope (recipientScopeRegion routing). */
   scopeRegionTags?: string[];
@@ -329,8 +451,19 @@ export async function expandDeliveries(
 
   const rows: Prisma.NotificationDeliveryCreateManyInput[] = [];
   const seen = new Set<string>(); // dedupe channelId|transport|target within one notification
+  // Parallel to `rows`: which recipient (if any) this row's acknowledge link
+  // belongs to. Tokens are minted in ONE batch after the walk, then stamped
+  // in — a create per recipient would put dozens of round trips on the
+  // alerting fan-out path.
+  const rowAck: Array<{ userId: string; channel: AckChannel } | null> = [];
 
-  const add = (channelId: string, transport: string, target: string, meta?: Prisma.InputJsonValue) => {
+  const add = (
+    channelId: string,
+    transport: string,
+    target: string,
+    meta?: Prisma.InputJsonValue,
+    ackFor?: { userId: string; channel: AckChannel } | null,
+  ) => {
     const key = `${channelId}|${transport}|${target}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -338,6 +471,7 @@ export async function expandDeliveries(
       ? ({ ...(meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {}), escalation } as Prisma.InputJsonValue)
       : meta;
     rows.push({ notificationId, channelId, transport, target, meta: withEsc ?? undefined });
+    rowAck.push(ackFor ?? null);
   };
 
   // Recipient users for a target = union of: specific user ids + (if opted in)
@@ -369,30 +503,47 @@ export async function expandDeliveries(
     const transport = CHANNEL_TRANSPORT[channel.type as ChannelType];
 
     if (transport === "email") {
-      const addresses = new Set<string>();
-      for (const a of t.addresses ?? []) addresses.add(a.trim().toLowerCase()); // custom emails
-      for (const u of await usersForTarget(t)) if (u.email) addresses.add(u.email.trim().toLowerCase());
       // Address-book contacts owning the triggering asset. Email-only: a
       // contact is an address, not an account, so there's no push endpoint to
       // reach — the web_push branch below deliberately ignores this flag.
-      if (t.recipientAssetContacts) {
-        for (const a of assetContactEmails ?? []) addresses.add(a.trim().toLowerCase());
-      }
+      const contactAddrs = t.recipientAssetContacts ? assetContactEmails ?? [] : [];
+      const targetUsers = await usersForTarget(t);
+      const owners = buildAddressOwnerMap(targetUsers, t.addresses, contactAddrs);
+      // An acknowledge link is only useful to someone whose role can actually
+      // acknowledge; emailLinksOn is false on installs with no public URL,
+      // where an /ack link would be unreachable anyway.
+      const ackable = await ackCapableUserIds(
+        Array.from(owners.values(), (u) => u?.id).filter((id): id is string => !!id),
+      );
+      const emailLinksOn = ackUrlForEmail("probe") !== null;
+      const ackUserFor = (u: RecipientUser | null | undefined): string | null =>
+        emailLinksOn && u && ackable.has(u.id) ? u.id : null;
+
       if (composedEmail) {
-        const to = Array.from(addresses);
+        const to = Array.from(owners.keys());
         if (to.length === 0) continue; // no recipients = no send (Graph rejects empty To)
         const { cc, bcc } = dedupeEmailRecipients(to, ccResolved, bccResolved);
-        add(channel.id, "email", to.join(", "), {
-          composed: true,
-          to,
-          cc,
-          bcc,
-          subject: composedEmail.subject,
-          text: composedEmail.text,
-          ...(composedEmail.html ? { html: composedEmail.html } : {}),
-        });
+        const soleUserId = ackUserFor(composedAckRecipient(to, cc, bcc, owners));
+        add(
+          channel.id,
+          "email",
+          to.join(", "),
+          {
+            composed: true,
+            to,
+            cc,
+            bcc,
+            subject: composedEmail.subject,
+            text: composedEmail.text,
+            ...(composedEmail.html ? { html: composedEmail.html } : {}),
+          },
+          soleUserId ? { userId: soleUserId, channel: "email" } : null,
+        );
       } else {
-        for (const addr of addresses) add(channel.id, "email", addr);
+        for (const [addr, owner] of owners) {
+          const userId = ackUserFor(owner);
+          add(channel.id, "email", addr, undefined, userId ? { userId, channel: "email" } : null);
+        }
       }
     } else if (transport === "web_push") {
       const users = await usersForTarget(t);
@@ -401,10 +552,21 @@ export async function expandDeliveries(
             where: { userId: { in: users.map((u) => u.id) } },
             // `surface` rides along so the drain can pick the right deep link
             // (mobile SPA vs desktop Automations page) without a second query.
-            select: { endpoint: true, p256dh: true, auth: true, surface: true },
+            // userId comes along for the acknowledge token — a push always
+            // belongs to a signed-in account, so every row can carry one.
+            select: { endpoint: true, p256dh: true, auth: true, surface: true, userId: true },
           })
         : [];
-      for (const s of subs) add(channel.id, "web_push", s.endpoint, { p256dh: s.p256dh, auth: s.auth, surface: s.surface });
+      const pushAckable = await ackCapableUserIds(subs.map((s) => s.userId));
+      for (const s of subs) {
+        add(
+          channel.id,
+          "web_push",
+          s.endpoint,
+          { p256dh: s.p256dh, auth: s.auth, surface: s.surface },
+          pushAckable.has(s.userId) ? { userId: s.userId, channel: "web_push" } : null,
+        );
+      }
       if (subs.length === 0) {
         // Push is opt-in per browser, so a perfectly valid-looking automation
         // can resolve to zero devices and deliver nothing at all. Say so.
@@ -424,8 +586,78 @@ export async function expandDeliveries(
   }
 
   if (rows.length === 0) return 0;
+  await stampAckTokens(notificationId, rows, rowAck);
   await prisma.notificationDelivery.createMany({ data: rows });
   return rows.length;
+}
+
+/**
+ * Mint one acknowledge token per (user, channel) that asked for one and write
+ * it into the matching delivery rows' meta — plus, for composed emails,
+ * substitute the deferred `{ack}` token inside the already-rendered
+ * subject/text/html.
+ *
+ * One token per (user, channel), not per row: a user with three enrolled
+ * devices should be able to acknowledge from whichever one buzzes, and the
+ * first click spending the token for the rest is exactly right — the alert is
+ * acknowledged. Tokens are NOT reused across notifications or escalation
+ * tiers, since only the digest is stored and each send mints fresh.
+ */
+async function stampAckTokens(
+  notificationId: string,
+  rows: Prisma.NotificationDeliveryCreateManyInput[],
+  rowAck: Array<{ userId: string; channel: AckChannel } | null>,
+): Promise<void> {
+  const wanted = new Map<string, { userId: string; channel: AckChannel }>();
+  for (const a of rowAck) if (a) wanted.set(`${a.userId}|${a.channel}`, a);
+  if (wanted.size === 0) return;
+
+  const reqs = Array.from(wanted.values()).map((w) => ({ notificationId, ...w }));
+  const minted = await mintAckTokens(reqs);
+  const tokenFor = new Map(minted.map((m) => [`${m.userId}|${m.channel}`, m.raw]));
+
+  rows.forEach((row, i) => {
+    const want = rowAck[i];
+    if (!want) return;
+    const token = tokenFor.get(`${want.userId}|${want.channel}`);
+    if (!token) return;
+    const meta = (row.meta && typeof row.meta === "object" ? { ...(row.meta as Record<string, unknown>) } : {}) as Record<string, unknown>;
+    meta.ack = { token, userId: want.userId };
+    if (meta.composed) {
+      // The body was rendered before recipients were known, so {ack} is still
+      // sitting in it literally. Fill it now for this one recipient, then
+      // re-prune: the fill can leave an "Acknowledge:" line or row with
+      // nothing after it.
+      const url = ackUrlForEmail(token);
+      if (typeof meta.subject === "string") meta.subject = substituteAckToken(meta.subject, url);
+      if (typeof meta.text === "string") meta.text = pruneEmptyTextLines(substituteAckToken(meta.text, url));
+      if (typeof meta.html === "string") meta.html = pruneDeadLinks(pruneEmptyRows(substituteAckToken(meta.html, url, { html: true })));
+    }
+    row.meta = meta as Prisma.InputJsonValue;
+  });
+
+  // A composed row that did NOT earn a token still carries the literal {ack}.
+  // Strip it rather than mailing "{ack}" to a contact who could never use it.
+  rows.forEach((row, i) => {
+    if (rowAck[i]) return;
+    const meta = row.meta as Record<string, unknown> | undefined;
+    if (!meta || !meta.composed) return;
+    const next = { ...meta };
+    if (typeof next.subject === "string") next.subject = substituteAckToken(next.subject, null);
+    // Pruning after the blank fill is what removes the whole "Acknowledge:"
+    // line for a recipient who can't acknowledge — rather than mailing them a
+    // label with nothing after it.
+    if (typeof next.text === "string") next.text = pruneEmptyTextLines(substituteAckToken(next.text, null));
+    if (typeof next.html === "string") next.html = pruneDeadLinks(pruneEmptyRows(substituteAckToken(next.html, null, { html: true })));
+    row.meta = next as Prisma.InputJsonValue;
+  });
+}
+
+/** Web-push payload URL for a delivery row's acknowledge token, if it has one. */
+export function ackUrlFromMeta(meta: unknown): string | null {
+  const m = meta && typeof meta === "object" ? (meta as Record<string, unknown>) : null;
+  const ack = m?.ack && typeof m.ack === "object" ? (m.ack as Record<string, unknown>) : null;
+  return typeof ack?.token === "string" ? ackUrlForPush(ack.token) : null;
 }
 
 /** Extract the `region:`-prefixed tags from a rule's scope (for

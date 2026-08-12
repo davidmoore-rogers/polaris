@@ -407,7 +407,12 @@ export async function ensureRoleSnapshot(req: Request): Promise<SessionRoleSnaps
   return resolveSnapshot(req);
 }
 
-function rankMeets(actual: AccessLevel, required: AccessLevel): boolean {
+/**
+ * Does `actual` satisfy `required`? Exported because the ack-link and
+ * recipient services answer "may this user acknowledge?" away from any
+ * request — a role matrix, not a session — and must not re-derive the ladder.
+ */
+export function rankMeets(actual: AccessLevel, required: AccessLevel): boolean {
   return ACCESS_RANK[actual] >= ACCESS_RANK[required];
 }
 

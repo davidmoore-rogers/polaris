@@ -15,6 +15,13 @@
  * or relative (relative when POLARIS_PUBLIC_URL is unset), and both
  * client.navigate() and clients.openWindow() resolve either.
  *
+ * ACKNOWLEDGE BUTTON. When the payload carries `ackUrl` (a single-use token
+ * link minted for this recipient — only recipients who may actually
+ * acknowledge get one), the notification grows an "Acknowledge" action that
+ * POSTs it and replaces the alert in the tray with a silent confirmation,
+ * without opening the app. Action buttons are unsupported on iOS/Safari, where
+ * the option is simply ignored and the body tap behaves as it always has.
+ *
  * NO FETCH HANDLER, deliberately. Polaris is an online-only tool: there is no
  * offline caching, no precache, no cache versioning to keep in step with
  * deploys. Do not add one without a deliberate decision — it changes this from
@@ -25,6 +32,11 @@
 
 var DEFAULT_URL = "/automations.html";
 var NOTIFICATION_ICON = "/icons/app-192.png";
+/* Severities that keep the notification on screen until it's dealt with. This
+ * read `data.severity === "error"` until 2026-08 — a value the server has never
+ * sent, since SEVERITIES is a closed enum of notice/informational/warning/
+ * serious/critical. No alert had ever actually been sticky. */
+var LOUD_SEVERITIES = ["serious", "critical"];
 
 self.addEventListener("install", function () {
   self.skipWaiting();
@@ -45,7 +57,15 @@ self.addEventListener("push", function (event) {
   var options = {
     body: data.body || "",
     tag: data.notificationId || undefined,
-    data: { url: data.url || DEFAULT_URL },
+    data: {
+      url: data.url || DEFAULT_URL,
+      // Single-use acknowledge link for THIS recipient. Absent when they
+      // can't acknowledge (see notificationRecipientService) — the button
+      // below is added only when it's here, so an unentitled recipient never
+      // sees a control that would fail.
+      ackUrl: data.ackUrl || null,
+      notificationId: data.notificationId || null,
+    },
     // Branded icon rendered from the operator's logo by appIconService. The
     // bare (unversioned) path is used because a service worker can't know the
     // current icon version; the route serves it with a short max-age so a
@@ -55,31 +75,92 @@ self.addEventListener("push", function (event) {
     // alpha mask, so a color logo arrives as a featureless white blob — worse
     // than the platform default.
     icon: NOTIFICATION_ICON,
-    requireInteraction: data.severity === "error",
+    requireInteraction: LOUD_SEVERITIES.indexOf(data.severity) !== -1,
   };
+  // Acknowledge straight from the tray. No feature detection: an unsupported
+  // NotificationOptions member is dropped, not an error, so iOS/Safari (which
+  // renders no action buttons at all) simply shows the plain notification and
+  // the body tap keeps working.
+  if (data.ackUrl) options.actions = [{ action: "ack", title: "Acknowledge" }];
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener("notificationclick", function (event) {
+  var d = event.notification.data || {};
+  var url = d.url || DEFAULT_URL;
   event.notification.close();
-  var url = (event.notification.data && event.notification.data.url) || DEFAULT_URL;
-  event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (clientList) {
-      for (var i = 0; i < clientList.length; i++) {
-        var client = clientList[i];
-        if ("focus" in client) {
-          // Only navigate when the client isn't already there. The previous
-          // unconditional navigate() reloaded an already-correct page,
-          // throwing away scroll position and in-flight state.
-          var target = new URL(url, self.location.origin).href;
-          if (client.url !== target) client.navigate(target);
-          return client.focus();
-        }
-      }
-      if (self.clients.openWindow) return self.clients.openWindow(url);
-    })
-  );
+  // Exactly one waitUntil per invocation, taken before the first await, so the
+  // worker stays alive for the whole chain.
+  if (event.action === "ack" && d.ackUrl) {
+    event.waitUntil(acknowledgeAndConfirm(d, url));
+    return;
+  }
+  event.waitUntil(focusOrOpen(url));
 });
+
+function focusOrOpen(url) {
+  return self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (clientList) {
+    for (var i = 0; i < clientList.length; i++) {
+      var client = clientList[i];
+      if ("focus" in client) {
+        // Only navigate when the client isn't already there. The previous
+        // unconditional navigate() reloaded an already-correct page,
+        // throwing away scroll position and in-flight state.
+        var target = new URL(url, self.location.origin).href;
+        if (client.url !== target) client.navigate(target);
+        return client.focus();
+      }
+    }
+    if (self.clients.openWindow) return self.clients.openWindow(url);
+  });
+}
+
+/* Acknowledge from the notification's own button, without opening the app.
+ *
+ * The token in ackUrl IS the credential, so this posts with credentials
+ * omitted: no session cookie rides along, and therefore none of the CSRF
+ * dance pushsubscriptionchange needs below (/ack is mounted above the CSRF
+ * middleware precisely because there is no cookie to protect).
+ *
+ * This is a fetch INSIDE notificationclick, not a `fetch` event handler — the
+ * worker's no-offline-caching posture is unchanged.
+ */
+async function acknowledgeAndConfirm(d, url) {
+  try {
+    // Same-origin only. The push is VAPID-signed, but resolving the URL costs
+    // nothing and keeps this worker from ever being a request forwarder to a
+    // foreign host (CSP connect-src is 'self' anyway).
+    var target = new URL(d.ackUrl, self.location.origin);
+    if (target.origin !== self.location.origin) return focusOrOpen(url);
+
+    var res = await fetch(target.href, {
+      method: "POST",
+      credentials: "omit",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: "{}",
+    });
+    // Expired, spent, or forbidden: hand it to the app rather than swallowing.
+    if (!res.ok) return focusOrOpen(url);
+
+    await self.registration.showNotification("Acknowledged", {
+      body: "This alert is acknowledged.",
+      // Same tag replaces the alert in the tray instead of stacking beside it.
+      tag: d.notificationId || undefined,
+      data: { url: url },
+      icon: NOTIFICATION_ICON,
+      requireInteraction: false,
+      // A confirmation must not buzz the phone a second time. `renotify` is
+      // deliberately omitted (defaults false) for the same reason.
+      silent: true,
+    });
+  } catch (e) {
+    // Offline or blocked — fall back to today's behaviour so the operator can
+    // still act. Deliberately no auto-dismiss timer: holding the worker alive
+    // on a timer invites the browser to kill it mid-flight, and a swipeable
+    // confirmation beats one that vanishes before it's read.
+    return focusOrOpen(url);
+  }
+}
 
 /* Endpoint rotation.
  *

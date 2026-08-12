@@ -1,0 +1,191 @@
+/**
+ * src/utils/sparklineSvg.ts — the small time-series charts embedded in alert
+ * emails (last-hour CPU, memory, response time).
+ *
+ * Pure: points in, SVG string out. The caller rasterizes with @resvg/resvg-js
+ * (already a dependency, used by appIconService) and attaches the PNG inline,
+ * because an SVG in an email body is not renderable anywhere that matters —
+ * Gmail strips it, Outlook's Word engine never supported it.
+ *
+ * Everything is drawn with explicit geometry and no text measurement: resvg
+ * ships no system fonts in this context, so labels are drawn at fixed
+ * positions in a generic family and kept short enough that clipping is
+ * impossible rather than merely unlikely.
+ */
+
+export interface SparkPoint {
+  /** Epoch ms. */
+  t: number;
+  /** The reading. Nulls are omitted by the caller, not passed as gaps. */
+  v: number;
+}
+
+export interface SparklineOptions {
+  /** Chart title, drawn top-left (e.g. "CPU"). */
+  label: string;
+  /** Appended to every rendered number (e.g. "%", " ms"). */
+  unit?: string;
+  /** Line + fill colour. */
+  color?: string;
+  width?: number;
+  height?: number;
+  /**
+   * Force the y-axis top. CPU/memory pass 100 so a quiet hour doesn't render
+   * a 3% blip as a dramatic climb — the shape of a percentage chart has to be
+   * comparable between messages. Response time leaves it off (no natural max).
+   */
+  yMax?: number;
+  /** Force the y-axis floor. Percentages pass 0 for the same reason. */
+  yMin?: number;
+  /** Drawn as a dashed horizontal rule — the automation's threshold. */
+  threshold?: number | null;
+  /** Window start/end in epoch ms, so the x-axis is the WINDOW, not the data. */
+  from?: number;
+  to?: number;
+}
+
+const W = 520;
+const H = 120;
+const PAD_L = 40;
+const PAD_R = 12;
+const PAD_T = 22;
+const PAD_B = 18;
+
+const esc = (s: string): string =>
+  s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+
+/**
+ * Round up to the next 1 / 2 / 5 × 10ⁿ, so an auto-scaled axis is labelled
+ * "200 ms" rather than "200.1 ms" — the extra digit reads as precision the
+ * chart doesn't have.
+ */
+export function niceCeil(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return v;
+  const mag = 10 ** Math.floor(Math.log10(v));
+  const norm = v / mag;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return step * mag;
+}
+
+/** Trim to 1 decimal, then drop a trailing ".0" — "97" reads better than "97.0". */
+export function formatReading(v: number, unit = ""): string {
+  const rounded = Math.round(v * 10) / 10;
+  const s = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  return `${s}${unit}`;
+}
+
+export interface SeriesStats {
+  min: number;
+  max: number;
+  avg: number;
+  last: number;
+  count: number;
+}
+
+/** Summary numbers for the chart caption AND the plain-text email fallback. */
+export function seriesStats(points: SparkPoint[]): SeriesStats | null {
+  if (points.length === 0) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  let sum = 0;
+  for (const p of points) {
+    if (p.v < min) min = p.v;
+    if (p.v > max) max = p.v;
+    sum += p.v;
+  }
+  return { min, max, avg: sum / points.length, last: points[points.length - 1]!.v, count: points.length };
+}
+
+/**
+ * One line chart, ~520×120, self-contained (no external fonts, no CSS).
+ * Returns a placeholder card when there is nothing to plot — an email that
+ * says "no data in the last hour" is more useful than a missing image the
+ * reader assumes their client blocked.
+ */
+export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): string {
+  const width = opts.width ?? W;
+  const height = opts.height ?? H;
+  const color = opts.color ?? "#2563eb";
+  const unit = opts.unit ?? "";
+  const plotW = width - PAD_L - PAD_R;
+  const plotH = height - PAD_T - PAD_B;
+
+  const head = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+    `<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>` +
+    `<text x="4" y="14" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#1f2430">${esc(opts.label)}</text>`;
+
+  const stats = seriesStats(points);
+  if (!stats) {
+    return (
+      head +
+      `<text x="${width / 2}" y="${height / 2 + 4}" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" font-size="12" fill="#9ca3af">no data in this window</text>` +
+      `</svg>`
+    );
+  }
+
+  // Axis range. Percentages pin 0–100 so two messages are comparable; an
+  // open-ended metric gets 10% headroom, and a flat line still gets a band so
+  // it renders as a line rather than sitting on the axis.
+  let yMin = opts.yMin ?? Math.min(stats.min, opts.threshold ?? Infinity);
+  let yMax = opts.yMax ?? Math.max(stats.max, opts.threshold ?? -Infinity);
+  if (opts.yMin === undefined && opts.yMax === undefined) {
+    const span = yMax - yMin;
+    if (span <= 0) {
+      yMin = Math.max(0, yMin - 1);
+      yMax = yMax + 1;
+    } else {
+      yMin = Math.max(0, yMin - span * 0.1);
+      // Round the top to a readable number. Without this the 10% headroom
+      // prints axis labels like "200.1 ms", which reads as precision that
+      // isn't there.
+      yMax = niceCeil(yMax + span * 0.1);
+    }
+  }
+  const ySpan = yMax - yMin || 1;
+
+  const from = opts.from ?? points[0]!.t;
+  const to = opts.to ?? points[points.length - 1]!.t;
+  const tSpan = to - from || 1;
+
+  const x = (t: number) => PAD_L + ((t - from) / tSpan) * plotW;
+  const y = (v: number) => PAD_T + plotH - ((v - yMin) / ySpan) * plotH;
+
+  // Gridlines + y labels at the range ends and the midpoint.
+  const gridVals = [yMax, (yMax + yMin) / 2, yMin];
+  const grid = gridVals
+    .map((v) => {
+      const gy = y(v).toFixed(1);
+      return (
+        `<line x1="${PAD_L}" y1="${gy}" x2="${width - PAD_R}" y2="${gy}" stroke="#e5e7eb" stroke-width="1"/>` +
+        `<text x="${PAD_L - 4}" y="${(Number(gy) + 3).toFixed(1)}" text-anchor="end" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">${esc(formatReading(v))}</text>`
+      );
+    })
+    .join("");
+
+  const pts = points.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`);
+  const line = `<polyline fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${pts.join(" ")}"/>`;
+  const area =
+    `<polygon fill="${color}" fill-opacity="0.10" points="${PAD_L},${PAD_T + plotH} ${pts.join(" ")} ${(PAD_L + plotW).toFixed(1)},${PAD_T + plotH}"/>`;
+
+  // A single sample has no line to draw — mark it so the chart isn't empty.
+  const dot =
+    points.length === 1
+      ? `<circle cx="${x(points[0]!.t).toFixed(1)}" cy="${y(points[0]!.v).toFixed(1)}" r="3" fill="${color}"/>`
+      : "";
+
+  const thresholdLine =
+    opts.threshold != null && opts.threshold >= yMin && opts.threshold <= yMax
+      ? `<line x1="${PAD_L}" y1="${y(opts.threshold).toFixed(1)}" x2="${width - PAD_R}" y2="${y(opts.threshold).toFixed(1)}" stroke="#dc2626" stroke-width="1" stroke-dasharray="4 3"/>`
+      : "";
+
+  const caption =
+    `<text x="${width - PAD_R}" y="14" text-anchor="end" font-family="Helvetica,Arial,sans-serif" font-size="11" fill="#4b5563">` +
+    `now ${esc(formatReading(stats.last, unit))} · avg ${esc(formatReading(stats.avg, unit))} · peak ${esc(formatReading(stats.max, unit))}</text>`;
+
+  const axis = `<line x1="${PAD_L}" y1="${PAD_T + plotH}" x2="${width - PAD_R}" y2="${PAD_T + plotH}" stroke="#d1d5db" stroke-width="1"/>`;
+  const xLabels =
+    `<text x="${PAD_L}" y="${height - 5}" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">-60 min</text>` +
+    `<text x="${width - PAD_R}" y="${height - 5}" text-anchor="end" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">now</text>`;
+
+  return head + grid + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;
+}

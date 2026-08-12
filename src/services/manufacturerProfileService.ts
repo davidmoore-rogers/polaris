@@ -51,6 +51,10 @@ export const STD_MIB_KEYS = new Set<string>([
   "std:entity",
   "std:entity-sensor",
   "std:lldp",
+  "std:poe",
+  "std:bridge",
+  "std:q-bridge",
+  "std:rstp",
 ]);
 
 function asStdMibKeyOrNull(value: unknown): string | null {

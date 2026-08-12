@@ -98,10 +98,71 @@ export async function listNotifications(params: ListParams) {
 }
 
 /**
+ * Run each alert's automation reset actions before an OPERATOR clear.
+ *
+ * Lives here rather than in the engine because the engine owns the paths where
+ * a condition recovered; this is the human one. Only alerts that are still
+ * open and whose rule actually defines reset actions do any work, so the
+ * common case is one extra indexed read.
+ */
+async function runResetActionsForCleared(ids: string[], actor: string): Promise<void> {
+  const rows = await prisma.notification.findMany({
+    where: { id: { in: ids }, cleared: false, ruleId: { not: null } },
+    select: {
+      id: true, message: true, severity: true, assetId: true, assetHostname: true,
+      rule: { select: { id: true, name: true, scope: true, emailComposition: true, resetActions: true } },
+    },
+    take: 200,
+  });
+  const withActions = rows.filter((r) => Array.isArray(r.rule?.resetActions) && (r.rule!.resetActions as unknown[]).length > 0);
+  if (withActions.length === 0) return;
+
+  // Imported lazily: notificationService is imported BY the recipient service
+  // (stripRegionPrefix), so a top-level import here would close the cycle.
+  const [{ executeActions }, { buildTemplateContext }, { scopeRegionTagsOf }] = await Promise.all([
+    import("./automationActionService.js"),
+    import("../utils/notificationTemplate.js"),
+    import("./notificationRecipientService.js"),
+  ]);
+
+  for (const n of withActions) {
+    const rule = n.rule!;
+    const ctx = buildTemplateContext({
+      asset: n.assetHostname ?? "",
+      severity: "resolved",
+      time: new Date(),
+      ruleName: rule.name,
+      message: `Resolved: ${rule.name} — ${n.assetHostname ?? "alert"} cleared by ${actor}`,
+    });
+    await executeActions(n.id, rule.resetActions as never, ctx, {
+      scopeRegionTags: scopeRegionTagsOf(rule.scope as never),
+      assetId: n.assetId,
+      ruleId: rule.id,
+      ruleName: rule.name,
+      ruleEmailComposition: (rule.emailComposition ?? null) as never,
+      actor,
+    }).catch(() => { /* one bad alert must not stop the rest of the batch */ });
+  }
+}
+
+/** How an acknowledgement reached us — audit detail only, never a gate. */
+export type AckSource = "ui" | "ack_link" | "web_push_action";
+
+/**
  * Acknowledge a batch of notifications, stamping a shared optional note.
  * Skips rows already acknowledged. One updateMany; one audit Event.
+ *
+ * `acknowledgedBy` stays the plain actor string the Alerts surfaces render;
+ * provenance rides the Event's details instead, so an emailed one-click
+ * acknowledgement is distinguishable in the audit log without changing what
+ * every existing reader of the column sees.
  */
-export async function acknowledgeNotifications(ids: string[], actor: string, note?: string): Promise<number> {
+export async function acknowledgeNotifications(
+  ids: string[],
+  actor: string,
+  note?: string,
+  opts?: { source?: AckSource },
+): Promise<number> {
   if (!Array.isArray(ids) || ids.length === 0) {
     throw new AppError(400, "No notification ids provided");
   }
@@ -120,7 +181,7 @@ export async function acknowledgeNotifications(ids: string[], actor: string, not
     resourceType: "notification",
     actor,
     message: `Acknowledged ${res.count} notification${res.count === 1 ? "" : "s"}`,
-    details: { ids, count: res.count, hasNote: trimmed.length > 0 },
+    details: { ids, count: res.count, hasNote: trimmed.length > 0, source: opts?.source ?? "ui" },
   });
   return res.count;
 }
@@ -130,6 +191,12 @@ export async function clearNotifications(ids: string[], actor: string): Promise<
   if (!Array.isArray(ids) || ids.length === 0) {
     throw new AppError(400, "No notification ids provided");
   }
+  // An operator clearing an alert IS the alert ending, so the automation's
+  // reset actions run — the recovery message names who ended it, since "it
+  // recovered" and "someone closed it out" are different facts. Best-effort
+  // and before the write, so the actions' deliveries attach to a live
+  // notification; a failure here must never block the clear.
+  await runResetActionsForCleared(ids, actor).catch(() => {});
   const res = await prisma.notification.updateMany({
     where: { id: { in: ids }, cleared: false },
     data: { cleared: true, clearedBy: actor, clearedAt: new Date() },

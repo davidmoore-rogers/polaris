@@ -12,8 +12,8 @@ import {
 
 describe("stdMibLibrary", () => {
   describe("registry", () => {
-    it("lists 7 standard MIBs", () => {
-      expect(listStdMibs().length).toBe(7);
+    it("lists 11 standard MIBs", () => {
+      expect(listStdMibs().length).toBe(11);
     });
 
     // Guards the build/deploy bug where the bundled .txt files never made it
@@ -118,6 +118,48 @@ describe("stdMibLibrary", () => {
       expect(s.symbols.find((x) => x.name === "lldpObjects")?.fullOid).toBe("1.0.8802.1.1.2.1");
       expect(s.symbols.find((x) => x.name === "lldpRemTable")?.fullOid).toBe("1.0.8802.1.1.2.1.4.1");
       expect(s.symbols.find((x) => x.name === "lldpRemSysName")?.fullOid).toBe("1.0.8802.1.1.2.1.4.1.1.9");
+    });
+
+    it("resolves POWER-ETHERNET-MIB PoE port + PSE tables", () => {
+      const s = getStdMibStructure("std:poe");
+      const oid = (n: string) => s.symbols.find((x) => x.name === n)?.fullOid;
+      expect(oid("pethPsePortDetectionStatus")).toBe("1.3.6.1.2.1.105.1.1.1.6");
+      expect(oid("pethPsePortPowerClassifications")).toBe("1.3.6.1.2.1.105.1.1.1.10");
+      // Guards a real mistake: the chain carries an extra pethMainPseObjects
+      // level (pethObjects.3 → Table.1 → Entry.1 → column.4), so writing this
+      // as ...105.1.3.1.4 from memory yields a silently-empty walk.
+      expect(oid("pethMainPseConsumptionPower")).toBe("1.3.6.1.2.1.105.1.3.1.1.4");
+    });
+
+    it("resolves BRIDGE-MIB forwarding, STP and the basePort→ifIndex join", () => {
+      const s = getStdMibStructure("std:bridge");
+      const oid = (n: string) => s.symbols.find((x) => x.name === n)?.fullOid;
+      expect(oid("dot1dBasePortIfIndex")).toBe("1.3.6.1.2.1.17.1.4.1.2");
+      expect(oid("dot1dTpFdbPort")).toBe("1.3.6.1.2.1.17.4.3.1.2");
+      expect(oid("dot1dTpFdbStatus")).toBe("1.3.6.1.2.1.17.4.3.1.3");
+      expect(oid("dot1dStpPortState")).toBe("1.3.6.1.2.1.17.2.15.1.3");
+    });
+
+    // Q-BRIDGE and RSTP anchor on symbols IMPORTed from BRIDGE-MIB, and
+    // stdMibLibrary resolves each module independently against BUILT_IN_OIDS
+    // with no cross-MIB visibility — so bundling BRIDGE-MIB alongside them is
+    // NOT what makes these resolve; the seeded `dot1dBridge` / `dot1dStp`
+    // anchors are. Drop those seeds and Q-BRIDGE resolves 0 of 129
+    // assignments and RSTP 9 of 19, which is what these two pin.
+    it("resolves Q-BRIDGE-MIB's VLAN-aware forwarding table via the seeded dot1dBridge anchor", () => {
+      const s = getStdMibStructure("std:q-bridge");
+      const oid = (n: string) => s.symbols.find((x) => x.name === n)?.fullOid;
+      expect(oid("dot1qTpFdbPort")).toBe("1.3.6.1.2.1.17.7.1.2.2.1.2");
+      expect(oid("dot1qTpFdbStatus")).toBe("1.3.6.1.2.1.17.7.1.2.2.1.3");
+      expect(s.unresolvedCount).toBe(0);
+    });
+
+    it("resolves RSTP-MIB via the seeded dot1dStp anchor", () => {
+      const s = getStdMibStructure("std:rstp");
+      const oid = (n: string) => s.symbols.find((x) => x.name === n)?.fullOid;
+      expect(oid("dot1dStpVersion")).toBe("1.3.6.1.2.1.17.2.16");
+      expect(oid("dot1dStpExtPortTable")).toBe("1.3.6.1.2.1.17.2.19");
+      expect(s.unresolvedCount).toBe(0);
     });
 
     it("returns the same cached object on second call (no re-parse)", () => {

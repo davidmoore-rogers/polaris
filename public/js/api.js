@@ -801,6 +801,9 @@ const api = {
     // (sensor classes, interfaces, mounts …) for the builder's dimension picker.
     dimensionValues: (body) => request("POST", "/automations/dimension-values", body),
     preview: (body)    => request("POST", "/automations/preview", body),
+    // Fires ONE action of a draft for real (creates a test-flagged alert and
+    // dispatches immediately) — the wizard's Summary-step test buttons.
+    testDelivery: (body) => request("POST", "/automations/test-delivery", body),
     create:  (body)    => request("POST", "/automations", body),
     update:  (id, b)   => request("PUT", `/automations/${id}`, b),
     delete:  (id)      => request("DELETE", `/automations/${id}`),

@@ -122,7 +122,7 @@ describe("legacy email-tier output parity", () => {
     expect(row.channelId).toBe("ch-email");
     expect(row.transport).toBe("email");
     expect(row.target).toBe("oncall@example.com");
-    expect(row.meta).toEqual({
+    expect(row.meta).toMatchObject({
       composed: true,
       to: ["oncall@example.com"],
       cc: [],
@@ -131,6 +131,9 @@ describe("legacy email-tier output parity", () => {
       text: "BODY 95",
       escalation: { tier: 1, attempt: 1 },
     });
+    // The rule supplied subject + text but no HTML, so the HTML half falls
+    // back to the shared default body (an escalation is still an alert email).
+    expect(row.meta.html).toContain("sw-core-1");
     // escalationState bookkeeping
     expect(db.notifUpdates).toHaveLength(1);
     expect(db.notifUpdates[0].data.escalationState.tiers["0"].count).toBe(1);
@@ -142,9 +145,15 @@ describe("legacy email-tier output parity", () => {
     });
     seedNotif();
     await runEscalationSweep(NOW);
+    // The default subject is "[SEV] asset — rule", but this notification's
+    // stored templateCtx carries no `rule` key (it predates the token), so the
+    // name renders blank and the dangling separator is trimmed rather than
+    // mailed as "sw-core-1 — {rule}". The tier prefix still leads.
     expect(db.deliveries[0].meta.subject).toBe("[ESCALATION 1] [WARNING] sw-core-1");
-    // default body = message + no link (empty link in ctx)
-    expect(db.deliveries[0].meta.text).toBe("cpu hot");
+    // Default body = the shared rich alert template: the message leads, and
+    // the acknowledge token survives compose (it is filled per recipient).
+    expect(db.deliveries[0].meta.text).toContain("cpu hot");
+    expect(db.deliveries[0].meta.text).toContain("Acknowledge:");
   });
 
   it("tier subject-only override keeps the RULE body (per-field merge) and tier cc", async () => {

@@ -332,6 +332,24 @@ describe("automation wizard DOM render", () => {
     (bandAction.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
     (baseAction.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
 
+    // "When this resets" — the list that makes a recovery expressible at all.
+    // It starts mirroring the trigger's notify actions, so telling the same
+    // people it came back costs nothing.
+    const resetCard = doc.querySelector("#aw-step-5 #aw-reset-card")!;
+    expect(resetCard).toBeTruthy();
+    expect((doc.querySelector("#aw-reset-actions-on") as unknown as { checked: boolean }).checked).toBe(true);
+    (doc.querySelector("#aw-add-action") as unknown as { click: () => void }).click();
+    const newNotify = Array.from(doc.querySelectorAll("#aw-actions .aw-action")).pop()!;
+    const chanSel = newNotify.querySelector(".na-channel") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    chanSel.value = "c1";
+    chanSel.dispatchEvent(new win5.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(doc.querySelector("#aw-reset-actions .aw-action")).toBeTruthy();
+    expect(doc.querySelector("#aw-reset-mirror-note")!.textContent).toContain("Following your notify actions");
+    // Clean up so step-5 validation (a notify needs a recipient) still passes.
+    (newNotify.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 10));
+
     (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(doc.querySelector("#aw-step-6.visible")).toBeTruthy();
@@ -340,6 +358,31 @@ describe("automation wizard DOM render", () => {
     const affected = doc.querySelector("#aw-affected")!;
     expect(affected.textContent).toContain("3"); // stubbed preview totalEvaluated
     expect(toastErrors).toEqual([]);
+  });
+
+  it("step 6 offers a test per delivery destination, defaulting to 'me only'", async () => {
+    const block = doc.querySelector("#aw-test-delivery")!;
+    expect(block).toBeTruthy();
+
+    // "Send to me only" must be the default — a mis-aimed press otherwise
+    // emails the automation's real recipient list.
+    const self = doc.querySelector('input[name="aw-test-to"][value="self"]') as unknown as { checked: boolean };
+    expect(self.checked).toBe(true);
+    expect((doc.querySelector("#aw-test-real-warn") as unknown as { style: { display: string } }).style.display).toBe("none");
+
+    // The draft carries the default audit-Event action, so the Event test is
+    // offered; api_call/script actions never are (the server refuses to run
+    // them from a button, so a button would be a lie).
+    const labels = Array.from(doc.querySelectorAll(".awtd-btn")).map((b) => b.textContent);
+    expect(labels).toContain("Write a test Event");
+    expect(labels.join(" ")).not.toMatch(/script|API/i);
+
+    // Picking "real recipients" reveals the warning.
+    const win6 = g.window as InstanceType<typeof Window>;
+    const real = doc.querySelector('input[name="aw-test-to"][value="recipients"]') as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
+    real.checked = true;
+    real.dispatchEvent(new win6.Event("change", { bubbles: true }));
+    expect((doc.querySelector("#aw-test-real-warn") as unknown as { style: { display: string } }).style.display).toBe("");
   });
 
   it("edit-mode round-trip: per-action escalation, band actions, device-region and the moved template survive save", async () => {
@@ -437,6 +480,69 @@ describe("automation wizard DOM render", () => {
     expect(p.severity).toBe("warning");
     expect(p.severityBands.map((b: any) => b.severity)).toEqual(["serious", "critical"]);
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
+  it("changing the base condition's sampling re-mirrors onto every existing severity tier", async () => {
+    // Tiers SHARE the base's metric / aggregation / dimension filters (business
+    // rule 19) — collectBands takes only their operator + threshold. A tier left
+    // displaying the sampling it was created with told the operator the change
+    // hadn't applied, and deleting + re-adding every tier was the only way to
+    // make the display agree with what would actually be saved.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    const win = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-resample",
+      name: "Packet loss",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 300 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: [
+        { threshold: 15, severity: "serious", forDurationSec: 300, actions: [] },
+        { threshold: 25, severity: "critical", operator: ">=", forDurationSec: 60, actions: [] },
+      ],
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" },
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
+    const bandAggs = () =>
+      Array.from(doc.querySelectorAll("#aw-bands .band-cond .tgl-agg")).map((el) => (el as unknown as { value: string }).value);
+    expect(bandAggs()).toEqual(["latest", "latest"]);
+
+    // Base latest → median: every tier follows, and each keeps its own value +
+    // its own operator override (only the SAMPLING is shared).
+    const agg = doc.querySelector("#aw-trig-root .tgl-agg") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    agg.value = "median";
+    agg.dispatchEvent(new win.Event("change", { bubbles: true }));
+    expect(bandAggs()).toEqual(["median", "median"]);
+    expect(Array.from(doc.querySelectorAll("#aw-bands .band-cond .tgl-threshold")).map((el) => (el as unknown as { value: string }).value))
+      .toEqual(["15", "25"]);
+    expect(Array.from(doc.querySelectorAll("#aw-bands .band-cond .tgl-op")).map((el) => (el as unknown as { value: string }).value))
+      .toEqual([">", ">="]);
+    // Still locked after the re-render — a tier's sampling isn't editable.
+    expect((doc.querySelector("#aw-bands .band-cond .tgl-agg") as unknown as { disabled: boolean }).disabled).toBe(true);
+    expect((doc.querySelector("#aw-bands .band-cond .tgl-what") as unknown as { disabled: boolean }).disabled).toBe(true);
+
+    // The metric follows too (the same lie, one control over).
+    const what = doc.querySelector("#aw-trig-root .tgl-what") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    what.value = "m:cpuPct";
+    what.dispatchEvent(new win.Event("change", { bubbles: true }));
+    expect(Array.from(doc.querySelectorAll("#aw-bands .band-cond .tgl-what")).map((el) => (el as unknown as { value: string }).value))
+      .toEqual(["m:cpuPct", "m:cpuPct"]);
+    // Re-rendering a row from a metric swap resets the base's own aggregation to
+    // `latest`; the tiers mirror that too rather than keeping a stale median.
+    expect(bandAggs()).toEqual(["latest", "latest"]);
+    expect(toastErrors).toEqual([]);
   });
 
   it("sensor-name filter is a picker: offers the fleet's own sensor names, filters as you type, and flags one nothing reports", async () => {
