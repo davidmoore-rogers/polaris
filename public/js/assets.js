@@ -13545,6 +13545,33 @@ function _screenshotTableEl(tableEl, label, opts) {
     })(el);
     return parts.join('').replace(/\s+/g, ' ').trim();
   }
+  // The capture is a canvas re-draw, not a DOM rasterization, so a cell's color
+  // has to be carried across explicitly — otherwise every cell paints in the
+  // base text color and the image flattens the one thing a table screenshot is
+  // often taken FOR (a red PoE "Fault", a down status pill, an alarming sensor:
+  // in dark theme they all came out near-white). Resolution order matters: the
+  // cell's OWN color first (the PoE cell colors the <td>, whose children include
+  // a muted "· class3" suffix that would otherwise win), then the first
+  // text-bearing descendant that differs from the base (status pills, type
+  // badges, the interface-name link).
+  var baseColor = view.getComputedStyle(tableEl).color;
+  function cellColor(td) {
+    var own = view.getComputedStyle(td).color;
+    if (own && own !== baseColor) return own;
+    var els = td.querySelectorAll('*');
+    for (var i = 0; i < els.length; i++) {
+      var t = (els[i].textContent || '').trim();
+      // Decorative glyphs (the ▼/▶ expand caret, the └ nesting bullet, a "·"
+      // separator) carry their own muted color and sit FIRST in the cell — they
+      // would otherwise mute the whole cell instead of the label doing the
+      // talking.
+      if (!t || !/[a-z0-9]/i.test(t)) continue;
+      if (!visible(els[i])) continue;
+      var c = view.getComputedStyle(els[i]).color;
+      if (c && c !== baseColor) return c;
+    }
+    return own;
+  }
   var ths = Array.prototype.slice.call(tableEl.querySelectorAll('thead th'));
   var visMask = ths.map(visible);
   var headers = [];
@@ -13552,6 +13579,7 @@ function _screenshotTableEl(tableEl, label, opts) {
     if (visMask[i]) headers.push((th.innerText || th.textContent || '').trim());
   });
   var rows = [];
+  var rowColors = [];   // parallel to rows: the per-cell color to draw with
   // Count data rows the operator has hidden (the children of a collapsed
   // parent). They're left out of the image but we note their count so
   // the screenshot can't be mistaken for the full set — reveal them, then re-shoot.
@@ -13567,11 +13595,13 @@ function _screenshotTableEl(tableEl, label, opts) {
       return;
     }
     var row = [];
+    var colors = [];
     tr.querySelectorAll(':scope > td').forEach(function (td, i) {
       if (visMask[i] === false) return;   // skip hidden columns
       row.push(cellText(td));
+      colors.push(cellColor(td));
     });
-    if (row.length) rows.push(row);
+    if (row.length) { rows.push(row); rowColors.push(colors); }
   });
   if (!rows.length) { showToast("Nothing to screenshot", "error"); return; }
 
@@ -13667,9 +13697,9 @@ function _screenshotTableEl(tableEl, label, opts) {
       ctx.fillStyle = bgSurface;
       ctx.fillRect(pad, ty, contentW, tableRowH);
     }
-    ctx.fillStyle = clrText;
     var cx = pad;
     for (var ci = 0; ci < cols; ci++) {
+      ctx.fillStyle = (rowColors[ri] && rowColors[ri][ci]) || clrText;
       ctx.fillText(fitText(row[ci] || '', colW[ci] - cellPadX * 2), cx + cellPadX, ty + 15);
       cx += colW[ci];
     }
