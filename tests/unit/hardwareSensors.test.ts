@@ -9,11 +9,15 @@
 import { describe, it, expect } from "vitest";
 import {
   alarmStatusToFlag,
+  classifyEntitySensor,
   classifyHardwareSensor,
+  entityOperStatusToAlarm,
+  entityTypeColumnTrusted,
   normalizeFgAlarmStatus,
   normalizeRestAlarmStatus,
   resolveSensorIfName,
   syntheticSensorIndex,
+  unitsDisplayLooksOptical,
   SENSOR_CLASS_UNITS,
 } from "../../src/utils/hardwareSensors.js";
 
@@ -66,6 +70,122 @@ describe("classifyHardwareSensor", () => {
     expect(classifyHardwareSensor("DTS CPU0").sensorClass).toBe("temperature");
     expect(classifyHardwareSensor("LM75 Board").sensorClass).toBe("temperature");
     expect(classifyHardwareSensor("Chassis Thermal").sensorClass).toBe("temperature");
+  });
+
+  it("classifies transceiver names ahead of the generic power test", () => {
+    // "RX Power" / "Tx Power" both contain "power"; if the generic test ran
+    // first they'd land in `power` (unit null) and the dBm reading would be
+    // stored unlabelled.
+    expect(classifyHardwareSensor("SFP1 RX Power")).toEqual({ sensorClass: "optical", unit: "dBm" });
+    expect(classifyHardwareSensor("Tx Power port5")).toEqual({ sensorClass: "optical", unit: "dBm" });
+    expect(classifyHardwareSensor("Optical Power").sensorClass).toBe("optical");
+    expect(classifyHardwareSensor("SFP Bias Current")).toEqual({ sensorClass: "current", unit: "A" });
+    // Still a PSU, not an optic.
+    expect(classifyHardwareSensor("PSU [1]").sensorClass).toBe("power");
+  });
+
+  it("recognises spelled-out 'voltage', which previously fell through to other", () => {
+    expect(classifyHardwareSensor("SFP1 Voltage")).toEqual({ sensorClass: "voltage", unit: "V" });
+  });
+});
+
+describe("entityTypeColumnTrusted", () => {
+  it("distrusts a table where every row reports the same type", () => {
+    // FortiSwitchOS stamps celsius(8) on optical, fan and voltage rows alike.
+    expect(entityTypeColumnTrusted([8, 8, 8, 8])).toBe(false);
+  });
+
+  it("trusts a table reporting more than one type", () => {
+    expect(entityTypeColumnTrusted([8, 4, 10])).toBe(true);
+  });
+
+  it("trusts a single-row table — there is nothing to be uniform with", () => {
+    expect(entityTypeColumnTrusted([8])).toBe(true);
+    expect(entityTypeColumnTrusted([])).toBe(true);
+  });
+});
+
+describe("unitsDisplayLooksOptical", () => {
+  it("detects the dBm spellings vendors use", () => {
+    expect(unitsDisplayLooksOptical("dBm")).toBe(true);
+    expect(unitsDisplayLooksOptical("dbm")).toBe(true);
+    expect(unitsDisplayLooksOptical("dBmW")).toBe(true);
+  });
+
+  it("does not fire on other units", () => {
+    expect(unitsDisplayLooksOptical("celsius")).toBe(false);
+    expect(unitsDisplayLooksOptical("mA")).toBe(false);
+    expect(unitsDisplayLooksOptical(null)).toBe(false);
+  });
+});
+
+describe("classifyEntitySensor", () => {
+  it("takes unitsDisplay as the strongest signal — the type enum has no dBm", () => {
+    // Reported as celsius on an untrusted table AND as watts on a trusted one;
+    // the declared unit wins in both cases.
+    expect(classifyEntitySensor({
+      typeCode: 8, unitsDisplay: "dBm", descr: "SFP1", typeColumnTrusted: false,
+    })).toEqual({ sensorClass: "optical", unit: "dBm" });
+    expect(classifyEntitySensor({
+      typeCode: 6, unitsDisplay: "dBm", descr: "port9 optic", typeColumnTrusted: true,
+    }).sensorClass).toBe("optical");
+  });
+
+  it("trusts the type code over a misleading name on a compliant device", () => {
+    // The name contains "fan", which the name heuristic tests before
+    // temperature — a compliant agent's celsius(8) must win.
+    expect(classifyEntitySensor({
+      typeCode: 8, unitsDisplay: null, descr: "Fan Inlet Temp", typeColumnTrusted: true,
+    }).sensorClass).toBe("temperature");
+    expect(classifyEntitySensor({
+      typeCode: 10, unitsDisplay: null, descr: "Chassis Thermal", typeColumnTrusted: true,
+    }).sensorClass).toBe("fan");
+  });
+
+  it("classifies by name when the type column is untrustworthy", () => {
+    // The FortiSwitch case: everything claims celsius, so the descr decides.
+    expect(classifyEntitySensor({
+      typeCode: 8, unitsDisplay: null, descr: "SFP1 Voltage", typeColumnTrusted: false,
+    }).sensorClass).toBe("voltage");
+    expect(classifyEntitySensor({
+      typeCode: 8, unitsDisplay: null, descr: "Bias Current port3", typeColumnTrusted: false,
+    }).sensorClass).toBe("current");
+  });
+
+  // The behaviour-preservation case. A FortiSwitch's rows are named only by
+  // bare index, so there is no descr to classify by; falling back to the type
+  // code is what has always made them temperature rows, and must keep doing so.
+  it("falls back to the type code for an unnamed row on an untrusted device", () => {
+    expect(classifyEntitySensor({
+      typeCode: 8, unitsDisplay: null, descr: "", typeColumnTrusted: false,
+    })).toEqual({ sensorClass: "temperature", unit: "°C" });
+  });
+
+  it("degrades to other when nothing identifies the row", () => {
+    expect(classifyEntitySensor({
+      typeCode: null, unitsDisplay: null, descr: "WIDGET 7", typeColumnTrusted: true,
+    })).toEqual({ sensorClass: "other", unit: null });
+  });
+});
+
+describe("entityOperStatusToAlarm", () => {
+  it("maps a broken sensor to an alarm", () => {
+    expect(entityOperStatusToAlarm(3)).toBe("alarm"); // nonoperational
+  });
+
+  it("maps a readable sensor to ok so a cleared fault can resolve", () => {
+    expect(entityOperStatusToAlarm(1)).toBe("ok");
+  });
+
+  // The load-bearing one: an empty SFP cage reports unavailable(2). Mapping
+  // that to "alarm" would fire on every unused port on the switch.
+  it("treats unavailable as no claim, NOT as a fault", () => {
+    expect(entityOperStatusToAlarm(2)).toBeNull();
+  });
+
+  it("returns null when the device reported no status at all", () => {
+    expect(entityOperStatusToAlarm(null)).toBeNull();
+    expect(entityOperStatusToAlarm(undefined)).toBeNull();
   });
 });
 

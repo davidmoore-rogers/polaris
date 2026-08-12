@@ -112,6 +112,9 @@ import {
   classifyHardwareSensor,
   normalizeFgAlarmStatus,
   normalizeRestAlarmStatus,
+  classifyEntitySensor,
+  entityOperStatusToAlarm,
+  entityTypeColumnTrusted,
   resolveSensorIfName,
   syntheticSensorIndex,
 } from "../utils/hardwareSensors.js";
@@ -5250,6 +5253,9 @@ const OID = {
   entPhySensorPrecision:  "1.3.6.1.2.1.99.1.1.1.3",
   entPhySensorValue:      "1.3.6.1.2.1.99.1.1.1.4",
   entPhySensorOperStatus: "1.3.6.1.2.1.99.1.1.1.5",
+  // Textual unit label. RFC 3433's type enum has no dBm member, so this is the
+  // only place a device can declare that a reading is optical power.
+  entPhySensorUnitsDisplay: "1.3.6.1.2.1.99.1.1.1.6",
   // FORTINET-FORTIGATE-MIB::fgHwSensorTable. Branch-class FortiGates
   // (40F/60F/61F/91G/101F) don't populate ENTITY-SENSOR-MIB and 404 the
   // FortiOS REST sensor-info endpoint, but they do publish hardware sensors
@@ -5988,42 +5994,60 @@ async function collectHardwareSensorsSnmp(
   }
 
   // 2. ENTITY-SENSOR-MIB (RFC 3433). Standard table on non-Fortinet gear (and
-  //    FortiSwitch). We surface entPhySensorType=8 (celsius) rows as the
-  //    `temperature` class. Non-temperature ENTITY classes (fan/volt) are a
-  //    future enhancement — the FortiGate fleet uses path 1.
-  const [types, values, scales, precisions, opers, descrs] = await Promise.all([
+  //    FortiSwitch). Every class the table reports is surfaced — temperature,
+  //    fan, voltage, transceiver bias current and optical power — plus the
+  //    agent's own per-sensor oper status as the alarm bit.
+  //
+  //    This used to keep celsius rows only, drop any row whose descr mentioned
+  //    sfp/fan/voltage/bias, and drop any row whose oper status was not ok.
+  //    On a FortiSwitch those three filters discarded the entire transceiver
+  //    picture — the DDM readings were already on the wire.
+  const [types, values, scales, precisions, opers, descrs, unitsDisplays] = await Promise.all([
     snmpWalk(session, OID.entPhySensorType).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorValue).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorScale).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorPrecision).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorOperStatus).catch(() => new Map()),
     snmpWalk(session, OID.entPhysicalDescr).catch(() => new Map()),
+    // The only reliable dBm signal — RFC 3433's type enum cannot express
+    // optical power, so vendors declare the real unit here.
+    snmpWalk(session, OID.entPhySensorUnitsDisplay).catch(() => new Map()),
   ]);
   const out: HardwareSensorSample[] = [];
-  // Some agents (notably FortiSwitchOS) stamp entPhySensorType=8 (celsius) on
-  // every row in the table — SFP optical readings, fan tachs, voltage rails —
-  // not just real temperature sensors. Cross-check the entPhysicalDescr from
-  // ENTITY-MIB to drop rows the descr identifies as something else.
-  const NON_TEMP_DESCR = /\b(sfp|fan|rpm|voltage|bias)\b/i;
+  // Decided once per table, not per row: a device reporting a single type code
+  // across every sensor (FortiSwitchOS stamps celsius on all of them) is
+  // defaulting rather than describing, so names classify instead.
+  const typeColumnTrusted = entityTypeColumnTrusted(
+    [...types.values()]
+      .map((v) => snmpVbToNumber(v))
+      .filter((n): n is number => n != null),
+  );
   for (const [idx, typeRaw] of types.entries()) {
     const t = snmpVbToNumber(typeRaw);
-    if (t !== 8) continue; // RFC 3433: 8 = celsius
     const oper = snmpVbToNumber(opers.get(idx));
-    // 1 = ok, 2 = unavailable, 3 = nonoperational. Skip non-ok rows.
-    if (oper != null && oper !== 1) continue;
     const descr = snmpVbToString(descrs.get(idx));
-    if (descr && NON_TEMP_DESCR.test(descr)) continue;
+    const unitsDisplay = snmpVbToString(unitsDisplays.get(idx));
+    const { sensorClass, unit } = classifyEntitySensor({
+      typeCode: t,
+      unitsDisplay,
+      descr,
+      typeColumnTrusted,
+    });
     const raw = snmpVbToNumber(values.get(idx));
-    if (raw == null) continue;
     const scale = snmpVbToNumber(scales.get(idx));   // SI prefix code
     const prec  = snmpVbToNumber(precisions.get(idx)); // decimal-point shift
-    const celsius = scaleEntitySensor(raw, scale, prec);
+    // A broken or unreadable sensor keeps its row with a null value: the row IS
+    // the fault signal, and dropping it would also strip the alarm status that
+    // makes the fault alertable. `value` is nullable for exactly this case.
+    const scaled = raw != null && oper !== 2 && oper !== 3
+      ? scaleEntitySensor(raw, scale, prec)
+      : null;
     out.push({
       sensorName:  descr || `sensor-${idx}`,
-      sensorClass: "temperature",
-      value:       Number.isFinite(celsius) ? Math.round(celsius * 10) / 10 : null,
-      unit:        "°C",
-      alarmStatus: null,
+      sensorClass,
+      value:       scaled != null && Number.isFinite(scaled) ? Math.round(scaled * 100) / 100 : null,
+      unit,
+      alarmStatus: entityOperStatusToAlarm(oper),
     });
   }
   if (out.length > 0) {

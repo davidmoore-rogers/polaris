@@ -6845,6 +6845,8 @@ function _hwClassLabel(cls) {
     case "temperature": return "Temp";
     case "fan":         return "Fan";
     case "voltage":     return "Voltage";
+    case "current":     return "Current";
+    case "optical":     return "Optical";
     case "power":       return "Power";
     case "disk":        return "Disk";
     default:            return "Other";
