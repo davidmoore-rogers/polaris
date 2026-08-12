@@ -6079,6 +6079,10 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       (Array.isArray(r.taggedVlans) && r.taggedVlans.length > 0) ||
       r.trunksAllVlans === true;
   });
+  // Same rule for PoE: only a device that actually reports a PSE gets the
+  // column. A FortiGate, a server, or a switch polled over REST would
+  // otherwise show a dash on every row for a feature it never reports.
+  var showPoeCol = rows.some(function (r) { return r.poeStatus != null; });
   // "Inactive" = no traffic ever observed (both cumulative counters are
   // null or zero). User-set rule: ports with any non-zero in/out count
   // are always shown regardless of admin/oper status; everything else
@@ -6109,7 +6113,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     var hasOut = tn.outgoingBytes != null && tn.outgoingBytes > 0;
     return !hasIn && !hasOut;
   }
-  var COLS = 11 + (showVlanCols ? 2 : 0);
+  var COLS = 11 + (showVlanCols ? 2 : 0) + (showPoeCol ? 1 : 0);
   // Group LLDP neighbors by local interface so the row builder can stamp the
   // first neighbor's label inline. Most ports only ever see one neighbor; a
   // "+N" badge appears when more are present and the slide-over enumerates them.
@@ -6163,6 +6167,22 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
   // The Tagged column collapses long lists past 6 entries to "<6>, +N more"
   // with the full list in the cell tooltip; trunk-all ports show "all"
   // distinctly from explicit-list trunks, matching the slide-over pill.
+  // "Delivering · class3" — status and negotiated budget read together, since
+  // the class is meaningless without knowing power is actually flowing.
+  // The class is a BUDGET bracket, not a measurement: RFC 3621 defines no
+  // per-port wattage object, so there is no wattage to show here.
+  function poeCellHTML(iface) {
+    if (!showPoeCol) return "";
+    var st = iface.poeStatus;
+    if (!st) return '<td class="mono">—</td>';
+    var LABEL = { disabled: "Disabled", searching: "Searching", delivering: "Delivering",
+                  fault: "Fault", test: "Test", "other-fault": "Fault (other)" };
+    var color = (st === "fault" || st === "other-fault") ? "var(--color-danger,#dc2626)"
+      : st === "delivering" ? "var(--color-success,#16a34a)"
+      : "var(--color-text-secondary)";
+    var cls = iface.poeClass ? ' <span style="color:var(--color-text-secondary)">· ' + escapeHtml(iface.poeClass) + '</span>' : "";
+    return '<td class="mono" style="color:' + color + '">' + escapeHtml(LABEL[st] || st) + cls + '</td>';
+  }
   function vlanCellsHTML(iface) {
     if (!showVlanCols) return "";
     var native = (iface.nativeVlan != null) ? iface.nativeVlan : null;
@@ -6258,6 +6278,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       addressingCell(iface) +
       '<td class="mono">' + escapeHtml(iface.macAddress || "—") + "</td>" +
       vlanCellsHTML(iface) +
+      poeCellHTML(iface) +
       "<td>" + (iface.inOctets  != null ? _fmtBytes(iface.inOctets)  : "—") + "</td>" +
       "<td>" + (iface.outOctets != null ? _fmtBytes(iface.outOctets) : "—") + "</td>" +
       '<td title="In errors / Out errors (cumulative)">' + errs + "</td>" +
@@ -6319,6 +6340,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     // don't carry per-port VLAN config, so emit empty placeholders so the
     // column count stays consistent across every row in the table.
     var vlanPlaceholders = showVlanCols ? '<td class="mono">—</td><td class="mono">—</td>' : "";
+    var poePlaceholder = showPoeCol ? '<td class="mono">—</td>' : "";
     return "<tr" + rowAttr + ">" +
       '<td style="text-align:center;width:1%">' + checkbox + "</td>" +
       nameCell +
@@ -6328,6 +6350,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       "<td>—</td>" +
       '<td class="mono">—</td>' +
       vlanPlaceholders +
+      poePlaceholder +
       "<td>" + (tn.incomingBytes != null ? _fmtBytes(tn.incomingBytes) : "—") + "</td>" +
       "<td>" + (tn.outgoingBytes != null ? _fmtBytes(tn.outgoingBytes) : "—") + "</td>" +
       "<td>—</td>" +
@@ -6454,6 +6477,9 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     ? '<th data-col-id="native-vlan" title="Untagged PVID on the FortiSwitch port">Native VLAN</th>' +
       '<th data-col-id="tagged-vlans" title="Tagged VLAN set on the FortiSwitch port (allowed-vlans − untagged-vlans). \"all\" indicates `set allowed-vlans all`.">Tagged VLANs</th>'
     : "";
+  var poeHeader = showPoeCol
+    ? '<th data-col-id="poe" title="Power over Ethernet: detection status and the negotiated power CLASS (a budget bracket, e.g. class3 = up to 12.95 W at the powered device). POWER-ETHERNET-MIB defines no per-port wattage, so no draw is shown. SNMP only.">PoE</th>'
+    : "";
   container.innerHTML = staleBanner +
     '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>full-history retention</strong>. Unselected interfaces are kept for 24&nbsp;h only.</p>' +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
@@ -6467,6 +6493,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       '<th data-col-id="addressing" title="L3 addressing mode — FortiOS only (CMDB system/interface mode). DHCP, Static, or PPPoE; other sources show —">Addressing</th>' +
       '<th data-col-id="mac">MAC</th>' +
       vlanHeader +
+      poeHeader +
       '<th data-col-id="in">In</th>' +
       '<th data-col-id="out">Out</th>' +
       '<th data-col-id="errors">Errors (in/out)</th>' +

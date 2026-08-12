@@ -1091,6 +1091,22 @@ model AssetInterfaceSample {
   // FortiSwitch-only VLAN columns). Config metadata — shown only in the live
   // System-tab snapshot, not rolled up.
   addressingMode String?
+  // Power over Ethernet, from POWER-ETHERNET-MIB (RFC 3621) via SNMP only.
+  // FortiOS REST carries no equivalent in its interface payload, so a managed
+  // FortiSwitch polled through its parent FortiGate leaves both null.
+  //
+  // poeStatus: pethPsePortDetectionStatus, decoded by utils/poePorts.ts —
+  //   "disabled" | "searching" | "delivering" | "fault" | "test" | "other-fault".
+  //   Also an asset_state automation field (see ASSET_STATE_FIELDS).
+  // poeClass: pethPsePortPowerClassifications — "class0".."class4". A negotiated
+  //   power BUDGET bracket ("up to 12.95 W at the PD" for class3), NOT a
+  //   measurement: RFC 3621 defines no per-port wattage object at all.
+  //
+  // Both are correlated to ifName by inference (poeIfNameByIndex) because the
+  // MIB provides no ifIndex join; unresolvable PoE rows are dropped rather than
+  // attached to a best-guess interface.
+  poeStatus   String?
+  poeClass    String?
   // Cadence discriminator for selection-aware retention. "fast" = this row came
   // from the response-time re-walk of an operator-pinned interface
   // (monitoredInterfaces); "slow" = the full system-info scrape. NULL = legacy
@@ -2096,6 +2112,12 @@ model AssetInterfaceSampleHourly {
   lastIfType          String?
   lastIfParent        String?
   lastVlanId          Int?
+  // PoE descriptors — most-recent value within the bucket wins, matching
+  // lastAdminStatus/lastOperStatus. Deliberately last-value rather than an
+  // aggregate: averaging an enum is meaningless, and "what state did this
+  // port end the hour in" is the question a rollup should answer.
+  lastPoeStatus       String?
+  lastPoeClass        String?
   // Wall-clock of the actual last sample inside the bucket — used as the
   // counter-rate denominator so rate is correct for partial buckets at the
   // leading edge of the time series.
@@ -2132,6 +2154,8 @@ model AssetInterfaceSampleDaily {
   lastIfType          String?
   lastIfParent        String?
   lastVlanId          Int?
+  lastPoeStatus       String?
+  lastPoeClass        String?
   lastBucketSampleAt  DateTime
 
   @@id([id, bucketStart])

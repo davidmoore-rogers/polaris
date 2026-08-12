@@ -13,6 +13,7 @@ import { z } from "zod";
 import { isValidCidr, isValidIpAddress, ipInCidr } from "../utils/cidr.js";
 import { TEMPLATE_VARIABLES } from "../utils/notificationTemplate.js";
 import { SENSOR_CLASS_UNITS } from "../utils/hardwareSensors.js";
+import { POE_STATUS_VALUES } from "../utils/poePorts.js";
 
 // Notification severity (rule.severity → notification.severity). Ordered
 // least → most severe. NOTE: distinct from EVENT_LEVELS below — that's the
@@ -248,7 +249,7 @@ export const BOOLEAN_METRIC_LABELS: Record<string, { trueLabel: string; falseLab
 // Current Asset (or current-state child row) field conditions.
 export const ASSET_STATE_FIELDS = [
   "monitorStatus", "status", "consecutiveFailures", "dependencySuppressed", "quarantined",
-  "ifOperStatus", "ifAdminStatus", "ipsecStatus", "sdwanRuleStatus", "sdwanSelectedMember",
+  "ifOperStatus", "ifAdminStatus", "poeStatus", "ipsecStatus", "sdwanRuleStatus", "sdwanSelectedMember",
 ] as const;
 
 // ─── Host-metric trigger ────────────────────────────────────────────────────
@@ -1864,6 +1865,10 @@ export const FIELD_META: Record<string, { label: string; kind: "enum" | "bool" |
   quarantined: { label: "Quarantined", kind: "bool", values: ["true", "false"] },
   ifOperStatus: { label: "Interface oper status", kind: "dynamic" },
   ifAdminStatus: { label: "Interface admin status", kind: "dynamic" },
+  // Closed enum rather than "dynamic" (which ifOperStatus uses): every value
+  // POWER-ETHERNET-MIB can report is known up front, so the wizard offers a
+  // picker and a typo cannot silently produce a rule that never matches.
+  poeStatus: { label: "Interface PoE status", kind: "enum", values: [...POE_STATUS_VALUES] },
   ipsecStatus: { label: "IPsec tunnel status", kind: "dynamic" },
   sdwanRuleStatus: { label: "SD-WAN rule status", kind: "dynamic" },
   sdwanSelectedMember: { label: "SD-WAN selected member", kind: "dynamic" },

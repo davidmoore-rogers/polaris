@@ -513,10 +513,12 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
     case "consecutiveFailures": return assets.map((a) => mk(a, "", "", a.consecutiveFailures));
     case "dependencySuppressed": return assets.map((a) => mk(a, "", "", a.dependencySuppressed));
     case "quarantined": return assets.map((a) => mk(a, "", "", a.quarantinedAt !== null || a.status === "quarantined"));
-    case "ifOperStatus": case "ifAdminStatus": {
-      const col = trigger.field === "ifOperStatus" ? "operStatus" : "adminStatus";
+    case "ifOperStatus": case "ifAdminStatus": case "poeStatus": {
+      const col = trigger.field === "ifOperStatus" ? "operStatus"
+        : trigger.field === "ifAdminStatus" ? "adminStatus"
+        : "poeStatus";
       const since = new Date(Date.now() - DEFAULT_LOOKBACK_MS);
-      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], distinct: ["assetId", "ifName"], select: { assetId: true, ifName: true, operStatus: true, adminStatus: true } });
+      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], distinct: ["assetId", "ifName"], select: { assetId: true, ifName: true, operStatus: true, adminStatus: true, poeStatus: true } });
       // Only PINNED interfaces produce readings (Asset.monitoredInterfaces —
       // the same join the Down Interfaces widget uses): the interfaces stream
       // samples every port a device reports, and an unpinned port is usually
@@ -529,6 +531,15 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
         const a = index.get(r.assetId);
         if (!a?.monitoredInterfaces?.includes(r.ifName)) return false;
         if (trigger.field === "ifOperStatus" && r.adminStatus !== "up") return false;
+        // A port with no PSE reports nothing — a null is "not a PoE port",
+        // not "PoE is off", and a rule like `poeStatus is-not delivering`
+        // would otherwise fire on every uplink and SVI on the switch.
+        if (trigger.field === "poeStatus" && r.poeStatus == null) return false;
+        // "disabled" is an operator's choice, the PoE analogue of the
+        // admin-up gate above. Excluding it keeps a not-delivering rule from
+        // alerting on ports PoE was deliberately turned off for. A fault rule
+        // is unaffected: a disabled port reports "disabled", never "fault".
+        if (trigger.field === "poeStatus" && r.poeStatus === "disabled") return false;
         return substringMatch(r.ifName, df.ifNamePattern);
       }).map((r) => { const a = index.get(r.assetId)!; return mk(a, r.ifName, r.ifName, (r as any)[col]); });
     }

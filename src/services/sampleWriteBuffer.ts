@@ -116,6 +116,8 @@ export interface InterfaceSampleRow {
   alias: string | null;
   description: string | null;
   addressingMode: string | null;
+  poeStatus: string | null;
+  poeClass: string | null;
 }
 
 export interface StorageSampleRow {

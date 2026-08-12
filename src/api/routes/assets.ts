@@ -1806,6 +1806,8 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
         alias:       i.alias       ?? null,
         description: i.description ?? null,
         addressingMode: i.addressingMode ?? null,
+        poeStatus:   i.poeStatus ?? null,
+        poeClass:    i.poeClass  ?? null,
       })),
       storage: storage.map((s) => ({
         timestamp:  s.timestamp,

@@ -450,6 +450,11 @@ async function ingestInterfaces(assetId: string, samples: StreamSamples<"interfa
     // The Polaris Agent doesn't report L3 addressing mode (no FortiOS CMDB
     // equivalent on a generic host); leave null.
     addressingMode: null,
+    // PoE comes from POWER-ETHERNET-MIB over SNMP against a switch. An agent
+    // runs ON a host, not on the switch powering it, so there is nothing to
+    // report here.
+    poeStatus: null,
+    poeClass: null,
   }));
   enqueueInterfaceSamples(rows);
   // Fold EVERY pushed interface MAC (monitored or not) into the asset's

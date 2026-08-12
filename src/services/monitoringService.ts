@@ -118,6 +118,7 @@ import {
   resolveSensorIfName,
   syntheticSensorIndex,
 } from "../utils/hardwareSensors.js";
+import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
@@ -3166,6 +3167,10 @@ export interface InterfaceSample {
   alias?:       string | null;
   /** Operator-set free-text comment. FortiOS CMDB `description`; SNMP has no equivalent. */
   description?: string | null;
+  /** PoE detection status from POWER-ETHERNET-MIB — "disabled" | "searching" | "delivering" | "fault" | "test" | "other-fault". SNMP only; FortiOS REST and the agent leave it null. */
+  poeStatus?:   string | null;
+  /** Negotiated PoE power-budget bracket, "class0".."class4". NOT a wattage measurement — RFC 3621 has no per-port wattage object. SNMP only. */
+  poeClass?:    string | null;
   /** L3 addressing mode: "static" | "dhcp" | "pppoe". FortiOS CMDB `system/interface.mode`; SNMP / agent leave null. */
   addressingMode?: string | null;
 }
@@ -3754,6 +3759,11 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
         alias:       i.alias       ?? null,
         description: i.description ?? null,
         addressingMode: null,
+        // Passed through, NOT nulled: the fast SNMP path collects PoE so a
+        // port fault is alertable on the per-minute cadence rather than
+        // waiting for the next heavy scrape.
+        poeStatus:   i.poeStatus ?? null,
+        poeClass:    i.poeClass  ?? null,
       })),
     );
   }
@@ -5247,6 +5257,11 @@ const OID = {
   // us how to scale entPhySensorValue back to a real number; entPhysicalDescr
   // (indexed by the same physical-entity index) gives the operator-friendly
   // sensor name.
+  // POWER-ETHERNET-MIB (RFC 3621) pethPsePortTable. INDEX is
+  // { pethPsePortGroupIndex, pethPsePortIndex } and the MIB defines NO join
+  // back to ifIndex, so rows are correlated by inference in utils/poePorts.ts.
+  pethPsePortDetectionStatus:      "1.3.6.1.2.1.105.1.1.1.6",
+  pethPsePortPowerClassifications: "1.3.6.1.2.1.105.1.1.1.10",
   entPhysicalDescr:       "1.3.6.1.2.1.47.1.1.1.1.2",
   entPhySensorType:       "1.3.6.1.2.1.99.1.1.1.1",
   entPhySensorScale:      "1.3.6.1.2.1.99.1.1.1.2",
@@ -6126,6 +6141,68 @@ async function collectHardwareSensorsFortinetSnmp(session: any): Promise<Hardwar
 // hardware sensors are scraped on the telemetry cadence — re-walking ifName +
 // ifDescr every tick would add two full-table walks per switch per tick across
 // the fleet (~400 rows apiece on an FS-112D).
+// ─── PoE (POWER-ETHERNET-MIB) ──────────────────────────────────────────────
+//
+// Negative cache for devices with no PSE. Most of a fleet is not PoE-capable,
+// and both the heavy AND the per-minute fast cadence would otherwise pay two
+// empty column walks per tick per device forever. One empty result marks the
+// target for the TTL; a PoE switch keeps paying two small walks a minute,
+// which is what makes a PoE fault alertable at the fast cadence instead of the
+// heavy one.
+//
+// Deliberately NOT cached positively: the readings are the whole point, and
+// they change whenever a powered device is plugged, unplugged or faults.
+const POE_ABSENT_TTL_MS = 30 * 60_000;
+const POE_ABSENT_MAX    = 4000;
+const poeAbsentCache    = new Map<string, number>();
+
+/**
+ * Walk pethPsePortTable and return per-ifName PoE state, or an empty map when
+ * the device has no PSE. Correlation to interfaces is inference — see
+ * utils/poePorts.ts — so an unresolvable row is dropped, never guessed.
+ *
+ * `ifNameByIndex` is supplied by the caller because both cadences have already
+ * walked ifName/ifDescr for their own purposes; re-walking here would double
+ * the cost of the thing this cache exists to keep cheap.
+ */
+async function collectPoePortsSnmp(
+  session: any,
+  cacheKey: string | null,
+  ifNameByIndex: ReadonlyMap<string, string>,
+): Promise<Map<string, { poeStatus: string | null; poeClass: string | null }>> {
+  const out = new Map<string, { poeStatus: string | null; poeClass: string | null }>();
+  if (ifNameByIndex.size === 0) return out;
+
+  const now = Date.now();
+  if (cacheKey) {
+    const absentAt = poeAbsentCache.get(cacheKey);
+    if (absentAt != null && now - absentAt < POE_ABSENT_TTL_MS) return out;
+  }
+
+  const [statuses, classes] = await Promise.all([
+    snmpWalk(session, OID.pethPsePortDetectionStatus).catch(() => new Map()),
+    snmpWalk(session, OID.pethPsePortPowerClassifications).catch(() => new Map()),
+  ]);
+
+  if (statuses.size === 0) {
+    if (cacheKey) {
+      if (poeAbsentCache.size >= POE_ABSENT_MAX) poeAbsentCache.clear();
+      poeAbsentCache.set(cacheKey, now);
+    }
+    return out;
+  }
+  if (cacheKey) poeAbsentCache.delete(cacheKey);
+
+  const ifNameBySuffix = poeIfNameByIndex([...statuses.keys()], ifNameByIndex);
+  for (const [suffix, ifName] of ifNameBySuffix.entries()) {
+    out.set(ifName, {
+      poeStatus: poeStatusLabel(snmpVbToNumber(statuses.get(suffix))),
+      poeClass:  poeClassLabel(snmpVbToNumber(classes.get(suffix))),
+    });
+  }
+  return out;
+}
+
 const IFNAME_CACHE_TTL_MS = 15 * 60_000;
 const IFNAME_CACHE_MAX    = 2000;
 const ifNameByIndexCache  = new Map<string, { at: number; names: Map<string, string> }>();
@@ -6364,6 +6441,22 @@ async function collectSystemInfoSnmp(
           alias,
         });
       }
+
+      // PoE rides the same walk. Correlation needs ifIndex -> name, which
+      // this loop has already resolved for every interface it kept, so it is
+      // rebuilt here rather than re-walking IF-MIB.
+      const poeIfNames = new Map<string, string>();
+      for (const idx of allIdx) {
+        const n = snmpVbToString(names.get(idx)) || snmpVbToString(descrs.get(idx));
+        if (n) poeIfNames.set(idx, n);
+      }
+      const poeByIfName = await collectPoePortsSnmp(session, host, poeIfNames);
+      if (poeByIfName.size > 0) {
+        for (const iface of interfaces) {
+          const poe = poeByIfName.get(iface.ifName);
+          if (poe) { iface.poeStatus = poe.poeStatus; iface.poeClass = poe.poeClass; }
+        }
+      }
     } catch { /* fall through */ }
     endIfaces({ interfaces: interfaces.length });
 
@@ -6468,6 +6561,9 @@ async function collectFastFilteredSnmp(
     // behavior as the full walk: the stored sample just doesn't include
     // that ifName on this tick).
     const ifIndexByName = new Map<string, string>();
+    // Full ifIndex -> name map (not just the pinned subset) — PoE correlation
+    // may need to match a port by its trailing number against any interface.
+    const indexToNameAll = new Map<string, string>();
     const endIfaceDiscovery = startPhase("fastfiltered.snmp.iface_discovery");
     try {
       const [names, descrs] = await Promise.all([
@@ -6487,6 +6583,7 @@ async function collectFastFilteredSnmp(
         if (n) indexToName.set(idx, n);
       }
       for (const [idx, name] of indexToName.entries()) {
+        indexToNameAll.set(idx, name);
         if (wantedIfaceSet.has(name)) ifIndexByName.set(name, idx);
       }
     } catch { /* leave ifIndexByName empty; sample will skip iface rows */ }
@@ -6567,6 +6664,14 @@ async function collectFastFilteredSnmp(
       : new Map<string, unknown>();
     endMultiGet({ oids: oids.length });
 
+    // PoE for the pinned ports. The peth index is not derivable from ifIndex
+    // without walking, so this is two small column walks rather than extra
+    // OIDs in the multi-GET above; the negative cache keeps non-PoE devices
+    // from paying for it every tick.
+    const poeByIfName = ifIndexByName.size > 0
+      ? await collectPoePortsSnmp(session, host, indexToNameAll)
+      : new Map<string, { poeStatus: string | null; poeClass: string | null }>();
+
     const interfaces: InterfaceSample[] = [];
     for (const [pinnedName, idx] of ifIndexByName.entries()) {
       const name = snmpVbToString(vbByOid.get(`${OID.ifName}.${idx}`)) || pinnedName;
@@ -6592,6 +6697,8 @@ async function collectFastFilteredSnmp(
         outErrors:   snmpVbToNumber(vbByOid.get(`${OID.ifOutErrors}.${idx}`)),
         ifType:      snmpIfTypeLabel(snmpVbToNumber(vbByOid.get(`${OID.ifType}.${idx}`))),
         alias,
+        poeStatus:   poeByIfName.get(name)?.poeStatus ?? null,
+        poeClass:    poeByIfName.get(name)?.poeClass ?? null,
       });
     }
 
@@ -7072,6 +7179,8 @@ async function persistInterfaceSampleStream(
       alias:       i.alias       ?? null,
       description: i.description ?? null,
       addressingMode: i.addressingMode ?? null,
+      poeStatus:   i.poeStatus ?? null,
+      poeClass:    i.poeClass  ?? null,
     })),
   );
   // Fold EVERY scraped interface MAC (monitored or not) into the asset's
