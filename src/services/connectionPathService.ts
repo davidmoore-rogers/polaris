@@ -18,6 +18,13 @@
 
 import { prisma } from "../db.js";
 import type { Asset } from "../generated/prisma/client.js";
+import {
+  buildInfraParentIndex,
+  parentAssetWhereOr,
+  readControllerStamp,
+  readParentSwitchStamp,
+  resolveInfraParentAsset,
+} from "../utils/fortinetParentKey.js";
 
 export type ConnectionHopKind = "endpoint" | "switch" | "firewall";
 
@@ -188,28 +195,44 @@ function sortParentsByPreference(parents: Asset[]): Asset[] {
   });
 }
 
+/**
+ * Fetch the parent asset a child's topology stamp names.
+ *
+ * The stamp is matched serial-first, then against the candidate's own FMG
+ * device-name stamp, then its hostname (see utils/fortinetParentKey.ts) —
+ * matching hostname ALONE, as this did before 2026-08, resolved nothing on
+ * installs whose FMG device names differ from their gates' configured
+ * hostnames, so the path simply ended at the switch.
+ */
+async function fetchStampedParent(
+  stamp: { serial?: string | null; name?: string | null },
+  assetType: string,
+): Promise<Asset | null> {
+  const or = parentAssetWhereOr(stamp);
+  if (or.length === 0) return null;
+  const candidates = await prisma.asset.findMany({ where: { assetType, OR: or } });
+  if (candidates.length === 0) return null;
+  // One query, then the shared precedence — never let SQL pick among matches.
+  const hit = resolveInfraParentAsset(buildInfraParentIndex(candidates), stamp, assetType);
+  return hit ? (candidates.find((c) => c.id === hit.id) ?? null) : null;
+}
+
 async function resolveTopologyFallback(asset: Asset | null): Promise<Asset | null> {
   if (!asset) return null;
-  const ft = (asset.fortinetTopology as { controllerFortigate?: string; parentSwitch?: string } | null) ?? null;
-  if (!ft) return null;
-  // For a switch that stamps controllerFortigate, jump straight to the FortiGate.
-  if (asset.assetType === "switch" && ft.controllerFortigate) {
-    return prisma.asset.findFirst({
-      where: { hostname: ft.controllerFortigate, assetType: "firewall" },
-    });
+  const controller = readControllerStamp(asset.fortinetTopology);
+  const parentSwitch = readParentSwitchStamp(asset.fortinetTopology);
+  // For a switch that stamps its controller, jump straight to the FortiGate.
+  if (asset.assetType === "switch" && (controller.name || controller.serial)) {
+    return fetchStampedParent(controller, "firewall");
   }
   // For an AP that stamps parentSwitch, hop to the switch (which on next loop
   // iteration will jump to its FortiGate via its own dependency rows or
-  // controllerFortigate).
-  if (asset.assetType === "access_point" && ft.parentSwitch) {
-    return prisma.asset.findFirst({
-      where: { hostname: ft.parentSwitch, assetType: "switch" },
-    });
+  // controller stamp).
+  if (asset.assetType === "access_point" && parentSwitch.name) {
+    return fetchStampedParent(parentSwitch, "switch");
   }
-  if (asset.assetType === "access_point" && ft.controllerFortigate) {
-    return prisma.asset.findFirst({
-      where: { hostname: ft.controllerFortigate, assetType: "firewall" },
-    });
+  if (asset.assetType === "access_point" && (controller.name || controller.serial)) {
+    return fetchStampedParent(controller, "firewall");
   }
   return null;
 }

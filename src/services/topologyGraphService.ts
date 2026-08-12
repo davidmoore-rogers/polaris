@@ -25,6 +25,7 @@
 import { EXCLUDED_LIFECYCLE_STATUSES } from "../utils/assetInvariants.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { controllerStampWhereOr, readFirewallDeviceName } from "../utils/fortinetParentKey.js";
 import { loadIconResolutionCache, resolveIconUrl } from "./deviceIconService.js";
 import { inferInterfaceTopology } from "./interfaceTopologyService.js";
 import { resolveEffectiveLocation, hasLocationCodes, type LocationCodes } from "../utils/locationCodes.js";
@@ -191,16 +192,33 @@ export async function buildSiteTopology(siteId: string) {
     const iconCache = await loadIconResolutionCache();
 
     const fgHostname = fg.hostname || "";
+    const fgSerial = fg.serialNumber || "";
+    // The FMG device name off the gate's OWN topology stamp — the key its
+    // children actually carry in `controllerFortigate`. See below.
+    const fgDeviceName = readFirewallDeviceName(fg.fortinetTopology);
 
     // Siblings: every FortiSwitch + FortiAP whose fortinetTopology points at
-    // this FortiGate by hostname. We match by hostname (not id) because the
-    // discovery pipeline stamps controllerFortigate with the device name, and
-    // the FortiGate asset may or may not share its id across environments.
-    const siblings = fgHostname
+    // this FortiGate. Matched by stamped identity (not asset id) because the
+    // discovery pipeline stamps the controller, not a foreign key.
+    //
+    // This used to match `controllerFortigate` against `fg.hostname` ALONE,
+    // which is the one key that is NOT guaranteed to be it: children stamp
+    // FMG's device NAME, while a firewall's hostname is projected from the
+    // gate's own configured hostname. On an install where an operator named the
+    // FMG device differently, this query returned zero siblings and the Device
+    // Map drew the gate with none of its switches or APs (prod 2026-08-12).
+    // Now: definitive serial, the gate's own FMG-device-name stamp (correct on
+    // pre-fix data, so no re-discovery needed), then hostname.
+    const controllerKeyOr = controllerStampWhereOr({
+      hostname: fgHostname,
+      serialNumber: fgSerial,
+      deviceName: fgDeviceName,
+    });
+    const siblings = controllerKeyOr.length > 0
       ? await prisma.asset.findMany({
           where: {
             OR: [{ assetType: "switch" }, { assetType: "access_point" }],
-            fortinetTopology: { path: ["controllerFortigate"], equals: fgHostname },
+            AND: [{ OR: controllerKeyOr }],
             status: { notIn: EXCLUDED_LIFECYCLE_STATUSES },
           },
           select: {

@@ -54,6 +54,7 @@ import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { normalizeFortiapInterfaceName } from "../utils/fortiapInterfaceAlias.js";
+import { readFirewallDeviceName } from "../utils/fortinetParentKey.js";
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -560,14 +561,37 @@ function selectionUsesLldp(sel: AutoMonitorSelection): boolean {
  *                           the matched switch's monitored flag.
  */
 async function loadInferredLldpByAsset(
-  assets: ReadonlyArray<{ id: string; hostname: string | null }>,
+  assets: ReadonlyArray<{
+    id: string;
+    hostname: string | null;
+    serialNumber?: string | null;
+    fortinetTopology?: unknown;
+  }>,
   klass: AutoMonitorClass,
 ): Promise<Map<string, LldpByIfName>> {
   const out = new Map<string, LldpByIfName>();
-  const hostnames = assets.map((a) => a.hostname).filter((h): h is string => !!h && h.length > 0);
-  if (hostnames.length === 0) return out;
-  const byHostname = new Map<string, string>();
-  for (const a of assets) if (a.hostname) byHostname.set(a.hostname, a.id);
+  // Match the child's stamp against BOTH identities of each in-scope asset.
+  // `controllerFortigate` holds FMG's device NAME, not the gate's configured
+  // hostname, so a hostname-only match found no child switches at all on
+  // installs where the two differ (prod 2026-08-12) — the FortiGate class then
+  // auto-monitored zero FortiLink ports. `parentSwitch` has the mirror problem:
+  // it carries the switch-id (= serial) while the hostname may be a label.
+  // See utils/fortinetParentKey.ts for the shared resolution order.
+  const keys: string[] = [];
+  const idByKey = new Map<string, string>();
+  for (const a of assets) {
+    // Hostname first so it wins a collision, preserving pre-fix resolution.
+    // `deviceName` (the gate's own name in FMG) is what a child's
+    // `controllerFortigate` actually holds, and is the key that resolves rows
+    // stamped before `controllerSerial` existed.
+    for (const k of [a.hostname, a.serialNumber, readFirewallDeviceName(a.fortinetTopology)]) {
+      if (!k) continue;
+      if (idByKey.has(k)) continue;
+      idByKey.set(k, a.id);
+      keys.push(k);
+    }
+  }
+  if (keys.length === 0) return out;
 
   const add = (selfId: string, ifName: string, matchedAssetType: string, matchedMonitored: boolean) => {
     let perAsset = out.get(selfId);
@@ -582,18 +606,25 @@ async function loadInferredLldpByAsset(
       controllerFortigate: string;
       uplinkInterface: string;
       monitored: boolean;
+      controllerSerial: string | null;
     }>>`
       SELECT
         "fortinetTopology"->>'controllerFortigate' AS "controllerFortigate",
+        "fortinetTopology"->>'controllerSerial'    AS "controllerSerial",
         "fortinetTopology"->>'uplinkInterface'     AS "uplinkInterface",
         monitored                                  AS "monitored"
       FROM assets
       WHERE "assetType"::text = 'switch'
-        AND "fortinetTopology"->>'controllerFortigate' = ANY(${hostnames}::text[])
+        AND (
+          "fortinetTopology"->>'controllerSerial'    = ANY(${keys}::text[])
+          OR "fortinetTopology"->>'controllerFortigate' = ANY(${keys}::text[])
+        )
         AND "fortinetTopology"->>'uplinkInterface' IS NOT NULL
     `;
     for (const r of rows) {
-      const fgId = byHostname.get(r.controllerFortigate);
+      // Serial first — definitive. Falls back to the FMG device name.
+      const fgId = (r.controllerSerial ? idByKey.get(r.controllerSerial) : undefined)
+        ?? idByKey.get(r.controllerFortigate);
       if (!fgId) continue;
       add(fgId, r.uplinkInterface, "switch", r.monitored === true);
     }
@@ -609,11 +640,11 @@ async function loadInferredLldpByAsset(
         monitored                           AS "monitored"
       FROM assets
       WHERE "assetType"::text = 'access_point'
-        AND "fortinetTopology"->>'parentSwitch' = ANY(${hostnames}::text[])
+        AND "fortinetTopology"->>'parentSwitch' = ANY(${keys}::text[])
         AND "fortinetTopology"->>'parentPort' IS NOT NULL
     `;
     for (const r of rows) {
-      const swId = byHostname.get(r.parentSwitch);
+      const swId = idByKey.get(r.parentSwitch);
       if (!swId) continue;
       add(swId, r.parentPort, "access_point", r.monitored === true);
     }
@@ -635,16 +666,26 @@ async function loadInferredLldpByAsset(
         AND "fortinetTopology"->>'uplinkInterface' IS NOT NULL
     `;
     if (apRows.length > 0) {
-      const switchHostnames = [...new Set(apRows.map((r) => r.parentSwitch))];
+      // The AP's parentSwitch stamp is an LLDP system name — usually the
+      // switch-id (= serial), sometimes the hostname. Look the switch up by
+      // either, or the AP contributes no inferred neighbor at all.
+      const switchKeys = [...new Set(apRows.map((r) => r.parentSwitch))];
       const switches = await prisma.asset.findMany({
-        where: { hostname: { in: switchHostnames }, assetType: "switch" as any },
-        select: { hostname: true, monitored: true },
+        where: {
+          assetType: "switch" as any,
+          OR: [{ hostname: { in: switchKeys } }, { serialNumber: { in: switchKeys } }],
+        },
+        select: { hostname: true, serialNumber: true, monitored: true },
       });
-      const swMonitoredByHostname = new Map<string, boolean>();
-      for (const sw of switches) if (sw.hostname) swMonitoredByHostname.set(sw.hostname, sw.monitored === true);
+      const swMonitoredByKey = new Map<string, boolean>();
+      for (const sw of switches) {
+        const mon = sw.monitored === true;
+        if (sw.hostname) swMonitoredByKey.set(sw.hostname, mon);
+        if (sw.serialNumber && !swMonitoredByKey.has(sw.serialNumber)) swMonitoredByKey.set(sw.serialNumber, mon);
+      }
       for (const r of apRows) {
-        if (!swMonitoredByHostname.has(r.parentSwitch)) continue;
-        add(r.id, r.uplinkInterface, "switch", swMonitoredByHostname.get(r.parentSwitch)!);
+        if (!swMonitoredByKey.has(r.parentSwitch)) continue;
+        add(r.id, r.uplinkInterface, "switch", swMonitoredByKey.get(r.parentSwitch)!);
       }
     }
   }
@@ -911,7 +952,7 @@ export async function previewAutoMonitorForClass(
   const assetType = CLASS_TO_ASSET_TYPE[klass];
   const assets = await prisma.asset.findMany({
     where: { discoveredByIntegrationId: integrationId, assetType: assetType as any },
-    select: { id: true, hostname: true },
+    select: { id: true, hostname: true, serialNumber: true, fortinetTopology: true },
   });
   if (assets.length === 0) {
     return wantDiff
@@ -1013,7 +1054,7 @@ export async function applyAutoMonitorForClass(
   const assetType = CLASS_TO_ASSET_TYPE[klass];
   const assets = await prisma.asset.findMany({
     where: { discoveredByIntegrationId: integrationId, assetType: assetType as any },
-    select: { id: true, hostname: true, monitoredInterfaces: true, monitoredIpsecTunnels: true },
+    select: { id: true, hostname: true, serialNumber: true, fortinetTopology: true, monitoredInterfaces: true, monitoredIpsecTunnels: true },
   });
   if (assets.length === 0) return empty;
   const ids = assets.map((a) => a.id);
