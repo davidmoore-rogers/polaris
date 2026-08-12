@@ -2900,13 +2900,12 @@ function macCellHTML(asset) {
 
 function assetFormHTML(defaults) {
   var d = defaults || {};
-  // FortiAP descriptions push to the device `location` field, which FortiOS
-  // caps at 35 chars. When this AP's integration syncs descriptions, cap the
-  // Description input to match so the Polaris value can't silently outrun the
-  // device. Non-AP types, and APs whose integration doesn't sync, keep 255.
-  var apLocationCap = d.assetType === "access_point" &&
-    d.discoveredByIntegration && d.discoveredByIntegration.syncDescriptions === true;
-  var descMaxLen = apLocationCap ? 35 : 255;
+  // The device-side cap this asset's Description pushes into, when it pushes
+  // at all (see descriptionDeviceTarget). Polaris does NOT cap the input to
+  // it — the Polaris value is authoritative and may legitimately carry more
+  // location codes than the short device field holds. Instead the field warns
+  // live once the value would be truncated on push.
+  var descTarget = descriptionDeviceTarget(d);
   var identitySection = d._editing
     ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
         // Hostname is editable on edit as an operator override (coordinate-pin
@@ -2984,18 +2983,74 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Warranty Expires</label><input type="date" id="f-warrantyExpiry" value="' + dateInputVal(d.warrantyExpiry) + '"></div>' +
     '<div class="form-group"><label>Purchase Order</label><input type="text" id="f-purchaseOrder" value="' + escapeHtml(d.purchaseOrder || "") + '" placeholder="PO-12345"></div>' +
   '</div>' +
-  '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="' + descMaxLen + '" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
+  '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="255" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
     '<p class="hint">Device Map grouping codes: <code>a:</code>area &nbsp;<code>b:</code>building &nbsp;<code>f:</code>floor &nbsp;<code>r:</code>room &nbsp;<code>jb:</code>junction box — e.g. <code>a:Mine b:Shop f:2 r:North Closet jb:112-305</code>. Values may contain spaces; each runs until the next code. Codes here (falling back to the device-side description) group this device into building/floor/room shapes and floor views on the topology map.</p>' +
     '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP location) — Polaris is primary: a value here always wins and pushes to the device. Leave empty to adopt the device\'s value.</p>' +
-    (apLocationCap ? '<p class="hint" style="color:var(--color-warning,#b45309)">Limited to 35 characters — this access point\'s integration syncs descriptions to the FortiAP <code>location</code> field, which FortiOS caps at 35 characters.</p>' : '') + '</div>' +
+    descriptionCapWarningHTML(descTarget, "f-description-cap-warn") + '</div>' +
   '<div class="form-group"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes">' + escapeHtml(d.notes || "") + '</textarea></div>' +
   tagFieldHTML(d.tags || []);
 }
 
+// ── Device-side description caps (warn, never limit) ────────────────────────
+// Asset.description pushes to a short device field on some Fortinet roles, and
+// FortiOS/FortiManager truncate what doesn't fit (capDescriptionForTarget in
+// src/services/descriptionSyncService.ts). Polaris deliberately does NOT cap
+// the operator's input to match — the Polaris value is primary and may carry
+// more location codes than the device field holds — so the edit surfaces warn
+// live instead, and only when the originating integration actually syncs
+// descriptions to the device. Keep these numbers in lockstep with
+// DESCRIPTION_CAPS. (FortiSwitch `description` is capped at 63 device-side but
+// carries no warning here — 63 is roomy enough that nobody has hit it.)
+var DESCRIPTION_DEVICE_TARGETS = {
+  access_point: { cap: 35, device: "FortiAP",   field: "location" },
+  firewall:     { cap: 35, device: "FortiGate", field: "alias" },
+};
+
+// The device target this asset's Description would be truncated into, or null
+// when nothing pushes (non-Fortinet role, or Description Sync off).
+function descriptionDeviceTarget(asset) {
+  if (!asset || !asset.discoveredByIntegration) return null;
+  if (asset.discoveredByIntegration.syncDescriptions !== true) return null;
+  return DESCRIPTION_DEVICE_TARGETS[asset.assetType] || null;
+}
+
+// Hidden warning paragraph for a Description field; wireDescriptionCapWarning
+// fills and reveals it. Renders nothing when the asset has no device target.
+function descriptionCapWarningHTML(target, id) {
+  if (!target) return "";
+  return '<p class="hint" id="' + id + '" data-cap="' + target.cap +
+    '" data-device="' + escapeHtml(target.device) + '" data-field="' + escapeHtml(target.field) +
+    '" style="display:none;color:var(--color-warning,#b45309)"></p>';
+}
+
+// Show the warning whenever the typed value exceeds the device cap, live. Runs
+// once on wire-up too, so a pre-existing over-length description warns on open
+// rather than only after an edit.
+function wireDescriptionCapWarning(inputId, warnId) {
+  var input = document.getElementById(inputId);
+  var warn = document.getElementById(warnId);
+  if (!input || !warn) return;
+  var cap = parseInt(warn.getAttribute("data-cap") || "", 10);
+  if (!(cap > 0)) return;
+  var device = warn.getAttribute("data-device") || "device";
+  var field = warn.getAttribute("data-field") || "description";
+  function update() {
+    var len = input.value.length;
+    if (len <= cap) { warn.style.display = "none"; return; }
+    warn.innerHTML = "Over the device limit — FortiManager/FortiGate caps the " +
+      escapeHtml(device) + " <code>" + escapeHtml(field) + "</code> field at " + cap +
+      " characters, so this description (" + len + " characters) is cut off at " + cap +
+      " when it's written to the device. Polaris keeps the full text: <code>" +
+      escapeHtml(input.value.slice(0, cap)) + "</code> is what the device gets.";
+    warn.style.display = "";
+  }
+  input.addEventListener("input", update);
+  update();
+}
+
 // Read the Description field, trimmed to the input's own maxlength. maxlength
 // prevents over-typing but doesn't shorten a longer value assigned via the
-// value attribute (e.g. a pre-existing description on an AP that only just
-// became sync-capped at 35), so slice defensively.
+// value attribute, so slice defensively (the server's Zod schema caps at 255).
 function descriptionFieldValue() {
   var el = document.getElementById("f-description");
   if (!el) return "";
@@ -3024,10 +3079,9 @@ function getAssetFormData() {
     // server-side (notes are operator-only; erasing them must stick).
     notes:         val("f-notes"),
     // Always sent (including "") — an emptied Description clears to null
-    // server-side so the device value can re-seed it (description sync).
-    // Truncate to the input's own maxlength: for a synced FortiAP this is 35
-    // (the device `location` cap), and maxlength alone doesn't retro-trim a
-    // longer value that was set programmatically before the cap applied.
+    // server-side so the device value can re-seed it (description sync). Sent
+    // in full even when it outruns a short device field (FortiAP `location` /
+    // FortiGate `alias`): the Polaris value is primary and the push truncates.
     description:   descriptionFieldValue(),
     tags:          getTagFieldValue(),
   };
@@ -3916,6 +3970,7 @@ async function openCreateModal() {
     '<button class="btn btn-primary" id="btn-save">Create Asset</button>';
   openModal("Add Asset", body, footer);
   _wireModalTabs("asset-edit");
+  wireDescriptionCapWarning("f-description", "f-description-cap-warn");
   wireTagPicker();
   _wireMonitorEditTab({});
   _populateUploadedMibsInDropdowns();
@@ -3972,6 +4027,7 @@ async function openEditModal(id, opts) {
       var tabBtn = document.querySelector('#asset-edit-tabs .page-tab[data-tab="' + opts.tab + '"]');
       if (tabBtn) tabBtn.click();
     }
+    wireDescriptionCapWarning("f-description", "f-description-cap-warn");
     wireTagPicker();
     _wireMonitorEditTab(asset);
     _populateUploadedMibsInDropdowns();
@@ -4400,6 +4456,12 @@ async function openViewModal(id) {
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) {
       tabs.push({ key: "sdwan", label: "SD-WAN", html: _assetSdwanTabHTML(a, sdwanRules, sdwanLinks, sdwanMembers) });
     }
+    // MAC Table tab — the switch's layer-2 forwarding database. Switch-class
+    // only, mirroring where the collector spends the walk; lazy-loaded on
+    // first click since it can carry a few thousand rows.
+    if (a.assetType === "switch") {
+      tabs.push({ key: "mactable", label: "MAC Table", html: _assetMacTableTabHTML(a.id) });
+    }
     // Services tab — merged unit + process inventory. Shows systemd units /
     // Windows services by default; an "Include processes" checkbox folds the
     // current-state process inventory into the same table. Lazy-loaded on first
@@ -4512,6 +4574,7 @@ async function openViewModal(id) {
     if (showSnmpWalkTab) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
+    if (a.assetType === "switch") _wireAssetMacTableTab(a.id);
     if (!isInfraProc) _wireAssetServicesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     if (permAtLeast("alerts", "read")) _loadAssetNotificationsTab(a.id);
@@ -5751,8 +5814,46 @@ function assetSystemViewHTML(a) {
     '<div data-shot-section="lldp" data-shot-label="LLDP Neighbors">' +
     sectionHeader("LLDP Neighbors", lldpBadgeFull, false) +
     '<div id="asset-system-lldp"><span class="empty-state">Loading…</span></div>' +
+    '</div>' +
+    // Hidden until the device actually reports FRUs — most hosts publish no
+    // entPhysicalTable at all, and an empty "Modules" header on every server
+    // would be pure noise.
+    '<div id="asset-system-modules-section" data-shot-section="modules" data-shot-label="Hardware Modules" style="display:none">' +
+    sectionHeader("Hardware Modules", "", false) +
+    '<div id="asset-system-modules"><span class="empty-state">Loading…</span></div>' +
     '</div>'
   );
+}
+
+// Field-replaceable hardware (transceivers, PSUs, fan trays) from ENTITY-MIB.
+// Vendor / model / serial are what an operator needs to raise an RMA or find
+// the spare on the shelf, which is why they are the columns.
+function _renderPhysicalEntities(entities) {
+  var section = document.getElementById("asset-system-modules-section");
+  var host = document.getElementById("asset-system-modules");
+  if (!section || !host) return;
+  var rows = Array.isArray(entities) ? entities : [];
+  if (rows.length === 0) { section.style.display = "none"; return; }
+  section.style.display = "";
+
+  var CLASS_LABEL = { module: "Module", powerSupply: "Power Supply", fan: "Fan",
+                      chassis: "Chassis", container: "Container", port: "Port" };
+  host.innerHTML =
+    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th>Type</th><th>Name</th><th>Vendor</th><th>Model</th><th>Serial</th><th>HW Rev</th>' +
+    '</tr></thead><tbody>' +
+    rows.map(function (e) {
+      var dash = '<span style="color:var(--color-text-secondary)">—</span>';
+      return '<tr>' +
+        '<td>' + escapeHtml(CLASS_LABEL[e.entClass] || e.entClass) + '</td>' +
+        '<td>' + escapeHtml(e.name || e.descr || ("index " + e.entIndex)) + '</td>' +
+        '<td>' + (e.mfgName ? escapeHtml(e.mfgName) : dash) + '</td>' +
+        '<td class="mono">' + (e.modelName ? escapeHtml(e.modelName) : dash) + '</td>' +
+        '<td class="mono">' + (e.serialNum ? escapeHtml(e.serialNum) : dash) + '</td>' +
+        '<td class="mono">' + (e.hardwareRev ? escapeHtml(e.hardwareRev) : dash) + '</td>' +
+      '</tr>';
+    }).join("") +
+    '</tbody></table></div>';
 }
 
 function _currentSystemTabRange() {
@@ -5838,6 +5939,7 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
       _renderStorageTable(storage, si, asset);
       _renderTemperatures(temps, si, asset);
       _renderLldpNeighborsCard(lldp, si, asset);
+      _renderPhysicalEntities(si && si.physicalEntities);
       if (stations) _renderWirelessStationsCard(stations, si, asset);
     }
   } catch (err) {
@@ -6079,6 +6181,10 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       (Array.isArray(r.taggedVlans) && r.taggedVlans.length > 0) ||
       r.trunksAllVlans === true;
   });
+  // Same rule for PoE: only a device that actually reports a PSE gets the
+  // column. A FortiGate, a server, or a switch polled over REST would
+  // otherwise show a dash on every row for a feature it never reports.
+  var showPoeCol = rows.some(function (r) { return r.poeStatus != null; });
   // "Inactive" = no traffic ever observed (both cumulative counters are
   // null or zero). User-set rule: ports with any non-zero in/out count
   // are always shown regardless of admin/oper status; everything else
@@ -6109,7 +6215,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     var hasOut = tn.outgoingBytes != null && tn.outgoingBytes > 0;
     return !hasIn && !hasOut;
   }
-  var COLS = 11 + (showVlanCols ? 2 : 0);
+  var COLS = 11 + (showVlanCols ? 2 : 0) + (showPoeCol ? 1 : 0);
   // Group LLDP neighbors by local interface so the row builder can stamp the
   // first neighbor's label inline. Most ports only ever see one neighbor; a
   // "+N" badge appears when more are present and the slide-over enumerates them.
@@ -6163,6 +6269,22 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
   // The Tagged column collapses long lists past 6 entries to "<6>, +N more"
   // with the full list in the cell tooltip; trunk-all ports show "all"
   // distinctly from explicit-list trunks, matching the slide-over pill.
+  // "Delivering · class3" — status and negotiated budget read together, since
+  // the class is meaningless without knowing power is actually flowing.
+  // The class is a BUDGET bracket, not a measurement: RFC 3621 defines no
+  // per-port wattage object, so there is no wattage to show here.
+  function poeCellHTML(iface) {
+    if (!showPoeCol) return "";
+    var st = iface.poeStatus;
+    if (!st) return '<td class="mono">—</td>';
+    var LABEL = { disabled: "Disabled", searching: "Searching", delivering: "Delivering",
+                  fault: "Fault", test: "Test", "other-fault": "Fault (other)" };
+    var color = (st === "fault" || st === "other-fault") ? "var(--color-danger,#dc2626)"
+      : st === "delivering" ? "var(--color-success,#16a34a)"
+      : "var(--color-text-secondary)";
+    var cls = iface.poeClass ? ' <span style="color:var(--color-text-secondary)">· ' + escapeHtml(iface.poeClass) + '</span>' : "";
+    return '<td class="mono" style="color:' + color + '">' + escapeHtml(LABEL[st] || st) + cls + '</td>';
+  }
   function vlanCellsHTML(iface) {
     if (!showVlanCols) return "";
     var native = (iface.nativeVlan != null) ? iface.nativeVlan : null;
@@ -6258,6 +6380,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       addressingCell(iface) +
       '<td class="mono">' + escapeHtml(iface.macAddress || "—") + "</td>" +
       vlanCellsHTML(iface) +
+      poeCellHTML(iface) +
       "<td>" + (iface.inOctets  != null ? _fmtBytes(iface.inOctets)  : "—") + "</td>" +
       "<td>" + (iface.outOctets != null ? _fmtBytes(iface.outOctets) : "—") + "</td>" +
       '<td title="In errors / Out errors (cumulative)">' + errs + "</td>" +
@@ -6319,6 +6442,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     // don't carry per-port VLAN config, so emit empty placeholders so the
     // column count stays consistent across every row in the table.
     var vlanPlaceholders = showVlanCols ? '<td class="mono">—</td><td class="mono">—</td>' : "";
+    var poePlaceholder = showPoeCol ? '<td class="mono">—</td>' : "";
     return "<tr" + rowAttr + ">" +
       '<td style="text-align:center;width:1%">' + checkbox + "</td>" +
       nameCell +
@@ -6328,6 +6452,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       "<td>—</td>" +
       '<td class="mono">—</td>' +
       vlanPlaceholders +
+      poePlaceholder +
       "<td>" + (tn.incomingBytes != null ? _fmtBytes(tn.incomingBytes) : "—") + "</td>" +
       "<td>" + (tn.outgoingBytes != null ? _fmtBytes(tn.outgoingBytes) : "—") + "</td>" +
       "<td>—</td>" +
@@ -6454,6 +6579,9 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     ? '<th data-col-id="native-vlan" title="Untagged PVID on the FortiSwitch port">Native VLAN</th>' +
       '<th data-col-id="tagged-vlans" title="Tagged VLAN set on the FortiSwitch port (allowed-vlans − untagged-vlans). \"all\" indicates `set allowed-vlans all`.">Tagged VLANs</th>'
     : "";
+  var poeHeader = showPoeCol
+    ? '<th data-col-id="poe" title="Power over Ethernet: detection status and the negotiated power CLASS (a budget bracket, e.g. class3 = up to 12.95 W at the powered device). POWER-ETHERNET-MIB defines no per-port wattage, so no draw is shown. SNMP only.">PoE</th>'
+    : "";
   container.innerHTML = staleBanner +
     '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>full-history retention</strong>. Unselected interfaces are kept for 24&nbsp;h only.</p>' +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
@@ -6467,6 +6595,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
       '<th data-col-id="addressing" title="L3 addressing mode — FortiOS only (CMDB system/interface mode). DHCP, Static, or PPPoE; other sources show —">Addressing</th>' +
       '<th data-col-id="mac">MAC</th>' +
       vlanHeader +
+      poeHeader +
       '<th data-col-id="in">In</th>' +
       '<th data-col-id="out">Out</th>' +
       '<th data-col-id="errors">Errors (in/out)</th>' +
@@ -6845,6 +6974,8 @@ function _hwClassLabel(cls) {
     case "temperature": return "Temp";
     case "fan":         return "Fan";
     case "voltage":     return "Voltage";
+    case "current":     return "Current";
+    case "optical":     return "Optical";
     case "power":       return "Power";
     case "disk":        return "Disk";
     default:            return "Other";
@@ -14680,6 +14811,10 @@ var _SNMP_STANDARD_MIBS = [
   { id: "std:entity",         label: "ENTITY-MIB (RFC 4133)",          oid: "1.3.6.1.2.1.47"         },
   { id: "std:entity-sensor",  label: "ENTITY-SENSOR-MIB (RFC 3433)",   oid: "1.3.6.1.2.1.99"         },
   { id: "std:lldp",           label: "LLDP-MIB (IEEE 802.1AB)",        oid: "1.0.8802.1.1.2"         },
+  { id: "std:poe",            label: "PoE — POWER-ETHERNET-MIB (RFC 3621)", oid: "1.3.6.1.2.1.105"   },
+  { id: "std:bridge",         label: "Bridge — MAC forwarding + STP (RFC 4188)", oid: "1.3.6.1.2.1.17" },
+  { id: "std:q-bridge",       label: "Bridge — VLAN-aware forwarding (RFC 4363)", oid: "1.3.6.1.2.1.17.7" },
+  { id: "std:rstp",           label: "Rapid Spanning Tree (RFC 4318)", oid: "1.3.6.1.2.1.134"        },
 ];
 
 function _snmpCredentialOptions(selectedId) {
@@ -18420,5 +18555,91 @@ async function bulkSetMonitoring(monitored) {
     showToast(err.message, "error");
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+
+// ─── MAC Table tab ─────────────────────────────────────────────────────────
+//
+// The switch's layer-2 forwarding database. Two views of the same fetch: the
+// per-port MAC counts (which distinguish an access port from an uplink at a
+// glance) and the entry list itself.
+
+function _assetMacTableTabHTML(assetId) {
+  return '<div id="asset-mactable-mount-' + escapeHtml(assetId) + '">' +
+    '<span class="empty-state">Loading…</span></div>';
+}
+
+function _wireAssetMacTableTab(assetId) {
+  var btn = document.querySelector('#asset-view-tabs .page-tab[data-tab="mactable"]');
+  if (!btn) return;
+  var loaded = false;
+  btn.addEventListener("click", function () {
+    if (loaded) return;
+    loaded = true;
+    _loadAssetMacTable(assetId);
+  });
+}
+
+async function _loadAssetMacTable(assetId) {
+  var mount = document.getElementById("asset-mactable-mount-" + assetId);
+  if (!mount) return;
+  try {
+    var data = await api.request("GET", "/assets/" + encodeURIComponent(assetId) + "/mac-table");
+    var entries = (data && data.entries) || [];
+    var counts = (data && data.portCounts) || {};
+    if (entries.length === 0) {
+      mount.innerHTML = '<span class="empty-state">No forwarding-database entries. ' +
+        'This is collected over SNMP on the system-info cadence; a switch polled ' +
+        'via its parent FortiGate reports none.</span>';
+      return;
+    }
+
+    // Uplink/access summary first — it is the reading of this table that
+    // matters most, and it is a single number per port.
+    var portRows = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
+    var summary = portRows.length === 0 ? "" :
+      '<h4 style="margin:0 0 0.4rem">MACs per port</h4>' +
+      '<div class="table-wrapper" style="margin-bottom:1rem;max-height:220px;overflow:auto">' +
+      '<table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+        '<th>Interface</th><th>Learned MACs</th><th>Reads as</th>' +
+      '</tr></thead><tbody>' +
+      portRows.map(function (p) {
+        var n = counts[p];
+        // One learned MAC is a directly-attached endpoint; many means the port
+        // faces other switches. This is a HINT, not a claim — a port with an
+        // IP phone and a PC behind it also shows two.
+        var reads = n === 1 ? "access port (one device)" : "uplink / trunk (" + n + " devices behind it)";
+        return '<tr><td class="mono">' + escapeHtml(p) + '</td>' +
+          '<td class="mono">' + n + '</td>' +
+          '<td style="color:var(--color-text-secondary)">' + escapeHtml(reads) + '</td></tr>';
+      }).join("") +
+      '</tbody></table></div>';
+
+    var dash = '<span style="color:var(--color-text-secondary)">—</span>';
+    mount.innerHTML = summary +
+      '<h4 style="margin:0 0 0.4rem">Forwarding database <span style="font-weight:400;color:var(--color-text-secondary)">(' + entries.length + ' entries)</span></h4>' +
+      '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+        '<th>MAC</th><th>VLAN</th><th>Interface</th><th>Status</th><th>Device</th>' +
+      '</tr></thead><tbody>' +
+      entries.map(function (e) {
+        var dev = e.matchedAsset
+          ? '<a href="#" class="asset-link" data-asset-id="' + escapeHtml(e.matchedAsset.id) + '">' +
+              escapeHtml(e.matchedAsset.hostname || e.matchedAsset.ipAddress || e.matchedAsset.id) + '</a>'
+          : dash;
+        return '<tr>' +
+          '<td class="mono">' + escapeHtml(e.macAddress) + '</td>' +
+          '<td class="mono">' + (e.vlanId != null ? e.vlanId : dash) + '</td>' +
+          // basePort is shown when the ifIndex join failed, so the entry stays
+          // identifiable rather than looking like it belongs to no port.
+          '<td class="mono">' + (e.ifName ? escapeHtml(e.ifName)
+            : (e.basePort != null ? '<span style="color:var(--color-text-secondary)">base port ' + e.basePort + '</span>' : dash)) + '</td>' +
+          '<td>' + escapeHtml(e.status) + '</td>' +
+          '<td>' + dev + '</td>' +
+        '</tr>';
+      }).join("") +
+      '</tbody></table></div>';
+  } catch (err) {
+    mount.innerHTML = '<span class="empty-state">Error: ' + escapeHtml(err.message || "failed to load") + '</span>';
   }
 }

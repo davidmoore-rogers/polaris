@@ -36,6 +36,12 @@
 
 import { prisma } from "../db.js";
 import { normalizeFortiapInterfaceName } from "../utils/fortiapInterfaceAlias.js";
+import { inferDirectAttachments, type MatchedFdbEntry } from "../utils/macForwarding.js";
+import {
+  controllerStampWhereOr,
+  topologyStampWhereOr,
+  readFirewallDeviceName,
+} from "../utils/fortinetParentKey.js";
 
 interface FortinetTopology {
   role?: string;
@@ -56,7 +62,13 @@ export interface InferredLldpNeighbor {
   systemDescription: string | null;
   managementIp: string | null;
   capabilities: string[];
-  source: "peer-inferred";
+  /**
+   * Which inference produced the row. "peer-inferred" is derived from
+   * Asset.fortinetTopology (what Polaris already knows about the fabric);
+   * "mac-inferred" is derived from the switch's own forwarding database and
+   * therefore covers links no Fortinet topology stamp describes.
+   */
+  source: "peer-inferred" | "mac-inferred";
   firstSeen: Date;
   lastSeen: Date;
   matchedAsset: {
@@ -79,19 +91,25 @@ const PEER_SELECT = {
 export async function buildInferredNeighborsForAsset(assetId: string): Promise<InferredLldpNeighbor[]> {
   const self = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: { id: true, hostname: true, assetType: true, fortinetTopology: true },
+    select: { id: true, hostname: true, serialNumber: true, assetType: true, fortinetTopology: true },
   });
-  if (!self || !self.hostname) return [];
+  // Either identity is enough to find peers — the stamps below are matched
+  // serial-first with the name as fallback (utils/fortinetParentKey.ts), so a
+  // hostname-less asset with a serial is no longer a dead end.
+  if (!self || (!self.hostname && !self.serialNumber)) return [];
   const selfFt = (self.fortinetTopology as FortinetTopology | null) ?? null;
 
   const now = new Date();
   const inferred: InferredLldpNeighbor[] = [];
 
   if (self.assetType === "switch") {
+    // An AP stamps parentSwitch from its own LLDP table, which reports the
+    // switch's system name — usually the switch-id (= the serial), while
+    // Asset.hostname may be an operator label. Match either.
     const aps = await prisma.asset.findMany({
       where: {
         assetType: "access_point",
-        fortinetTopology: { path: ["parentSwitch"], equals: self.hostname },
+        AND: [{ OR: topologyStampWhereOr("parentSwitch", [self.hostname, self.serialNumber]) }],
       },
       select: PEER_SELECT,
     });
@@ -125,7 +143,11 @@ export async function buildInferredNeighborsForAsset(assetId: string): Promise<I
     const switches = await prisma.asset.findMany({
       where: {
         assetType: "switch",
-        fortinetTopology: { path: ["controllerFortigate"], equals: self.hostname },
+        AND: [{ OR: controllerStampWhereOr({
+          hostname: self.hostname,
+          serialNumber: self.serialNumber,
+          deviceName: readFirewallDeviceName(self.fortinetTopology),
+        }) }],
       },
       select: PEER_SELECT,
     });
@@ -200,6 +222,57 @@ export async function buildInferredNeighborsForAsset(assetId: string): Promise<I
             hostname: sw.hostname,
             ipAddress: sw.ipAddress,
             assetType: sw.assetType,
+          },
+        });
+      }
+    }
+  }
+
+  // MAC-derived attachments. Additive to everything above: the FDB sees links
+  // no Fortinet topology stamp describes (a third-party switch, an unmanaged
+  // device, a port whose neighbour speaks no LLDP), which is the whole point of
+  // not inferring topology from LLDP alone.
+  //
+  // DISPLAY-ONLY BY DESIGN. These rows are synthesized at read time and merged
+  // into the neighbour list; nothing here writes AssetLldpNeighbor, and nothing
+  // here writes AssetDependencyParent. Dependency edges feed all-down
+  // suppression, so a wrong edge silences real alerts — that step waits for
+  // bidirectional confirmation validated against a real fleet, and is
+  // deliberately not attempted from one switch's table.
+  if (self.assetType === "switch") {
+    const fdb = await prisma.assetMacTableEntry.findMany({
+      where: { assetId, status: "learned", matchedAssetId: { not: null }, ifName: { not: null } },
+      select: { ifName: true, macAddress: true, vlanId: true, basePort: true, status: true, matchedAssetId: true },
+    });
+    const attachments = inferDirectAttachments(fdb as MatchedFdbEntry[]);
+    if (attachments.length > 0) {
+      const peers = await prisma.asset.findMany({
+        where: { id: { in: attachments.map((a) => a.assetId) } },
+        select: PEER_SELECT,
+      });
+      const peerById = new Map(peers.map((p) => [p.id, p]));
+      for (const att of attachments) {
+        const peer = peerById.get(att.assetId);
+        if (!peer) continue;
+        inferred.push({
+          localIfName: att.ifName,
+          chassisIdSubtype: null,
+          chassisId: null,
+          portIdSubtype: null,
+          portId: null,
+          portDescription: null,
+          systemName: peer.hostname,
+          systemDescription: "Inferred from the MAC forwarding table (sole device learned on this port)",
+          managementIp: peer.ipAddress,
+          capabilities: [],
+          source: "mac-inferred",
+          firstSeen: now,
+          lastSeen: now,
+          matchedAsset: {
+            id: peer.id,
+            hostname: peer.hostname,
+            ipAddress: peer.ipAddress,
+            assetType: peer.assetType,
           },
         });
       }

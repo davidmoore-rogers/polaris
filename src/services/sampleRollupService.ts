@@ -514,6 +514,7 @@ function sqlInterfaceHourly(): string {
       "lastIpAddress", "lastMacAddress",
       "lastAlias", "lastDescription",
       "lastIfType", "lastIfParent", "lastVlanId",
+      "lastPoeStatus", "lastPoeClass",
       "lastBucketSampleAt"
     )
     SELECT
@@ -540,6 +541,8 @@ function sqlInterfaceHourly(): string {
       (ARRAY_AGG("ifType"      ORDER BY "timestamp" DESC) FILTER (WHERE "ifType"      IS NOT NULL))[1],
       (ARRAY_AGG("ifParent"    ORDER BY "timestamp" DESC) FILTER (WHERE "ifParent"    IS NOT NULL))[1],
       (ARRAY_AGG("vlanId"      ORDER BY "timestamp" DESC) FILTER (WHERE "vlanId"      IS NOT NULL))[1],
+      (ARRAY_AGG("poeStatus"   ORDER BY "timestamp" DESC) FILTER (WHERE "poeStatus"   IS NOT NULL))[1],
+      (ARRAY_AGG("poeClass"    ORDER BY "timestamp" DESC) FILTER (WHERE "poeClass"    IS NOT NULL))[1],
       MAX("timestamp")
     FROM "asset_interface_samples"
     WHERE "timestamp" >= $1 AND "cadence" = 'fast'
@@ -564,6 +567,8 @@ function sqlInterfaceHourly(): string {
       "lastIfType"         = EXCLUDED."lastIfType",
       "lastIfParent"       = EXCLUDED."lastIfParent",
       "lastVlanId"         = EXCLUDED."lastVlanId",
+      "lastPoeStatus"      = EXCLUDED."lastPoeStatus",
+      "lastPoeClass"       = EXCLUDED."lastPoeClass",
       "lastBucketSampleAt" = EXCLUDED."lastBucketSampleAt"
   `;
 }
@@ -581,6 +586,7 @@ function sqlInterfaceDaily(): string {
       "lastIpAddress", "lastMacAddress",
       "lastAlias", "lastDescription",
       "lastIfType", "lastIfParent", "lastVlanId",
+      "lastPoeStatus", "lastPoeClass",
       "lastBucketSampleAt"
     )
     SELECT
@@ -607,6 +613,8 @@ function sqlInterfaceDaily(): string {
       (ARRAY_AGG("lastIfType"      ORDER BY "bucketStart" DESC) FILTER (WHERE "lastIfType"      IS NOT NULL))[1],
       (ARRAY_AGG("lastIfParent"    ORDER BY "bucketStart" DESC) FILTER (WHERE "lastIfParent"    IS NOT NULL))[1],
       (ARRAY_AGG("lastVlanId"      ORDER BY "bucketStart" DESC) FILTER (WHERE "lastVlanId"      IS NOT NULL))[1],
+      (ARRAY_AGG("lastPoeStatus"   ORDER BY "bucketStart" DESC) FILTER (WHERE "lastPoeStatus"   IS NOT NULL))[1],
+      (ARRAY_AGG("lastPoeClass"    ORDER BY "bucketStart" DESC) FILTER (WHERE "lastPoeClass"    IS NOT NULL))[1],
       MAX("lastBucketSampleAt")
     FROM "asset_interface_samples_hourly"
     WHERE "bucketStart" >= $1
@@ -631,6 +639,8 @@ function sqlInterfaceDaily(): string {
       "lastIfType"         = EXCLUDED."lastIfType",
       "lastIfParent"       = EXCLUDED."lastIfParent",
       "lastVlanId"         = EXCLUDED."lastVlanId",
+      "lastPoeStatus"      = EXCLUDED."lastPoeStatus",
+      "lastPoeClass"       = EXCLUDED."lastPoeClass",
       "lastBucketSampleAt" = EXCLUDED."lastBucketSampleAt"
   `;
 }

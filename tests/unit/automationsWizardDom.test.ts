@@ -585,4 +585,141 @@ describe("automation wizard DOM render", () => {
     expect(p.trigger.dimensionFilter).toEqual({ sensorClass: "temperature", sensorNamePattern: "CPU ON-DIE Temperature" });
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
   });
+
+  it("the condition row has no window box: 'Sustained for' IS the aggregation window, mandatory and starred", async () => {
+    // Two time inputs meaning almost the same thing ("avg over 300 sec" +
+    // "sustained for N minutes") is what this collapses. The duration field is
+    // the trigger's one time knob: the measurement window for avg/median/min/max
+    // (so no sustain on top), the sustain clock for `latest`.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    const win = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-window",
+      name: "Hot CPU",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: null,
+      bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
+
+    // The per-condition window control is gone; the aggregation select remains.
+    expect(doc.querySelector("#aw-trig-root .tgl-window")).toBeFalsy();
+    expect(doc.querySelector("#aw-trig-root .tgl-agg")).toBeTruthy();
+    // median joined the vocabulary.
+    const agg = doc.querySelector("#aw-trig-root .tgl-agg") as unknown as { value: string; textContent: string; dispatchEvent: (e: unknown) => void };
+    expect(agg.value).toBe("avg");
+    expect(agg.textContent).toContain("median");
+
+    // A stored aggregation window renders as the duration (300s → 5 min) and the
+    // field is marked required.
+    const dur = doc.querySelector("#tf-duration-min") as unknown as { value: string; placeholder: string; dispatchEvent: (e: unknown) => void };
+    expect(dur.value).toBe("5");
+    const star = () => (doc.querySelector(".aw-dur .aw-dur-req") as unknown as { style: { display: string } }).style.display;
+    expect(star()).not.toBe("none");
+
+    // Switch to median + 10 minutes: the window follows the duration and no
+    // sustain clock is stacked on top of it.
+    agg.value = "median";
+    agg.dispatchEvent(new win.Event("change", { bubbles: true }));
+    dur.value = "10";
+    dur.dispatchEvent(new win.Event("input", { bubbles: true }));
+    expect(star()).not.toBe("none");
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    expect(savedPayloads).toHaveLength(1);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.trigger.aggregation).toBe("median");
+    expect(saved.trigger.windowSec).toBe(600);
+    expect(saved.trigger.forDurationSec).toBe(0);
+    expect(() => ruleInputSchema.parse(saved)).not.toThrow();
+
+    // Back on `latest` the same field is the optional sustain again — no
+    // asterisk, and the minutes land on forDurationSec instead of the window.
+    agg.value = "latest";
+    agg.dispatchEvent(new win.Event("change", { bubbles: true }));
+    expect(star()).toBe("none");
+    expect(dur.placeholder).toContain("0 = fire as soon as");
+  });
+
+  it("a `latest` condition's minutes stay the sustain clock, not a window", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-sustain-only",
+      name: "Loss",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 600 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: null,
+      bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("10");
+    expect((doc.querySelector(".aw-dur .aw-dur-req") as unknown as { style: { display: string } }).style.display).toBe("none");
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.trigger.windowSec).toBe(0);
+    expect(saved.trigger.forDurationSec).toBe(600);
+  });
+
+  it("an aggregation with the period left at 0 is refused, not measured over a default lookback", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    const win = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-no-window",
+      name: "Hot CPU",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: null,
+      bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const dur = doc.querySelector("#tf-duration-min") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    dur.value = "0";
+    dur.dispatchEvent(new win.Event("input", { bubbles: true }));
+    toastErrors.length = 0;
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(savedPayloads).toHaveLength(0);
+    expect(toastErrors.join(" ")).toContain("Sustained for (minutes)");
+  });
 });

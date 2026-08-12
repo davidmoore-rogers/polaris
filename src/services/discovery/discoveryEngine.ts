@@ -1337,7 +1337,7 @@ async function upsertFortigateFirewallAssetSource(
 // per-source JSON shape sketched in CLAUDE.md ("Per-source observed shapes
 // / sourceKind: fortiswitch"). Companion to the firewall blob above.
 function buildFortiswitchObservedBlob(
-  sw: { device?: string; name?: string; serial?: string; ipAddress?: string; fgtInterface?: string; osVersion?: string; joinTime?: number; state?: string; connected?: boolean; baseMac?: string; description?: string | null },
+  sw: { device?: string; deviceSerial?: string; name?: string; serial?: string; ipAddress?: string; fgtInterface?: string; osVersion?: string; joinTime?: number; state?: string; connected?: boolean; baseMac?: string; description?: string | null },
   syncedAt: Date,
 ): Record<string, unknown> {
   return {
@@ -1357,6 +1357,7 @@ function buildFortiswitchObservedBlob(
     // when the switch wasn't represented in any is_fortilink_peer row.
     baseMac: sw.baseMac || null,
     controllerFortigate: sw.device || null,
+    controllerSerial: sw.deviceSerial || null,
     uplinkInterface: sw.fgtInterface || null,
     state: sw.state || null,
     connected: typeof sw.connected === "boolean" ? sw.connected : null,
@@ -1368,6 +1369,7 @@ function buildFortiswitchObservedBlob(
 function buildFortiapObservedBlob(
   ap: {
     device?: string;
+    deviceSerial?: string;
     name?: string;
     serial?: string;
     model?: string;
@@ -1408,6 +1410,7 @@ function buildFortiapObservedBlob(
     // mirrors the fortiswitch blob's `state` field.
     state: ap.authorizationState || null,
     controllerFortigate: ap.device || null,
+    controllerSerial: ap.deviceSerial || null,
     parentSwitch: ap.peerSwitch || null,
     parentPort: ap.peerPort || null,
     parentVlan: typeof ap.peerVlan === "number" ? ap.peerVlan : null,
@@ -3231,6 +3234,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const swTopology = {
         role: "fortiswitch" as const,
         controllerFortigate: sw.device || null,
+        // Definitive controller identity — see resolveInfraParentAsset in
+        // utils/fortinetParentKey.ts. `controllerFortigate` is FMG's device
+        // NAME, which routinely differs from the gate's configured hostname
+        // (and therefore from Asset.hostname); the serial does not.
+        controllerSerial: sw.deviceSerial || null,
         uplinkInterface: sw.fgtInterface || null,
         // Controller admission state ("Authorized" | "Unauthorized"). Also
         // drives the create-path status→storage flip below; surfaced as the
@@ -3528,6 +3536,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const apTopology = {
         role: "fortiap" as const,
         controllerFortigate: ap.device || null,
+        // Definitive controller identity — see the fortiswitch stamp above.
+        controllerSerial: ap.deviceSerial || null,
         parentSwitch: ap.peerSwitch || null,
         parentPort: ap.peerPort || null,
         parentVlan: ap.peerVlan ?? null,

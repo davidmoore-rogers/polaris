@@ -14,6 +14,7 @@ import { isValidCidr, isValidIpAddress, ipInCidr } from "../utils/cidr.js";
 import { TEMPLATE_VARIABLES } from "../utils/notificationTemplate.js";
 import { defaultAlertEmailTemplate } from "../utils/alertEmailTemplate.js";
 import { SENSOR_CLASS_UNITS } from "../utils/hardwareSensors.js";
+import { POE_STATUS_VALUES } from "../utils/poePorts.js";
 
 // Notification severity (rule.severity → notification.severity). Ordered
 // least → most severe. NOTE: distinct from EVENT_LEVELS below — that's the
@@ -23,7 +24,7 @@ export const SEVERITIES = ["notice", "informational", "warning", "serious", "cri
 export const EVENT_LEVELS = ["info", "warning", "error"] as const;
 export const CLEAR_BEHAVIORS = ["manual", "auto", "timed"] as const;
 export const COMPARATORS = [">", ">=", "<", "<=", "==", "!="] as const;
-export const AGGREGATIONS = ["latest", "avg", "min", "max"] as const;
+export const AGGREGATIONS = ["latest", "avg", "median", "min", "max"] as const;
 
 export type Severity = (typeof SEVERITIES)[number];
 export type Comparator = (typeof COMPARATORS)[number];
@@ -249,7 +250,7 @@ export const BOOLEAN_METRIC_LABELS: Record<string, { trueLabel: string; falseLab
 // Current Asset (or current-state child row) field conditions.
 export const ASSET_STATE_FIELDS = [
   "monitorStatus", "status", "consecutiveFailures", "dependencySuppressed", "quarantined",
-  "ifOperStatus", "ifAdminStatus", "ipsecStatus", "sdwanRuleStatus", "sdwanSelectedMember",
+  "ifOperStatus", "ifAdminStatus", "poeStatus", "ipsecStatus", "sdwanRuleStatus", "sdwanSelectedMember",
 ] as const;
 
 // ─── Host-metric trigger ────────────────────────────────────────────────────
@@ -281,7 +282,11 @@ export const CHANGE_TYPE_ACTIONS: Record<(typeof CHANGE_TYPES)[number], string> 
 const dimensionFilterSchema = z
   .object({
     ifNamePattern: z.string().max(200).optional(),
-    sensorClass: z.enum(["temperature", "fan", "voltage", "power", "disk", "other"]).optional(),
+    // Closed enum — must stay in lockstep with HardwareSensorClass in
+    // src/utils/hardwareSensors.ts. A class missing here is unselectable in the
+    // wizard even once samples carry it, which is what makes "alert on optics"
+    // impossible to author.
+    sensorClass: z.enum(["temperature", "fan", "voltage", "current", "optical", "power", "disk", "other"]).optional(),
     // One NAMED sensor rather than a whole class: a firewall reports a dozen
     // temperature sensors ("CPU ON-DIE Temperature", "TMP1 External
     // Temperature", per-PHY dies), and an operator alerting on the CPU die does
@@ -1887,6 +1892,10 @@ export const FIELD_META: Record<string, { label: string; kind: "enum" | "bool" |
   quarantined: { label: "Quarantined", kind: "bool", values: ["true", "false"] },
   ifOperStatus: { label: "Interface oper status", kind: "dynamic" },
   ifAdminStatus: { label: "Interface admin status", kind: "dynamic" },
+  // Closed enum rather than "dynamic" (which ifOperStatus uses): every value
+  // POWER-ETHERNET-MIB can report is known up front, so the wizard offers a
+  // picker and a typo cannot silently produce a rule that never matches.
+  poeStatus: { label: "Interface PoE status", kind: "enum", values: [...POE_STATUS_VALUES] },
   ipsecStatus: { label: "IPsec tunnel status", kind: "dynamic" },
   sdwanRuleStatus: { label: "SD-WAN rule status", kind: "dynamic" },
   sdwanSelectedMember: { label: "SD-WAN selected member", kind: "dynamic" },
@@ -2071,7 +2080,7 @@ export function buildSchemaCatalog() {
       "==": "equals", "!=": "is not",
     },
     inverseComparators: { ">": "<=", ">=": "<", "<": ">=", "<=": ">", "==": "!=", "!=": "==" },
-    aggregationPhrases: { latest: "", avg: "avg over", min: "min over", max: "max over" },
+    aggregationPhrases: { latest: "", avg: "avg over", median: "median over", min: "min over", max: "max over" },
     dimensionPhrases: {
       sensorClass: "for sensors of class {value}",
       sensorNamePattern: "on sensors matching {value}",

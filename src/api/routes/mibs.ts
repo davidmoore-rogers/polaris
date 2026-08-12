@@ -30,7 +30,7 @@ import {
   type MibTable,
   type ParsedMibStructured,
 } from "../../services/mibService.js";
-import { resolveSymbolsForMib } from "../../services/oidRegistry.js";
+import { resolveSymbolsForMib, findUnresolvedRootSymbols } from "../../services/oidRegistry.js";
 import { snmpWalkRaw } from "../../services/monitoringService.js";
 import { getCredential } from "../../services/credentialService.js";
 import {
@@ -166,17 +166,25 @@ router.get("/:id/structure", requirePermission("mibDatabase", "read"), async (re
       }
     }
     const unresolvedCount = structured.symbols.filter((s) => s.fullOid === null).length;
+    // Which EXTERNAL symbols the file leans on but nothing defines. The count
+    // above says how much broke; this says what to upload to fix it — see
+    // findUnresolvedRootSymbols on why an unresolved MIB is usually one root
+    // cause rather than N independent ones.
+    const unresolvedRoots =
+      unresolvedCount > 0 && oidMap ? findUnresolvedRootSymbols(row.contents, oidMap) : [];
     const payload: ParsedMibStructured & {
       mibId: string;
       manufacturer: string | null;
       model: string | null;
       unresolvedCount: number;
+      unresolvedRoots: string[];
     } = {
       ...structured,
       mibId: row.id,
       manufacturer: row.manufacturer,
       model: row.model,
       unresolvedCount,
+      unresolvedRoots,
     };
     res.json(payload);
   } catch (err) {

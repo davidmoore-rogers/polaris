@@ -56,6 +56,34 @@ export const BUILT_IN_OIDS: Record<string, string> = {
   snmpDomains: "1.3.6.1.6.1",
   snmpProxys: "1.3.6.1.6.2",
   snmpModules: "1.3.6.1.6.3",
+  // IEEE 802.1 anchor chain (1.0.8802.1.1.*).
+  //
+  // LLDP-MIB resolves without these because it spells every arc with an inline
+  // number — `{ iso std(0) iso8802(8802) ieee802dot1(1) ieee802dot1mibs(1) 2 }`
+  // — which tryResolveParts reads straight off the named-number syntax. The
+  // IEEE8021-* family does NOT: IEEE8021-MSTP-MIB anchors at
+  // `::= { ieee802dot1mibs 6 }` with that symbol IMPORTED from IEEE8021-TC-MIB.
+  // Without a seed the module root is unresolvable, and because every other
+  // symbol in the file chains off that root, the whole MIB resolves to nothing
+  // rather than to a few gaps. Seeding the chain lets an operator upload one
+  // leaf module without also chasing down the TC MIB — the same rationale as
+  // the vendor enterprise prefixes below.
+  std: "1.0",
+  iso8802: "1.0.8802",
+  ieee802dot1: "1.0.8802.1",
+  ieee802dot1mibs: "1.0.8802.1.1",
+  // BRIDGE-MIB (RFC 4188) anchors, for the same reason.
+  //
+  // stdMibLibrary resolves each bundled module INDEPENDENTLY against this seed
+  // — there is deliberately no cross-MIB visibility — so a module that anchors
+  // on a symbol IMPORTed from BRIDGE-MIB cannot see it even when BRIDGE-MIB is
+  // bundled right alongside. Measured against the real files: without these,
+  // Q-BRIDGE-MIB resolves 0 of 129 assignments (its whole tree hangs off
+  // `dot1dBridge`) and RSTP-MIB 9 of 19 (`dot1dStp`). Values read off
+  // BRIDGE-MIB itself: `dot1dBridge ::= { mib-2 17 }`, `dot1dStp ::=
+  // { dot1dBridge 2 }`.
+  dot1dBridge: "1.3.6.1.2.1.17",
+  dot1dStp: "1.3.6.1.2.1.17.2",
   // Cisco
   cisco: "1.3.6.1.4.1.9",
   ciscoMgmt: "1.3.6.1.4.1.9.9",
@@ -255,6 +283,47 @@ export function tryResolveParts(parts: string[], numeric: Map<string, string>): 
     prefix += "." + v;
   }
   return prefix;
+}
+
+/**
+ * The distinct EXTERNAL symbols a MIB leans on but never defines — the actual
+ * cause when an upload resolves to nothing.
+ *
+ * An unresolved MIB almost always has ONE root problem rather than N
+ * independent ones. A module anchored on an IMPORTed symbol
+ * (IEEE8021-MSTP-MIB's `::= { ieee802dot1mibs 6 }`) fails at its root, and
+ * because every other assignment in the file chains off that root they all
+ * fail with it. A count tells an operator how bad it is; the missing anchor
+ * tells them what to upload.
+ *
+ * Locally-defined names are deliberately skipped even when unresolved — those
+ * are symptoms, not causes. Only names referenced in some assignment body and
+ * defined NOWHERE (not in this MIB, not in the seed, not in a co-scoped
+ * upload) come back, which is precisely the missing IMPORTS dependency.
+ */
+export function findUnresolvedRootSymbols(
+  rawText: string,
+  resolved: ReadonlyMap<string, string | null>,
+): string[] {
+  const entries = parseObjectAssignments(rawText);
+  const localNames = new Set(entries.map((e) => e.name));
+  const roots = new Set<string>();
+
+  // `resolveSymbolsForMib` keys EVERY symbol in the module and stores null for
+  // the ones it couldn't resolve, so membership is not resolution — a bare
+  // `.has()` here would treat every unresolved symbol as fine and report
+  // nothing at all. Presence of a non-null value is the actual test.
+  const isResolved = (n: string): boolean => resolved.get(n) != null;
+
+  for (const { name, parts } of entries) {
+    if (isResolved(name)) continue;
+    for (const p of parts) {
+      if (isInteger(p) || NAMED_NUMBER_RE.test(p)) continue;
+      if (isResolved(p) || localNames.has(p)) continue;
+      roots.add(p);
+    }
+  }
+  return [...roots].sort();
 }
 
 // Run resolution for a given scope. The MIB layers are processed in

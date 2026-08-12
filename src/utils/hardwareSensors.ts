@@ -18,6 +18,8 @@ export type HardwareSensorClass =
   | "temperature"
   | "fan"
   | "voltage"
+  | "current"
+  | "optical"
   | "power"
   | "disk"
   | "other";
@@ -38,6 +40,14 @@ export const SENSOR_CLASS_UNITS: Record<HardwareSensorClass, string | null> = {
   temperature: "°C",
   fan:         "RPM",
   voltage:     "V",
+  // Transceiver TX bias. Stored in BASE amperes because scaleEntitySensor
+  // resolves ENTITY-SENSOR's scale exponent back to base units — a device
+  // reporting 35 mA lands here as 0.035.
+  current:     "A",
+  // RX / TX optical power. Its own class rather than `power` because the unit
+  // differs (dBm vs none) and because "which optic is going dark" is the thing
+  // an operator wants to scope an automation to — sensorClass IS that filter.
+  optical:     "dBm",
   power:       null,
   disk:        "°C",
   other:       null,
@@ -68,7 +78,14 @@ export function classifyHardwareSensor(
   // Order matters: fan/voltage/power names can also contain digits that the
   // temperature pattern would catch, so test the specific classes first.
   if (/\bfan\b|rpm|tach/.test(n))                 return cls("fan");
-  if (/\bvol\b|vcc|vdd|vrm|\bvin\b|p\d*v\d/.test(n)) return cls("voltage");
+  // Optical power MUST precede the generic power test — "SFP1 RX Power" and
+  // "Tx Power" both contain "power" and would otherwise land in `power` with
+  // no unit, losing the dBm reading that makes an optic's decline visible.
+  if (/\b[rt]x[\s_-]*(power|pwr)\b|\bopt(ical)?[\s_-]*(power|pwr)\b|dbm/.test(n))
+                                                  return cls("optical");
+  // Transceiver bias current, likewise before `power`.
+  if (/\bbias\b/.test(n))                         return cls("current");
+  if (/\bvol\b|voltage|vcc|vdd|vrm|\bvin\b|p\d*v\d/.test(n)) return cls("voltage");
   if (/psu|power|\bpwr\b/.test(n))                return cls("power");
   if (/\bdisk\b|nvme|\bssd\b|\bhdd\b/.test(n))    return cls("disk");
   if (/temp|tmp|dts|adt\d|lm7\d|thermal|cputin|peci|°c/.test(n))
@@ -76,6 +93,121 @@ export function classifyHardwareSensor(
   // Marvell switch-chip temps on FortiGates surface as mvlgen_* / MV_88E*.
   if (/^mv[_l]/.test(n))                          return cls("temperature");
   return cls("other");
+}
+
+// ─── ENTITY-SENSOR-MIB (RFC 3433) ──────────────────────────────────────────
+
+/**
+ * `entPhySensorType` → our class. RFC 3433's EntitySensorDataType is
+ * `other(1) unknown(2) voltsAC(3) voltsDC(4) amperes(5) watts(6) hertz(7)
+ * celsius(8) percentRH(9) rpm(10) cmm(11) truthvalue(12)`.
+ *
+ * Note what is NOT in that list: **dBm**. The enum has no optical-power member,
+ * so vendors report RX/TX power as `other(1)` or `watts(6)` and name the real
+ * unit in `entPhySensorUnitsDisplay` — which is why that column is walked and
+ * consulted ahead of the type code.
+ *
+ * `watts(6)` maps to `power`, whose canonical unit is deliberately null (the
+ * class also carries Fortinet's status-shaped PSU rows). A true wattage reading
+ * therefore stores without a unit label; acceptable because switch PSU wattage
+ * is not what this collection is for, and keeping one unit per class is what
+ * the automation builder's `sensorClassUnits` hint depends on.
+ */
+const ENTITY_SENSOR_CLASS_BY_TYPE: Readonly<Record<number, HardwareSensorClass>> = {
+  1: "other",
+  2: "other",
+  3: "voltage",
+  4: "voltage",
+  5: "current",
+  6: "power",
+  7: "other",
+  8: "temperature",
+  9: "other",
+  10: "fan",
+  11: "other",
+  12: "other",
+};
+
+/** `entPhySensorUnitsDisplay` strings that mean optical power. */
+export function unitsDisplayLooksOptical(unitsDisplay: string | null | undefined): boolean {
+  return /\bdbm?w?\b/i.test((unitsDisplay ?? "").trim());
+}
+
+/**
+ * Whether `entPhySensorType` can be believed on this device.
+ *
+ * FortiSwitchOS stamps `celsius(8)` on EVERY row of its entPhySensorTable —
+ * SFP optical readings, fan tachs and voltage rails included. A device whose
+ * whole table reports one type is therefore not describing its sensors, it is
+ * defaulting; classify from the name instead. A device that reports two or more
+ * distinct types is populating the column for real and should be trusted over
+ * any name heuristic (a compliant agent labelling `celsius(8)` on a row named
+ * "Fan Inlet Temp" means temperature, and the word "fan" must not win).
+ *
+ * A single-row table is trusted — there is nothing to be uniform WITH, and the
+ * alternative would mis-handle a device with exactly one sensor.
+ */
+export function entityTypeColumnTrusted(typeCodes: readonly number[]): boolean {
+  if (typeCodes.length <= 1) return true;
+  const first = typeCodes[0];
+  return typeCodes.some((t) => t !== first);
+}
+
+/**
+ * Classify one ENTITY-SENSOR-MIB row, in descending order of evidence quality:
+ *
+ *   1. `entPhySensorUnitsDisplay` saying dBm — the only trustworthy signal for
+ *      optical power, since the type enum cannot express it.
+ *   2. The type code, when the column is trustworthy (see above).
+ *   3. The `entPhysicalDescr` name heuristic — what rescues an untrusted
+ *      device's voltage / bias / optical rows.
+ *   4. The type code anyway. This is the fallback that PRESERVES existing
+ *      behaviour: a FortiSwitch's unnamed `sensor-18` row has no descr to
+ *      classify by, and its `celsius(8)` is how it has always become a
+ *      temperature row.
+ */
+export function classifyEntitySensor(opts: {
+  typeCode: number | null;
+  unitsDisplay?: string | null;
+  descr?: string | null;
+  typeColumnTrusted: boolean;
+}): ClassifiedSensor {
+  const { typeCode, unitsDisplay, descr, typeColumnTrusted } = opts;
+
+  if (unitsDisplayLooksOptical(unitsDisplay)) return cls("optical");
+
+  const byType = typeCode != null ? ENTITY_SENSOR_CLASS_BY_TYPE[typeCode] : undefined;
+  if (typeColumnTrusted && byType && byType !== "other") return cls(byType);
+
+  const byName = classifyHardwareSensor(descr ?? "");
+  if (byName.sensorClass !== "other") return byName;
+
+  return cls(byType ?? "other");
+}
+
+/**
+ * `entPhySensorOperStatus` → the stored alarm string, or null for "no claim".
+ *
+ * RFC 3433: `ok(1)` the agent can read the sensor, `unavailable(2)` it cannot,
+ * `nonoperational(3)` it believes the sensor is broken.
+ *
+ * The mapping that matters is **`unavailable(2)` → null, not "alarm"**. An
+ * empty SFP cage reports unavailable, and a port with no transceiver in it is
+ * not a fault — alerting on it would fire on every unused port on the switch.
+ * Null means "no reading", which is exactly right and keeps the NULL discipline
+ * the alarm metric depends on.
+ *
+ * Note the resulting semantics differ by source, and deliberately: on the
+ * Fortinet path `alarmStatus` is the device's own limit alarm, while here it
+ * reports whether the SENSOR is functioning. Both answer "should a human look
+ * at this", which is what the metric is for, but a nonoperational optic is a
+ * broken/absent sensor rather than a reading outside its limits.
+ */
+export function entityOperStatusToAlarm(oper: number | null | undefined): string | null {
+  if (oper == null) return null;
+  if (oper === 1) return "ok";
+  if (oper === 3) return "alarm";
+  return null; // unavailable(2), and anything undefined by the RFC
 }
 
 /**
@@ -127,4 +259,59 @@ export function normalizeRestAlarmStatus(raw: unknown): string | null {
   if (s === "" ) return null;
   if (s === "0" || s === "false" || s === "ok" || s === "normal" || s === "none") return "ok";
   return "alarm";
+}
+
+// ─── ENTITY-MIB entPhysicalTable (RFC 4133) ────────────────────────────────
+
+/** `entPhysicalClass` → our stored class string. RFC 4133's PhysicalClass. */
+const ENTITY_PHYSICAL_CLASS: Readonly<Record<number, string>> = {
+  1: "other",
+  2: "unknown",
+  3: "chassis",
+  4: "backplane",
+  5: "container",
+  6: "powerSupply",
+  7: "fan",
+  8: "sensor",
+  9: "module",
+  10: "port",
+  11: "stack",
+  12: "cpu",
+};
+
+export function entityPhysicalClassLabel(raw: number | null | undefined): string {
+  if (raw == null) return "unknown";
+  return ENTITY_PHYSICAL_CLASS[raw] ?? "other";
+}
+
+/**
+ * Whether an entPhysicalTable row is worth storing as inventory.
+ *
+ * A chassis publishes a row for every container, port and sensor it has —
+ * hundreds of rows naming nothing an operator could ever replace or RMA. What
+ * matters is the field-replaceable units: transceivers, power supplies, fan
+ * trays.
+ *
+ * `entPhysicalIsFRU` is the device's own answer and is trusted when true. The
+ * class fallback exists because plenty of agents leave IsFRU false (or omit it)
+ * on modules that plainly are replaceable — a `module`-class row with a serial
+ * number is an SFP whatever the FRU bit says.
+ *
+ * `container` is deliberately excluded even though an empty SFP cage is
+ * arguably inventory: it carries no serial, no model and no vendor, so a row
+ * for it is a row that says nothing.
+ */
+export function entityPhysicalIsInventory(opts: {
+  entClass: string;
+  isFru: boolean;
+  serialNum?: string | null;
+  modelName?: string | null;
+}): boolean {
+  if (opts.isFru) return true;
+  if (opts.entClass === "module" || opts.entClass === "powerSupply" || opts.entClass === "fan") {
+    // Keep only rows that actually identify something — a bare class with no
+    // serial and no model is scaffolding, not a part.
+    return !!(opts.serialNum?.trim() || opts.modelName?.trim());
+  }
+  return false;
 }

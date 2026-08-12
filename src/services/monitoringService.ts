@@ -112,7 +112,13 @@ import {
   classifyHardwareSensor,
   normalizeFgAlarmStatus,
   normalizeRestAlarmStatus,
+  classifyEntitySensor,
+  entityOperStatusToAlarm,
+  entityTypeColumnTrusted,
 } from "../utils/hardwareSensors.js";
+import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
+import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
+import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, parseFdbIndex, type FdbEntry } from "../utils/macForwarding.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
@@ -3161,6 +3167,10 @@ export interface InterfaceSample {
   alias?:       string | null;
   /** Operator-set free-text comment. FortiOS CMDB `description`; SNMP has no equivalent. */
   description?: string | null;
+  /** PoE detection status from POWER-ETHERNET-MIB — "disabled" | "searching" | "delivering" | "fault" | "test" | "other-fault". SNMP only; FortiOS REST and the agent leave it null. */
+  poeStatus?:   string | null;
+  /** Negotiated PoE power-budget bracket, "class0".."class4". NOT a wattage measurement — RFC 3621 has no per-port wattage object. SNMP only. */
+  poeClass?:    string | null;
   /** L3 addressing mode: "static" | "dhcp" | "pppoe". FortiOS CMDB `system/interface.mode`; SNMP / agent leave null. */
   addressingMode?: string | null;
 }
@@ -3294,9 +3304,37 @@ export interface WirelessStationSample {
   idleSeconds?:    number | null;
 }
 
+/** One field-replaceable unit from ENTITY-MIB entPhysicalTable. */
+export interface PhysicalEntitySample {
+  entIndex:    number;
+  entClass:    string;
+  descr:       string | null;
+  name:        string | null;
+  hardwareRev: string | null;
+  firmwareRev: string | null;
+  serialNum:   string | null;
+  mfgName:     string | null;
+  modelName:   string | null;
+  isFru:       boolean;
+  /** Display-only correlated interface for a transceiver; never an identity. */
+  ifName:      string | null;
+}
+
 export interface SystemInfoSample {
   interfaces:    InterfaceSample[];
   storage:       StorageSample[];
+  /**
+   * Field-replaceable hardware inventory. `undefined` means the collector
+   * didn't try (non-SNMP transport / fast cadence); `[]` means the device was
+   * queried and reported no FRUs, which the persist layer treats as "wipe".
+   */
+  physicalEntities?: PhysicalEntitySample[];
+  /**
+   * Switch MAC forwarding database. Same undefined/[] contract: undefined
+   * means not collected or the device answers no FDB table at all, `[]` means
+   * a bridge that currently has nothing in its table.
+   */
+  macTable?: FdbEntry[];
   ipsecTunnels?: IpsecTunnelSample[];
   /**
    * SD-WAN Performance SLA health-check readings. `undefined` means the
@@ -3745,6 +3783,11 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
         alias:       i.alias       ?? null,
         description: i.description ?? null,
         addressingMode: null,
+        // Passed through, NOT nulled: the fast SNMP path collects PoE so a
+        // port fault is alertable on the per-minute cadence rather than
+        // waiting for the next heavy scrape.
+        poeStatus:   i.poeStatus ?? null,
+        poeClass:    i.poeClass  ?? null,
       })),
     );
   }
@@ -5238,12 +5281,39 @@ const OID = {
   // us how to scale entPhySensorValue back to a real number; entPhysicalDescr
   // (indexed by the same physical-entity index) gives the operator-friendly
   // sensor name.
+  // POWER-ETHERNET-MIB (RFC 3621) pethPsePortTable. INDEX is
+  // { pethPsePortGroupIndex, pethPsePortIndex } and the MIB defines NO join
+  // back to ifIndex, so rows are correlated by inference in utils/poePorts.ts.
+  pethPsePortDetectionStatus:      "1.3.6.1.2.1.105.1.1.1.6",
+  pethPsePortPowerClassifications: "1.3.6.1.2.1.105.1.1.1.10",
   entPhysicalDescr:       "1.3.6.1.2.1.47.1.1.1.1.2",
+  // ENTITY-MIB entPhysicalTable inventory columns (RFC 4133). Walked on the
+  // heavy cadence only — a transceiver's serial changes when someone swaps it,
+  // not on a poll interval.
+  // BRIDGE-MIB / Q-BRIDGE-MIB forwarding database (RFC 4188 / 4363).
+  // dot1dBasePortIfIndex is the basePort -> ifIndex join BOTH FDB tables need:
+  // dot1qTpFdbPort and dot1dTpFdbPort report a dot1dBasePort, never an ifIndex.
+  dot1dBasePortIfIndex:   "1.3.6.1.2.1.17.1.4.1.2",
+  dot1qTpFdbPort:         "1.3.6.1.2.1.17.7.1.2.2.1.2",
+  dot1qTpFdbStatus:       "1.3.6.1.2.1.17.7.1.2.2.1.3",
+  dot1dTpFdbPort:         "1.3.6.1.2.1.17.4.3.1.2",
+  dot1dTpFdbStatus:       "1.3.6.1.2.1.17.4.3.1.3",
+  entPhysicalClass:       "1.3.6.1.2.1.47.1.1.1.1.5",
+  entPhysicalName:        "1.3.6.1.2.1.47.1.1.1.1.7",
+  entPhysicalHardwareRev: "1.3.6.1.2.1.47.1.1.1.1.8",
+  entPhysicalFirmwareRev: "1.3.6.1.2.1.47.1.1.1.1.9",
+  entPhysicalSerialNum:   "1.3.6.1.2.1.47.1.1.1.1.11",
+  entPhysicalMfgName:     "1.3.6.1.2.1.47.1.1.1.1.12",
+  entPhysicalModelName:   "1.3.6.1.2.1.47.1.1.1.1.13",
+  entPhysicalIsFRU:       "1.3.6.1.2.1.47.1.1.1.1.16",
   entPhySensorType:       "1.3.6.1.2.1.99.1.1.1.1",
   entPhySensorScale:      "1.3.6.1.2.1.99.1.1.1.2",
   entPhySensorPrecision:  "1.3.6.1.2.1.99.1.1.1.3",
   entPhySensorValue:      "1.3.6.1.2.1.99.1.1.1.4",
   entPhySensorOperStatus: "1.3.6.1.2.1.99.1.1.1.5",
+  // Textual unit label. RFC 3433's type enum has no dBm member, so this is the
+  // only place a device can declare that a reading is optical power.
+  entPhySensorUnitsDisplay: "1.3.6.1.2.1.99.1.1.1.6",
   // FORTINET-FORTIGATE-MIB::fgHwSensorTable. Branch-class FortiGates
   // (40F/60F/61F/91G/101F) don't populate ENTITY-SENSOR-MIB and 404 the
   // FortiOS REST sensor-info endpoint, but they do publish hardware sensors
@@ -5981,42 +6051,60 @@ async function collectHardwareSensorsSnmp(
   }
 
   // 2. ENTITY-SENSOR-MIB (RFC 3433). Standard table on non-Fortinet gear (and
-  //    FortiSwitch). We surface entPhySensorType=8 (celsius) rows as the
-  //    `temperature` class. Non-temperature ENTITY classes (fan/volt) are a
-  //    future enhancement — the FortiGate fleet uses path 1.
-  const [types, values, scales, precisions, opers, descrs] = await Promise.all([
+  //    FortiSwitch). Every class the table reports is surfaced — temperature,
+  //    fan, voltage, transceiver bias current and optical power — plus the
+  //    agent's own per-sensor oper status as the alarm bit.
+  //
+  //    This used to keep celsius rows only, drop any row whose descr mentioned
+  //    sfp/fan/voltage/bias, and drop any row whose oper status was not ok.
+  //    On a FortiSwitch those three filters discarded the entire transceiver
+  //    picture — the DDM readings were already on the wire.
+  const [types, values, scales, precisions, opers, descrs, unitsDisplays] = await Promise.all([
     snmpWalk(session, OID.entPhySensorType).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorValue).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorScale).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorPrecision).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorOperStatus).catch(() => new Map()),
     snmpWalk(session, OID.entPhysicalDescr).catch(() => new Map()),
+    // The only reliable dBm signal — RFC 3433's type enum cannot express
+    // optical power, so vendors declare the real unit here.
+    snmpWalk(session, OID.entPhySensorUnitsDisplay).catch(() => new Map()),
   ]);
   const out: HardwareSensorSample[] = [];
-  // Some agents (notably FortiSwitchOS) stamp entPhySensorType=8 (celsius) on
-  // every row in the table — SFP optical readings, fan tachs, voltage rails —
-  // not just real temperature sensors. Cross-check the entPhysicalDescr from
-  // ENTITY-MIB to drop rows the descr identifies as something else.
-  const NON_TEMP_DESCR = /\b(sfp|fan|rpm|voltage|bias)\b/i;
+  // Decided once per table, not per row: a device reporting a single type code
+  // across every sensor (FortiSwitchOS stamps celsius on all of them) is
+  // defaulting rather than describing, so names classify instead.
+  const typeColumnTrusted = entityTypeColumnTrusted(
+    [...types.values()]
+      .map((v) => snmpVbToNumber(v))
+      .filter((n): n is number => n != null),
+  );
   for (const [idx, typeRaw] of types.entries()) {
     const t = snmpVbToNumber(typeRaw);
-    if (t !== 8) continue; // RFC 3433: 8 = celsius
     const oper = snmpVbToNumber(opers.get(idx));
-    // 1 = ok, 2 = unavailable, 3 = nonoperational. Skip non-ok rows.
-    if (oper != null && oper !== 1) continue;
     const descr = snmpVbToString(descrs.get(idx));
-    if (descr && NON_TEMP_DESCR.test(descr)) continue;
+    const unitsDisplay = snmpVbToString(unitsDisplays.get(idx));
+    const { sensorClass, unit } = classifyEntitySensor({
+      typeCode: t,
+      unitsDisplay,
+      descr,
+      typeColumnTrusted,
+    });
     const raw = snmpVbToNumber(values.get(idx));
-    if (raw == null) continue;
     const scale = snmpVbToNumber(scales.get(idx));   // SI prefix code
     const prec  = snmpVbToNumber(precisions.get(idx)); // decimal-point shift
-    const celsius = scaleEntitySensor(raw, scale, prec);
+    // A broken or unreadable sensor keeps its row with a null value: the row IS
+    // the fault signal, and dropping it would also strip the alarm status that
+    // makes the fault alertable. `value` is nullable for exactly this case.
+    const scaled = raw != null && oper !== 2 && oper !== 3
+      ? scaleEntitySensor(raw, scale, prec)
+      : null;
     out.push({
       sensorName:  descr || `sensor-${idx}`,
-      sensorClass: "temperature",
-      value:       Number.isFinite(celsius) ? Math.round(celsius * 10) / 10 : null,
-      unit:        "°C",
-      alarmStatus: null,
+      sensorClass,
+      value:       scaled != null && Number.isFinite(scaled) ? Math.round(scaled * 100) / 100 : null,
+      unit,
+      alarmStatus: entityOperStatusToAlarm(oper),
     });
   }
   if (out.length > 0) return out;
@@ -6077,6 +6165,68 @@ async function collectHardwareSensorsFortinetSnmp(session: any): Promise<Hardwar
   return out;
 }
 
+// ─── PoE (POWER-ETHERNET-MIB) ──────────────────────────────────────────────
+//
+// Negative cache for devices with no PSE. Most of a fleet is not PoE-capable,
+// and both the heavy AND the per-minute fast cadence would otherwise pay two
+// empty column walks per tick per device forever. One empty result marks the
+// target for the TTL; a PoE switch keeps paying two small walks a minute,
+// which is what makes a PoE fault alertable at the fast cadence instead of the
+// heavy one.
+//
+// Deliberately NOT cached positively: the readings are the whole point, and
+// they change whenever a powered device is plugged, unplugged or faults.
+const POE_ABSENT_TTL_MS = 30 * 60_000;
+const POE_ABSENT_MAX    = 4000;
+const poeAbsentCache    = new Map<string, number>();
+
+/**
+ * Walk pethPsePortTable and return per-ifName PoE state, or an empty map when
+ * the device has no PSE. Correlation to interfaces is inference — see
+ * utils/poePorts.ts — so an unresolvable row is dropped, never guessed.
+ *
+ * `ifNameByIndex` is supplied by the caller because both cadences have already
+ * walked ifName/ifDescr for their own purposes; re-walking here would double
+ * the cost of the thing this cache exists to keep cheap.
+ */
+async function collectPoePortsSnmp(
+  session: any,
+  cacheKey: string | null,
+  ifNameByIndex: ReadonlyMap<string, string>,
+): Promise<Map<string, { poeStatus: string | null; poeClass: string | null }>> {
+  const out = new Map<string, { poeStatus: string | null; poeClass: string | null }>();
+  if (ifNameByIndex.size === 0) return out;
+
+  const now = Date.now();
+  if (cacheKey) {
+    const absentAt = poeAbsentCache.get(cacheKey);
+    if (absentAt != null && now - absentAt < POE_ABSENT_TTL_MS) return out;
+  }
+
+  const [statuses, classes] = await Promise.all([
+    snmpWalk(session, OID.pethPsePortDetectionStatus).catch(() => new Map()),
+    snmpWalk(session, OID.pethPsePortPowerClassifications).catch(() => new Map()),
+  ]);
+
+  if (statuses.size === 0) {
+    if (cacheKey) {
+      if (poeAbsentCache.size >= POE_ABSENT_MAX) poeAbsentCache.clear();
+      poeAbsentCache.set(cacheKey, now);
+    }
+    return out;
+  }
+  if (cacheKey) poeAbsentCache.delete(cacheKey);
+
+  const ifNameBySuffix = poeIfNameByIndex([...statuses.keys()], ifNameByIndex);
+  for (const [suffix, ifName] of ifNameBySuffix.entries()) {
+    out.set(ifName, {
+      poeStatus: poeStatusLabel(snmpVbToNumber(statuses.get(suffix))),
+      poeClass:  poeClassLabel(snmpVbToNumber(classes.get(suffix))),
+    });
+  }
+  return out;
+}
+
 // Apply ENTITY-SENSOR-MIB scale + precision to a raw integer reading. Scale is
 // the SI-prefix code (1=10^-24 ... 9=10^0 ... 17=10^24); precision is a signed
 // shift of the decimal point. Both default to "no scaling" when omitted.
@@ -6084,6 +6234,231 @@ function scaleEntitySensor(raw: number, scale: number | null, precision: number 
   const sExp = scale != null ? (scale - 9) * 3 : 0;
   const pExp = precision != null ? -precision : 0;
   return raw * Math.pow(10, sExp) * Math.pow(10, pExp);
+}
+
+/**
+ * Walk ENTITY-MIB entPhysicalTable for field-replaceable hardware — the
+ * transceivers, PSUs and fan trays an operator can actually swap.
+ *
+ * Returns [] when the device publishes no entPhysicalTable at all; the caller
+ * distinguishes that from "queried and found nothing" by whether it called at
+ * all (undefined vs []). Nine columns, all on the heavy cadence only: a serial
+ * number changes when someone pulls a module, not on a poll interval.
+ *
+ * No interface correlation is attempted: see the ifName note at the row
+ * build below.
+ */
+const PHYSICAL_ENTITY_ROW_CAP = 500;
+
+async function collectPhysicalEntitiesSnmp(
+  session: any,
+): Promise<PhysicalEntitySample[]> {
+  const [classes, descrs, names, hwRevs, fwRevs, serials, mfgs, models, isFrus] = await Promise.all([
+    snmpWalk(session, OID.entPhysicalClass).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalDescr).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalName).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalHardwareRev).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalFirmwareRev).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalSerialNum).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalMfgName).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalModelName).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalIsFRU).catch(() => new Map()),
+  ]);
+  if (classes.size === 0) return [];
+
+  const out: PhysicalEntitySample[] = [];
+  let dropped = 0;
+  const str = (m: Map<string, unknown>, idx: string): string | null => {
+    const v = snmpVbToString(m.get(idx)).trim();
+    return v ? v : null;
+  };
+
+  for (const [idx, classRaw] of classes.entries()) {
+    const entIndex = Number(idx);
+    if (!Number.isFinite(entIndex)) continue;
+    const entClass  = entityPhysicalClassLabel(snmpVbToNumber(classRaw));
+    const serialNum = str(serials, idx);
+    const modelName = str(models, idx);
+    // RFC 4133 TruthValue: true(1) / false(2).
+    const isFru     = snmpVbToNumber(isFrus.get(idx)) === 1;
+    if (!entityPhysicalIsInventory({ entClass, isFru, serialNum, modelName })) continue;
+
+    if (out.length >= PHYSICAL_ENTITY_ROW_CAP) { dropped++; continue; }
+    out.push({
+      entIndex,
+      entClass,
+      descr:       str(descrs, idx),
+      name:        str(names, idx),
+      hardwareRev: str(hwRevs, idx),
+      firmwareRev: str(fwRevs, idx),
+      serialNum,
+      mfgName:     str(mfgs, idx),
+      modelName,
+      isFru,
+      // Deliberately NOT populated. Correlating a module to an interface by
+      // entPhysicalIndex == ifIndex is the same equivalence the FortiSwitch
+      // sensor annotation was reverted for (97e54fd2): right often enough to
+      // look correct, silently wrong the rest of the time, and an operator
+      // reading "SFP (port5)" cannot tell a real correlation from a
+      // coincidence. The honest chain is entPhysicalContainedIn ->
+      // entAliasMappingIdentifier (RFC 4133), which needs a real switch to
+      // validate against; the column stays nullable and waits for it.
+      ifName: null,
+    });
+  }
+  // Loudly, not silently: a truncated inventory that looks complete is worse
+  // than one an operator knows is truncated.
+  if (dropped > 0) {
+    logger.warn({ dropped, cap: PHYSICAL_ENTITY_ROW_CAP }, "entPhysicalTable inventory truncated");
+  }
+  return out;
+}
+
+/**
+ * Full-replace an asset's hardware inventory. Same delete-replace shape as
+ * persistLldpNeighbors / persistMclagPeers: current state, no history.
+ *
+ * `firstSeen` is preserved across scrapes for a module that is still present,
+ * so "this SFP has been in this port since March" survives; a swapped module
+ * (same slot, new serial) correctly resets it.
+ */
+async function persistPhysicalEntities(assetId: string, rows: PhysicalEntitySample[]): Promise<void> {
+  const existing = await prisma.assetPhysicalEntity.findMany({
+    where: { assetId },
+    select: { entIndex: true, serialNum: true, firstSeen: true },
+  });
+  const prior = new Map(existing.map((e) => [e.entIndex, e]));
+  const now = new Date();
+
+  await prisma.$transaction([
+    prisma.assetPhysicalEntity.deleteMany({ where: { assetId } }),
+    ...(rows.length > 0
+      ? [prisma.assetPhysicalEntity.createMany({
+          data: rows.map((r) => {
+            const was = prior.get(r.entIndex);
+            const sameModule = was && (was.serialNum ?? null) === (r.serialNum ?? null);
+            return { assetId, ...r, firstSeen: sameModule ? was!.firstSeen : now, lastSeen: now };
+          }),
+        })]
+      : []),
+  ]);
+}
+
+/**
+ * Cap per asset. A single 48-port access switch routinely holds a few thousand
+ * FDB entries; a distribution switch can hold tens of thousands. The cap keeps
+ * one device from dominating a scrape and the table, and truncation is WARNED
+ * rather than silent because a partial table makes the per-port MAC counts --
+ * and therefore any uplink inference drawn from them -- quietly wrong.
+ */
+const MAC_TABLE_ROW_CAP = 4000;
+
+/**
+ * Walk the switch forwarding database.
+ *
+ * Prefers Q-BRIDGE-MIB `dot1qTpFdbTable`, which a VLAN-aware switch populates
+ * and which carries the VLAN in its index; falls back to BRIDGE-MIB
+ * `dot1dTpFdbTable` for switches that only answer the older table (those rows
+ * have no VLAN dimension at all, hence a null vlanId rather than a guess).
+ *
+ * Returns undefined when the device answers neither table, so the caller can
+ * distinguish "not a bridge" from "a bridge with an empty table" — the same
+ * undefined-preserves / []-wipes contract LLDP uses.
+ */
+async function collectMacTableSnmp(
+  session: any,
+  ifNameByIndex: ReadonlyMap<string, string>,
+): Promise<FdbEntry[] | undefined> {
+  // The basePort -> ifIndex join both tables depend on. Without it every MAC
+  // would be attributed to whatever interface sits at that ifIndex, which is
+  // reliably wrong wherever the two numbering schemes differ.
+  const basePortWalk = await snmpWalk(session, OID.dot1dBasePortIfIndex).catch(() => new Map());
+  const basePortToIfIndex = new Map<string, number>();
+  for (const [basePort, vb] of basePortWalk.entries()) {
+    const idx = snmpVbToNumber(vb);
+    if (idx != null) basePortToIfIndex.set(basePort, idx);
+  }
+  const ifNameByBasePort = basePortToIfName(basePortToIfIndex, ifNameByIndex);
+
+  let ports = await snmpWalk(session, OID.dot1qTpFdbPort).catch(() => new Map());
+  let statuses = await snmpWalk(session, OID.dot1qTpFdbStatus).catch(() => new Map());
+  if (ports.size === 0) {
+    ports = await snmpWalk(session, OID.dot1dTpFdbPort).catch(() => new Map());
+    statuses = await snmpWalk(session, OID.dot1dTpFdbStatus).catch(() => new Map());
+  }
+  if (ports.size === 0) return undefined;
+
+  const out: FdbEntry[] = [];
+  const seen = new Set<string>();
+  let dropped = 0;
+  for (const [suffix, portVb] of ports.entries()) {
+    const parsed = parseFdbIndex(suffix);
+    if (!parsed) continue;
+    const status = fdbStatusLabel(snmpVbToNumber(statuses.get(suffix)));
+    if (!fdbStatusIsUsable(status)) continue;
+
+    // The unique key is (asset, mac, vlan) and NULLs compare distinct in a
+    // Postgres unique index, so de-duplicate here rather than relying on it.
+    const key = `${parsed.macAddress}|${parsed.fdbId ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (out.length >= MAC_TABLE_ROW_CAP) { dropped++; continue; }
+    const basePort = snmpVbToNumber(portVb);
+    out.push({
+      macAddress: parsed.macAddress,
+      vlanId:     parsed.fdbId,
+      basePort:   basePort ?? null,
+      // Null when the join failed; basePort is retained above so the entry is
+      // still identifiable instead of appearing to belong to no port.
+      ifName:     basePort != null ? (ifNameByBasePort.get(basePort) ?? null) : null,
+      status,
+    });
+  }
+  if (dropped > 0) {
+    logger.warn({ dropped, cap: MAC_TABLE_ROW_CAP }, "MAC forwarding table truncated");
+  }
+  return out;
+}
+
+/**
+ * Full-replace an asset's forwarding database. Delete-replace, like
+ * persistLldpNeighbors — an FDB entry ages out on the switch in minutes, so
+ * there is no history worth keeping.
+ *
+ * `matchedAssetId` resolves through the SAME cached MAC index LLDP matching
+ * uses: at a few thousand rows per switch a per-row lookup would dominate the
+ * write.
+ */
+async function persistMacTable(assetId: string, rows: FdbEntry[]): Promise<void> {
+  const index = await buildLldpAssetMatchIndex();
+  const now = new Date();
+  const existing = await prisma.assetMacTableEntry.findMany({
+    where: { assetId },
+    select: { macAddress: true, vlanId: true, firstSeen: true },
+  });
+  const prior = new Map(existing.map((e) => [`${e.macAddress}|${e.vlanId ?? ""}`, e.firstSeen]));
+
+  await prisma.$transaction([
+    prisma.assetMacTableEntry.deleteMany({ where: { assetId } }),
+    ...(rows.length > 0
+      ? [prisma.assetMacTableEntry.createMany({
+          data: rows.map((r) => ({
+            assetId,
+            macAddress: r.macAddress,
+            vlanId:     r.vlanId,
+            basePort:   r.basePort,
+            ifName:     r.ifName,
+            status:     r.status,
+            matchedAssetId: index.byMac.get(r.macAddress) ?? null,
+            // Preserved so "this device has been on this switch since..." holds
+            // across the delete-replace.
+            firstSeen: prior.get(`${r.macAddress}|${r.vlanId ?? ""}`) ?? now,
+            lastSeen:  now,
+          })),
+        })]
+      : []),
+  ]);
 }
 
 async function collectSystemInfoSnmp(
@@ -6190,6 +6565,8 @@ async function collectSystemInfoSnmp(
     // ifName / ifHC*Octets / ifHighSpeed when present; otherwise fall back
     // to the legacy 32-bit columns.
     const interfaces: InterfaceSample[] = [];
+    let physicalEntities: PhysicalEntitySample[] | undefined;
+    let macTable: FdbEntry[] | undefined;
     const endIfaces = startPhase("systeminfo.snmp.interfaces_walk");
     try {
       const [
@@ -6257,6 +6634,34 @@ async function collectSystemInfoSnmp(
           alias,
         });
       }
+
+      // PoE rides the same walk. Correlation needs ifIndex -> name, which
+      // this loop has already resolved for every interface it kept, so it is
+      // rebuilt here rather than re-walking IF-MIB.
+      const poeIfNames = new Map<string, string>();
+      for (const idx of allIdx) {
+        const n = snmpVbToString(names.get(idx)) || snmpVbToString(descrs.get(idx));
+        if (n) poeIfNames.set(idx, n);
+      }
+      const poeByIfName = await collectPoePortsSnmp(session, host, poeIfNames);
+      if (poeByIfName.size > 0) {
+        for (const iface of interfaces) {
+          const poe = poeByIfName.get(iface.ifName);
+          if (poe) { iface.poeStatus = poe.poeStatus; iface.poeClass = poe.poeClass; }
+        }
+      }
+
+      // Hardware inventory rides the same walk — heavy cadence only, since a
+      // module's serial changes on a swap, not on a poll.
+      physicalEntities = await collectPhysicalEntitiesSnmp(session)
+        .catch(() => undefined);
+
+      // Forwarding database — switch-class only. Every bridge answers this
+      // table, but a server or firewall would return nothing useful for a
+      // walk that can run to thousands of rows, so the cost is not spent.
+      if (opts.assetType === "switch") {
+        macTable = await collectMacTableSnmp(session, poeIfNames).catch(() => undefined);
+      }
     } catch { /* fall through */ }
     endIfaces({ interfaces: interfaces.length });
 
@@ -6292,6 +6697,8 @@ async function collectSystemInfoSnmp(
     return {
       interfaces,
       storage,
+      physicalEntities,
+      macTable,
       lldpNeighbors,
       lldpSource: opts.includeLldp !== false ? "snmp" : undefined,
       wirelessStations,
@@ -6361,6 +6768,9 @@ async function collectFastFilteredSnmp(
     // behavior as the full walk: the stored sample just doesn't include
     // that ifName on this tick).
     const ifIndexByName = new Map<string, string>();
+    // Full ifIndex -> name map (not just the pinned subset) — PoE correlation
+    // may need to match a port by its trailing number against any interface.
+    const indexToNameAll = new Map<string, string>();
     const endIfaceDiscovery = startPhase("fastfiltered.snmp.iface_discovery");
     try {
       const [names, descrs] = await Promise.all([
@@ -6380,6 +6790,7 @@ async function collectFastFilteredSnmp(
         if (n) indexToName.set(idx, n);
       }
       for (const [idx, name] of indexToName.entries()) {
+        indexToNameAll.set(idx, name);
         if (wantedIfaceSet.has(name)) ifIndexByName.set(name, idx);
       }
     } catch { /* leave ifIndexByName empty; sample will skip iface rows */ }
@@ -6460,6 +6871,14 @@ async function collectFastFilteredSnmp(
       : new Map<string, unknown>();
     endMultiGet({ oids: oids.length });
 
+    // PoE for the pinned ports. The peth index is not derivable from ifIndex
+    // without walking, so this is two small column walks rather than extra
+    // OIDs in the multi-GET above; the negative cache keeps non-PoE devices
+    // from paying for it every tick.
+    const poeByIfName = ifIndexByName.size > 0
+      ? await collectPoePortsSnmp(session, host, indexToNameAll)
+      : new Map<string, { poeStatus: string | null; poeClass: string | null }>();
+
     const interfaces: InterfaceSample[] = [];
     for (const [pinnedName, idx] of ifIndexByName.entries()) {
       const name = snmpVbToString(vbByOid.get(`${OID.ifName}.${idx}`)) || pinnedName;
@@ -6485,6 +6904,8 @@ async function collectFastFilteredSnmp(
         outErrors:   snmpVbToNumber(vbByOid.get(`${OID.ifOutErrors}.${idx}`)),
         ifType:      snmpIfTypeLabel(snmpVbToNumber(vbByOid.get(`${OID.ifType}.${idx}`))),
         alias,
+        poeStatus:   poeByIfName.get(name)?.poeStatus ?? null,
+        poeClass:    poeByIfName.get(name)?.poeClass ?? null,
       });
     }
 
@@ -6508,6 +6929,10 @@ async function collectFastFilteredSnmp(
       // contract as `collectSystemInfoSnmp` with `includeLldp: false`.
       lldpNeighbors: undefined,
       wirelessStations: undefined,
+      // Inventory likewise omitted here: undefined preserves what the last
+      // heavy pass stored. A module's serial does not change per minute, and
+      // wiping it on every fast tick would cost a delete-replace for nothing.
+      physicalEntities: undefined,
     };
   }, opts.timeoutMs);
 }
@@ -6964,6 +7389,8 @@ async function persistInterfaceSampleStream(
       alias:       i.alias       ?? null,
       description: i.description ?? null,
       addressingMode: i.addressingMode ?? null,
+      poeStatus:   i.poeStatus ?? null,
+      poeClass:    i.poeClass  ?? null,
     })),
   );
   // Fold EVERY scraped interface MAC (monitored or not) into the asset's
@@ -7185,6 +7612,24 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     const endLldp = startPhase("systeminfo.persist.lldp");
     await persistLldpNeighbors(assetId, d.lldpNeighbors, now, d.lldpSource ?? "fortios");
     endLldp({ neighbors: d.lldpNeighbors.length });
+    stopWrite();
+  }
+  // Hardware inventory. Same undefined/[] contract as LLDP: undefined means
+  // the transport can't supply it (FortiOS REST, agent) and stored rows stay;
+  // [] means the device was walked and has no FRUs to report, which wipes.
+  if (Array.isArray(d.physicalEntities)) {
+    const stopWrite = startSampleWriteTimer("asset_physical_entities");
+    const endEnt = startPhase("systeminfo.persist.physical_entities");
+    await persistPhysicalEntities(assetId, d.physicalEntities);
+    endEnt({ entities: d.physicalEntities.length });
+    stopWrite();
+  }
+  // Forwarding database. Same undefined/[] contract again.
+  if (Array.isArray(d.macTable)) {
+    const stopWrite = startSampleWriteTimer("asset_mac_table_entries");
+    const endMac = startPhase("systeminfo.persist.mac_table");
+    await persistMacTable(assetId, d.macTable);
+    endMac({ entries: d.macTable.length });
     stopWrite();
   }
   // Wireless stations (FortiAP only). Same undefined/[] semantics as LLDP —

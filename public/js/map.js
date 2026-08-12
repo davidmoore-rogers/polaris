@@ -939,11 +939,18 @@
       return;
     }
     var name = asset.hostname || asset.dnsName || asset.ipAddress || "asset";
+    // Same warn-never-limit posture as the asset edit form: a FortiAP's
+    // description pushes to the short device `location` field, and this editor
+    // is the fast path for stamping location codes into exactly that field.
+    var descTarget = typeof descriptionDeviceTarget === "function"
+      ? descriptionDeviceTarget(asset) : null;
     var bodyHtml =
       '<label for="topo-desc-input" style="display:block;margin-bottom:6px;font-size:0.9rem">Description</label>' +
       '<textarea id="topo-desc-input" maxlength="255" rows="3" ' +
         'style="width:100%;resize:vertical;padding:6px 8px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
         escapeHtml(asset.description || "") + '</textarea>' +
+      (descTarget && typeof descriptionCapWarningHTML === "function"
+        ? descriptionCapWarningHTML(descTarget, "topo-desc-cap-warn") : '') +
       '<div style="margin-top:10px;font-size:0.8rem;color:var(--color-text-secondary)">' +
         'Device grouping shortcuts — include anywhere in the description:' +
         '<div style="margin-top:4px;font-family:monospace">' +
@@ -964,6 +971,9 @@
       var cancel = document.getElementById("topo-desc-cancel");
       var save = document.getElementById("topo-desc-save");
       if (input) input.focus();
+      if (typeof wireDescriptionCapWarning === "function") {
+        wireDescriptionCapWarning("topo-desc-input", "topo-desc-cap-warn");
+      }
       if (cancel) cancel.addEventListener("click", function () {
         if (typeof closeModal === "function") closeModal();
       });

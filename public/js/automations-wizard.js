@@ -222,7 +222,7 @@ function makeAutomationSentences(s) {
   // ── Sentence builder ───────────────────────────────────────────────────
   var CMP_PHRASE = Object.assign({ ">": "is above", ">=": "is at or above", "<": "is below", "<=": "is at or below", "==": "equals", "!=": "is not" }, s.comparatorPhrases || {});
   var INV_CMP = Object.assign({ ">": "<=", ">=": "<", "<": ">=", "<=": ">", "==": "!=", "!=": "==" }, s.inverseComparators || {});
-  var AGG_PHRASE = Object.assign({ latest: "", avg: "avg over", min: "min over", max: "max over" }, s.aggregationPhrases || {});
+  var AGG_PHRASE = Object.assign({ latest: "", avg: "avg over", median: "median over", min: "min over", max: "max over" }, s.aggregationPhrases || {});
   var DIM_PHRASE = Object.assign({
     sensorClass: "for sensors of class {value}", sensorNamePattern: "on sensors matching {value}",
     ifNamePattern: "on interfaces matching {value}",
@@ -635,7 +635,7 @@ async function openAutomationWizard(existing) {
       triggerSentence = _sent.triggerSentence, resetSentence = _sent.resetSentence,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
+  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / current / optical / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
   // populate and whether each is a closed enum (`strict` → select-only, e.g.
   // sensorClass) or a substring match (→ suggestions, typing still allowed);
@@ -1707,14 +1707,18 @@ async function openAutomationWizard(existing) {
       // flag's aggregation is limited to the three that mean something, worded as
       // what they actually ask of the window.
       var aggControl = isFlag
+        // These read as complete phrases now that no window box follows them —
+        // the period itself is the "Sustained for (minutes)" field below.
         ? '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + optLabeled(["latest", "max", "min"], leaf.aggregation || "latest", function (v) {
-            return v === "latest" ? "current state" : v === "max" ? "at any point in" : "throughout";
+            return v === "latest" ? "current state" : v === "max" ? "at any point in the period" : "throughout the period";
           }) + '</select>'
         : '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + opt(s.aggregations, leaf.aggregation || "latest") + '</select>';
+      // No per-condition window input: an aggregation's measurement period IS
+      // the "Sustained for (minutes)" field below the tree (see tgStampWindows).
+      // Two time boxes meaning almost the same thing is what this removes.
       line2 =
         '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
           aggControl +
-          '<span>over</span><input type="number" class="tgl-window" value="' + (leaf.windowSec || 0) + '" style="width:70px"><span>sec (0 = latest)</span>' +
           dimInputs +
           (dims.some(function (d) { return DIM_PICKERS[d]; }) ? '<span class="tgl-dim-note" style="flex-basis:100%;font-size:0.78rem"></span>' : "") +
         '</div>';
@@ -1752,7 +1756,9 @@ async function openAutomationWizard(existing) {
       type: kind === "host" ? "host_metric" : "asset_metric",
       metric: what.slice(2),
       aggregation: (rowEl.querySelector(".tgl-agg") || { value: "latest" }).value || "latest",
-      windowSec: Number((rowEl.querySelector(".tgl-window") || { value: 0 }).value) || 0,
+      // Stamped by tgStampWindows from the tree's duration field — the row
+      // carries no window control of its own.
+      windowSec: 0,
       operator: op,
       threshold: Number(rowEl.querySelector(".tgl-threshold").value),
     };
@@ -1854,10 +1860,44 @@ async function openAutomationWizard(existing) {
   // its own duration before the alert takes that severity. Rendered identically
   // for the base tier (moved inside the base condition group in multi mode by
   // injectBaseSeverity) and for every added tier.
+  var DUR_PLACEHOLDER_OPTIONAL = "0 = fire as soon as the value reaches this level";
   function durationFieldHtml(attr, mins) {
+    // The asterisk is hidden until an aggregated condition makes the field
+    // mandatory (syncDurationRequirement) — avg / median / min / max have no
+    // period to measure over without it.
     return '<div class="form-group aw-dur" style="margin:0.5rem 0 0">' +
-      '<label style="font-size:0.8rem">Sustained for (minutes)</label>' +
-      '<input type="number" ' + attr + ' min="0" value="' + mins + '" placeholder="0 = fire as soon as the value reaches this level"></div>';
+      '<label style="font-size:0.8rem">Sustained for (minutes)<span class="aw-dur-req" style="display:none;color:var(--color-danger);font-weight:700;margin-left:2px">*</span></label>' +
+      '<input type="number" ' + attr + ' min="0" value="' + mins + '" placeholder="' + DUR_PLACEHOLDER_OPTIONAL + '">' +
+      '<p class="aw-dur-note" style="display:none;margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>';
+  }
+  /**
+   * Show/hide the duration field's red asterisk + note for the BASE tree: with
+   * an aggregated condition the field supplies the measurement window, so it's
+   * mandatory; with `latest` only it stays the optional sustain clock. Severity
+   * tiers share the base's window, so their own duration field (a per-tier hold)
+   * is never marked required.
+   */
+  function syncDurationRequirement(panel) {
+    var wrap = panel.querySelector("#tf-duration-min");
+    wrap = wrap && wrap.closest(".aw-dur");
+    if (!wrap) return;
+    var root = panel.querySelector("#aw-trig-root");
+    var aggs = root ? root.querySelectorAll(".scr-row .tgl-agg") : [];
+    var aggregated = false;
+    Array.prototype.forEach.call(aggs, function (el) { if (el.value && el.value !== "latest") aggregated = true; });
+    var star = wrap.querySelector(".aw-dur-req");
+    var note = wrap.querySelector(".aw-dur-note");
+    var input = wrap.querySelector("#tf-duration-min");
+    if (star) star.style.display = aggregated ? "" : "none";
+    if (note) {
+      note.style.display = aggregated ? "" : "none";
+      note.textContent = aggregated ? "Required — this is the period the value is measured over." : "";
+    }
+    if (input) {
+      input.placeholder = aggregated ? "e.g. 5" : DUR_PLACEHOLDER_OPTIONAL;
+      if (aggregated) input.setAttribute("required", "required");
+      else input.removeAttribute("required");
+    }
   }
   function step3Html() {
     var cat = triggerCategoryOf(draft.trigger);
@@ -1888,7 +1928,7 @@ async function openAutomationWizard(existing) {
       var tree = triggerToTree(tr, kind);
       html += '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Add conditions and combine them with AND/OR groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move them. ' + escapeHtml(tgMeta.anyDimensionNote || "") + '</p>' +
         '<div id="aw-trig-root">' + tgGroupHtml(tree, 0, kind) + '</div>' +
-        durationFieldHtml('id="tf-duration-min"', Math.round(((tr.forDurationSec || 0)) / 60));
+        durationFieldHtml('id="tf-duration-min"', triggerDurationMinutes(tr));
       if (cat === "host") {
         html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">Polaris-host conditions aren’t tied to assets — the device filter from the previous step is ignored.</p>';
       }
@@ -1906,6 +1946,7 @@ async function openAutomationWizard(existing) {
     box.innerHTML = html;
     refreshTriggerSentence();
     refreshDimOptions(panel);
+    syncDurationRequirement(panel);
   }
   function wireStep3() {
     var panel = document.getElementById("aw-step-3");
@@ -1930,8 +1971,8 @@ async function openAutomationWizard(existing) {
     // Delegated: any input/select change re-renders the sentence (the tree's
     // own change handler also calls it — a second render is harmless) and
     // re-syncs the severity mode (single dropdown vs multi tiers + accent).
-    panel.addEventListener("input", function () { refreshTriggerSentence(); syncSeverityMode(panel); });
-    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); refreshDimOptions(panel); });
+    panel.addEventListener("input", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncDurationRequirement(panel); });
+    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); refreshDimOptions(panel); syncDurationRequirement(panel); });
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
     renderTriggerFields();
     syncSeverityMode(panel);
@@ -1948,9 +1989,13 @@ async function openAutomationWizard(existing) {
         var tree = tgCollectGroup(root, kind);
         var dEl = panel.querySelector("#tf-duration-min");
         var mins = dEl && dEl.value !== "" ? Number(dEl.value) : 0;
+        if (isNaN(mins) || mins < 0) mins = 0;
+        // One time knob: it's the window for an aggregated condition (which then
+        // needs no sustain on top), the sustain clock for a `latest` one.
+        var aggregated = tgStampWindows(tree, mins * 60);
         draft.trigger = tgCollapse({
           type: "composite", kind: kind, op: tree.op, children: tree.children,
-          forDurationSec: (isNaN(mins) ? 0 : mins) * 60,
+          forDurationSec: aggregated ? 0 : mins * 60,
         });
       }
     } else if (cat === "event") {
@@ -1967,12 +2012,50 @@ async function openAutomationWizard(existing) {
     if (baseSel) draft.severity = baseSel.value;
     collectBands(panel); // severity tiers live with the trigger (step 3)
   }
+  /** True when this leaf measures over a period rather than reading the latest
+   *  sample — the case that needs a window, and so needs the duration field. */
+  function tgLeafAggregated(leaf) {
+    return !!(leaf && leaf.type !== "asset_state" && leaf.aggregation && leaf.aggregation !== "latest");
+  }
+  /**
+   * Push `sec` into every aggregated leaf's windowSec (and 0 into every `latest`
+   * leaf's). The duration field is the trigger's ONE time knob: for avg / median
+   * / min / max it IS the measurement window, so the reading already covers the
+   * period and no separate sustain clock applies; for `latest` it stays the
+   * sustain it has always been. Returns whether any leaf is aggregated, which is
+   * what tells the caller to zero forDurationSec.
+   */
+  function tgStampWindows(node, sec) {
+    var aggregated = false;
+    (function walk(n) {
+      if (!n) return;
+      if (n.type === undefined && Array.isArray(n.children)) { n.children.forEach(walk); return; }
+      if (tgLeafAggregated(n)) { n.windowSec = sec; aggregated = true; }
+      else if (n.type !== "asset_state") n.windowSec = 0;
+    })(node);
+    return aggregated;
+  }
+  /** Minutes to show in the duration field for a stored trigger: an aggregated
+   *  leaf's window, else the sustain (which is what `latest` triggers carry). */
+  function triggerDurationMinutes(tr) {
+    if (!tr) return 0;
+    var leaves = tr.type === "composite" ? tgLeaves(tr) : [tr];
+    var win = 0;
+    leaves.forEach(function (l) { if (tgLeafAggregated(l)) win = Math.max(win, Number(l.windowSec) || 0); });
+    return Math.round((win || Number(tr.forDurationSec) || 0) / 60);
+  }
   function tgValidateLeaf(leaf, label) {
     if (leaf.type === "asset_state") {
       if (leaf.value == null || String(leaf.value).trim() === "") return label + ": choose or enter a value.";
       return null;
     }
     if (leaf.threshold == null || isNaN(leaf.threshold)) return label + ": enter a numeric threshold.";
+    // An aggregation with no window has nothing to average / scan over, and the
+    // engine would fall back to its own default lookback — so require the period
+    // rather than quietly measuring something the operator never chose.
+    if (tgLeafAggregated(leaf) && !(Number(leaf.windowSec) > 0)) {
+      return label + ': "' + leaf.aggregation + '" measures over a period — set "Sustained for (minutes)" to 1 or more.';
+    }
     return null;
   }
   function validateStep3() {
@@ -2700,9 +2783,10 @@ async function openAutomationWizard(existing) {
       '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>';
     host.appendChild(row);
     // Lock the shared-sampling fields on the tier's condition row — metric,
-    // aggregation, window, dimensions — so only operator + value are editable.
+    // aggregation, dimensions — so only operator + value are editable. (The
+    // window isn't a row control any more; tiers take the base's.)
     var cond = row.querySelector(".band-cond");
-    cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-window, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
+    cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
     var grip = cond.querySelector(".aw-grip"); if (grip) grip.style.display = "none";
     var rmCond = cond.querySelector(".scr-remove"); if (rmCond) rmCond.style.display = "none";
     refreshDimOptions(panel); // the tier's locked condition row has its own dim control

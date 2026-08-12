@@ -47,6 +47,36 @@ const EXPECTED: Record<string, Record<string, string>> = {
     lldpRemSysName:  "1.0.8802.1.1.2.1.4.1.1.9",
     lldpRemManAddrTable: "1.0.8802.1.1.2.1.4.2",
   },
+  "std:poe": {
+    pethPsePortTable:                "1.3.6.1.2.1.105.1.1",
+    pethPsePortDetectionStatus:      "1.3.6.1.2.1.105.1.1.1.6",
+    pethPsePortPowerClassifications: "1.3.6.1.2.1.105.1.1.1.10",
+    // Note the extra pethMainPseObjects level: pethObjects(.1) →
+    // pethMainPseObjects(.3) → Table(.1) → Entry(.1) → column(.4). Easy to
+    // write as ...105.1.3.1.4 from memory and be silently wrong.
+    pethMainPseConsumptionPower:     "1.3.6.1.2.1.105.1.3.1.1.4",
+  },
+  "std:bridge": {
+    dot1dBridge:          "1.3.6.1.2.1.17",
+    // The basePort→ifIndex join every FDB and STP row has to go through:
+    // dot1dTpFdbPort / dot1dStpPort are dot1dBasePort values, NOT ifIndex.
+    dot1dBasePortIfIndex: "1.3.6.1.2.1.17.1.4.1.2",
+    dot1dTpFdbPort:       "1.3.6.1.2.1.17.4.3.1.2",
+    dot1dTpFdbStatus:     "1.3.6.1.2.1.17.4.3.1.3",
+    dot1dStpPortState:    "1.3.6.1.2.1.17.2.15.1.3",
+  },
+  "std:q-bridge": {
+    // Anchored on BRIDGE-MIB's dot1dBridge via IMPORTS — resolves only
+    // because that symbol is seeded in BUILT_IN_OIDS. Without it this
+    // module resolves 0 of 129 assignments.
+    dot1qTpFdbPort:   "1.3.6.1.2.1.17.7.1.2.2.1.2",
+    dot1qTpFdbStatus: "1.3.6.1.2.1.17.7.1.2.2.1.3",
+  },
+  "std:rstp": {
+    // Likewise anchored on BRIDGE-MIB's dot1dStp.
+    dot1dStpVersion:         "1.3.6.1.2.1.17.2.16",
+    dot1dStpExtPortTable:    "1.3.6.1.2.1.17.2.19",
+  },
 };
 
 let pass = 0;

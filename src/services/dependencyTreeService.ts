@@ -27,6 +27,14 @@
  */
 
 import { prisma } from "../db.js";
+import {
+  buildInfraParentIndex,
+  resolveInfraParentAsset,
+  readControllerStamp,
+  readParentSwitchStamp,
+  normalizeNameKey,
+  normalizeSerialKey,
+} from "../utils/fortinetParentKey.js";
 import { inferInterfaceTopology } from "./interfaceTopologyService.js";
 import { logEvent } from "./eventLogService.js";
 import { logger } from "../utils/logger.js";
@@ -105,10 +113,12 @@ export function buildDependencyEdgesFromInputs(
    * LLDP edge instead of on the FortiGate. */
   bridgeLeafSwitchIds: Set<string> = new Set(),
 ): DependencyEdge[] {
-  const byHostname = new Map<string, DepAsset>();
-  for (const a of assets) {
-    if (a.hostname) byHostname.set(a.hostname.toLowerCase(), a);
-  }
+  // Parent resolution is serial-first with the historical hostname match as
+  // fallback — FMG's device NAME (what `controllerFortigate` holds) is not the
+  // gate's configured hostname (what `Asset.hostname` holds), so a name-only
+  // lookup drops every edge on installs where the two diverge. See
+  // utils/fortinetParentKey.ts.
+  const parentIndex = buildInfraParentIndex(assets);
   const byId = new Map<string, DepAsset>();
   for (const a of assets) byId.set(a.id, a);
 
@@ -149,11 +159,8 @@ export function buildDependencyEdgesFromInputs(
       // path, not the physical uplink — skip it; the LLDP edge to the AP (added
       // below) makes it depend on the AP instead.
       if (bridgeLeafSwitchIds.has(a.id)) continue;
-      const parentHost = typeof top.controllerFortigate === "string" ? top.controllerFortigate.toLowerCase() : null;
-      if (parentHost) {
-        const parent = byHostname.get(parentHost);
-        if (parent && parent.assetType === "firewall") add(a.id, parent.id, "controller");
-      }
+      const parent = resolveInfraParentAsset(parentIndex, readControllerStamp(top), "firewall");
+      if (parent) add(a.id, parent.id, "controller");
     } else if (a.assetType === "access_point") {
       // Mesh leaf: its switch/FG controller edge is backwards — skip it; the
       // mesh edge (added below) makes it depend on its root AP instead.
@@ -164,15 +171,19 @@ export function buildDependencyEdgesFromInputs(
       // the switch bridged BEHIND the leaf.
       if (meshLeafSet.has(a.id)) continue;
       if (top.meshUplink === "mesh") continue;
-      const parentSwitchHost = typeof top.parentSwitch === "string" ? top.parentSwitch.toLowerCase() : null;
-      const parentFgHost = typeof top.controllerFortigate === "string" ? top.controllerFortigate.toLowerCase() : null;
-      if (parentSwitchHost) {
-        const parent = byHostname.get(parentSwitchHost);
-        if (parent && parent.assetType === "switch") add(a.id, parent.id, "controller");
-      } else if (parentFgHost) {
+      // Branch on stamp PRESENCE, not resolution success — unchanged from the
+      // pre-serial behavior. An AP that names a parentSwitch Polaris doesn't
+      // know gets no edge rather than a shortcut edge to the controller gate,
+      // which would claim a physical adjacency that isn't there.
+      const switchStamp = readParentSwitchStamp(top);
+      const fgStamp = readControllerStamp(top);
+      if (switchStamp.name) {
+        const parent = resolveInfraParentAsset(parentIndex, switchStamp, "switch");
+        if (parent) add(a.id, parent.id, "controller");
+      } else if (fgStamp.name || fgStamp.serial) {
         // AP not behind a FortiSwitch (rare — direct uplink to FortiGate).
-        const parent = byHostname.get(parentFgHost);
-        if (parent && parent.assetType === "firewall") add(a.id, parent.id, "controller");
+        const parent = resolveInfraParentAsset(parentIndex, fgStamp, "firewall");
+        if (parent) add(a.id, parent.id, "controller");
       }
     }
   }
@@ -658,9 +669,24 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
   // NOT that AP's controller parent, is bridged behind the AP → its FortiLink
   // edge is suppressed so it depends on the AP via LLDP.
   const invById = new Map(inventory.map(a => [a.id, a]));
-  const apParentSwitchOf = (a: typeof inventory[number]) => {
-    const t = a.fortinetTopology as Record<string, unknown> | null;
-    return t && typeof t.parentSwitch === "string" ? t.parentSwitch.toLowerCase() : null;
+  const apParentSwitchOf = (a: typeof inventory[number]) =>
+    readParentSwitchStamp(a.fortinetTopology).name ?? null;
+  /**
+   * Does `sw` match the name the AP stamped as its parentSwitch? The stamp comes
+   * from the AP's LLDP table, which reports the switch's system name — normally
+   * the switch-id (= the serial), while `Asset.hostname` may be an operator-set
+   * label. Comparing against hostname ALONE mis-fires in the dangerous
+   * direction: the AP's real uplink switch fails the check, gets treated as
+   * "bridged behind the AP", and has its FortiLink edge to the FortiGate
+   * replaced by an edge to the AP — inverting the topology instead of merely
+   * dropping it. Match either identity.
+   */
+  const switchMatchesParentStamp = (sw: typeof inventory[number], stampName: string | null) => {
+    if (!stampName) return false;
+    const n = normalizeNameKey(stampName);
+    if (sw.hostname && normalizeNameKey(sw.hostname) === n) return true;
+    const s = normalizeSerialKey(sw.serialNumber);
+    return !!s && s === normalizeSerialKey(stampName);
   };
   const apIsMeshLeaf = (a: typeof inventory[number]) => {
     const t = a.fortinetTopology as Record<string, unknown> | null;
@@ -679,7 +705,7 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
     // Normal switch→AP uplink — unless the AP is a wireless-mesh leaf, whose
     // wired LLDP adjacency is always a switch bridged behind it (parentSwitch
     // on a mesh leaf is the pre-mesh-fix inversion, not a real uplink).
-    if (!apIsMeshLeaf(ap) && sw.hostname && apParentSwitchOf(ap) === sw.hostname.toLowerCase()) continue;
+    if (!apIsMeshLeaf(ap) && switchMatchesParentStamp(sw, apParentSwitchOf(ap))) continue;
     bridgeLeafSwitchIds.add(sw.id);
   }
 

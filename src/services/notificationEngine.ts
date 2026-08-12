@@ -72,6 +72,7 @@ import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientSe
 import { executeActions, type ActionExecContext } from "./automationActionService.js";
 import { queryProbeLossRatios } from "./probeLossQuery.js";
 import { alarmStatusToFlag } from "../utils/hardwareSensors.js";
+import { median } from "../utils/stats.js";
 import {
   buildTemplateContext,
   renderNotificationTemplate,
@@ -300,6 +301,7 @@ function reduceReadings(
   for (const g of groups.values()) {
     let value: number | null;
     if (aggregation === "avg") value = g.values.length ? g.values.reduce((a, b) => a + b, 0) / g.values.length : null;
+    else if (aggregation === "median") value = median(g.values);
     else if (aggregation === "min") value = g.values.length ? Math.min(...g.values) : null;
     else if (aggregation === "max") value = g.values.length ? Math.max(...g.values) : null;
     else value = g.latest.v; // latest
@@ -515,10 +517,12 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
     case "consecutiveFailures": return assets.map((a) => mk(a, "", "", a.consecutiveFailures));
     case "dependencySuppressed": return assets.map((a) => mk(a, "", "", a.dependencySuppressed));
     case "quarantined": return assets.map((a) => mk(a, "", "", a.quarantinedAt !== null || a.status === "quarantined"));
-    case "ifOperStatus": case "ifAdminStatus": {
-      const col = trigger.field === "ifOperStatus" ? "operStatus" : "adminStatus";
+    case "ifOperStatus": case "ifAdminStatus": case "poeStatus": {
+      const col = trigger.field === "ifOperStatus" ? "operStatus"
+        : trigger.field === "ifAdminStatus" ? "adminStatus"
+        : "poeStatus";
       const since = new Date(Date.now() - DEFAULT_LOOKBACK_MS);
-      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], distinct: ["assetId", "ifName"], select: { assetId: true, ifName: true, operStatus: true, adminStatus: true } });
+      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], distinct: ["assetId", "ifName"], select: { assetId: true, ifName: true, operStatus: true, adminStatus: true, poeStatus: true } });
       // Only PINNED interfaces produce readings (Asset.monitoredInterfaces —
       // the same join the Down Interfaces widget uses): the interfaces stream
       // samples every port a device reports, and an unpinned port is usually
@@ -531,6 +535,15 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
         const a = index.get(r.assetId);
         if (!a?.monitoredInterfaces?.includes(r.ifName)) return false;
         if (trigger.field === "ifOperStatus" && r.adminStatus !== "up") return false;
+        // A port with no PSE reports nothing — a null is "not a PoE port",
+        // not "PoE is off", and a rule like `poeStatus is-not delivering`
+        // would otherwise fire on every uplink and SVI on the switch.
+        if (trigger.field === "poeStatus" && r.poeStatus == null) return false;
+        // "disabled" is an operator's choice, the PoE analogue of the
+        // admin-up gate above. Excluding it keeps a not-delivering rule from
+        // alerting on ports PoE was deliberately turned off for. A fault rule
+        // is unaffected: a disabled port reports "disabled", never "fault".
+        if (trigger.field === "poeStatus" && r.poeStatus === "disabled") return false;
         return substringMatch(r.ifName, df.ifNamePattern);
       }).map((r) => { const a = index.get(r.assetId)!; return mk(a, r.ifName, r.ifName, (r as any)[col]); });
     }
@@ -567,6 +580,7 @@ async function resolveHostMetricReading(trigger: Extract<Trigger, { type: "host_
   };
   let value: number;
   if (trigger.aggregation === "avg") value = rows.reduce((a, r) => a + valueOf(r), 0) / rows.length;
+  else if (trigger.aggregation === "median") value = median(rows.map(valueOf)) ?? NaN;
   else if (trigger.aggregation === "min") value = Math.min(...rows.map(valueOf));
   else if (trigger.aggregation === "max") value = Math.max(...rows.map(valueOf));
   else value = valueOf(rows[0]); // latest

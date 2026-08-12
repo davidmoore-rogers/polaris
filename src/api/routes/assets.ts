@@ -1735,6 +1735,12 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
       ...lldpNeighbors,
       ...dedupeInferredNeighbors(lldpNeighbors, inferredNeighbors, aggregateMembershipMap(interfaces)),
     ];
+    // Hardware inventory is current-state (delete-replaced per scrape), so it
+    // needs no timestamp gate the way the sample tables do.
+    const physicalEntities = await prisma.assetPhysicalEntity.findMany({
+      where: { assetId: id },
+      orderBy: [{ entClass: "asc" }, { entIndex: "asc" }],
+    });
     const storage = latestStorageMeta
       ? await prisma.assetStorageSample.findMany({
           where: { assetId: id, timestamp: latestStorageMeta.timestamp },
@@ -1806,6 +1812,22 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
         alias:       i.alias       ?? null,
         description: i.description ?? null,
         addressingMode: i.addressingMode ?? null,
+        poeStatus:   i.poeStatus ?? null,
+        poeClass:    i.poeClass  ?? null,
+      })),
+      physicalEntities: physicalEntities.map((e) => ({
+        entIndex:    e.entIndex,
+        entClass:    e.entClass,
+        descr:       e.descr,
+        name:        e.name,
+        hardwareRev: e.hardwareRev,
+        firmwareRev: e.firmwareRev,
+        serialNum:   e.serialNum,
+        mfgName:     e.mfgName,
+        modelName:   e.modelName,
+        isFru:       e.isFru,
+        ifName:      e.ifName,
+        firstSeen:   e.firstSeen,
       })),
       storage: storage.map((s) => ({
         timestamp:  s.timestamp,
@@ -1938,6 +1960,48 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
 // inventory for the Services tab. Mirrors /:id/processes: the current AssetService
 // rows plus the two pin arrays (monitoredServices = journalctl tailing,
 // mappedServices = Application Map connection attribution).
+/**
+ * GET /assets/:id/mac-table — the switch's layer-2 forwarding database.
+ *
+ * Current-state (delete-replaced per scrape), so there is no time window to
+ * select. Returns the entries plus per-port MAC counts, which is the number
+ * that separates an access port from an uplink and is far cheaper to compute
+ * here than in the browser over a few thousand rows.
+ */
+router.get("/:id/mac-table", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const rows = await prisma.assetMacTableEntry.findMany({
+      where: { assetId: id },
+      orderBy: [{ ifName: "asc" }, { macAddress: "asc" }],
+      include: {
+        matchedAsset: { select: { id: true, hostname: true, ipAddress: true, assetType: true } },
+      },
+    });
+    const portCounts: Record<string, number> = {};
+    for (const r of rows) {
+      if (r.status !== "learned" || !r.ifName) continue;
+      portCounts[r.ifName] = (portCounts[r.ifName] ?? 0) + 1;
+    }
+    res.json({
+      entries: rows.map((r) => ({
+        macAddress: r.macAddress,
+        vlanId:     r.vlanId,
+        basePort:   r.basePort,
+        ifName:     r.ifName,
+        status:     r.status,
+        firstSeen:  r.firstSeen,
+        lastSeen:   r.lastSeen,
+        matchedAsset: r.matchedAsset,
+      })),
+      portCounts,
+      total: rows.length,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/:id/services", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;

@@ -118,8 +118,13 @@ FMG Integration Discovery
 │   │     existing monitorCredentialId differs           → preserve operator choice
 │   │
 │   ├─ fortinetTopology stamp:
-│   │     { role: "fortiswitch", controllerFortigate, uplinkInterface,
-│   │       uplinkPhysicalPort, state }
+│   │     { role: "fortiswitch", controllerFortigate, controllerSerial,
+│   │       uplinkInterface, uplinkPhysicalPort, state }
+│   │     controllerFortigate = the controller's name IN FORTIMANAGER (which
+│   │       need NOT equal the gate's configured hostname); controllerSerial
+│   │       is the definitive controller identity. Anything resolving the
+│   │       parent ASSET must go through src/utils/fortinetParentKey.ts —
+│   │       never match controllerFortigate against Asset.hostname.
 │   │     state = controller admission ("Authorized"/"Unauthorized") →
 │   │       Authorization badge on asset details; "Unauthorized" also lands
 │   │       new switches with status = "storage"

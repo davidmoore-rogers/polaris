@@ -27,6 +27,7 @@ import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { pointInPolygon, type LatLng } from "../utils/geo.js";
 import { cidrContains } from "../utils/cidr.js";
+import { controllerIdentityKeys, readFirewallDeviceName } from "../utils/fortinetParentKey.js";
 
 const SETTING_KEY = "mapRegions";
 const TAG_PREFIX = "region:";
@@ -183,6 +184,7 @@ async function deleteTagRegistry(name: string): Promise<void> {
 interface TopologyMeta {
   role?: "fortigate" | "fortiswitch" | "fortiap";
   controllerFortigate?: string | null;
+  controllerSerial?: string | null;
 }
 
 function readTopology(raw: unknown): TopologyMeta {
@@ -203,24 +205,39 @@ async function computeMembership(region: MapRegion): Promise<Set<string>> {
       latitude: { not: null },
       longitude: { not: null },
     },
-    select: { id: true, hostname: true, latitude: true, longitude: true },
+    select: { id: true, hostname: true, serialNumber: true, fortinetTopology: true, latitude: true, longitude: true },
   });
 
-  const enclosedFirewalls: { id: string; hostname: string | null }[] = [];
+  const enclosedFirewalls: Array<{ id: string; keys: string[]; serial: string | null }> = [];
   for (const fw of firewalls) {
     const lat = fw.latitude as unknown as number | null;
     const lng = fw.longitude as unknown as number | null;
     if (lat == null || lng == null) continue;
     if (pointInPolygon([lat, lng], region.polygon)) {
-      enclosedFirewalls.push({ id: fw.id, hostname: fw.hostname });
+      // Every name this gate can be known by in a child's stamp or in
+      // Subnet.fortigateDevice — serial, its FortiManager device name, and its
+      // configured hostname. Matching on hostname ALONE (the pre-2026-08
+      // behavior) silently dropped every switch/AP and every subnet-propagated
+      // asset behind a gate whose FMG device name differs from its hostname.
+      // See utils/fortinetParentKey.ts.
+      enclosedFirewalls.push({
+        id: fw.id,
+        serial: fw.serialNumber,
+        keys: controllerIdentityKeys({
+          hostname: fw.hostname,
+          serialNumber: fw.serialNumber,
+          deviceName: readFirewallDeviceName(fw.fortinetTopology),
+        }),
+      });
     }
   }
 
   const memberIds = new Set<string>(enclosedFirewalls.map((f) => f.id));
-  const enclosedHostnames = new Set<string>(
-    enclosedFirewalls.map((f) => (f.hostname || "").trim()).filter((h) => h.length > 0),
+  const enclosedKeys = new Set<string>(enclosedFirewalls.flatMap((f) => f.keys));
+  const enclosedSerials = new Set<string>(
+    enclosedFirewalls.map((f) => (f.serial || "").trim()).filter((s) => s.length > 0),
   );
-  if (enclosedHostnames.size === 0) return memberIds;
+  if (enclosedKeys.size === 0) return memberIds;
 
   const infra = await prisma.asset.findMany({
     where: {
@@ -230,16 +247,23 @@ async function computeMembership(region: MapRegion): Promise<Set<string>> {
   });
   for (const a of infra) {
     const topo = readTopology(a.fortinetTopology);
+    const ctrlSerial = (topo.controllerSerial || "").trim();
+    if (ctrlSerial && enclosedSerials.has(ctrlSerial)) { memberIds.add(a.id); continue; }
     const ctrl = (topo.controllerFortigate || "").trim();
-    if (ctrl && enclosedHostnames.has(ctrl)) memberIds.add(a.id);
+    if (ctrl && enclosedKeys.has(ctrl)) memberIds.add(a.id);
   }
 
   // Subnet propagation: any asset whose IP falls in a subnet served by an
-  // enclosed firewall (Subnet.fortigateDevice = that firewall's hostname)
-  // inherits the region. This is how servers / workstations / standalone
-  // assets — which have no coordinates — get a region.
+  // enclosed firewall inherits the region. This is how servers / workstations /
+  // standalone assets — which have no coordinates — get a region.
+  //
+  // `Subnet.fortigateDevice` holds the discovery-time device NAME (FMG's name,
+  // or the standalone gate's), NOT the gate's configured hostname — so the
+  // pre-2026-08 `in: enclosedHostnames` comparison matched nothing on installs
+  // where the two differ, and no non-Fortinet asset ever inherited a region.
+  // `enclosedKeys` includes the device name.
   const regionSubnets = await prisma.subnet.findMany({
-    where: { fortigateDevice: { in: Array.from(enclosedHostnames) } },
+    where: { fortigateDevice: { in: Array.from(enclosedKeys) } },
     select: { cidr: true },
   });
   if (regionSubnets.length > 0) {

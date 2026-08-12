@@ -26,6 +26,12 @@
       + '  <div class="trailing"></div>'
       + '</div>';
   }
+  // Call this FIRST in a sub-page's render(), before the `return api…` that
+  // kicks off its fetch — a call placed after that return is unreachable, which
+  // is exactly how every sub-page's back chevron came to be inert. app.js
+  // renders the topbar before calling render(), so the button is already in the
+  // DOM at this point, and wiring it up front means back works while the list
+  // is still loading and on the error path too.
   function wireBack() {
     var btn = document.querySelector("[data-back]");
     if (!btn) return;
@@ -55,6 +61,7 @@
   registerSub("blocks", {
     renderTopbar: function () { return backTopbar("Blocks"); },
     render: function (body) {
+      wireBack();
       body.innerHTML = loadingHtml();
       return api.blocks.list().then(function (blocks) {
         if (!Array.isArray(blocks) || blocks.length === 0) {
@@ -79,8 +86,6 @@
           row.addEventListener("click", function () { PolarisRouter.go("block/" + row.dataset.id); });
         });
       }).catch(function (err) { body.innerHTML = errorState(err && err.message ? err.message : "error"); });
-
-      wireBack();
     },
   });
 
@@ -88,6 +93,7 @@
   registerSub("subnets", {
     renderTopbar: function () { return backTopbar("Networks"); },
     render: function (body) {
+      wireBack();
       body.innerHTML = loadingHtml();
       return api.subnets.list({ limit: 200 }).then(function (resp) {
         // listSubnets returns { subnets, total, limit, offset }
@@ -119,8 +125,6 @@
           row.addEventListener("click", function () { PolarisRouter.go("subnet/" + row.dataset.id); });
         });
       }).catch(function (err) { body.innerHTML = errorState(err && err.message ? err.message : "error"); });
-
-      wireBack();
     },
   });
 
@@ -128,6 +132,7 @@
   registerSub("events", {
     renderTopbar: function () { return backTopbar("Events"); },
     render: function (body) {
+      wireBack();
       body.innerHTML = loadingHtml();
       return api.events.list({ limit: 100 }).then(function (resp) {
         var events = (resp && resp.events) || [];
@@ -165,8 +170,6 @@
           });
         });
       }).catch(function (err) { body.innerHTML = errorState(err && err.message ? err.message : "error"); });
-
-      wireBack();
     },
   });
   function prettyAction(action) {
@@ -193,6 +196,9 @@
   registerSub("alerts", {
     renderTopbar: function () { return backTopbar("Alerts"); },
     render: function (body, ctx) {
+      // wireBack() must run BEFORE the `return api…` below — a call after it is
+      // unreachable, which is how every sub-page's back chevron came to be inert.
+      wireBack();
       var canAck = permAtLeast(ctx && ctx.user, "alerts", "write");
       body.innerHTML = loadingHtml();
       return api.alerts.list({ limit: 100 }).then(function (resp) {
@@ -276,6 +282,7 @@
   registerSub("install", {
     renderTopbar: function () { return backTopbar("Add to Home Screen"); },
     render: function (body) {
+      wireBack();
       var ios = window.PolarisInstall && PolarisInstall.isIos();
       var firefox = window.PolarisInstall && PolarisInstall.isFirefox();
       var steps;
