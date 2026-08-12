@@ -54,6 +54,19 @@ const PAD_B = 18;
 const esc = (s: string): string =>
   s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 
+/**
+ * Round up to the next 1 / 2 / 5 × 10ⁿ, so an auto-scaled axis is labelled
+ * "200 ms" rather than "200.1 ms" — the extra digit reads as precision the
+ * chart doesn't have.
+ */
+export function niceCeil(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return v;
+  const mag = 10 ** Math.floor(Math.log10(v));
+  const norm = v / mag;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return step * mag;
+}
+
 /** Trim to 1 decimal, then drop a trailing ".0" — "97" reads better than "97.0". */
 export function formatReading(v: number, unit = ""): string {
   const rounded = Math.round(v * 10) / 10;
@@ -122,7 +135,10 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
       yMax = yMax + 1;
     } else {
       yMin = Math.max(0, yMin - span * 0.1);
-      yMax = yMax + span * 0.1;
+      // Round the top to a readable number. Without this the 10% headroom
+      // prints axis labels like "200.1 ms", which reads as precision that
+      // isn't there.
+      yMax = niceCeil(yMax + span * 0.1);
     }
   }
   const ySpan = yMax - yMin || 1;

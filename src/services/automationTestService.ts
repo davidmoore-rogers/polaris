@@ -126,9 +126,18 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
   // A real device makes the test email look like a real one (the facts table
   // and the last-hour charts all key off it). Any monitored asset will do when
   // the caller didn't name one.
+  // The same fields the engine's ASSET_DETAIL_SELECT feeds a real fire: a test
+  // email that lacked them would prune down to a bare shell and mislead the
+  // operator about what a real alert looks like.
+  const detailSelect = {
+    id: true, hostname: true, tags: true, ipAddress: true, macAddress: true, assetType: true,
+    status: true, location: true, learnedLocation: true, manufacturer: true, model: true,
+    serialNumber: true, os: true, osVersion: true, department: true, assignedTo: true,
+    lastSeenSwitch: true, lastSeenAp: true,
+  } as const;
   const asset = args.assetId
-    ? await prisma.asset.findUnique({ where: { id: args.assetId }, select: { id: true, hostname: true, tags: true } })
-    : await prisma.asset.findFirst({ where: { monitored: true }, select: { id: true, hostname: true, tags: true }, orderBy: { hostname: "asc" } });
+    ? await prisma.asset.findUnique({ where: { id: args.assetId }, select: detailSelect })
+    : await prisma.asset.findFirst({ where: { monitored: true }, select: detailSelect, orderBy: { hostname: "asc" } });
 
   const severity: Severity = rule.severity ?? "warning";
   const message = testMessage(rule.name, asset?.hostname ?? null);
@@ -190,6 +199,7 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
     message,
     metric: "test",
     value: "—",
+    assetDetail: asset ? { ...asset, status: String(asset.status) } : null,
   });
 
   await executeActions(notif.id, actions, ctx, {

@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { sparklineSvg, seriesStats, formatReading, type SparkPoint } from "../../src/utils/sparklineSvg.js";
+import { sparklineSvg, seriesStats, formatReading, niceCeil, type SparkPoint } from "../../src/utils/sparklineSvg.js";
 
 const T0 = Date.parse("2026-08-12T10:00:00Z");
 const series = (vals: number[]): SparkPoint[] => vals.map((v, i) => ({ t: T0 + i * 60_000, v }));
@@ -20,6 +20,23 @@ describe("formatReading", () => {
     expect(formatReading(97.04)).toBe("97");
     expect(formatReading(97.25, "%")).toBe("97.3%");
     expect(formatReading(12.5, " ms")).toBe("12.5 ms");
+  });
+});
+
+describe("niceCeil", () => {
+  it("rounds an auto-scaled axis top to a readable number", () => {
+    // 183ms + 10% headroom = 200.1, which printed as "200.1 ms" on the axis —
+    // a decimal that reads as precision the chart doesn't have.
+    expect(niceCeil(200.1)).toBe(500);
+    expect(niceCeil(183)).toBe(200);
+    expect(niceCeil(42)).toBe(50);
+    expect(niceCeil(7.3)).toBe(10);
+    expect(niceCeil(1)).toBe(1);
+  });
+
+  it("leaves nothing to round alone", () => {
+    expect(niceCeil(0)).toBe(0);
+    expect(niceCeil(-5)).toBe(-5);
   });
 });
 
