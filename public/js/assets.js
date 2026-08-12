@@ -5751,8 +5751,47 @@ function assetSystemViewHTML(a) {
     '<div data-shot-section="lldp" data-shot-label="LLDP Neighbors">' +
     sectionHeader("LLDP Neighbors", lldpBadgeFull, false) +
     '<div id="asset-system-lldp"><span class="empty-state">Loading…</span></div>' +
+    '</div>' +
+    // Hidden until the device actually reports FRUs — most hosts publish no
+    // entPhysicalTable at all, and an empty "Modules" header on every server
+    // would be pure noise.
+    '<div id="asset-system-modules-section" data-shot-section="modules" data-shot-label="Hardware Modules" style="display:none">' +
+    sectionHeader("Hardware Modules", "", false) +
+    '<div id="asset-system-modules"><span class="empty-state">Loading…</span></div>' +
     '</div>'
   );
+}
+
+// Field-replaceable hardware (transceivers, PSUs, fan trays) from ENTITY-MIB.
+// Vendor / model / serial are what an operator needs to raise an RMA or find
+// the spare on the shelf, which is why they are the columns.
+function _renderPhysicalEntities(entities) {
+  var section = document.getElementById("asset-system-modules-section");
+  var host = document.getElementById("asset-system-modules");
+  if (!section || !host) return;
+  var rows = Array.isArray(entities) ? entities : [];
+  if (rows.length === 0) { section.style.display = "none"; return; }
+  section.style.display = "";
+
+  var CLASS_LABEL = { module: "Module", powerSupply: "Power Supply", fan: "Fan",
+                      chassis: "Chassis", container: "Container", port: "Port" };
+  host.innerHTML =
+    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th>Type</th><th>Name</th><th>Vendor</th><th>Model</th><th>Serial</th><th>HW Rev</th><th>Interface</th>' +
+    '</tr></thead><tbody>' +
+    rows.map(function (e) {
+      var dash = '<span style="color:var(--color-text-secondary)">—</span>';
+      return '<tr>' +
+        '<td>' + escapeHtml(CLASS_LABEL[e.entClass] || e.entClass) + '</td>' +
+        '<td>' + escapeHtml(e.name || e.descr || ("index " + e.entIndex)) + '</td>' +
+        '<td>' + (e.mfgName ? escapeHtml(e.mfgName) : dash) + '</td>' +
+        '<td class="mono">' + (e.modelName ? escapeHtml(e.modelName) : dash) + '</td>' +
+        '<td class="mono">' + (e.serialNum ? escapeHtml(e.serialNum) : dash) + '</td>' +
+        '<td class="mono">' + (e.hardwareRev ? escapeHtml(e.hardwareRev) : dash) + '</td>' +
+        '<td class="mono">' + (e.ifName ? escapeHtml(e.ifName) : dash) + '</td>' +
+      '</tr>';
+    }).join("") +
+    '</tbody></table></div>';
 }
 
 function _currentSystemTabRange() {
@@ -5838,6 +5877,7 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
       _renderStorageTable(storage, si, asset);
       _renderTemperatures(temps, si, asset);
       _renderLldpNeighborsCard(lldp, si, asset);
+      _renderPhysicalEntities(si && si.physicalEntities);
       if (stations) _renderWirelessStationsCard(stations, si, asset);
     }
   } catch (err) {

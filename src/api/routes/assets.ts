@@ -1735,6 +1735,12 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
       ...lldpNeighbors,
       ...dedupeInferredNeighbors(lldpNeighbors, inferredNeighbors, aggregateMembershipMap(interfaces)),
     ];
+    // Hardware inventory is current-state (delete-replaced per scrape), so it
+    // needs no timestamp gate the way the sample tables do.
+    const physicalEntities = await prisma.assetPhysicalEntity.findMany({
+      where: { assetId: id },
+      orderBy: [{ entClass: "asc" }, { entIndex: "asc" }],
+    });
     const storage = latestStorageMeta
       ? await prisma.assetStorageSample.findMany({
           where: { assetId: id, timestamp: latestStorageMeta.timestamp },
@@ -1808,6 +1814,20 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
         addressingMode: i.addressingMode ?? null,
         poeStatus:   i.poeStatus ?? null,
         poeClass:    i.poeClass  ?? null,
+      })),
+      physicalEntities: physicalEntities.map((e) => ({
+        entIndex:    e.entIndex,
+        entClass:    e.entClass,
+        descr:       e.descr,
+        name:        e.name,
+        hardwareRev: e.hardwareRev,
+        firmwareRev: e.firmwareRev,
+        serialNum:   e.serialNum,
+        mfgName:     e.mfgName,
+        modelName:   e.modelName,
+        isFru:       e.isFru,
+        ifName:      e.ifName,
+        firstSeen:   e.firstSeen,
       })),
       storage: storage.map((s) => ({
         timestamp:  s.timestamp,

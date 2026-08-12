@@ -12,6 +12,8 @@ import {
   classifyEntitySensor,
   classifyHardwareSensor,
   entityOperStatusToAlarm,
+  entityPhysicalClassLabel,
+  entityPhysicalIsInventory,
   entityTypeColumnTrusted,
   normalizeFgAlarmStatus,
   normalizeRestAlarmStatus,
@@ -295,5 +297,46 @@ describe("normalizeRestAlarmStatus", () => {
     expect(normalizeRestAlarmStatus("critical")).toBe("alarm");
     expect(normalizeRestAlarmStatus(null)).toBeNull();
     expect(normalizeRestAlarmStatus("")).toBeNull();
+  });
+});
+
+describe("entityPhysicalClassLabel", () => {
+  it("decodes the RFC 4133 PhysicalClass enum", () => {
+    expect(entityPhysicalClassLabel(6)).toBe("powerSupply");
+    expect(entityPhysicalClassLabel(7)).toBe("fan");
+    expect(entityPhysicalClassLabel(9)).toBe("module");
+    expect(entityPhysicalClassLabel(3)).toBe("chassis");
+  });
+
+  it("degrades unknown codes rather than throwing", () => {
+    expect(entityPhysicalClassLabel(99)).toBe("other");
+    expect(entityPhysicalClassLabel(null)).toBe("unknown");
+  });
+});
+
+describe("entityPhysicalIsInventory", () => {
+  it("trusts the device's own FRU bit", () => {
+    expect(entityPhysicalIsInventory({ entClass: "module", isFru: true })).toBe(true);
+    // Even a class we wouldn't otherwise keep, if the device says it's replaceable.
+    expect(entityPhysicalIsInventory({ entClass: "backplane", isFru: true })).toBe(true);
+  });
+
+  // Plenty of agents leave IsFRU false on modules that plainly are replaceable,
+  // so a module carrying a serial or model is kept regardless of the bit.
+  it("keeps identifiable modules/PSUs/fans when the FRU bit is unset", () => {
+    expect(entityPhysicalIsInventory({ entClass: "module", isFru: false, serialNum: "ABC123" })).toBe(true);
+    expect(entityPhysicalIsInventory({ entClass: "powerSupply", isFru: false, modelName: "PSU-500W" })).toBe(true);
+    expect(entityPhysicalIsInventory({ entClass: "fan", isFru: false, serialNum: "F1" })).toBe(true);
+  });
+
+  // A chassis publishes a row per container, port and sensor — hundreds naming
+  // nothing an operator could replace. Those are what this filter exists to drop.
+  it("drops scaffolding rows", () => {
+    expect(entityPhysicalIsInventory({ entClass: "container", isFru: false })).toBe(false);
+    expect(entityPhysicalIsInventory({ entClass: "port", isFru: false, serialNum: "x" })).toBe(false);
+    expect(entityPhysicalIsInventory({ entClass: "sensor", isFru: false })).toBe(false);
+    // A module with nothing identifying it is scaffolding too.
+    expect(entityPhysicalIsInventory({ entClass: "module", isFru: false })).toBe(false);
+    expect(entityPhysicalIsInventory({ entClass: "module", isFru: false, serialNum: "  " })).toBe(false);
   });
 });

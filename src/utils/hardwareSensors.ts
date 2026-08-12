@@ -304,3 +304,58 @@ export function normalizeRestAlarmStatus(raw: unknown): string | null {
   if (s === "0" || s === "false" || s === "ok" || s === "normal" || s === "none") return "ok";
   return "alarm";
 }
+
+// ─── ENTITY-MIB entPhysicalTable (RFC 4133) ────────────────────────────────
+
+/** `entPhysicalClass` → our stored class string. RFC 4133's PhysicalClass. */
+const ENTITY_PHYSICAL_CLASS: Readonly<Record<number, string>> = {
+  1: "other",
+  2: "unknown",
+  3: "chassis",
+  4: "backplane",
+  5: "container",
+  6: "powerSupply",
+  7: "fan",
+  8: "sensor",
+  9: "module",
+  10: "port",
+  11: "stack",
+  12: "cpu",
+};
+
+export function entityPhysicalClassLabel(raw: number | null | undefined): string {
+  if (raw == null) return "unknown";
+  return ENTITY_PHYSICAL_CLASS[raw] ?? "other";
+}
+
+/**
+ * Whether an entPhysicalTable row is worth storing as inventory.
+ *
+ * A chassis publishes a row for every container, port and sensor it has —
+ * hundreds of rows naming nothing an operator could ever replace or RMA. What
+ * matters is the field-replaceable units: transceivers, power supplies, fan
+ * trays.
+ *
+ * `entPhysicalIsFRU` is the device's own answer and is trusted when true. The
+ * class fallback exists because plenty of agents leave IsFRU false (or omit it)
+ * on modules that plainly are replaceable — a `module`-class row with a serial
+ * number is an SFP whatever the FRU bit says.
+ *
+ * `container` is deliberately excluded even though an empty SFP cage is
+ * arguably inventory: it carries no serial, no model and no vendor, so a row
+ * for it is a row that says nothing.
+ */
+export function entityPhysicalIsInventory(opts: {
+  entClass: string;
+  isFru: boolean;
+  serialNum?: string | null;
+  modelName?: string | null;
+}): boolean {
+  if (opts.isFru) return true;
+  if (opts.entClass === "module" || opts.entClass === "powerSupply" || opts.entClass === "fan") {
+    // Keep only rows that actually identify something — a bare class with no
+    // serial and no model is scaffolding, not a part.
+    return !!(opts.serialNum?.trim() || opts.modelName?.trim());
+  }
+  return false;
+}

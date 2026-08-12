@@ -119,6 +119,7 @@ import {
   syntheticSensorIndex,
 } from "../utils/hardwareSensors.js";
 import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
+import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
@@ -3306,9 +3307,31 @@ export interface WirelessStationSample {
   idleSeconds?:    number | null;
 }
 
+/** One field-replaceable unit from ENTITY-MIB entPhysicalTable. */
+export interface PhysicalEntitySample {
+  entIndex:    number;
+  entClass:    string;
+  descr:       string | null;
+  name:        string | null;
+  hardwareRev: string | null;
+  firmwareRev: string | null;
+  serialNum:   string | null;
+  mfgName:     string | null;
+  modelName:   string | null;
+  isFru:       boolean;
+  /** Display-only correlated interface for a transceiver; never an identity. */
+  ifName:      string | null;
+}
+
 export interface SystemInfoSample {
   interfaces:    InterfaceSample[];
   storage:       StorageSample[];
+  /**
+   * Field-replaceable hardware inventory. `undefined` means the collector
+   * didn't try (non-SNMP transport / fast cadence); `[]` means the device was
+   * queried and reported no FRUs, which the persist layer treats as "wipe".
+   */
+  physicalEntities?: PhysicalEntitySample[];
   ipsecTunnels?: IpsecTunnelSample[];
   /**
    * SD-WAN Performance SLA health-check readings. `undefined` means the
@@ -5263,6 +5286,17 @@ const OID = {
   pethPsePortDetectionStatus:      "1.3.6.1.2.1.105.1.1.1.6",
   pethPsePortPowerClassifications: "1.3.6.1.2.1.105.1.1.1.10",
   entPhysicalDescr:       "1.3.6.1.2.1.47.1.1.1.1.2",
+  // ENTITY-MIB entPhysicalTable inventory columns (RFC 4133). Walked on the
+  // heavy cadence only — a transceiver's serial changes when someone swaps it,
+  // not on a poll interval.
+  entPhysicalClass:       "1.3.6.1.2.1.47.1.1.1.1.5",
+  entPhysicalName:        "1.3.6.1.2.1.47.1.1.1.1.7",
+  entPhysicalHardwareRev: "1.3.6.1.2.1.47.1.1.1.1.8",
+  entPhysicalFirmwareRev: "1.3.6.1.2.1.47.1.1.1.1.9",
+  entPhysicalSerialNum:   "1.3.6.1.2.1.47.1.1.1.1.11",
+  entPhysicalMfgName:     "1.3.6.1.2.1.47.1.1.1.1.12",
+  entPhysicalModelName:   "1.3.6.1.2.1.47.1.1.1.1.13",
+  entPhysicalIsFRU:       "1.3.6.1.2.1.47.1.1.1.1.16",
   entPhySensorType:       "1.3.6.1.2.1.99.1.1.1.1",
   entPhySensorScale:      "1.3.6.1.2.1.99.1.1.1.2",
   entPhySensorPrecision:  "1.3.6.1.2.1.99.1.1.1.3",
@@ -6270,6 +6304,114 @@ function scaleEntitySensor(raw: number, scale: number | null, precision: number 
   return raw * Math.pow(10, sExp) * Math.pow(10, pExp);
 }
 
+/**
+ * Walk ENTITY-MIB entPhysicalTable for field-replaceable hardware — the
+ * transceivers, PSUs and fan trays an operator can actually swap.
+ *
+ * Returns [] when the device publishes no entPhysicalTable at all; the caller
+ * distinguishes that from "queried and found nothing" by whether it called at
+ * all (undefined vs []). Nine columns, all on the heavy cadence only: a serial
+ * number changes when someone pulls a module, not on a poll interval.
+ *
+ * `ifNameByIndex` is passed in (not re-walked) and is used ONLY to hang a
+ * display name on a transceiver, gated on Fortinet for the same reason
+ * annotateSyntheticSensorIfNames is: entPhysicalIndex == ifIndex is a
+ * FortiSwitchOS property, not an RFC 4133 guarantee.
+ */
+const PHYSICAL_ENTITY_ROW_CAP = 500;
+
+async function collectPhysicalEntitiesSnmp(
+  session: any,
+  ifNameByIndex: ReadonlyMap<string, string>,
+  manufacturer?: string | null,
+): Promise<PhysicalEntitySample[]> {
+  const [classes, descrs, names, hwRevs, fwRevs, serials, mfgs, models, isFrus] = await Promise.all([
+    snmpWalk(session, OID.entPhysicalClass).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalDescr).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalName).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalHardwareRev).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalFirmwareRev).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalSerialNum).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalMfgName).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalModelName).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalIsFRU).catch(() => new Map()),
+  ]);
+  if (classes.size === 0) return [];
+
+  const fortinet = !!manufacturer && /fortinet/i.test(manufacturer);
+  const out: PhysicalEntitySample[] = [];
+  let dropped = 0;
+  const str = (m: Map<string, unknown>, idx: string): string | null => {
+    const v = snmpVbToString(m.get(idx)).trim();
+    return v ? v : null;
+  };
+
+  for (const [idx, classRaw] of classes.entries()) {
+    const entIndex = Number(idx);
+    if (!Number.isFinite(entIndex)) continue;
+    const entClass  = entityPhysicalClassLabel(snmpVbToNumber(classRaw));
+    const serialNum = str(serials, idx);
+    const modelName = str(models, idx);
+    // RFC 4133 TruthValue: true(1) / false(2).
+    const isFru     = snmpVbToNumber(isFrus.get(idx)) === 1;
+    if (!entityPhysicalIsInventory({ entClass, isFru, serialNum, modelName })) continue;
+
+    if (out.length >= PHYSICAL_ENTITY_ROW_CAP) { dropped++; continue; }
+    out.push({
+      entIndex,
+      entClass,
+      descr:       str(descrs, idx),
+      name:        str(names, idx),
+      hardwareRev: str(hwRevs, idx),
+      firmwareRev: str(fwRevs, idx),
+      serialNum,
+      mfgName:     str(mfgs, idx),
+      modelName,
+      isFru,
+      // Only meaningful for a transceiver, and only on gear where the index
+      // equivalence holds. Never an identity — a failed IF-MIB walk must not
+      // fork a module's row.
+      ifName: fortinet && entClass === "module" ? (ifNameByIndex.get(idx) ?? null) : null,
+    });
+  }
+  // Loudly, not silently: a truncated inventory that looks complete is worse
+  // than one an operator knows is truncated.
+  if (dropped > 0) {
+    logger.warn({ dropped, cap: PHYSICAL_ENTITY_ROW_CAP }, "entPhysicalTable inventory truncated");
+  }
+  return out;
+}
+
+/**
+ * Full-replace an asset's hardware inventory. Same delete-replace shape as
+ * persistLldpNeighbors / persistMclagPeers: current state, no history.
+ *
+ * `firstSeen` is preserved across scrapes for a module that is still present,
+ * so "this SFP has been in this port since March" survives; a swapped module
+ * (same slot, new serial) correctly resets it.
+ */
+async function persistPhysicalEntities(assetId: string, rows: PhysicalEntitySample[]): Promise<void> {
+  const existing = await prisma.assetPhysicalEntity.findMany({
+    where: { assetId },
+    select: { entIndex: true, serialNum: true, firstSeen: true },
+  });
+  const prior = new Map(existing.map((e) => [e.entIndex, e]));
+  const now = new Date();
+
+  await prisma.$transaction([
+    prisma.assetPhysicalEntity.deleteMany({ where: { assetId } }),
+    ...(rows.length > 0
+      ? [prisma.assetPhysicalEntity.createMany({
+          data: rows.map((r) => {
+            const was = prior.get(r.entIndex);
+            const sameModule = was && (was.serialNum ?? null) === (r.serialNum ?? null);
+            return { assetId, ...r, firstSeen: sameModule ? was!.firstSeen : now, lastSeen: now };
+          }),
+        })]
+      : []),
+  ]);
+}
+
 async function collectSystemInfoSnmp(
   host: string,
   config: Record<string, unknown>,
@@ -6374,6 +6516,7 @@ async function collectSystemInfoSnmp(
     // ifName / ifHC*Octets / ifHighSpeed when present; otherwise fall back
     // to the legacy 32-bit columns.
     const interfaces: InterfaceSample[] = [];
+    let physicalEntities: PhysicalEntitySample[] | undefined;
     const endIfaces = startPhase("systeminfo.snmp.interfaces_walk");
     try {
       const [
@@ -6457,6 +6600,11 @@ async function collectSystemInfoSnmp(
           if (poe) { iface.poeStatus = poe.poeStatus; iface.poeClass = poe.poeClass; }
         }
       }
+
+      // Hardware inventory rides the same walk — heavy cadence only, since a
+      // module's serial changes on a swap, not on a poll.
+      physicalEntities = await collectPhysicalEntitiesSnmp(session, poeIfNames, opts.manufacturer)
+        .catch(() => undefined);
     } catch { /* fall through */ }
     endIfaces({ interfaces: interfaces.length });
 
@@ -6492,6 +6640,7 @@ async function collectSystemInfoSnmp(
     return {
       interfaces,
       storage,
+      physicalEntities,
       lldpNeighbors,
       lldpSource: opts.includeLldp !== false ? "snmp" : undefined,
       wirelessStations,
@@ -6722,6 +6871,10 @@ async function collectFastFilteredSnmp(
       // contract as `collectSystemInfoSnmp` with `includeLldp: false`.
       lldpNeighbors: undefined,
       wirelessStations: undefined,
+      // Inventory likewise omitted here: undefined preserves what the last
+      // heavy pass stored. A module's serial does not change per minute, and
+      // wiping it on every fast tick would cost a delete-replace for nothing.
+      physicalEntities: undefined,
     };
   }, opts.timeoutMs);
 }
@@ -7402,6 +7555,16 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     const endLldp = startPhase("systeminfo.persist.lldp");
     await persistLldpNeighbors(assetId, d.lldpNeighbors, now, d.lldpSource ?? "fortios");
     endLldp({ neighbors: d.lldpNeighbors.length });
+    stopWrite();
+  }
+  // Hardware inventory. Same undefined/[] contract as LLDP: undefined means
+  // the transport can't supply it (FortiOS REST, agent) and stored rows stay;
+  // [] means the device was walked and has no FRUs to report, which wipes.
+  if (Array.isArray(d.physicalEntities)) {
+    const stopWrite = startSampleWriteTimer("asset_physical_entities");
+    const endEnt = startPhase("systeminfo.persist.physical_entities");
+    await persistPhysicalEntities(assetId, d.physicalEntities);
+    endEnt({ entities: d.physicalEntities.length });
     stopWrite();
   }
   // Wireless stations (FortiAP only). Same undefined/[] semantics as LLDP —

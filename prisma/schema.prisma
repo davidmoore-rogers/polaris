@@ -231,16 +231,16 @@ model Reservation {
 }
 
 model Integration {
-  id              String    @id @default(uuid())
-  type            String // e.g. "fortimanager"
-  name            String // Human-readable label
-  config          Json      @default("{}") // Connection settings (host, port, adom, etc.)
-  enabled         Boolean   @default(true)
-  autoDiscover    Boolean   @default(true)
-  pollInterval    Int       @default(4) // Auto-discovery interval in hours (1–24)
-  lastTestAt      DateTime?
-  lastTestOk      Boolean?
-  lastDiscoveryAt DateTime? // Set at the start of each discovery run; used by the scheduler to gate auto-discovery across restarts
+  id                      String    @id @default(uuid())
+  type                    String // e.g. "fortimanager"
+  name                    String // Human-readable label
+  config                  Json      @default("{}") // Connection settings (host, port, adom, etc.)
+  enabled                 Boolean   @default(true)
+  autoDiscover            Boolean   @default(true)
+  pollInterval            Int       @default(4) // Auto-discovery interval in hours (1–24)
+  lastTestAt              DateTime?
+  lastTestOk              Boolean?
+  lastDiscoveryAt         DateTime? // Set at the start of each discovery run; used by the scheduler to gate auto-discovery across restarts
   // Precomputed "By name" checklist sources for the Auto-Monitor cards, refreshed
   // at the end of every successful discovery run (computeAndCacheInterfaceAggregate /
   // computeAndCacheStorageAggregate). Shape: { "<class>": { computedAt, rows: [...] } }
@@ -250,8 +250,8 @@ model Integration {
   // (the GET routes fall back to a live compute in that window).
   interfaceAggregateCache Json? // { [class]: { computedAt: ISO, rows: [{ifName, ifType, deviceCount}] } }
   storageAggregateCache   Json? // { [class]: { computedAt: ISO, rows: [{mountPath, deviceCount}] } }
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 
   subnets               Subnet[]
   discoveredAssets      Asset[] // Assets stamped with this integration's id (back-relation)
@@ -318,29 +318,29 @@ model Credential {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  assets                       Asset[]                @relation("AssetMonitorCred") // default credential back-relation
-  rtAssets                     Asset[]                @relation("AssetRTCred")
-  cpuMemoryAssets              Asset[]                @relation("AssetCpuMemCred")
-  temperatureAssets            Asset[]                @relation("AssetTempCred")
-  interfacesAssets             Asset[]                @relation("AssetInterfacesCred")
-  lldpAssets                   Asset[]                @relation("AssetLldpCred")
-  customWidgetAssets           Asset[]                @relation("AssetCustomWidgetCred")
-  processesAssets              Asset[]                @relation("AssetProcessesCred")
-  eventLogAssets               Asset[]                @relation("AssetEventLogCred")
+  assets                          Asset[]                @relation("AssetMonitorCred") // default credential back-relation
+  rtAssets                        Asset[]                @relation("AssetRTCred")
+  cpuMemoryAssets                 Asset[]                @relation("AssetCpuMemCred")
+  temperatureAssets               Asset[]                @relation("AssetTempCred")
+  interfacesAssets                Asset[]                @relation("AssetInterfacesCred")
+  lldpAssets                      Asset[]                @relation("AssetLldpCred")
+  customWidgetAssets              Asset[]                @relation("AssetCustomWidgetCred")
+  processesAssets                 Asset[]                @relation("AssetProcessesCred")
+  eventLogAssets                  Asset[]                @relation("AssetEventLogCred")
   // Back-relations for per-stream class override credentials
-  classOverrideRTAssets        MonitorClassOverride[] @relation("ClassOverrideRTCred")
-  classOverrideCpuMemAssets    MonitorClassOverride[] @relation("ClassOverrideCpuMemCred")
-  classOverrideTempAssets      MonitorClassOverride[] @relation("ClassOverrideTempCred")
-  classOverrideIfAssets        MonitorClassOverride[] @relation("ClassOverrideIfCred")
-  classOverrideLldpAssets      MonitorClassOverride[] @relation("ClassOverrideLldpCred")
+  classOverrideRTAssets           MonitorClassOverride[] @relation("ClassOverrideRTCred")
+  classOverrideCpuMemAssets       MonitorClassOverride[] @relation("ClassOverrideCpuMemCred")
+  classOverrideTempAssets         MonitorClassOverride[] @relation("ClassOverrideTempCred")
+  classOverrideIfAssets           MonitorClassOverride[] @relation("ClassOverrideIfCred")
+  classOverrideLldpAssets         MonitorClassOverride[] @relation("ClassOverrideLldpCred")
   classOverrideCustomWidgetAssets MonitorClassOverride[] @relation("ClassOverrideCustomWidgetCred")
-  classOverrideProcessesAssets MonitorClassOverride[] @relation("ClassOverrideProcessesCred")
-  classOverrideEventLogAssets  MonitorClassOverride[] @relation("ClassOverrideEventLogCred")
+  classOverrideProcessesAssets    MonitorClassOverride[] @relation("ClassOverrideProcessesCred")
+  classOverrideEventLogAssets     MonitorClassOverride[] @relation("ClassOverrideEventLogCred")
   // Back-relation for the Polaris Agent install credential (one per
   // ManagedAgent row). SetNull on credential delete so removing a
   // credential doesn't block a stuck agent install — operator falls
   // back to DELETE /assets/:id/agent?force=true in that case.
-  managedAgents           ManagedAgent[]         @relation("AgentInstallCredential")
+  managedAgents                   ManagedAgent[]         @relation("AgentInstallCredential")
 
   @@index([type])
   @@map("credentials")
@@ -366,64 +366,64 @@ model Credential {
 // insert. The DB-side index still prevents duplicates within a single
 // integration, which is the common case.
 model MonitorClassOverride {
-  id                        String       @id @default(uuid())
-  integrationId             String? // null = override applies to manual-tier (orphan) assets
-  integration               Integration? @relation(fields: [integrationId], references: [id], onDelete: Cascade)
-  assetType                 String // matches Asset.assetType — "firewall" | "switch" | "access_point" | "server" | "workstation" | "router" | "printer" | "other"
-  intervalSeconds           Int?
-  failureThreshold          Int?
-  probeTimeoutMs            Int?
+  id                            String       @id @default(uuid())
+  integrationId                 String? // null = override applies to manual-tier (orphan) assets
+  integration                   Integration? @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  assetType                     String // matches Asset.assetType — "firewall" | "switch" | "access_point" | "server" | "workstation" | "router" | "printer" | "other"
+  intervalSeconds               Int?
+  failureThreshold              Int?
+  probeTimeoutMs                Int?
   // Per-request timeout (ms) for the CPU+memory collector. 1000..120000;
   // null = inherit from the tier below. Applied to FortiOS REST + SNMP
   // session timeouts in collectCpuMemory.
-  cpuMemoryTimeoutMs        Int?
+  cpuMemoryTimeoutMs            Int?
   // Per-request timeout (ms) for the temperature collector. 1000..120000;
   // null = inherit. Applied to FortiOS REST + SNMP session timeouts in
   // collectTemperature (ENTITY-SENSOR-MIB walk + the FortiAP scalar
   // fallback).
-  temperatureTimeoutMs      Int?
+  temperatureTimeoutMs          Int?
   // Per-request timeout (ms) for the interface / storage / LLDP collector.
   // 1000..120000; null = inherit. Applied to FortiOS REST + SNMP sessions in
   // collectSystemInfo + collectFastFiltered.
-  systemInfoTimeoutMs       Int?
-  cpuMemoryIntervalSeconds  Int?
-  temperatureIntervalSeconds Int?
-  systemInfoIntervalSeconds Int?
+  systemInfoTimeoutMs           Int?
+  cpuMemoryIntervalSeconds      Int?
+  temperatureIntervalSeconds    Int?
+  systemInfoIntervalSeconds     Int?
   // Custom-widget cadence (Slice 7) — drives ManufacturerCustomWidget probes
   // for assets whose manufacturer has at least one widget defined. Default
   // 60s when null at every tier.
-  customWidgetIntervalSeconds Int?
+  customWidgetIntervalSeconds   Int?
   // Custom-widget per-request timeout (ms). null = inherit.
-  customWidgetTimeoutMs       Int?
+  customWidgetTimeoutMs         Int?
   // Cross-transport process / event-log cadences + timeouts. null = inherit.
-  processesIntervalSeconds    Int?
-  eventLogIntervalSeconds     Int?
-  processesTimeoutMs          Int?
-  eventLogTimeoutMs           Int?
+  processesIntervalSeconds      Int?
+  eventLogIntervalSeconds       Int?
+  processesTimeoutMs            Int?
+  eventLogTimeoutMs             Int?
   // ─── Legacy retention columns (single-tier) ─────────────────────────────
   // Phase 1 keeps these alongside the new detail/hourly/daily columns so the
   // resolver + prune layer keep working unchanged until the tier-aware
   // pruning lands. migrateRetentionTiers seeds the corresponding
   // *DetailRetentionDays from these values on first boot. Dropped in a
   // follow-up release once fleet-wide migration is confirmed.
-  sampleRetentionDays       Int?
+  sampleRetentionDays           Int?
   // Single retention setting shared by AssetTelemetrySample (CPU/memory)
   // AND AssetHardwareSensorSample. The stream split only affects polling
   // method / cadence / credential / MIB / timeout — sample retention is
   // table-level, so one knob covers both.
-  telemetryRetentionDays    Int?
-  systemInfoRetentionDays   Int?
+  telemetryRetentionDays        Int?
+  systemInfoRetentionDays       Int?
   // ─── Tiered retention columns (detail / hourly / daily) ─────────────────
   // Three retention windows per stream — detail (raw samples), hourly
   // (sampleRollup hourly aggregates), daily (sampleRollup daily aggregates).
   // null = inherit from the tier below. Defaults at the manual/integration
   // tier are 7 / 30 / 365 (Phase 1 introduces; phases 2+ start consuming).
-  sampleDetailRetentionDays    Int?
-  sampleHourlyRetentionDays    Int?
-  sampleDailyRetentionDays     Int?
-  telemetryDetailRetentionDays Int?
-  telemetryHourlyRetentionDays Int?
-  telemetryDailyRetentionDays  Int?
+  sampleDetailRetentionDays     Int?
+  sampleHourlyRetentionDays     Int?
+  sampleDailyRetentionDays      Int?
+  telemetryDetailRetentionDays  Int?
+  telemetryHourlyRetentionDays  Int?
+  telemetryDailyRetentionDays   Int?
   systemInfoDetailRetentionDays Int?
   systemInfoHourlyRetentionDays Int?
   systemInfoDailyRetentionDays  Int?
@@ -432,43 +432,43 @@ model MonitorClassOverride {
   // "rest_api" | "snmp" | "winrm" | "ssh" | "icmp". The compatibility-aware
   // resolver silently falls through when the chosen method isn't valid for
   // the asset's source — see CLAUDE.md "Polling-method compatibility matrix".
-  responseTimePolling       String?
-  cpuMemoryPolling          String?
-  temperaturePolling        String?
-  interfacesPolling         String?
-  lldpPolling               String?
-  storagePolling            String?
-  customWidgetPolling       String?
+  responseTimePolling           String?
+  cpuMemoryPolling              String?
+  temperaturePolling            String?
+  interfacesPolling             String?
+  lldpPolling                   String?
+  storagePolling                String?
+  customWidgetPolling           String?
   // Cross-transport streams (agent / SNMP / SSH / WinRM / REST). See
   // utils/pollingCompatibility STREAM_METHODS for the per-stream method set.
-  processesPolling          String?
-  eventLogPolling           String?
+  processesPolling              String?
+  eventLogPolling               String?
   // Per-stream credential overrides (FK to Credential, null = inherit)
-  responseTimeCredentialId  String?
-  responseTimeCredential    Credential?  @relation("ClassOverrideRTCred", fields: [responseTimeCredentialId], references: [id], onDelete: SetNull)
-  cpuMemoryCredentialId     String?
-  cpuMemoryCredential       Credential?  @relation("ClassOverrideCpuMemCred", fields: [cpuMemoryCredentialId], references: [id], onDelete: SetNull)
-  temperatureCredentialId   String?
-  temperatureCredential     Credential?  @relation("ClassOverrideTempCred", fields: [temperatureCredentialId], references: [id], onDelete: SetNull)
-  interfacesCredentialId    String?
-  interfacesCredential      Credential?  @relation("ClassOverrideIfCred", fields: [interfacesCredentialId], references: [id], onDelete: SetNull)
-  lldpCredentialId          String?
-  lldpCredential            Credential?  @relation("ClassOverrideLldpCred", fields: [lldpCredentialId], references: [id], onDelete: SetNull)
-  customWidgetCredentialId  String?
-  customWidgetCredential    Credential?  @relation("ClassOverrideCustomWidgetCred", fields: [customWidgetCredentialId], references: [id], onDelete: SetNull)
-  processesCredentialId     String?
-  processesCredential       Credential?  @relation("ClassOverrideProcessesCred", fields: [processesCredentialId], references: [id], onDelete: SetNull)
-  eventLogCredentialId      String?
-  eventLogCredential        Credential?  @relation("ClassOverrideEventLogCred", fields: [eventLogCredentialId], references: [id], onDelete: SetNull)
+  responseTimeCredentialId      String?
+  responseTimeCredential        Credential?  @relation("ClassOverrideRTCred", fields: [responseTimeCredentialId], references: [id], onDelete: SetNull)
+  cpuMemoryCredentialId         String?
+  cpuMemoryCredential           Credential?  @relation("ClassOverrideCpuMemCred", fields: [cpuMemoryCredentialId], references: [id], onDelete: SetNull)
+  temperatureCredentialId       String?
+  temperatureCredential         Credential?  @relation("ClassOverrideTempCred", fields: [temperatureCredentialId], references: [id], onDelete: SetNull)
+  interfacesCredentialId        String?
+  interfacesCredential          Credential?  @relation("ClassOverrideIfCred", fields: [interfacesCredentialId], references: [id], onDelete: SetNull)
+  lldpCredentialId              String?
+  lldpCredential                Credential?  @relation("ClassOverrideLldpCred", fields: [lldpCredentialId], references: [id], onDelete: SetNull)
+  customWidgetCredentialId      String?
+  customWidgetCredential        Credential?  @relation("ClassOverrideCustomWidgetCred", fields: [customWidgetCredentialId], references: [id], onDelete: SetNull)
+  processesCredentialId         String?
+  processesCredential           Credential?  @relation("ClassOverrideProcessesCred", fields: [processesCredentialId], references: [id], onDelete: SetNull)
+  eventLogCredentialId          String?
+  eventLogCredential            Credential?  @relation("ClassOverrideEventLogCred", fields: [eventLogCredentialId], references: [id], onDelete: SetNull)
   // Per-stream MIB overrides (String: "std:<key>" or uploaded MIB UUID or null)
-  responseTimeMibId         String?
-  cpuMemoryMibId            String?
-  temperatureMibId          String?
-  interfacesMibId           String?
-  lldpMibId                 String?
-  processesMibId            String?
-  createdAt                 DateTime     @default(now())
-  updatedAt                 DateTime     @updatedAt
+  responseTimeMibId             String?
+  cpuMemoryMibId                String?
+  temperatureMibId              String?
+  interfacesMibId               String?
+  lldpMibId                     String?
+  processesMibId                String?
+  createdAt                     DateTime     @default(now())
+  updatedAt                     DateTime     @updatedAt
 
   @@unique([integrationId, assetType])
   @@index([assetType])
@@ -525,9 +525,9 @@ enum AssetStatus {
 // See "Asset type registry" in CLAUDE.md.
 
 model Asset {
-  id               String      @id @default(uuid())
-  ipAddress        String? // IPv4 or IPv6
-  ipSource         String? // Where ipAddress was last set from: "manual", "fortimanager", "fortigate", etc.
+  id                    String      @id @default(uuid())
+  ipAddress             String? // IPv4 or IPv6
+  ipSource              String? // Where ipAddress was last set from: "manual", "fortimanager", "fortigate", etc.
   // Operator IP override (pin) — hostnameOverride-style, with one twist:
   // discovery gets a vote. When set, this value IS the effective ipAddress
   // (the assets PUT handler writes both fields, and the Prisma extension in
@@ -541,9 +541,9 @@ model Asset {
   // (the same discovered IP won't re-raise). Cleared by blanking the IP
   // Address field in the edit form — ipAddress then reverts to the
   // discovery-projected value. See src/services/ipOverrideService.ts.
-  ipOverride       String?
-  macAddress       String? // Most recently seen MAC, e.g. "AA:BB:CC:DD:EE:FF"
-  hostname         String?
+  ipOverride            String?
+  macAddress            String? // Most recently seen MAC, e.g. "AA:BB:CC:DD:EE:FF"
+  hostname              String?
   // Operator hostname override (pin) — coordSource-style. When set, this value
   // IS the effective hostname: the assets PUT handler writes both fields, and
   // the Prisma extension in src/db.ts re-asserts it over any later write that
@@ -552,26 +552,26 @@ model Asset {
   // hostname then reverts to the discovery-projected value. Overridden assets
   // are excluded from the duplicate-hostname ghost merge and from hostname
   // projection-drift logging.
-  hostnameOverride String?
-  dnsName          String? // FQDN from PTR lookup, e.g. "server01.corp.local"
-  dnsNameFetchedAt DateTime? // When the last PTR lookup ran (success or failure)
-  dnsNameTtl       Int? // TTL (seconds) from the PTR record; null = unknown (standard mode)
-  assetTag         String?     @unique // Internal tracking tag, e.g. "RGI-00421"
-  serialNumber     String?
-  manufacturer     String?
-  model            String?
-  assetType        String      @default("other") // validated against AssetTypeDef registry at write time
-  status           AssetStatus @default(active)
-  statusChangedAt  DateTime? // When status was last changed
-  statusChangedBy  String? // Who/what changed it: username, integration name, or "system"
-  location         String? // User-set location (overrides learnedLocation)
-  learnedLocation  String? // Auto-discovered from DHCP (FortiGate name)
-  department       String? // Owning department or team
-  assignedTo       String? // Person or team responsible
-  os               String? // Operating system
-  osVersion        String? // OS or firmware version
-  lastSeenSwitch   String? // FortiSwitch name/port, e.g. "FS-248E-01/port15"
-  lastSeenAp       String? // FortiAP name, e.g. "FAP-431F-01"
+  hostnameOverride      String?
+  dnsName               String? // FQDN from PTR lookup, e.g. "server01.corp.local"
+  dnsNameFetchedAt      DateTime? // When the last PTR lookup ran (success or failure)
+  dnsNameTtl            Int? // TTL (seconds) from the PTR record; null = unknown (standard mode)
+  assetTag              String?     @unique // Internal tracking tag, e.g. "RGI-00421"
+  serialNumber          String?
+  manufacturer          String?
+  model                 String?
+  assetType             String      @default("other") // validated against AssetTypeDef registry at write time
+  status                AssetStatus @default(active)
+  statusChangedAt       DateTime? // When status was last changed
+  statusChangedBy       String? // Who/what changed it: username, integration name, or "system"
+  location              String? // User-set location (overrides learnedLocation)
+  learnedLocation       String? // Auto-discovered from DHCP (FortiGate name)
+  department            String? // Owning department or team
+  assignedTo            String? // Person or team responsible
+  os                    String? // Operating system
+  osVersion             String? // OS or firmware version
+  lastSeenSwitch        String? // FortiSwitch name/port, e.g. "FS-248E-01/port15"
+  lastSeenAp            String? // FortiAP name, e.g. "FAP-431F-01"
   // Last time Polaris had direct evidence the device was alive on the
   // network. Written exclusively through bumpLastSeen() in
   // src/utils/assetInvariants.ts (no-regress: only advances, never moves
@@ -582,21 +582,21 @@ model Asset {
   // Directory activity timestamps (Entra lastSyncDateTime, AD
   // lastLogonTimestamp) do NOT write this field — they live in the
   // AssetSource.observed blobs and are surfaced separately in the UI.
-  lastSeen         DateTime? // Most recent verified network-presence evidence
+  lastSeen              DateTime? // Most recent verified network-presence evidence
   // Provenance label for the evidence that produced the current lastSeen
   // value — stamped by bumpLastSeen alongside every advance. Values:
   // "dhcp-lease" | "device-inventory" | "discovery" | "agent" | "probe" |
   // "ping" | "conflict-accept" (open set; UI renders verbatim).
-  lastSeenSource   String?
-  associatedUsers  Json?       @default("[]") // [{user, domain?, lastSeen, source?}] — logged-in / registered users
-  latitude         Float? // Geo coordinate (decimal degrees). Discovery-populated on FortiGate firewalls (from `config system global` / metavars / geocoded sysLocation) OR operator-typed via the asset edit form (any asset type).
-  longitude        Float? // Geo coordinate (decimal degrees)
+  lastSeenSource        String?
+  associatedUsers       Json?       @default("[]") // [{user, domain?, lastSeen, source?}] — logged-in / registered users
+  latitude              Float? // Geo coordinate (decimal degrees). Discovery-populated on FortiGate firewalls (from `config system global` / metavars / geocoded sysLocation) OR operator-typed via the asset edit form (any asset type).
+  longitude             Float? // Geo coordinate (decimal degrees)
   // Provenance of latitude/longitude: "manual" = operator-typed via the asset
   // edit form — discovery must NOT overwrite (syncDhcpSubnets skips the
   // projected coord write, projectionDriftService skips lat/long drift).
   // null = discovery-owned (or unset). Clearing manual coords resets to null
   // so discovery may repopulate on the next cycle.
-  coordSource      String?
+  coordSource           String?
   // Raw SNMP sysLocation (OID 1.3.6.1.2.1.1.6.0) pulled during FMG/standalone
   // FortiGate discovery when `fortigateMonitor.pullSnmpLocation` is enabled
   // on the originating integration. Captured independently of whether
@@ -613,7 +613,7 @@ model Asset {
   // `learnedLocation` (a site/controller label) and `snmpLocation` (raw SNMP
   // sysLocation string). Surfaced as "Address" on the asset details General tab.
   learnedAddress        String?
-  fortinetTopology Json? // { role: "fortigate" | "fortiswitch" | "fortiap", deviceName?, controllerFortigate?, uplinkInterface?, parentSwitch?, parentPort?, parentVlan? } — real connection graph from FMG/FortiGate discovery. deviceName (firewall role) = FMG/dvmdb device name for device-targeted write paths (description sync)
+  fortinetTopology      Json? // { role: "fortigate" | "fortiswitch" | "fortiap", deviceName?, controllerFortigate?, uplinkInterface?, parentSwitch?, parentPort?, parentVlan? } — real connection graph from FMG/FortiGate discovery. deviceName (firewall role) = FMG/dvmdb device name for device-targeted write paths (description sync)
   // Current-state virtualization facts from vCenter discovery (single writer:
   // syncVcenterDevices; fortinetTopology precedent — refreshed in full every
   // discovery cycle). Two role-discriminated shapes:
@@ -628,11 +628,11 @@ model Asset {
   // Usage fields on the vm shape are a discovery-time snapshot; live per-minute
   // figures ride the cpuMemory telemetry stream (polling method "vcenter").
   // hostAssetId is re-resolved every cycle so vMotion staleness self-heals.
-  virtualization   Json?
-  acquiredAt       DateTime? // Acquisition / purchase date
-  warrantyExpiry   DateTime? // Warranty end date
-  purchaseOrder    String? // PO or invoice reference
-  notes            String?     @db.Text
+  virtualization        Json?
+  acquiredAt            DateTime? // Acquisition / purchase date
+  warrantyExpiry        DateTime? // Warranty end date
+  purchaseOrder         String? // PO or invoice reference
+  notes                 String?     @db.Text
   // Operator-owned device description. When the originating integration's
   // `syncDescriptions` toggle is on (FMG / standalone FortiGate), this field
   // is description-synced with the device — POLARIS-PRIMARY: a non-empty
@@ -641,7 +641,7 @@ model Asset {
   // side write target depends on fortinetTopology.role: fortigate →
   // system/global `alias`, fortiswitch → managed-switch `description`,
   // fortiap → wtp `location` (AP Manager's field). See descriptionSyncService.
-  description      String?     @db.VarChar(255)
+  description           String?     @db.VarChar(255)
   // Device-level description sync state:
   //   { status: "synced"|"failed", at: ISO timestamp,
   //     value?: string|null,  // last synced value (FMG-mirror bookkeeping)
@@ -650,9 +650,9 @@ model Asset {
   // polaris keys) appears only on legacy rows from the retired newest-wins
   // engine and resolves on the next reconcile. JSON-blob precedent:
   // quarantineTargets.
-  descriptionSync  Json?
-  tags             String[]    @default([])
-  createdBy        String?
+  descriptionSync       Json?
+  tags                  String[]    @default([])
+  createdBy             String?
 
   // Stamped during discovery so the Monitoring tab can display the
   // originating integration's name and lock it for FMG/FortiGate-discovered
@@ -784,36 +784,36 @@ model Asset {
   // temperature scrapes every five minutes via SNMP, etc. System info = full
   // interface + storage scrape, taken once per ten minutes by default.
   // The per-asset *IntervalSec columns override the global setting when non-null.
-  cpuMemoryIntervalSec  Int?
-  temperatureIntervalSec Int?
-  systemInfoIntervalSec Int?
+  cpuMemoryIntervalSec    Int?
+  temperatureIntervalSec  Int?
+  systemInfoIntervalSec   Int?
   // Phase 2 carve-out: LLDP + Storage run on independent cadences (their own
   // pg-boss queues — polaris-monitor-lldp / polaris-monitor-storage) rather
   // than riding systemInfo. null = inherit from the resolved tier.
-  lldpIntervalSec        Int?
-  storageIntervalSec     Int?
+  lldpIntervalSec         Int?
+  storageIntervalSec      Int?
   // Slice 7 — per-asset custom-widget probe cadence (seconds). null = inherit.
   customWidgetIntervalSec Int?
   // Cross-transport process / event-log cadences (seconds) + request timeouts
   // (ms). null = inherit. For agent assets these mirror the agent loop intervals;
   // for SNMP/SSH/WinRM/REST they bound the agentless poll cadence.
-  processesIntervalSec   Int?
-  eventLogIntervalSec    Int?
-  processesTimeoutMs     Int?
-  eventLogTimeoutMs      Int?
-  lastTelemetryAt       DateTime?
-  lastSystemInfoAt      DateTime?
+  processesIntervalSec    Int?
+  eventLogIntervalSec     Int?
+  processesTimeoutMs      Int?
+  eventLogTimeoutMs       Int?
+  lastTelemetryAt         DateTime?
+  lastSystemInfoAt        DateTime?
   // Management-access summary read during discovery for Fortinet devices:
   // { source, interfaceName, profileName, mgmtIp, protocols: string[],
   //   https, ssh, snmp, checkedAt }. Drives the asset slide-over's Open HTTPS /
   //   Open SSH buttons and the FortiAP "SNMP not enabled in profile" warning.
   // Monitor/discovery-owned (like lastSystemInfoAt), never projected from AssetSource.
-  managementAccess      Json?
+  managementAccess        Json?
   // Per-cadence last-touched stamps for the LLDP + Storage queues. Bumped by
   // runLldpFor / runStorageFor on every successful pass; publisher reads them
   // to decide when the next job is due.
-  lastLldpAt            DateTime?
-  lastStorageAt         DateTime?
+  lastLldpAt              DateTime?
+  lastStorageAt           DateTime?
   // Agentless (ssh/winrm) processes-stream cadence anchors, same model as
   // lastLldpAt/lastStorageAt: lastProcessesAt gates the full inventory pass
   // (processesIntervalSec, default 600s); lastProcessPinsAt gates the 60s
@@ -821,10 +821,10 @@ model Asset {
   // connection rows for mappedProcesses). Agent-mode assets never use these —
   // the agent runs its own loops. Stamped even on failure so a bad credential
   // can't retrigger every heavy tick (AD-lockout / fail2ban exposure).
-  lastProcessesAt       DateTime?
-  lastProcessPinsAt     DateTime?
+  lastProcessesAt         DateTime?
+  lastProcessPinsAt       DateTime?
   // Bumped after every successful collectCustomWidgets pass.
-  lastCustomWidgetAt    DateTime?
+  lastCustomWidgetAt      DateTime?
 
   // ifNames the operator pinned for fast-cadence polling. Each name in this
   // array is also scraped on the response-time interval (default 60s) so that
@@ -929,10 +929,10 @@ model Asset {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  conflicts           Conflict[]
-  ipHistory           AssetIpHistory[]
-  fortigateSightings  AssetFortigateSighting[]
-  interfaceOverrides  AssetInterfaceOverride[]
+  conflicts              Conflict[]
+  ipHistory              AssetIpHistory[]
+  fortigateSightings     AssetFortigateSighting[]
+  interfaceOverrides     AssetInterfaceOverride[]
   // NOTE: the append-only sample/rollup time-series (AssetMonitorSample,
   // *InterfaceSample, the *Hourly/*Daily rollups, AssetCustomWidgetSample, etc.)
   // intentionally have NO relation to Asset and NO foreign key (dropped in
@@ -942,27 +942,28 @@ model Asset {
   // leaves its sample rows orphaned (queried only by assetId, never via the
   // gone Asset) to age out via drop_chunks. They keep `assetId String` + an
   // @@index([assetId, ...]) for query perf. DON'T re-add @relation to them.
-  lldpNeighbors       AssetLldpNeighbor[]      @relation("AssetLldpNeighbors")
-  lldpNeighborMatches AssetLldpNeighbor[]      @relation("AssetLldpNeighborMatch")
+  lldpNeighbors          AssetLldpNeighbor[]      @relation("AssetLldpNeighbors")
+  lldpNeighborMatches    AssetLldpNeighbor[]      @relation("AssetLldpNeighborMatch")
   // Wireless stations connected to this asset (when it's a FortiAP) and
   // back-link for endpoints matched to a station's MAC via the SNMP
   // fapStationTable scrape.
-  wirelessStations         AssetWirelessStation[] @relation("AssetWirelessStationsOnAp")
-  wirelessStationMatches   AssetWirelessStation[] @relation("AssetWirelessStationMatch")
+  wirelessStations       AssetWirelessStation[]   @relation("AssetWirelessStationsOnAp")
+  wirelessStationMatches AssetWirelessStation[]   @relation("AssetWirelessStationMatch")
   // MCLAG ICL peers (when this asset is a FortiSwitch in an MCLAG pair) and
   // the back-link for the switch on the far end of each ICL leg.
-  mclagPeers               AssetMclagPeer[]       @relation("AssetMclagPeers")
-  mclagPeerMatches         AssetMclagPeer[]       @relation("AssetMclagPeerMatch")
-  mibFiles                 MibFile[]              @relation("MibFilesOnAsset")
-  sources             AssetSource[]
-  associatedIpRows    AssetAssociatedIp[]
-  macAddressRows      AssetMacAddress[]
-  dependencyParents   AssetDependencyParent[]  @relation("AssetDependencyChild")
-  dependencyChildren  AssetDependencyParent[]  @relation("AssetDependencyParent")
-  managedAgent        ManagedAgent?
-  maintenanceWindows  AssetMaintenanceWindow[]
-  topologyLayouts     TopologyLayout[]
-  processConnections  AssetProcessConnection[]
+  mclagPeers             AssetMclagPeer[]         @relation("AssetMclagPeers")
+  physicalEntities       AssetPhysicalEntity[]    @relation("AssetPhysicalEntities")
+  mclagPeerMatches       AssetMclagPeer[]         @relation("AssetMclagPeerMatch")
+  mibFiles               MibFile[]                @relation("MibFilesOnAsset")
+  sources                AssetSource[]
+  associatedIpRows       AssetAssociatedIp[]
+  macAddressRows         AssetMacAddress[]
+  dependencyParents      AssetDependencyParent[]  @relation("AssetDependencyChild")
+  dependencyChildren     AssetDependencyParent[]  @relation("AssetDependencyParent")
+  managedAgent           ManagedAgent?
+  maintenanceWindows     AssetMaintenanceWindow[]
+  topologyLayouts        TopologyLayout[]
+  processConnections     AssetProcessConnection[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -1041,28 +1042,28 @@ model AssetTelemetrySample {
 // outOctets are cumulative SNMP/FortiOS counters; subtracting consecutive
 // samples gives throughput for charting.
 model AssetInterfaceSample {
-  id          String   @default(uuid())
-  assetId     String
-  timestamp   DateTime @default(now())
-  ifName      String
-  adminStatus String?
-  operStatus  String?
-  speedBps    BigInt?
-  ipAddress   String?
-  macAddress  String?
-  inOctets    BigInt?
-  outOctets   BigInt?
+  id             String   @default(uuid())
+  assetId        String
+  timestamp      DateTime @default(now())
+  ifName         String
+  adminStatus    String?
+  operStatus     String?
+  speedBps       BigInt?
+  ipAddress      String?
+  macAddress     String?
+  inOctets       BigInt?
+  outOctets      BigInt?
   // Cumulative error counters (IF-MIB ifInErrors / ifOutErrors, FortiOS
   // errors_in / errors_out). Subtract consecutive samples for an error rate.
-  inErrors    BigInt?
-  outErrors   BigInt?
+  inErrors       BigInt?
+  outErrors      BigInt?
   // Interface topology — populated by FortiOS REST path; SNMP sets ifType only.
   // ifType: "physical" | "aggregate" | "vlan" | "loopback" | "tunnel"
   // ifParent: aggregate name for member ports; parent interface name for VLANs
   // vlanId: 802.1Q VLAN ID for vlan-type interfaces
-  ifType      String?
-  ifParent    String?
-  vlanId      Int?
+  ifType         String?
+  ifParent       String?
+  vlanId         Int?
   // Switch-port VLAN config — populated only on managed FortiSwitches via a
   // CMDB call to the parent FortiGate's
   // `/api/v2/cmdb/switch-controller/managed-switch?datasource=1`. nativeVlan
@@ -1070,21 +1071,21 @@ model AssetInterfaceSample {
   // (allowed-vlans minus untagged-vlans), expanded to integer ids. Other
   // asset types and the SNMP-only path on non-Fortinet switches leave both
   // null/empty.
-  nativeVlan   Int?
-  taggedVlans  Int[]   @default([])
+  nativeVlan     Int?
+  taggedVlans    Int[]    @default([])
   // True when the FortiSwitch port has `set allowed-vlans all` — i.e. trunks
   // every VLAN on the switch. Operationally distinct from an access port
   // (taggedVlans=[]) AND from an explicit-list trunk (taggedVlans=[10,20]),
   // so it's a separate flag rather than a sentinel. Detected by reading the
   // CMDB port's `allowed-vlans-all` field (newer FortiOS) and falling back
   // to the string sentinel `"all"` in `allowed-vlans` on older versions.
-  trunksAllVlans Boolean @default(false)
+  trunksAllVlans Boolean  @default(false)
   // Operator-set label that overrides ifName in the UI when present.
   // FortiOS CMDB `alias`; SNMP IF-MIB ifAlias (1.3.6.1.2.1.31.1.1.1.18).
-  alias       String?
+  alias          String?
   // Operator-set free-text comment surfaced on the interface slide-over.
   // FortiOS CMDB `description`; SNMP has no equivalent and leaves this null.
-  description String?
+  description    String?
   // L3 addressing mode of the interface: "static" | "dhcp" | "pppoe".
   // FortiOS CMDB `system/interface.mode`; SNMP / Polaris Agent have no
   // equivalent and leave this null (rendered as "—" in the UI, like the
@@ -1105,14 +1106,14 @@ model AssetInterfaceSample {
   // Both are correlated to ifName by inference (poeIfNameByIndex) because the
   // MIB provides no ifIndex join; unresolvable PoE rows are dropped rather than
   // attached to a best-guess interface.
-  poeStatus   String?
-  poeClass    String?
+  poeStatus      String?
+  poeClass       String?
   // Cadence discriminator for selection-aware retention. "fast" = this row came
   // from the response-time re-walk of an operator-pinned interface
   // (monitoredInterfaces); "slow" = the full system-info scrape. NULL = legacy
   // rows written before this column existed — treated as "slow" everywhere.
   // Pinned/fast rows keep full retention + rollups; slow rows keep 24h, no rollup.
-  cadence     String?
+  cadence        String?
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
@@ -1238,11 +1239,11 @@ model AssetMacAddress {
 // the override and the discovered comment shows through again (the device-side
 // description is NOT deleted on clear). See descriptionSyncService.
 model AssetInterfaceOverride {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   assetId     String
-  asset       Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  asset       Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
   ifName      String
-  description String?  @db.VarChar(255)
+  description String?   @db.VarChar(255)
   updatedBy   String?
   // Description-sync state (null on all four = Polaris-local / never synced).
   // syncStatus: "synced" | "failed" | "conflict". Transport/read errors never
@@ -1255,9 +1256,9 @@ model AssetInterfaceOverride {
   syncStatus  String?
   lastSyncAt  DateTime?
   syncError   String?
-  syncedValue String?  @db.VarChar(255)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  syncedValue String?   @db.VarChar(255)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@unique([assetId, ifName])
   @@index([assetId])
@@ -1399,33 +1400,33 @@ model AssetIpsecTunnelSample {
 // One row per (health-check, member link). latency/jitter/packetLoss are
 // instantaneous gauges (not counters) — averaged, not diffed, in rollups.
 model AssetPerfSlaSample {
-  id          String   @default(uuid())
-  assetId     String
-  timestamp   DateTime @default(now())
+  id                  String   @default(uuid())
+  assetId             String
+  timestamp           DateTime @default(now())
   // Health-check name (the SD-WAN performance-SLA object) + the WAN member
   // interface it probed over (e.g. "wan1", "port2").
-  healthCheck String
-  link        String
+  healthCheck         String
+  link                String
   // SD-WAN zone the member belongs to (from `config system sdwan` members[].zone,
   // e.g. "virtual-wan-link" / "overlay"). Null when the CMDB lookup is unavailable.
-  zone        String?
+  zone                String?
   // "up" = link alive / SLA member reachable; "down" otherwise.
-  state       String
+  state               String
   // Instantaneous gauges from the health-check. Null when the member reported
   // no value (e.g. link down, or FortiOS omitted the field).
-  latencyMs   Float?
-  jitterMs    Float?
-  packetLoss  Float?
+  latencyMs           Float?
+  jitterMs            Float?
+  packetLoss          Float?
   // SLA target thresholds for the parent health-check (from CMDB
   // system/sdwan health-check `sla`). Same value across every member of a
   // health-check. Null when that metric has no configured SLA threshold;
   // the chart draws a dashed threshold line only where set.
-  latencyThresholdMs    Float?
-  jitterThresholdMs     Float?
-  packetLossThreshold   Float?
+  latencyThresholdMs  Float?
+  jitterThresholdMs   Float?
+  packetLossThreshold Float?
   // Cadence discriminator (see AssetIpsecTunnelSample.cadence). Always "fast"
   // for SD-WAN (no pinned-subset concept) so rollups include every row.
-  cadence     String?
+  cadence             String?
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
@@ -1491,30 +1492,30 @@ model AssetSdwanRule {
 // mounting ESXi hosts; the asset-details endpoint joins on that array.
 // No history/time-series — capacity figures are a discovery-time snapshot.
 model VcenterDatastore {
-  id            String      @id @default(uuid())
-  integrationId String
-  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
-  moref         String // vCenter MoRef, e.g. "datastore-123" (unique per vCenter, not across)
-  name          String
-  dsType        String? // VMFS | NFS | NFS41 | vSAN | VVOL | ...
-  capacityBytes BigInt?
-  freeBytes     BigInt?
+  id               String      @id @default(uuid())
+  integrationId    String
+  integration      Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  moref            String // vCenter MoRef, e.g. "datastore-123" (unique per vCenter, not across)
+  name             String
+  dsType           String? // VMFS | NFS | NFS41 | vSAN | VVOL | ...
+  capacityBytes    BigInt?
+  freeBytes        BigInt?
   // Total provisioned across VMs incl. thin overcommit. Nullable — not
   // exposed by the vSphere REST list; populated only when the SOAP
   // datastore-info call yields summary/uncommitted figures.
   provisionedBytes BigInt?
-  accessible    Boolean?
-  hostMorefs    String[] @default([]) // ESXi hosts mounting this datastore
+  accessible       Boolean?
+  hostMorefs       String[]    @default([]) // ESXi hosts mounting this datastore
   // Backing detail from the SOAP datastore-info call (graceful-null when the
   // call fails or the shape is unrecognized):
   //   { vmfs?: [{ diskName, vendor? }], nas?: { remoteHost, remotePath } }
   // diskName is the canonical device id (e.g. "naa.624a9370…") whose NAA
   // prefix identifies the array vendor (vendorFromNaa in vcenterService).
-  backing       Json?
+  backing          Json?
   // Derived display label for the backing storage, e.g. "Pure Storage",
   // "NetApp", "NFS: filer01.corp". Null when backing is unknown.
-  backingLabel  String?
-  updatedAt     DateTime @updatedAt
+  backingLabel     String?
+  updatedAt        DateTime    @updatedAt
 
   @@unique([integrationId, moref])
   @@index([integrationId])
@@ -1529,13 +1530,13 @@ model VcenterDatastore {
 // No FK to Asset — the delete-replace + per-asset queries don't need it, and
 // it matches the AssetSdwanRule convention.
 model AssetProcess {
-  id            String   @id @default(uuid())
+  id            String    @id @default(uuid())
   assetId       String
   // Aggregation key: the program name (e.g. "nginx", "sqlservr"). Pinning in
   // Asset.monitoredProcesses / alertWatchedProcesses is by this name.
   name          String
   // Number of live PIDs sharing this name at scrape time.
-  instanceCount Int      @default(1)
+  instanceCount Int       @default(1)
   // Summed CPU% (0..100×cores possible) + resident memory across instances.
   cpuPct        Float?
   memRssBytes   BigInt?
@@ -1547,8 +1548,8 @@ model AssetProcess {
   // collector could map it. Drives the Processes-tab control buttons (Phase 4).
   serviceUnit   String?
   // True when serviceUnit resolved → start/stop/restart is possible.
-  controllable  Boolean  @default(false)
-  updatedAt     DateTime @updatedAt
+  controllable  Boolean   @default(false)
+  updatedAt     DateTime  @updatedAt
 
   @@unique([assetId, name])
   @@index([assetId])
@@ -1564,7 +1565,7 @@ model AssetProcess {
 // live process still appear. No FK to Asset — matches the AssetProcess
 // convention. Agent-only (agentless SSH/WinRM does not resolve units).
 model AssetService {
-  id           String  @id @default(uuid())
+  id           String   @id @default(uuid())
   assetId      String
   // Aggregation key: the unit name ("truckscale-central.service") or Windows
   // service short name ("W32Time"). Pinning in Asset.monitoredServices /
@@ -1588,7 +1589,7 @@ model AssetService {
   // Current memory of the unit's cgroup (systemd MemoryCurrent); null when unset.
   memBytes     BigInt?
   // True when the unit is start/stop/restartable via the AgentCommand queue.
-  controllable Boolean @default(false)
+  controllable Boolean  @default(false)
   updatedAt    DateTime @updatedAt
 
   @@unique([assetId, unit])
@@ -1621,8 +1622,8 @@ model AssetProcessConnection {
   asset       Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   // AssetProcess.name key — same program-name space as the pin arrays.
   processName String
-  kind        String   // "listen" | "outbound" | "inbound"
-  proto       String   // "tcp" | "udp"
+  kind        String // "listen" | "outbound" | "inbound"
+  proto       String // "tcp" | "udp"
   localAddr   String   @default("")
   localPort   Int      @default(0)
   remoteIp    String   @default("")
@@ -1713,15 +1714,15 @@ model AssetLldpNeighbor {
 // sibling edge and the dependency tree can mark MCLAG siblings definitively
 // (vs. the prior same-controller/same-layer heuristic).
 model AssetMclagPeer {
-  id          String @id @default(uuid())
-  assetId     String
-  asset       Asset  @relation("AssetMclagPeers", fields: [assetId], references: [id], onDelete: Cascade)
-  localPort   String // local physical ICL port, e.g. "port51"
+  id        String @id @default(uuid())
+  assetId   String
+  asset     Asset  @relation("AssetMclagPeers", fields: [assetId], references: [id], onDelete: Cascade)
+  localPort String // local physical ICL port, e.g. "port51"
 
-  iclTrunk    String? // isl-local-trunk-name, e.g. "_FlInK1_ICL0_"
-  peerSn      String  // isl-peer-device-sn — the pairing key
-  peerName    String? // isl-peer-device-name
-  peerPort    String? // isl-peer-port-name (peer's port on the far end)
+  iclTrunk String? // isl-local-trunk-name, e.g. "_FlInK1_ICL0_"
+  peerSn   String // isl-peer-device-sn — the pairing key
+  peerName String? // isl-peer-device-name
+  peerPort String? // isl-peer-port-name (peer's port on the far end)
 
   matchedAssetId String?
   matchedAsset   Asset?  @relation("AssetMclagPeerMatch", fields: [matchedAssetId], references: [id], onDelete: SetNull)
@@ -1734,6 +1735,55 @@ model AssetMclagPeer {
   @@index([peerSn])
   @@index([matchedAssetId])
   @@map("asset_mclag_peers")
+}
+
+// Field-replaceable hardware inventory from ENTITY-MIB (RFC 4133)
+// entPhysicalTable -- transceivers, power supplies and fan trays, with the
+// vendor / model / serial an operator needs to raise an RMA or find the spare.
+//
+// CURRENT-STATE table, full-replaced per scrape by `persistPhysicalEntities`
+// (the AssetLldpNeighbor / AssetMclagPeer delete-replace pattern). Deliberately
+// NOT a hypertable and NOT a retention entity: inventory is not a time series,
+// it changes on a maintenance window rather than a cadence, and "when did this
+// SFP's serial change" is answered by the audit Event, not by 90 days of
+// identical rows. Plain table with a real FK to Asset -- the no-FK rule applies
+// to hypertables only.
+//
+// Scoped to FRUs (entPhysicalIsFRU, else class module/powerSupply/fan) so the
+// container and port scaffolding a chassis publishes -- often hundreds of rows
+// naming nothing replaceable -- stays out.
+//
+// `ifName` is the correlated interface for a transceiver, resolved the same way
+// hardware sensors are (entPhysicalIndex == ifIndex is a FortiSwitchOS property,
+// not an RFC 4133 guarantee, so it is vendor-gated and display-only).
+model AssetPhysicalEntity {
+  id       String @id @default(uuid())
+  assetId  String
+  asset    Asset  @relation("AssetPhysicalEntities", fields: [assetId], references: [id], onDelete: Cascade)
+  // entPhysicalIndex -- stable within a device between reboots, and the join
+  // key back to ENTITY-SENSOR-MIB rows for the same module.
+  entIndex Int
+
+  entClass    String // "module" | "powerSupply" | "fan" | "container" | ...
+  descr       String? @db.Text
+  name        String?
+  hardwareRev String?
+  firmwareRev String?
+  serialNum   String?
+  mfgName     String?
+  modelName   String?
+  isFru       Boolean @default(false)
+  // Display-only correlated interface for a transceiver. Never used as an
+  // identity or join key -- a failed IF-MIB walk must not fork a module's row.
+  ifName      String?
+
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
+
+  @@unique([assetId, entIndex])
+  @@index([assetId])
+  @@index([assetId, entClass])
+  @@map("asset_physical_entities")
 }
 
 // Wireless stations connected to a FortiAP. Populated from SNMP
@@ -1749,10 +1799,10 @@ model AssetMclagPeer {
 // hostname so the asset details view shows which AP last saw the
 // device.
 model AssetWirelessStation {
-  id             String @id @default(uuid())
-  apAssetId      String
-  apAsset        Asset  @relation("AssetWirelessStationsOnAp", fields: [apAssetId], references: [id], onDelete: Cascade)
-  staMacAddr     String  // normalized colon-uppercase (AA:BB:CC:DD:EE:FF)
+  id         String @id @default(uuid())
+  apAssetId  String
+  apAsset    Asset  @relation("AssetWirelessStationsOnAp", fields: [apAssetId], references: [id], onDelete: Cascade)
+  staMacAddr String // normalized colon-uppercase (AA:BB:CC:DD:EE:FF)
 
   staIpAddr      String?
   ssid           String?
@@ -1761,19 +1811,19 @@ model AssetWirelessStation {
   band           String? // "2.4GHz" | "5GHz" | "6GHz", derived from fapRadioTable via radioId
   vlanId         Int?
   bssid          String?
-  signalStrength Int?    // dBm — populated from the controller's FortiOS REST /api/v2/monitor/wifi/client
-  noise          Int?    // dBm — populated from the same REST overlay when present
-  bandwidthTx    Int?    // kbps
-  bandwidthRx    Int?    // kbps
+  signalStrength Int? // dBm — populated from the controller's FortiOS REST /api/v2/monitor/wifi/client
+  noise          Int? // dBm — populated from the same REST overlay when present
+  bandwidthTx    Int? // kbps
+  bandwidthRx    Int? // kbps
   idleSeconds    Int?
 
   matchedAssetId String?
   matchedAsset   Asset?  @relation("AssetWirelessStationMatch", fields: [matchedAssetId], references: [id], onDelete: SetNull)
 
-  source         String  // "snmp" (band) + optional REST overlay (signal/noise)
+  source String // "snmp" (band) + optional REST overlay (signal/noise)
 
-  firstSeen      DateTime @default(now())
-  lastSeen       DateTime @default(now())
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
 
   @@unique([apAssetId, staMacAddr])
   @@index([apAssetId])
@@ -1795,13 +1845,13 @@ model AssetWirelessStation {
 model AssetCustomWidgetSample {
   id        String   @default(uuid())
   assetId   String
-  widgetId  String   // stable UUID from ManufacturerCustomWidget; NOT an FK so
-                     // a widget delete doesn't cascade-blow historical samples
-                     // (the Custom MIB tab still shows the last-known values
-                     // until retention prunes them out).
+  widgetId  String // stable UUID from ManufacturerCustomWidget; NOT an FK so
+  // a widget delete doesn't cascade-blow historical samples
+  // (the Custom MIB tab still shows the last-known values
+  // until retention prunes them out).
   timestamp DateTime @default(now())
-  kind      String   // "scalar" | "table"
-  value     Json     // number for scalar; row array for table
+  kind      String // "scalar" | "table"
+  value     Json // number for scalar; row array for table
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
@@ -1832,8 +1882,8 @@ model AssetStateSample {
   id        String   @default(uuid())
   assetId   String
   timestamp DateTime @default(now())
-  probeId   String   // ManufacturerCustomWidget.id; NOT an FK, same rationale as
-                     // AssetCustomWidgetSample.widgetId
+  probeId   String // ManufacturerCustomWidget.id; NOT an FK, same rationale as
+  // AssetCustomWidgetSample.widgetId
   // OID index suffix the row came from ("" for a scalar probe). The STABLE
   // identity — it's what the engine keys firing state on, so a row keeps its
   // alert across a label change.
@@ -1841,8 +1891,8 @@ model AssetStateSample {
   // Resolved display name (from the probe's labelSymbol walk), falling back to
   // rowKey. Snapshotted per sample so an alert can name the row.
   rowLabel  String
-  value     Int      // 0 | 1
-  rawValue  String?  // what the device actually returned, for the asset tab
+  value     Int // 0 | 1
+  rawValue  String? // what the device actually returned, for the asset tab
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
@@ -2084,44 +2134,44 @@ model AssetHardwareSensorSampleDaily {
 }
 
 model AssetInterfaceSampleHourly {
-  id                  String   @default(uuid())
-  assetId             String
-  bucketStart         DateTime
-  ifName              String
-  sampleCount         Int
+  id                 String   @default(uuid())
+  assetId            String
+  bucketStart        DateTime
+  ifName             String
+  sampleCount        Int
   // Counter endpoints — rate computed at query time as
   // (last - first) / (lastBucketSampleAt - bucketStart in seconds).
   // Negative results dropped as counter resets.
-  firstInOctets       BigInt?
-  lastInOctets        BigInt?
-  firstOutOctets      BigInt?
-  lastOutOctets       BigInt?
-  firstInErrors       BigInt?
-  lastInErrors        BigInt?
-  firstOutErrors      BigInt?
-  lastOutErrors       BigInt?
-  maxSpeedBps         BigInt?
+  firstInOctets      BigInt?
+  lastInOctets       BigInt?
+  firstOutOctets     BigInt?
+  lastOutOctets      BigInt?
+  firstInErrors      BigInt?
+  lastInErrors       BigInt?
+  firstOutErrors     BigInt?
+  lastOutErrors      BigInt?
+  maxSpeedBps        BigInt?
   // last-seen descriptors (most-recent value within the bucket wins; these
   // are stable enough across one bucket that avg doesn't add value).
-  lastAdminStatus     String?
-  lastOperStatus      String?
-  lastIpAddress       String?
-  lastMacAddress      String?
-  lastAlias           String?
-  lastDescription     String?
-  lastIfType          String?
-  lastIfParent        String?
-  lastVlanId          Int?
+  lastAdminStatus    String?
+  lastOperStatus     String?
+  lastIpAddress      String?
+  lastMacAddress     String?
+  lastAlias          String?
+  lastDescription    String?
+  lastIfType         String?
+  lastIfParent       String?
+  lastVlanId         Int?
   // PoE descriptors — most-recent value within the bucket wins, matching
   // lastAdminStatus/lastOperStatus. Deliberately last-value rather than an
   // aggregate: averaging an enum is meaningless, and "what state did this
   // port end the hour in" is the question a rollup should answer.
-  lastPoeStatus       String?
-  lastPoeClass        String?
+  lastPoeStatus      String?
+  lastPoeClass       String?
   // Wall-clock of the actual last sample inside the bucket — used as the
   // counter-rate denominator so rate is correct for partial buckets at the
   // leading edge of the time series.
-  lastBucketSampleAt  DateTime
+  lastBucketSampleAt DateTime
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId, ifName])
@@ -2131,32 +2181,32 @@ model AssetInterfaceSampleHourly {
 }
 
 model AssetInterfaceSampleDaily {
-  id                  String   @default(uuid())
-  assetId             String
-  bucketStart         DateTime
-  ifName              String
-  sampleCount         Int
-  firstInOctets       BigInt?
-  lastInOctets        BigInt?
-  firstOutOctets      BigInt?
-  lastOutOctets       BigInt?
-  firstInErrors       BigInt?
-  lastInErrors        BigInt?
-  firstOutErrors      BigInt?
-  lastOutErrors       BigInt?
-  maxSpeedBps         BigInt?
-  lastAdminStatus     String?
-  lastOperStatus      String?
-  lastIpAddress       String?
-  lastMacAddress      String?
-  lastAlias           String?
-  lastDescription     String?
-  lastIfType          String?
-  lastIfParent        String?
-  lastVlanId          Int?
-  lastPoeStatus       String?
-  lastPoeClass        String?
-  lastBucketSampleAt  DateTime
+  id                 String   @default(uuid())
+  assetId            String
+  bucketStart        DateTime
+  ifName             String
+  sampleCount        Int
+  firstInOctets      BigInt?
+  lastInOctets       BigInt?
+  firstOutOctets     BigInt?
+  lastOutOctets      BigInt?
+  firstInErrors      BigInt?
+  lastInErrors       BigInt?
+  firstOutErrors     BigInt?
+  lastOutErrors      BigInt?
+  maxSpeedBps        BigInt?
+  lastAdminStatus    String?
+  lastOperStatus     String?
+  lastIpAddress      String?
+  lastMacAddress     String?
+  lastAlias          String?
+  lastDescription    String?
+  lastIfType         String?
+  lastIfParent       String?
+  lastVlanId         Int?
+  lastPoeStatus      String?
+  lastPoeClass       String?
+  lastBucketSampleAt DateTime
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId, ifName])
@@ -2300,25 +2350,25 @@ model AssetIpsecTunnelSampleDaily {
 }
 
 model AssetPerfSlaSampleHourly {
-  id             String   @default(uuid())
-  assetId        String
-  bucketStart    DateTime
-  healthCheck    String
-  link           String
-  sampleCount    Int
+  id                 String   @default(uuid())
+  assetId            String
+  bucketStart        DateTime
+  healthCheck        String
+  link               String
+  sampleCount        Int
   // Per-state sample counts across the bucket (link flap visibility).
-  stateUpCount   Int      @default(0)
-  stateDownCount Int      @default(0)
+  stateUpCount       Int      @default(0)
+  stateDownCount     Int      @default(0)
   // Gauge aggregates over the bucket (averaged, not counter-diffed).
-  avgLatencyMs   Float?
-  minLatencyMs   Float?
-  maxLatencyMs   Float?
-  avgJitterMs    Float?
-  minJitterMs    Float?
-  maxJitterMs    Float?
-  avgPacketLoss  Float?
-  minPacketLoss  Float?
-  maxPacketLoss  Float?
+  avgLatencyMs       Float?
+  minLatencyMs       Float?
+  maxLatencyMs       Float?
+  avgJitterMs        Float?
+  minJitterMs        Float?
+  maxJitterMs        Float?
+  avgPacketLoss      Float?
+  minPacketLoss      Float?
+  maxPacketLoss      Float?
   lastBucketSampleAt DateTime
 
   @@id([id, bucketStart])
@@ -2329,23 +2379,23 @@ model AssetPerfSlaSampleHourly {
 }
 
 model AssetPerfSlaSampleDaily {
-  id             String   @default(uuid())
-  assetId        String
-  bucketStart    DateTime
-  healthCheck    String
-  link           String
-  sampleCount    Int
-  stateUpCount   Int      @default(0)
-  stateDownCount Int      @default(0)
-  avgLatencyMs   Float?
-  minLatencyMs   Float?
-  maxLatencyMs   Float?
-  avgJitterMs    Float?
-  minJitterMs    Float?
-  maxJitterMs    Float?
-  avgPacketLoss  Float?
-  minPacketLoss  Float?
-  maxPacketLoss  Float?
+  id                 String   @default(uuid())
+  assetId            String
+  bucketStart        DateTime
+  healthCheck        String
+  link               String
+  sampleCount        Int
+  stateUpCount       Int      @default(0)
+  stateDownCount     Int      @default(0)
+  avgLatencyMs       Float?
+  minLatencyMs       Float?
+  maxLatencyMs       Float?
+  avgJitterMs        Float?
+  minJitterMs        Float?
+  maxJitterMs        Float?
+  avgPacketLoss      Float?
+  minPacketLoss      Float?
+  maxPacketLoss      Float?
   lastBucketSampleAt DateTime
 
   @@id([id, bucketStart])
@@ -2412,7 +2462,7 @@ model User {
   // Flipped true the first time the user actually logs in (lastLogin transitions
   // null → set). Drives the sidebar "new user — review role" notification for
   // admins; cleared globally by Dismiss.
-  needsRoleReview Boolean   @default(false) @map("needs_role_review")
+  needsRoleReview Boolean @default(false) @map("needs_role_review")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2585,7 +2635,7 @@ model ApplicationMapLayout {
 model AssetTypeDef {
   id          String   @id @default(uuid())
   name        String   @unique // machine value: lowercase, alphanumeric + dash/underscore, 2-32 chars
-  label       String   // human-facing display label, e.g. "Access Point"
+  label       String // human-facing display label, e.g. "Access Point"
   description String?
   isBuiltIn   Boolean  @default(false) @map("is_built_in")
   isProtected Boolean  @default(false) @map("is_protected") // blocks rename/delete; true for all 8 seeds
@@ -2749,9 +2799,9 @@ model MibFile {
   uploadedBy   String?
   uploadedAt   DateTime @default(now())
 
-  profileMetricDefaults   ManufacturerProfileMetric[]         @relation("ManufacturerProfileMetricDefaultMib")
-  profileMetricOverrides  ManufacturerProfileMetricOverride[] @relation("ManufacturerProfileMetricOverrideMib")
-  customWidgets           ManufacturerCustomWidget[]          @relation("ManufacturerCustomWidgetMib")
+  profileMetricDefaults  ManufacturerProfileMetric[]         @relation("ManufacturerProfileMetricDefaultMib")
+  profileMetricOverrides ManufacturerProfileMetricOverride[] @relation("ManufacturerProfileMetricOverrideMib")
+  customWidgets          ManufacturerCustomWidget[]          @relation("ManufacturerCustomWidgetMib")
 
   @@unique([manufacturer, model, moduleName])
   @@index([manufacturer, model])
@@ -2796,13 +2846,13 @@ model ManufacturerProfile {
 // and walk-the-subtree. `defaultTransform` is the optional value-transform
 // applied after the SNMP value lands (Celsius↔Fahrenheit, bytes→MB, etc.).
 model ManufacturerProfileMetric {
-  id               String   @id @default(uuid())
+  id               String              @id @default(uuid())
   profileId        String
   profile          ManufacturerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
-  metricKey        String   // "cpu" | "memory" | "temperature" | "interfaces" | "lldp" | "storage" | "wirelessStations"
+  metricKey        String // "cpu" | "memory" | "temperature" | "interfaces" | "lldp" | "storage" | "wirelessStations"
   defaultSymbol    String?
   defaultMibId     String?
-  defaultMib       MibFile? @relation("ManufacturerProfileMetricDefaultMib", fields: [defaultMibId], references: [id], onDelete: SetNull)
+  defaultMib       MibFile?            @relation("ManufacturerProfileMetricDefaultMib", fields: [defaultMibId], references: [id], onDelete: SetNull)
   // Operator-pinned standard MIB key (e.g. "std:lldp", "std:host-resources").
   // Mutually exclusive with defaultMibId in the UI — picking a standard MIB
   // sets this and clears defaultMibId, and vice versa. Display-only at probe
@@ -2810,7 +2860,7 @@ model ManufacturerProfileMetric {
   // Lets the Manufacturer Profile table show a meaningful MIB label for
   // metrics whose symbol comes from a built-in seed instead of "seed".
   defaultMibStdKey String?
-  defaultType      String   @default("scalar") // "scalar" | "double_scalar" | "table"
+  defaultType      String              @default("scalar") // "scalar" | "double_scalar" | "table"
   // Unary transforms (TransformKind, e.g. celsius_to_fahrenheit, bytes_to_gb)
   // when defaultType="scalar"; binary combiners (CombinerKind, e.g.
   // a_over_b_as_percent) when defaultType="double_scalar"; null on
@@ -2841,23 +2891,23 @@ model ManufacturerProfileMetric {
 // `Asset.model` is the effective symbol/mib/type/transform for that asset's
 // SNMP walk. No matches = the parent metric row's default* is used.
 model ManufacturerProfileMetricOverride {
-  id           String   @id @default(uuid())
+  id           String                    @id @default(uuid())
   metricRowId  String
   metricRow    ManufacturerProfileMetric @relation(fields: [metricRowId], references: [id], onDelete: Cascade)
-  modelPattern String   // regex tested against Asset.model
+  modelPattern String // regex tested against Asset.model
   symbol       String
   mibId        String?
-  mib          MibFile? @relation("ManufacturerProfileMetricOverrideMib", fields: [mibId], references: [id], onDelete: SetNull)
+  mib          MibFile?                  @relation("ManufacturerProfileMetricOverrideMib", fields: [mibId], references: [id], onDelete: SetNull)
   // Same display-only standard-MIB hint as the parent metric row. See
   // ManufacturerProfileMetric.defaultMibStdKey.
   mibStdKey    String?
-  type         String   @default("scalar") // "scalar" | "double_scalar" | "table"
-  transform    String?  // TransformKind on scalar; CombinerKind on double_scalar; null on table
+  type         String                    @default("scalar") // "scalar" | "double_scalar" | "table"
+  transform    String? // TransformKind on scalar; CombinerKind on double_scalar; null on table
   // Second OID for the double_scalar shape — mirrors the parent metric row's
   // defaultSymbolB. The combiner in `transform` is applied as
   // f(symbol, symbolB) at probe time. Null on scalar / table.
   symbolB      String?
-  order        Int      @default(0)
+  order        Int                       @default(0)
   // DEPRECATED — see ManufacturerProfileMetric.composition for the rationale
   // and removal plan. New writes must NOT populate this column.
   composition  Json?
@@ -2876,19 +2926,19 @@ model ManufacturerProfileMetricOverride {
 // type-specific blob (gauge min/max + thresholds, line aggregate/unit,
 // table column list / decode rules).
 model ManufacturerCustomWidget {
-  id             String   @id @default(uuid())
+  id             String              @id @default(uuid())
   profileId      String
   profile        ManufacturerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
-  name           String   // operator-set label, e.g. "Connected Wireless Clients"
+  name           String // operator-set label, e.g. "Connected Wireless Clients"
   symbol         String
   mibId          String
-  mib            MibFile  @relation("ManufacturerCustomWidgetMib", fields: [mibId], references: [id])
-  type           String   @default("scalar") // "scalar" | "table" (auto-detected; operator can override)
-  widgetType     String   // "gauge" | "line" | "table" | "state"
+  mib            MibFile             @relation("ManufacturerCustomWidgetMib", fields: [mibId], references: [id])
+  type           String              @default("scalar") // "scalar" | "table" (auto-detected; operator can override)
+  widgetType     String // "gauge" | "line" | "table" | "state"
   transform      String?
-  displayOptions Json     @default("{}")
-  order          Int      @default(0)
-  modelPattern   String?  // optional per-model gating
+  displayOptions Json                @default("{}")
+  order          Int                 @default(0)
+  modelPattern   String? // optional per-model gating
   // ── State probes (widgetType = "state") ───────────────────────────────────
   // A status-shaped OID (alarm bit, PSU present, fan-tray OK) rather than a
   // gauge. `stateMap` declares how a raw reading becomes true/false and what to
@@ -2905,8 +2955,8 @@ model ManufacturerCustomWidget {
   // Alarm". Ignored on scalar probes.
   labelSymbol    String?
   createdBy      String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 
   @@index([profileId, order])
   @@index([mibId])
@@ -2935,8 +2985,8 @@ model Conflict {
   proposedSourceType String? // Required for reservations, null for assets
 
   // Asset-conflict proposed values
-  proposedDeviceId    String? // Entra deviceId — used to de-dupe conflicts across discovery runs
-  proposedAssetFields Json? // Full Entra/Intune snapshot: hostname, serial, mac, model, manufacturer, os, osVersion, assignedTo, chassisType, complianceState, trustType
+  proposedDeviceId      String? // Entra deviceId — used to de-dupe conflicts across discovery runs
+  proposedAssetFields   Json? // Full Entra/Intune snapshot: hostname, serial, mac, model, manufacturer, os, osVersion, assignedTo, chassisType, complianceState, trustType
   // Snapshot of the existing (collision-target) asset captured when the
   // conflict was raised, so the resolved card shows what the asset looked
   // like at conflict time — not the post-merge live row. Refreshed on each
@@ -3212,9 +3262,9 @@ model ManagedAgent {
   assetId String @unique
   asset   Asset  @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
-  osPlatform   String // "linux" | "darwin" | "windows"
-  arch         String // "amd64" | "arm64"
-  agentVersion String? // semver reported on enroll; null until first enroll
+  osPlatform     String // "linux" | "darwin" | "windows"
+  arch           String // "amd64" | "arm64"
+  agentVersion   String? // semver reported on enroll; null until first enroll
   // Effective-capability bitmask the agent process actually holds, as the raw
   // CapEff hex from its /proc/self/status, reported on heartbeat (agent
   // ≥0.17.1, Linux only — null for Windows/macOS agents and pre-0.17.1
@@ -3225,8 +3275,8 @@ model ManagedAgent {
   // SYS_PTRACE-only mask means the unit predates the DAC fix and the agent
   // collects no Application Map connections until reinstalled.
   reportedCapEff String?
-  installedBy  String // username of operator who clicked Install
-  installedAt  DateTime @default(now())
+  installedBy    String // username of operator who clicked Install
+  installedAt    DateTime @default(now())
 
   // Credential used at install time. Stored so the default DELETE path
   // (remote uninstall via the same SSH/WinRM creds) doesn't have to ask
@@ -3324,22 +3374,22 @@ model ManagedAgent {
 // /agents/command-result). Operator-initiated only — the agent never self-acts.
 // Every transition is audited (asset.process.<action>.requested / .result).
 model AgentCommand {
-  id             String   @id @default(uuid())
+  id             String    @id @default(uuid())
   assetId        String
   managedAgentId String
-  action         String   // "stop" | "start" | "restart" | "run_script"
-  target         String   // the resolved service/unit name to act on (script name for run_script)
+  action         String // "stop" | "start" | "restart" | "run_script"
+  target         String // the resolved service/unit name to act on (script name for run_script)
   // run_script payload: { runId, interpreter, body, sha256, args, timeoutSec }.
   // Body ships inline (≤64KB, bounded by the registry) with a sha256 the
   // agent VERIFIES before executing. NULL for process-control commands.
   payload        Json?
-  status         String   @default("pending") // pending | sent | succeeded | failed
-  requestedBy    String?  // operator username
-  requestedAt    DateTime @default(now())
+  status         String    @default("pending") // pending | sent | succeeded | failed
+  requestedBy    String? // operator username
+  requestedAt    DateTime  @default(now())
   sentAt         DateTime?
   completedAt    DateTime?
-  error          String?  // failure detail reported by the agent
-  resultState    String?  // post-action service state the agent observed
+  error          String? // failure detail reported by the agent
+  resultState    String? // post-action service state the agent observed
 
   @@index([managedAgentId, status])
   @@index([assetId])
@@ -3353,15 +3403,15 @@ model AgentCommand {
 // triggering asset. Creation and every body change stamp a warning Event with
 // the old/new sha256. A human must review scripts before production use.
 model AutomationScript {
-  id          String  @id @default(uuid())
-  name        String  @unique
-  description String? @db.Text
-  interpreter String  // "bash" | "sh" | "powershell" | "cmd" | "python3"
-  body        String  @db.Text // ≤ 64 KB, validated at the API layer
-  runTarget   String  @default("server") // "server" | "agent" | "either"
-  timeoutSec  Int     @default(60) // default; a script action may override (≤600)
-  sha256      String  // hex digest of body, recomputed on every save (agents verify)
-  enabled     Boolean @default(true)
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?  @db.Text
+  interpreter String // "bash" | "sh" | "powershell" | "cmd" | "python3"
+  body        String   @db.Text // ≤ 64 KB, validated at the API layer
+  runTarget   String   @default("server") // "server" | "agent" | "either"
+  timeoutSec  Int      @default(60) // default; a script action may override (≤600)
+  sha256      String // hex digest of body, recomputed on every save (agents verify)
+  enabled     Boolean  @default(true)
   createdBy   String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -3388,14 +3438,14 @@ model AutomationScriptRun {
   assetId        String? // agent runs: the triggering asset
   runOn          String // "server" | "agent"
   agentCommandId String? // agent runs: the AgentCommand carrying the payload
-  args           String? @db.Text // rendered argsTemplate snapshot
+  args           String?           @db.Text // rendered argsTemplate snapshot
   timeoutSec     Int
-  status         String  @default("pending") // pending | running | succeeded | failed | timeout
+  status         String            @default("pending") // pending | running | succeeded | failed | timeout
   exitCode       Int?
-  stdout         String? @db.Text // capped at 64 KB
-  stderr         String? @db.Text // capped at 64 KB
+  stdout         String?           @db.Text // capped at 64 KB
+  stderr         String?           @db.Text // capped at 64 KB
   requestedBy    String? // "system:automation" | operator username (test runs)
-  requestedAt    DateTime  @default(now())
+  requestedAt    DateTime          @default(now())
   startedAt      DateTime?
   completedAt    DateTime?
 
@@ -3446,23 +3496,23 @@ model GeocodeCache {
 // without a migration. Delivery `channels` defaults to in-app only; SMTP /
 // OAuth / browser push land in a later change.
 model NotificationRule {
-  id              String  @id @default(uuid())
-  name            String
-  description     String? @db.Text
-  enabled         Boolean @default(true)
-  severity        String  @default("warning") // info | warning | error
-  trigger         Json // discriminated union — see notificationRuleService
-  scope           Json   @default("{}") // { allAssets?, assetTypes?, tags?, assetIds?, integrationIds?, manufacturers?, models?, subnetCidrs?, condition? (nested AND/OR rule tree — see notificationTypes.scopeConditionSchema) }
-  clearBehavior   String  @default("manual") // manual | auto | timed
-  clearAfterSec   Int? // for clearBehavior=timed
-  cooldownSec     Int? // suppress re-fire window (re-notify)
-  messageTemplate String? @db.Text // tokens: {asset} {metric} {value} {threshold}
-  channels        String[] @default(["in_app"])
+  id               String   @id @default(uuid())
+  name             String
+  description      String?  @db.Text
+  enabled          Boolean  @default(true)
+  severity         String   @default("warning") // info | warning | error
+  trigger          Json // discriminated union — see notificationRuleService
+  scope            Json     @default("{}") // { allAssets?, assetTypes?, tags?, assetIds?, integrationIds?, manufacturers?, models?, subnetCidrs?, condition? (nested AND/OR rule tree — see notificationTypes.scopeConditionSchema) }
+  clearBehavior    String   @default("manual") // manual | auto | timed
+  clearAfterSec    Int? // for clearBehavior=timed
+  cooldownSec      Int? // suppress re-fire window (re-notify)
+  messageTemplate  String?  @db.Text // tokens: {asset} {metric} {value} {threshold}
+  channels         String[] @default(["in_app"])
   // Delivery targets — array of { channel, recipientTags?, addresses?,
   // webhookUrl?, webhookKind? }. In-app delivery stays implicit (every fire
   // writes a Notification); `targets` drives outbound email/webhook/web_push.
   // Validated by notificationRuleService; expanded by notificationRecipientService.
-  targets         Json    @default("[]")
+  targets          Json     @default("[]")
   // Rule-level outbound-email composition: { subjectTemplate?, bodyTextTemplate?,
   // bodyHtmlTemplate?, cc?: {recipientUserIds?, addresses?}, bcc?: {...} }.
   // NULL = default subject/body + per-address fan-out (pre-feature behavior).
@@ -3473,7 +3523,7 @@ model NotificationRule {
   // channelId, to, cc?, bcc?, subjectTemplate?, bodyTextTemplate?,
   // bodyHtmlTemplate?, repeatEveryMin?, maxRepeats? }] }. Email-only (tier
   // channels must be smtp/oauth_m365). Swept by the escalateNotifications job.
-  escalation      Json?
+  escalation       Json?
   // ── Automation rule-shape v2 (2026-07) ─────────────────────────────────
   // reset: { mode: "manual"|"auto"|"timed", clearThreshold?, sustainSec?,
   // afterSec? } — supersedes clearBehavior/clearAfterSec (auto gains
@@ -3484,8 +3534,8 @@ model NotificationRule {
   // persists the converted shape. The legacy columns above are retained as a
   // lossless mirror (rewritten on every save from the v2 shape where
   // representable) so a pre-wizard UI and pre-upgrade backups stay coherent.
-  reset           Json?
-  actions         Json?
+  reset            Json?
+  actions          Json?
   // ── Severity bands (value-driven escalation, 2026-07) ──────────────────────
   // Optional higher tiers stacked on the base trigger threshold/severity (tier
   // 0 = severity + trigger.threshold + actions/escalation above). Each band:
@@ -3493,14 +3543,14 @@ model NotificationRule {
   // metric climbs the alert's severity escalates and re-notifies with that
   // band's actions. NULL = single-severity (pre-band) behavior. Numeric
   // (asset_metric/host_metric) triggers only. See notificationTypes.severityBandSchema.
-  severityBands   Json?
+  severityBands    Json?
   // Per-automation notify policy for band transitions: { onIncrease, onDecrease,
   // onResolved, resolvedMode: "reuse"|"dedicated", resolvedActions? }. NULL =
   // defaults (increase + resolved via reuse). See notificationTypes.bandNotifySchema.
-  bandNotify      Json?
-  createdBy       String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  bandNotify       Json?
+  createdBy        String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   notifications Notification[]
   states        NotificationRuleState[]
@@ -3581,24 +3631,24 @@ model NotificationChannel {
 }
 
 model NotificationDelivery {
-  id             String       @id @default(uuid())
+  id             String               @id @default(uuid())
   notificationId String
-  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  notification   Notification         @relation(fields: [notificationId], references: [id], onDelete: Cascade)
   // The configured channel this delivery goes through. Nullable + SetNull so a
   // channel can be deleted without orphaning history; a NULL channelId on a
   // pending row is treated as a permanent failure by the drain (channel gone).
   channelId      String?
   channel        NotificationChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
   transport      String // email | webhook | web_push | pushbullet (dispatch routing)
-  target         String       @db.Text // email address / push endpoint; "" for fixed-destination channels (URL/token live on the channel)
+  target         String               @db.Text // email address / push endpoint; "" for fixed-destination channels (URL/token live on the channel)
   // Per-recipient payload snapshot: webhook → { kind }, web_push →
   // { p256dh, auth }. Destination secrets stay on the channel, NOT here.
   meta           Json?
-  status         String       @default("pending") // pending | sent | failed
-  attempts       Int          @default(0)
+  status         String               @default("pending") // pending | sent | failed
+  attempts       Int                  @default(0)
   lastAttemptAt  DateTime?
-  error          String?      @db.Text
-  createdAt      DateTime     @default(now())
+  error          String?              @db.Text
+  createdAt      DateTime             @default(now())
 
   @@index([status])
   @@index([notificationId])
@@ -3718,22 +3768,22 @@ model Contact {
 // server-local wall-clock). Reconciled by the maintenanceScheduler job every
 // 30s and inline on every CRUD mutation.
 model MaintenanceSchedule {
-  id        String   @id @default(uuid())
-  name      String
-  enabled   Boolean  @default(true)
-  criteria  Json? // tagAssignmentService criteria shape; null = explicit assets only
-  assetIds  String[] @default([]) // explicit targets, unioned with criteria matches
-  schedule  Json // recurrence shape (see maintenanceRecurrence.ts)
+  id               String   @id @default(uuid())
+  name             String
+  enabled          Boolean  @default(true)
+  criteria         Json? // tagAssignmentService criteria shape; null = explicit assets only
+  assetIds         String[] @default([]) // explicit targets, unioned with criteria matches
+  schedule         Json // recurrence shape (see maintenanceRecurrence.ts)
   // Whether an in-window asset counts as DOWN for child dependency
   // suppression (evaluateSuppression). true (default) = dependents behind it
   // suppress like a Dependency Test; false = the maintenance status is
   // ignored by suppression and the parent evaluates by its frozen
   // monitorStatus (dependents keep monitoring/alerting normally — e.g. a
   // clustered/redundant parent whose children stay reachable).
-  suppressChildren Boolean @default(true)
-  createdBy String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  suppressChildren Boolean  @default(true)
+  createdBy        String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   windows AssetMaintenanceWindow[]
 
