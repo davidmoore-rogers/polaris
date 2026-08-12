@@ -2352,8 +2352,16 @@ async function openAutomationWizard(existing) {
     // "tell the NOC it came back" wasn't expressible. The list starts mirroring
     // the trigger's Notify actions (see mirroredResetActions) so the recovery
     // reaches the same people without configuring them twice.
-    var resetOn = draft.resetActions !== null && draft.resetActions !== undefined;
-    if (draft.resetActions === undefined) resetOn = true; // new automation
+    // The toggle is its OWN state, not "is the list non-empty": a re-render
+    // between an operator ticking it and adding a row would otherwise silently
+    // untick it. On a new automation it starts on (the list seeds from the
+    // trigger's notify actions); a stored rule reflects what it saved.
+    if (draft.resetOn === undefined) {
+      draft.resetOn = draft.resetActions === undefined
+        ? true
+        : !!(draft.resetActions && draft.resetActions.length);
+    }
+    var resetOn = draft.resetOn;
     html += '<div class="form-group" id="aw-reset-card" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem;margin-top:0.5rem">' +
       '<label style="font-weight:600;margin:0 0 4px;display:block">' +
         '<input type="checkbox" id="aw-reset-actions-on"' + (resetOn ? " checked" : "") + '> When this resets' +
@@ -2405,6 +2413,7 @@ async function openAutomationWizard(existing) {
       refreshMirrorNote(panel);
     });
     panel.querySelector("#aw-reset-actions-on").addEventListener("change", function () {
+      draft.resetOn = this.checked;
       panel.querySelector("#aw-reset-wrap").style.display = this.checked ? "" : "none";
       // Turning it back on re-seeds from the trigger rather than leaving the
       // operator with an empty list they have to rebuild by hand.
@@ -2746,9 +2755,216 @@ async function openAutomationWizard(existing) {
       '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
         '<label style="font-weight:600;margin:0 0 6px;display:block">Devices this automation affects</label>' +
         '<div id="aw-affected"><p style="color:var(--color-text-tertiary);font-size:0.85rem">Checking…</p></div>' +
-      '</div>';
+      '</div>' +
+      // Test delivery — omitted entirely (not disabled) without fullwrite, the
+      // way the Delivery tab drops its buttons: the endpoint would 403 anyway.
+      (permAtLeast("automationManagement", "fullwrite")
+        ? '<div class="form-group" id="aw-test-delivery" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
+            '<label style="font-weight:600;margin:0 0 6px;display:block">Test delivery</label>' +
+            '<div id="aw-test-body"></div>' +
+          '</div>'
+        : "");
     renderSummary();
     renderAffectedDevices();
+    if (permAtLeast("automationManagement", "fullwrite")) renderTestDelivery();
+  }
+
+  /**
+   * Distinct testable targets for the draft, deduped by channel. PURE apart
+   * from reading the channel catalogue: walks the same locations the server's
+   * allRuleActionRefs does, so the `index` sent back addresses the same action.
+   *
+   * `api_call` and `script` are deliberately absent — the server refuses to run
+   * them from a test button (an api_call would open a real ticket; a script is
+   * RCE-by-button), so offering them would be a lie.
+   */
+  function testDeliveryTargets() {
+    var out = [];
+    var seen = {};
+    var idx = -1;
+    var perSev = bandActionsPerSeverityOn();
+    var push = function (action, where) {
+      idx++;
+      if (action.type === "event") {
+        if (!seen["event"]) { seen["event"] = true; out.push({ key: "event", kind: "event", index: idx, label: "Write a test Event", detail: "", usedIn: [where] }); }
+        else out.push(null);
+        return;
+      }
+      if (action.type !== "notify" || !action.channelId) return;
+      var ch = chanById(action.channelId);
+      if (!ch) return;
+      var key = "ch:" + ch.id;
+      if (seen[key]) {
+        // Same channel again (a band, an escalation tier): note where, don't
+        // offer a second button for the same destination.
+        var prior = out.find(function (t) { return t && t.key === key; });
+        if (prior && prior.usedIn.indexOf(where) === -1) prior.usedIn.push(where);
+        return;
+      }
+      seen[key] = true;
+      var kind = ch.type === "web_push" ? "push" : isEmailType(ch.type) ? "email" : "webhook";
+      out.push({
+        key: key, kind: kind, index: idx, channel: ch, action: action, usedIn: [where],
+        label: kind === "push" ? "Send test push" : kind === "email" ? "Send test email" : "Send test message",
+        detail: ch.name + " — " + chanTypeLabel(ch.type),
+      });
+    };
+    // Walk order MUST match allRuleActionRefs: actions (+ their tiers), rule
+    // tiers, band actions (+ tiers), band tiers, resolved actions, reset actions.
+    var walkTiers = function (esc, where) {
+      ((esc && esc.tiers) || []).forEach(function (t) { (t.actions || []).forEach(function (a) { push(a, where); }); });
+    };
+    (draft.actions || []).forEach(function (a) { push(a, "actions"); walkTiers(a.escalation, "escalation"); });
+    walkTiers(draft.escalation, "escalation");
+    (perSev ? (draft.severityBands || []) : []).forEach(function (b) {
+      (b.actions || []).forEach(function (a) { push(a, "at " + b.severity); walkTiers(a.escalation, "escalation"); });
+      walkTiers(b.escalation, "escalation");
+    });
+    ((draft.bandNotify && draft.bandNotify.resolvedActions) || []).forEach(function (a) { push(a, "resolved"); });
+    (draft.resetActions || []).forEach(function (a) { push(a, "reset"); });
+    return out.filter(Boolean);
+  }
+
+  var _awTestBusy = false;
+
+  function renderTestDelivery() {
+    var box = document.getElementById("aw-test-body");
+    if (!box) return;
+    var targets = testDeliveryTargets();
+    if (targets.length === 0) {
+      box.innerHTML = '<p class="hint" style="margin:0">This automation only creates an in-app alert — there’s nothing to send. ' +
+        'Add a <strong>Notify</strong> or <strong>Create an Event</strong> action on the previous step to test delivery.</p>';
+      return;
+    }
+    var me = (_ruleRecipientUsers || []).find(function (u) { return u.username === (typeof currentUsername !== "undefined" ? currentUsername : ""); });
+    var selfDesc = me
+      ? [me.email || "no email on your account", (me.pushDevices || 0) + " push device" + ((me.pushDevices || 0) === 1 ? "" : "s")].join(" · ")
+      : "your account";
+    box.innerHTML =
+      '<p class="hint" style="margin:0 0 8px">Each test creates a <strong>real alert</strong> (flagged as a test) and delivers it through that one action immediately.</p>' +
+      '<div id="aw-test-mode" style="margin:0 0 8px">' +
+        '<label style="display:block;font-size:0.85rem"><input type="radio" name="aw-test-to" value="self" checked> Send to me only ' +
+          '<span style="color:var(--color-text-tertiary)">— ' + escapeHtml(selfDesc) + '</span></label>' +
+        '<label style="display:block;font-size:0.85rem"><input type="radio" name="aw-test-to" value="recipients"> Send to this automation’s real recipients</label>' +
+        '<div id="aw-test-real-warn" style="display:none;border:1px solid var(--color-danger);border-radius:6px;padding:0.5rem 0.6rem;margin:6px 0 0">' +
+          '<p style="margin:0;font-size:0.82rem"><strong>This sends to real people.</strong> Every recipient the action targets receives an alert email or message now.</p>' +
+        '</div>' +
+      '</div>' +
+      '<div id="aw-test-buttons">' + targets.map(function (t) {
+        return '<div class="awtd-row" style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">' +
+          '<button type="button" class="btn btn-sm btn-secondary awtd-btn" data-key="' + escapeHtml(t.key) + '">' + escapeHtml(t.label) + '</button>' +
+          '<span style="font-size:0.8rem">' + escapeHtml(t.detail) +
+            (t.usedIn.length > 1 || t.usedIn[0] !== "actions"
+              ? ' <span style="color:var(--color-text-tertiary)">— used by: ' + escapeHtml(t.usedIn.join(", ")) + '</span>'
+              : "") +
+          '</span>' +
+          '<div class="awtd-out" data-key="' + escapeHtml(t.key) + '" style="flex-basis:100%;font-size:0.78rem;margin:0"></div>' +
+        '</div>';
+      }).join("") + '</div>';
+
+    box.querySelectorAll('input[name="aw-test-to"]').forEach(function (r) {
+      r.addEventListener("change", function () {
+        box.querySelector("#aw-test-real-warn").style.display = r.value === "recipients" && r.checked ? "" : "none";
+        syncTestButtons(box, targets);
+      });
+    });
+    box.querySelectorAll(".awtd-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var t = targets.find(function (x) { return x.key === btn.dataset.key; });
+        if (t) runDeliveryTest(t, btn, box);
+      });
+    });
+    syncTestButtons(box, targets);
+  }
+
+  /** Disable what the chosen mode can't honour, and say why. */
+  function syncTestButtons(box, targets) {
+    var mode = (box.querySelector('input[name="aw-test-to"]:checked') || {}).value || "self";
+    var me = (_ruleRecipientUsers || []).find(function (u) { return u.username === (typeof currentUsername !== "undefined" ? currentUsername : ""); });
+    targets.forEach(function (t) {
+      var btn = box.querySelector('.awtd-btn[data-key="' + t.key + '"]');
+      var out = box.querySelector('.awtd-out[data-key="' + t.key + '"]');
+      if (!btn) return;
+      var why = "";
+      if (mode === "self") {
+        // A webhook/chat channel has exactly ONE destination — there is no
+        // private version of a Teams post.
+        if (t.kind === "webhook") why = "Posts to this channel’s configured destination — switch to real recipients to test it.";
+        else if (t.kind === "email" && me && !me.email) why = "Your account has no email address.";
+        else if (t.kind === "push" && me && !me.pushDevices) why = "You have no push-enabled device — turn push on from the sidebar, then reopen this step.";
+      }
+      if (t.channel && t.channel.enabled === false) why = "This channel is disabled — it won’t deliver until you enable it on the Delivery tab.";
+      btn.disabled = !!why || _awTestBusy;
+      if (out && why) out.innerHTML = '<span style="color:var(--color-text-tertiary)">' + escapeHtml(why) + "</span>";
+      else if (out && out.dataset.result !== "1") out.innerHTML = "";
+    });
+  }
+
+  async function runDeliveryTest(target, btn, box) {
+    if (_awTestBusy) return;
+    var mode = (box.querySelector('input[name="aw-test-to"]:checked') || {}).value || "self";
+    if (mode === "recipients" && target.kind !== "event") {
+      var okToSend = await showConfirm(
+        'Send a REAL test through "' + (target.channel ? target.channel.name : "this channel") + '" to its configured recipients?\n\n' +
+        "Everyone the action targets receives it now.",
+      );
+      if (!okToSend) return;
+    }
+    // One at a time: every press mints a real alert.
+    _awTestBusy = true;
+    var old = btn.textContent;
+    btn.textContent = "Sending…";
+    box.querySelectorAll(".awtd-btn").forEach(function (b) { b.disabled = true; });
+    var out = box.querySelector('.awtd-out[data-key="' + target.key + '"]');
+    var stamp = new Date().toLocaleTimeString();
+    try {
+      var r = await api.automations.testDelivery({
+        rule: testDeliveryPayload(),
+        path: { index: target.index },
+        mode: mode,
+        target: target.kind === "event" ? "event" : "delivery",
+      });
+      showToast(r.message || "Test sent", r.ok ? "success" : "error");
+      if (out) {
+        out.dataset.result = "1";
+        out.innerHTML = '<strong style="color:var(--color-' + (r.ok ? "success" : "danger") + ')">' + (r.ok ? "✓" : "✗") + "</strong> " +
+          escapeHtml(r.message || "") + ' <span style="color:var(--color-text-tertiary)">· ' + escapeHtml(stamp) + "</span>" +
+          (r.ackLinks && r.ackLinks.minted
+            ? '<br><span style="color:var(--color-text-tertiary)">The Acknowledge link in it will clear the test alert.</span>'
+            : r.ackLinks && r.ackLinks.reason
+              ? '<br><span style="color:var(--color-text-tertiary)">No acknowledge link: ' + escapeHtml(r.ackLinks.reason) + "</span>"
+              : "");
+      }
+    } catch (err) {
+      showToast(err.message || "Test failed", "error");
+      if (out) {
+        out.dataset.result = "1";
+        out.innerHTML = '<strong style="color:var(--color-danger)">✗</strong> ' + escapeHtml(err.message || "failed") +
+          ' <span style="color:var(--color-text-tertiary)">· ' + escapeHtml(stamp) + "</span>";
+      }
+    }
+    _awTestBusy = false;
+    btn.textContent = old;
+    syncTestButtons(box, testDeliveryTargets());
+  }
+
+  /** The DRAFT as the test endpoint wants it — what's on screen, not what's saved. */
+  function testDeliveryPayload() {
+    return {
+      name: draft.name || "Untitled automation",
+      description: draft.description,
+      severity: draft.severity,
+      trigger: draft.trigger,
+      scope: isTriggerScoped(draft.trigger) ? draft.scope : {},
+      reset: draft.reset,
+      actions: draft.actions,
+      cooldownSec: draft.cooldownSec,
+      messageTemplate: draft.messageTemplate,
+      escalation: draft.escalation,
+      severityBands: bandsApplicable(draft.trigger) ? payloadBands() : null,
+      bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
+      resetActions: draft.resetActions && draft.resetActions.length ? stripMirrorMarks(draft.resetActions) : null,
+    };
   }
   async function renderAffectedDevices() {
     var box = document.getElementById("aw-affected");
@@ -3647,8 +3863,9 @@ async function openAutomationWizard(existing) {
     });
     var resetHost = panel.querySelector("#aw-reset-actions");
     if (resetHost) {
-      var resetOn = panel.querySelector("#aw-reset-actions-on");
-      draft.resetActions = resetOn && !resetOn.checked ? null : collectActionsFrom(resetHost);
+      var resetToggle = panel.querySelector("#aw-reset-actions-on");
+      if (resetToggle) draft.resetOn = resetToggle.checked;
+      draft.resetActions = draft.resetOn === false ? null : collectActionsFrom(resetHost);
       if (draft.resetActions && draft.resetActions.length === 0) draft.resetActions = null;
     }
   }

@@ -332,6 +332,24 @@ describe("automation wizard DOM render", () => {
     (bandAction.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
     (baseAction.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
 
+    // "When this resets" — the list that makes a recovery expressible at all.
+    // It starts mirroring the trigger's notify actions, so telling the same
+    // people it came back costs nothing.
+    const resetCard = doc.querySelector("#aw-step-5 #aw-reset-card")!;
+    expect(resetCard).toBeTruthy();
+    expect((doc.querySelector("#aw-reset-actions-on") as unknown as { checked: boolean }).checked).toBe(true);
+    (doc.querySelector("#aw-add-action") as unknown as { click: () => void }).click();
+    const newNotify = Array.from(doc.querySelectorAll("#aw-actions .aw-action")).pop()!;
+    const chanSel = newNotify.querySelector(".na-channel") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    chanSel.value = "c1";
+    chanSel.dispatchEvent(new win5.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(doc.querySelector("#aw-reset-actions .aw-action")).toBeTruthy();
+    expect(doc.querySelector("#aw-reset-mirror-note")!.textContent).toContain("Following your notify actions");
+    // Clean up so step-5 validation (a notify needs a recipient) still passes.
+    (newNotify.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 10));
+
     (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(doc.querySelector("#aw-step-6.visible")).toBeTruthy();
@@ -340,6 +358,31 @@ describe("automation wizard DOM render", () => {
     const affected = doc.querySelector("#aw-affected")!;
     expect(affected.textContent).toContain("3"); // stubbed preview totalEvaluated
     expect(toastErrors).toEqual([]);
+  });
+
+  it("step 6 offers a test per delivery destination, defaulting to 'me only'", async () => {
+    const block = doc.querySelector("#aw-test-delivery")!;
+    expect(block).toBeTruthy();
+
+    // "Send to me only" must be the default — a mis-aimed press otherwise
+    // emails the automation's real recipient list.
+    const self = doc.querySelector('input[name="aw-test-to"][value="self"]') as unknown as { checked: boolean };
+    expect(self.checked).toBe(true);
+    expect((doc.querySelector("#aw-test-real-warn") as unknown as { style: { display: string } }).style.display).toBe("none");
+
+    // The draft carries the default audit-Event action, so the Event test is
+    // offered; api_call/script actions never are (the server refuses to run
+    // them from a button, so a button would be a lie).
+    const labels = Array.from(doc.querySelectorAll(".awtd-btn")).map((b) => b.textContent);
+    expect(labels).toContain("Write a test Event");
+    expect(labels.join(" ")).not.toMatch(/script|API/i);
+
+    // Picking "real recipients" reveals the warning.
+    const win6 = g.window as InstanceType<typeof Window>;
+    const real = doc.querySelector('input[name="aw-test-to"][value="recipients"]') as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
+    real.checked = true;
+    real.dispatchEvent(new win6.Event("change", { bubbles: true }));
+    expect((doc.querySelector("#aw-test-real-warn") as unknown as { style: { display: string } }).style.display).toBe("");
   });
 
   it("edit-mode round-trip: per-action escalation, band actions, device-region and the moved template survive save", async () => {

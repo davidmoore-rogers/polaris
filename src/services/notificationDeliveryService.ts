@@ -219,9 +219,22 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promi
 }
 
 /** One drain pass. Returns counts. */
-export async function drainPendingDeliveries(): Promise<{ processed: number; sent: number; failed: number }> {
+/**
+ * @param opts.notificationId Drain only ONE alert's rows. The wizard's test
+ * buttons use this to dispatch immediately instead of waiting up to 15s for
+ * the tick — extending the drain rather than cloning it, because this function
+ * owns retries, permanent-fail classification, dead-push pruning and the
+ * summary Event. The job itself calls it with no arguments, unchanged.
+ */
+export async function drainPendingDeliveries(
+  opts: { notificationId?: string } = {},
+): Promise<{ processed: number; sent: number; failed: number }> {
   const rows = (await prisma.notificationDelivery.findMany({
-    where: { status: "pending", attempts: { lt: MAX_ATTEMPTS } },
+    where: {
+      status: "pending",
+      attempts: { lt: MAX_ATTEMPTS },
+      ...(opts.notificationId ? { notificationId: opts.notificationId } : {}),
+    },
     orderBy: { createdAt: "asc" },
     take: BATCH_SIZE,
     select: {
