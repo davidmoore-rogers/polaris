@@ -42,6 +42,23 @@ export const ssoEntryLimiter = makeRateLimiter({
 });
 
 /**
+ * IdP-driven SSO callbacks (SAML POST /azure/callback, OIDC GET
+ * /oidc/callback) and the public /entra-proxy/config probe the login page
+ * reads. These provision sessions, so they must be bounded — but the ceiling
+ * is deliberately far above `ssoEntryLimiter`'s: a callback carries a
+ * signature-validated assertion rather than a guessable credential, so the
+ * limiter bounds replay/flood volume, not guessing. It is per-IP, and an
+ * office behind one NAT egress address can land its whole staff here inside a
+ * few minutes at shift start — a login-limiter-sized ceiling would lock that
+ * site out of SSO entirely, which is a worse outcome than the flood.
+ */
+export const ssoCallbackLimiter = makeRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 300,
+  message: "Too many sign-in attempts — please try again shortly.",
+});
+
+/**
  * Entra App Proxy header login. ALL App Proxy users arrive from the shared
  * connector IP(s), so the strict per-IP login limiter (10/15min) would lock
  * out the whole external population behind one address. There is no

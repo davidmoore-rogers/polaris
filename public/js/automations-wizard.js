@@ -324,17 +324,21 @@ function makeAutomationSentences(s) {
     }
     if (tr.type === "asset_metric" || tr.type === "host_metric") {
       var subject = tr.type === "host_metric" ? "the Polaris host's " + metricLabel(tr.metric) : metricLabel(tr.metric);
+      // The `|| tr.x` fallbacks echo the STORED value when it isn't a known
+      // phrase key. The builder only ever emits known keys, but a rule can also
+      // be written straight to the API, so the fallback is arbitrary stored text
+      // landing in a sentence the wizard assigns to innerHTML — escape it.
       var agg = tr.aggregation && tr.aggregation !== "latest" && tr.windowSec
-        ? " (" + (AGG_PHRASE[tr.aggregation] || tr.aggregation) + " " + humanDuration(tr.windowSec) + ")" : "";
+        ? " (" + escapeHtml(AGG_PHRASE[tr.aggregation] || tr.aggregation) + " " + humanDuration(tr.windowSec) + ")" : "";
       var thr = tr.threshold == null || isNaN(tr.threshold) ? "…" : tr.threshold;
       var unit = leafUnit(tr.metric, tr.dimensionFilter); unit = unit ? " " + unit : "";
-      out = "When <strong>" + escapeHtml(subject) + agg + " " + (CMP_PHRASE[tr.operator] || tr.operator) + " " + escapeHtml(String(thr)) + escapeHtml(unit) + "</strong>";
+      out = "When <strong>" + escapeHtml(subject) + agg + " " + escapeHtml(CMP_PHRASE[tr.operator] || tr.operator) + " " + escapeHtml(String(thr)) + escapeHtml(unit) + "</strong>";
       var df = tr.dimensionFilter || {};
       Object.keys(df).forEach(function (k) {
         if (df[k]) out += " " + escapeHtml((DIM_PHRASE[k] || k + " = {value}").replace("{value}", df[k]));
       });
     } else if (tr.type === "asset_state") {
-      out = "When <strong>" + escapeHtml(fieldLabel(tr.field)) + " " + (CMP_PHRASE[tr.operator] || tr.operator) + " " + escapeHtml(String(tr.value == null ? "…" : tr.value)) + "</strong>";
+      out = "When <strong>" + escapeHtml(fieldLabel(tr.field)) + " " + escapeHtml(CMP_PHRASE[tr.operator] || tr.operator) + " " + escapeHtml(String(tr.value == null ? "…" : tr.value)) + "</strong>";
     } else if (tr.type === "event") {
       out = "When an audit event matching <strong>" + escapeHtml(tr.actionPattern || "…") + "</strong>" +
         (tr.resourceType ? " on <strong>" + escapeHtml(tr.resourceType) + "</strong> resources" : "") +
@@ -3807,7 +3811,7 @@ async function openAutomationWizard(existing) {
     if (perSevActions) {
       (draft.severityBands || []).forEach(function (b) {
         (b.actions || []).forEach(function (a) {
-          actionLines.push('<span style="color:' + sevColor(b.severity) + '">at ' + escapeHtml(b.severity) + ':</span> ' + escapeHtml(actionSummary(a) + escSuffix(a)));
+          actionLines.push('<span style="color:' + escapeHtml(sevColor(b.severity)) + '">at ' + escapeHtml(b.severity) + ':</span> ' + escapeHtml(actionSummary(a) + escSuffix(a)));
         });
       });
     }
@@ -3842,7 +3846,7 @@ async function openAutomationWizard(existing) {
         '; ' + (perSevActions ? "per-severity actions" : "same actions at every severity") + '</span></dd>';
     }
     box.innerHTML = '<dl class="review-grid">' +
-      '<dt>Name</dt><dd>' + escapeHtml(draft.name || "…") + ' <span class="badge badge-level-' + (draft.severity || "warning") + '">' + escapeHtml((draft.severity || "warning").toUpperCase()) + '</span>' + (draft.enabled === false ? ' <span class="badge">disabled</span>' : "") + '</dd>' +
+      '<dt>Name</dt><dd>' + escapeHtml(draft.name || "…") + ' <span class="badge badge-level-' + escapeHtml(draft.severity || "warning") + '">' + escapeHtml((draft.severity || "warning").toUpperCase()) + '</span>' + (draft.enabled === false ? ' <span class="badge">disabled</span>' : "") + '</dd>' +
       '<dt>Devices</dt><dd>' + escapeHtml(scopeSummaryText(draft.scope)) + '</dd>' +
       '<dt>Trigger</dt><dd>' + triggerSentence(draft.trigger, draftLadder()) + '</dd>' +
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +

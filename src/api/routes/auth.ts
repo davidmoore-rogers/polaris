@@ -57,7 +57,8 @@ import {
 } from "../../services/entraProxyAuthService.js";
 import { resolveTagScopesForUser } from "../../services/regionScopeService.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
-import { totpCodeLimiter, ssoEntryLimiter, entraProxyLoginLimiter } from "../middleware/rateLimits.js";
+import { totpCodeLimiter, ssoEntryLimiter, entraProxyLoginLimiter, ssoCallbackLimiter } from "../middleware/rateLimits.js";
+import { safeNextPath } from "../../utils/safeRedirect.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
@@ -479,7 +480,7 @@ router.get("/azure/login", async (req, res) => {
 });
 
 // POST /api/v1/auth/azure/callback — handles SAML Response from IdP
-router.post("/azure/callback", async (req, res) => {
+router.post("/azure/callback", ssoCallbackLimiter, async (req, res) => {
   try {
     // Validate relay state when available (SameSite=Lax cookies are not
     // sent on cross-site POST, so the session may be empty here — the
@@ -714,7 +715,7 @@ router.get("/oidc/login", ssoEntryLimiter, async (req, res) => {
 // GET /api/v1/auth/oidc/callback — exchange code, validate ID token, provision.
 // SameSite=Lax cookies ARE sent on this top-level GET navigation (unlike the
 // SAML cross-site POST), so the session-stored checks are reliably present.
-router.get("/oidc/callback", async (req, res) => {
+router.get("/oidc/callback", ssoCallbackLimiter, async (req, res) => {
   const state = req.session.oidcState;
   const nonce = req.session.oidcNonce;
   const codeVerifier = req.session.oidcCodeVerifier;
@@ -813,20 +814,10 @@ const EntraProxySettingsSchema = z.object({
   groupsHeader: z.string().max(64),
 });
 
-// Only same-origin relative paths survive; anything else falls back to "/".
-// Blocks protocol-relative ("//evil"), backslash tricks ("/\evil"), absolute
-// URLs, and a /login.html target (which would look like a failed login).
-function safeNextPath(raw: unknown): string {
-  if (typeof raw !== "string") return "/";
-  if (!raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) return "/";
-  if (raw === "/login.html" || raw.startsWith("/login.html?")) return "/";
-  return raw;
-}
-
 // GET /api/v1/auth/entra-proxy/config — public, login page checks this.
 // `available` = THIS request could complete a header login (trusted source +
 // identity header present). Booleans only — never header values.
-router.get("/entra-proxy/config", async (req, res) => {
+router.get("/entra-proxy/config", ssoCallbackLimiter, async (req, res) => {
   const enabled = await isEntraProxyEnabled().catch(() => false);
   const available = enabled && (await isEntraProxyLoginAvailable(req).catch(() => false));
   res.json({ enabled, available });

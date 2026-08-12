@@ -13,10 +13,14 @@
  *     stuck-running sweep (running > timeout + 60s ⇒ status "timeout").
  *   - execute: the script body is written to a 0600 temp file under the state
  *     dir and passed to the interpreter via execFile — the args string is a
- *     SINGLE argv entry, never shell-interpolated; alert context rides env
- *     vars (POLARIS_ALERT_ID / POLARIS_RULE / POLARIS_ASSET). Kill on
- *     timeout; stdout/stderr captured with a 64 KB cap; temp file always
- *     deleted.
+ *     SINGLE argv entry, never shell-interpolated; the interpreter itself
+ *     resolves to a known absolute path where one exists rather than to
+ *     whatever the inherited PATH names first; alert context rides env vars
+ *     (POLARIS_ALERT_ID / POLARIS_RULE / POLARIS_ASSET) over an environment
+ *     stripped of secret-shaped keys (`buildScriptEnv` — stdout is STORED and
+ *     displayed, so the server's own credentials must not be reachable in it).
+ *     Kill on timeout; stdout/stderr captured with a 64 KB cap; temp file
+ *     always deleted.
  *   - record: exitCode/status/output/completedAt + one audit Event per run
  *     (`automation.script.run`, warning on failure/timeout).
  *   - sweep: prunes completed runs older than the retention window.
@@ -24,6 +28,7 @@
 
 import { chunkArray } from "../utils/chunk.js";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -39,24 +44,88 @@ const OUTPUT_CAP_BYTES = SCRIPT_OUTPUT_CAP_BYTES;
 const STUCK_GRACE_MS = 60_000;
 const SCRIPT_TMP_DIR = resolve(STATE_DIR, "data", "automation-scripts-tmp");
 
+/**
+ * Standard absolute locations per interpreter, most-specific first.
+ *
+ * `execFile("bash", …)` resolves the binary through the inherited PATH, so
+ * whatever the service environment's PATH names first is what runs operator
+ * scripts. Preferring a known absolute path takes that decision away from the
+ * environment. The bare name stays as the last candidate so an install with a
+ * non-standard layout (a python3 under /opt, a Nix store path) keeps working
+ * rather than failing every run — on such a host PATH is the only answer
+ * available, and the systemd unit is what controls it.
+ */
+const INTERPRETER_PATHS: Record<string, string[]> = {
+  bash: ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"],
+  sh: ["/bin/sh", "/usr/bin/sh"],
+  python3: ["/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3"],
+  pwsh: ["/usr/bin/pwsh", "/usr/local/bin/pwsh", "/opt/microsoft/powershell/7/pwsh"],
+};
+
+/** First existing standard path for `name`, else `name` itself (PATH lookup). */
+function resolveInterpreterBin(name: string): string {
+  if (process.platform === "win32") {
+    const root = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+    const winPath = name === "cmd.exe"
+      ? resolve(root, "System32", "cmd.exe")
+      : name === "powershell.exe"
+        ? resolve(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        : null;
+    return winPath && existsSync(winPath) ? winPath : name;
+  }
+  for (const p of INTERPRETER_PATHS[name] ?? []) {
+    if (existsSync(p)) return p;
+  }
+  return name;
+}
+
 /** Interpreter → [binary, argv prefix]. The temp file path + rendered args are
  *  appended as discrete argv entries — no shell ever parses them. */
 function interpreterArgv(interpreter: string, scriptPath: string, args: string | null): { bin: string; argv: string[] } | null {
   const tail = args !== null && args !== "" ? [args] : [];
   switch (interpreter) {
-    case "bash": return { bin: "bash", argv: [scriptPath, ...tail] };
-    case "sh": return { bin: "sh", argv: [scriptPath, ...tail] };
-    case "python3": return { bin: "python3", argv: [scriptPath, ...tail] };
+    case "bash": return { bin: resolveInterpreterBin("bash"), argv: [scriptPath, ...tail] };
+    case "sh": return { bin: resolveInterpreterBin("sh"), argv: [scriptPath, ...tail] };
+    case "python3": return { bin: resolveInterpreterBin("python3"), argv: [scriptPath, ...tail] };
     case "powershell": {
-      const bin = process.platform === "win32" ? "powershell.exe" : "pwsh";
+      const bin = resolveInterpreterBin(process.platform === "win32" ? "powershell.exe" : "pwsh");
       return { bin, argv: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...tail] };
     }
     case "cmd":
       if (process.platform !== "win32") return null;
-      return { bin: "cmd.exe", argv: ["/d", "/s", "/c", scriptPath, ...tail] };
+      return { bin: resolveInterpreterBin("cmd.exe"), argv: ["/d", "/s", "/c", scriptPath, ...tail] };
     default:
       return null;
   }
+}
+
+/**
+ * Server secrets stripped from the child environment.
+ *
+ * The runner used to hand every script the web role's entire `process.env` —
+ * DATABASE_URL, POLARIS_SECRET_KEY, SESSION_SECRET, HEALTH_TOKEN,
+ * METRICS_TOKEN. A script that so much as runs `env` therefore wrote the
+ * secret-box key into `AutomationScriptRun.stdout`, where it is stored
+ * unencrypted and rendered in the Scripts tab to anyone who can read a run.
+ * Authoring a script already requires an RCE-equivalent permission, so this is
+ * not a privilege boundary — but the accidental copy into a stored, displayed,
+ * backed-up column is worth removing regardless.
+ *
+ * A denylist rather than an allowlist on purpose: PATH / HOME / proxy vars /
+ * locale stay inherited, so scripts that work today keep working.
+ */
+const SENSITIVE_ENV_PATTERN = /SECRET|TOKEN|PASSWORD|PASSWD|DATABASE_URL|SESSION|CREDENTIAL|PRIVATE_KEY|_KEY$/i;
+
+/** process.env minus secret-shaped keys, plus the alert context vars. */
+export function buildScriptEnv(
+  base: NodeJS.ProcessEnv,
+  context: Record<string, string>,
+): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (!SENSITIVE_ENV_PATTERN.test(k)) out[k] = v;
+  }
+  return { ...out, ...context };
 }
 
 function scriptFileExtension(interpreter: string): string {
@@ -104,12 +173,11 @@ export async function executeServerScript(run: {
           timeout: run.timeoutSec * 1000,
           killSignal: "SIGKILL",
           maxBuffer: OUTPUT_CAP_BYTES,
-          env: {
-            ...process.env,
+          env: buildScriptEnv(process.env, {
             POLARIS_ALERT_ID: run.notificationId ?? "",
             POLARIS_RULE: run.ruleId ?? "",
             POLARIS_ASSET: run.assetId ?? "",
-          },
+          }),
           windowsHide: true,
         },
         (err, stdout, stderr) => {

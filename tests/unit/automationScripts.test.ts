@@ -92,7 +92,7 @@ import {
   MIN_AGENT_SCRIPT_VERSION,
   type ScriptInput,
 } from "../../src/services/automationScriptService.js";
-import { executeServerScript } from "../../src/services/automationScriptRunner.js";
+import { executeServerScript, buildScriptEnv } from "../../src/services/automationScriptRunner.js";
 
 const WIN = process.platform === "win32";
 const SHELL = WIN ? ("cmd" as const) : ("sh" as const);
@@ -276,5 +276,54 @@ describe("executeServerScript (real interpreter)", () => {
     const res = await executeServerScript({ id: "x", scriptId: "gone", args: null, timeoutSec: 5, notificationId: null, ruleId: null, assetId: null });
     expect(res.status).toBe("failed");
     expect(res.stderr).toMatch(/no longer exists/);
+  });
+});
+
+/**
+ * A script's stdout is STORED on AutomationScriptRun and rendered in the
+ * Scripts tab, so anything reachable in its environment is effectively
+ * copied into a displayed, backed-up column by a one-line script.
+ */
+describe("buildScriptEnv", () => {
+  const BASE = {
+    PATH: "/usr/bin:/bin",
+    HOME: "/home/polaris",
+    LANG: "en_US.UTF-8",
+    HTTPS_PROXY: "http://proxy:3128",
+    DATABASE_URL: "postgresql://u:p@localhost/polaris",
+    POLARIS_SECRET_KEY: "deadbeef",
+    SESSION_SECRET: "s3cret",
+    HEALTH_TOKEN: "ht",
+    METRICS_TOKEN: "mt",
+    SMTP_PASSWORD: "pw",
+    AWS_SECRET_ACCESS_KEY: "ak",
+  };
+
+  it("strips every secret-shaped key", () => {
+    const env = buildScriptEnv(BASE, {});
+    for (const k of ["DATABASE_URL", "POLARIS_SECRET_KEY", "SESSION_SECRET", "HEALTH_TOKEN", "METRICS_TOKEN", "SMTP_PASSWORD", "AWS_SECRET_ACCESS_KEY"]) {
+      expect(env[k], `${k} must not reach an operator script`).toBeUndefined();
+    }
+  });
+
+  it("keeps the operational vars a script legitimately needs", () => {
+    const env = buildScriptEnv(BASE, {});
+    expect(env.PATH).toBe("/usr/bin:/bin");
+    expect(env.HOME).toBe("/home/polaris");
+    expect(env.LANG).toBe("en_US.UTF-8");
+    expect(env.HTTPS_PROXY).toBe("http://proxy:3128");
+  });
+
+  it("adds the alert context", () => {
+    const env = buildScriptEnv(BASE, { POLARIS_ALERT_ID: "n-1", POLARIS_RULE: "r-1", POLARIS_ASSET: "" });
+    expect(env.POLARIS_ALERT_ID).toBe("n-1");
+    expect(env.POLARIS_RULE).toBe("r-1");
+    expect(env.POLARIS_ASSET).toBe("");
+  });
+
+  it("does not mutate the environment it was handed", () => {
+    const copy = { ...BASE };
+    buildScriptEnv(copy, { POLARIS_ALERT_ID: "n-1" });
+    expect(copy).toEqual(BASE);
   });
 });

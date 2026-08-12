@@ -166,6 +166,25 @@ const CLASS_TO_ASSET_TYPE: Record<AutoMonitorClass, string> = {
 // ─── Pattern compilation (wildcard vs regex) ────────────────────────────────
 
 /**
+ * Cap on an operator-supplied pattern. Every consumer matches SHORT strings
+ * (ifNames, mount paths, hostnames, unit names), so no legitimate pattern comes
+ * near this — it exists to bound what a single stored value can cost.
+ *
+ * On the raw-regex path this is a mitigation, not a cure: catastrophic
+ * backtracking is exponential in INPUT length, so a length cap on the pattern
+ * bounds the constant factor and nothing more. That is a deliberate call rather
+ * than an oversight. Authoring a regex here requires `integrations:write` /
+ * `applicationMap:write` / tag-management, and an operator holding any of those
+ * can already run arbitrary code through the AutomationScript registry — so a
+ * pathological regex costs them their own discovery loop, and does not cross a
+ * privilege boundary. Removing the feature or taking a native linear-time
+ * engine (re2) as a dependency would both cost more than the risk they retire.
+ * The compile itself stays wrapped so a malformed pattern is a 400 at save
+ * time, not a throw inside a discovery run.
+ */
+export const MAX_PATTERN_LENGTH = 512;
+
+/**
  * Compile a shell-style wildcard ("port4*", "wan?") into an anchored regex.
  * Escapes regex metacharacters so e.g. "port[1]" matches the literal string,
  * not a character class.
@@ -173,6 +192,9 @@ const CLASS_TO_ASSET_TYPE: Record<AutoMonitorClass, string> = {
 export function compileWildcard(pattern: string): RegExp {
   if (typeof pattern !== "string" || pattern.length === 0) {
     throw new AppError(400, "Empty wildcard pattern");
+  }
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    throw new AppError(400, `Wildcard pattern exceeds ${MAX_PATTERN_LENGTH} characters`);
   }
   let out = "";
   for (const ch of pattern) {
@@ -197,6 +219,9 @@ export function compileWildcard(pattern: string): RegExp {
 export function compilePattern(pattern: string, regex: boolean): RegExp {
   if (typeof pattern !== "string" || pattern.length === 0) {
     throw new AppError(400, "Empty pattern");
+  }
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    throw new AppError(400, `Pattern exceeds ${MAX_PATTERN_LENGTH} characters`);
   }
   if (!regex) return compileWildcard(pattern);
   try {
