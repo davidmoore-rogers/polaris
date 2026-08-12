@@ -1961,7 +1961,10 @@ async function openAutomationWizard(existing) {
     // own change handler also calls it — a second render is harmless) and
     // re-syncs the severity mode (single dropdown vs multi tiers + accent).
     panel.addEventListener("input", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncDurationRequirement(panel); });
-    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); refreshDimOptions(panel); syncDurationRequirement(panel); });
+    // syncBandsToBase runs AFTER syncSeverityMode so tiers built lazily on this
+    // same event (first tick of the multi-severity checkbox, from a draft that
+    // predates in-progress edits to the base condition) are corrected at once.
+    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncBandsToBase(panel); refreshDimOptions(panel); syncDurationRequirement(panel); });
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
     renderTriggerFields();
     syncSeverityMode(panel);
@@ -2668,6 +2671,66 @@ async function openAutomationWizard(existing) {
     var sevs = s.severities || [];
     return sevs[Math.min(maxRank + 1, sevs.length - 1)] || sevs[sevs.length - 1];
   }
+  /** What a tier SHARES with the base condition (business rule 19): metric,
+   *  aggregation, dimension filters. Only these are mirrored — a tier's own
+   *  operator / threshold / sustained-for are its own. */
+  function bandSampleSig(leaf) {
+    return [leaf.type, leaf.metric, leaf.aggregation || "latest", JSON.stringify(leaf.dimensionFilter || {})].join("|");
+  }
+  /** Render + lock a tier's condition row. The shared-sampling controls (metric,
+   *  aggregation, dimensions) come from the BASE condition and are disabled, so
+   *  only the operator + value are the tier's own. (The window isn't a row
+   *  control any more; tiers take the base's.) */
+  function renderBandCond(row, panel, leaf, kind) {
+    var cond = row.querySelector(".band-cond");
+    cond.innerHTML = tgLeafRowHtml(leaf, kind);
+    // Set the select values rather than relying on the markup's `selected`
+    // attribute (the sevSel / scg-sev precedent) — this row is re-rendered in
+    // place as the base condition changes, and a mirrored control silently
+    // falling back to its first option would defeat the mirroring.
+    var setVal = function (q, v) { var el = cond.querySelector(q); if (el && v != null && v !== "") el.value = v; };
+    setVal(".tgl-what", "m:" + leaf.metric);
+    setVal(".tgl-agg", leaf.aggregation || "latest");
+    setVal(".tgl-op", leaf.operator);
+    var df = leaf.dimensionFilter || {};
+    cond.querySelectorAll(".tgl-dim").forEach(function (el) { el.value = df[el.getAttribute("data-dim")] || ""; });
+    cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
+    var grip = cond.querySelector(".aw-grip"); if (grip) grip.style.display = "none";
+    var rmCond = cond.querySelector(".scr-remove"); if (rmCond) rmCond.style.display = "none";
+    row._sampleSig = bandSampleSig(leaf);
+    refreshDimOptions(panel); // the tier's locked condition row has its own dim control
+  }
+  /**
+   * Re-mirror the base condition's sampling onto every tier whenever it changes.
+   * Tiers share metric / aggregation / dimensionFilter by definition — collectBands
+   * takes only their operator + threshold — so a tier still displaying the sampling
+   * it was CREATED with is a lie the operator can otherwise only fix by deleting and
+   * re-adding the tier. Signature-guarded, so an edit to a tier's own operator or
+   * value (which fires the same delegated change event) never re-renders it out
+   * from under the cursor.
+   */
+  function syncBandsToBase(panel) {
+    var host = panel.querySelector("#aw-bands");
+    if (!host || !host.querySelector(".aw-band")) return;
+    var rows = panel.querySelectorAll("#aw-trig-root .scr-row");
+    if (rows.length !== 1) return; // bands only apply to a single-metric trigger
+    var kind = panel.querySelector("#aw-trigger-type").value === "host" ? "host" : "asset";
+    var base = tgCollectLeaf(rows[0], kind);
+    if (base.type === "asset_state") return;
+    var sig = bandSampleSig(base);
+    host.querySelectorAll(":scope > .aw-band").forEach(function (row) {
+      if (row._sampleSig === sig) return;
+      var cur = row.querySelector(".band-cond .scr-row");
+      var prev = cur ? tgCollectLeaf(cur, kind) : {};
+      renderBandCond(row, panel, {
+        type: base.type, metric: base.metric, aggregation: base.aggregation, windowSec: 0,
+        dimensionFilter: base.dimensionFilter,
+        // The tier keeps its own comparison — only the sampling is shared.
+        operator: prev.operator || base.operator,
+        threshold: prev.threshold != null && !isNaN(prev.threshold) ? prev.threshold : null,
+      }, kind);
+    });
+  }
   function addBandRow(host, band) {
     if (host.querySelectorAll(".aw-band").length >= 4 && !band) { showToast("At most 4 additional severities", "info"); return null; }
     band = band || { threshold: "", severity: nextTierSeverity(host), actions: [] };
@@ -2705,18 +2768,11 @@ async function openAutomationWizard(existing) {
         '<button type="button" class="btn btn-sm btn-danger band-remove" title="Remove severity" style="margin-left:auto">&times;</button>' +
       '</div>' +
       '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
-      '<div class="band-cond scg-children">' + tgLeafRowHtml(tierLeaf, kind) + '</div>' +
+      '<div class="band-cond scg-children"></div>' +
       durationFieldHtml('class="band-duration"', bandDurMin) +
       '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>';
     host.appendChild(row);
-    // Lock the shared-sampling fields on the tier's condition row — metric,
-    // aggregation, dimensions — so only operator + value are editable. (The
-    // window isn't a row control any more; tiers take the base's.)
-    var cond = row.querySelector(".band-cond");
-    cond.querySelectorAll(".tgl-what, .tgl-agg, .tgl-dim").forEach(function (el) { el.disabled = true; el.style.opacity = "0.55"; });
-    var grip = cond.querySelector(".aw-grip"); if (grip) grip.style.display = "none";
-    var rmCond = cond.querySelector(".scr-remove"); if (rmCond) rmCond.style.display = "none";
-    refreshDimOptions(panel); // the tier's locked condition row has its own dim control
+    renderBandCond(row, panel, tierLeaf, kind);
     row.querySelector(".band-add-sev").addEventListener("click", function () { addBandRow(host, null); syncBandNotify(panel); });
     // Per-tier accent + "only increase severity" guard: a tier can't be set at
     // or below the tier before it (or the base).
