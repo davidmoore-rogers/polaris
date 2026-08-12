@@ -106,6 +106,8 @@ interface DbRule {
   severityBands: SeverityBand[] | null;
   /** Band-transition notify policy; null = defaults (increase + resolved/reuse). */
   bandNotify: BandNotify | null;
+  /** Actions to run when the alert ENDS; null = nothing happens on reset. */
+  resetActions: AutomationAction[] | null;
 }
 
 /** Best-effort action fan-out — never breaks rule evaluation. (executeActions
@@ -937,7 +939,7 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
       } else if (st && st.state === "firing") {
         if (rule.reset.mode !== "auto") {
           // manual re-arms the state; timed waits for its sweep — same as ever.
-          await recover(rule, st);
+          await recover(rule, st, reading, now);
         } else if (!recoveredMeets(trigger, rule.reset, reading.value)) {
           // Hysteresis dead band (below fire, above clear): stay firing — but
           // a BANDED alert eases to the base severity here. The value is out
@@ -957,13 +959,13 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
           const sustainSec = rule.reset.sustainSec ?? 0;
           if (sustainSec <= 0) {
             if (hasBands) await fireResolved(rule, reading, st, now);
-            await recover(rule, st);
+            await recover(rule, st, reading, now);
           } else if (!st.recoveredSince) {
             // Recovery observed — start the clear-sustain timer.
             await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: now } });
           } else if (now.getTime() - st.recoveredSince.getTime() >= sustainSec * 1000) {
             if (hasBands) await fireResolved(rule, reading, st, now);
-            await recover(rule, st);
+            await recover(rule, st, reading, now);
           }
           // else: recovered but not sustained long enough yet — keep firing.
         }
@@ -1029,6 +1031,9 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     const afterSec = rule.reset.afterSec;
     for (const st of states) {
       if (st.state === "firing" && st.firedAt && now.getTime() - st.firedAt.getTime() >= afterSec * 1000) {
+        // A timed clear may have no reading at all (the asset stopped
+        // reporting), so the reset context is built from the state row.
+        await fireReset(rule, readingFromState(st), st, "alert timed out", now);
         await clearActiveNotification(st, "system:timed");
         await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull } });
       }
@@ -1191,6 +1196,8 @@ async function applySustainedRecovery(
   st: { id: string; notificationId: string | null; recoveredSince: Date | null },
   recovered: boolean,
   now: Date,
+  /** Carried purely so the reset actions have a device to talk about. */
+  reading?: Reading,
 ): Promise<void> {
   if (!recovered) {
     if (st.recoveredSince) {
@@ -1200,11 +1207,11 @@ async function applySustainedRecovery(
   }
   const sustainSec = rule.reset.sustainSec ?? 0;
   if (sustainSec <= 0) {
-    await recover(rule, st);
+    await recover(rule, st, reading, now);
   } else if (!st.recoveredSince) {
     await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: now } });
   } else if (now.getTime() - st.recoveredSince.getTime() >= sustainSec * 1000) {
-    await recover(rule, st);
+    await recover(rule, st, reading, now);
   }
   // else: recovered but not sustained long enough yet — keep firing.
 }
@@ -1273,18 +1280,18 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
         // trigger re-meeting does not independently cancel the sustain timer.
         // No reset reading ⇒ not recovered (never clear on absent evidence).
         const recovered = resetOutcomeFor(a.id)?.meets === true;
-        await applySustainedRecovery(rule, st, recovered, now);
+        await applySustainedRecovery(rule, st, recovered, now, reading);
       } else if (outcome.meets) {
         if (st.recoveredSince) {
           // Re-met mid-recovery under auto: cancel the clear-sustain timer.
           await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
         }
       } else if (rule.reset.mode !== "auto") {
-        await recover(rule, st); // manual re-arms the state; timed waits for its sweep
+        await recover(rule, st, reading, now); // manual re-arms the state; timed waits for its sweep
       } else {
         // auto for composites = the tree is no longer true (no hysteresis
         // dead band — clearThreshold is rejected at save for composites).
-        await applySustainedRecovery(rule, st, true, now);
+        await applySustainedRecovery(rule, st, true, now, reading);
       }
       continue;
     }
@@ -1338,6 +1345,9 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
     const afterSec = rule.reset.afterSec;
     for (const st of states) {
       if (st.dimensionKey === "" && st.state === "firing" && st.firedAt && now.getTime() - st.firedAt.getTime() >= afterSec * 1000) {
+        // A timed clear may have no reading at all (the asset stopped
+        // reporting), so the reset context is built from the state row.
+        await fireReset(rule, readingFromState(st), st, "alert timed out", now);
         await clearActiveNotification(st, "system:timed");
         await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull } });
       }
@@ -1622,10 +1632,68 @@ async function fireResolved(
   await enqueueAlertActions(st.notificationId, actions, ctx, rule, reading);
 }
 
-async function recover(rule: DbRule, st: { id: string; notificationId: string | null }): Promise<void> {
+/**
+ * Run the automation's RESET actions — "the alert ended, tell someone".
+ *
+ * Called BEFORE the notification is cleared, exactly like fireResolved: the
+ * actions attach to the still-live notification id, so their delivery rows
+ * (and the acknowledge tokens minted for them) hang off the alert they are
+ * about rather than orphaning.
+ *
+ * `reason` names how it ended — the recovery message says so, because "it's
+ * back" and "someone gave up and cleared it" are different facts.
+ */
+/**
+ * A minimal Reading for a reset that has no live reading behind it — a timed
+ * clear fires precisely because the condition stopped being observed, and the
+ * asset may have gone silent entirely. `lastValue` is the last thing we saw,
+ * which is the honest value for a recovery message.
+ */
+function readingFromState(st: { assetId: string | null; dimensionKey: string; lastValue?: number | null }): Reading {
+  return {
+    assetId: st.assetId ?? "",
+    hostname: null,
+    tags: [],
+    dimKey: st.dimensionKey,
+    dimLabel: st.dimensionKey,
+    value: st.lastValue ?? null,
+  };
+}
+
+async function fireReset(
+  rule: DbRule,
+  reading: Reading,
+  st: { notificationId: string | null },
+  reason: string,
+  now: Date,
+): Promise<void> {
+  const actions = rule.resetActions;
+  if (!actions?.length || !st.notificationId) return;
+  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
+  const parts = readingContextParts(rule, reading, now);
+  // "resolved" is a pseudo-severity (not in SEVERITIES) that colours the email
+  // green and reads correctly in a subject line — the same one fireResolved
+  // uses for a severity-band recovery.
+  parts.severity = "resolved";
+  const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
+  ctx["message"] = `Resolved: ${rule.name} — ${ctx["asset"] || reading.hostname || "device"} ${reason}`;
+  await enqueueAlertActions(st.notificationId, actions, ctx, rule, reading);
+}
+
+async function recover(
+  rule: DbRule,
+  st: { id: string; notificationId: string | null },
+  reading?: Reading,
+  now?: Date,
+): Promise<void> {
   // "condition" recovers like "auto": the reset tree (or trigger negation)
   // observed a real recovery, so clear the notification + stamp the event.
   if (rule.reset.mode === "auto" || rule.reset.mode === "condition") {
+    // Reset actions run BEFORE the clear, while the notification id is still
+    // live for their delivery rows to hang off. The manual/timed branch below
+    // deliberately doesn't: manual leaves the alert standing for a human, and
+    // timed fires its own reset from the sweep that actually clears it.
+    if (reading && now) await fireReset(rule, reading, st, "recovered", now);
     await clearActiveNotification(st, "system:auto-resolve");
     await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull } });
     await logEvent({
@@ -1680,6 +1748,26 @@ export async function runEventRuleTimedClear(rules: DbRule[], now = new Date()):
   let cleared = 0;
   for (const rule of timedRules) {
     const cutoff = new Date(now.getTime() - (rule.reset.afterSec as number) * 1000);
+    // Reset actions need the alerts THEMSELVES, not a count — an action is
+    // per-alert (its deliveries hang off a notification id). Select first when
+    // the rule has any, then clear; without reset actions this stays the
+    // single bulk update it always was.
+    const doomed = rule.resetActions?.length
+      ? await prisma.notification.findMany({
+          where: { ruleId: rule.id, cleared: false, triggeredAt: { lte: cutoff } },
+          select: { id: true, assetId: true, assetHostname: true },
+          take: 500,
+        })
+      : [];
+    for (const n of doomed) {
+      await fireReset(
+        rule,
+        { assetId: n.assetId ?? "", hostname: n.assetHostname, tags: [], dimKey: "", dimLabel: "", value: null },
+        { notificationId: n.id },
+        "alert timed out",
+        now,
+      );
+    }
     const res = await prisma.notification.updateMany({
       where: { ruleId: rule.id, cleared: false, triggeredAt: { lte: cutoff } },
       data: { cleared: true, clearedBy: "system:timed", clearedAt: now },
@@ -1901,6 +1989,7 @@ export async function evaluateAllNotificationRules(): Promise<void> {
       escalation: v2.escalation,
       severityBands: v2.severityBands,
       bandNotify: v2.bandNotify,
+      resetActions: v2.resetActions,
     };
   });
 
@@ -2081,7 +2170,7 @@ async function computeCarveOut(
 function draftRuleForPreview(input: PreviewRuleInput, trigger: DbRule["trigger"]): DbRule {
   return {
     id: "", name: input.name, description: input.description ?? null, severity: input.severity,
-    trigger, scope: input.scope,
+    trigger, scope: input.scope, resetActions: input.resetActions ?? null,
     reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
     messageTemplate: input.messageTemplate ?? null,
     emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),

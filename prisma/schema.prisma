@@ -3478,6 +3478,15 @@ model NotificationRule {
   // onResolved, resolvedMode: "reuse"|"dedicated", resolvedActions? }. NULL =
   // defaults (increase + resolved via reuse). See notificationTypes.bandNotifySchema.
   bandNotify      Json?
+
+  // Actions that run when the alert ENDS: auto / timed / custom-condition
+  // reset, or an operator clearing it by hand. Plain actions (notify |
+  // api_call | script | event) — never escalatable, because there is nothing
+  // to chase about a recovery. NULL = silent on reset, which is what every
+  // pre-feature automation keeps until someone edits and saves it; the wizard
+  // seeds this from the trigger's notify actions as they are created, so new
+  // automations tell the same people it recovered.
+  resetActions    Json?
   createdBy       String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt

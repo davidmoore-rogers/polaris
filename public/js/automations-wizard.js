@@ -2347,6 +2347,26 @@ async function openAutomationWizard(existing) {
         '<button type="button" class="btn btn-sm btn-secondary ba-add" style="margin-top:6px">+ Add action</button>' +
       '</div>';
     });
+    // ── When this resets ────────────────────────────────────────────────
+    // Every clear path today writes cleared/clearedBy and nothing else, so
+    // "tell the NOC it came back" wasn't expressible. The list starts mirroring
+    // the trigger's Notify actions (see mirroredResetActions) so the recovery
+    // reaches the same people without configuring them twice.
+    var resetOn = draft.resetActions !== null && draft.resetActions !== undefined;
+    if (draft.resetActions === undefined) resetOn = true; // new automation
+    html += '<div class="form-group" id="aw-reset-card" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem;margin-top:0.5rem">' +
+      '<label style="font-weight:600;margin:0 0 4px;display:block">' +
+        '<input type="checkbox" id="aw-reset-actions-on"' + (resetOn ? " checked" : "") + '> When this resets' +
+      '</label>' +
+      '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">' +
+        'Runs when the alert ends — it recovered, its timer ran out, or someone cleared it. ' +
+        '<span id="aw-reset-mirror-note"></span></p>' +
+      '<div id="aw-reset-wrap"' + (resetOn ? "" : ' style="display:none"') + '>' +
+        '<div id="aw-reset-actions"></div>' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="aw-reset-add" style="margin-top:6px">+ Add action</button>' +
+      '</div>' +
+    '</div>';
+
     panel.innerHTML = html;
 
     // Mandatory-card escalation = the rule-level chain.
@@ -2354,13 +2374,46 @@ async function openAutomationWizard(existing) {
 
     var host = panel.querySelector("#aw-actions");
     (draft.actions || []).forEach(function (a) { addActionRow(host, a, true); });
-    panel.querySelector("#aw-add-action").addEventListener("click", function () { addActionRow(host, null, true); });
+    panel.querySelector("#aw-add-action").addEventListener("click", function () {
+      addActionRow(host, null, true);
+      syncResetMirror(panel);
+    });
+    // The reset list follows the trigger list as it is BUILT: picking a channel
+    // on a new Notify action, or removing one, re-derives the mirrored rows.
+    // Delegated so it covers rows added later. Timeout lets the row's own
+    // handlers (and its removal) settle first.
+    host.addEventListener("change", function () { setTimeout(function () { syncResetMirror(panel); }, 0); });
+    host.addEventListener("click", function (e) {
+      if (e.target && e.target.classList && e.target.classList.contains("aw-action-remove")) {
+        setTimeout(function () { syncResetMirror(panel); }, 0);
+      }
+    });
 
     panel.querySelectorAll(".aw-band-actions").forEach(function (sec, i) {
       var bHost = sec.querySelector(".ba-actions");
       (((draft.severityBands || [])[i] || {}).actions || []).forEach(function (a) { addActionRow(bHost, a, true); });
       sec.querySelector(".ba-add").addEventListener("click", function () { addActionRow(bHost, null, true); });
     });
+    // Reset list: hydrate, then keep it following the trigger actions.
+    var resetHost = panel.querySelector("#aw-reset-actions");
+    var resetSeed = draft.resetActions === undefined
+      ? mirroredResetActions(draft.actions, [])            // brand-new automation
+      : (draft.resetActions || []);                         // stored, or explicitly off
+    renderResetRows(panel, resetSeed);
+    panel.querySelector("#aw-reset-add").addEventListener("click", function () {
+      addActionRow(resetHost, null);
+      refreshMirrorNote(panel);
+    });
+    panel.querySelector("#aw-reset-actions-on").addEventListener("change", function () {
+      panel.querySelector("#aw-reset-wrap").style.display = this.checked ? "" : "none";
+      // Turning it back on re-seeds from the trigger rather than leaving the
+      // operator with an empty list they have to rebuild by hand.
+      if (this.checked && !resetHost.querySelector(".aw-action")) {
+        renderResetRows(panel, mirroredResetActions(collectActionsFrom(host), []));
+      }
+      refreshMirrorNote(panel);
+    });
+
     var perSevCb = panel.querySelector("#aw-band-actions-multi");
     if (perSevCb) {
       perSevCb.addEventListener("change", function () {
@@ -3501,9 +3554,23 @@ async function openAutomationWizard(existing) {
     var out = [];
     host.querySelectorAll(":scope > .aw-action").forEach(function (row) {
       var a = collectAction(row);
-      if (a) out.push(a);
+      if (!a) return;
+      // `_mirrorOf` marks a reset row still following its trigger action. It's
+      // wizard bookkeeping, never part of the saved rule (the server schema is
+      // .strict() and would reject it).
+      if (row._mirrorOf) a._mirrorOf = row._mirrorOf;
+      out.push(a);
     });
     return out;
+  }
+
+  /** Strip the wizard-only markers before the payload leaves the browser. */
+  function stripMirrorMarks(actions) {
+    return (actions || []).map(function (a) {
+      var copy = JSON.parse(JSON.stringify(a));
+      delete copy._mirrorOf;
+      return copy;
+    });
   }
 
   // Escalation tier row — afterMin/repeat controls + a nested action list.
@@ -3578,6 +3645,91 @@ async function openAutomationWizard(existing) {
       band.actions = collectActionsFrom(sec.querySelector(".ba-actions"));
       if (bandRows[i]) bandRows[i]._bandActions = band.actions;
     });
+    var resetHost = panel.querySelector("#aw-reset-actions");
+    if (resetHost) {
+      var resetOn = panel.querySelector("#aw-reset-actions-on");
+      draft.resetActions = resetOn && !resetOn.checked ? null : collectActionsFrom(resetHost);
+      if (draft.resetActions && draft.resetActions.length === 0) draft.resetActions = null;
+    }
+  }
+
+  /**
+   * The reset list mirrors the trigger's NOTIFY actions as they're created:
+   * add a Notify on the left and the same channel + recipients appear on the
+   * right, so "tell the same people it came back" costs nothing.
+   *
+   * A mirrored row is marked (_mirrorOf, client-only — stripped by
+   * collectActionsFrom like the band stash) and DETACHES the moment the
+   * operator edits or deletes it. Rows that are still attached follow later
+   * changes; an edited one never gets overwritten.
+   */
+  /** (Re)draw the reset rows, tagging the mirrored ones so they keep tracking. */
+  function renderResetRows(panel, actions) {
+    var host = panel.querySelector("#aw-reset-actions");
+    if (!host) return;
+    host.innerHTML = "";
+    (actions || []).forEach(function (a) {
+      addActionRow(host, a);
+      var row = host.lastElementChild;
+      if (row && a._mirrorOf) {
+        row._mirrorOf = a._mirrorOf;
+        // Any edit inside a mirrored row detaches it: from here it is the
+        // operator's, and a later trigger change must not overwrite it.
+        row.addEventListener("input", function () { detachMirror(row, panel); }, true);
+        row.addEventListener("change", function () { detachMirror(row, panel); }, true);
+        var rm = row.querySelector(".aw-action-remove");
+        if (rm) rm.addEventListener("click", function () { setTimeout(function () { refreshMirrorNote(panel); }, 0); });
+      }
+    });
+    refreshMirrorNote(panel);
+  }
+
+  function detachMirror(row, panel) {
+    if (!row._mirrorOf) return;
+    row._mirrorOf = null;
+    refreshMirrorNote(panel);
+  }
+
+  /** Re-mirror after the TRIGGER action list changes (add / remove / channel). */
+  function syncResetMirror(panel) {
+    var host = panel.querySelector("#aw-reset-actions");
+    var on = panel.querySelector("#aw-reset-actions-on");
+    if (!host || !on || !on.checked) return;
+    var current = collectActionsFrom(host);
+    // Rows the operator has touched are kept verbatim; the rest re-derive.
+    renderResetRows(panel, mirroredResetActions(collectActionsFrom(panel.querySelector("#aw-actions")), current));
+  }
+
+  function refreshMirrorNote(panel) {
+    var note = panel.querySelector("#aw-reset-mirror-note");
+    var host = panel.querySelector("#aw-reset-actions");
+    if (!note || !host) return;
+    var rows = Array.from(host.querySelectorAll(":scope > .aw-action"));
+    var mirrored = rows.filter(function (r) { return !!r._mirrorOf; }).length;
+    if (rows.length === 0) {
+      note.textContent = "Nothing here yet — add an action, or add a Notify above and it will appear here.";
+    } else if (mirrored === rows.length) {
+      note.textContent = "Following your notify actions above.";
+    } else if (mirrored === 0) {
+      note.textContent = "Edited — no longer following your notify actions.";
+    } else {
+      note.textContent = mirrored + " of " + rows.length + " still following your notify actions.";
+    }
+  }
+
+  function mirroredResetActions(triggerActions, existing) {
+    var notifies = (triggerActions || []).filter(function (a) { return a.type === "notify" && a.channelId; });
+    var kept = (existing || []).filter(function (a) { return !a._mirrorOf; });
+    var stillMirrored = notifies.map(function (a) {
+      var clone = JSON.parse(JSON.stringify(a));
+      // An escalation chases an UNHANDLED alert — meaningless on a recovery,
+      // and the server rejects it (reset actions are plain, not escalatable).
+      delete clone.escalation;
+      clone._mirrorOf = a.channelId;
+      return clone;
+    });
+    // Operator-authored rows keep their place after the mirrored ones.
+    return stillMirrored.concat(kept);
   }
   // Severity tiers + notify policy — collected only in multi-severity mode
   // (a single numeric metric). Single mode clears them.
@@ -3773,6 +3925,9 @@ async function openAutomationWizard(existing) {
     var msgRow = draft.messageTemplate
       ? '<dt>Message</dt><dd><code style="font-size:0.8rem">' + escapeHtml(draft.messageTemplate) + '</code></dd>'
       : "";
+    var resetRow = (draft.resetActions && draft.resetActions.length)
+      ? '<dt>When it resets</dt><dd>' + draft.resetActions.map(function (a) { return escapeHtml(actionSummary(a)); }).join("<br>") + '</dd>'
+      : '<dt>When it resets</dt><dd><span style="color:var(--color-text-tertiary)">nothing — the alert just clears</span></dd>';
     var bandsRow = "";
     if (bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length) {
       var op = (draft.trigger && draft.trigger.operator) || ">=";
@@ -3796,6 +3951,7 @@ async function openAutomationWizard(existing) {
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
       msgRow +
       '<dt>Actions</dt><dd>' + (actionLines.length ? actionLines.join("<br>") : '<span style="color:var(--color-text-tertiary)">in-app alert only</span>') + '</dd>' +
+      resetRow +
       bandsRow +
       '<dt>Escalation</dt><dd>' + escapeHtml(escLine) + '</dd>' +
     '</dl>';
@@ -3914,6 +4070,9 @@ async function openAutomationWizard(existing) {
       // band saves bare and the server runs the base actions at every severity.
       severityBands: bandsApplicable(draft.trigger) ? payloadBands() : null,
       bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
+      // Reset actions: the wizard's mirror markers are wizard-only, and the
+      // server schema is strict.
+      resetActions: draft.resetActions && draft.resetActions.length ? stripMirrorMarks(draft.resetActions) : null,
     };
     this.disabled = true;
     try {
@@ -3978,6 +4137,9 @@ function _awDraftFromRule(r) {
     escalation: esc ? JSON.parse(JSON.stringify(esc)) : null,
     severityBands: Array.isArray(r.severityBands) && r.severityBands.length ? JSON.parse(JSON.stringify(r.severityBands)) : null,
     bandNotify: r.bandNotify ? JSON.parse(JSON.stringify(r.bandNotify)) : null,
+    // undefined (never set) vs null (deliberately off) matters: a NEW draft
+    // seeds its reset list from the trigger, a stored rule shows what it saved.
+    resetActions: Array.isArray(r.resetActions) && r.resetActions.length ? JSON.parse(JSON.stringify(r.resetActions)) : null,
     // Per-severity actions are opt-in on the Actions step; a stored rule opts in
     // iff any band actually carries its own actions/escalation.
     bandActionsPerSeverity: (Array.isArray(r.severityBands) ? r.severityBands : []).some(function (b) {

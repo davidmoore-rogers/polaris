@@ -1247,6 +1247,12 @@ const ruleInputBaseSchema = z.object({
   // are numeric-metric-trigger only (enforced in validateRuleV2).
   severityBands: z.array(severityBandSchema).max(4).optional().nullable(),
   bandNotify: bandNotifySchema.optional().nullable(),
+  // Actions that run when the alert ENDS — auto / timed / custom-condition
+  // reset, or an operator clearing it by hand. Plain actions, not escalatable:
+  // there is nothing to chase about a recovery (same reason bandNotify's
+  // resolvedActions stay bare). Absent/null = nothing happens on reset, which
+  // is what every stored automation keeps until someone edits and saves it.
+  resetActions: z.array(actionSchema).max(20).optional().nullable(),
 });
 
 type RuleInputRaw = z.infer<typeof ruleInputBaseSchema>;
@@ -1272,6 +1278,8 @@ export interface RuleInput {
   severityBands: SeverityBand[] | null;
   /** Band-transition notify policy; null = defaults. */
   bandNotify: BandNotify | null;
+  /** Actions to run when the alert ENDS; null = nothing happens on reset. */
+  resetActions: AutomationAction[] | null;
 }
 
 /** Preview input = RuleInput with trigger optional (scope-only preview mode).
@@ -1383,6 +1391,8 @@ function normalizeRuleInputCore(raw: Omit<RuleInputRaw, "trigger">): Omit<RuleIn
     escalation: raw.escalation ?? null,
     severityBands: raw.severityBands?.length ? raw.severityBands : null,
     bandNotify: raw.bandNotify ?? null,
+    // Anything not copied here is silently dropped by the transform.
+    resetActions: raw.resetActions?.length ? raw.resetActions : null,
   };
 }
 
@@ -1562,6 +1572,8 @@ export interface RuleV2View {
   severityBands: SeverityBand[] | null;
   /** Band-transition notify policy; null = defaults. */
   bandNotify: BandNotify | null;
+  /** Actions to run when the alert ENDS; null = nothing happens on reset. */
+  resetActions: AutomationAction[] | null;
 }
 
 /** Legacy escalation tier → v2 tier of one notify action. Tier-level template
@@ -1634,6 +1646,7 @@ export function normalizeRuleToV2(row: {
   actions?: unknown;
   severityBands?: unknown;
   bandNotify?: unknown;
+  resetActions?: unknown;
 }): RuleV2View {
   const storedReset = row.reset ? resetSchema.safeParse(row.reset) : null;
   const reset = storedReset?.success
@@ -1674,14 +1687,25 @@ export function normalizeRuleToV2(row: {
     ? bandNotifySchema.parse(row.bandNotify)
     : null;
 
-  return { reset, actions, escalation: normalizeEscalationToV2(row.escalation), severityBands, bandNotify };
+  // Reset actions have no legacy counterpart (like resolvedActions), so an
+  // un-migrated row simply has none and stays silent on reset.
+  const resetParsed = Array.isArray(row.resetActions)
+    ? row.resetActions
+        .map((a) => actionSchema.safeParse(a))
+        .filter((r): r is { success: true; data: AutomationAction } => r.success)
+        .map((r) => r.data)
+    : [];
+  const resetActions = resetParsed.length ? resetParsed : null;
+
+  return { reset, actions, escalation: normalizeEscalationToV2(row.escalation), severityBands, bandNotify, resetActions };
 }
 
 // ─── Canonical action walk + escalation-chain selection ─────────────────────
-// Actions live in seven places on a rule: top-level actions, each top-level
+// Actions live in EIGHT places on a rule: top-level actions, each top-level
 // action's escalation tiers, the rule-level escalation tiers, each severity
 // band's actions, each band action's escalation tiers, each band-level
-// escalation tiers, and bandNotify.resolvedActions. Every consumer that must
+// escalation tiers, bandNotify.resolvedActions, and resetActions (what runs
+// when the alert ends). Every consumer that must
 // see ALL of them (the automationScripts route gate, assertActionRefs'
 // channel/SSRF/script checks, ruleWantsAssetDetail) walks through
 // allRuleActionRefs so a new action location can't silently escape a gate.
@@ -1692,6 +1716,7 @@ export interface RuleActionCarrier {
   escalation?: unknown;
   severityBands?: SeverityBand[] | null;
   bandNotify?: BandNotify | null;
+  resetActions?: AutomationAction[] | null;
 }
 
 /**
@@ -1730,6 +1755,7 @@ export function allRuleActionRefs(rule: RuleActionCarrier): RuleActionRef[] {
     addTiers(b.escalation, `${b.severity} band`);
   }
   (rule.bandNotify?.resolvedActions ?? []).forEach((a, i) => out.push({ action: a, label: `Resolved action ${i + 1}` }));
+  (rule.resetActions ?? []).forEach((a, i) => out.push({ action: a, label: `Reset action ${i + 1}` }));
   return out;
 }
 
