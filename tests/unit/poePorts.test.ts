@@ -104,7 +104,9 @@ describe("poeIfNameByIndex", () => {
     ["6", "port6"],
   ]);
 
-  it("resolves a port index that is itself an ifIndex", () => {
+  // On a FortiSwitch the ifIndex and the port number coincide, so this passes
+  // via the trailing-number match — not via any ifIndex equivalence.
+  it("resolves FortiSwitch-style port names", () => {
     const out = poeIfNameByIndex(["1.5", "1.6"], fortiswitch);
     expect(out.get("1.5")).toBe("port5");
     expect(out.get("1.6")).toBe("port6");
@@ -137,13 +139,17 @@ describe("poeIfNameByIndex", () => {
     expect(out.size).toBe(0);
   });
 
-  it("prefers the ifIndex reading over the trailing-number one", () => {
-    // ifIndex 5 is "port42"; a trailing-number match would say "port5".
-    // The agent indexing by ifIndex is the stronger claim.
+  // Regression guard for a heuristic that was REMOVED. Treating the PoE port
+  // index as an ifIndex is the same `index == ifIndex` equivalence the
+  // FortiSwitch sensor annotation was reverted for (97e54fd2) — right often
+  // enough to look correct, silently wrong the rest of the time. Here ifIndex 5
+  // is "port42" while the front-panel number says "port5"; the port NUMBER wins,
+  // because that is a convention the vendor maintains deliberately.
+  it("does NOT treat the PoE port index as an ifIndex", () => {
     const byIndex = new Map<string, string>([
       ["5", "port42"],
       ["9", "port5"],
     ]);
-    expect(poeIfNameByIndex(["1.5"], byIndex).get("1.5")).toBe("port42");
+    expect(poeIfNameByIndex(["1.5"], byIndex).get("1.5")).toBe("port5");
   });
 });

@@ -115,17 +115,21 @@ export function parsePoeIndex(suffix: string): { group: number; port: number } |
 /**
  * Map each `pethPsePortTable` row to an interface name.
  *
- * Two strategies, tried in order, both of which are INFERENCE — RFC 3621
- * defines no relationship between a PoE port index and ifIndex, so which one
- * is correct is a property of the agent:
+ * ONE strategy: the PoE port index matches the trailing number of an interface
+ * name. A FortiSwitch names its ports `port1..port48`, so PoE port 5 is
+ * `port5`; `GigabitEthernet1/0/7` likewise ends in the front-panel number.
+ * Accepted only when exactly ONE interface has that trailing number — an
+ * ambiguous match (a stacked switch with `1/0/5` and `2/0/5`) is not resolved
+ * by guessing.
  *
- *   1. **Port index is an ifIndex.** Some agents number PoE ports by ifIndex
- *      directly. Accepted only when that ifIndex actually exists in the same
- *      scrape's IF-MIB walk.
- *   2. **Port index matches the trailing number of a port name.** A FortiSwitch
- *      names its ports `port1..port48`, so PoE port 5 is `port5`. Accepted only
- *      when exactly ONE interface has that trailing number — an ambiguous match
- *      (a stacked switch with `1/0/5` and `2/0/5`) is not resolved by guessing.
+ * A second strategy — treating the PoE port index as an ifIndex — was
+ * deliberately REMOVED. That is the same `index == ifIndex` equivalence the
+ * FortiSwitch sensor-name annotation was reverted for (commit 97e54fd2): it
+ * holds often enough to look right and fails silently the rest of the time,
+ * and a PoE status attached to the wrong port is worse than none — it alerts
+ * on a healthy port while staying silent on the faulted one. Port NUMBERING,
+ * by contrast, is a front-panel convention the vendor maintains deliberately,
+ * which is a weaker claim about the OID tree and a stronger one about reality.
  *
  * Anything unresolved is omitted from the result rather than attached to a
  * best-guess interface: a PoE status stamped on the wrong port is worse than
@@ -152,12 +156,6 @@ export function poeIfNameByIndex(
   for (const suffix of poeIndexes) {
     const parsed = parsePoeIndex(suffix);
     if (!parsed) continue;
-
-    const asIfIndex = ifNameByIndex.get(String(parsed.port));
-    if (asIfIndex) {
-      out.set(suffix, asIfIndex);
-      continue;
-    }
 
     const byName = byTrailing.get(parsed.port);
     if (byName) out.set(suffix, byName);

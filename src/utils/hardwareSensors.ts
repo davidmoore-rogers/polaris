@@ -211,50 +211,6 @@ export function entityOperStatusToAlarm(oper: number | null | undefined): string
 }
 
 /**
- * The synthetic name `collectHardwareSensorsSnmp` falls back to when a device
- * populates ENTITY-SENSOR-MIB's entPhySensorTable but leaves the matching
- * ENTITY-MIB entPhysicalDescr empty — the bare entPhysicalIndex, e.g.
- * `sensor-18`. FortiSwitchOS does exactly this on every row.
- */
-const SYNTHETIC_SENSOR_NAME = /^sensor-(\d+)$/;
-
-/**
- * The entPhysicalIndex behind a synthetic `sensor-<n>` name, or null for a
- * device-named sensor ("CPU ON-DIE Temperature", "FAN 1", …). Returned as a
- * string because SNMP walk maps are keyed by their index suffix as text.
- */
-export function syntheticSensorIndex(sensorName: string): string | null {
-  const m = SYNTHETIC_SENSOR_NAME.exec((sensorName ?? "").trim());
-  return m ? m[1] : null;
-}
-
-/**
- * Resolve the IF-MIB interface a synthetic `sensor-<n>` row belongs to, given
- * an ifIndex → interface-name map walked from the same device.
- *
- * On FortiSwitchOS the physical-entity indexes are the same numbers as ifIndex,
- * so `sensor-18` is the sensor on the interface at ifIndex 18 — in practice the
- * optical module in that port (or in the port a trunk is built from), which is
- * why the row reads a real temperature on SFP ports and zero on virtual ones.
- * That coincidence is a FortiSwitchOS property, NOT an RFC 4133 guarantee: a
- * standards-compliant agent may number physical entities however it likes, so
- * callers gate this on the vendor rather than applying it to every device.
- *
- * Display-only. The correlated name never replaces `sensorName` — that string
- * is the automation dimension + the chart/rollup series key, and it must not
- * flip to a second identity the tick an IF-MIB walk fails.
- */
-export function resolveSensorIfName(
-  sensorName: string,
-  ifNameByIndex: ReadonlyMap<string, string>,
-): string | null {
-  const idx = syntheticSensorIndex(sensorName);
-  if (!idx) return null;
-  const name = ifNameByIndex.get(idx);
-  return name && name.trim() ? name.trim() : null;
-}
-
-/**
  * Normalize a FortiGate fgHwSensorEntAlarmStatus integer (0 = no alarm,
  * 1 = alarm) into the stored alarm string. Returns null when the device
  * didn't report a status.

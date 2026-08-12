@@ -1344,15 +1344,18 @@ model AssetHardwareSensorSample {
   value       Float?
   unit        String?
   alarmStatus String?
-  // DISPLAY-ONLY correlated interface name for sensors the device names by bare
-  // entPhysicalIndex (`sensor-18`) — on FortiSwitchOS those indexes are ifIndex,
-  // so the row is the optical module in the interface at that ifIndex. Resolved
-  // from the same device's IF-MIB walk (`resolveSensorIfName`) and rendered in
-  // parentheses beside the sensor name. Never folded into `sensorName`: that
-  // string is the automation dimension + chart/rollup series key. Null on every
-  // device-named sensor and on non-Fortinet gear (see resolveSensorIfName for
-  // why the index↔ifIndex equivalence isn't portable). Rollup tiers skip it —
-  // current-state metadata, not an aggregate.
+  // UNUSED — nothing writes or reads this. It was added by migration
+  // 20260810130000 for a display-only "which interface is this sensor on?"
+  // annotation that inferred the interface from the sensor's entPhysicalIndex.
+  // That inference was withdrawn: on FortiSwitchOS the indexes only SOMETIMES
+  // line up with ifIndex (`sensor-15` is not reliably the interface at ifIndex
+  // 15), so the label was wrong often enough to mislead. The column stays
+  // because it is nullable and free, and because DROP COLUMN on a hypertable
+  // with compressed chunks is the DDL this file warns about above — keeping it
+  // also means a future correct implementation needs no migration. Do not
+  // repopulate it without a correlation the device actually guarantees
+  // (ENTITY-MIB entPhysicalContainedIn → entAliasMappingIdentifier, or a
+  // vendor table that names the interface outright).
   ifName      String?
 
   @@id([id, timestamp])

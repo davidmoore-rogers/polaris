@@ -17,8 +17,6 @@ import {
   entityTypeColumnTrusted,
   normalizeFgAlarmStatus,
   normalizeRestAlarmStatus,
-  resolveSensorIfName,
-  syntheticSensorIndex,
   unitsDisplayLooksOptical,
   SENSOR_CLASS_UNITS,
 } from "../../src/utils/hardwareSensors.js";
@@ -188,52 +186,6 @@ describe("entityOperStatusToAlarm", () => {
   it("returns null when the device reported no status at all", () => {
     expect(entityOperStatusToAlarm(null)).toBeNull();
     expect(entityOperStatusToAlarm(undefined)).toBeNull();
-  });
-});
-
-describe("syntheticSensorIndex", () => {
-  it("extracts the entPhysicalIndex from the collector's fallback name", () => {
-    expect(syntheticSensorIndex("sensor-13")).toBe("13");
-    expect(syntheticSensorIndex("sensor-18")).toBe("18");
-    expect(syntheticSensorIndex(" sensor-7 ")).toBe("7");
-  });
-
-  it("returns null for device-named sensors", () => {
-    // A real entPhysicalDescr / fgHwSensorEntName must never be mistaken for
-    // an index — annotating "TMP 1 CPUTIN" with an interface would be a lie.
-    expect(syntheticSensorIndex("CPU ON-DIE Temperature")).toBeNull();
-    expect(syntheticSensorIndex("TMP 1 CPUTIN")).toBeNull();
-    expect(syntheticSensorIndex("sensor-18 (port18)")).toBeNull();
-    expect(syntheticSensorIndex("sensor-")).toBeNull();
-    expect(syntheticSensorIndex("")).toBeNull();
-  });
-});
-
-describe("resolveSensorIfName", () => {
-  // The exact FS-112D walk that motivated the feature: sensor-13 lands on a
-  // virtual interface (reads zero), sensor-18 on a trunk whose member is an
-  // SFP cage (reads the module's temperature).
-  const ifNames = new Map<string, string>([
-    ["8",  "port8(primary)"],
-    ["13", "internal(primary)"],
-    ["15", "mgmt"],
-    ["18", "2FPTY25006868-0"],
-    ["19", "   "],
-  ]);
-
-  it("maps a synthetic sensor onto the interface at the same ifIndex", () => {
-    expect(resolveSensorIfName("sensor-13", ifNames)).toBe("internal(primary)");
-    expect(resolveSensorIfName("sensor-18", ifNames)).toBe("2FPTY25006868-0");
-  });
-
-  it("returns null when the index has no interface, or the name is blank", () => {
-    expect(resolveSensorIfName("sensor-99", ifNames)).toBeNull();
-    expect(resolveSensorIfName("sensor-19", ifNames)).toBeNull();
-    expect(resolveSensorIfName("sensor-13", new Map())).toBeNull();
-  });
-
-  it("never annotates a device-named sensor", () => {
-    expect(resolveSensorIfName("TMP 1 CPUTIN", ifNames)).toBeNull();
   });
 });
 

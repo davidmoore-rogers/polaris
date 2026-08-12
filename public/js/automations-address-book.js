@@ -1,4 +1,4 @@
-/* global api, escapeHtml, showToast, showConfirm, collectTagCriteria, _trapFocus, _focusFirstIn, permAtLeast */
+/* global api, escapeHtml, showToast, showConfirm, collectTagCriteria, _trapFocus, _focusFirstIn, permAtLeast, _ensureLockButton, isPanelLocked, flashModalCloseBtn */
 /**
  * public/js/automations-address-book.js
  *
@@ -20,7 +20,8 @@
  *   1320  editor   (stacks over the picker, and over nothing on the tab)
  *
  * Unlike _showMergeReviewModal, both restore focus and trap Tab — the two
- * things that instance drops.
+ * things that instance drops. They also carry the app-wide modal lock (the
+ * padlock next to the X, shared with every openModal dialog).
  */
 (function () {
   var Z_PICKER = 1300;
@@ -76,7 +77,7 @@
     overlay.innerHTML =
       '<div class="modal' + (wide ? " modal-large" : " modal-wide") + '" role="dialog" aria-modal="true" tabindex="-1">' +
         '<div class="modal-header"><h3>' + escapeHtml(title) + '</h3>' +
-          '<button class="modal-close" type="button" aria-label="Close">&times;</button></div>' +
+          '<button class="btn-icon modal-close" type="button" aria-label="Close dialog">&times;</button></div>' +
         '<div class="modal-body">' + bodyHtml + '</div>' +
         '<div class="modal-footer">' + footerHtml + '</div>' +
       '</div>';
@@ -101,8 +102,25 @@
       if (onClose) onClose();
     }
 
-    overlay.querySelector(".modal-close").addEventListener("click", close);
-    overlay.addEventListener("click", function (ev) { if (ev.target === overlay) close(); });
+    // Panel lock: one global switch governs EVERY modal, so these stacked
+    // overlays take the same toggle app.js injects into the shared #modal-overlay
+    // (its MutationObserver only looks at that one element, hence the direct
+    // call) and honor it the same way — an off-click while locked flashes the X
+    // + bloom instead of dismissing. Guarded so the module still works on a page
+    // that somehow loads without app.js.
+    var closeBtn = overlay.querySelector(".modal-close");
+    if (typeof _ensureLockButton === "function") {
+      _ensureLockButton(overlay.querySelector(".modal-header"), "modal");
+    }
+    closeBtn.addEventListener("click", close);
+    overlay.addEventListener("click", function (ev) {
+      if (ev.target !== overlay) return;
+      if (typeof isPanelLocked === "function" && isPanelLocked("modal")) {
+        if (typeof flashModalCloseBtn === "function") flashModalCloseBtn(closeBtn);
+        return;
+      }
+      close();
+    });
     requestAnimationFrame(function () { overlay.classList.add("open"); _focusFirstIn(dialog); });
 
     return { overlay: overlay, dialog: dialog, close: close };
