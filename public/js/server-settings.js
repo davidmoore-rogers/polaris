@@ -4672,12 +4672,21 @@ function renderMibBrowseModal() {
 
   var unresolvedNote = "";
   if (st.unresolvedCount > 0) {
+    // Name the missing anchor when the server could identify it. A MIB whose
+    // root is an IMPORTed symbol fails wholesale rather than partially, so the
+    // bare count reads as "this MIB is broken" when the actual fix is usually
+    // "upload the one module that defines <symbol>".
+    var roots = Array.isArray(st.unresolvedRoots) ? st.unresolvedRoots : [];
+    var cause = roots.length > 0
+      ? ' Undefined here: <b>' + roots.map(escapeHtml).join("</b>, <b>") + '</b>' +
+        ' — upload the MIB that defines ' + (roots.length === 1 ? 'it' : 'them') + '.'
+      : (Array.isArray(st.imports) && st.imports.length > 0
+          ? ' This MIB imports from: ' + st.imports.map(escapeHtml).join(", ")
+          : '');
     unresolvedNote =
       '<div style="margin:0 0 0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--color-warning,#d97706);border-radius:4px;background:rgba(217,119,6,0.06);font-size:0.82rem">' +
         '<b>' + st.unresolvedCount + '</b> symbol' + (st.unresolvedCount === 1 ? '' : 's') + ' could not be resolved to a numeric OID — likely a missing IMPORTS dependency.' +
-        (Array.isArray(st.imports) && st.imports.length > 0
-          ? ' This MIB imports from: ' + st.imports.map(escapeHtml).join(", ")
-          : '') +
+        cause +
       '</div>';
   }
 
