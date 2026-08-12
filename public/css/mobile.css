@@ -842,6 +842,35 @@ input, select, textarea { font-family: inherit; }
 .login-shell .divider::before { left: 0; }
 .login-shell .divider::after  { right: 0; }
 
+/* On-screen-keyboard mode (mirrors the .kb-open rules in login.html).
+ *
+ * iOS Safari — and the installed PWA — leave the LAYOUT viewport at full
+ * screen height when the keyboard opens, so .app (height:100%) never shrinks
+ * and the flex-centered .login-shell doesn't move: the password field and the
+ * Sign in button end up behind the keyboard. And there's no scrolling out of
+ * it, because body is overflow:hidden and .login-shell is exactly
+ * min-height:100% — the content is the same height as its scroll container,
+ * so .app-body has nothing to scroll.
+ *
+ * mobile/auth.js watches window.visualViewport (the actually-visible rect on
+ * both iOS Safari and Chrome Android) and flips this class on .app while the
+ * keyboard is up. Pinning .app to that rect makes .login-shell taller than
+ * its container, which is what turns .app-body back into a real scroller;
+ * top-aligning is required rather than optional, since overflow above a
+ * justify-content:center flex item is unreachable (scrollTop can't go
+ * negative). Android, where the layout viewport DOES shrink, never gets the
+ * class — auth.js's delta check sees no gap and leaves the native behavior
+ * alone. */
+.app.kb-open {
+  height: var(--vv-height, 100%);
+  transform: translateY(var(--vv-offset-top, 0px));
+}
+.app.kb-open .login-shell {
+  justify-content: flex-start;
+  padding-top: 16px;
+  padding-bottom: 16px;
+}
+
 /* ─── Loading & empty states ──────────────────────────────────────────── */
 .loading-screen {
   flex: 1 1 auto;

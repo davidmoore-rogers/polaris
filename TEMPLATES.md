@@ -50,6 +50,7 @@ Per-pattern sections:
 - [Polling methods section (per-stream subtab strip)](#polling-methods-section-per-stream-subtab-strip)
 - [Mobile bottom sheet](#mobile-bottom-sheet)
 - [Mobile pull-to-refresh](#mobile-pull-to-refresh)
+- [On-screen keyboard fit (login/form screens)](#on-screen-keyboard-fit-loginform-screens)
 
 ---
 
@@ -955,3 +956,21 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - Define `onPullToRefresh(ctx)` on the tab or detail spec. Return the Promise from the same data-load function the topbar Refresh button uses (or equivalent) — don't fork a separate refresh path.
 - The spec's render-time DOM must still be present when the promise resolves; loaders that target `getElementById` should be safe because the user can't navigate away during the PTR gesture without releasing first.
 - Whenever the refresh action has variant behavior depending on user role / route parts (e.g. subnet detail's gate-side refresh vs. plain re-pull, or More's per-sub-page dispatch), branch inside `onPullToRefresh` rather than inside the install wiring. Use `enablesPullToRefresh` only for "no PTR at all on this route."
+
+---
+
+## On-screen keyboard fit (login/form screens)
+
+**What it is:** Keeping the focused field and its submit button above the on-screen keyboard on a viewport-height-locked screen. iOS Safari (and the installed PWA) do **not** shrink the layout viewport when the keyboard opens, so `100vh` / `height:100%` still measure the whole screen and a vertically-centered card doesn't move — the password field and Sign in button end up behind the keyboard. Android Chrome shrinks the layout viewport itself and needs no help.
+
+**Canonical implementations:** the IIFE at the `visualViewport` block in [public/js/login.js](public/js/login.js) (desktop login page, pins `.login-wrapper`) and the `installKeyboardFit` block in [public/js/mobile/auth.js](public/js/mobile/auth.js) (mobile SPA login + TOTP, pins `.app`). CSS lives beside each: the `.kb-open` rules inline in [public/login.html](public/login.html) and in [public/css/mobile.css](public/css/mobile.css). Behavior is unit-tested in [tests/unit/mobileLoginKeyboardFit.test.ts](tests/unit/mobileLoginKeyboardFit.test.ts).
+
+**Key conventions:**
+- Measure with `window.visualViewport` — the only API that reports the actually-visible rect on both engines. Treat the keyboard as open when `max(window.innerHeight, documentElement.clientHeight) - vv.height > 120`. The threshold is what tells a keyboard from a collapsing URL bar, and it is also what keeps Android out: there the layout viewport shrinks too, the delta stays ~0, and the native behavior is left alone.
+- Pin the container to the visible rect through CSS custom properties (`--vv-height` / `--vv-offset-top`), never by writing layout properties from JS. Include `offsetTop` — iOS scrolls the layout viewport under the keyboard even when the page can't scroll.
+- **Top-align in `.kb-open`.** This is required, not cosmetic: overflow above a `justify-content:center` flex item is unreachable because `scrollTop` can't go negative. Shortening the container without flipping the alignment trades one hidden control for another.
+- Coalesce every handler through one `requestAnimationFrame` (`if (!pending) pending = rAF(apply)`), bound to `resize` + `scroll` on the viewport, `orientationchange`, and `focusin`. `focusin` is what re-measures when a step swaps the form in place (password → TOTP) with the keyboard already up.
+- `scrollIntoView({block:"end"})` the focused element's **form**, and only when that target differs from the last one scrolled — re-running it on every viewport event fights the user's own scrolling.
+- Where the screen is replaced wholesale with no teardown hook (the mobile SPA's auth screens), re-check on every measurement that the form is still mounted and unpin when it isn't, rather than trusting a lifecycle callback. Clear the class explicitly on the success path too: the next viewport event may be a long way off, and a stale pin sizes the authenticated shell to a dead height.
+
+**When adding a new instance:** reuse the threshold, the rAF coalescing, and the top-align flip verbatim — the failure modes above are all silent. Anything inside a scroll container that already has room to scroll doesn't need this at all; the browser's own scroll-into-view handles it.

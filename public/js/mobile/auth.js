@@ -22,6 +22,86 @@
     return ssoConfig;
   }
 
+  // ─── On-screen keyboard fit ──────────────────────────────────────────────
+  //
+  // Same problem and same fix as the desktop login page (see login.js): iOS
+  // Safari does not shrink the layout viewport when the keyboard opens, so the
+  // centered login card stays put with the password field and Sign in button
+  // behind the keyboard. On the mobile shell it's worse than a scroll away —
+  // body is overflow:hidden and .login-shell is exactly min-height:100%, so
+  // .app-body has nothing to scroll and those controls are unreachable.
+  //
+  // window.visualViewport reports the actually-visible rect on both iOS Safari
+  // and Chrome Android. While it's meaningfully shorter than the layout
+  // viewport we pin .app to that rect (--vv-height / --vv-offset-top, see the
+  // .kb-open rules in mobile.css) and scroll the active form's bottom — the
+  // submit button — into view.
+  var KEYBOARD_MIN_PX = 120;   // below this it's browser chrome, not a keyboard
+  var kbInstalled = false;
+  var kbPending = 0;
+  var kbLastScrolled = null;
+
+  function applyKeyboardFit() {
+    kbPending = 0;
+    var app = document.getElementById("app");
+    var vv = window.visualViewport;
+    if (!app || !vv) return;
+
+    // Self-unmount: the auth screens own this behavior, but they're replaced
+    // wholesale by boot() with no teardown hook, so every measurement re-checks
+    // that a login form is still on screen rather than trusting a lifecycle
+    // callback to have fired.
+    var mounted = !!(document.getElementById("login-form") || document.getElementById("totp-form"));
+    var layoutH = Math.max(window.innerHeight, document.documentElement.clientHeight || 0);
+    var open = mounted && layoutH - vv.height > KEYBOARD_MIN_PX;
+
+    if (!open) {
+      resetKeyboardFit();
+      return;
+    }
+
+    app.style.setProperty("--vv-height", vv.height + "px");
+    app.style.setProperty("--vv-offset-top", vv.offsetTop + "px");
+    app.classList.add("kb-open");
+
+    var active = document.activeElement;
+    var target = active && active.form ? active.form : active;
+    // Only when the focused form changes (keyboard just opened, or the TOTP
+    // step swapped the form in place) — re-running this on every resize/scroll
+    // event would fight the user's own scrolling.
+    if (target && target !== kbLastScrolled && target.scrollIntoView) {
+      target.scrollIntoView({ block: "end", behavior: "smooth" });
+      kbLastScrolled = target;
+    }
+  }
+
+  function resetKeyboardFit() {
+    var app = document.getElementById("app");
+    if (app) {
+      app.classList.remove("kb-open");
+      app.style.removeProperty("--vv-height");
+      app.style.removeProperty("--vv-offset-top");
+    }
+    kbLastScrolled = null;
+  }
+
+  function scheduleKeyboardFit() {
+    if (!kbPending) kbPending = window.requestAnimationFrame(applyKeyboardFit);
+  }
+
+  // Idempotent — both auth screens call it on render, and the listeners live
+  // for the page's lifetime (rAF-coalesced, and a no-op once the forms are
+  // gone). Nothing here removes them, because a session can expire back onto
+  // the login screen at any point.
+  function installKeyboardFit() {
+    if (kbInstalled || !window.visualViewport) return;
+    kbInstalled = true;
+    window.visualViewport.addEventListener("resize", scheduleKeyboardFit);
+    window.visualViewport.addEventListener("scroll", scheduleKeyboardFit);
+    window.addEventListener("orientationchange", scheduleKeyboardFit);
+    document.addEventListener("focusin", scheduleKeyboardFit);
+  }
+
   function renderLogin(app) {
     app.dataset.tab = "";
     app.innerHTML = ''
@@ -89,6 +169,8 @@
     });
 
     document.getElementById("login-form").addEventListener("submit", onLoginSubmit);
+    kbLastScrolled = null;
+    installKeyboardFit();
   }
 
   function renderTotp(app) {
@@ -145,6 +227,12 @@
     });
 
     document.getElementById("totp-form").addEventListener("submit", onTotpSubmit);
+    // The keyboard is typically already up from the password field, so no
+    // visualViewport event follows this render — re-measure explicitly to get
+    // the Verify button above it.
+    kbLastScrolled = null;
+    installKeyboardFit();
+    scheduleKeyboardFit();
   }
 
   function showError(msg) {
@@ -173,7 +261,11 @@
       renderTotp(document.getElementById("app"));
       return;
     }
-    // Success — re-bootstrap with the new session.
+    // Success — re-bootstrap with the new session. Unpin .app first: the
+    // authenticated shell sizes itself off height:100%, and the measurement
+    // pass that would otherwise clear the class only runs on the next
+    // viewport event.
+    resetKeyboardFit();
     window.PolarisMobile.boot();
   }
 
@@ -194,6 +286,7 @@
       return;
     }
     pendingToken = null;
+    resetKeyboardFit();
     window.PolarisMobile.boot();
   }
 
