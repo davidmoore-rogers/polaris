@@ -25,8 +25,12 @@ desktop.ini
 # Audit output folder
 Audit/
 
-# Audit report output
+# Audit report output. These are generated, self-contained HTML review
+# artifacts — not app code and not shipped. They were being scanned as source
+# (4 of the 2026-08-12 CodeQL alerts came from production-readiness.html's
+# report renderer), so they are untracked rather than maintained.
 audit-reports/
+production-readiness.html
 
 # Runtime update-progress state written by the in-app updater (survives restarts
 # so the Application Updates card can resume its progress view). Not source.
