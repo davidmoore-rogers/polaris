@@ -180,10 +180,20 @@
   // (PushSubscription.surface = "mobile" → /mobile.html#more/alerts). Without
   // this route the hash resolves to nothing and app.js's routeChanged bounces
   // unknown routes to #search — i.e. a push tap would land on an empty search
-  // box. Read-only for now; acknowledge/clear stay on desktop.
+  // box. Acknowledging happens here too (alerts:write): the phone is where an
+  // alert is usually READ, so making it desktop-only meant the person holding
+  // the pager couldn't stop an escalation chain. Clearing stays on desktop —
+  // it's the destructive half and needs fullwrite.
+  var _PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 };
+  function permAtLeast(user, key, level) {
+    var have = (user && user.permissions && user.permissions[key]) || "none";
+    return (_PERM_RANK[have] || 0) >= (_PERM_RANK[level] || 0);
+  }
+
   registerSub("alerts", {
     renderTopbar: function () { return backTopbar("Alerts"); },
-    render: function (body) {
+    render: function (body, ctx) {
+      var canAck = permAtLeast(ctx && ctx.user, "alerts", "write");
       body.innerHTML = loadingHtml();
       return api.alerts.list({ limit: 100 }).then(function (resp) {
         var alerts = (resp && resp.notifications) || [];
@@ -197,9 +207,14 @@
           var leadCls = sev === "critical" || sev === "error" ? "error" : (sev === "warning" ? "warning" : "");
           var iconHref = sev === "critical" || sev === "error" ? "#i-down-arrow" : (sev === "warning" ? "#i-warn" : "#i-info");
           var meta = formatTimeAgo(n.triggeredAt);
-          if (n.acknowledged) meta += " · acknowledged";
+          if (n.acknowledged) meta += " · acknowledged" + (n.acknowledgedBy ? " by " + n.acknowledgedBy : "");
+          // The Ack control is a sibling of the row button, not inside it —
+          // nesting a <button> inside a <button> is invalid and swallows the
+          // tap that opens the device.
+          var showAck = canAck && !n.acknowledged;
           html += ''
-            + '<button class="list-item three-line" data-aid="' + escapeHtml(n.assetId || "") + '">'
+            + '<div class="alert-row" style="display:flex;align-items:stretch;">'
+            + '<button class="list-item three-line" style="flex:1;min-width:0;" data-aid="' + escapeHtml(n.assetId || "") + '">'
             + '  <span class="leading ' + leadCls + '"><svg viewBox="0 0 24 24"><use href="' + iconHref + '"/></svg></span>'
             + '  <div class="content">'
             + '    <div class="headline">' + escapeHtml(sev.toUpperCase()) + (n.assetHostname ? " · " + escapeHtml(n.assetHostname) : "") + '</div>'
@@ -207,6 +222,12 @@
             + '    <div class="supporting mono" style="font-size:12px;color:var(--md-on-surface-variant);margin-top:4px;">' + escapeHtml(meta) + '</div>'
             + '  </div>'
             + '</button>'
+            + (showAck
+              ? '<button class="ack-btn" data-ack="' + escapeHtml(n.id) + '" aria-label="Acknowledge alert"'
+                + ' style="flex:0 0 auto;align-self:center;margin-right:12px;padding:8px 12px;border-radius:20px;'
+                + 'border:1px solid var(--md-outline);background:transparent;color:var(--md-primary);font:inherit;font-size:13px;">Ack</button>'
+              : '')
+            + '</div>'
             + (i < alerts.length - 1 ? '<div class="list-divider"></div>' : '');
         });
         body.innerHTML = html;
@@ -220,9 +241,36 @@
             else PolarisRouter.go("asset/" + aid);
           });
         });
+        body.querySelectorAll("[data-ack]").forEach(function (btn) {
+          btn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            acknowledgeMobileAlert(btn, body, ctx);
+          });
+        });
       }).catch(function (err) { body.innerHTML = errorState(err && err.message ? err.message : "error"); });
     },
   });
+
+  // Acknowledge from the phone. No note field: this is the one-tap path for
+  // someone who just got paged — the desktop tab and the emailed link both
+  // take a note when there's something to say.
+  function acknowledgeMobileAlert(btn, body, ctx) {
+    btn.disabled = true;
+    var old = btn.textContent;
+    btn.textContent = "…";
+    api.alerts.acknowledge([btn.dataset.ack])
+      .then(function () {
+        if (window.PolarisTabs && PolarisTabs.showSnackbar) PolarisTabs.showSnackbar("Alert acknowledged");
+        return SUB_PAGES.alerts.render(body, ctx);
+      })
+      .catch(function (err) {
+        if (window.PolarisTabs && PolarisTabs.showSnackbar) {
+          PolarisTabs.showSnackbar((err && err.message) || "Couldn't acknowledge", { error: true });
+        }
+        btn.disabled = false;
+        btn.textContent = old;
+      });
+  }
 
   // ─── Add to Home Screen sub-page ───────────────────────────────────────
   registerSub("install", {

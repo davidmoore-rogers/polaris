@@ -16684,10 +16684,15 @@ function openLogFlagRulesModal(asset, processName, onChange) {
 // Asset-details Alerts tab: active alerts for this asset + the automations
 // whose scope matches it. Both loaded by _loadAssetNotificationsTab.
 function _assetNotificationsTabHTML() {
+  // The Acknowledged column doubles as the action column: an unacknowledged
+  // row offers the button, an acknowledged one names who did it. Until now
+  // this table was read-only and api.alerts.acknowledge had no caller at all,
+  // which left escalation chains set to stopOn:"acknowledge" unstoppable.
+  var canAck = permAtLeast("alerts", "write");
   return '<div class="section-block">' +
     '<h4 style="margin:0 0 0.5rem">Active alerts</h4>' +
     '<div class="table-wrapper"><table><thead><tr>' +
-      '<th style="width:160px">Time</th><th style="width:80px">Severity</th><th>Message</th><th style="width:160px">Acknowledged</th>' +
+      '<th style="width:160px">Time</th><th style="width:80px">Severity</th><th>Message</th><th style="width:' + (canAck ? "200" : "160") + 'px">Acknowledged</th>' +
     '</tr></thead><tbody id="asset-notif-active-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>' +
     '<h4 style="margin:1rem 0 0.5rem">Automations that can trigger for this asset</h4>' +
     '<div class="table-wrapper"><table><thead><tr>' +
@@ -16726,13 +16731,28 @@ function _loadAssetNotificationsTab(assetId) {
     var rules = (data && data.matchingRules) || [];
     var aTbody = document.getElementById("asset-notif-active-tbody");
     if (aTbody) {
+      var canAck = permAtLeast("alerts", "write");
       aTbody.innerHTML = active.length ? active.map(function (n) {
         var ts = new Date(n.triggeredAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-        var ack = n.acknowledged ? escapeHtml(n.acknowledgedBy || "yes") : '<span style="color:var(--color-text-tertiary)">—</span>';
+        var ack;
+        if (n.acknowledged) {
+          var when = n.acknowledgedAt
+            ? new Date(n.acknowledgedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+            : "";
+          ack = escapeHtml(n.acknowledgedBy || "yes") +
+            (when ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">' + escapeHtml(when) + '</span>' : "");
+        } else if (canAck) {
+          ack = '<button class="btn btn-sm btn-secondary asset-alert-ack" data-id="' + escapeHtml(n.id) + '">Acknowledge</button>';
+        } else {
+          ack = '<span style="color:var(--color-text-tertiary)">—</span>';
+        }
         return '<tr><td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ts) + '</td>' +
           '<td><span class="badge badge-level-' + (n.severity || "info") + '">' + (n.severity || "info").toUpperCase() + '</span></td>' +
           '<td>' + escapeHtml(n.message || "") + '</td><td>' + ack + '</td></tr>';
       }).join("") : '<tr><td colspan="4" class="empty-state">No active alerts</td></tr>';
+      aTbody.querySelectorAll(".asset-alert-ack").forEach(function (btn) {
+        btn.addEventListener("click", function () { _acknowledgeAssetAlert(btn, assetId); });
+      });
     }
     var rTbody = document.getElementById("asset-notif-rules-tbody");
     if (!rTbody) return;
@@ -16747,6 +16767,29 @@ function _loadAssetNotificationsTab(assetId) {
     var rTbody = document.getElementById("asset-notif-rules-tbody");
     if (rTbody) rTbody.innerHTML = '<tr><td colspan="3" class="empty-state">Failed to load</td></tr>';
   });
+}
+
+/**
+ * Acknowledge one alert from the asset's Alerts tab. The note is optional —
+ * prompt() rather than a modal because this tab already lives inside the
+ * asset slide-over, and a third stacked overlay to type one line is worse
+ * than the browser's own box. Cancelling the prompt cancels the whole thing.
+ */
+async function _acknowledgeAssetAlert(btn, assetId) {
+  var note = window.prompt("Acknowledge this alert. Add a note (optional):", "");
+  if (note === null) return; // cancelled
+  btn.disabled = true;
+  var old = btn.textContent;
+  btn.textContent = "…";
+  try {
+    await api.alerts.acknowledge([btn.dataset.id], note.trim() || undefined);
+    showToast("Alert acknowledged", "success");
+    _loadAssetNotificationsTab(assetId);
+  } catch (err) {
+    showToast(err.message || "Couldn't acknowledge the alert", "error");
+    btn.disabled = false;
+    btn.textContent = old;
+  }
 }
 
 function _renderAssetRuleRows(rTbody, rules, sent, assetId) {
