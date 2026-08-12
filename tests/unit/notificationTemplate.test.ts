@@ -15,6 +15,7 @@ import {
   escapeHtml,
   templateNeedsAsset,
   formatElapsed,
+  formatLocalTime,
   isDeferredToken,
   type TemplateContextParts,
 } from "../../src/utils/notificationTemplate.js";
@@ -213,5 +214,31 @@ describe("formatElapsed", () => {
     expect(formatElapsed(120 * 60_000)).toBe("2h");
     expect(formatElapsed(26 * 60 * 60_000)).toBe("1d 2h");
     expect(formatElapsed(-500)).toBe("0m");
+  });
+});
+
+describe("formatLocalTime", () => {
+  // The email's "Raised" row. {time}'s ISO form is right for a machine and
+  // wrong for a body: unfriendly, and a 24-character string with no break
+  // opportunity, which wrapped mid-token inside the facts table.
+  it("reads as a date and a clock time, with the server's zone named", () => {
+    const out = formatLocalTime(new Date("2026-08-12T18:46:01.561Z"));
+    expect(out).toMatch(/Aug \d{1,2}, 2026/);
+    expect(out).toMatch(/\d{1,2}:\d{2}\s?(AM|PM)/);
+    // Which zone depends on the host; that it's NAMED is the point — an
+    // unlabelled wall-clock time is worse than the ISO string it replaced.
+    expect(out).not.toBe(new Date("2026-08-12T18:46:01.561Z").toISOString());
+    expect(out.length).toBeGreaterThan("Aug 12, 2026, 1:46 PM".length);
+  });
+
+  it("accepts the string form a snapshotted context carries", () => {
+    expect(formatLocalTime("2026-08-12T18:46:01.561Z")).toMatch(/Aug \d{1,2}, 2026/);
+  });
+
+  it("renders nothing it can't parse, so the row prunes instead of mailing Invalid Date", () => {
+    expect(formatLocalTime("not a date")).toBe("");
+    expect(formatLocalTime(null)).toBe("");
+    expect(formatLocalTime(undefined)).toBe("");
+    expect(formatLocalTime("")).toBe("");
   });
 });

@@ -54,6 +54,7 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{chart.memory}", label: "Memory chart", description: "Last hour of memory as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
   { token: "{chart.responseTime}", label: "Response-time chart", description: "Last hour of probe response time as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
   { token: "{time}", label: "Time", description: "Trigger time (ISO-8601)", group: "notification" },
+  { token: "{time.local}", label: "Time (readable)", description: "Trigger time in the Polaris server's own timezone, e.g. \"Aug 12, 2026, 1:46 PM CDT\" — what the default email prints", group: "notification" },
   { token: "{link}", label: "Link", description: "Notifications page URL (empty if POLARIS_PUBLIC_URL unset)", group: "notification" },
   { token: "{ack}", label: "Acknowledge link", description: "One-click acknowledge URL — resolved per recipient at send time. Empty for address-book/typed recipients (only Polaris users can acknowledge) and when POLARIS_PUBLIC_URL is unset", group: "notification" },
   { token: "{asset.link}", label: "Open asset", description: "URL that opens this device in Polaris (empty if POLARIS_PUBLIC_URL unset)", group: "asset" },
@@ -156,6 +157,36 @@ export interface TemplateContextParts {
 const str = (v: string | null | undefined): string => v ?? "";
 
 /**
+ * "Aug 12, 2026, 1:46 PM CDT" — the trigger time as a person reads it, in the
+ * SERVER's timezone (the same wall clock maintenance windows are expressed in,
+ * and the only one Polaris knows: a recipient's is unknowable from an email).
+ *
+ * ISO-8601 stays available as `{time}` for anything machine-read. It is a poor
+ * default for a body, though: besides being unfriendly it is a 24-character
+ * string with no break opportunity, which wrapped mid-token inside the facts
+ * table. Returns "" for an unparseable input rather than "Invalid Date", so the
+ * row prunes away instead of mailing an error.
+ */
+export function formatLocalTime(value: Date | string | null | undefined): string {
+  if (!value) return "";
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  try {
+    return d.toLocaleString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    });
+  } catch {
+    // A Node build without full ICU: the ISO form beats nothing.
+    return d.toISOString();
+  }
+}
+
+/**
  * Flatten the fire-time parts into the token→string map the renderer consumes.
  * Every cataloged token gets a key (missing parts render as ""), so the map
  * serializes cleanly onto Notification.templateCtx.
@@ -176,6 +207,11 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "severity.upper": severity.toUpperCase(),
     "severity.color": severityCss(severity),
     "time": time,
+    // A pre-upgrade Notification.templateCtx has no key for this, so an
+    // escalation re-rendering that snapshot renders it blank (unknown:"blank"
+    // for our own default body) and the "Raised" row prunes away — a missing
+    // row, never a literal "{time.local}" in an operator's inbox.
+    "time.local": formatLocalTime(parts.time ?? null),
     "link": str(parts.link),
     "rule": str(parts.ruleName),
     "rule.description": str(parts.ruleDescription),

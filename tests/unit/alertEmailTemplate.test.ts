@@ -11,6 +11,8 @@
 import { describe, it, expect } from "vitest";
 import {
   defaultAlertEmailTemplate,
+  pruneEmptyChartSection,
+  pruneEmptyDivs,
   pruneEmptyRows,
   pruneEmptyTextLines,
   DEFAULT_ALERT_HTML,
@@ -86,6 +88,27 @@ describe("the default alert email is a template, not string building", () => {
       .toContain("#d97706");
   });
 
+  it("gives the facts table's label column a fixed width so a long value wraps in its own column", () => {
+    // Auto layout sized the two columns from their content: on a body whose
+    // device rows pruned away, "Automation"/"Raised" claimed most of the 600px
+    // and their values wrapped into a two-word gutter.
+    expect(DEFAULT_ALERT_HTML).toContain('<td width="140" style="width:140px');
+    expect(DEFAULT_ALERT_HTML).toContain("word-break:break-word");
+  });
+
+  it("prints the raised time as a person reads it, not as ISO-8601", () => {
+    expect(DEFAULT_ALERT_HTML).toContain("{time.local}");
+    expect(DEFAULT_ALERT_HTML).not.toMatch(/>\{time\}</);
+    expect(DEFAULT_ALERT_TEXT).toContain("{time.local}");
+  });
+
+  it("says what the alert is about without calling the Polaris server a Device", () => {
+    // Plenty of alerts are about Polaris itself; "Device: Polaris server" is
+    // what made those read like they were about somebody's switch.
+    expect(DEFAULT_ALERT_TEXT).toContain("Subject:");
+    expect(DEFAULT_ALERT_TEXT).not.toContain("Device:");
+  });
+
   it("is what defaultAlertEmailTemplate hands the wizard to prefill", () => {
     const t = defaultAlertEmailTemplate();
     expect(t.bodyHtmlTemplate).toBe(DEFAULT_ALERT_HTML);
@@ -121,6 +144,58 @@ describe("pruneEmptyRows", () => {
     // The message and the scaffolding survive.
     expect(out).toContain("down");
     expect(out).toContain("Acknowledge alert");
+  });
+
+  // The regression that produced the broken box: an alert about Polaris itself
+  // has NO asset, so the facts table's first row ({asset.ip}) is empty. The
+  // pattern used to start at the row WRAPPING the table, run to that first
+  // fact row's </tr>, read as a two-cell label/value pair, and take the
+  // opening <table> tag with it — leaving an unmatched </table> that closed
+  // the card early, so "Last hour" and the buttons rendered outside the box.
+  it("never eats the table a fact row lives in, however empty that row is", () => {
+    const ctx = buildTemplateContext({ severity: "warning", ruleName: "Capacity severity escalated", time: new Date("2026-08-12T18:46:01Z") });
+    const out = pruneEmptyRows(renderNotificationTemplate(DEFAULT_ALERT_HTML, ctx, { html: true, unknown: "blank" }));
+    // The facts table still opens (its own font-size is what identifies it)...
+    expect(out).toMatch(/<table[^>]*font-size:13px/);
+    // ...and every <table> is still closed exactly once, which is the property
+    // that keeps the card from ending early.
+    expect((out.match(/<table\b/g) ?? []).length).toBe((out.match(/<\/table>/g) ?? []).length);
+    // The surviving rows are the ones with something to say.
+    expect(out).toContain("Automation");
+    expect(out).not.toContain("IP address");
+  });
+
+});
+
+describe("pruneEmptyDivs", () => {
+  it("drops a header line whose token rendered empty", () => {
+    expect(pruneEmptyDivs('<div style="font-size:19px"></div>\n<div>Polaris server</div>')).toBe("<div>Polaris server</div>");
+  });
+
+  it("leaves a div with content alone, chart tokens included", () => {
+    const pending = '<div style="x">{chart.cpu}</div>';
+    expect(pruneEmptyDivs(pending)).toBe(pending);
+  });
+});
+
+describe("pruneEmptyChartSection", () => {
+  const section = (inner: string) => `<tr data-section="charts"><td><div>Last hour</div>${inner}</td></tr>`;
+
+  it("drops a Last-hour heading left standing over nothing", () => {
+    // Every chart token renders away for an alert with no asset to chart —
+    // Polaris's own capacity, a failed backup — and a heading over empty space
+    // reads as a broken email.
+    expect(pruneEmptyChartSection(section(""))).toBe("");
+  });
+
+  it("keeps the section once a chart — or its numbers-only fallback — rendered", () => {
+    expect(pruneEmptyChartSection(section('<img src="cid:x">'))).toContain("Last hour");
+    expect(pruneEmptyChartSection(section("<p>CPU (last hour): now 62%</p>"))).toContain("Last hour");
+  });
+
+  it("never touches another single-cell row", () => {
+    const other = '<tr><td style="padding:16px"><div>Sent by Polaris</div></td></tr>';
+    expect(pruneEmptyChartSection(other)).toBe(other);
   });
 });
 

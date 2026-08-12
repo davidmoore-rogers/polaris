@@ -23,6 +23,7 @@ import { logger } from "../utils/logger.js";
 import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail } from "../utils/notificationTemplate.js";
 import { ackUrlFromMeta } from "./notificationRecipientService.js";
 import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor } from "./alertChartService.js";
+import { pruneEmptyChartSection, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
 import { logEvent } from "./eventLogService.js";
 import { type ChannelType } from "./notificationTypes.js";
 import { sendSmtpEmail, sendM365Email, type EmailMessage } from "./notificationChannels/emailChannel.js";
@@ -100,9 +101,14 @@ async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, ur
       const charts = d.notification.assetId
         ? await buildAlertCharts(d.notification.assetId, wanted, { sensorName: d.notification.dimension, metric: d.notification.metric })
         : new Map();
-      text = substituteChartTokens(text, charts, { html: false });
+      // Charts render away individually (no samples) and collectively (an alert
+      // about Polaris itself has no asset to chart), so both bodies get a tidy
+      // pass afterwards: the HTML drops the "Last hour" heading left standing
+      // over nothing, the text collapses the blank lines the removed tokens
+      // left behind.
+      text = pruneEmptyTextLines(substituteChartTokens(text, charts, { html: false }));
       if (html) {
-        html = substituteChartTokens(html, charts, { html: true });
+        html = pruneEmptyChartSection(substituteChartTokens(html, charts, { html: true }));
         attachments = attachmentsFor(charts, html);
       }
     }

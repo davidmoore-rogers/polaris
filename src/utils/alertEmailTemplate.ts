@@ -38,7 +38,11 @@ export const DEFAULT_ALERT_TEXT = [
   "",
   "{message}",
   "",
-  "Device:     {asset}",
+  // "Subject", not "Device": plenty of alerts are about Polaris itself (a
+  // capacity escalation, a failed backup, the host's own CPU) rather than
+  // about a monitored device, and labelling the Polaris server as a "Device"
+  // is what made those emails read like they were about somebody's switch.
+  "Subject:    {asset}",
   "IP:         {asset.ip}",
   "Switch:     {asset.connectedSwitch}",
   "AP:         {asset.connectedAp}",
@@ -47,7 +51,11 @@ export const DEFAULT_ALERT_TEXT = [
   "Resource:   {event.resource}",
   "Triggered by: {event.actor}",
   "Severity:   {severity}",
-  "Raised:     {time}",
+  // {time.local} rather than {time}: the ISO-8601 form is what a machine wants,
+  // and "2026-08-12T18:46:01.561Z" is also a 24-character unbreakable string
+  // that wrapped mid-token in the HTML table. {time} stays catalogued for
+  // operator templates that want the machine form.
+  "Raised:     {time.local}",
   "",
   "{chart.trigger}",
   "{chart.sensor}",
@@ -59,6 +67,23 @@ export const DEFAULT_ALERT_TEXT = [
   "Open device:      {asset.link}",
   "Acknowledge:      {ack}",
 ].join("\n");
+
+/**
+ * One label/value row of the facts table.
+ *
+ * The label column is a FIXED width rather than shrink-to-fit. With auto
+ * layout the two columns are sized from their content, so a body whose facts
+ * are down to "Automation" and "Raised" — every alert about Polaris itself,
+ * where the device rows prune away — gave the labels most of the 600px and
+ * wrapped the values into a two-word-wide gutter. A fixed label column means
+ * the value always gets the rest of the card, and `word-break` keeps a long
+ * unbroken value (a URL, an ISO timestamp) inside it instead of widening the
+ * table past the card. `vertical-align:top` keeps a wrapped value's first line
+ * level with its label.
+ */
+const fact = (label: string, value: string): string =>
+  `<tr><td width="140" style="width:140px;padding:3px 12px 3px 0;color:#6b7280;vertical-align:top;white-space:nowrap">${label}</td>` +
+  `<td style="padding:3px 0;vertical-align:top;word-break:break-word">${value}</td></tr>`;
 
 /**
  * HTML body. The two buttons are bulletproof-ish table buttons rather than
@@ -84,27 +109,31 @@ export const DEFAULT_ALERT_HTML = [
   // Facts
   '<tr><td style="padding:10px 22px 0">',
   '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#374151;border-collapse:collapse">',
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">IP address</td><td style="padding:3px 0">{asset.ip}</td></tr>',
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Connected switch</td><td style="padding:3px 0">{asset.connectedSwitch}</td></tr>',
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Connected AP</td><td style="padding:3px 0">{asset.connectedAp}</td></tr>',
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Location</td><td style="padding:3px 0">{asset.location}</td></tr>',
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Model</td><td style="padding:3px 0">{asset.manufacturer} {asset.model}</td></tr>',
+  fact("IP address", "{asset.ip}"),
+  fact("Connected switch", "{asset.connectedSwitch}"),
+  fact("Connected AP", "{asset.connectedAp}"),
+  fact("Location", "{asset.location}"),
+  fact("Model", "{asset.manufacturer} {asset.model}"),
   // Event-path rows. An event automation usually fires on something that is
   // NOT a device (an integration, a user, the host), so the asset rows above
   // prune away and these are the only facts the reader gets. They prune away
   // in turn on a metric alert, which has no event behind it.
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Event</td><td style="padding:3px 0">{event.action}</td></tr>',
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">{event.resourceType}</td><td style="padding:3px 0">{event.resource}</td></tr>',
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Triggered by</td><td style="padding:3px 0">{event.actor}</td></tr>',
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Automation</td><td style="padding:3px 0">{rule}</td></tr>',
-  '<tr><td style="padding:3px 12px 3px 0;color:#6b7280;white-space:nowrap">Raised</td><td style="padding:3px 0">{time}</td></tr>',
+  fact("Event", "{event.action}"),
+  fact("{event.resourceType}", "{event.resource}"),
+  fact("Triggered by", "{event.actor}"),
+  fact("Automation", "{rule}"),
+  fact("Raised", "{time.local}"),
   "</table>",
   "</td></tr>",
   // Charts — the last hour of the metrics that explain most alerts. The sensor
   // chart leads because when it renders at all, it IS what the alert is about:
   // a hardware-sensor automation (value or alarm) charts the sensor it fired
   // on. It renders away entirely for every other kind of alert.
-  '<tr><td style="padding:14px 22px 0">',
+  // data-section="charts" is what pruneEmptyChartSection looks for at delivery
+  // time: every chart token can render away (an alert about Polaris itself has
+  // no asset to chart at all), and a "LAST HOUR" heading over nothing reads as
+  // a broken email rather than as "no telemetry applies here".
+  '<tr data-section="charts"><td style="padding:14px 22px 0">',
   '<div style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#6b7280;font-weight:700;margin-bottom:2px">Last hour</div>',
   "{chart.trigger}",
   "{chart.sensor}",
@@ -152,7 +181,22 @@ export function defaultAlertEmailTemplate(): AlertEmailTemplate {
  * an operator's own rows get the same treatment as ours.
  */
 export function pruneEmptyRows(html: string): string {
-  return html.replace(/<tr>(?:(?!<\/tr>).)*<\/tr>/gs, (row) => {
+  // The match may NOT span a nested `<table>` or a second `<tr>`. Without those
+  // two exclusions the pattern started at a layout row — `<tr><td>` wrapping the
+  // facts table — and ran to the first `</tr>` inside it, which belongs to the
+  // first FACT row. That span looks exactly like a two-cell label/value pair
+  // (the container's own <td>, then the fact row's empty value cell), so
+  // dropping it took the facts table's opening `<table>` tag with it: the
+  // surviving rows reparented onto the 600px card and the now-unmatched
+  // `</table>` closed the card early, putting "Last hour" and the buttons
+  // OUTSIDE the box. It fired whenever the first fact row was empty — i.e. on
+  // every alert about Polaris itself, which has no {asset.ip}.
+  //
+  // Failing the match at the container (rather than matching and skipping it)
+  // is what lets the engine advance INTO the table and judge each fact row on
+  // its own; a guard that returned the container unchanged consumed the first
+  // fact row with it and left an empty "IP address" cell behind.
+  return html.replace(/<tr\b[^>]*>(?:(?!<\/tr>|<tr\b|<table\b).)*<\/tr>/gs, (row) => {
     const cells = Array.from(row.matchAll(/<td[^>]*>(.*?)<\/td>/gs), (m) => m[1] ?? "");
     // Only touch two-cell label/value rows — never the layout scaffolding,
     // the severity bar, or the button row.
@@ -177,6 +221,36 @@ export function pruneDeadLinks(html: string): string {
     // A spacer left at the start or end of its row after the drop.
     .replace(/(<tr>)\s*<td style="width:10px">&nbsp;<\/td>/g, "$1")
     .replace(/<td style="width:10px">&nbsp;<\/td>\s*(<\/tr>)/g, "$1");
+}
+
+/**
+ * Drop a header line whose token rendered empty.
+ *
+ * The header's three lines are divs, not table rows, so `pruneEmptyRows` never
+ * saw them: an alert with no subject line ({asset} empty) or no trigger
+ * sentence (a context snapshotted before that token existed) mailed an empty
+ * div and the vertical space that goes with it. Only exactly-empty divs match,
+ * so nothing with content — or with a chart token still waiting for its
+ * delivery-time fill — is touched.
+ */
+export function pruneEmptyDivs(html: string): string {
+  return html.replace(/<div\b[^>]*>\s*<\/div>\n?/g, "");
+}
+
+/**
+ * Drop the charts section when nothing rendered into it.
+ *
+ * Runs at DELIVERY time, after `substituteChartTokens` — that is the pass that
+ * decides a chart has no data and removes its token, and it is also the point
+ * where an alert with no asset at all (Polaris's own capacity, a failed backup)
+ * ends up with every token gone. What's left is the "Last hour" heading over
+ * empty space. A row is kept if it gained an <img> (a chart) or a <p> (the
+ * numbers-only fallback when the rasterizer failed).
+ */
+export function pruneEmptyChartSection(html: string): string {
+  return html.replace(/<tr\b[^>]*data-section="charts"[^>]*>(?:(?!<\/tr>).)*<\/tr>\n?/gs, (row) =>
+    /<img\b|<p\b/i.test(row) ? row : "",
+  );
 }
 
 /** Text-body counterpart: drop "Label:" lines with nothing after the colon. */

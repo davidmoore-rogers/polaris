@@ -33,7 +33,7 @@ import {
   ackUrlForEmail,
   ackUrlForPush,
 } from "../utils/notificationTemplate.js";
-import { defaultAlertEmailTemplate, pruneDeadLinks, pruneEmptyRows, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
+import { defaultAlertEmailTemplate, pruneDeadLinks, pruneEmptyDivs, pruneEmptyRows, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
 import { mintAckTokens, type AckChannel } from "./notificationAckService.js";
 import { permissionOf, rankMeets, type AccessLevel } from "../api/middleware/permissions.js";
 import {
@@ -103,7 +103,7 @@ export function buildComposedEmail(comp: EmailComposition, ctx: Record<string, s
     text: pruneEmptyTextLines(text),
     // Dead links are pruned again after the per-recipient {ack} fill, since
     // that is when a recipient without a link gets an empty href.
-    html: pruneDeadLinks(pruneEmptyRows(html)),
+    html: pruneDeadLinks(pruneEmptyDivs(pruneEmptyRows(html))),
     cc: comp.cc ?? undefined,
     bcc: comp.bcc ?? undefined,
   };

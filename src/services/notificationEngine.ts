@@ -27,6 +27,7 @@ import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { logEvent } from "./eventLogService.js";
 import { triggerSummary } from "../utils/triggerSummary.js";
+import { eventSubjectLabel } from "../utils/alertSubject.js";
 import { sensorReadingDisplay } from "./alertChartService.js";
 import { REGION_TAG_PREFIX } from "./notificationService.js";
 import {
@@ -1927,6 +1928,12 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         if (c.trigger.detailsMatch && !detailsMatch(ev.details, c.trigger.detailsMatch)) continue;
       }
       const assetId = ev.resourceType === "asset" ? ev.resourceId ?? null : null;
+      // What this alert is ABOUT, as a label. A system-scoped Event (capacity,
+      // backups, updates) names no resource because the resource IS this
+      // install, so without the fallback the alert had no subject at all. Used
+      // for every field that has to agree on it: {asset}, the stored
+      // assetHostname, and the cooldown key below.
+      const subjectLabel = eventSubjectLabel(ev.resourceType, ev.resourceName);
       const detail = assetId ? await assetDetail(assetId) : null;
       // Event/change rules honor the same silence as threshold rules: no
       // notifications for assets in a maintenance window or dependency-
@@ -1936,7 +1943,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       // Cooldown: skip when this (rule, asset/resource) fired within
       // cooldownSec — and stamp the map so later events in this batch dedupe.
       if (c.rule.cooldownSec) {
-        const cdKey = `${c.rule.id}|${assetId ?? ev.resourceName ?? ""}`;
+        const cdKey = `${c.rule.id}|${assetId ?? subjectLabel}`;
         const last = lastFired.get(cdKey);
         const evT = ev.timestamp.getTime();
         if (last !== undefined && evT - last < c.rule.cooldownSec * 1000) continue;
@@ -1946,7 +1953,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       // Event-path token mapping: {asset}=resourceName, {metric}=action,
       // {value}=event message; threshold/dimension are empty.
       const ctx = buildTemplateContext({
-        asset: ev.resourceName ?? "",
+        asset: subjectLabel,
         metric: ev.action,
         value: ev.message,
         threshold: "",
@@ -1972,7 +1979,9 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         triggerSummary: triggerSummary({
           trigger: c.rule.trigger as never,
           eventAction: ev.action,
-          eventResource: ev.resourceName ?? ev.resourceType ?? null,
+          // "… on Polaris server" for a system-scoped event, where the bare
+          // resourceType ("system") named nothing a reader recognizes.
+          eventResource: subjectLabel || ev.resourceType || null,
         }),
       });
       const tmpl = c.rule.messageTemplate;
@@ -1989,7 +1998,9 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         ...(id ? { id } : {}),
         ruleId: c.rule.id,
         assetId,
-        assetHostname: ev.resourceName ?? null,
+        // The in-app / mobile alert lists render this as the alert's subject —
+        // blank for a system-scoped event before the label existed.
+        assetHostname: subjectLabel || null,
         severity: c.rule.severity,
         message,
         regionTags: regionSnapshot(tags),
