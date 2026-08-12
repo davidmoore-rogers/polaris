@@ -2900,13 +2900,12 @@ function macCellHTML(asset) {
 
 function assetFormHTML(defaults) {
   var d = defaults || {};
-  // FortiAP descriptions push to the device `location` field, which FortiOS
-  // caps at 35 chars. When this AP's integration syncs descriptions, cap the
-  // Description input to match so the Polaris value can't silently outrun the
-  // device. Non-AP types, and APs whose integration doesn't sync, keep 255.
-  var apLocationCap = d.assetType === "access_point" &&
-    d.discoveredByIntegration && d.discoveredByIntegration.syncDescriptions === true;
-  var descMaxLen = apLocationCap ? 35 : 255;
+  // The device-side cap this asset's Description pushes into, when it pushes
+  // at all (see descriptionDeviceTarget). Polaris does NOT cap the input to
+  // it — the Polaris value is authoritative and may legitimately carry more
+  // location codes than the short device field holds. Instead the field warns
+  // live once the value would be truncated on push.
+  var descTarget = descriptionDeviceTarget(d);
   var identitySection = d._editing
     ? '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
         // Hostname is editable on edit as an operator override (coordinate-pin
@@ -2984,18 +2983,74 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Warranty Expires</label><input type="date" id="f-warrantyExpiry" value="' + dateInputVal(d.warrantyExpiry) + '"></div>' +
     '<div class="form-group"><label>Purchase Order</label><input type="text" id="f-purchaseOrder" value="' + escapeHtml(d.purchaseOrder || "") + '" placeholder="PO-12345"></div>' +
   '</div>' +
-  '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="' + descMaxLen + '" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
+  '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="255" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
     '<p class="hint">Device Map grouping codes: <code>a:</code>area &nbsp;<code>b:</code>building &nbsp;<code>f:</code>floor &nbsp;<code>r:</code>room &nbsp;<code>jb:</code>junction box — e.g. <code>a:Mine b:Shop f:2 r:North Closet jb:112-305</code>. Values may contain spaces; each runs until the next code. Codes here (falling back to the device-side description) group this device into building/floor/room shapes and floor views on the topology map.</p>' +
     '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP location) — Polaris is primary: a value here always wins and pushes to the device. Leave empty to adopt the device\'s value.</p>' +
-    (apLocationCap ? '<p class="hint" style="color:var(--color-warning,#b45309)">Limited to 35 characters — this access point\'s integration syncs descriptions to the FortiAP <code>location</code> field, which FortiOS caps at 35 characters.</p>' : '') + '</div>' +
+    descriptionCapWarningHTML(descTarget, "f-description-cap-warn") + '</div>' +
   '<div class="form-group"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes">' + escapeHtml(d.notes || "") + '</textarea></div>' +
   tagFieldHTML(d.tags || []);
 }
 
+// ── Device-side description caps (warn, never limit) ────────────────────────
+// Asset.description pushes to a short device field on some Fortinet roles, and
+// FortiOS/FortiManager truncate what doesn't fit (capDescriptionForTarget in
+// src/services/descriptionSyncService.ts). Polaris deliberately does NOT cap
+// the operator's input to match — the Polaris value is primary and may carry
+// more location codes than the device field holds — so the edit surfaces warn
+// live instead, and only when the originating integration actually syncs
+// descriptions to the device. Keep these numbers in lockstep with
+// DESCRIPTION_CAPS. (FortiSwitch `description` is capped at 63 device-side but
+// carries no warning here — 63 is roomy enough that nobody has hit it.)
+var DESCRIPTION_DEVICE_TARGETS = {
+  access_point: { cap: 35, device: "FortiAP",   field: "location" },
+  firewall:     { cap: 35, device: "FortiGate", field: "alias" },
+};
+
+// The device target this asset's Description would be truncated into, or null
+// when nothing pushes (non-Fortinet role, or Description Sync off).
+function descriptionDeviceTarget(asset) {
+  if (!asset || !asset.discoveredByIntegration) return null;
+  if (asset.discoveredByIntegration.syncDescriptions !== true) return null;
+  return DESCRIPTION_DEVICE_TARGETS[asset.assetType] || null;
+}
+
+// Hidden warning paragraph for a Description field; wireDescriptionCapWarning
+// fills and reveals it. Renders nothing when the asset has no device target.
+function descriptionCapWarningHTML(target, id) {
+  if (!target) return "";
+  return '<p class="hint" id="' + id + '" data-cap="' + target.cap +
+    '" data-device="' + escapeHtml(target.device) + '" data-field="' + escapeHtml(target.field) +
+    '" style="display:none;color:var(--color-warning,#b45309)"></p>';
+}
+
+// Show the warning whenever the typed value exceeds the device cap, live. Runs
+// once on wire-up too, so a pre-existing over-length description warns on open
+// rather than only after an edit.
+function wireDescriptionCapWarning(inputId, warnId) {
+  var input = document.getElementById(inputId);
+  var warn = document.getElementById(warnId);
+  if (!input || !warn) return;
+  var cap = parseInt(warn.getAttribute("data-cap") || "", 10);
+  if (!(cap > 0)) return;
+  var device = warn.getAttribute("data-device") || "device";
+  var field = warn.getAttribute("data-field") || "description";
+  function update() {
+    var len = input.value.length;
+    if (len <= cap) { warn.style.display = "none"; return; }
+    warn.innerHTML = "Over the device limit — FortiManager/FortiGate caps the " +
+      escapeHtml(device) + " <code>" + escapeHtml(field) + "</code> field at " + cap +
+      " characters, so this description (" + len + " characters) is cut off at " + cap +
+      " when it's written to the device. Polaris keeps the full text: <code>" +
+      escapeHtml(input.value.slice(0, cap)) + "</code> is what the device gets.";
+    warn.style.display = "";
+  }
+  input.addEventListener("input", update);
+  update();
+}
+
 // Read the Description field, trimmed to the input's own maxlength. maxlength
 // prevents over-typing but doesn't shorten a longer value assigned via the
-// value attribute (e.g. a pre-existing description on an AP that only just
-// became sync-capped at 35), so slice defensively.
+// value attribute, so slice defensively (the server's Zod schema caps at 255).
 function descriptionFieldValue() {
   var el = document.getElementById("f-description");
   if (!el) return "";
@@ -3024,10 +3079,9 @@ function getAssetFormData() {
     // server-side (notes are operator-only; erasing them must stick).
     notes:         val("f-notes"),
     // Always sent (including "") — an emptied Description clears to null
-    // server-side so the device value can re-seed it (description sync).
-    // Truncate to the input's own maxlength: for a synced FortiAP this is 35
-    // (the device `location` cap), and maxlength alone doesn't retro-trim a
-    // longer value that was set programmatically before the cap applied.
+    // server-side so the device value can re-seed it (description sync). Sent
+    // in full even when it outruns a short device field (FortiAP `location` /
+    // FortiGate `alias`): the Polaris value is primary and the push truncates.
     description:   descriptionFieldValue(),
     tags:          getTagFieldValue(),
   };
@@ -3916,6 +3970,7 @@ async function openCreateModal() {
     '<button class="btn btn-primary" id="btn-save">Create Asset</button>';
   openModal("Add Asset", body, footer);
   _wireModalTabs("asset-edit");
+  wireDescriptionCapWarning("f-description", "f-description-cap-warn");
   wireTagPicker();
   _wireMonitorEditTab({});
   _populateUploadedMibsInDropdowns();
@@ -3972,6 +4027,7 @@ async function openEditModal(id, opts) {
       var tabBtn = document.querySelector('#asset-edit-tabs .page-tab[data-tab="' + opts.tab + '"]');
       if (tabBtn) tabBtn.click();
     }
+    wireDescriptionCapWarning("f-description", "f-description-cap-warn");
     wireTagPicker();
     _wireMonitorEditTab(asset);
     _populateUploadedMibsInDropdowns();

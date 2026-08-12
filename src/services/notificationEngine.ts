@@ -72,6 +72,7 @@ import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientSe
 import { executeActions, type ActionExecContext } from "./automationActionService.js";
 import { queryProbeLossRatios } from "./probeLossQuery.js";
 import { alarmStatusToFlag } from "../utils/hardwareSensors.js";
+import { median } from "../utils/stats.js";
 import {
   buildTemplateContext,
   renderNotificationTemplate,
@@ -298,6 +299,7 @@ function reduceReadings(
   for (const g of groups.values()) {
     let value: number | null;
     if (aggregation === "avg") value = g.values.length ? g.values.reduce((a, b) => a + b, 0) / g.values.length : null;
+    else if (aggregation === "median") value = median(g.values);
     else if (aggregation === "min") value = g.values.length ? Math.min(...g.values) : null;
     else if (aggregation === "max") value = g.values.length ? Math.max(...g.values) : null;
     else value = g.latest.v; // latest
@@ -576,6 +578,7 @@ async function resolveHostMetricReading(trigger: Extract<Trigger, { type: "host_
   };
   let value: number;
   if (trigger.aggregation === "avg") value = rows.reduce((a, r) => a + valueOf(r), 0) / rows.length;
+  else if (trigger.aggregation === "median") value = median(rows.map(valueOf)) ?? NaN;
   else if (trigger.aggregation === "min") value = Math.min(...rows.map(valueOf));
   else if (trigger.aggregation === "max") value = Math.max(...rows.map(valueOf));
   else value = valueOf(rows[0]); // latest

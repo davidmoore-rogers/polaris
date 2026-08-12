@@ -1242,11 +1242,12 @@ function onSyncDescriptionsToggle(el) {
   if (!el || !el.checked) return;
   showConfirm(
     "Enable Description Sync?\n\n" +
-    "FortiAP descriptions are written to the device's location field, which " +
-    "FortiOS limits to 35 characters. With sync on, Polaris caps the " +
-    "Description field to 35 characters for access points and truncates " +
-    "longer values when pushing to the device.\n\n" +
-    "FortiGate and FortiSwitch descriptions are not affected."
+    "Device description fields are short: FortiOS limits the FortiAP location " +
+    "field and the FortiGate alias to 35 characters, and the FortiSwitch " +
+    "description to 63.\n\n" +
+    "Polaris does not shorten what you type — it keeps the full description " +
+    "and warns on the asset's Description field when the value is longer than " +
+    "the device allows. The push truncates it to fit."
   ).then(function (ok) {
     if (!ok) el.checked = false;
   });
