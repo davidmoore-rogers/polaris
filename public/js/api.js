@@ -252,10 +252,59 @@ async function request(method, path, body, signal) {
     window.location.href = "/login.html"; return;
   }
 
-  const data = await res.json();
+  return _readResponseBody(res);
+}
+
+// Turn a proxy-generated error page into a sentence that names the failure.
+//
+// Every error the Express app itself produces is JSON (errorHandler.ts), so an
+// HTML body means the response never came from Polaris — nginx or the load
+// balancer in front of it answered instead, and those emit
+// `<html><head><title>502 Bad Gateway</title>…`. Their <title> is the single
+// most useful string in the page, so lift it verbatim and add the operator-
+// facing "so what" for the statuses that actually reach this path.
+function _proxyErrorMessage(status, text) {
+  var m = /<title>([^<]{1,120})<\/title>/i.exec(text || "");
+  var detail = m ? m[1].trim() : "HTTP " + status;
+  var hint = "";
+  if (status === 413) {
+    hint = " — the reverse proxy rejected the request body as too large.";
+  } else if (status === 502 || status === 503) {
+    hint = " — Polaris isn't answering behind the reverse proxy (restarting?).";
+  } else if (status === 504) {
+    hint = " — the request timed out at the reverse proxy.";
+  } else if (status === 400 || status === 414 || status === 431) {
+    hint = " — the reverse proxy rejected the request line or headers.";
+  }
+  return detail + hint;
+}
+
+// Read a response body as JSON, but never blind-parse it.
+//
+// `request` used to call `res.json()` before checking `res.ok`, so any non-JSON
+// error response surfaced as `Unexpected token '<', "<html> <h"... is not valid
+// JSON` — a toast that hides both the status code and the reason. Since only a
+// proxy can produce a non-JSON response here, that string was the one piece of
+// evidence an operator got, and it named nothing. Parse defensively instead and
+// keep `status` on the thrown error so callers can branch on it.
+async function _readResponseBody(res, fallbackMsg) {
+  const text = await res.text();
+  let data = null;
+  if (text) {
+    try { data = JSON.parse(text); } catch (_e) { data = null; }
+  }
+
+  if (data === null && text) {
+    const err = new Error(res.ok
+      ? `Server returned a non-JSON response (${res.status})`
+      : _proxyErrorMessage(res.status, text));
+    err.status = res.status;
+    err.bodyText = text;
+    throw err;
+  }
+
   if (!res.ok) {
-    const msg = data?.error || `Request failed (${res.status})`;
-    const err = new Error(msg);
+    const err = new Error(data?.error || fallbackMsg || `Request failed (${res.status})`);
     err.status = res.status;
     err.data = data;
     throw err;
@@ -1170,9 +1219,9 @@ async function uploadFile(path, category, file) {
   });
 
   if (res.status === 401) { window.location.href = "/login.html"; return; }
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error || "Upload failed");
-  return data;
+  // Same defensive parse as `request` — and the likeliest caller to meet
+  // nginx's 1 MB `client_max_body_size` head-on, since this one posts files.
+  return _readResponseBody(res, "Upload failed");
 }
 
 function toQuery(params) {
