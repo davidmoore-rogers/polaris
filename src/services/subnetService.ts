@@ -38,6 +38,8 @@
 import type { Prisma, SubnetStatus } from "../generated/prisma/client.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { DEFAULT_PLACEHOLDER_MAC_PREFIX } from "../utils/mac.js";
+import { getPlaceholderPrefix } from "./reservationMacService.js";
 import { isFortinetIntegrationType } from "../utils/pollingCompatibility.js";
 import { integrationPushEnabled } from "./reservationPushService.js";
 import { logEvent, buildChanges } from "./eventLogService.js";
@@ -752,6 +754,12 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
     (isFortinetIntegrationType(integrationType)) &&
     !!subnet.fortigateDevice;
 
+  // Never fail the panel over a settings read — the generator falls back to the
+  // compiled-in default client-side when this is absent.
+  const macPlaceholderPrefix = await getPlaceholderPrefix().catch(
+    () => DEFAULT_PLACEHOLDER_MAC_PREFIX,
+  );
+
   const subnetInfo = {
     name: subnet.name,
     cidr: subnet.cidr,
@@ -766,6 +774,11 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
     fortigateDevice: subnet.fortigateDevice,
     pushEligible,
     refreshEligible,
+    // The prefix the reserve modals' "Generate" button builds a placeholder MAC
+    // from. It rides this payload rather than its own fetch because that button
+    // is used by `reservations:write` callers who typically have no Server
+    // Settings access, and the panel already fetches this.
+    macPlaceholderPrefix,
     lastDiscoveredAt: subnet.lastDiscoveredAt,
     hasConflict: subnet.reservations.some(r => r.conflictMessage),
     conflictMessage: subnet.reservations.some(r => r.conflictMessage)

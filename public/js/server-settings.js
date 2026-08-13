@@ -3665,6 +3665,7 @@ var _tagsData = [];
 var _emptyCategories = [];
 var _tagSettings = { enforce: false };
 var _ouiOverrides = [];
+var _placeholderMac = null;
 var _mibsData = [];
 var _mibFacets = { manufacturers: [], modelsByManufacturer: {} };
 var _manufacturerAliases = [];
@@ -3861,6 +3862,7 @@ async function loadIdentificationTab() {
       api.serverSettings.listManufacturerAliases().catch(function () { return []; }),
       api.deviceIcons.list().catch(function () { return []; }),
       api.serverSettings.listManufacturerProfiles().catch(function () { return { profiles: [], transforms: [] }; }),
+      api.serverSettings.getPlaceholderMac().catch(function () { return null; }),
     ]);
     _tagsData = results[0];
     _tagSettings = results[1] || { enforce: false };
@@ -3879,6 +3881,7 @@ async function loadIdentificationTab() {
     _mfgProfiles = profilePayload.profiles || [];
     _mfgProfileTransforms = profilePayload.transforms || [];
     _mfgProfileCombiners = profilePayload.combiners || [];
+    _placeholderMac = results[9] || null;
     _tagsLoaded = true;
     renderIdentificationTab();
   } catch (err) {
@@ -3928,6 +3931,39 @@ function renderIdentificationTab() {
       'then <strong>Manufacturer Aliases</strong> normalize the vendor name, ' +
       'and the <strong>IEEE OUI Database</strong> provides the base lookup.' +
     '</p>';
+
+  // ── Placeholder MAC Prefix ──
+  // Sits in this card because it IS a MAC-prefix setting, next to the OUI
+  // machinery that interprets prefixes — an operator will often add a matching
+  // Prefix Override ("02:0F:5E → Polaris (placeholder)") a few inches below.
+  var phPrefix = (_placeholderMac && _placeholderMac.prefix) || "02:0F:5E";
+  html += '<h5 class="mac-id-section-heading">Placeholder MAC Prefix</h5>' +
+    '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:0.75rem">' +
+      'A DHCP reservation is a MAC&rarr;IP binding, so reserving an IP for a device that isn\'t racked yet ' +
+      'needs a MAC before there is a device to supply one. The IP panel\'s <strong>Generate</strong> button ' +
+      'builds one from this prefix, and it is the <em>only</em> thing marking that MAC as a placeholder &mdash; ' +
+      'Fortinet discovery replaces a MAC matching it with the real device\'s MAC once one appears at that IP ' +
+      '(per-integration opt-in on the DHCP Push tab). A MAC that does not match is never touched.' +
+    '</p>' +
+    '<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:0.5rem">' +
+      '<div style="flex:1;min-width:160px">' +
+        '<label style="font-size:0.78rem;font-weight:500">Prefix</label>' +
+        '<input type="text" id="f-placeholder-mac-prefix" value="' + escapeHtml(phPrefix) + '" ' +
+          'placeholder="02:0F:5E" style="font-family:var(--font-mono);font-size:0.85rem">' +
+      '</div>' +
+      '<button class="btn btn-primary" id="btn-save-placeholder-mac">Save</button>' +
+    '</div>' +
+    '<ul class="hint" style="margin:0.25rem 0 1.25rem 1.2rem;padding:0">' +
+      '<li>1&ndash;5 hex octets. The first octet must be <strong>locally administered and unicast</strong> ' +
+        '(02, 06, 0A, 0E, &hellip;). A real vendor OUI is rejected: it would make that vendor\'s genuine ' +
+        'devices look like placeholders, and discovery would be free to overwrite them.</li>' +
+      '<li><strong>Changing this is not retroactive, in either direction.</strong> Reservations carrying the ' +
+        'old prefix stop being adoptable, and any reservation that happens to match the new one becomes ' +
+        'adoptable immediately.</li>' +
+      '<li>Installs that generated MACs before this setting existed used a bare <code>02</code>. Set the ' +
+        'prefix to <code>02</code> to have those recognized &mdash; noting that <code>02</code> alone also ' +
+        'matches genuine KVM, Docker and FortiOS-HA MACs.</li>' +
+    '</ul>';
 
   // ── Prefix Overrides ──
   html += '<h5 class="mac-id-section-heading">Prefix Overrides</h5>' +
@@ -4150,6 +4186,10 @@ function renderIdentificationTab() {
   // MIB + manufacturer-profile wiring lives on the Credentials tab now.
   wireDeviceIconHandlers();
 
+  // Placeholder MAC prefix
+  var phBtn = document.getElementById("btn-save-placeholder-mac");
+  if (phBtn) phBtn.addEventListener("click", savePlaceholderMacPrefix);
+
   // OUI override events
   document.getElementById("btn-add-oui-override").addEventListener("click", addOuiOverride);
   container.querySelectorAll(".oui-override-del").forEach(function (btn) {
@@ -4217,6 +4257,35 @@ function renderIdentificationTab() {
   // renderIdentificationTab() after a mutation. This keeps both surfaces in
   // sync without touching every callsite.
   _maybeRerenderCredentialsTabForMibOrProfile();
+}
+
+// Save the placeholder MAC prefix. The confirm is the load-bearing part: a
+// prefix change silently changes which existing reservations discovery is
+// allowed to overwrite, in both directions, and nothing else in the UI would
+// tell the operator that.
+async function savePlaceholderMacPrefix() {
+  var input = document.getElementById("f-placeholder-mac-prefix");
+  if (!input) return;
+  var prefix = input.value.trim();
+  var current = (_placeholderMac && _placeholderMac.prefix) || "";
+  if (!prefix) { showToast("Enter a prefix", "error"); return; }
+  if (prefix.toUpperCase() === current.toUpperCase()) { showToast("Prefix unchanged"); return; }
+
+  var ok = await showConfirm(
+    "Change the placeholder MAC prefix from " + current + " to " + prefix + "?\n\n"
+      + "Reservations still carrying " + current + " will no longer be adopted by discovery, and any "
+      + "reservation whose MAC happens to match " + prefix + " becomes adoptable immediately.\n\n"
+      + "This does not change any existing reservation by itself.",
+  );
+  if (!ok) return;
+
+  try {
+    _placeholderMac = await api.serverSettings.setPlaceholderMac({ prefix: prefix });
+    showToast("Placeholder MAC prefix saved");
+    renderIdentificationTab();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 async function addOuiOverride() {

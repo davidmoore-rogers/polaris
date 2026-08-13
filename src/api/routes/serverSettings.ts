@@ -22,6 +22,7 @@ import {
 import { getDnsSettings, updateDnsSettings, createResolver } from "../../services/dnsService.js";
 import type { DnsSettings } from "../../services/dnsService.js";
 import { getOuiStatus, refreshOuiDatabase, getOuiOverrides, setOuiOverride, deleteOuiOverride, lookupOuiDetailed } from "../../services/ouiService.js";
+import { getReservationMacSettings, saveReservationMacSettings } from "../../services/reservationMacService.js";
 import { getDashSettings, saveDashSettings } from "../../services/dashSettingsService.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { requestActor } from "../middleware/auth.js";
@@ -998,6 +999,30 @@ router.delete("/oui/overrides/:prefix", requirePermission("serverSettingsSystem"
       message: `OUI override removed for ${prefix}`,
     });
     res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Placeholder MAC prefix ───────────────────────────────────────────────
+//
+// The OUI every MAC Polaris generates for a not-yet-racked device's DHCP
+// reservation begins with. Read is open to any authenticated caller (the
+// generator UI needs it and lives behind reservations:write, not server
+// settings — though the IP-panel payload is the delivery path in practice);
+// the write carries the same fullwrite gate as its OUI-override neighbours.
+
+router.get("/reservation-mac", async (_req, res, next) => {
+  try {
+    res.json(await getReservationMacSettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/reservation-mac", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
+  try {
+    res.json(await saveReservationMacSettings(req.body ?? {}, req.session?.username));
   } catch (err) {
     next(err);
   }

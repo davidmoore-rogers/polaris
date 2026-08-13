@@ -426,13 +426,13 @@
           + '    <input class="field mono" id="r-mac" placeholder="aa:bb:cc:dd:ee:ff" required value="' + escapeHtml(pf.mac || "") + '">'
           + '    <div class="support" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">'
           + '      <span>Will be pushed to ' + escapeHtml(s.fortigateDevice || "FortiGate") + ' as a DHCP reservation.</span>'
-          + '      <button type="button" class="btn btn-text" id="r-mac-gen" title="Generate a locally-administered MAC (02:xx:xx:xx:xx:xx) — placeholder when the device’s real MAC isn’t known yet" style="font-size:13px;padding:4px 10px;flex-shrink:0;">Generate</button>'
+          + '      <button type="button" class="btn btn-text" id="r-mac-gen" title="Generate a placeholder MAC for a device that isn’t racked yet — discovery replaces it with the real one once the device appears at this IP" style="font-size:13px;padding:4px 10px;flex-shrink:0;">Generate</button>'
           + '    </div>'
           + '  </div>'
         : '  <div class="tf-outlined"><span class="lbl">MAC address</span>'
           + '    <input class="field mono" id="r-mac" placeholder="optional" value="' + escapeHtml(pf.mac || "") + '">'
           + '    <div class="support" style="display:flex;justify-content:flex-end;">'
-          + '      <button type="button" class="btn btn-text" id="r-mac-gen" title="Generate a locally-administered MAC (02:xx:xx:xx:xx:xx) — placeholder when the device’s real MAC isn’t known yet" style="font-size:13px;padding:4px 10px;">Generate</button>'
+          + '      <button type="button" class="btn btn-text" id="r-mac-gen" title="Generate a placeholder MAC for a device that isn’t racked yet — discovery replaces it with the real one once the device appears at this IP" style="font-size:13px;padding:4px 10px;">Generate</button>'
           + '    </div>'
           + '  </div>')
       + '  <div class="tf-outlined"><span class="lbl">Notes</span>'
@@ -469,25 +469,18 @@
     var macInput = document.getElementById("r-mac");
     if (genBtn && macInput) {
       genBtn.addEventListener("click", function () {
-        macInput.value = generateLocalMac();
+        macInput.value = generateLocalMac(s ? s.macPlaceholderPrefix : null);
         macInput.focus();
         try { macInput.select(); } catch (_) {}
       });
     }
   }
 
-  // Generate a locally-administered unicast MAC for placeholder use when the
-  // real client MAC isn't known yet (e.g. reserving an IP before the device
-  // is racked). First octet fixed at 02 so the locally-administered bit is
-  // set and the multicast bit is clear — same convention as desktop's
-  // _generateLocalMac() in public/js/ip-panel.js.
-  function generateLocalMac() {
-    var bytes = ["02"];
-    for (var i = 0; i < 5; i++) {
-      var b = Math.floor(Math.random() * 256);
-      bytes.push((b < 16 ? "0" : "") + b.toString(16));
-    }
-    return bytes.join(":").toUpperCase();
+  // Placeholder MAC for an IP reserved ahead of the device. Delegates to the
+  // shared helper in public/js/placeholder-mac.js — this file used to carry its
+  // own byte-for-byte copy of the generator, and the two drifted.
+  function generateLocalMac(prefix) {
+    return window.PolarisPlaceholderMac.generate(prefix);
   }
 
   function closeReserveSheet() {

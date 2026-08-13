@@ -80,6 +80,12 @@ import { reconcileMapRegions } from "../mapRegionService.js";
 import { releaseAssetsForDecommission } from "../maintenanceScheduleService.js";
 import { releaseInfraReservationsForAssets } from "../reservationService.js";
 import { runInfraReservationPush } from "../infraReservationPushService.js";
+import {
+  buildMacEvidenceIndex,
+  createAdoptionBudget,
+  runPlaceholderMacAdoption,
+  type AdoptionBudget,
+} from "../placeholderMacAdoptionService.js";
 import { reconcileAllTags } from "../tagAssignmentService.js";
 import * as sightings from "../assetSightingService.js";
 import { quarantineAsset, verifyAssetQuarantine } from "../assetQuarantineService.js";
@@ -694,10 +700,17 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
     // Accumulate per-device sync totals for the completion log
     const syncTotals = { created: [] as string[], updated: [] as string[], skipped: [] as string[], deprecated: [] as string[], decommissionedSwitches: [] as string[], decommissionedAps: [] as string[] };
 
+    // Phase 7.7's device-write budget for this ENTIRE run. In FMG mode the sync
+    // below runs once per managed FortiGate, so a ceiling held inside the phase
+    // would become ceiling × gate-count DHCP writes in a single cycle. One
+    // mutable object, decremented by every gate, is what keeps the pass bounded
+    // per run the way infraReservationPushService is bounded per integration.
+    const adoptionBudget = createAdoptionBudget();
+
     // Per-device callback: sync each FortiGate's data as it arrives (phases 1, 3–9).
     // Phase 2 (stale deprecation) runs separately at the end once all devices are known.
     const onDeviceComplete = async (deviceResult: DiscoveryResult) => {
-      const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, deviceResult, actor, "skip-deprecation", ac.signal);
+      const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, deviceResult, actor, "skip-deprecation", ac.signal, adoptionBudget);
       syncTotals.created.push(...r.created);
       syncTotals.updated.push(...r.updated);
       syncTotals.skipped.push(...r.skipped);
@@ -768,7 +781,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
         onProgress,
       );
       if (!ac.signal.aborted) {
-        const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "full", ac.signal);
+        const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "full", ac.signal, adoptionBudget);
         syncTotals.created.push(...r.created);
         syncTotals.updated.push(...r.updated);
         syncTotals.skipped.push(...r.skipped);
@@ -1669,7 +1682,7 @@ export function isVouchedManagedDevice(
   return !!(asset.hostname && sightings.seenHostnamesByController.get(ctlKey)?.has(asset.hostname));
 }
 
-async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full", signal?: AbortSignal) {
+async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full", signal?: AbortSignal, adoptionBudget?: AdoptionBudget) {
   const syncLog = (level: "info" | "error", message: string) => {
     logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
   };
@@ -4838,7 +4851,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           if (asset.assignedTo && res.owner !== asset.assignedTo && macChanged) {
             resUpdate.owner = asset.assignedTo;
           }
-          if (macChanged) {
+          // A row Polaris pushed to a gate is NOT ours to rewrite here: this is
+          // a bare prisma.update with no device write behind it, so changing the
+          // MAC would leave Polaris pointing at a MAC the FortiGate's
+          // reserved-address entry doesn't have — a divergence nothing later
+          // reconciles. Phase 7.7 owns the pushed case; it goes through
+          // updatePushedReservation, which writes the device first and verifies
+          // by read-back. Unpushed rows keep the historical behaviour.
+          const isPushedRow = !!res.pushedToId || !!res.pushStatus;
+          if (macChanged && !isPushedRow) {
             resUpdate.macAddress = normalized;
           }
           if (Object.keys(resUpdate).length > 0) {
@@ -5368,6 +5389,54 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         });
         syncLog("info", `ARP presence: ${arpConfirmedIds.length} DHCP reservation(s) confirmed live by FortiGate ARP (IP+MAC match)`);
       }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Phase 7.7 — Adopt the real MAC onto placeholder-MAC reservations
+  phaseMark("7.7");
+  //
+  // A reservation created for a not-yet-racked device carries a SYNTHETIC MAC
+  // (see utils/mac.ts) so it could be written to the gate at all. That entry
+  // matches nothing: when the device finally arrives it DHCPs with its real MAC,
+  // misses the reservation and takes a pool address instead. Phase 7.6 above has
+  // the correcting evidence in hand — it just drops a MAC mismatch on the floor,
+  // because for PRESENCE a different MAC genuinely isn't proof the reserved
+  // device is alive. Here that same mismatch is the signal: if the stored MAC is
+  // a placeholder, whatever is actually answering at that IP is the device the
+  // reservation was always meant for.
+  //
+  // Double opt-in (pushReservations + adoptDiscoveredMac), placeholder-only
+  // overwrite, device-write-then-Polaris ordering and the per-RUN budget all
+  // live in the service — see its header. Wrapped in a catch so an adoption
+  // failure never poisons the run's accounting, matching the other
+  // device-writing passes.
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  if (adoptionBudget && adoptionBudget.remaining > 0 && !signal?.aborted) {
+    const evidence = buildMacEvidenceIndex(result.arpTable || [], result.deviceInventory || []);
+    if (evidence.size > 0) {
+      await runPlaceholderMacAdoption({
+        integrationId,
+        integrationName,
+        evidence,
+        budget: adoptionBudget,
+        actor,
+        signal,
+      })
+        .then((r) => {
+          if (r.attempted > 0) {
+            syncLog(
+              "info",
+              `Placeholder MAC adoption: ${r.adopted} reservation(s) updated to the discovered device's MAC`
+                + (r.failed > 0 ? `, ${r.failed} failed` : "")
+                + (r.deferred > 0 ? `, ${r.deferred} deferred to the next cycle` : ""),
+            );
+          }
+        })
+        .catch((err: any) => {
+          syncLog("error", `Placeholder MAC adoption failed: ${err?.message || "Unknown error"}`);
+        });
     }
   }
 

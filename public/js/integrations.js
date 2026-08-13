@@ -846,14 +846,15 @@ function calloutHTML(variant, title, bodyHtml) {
 // its own Stale Detection section at the bottom of the tab (stored in
 // integration.config.arpPresenceSweep, read on save by
 // _readArpPresenceSweepToggle()).
-function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep, autoReserveFortinetInfra) {
+function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep, autoReserveFortinetInfra, adoptDiscoveredMac) {
   var checked = pushReservations === true ? "checked" : "";
   var arpChecked = arpPresenceSweep === true ? "checked" : "";
-  // Meaningless without the transport gate above it, so it renders nested and
+  // Meaningless without the transport gate above it, so they render nested and
   // disabled until that box is ticked. The server re-checks anyway — the client
   // state is a convenience, not the enforcement.
   var autoChecked = autoReserveFortinetInfra === true ? "checked" : "";
   var autoDisabled = pushReservations === true ? "" : " disabled";
+  var adoptChecked = adoptDiscoveredMac === true ? "checked" : "";
   var modeLabel = (useProxy === false)
     ? "Direct to each FortiGate"
     : "Proxy through FortiManager to each FortiGate";
@@ -882,7 +883,19 @@ function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep, a
         '<li><strong>Paced, not a fan-out.</strong> A bounded number of entries are written per discovery cycle and the rest are picked up on later cycles. Each write is verified by reading it back, and a device that refuses is left alone and logged rather than retried into the ground.</li>' +
         '<li><strong>Reversible.</strong> Decommissioning or deleting a switch/AP removes its entry from the gate. Turning this off stops new entries; it does not remove ones already written &mdash; release those reservations to do that.</li>' +
       '</ul>' +
-      calloutHTML("warning", "This writes DHCP configuration automatically", "Every other Polaris DHCP write is something an operator asked for on a specific IP. This one runs on a schedule across the fleet. Enable it on one integration and check the result on a single gate before relying on it, and have someone who owns the network sign off &mdash; particularly for FortiLink pools, which the FortiGate manages itself.") +
+      '<div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin:1rem 0 0.5rem;padding-left:1.2rem;border-left:2px solid var(--color-border)">' +
+        '<input type="checkbox" id="f-adoptDiscoveredMac" ' + adoptChecked + autoDisabled + ' style="width:auto;margin-top:3px">' +
+        '<label for="f-adoptDiscoveredMac" style="margin:0">Replace a placeholder MAC with the real device\'s MAC once one appears' +
+          (pushReservations === true ? '' : ' <span style="color:var(--color-text-tertiary)">(requires the setting above)</span>') +
+        '</label>' +
+      '</div>' +
+      '<ul class="hint" style="margin:0.25rem 0 0 2.4rem;padding:0">' +
+        '<li><strong>The problem it fixes.</strong> Reserving an IP for a device that isn\'t racked yet needs a MAC before there is a device to supply one, so Polaris generates a placeholder. That entry matches nothing: when the device finally arrives it asks for DHCP with its real MAC, misses the reservation and takes a pool address instead. The reservation looks correct on both sides and silently does nothing.</li>' +
+        '<li><strong>What it does.</strong> When discovery sees a real device answering at that reserved IP &mdash; in the gate\'s ARP table or its device inventory &mdash; the reservation takes that device\'s MAC and the corrected entry is written back to the gate and verified by read-back. Every change is audited with both MACs and which source saw it.</li>' +
+        '<li><strong>Only placeholders.</strong> A MAC is only replaced when it matches the placeholder prefix set under Server Settings &rarr; Identification. A MAC an operator typed is never touched, whatever discovery saw. Paced like the setting above, and a gate that refuses a write is recorded as "Push failed" rather than retried every cycle.</li>' +
+        '<li><strong>It rewrites the entry\'s description.</strong> Updating the reserved-address entry rewrites its description from Polaris\'s hostname/notes, so a description typed by hand on the FortiGate is replaced.</li>' +
+      '</ul>' +
+      calloutHTML("warning", "This writes DHCP configuration automatically", "Every other Polaris DHCP write is something an operator asked for on a specific IP. These two run on a schedule across the fleet. Enable them on one integration and check the result on a single gate before relying on them, and have someone who owns the network sign off &mdash; particularly for FortiLink pools, which the FortiGate manages itself.") +
     '</section>' +
     '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
     '<section style="margin-bottom:1.5rem">' +
@@ -938,17 +951,24 @@ function _readPushReservationsToggle() {
   return !!el.checked;
 }
 
-// Enable/disable the nested auto-reserve checkbox as the DHCP-push master is
-// toggled. Global because it's wired as an inline onchange (the modal builds its
-// tabs as HTML strings, and this file is a classic script — same idiom as the
-// inline onclick="closeModal()" used by every modal footer). Unticking the
-// master also clears the child so the disabled state and the value agree.
+// Enable/disable BOTH nested DHCP-push children as the master is toggled.
+// Global because it's wired as an inline onchange (the modal builds its tabs as
+// HTML strings, and this file is a classic script — same idiom as the inline
+// onclick="closeModal()" used by every modal footer). Unticking the master also
+// clears each child so the disabled state and the value agree.
+//
+// Kept under its historical name: it's referenced from an inline onchange="…"
+// string, so renaming it means renaming that too, and any stale copy of the
+// markup would silently stop syncing.
 function syncAutoReserveInfraEnabled() {
   var master = document.getElementById("f-pushReservations");
-  var child = document.getElementById("f-autoReserveFortinetInfra");
-  if (!master || !child) return;
-  child.disabled = !master.checked;
-  if (!master.checked) child.checked = false;
+  if (!master) return;
+  ["f-autoReserveFortinetInfra", "f-adoptDiscoveredMac"].forEach(function (id) {
+    var child = document.getElementById(id);
+    if (!child) return;
+    child.disabled = !master.checked;
+    if (!master.checked) child.checked = false;
+  });
 }
 
 // Read the auto-reserve toggle out of the DHCP Push tab. Returns undefined when
@@ -957,6 +977,16 @@ function syncAutoReserveInfraEnabled() {
 // the server also refuses to act on it in that state.
 function _readAutoReserveInfraToggle() {
   var el = document.getElementById("f-autoReserveFortinetInfra");
+  if (!el) return undefined;
+  var master = document.getElementById("f-pushReservations");
+  if (master && !master.checked) return false;
+  return !!el.checked;
+}
+
+// Same contract as _readAutoReserveInfraToggle, for the placeholder-MAC
+// adoption toggle.
+function _readAdoptDiscoveredMacToggle() {
+  var el = document.getElementById("f-adoptDiscoveredMac");
   if (!el) return undefined;
   var master = document.getElementById("f-pushReservations");
   if (master && !master.checked) return false;
@@ -4942,7 +4972,7 @@ async function openCreateModal(type) {
     // helpers labels the active mode for FMG; standalone FortiGate ignores it
     // and always uses direct REST with the integration's own credentials —
     // pass true so the FMG copy doesn't render an irrelevant "direct" warning.
-    addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true, false, false) });
+    addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true, false, false, false) });
     addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
     // Description Sync tab (FMG + standalone FortiGate). Default off.
     addTabs.push({ key: "description-sync", label: "Description Sync", html: descriptionSyncFormHTML(false, true) });
@@ -5114,6 +5144,8 @@ async function openCreateModal(type) {
         if (arpSweepToggleNew !== undefined) createConfig.arpPresenceSweep = arpSweepToggleNew;
         var autoReserveInfraNew = _readAutoReserveInfraToggle();
         if (autoReserveInfraNew !== undefined) createConfig.autoReserveFortinetInfra = autoReserveInfraNew;
+        var adoptMacNew = _readAdoptDiscoveredMacToggle();
+        if (adoptMacNew !== undefined) createConfig.adoptDiscoveredMac = adoptMacNew;
         var quarantinePushToggleNew = _readPushQuarantineToggle();
         if (quarantinePushToggleNew !== undefined) createConfig.pushQuarantine = quarantinePushToggleNew;
         var syncDescriptionsNew = _readSyncDescriptionsToggle();
@@ -5296,7 +5328,7 @@ async function openEditModal(id) {
         editTabs.push({
           key: "push",
           label: "DHCP Push",
-          html: reservationPushFormHTML(config.pushReservations === true, pushUseProxy, config.arpPresenceSweep === true, config.autoReserveFortinetInfra === true),
+          html: reservationPushFormHTML(config.pushReservations === true, pushUseProxy, config.arpPresenceSweep === true, config.autoReserveFortinetInfra === true, config.adoptDiscoveredMac === true),
         });
         editTabs.push({
           key: "quarantine-push",
@@ -5676,6 +5708,8 @@ function _wireIntgEditSave(id, intg, formGetter) {
         if (arpSweepToggle !== undefined) editConfig.arpPresenceSweep = arpSweepToggle;
         var autoReserveInfraEdit = _readAutoReserveInfraToggle();
         if (autoReserveInfraEdit !== undefined) editConfig.autoReserveFortinetInfra = autoReserveInfraEdit;
+        var adoptMacEdit = _readAdoptDiscoveredMacToggle();
+        if (adoptMacEdit !== undefined) editConfig.adoptDiscoveredMac = adoptMacEdit;
         var quarantinePushToggle = _readPushQuarantineToggle();
         if (quarantinePushToggle !== undefined) editConfig.pushQuarantine = quarantinePushToggle;
         var syncDescriptionsEdit = _readSyncDescriptionsToggle();

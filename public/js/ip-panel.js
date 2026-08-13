@@ -712,25 +712,23 @@ function _renderPanelFooter(data) {
 
 // ─── Reservation modals (reuse existing modal system) ───────────────────────
 
-// Generate a locally-administered unicast MAC for placeholder use when the
-// real client MAC isn't known yet (e.g. reserving an IP before the device is
-// racked). First octet is fixed at "02" so the locally-administered bit is
-// set and the multicast bit is clear — matches the convention used by KVM,
-// Docker, FortiOS HA, etc. RFC 1918 is the IPv4 analogue.
+// Generate a PLACEHOLDER MAC for an IP reserved ahead of the device (see
+// public/js/placeholder-mac.js — shared with the mobile sheet, which carried a
+// byte-for-byte copy of this before). The prefix comes from the IP-panel payload
+// so it tracks the operator's Server Settings → Identification value; the shared
+// helper falls back to the compiled-in default when the payload predates it.
 function _generateLocalMac() {
-  var bytes = ["02"];
-  for (var i = 0; i < 5; i++) {
-    var b = Math.floor(Math.random() * 256);
-    bytes.push((b < 16 ? "0" : "") + b.toString(16));
-  }
-  return bytes.join(":").toUpperCase();
+  var prefix = _ipPanelData && _ipPanelData.subnet
+    ? _ipPanelData.subnet.macPlaceholderPrefix
+    : null;
+  return window.PolarisPlaceholderMac.generate(prefix);
 }
 
 function _macFieldMarkup(label, hint, valueAttr) {
   return '<div class="form-group"><label>' + label + '</label>' +
     '<div style="display:flex;gap:6px;align-items:stretch">' +
       '<input type="text" id="f-macAddress"' + (valueAttr || "") + ' placeholder="aa:bb:cc:dd:ee:ff" style="flex:1">' +
-      '<button type="button" class="btn btn-secondary btn-sm" id="btn-gen-mac" title="Generate a locally-administered MAC (02:xx:xx:xx:xx:xx) — placeholder use when the device\'s real MAC isn\'t known yet">Generate</button>' +
+      '<button type="button" class="btn btn-secondary btn-sm" id="btn-gen-mac" title="' + escapeHtml(window.PolarisPlaceholderMac.buttonHint) + '">Generate</button>' +
     '</div>' +
     '<p class="hint">' + hint + '</p>' +
   '</div>';
@@ -1175,7 +1173,7 @@ function _openEditReservationModal(reservationId) {
       '<div class="form-group"><label>' + macLabel + '</label>' +
         '<div style="display:flex;gap:6px;align-items:stretch">' +
           '<input type="text" id="f-mac" placeholder="AA:BB:CC:DD:EE:FF" value="' + escapeHtml(r.macAddress || "") + '" style="flex:1"' + lock + '>' +
-          (readOnly ? "" : '<button type="button" class="btn btn-secondary btn-sm" id="btn-gen-mac-edit" title="Generate a locally-administered MAC (02:xx:xx:xx:xx:xx) — placeholder when the device&#39;s real MAC isn&#39;t known yet">Generate</button>') +
+          (readOnly ? "" : '<button type="button" class="btn btn-secondary btn-sm" id="btn-gen-mac-edit" title="' + escapeHtml(window.PolarisPlaceholderMac.buttonHint) + '">Generate</button>') +
         '</div>' +
         '<p class="hint">' + macHint + '</p></div>' +
       '<div class="form-group"><label>Owner</label>' +

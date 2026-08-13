@@ -501,6 +501,15 @@ const FortiManagerConfigSchema = z.object({
   // from the gate's own lease table, verified by read-back. Mirrored on
   // FortiGateConfigSchema for parity. See business rule 23.
   autoReserveFortinetInfra: z.boolean().optional().default(false),
+  // Adopt the discovered device's MAC onto a PLACEHOLDER-MAC reservation. When
+  // true, discovery replaces the synthetic MAC Polaris generated for a
+  // not-yet-racked device with the real MAC of whatever it now sees answering at
+  // that reserved IP (ARP table / device inventory), and re-pushes the corrected
+  // binding to the gate. Only ever overwrites a MAC matching the configured
+  // placeholder prefix — an operator-typed MAC is never touched. Requires
+  // pushReservations (the transport gate) and is ignored without it. Default off.
+  // Mirrored on FortiGateConfigSchema for parity. See business rule 26.
+  adoptDiscoveredMac: z.boolean().optional().default(false),
   // Description sync (Polaris-primary). When true, operator descriptions in
   // Polaris are written back to the devices this integration discovered —
   // interface comments (AssetInterfaceOverride) to FortiGate system/interface
@@ -567,6 +576,10 @@ const FortiGateConfigSchema = z.object({
   // FortiManagerConfigSchema.autoReserveFortinetInfra for shape + semantics.
   // Requires pushReservations. Default off.
   autoReserveFortinetInfra: z.boolean().optional().default(false),
+  // Adopt the discovered device's MAC onto a placeholder-MAC reservation — see
+  // FortiManagerConfigSchema.adoptDiscoveredMac for shape + semantics.
+  // Requires pushReservations. Default off.
+  adoptDiscoveredMac: z.boolean().optional().default(false),
   // Description sync (Polaris-primary) — see FortiManagerConfigSchema
   // .syncDescriptions for shape + semantics. Default off.
   syncDescriptions: z.boolean().optional().default(false),

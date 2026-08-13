@@ -335,9 +335,12 @@
       + '  </div>'
       + '  <div class="tf-outlined"><span class="lbl">MAC address' + (pushEligible ? ' *' : '') + '</span>'
       + '    <input class="field mono" id="e-mac" placeholder="aa:bb:cc:dd:ee:ff" value="' + escapeHtml(row.macAddress || "") + '"' + (pushEligible ? ' required' : '') + '>'
-      +     (pushEligible
-              ? '    <div class="support">Pushed to ' + escapeHtml((subnet && subnet.fortigateDevice) || "FortiGate") + '. Clearing the MAC is not allowed — release the reservation instead.</div>'
-              : '')
+      + '    <div class="support" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">'
+      +       (pushEligible
+                ? '<span>Pushed to ' + escapeHtml((subnet && subnet.fortigateDevice) || "FortiGate") + '. Clearing the MAC is not allowed — release the reservation instead.</span>'
+                : '<span></span>')
+      + '      <button type="button" class="btn btn-text" id="e-mac-gen" title="Generate a placeholder MAC for a device that isn’t racked yet — discovery replaces it with the real one once the device appears at this IP" style="font-size:13px;padding:4px 10px;flex-shrink:0;">Generate</button>'
+      + '    </div>'
       + '  </div>'
       + '  <div class="tf-outlined"><span class="lbl">Notes</span>'
       + '    <input class="field" id="e-notes" maxlength="500" value="' + escapeHtml(row.notes || "") + '">'
@@ -363,6 +366,20 @@
       e.preventDefault();
       submitEdit(row, pushEligible, onSuccess);
     });
+    // The edit sheet had no Generate button, unlike mobile create and both
+    // desktop paths — so the one place an operator would fix a MAC on a phone
+    // was the one place that couldn't produce a placeholder.
+    var genBtn = document.getElementById("e-mac-gen");
+    var macInput = document.getElementById("e-mac");
+    if (genBtn && macInput) {
+      genBtn.addEventListener("click", function () {
+        macInput.value = window.PolarisPlaceholderMac.generate(
+          subnet ? subnet.macPlaceholderPrefix : null,
+        );
+        macInput.focus();
+        try { macInput.select(); } catch (_) {}
+      });
+    }
   }
 
   function submitEdit(row, pushEligible, onSuccess) {
