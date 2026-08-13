@@ -9,7 +9,7 @@
  * the alert WITHOUT a link — silently, not as a broken one.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   buildAddressOwnerMap,
   composedAckRecipient,
@@ -155,6 +155,20 @@ describe("{ack} is deferred, not contextual", () => {
 });
 
 describe("applyAckToRows", () => {
+  // A composed body carries a literal "{ack}" until a recipient is known, and
+  // `ackUrlForEmail` correctly returns null without a public URL — a relative
+  // link is useless in an email. So these cases only exercise the fill path
+  // with POLARIS_PUBLIC_URL set; without it the token blanks and the whole
+  // "Acknowledge:" line is pruned, which is a different (already covered)
+  // behaviour. The ackUrlForEmail suite above DELETES the var in its afterEach,
+  // so this block has to set it rather than inherit it.
+  const prevPublicUrl = process.env.POLARIS_PUBLIC_URL;
+  beforeEach(() => { process.env.POLARIS_PUBLIC_URL = "https://polaris.example.com"; });
+  afterEach(() => {
+    if (prevPublicUrl === undefined) delete process.env.POLARIS_PUBLIC_URL;
+    else process.env.POLARIS_PUBLIC_URL = prevPublicUrl;
+  });
+
   const composedRow = () => ({
     notificationId: "n1",
     transport: "email",
