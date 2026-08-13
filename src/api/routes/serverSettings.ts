@@ -86,7 +86,7 @@ import { maintenanceLimiter } from "../middleware/rateLimits.js";
 import { getAppVersion } from "../../utils/version.js";
 import { isTimescaleAvailable } from "../../services/timescaleService.js";
 import { detectImageMagic } from "../../utils/imageMagic.js";
-import { BRANDING_DEFAULTS, getBranding, normalizeTemperatureUnit } from "../../services/brandingService.js";
+import { BRANDING_DEFAULTS, getBranding, hasCustomLogo, normalizeBrandingFlag, normalizeTemperatureUnit } from "../../services/brandingService.js";
 import type { BrandingSettings } from "../../services/brandingService.js";
 // Re-exported for the existing importers of this module (src/api/router.ts
 // mounts a public /branding alias via a dynamic import of this file).
@@ -1724,9 +1724,14 @@ router.put("/branding", requirePermission("serverSettingsSystem", "fullwrite"), 
   try {
     const current = await getBranding();
     const updated: BrandingSettings = {
-      appName:  (req.body.appName  ?? current.appName).trim()  || BRANDING_DEFAULTS.appName,
+      // No `|| BRANDING_DEFAULTS.appName`: blanking the field is how an
+      // operator whose logo already carries their wordmark says "no text".
+      appName:  (req.body.appName  ?? current.appName).trim(),
       subtitle: (req.body.subtitle ?? current.subtitle).trim(),
       logoUrl:  current.logoUrl,
+      logoAccent:    normalizeBrandingFlag(req.body.logoAccent,    current.logoAccent),
+      logoOnLogin:   normalizeBrandingFlag(req.body.logoOnLogin,   current.logoOnLogin),
+      logoOnSidebar: normalizeBrandingFlag(req.body.logoOnSidebar, current.logoOnSidebar),
       // Display-only temperature unit (see brandingService). Anything but "f"
       // normalizes to Celsius, so a malformed body can't wedge the setting.
       temperatureUnit: normalizeTemperatureUnit(req.body.temperatureUnit ?? current.temperatureUnit),
@@ -1742,9 +1747,9 @@ router.put("/branding", requirePermission("serverSettingsSystem", "fullwrite"), 
       resourceType: "setting",
       resourceName: "branding",
       actor: req.session?.username,
-      message: `Branding updated: appName="${updated.appName}", subtitle="${updated.subtitle}", temperatureUnit=${updated.temperatureUnit}`,
+      message: `Branding updated: appName="${updated.appName}", subtitle="${updated.subtitle}", temperatureUnit=${updated.temperatureUnit}, logoAccent=${updated.logoAccent}, logoOnLogin=${updated.logoOnLogin}, logoOnSidebar=${updated.logoOnSidebar}`,
     });
-    res.json({ ...updated, version: APP_VERSION });
+    res.json({ ...updated, version: APP_VERSION, customLogo: hasCustomLogo(updated.logoUrl) });
   } catch (err) {
     next(err);
   }
@@ -1769,6 +1774,9 @@ router.post("/branding/logo", maintenanceLimiter, requirePermission("serverSetti
     // omitting one silently resets it (e.g. an operator's °F preference).
     const updated: BrandingSettings = {
       appName: current.appName, subtitle: current.subtitle, logoUrl,
+      logoAccent: current.logoAccent,
+      logoOnLogin: current.logoOnLogin,
+      logoOnSidebar: current.logoOnSidebar,
       temperatureUnit: current.temperatureUnit,
     };
     await prisma.setting.upsert({
@@ -1784,7 +1792,7 @@ router.post("/branding/logo", maintenanceLimiter, requirePermission("serverSetti
       actor: req.session?.username,
       message: `Custom logo set (${filename})`,
     });
-    res.json({ ...updated, version: APP_VERSION });
+    res.json({ ...updated, version: APP_VERSION, customLogo: hasCustomLogo(updated.logoUrl) });
   } catch (err) {
     next(err);
   }
@@ -1800,6 +1808,12 @@ router.delete("/branding/logo", maintenanceLimiter, requirePermission("serverSet
     }
     const updated: BrandingSettings = {
       appName: current.appName, subtitle: current.subtitle, logoUrl: BRANDING_DEFAULTS.logoUrl,
+      // Placement/accent flags are kept, not reset: they're inert while the
+      // default logo is in play and the operator gets them back verbatim if
+      // they upload again.
+      logoAccent: current.logoAccent,
+      logoOnLogin: current.logoOnLogin,
+      logoOnSidebar: current.logoOnSidebar,
       temperatureUnit: current.temperatureUnit,
     };
     await prisma.setting.upsert({
@@ -1815,7 +1829,7 @@ router.delete("/branding/logo", maintenanceLimiter, requirePermission("serverSet
       actor: req.session?.username,
       message: "Custom logo removed — reverted to default",
     });
-    res.json({ ...updated, version: APP_VERSION });
+    res.json({ ...updated, version: APP_VERSION, customLogo: hasCustomLogo(updated.logoUrl) });
   } catch (err) {
     next(err);
   }

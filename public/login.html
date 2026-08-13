@@ -84,6 +84,15 @@
       max-width: 160px;
       border-radius: 8px;
     }
+    /* The shipped Polaris art is a horizontal wordmark, so it wants the card's
+       width rather than a square logo's box — and no rounded corners, since
+       it's transparent artwork rather than an uploaded tile. */
+    .login-logo.brand-mark {
+      max-width: 240px;
+      width: 100%;
+      border-radius: 0;
+      margin-bottom: 1.25rem;
+    }
     .login-divider {
       display: flex;
       align-items: center;
@@ -132,8 +141,8 @@
 <body>
   <div class="login-wrapper">
     <div class="login-card">
-      <img src="/logo.png" alt="" class="login-logo" style="visibility:hidden">
-      <h2 style="visibility:hidden">Polaris</h2>
+      <img src="/img/brand/polaris-horiz-dark.png" alt="" class="login-logo brand-mark brand-mark-login" style="visibility:hidden">
+      <h2 style="visibility:hidden;display:none">Polaris</h2>
       <p class="subtitle" style="visibility:hidden">Network Management Tool</p>
       <div class="login-error" id="login-error"></div>
       <div id="local-login-section">
@@ -186,6 +195,7 @@
       </div>
     </div>
   </div>
+  <script src="/js/brand-logo.js"></script>
   <script src="/js/auth-flow.js"></script>
   <script src="/js/login.js"></script>
 </body>

@@ -15,23 +15,39 @@
   }
 })();
 
-// Apply branding
+// Apply branding. The mark is either the operator's own logo or the shipped
+// Polaris wordmark art for the current theme — PolarisBrandLogo owns that
+// choice (and the rule that the Application Name is text only shown beside a
+// custom logo, since the Polaris art already spells it out).
 (async function () {
   var h2 = document.querySelector(".login-card h2");
   var subEl = document.querySelector(".login-card .subtitle");
   var logo = document.querySelector(".login-logo");
+
+  function paint(b) {
+    var r = PolarisBrandLogo.applyTo(logo, b, "login");
+    h2.textContent = (b && b.appName) || "Polaris";
+    h2.style.display = r.showName ? "" : "none";
+    subEl.textContent = (b && b.subtitle) || "";
+    subEl.style.display = r.showSubtitle ? "" : "none";
+  }
+
   var b = await PolarisAuthFlow.fetchBranding();
+  paint(b);
   if (b) {
-    h2.textContent = b.appName || "Polaris";
-    document.title = (b.appName || "Polaris") + " — Login";
-    subEl.textContent = b.subtitle || "";
-    subEl.style.display = b.subtitle ? "" : "none";
-    if (b.logoUrl) {
-      logo.src = b.logoUrl;
+    document.title = ((b.appName || "").trim() || "Polaris") + " — Login";
+    // Favicon follows the uploaded logo only; the brand art is a wordmark that
+    // is unreadable at 16px, and /logo.png (the shipped mark) is already the
+    // page's declared icon.
+    if (b.customLogo && b.logoUrl) {
       var fav = document.querySelector('link[rel="icon"]');
       if (fav) fav.href = b.logoUrl;
     }
   }
+  // Repaint on a theme flip — the OS switching light/dark under a user who has
+  // never picked a theme swaps which wordmark art is legible.
+  PolarisBrandLogo.onThemeChange(function () { paint(b); });
+
   h2.style.visibility = "";
   subEl.style.visibility = "";
   logo.style.visibility = "";
