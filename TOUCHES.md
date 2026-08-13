@@ -3786,6 +3786,34 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/interfaceInventoryService.ts
+
+**What it owns:** The `AssetInterface` CURRENT-STATE table (one row per `(assetId, ifName)`) — the interface analogue of `AssetPhysicalEntity` / `AssetMacTableEntry`. Full-replace per FULL system-info scrape. It is what lets `AssetInterfaceSample` carry only operator-pinned interfaces.
+
+**Public API:** `persistInterfaces`, `persistInterfaceRows`, `dedupeAndCapInterfaces`, `INTERFACE_ROW_CAP`, `InterfaceInventoryRow`.
+
+**Cross-service deps:** `prisma.assetInterface`, `logger`; `InterfaceSample` from monitoringService as a TYPE-ONLY import (monitoringService imports this service's writer, so a value import would close a runtime cycle).
+
+**Used by:**
+- `src/services/monitoringService.ts` — `recordSystemInfoResult` calls `persistInterfaces` on the full pass, guarded on a non-empty interface list, wrapped in the standard `startSampleWriteTimer("asset_interfaces")` + `startPhase("systeminfo.persist.interfaces")` pair.
+- `src/api/routes/agents.ts` — `ingestInterfaces` calls `persistInterfaceRows` with the rows it already built for the sample write, minus `assetId`/`timestamp`/`cadence`. The agent push is a legitimate full-pass writer: it sends the host's whole NIC table.
+- `src/jobs/backfillInterfaceInventory.ts` — one-shot seed from the latest `lastSystemInfoAt` snapshot.
+
+**Invariants:**
+- **ONLY the full system-info pass and the agent push may write.** `recordFastFilteredResult` must NEVER call this: it sees only pinned interfaces (`collectFastFiltered` filters the scrape), so a per-asset delete-replace from it would wipe every unpinned row on each probe tick — and it writes `ifType`/`ifParent`/`vlanId` as NULL, which is exactly the topology-column loss this table exists to prevent (that NULL-overwrite is a real pre-existing bug in the DISTINCT-ON readers; routing them here repairs it).
+- **An empty interface list is SKIPPED by the callers, not wiped.** Unlike LLDP's `undefined`-preserves/`[]`-wipes contract, empty is ambiguous here: a FortiOS token without monitor scope answers 200 OK with empty results, and the pre-existing `lastSystemInfoAt` guard already treats that as "preserve rather than show nothing while the device is online". `persistInterfaceRows([])` still wipes if called — the guard lives in the callers.
+- Delete-then-`createMany` in ONE `$transaction`: this table backs the System tab, so a reader catching an empty intermediate renders "no interfaces".
+- Duplicate `ifName` in one scrape keeps the FIRST occurrence and warns — `(assetId, ifName)` is UNIQUE, so an unhandled duplicate would abort an otherwise-good scrape.
+- Capped at `INTERFACE_ROW_CAP` (2000) per asset with a LOUD warn: a hidden port is invisible in the auto-monitor pin picker, which is the only way an operator can start collecting history for it.
+- `firstSeen` carries forward while a name is present, resets when it disappears and returns. `lastSeen` is the scrape's timestamp, never `now` on the backfill path.
+- Plain table with a real FK (cascade) — the no-FK rule is hypertables-only. NOT a retention entity, NOT pruned, NOT in `sampleWriteBuffer`/`sampleRollupService`/`sampleRetentionService`/`timescaleService`/`capacityService`.
+
+**When changing this:**
+- Adding a column: Prisma model + migration → `toRow` (which mirrors `persistInterfaceSampleStream`'s mapping — keep the two in step or the sample and current-state views of an interface drift) → the agent's row map in `agents.ts` → the backfill job's projection → the `GET /assets/:id/system-info` interface projection → `public/js/assets.js` `_buildInterfacesTableDOM`.
+- Never add a second write cadence without re-reading the single-writer invariant above.
+
+---
+
 ## services/interfaceTopologyService.ts
 
 **What it owns:** Infer inter-Fortinet device topology edges (FortiGate ↔ FortiSwitch ↔ FortiAP stacks) from interface naming conventions & serial patterns without new live queries.

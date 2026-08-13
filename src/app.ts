@@ -745,6 +745,7 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/mergeFortiswitchEndpointGhosts.js",
       "./jobs/backfillDependencyTree.js",
       "./jobs/backfillMonitorStatusChangedAt.js",
+      "./jobs/backfillInterfaceInventory.js",
       "./jobs/rasterizeStoredSvgIcons.js",
       "./jobs/clampAssetAcquiredAt.js",
       "./jobs/bootstrapProxyConfig.js",

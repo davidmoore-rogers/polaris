@@ -52,6 +52,7 @@ import {
   enqueueServiceLogSamples,
 } from "../../services/sampleWriteBuffer.js";
 import { persistAssetServices } from "../../services/serviceInventoryService.js";
+import { persistInterfaceRows } from "../../services/interfaceInventoryService.js";
 import { reconcileMacAddresses, reconcileInterfaceMacs } from "../../services/macAddressService.js";
 import { logEvent } from "./events.js";
 import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
@@ -457,6 +458,19 @@ async function ingestInterfaces(assetId: string, samples: StreamSamples<"interfa
     poeClass: null,
   }));
   enqueueInterfaceSamples(rows);
+  // CURRENT-STATE interface inventory. The agent push IS the full NIC table for
+  // an agent-monitored host, so it's a legitimate full-pass writer — unlike the
+  // fast pinned re-walk, which must never touch this table. Reuses the rows
+  // built above (minus the two sample-only columns) so the 22-field mapping
+  // lives in exactly one place. Skipped on empty for the same reason
+  // lastSystemInfoAt is: an empty push shouldn't blank the System tab.
+  if (rows.length > 0) {
+    await persistInterfaceRows(
+      assetId,
+      rows.map(({ assetId: _assetId, timestamp: _timestamp, cadence: _cadence, ...rest }) => rest),
+      sampleTs,
+    );
+  }
   // Fold EVERY pushed interface MAC (monitored or not) into the asset's
   // Associated MACs list (AssetMacAddress) — the same range-coalescing
   // fold recordSystemInfoResult does for the SNMP/REST scrape. For

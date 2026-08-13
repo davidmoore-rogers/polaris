@@ -46,6 +46,7 @@ import { applyTransform } from "../utils/symbolTransforms.js";
 import { createTtlCache } from "../utils/ttlCache.js";
 import { expandMacRange } from "../utils/macAddresses.js";
 import { reconcileInterfaceMacs } from "./macAddressService.js";
+import { persistInterfaces } from "./interfaceInventoryService.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
 import {
@@ -7721,6 +7722,22 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
   });
 
   await persistInterfaceSampleStream(assetId, d.interfaces, pinned, now);
+  // CURRENT-STATE interface inventory. Written from the FULL pass only — never
+  // from recordFastFilteredResult, which sees just the pinned subset and would
+  // wipe every unpinned interface's row on each probe tick.
+  //
+  // Skipped on an empty array for the same reason lastSystemInfoAt is: an empty
+  // interface list means "this pull returned nothing useful" at least as often
+  // as it means "this device has no interfaces" (a FortiOS token without
+  // monitor scope answers 200 OK with empty results), and blanking the System
+  // tab while the device is online is the worse failure.
+  if (d.interfaces.length > 0) {
+    const stopIfWrite = startSampleWriteTimer("asset_interfaces");
+    const endIfaces = startPhase("systeminfo.persist.interfaces");
+    await persistInterfaces(assetId, d.interfaces, now);
+    endIfaces({ interfaces: d.interfaces.length });
+    stopIfWrite();
+  }
   persistStorageSampleStream(assetId, d.storage, pinned, now);
   persistIpsecTunnelSampleStream(assetId, d.ipsecTunnels, pinned, now);
   persistPerfSlaSampleStream(assetId, d.perfSla, now);

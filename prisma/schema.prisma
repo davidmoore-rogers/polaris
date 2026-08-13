@@ -953,6 +953,10 @@ model Asset {
   // the back-link for the switch on the far end of each ICL leg.
   mclagPeers             AssetMclagPeer[]         @relation("AssetMclagPeers")
   physicalEntities       AssetPhysicalEntity[]    @relation("AssetPhysicalEntities")
+  // Current-state interface inventory (one row per ifName), delete-replaced per
+  // full system-info scrape. The pinned-only time-series lives in
+  // AssetInterfaceSample.
+  interfaces             AssetInterface[]         @relation("AssetInterfaces")
   macTableEntries        AssetMacTableEntry[]     @relation("AssetMacTableEntries")
   macTableMatches        AssetMacTableEntry[]     @relation("AssetMacTableMatch")
 
@@ -1124,6 +1128,81 @@ model AssetInterfaceSample {
   @@index([assetId, timestamp])
   @@index([assetId, ifName, timestamp])
   @@map("asset_interface_samples")
+}
+
+// CURRENT-STATE interface inventory -- one row per (asset, ifName), full-replaced
+// per full system-info scrape by `persistInterfaces` (the AssetPhysicalEntity /
+// AssetMacTableEntry delete-replace pattern).
+//
+// Why this exists rather than reading the newest AssetInterfaceSample rows: every
+// all-interface consumer wants CURRENT STATE, not history. The System tab renders
+// exactly one timestamp, and topology / auto-monitor / LLDP-name normalization all
+// want "latest row per (assetId, ifName)" -- which against a hypertable is a
+// DISTINCT ON that had to be time-bounded after it was measured at 13.5 minutes /
+// 90M rows / 9 GB of I/O on prod. Against this table each of those is an indexed
+// lookup over ~one row per interface.
+//
+// It is what lets the sample table carry ONLY operator-pinned interfaces: the
+// unpinned rows existed solely to answer this current-state question, were never
+// compressed (deleted at 24h, compression floors at 2 days) and never rolled up.
+//
+// Plain table with a real FK -- the no-foreign-key rule applies to the TimescaleDB
+// hypertables only, and this is deliberately not one.
+//
+// SINGLE WRITER CADENCE: only the FULL system-info pass and the Polaris Agent push
+// write here, never `recordFastFilteredResult`. The fast pass sees only pinned
+// interfaces (collectFastFiltered filters the scrape), so a delete-replace from it
+// would wipe every unpinned interface's row every probe tick -- and it writes
+// ifType/ifParent/vlanId as NULL, which is exactly the topology-column loss this
+// table exists to stop.
+model AssetInterface {
+  id      String @id @default(uuid())
+  assetId String
+  asset   Asset  @relation("AssetInterfaces", fields: [assetId], references: [id], onDelete: Cascade)
+  ifName  String
+
+  adminStatus String?
+  operStatus  String?
+  speedBps    BigInt?
+  ipAddress   String?
+  macAddress  String?
+
+  // Cumulative counters as of the last full scrape. Current values only -- rate
+  // math still comes from AssetInterfaceSample, which is why these are a snapshot
+  // rather than a series.
+  inOctets  BigInt?
+  outOctets BigInt?
+  inErrors  BigInt?
+  outErrors BigInt?
+
+  // Interface topology. Populated ONLY by the full scrape (the fast re-walk nulls
+  // them), which is why the fast pass must never write this table.
+  ifType   String?
+  ifParent String?
+  vlanId   Int?
+
+  // Switch-port VLAN config -- FortiSwitch only, null elsewhere.
+  nativeVlan     Int?
+  taggedVlans    Int[]   @default([])
+  trunksAllVlans Boolean @default(false)
+
+  alias          String?
+  description    String?
+  addressingMode String?
+
+  poeStatus String?
+  poeClass  String?
+
+  // firstSeen survives a re-scrape while the interface is still present and resets
+  // when it disappears and comes back, matching AssetPhysicalEntity. lastSeen is
+  // the full-pass timestamp, so a stale row is identifiable rather than silently
+  // presented as current.
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
+
+  @@unique([assetId, ifName])
+  @@index([assetId])
+  @@map("asset_interfaces")
 }
 
 // Per-asset additional IPs ("interface IPs", "secondary IPs", manually-tagged
