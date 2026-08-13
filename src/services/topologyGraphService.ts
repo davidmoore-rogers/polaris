@@ -1054,20 +1054,25 @@ export async function buildSiteTopology(siteId: string) {
     }
 
     // Per-edge interface details for the hover tooltip: speed / oper status /
-    // error counters for the named interface on each side. One DISTINCT-ON
-    // query (latest sample per assetId+ifName, 1h window — same pattern as the
-    // interface-inference query) then a label-parse attach. FortiOS has no
-    // duplex field, so duplex isn't available. Logical/unknown ports
-    // ("fortilink" → "unknown") and cross-site ghosts simply get no detail.
-    const ifMetricRows = await prisma.$queryRaw<
-      Array<{ assetId: string; ifName: string; ifType: string | null; ifParent: string | null; speedBps: bigint | null; operStatus: string | null; inErrors: bigint | null; outErrors: bigint | null }>
-    >`
-      SELECT DISTINCT ON ("assetId", "ifName") "assetId", "ifName", "ifType", "ifParent", "speedBps", "operStatus", "inErrors", "outErrors"
-      FROM asset_interface_samples
-      WHERE "assetId" = ANY(${siteAssetIds}::text[])
-        AND "timestamp" > NOW() - INTERVAL '1 hour'
-      ORDER BY "assetId", "ifName", "timestamp" DESC
-    `;
+    // error counters for the named interface on each side, from the
+    // CURRENT-STATE `AssetInterface` table (one row per assetId+ifName, so a
+    // plain indexed read replaces the former DISTINCT ON over the hypertable).
+    // The 1h staleness bound is preserved — a tooltip showing a reading from
+    // hours ago is worse than showing none. FortiOS has no duplex field, so
+    // duplex isn't available. Logical/unknown ports ("fortilink" → "unknown")
+    // and cross-site ghosts simply get no detail.
+    //
+    // Also fixes the aggregate→physical map below: the fast pinned re-walk
+    // wrote ifType/ifParent as NULL and DISTINCT ON took the newest row, so a
+    // pinned aggregate lost its members. The full pass always populates them.
+    const ifMetricStaleCutoff = new Date(Date.now() - 60 * 60 * 1000);
+    const ifMetricRows = await prisma.assetInterface.findMany({
+      where: { assetId: { in: siteAssetIds }, lastSeen: { gt: ifMetricStaleCutoff } },
+      select: {
+        assetId: true, ifName: true, ifType: true, ifParent: true,
+        speedBps: true, operStatus: true, inErrors: true, outErrors: true,
+      },
+    });
     const ifMetricByKey = new Map<string, { speedBps: number | null; operStatus: string | null; inErrors: number | null; outErrors: number | null }>();
     // Aggregate → physical members, per asset. A FortiLink uplink trunk (and
     // any auto-ISL aggregate) is named opaquely — for a switch the trunk is

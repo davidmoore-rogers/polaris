@@ -1646,15 +1646,17 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
     });
     if (!asset) throw new AppError(404, "Asset not found");
 
-    const [latestTelemetry, latestIfaceMeta, latestStorageMeta, latestHwMeta, latestIpsecMeta, lldpNeighbors, wirelessStations, inferredNeighbors] = await Promise.all([
+    const [latestTelemetry, interfaces, latestStorageMeta, latestHwMeta, latestIpsecMeta, lldpNeighbors, wirelessStations, inferredNeighbors] = await Promise.all([
       prisma.assetTelemetrySample.findFirst({
         where: { assetId: id },
         orderBy: { timestamp: "desc" },
       }),
-      prisma.assetInterfaceSample.findFirst({
+      // Current-state interface inventory — one row per ifName, delete-replaced
+      // per full scrape, so it needs no timestamp gate the way the sample
+      // tables do (same shape as the physicalEntities read below).
+      prisma.assetInterface.findMany({
         where: { assetId: id },
-        orderBy: { timestamp: "desc" },
-        select: { timestamp: true },
+        orderBy: { ifName: "asc" },
       }),
       prisma.assetStorageSample.findFirst({
         where: { assetId: id },
@@ -1705,28 +1707,11 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
       buildInferredNeighborsForAsset(id),
     ]);
 
-    // Prefer the full system-info pass timestamp so the table renders every
-    // interface — the fast cadence only writes pinned ones, and ordering by
-    // raw timestamp would otherwise hide unpinned interfaces.
-    let ifaceTimestamp = asset.lastSystemInfoAt ?? latestIfaceMeta?.timestamp ?? null;
-    // Guard against lastSystemInfoAt being newer than the newest interface
-    // sample: the SNMP/FortiOS path writes interfaces + storage in one pass so
-    // the two always agree, but the Polaris Agent sends interfaces and storage
-    // in independent pushes — a storage push bumps lastSystemInfoAt to a time
-    // with no interface rows, which would empty this table until the next
-    // interface push. When the anchor is ahead of the latest interface sample,
-    // fall back to that sample's timestamp (for the agent every push is the
-    // full NIC table, so it's safe; for SNMP the full pass is never ahead of
-    // its own rows, so this branch never fires there).
-    if (ifaceTimestamp && latestIfaceMeta?.timestamp && ifaceTimestamp > latestIfaceMeta.timestamp) {
-      ifaceTimestamp = latestIfaceMeta.timestamp;
-    }
-    const interfaces = ifaceTimestamp
-      ? await prisma.assetInterfaceSample.findMany({
-          where: { assetId: id, timestamp: ifaceTimestamp },
-          orderBy: { ifName: "asc" },
-        })
-      : [];
+    // `interfaces` now comes straight from the current-state table above. The
+    // former lastSystemInfoAt anchor (and its clamp for the agent's
+    // independent interface/storage pushes, which could leave the anchor at a
+    // time with no interface rows and empty this table) existed only because a
+    // hypertable has no notion of "current" — both are gone with it.
 
     // Merge inferred neighbors after the interface rows are loaded so an
     // inferred row on an aggregate (e.g. FortiLink) dedupes against a real
@@ -1792,7 +1777,10 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
         memTotalBytes: bigIntToNumber(latestTelemetry.memTotalBytes),
       } : null,
       interfaces: interfaces.map((i) => ({
-        timestamp:   i.timestamp,
+        // Response shape is unchanged for the frontend: `timestamp` is now the
+        // current-state row's lastSeen (the full-pass time it was observed),
+        // which is exactly what the old per-sample timestamp carried.
+        timestamp:   i.lastSeen,
         ifName:      i.ifName,
         adminStatus: i.adminStatus,
         operStatus:  i.operStatus,
@@ -2253,15 +2241,16 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
       // a per-interface query isn't worth the extra surface area on the
       // service.
       buildInferredNeighborsForAsset(id),
-      // Interface metadata (ifType/ifParent) from the latest full snapshot →
-      // aggregate membership map for the inferred-on-aggregate dedupe. Cheap
-      // indexed point-lookup on the snapshot timestamp, not a history scan.
-      assetMeta?.lastSystemInfoAt
-        ? prisma.assetInterfaceSample.findMany({
-            where: { assetId: id, timestamp: assetMeta.lastSystemInfoAt },
-            select: { ifName: true, ifType: true, ifParent: true },
-          })
-        : Promise.resolve([] as { ifName: string; ifType: string | null; ifParent: string | null }[]),
+      // Interface metadata (ifType/ifParent) → aggregate membership map for the
+      // inferred-on-aggregate dedupe. Current-state, so this is a plain indexed
+      // read with no snapshot-timestamp gate. It is also strictly MORE correct
+      // than the sample-table version: the fast pinned re-walk writes
+      // ifType/ifParent as NULL, so on a pinned aggregate the newest sample row
+      // carried nulls and the membership map silently lost that aggregate.
+      prisma.assetInterface.findMany({
+        where: { assetId: id },
+        select: { ifName: true, ifType: true, ifParent: true },
+      }),
     ]);
     const neighbors = allNeighbors.filter((n) => n.localIfName === ifName);
     const inferredForIf = inferredAll.filter((n) => n.localIfName === ifName);

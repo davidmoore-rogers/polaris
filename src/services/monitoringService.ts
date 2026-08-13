@@ -8419,11 +8419,13 @@ export async function persistManagedApLldpNeighbors(
       if (otherWriterFresh) return "skipped";
     }
   }
-  const ifRows = await prisma.assetInterfaceSample.findMany({
+  // The AP's own interface names, from the CURRENT-STATE inventory. This needs
+  // the FULL set (an unpinned eth0 is exactly the case being normalized), which
+  // is why it can't read the pinned-only sample table. Also replaces a
+  // timestamp-ordered `take: 64` scan with a scoped indexed read.
+  const ifRows = await prisma.assetInterface.findMany({
     where: { assetId },
-    orderBy: { timestamp: "desc" },
     select: { ifName: true },
-    take: 64,
   });
   const knownIfNames = new Set(ifRows.map((r) => r.ifName));
   const normalized: LldpNeighborSample[] = neighbors.map((n) => ({

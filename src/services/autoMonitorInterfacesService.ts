@@ -458,42 +458,50 @@ export function mergeTunnelsIntoInterfaces(
 // ─── DB-bound functions ─────────────────────────────────────────────────────
 
 /**
- * Latest AssetInterfaceSample per (assetId, ifName) for every asset in
- * `assetIds`. Single round-trip via DISTINCT ON. Returns a Map keyed by
- * assetId; each value is the asset's interface list.
+ * Every currently-reported interface per asset, from the CURRENT-STATE
+ * `AssetInterface` table (one row per (assetId, ifName) by construction, so no
+ * DISTINCT ON is needed). Returns a Map keyed by assetId.
  *
  * When `includeIpsecTunnels` is set (fortigate class only — switches/APs have
  * no IPsec), the latest IPsec tunnel per (assetId, tunnelName) is also pulled
  * from asset_ipsec_tunnel_samples and merged in as synthetic tunnel-type
  * interfaces via `mergeTunnelsIntoInterfaces`. The two reads run in parallel.
+ * Tunnels still come from the sample table — they have no current-state
+ * equivalent yet (see the storage/ipsec parity note in the plan).
  */
+/**
+ * Staleness bound for the pin candidate list. Preserves the previous 72h
+ * behaviour verbatim: it tolerates the long end of the pollInterval-linked
+ * systemInfo cadence (up to 24h) plus a couple of missed scrapes, so an AP
+ * that hasn't reported in three days drops off the "By name" checklist —
+ * which is the right behaviour, since you can't usefully pin a port on a
+ * device that stopped answering.
+ */
+const INTERFACE_STALE_MS = 72 * 60 * 60 * 1000;
+
 async function loadLatestInterfaces(
   assetIds: string[],
   includeIpsecTunnels = false,
 ): Promise<Map<string, ResolverInterface[]>> {
   const out = new Map<string, ResolverInterface[]>();
   if (assetIds.length === 0) return out;
-  // Bound the read to a recent window — without it the DISTINCT ON has to
-  // walk the entire active hypertable chunk per (assetId, ifName) pair, the
-  // same disaster pattern interfaceTopologyService.ts had to fix (observed
-  // at 13.5 min / 90M rows / 9 GB I/O on prod). 72h tolerates the long end
-  // of the pollInterval-linked systemInfo cadence (up to 24h) plus a couple
-  // missed scrapes; APs that haven't reported in 3 days drop from the
-  // "By name" checklist, which is the right behavior.
-  const ifacesPromise = prisma.$queryRaw<Array<{
-    assetId: string;
-    ifName: string;
-    ifType: string | null;
-    operStatus: string | null;
-    ipAddress: string | null;
-  }>>`
-    SELECT DISTINCT ON ("assetId", "ifName")
-      "assetId", "ifName", "ifType", "operStatus", "ipAddress"
-    FROM asset_interface_samples
-    WHERE "assetId" = ANY(${assetIds}::text[])
-      AND "timestamp" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '72 hours'
-    ORDER BY "assetId", "ifName", "timestamp" DESC
-  `;
+  // Reads the CURRENT-STATE inventory (`asset_interfaces`) — one row per
+  // (assetId, ifName) already, so no DISTINCT ON and no hypertable scan. The
+  // former 72h timestamp window existed purely to keep that DISTINCT ON off
+  // the bulk of asset_interface_samples (the disaster pattern
+  // interfaceTopologyService.ts had to fix: 13.5 min / 90M rows / 9 GB I/O on
+  // prod); the equivalent staleness filter is now a cheap `lastSeen` bound.
+  //
+  // THIS READ IS WHY THE CURRENT-STATE TABLE HAS TO EXIST. It builds the
+  // candidate list an operator pins FROM, so it must see interfaces that are
+  // not yet pinned. Pointing it at the sample table after that table goes
+  // pinned-only would deadlock the feature: only already-pinned interfaces
+  // would be visible, and nothing new could ever be pinned.
+  const staleCutoff = new Date(Date.now() - INTERFACE_STALE_MS);
+  const ifacesPromise = prisma.assetInterface.findMany({
+    where: { assetId: { in: assetIds }, lastSeen: { gt: staleCutoff } },
+    select: { assetId: true, ifName: true, ifType: true, operStatus: true, ipAddress: true },
+  });
   // IPsec tunnels (fortigate only): same 72h-bounded DISTINCT ON shape so the
   // picker surfaces phase1-interface tunnels the REST monitor endpoint omits.
   // parentInterface feeds the dead-parent exclusion in the merge helper.

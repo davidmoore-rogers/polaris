@@ -159,10 +159,16 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
   ifNamePattern: {
     noun: "interfaces",
     strict: false,
-    pairs: async (ids, since) =>
-      (await prisma.assetInterfaceSample.groupBy({
-        by: ["ifName", "assetId"],
-        where: { assetId: { in: ids }, timestamp: { gte: since } },
+    // Reads the CURRENT-STATE inventory, not the (pinned-only) sample table:
+    // an operator building a rule needs to pick an interface BEFORE it has any
+    // data, so narrowing this picker to pinned interfaces would be a
+    // regression. `since` is unused here — current state has no time
+    // dimension, and the inventory is delete-replaced per scrape so a stale
+    // interface is already gone.
+    pairs: async (ids) =>
+      (await prisma.assetInterface.findMany({
+        where: { assetId: { in: ids } },
+        select: { ifName: true, assetId: true },
       })).map((r) => ({ value: r.ifName, assetId: r.assetId })),
   },
   mountPathPattern: {
