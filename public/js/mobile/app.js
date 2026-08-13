@@ -12,9 +12,17 @@
 // uses the right surface color (no dark-flash on a light-mode user's
 // reload). Same `polaris-theme` localStorage key the desktop uses, so a
 // preference set on either surface flows to the other.
+// Nothing saved (first launch of the installed app, typically) follows the OS
+// — matching on "light" so a browser with no stated preference still lands on
+// dark, the historical default. Same rule as js/theme-init.js and app.js.
 (function () {
-  var saved = "dark";
-  try { saved = localStorage.getItem("polaris-theme") || "dark"; } catch (e) {}
+  var saved = null;
+  try { saved = localStorage.getItem("polaris-theme"); } catch (e) {}
+  if (!saved) {
+    var light = false;
+    try { light = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches; } catch (e) {}
+    saved = light ? "light" : "dark";
+  }
   document.documentElement.setAttribute("data-theme", saved);
 })();
 

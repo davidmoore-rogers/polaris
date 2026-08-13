@@ -1010,3 +1010,19 @@ Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree li
 - Where the screen is replaced wholesale with no teardown hook (the mobile SPA's auth screens), re-check on every measurement that the form is still mounted and unpin when it isn't, rather than trusting a lifecycle callback. Clear the class explicitly on the success path too: the next viewport event may be a long way off, and a stale pin sizes the authenticated shell to a dead height.
 
 **When adding a new instance:** reuse the threshold, the rAF coalescing, and the top-align flip verbatim — the failure modes above are all silent. Anything inside a scroll container that already has room to scroll doesn't need this at all; the browser's own scroll-into-view handles it.
+
+---
+
+## Theme-paired image asset with one resolver
+
+**Reference:** `public/js/brand-logo.js` (`window.PolarisBrandLogo`) + `public/img/brand/` — consumed by `public/js/login.js`, `public/js/mobile/auth.js`, `applyBranding` in `public/js/app.js`, and the Customization tab in `public/js/server-settings.js`. Tests: `tests/unit/brandLogoResolver.test.ts`.
+
+**What it is:** An image (not CSS) that has to change with the theme — artwork whose ink is near-black on light and near-white on dark, so the wrong variant doesn't look off, it disappears. Ship one file per (variant, theme), and put the choice in ONE module that every surface calls.
+
+**Key conventions:**
+- **Name files by the BACKGROUND they're for, not their ink** (`-dark` = for the dark theme = light-colored artwork). Every consumer then indexes with the theme string it already has, and nobody has to remember the inversion.
+- One `ASSETS` map, one `resolve(payload, surface)` returning everything the surface needs (`{src, custom, showName, …}`). Surfaces set `src` and toggle visibility; they never branch on the payload themselves. A fifth surface is then a call, not a fifth copy of the rule.
+- **Observe `data-theme` with a MutationObserver** instead of hooking each theme setter. The desktop toggle, the mobile toggle, and the `prefers-color-scheme` listener all end at that one attribute, so one observer covers paths that don't know about each other. Evaluate the file in a Node `vm` with a stub `document.documentElement.getAttribute` to unit-test it (see `appmapFilter.test.ts` for the harness).
+- **Tag the element with a class for the shipped variant** (`.brand-mark`) so CSS can size fixed-aspect artwork differently from an arbitrary operator upload sharing the same `<img>`.
+- A **server-rendered** derivative (here: the logo with a symbol composited on) beats a per-surface CSS overlay the moment more than two surfaces show it — one URL, one geometry, and it works in contexts with no stylesheet of yours (a preview box, an email, an icon). Give it `no-cache` + a strong ETag if its path is fixed, and have it **redirect to the plain asset** rather than 404 when the derivative doesn't apply.
+- Follow the OS only while the user has **no** stored preference, and don't persist that resolution — unsaved *is* the "follow my system" state. Match on `light` so a browser stating no preference keeps the product's existing default.

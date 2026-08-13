@@ -196,6 +196,18 @@ code {
   margin: 0 auto 6px;
   border-radius: 8px;
 }
+/* The shipped Polaris art (public/img/brand/polaris-vert-*.png) stacks the
+   star over the wordmark, so it needs more of the column than an uploaded
+   square tile — and no rounded corners, being transparent artwork rather than
+   a cropped image. Applied by public/js/brand-logo.js. */
+.sidebar-logo.brand-mark {
+  max-width: 120px;
+  border-radius: 0;
+  /* Wider than the 6px an uploaded tile gets: the wordmark is baked into the
+     art and sits right at its bottom edge, so the subtitle would otherwise
+     crowd the letterforms. */
+  margin-bottom: 12px;
+}
 .sidebar-brand p {
   font-size: 0.7rem;
   color: var(--color-text-tertiary);

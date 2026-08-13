@@ -28,7 +28,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { inspectAckToken, redeemAckToken, type AckOutcome } from "../../services/notificationAckService.js";
-import { getBranding } from "../../services/brandingService.js";
+import { displayAppName, getBranding } from "../../services/brandingService.js";
 import { escapeHtml } from "../../utils/notificationTemplate.js";
 import { severityCss } from "../../utils/severityStyle.js";
 import { logger } from "../../utils/logger.js";
@@ -195,7 +195,9 @@ function send(res: import("express").Response, status: number, html: string): vo
 
 async function appName(): Promise<string> {
   try {
-    return (await getBranding()).appName;
+    // displayAppName, not .appName: an operator whose logo carries their
+    // wordmark can leave the name blank, and this page prints it as text.
+    return displayAppName(await getBranding());
   } catch {
     return "Polaris";
   }
