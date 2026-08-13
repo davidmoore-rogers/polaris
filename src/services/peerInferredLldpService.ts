@@ -193,11 +193,12 @@ export async function buildInferredNeighborsForAsset(assetId: string): Promise<I
           where: { hostname: parentSwitchName, assetType: "switch" },
           select: PEER_SELECT,
         }),
-        prisma.assetInterfaceSample.findMany({
+        // Current-state inventory: needs the FULL interface set (the eth0 being
+        // normalized to is typically unpinned), so it cannot read the
+        // pinned-only sample table. Replaces a timestamp-ordered take:64 scan.
+        prisma.assetInterface.findMany({
           where: { assetId: self.id },
-          orderBy: { timestamp: "desc" },
           select: { ifName: true },
-          take: 64,
         }),
       ]);
       if (sw) {

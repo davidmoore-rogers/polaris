@@ -46,6 +46,7 @@ import { applyTransform } from "../utils/symbolTransforms.js";
 import { createTtlCache } from "../utils/ttlCache.js";
 import { expandMacRange } from "../utils/macAddresses.js";
 import { reconcileInterfaceMacs } from "./macAddressService.js";
+import { persistInterfaces } from "./interfaceInventoryService.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
 import {
@@ -7502,11 +7503,28 @@ async function persistInterfaceSampleStream(
 ): Promise<void> {
   if (interfaces.length === 0) return;
   const pinnedIfaces = new Set(pinned?.monitoredInterfaces ?? []);
-  enqueueInterfaceSamples(
-    interfaces.map((i) => ({
+  // TIME-SERIES rows are written for PINNED interfaces only. Current state for
+  // every interface (pinned or not) is persisted separately by
+  // `persistInterfaces` into `asset_interfaces` — see the AssetInterface model.
+  //
+  // Unpinned interfaces used to be written here as cadence="slow" and deleted
+  // 24h later. That was ~4-5x the pinned write volume for rows nothing read as
+  // history: they were never compressed (deleted at 24h while the
+  // selection-aware compression floor is 2 days, so they lived their whole life
+  // in uncompressed heap), never rolled up, and removed by the row-level DELETE
+  // behind the 2026-06-08 / 2026-06-17 compressed-chunk bloat incidents. Every
+  // consumer that needed them wanted *current state*, which now has its own
+  // table.
+  //
+  // The `cadence` column stays: storage and ipsec still use the fast/slow
+  // split, the rollup + prune paths are shared, and legacy slow rows age out
+  // through the existing 24h prune rather than needing a migration.
+  const pinnedOnly = interfaces.filter((i) => pinnedIfaces.has(i.ifName));
+  if (pinnedOnly.length > 0) enqueueInterfaceSamples(
+    pinnedOnly.map((i) => ({
       assetId,
       timestamp: now,
-      cadence:     pinnedIfaces.has(i.ifName) ? ("fast" as const) : ("slow" as const),
+      cadence:     "fast" as const,
       ifName:      i.ifName,
       adminStatus: i.adminStatus ?? null,
       operStatus:  i.operStatus ?? null,
@@ -7721,6 +7739,22 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
   });
 
   await persistInterfaceSampleStream(assetId, d.interfaces, pinned, now);
+  // CURRENT-STATE interface inventory. Written from the FULL pass only — never
+  // from recordFastFilteredResult, which sees just the pinned subset and would
+  // wipe every unpinned interface's row on each probe tick.
+  //
+  // Skipped on an empty array for the same reason lastSystemInfoAt is: an empty
+  // interface list means "this pull returned nothing useful" at least as often
+  // as it means "this device has no interfaces" (a FortiOS token without
+  // monitor scope answers 200 OK with empty results), and blanking the System
+  // tab while the device is online is the worse failure.
+  if (d.interfaces.length > 0) {
+    const stopIfWrite = startSampleWriteTimer("asset_interfaces");
+    const endIfaces = startPhase("systeminfo.persist.interfaces");
+    await persistInterfaces(assetId, d.interfaces, now);
+    endIfaces({ interfaces: d.interfaces.length });
+    stopIfWrite();
+  }
   persistStorageSampleStream(assetId, d.storage, pinned, now);
   persistIpsecTunnelSampleStream(assetId, d.ipsecTunnels, pinned, now);
   persistPerfSlaSampleStream(assetId, d.perfSla, now);
@@ -8402,11 +8436,13 @@ export async function persistManagedApLldpNeighbors(
       if (otherWriterFresh) return "skipped";
     }
   }
-  const ifRows = await prisma.assetInterfaceSample.findMany({
+  // The AP's own interface names, from the CURRENT-STATE inventory. This needs
+  // the FULL set (an unpinned eth0 is exactly the case being normalized), which
+  // is why it can't read the pinned-only sample table. Also replaces a
+  // timestamp-ordered `take: 64` scan with a scoped indexed read.
+  const ifRows = await prisma.assetInterface.findMany({
     where: { assetId },
-    orderBy: { timestamp: "desc" },
     select: { ifName: true },
-    take: 64,
   });
   const knownIfNames = new Set(ifRows.map((r) => r.ifName));
   const normalized: LldpNeighborSample[] = neighbors.map((n) => ({
@@ -10563,7 +10599,13 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily,
     psDetail, psHourly, psDaily, lldp, customWidget, stateProbe, processLog, processConn,
   ] = await Promise.all([
-    // interfaces — detail is selection-aware (selected=configured, unselected=24h)
+    // interfaces — detail is selection-aware. Nothing WRITES unselected
+    // (cadence="slow") interface rows any more (see persistInterfaceSampleStream:
+    // current state moved to `asset_interfaces`), so the slow arm of this prune
+    // is now a legacy drain: it clears rows written before the cutover and then
+    // matches nothing. It is deliberately kept rather than removed — dropping it
+    // would leave those legacy rows to age out on the much longer selected
+    // window, and the arm is shared with storage/ipsec, which still use it.
     pruneSelectionAwareDetail((w) => prisma.assetInterfaceSample.deleteMany({ where: w as any }), r.interfaces.detail, "asset_interface_samples"),
     pruneTierByDays((w) => prisma.assetInterfaceSampleHourly.deleteMany({ where: w as any }), r.interfaces.hourly, "bucketStart", "asset_interface_samples_hourly"),
     pruneTierByDays((w) => prisma.assetInterfaceSampleDaily.deleteMany({  where: w as any }), r.interfaces.daily,  "bucketStart", "asset_interface_samples_daily"),

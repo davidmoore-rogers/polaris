@@ -57,6 +57,17 @@ export interface InterfaceInferenceResult {
 }
 
 /**
+ * Staleness bound for topology inference. Preserves the previous 1-hour
+ * behaviour: at the default 600s system-info cadence that tolerates ~5 missed
+ * scrapes (transient REST hiccups, brief network blips) while still excluding
+ * interfaces that have genuinely stopped reporting because the asset is down,
+ * decommissioned, or no longer monitored. An edge drawn from a stale reading
+ * is wrong data, so this bound is deliberately tighter than the auto-monitor
+ * picker's 72h.
+ */
+const INTERFACE_STALE_MS = 60 * 60 * 1000;
+
+/**
  * Infer inter-Fortinet topology edges from each seed asset's most recent
  * interface scrape.
  *
@@ -78,38 +89,29 @@ export async function inferInterfaceTopology(
     return { edges: [], remoteAssets: new Map() };
   }
 
-  // Latest AssetInterfaceSample per (assetId, ifName) for the seed set.
-  // DISTINCT ON requires the ORDER BY to start with the same columns.
-  // The Prisma model name is `AssetInterfaceSample` but the underlying
-  // table is `asset_interface_samples` via the @@map in schema.prisma.
-  // assetId is `String` in the schema → TEXT in Postgres (the
-  // @default(uuid()) only affects the value generator, not the column
-  // type), so the ANY cast must be text[] to match.
+  // Current interfaces for the seed set, from the CURRENT-STATE
+  // `AssetInterface` table — one row per (assetId, ifName) by construction, so
+  // this is a plain indexed read.
   //
-  // The 1-hour timestamp window keeps this query off the bulk of the
-  // hypertable. asset_interface_samples is the largest sample table by
-  // far (interface rows per asset × every system-info pass — the prod
-  // box has ~90M rows in the active chunk alone). The function only
-  // needs ONE row per (assetId, ifName) — the latest — so the window
-  // exists purely to filter out interfaces that have stopped reporting
-  // (asset is down, decommissioned, or monitoring was disabled);
-  // drawing a topology edge from a stale sample would be wrong data.
-  // Default system-info cadence is 600s, so 1 hour tolerates ~5 missed
-  // scrapes (transient REST hiccups, brief network blips) without
-  // letting genuinely-stale interfaces through. Without the bound, the
-  // DISTINCT ON had to scan every sample in the active chunk and sort
-  // 6+ GB to keep the latest 88K (assetId, ifName) pairs — observed at
-  // 13.5 minutes / 90M rows fetched / 9 GB I/O on the prod box even
-  // though the existing schema index was being chosen correctly.
-  const interfaceRows = await prisma.$queryRaw<
-    Array<{ assetId: string; ifName: string; ifType: string | null; ifParent: string | null }>
-  >`
-    SELECT DISTINCT ON ("assetId", "ifName") "assetId", "ifName", "ifType", "ifParent"
-    FROM asset_interface_samples
-    WHERE "assetId" = ANY(${seedAssetIds}::text[])
-      AND "timestamp" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour'
-    ORDER BY "assetId", "ifName", "timestamp" DESC
-  `;
+  // It replaces a DISTINCT ON over asset_interface_samples that needed a
+  // 1-hour timestamp window purely to stay off the bulk of the hypertable:
+  // without the bound it scanned every sample in the active chunk and sorted
+  // 6+ GB to keep the latest ~88K (assetId, ifName) pairs — observed at 13.5
+  // minutes / 90M rows fetched / 9 GB I/O on the prod box even with the right
+  // index chosen. The staleness half of that window is preserved below as a
+  // `lastSeen` bound, since drawing a topology edge from a stale reading is
+  // wrong data.
+  //
+  // This read is also strictly MORE correct than the one it replaces. The fast
+  // pinned re-walk writes ifType/ifParent as NULL, and DISTINCT ON took the
+  // newest row — so on any PINNED aggregate the topology map silently saw
+  // nulls and lost that aggregate's physical members. The current-state table
+  // is written only by the full pass, which always populates them.
+  const staleCutoff = new Date(Date.now() - INTERFACE_STALE_MS);
+  const interfaceRows = await prisma.assetInterface.findMany({
+    where: { assetId: { in: seedAssetIds }, lastSeen: { gt: staleCutoff } },
+    select: { assetId: true, ifName: true, ifType: true, ifParent: true },
+  });
 
   // Aggregate → physical member map. The aggregate name is the inference
   // signal (the peer's serial fragment / hostname is encoded in it) but

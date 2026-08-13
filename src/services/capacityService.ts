@@ -450,19 +450,52 @@ const SAMPLE_TABLES: Array<{
 // tables drive their rate from the monitor cadence settings; rollup tables
 // are tier-fixed (24 buckets/day for hourly, 1 for daily) and ignore
 // the cadence input.
-interface CadenceIntervals { sample: number; telemetry: number; systemInfo: number }
+/**
+ * Selection-aware entities whose DETAIL tier is still dominated by unselected
+ * (`cadence="slow"`) rows pruned at UNSELECTED_DETAIL_HOURS.
+ *
+ * A subset of SELECTION_AWARE_ENTITIES: `interfaces` left it in the pinned-only
+ * cutover (unpinned interfaces stopped producing sample rows entirely — their
+ * current state moved to `asset_interfaces`), so its detail tier is now
+ * all-pinned and keeps the configured retention like any ordinary stream.
+ * Storage and IPsec still write the slow rows and keep the 24h cap.
+ */
+const UNSELECTED_DOMINATED_ENTITIES: readonly string[] = SELECTION_AWARE_ENTITIES.filter(
+  (e) => e !== "interfaces",
+);
+
+interface WorkloadModelInputs {
+  sample: number;
+  telemetry: number;
+  systemInfo: number;
+  /** Fleet-average PINNED interfaces per system-info-eligible asset
+   *  (sum of Asset.monitoredInterfaces / eligible asset count).
+   *
+   *  Not a cadence, but it belongs in the same model input: since the
+   *  pinned-only cutover, `asset_interface_samples` carries one row per PINNED
+   *  interface per scrape rather than one per interface, so the row rate scales
+   *  with what operators pinned rather than with port count. Modelling it as a
+   *  flat ~20 interfaces/asset would now over-project badly on a fleet of
+   *  48-port switches with two pinned uplinks each — and an over-projection
+   *  raises false capacity warnings. */
+  pinnedIfacesPerAsset: number;
+}
 
 // Default rows-per-asset-per-day when we have no samples yet to learn from.
 // Numbers are deliberately conservative so a fresh install with monitoring
 // just turned on still gets a sensible projection. Multipliers for tables
 // with an extra-key dimension (sensorName / ifName / mountPath / tunnelName)
 // match the prior single-tier defaults.
-const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: CadenceIntervals) => number> = {
+const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: WorkloadModelInputs) => number> = {
   // Source tables — rate × extra-key multiplier
   asset_monitor_samples:       (c) => 86400 / c.sample,
   asset_telemetry_samples:     (c) => 86400 / c.telemetry,
   asset_hardware_sensor_samples: (c) => (86400 / c.telemetry)  * 12,  // ~12 sensors (FortiGates ~22)
-  asset_interface_samples:     (c) => (86400 / c.systemInfo) * 20,  // ~20 ifaces
+  // PINNED interfaces only, and they are written on BOTH cadences: the full
+  // system-info pass covers them, and the fast re-walk re-scrapes them on the
+  // probe interval. Unpinned interfaces no longer produce sample rows at all —
+  // their current state lives in `asset_interfaces` (see AssetInterface).
+  asset_interface_samples:     (c) => ((86400 / c.systemInfo) + (86400 / c.sample)) * c.pinnedIfacesPerAsset,
   asset_storage_samples:       (c) => (86400 / c.systemInfo) * 3,   // ~3 mounts
   asset_ipsec_tunnel_samples:  (c) => (86400 / c.systemInfo) * 1,   // ~1 tunnel
   asset_perf_sla_samples:      (c) => (86400 / c.systemInfo) * 4,   // ~2 health-checks × 2 WAN members (SD-WAN FortiGates only)
@@ -471,7 +504,10 @@ const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: CadenceIntervals) => nu
   asset_monitor_samples_hourly:       () => 24,
   asset_telemetry_samples_hourly:     () => 24,
   asset_hardware_sensor_samples_hourly: () => 24 * 12,
-  asset_interface_samples_hourly:     () => 24 * 20,
+  // Rollups have always been cadence='fast' only, so keying them off pinned
+  // count rather than a flat ~20 interfaces/asset also corrects a pre-existing
+  // over-projection, not just the effect of the pinned-only cutover.
+  asset_interface_samples_hourly:     (c) => 24 * c.pinnedIfacesPerAsset,
   asset_storage_samples_hourly:       () => 24 * 3,
   asset_ipsec_tunnel_samples_hourly:  () => 24,
   asset_perf_sla_samples_hourly:      () => 24 * 4,
@@ -480,7 +516,7 @@ const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: CadenceIntervals) => nu
   asset_monitor_samples_daily:        () => 1,
   asset_telemetry_samples_daily:      () => 1,
   asset_hardware_sensor_samples_daily: () => 12,
-  asset_interface_samples_daily:      () => 20,
+  asset_interface_samples_daily:      (c) => c.pinnedIfacesPerAsset,
   asset_storage_samples_daily:        () => 3,
   asset_ipsec_tunnel_samples_daily:   () => 1,
   asset_perf_sla_samples_daily:       () => 4,
@@ -839,8 +875,13 @@ export function projectSteadyStateSize(args: {
   /** Effective compress-after window (days) per table; gates the measured-rate
    *  path (only trusted when retention ≤ this). */
   compressAfterByTable?: Record<string, number>;
+  /** Fleet-wide sum of `Asset.monitoredInterfaces` lengths. Drives the
+   *  interface tables' row rate, which since the pinned-only cutover scales
+   *  with pinned interfaces rather than with port count. Omitted → a
+   *  conservative per-asset default. */
+  pinnedInterfaceCount?: number;
 }): number {
-  const { currentDbBytes, sampleTables, monitoredCount, telemetryEligibleCount, systemInfoEligibleCount, monitor, retention, measuredDetailDailyBytes, compressAfterByTable } = args;
+  const { currentDbBytes, sampleTables, monitoredCount, telemetryEligibleCount, systemInfoEligibleCount, monitor, retention, measuredDetailDailyBytes, compressAfterByTable, pinnedInterfaceCount } = args;
 
   // Subtract current sample-table bytes so we don't double-count when adding
   // the projected sample-table bytes back in.
@@ -852,11 +893,21 @@ export function projectSteadyStateSize(args: {
   }
 
   // Cadence intervals drive the source-table row rate. Rollup tables ignore
-  // these (they're tier-fixed at 24 buckets/day hourly, 1 daily).
-  const intervals: CadenceIntervals = {
+  // these (they're tier-fixed at 24 buckets/day hourly, 1 daily) — except the
+  // interface rollups, which scale with pinned count like their source.
+  const intervals: WorkloadModelInputs = {
     sample:     monitor.intervalSeconds,
     telemetry:  monitor.telemetryIntervalSeconds,
     systemInfo: monitor.systemInfoIntervalSeconds,
+    // Fleet average. Falls back to 2 (a typical "pin the uplinks" selection)
+    // when the caller didn't supply a count — deliberately a small number, not
+    // the old flat 20: since the pinned-only cutover an unpinned interface
+    // produces no sample rows at all, so assuming a port-count-shaped figure
+    // would over-project and raise false capacity warnings.
+    pinnedIfacesPerAsset:
+      pinnedInterfaceCount != null && systemInfoEligibleCount > 0
+        ? pinnedInterfaceCount / systemInfoEligibleCount
+        : 2,
   };
 
   let projectedSampleBytes = 0;
@@ -887,12 +938,20 @@ export function projectSteadyStateSize(args: {
       // retention when the tier never compresses (retention ≤ compress-after) —
       // that captures the true on-disk footprint (indexes + overhead + the real
       // pinned-interface/cadence/asset mix) the workload model can't see. The
-      // workload model is the fallback, and for selection-aware entities it
-      // keeps the conservative UNSELECTED_DETAIL_HOURS (24h) cap (the bulk of
-      // unmeasured detail is unselected rows pruned at 24h; the pinned subset is
-      // omitted as negligible — only used on fresh installs with no chunk yet).
+      // workload model is the fallback, and for entities whose detail is still
+      // dominated by UNSELECTED rows it keeps the conservative
+      // UNSELECTED_DETAIL_HOURS (24h) cap (that bulk prunes at 24h; the pinned
+      // subset is negligible beside it — only used on fresh installs with no
+      // settled chunk yet).
+      //
+      // `interfaces` is deliberately NOT in that set any more: since the
+      // pinned-only cutover it writes no unselected rows at all, so every row
+      // in asset_interface_samples is pinned and keeps FULL retention.
+      // Capping it at 24h would now UNDER-project by the whole retention
+      // multiple (7× at the default), which is the dangerous direction for a
+      // capacity forecast.
       let fallbackRetentionDays = fullRetentionDays;
-      if ((SELECTION_AWARE_ENTITIES as readonly string[]).includes(def.entity)) {
+      if ((UNSELECTED_DOMINATED_ENTITIES as readonly string[]).includes(def.entity)) {
         fallbackRetentionDays = Math.min(fullRetentionDays || UNSELECTED_DETAIL_HOURS / 24, UNSELECTED_DETAIL_HOURS / 24);
       }
       const workloadFallbackBytes = count * rowsPerAssetPerDay * fallbackRetentionDays * bytesPerRow;
@@ -1670,6 +1729,9 @@ export async function getCapacitySnapshot(opts: {
     retention: sampleRetention,
     measuredDetailDailyBytes,
     compressAfterByTable,
+    // Since the pinned-only cutover the interface tables' row rate scales with
+    // what operators pinned, not with port count.
+    pinnedInterfaceCount: monitoredInterfaceCount,
   });
 
   const snap: CapacitySnapshot = {

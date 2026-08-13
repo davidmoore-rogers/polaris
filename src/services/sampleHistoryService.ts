@@ -1060,18 +1060,19 @@ export async function readSdwanMembers(assetId: string): Promise<{ members: Sdwa
     assetId,
   );
 
-  // C: latest interface sample per member ifName (IP / speed / link state / bytes).
+  // C: current interface state per member ifName (IP / speed / link state /
+  // bytes), from the CURRENT-STATE inventory. A WAN member is frequently NOT
+  // pinned, so reading the pinned-only sample table here would silently blank
+  // these columns for exactly the common case. The previous DISTINCT ON also
+  // had no time bound at all, so it could return an arbitrarily old reading.
   const links = Array.from(new Set(latest.map((r) => r.link)));
-  const ifaceRows = await prisma.$queryRawUnsafe<Array<{
-    ifName: string; ipAddress: string | null; speedBps: bigint | null;
-    operStatus: string | null; inOctets: bigint | null; outOctets: bigint | null;
-  }>>(
-    `SELECT DISTINCT ON ("ifName")
-            "ifName", "ipAddress", "speedBps", "operStatus", "inOctets", "outOctets"
-     FROM "asset_interface_samples" WHERE "assetId" = $1 AND "ifName" = ANY($2::text[])
-     ORDER BY "ifName", "timestamp" DESC`,
-    assetId, links,
-  );
+  const ifaceRows = await prisma.assetInterface.findMany({
+    where: { assetId, ifName: { in: links } },
+    select: {
+      ifName: true, ipAddress: true, speedBps: true,
+      operStatus: true, inOctets: true, outOctets: true,
+    },
+  });
   const ifaceByName = new Map(ifaceRows.map((r) => [r.ifName, r]));
   const recentByLink = new Map<string, Array<{ timestamp: Date; up: boolean }>>();
   for (const r of recentRows) {
