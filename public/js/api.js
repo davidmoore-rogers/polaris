@@ -543,6 +543,10 @@ const api = {
     updateSightingSettings: (body) => request("PUT", "/assets/sighting-settings", body),
     // System tab — telemetry, system-info snapshot, per-interface counters, per-mountpoint storage.
     systemInfo:           (id)  => request("GET", `/assets/${id}/system-info`),
+    // MAC Table tab (switches). The tab called a nonexistent `api.request` and
+    // so threw on every open — `request` is module-scope here, never a member
+    // of `api`.
+    macTable:             (id)  => request("GET", `/assets/${id}/mac-table`),
     processes:            (id)  => request("GET", `/assets/${id}/processes`),
     processHistory:       (id, name, opts) => {
       if (typeof opts === "string") opts = { range: opts };

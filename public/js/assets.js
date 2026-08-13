@@ -18817,7 +18817,7 @@ async function _loadAssetMacTable(assetId) {
   var mount = document.getElementById("asset-mactable-mount-" + assetId);
   if (!mount) return;
   try {
-    var data = await api.request("GET", "/assets/" + encodeURIComponent(assetId) + "/mac-table");
+    var data = await api.assets.macTable(assetId);
     var entries = (data && data.entries) || [];
     var counts = (data && data.portCounts) || {};
     if (entries.length === 0) {
