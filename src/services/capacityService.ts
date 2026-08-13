@@ -1133,7 +1133,7 @@ function computeReasons(
       code: "projected_exceeds_disk",
       family: "disk:db",
       message: `Database growth will overflow the DB volume before reaching steady-state (need ${formatBytes(projectedGrowthBytes)} more, only ${formatBytes(dbVolume.freeBytes)} free; steady-state target ${formatBytes(snap.workload.steadyStateSizeBytes)}).`,
-      suggestion: "Reduce sample retention or monitored asset count, or expand the database volume. The Capacity Advisor card surfaces retention and cadence levers if you can't expand the volume.",
+      suggestion: "Narrow the monitored-interface selection (each integration's Monitoring tab), reduce sample retention or monitored asset count, or expand the database volume. Pinned interfaces are usually the largest single driver — only they keep a time-series, so a broad auto-monitor pattern across many-port switches dominates the projection. The Capacity Advisor card surfaces the retention and cadence levers if you can't expand the volume.",
     });
   } else if (dbVolume && projectedGrowthBytes > dbVolume.freeBytes * 0.75) {
     reasons.push({
@@ -1141,7 +1141,7 @@ function computeReasons(
       code: "projected_approaches_disk",
       family: "disk:db",
       message: `Database growth will consume more than 75% of the DB volume's free space before reaching steady-state (need ${formatBytes(projectedGrowthBytes)} more, only ${formatBytes(dbVolume.freeBytes)} free; steady-state target ${formatBytes(snap.workload.steadyStateSizeBytes)}).`,
-      suggestion: "Reduce sample retention or expand the database volume before it fills. The Capacity Advisor card surfaces retention and cadence levers if you can't expand the volume.",
+      suggestion: "Narrow the monitored-interface selection (each integration's Monitoring tab) or reduce sample retention, or expand the database volume before it fills. Pinned interfaces are usually the largest single driver — only they keep a time-series. The Capacity Advisor card surfaces the retention and cadence levers if you can't expand the volume.",
     });
   }
 
@@ -1177,7 +1177,7 @@ function computeReasons(
       code: "projected_db_huge",
       family: "db_ram",
       message: `Database steady-state size is more than 8× host RAM (steady-state ${formatBytes(snap.workload.steadyStateSizeBytes)}, host RAM ${formatBytes(ram)}).`,
-      suggestion: "Add RAM or reduce sample retention — query performance will collapse without it. The Capacity Advisor card surfaces retention and cadence levers if you can't add RAM.",
+      suggestion: "Add RAM, narrow the monitored-interface selection (each integration's Monitoring tab), or reduce sample retention — query performance will collapse without it. Pinned interfaces are usually the largest single driver of sample volume, since only they keep a time-series. The Capacity Advisor card surfaces the retention and cadence levers if you can't add RAM.",
     });
   }
 
@@ -1209,7 +1209,7 @@ function computeReasons(
       code: "projected_db_large",
       family: "db_ram",
       message: `Database steady-state size exceeds 4× host RAM (steady-state ${formatBytes(snap.workload.steadyStateSizeBytes)}, host RAM ${formatBytes(ram)}).`,
-      suggestion: "Add RAM or reduce sample retention before performance degrades. The Capacity Advisor card surfaces retention and cadence levers if you can't add RAM.",
+      suggestion: "Add RAM, narrow the monitored-interface selection (each integration's Monitoring tab), or reduce sample retention before performance degrades. Pinned interfaces are usually the largest single driver of sample volume, since only they keep a time-series. The Capacity Advisor card surfaces the retention and cadence levers if you can't add RAM.",
     });
   }
 
@@ -1473,7 +1473,7 @@ function computeReasons(
       code: "db_io_pressure",
       family: "db_ram",
       message: `Disk I/O is high — PostgreSQL is spending significant time reading from storage rather than serving from cache (avg ${avg.toFixed(1)} connection(s) blocked on disk${windowText}; host RAM ${formatBytes(ram)}, database ${formatBytes(snap.database.sizeBytes)}).`,
-      suggestion: "Consider adding RAM so more of the working set stays cached. Faster storage (NVMe) or lower sample retention also reduce disk reads — the Capacity Advisor card surfaces retention and cadence levers.",
+      suggestion: "Consider adding RAM so more of the working set stays cached. Narrowing the monitored-interface selection (each integration's Monitoring tab) is often the biggest lever — only pinned interfaces keep a time-series, so fewer pins means fewer rows written AND a smaller working set competing for cache. Faster storage (NVMe) or lower sample retention also reduce disk reads; the Capacity Advisor card surfaces the retention and cadence levers.",
     });
   }
   if (pgTuningNeeded) {
