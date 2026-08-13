@@ -42,15 +42,24 @@ async function _initBlocksPage() {
   loadBlocks();
   wireFavoriteClicks("blocks-tbody", function () { renderBlocksPage(); });
 
+  // The row's verbs live behind its name. "Open" is what the name click used to
+  // do on its own; Edit / Delete appear only for operators who may manage
+  // networks, so a read-only viewer still gets a one-item menu that opens the
+  // block rather than a control that does nothing.
   document.getElementById("blocks-tbody").addEventListener("click", function (e) {
-    var link = e.target.closest(".block-name-link");
-    if (!link) return;
+    var trigger = e.target.closest(".block-menu");
+    if (!trigger) return;
     e.preventDefault();
-    var prev = document.querySelector("tr.row-panel-active");
-    if (prev) prev.classList.remove("row-panel-active");
-    var row = link.closest("tr");
-    if (row) row.classList.add("row-panel-active");
-    openBlockPanel(link.getAttribute("data-block-id"));
+    var id = trigger.getAttribute("data-block-id");
+    var b = (_blocksData || []).find(function (x) { return x.id === id; });
+    if (!b) return;
+    var items = [{ label: "Open", onSelect: function () { openBlockFromRow(trigger, id); } }];
+    if (canManageNetworks()) {
+      items.push({ label: "Edit", onSelect: function () { openBlockEditModal(id); } });
+      items.push({ separator: true });
+      items.push({ label: "Delete", danger: true, onSelect: function () { confirmDeleteBlock(id, b.cidr); } });
+    }
+    showRowMenu(trigger, items, { label: "Actions for " + b.name });
   });
 
   var addBtn = document.getElementById("btn-add-block");
@@ -70,6 +79,15 @@ if (!window.__polarisIpamTabs) {
   document.addEventListener("DOMContentLoaded", _initBlocksPage);
 }
 
+/** Open the block panel, moving the row highlight to this row. */
+function openBlockFromRow(trigger, id) {
+  var prev = document.querySelector("tr.row-panel-active");
+  if (prev) prev.classList.remove("row-panel-active");
+  var row = trigger.closest("tr");
+  if (row) row.classList.add("row-panel-active");
+  openBlockPanel(id);
+}
+
 async function loadBlocks() {
   var tbody = document.getElementById("blocks-tbody");
   try {
@@ -78,20 +96,20 @@ async function loadBlocks() {
     _blocksData = await api.blocks.list();
     renderBlocksPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
 function renderBlocksPage() {
   var tbody = document.getElementById("blocks-tbody");
   if (_blocksData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No IP blocks found. Create one to get started.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No IP blocks found. Create one to get started.</td></tr>';
     clearPageControls("pagination");
     return;
   }
   var sfData = _blocksSF ? _blocksSF.apply(_blocksData) : _blocksData;
   if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No results match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
     return;
   }
@@ -102,17 +120,16 @@ function renderBlocksPage() {
     var tags = (b.tags || []).map(function (t) { return escapeHtml(t); }).join(", ");
     return '<tr>' +
       starCellHTML("blocks", b.id) +
-      '<td><a href="#" class="block-name-link" data-block-id="' + b.id + '"><strong>' + escapeHtml(b.name) + '</strong></a></td>' +
+      '<td><button type="button" class="row-menu-trigger block-menu" data-block-id="' + b.id + '" ' +
+        'aria-haspopup="menu" aria-expanded="false" title="Actions for this block">' +
+        '<strong>' + escapeHtml(b.name) + '</strong></button></td>' +
       '<td class="mono" title="' + cidrRangeTitle(b.cidr) + '">' + escapeHtml(b.cidr) + '</td>' +
       '<td>' + statusBadge(b.ipVersion) + '</td>' +
       '<td>' + escapeHtml(b.description || "-") + '</td>' +
       '<td>' + (tags || '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
       '<td>' + (b._count ? b._count.subnets : 0) + '</td>' +
       '<td>' + formatDate(b.createdAt) + '</td>' +
-      '<td class="actions">' +
-        (canManageNetworks() ? '<button class="btn btn-sm btn-secondary" onclick="openBlockEditModal(\'' + b.id + '\')">Edit</button>' +
-        '<button class="btn btn-sm btn-danger" onclick="confirmDeleteBlock(\'' + b.id + '\', \'' + escapeHtml(b.cidr) + '\')">Del</button>' : '') +
-      '</td></tr>';
+      '</tr>';
   }).join("");
   renderPageControls("pagination", sfData.length, _blocksPageSize, _blocksPage, function (p) {
     _blocksPage = p;

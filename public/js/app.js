@@ -1927,6 +1927,145 @@ function closeModal() {
   _modalFlashLevel = 0;
 }
 
+// ─── Row context menu ─────────────────────────────────────────────────────────
+//
+// The list pages put their per-row verbs behind the row's NAME rather than an
+// Actions column of buttons: one affordance, no column competing with the data
+// for horizontal space, and room to add a verb without re-cutting the layout.
+//
+// Why this is `position: fixed` on <body> rather than the existing
+// `.btn-dropdown-menu` pattern (which is absolute inside a positioned wrapper):
+// every list table scrolls inside `.table-wrapper-sticky`, so an absolutely
+// positioned menu in a <td> is clipped by that overflow the moment it's taller
+// than the remaining rows. Fixed + body-mounted escapes the clip; the cost is
+// that the menu must close on scroll, since it can no longer follow its anchor.
+//
+// items: [{ label, onSelect, danger?, disabled?, title? } | { separator: true }]
+var _rowMenuTeardown = null;
+
+/** Close whatever row menu is open. Safe to call when none is. */
+function closeRowMenu(opts) {
+  if (_rowMenuTeardown) _rowMenuTeardown(opts || {});
+}
+
+function showRowMenu(anchor, items, opts) {
+  if (!anchor || !items || !items.length) return;
+  // A second click on the same anchor toggles rather than stacking menus.
+  var reopening = _rowMenuTeardown && _rowMenuTeardown.anchor === anchor;
+  closeRowMenu({ silent: true });
+  if (reopening) return;
+
+  var menu = document.createElement("div");
+  menu.className = "btn-dropdown-menu row-context-menu open";
+  menu.setAttribute("role", "menu");
+  if (opts && opts.label) menu.setAttribute("aria-label", opts.label);
+
+  var buttons = [];
+  items.forEach(function (it) {
+    if (!it) return;
+    if (it.separator) {
+      var hr = document.createElement("div");
+      hr.className = "dropdown-divider";
+      menu.appendChild(hr);
+      return;
+    }
+    if (it.heading) {
+      var h = document.createElement("div");
+      h.className = "dropdown-heading";
+      h.textContent = it.heading;
+      menu.appendChild(h);
+      return;
+    }
+    var b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.textContent = it.label;
+    if (it.title) b.title = it.title;
+    if (it.danger) b.className = "danger";
+    if (it.disabled) {
+      b.disabled = true;
+    } else {
+      b.addEventListener("click", function () {
+        // Close BEFORE the handler runs: most of these open a modal or a
+        // slide-over, and a lingering fixed menu would float over it.
+        closeRowMenu();
+        try { it.onSelect(); } catch (err) { if (typeof showToast === "function") showToast((err && err.message) || "Action failed", "error"); }
+      });
+      buttons.push(b);
+    }
+    menu.appendChild(b);
+  });
+  if (!buttons.length && !menu.childNodes.length) return;
+
+  document.body.appendChild(menu);
+
+  // Position under the anchor, flipped when it would leave the viewport.
+  var r = anchor.getBoundingClientRect();
+  var mw = menu.offsetWidth;
+  var mh = menu.offsetHeight;
+  var pad = 6;
+  var top = r.bottom + 4;
+  if (top + mh > window.innerHeight - pad) {
+    var above = r.top - 4 - mh;
+    top = above >= pad ? above : Math.max(pad, window.innerHeight - pad - mh);
+  }
+  var left = r.left;
+  if (left + mw > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - pad - mw);
+  menu.style.top = top + "px";
+  menu.style.left = left + "px";
+
+  // ── Dismissal + keyboard ────────────────────────────────────────────────
+  function onDocPointerDown(e) {
+    if (!menu.contains(e.target) && e.target !== anchor) closeRowMenu();
+  }
+  function onKeyDown(e) {
+    if (e.key === "Escape") { e.stopPropagation(); closeRowMenu(); return; }
+    if (e.key === "Tab") { closeRowMenu(); return; }
+    if (!buttons.length) return;
+    var idx = buttons.indexOf(document.activeElement);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      var next = e.key === "ArrowDown"
+        ? (idx < 0 ? 0 : (idx + 1) % buttons.length)
+        : (idx <= 0 ? buttons.length - 1 : idx - 1);
+      buttons[next].focus();
+    } else if (e.key === "Home") { e.preventDefault(); buttons[0].focus(); }
+    else if (e.key === "End") { e.preventDefault(); buttons[buttons.length - 1].focus(); }
+  }
+  // Capture-phase scroll so a scroll inside the table wrapper closes it too —
+  // the menu is fixed and cannot track its anchor.
+  function onScrollOrResize() { closeRowMenu(); }
+
+  document.addEventListener("pointerdown", onDocPointerDown, true);
+  document.addEventListener("keydown", onKeyDown, true);
+  window.addEventListener("scroll", onScrollOrResize, true);
+  window.addEventListener("resize", onScrollOrResize);
+
+  _rowMenuTeardown = function (o) {
+    document.removeEventListener("pointerdown", onDocPointerDown, true);
+    document.removeEventListener("keydown", onKeyDown, true);
+    window.removeEventListener("scroll", onScrollOrResize, true);
+    window.removeEventListener("resize", onScrollOrResize);
+    if (menu.parentNode) menu.parentNode.removeChild(menu);
+    _rowMenuTeardown = null;
+    if (anchor) anchor.setAttribute("aria-expanded", "false");
+    // Hand focus back so keyboard users don't land at the top of the document —
+    // except when another affordance is about to claim it (silent close).
+    if (!(o && o.silent) && typeof anchor.focus === "function") {
+      try { anchor.focus(); } catch (_) { /* row re-rendered */ }
+    }
+  };
+  _rowMenuTeardown.anchor = anchor;
+
+  anchor.setAttribute("aria-expanded", "true");
+  if (buttons.length) buttons[0].focus();
+}
+
+if (typeof window !== "undefined") {
+  window.showRowMenu = showRowMenu;
+  window.closeRowMenu = closeRowMenu;
+}
+
 // ─── Confirm Dialog ───────────────────────────────────────────────────────────
 
 function showConfirm(message) {

@@ -226,7 +226,7 @@ var _rulesPage = 1;
       _rules = results[0].rules || [];
       renderRules();
     }).catch(function () {
-      document.getElementById("rules-tbody").innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load automations</td></tr>';
+      document.getElementById("rules-tbody").innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load automations</td></tr>';
     });
   }
   window._reloadRules = loadRules;
@@ -260,6 +260,31 @@ var _rulesPage = 1;
     }, overrides || {});
   }
   window._ruleToInput = _ruleToInput;
+
+  // ── Clone naming ──────────────────────────────────────────────────────────
+  //
+  // Suggested name for a cloned automation: "<root> (copy)", then "(copy 2)",
+  // "(copy 3)" … until one is free among the names already in the list.
+  //
+  // Two deliberate behaviours. An existing copy suffix on the SOURCE is
+  // stripped first, so cloning "Switch temp (copy)" gives "Switch temp
+  // (copy 2)" rather than "Switch temp (copy) (copy)" — repeated cloning is
+  // exactly the case this runs in. And uniqueness here is about the operator
+  // being able to tell two rows apart in the list, NOT about validity:
+  // NotificationRule.name carries no unique constraint, so a collision would
+  // save fine and simply be unreadable.
+  function cloneName(baseName, takenNames) {
+    var root = String(baseName == null ? "" : baseName).replace(/\s*\(copy(?:\s+\d+)?\)\s*$/i, "").trim();
+    if (!root) root = "Automation";
+    var taken = {};
+    (takenNames || []).forEach(function (n) { taken[String(n == null ? "" : n).trim().toLowerCase()] = true; });
+    for (var i = 1; i <= 200; i++) {
+      var candidate = root + (i === 1 ? " (copy)" : " (copy " + i + ")");
+      if (!taken[candidate.toLowerCase()]) return candidate;
+    }
+    return root + " (copy)";
+  }
+  window._automationCloneName = cloneName;
 
   // ── Scope-cell hover tooltip ──────────────────────────────────────────────
   //
@@ -379,7 +404,7 @@ var _rulesPage = 1;
     });
     if (_rulesSF) data = _rulesSF.apply(data);
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No automations yet' + (canEditRules ? ' — click "+ New automation" to create one.' : "") + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No automations yet' + (canEditRules ? ' — click "+ New automation" to create one.' : "") + '</td></tr>';
       clearPageControls("rules-pagination");
       return;
     }
@@ -404,11 +429,14 @@ var _rulesPage = 1;
       });
 
     tbody.innerHTML = pageRows.map(function (r) {
-      var actions = "";
-      if (canEditRules) {
-        actions = '<button class="btn btn-sm btn-secondary rule-edit" data-id="' + r.id + '">Edit</button> ' +
-          '<button class="btn btn-sm btn-secondary rule-del" data-id="' + r.id + '">Delete</button>';
-      }
+      // The row's verbs live behind the name (Edit / Clone / Delete) instead of
+      // an Actions column. Without edit rights there's nothing to offer, so the
+      // name stays plain text rather than a control that opens an empty menu.
+      var nameCell = canEditRules
+        ? '<button type="button" class="row-menu-trigger rule-menu" data-id="' + r.id + '" ' +
+            'aria-haspopup="menu" aria-expanded="false" title="Actions for this automation">' +
+            escapeHtml(r.name) + '</button>'
+        : escapeHtml(r.name);
       // Enabled toggle — interactive switch for rule editors; static label otherwise.
       var enabledCell = canEditRules
         ? '<label class="toggle-switch" title="' + (r.enabled ? "Enabled — click to disable" : "Disabled — click to enable") + '">' +
@@ -417,13 +445,12 @@ var _rulesPage = 1;
           '</label>'
         : (r.enabled ? "Yes" : '<span style="color:var(--color-text-tertiary)">No</span>');
       return '<tr>' +
-        '<td>' + escapeHtml(r.name) + '</td>' +
+        '<td>' + nameCell + '</td>' +
         '<td><span class="badge">' + escapeHtml(r.triggerType) + '</span></td>' +
         '<td><span class="badge badge-level-' + escapeHtml(r.severity || "info") + '">' + escapeHtml((r.severity || "info").toUpperCase()) + '</span></td>' +
         '<td>' + enabledCell + '</td>' +
         '<td style="font-size:0.85rem" title="' + escapeHtml(r.scopeTooltip) + '">' + escapeHtml(r.scopeSummary) + '</td>' +
         '<td>' + escapeHtml(r.createdBy || "-") + '</td>' +
-        '<td>' + actions + '</td>' +
         '</tr>';
     }).join("");
     tbody.querySelectorAll(".rule-enabled-toggle").forEach(function (cb) {
@@ -444,19 +471,37 @@ var _rulesPage = 1;
         }
       });
     });
-    tbody.querySelectorAll(".rule-edit").forEach(function (b) {
-      b.addEventListener("click", function () { var r = _rules.find(function (x) { return x.id === b.dataset.id; }); if (r) openAutomationWizard(r).catch(function (err) { showToast(err && err.message || "Failed to open the automation wizard", "error"); }); });
-    });
-    tbody.querySelectorAll(".rule-del").forEach(function (b) {
-      b.addEventListener("click", async function () {
+    tbody.querySelectorAll(".rule-menu").forEach(function (b) {
+      b.addEventListener("click", function () {
         var r = _rules.find(function (x) { return x.id === b.dataset.id; });
         if (!r) return;
-        var ok = await showConfirm('Delete automation "' + r.name + '"? Its firing state is dropped; existing alerts are kept.');
-        if (!ok) return;
-        try { await api.automations.delete(r.id); showToast("Automation deleted", "success"); loadRules(); }
-        catch (err) { showToast(err.message || "Delete failed", "error"); }
+        showRowMenu(b, [
+          { label: "Edit", onSelect: function () { openWizardFor(r); } },
+          {
+            label: "Clone",
+            title: "Create a disabled copy of this automation",
+            // Name is uniquified HERE, not in the wizard: this is the only side
+            // holding the full rule list (_rules is every row, not the page slice).
+            onSelect: function () { openWizardFor(r, { clone: true, name: cloneName(r.name, _rules.map(function (x) { return x.name; })) }); },
+          },
+          { separator: true },
+          { label: "Delete", danger: true, onSelect: function () { confirmDeleteRule(r); } },
+        ], { label: "Actions for " + r.name });
       });
     });
+  }
+
+  function openWizardFor(rule, opts) {
+    openAutomationWizard(rule, opts).catch(function (err) {
+      showToast((err && err.message) || "Failed to open the automation wizard", "error");
+    });
+  }
+
+  async function confirmDeleteRule(r) {
+    var ok = await showConfirm('Delete automation "' + r.name + '"? Its firing state is dropped; existing alerts are kept.');
+    if (!ok) return;
+    try { await api.automations.delete(r.id); showToast("Automation deleted", "success"); loadRules(); }
+    catch (err) { showToast(err.message || "Delete failed", "error"); }
   }
 
   // expose for the builder (defined at module scope below)

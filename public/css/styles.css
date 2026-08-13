@@ -1145,6 +1145,54 @@ code {
   background: var(--color-border);
   margin: 4px 0;
 }
+.btn-dropdown-menu button:disabled {
+  color: var(--color-text-tertiary);
+  cursor: default;
+}
+.btn-dropdown-menu button:disabled:hover { background: none; }
+.btn-dropdown-menu button.danger { color: var(--color-danger, #c53030); }
+
+/* ─── Row context menu ─────────────────────────────────────────────────────
+   The list pages' per-row verbs (Open / Edit / Clone / Delete), opened from the
+   row's name instead of an Actions column. Shares the dropdown look above but
+   is FIXED and body-mounted: list tables scroll inside .table-wrapper-sticky,
+   which clips an absolutely positioned menu. Positioned in JS (showRowMenu in
+   app.js), which also closes it on scroll — fixed can't follow its anchor.
+   z-index sits above the sticky table header (100) and the page chrome, but
+   below the modal overlay (1000) it usually opens. */
+.row-context-menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: auto;
+  z-index: 900;
+  min-width: 160px;
+}
+/* The row-name trigger: reads as the name, not as a control, until hovered. */
+.row-menu-trigger {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--color-primary);
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-menu-trigger:hover { text-decoration: underline; }
+.row-menu-trigger::after {
+  content: " \25BE";
+  color: var(--color-text-tertiary);
+  font-size: 0.75em;
+}
+.row-menu-trigger:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 /* ─── List-page view tabs (Assets page tab strip) ──────────────────────────
    Per-user tabs, each holding its own filter + sort state. Visually a lighter
    sibling of .page-tabs (which navigates between whole sections) — these sit
