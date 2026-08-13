@@ -2953,25 +2953,55 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/brandLogoService.ts
+
+**What it owns:** The composite of the operator's logo with the Polaris symbol on its bottom-right corner (`branding.logoAccent`) — the geometry, the rasterization, and the in-process cache. Same `@resvg/resvg-js` embed-a-bitmap-in-an-SVG technique as `appIconService`.
+
+**Public API:** `accentGeometry` (pure), `renderAccentedLogo`, `ACCENT_SYMBOL_PATH`, `ACCENT_FRACTION`, `MAX_RENDER_PX`, `__resetBrandLogoCacheForTests`
+
+**Cross-service deps:** `brandingService` (`getBranding`, `hasCustomLogo`), `appIconService.resolveBrandingLogoFile` (the basename + inside-UPLOADS_DIR assertion — one definition of "which file is the logo"), `utils/imageMagic.detectImageMagic`, `utils/imageSize.imageSize`, `utils/paths.PUBLIC_DIR`, lazy `@resvg/resvg-js`.
+
+**Used by:** `src/api/router.ts` only — the PUBLIC `GET /server-settings/branding/logo-accent.png`, declared above `requireAuth` because the login page renders the mark with no session. The frontends reach it through `public/js/brand-logo.js`, never by building the path themselves.
+
+**Invariants:**
+- **Nothing here throws.** Accent off, default logo, missing/unreadable file, WebP, resvg failure, dimensions unparseable → `null`, and the route 302s to the plain `logoUrl`. This feeds an `<img>` on an unauthenticated login page; an accent is decoration and must never be why a login page renders without a mark.
+- **Compositing is server-side on purpose.** A CSS overlay would need its own absolute positioning and its own fraction-of-what arithmetic on the desktop login, the mobile login, the sidebar and the settings preview — four chances to disagree. One PNG, one URL.
+- The cache key is the logo's **and** the symbol's mtime — the upload route writes a FIXED filename, so mtime is the only invalidation signal (the `appIconService` rule, for the same reason).
+- `accentGeometry` clamps to half the SHORTEST side. Without it a wide banner logo would get an accent taller than the logo itself, since `ACCENT_FRACTION` (0.5) is measured on the longest side.
+- Rendering caps at `MAX_RENDER_PX`. The route is unauthenticated, so the canvas size must not be a function of what an operator uploaded.
+
+**When changing this:**
+- Changing the geometry changes what operators already saved — `accentGeometry` is pure and unit-tested (`tests/unit/brandLogoService.test.ts`) precisely so the placement promise ("bottom-right, roughly half the logo") is a test, not a comment. The Customization tab's checkbox hint states the same number; move both together.
+- The frontend's `logoAccent` → URL mapping lives in `public/js/brand-logo.js`; a path change is a two-file change.
+- WebP is deliberately unsupported (resvg can't decode it in an embedded `<image>`) — a WebP-branded install shows its logo un-accented, which is the same fallback `appIconService` already makes.
+
+---
+
 ## services/brandingService.ts
 
-**What it owns:** The `branding` Setting row — `appName` / `subtitle` / `logoUrl` / `temperatureUnit` — plus `BRANDING_DEFAULTS` and `normalizeTemperatureUnit`. Read-side only; the writers stay in the serverSettings routes.
+**What it owns:** The `branding` Setting row — `appName` / `subtitle` / `logoUrl` / `logoAccent` / `logoOnLogin` / `logoOnSidebar` / `temperatureUnit` — plus `BRANDING_DEFAULTS`, `normalizeTemperatureUnit`, `normalizeBrandingFlag`, `hasCustomLogo` and `displayAppName`. Read-side only; the writers stay in the serverSettings routes.
 
-**Public API:** `getBranding`, `BRANDING_DEFAULTS`, `normalizeTemperatureUnit`, the `BrandingSettings` + `TemperatureUnit` types
+**Public API:** `getBranding`, `BRANDING_DEFAULTS`, `normalizeTemperatureUnit`, `normalizeBrandingFlag`, `hasCustomLogo`, `displayAppName`, the `BrandingSettings` + `TemperatureUnit` types
 
 **Cross-service deps:** `prisma` (the `Setting` table), `utils/version.getAppVersion` (the `version` field on the response).
 
-**Used by:** `src/api/routes/serverSettings.ts` (`GET|PUT /branding`, `POST|DELETE /branding/logo` — it also **re-exports `getBranding`** so the public `/branding` alias in `src/api/router.ts` keeps working via its dynamic import), `src/api/routes/pwa.ts`, `src/services/appIconService.ts`.
+**Used by:** `src/api/routes/serverSettings.ts` (`GET|PUT /branding`, `POST|DELETE /branding/logo` — it also **re-exports `getBranding`** so the public `/branding` alias in `src/api/router.ts` keeps working via its dynamic import), `src/api/routes/pwa.ts`, `src/api/routes/ack.ts` (`displayAppName`), `src/services/appIconService.ts`, `src/services/brandLogoService.ts`. Browser-side, `public/js/brand-logo.js` is the only reader of the logo/placement fields — surfaces call it rather than branching on the payload themselves.
 
 **Invariants:**
 - Extracted from `routes/serverSettings.ts` precisely so services can read branding without importing a route module — do not reintroduce the reverse dependency.
 - `getBranding` never throws on a missing row; it returns defaults.
-- Writers (logo upload/delete, name/subtitle PUT) still live in the route and each **replaces the whole row**, so a writer that omits a field silently resets it — the logo upload/delete routes carry `temperatureUnit` forward for exactly that reason (the typechecker caught it when the field was added; keep every `BrandingSettings` field non-optional so it keeps catching it).
+- Writers (logo upload/delete, name/subtitle PUT) still live in the route and each **replaces the whole row**, so a writer that omits a field silently resets it — the logo upload/delete routes carry `temperatureUnit` AND the three logo flags forward for exactly that reason (the typechecker caught it when each field was added; keep every `BrandingSettings` field non-optional so it keeps catching it).
+- **`appName` may be empty.** Read with `!== undefined`, written without a `|| BRANDING_DEFAULTS.appName`: blanking it is how an operator whose uploaded logo already carries their wordmark says "no text beside the logo". Anything that must PRINT a name — page titles, the PWA manifest's `name`, the acknowledge page — goes through `displayAppName`, never `.appName` raw. `shortNameFor` in `routes/pwa.ts` already had its own fallback and keeps it.
+- **The three logo flags are read through `normalizeBrandingFlag`, not `||`.** `logoOnLogin`/`logoOnSidebar` default ON, so a `||` would resurrect a stored `false` on every read and quietly re-enable a logo the operator had switched off for that surface. Only `undefined`/`null` take the default.
+- `hasCustomLogo` is the single definition of "the operator uploaded something", surfaced on the GET payload as the derived `customLogo` so no frontend has to compare against `/logo.png`. The three write routes include it in their responses too — the Customization tab renders straight off the PUT/POST result.
+- The placement + accent flags are **inert without a custom logo** and are deliberately NOT reset by `DELETE /branding/logo`: an operator who re-uploads gets their choices back verbatim.
 - **`temperatureUnit` is DISPLAY-ONLY and rides this row deliberately.** Hardware-sensor samples are always stored, rolled up, and alerted on in Celsius (`SENSOR_CLASS_UNITS`); the frontends convert at render through `public/js/temp-unit.js` (`window.PolarisTempUnit`, unit-tested in `tests/unit/tempUnit.test.ts`). Branding is the only presentation channel every surface already has: the `/branding` alias is unauthenticated, `applyBranding` in app.js mirrors the payload into `localStorage["polaris-branding"]` (which is what lets the converter be SYNCHRONOUS for the sync string-building renderers), `PolarisAuthFlow.fetchBranding` primes the same cache for the mobile SPA, and the Dash wallboard — no user identity, so a per-user preference could never reach it — serves the same route. Readers that must convert TOGETHER or a chart contradicts itself: `_hwReadingText` (the Hardware Sensors table), `_loadSensorHistoryFor` (series + stats + the °C automation thresholds behind the severity shading), the mobile asset sheet's sensor list, and `widgets/temperature.js` (rows AND its 80/65 °C color breakpoints). Conversion is gated on each reading's OWN stored unit, never its class, so fan RPM and voltage rails pass through untouched. Never plumb it into the automation builder or any threshold input — those stay °C.
 
 **When changing this:**
 - Adding a branding field means updating the route's PUT schema too — and consider whether it belongs in the PWA manifest (`buildManifest` in `routes/pwa.ts`).
-- Changing `logoUrl` semantics (e.g. non-fixed filenames) breaks `appIconService`'s mtime-based cache key — read that invariant first.
+- Changing `logoUrl` semantics (e.g. non-fixed filenames) breaks `appIconService`'s AND `brandLogoService`'s mtime-based cache keys — read those invariants first.
+- Which mark each surface paints is `public/js/brand-logo.js`'s call, not the surface's: desktop login (`js/login.js`), mobile login (`js/mobile/auth.js`), the sidebar (`applyBranding` in `js/app.js`) and the Customization tab preview (`js/server-settings.js`) all go through `PolarisBrandLogo.resolve/applyTo`. Adding a fifth surface means calling it too, not re-deriving the rule.
+- The shipped art lives in `public/img/brand/` as one file per (orientation, theme) — those names are in `brand-logo.js`'s `ASSETS` map and nowhere else.
 
 ---
 

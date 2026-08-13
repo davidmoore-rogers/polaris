@@ -107,8 +107,8 @@
     app.innerHTML = ''
       + '<div class="app-body">'
       + '  <div class="login-shell">'
-      + '    <img class="brand-logo" id="brand-logo" src="/logo.png" alt="">'
-      + '    <h2 id="brand-name">Polaris</h2>'
+      + '    <img class="brand-logo brand-mark brand-mark-login" id="brand-logo" src="/img/brand/polaris-horiz-dark.png" alt="Polaris">'
+      + '    <h2 id="brand-name" style="display:none">Polaris</h2>'
       + '    <div class="sub" id="brand-sub">IP management, navigated</div>'
 
       + '    <div id="login-error" class="hidden" style="width:100%;background:var(--md-error-container);color:var(--md-on-error-container);border-radius:var(--shape-xs);padding:10px 14px;font-size:13px;margin-bottom:12px;letter-spacing:.25px;"></div>'
@@ -134,17 +134,33 @@
       + '  </div>'
       + '</div>';
 
-    // Pull branding (logo + app name) — best-effort.
+    // Pull branding (logo + app name) — best-effort. Which mark to paint, and
+    // whether the Application Name is shown as text at all, is
+    // PolarisBrandLogo's call: the shipped Polaris art already carries the
+    // wordmark, so a caption under it would only repeat it.
     PolarisAuthFlow.fetchBranding().then(function (b) {
       if (!b) return;
-      if (b.appName) {
-        document.getElementById("brand-name").textContent = b.appName;
-        document.title = b.appName;
+      var nameEl = document.getElementById("brand-name");
+      var subEl = document.getElementById("brand-sub");
+
+      function paint() {
+        var r = PolarisBrandLogo.applyTo(document.getElementById("brand-logo"), b, "login");
+        if (nameEl) {
+          nameEl.textContent = b.appName || "Polaris";
+          nameEl.style.display = r.showName ? "" : "none";
+        }
+        if (subEl && b.subtitle !== undefined) {
+          subEl.textContent = b.subtitle || "";
+          subEl.style.display = r.showSubtitle ? "" : "none";
+        }
       }
-      if (b.subtitle) document.getElementById("brand-sub").textContent = b.subtitle;
-      if (b.logoUrl) {
-        var logo = document.getElementById("brand-logo");
-        if (logo) logo.src = b.logoUrl;
+
+      paint();
+      PolarisBrandLogo.onThemeChange(paint);
+      document.title = (b.appName || "").trim() || "Polaris";
+      // Favicon tracks the uploaded logo only — a wordmark is illegible at
+      // 16px, and the shipped mark is already the declared icon.
+      if (b.customLogo && b.logoUrl) {
         var fav = document.querySelector('link[rel="icon"]');
         if (fav) fav.href = b.logoUrl;
       }

@@ -24,7 +24,7 @@
 
 import { Router } from "express";
 import { createHash } from "node:crypto";
-import { getBranding } from "../../services/brandingService.js";
+import { displayAppName, getBranding } from "../../services/brandingService.js";
 import { renderAppIcon, getIconSetVersion, findIconSpec } from "../../services/appIconService.js";
 
 export const pwaRouter = Router();
@@ -73,7 +73,10 @@ export function buildManifest(
     // no-op TODAY — but it pins identity so a future start_url change can't
     // fork every existing install into a second app. NEVER CHANGE THIS VALUE.
     id: "/mobile.html",
-    name: branding.appName,
+    // An operator may leave appName blank when their logo carries the wordmark
+    // (see brandingService) — a manifest with an empty `name` is invalid, so
+    // the install label falls back the same way shortNameFor already did.
+    name: displayAppName(branding),
     short_name: shortNameFor(branding.appName),
     description: branding.subtitle,
     // Not "/": the phone-UA redirect in app.ts fires only for "/" and

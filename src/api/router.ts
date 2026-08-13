@@ -64,6 +64,33 @@ router.get("/server-settings/branding", async (_req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The operator's logo with the Polaris symbol composited onto it. Public for
+// the same reason the branding payload is: the login page renders it before
+// anyone has a session. Declared here (above requireAuth) rather than in the
+// serverSettings router, so there is exactly one definition of the path.
+router.get("/server-settings/branding/logo-accent.png", async (req, res, next) => {
+  try {
+    const { renderAccentedLogo } = await import("../services/brandLogoService.js");
+    const rendered = await renderAccentedLogo();
+    if (!rendered) {
+      // Accent off, no custom logo, or an unrenderable one — send the caller to
+      // whatever the plain logo is instead of 404-ing a live <img>.
+      const { getBranding } = await import("../services/brandingService.js");
+      res.redirect(302, (await getBranding()).logoUrl);
+      return;
+    }
+    // Revalidate every time: the upload route reuses one filename, so the URL
+    // can't carry a version. A 304 costs one stat + a hash of two stamps.
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("ETag", `"${rendered.etag}"`);
+    if (req.headers["if-none-match"] === `"${rendered.etag}"`) {
+      res.status(304).end();
+      return;
+    }
+    res.type("image/png").send(rendered.buf);
+  } catch (err) { next(err); }
+});
+
 // Polaris Agent — /enroll and /binary/:filename are public (no bearer
 // yet; the body or path carries everything needed). The rest of
 // /agents/* is gated by the requireAgentBearer middleware mounted

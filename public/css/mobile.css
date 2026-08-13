@@ -798,6 +798,16 @@ input, select, textarea { font-family: inherit; }
   margin: 0 auto 16px;
   border-radius: var(--shape-md);
 }
+/* Shipped Polaris art (public/img/brand/polaris-horiz-*.png) — a wide wordmark
+   rather than an uploaded tile, so it takes more width, no rounding, and a
+   little more room beneath since the app-name caption is hidden under it. */
+.login-shell .brand-logo.brand-mark {
+  max-width: 232px;
+  max-height: none;
+  width: 100%;
+  border-radius: 0;
+  margin-bottom: 20px;
+}
 /* Retained for the TOTP step which still uses the icon-tile look. */
 .login-shell .logo-mark {
   width: 64px; height: 64px;

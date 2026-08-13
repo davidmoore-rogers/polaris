@@ -19,8 +19,17 @@
 
 // ─── Theme (same key as the main app, so the wallboard follows the browser's
 //     last-chosen Polaris theme) ─────────────────────────────────────────────
+// A wallboard browser has usually never chosen a theme, so with nothing saved
+// follow the OS (matching on "light" keeps dark as the fallback) — same rule
+// as js/theme-init.js and app.js.
 (function () {
-  var saved = localStorage.getItem("polaris-theme") || "dark";
+  var saved = null;
+  try { saved = localStorage.getItem("polaris-theme"); } catch (e) {}
+  if (!saved) {
+    var light = false;
+    try { light = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches; } catch (e) {}
+    saved = light ? "light" : "dark";
+  }
   document.documentElement.setAttribute("data-theme", saved);
 })();
 

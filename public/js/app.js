@@ -4,8 +4,20 @@
 
 // ─── Theme ──────────────────────────────────────────────────────────────────
 
+// No saved preference (fresh browser, or a user who has never touched the
+// toggle) follows the OS; matching on "light" leaves dark as the fallback for
+// a browser that states no preference. Mirrors js/theme-init.js, which does
+// the same for the login + setup pages. Deliberately does not persist: staying
+// unsaved is what keeps the user tracking their system, and _setTheme is the
+// opt-out.
 (function () {
-  var saved = localStorage.getItem("polaris-theme") || "dark";
+  var saved = null;
+  try { saved = localStorage.getItem("polaris-theme"); } catch (e) {}
+  if (!saved) {
+    var light = false;
+    try { light = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches; } catch (e) {}
+    saved = light ? "light" : "dark";
+  }
   document.documentElement.setAttribute("data-theme", saved);
 })();
 
@@ -242,8 +254,8 @@ function renderNav() {
 
   sidebar.innerHTML = `
     <div class="sidebar-brand">
-      <img src="/logo.png" alt="" class="sidebar-logo" style="visibility:hidden">
-      <h1 style="font-size:1.1rem;font-weight:600;margin:0.5rem 0 0;color:var(--color-text-primary);text-align:center;visibility:hidden">Polaris</h1>
+      <img src="/img/brand/polaris-vert-dark.png" alt="" class="sidebar-logo brand-mark brand-mark-sidebar" style="visibility:hidden">
+      <h1 style="font-size:1.1rem;font-weight:600;margin:0.5rem 0 0;color:var(--color-text-primary);text-align:center;visibility:hidden;display:none">Polaris</h1>
       <p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.15rem 0 0;text-align:center;visibility:hidden">Network Management Tool</p>
     </div>
     <ul class="sidebar-nav">
@@ -1099,21 +1111,24 @@ function applyBranding(b, skipCache) {
   // branding) takes effect on this page without a reload.
   if (window.PolarisTempUnit) window.PolarisTempUnit.setFromBranding(b);
 
-  // Update sidebar logo + name
+  // Update sidebar logo + name. Which mark (operator's logo vs the shipped
+  // Polaris art for the current theme) and whether the name is text at all are
+  // PolarisBrandLogo's call — see public/js/brand-logo.js.
   var sidebarLogo = document.querySelector(".sidebar-logo");
-  if (sidebarLogo) {
-    sidebarLogo.src = b.logoUrl || "/logo.png";
-    sidebarLogo.style.visibility = "";
-  }
+  var placement = window.PolarisBrandLogo
+    ? PolarisBrandLogo.applyTo(sidebarLogo, b, "sidebar")
+    : { showName: true, showSubtitle: Boolean(b.subtitle) };
+  if (sidebarLogo) sidebarLogo.style.visibility = "";
   var sidebarName = document.querySelector(".sidebar-brand h1");
   if (sidebarName) {
     sidebarName.textContent = b.appName || "Polaris";
+    sidebarName.style.display = placement.showName ? "" : "none";
     sidebarName.style.visibility = "";
   }
   var sidebarSub = document.querySelector(".sidebar-brand p");
   if (sidebarSub) {
     sidebarSub.textContent = b.subtitle || "";
-    sidebarSub.style.display = b.subtitle ? "" : "none";
+    sidebarSub.style.display = placement.showSubtitle ? "" : "none";
     sidebarSub.style.visibility = "";
   }
 
@@ -1145,6 +1160,16 @@ function applyBranding(b, skipCache) {
 
   // Check for available updates (admin only)
   if (isAdmin()) checkSidebarUpdate();
+}
+
+// Swap the sidebar mark when the theme flips (the toggle, or the OS changing
+// under a user who never picked one) — the Polaris art is theme-specific and
+// the wrong variant is near-invisible. Logo only: applyBranding also kicks an
+// update check, which has nothing to do with a color scheme.
+if (window.PolarisBrandLogo) {
+  PolarisBrandLogo.onThemeChange(function () {
+    if (_branding) PolarisBrandLogo.applyTo(document.querySelector(".sidebar-logo"), _branding, "sidebar");
+  });
 }
 
 async function fetchBranding() {
