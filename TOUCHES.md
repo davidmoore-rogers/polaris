@@ -4614,6 +4614,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 **Invariants:**
 - Encoding: positive = N days, 0 = tier off (pruned), `FOREVER` = -1 (keep forever); short in-process cache TTL, invalidated on every write; partial PUT merges into stored value.
 - Unselected rows keep a fixed short detail window with no rollup; the unselected-slow-prune window respects the compress-after frontier to avoid expensive decompression.
+- **`interfaces` no longer produces unselected rows at all** (pinned-only cutover, 2026-08): `persistInterfaceSampleStream` and the agent's `ingestInterfaces` enqueue PINNED interfaces only, and current state for every interface moved to the `AssetInterface` table. So `asset_interface_samples` is now all-`cadence="fast"` and keeps the configured detail retention like an ordinary stream. The slow arm of `pruneSelectionAwareDetail` is kept for it as a **legacy drain** (it clears pre-cutover rows within 24h of deploy, then matches nothing) — and because the same arm still serves storage + ipsec, which DO still write slow rows. Capacity mirrors this: `capacityService.UNSELECTED_DOMINATED_ENTITIES` excludes `interfaces`, so its detail is no longer projected under the conservative 24h cap (that cap would now under-project by the full retention multiple), and its row rate keys off the fleet's pinned-interface count across BOTH the system-info and probe cadences.
 
 **When changing this:**
 - `RETENTION_ENTITIES` has eight entries (the two SD-WAN streams included) — keep it aligned with the sample-table inventory.

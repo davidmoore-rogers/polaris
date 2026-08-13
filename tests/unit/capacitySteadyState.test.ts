@@ -129,12 +129,39 @@ describe("projectSteadyStateSize — measured detail daily rate", () => {
     expect(projected).toBe(base + 12_000_000_000 * 7); // 84 GB of interface detail, matching reality
   });
 
-  it("without a measurement, keeps the conservative 24h-capped workload model for selection-aware detail", () => {
+  // Post pinned-only cutover: interface detail carries PINNED rows only, so it
+  // keeps FULL retention (no unselected bulk to cap at 24h), and the row rate
+  // is driven by pinned count across BOTH cadences — the full system-info pass
+  // and the fast pinned re-walk.
+  it("without a measurement, uses the pinned-count workload model at full retention", () => {
     const projected = projectSteadyStateSize({ ...baseArgs, sampleTables: ifaceTable });
     const base = baseArgs.currentDbBytes - 2_000_000;
-    // interface rowsPerAssetPerDay = (86400/600)*20 = 2880; selection-aware cap = 1 day; 395 B/row.
-    const fallback = 2000 * 2880 * 1 * 395;
+    // No pinnedInterfaceCount supplied → conservative default of 2/asset.
+    // rowsPerAssetPerDay = (86400/600 + 86400/60) * 2 = (144 + 1440) * 2 = 3168
+    // interfaces.detail retention = 7d; 395 B/row.
+    const fallback = 2000 * 3168 * 7 * 395;
     expect(projected).toBe(base + fallback);
+  });
+
+  it("scales interface detail with the fleet's actual pinned-interface count", () => {
+    // 2000 assets, 20 000 pinned interfaces → 10 per asset, i.e. 5× the default.
+    const projected = projectSteadyStateSize({
+      ...baseArgs,
+      sampleTables: ifaceTable,
+      pinnedInterfaceCount: 20_000,
+    });
+    const base = baseArgs.currentDbBytes - 2_000_000;
+    const fallback = 2000 * ((86400 / 600 + 86400 / 60) * 10) * 7 * 395;
+    expect(projected).toBe(base + fallback);
+  });
+
+  // The whole point of the cutover: pinning fewer interfaces must project less
+  // disk. Before it, every interface was sampled regardless, so the forecast
+  // was insensitive to what operators actually pinned.
+  it("projects strictly less disk when fewer interfaces are pinned", () => {
+    const few = projectSteadyStateSize({ ...baseArgs, sampleTables: ifaceTable, pinnedInterfaceCount: 2_000 });
+    const many = projectSteadyStateSize({ ...baseArgs, sampleTables: ifaceTable, pinnedInterfaceCount: 40_000 });
+    expect(few).toBeLessThan(many);
   });
 });
 

@@ -7503,11 +7503,28 @@ async function persistInterfaceSampleStream(
 ): Promise<void> {
   if (interfaces.length === 0) return;
   const pinnedIfaces = new Set(pinned?.monitoredInterfaces ?? []);
-  enqueueInterfaceSamples(
-    interfaces.map((i) => ({
+  // TIME-SERIES rows are written for PINNED interfaces only. Current state for
+  // every interface (pinned or not) is persisted separately by
+  // `persistInterfaces` into `asset_interfaces` — see the AssetInterface model.
+  //
+  // Unpinned interfaces used to be written here as cadence="slow" and deleted
+  // 24h later. That was ~4-5x the pinned write volume for rows nothing read as
+  // history: they were never compressed (deleted at 24h while the
+  // selection-aware compression floor is 2 days, so they lived their whole life
+  // in uncompressed heap), never rolled up, and removed by the row-level DELETE
+  // behind the 2026-06-08 / 2026-06-17 compressed-chunk bloat incidents. Every
+  // consumer that needed them wanted *current state*, which now has its own
+  // table.
+  //
+  // The `cadence` column stays: storage and ipsec still use the fast/slow
+  // split, the rollup + prune paths are shared, and legacy slow rows age out
+  // through the existing 24h prune rather than needing a migration.
+  const pinnedOnly = interfaces.filter((i) => pinnedIfaces.has(i.ifName));
+  if (pinnedOnly.length > 0) enqueueInterfaceSamples(
+    pinnedOnly.map((i) => ({
       assetId,
       timestamp: now,
-      cadence:     pinnedIfaces.has(i.ifName) ? ("fast" as const) : ("slow" as const),
+      cadence:     "fast" as const,
       ifName:      i.ifName,
       adminStatus: i.adminStatus ?? null,
       operStatus:  i.operStatus ?? null,
@@ -10582,7 +10599,13 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily,
     psDetail, psHourly, psDaily, lldp, customWidget, stateProbe, processLog, processConn,
   ] = await Promise.all([
-    // interfaces — detail is selection-aware (selected=configured, unselected=24h)
+    // interfaces — detail is selection-aware. Nothing WRITES unselected
+    // (cadence="slow") interface rows any more (see persistInterfaceSampleStream:
+    // current state moved to `asset_interfaces`), so the slow arm of this prune
+    // is now a legacy drain: it clears rows written before the cutover and then
+    // matches nothing. It is deliberately kept rather than removed — dropping it
+    // would leave those legacy rows to age out on the much longer selected
+    // window, and the arm is shared with storage/ipsec, which still use it.
     pruneSelectionAwareDetail((w) => prisma.assetInterfaceSample.deleteMany({ where: w as any }), r.interfaces.detail, "asset_interface_samples"),
     pruneTierByDays((w) => prisma.assetInterfaceSampleHourly.deleteMany({ where: w as any }), r.interfaces.hourly, "bucketStart", "asset_interface_samples_hourly"),
     pruneTierByDays((w) => prisma.assetInterfaceSampleDaily.deleteMany({  where: w as any }), r.interfaces.daily,  "bucketStart", "asset_interface_samples_daily"),

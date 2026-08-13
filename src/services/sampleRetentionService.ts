@@ -28,6 +28,14 @@
  * unselected, not a configurable cell. assets / cpuMem / hardware have no
  * selection concept — their retention applies to every row.
  *
+ * NOTE `interfaces` no longer WRITES unselected rows (pinned-only cutover,
+ * 2026-08): unpinned interfaces produce no sample rows at all, and current
+ * state for every interface lives in the `AssetInterface` table instead. Its
+ * detail tier is therefore all-`fast` and keeps the configured retention like
+ * an ordinary stream. It stays in SELECTION_AWARE_ENTITIES because the slow
+ * prune arm is still the drain for pre-cutover rows, and the arm is shared
+ * with storage + ipsec, which DO still write them.
+ *
  * FLAT entities: a second, non-tiered dimension in the same Setting row for
  * tables that are current-state-with-age rather than tiered time-series, so
  * detail/hourly/daily would be meaningless. Today that's:

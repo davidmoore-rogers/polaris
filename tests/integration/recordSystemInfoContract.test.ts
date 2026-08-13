@@ -90,7 +90,12 @@ d("recordSystemInfoResult", () => {
     expect(await prisma.assetInterfaceSample.count({ where: { assetId } })).toBe(0);
   });
 
-  it("interface samples land pin-aware (fast for monitored, slow otherwise) and bump lastSystemInfoAt", async () => {
+  // The pinned-only cutover: time-series rows are written for PINNED
+  // interfaces only, while current state is recorded for EVERY interface in
+  // asset_interfaces. Before this, every interface got a sample row (pinned
+  // ones stamped "fast", the rest "slow" and deleted 24h later) — which was the
+  // bulk of the largest table in the database, for rows nothing read as history.
+  it("time-series rows land for PINNED interfaces only, and bump lastSystemInfoAt", async () => {
     await seedAsset({ monitoredInterfaces: ["port1"] });
     await recordSystemInfoResult(assetId, ok({
       interfaces: [
@@ -101,12 +106,41 @@ d("recordSystemInfoResult", () => {
     await flushAllSampleBuffers();
 
     const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId }, orderBy: { ifName: "asc" } });
-    expect(rows.map((r) => [r.ifName, r.cadence])).toEqual([["port1", "fast"], ["port2", "slow"]]);
+    expect(rows.map((r) => [r.ifName, r.cadence])).toEqual([["port1", "fast"]]);
     expect(rows[0]!.speedBps).toBe(BigInt(1e9));
     expect(rows[0]!.inOctets).toBe(BigInt(1234));
 
     const fresh = await prisma.asset.findUnique({ where: { id: assetId } });
     expect(fresh!.lastSystemInfoAt).not.toBeNull();
+  });
+
+  it("current state is recorded for EVERY interface, pinned or not", async () => {
+    await seedAsset({ monitoredInterfaces: ["port1"] });
+    await recordSystemInfoResult(assetId, ok({
+      interfaces: [
+        { ifName: "port1", operStatus: "up", speedBps: 1e9 },
+        { ifName: "port2", operStatus: "down", ifType: "physical" },
+      ],
+    }));
+
+    const inv = await prisma.assetInterface.findMany({ where: { assetId }, orderBy: { ifName: "asc" } });
+    expect(inv.map((r) => r.ifName)).toEqual(["port1", "port2"]);
+    expect(inv[1]!.operStatus).toBe("down");
+    // Topology columns must survive here — the fast re-walk nulls them, which
+    // is why only the full pass writes this table.
+    expect(inv[1]!.ifType).toBe("physical");
+  });
+
+  // Same guard as lastSystemInfoAt: an empty interface list means "this pull
+  // returned nothing useful" at least as often as "this device has no
+  // interfaces", so it must not blank the System tab.
+  it("an empty interfaces[] preserves the stored current-state inventory", async () => {
+    await seedAsset({ monitoredInterfaces: [] });
+    await recordSystemInfoResult(assetId, ok({ interfaces: [{ ifName: "port1" }] }));
+    expect(await prisma.assetInterface.count({ where: { assetId } })).toBe(1);
+
+    await recordSystemInfoResult(assetId, ok({ interfaces: [] }));
+    expect(await prisma.assetInterface.count({ where: { assetId } })).toBe(1);
   });
 
   it("an empty interfaces[] never bumps lastSystemInfoAt, but other streams still persist", async () => {

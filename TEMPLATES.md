@@ -39,6 +39,7 @@ Per-pattern sections:
 - [Serialized check-then-insert (per-scope advisory lock + DB backstop)](#serialized-check-then-insert-per-scope-advisory-lock--db-backstop)
 - [Encrypt-at-rest for a JSON config column](#encrypt-at-rest-for-a-json-config-column)
 - [Prometheus metric instrumentation](#prometheus-metric-instrumentation)
+- [Current-state table refreshed per scrape (delete-replace)](#current-state-table-refreshed-per-scrape-delete-replace)
 - [High-volume append-only time-series writes (batch-flush buffer)](#high-volume-append-only-time-series-writes-batch-flush-buffer)
 - [Tiered time-series rollups (hourly + daily aggregates over detail samples)](#tiered-time-series-rollups-hourly--daily-aggregates-over-detail-samples)
 - [Operator-declared value mapping → normalized sample → alertable dimension](#operator-declared-value-mapping--normalized-sample--alertable-dimension)
@@ -588,6 +589,29 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - Wrap the tick body in `runInstrumentedJob("name", async () => { ... })`. Keep the existing outer try/catch for error logging — the helper's catch re-throws so log paths are preserved.
 - Pick a stable, machine-readable name (no spaces, no version suffixes, no UUIDs). One-shot startup migrations use the module basename; multi-tick modules use `<module>.<loop>`.
 - If the new job ships with the same commit that adds an unrelated capability, the metric label is one observation that confirms the job is actually firing on a real install — useful smoke check during the first deploy.
+
+---
+
+## Current-state table refreshed per scrape (delete-replace)
+
+**Canonical:** `persistPhysicalEntities` / `persistMacTable` / `persistTrunkMembers` in `src/services/monitoringService.ts`; `persistInterfaces` in `src/services/interfaceInventoryService.ts` (the fullest worked example — it has its own service, tests and a backfill job).
+
+Use this when the device reports a SET that replaces the previous one and history answers no question worth storing: an interface list, an FDB table, an FRU inventory, LLDP neighbours, SD-WAN rules. The tell is that every consumer asks "what is it now?" — if you find yourself writing `DISTINCT ON (assetId, key) ORDER BY timestamp DESC` against a hypertable, you wanted this table, not that one.
+
+The shape:
+
+- **Plain table with a real FK to Asset** (`onDelete: Cascade`), `@@unique([assetId, <key>])`, `@@index([assetId])`. The no-foreign-key rule is hypertables-only — this deliberately is not one. Not a retention entity, not pruned, not in `sampleWriteBuffer` / `sampleRollupService` / `sampleRetentionService` / `timescaleService` / `capacityService`.
+- **Delete-then-`createMany` in ONE `$transaction`.** A concurrent reader must see the old set or the new set, never an empty intermediate — these tables back UI tables, and an empty read renders as "this device has nothing". Wrap in `retryOnDeadlock` if the writer can run concurrently per asset. An empty incoming array is a legal delete-only transaction: `...(rows.length > 0 ? [createMany] : [])`.
+- **`firstSeen` / `lastSeen`.** Pre-read the existing rows into a Map and carry `firstSeen` forward for a key still present, resetting when it disappears and returns (or when its identity changes — `persistPhysicalEntities` resets on a serial change, i.e. a module swap). `lastSeen` is the SCRAPE's timestamp, never `now`, so a backfilled or stale row is identifiable.
+- **`undefined` preserves, `[]` wipes** — enforced by the CALLER via `Array.isArray(...)`, never a truthiness check, so "the transport can't supply this" and "the device has none" stay distinguishable. Note the one deliberate exception: `persistInterfaces` callers skip an empty array instead of wiping, because an empty interface list is ambiguous (a FortiOS token without monitor scope answers `200 OK` with empty results) and blanking the System tab is the worse failure. Decide which case you're in and say so in a comment.
+- **Cap rows per asset with a LOUD warn**, counting drops rather than slicing silently. A partial set that looks complete is worse than a truncated one an operator knows about.
+- **Dedupe the incoming rows on the unique key** if the device can repeat one — otherwise a single duplicate aborts an entire otherwise-good scrape.
+- **Instrumentation triple** at the call site: `startSampleWriteTimer("<table>")` + `startPhase("systeminfo.persist.<name>")` + `end({ count })`.
+- **Watch for a second write cadence.** Every precedent has exactly one writer. `AssetInterface` has two candidates — the full system-info pass and the fast pinned re-walk — and only the full pass may write, because the fast pass sees a filtered subset (a delete-replace from it would wipe everything outside that subset) and leaves some columns null. If your stream has a fast path, decide this explicitly.
+
+`persistLldpNeighbors` is the **exception, not the template**: it does a keyed diff with a 48h sticky window because a missed LLDP advertisement shouldn't drop a neighbour. Don't copy it unless you have that same failure mode.
+
+Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree line (both enforced by `npm run check:docs`), and a `## services/<name>.ts` TOUCHES.md entry.
 
 ---
 

@@ -424,10 +424,14 @@ async function ingestInterfaces(assetId: string, samples: StreamSamples<"interfa
   // timestamp when present (more accurate for the time-series/rollups),
   // falling back to server `now`, and pin lastSystemInfoAt to the same value.
   const sampleTs = samples[0]?.timestamp ? new Date(samples[0].timestamp) : now;
+  // `rows` covers the whole NIC table — it feeds the current-state inventory
+  // below. Only the PINNED subset is enqueued as time-series (see the filter
+  // after this map, and persistInterfaceSampleStream for the rationale), so
+  // every row that does get enqueued is "fast" by construction.
   const rows = samples.map((s) => ({
     assetId,
     timestamp:   sampleTs,
-    cadence:     pinnedIfaces.has(s.ifName) ? ("fast" as const) : ("slow" as const),
+    cadence:     "fast" as const,
     ifName:      s.ifName,
     adminStatus: s.adminStatus ?? null,
     operStatus:  s.operStatus ?? null,
@@ -457,7 +461,12 @@ async function ingestInterfaces(assetId: string, samples: StreamSamples<"interfa
     poeStatus: null,
     poeClass: null,
   }));
-  enqueueInterfaceSamples(rows);
+  // Time-series for PINNED interfaces only — unpinned rows used to land here as
+  // cadence="slow" and be deleted 24h later, which was the bulk of the largest
+  // table in the database for rows nothing read as history. Current state for
+  // every interface is written just below.
+  const pinnedRows = rows.filter((r) => pinnedIfaces.has(r.ifName));
+  if (pinnedRows.length > 0) enqueueInterfaceSamples(pinnedRows);
   // CURRENT-STATE interface inventory. The agent push IS the full NIC table for
   // an agent-monitored host, so it's a legitimate full-pass writer — unlike the
   // fast pinned re-walk, which must never touch this table. Reuses the rows

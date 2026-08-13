@@ -6678,9 +6678,9 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     ? '<th data-col-id="poe" data-sf-key="poe" data-sf-options="" title="Power over Ethernet: detection status and the negotiated power CLASS (a budget bracket, e.g. class3 = up to 12.95 W at the powered device). POWER-ETHERNET-MIB defines no per-port wattage, so no draw is shown. SNMP only.">PoE</th>'
     : "";
   container.innerHTML = staleBanner +
-    '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>full-history retention</strong>. Unselected interfaces are kept for 24&nbsp;h only.</p>' +
+    '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>history</strong>. Every interface below shows its current state; only selected ones record history you can chart or alert on throughput.</p>' +
     '<div class="table-wrapper table-wrapper-panel-sticky" id="asset-iface-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this interface for fast-cadence polling + full-history retention (unselected interfaces are kept 24h)" style="width:32px" data-col-id="poll" data-col-required="true">' +
+      '<th title="Pin this interface for fast-cadence polling + history. Unselected interfaces still show current state here, but record no history to chart." style="width:32px" data-col-id="poll" data-col-required="true">' +
         '<input type="checkbox" id="iface-poll-all" title="Select / de-select every listed interface and tunnel for fast-cadence polling (rows hidden by a filter keep their current setting)"' + (canEdit ? '' : ' disabled') + '>' +
       '</th>' +
       '<th data-col-id="ifname" data-col-required="true" data-sf-key="ifname" data-sf-type="string">Interface</th>' +
@@ -10352,6 +10352,28 @@ function closeIfacePanel() {
   _clearIfaceRefreshTimer();
 }
 
+/**
+ * Notice shown above the charts when this interface is NOT pinned for
+ * fast-cadence polling.
+ *
+ * History is recorded only for pinned interfaces, so an unpinned one charts
+ * nothing. Without this the operator sees two empty graphs and no reason —
+ * indistinguishable from a broken panel. The fix is one checkbox away, so say
+ * so and name where it is.
+ */
+function _ifaceUnpinnedNoticeHTML(asset, ifName) {
+  var pinned = new Set((asset && asset.monitoredInterfaces) || []);
+  if (pinned.has(ifName)) return "";
+  return (
+    '<div class="hint" style="margin:0 0 0.75rem 0;padding:0.5rem 0.65rem;background:var(--color-bg-primary);' +
+      'border:1px solid var(--color-border);border-left:3px solid var(--color-warning, #d08540);border-radius:6px;font-size:0.8rem">' +
+      '<strong>Not recording history.</strong> Current state above is live, but throughput and error history ' +
+      'is kept only for interfaces selected for fast-cadence polling. Tick <strong>Poll&nbsp;1m</strong> for ' +
+      escapeHtml(ifName) + ' on the System tab to start collecting it.' +
+    '</div>'
+  );
+}
+
 async function openInterfaceDetailPanel(asset, ifName, ifaceRow) {
   if (!asset || !ifName) return;
   _ensureIfacePanelDOM();
@@ -10415,6 +10437,7 @@ async function openInterfaceDetailPanel(asset, ifName, ifaceRow) {
       '</div>' +
       _ifaceVlanBlockHTML(ifaceRow) +
       '<div id="iface-lldp-block" style="margin-bottom:0.75rem"></div>' +
+      _ifaceUnpinnedNoticeHTML(asset, ifName) +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
         '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
           '<h4 style="margin:0">Throughput &amp; errors</h4>' +
