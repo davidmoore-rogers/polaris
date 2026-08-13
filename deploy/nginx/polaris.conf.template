@@ -63,8 +63,39 @@ server {
   proxy_read_timeout 3600s;
   proxy_send_timeout 3600s;
 
+  # Request-body ceiling. nginx defaults to 1m, which is BELOW what Polaris's
+  # own handlers accept and silently rejected them at the edge — a 413 whose
+  # HTML error page the browser then failed to parse as JSON. The app is the
+  # real enforcement layer (express.json is capped at 1mb; each multer route
+  # sets its own fileSize — 256k device icons, 1m MIBs/certs, 5m branding
+  # logo), so this is defense-in-depth sized just above the largest of them.
+  # Raise only if a route's own limit is raised to match.
+  client_max_body_size 8m;
+
   # Main app
   location / {
+    proxy_pass http://127.0.0.1:{{POLARIS_PORT}};
+  }
+
+  # ─── Database restore upload ──────────────────────────────────────────
+  # The one route with no size ceiling of its own, deliberately: a restore
+  # takes a pg_dump of the whole database, which scales with the fleet's
+  # sample volume (docs/INSTALL.md sizes the DB volume at 50-100 GB+), and
+  # backupService streams it to disk rather than buffering it. Any finite
+  # number here would be a guess that silently breaks somebody's restore —
+  # which is the bug this block exists to fix — so the limit is lifted.
+  #
+  # Two reasons that's safe rather than an open door:
+  #   * proxy_request_buffering off — nginx streams straight to the app
+  #     instead of spooling the whole upload into client_body_temp first, so
+  #     an oversized body can't fill nginx's temp volume.
+  #   * On that route Polaris runs its rate limiter and the
+  #     serverSettingsData=fullwrite permission check BEFORE multer touches
+  #     the body, so an unauthenticated POST is refused without a byte
+  #     reaching disk.
+  location = /api/v1/server-settings/database/restore {
+    client_max_body_size 0;
+    proxy_request_buffering off;
     proxy_pass http://127.0.0.1:{{POLARIS_PORT}};
   }
 

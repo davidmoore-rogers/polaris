@@ -29,6 +29,10 @@ const KNOWN_PROXY_PASS_PATTERNS: RegExp[] = [
 
 const KNOWN_ADD_HEADERS = new Set(["Alt-Svc", "Strict-Transport-Security"]);
 
+/** Location blocks deploy/nginx/polaris.conf.template ships. Keep in lockstep
+ *  with that file — a mismatch reports drift on every managed install. */
+const EXPECTED_LOCATION_BLOCKS = 8;
+
 export function parseNginxConfig(filePath: string): ParseResult {
   if (!existsSync(filePath)) {
     return { config: defaultProxyConfig(), drift: ["file not found"] };
@@ -114,13 +118,15 @@ export function parseNginxConfigText(rawText: string): ParseResult {
       drift.push(`unknown add_header: ${m[1]}`);
     }
   }
-  // We ship exactly 7 location blocks: / + 2 dash + 4 metrics. Anything else
-  // is custom. (A pre-dash 5-location file reports drift here by design — the
-  // refuse-and-banner UX makes the operator re-adopt so the /dash locations
-  // land explicitly rather than by silent clobber.)
+  // We ship exactly 8 location blocks: / + the database-restore override +
+  // 2 dash + 4 metrics. Anything else is custom. (A file rendered by an older
+  // template reports drift here by design — a pre-dash one has 5, a
+  // pre-restore-override one has 7 — because the refuse-and-banner UX makes
+  // the operator re-adopt so the new blocks land explicitly rather than by
+  // silent clobber.)
   const locationCount = (text.match(/^\s*location\b/gm) ?? []).length;
-  if (locationCount !== 7) {
-    drift.push(`location block count is ${locationCount} (expected 7)`);
+  if (locationCount !== EXPECTED_LOCATION_BLOCKS) {
+    drift.push(`location block count is ${locationCount} (expected ${EXPECTED_LOCATION_BLOCKS})`);
   }
 
   return { config: cfg, drift };
