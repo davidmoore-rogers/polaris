@@ -3507,7 +3507,11 @@ function renderUpdateFailed(status) {
 // ─── Customization Tab ─────────────────────────────────────────────────────
 
 var _brandingLoaded = false;
-var _brandingData = { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/logo.png" };
+// Shipped-default logo URLs, current first. "/logo.png" was retired 2026-08 but
+// is still stored by installs seeded before then; only the pre-upgrade fallback
+// below consults this. Mirrors DEFAULT_LOGO_URLS in services/brandingService.ts.
+var DEFAULT_LOGO_URLS = ["/img/brand/polaris-symbol-dark.png", "/logo.png"];
+var _brandingData = { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/img/brand/polaris-symbol-dark.png" };
 
 async function loadCustomizationTab() {
   var container = document.getElementById("tab-customization");
@@ -3528,7 +3532,7 @@ function renderCustomizationTab() {
   // path comparison is the fallback for a pre-upgrade payload.
   var isCustomLogo = _brandingData.customLogo !== undefined
     ? _brandingData.customLogo
-    : Boolean(_brandingData.logoUrl && _brandingData.logoUrl !== "/logo.png");
+    : Boolean(_brandingData.logoUrl && DEFAULT_LOGO_URLS.indexOf(_brandingData.logoUrl) === -1);
   // Placement + accent default ON/OFF the same way the server does, so an
   // install that has never saved this card renders its real behavior.
   var logoAccent    = _brandingData.logoAccent === true;

@@ -29,7 +29,7 @@ export const STATE_DIR = process.env.POLARIS_STATE_DIR
   ? resolve(process.env.POLARIS_STATE_DIR)
   : PROJECT_ROOT;
 
-// Shipped static assets (public/logo.png, mobile.html, sw.js, …). Deliberately
+// Shipped static assets (public/img/brand/*.png, mobile.html, sw.js, …). Deliberately
 // derived from PROJECT_ROOT and NOT from STATE_DIR: this is code that ships
 // with the release, not operator state, and it must resolve identically
 // whether we're running from src/ (tsx) or dist/ (built).

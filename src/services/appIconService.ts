@@ -26,7 +26,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
-import { getBranding, BRANDING_DEFAULTS } from "./brandingService.js";
+import { getBranding, BRANDING_DEFAULTS, isDefaultLogoUrl } from "./brandingService.js";
 import { detectImageMagic } from "../utils/imageMagic.js";
 import { UPLOADS_DIR, PUBLIC_DIR } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
@@ -75,7 +75,11 @@ const VARIANT_STYLE: Record<IconVariant, { inset: number; opaque: boolean }> = {
   apple: { inset: 0.1, opaque: true },
 };
 
-const DEFAULT_LOGO_PATH = join(PUBLIC_DIR, "logo.png");
+// The shipped mark used when no custom logo is set. The LIGHT-INKED variant
+// (`-dark` = for a dark background, per the brand naming convention) because
+// every opaque icon variant paints ICON_BG behind it and iOS composites
+// transparency onto black — the dark-inked file would vanish on both.
+const DEFAULT_LOGO_PATH = join(PUBLIC_DIR, "img", "brand", "polaris-symbol-dark.png");
 
 // ─── Source-file resolution ──────────────────────────────────────────────
 
@@ -94,7 +98,10 @@ export interface ResolvedLogo {
  * resolved path is still inside UPLOADS_DIR.
  */
 export function resolveBrandingLogoFile(logoUrl: string): ResolvedLogo {
-  if (!logoUrl || logoUrl === BRANDING_DEFAULTS.logoUrl) return { path: DEFAULT_LOGO_PATH, ok: true };
+  // isDefaultLogoUrl, not an equality check: an install seeded before the themed
+  // marks still stores the retired "/logo.png", and treating that as an upload
+  // would send it down the /uploads/ branch and render ok:false forever.
+  if (!logoUrl || isDefaultLogoUrl(logoUrl)) return { path: DEFAULT_LOGO_PATH, ok: true };
   if (!logoUrl.startsWith("/uploads/")) return { path: DEFAULT_LOGO_PATH, ok: false };
 
   const name = basename(logoUrl.slice("/uploads/".length));

@@ -54,10 +54,33 @@ export interface BrandingSettings {
   temperatureUnit: TemperatureUnit;
 }
 
+/**
+ * Shipped-default logo URLs — the current one FIRST, followed by every
+ * historical one.
+ *
+ * This is not tidiness: an install seeded before the themed brand marks has
+ * `logoUrl: "/logo.png"` written into its `branding` Setting row, and
+ * `/logo.png` no longer exists. If `hasCustomLogo` judged that row by the
+ * current default alone it would answer TRUE, every surface would treat the
+ * stored value as an operator upload, and the sidebar + login page of every
+ * pre-existing install would paint a 404. Recognising the legacy value keeps
+ * those installs on the shipped art with no migration.
+ */
+const DEFAULT_LOGO_URLS = [
+  "/img/brand/polaris-symbol-dark.png",
+  "/logo.png", // retired 2026-08; still stored by installs seeded before then
+] as const;
+
+export const DEFAULT_LOGO_URL: string = DEFAULT_LOGO_URLS[0];
+
 export const BRANDING_DEFAULTS: BrandingSettings = {
   appName: "Polaris",
   subtitle: "Network Management Tool",
-  logoUrl: "/logo.png",
+  // The light-inked symbol: this value's only rendered consumer is the PWA icon
+  // rasterizer, whose canvas is ICON_BG (#111418) and which iOS composites onto
+  // black. Every in-app surface paints the theme-aware art from brand-logo.js
+  // instead whenever no custom logo is set.
+  logoUrl: DEFAULT_LOGO_URL,
   logoAccent: false,
   // An operator who bothered to upload a logo wants it in both places; the
   // checkboxes exist to take it back out of one of them.
@@ -88,7 +111,12 @@ export function normalizeBrandingFlag(value: unknown, fallback: boolean): boolea
  * logo every surface shows the Polaris brand art regardless.
  */
 export function hasCustomLogo(logoUrl: string): boolean {
-  return Boolean(logoUrl) && logoUrl !== BRANDING_DEFAULTS.logoUrl;
+  return Boolean(logoUrl) && !isDefaultLogoUrl(logoUrl);
+}
+
+/** Is this one of the shipped defaults, current or retired? See DEFAULT_LOGO_URLS. */
+export function isDefaultLogoUrl(logoUrl: string | null | undefined): boolean {
+  return !!logoUrl && (DEFAULT_LOGO_URLS as readonly string[]).includes(logoUrl);
 }
 
 /** A non-empty name, for the surfaces that must print one. */

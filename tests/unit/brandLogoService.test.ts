@@ -12,7 +12,9 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const REAL_LOGO = readFileSync(join(process.cwd(), "public", "logo.png"));
+// Stand-in bytes for an operator upload — any decodable PNG will do; the
+// shipped mark is reused so the fixture can't rot with a retired filename.
+const REAL_LOGO = readFileSync(join(process.cwd(), "public", "img", "brand", "polaris-symbol-dark.png"));
 const REAL_SYMBOL_DARK = readFileSync(join(process.cwd(), "public", "img", "brand", "polaris-symbol-dark.png"));
 const REAL_SYMBOL_LIGHT = readFileSync(join(process.cwd(), "public", "img", "brand", "polaris-symbol-light.png"));
 
@@ -149,6 +151,13 @@ describe("renderAccentedLogo", () => {
   });
 
   it("returns null on the shipped default logo — there is nothing to accent", async () => {
+    branding.logoUrl = "/img/brand/polaris-symbol-dark.png";
+    expect(await renderAccentedLogo()).toBeNull();
+  });
+
+  it("returns null on the RETIRED default logo too", async () => {
+    // "/logo.png" is still the stored value on installs seeded before the
+    // themed marks; reading it as an upload would try to accent a 404.
     branding.logoUrl = "/logo.png";
     expect(await renderAccentedLogo()).toBeNull();
   });

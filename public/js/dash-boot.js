@@ -81,8 +81,19 @@ async function applyDashBranding() {
     document.title = name + " — Dash";
     var h = document.getElementById("dash-title");
     if (h) h.textContent = name + " Dashboard";
-    var favicon = document.querySelector('link[rel="icon"]');
-    if (favicon && b && b.logoUrl) favicon.href = b.logoUrl;
+    // Inlined rather than calling PolarisBrandLogo.setFavicon: dash.html
+    // deliberately loads a slim script set and not brand-logo.js. Two things
+    // must hold anyway — swap only for an operator UPLOAD (the shipped default
+    // is the light-inked symbol, which would vanish on light browser chrome),
+    // and update BOTH declared links or the prefers-color-scheme override
+    // still wins on dark chrome.
+    if (b && b.customLogo && b.logoUrl) {
+      var icons = document.querySelectorAll('link[rel="icon"]');
+      for (var i = 0; i < icons.length; i++) {
+        icons[i].removeAttribute("media");
+        icons[i].href = b.logoUrl;
+      }
+    }
   } catch (_) {}
 }
 

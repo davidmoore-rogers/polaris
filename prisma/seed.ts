@@ -51,7 +51,7 @@ async function main() {
     update: {},
     create: {
       key:   "branding",
-      value: { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/logo.png" },
+      value: { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/img/brand/polaris-symbol-dark.png" },
     },
   });
 

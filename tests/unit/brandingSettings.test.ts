@@ -12,6 +12,7 @@ import {
   BRANDING_DEFAULTS,
   displayAppName,
   hasCustomLogo,
+  isDefaultLogoUrl,
   normalizeBrandingFlag,
   normalizeTemperatureUnit,
 } from "../../src/services/brandingService.js";
@@ -38,6 +39,32 @@ describe("hasCustomLogo", () => {
     expect(hasCustomLogo("/uploads/custom-logo.png")).toBe(true);
     expect(hasCustomLogo(BRANDING_DEFAULTS.logoUrl)).toBe(false);
     expect(hasCustomLogo("")).toBe(false);
+  });
+
+  it("still treats the RETIRED /logo.png default as non-custom", () => {
+    // The upgrade trap this guards: an install seeded before the themed brand
+    // marks has `logoUrl: "/logo.png"` in its branding Setting row, and that
+    // file no longer ships. Judging it by the CURRENT default alone answers
+    // true, every surface then treats it as an operator upload, and the sidebar
+    // and login page of every pre-existing install paint a 404.
+    expect(hasCustomLogo("/logo.png")).toBe(false);
+  });
+});
+
+describe("isDefaultLogoUrl", () => {
+  it("accepts the current default and every retired one", () => {
+    expect(isDefaultLogoUrl("/img/brand/polaris-symbol-dark.png")).toBe(true);
+    expect(isDefaultLogoUrl("/logo.png")).toBe(true);
+  });
+
+  it("rejects an upload, a lookalike path, and empty values", () => {
+    expect(isDefaultLogoUrl("/uploads/custom-logo.png")).toBe(false);
+    // Substring-ish neighbours must not pass — this is an exact-match list.
+    expect(isDefaultLogoUrl("/img/brand/polaris-symbol-light.png")).toBe(false);
+    expect(isDefaultLogoUrl("/logo.png.bak")).toBe(false);
+    expect(isDefaultLogoUrl("")).toBe(false);
+    expect(isDefaultLogoUrl(null)).toBe(false);
+    expect(isDefaultLogoUrl(undefined)).toBe(false);
   });
 });
 

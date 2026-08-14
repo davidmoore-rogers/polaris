@@ -1153,10 +1153,14 @@ function applyBranding(b, skipCache) {
     }
   }
 
-  // Update favicon if custom logo
-  var favicon = document.querySelector('link[rel="icon"]');
-  if (favicon && b.logoUrl) {
-    favicon.href = b.logoUrl;
+  // Favicon follows an operator's UPLOAD only. The `customLogo` check is
+  // load-bearing: the shipped default logoUrl is now the light-inked symbol
+  // (for the PWA icon's dark canvas), so swapping it in unconditionally — as
+  // this did while the default was the same file the page already declared —
+  // would force light ink onto light browser chrome and make the icon vanish.
+  // setFavicon updates BOTH declared links; see brand-logo.js.
+  if (b.customLogo && b.logoUrl && window.PolarisBrandLogo) {
+    PolarisBrandLogo.setFavicon(b.logoUrl);
   }
 
   // Update version in sidebar
@@ -1188,7 +1192,7 @@ async function fetchBranding() {
     var b = await api.serverSettings.getBranding();
     applyBranding(b);
   } catch (_) {
-    if (!_branding) applyBranding({ appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/logo.png", version: "" });
+    if (!_branding) applyBranding({ appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/img/brand/polaris-symbol-dark.png", version: "" });
   }
 }
 

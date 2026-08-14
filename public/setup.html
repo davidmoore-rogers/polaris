@@ -7,7 +7,8 @@
   <title>Polaris — Setup</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="icon" type="image/png" href="/logo.png">
+  <link rel="icon" type="image/png" href="/img/brand/polaris-symbol-light.png">
+  <link rel="icon" type="image/png" href="/img/brand/polaris-symbol-dark.png" media="(prefers-color-scheme: dark)">
   <link rel="stylesheet" href="/css/styles.css">
   <style>
     .setup-wrapper {
@@ -187,7 +188,11 @@
 <body>
   <div class="setup-wrapper">
     <div class="setup-card">
-      <img src="/logo.png" alt="Polaris" class="setup-logo">
+      <!-- The wizard never sets data-theme, and :root is the dark palette, so
+           this is always on a dark card: the light-inked mark (-dark = for a
+           dark background). The symbol rather than a wordmark because the <h2>
+           below already prints the name. -->
+      <img src="/img/brand/polaris-symbol-dark.png" alt="Polaris" class="setup-logo">
       <h2>Polaris</h2>
       <p class="subtitle">First-Run Setup</p>
 

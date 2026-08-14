@@ -35,7 +35,12 @@
   };
 
   var ACCENT_PATH = "/server-settings/branding/logo-accent.png";
-  var DEFAULT_LOGO = "/logo.png";
+  // Shipped defaults, current first. "/logo.png" was retired in 2026-08 but is
+  // still the stored value on any install seeded before then, and this list is
+  // only consulted on a payload cached before the server started sending
+  // `customLogo` — mistaking that legacy value for an upload would paint a 404.
+  // Mirrors DEFAULT_LOGO_URLS in src/services/brandingService.ts.
+  var DEFAULT_LOGOS = ["/img/brand/polaris-symbol-dark.png", "/logo.png"];
 
   function currentTheme() {
     return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
@@ -66,7 +71,7 @@
   function isCustom(b) {
     if (!b) return false;
     if (typeof b.customLogo === "boolean") return b.customLogo;
-    return Boolean(b.logoUrl) && b.logoUrl !== DEFAULT_LOGO;
+    return Boolean(b.logoUrl) && DEFAULT_LOGOS.indexOf(b.logoUrl) === -1;
   }
 
   /**
@@ -166,8 +171,31 @@
 
   followSystemTheme();
 
+  /**
+   * Point the page's favicon at an operator's uploaded logo.
+   *
+   * Every page declares TWO icon links — an unconditional light-inked one and a
+   * `media="(prefers-color-scheme: dark)"` light-inked override — because the
+   * favicon renders in browser chrome, which follows the OS rather than
+   * Polaris's own data-theme. That makes a `querySelector` swap wrong: it
+   * updates only the first link, and on dark chrome the media link still wins,
+   * so the custom logo silently wouldn't apply. Update ALL of them and drop the
+   * `media` attribute, since one uploaded image serves both.
+   *
+   * No-op without a URL — never clear a working icon.
+   */
+  function setFavicon(url) {
+    if (!url) return;
+    var links = document.querySelectorAll('link[rel="icon"]');
+    for (var i = 0; i < links.length; i++) {
+      links[i].removeAttribute("media");
+      links[i].href = url;
+    }
+  }
+
   global.PolarisBrandLogo = {
     ASSETS: ASSETS,
+    setFavicon: setFavicon,
     currentTheme: currentTheme,
     preferredTheme: preferredTheme,
     savedTheme: savedTheme,

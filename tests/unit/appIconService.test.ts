@@ -4,7 +4,12 @@ import { join, resolve, sep } from "node:path";
 
 // A real PNG so resvg has something decodable to embed. Read with the sync fs
 // API, which the node:fs/promises mock below does not touch.
-const REAL_LOGO = readFileSync(join(process.cwd(), "public", "logo.png"));
+// The shipped default mark. "-dark" = for a dark background: every opaque icon
+// variant paints ICON_BG behind it and iOS composites onto black.
+const DEFAULT_LOGO_URL = "/img/brand/polaris-symbol-dark.png";
+const DEFAULT_LOGO_FILE = "polaris-symbol-dark.png";
+const LEGACY_LOGO_URL = "/logo.png"; // retired 2026-08, still stored by old installs
+const REAL_LOGO = readFileSync(join(process.cwd(), "public", "img", "brand", DEFAULT_LOGO_FILE));
 
 function webpBuffer(): Buffer {
   const b = Buffer.alloc(64);
@@ -22,21 +27,24 @@ vi.mock("node:fs/promises", () => ({
     const key = String(p);
     const hit = files.get(key);
     if (hit) return hit;
-    if (key.endsWith("logo.png")) return REAL_LOGO;
+    if (key.endsWith(DEFAULT_LOGO_FILE)) return REAL_LOGO;
     throw Object.assign(new Error(`ENOENT: ${key}`), { code: "ENOENT" });
   }),
   stat: vi.fn(async (p: unknown) => {
     const key = String(p);
-    if (!files.has(key) && !key.endsWith("logo.png")) {
+    if (!files.has(key) && !key.endsWith(DEFAULT_LOGO_FILE)) {
       throw Object.assign(new Error(`ENOENT: ${key}`), { code: "ENOENT" });
     }
     return { mtimeMs: state.mtimeMs };
   }),
 }));
 
-const branding = { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/logo.png", version: "0.0.0" };
+const branding = { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: DEFAULT_LOGO_URL, version: "0.0.0" };
 vi.mock("../../src/services/brandingService.js", () => ({
-  BRANDING_DEFAULTS: { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/logo.png" },
+  BRANDING_DEFAULTS: { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/img/brand/polaris-symbol-dark.png" },
+  // Mirrors the real predicate: the current default AND the retired one, so a
+  // pre-upgrade branding row is not mistaken for an operator upload.
+  isDefaultLogoUrl: (u: string) => u === "/img/brand/polaris-symbol-dark.png" || u === "/logo.png",
   getBranding: vi.fn(async () => branding),
 }));
 
@@ -53,13 +61,22 @@ function pngDims(buf: Buffer): { sig: boolean; w: number; h: number } {
 beforeEach(() => {
   files.clear();
   state.mtimeMs = 1000;
-  branding.logoUrl = "/logo.png";
+  branding.logoUrl = DEFAULT_LOGO_URL;
   __resetIconCacheForTests();
 });
 
 describe("resolveBrandingLogoFile", () => {
   it("maps the default logoUrl to the shipped logo", () => {
-    expect(resolveBrandingLogoFile("/logo.png").ok).toBe(true);
+    expect(resolveBrandingLogoFile(DEFAULT_LOGO_URL).ok).toBe(true);
+  });
+
+  it("still maps the RETIRED default to the shipped logo", () => {
+    // An install seeded before the themed marks stores "/logo.png". Treating it
+    // as an upload would send it down the /uploads/ branch and answer ok:false
+    // forever, so every PWA icon would fall back to raw bytes.
+    const r = resolveBrandingLogoFile(LEGACY_LOGO_URL);
+    expect(r.ok).toBe(true);
+    expect(r.path).toContain(DEFAULT_LOGO_FILE);
   });
 
   it("maps an uploaded logo into UPLOADS_DIR", () => {

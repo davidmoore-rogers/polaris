@@ -37,12 +37,10 @@
   if (b) {
     document.title = ((b.appName || "").trim() || "Polaris") + " — Login";
     // Favicon follows the uploaded logo only; the brand art is a wordmark that
-    // is unreadable at 16px, and /logo.png (the shipped mark) is already the
-    // page's declared icon.
-    if (b.customLogo && b.logoUrl) {
-      var fav = document.querySelector('link[rel="icon"]');
-      if (fav) fav.href = b.logoUrl;
-    }
+    // is unreadable at 16px, and the themed symbol pair is already the page's
+    // declared icon. setFavicon updates BOTH links — a querySelector swap would
+    // leave the prefers-color-scheme override winning on dark chrome.
+    if (b.customLogo && b.logoUrl) PolarisBrandLogo.setFavicon(b.logoUrl);
   }
   // Repaint on a theme flip — the OS switching light/dark under a user who has
   // never picked a theme swaps which wordmark art is legible.

@@ -159,11 +159,9 @@
       PolarisBrandLogo.onThemeChange(paint);
       document.title = (b.appName || "").trim() || "Polaris";
       // Favicon tracks the uploaded logo only — a wordmark is illegible at
-      // 16px, and the shipped mark is already the declared icon.
-      if (b.customLogo && b.logoUrl) {
-        var fav = document.querySelector('link[rel="icon"]');
-        if (fav) fav.href = b.logoUrl;
-      }
+      // 16px, and the themed symbol pair is already the declared icon.
+      // setFavicon updates BOTH links (see brand-logo.js).
+      if (b.customLogo && b.logoUrl) PolarisBrandLogo.setFavicon(b.logoUrl);
     }).catch(function () {});
 
     // SSO button (Microsoft only for now — matches desktop scope).
