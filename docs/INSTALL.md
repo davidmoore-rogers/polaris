@@ -790,6 +790,19 @@ card (enable toggle + source-IP scope for the unauthenticated read-only
 > hand-edited the config will (correctly) see the drift banner and need to
 > re-adopt managed mode for `/dash` to route. The wallboard itself stays
 > dark either way until you enable it on the Dash Wallboard card.
+> **Upgrade note (request-body limits):** the shipped nginx config gained a
+> server-level `client_max_body_size 8m` plus one `location` that lifts the
+> limit for the database-restore upload (7 → 8 locations). Before this, nginx
+> enforced its 1 MB default on every request — **below** what Polaris's own
+> handlers accept — so a branding logo over 1 MB and *any* database restore
+> through the UI were rejected at the edge with a 413 whose HTML error page the
+> browser surfaced as an `Unexpected token '<'` JSON error. Managed-mode
+> installs pick this up on the next in-app update; installs that have **not**
+> adopted managed mode do not — the in-app updater skips the render entirely in
+> that case, so either adopt managed mode or add the two directives to
+> `/etc/nginx/conf.d/polaris.conf` by hand. The manual `deploy/update-linux.sh`
+> path syncs the shipped config regardless of managed mode, so it applies the
+> change either way.
 
 A yellow drift banner reads "nginx config not Polaris-managed yet" until
 you click **Adopt managed mode**. Until then the controls are read-only and

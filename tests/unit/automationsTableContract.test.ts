@@ -71,8 +71,10 @@ describe("Automations list — sort/filter/width column contract", () => {
   };
 
   it("marks every data column with data-sf-key so it sorts and filters", () => {
-    // The trailing actions column is the one legitimate exception — it holds
-    // buttons, not data, and is flagged data-col-required so it can't be hidden.
+    // There is no longer an actions column to exempt: the row's verbs moved
+    // behind the name as a context menu (showRowMenu), so every column here
+    // carries data. data-col-required is still tolerated for a future utility
+    // column that legitimately holds no sortable value.
     const unmarked = dataColumns().filter(
       (th) => !th.getAttribute("data-sf-key") && !th.getAttribute("data-col-required"),
     );

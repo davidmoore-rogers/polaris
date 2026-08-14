@@ -82,6 +82,35 @@ describe("renderNginxConfig — defaults", () => {
     expect(custom).not.toMatch(/127\.0\.0\.1:3001/);
   });
 
+  it("caps the request body above the largest per-route limit", () => {
+    // nginx's 1m default sat BELOW what Polaris's own handlers accept, so an
+    // upload the app would have taken (the 5m branding logo) died at the edge
+    // with a 413 whose HTML body the frontend couldn't parse. Pinned at the
+    // server level so every location inherits it.
+    expect(contents).toMatch(/^\s*client_max_body_size 8m;/m);
+  });
+
+  it("lifts the body limit for the database-restore upload only", () => {
+    // A restore carries a pg_dump of the whole database and the route has no
+    // fileSize of its own by design, so any finite ceiling here would silently
+    // break somebody's restore.
+    expect(contents).toMatch(/^\s*location = \/api\/v1\/server-settings\/database\/restore \{/m);
+    const block = contents.split("location = /api/v1/server-settings/database/restore {")[1]!.split("}")[0]!;
+    expect(block).toMatch(/^\s*client_max_body_size 0;/m);
+    // Streaming rather than spooling is what keeps "unlimited" from being able
+    // to fill nginx's client_body_temp volume.
+    expect(block).toMatch(/^\s*proxy_request_buffering off;/m);
+    // Only that one location overrides the limit. Anchored to directive lines
+    // so the surrounding explanatory comments don't count as occurrences.
+    expect((contents.match(/^\s*client_max_body_size .+;/gm) ?? []).length).toBe(2);
+    expect((contents.match(/^\s*proxy_request_buffering .+;/gm) ?? []).length).toBe(1);
+  });
+
+  it("points the restore override at the app upstream, not dash or metrics", () => {
+    const block = contents.split("location = /api/v1/server-settings/database/restore {")[1]!.split("}")[0]!;
+    expect(block).toMatch(/proxy_pass http:\/\/127\.0\.0\.1:3000;/);
+  });
+
   it("is sha256-deterministic across calls", () => {
     const second = renderNginxConfig({ config: cfg(), ...ENV });
     expect(second.sha256).toBe(sha256);

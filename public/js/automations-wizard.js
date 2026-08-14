@@ -539,7 +539,16 @@ if (typeof window !== "undefined") {
   };
 }
 
-async function openAutomationWizard(existing) {
+/**
+ * Open the automation builder.
+ *   openAutomationWizard(null)                       → new automation
+ *   openAutomationWizard(rule)                       → edit that automation
+ *   openAutomationWizard(rule, { clone: true, name }) → new automation
+ *       pre-filled from `rule`, saved as a create. `name` is the caller's
+ *       suggested copy name (the list uniquifies it against the other rows);
+ *       omitted, it falls back to "<name> (copy)".
+ */
+async function openAutomationWizard(existing, opts) {
   // ── Load the catalogs the steps render from ────────────────────────────
   if (!_ruleSchema) {
     try { _ruleSchema = await api.automations.schema(); }
@@ -586,12 +595,21 @@ async function openAutomationWizard(existing) {
   }
 
   var s = _ruleSchema;
-  var editing = existing || null;
+  // Three modes, two of which start from an existing row. A CLONE opens a
+  // fully-populated draft like an edit but saves as a CREATE, so `editing`
+  // stays null on purpose: every `editing`-gated branch below — PUT vs POST,
+  // the affected-devices preview's self-exclusion, the draft stash — then does
+  // the right thing without a second condition. Only the copy and the
+  // all-steps-unlocked behaviour need to know about cloning explicitly.
+  var cloning = !!(opts && opts.clone) && !!existing;
+  var editing = cloning ? null : (existing || null);
 
   // ── Draft (rule-shape v2) ──────────────────────────────────────────────
   var draft;
-  if (editing) {
-    draft = _awDraftFromRule(editing);
+  if (editing || cloning) {
+    // _awDraftFromRule deep-copies every branch and carries no id, so a clone
+    // draft is already fully detached from the row it came from.
+    draft = _awDraftFromRule(existing);
   } else if (_awDraftStash && await showConfirm("Restore your unsaved automation draft?")) {
     draft = _awDraftStash;
   } else {
@@ -606,10 +624,20 @@ async function openAutomationWizard(existing) {
       actions: [{ type: "event" }], escalation: null,
     };
   }
+  if (cloning) {
+    draft.name = (opts && opts.name) || (draft.name + " (copy)");
+    // A clone starts DISABLED, and that is deliberate. Business rule 18: two
+    // automations watching the same thing at the same scope rank BOTH fire, and
+    // a clone is by construction identical to its source — so saving it enabled
+    // would double-alert the whole fleet before the operator has changed the
+    // one thing they cloned it to change. The wizard has no enabled control
+    // (it moved to the list toggle), so step 1 says so in a note.
+    draft.enabled = false;
+  }
   _awDraftStash = null;
 
   var step = 1;
-  var visited = editing ? 6 : 1;
+  var visited = (editing || cloning) ? 6 : 1;
   var STEPS = ["Name", "Devices", "Trigger", "Reset", "Actions", "Summary"];
   var scopePreviewTimer = null;
   var trigPreviewTimer = null;
@@ -896,14 +924,24 @@ async function openAutomationWizard(existing) {
     '<button class="btn btn-secondary" id="aw-cancel">Cancel</button>' +
     '<button class="btn btn-secondary" id="aw-back" style="display:none">&larr; Back</button>' +
     '<button class="btn btn-primary" id="aw-next">Next &rarr;</button>' +
-    '<button class="btn btn-primary" id="aw-save" style="display:none">' + (editing ? "Save changes" : "Create automation") + '</button>';
+    '<button class="btn btn-primary" id="aw-save" style="display:none">' + (editing ? "Save changes" : cloning ? "Create clone" : "Create automation") + '</button>';
 
-  openModal(editing ? "Edit automation" : "New automation", body, footer, { wide: true });
+  openModal(editing ? "Edit automation" : cloning ? "Clone automation" : "New automation", body, footer, { wide: true });
 
   // ── Step 1: Name & description ─────────────────────────────────────────
   function step1Html() {
+    // Cloning: say up front that the copy is inert and why, because the wizard
+    // has no enabled control to show it — that lives on the list toggle.
+    var cloneNote = cloning
+      ? '<p class="aw-clone-note" style="font-size:0.85rem;margin:0 0 1rem;padding:0.5rem 0.65rem;' +
+        'border-left:3px solid var(--color-warning, #b7791f);background:var(--color-bg-subtle, rgba(183,121,31,0.08))">' +
+        'Copied from <strong>' + escapeHtml((existing && existing.name) || "") + '</strong>. ' +
+        'It will be created <strong>disabled</strong> — an identical automation watching the same thing would ' +
+        'alert alongside the original. Change what you need, save, then enable it from the list.</p>'
+      : "";
     return '<h3 style="margin:0 0 0.25rem">What is this automation?</h3>' +
       '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Name it and describe what it watches for. (Severity is set with the trigger on the next steps.)</p>' +
+      cloneNote +
       '<div class="form-group"><label>Name</label><input type="text" id="aw-name" value="' + escapeHtml(draft.name || "") + '" placeholder="e.g. Switch temperature high"></div>' +
       '<div class="form-group"><label>Description (optional)</label><input type="text" id="aw-desc" value="' + escapeHtml(draft.description || "") + '"></div>';
   }
@@ -4359,7 +4397,9 @@ async function openAutomationWizard(existing) {
   function syncFooter() {
     document.getElementById("aw-back").style.display = step > 1 ? "" : "none";
     document.getElementById("aw-next").style.display = step < STEPS.length ? "" : "none";
-    document.getElementById("aw-save").style.display = (step === STEPS.length || editing) ? "" : "none";
+    // A clone opens with every step already visited, so it gets the edit-mode
+    // affordance too: save from wherever the operator finished changing things.
+    document.getElementById("aw-save").style.display = (step === STEPS.length || editing || cloning) ? "" : "none";
   }
   function goToStep(n, opts) {
     opts = opts || {};
@@ -4397,7 +4437,11 @@ async function openAutomationWizard(existing) {
   });
   document.getElementById("aw-cancel").addEventListener("click", function () {
     COLLECT[step]();
-    if (!editing && (draft.name || (draft.actions || []).length)) _awDraftStash = draft; // in-memory only
+    // Clones are excluded from the stash: it exists to protect work typed from
+    // scratch, and a clone is one click away from being recreated — offering to
+    // restore one when the operator next opens "New automation" would only
+    // confuse.
+    if (!editing && !cloning && (draft.name || (draft.actions || []).length)) _awDraftStash = draft; // in-memory only
     closeModal();
   });
 
@@ -4441,7 +4485,9 @@ async function openAutomationWizard(existing) {
       else await api.automations.create(payload);
       _awDraftStash = null;
       closeModal();
-      showToast(editing ? "Automation saved" : "Automation created", "success");
+      showToast(editing ? "Automation saved"
+        : cloning ? "Automation cloned — it starts disabled, enable it when you're ready"
+        : "Automation created", "success");
       if (window._reloadRules) window._reloadRules();
     } catch (err) { this.disabled = false; showToast(err.message || "Save failed", "error"); }
   });

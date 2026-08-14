@@ -414,6 +414,25 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 
 ---
 
+## Row context menu (per-row verbs behind the row name)
+
+**What it is:** A list row’s actions (Open / Edit / Clone / Delete) reached by clicking the row’s **name**, instead of a trailing Actions column of buttons. One affordance per row, no column competing with the data for width, and a verb can be added without re-cutting the table layout.
+
+**Canonical implementation:** `showRowMenu(anchor, items, opts)` / `closeRowMenu()` in [public/js/app.js](public/js/app.js), styled by `.row-context-menu` + `.row-menu-trigger` in [public/css/styles.css](public/css/styles.css). Used by the Automations list ([public/js/automations.js](public/js/automations.js) — Edit / Clone / Delete) and IPAM’s Blocks + Networks lists ([public/js/blocks.js](public/js/blocks.js), [public/js/subnets.js](public/js/subnets.js) — Open / Edit / Delete).
+
+**Key conventions:**
+- The trigger is a real `<button class="row-menu-trigger">` carrying `aria-haspopup="menu"` + `aria-expanded`, NOT an `<a href="#">` — it opens a menu rather than navigating.
+- `items` is `[{ label, onSelect, danger?, disabled?, title? } | { separator: true } | { heading }]`. Build it **per row, from that row’s own permission**: `subnets.js` calls `canEditSubnet(s)` because the ownership dimension makes Edit row-specific, while `blocks.js` can use the page-wide `canManageNetworks()`.
+- **The menu is `position: fixed` and mounted on `<body>`.** List tables scroll inside `.table-wrapper-sticky`, which clips an absolutely-positioned menu — the existing `.btn-dropdown-menu` pattern (absolute inside `.btn-dropdown-wrap`) is for toolbar buttons, not table rows. The cost of `fixed` is that the menu cannot track its anchor, so `showRowMenu` closes on scroll and resize.
+- **Close before running the handler.** Most verbs open a modal or slide-over, and a lingering fixed menu would float above it.
+- Keep the row’s existing open-the-panel behaviour as the **first** item rather than dropping it — clicking the name used to open the panel directly, and `Open` is what preserves that muscle memory (`openBlockFromRow` / `openSubnetFromRow` also carry the `tr.row-panel-active` highlight that the old click handler owned).
+- When the operator can do nothing to a row, render the name as **plain text**, not a trigger that opens an empty menu (automations.js does this below `automationManagement:fullwrite`).
+- Dropping an Actions column means updating **three** things in lockstep: the `<th>` in *every* page that mounts the table (blocks/subnets have legacy standalone pages **and** the IPAM tab page — all three share the same JS), the static placeholder `<td colspan>` in the HTML, and every `colspan` in the JS empty/error states. A stale `data-col-id` in a saved column-order pref is harmless — `normalizeOrder` in table-sf.js filters unknown ids.
+
+**Tests:** [tests/unit/rowContextMenu.test.ts](tests/unit/rowContextMenu.test.ts). Positioning is deliberately unasserted — happy-dom reports zero-size rects, so `getBoundingClientRect` placement only means anything in a real browser. [tests/unit/automationsTableContract.test.ts](tests/unit/automationsTableContract.test.ts) pins the header-count ↔ colspan match for the automations table.
+
+---
+
 ## Per-instance multi-lane worker (constrained + unconstrained endpoints)
 
 **What it is:** A per-instance worker that segregates traffic to a flaky external system by endpoint family — endpoints subject to the system's parallel-connection limit ride a strict single-consumer FIFO lane (concurrency=1); endpoints without that constraint ride an unbounded lane that just tracks inflight count for observability. Distinct from a single-cap worker pool: the value is *cross-feature serialization for the constrained endpoints only*, while letting unconstrained endpoints parallelize freely.

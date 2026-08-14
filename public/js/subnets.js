@@ -45,15 +45,28 @@ async function _initSubnetsPage() {
   if (addBtn) addBtn.addEventListener("click", openSubnetCreateModal);
   var allocBtn = document.getElementById("btn-auto-alloc");
   if (allocBtn) allocBtn.addEventListener("click", openAllocateModal);
+  // Row verbs live behind the name. "Open" is what the name click used to do on
+  // its own; Edit / Delete are per-ROW (canEditSubnet honours the ownership
+  // dimension — write-level callers only manage networks they created), so the
+  // menu is built from the row's own permission rather than a page-wide one.
   document.getElementById("subnets-tbody").addEventListener("click", function (e) {
-    var link = e.target.closest(".subnet-name-link");
-    if (!link) return;
+    var trigger = e.target.closest(".subnet-menu");
+    if (!trigger) return;
     e.preventDefault();
-    var prev = document.querySelector("tr.row-panel-active");
-    if (prev) prev.classList.remove("row-panel-active");
-    var row = link.closest("tr");
-    if (row) row.classList.add("row-panel-active");
-    openIpPanel(link.getAttribute("data-subnet-id"));
+    var id = trigger.getAttribute("data-subnet-id");
+    var s = (_subnetsData || []).find(function (x) { return x.id === id; });
+    if (!s) return;
+    var items = [{ label: "Open", onSelect: function () { openSubnetFromRow(trigger, id); } }];
+    if (canEditSubnet(s)) {
+      items.push({ label: "Edit", onSelect: function () { openSubnetEditModal(id); } });
+      items.push({ separator: true });
+      items.push({
+        label: "Delete",
+        danger: true,
+        onSelect: function () { confirmDeleteSubnet(id, s.cidr, s._count ? s._count.reservations : 0); },
+      });
+    }
+    showRowMenu(trigger, items, { label: "Actions for " + s.name });
   });
   wireFavoriteClicks("subnets-tbody", function () { renderSubnetsPage(); });
   // Page-size selector now lives in the pagination row (renderPageControls
@@ -155,7 +168,7 @@ async function loadSubnets() {
     _subnetsData = _allSubnetsData;
     renderSubnetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -195,13 +208,13 @@ function _rebuildCreatorColumnOptions() {
 function renderSubnetsPage() {
   var tbody = document.getElementById("subnets-tbody");
   if (_subnetsData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No networks found. Create one to get started.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No networks found. Create one to get started.</td></tr>';
     clearPageControls("pagination");
     return;
   }
   var sfData = _subnetsSF ? _subnetsSF.apply(_subnetsData) : _subnetsData;
   if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No results match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
     return;
   }
@@ -215,15 +228,12 @@ function renderSubnetsPage() {
     var source = s.integration
       ? escapeHtml(s.integration.name)
       : '<span style="color:var(--color-text-tertiary)">Manual</span>';
-    var canEdit = canEditSubnet(s);
     var resvCount = s._count ? s._count.reservations : 0;
-    var actions = canEdit
-      ? '<button class="btn btn-sm btn-secondary" onclick="openSubnetEditModal(\'' + s.id + '\')">Edit</button>' +
-        '<button class="btn btn-sm btn-danger" onclick="confirmDeleteSubnet(\'' + s.id + '\', \'' + escapeHtml(s.cidr) + '\', ' + resvCount + ')">Del</button>'
-      : '';
     return '<tr>' +
       starCellHTML("subnets", s.id) +
-      '<td><a href="#" class="subnet-name-link" data-subnet-id="' + s.id + '"><strong>' + escapeHtml(s.name) + '</strong></a></td>' +
+      '<td><button type="button" class="row-menu-trigger subnet-menu" data-subnet-id="' + s.id + '" ' +
+        'aria-haspopup="menu" aria-expanded="false" title="Actions for this network">' +
+        '<strong>' + escapeHtml(s.name) + '</strong></button></td>' +
       '<td class="mono">' + escapeHtml(s.cidr) + '</td>' +
       '<td>' + blockName + '</td>' +
       '<td>' + escapeHtml(s.purpose || "-") + '</td>' +
@@ -234,7 +244,6 @@ function renderSubnetsPage() {
       '<td>' + source + '</td>' +
       '<td>' + (s.createdBy ? escapeHtml(s.createdBy) : '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
       '<td>' + resvCount + '</td>' +
-      '<td class="actions">' + actions + '</td>' +
       '</tr>';
   }).join("");
   renderPageControls("pagination", sfData.length, _subnetsPageSize, _subnetsPage, function (p) {
@@ -870,6 +879,15 @@ async function _onAllocSubmit() {
   } finally {
     btn.disabled = false;
   }
+}
+
+/** Open the IP panel, moving the row highlight to this row. */
+function openSubnetFromRow(trigger, id) {
+  var prev = document.querySelector("tr.row-panel-active");
+  if (prev) prev.classList.remove("row-panel-active");
+  var row = trigger.closest("tr");
+  if (row) row.classList.add("row-panel-active");
+  openIpPanel(id);
 }
 
 async function openSubnetEditModal(id) {

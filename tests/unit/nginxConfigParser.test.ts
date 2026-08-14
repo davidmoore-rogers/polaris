@@ -164,7 +164,27 @@ describe("parseNginxConfigText — missing pieces", () => {
   location = /metrics-discovery { proxy_pass http://127.0.0.1:9110/metrics; }
 }`;
     const { drift } = parseNginxConfigText(preDash);
-    expect(drift.some((d) => d.includes("location block count is 5 (expected 7)"))).toBe(true);
+    expect(drift.some((d) => d.includes("location block count is 5 (expected 8)"))).toBe(true);
+  });
+
+  it("reports drift on a pre-restore-override 7-location config", () => {
+    // The generation before the database-restore client_max_body_size override:
+    // / + 2 dash + 4 metrics. Same re-adopt path as the pre-dash case — the
+    // operator must adopt so the restore block lands explicitly, because
+    // without it an oversized restore upload dies at nginx with a 413.
+    const preRestore = `server {
+  listen 443 ssl;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  location / { proxy_pass http://127.0.0.1:3000; }
+  location = /dash { proxy_pass http://127.0.0.1:3001; }
+  location /dash/ { proxy_pass http://127.0.0.1:3001; }
+  location = /metrics { proxy_pass http://127.0.0.1:3000/metrics; }
+  location = /metrics-monitor-1 { proxy_pass http://127.0.0.1:9101/metrics; }
+  location = /metrics-monitor-2 { proxy_pass http://127.0.0.1:9102/metrics; }
+  location = /metrics-discovery { proxy_pass http://127.0.0.1:9110/metrics; }
+}`;
+    const { drift } = parseNginxConfigText(preRestore);
+    expect(drift.some((d) => d.includes("location block count is 7 (expected 8)"))).toBe(true);
   });
 
   it("defaults managedMode=false (bootstrap caller decides when to flip it)", () => {
