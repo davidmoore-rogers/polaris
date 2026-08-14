@@ -3539,7 +3539,10 @@ function renderCustomizationTab() {
   // reuses one filename.
   var previewSrc = isCustomLogo
     ? (logoAccent
-        ? "/api/v1/server-settings/branding/logo-accent.png?t=" + Date.now()
+        // Same theme the surfaces will request, so the preview shows the
+        // variant this operator is actually looking at.
+        ? "/api/v1/server-settings/branding/logo-accent.png?theme=" +
+          PolarisBrandLogo.currentTheme() + "&t=" + Date.now()
         : _brandingData.logoUrl)
     : PolarisBrandLogo.ASSETS.sidebar[PolarisBrandLogo.currentTheme()];
   // Pre-feature payloads carry no temperatureUnit — treat anything but "f" as °C,

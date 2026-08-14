@@ -2955,7 +2955,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** The composite of the operator's logo with the Polaris symbol on its bottom-right corner (`branding.logoAccent`) — the geometry, the rasterization, and the in-process cache. Same `@resvg/resvg-js` embed-a-bitmap-in-an-SVG technique as `appIconService`.
 
-**Public API:** `accentGeometry` (pure), `renderAccentedLogo`, `ACCENT_SYMBOL_PATH`, `ACCENT_FRACTION`, `MAX_RENDER_PX`, `__resetBrandLogoCacheForTests`
+**Public API:** `accentGeometry` (pure), `normalizeBrandTheme` (pure), `renderAccentedLogo(theme)`, `ACCENT_SYMBOL_PATHS`, `ACCENT_FRACTION`, `MAX_RENDER_PX`, `BrandTheme`, `__resetBrandLogoCacheForTests`
 
 **Cross-service deps:** `brandingService` (`getBranding`, `hasCustomLogo`), `appIconService.resolveBrandingLogoFile` (the basename + inside-UPLOADS_DIR assertion — one definition of "which file is the logo"), `utils/imageMagic.detectImageMagic`, `utils/imageSize.imageSize`, `utils/paths.PUBLIC_DIR`, lazy `@resvg/resvg-js`.
 
@@ -2964,13 +2964,14 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 **Invariants:**
 - **Nothing here throws.** Accent off, default logo, missing/unreadable file, WebP, resvg failure, dimensions unparseable → `null`, and the route 302s to the plain `logoUrl`. This feeds an `<img>` on an unauthenticated login page; an accent is decoration and must never be why a login page renders without a mark.
 - **Compositing is server-side on purpose.** A CSS overlay would need its own absolute positioning and its own fraction-of-what arithmetic on the desktop login, the mobile login, the sidebar and the settings preview — four chances to disagree. One PNG, one URL.
-- The cache key is the logo's **and** the symbol's mtime — the upload route writes a FIXED filename, so mtime is the only invalidation signal (the `appIconService` rule, for the same reason).
+- The cache key is the logo's **and** the symbol's mtime **and the theme** — the upload route writes a FIXED filename, so mtime is the only invalidation signal (the `appIconService` rule, for the same reason), and the ETag is derived from that same key so the two theme variants can never revalidate into each other.
+- **The symbol is theme-paired, so the render takes a theme.** Its wedges are white on `polaris-symbol-dark.png` and navy on `polaris-symbol-light.png`; against the wrong background half the mark vanishes and the star reads as four loose arms. `normalizeBrandTheme` narrows the query value to the two known keys before it indexes `ACCENT_SYMBOL_PATHS` — this is an unauthenticated route selecting a filesystem path.
 - `accentGeometry` clamps to half the SHORTEST side. Without it a wide banner logo would get an accent taller than the logo itself, since `ACCENT_FRACTION` (0.5) is measured on the longest side.
 - Rendering caps at `MAX_RENDER_PX`. The route is unauthenticated, so the canvas size must not be a function of what an operator uploaded.
 
 **When changing this:**
 - Changing the geometry changes what operators already saved — `accentGeometry` is pure and unit-tested (`tests/unit/brandLogoService.test.ts`) precisely so the placement promise ("bottom-right, roughly half the logo") is a test, not a comment. The Customization tab's checkbox hint states the same number; move both together.
-- The frontend's `logoAccent` → URL mapping lives in `public/js/brand-logo.js`; a path change is a two-file change.
+- The frontend's `logoAccent` → URL mapping lives in `public/js/brand-logo.js` (which appends `?theme=`), plus the Customization tab's preview `src` in `public/js/server-settings.js`; a path or query change is a three-file change.
 - WebP is deliberately unsupported (resvg can't decode it in an embedded `<image>`) — a WebP-branded install shows its logo un-accented, which is the same fallback `appIconService` already makes.
 
 ---

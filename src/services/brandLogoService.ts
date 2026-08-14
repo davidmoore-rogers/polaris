@@ -29,8 +29,25 @@ import { imageSize, type ImageSize } from "../utils/imageSize.js";
 import { PUBLIC_DIR } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
 
-/** The overlay art — the "Light Stroke" symbol, which reads on any backdrop. */
-export const ACCENT_SYMBOL_PATH = join(PUBLIC_DIR, "img", "brand", "polaris-symbol.png");
+/** Which app surface the composite will sit on. */
+export type BrandTheme = "dark" | "light";
+
+/**
+ * The overlay art, per theme — the symbol is theme-paired like the wordmarks.
+ * The dark variant's wedges are white and disappear on a light background; the
+ * light variant's are navy and disappear on a dark one. Neither is a safe
+ * default for both, which is why the render takes a theme rather than baking
+ * one in.
+ */
+export const ACCENT_SYMBOL_PATHS: Record<BrandTheme, string> = {
+  dark: join(PUBLIC_DIR, "img", "brand", "polaris-symbol-dark.png"),
+  light: join(PUBLIC_DIR, "img", "brand", "polaris-symbol-light.png"),
+};
+
+/** Narrow a query-string theme; anything unrecognized renders for dark. */
+export function normalizeBrandTheme(value: unknown): BrandTheme {
+  return String(value ?? "").trim().toLowerCase() === "light" ? "light" : "dark";
+}
 
 /** Operator-facing promise: the accent is "roughly 50% the size of the logo". */
 export const ACCENT_FRACTION = 0.5;
@@ -81,7 +98,9 @@ interface RenderedLogo {
   etag: string;
 }
 
-let cached: (RenderedLogo & { key: string }) | null = null;
+/** Keyed by source mtimes + theme — at most one entry per theme in practice. */
+const cached = new Map<string, RenderedLogo>();
+const MAX_CACHE_ENTRIES = 4;
 const warned = new Set<string>();
 
 function warnOnce(key: string, msg: string, detail?: Record<string, unknown>): void {
@@ -92,7 +111,7 @@ function warnOnce(key: string, msg: string, detail?: Record<string, unknown>): v
 
 /** Test seam. */
 export function __resetBrandLogoCacheForTests(): void {
-  cached = null;
+  cached.clear();
   warned.clear();
 }
 
@@ -143,10 +162,10 @@ function buildSvg(logo: Source, symbol: Source, geo: AccentGeometry): string {
 }
 
 /**
- * The accented custom logo, or null when there's nothing to accent (default
- * logo, accent switched off) or the composite can't be built.
+ * The accented custom logo for one theme, or null when there's nothing to
+ * accent (default logo, accent switched off) or the composite can't be built.
  */
-export async function renderAccentedLogo(): Promise<RenderedLogo | null> {
+export async function renderAccentedLogo(theme: BrandTheme = "dark"): Promise<RenderedLogo | null> {
   const branding = await getBranding().catch(() => null);
   if (!branding || !branding.logoAccent || !hasCustomLogo(branding.logoUrl)) return null;
 
@@ -155,12 +174,13 @@ export async function renderAccentedLogo(): Promise<RenderedLogo | null> {
 
   const [logo, symbol] = await Promise.all([
     loadImage(resolved.path, "logo"),
-    loadImage(ACCENT_SYMBOL_PATH, "accent symbol"),
+    loadImage(ACCENT_SYMBOL_PATHS[theme], "accent symbol"),
   ]);
   if (!logo || !symbol) return null;
 
-  const key = `${logo.stamp}|${symbol.stamp}`;
-  if (cached && cached.key === key) return { buf: cached.buf, etag: cached.etag };
+  const key = `${logo.stamp}|${symbol.stamp}|${theme}`;
+  const hit = cached.get(key);
+  if (hit) return hit;
 
   try {
     const { Resvg } = await import("@resvg/resvg-js");
@@ -170,9 +190,15 @@ export async function renderAccentedLogo(): Promise<RenderedLogo | null> {
       .asPng();
     const rendered: RenderedLogo = {
       buf: Buffer.from(png),
+      // Key includes the theme, so the two variants can never share an ETag
+      // and revalidate into each other.
       etag: createHash("sha256").update(key).digest("hex").slice(0, 16),
     };
-    cached = { ...rendered, key };
+    if (cached.size >= MAX_CACHE_ENTRIES) {
+      const oldest = cached.keys().next().value;
+      if (oldest !== undefined) cached.delete(oldest);
+    }
+    cached.set(key, rendered);
     return rendered;
   } catch (err) {
     warnOnce("resvg-failed", "brandLogo: accent compositing failed, serving the plain logo", { err: (err as Error)?.message });

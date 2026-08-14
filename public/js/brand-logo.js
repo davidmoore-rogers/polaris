@@ -91,7 +91,10 @@
     var assets = ASSETS[surface] || ASSETS.login;
     if (customOn(b, surface)) {
       return {
-        src: b.logoAccent ? apiBase() + ACCENT_PATH : b.logoUrl,
+        // The accent symbol is theme-paired too, so the composite is requested
+        // per theme — which also makes the URL change on a theme flip, so the
+        // <img> re-fetches without any cache-busting of its own.
+        src: b.logoAccent ? apiBase() + ACCENT_PATH + "?theme=" + currentTheme() : b.logoUrl,
         custom: true,
         showName: Boolean((b.appName || "").trim()),
         showSubtitle: Boolean((b.subtitle || "").trim()),

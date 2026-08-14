@@ -112,9 +112,16 @@ describe("custom logo placement", () => {
     expect(BrandLogo.resolve(custom({ appName: "   " }), "login").showName).toBe(false);
   });
 
-  it("points at the server-composited render when the accent is on", () => {
+  it("points at the server-composited render when the accent is on, per theme", () => {
+    theme = "dark";
     expect(BrandLogo.resolve(custom({ logoAccent: true }), "login").src)
-      .toBe("/api/v1/server-settings/branding/logo-accent.png");
+      .toBe("/api/v1/server-settings/branding/logo-accent.png?theme=dark");
+    // The symbol art is theme-paired too, so a theme flip has to change the
+    // URL — that is also what makes the <img> re-fetch.
+    theme = "light";
+    expect(BrandLogo.resolve(custom({ logoAccent: true }), "login").src)
+      .toBe("/api/v1/server-settings/branding/logo-accent.png?theme=light");
+    theme = "dark";
   });
 
   it("treats a payload cached before these fields existed as 'show my logo'", () => {
