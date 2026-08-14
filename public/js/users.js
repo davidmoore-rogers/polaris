@@ -79,41 +79,41 @@ document.addEventListener("DOMContentLoaded", async function () {
   var gmTbody = document.getElementById("group-mappings-tbody");
   if (gmTbody) {
     gmTbody.addEventListener("click", function (e) {
-      var btn = e.target.closest("[data-gm-action]");
-      if (!btn) return;
-      var action = btn.getAttribute("data-gm-action");
-      var id = btn.getAttribute("data-gm-id");
-      if (action === "edit") openGroupMappingSlideover(id);
-      else if (action === "delete") confirmDeleteGroupMapping(id);
+      var trigger = e.target.closest(".gm-menu");
+      if (!trigger) return;
+      var id = trigger.getAttribute("data-gm-id");
+      var m = _groupMappingsById[id];
+      if (!m) return;
+      showRowMenu(trigger, [
+        { label: "Edit…", onSelect: function () { openGroupMappingSlideover(id); } },
+        { separator: true },
+        { label: "Delete", danger: true, onSelect: function () { confirmDeleteGroupMapping(id); } },
+      ], { label: "Actions for " + (m.groupLabel || m.groupKey) });
     });
   }
 
-  // Event delegation for users-table action buttons
+  // Username opens the row's verb menu. Built from the row RECORD rather than
+  // the trigger's data-* attributes, because which verbs exist depends on
+  // authProvider / totpEnabled / whether it's your own account.
   document.getElementById("users-tbody").addEventListener("click", function (e) {
-    var btn = e.target.closest("[data-action]");
-    if (!btn) return;
-    var action = btn.getAttribute("data-action");
-    var id = btn.getAttribute("data-id");
-    var username = btn.getAttribute("data-username");
-    var roleId = btn.getAttribute("data-role-id");
-    if (action === "role") openChangeRoleModal(id, username, roleId);
-    else if (action === "regions") openUserRegionsModal(id, username);
-    else if (action === "password") openResetPasswordModal(id, username);
-    else if (action === "delete") confirmDelete(id, username);
-    else if (action === "totp-self") openTotpSelfModal();
-    else if (action === "totp-reset") confirmTotpReset(id, username);
+    var trigger = e.target.closest(".user-menu");
+    if (!trigger) return;
+    var id = trigger.getAttribute("data-id");
+    var u = (_usersRaw || []).find(function (x) { return String(x.id) === id; });
+    if (!u) return;
+    showRowMenu(trigger, _userMenuItems(u), { label: "Actions for " + u.username });
   });
 
   // Event delegation for roles-table action buttons
   var rolesTbody = document.getElementById("roles-tbody");
   if (rolesTbody) {
     rolesTbody.addEventListener("click", function (e) {
-      var btn = e.target.closest("[data-role-action]");
-      if (!btn) return;
-      var action = btn.getAttribute("data-role-action");
-      var id = btn.getAttribute("data-role-id");
-      if (action === "edit") openRoleSlideover(id);
-      else if (action === "delete") confirmDeleteRole(id);
+      var trigger = e.target.closest(".role-menu");
+      if (!trigger) return;
+      var id = trigger.getAttribute("data-role-id");
+      var r = _rolesById[id];
+      if (!r) return;
+      showRowMenu(trigger, _roleMenuItems(r), { label: "Actions for " + r.name });
     });
   }
 });
@@ -123,7 +123,7 @@ async function loadUsers() {
   try {
     _usersRaw = await api.users.list();
     if (_usersRaw.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No users found.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No users found.</td></tr>';
       return;
     }
     // Decorate each row with a stable `totpEnabledSort` string so TableSF
@@ -135,7 +135,7 @@ async function loadUsers() {
     });
     renderUsersBody();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -160,7 +160,7 @@ function renderUsersBody() {
   var tbody = document.getElementById("users-tbody");
   var rows = _usersSF ? _usersSF.apply(_usersRaw) : _usersRaw;
   if (!rows || rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No users match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No users match the current filters.</td></tr>';
     return;
   }
   tbody.innerHTML = rows.map(function (u) {
@@ -203,8 +203,6 @@ function renderUsersBody() {
     if (Array.isArray(u.regionTags) && u.regionTags.length > 0) {
       regionsLabel = '<div style="margin-top:0.25rem;display:flex;flex-wrap:wrap;gap:0.25rem" title="Per-user region scope">' + regionPillsHtml(u.regionTags) + '</div>';
     }
-    var passwordBtn = isIdpManaged(u) ? '' :
-      '<button class="btn btn-sm btn-secondary" data-action="password" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '">Password</button>';
     var totpCell;
     if (isIdpManaged(u)) {
       totpCell = '<span style="color:var(--color-text-tertiary);font-size:0.85em" title="Handled by your identity provider">IdP-managed</span>';
@@ -213,32 +211,57 @@ function renderUsersBody() {
     } else {
       totpCell = '<span style="color:var(--color-text-tertiary)">Not set</span>';
     }
-    var isSelf = currentUsername === u.username;
-    var totpBtn = "";
-    if (u.authProvider !== "azure") {
-      if (isSelf) {
-        totpBtn = '<button class="btn btn-sm btn-secondary" data-action="totp-self" title="Manage your two-factor authentication">2FA</button>';
-      } else if (u.totpEnabled) {
-        totpBtn = '<button class="btn btn-sm btn-secondary" data-action="totp-reset" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '" title="Reset 2FA (e.g. lost device)">Reset 2FA</button>';
-      }
-    }
     var roleId = u.role ? u.role.id : "";
+    // Row verbs moved behind the username (TEMPLATES.md → "Row context menu").
+    // The conditional set is unchanged — which items exist is decided in
+    // _userMenuItems so the render and the menu can't drift apart.
+    var nameCell = '<button type="button" class="row-menu-trigger user-menu"' +
+      ' data-id="' + escapeHtml(u.id) + '"' +
+      ' data-username="' + escapeHtml(u.username) + '"' +
+      ' data-role-id="' + escapeHtml(roleId) + '"' +
+      ' aria-haspopup="menu" aria-expanded="false" title="Actions for this user">' +
+      '<strong>' + escapeHtml(u.username) + '</strong></button>';
     return '<tr>' +
       '<td style="text-align:center">' + onlineDot + '</td>' +
-      '<td><strong>' + escapeHtml(u.username) + '</strong>' + displayName + regionsLabel + '</td>' +
+      '<td>' + nameCell + displayName + regionsLabel + '</td>' +
       '<td>' + authBadge + '</td>' +
       '<td>' + roleBadge + '</td>' +
       '<td>' + totpCell + '</td>' +
       '<td>' + lastLogin + '</td>' +
       '<td>' + formatDate(u.createdAt) + '</td>' +
-      '<td class="actions">' +
-        '<button class="btn btn-sm btn-secondary" data-action="role" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '" data-role-id="' + escapeHtml(roleId) + '">Role</button>' +
-        '<button class="btn btn-sm btn-secondary" data-action="regions" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '" title="Per-user region scope">Regions</button>' +
-        passwordBtn +
-        totpBtn +
-        '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '">Delete</button>' +
-      '</td></tr>';
+      '</tr>';
   }).join("");
+}
+
+/**
+ * The verbs offered for one user row, in menu order.
+ *
+ * Two conditions carried over verbatim from the old button row: an IdP-managed
+ * account has no local password to reset, and 2FA is self-service for your own
+ * account, an admin reset for someone else's (only when they actually have it
+ * enabled), and absent entirely for Azure accounts where the IdP owns it.
+ * Returning [] is impossible — Role, Regions and Delete are unconditional — so
+ * the trigger never opens an empty menu.
+ */
+function _userMenuItems(u) {
+  var isSelf = currentUsername === u.username;
+  var items = [
+    { label: "Change role…", onSelect: function () { openChangeRoleModal(u.id, u.username, u.role ? u.role.id : ""); } },
+    { label: "Regions…", title: "Per-user region scope", onSelect: function () { openUserRegionsModal(u.id, u.username); } },
+  ];
+  if (!isIdpManaged(u)) {
+    items.push({ label: "Reset password…", onSelect: function () { openResetPasswordModal(u.id, u.username); } });
+  }
+  if (u.authProvider !== "azure") {
+    if (isSelf) {
+      items.push({ label: "Two-factor auth…", title: "Manage your two-factor authentication", onSelect: function () { openTotpSelfModal(); } });
+    } else if (u.totpEnabled) {
+      items.push({ label: "Reset 2FA…", title: "Reset 2FA (e.g. lost device)", onSelect: function () { confirmTotpReset(u.id, u.username); } });
+    }
+  }
+  items.push({ separator: true });
+  items.push({ label: "Delete", danger: true, onSelect: function () { confirmDelete(u.id, u.username); } });
+  return items;
 }
 
 // Build a <select> of roles. `selectedId` pre-selects a row; `defaultName`
@@ -1150,7 +1173,7 @@ async function loadRoles() {
     }
     renderRolesBody();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -1162,7 +1185,7 @@ function renderRolesBody() {
   // user) show up here.
   var visible = _rolesRaw.filter(function (r) { return !r.isProtected; });
   if (visible.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No editable roles. Click "+ Add Role" to create one.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No editable roles. Click "+ Add Role" to create one.</td></tr>';
     return;
   }
   visible.sort(function (a, b) {
@@ -1174,25 +1197,38 @@ function renderRolesBody() {
     var swatch = r.color
       ? '<span title="Badge color" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + escapeHtml(r.color) + ';margin-right:7px;vertical-align:middle;border:1px solid var(--color-border)"></span>'
       : '';
-    var nameCell = swatch + '<button class="btn btn-link" data-role-action="edit" data-role-id="' + escapeHtml(r.id) + '" style="padding:0;font-weight:600;color:var(--color-accent);background:none;border:none;cursor:pointer;vertical-align:middle">' + escapeHtml(r.name) + '</button>';
+    // The name was already a button that jumped straight to Edit; it now opens
+    // the row's menu, with Edit as the first item so that path is one extra key
+    // or click rather than gone.
+    var nameCell = swatch + '<button type="button" class="row-menu-trigger role-menu" data-role-id="' + escapeHtml(r.id) + '"' +
+      ' aria-haspopup="menu" aria-expanded="false" title="Actions for this role"' +
+      ' style="font-weight:600;vertical-align:middle">' + escapeHtml(r.name) + '</button>';
     var descCell = '<span style="color:var(--color-text-secondary);font-size:0.88em">' + escapeHtml(r.description || "—") + '</span>';
     var usersCell = '<span class="badge" style="background:var(--color-bg-secondary);color:var(--color-text-primary)">' + r.userCount + '</span>';
     var builtInCell = r.isBuiltIn
       ? '<span class="badge" style="background:var(--color-bg-secondary);color:var(--color-text-secondary)">Built-in</span>'
       : '<span style="color:var(--color-text-tertiary)">—</span>';
-    var delBtn = r.isBuiltIn || r.userCount > 0
-      ? '<button class="btn btn-sm btn-secondary" disabled title="' + (r.isBuiltIn ? "Built-in roles cannot be deleted" : "Reassign users first") + '">Delete</button>'
-      : '<button class="btn btn-sm btn-danger" data-role-action="delete" data-role-id="' + escapeHtml(r.id) + '">Delete</button>';
     return '<tr>' +
       '<td>' + nameCell + '</td>' +
       '<td>' + descCell + '</td>' +
       '<td>' + usersCell + '</td>' +
       '<td>' + builtInCell + '</td>' +
-      '<td class="actions">' +
-        '<button class="btn btn-sm btn-secondary" data-role-action="edit" data-role-id="' + escapeHtml(r.id) + '">Edit</button>' +
-        delBtn +
-      '</td></tr>';
+      '</tr>';
   }).join("");
+}
+
+/** Verbs for one role row. Delete stays PRESENT but disabled when it can't
+ *  apply, carrying the reason as its tooltip — the old button row did the same,
+ *  and hiding it would leave an admin wondering where the action went. */
+function _roleMenuItems(r) {
+  var blocked = r.isBuiltIn ? "Built-in roles cannot be deleted"
+    : r.userCount > 0 ? "Reassign users first"
+    : null;
+  return [
+    { label: "Edit…", onSelect: function () { openRoleSlideover(r.id); } },
+    { separator: true },
+    { label: "Delete", danger: !blocked, disabled: !!blocked, title: blocked || undefined, onSelect: function () { confirmDeleteRole(r.id); } },
+  ];
 }
 
 async function confirmDeleteRole(id) {
@@ -1234,7 +1270,7 @@ async function loadGroupMappings() {
     _groupMappingsRaw.forEach(function (m) { _groupMappingsById[m.id] = m; });
     renderGroupMappingsBody();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -1252,7 +1288,7 @@ function gmTagsCell(m) {
 function renderGroupMappingsBody() {
   var tbody = document.getElementById("group-mappings-tbody");
   if (!_groupMappingsRaw.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No group mappings. Click "+ Add Mapping" to map an IdP group to a role + tags.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No group mappings. Click "+ Add Mapping" to map an IdP group to a role + tags.</td></tr>';
     return;
   }
   tbody.innerHTML = _groupMappingsRaw.map(function (m) {
@@ -1262,14 +1298,15 @@ function renderGroupMappingsBody() {
       : '<span class="badge" style="background:rgba(158,158,158,0.14);color:var(--color-text-tertiary);border:1px solid rgba(158,158,158,0.4)">Disabled</span>';
     return '<tr>' +
       '<td style="text-transform:uppercase;font-size:0.75rem;font-weight:600">' + escapeHtml(m.provider) + '</td>' +
-      '<td style="word-break:break-all">' + escapeHtml(m.groupLabel || m.groupKey) + (m.description ? '<div class="hint" style="margin:0.15rem 0 0">' + escapeHtml(m.description) + '</div>' : '') + '</td>' +
+      '<td style="word-break:break-all">' +
+        '<button type="button" class="row-menu-trigger gm-menu" data-gm-id="' + m.id + '"' +
+          ' aria-haspopup="menu" aria-expanded="false" title="Actions for this mapping"' +
+          ' style="white-space:normal;text-align:left">' + escapeHtml(m.groupLabel || m.groupKey) + '</button>' +
+        (m.description ? '<div class="hint" style="margin:0.15rem 0 0">' + escapeHtml(m.description) + '</div>' : '') +
+      '</td>' +
       '<td>' + role + '</td>' +
       '<td>' + gmTagsCell(m) + '</td>' +
       '<td>' + enabled + '</td>' +
-      '<td>' +
-        '<button class="btn btn-sm btn-secondary" data-gm-action="edit" data-gm-id="' + m.id + '">Edit</button> ' +
-        '<button class="btn btn-sm btn-danger" data-gm-action="delete" data-gm-id="' + m.id + '">Delete</button>' +
-      '</td>' +
     '</tr>';
   }).join("");
 }

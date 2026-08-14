@@ -535,11 +535,18 @@ document.addEventListener("DOMContentLoaded", async function () {
     _assetsUpdateSelectAll();
     _assetsUpdateBulkBar();
   });
+  // The row's verbs live behind the hostname (TEMPLATES.md → "Row context
+  // menu"). Built from the row RECORD in _assetsData, not the trigger's
+  // data-* attributes, because the quarantine verbs depend on the asset's MAC,
+  // status and type.
   document.getElementById("assets-tbody").addEventListener("click", function (e) {
-    var link = e.target.closest(".asset-name-link");
-    if (!link) return;
+    var trigger = e.target.closest(".asset-menu");
+    if (!trigger) return;
     e.preventDefault();
-    openViewModal(link.getAttribute("data-asset-id"));
+    var id = trigger.getAttribute("data-asset-id");
+    var a = (_assetsData || []).find(function (x) { return String(x.id) === id; });
+    if (!a) return;
+    showRowMenu(trigger, _assetMenuItems(a), { label: "Actions for " + (a.hostname || "asset") });
   });
   // Favorites-first ordering is resolved server-side, so toggling a star must
   // re-fetch to re-order the page.
@@ -1292,7 +1299,9 @@ function renderAssetsPage() {
     return '<tr>' +
       '<td class="cb-col"><input type="checkbox" class="row-cb"' + checked + ' data-id="' + a.id + '"></td>' +
       starCellHTML("assets", a.id) +
-      '<td><a href="#" class="asset-name-link" data-asset-id="' + a.id + '"><strong>' + escapeHtml(a.hostname || "-") + '</strong></a>' +
+      '<td><button type="button" class="row-menu-trigger asset-menu" data-asset-id="' + a.id + '" ' +
+        'aria-haspopup="menu" aria-expanded="false" title="Actions for this asset">' +
+        '<strong>' + escapeHtml(a.hostname || "-") + '</strong></button>' +
         (a.assetTag ? '<br><span class="asset-tag-label">' + escapeHtml(a.assetTag) + '</span>' : '') +
       '</td>' +
       '<td class="mono">' + ipCellHTML(a) + '</td>' +
@@ -1569,21 +1578,72 @@ function _renderLeaseBody(r, ctx) {
   '</div>';
 }
 
-// Quarantine action button in asset row. Only shown to assets-admins; only
-// shown when the asset has a MAC (no MAC → no FortiGate target to push).
-// Infrastructure assets (firewalls, switches, access points) cannot be
-// quarantined — quarantining the device that does the quarantining would
-// lock the operator out of the network. Release stays available for assets
-// already in the quarantined state regardless of type, so a misclassified
-// quarantine can still be undone.
-function _quarantineActionHTML(a) {
-  if (!canManageAssets()) return '';
-  if (!a.macAddress && (!a.macAddresses || !a.macAddresses.length)) return '';
-  if (a.status === 'quarantined') {
-    return '<button class="btn btn-sm btn-secondary" onclick="releaseAssetQuarantine(\'' + a.id + '\')" title="Release quarantine — removes MAC block from FortiGate(s)">Release Quarantine</button>';
+/**
+ * Quarantine verbs for one asset row, as row-context-menu items (0 or 1 of them).
+ *
+ * Gated on `assetsQuarantine`, NOT `assets` — quarantine is its own function key
+ * and every /assets/:id/quarantine* route checks it, so gating on
+ * canManageAssets() here would offer the verb to operators whose click can only
+ * 403. (The pre-menu version of this function did exactly that; it was never
+ * wired up, so the mismatch never shipped.)
+ *
+ * The rest of the conditions are unchanged:
+ *  - No MAC → nothing to block, so no FortiGate target to push to.
+ *  - Already quarantined → offer Release, whatever the asset type, so a
+ *    misclassified quarantine can always be undone.
+ *  - Fortinet infrastructure (firewall / switch / access point) can never be
+ *    quarantined: blocking the device that enforces the block would lock the
+ *    operator out of their own network.
+ */
+/**
+ * Every verb offered for one asset row, in menu order:
+ *   Open · Edit · — · Quarantine|Release · — · Delete
+ *
+ * Open is unconditional (it is what clicking the hostname always did), so the
+ * menu is never empty and a read-only viewer still gets a working affordance.
+ * Edit and Delete ride `assets:write`; the quarantine pair rides its own
+ * `assetsQuarantine` key, so a role holding one and not the other sees exactly
+ * the verbs it can actually use. Separators are pushed only immediately before
+ * a group that has items, so no divider can ever render with nothing after it.
+ */
+function _assetMenuItems(a) {
+  var items = [{ label: "Open", onSelect: function () { openViewModal(a.id); } }];
+  if (canManageAssets()) {
+    items.push({ label: "Edit…", onSelect: function () { openEditModal(a.id); } });
   }
-  if (a.assetType === 'firewall' || a.assetType === 'switch' || a.assetType === 'access_point') return '';
-  return '<button class="btn btn-sm btn-danger" onclick="quarantineAssetRow(\'' + a.id + '\')" title="Quarantine — push MAC block to FortiGate(s) that have seen this asset">Quarantine</button>';
+  var quarantine = _quarantineMenuItems(a);
+  if (quarantine.length) {
+    items.push({ separator: true });
+    quarantine.forEach(function (q) { items.push(q); });
+  }
+  if (canManageAssets()) {
+    items.push({ separator: true });
+    items.push({
+      label: "Delete",
+      danger: true,
+      onSelect: function () { confirmDelete(a.id, a.hostname || "-"); },
+    });
+  }
+  return items;
+}
+
+function _quarantineMenuItems(a) {
+  if (!canQuarantineAssets()) return [];
+  if (!a.macAddress && (!a.macAddresses || !a.macAddresses.length)) return [];
+  if (a.status === 'quarantined') {
+    return [{
+      label: "Release quarantine",
+      title: "Removes the MAC block from the FortiGate(s) it was pushed to",
+      onSelect: function () { releaseAssetQuarantine(a.id); },
+    }];
+  }
+  if (a.assetType === 'firewall' || a.assetType === 'switch' || a.assetType === 'access_point') return [];
+  return [{
+    label: "Quarantine…",
+    danger: true,
+    title: "Pushes a MAC block to the FortiGate(s) that have seen this asset",
+    onSelect: function () { quarantineAssetRow(a.id); },
+  }];
 }
 
 async function quarantineAssetRow(id) {
