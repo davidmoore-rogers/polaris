@@ -2148,6 +2148,119 @@ function showConfirm(message) {
   });
 }
 
+/**
+ * showConfirm's sibling for the case where the operator has to TYPE something:
+ * resolves to the entered string, or `null` if they cancelled.
+ *
+ * `null` vs `""` is the whole contract, and callers depend on it — an empty
+ * string is a deliberate "no reason given" on an optional field, while null
+ * means "don't do this at all". It matches `window.prompt`'s semantics, which is
+ * what this replaces: prompt() is styled by the browser, unreachable in the
+ * mobile PWA, and suppressed outright by some browsers (and by Chrome in
+ * cross-origin iframes), so an operator could be left unable to complete an
+ * action with no visible reason why.
+ *
+ * opts: { title, label, placeholder, value, okLabel, danger, required,
+ *         multiline, maxLength, help }
+ */
+function showPrompt(message, opts) {
+  opts = opts || {};
+  return new Promise(function (resolve) {
+    // Standalone overlay at the same z-index as showConfirm, for the same
+    // reason: it must stack over an open modal without destroying its DOM.
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.style.zIndex = "1300";
+    var title = opts.title || "Enter a value";
+    var field = opts.multiline
+      ? '<textarea id="prompt-input" rows="3" style="width:100%;resize:vertical"></textarea>'
+      : '<input type="text" id="prompt-input" style="width:100%">';
+    overlay.innerHTML =
+      '<div class="modal" role="dialog" aria-modal="true" tabindex="-1">' +
+        '<div class="modal-header"><h3></h3></div>' +
+        '<div class="modal-body">' +
+          '<p class="prompt-message" style="font-size:0.9rem;color:var(--color-text-secondary);white-space:pre-wrap;margin:0 0 0.75rem"></p>' +
+          '<div class="form-group" style="margin-bottom:0">' +
+            '<label for="prompt-input" class="prompt-label"></label>' +
+            field +
+            '<p class="hint prompt-help" style="margin:0.35rem 0 0;display:none"></p>' +
+          '</div>' +
+        '</div>' +
+        '<div class="modal-footer">' +
+          '<button class="btn btn-secondary" data-prompt="cancel">Cancel</button>' +
+          '<button class="btn" data-prompt="ok"></button>' +
+        '</div>' +
+      '</div>';
+
+    var dialog = overlay.querySelector(".modal");
+    dialog.setAttribute("aria-label", title);
+    dialog.querySelector(".modal-header h3").textContent = title;
+    // textContent throughout: every one of these is caller-supplied copy, and
+    // some callers interpolate a hostname straight from discovery.
+    var msgEl = overlay.querySelector(".prompt-message");
+    if (message) msgEl.textContent = message; else msgEl.style.display = "none";
+    var labelEl = overlay.querySelector(".prompt-label");
+    if (opts.label) labelEl.textContent = opts.label; else labelEl.style.display = "none";
+    if (opts.help) {
+      var helpEl = overlay.querySelector(".prompt-help");
+      helpEl.textContent = opts.help;
+      helpEl.style.display = "";
+    }
+    var input = overlay.querySelector("#prompt-input");
+    if (opts.placeholder) input.placeholder = opts.placeholder;
+    if (opts.value) input.value = opts.value;
+    if (opts.maxLength) input.maxLength = opts.maxLength;
+    var okBtn = overlay.querySelector('[data-prompt="ok"]');
+    okBtn.textContent = opts.okLabel || "OK";
+    okBtn.classList.add(opts.danger ? "btn-danger" : "btn-primary");
+
+    document.body.appendChild(overlay);
+    var prevFocus = document.activeElement;
+    // Escape / backdrop resolve null — cancelling must never read as "".
+    var teardownTrap = _trapFocus(dialog, function () { done(null); });
+
+    function done(val) {
+      teardownTrap();
+      overlay.classList.remove("open");
+      overlay.addEventListener("transitionend", function () {
+        if (overlay.parentNode) overlay.remove();
+      }, { once: true });
+      setTimeout(function () { if (overlay.parentNode) overlay.remove(); }, 400);
+      if (prevFocus && typeof prevFocus.focus === "function") {
+        try { prevFocus.focus(); } catch (_) { /* element gone */ }
+      }
+      resolve(val);
+    }
+
+    function submit() {
+      var v = input.value.trim();
+      if (opts.required && !v) {
+        // Don't resolve — an empty required field is a correction, not a cancel.
+        input.focus();
+        input.classList.add("input-error");
+        return;
+      }
+      done(v);
+    }
+
+    overlay.querySelector('[data-prompt="cancel"]').onclick = function () { done(null); };
+    okBtn.onclick = submit;
+    input.addEventListener("input", function () { input.classList.remove("input-error"); });
+    // Enter submits a single-line field; a textarea keeps Enter for newlines.
+    if (!opts.multiline) {
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); submit(); }
+      });
+    }
+
+    requestAnimationFrame(function () {
+      overlay.classList.add("open");
+      try { input.focus(); } catch (_) { _focusFirstIn(dialog); }
+    });
+  });
+}
+if (typeof window !== "undefined") window.showPrompt = showPrompt;
+
 function showFormModal(title, formHTML, confirmLabel) {
   return new Promise(function (resolve) {
     var footer = '<button class="btn btn-secondary" id="form-modal-cancel">Cancel</button>' +

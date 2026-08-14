@@ -2080,6 +2080,14 @@ input:focus, select:focus, textarea:focus {
 }
 textarea { resize: vertical; min-height: 60px; }
 .field-locked { opacity: 0.45; cursor: not-allowed; }
+/* A field the operator must correct before the dialog will submit. Applied by
+   showPrompt() on a required-but-empty field and cleared on the next keystroke,
+   so it reads as "fix this", not as a permanent error state. */
+.input-error,
+.input-error:focus {
+  border-color: var(--color-danger, #c44);
+  outline-color: var(--color-danger, #c44);
+}
 select { cursor: pointer; }
 select option { background: var(--color-bg-secondary); color: var(--color-text-primary); }
 

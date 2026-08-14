@@ -1646,8 +1646,42 @@ function _quarantineMenuItems(a) {
   }];
 }
 
+/**
+ * The one definition of the quarantine-reason dialog, shared by the three
+ * desktop paths that can start a quarantine — the row menu, the bulk bar, and
+ * the asset-details Quarantine tab. They each carried their own `window.prompt`
+ * with slightly different wording; centralising it keeps the warning, the
+ * character cap and the cancel contract identical wherever an operator lands.
+ *
+ * Resolves to the reason, `""` when left blank (the field is optional), or
+ * `null` if cancelled — the same null-vs-empty distinction `window.prompt` had,
+ * which every caller branches on to decide whether to push at all.
+ *
+ * showPrompt rather than window.prompt because the browser dialog is unstyled,
+ * unavailable in the mobile PWA, and suppressed outright by some browsers — for
+ * a containment action that means the operator silently cannot act.
+ */
+function _promptQuarantineReason(assetCount) {
+  var many = assetCount > 1;
+  return showPrompt(
+    many
+      ? "This pushes a MAC block for " + assetCount + " assets to every FortiGate that has seen each one, cutting them off the network."
+      : "This pushes a MAC block to every FortiGate that has seen this asset, cutting it off the network.",
+    {
+      title: many ? "Quarantine " + assetCount + " assets" : "Quarantine asset",
+      label: "Reason (optional)",
+      placeholder: "e.g. malware alert from SIEM",
+      okLabel: many ? "Quarantine " + assetCount : "Quarantine",
+      danger: true,
+      multiline: true,
+      maxLength: 500, // matches the route's z.string().max(500)
+      help: "Recorded on the audit Event so the next operator knows why.",
+    },
+  );
+}
+
 async function quarantineAssetRow(id) {
-  var reason = window.prompt('Reason for quarantine (optional):');
+  var reason = await _promptQuarantineReason(1);
   if (reason === null) return; // cancelled
   try {
     var result = await api.assets.quarantine(id, reason || undefined);
@@ -2446,7 +2480,7 @@ function _renderBulkAgentDeployResult(r) {
 async function bulkQuarantineAssets() {
   var ids = Array.from(_assetsSelected);
   if (!ids.length) return;
-  var reason = window.prompt('Reason for quarantine (optional, applies to all selected):');
+  var reason = await _promptQuarantineReason(ids.length);
   if (reason === null) return;
   try {
     var r = await api.assets.bulkQuarantine(ids, reason || undefined);
@@ -17939,7 +17973,7 @@ function _wireQuarantineTab(a) {
   var quarantineBtn = tabPanel.querySelector("#btn-qtn-quarantine");
   if (quarantineBtn) {
     quarantineBtn.addEventListener("click", async function () {
-      var reason = window.prompt("Reason for quarantine (optional):");
+      var reason = await _promptQuarantineReason(1);
       if (reason === null) return;
       quarantineBtn.disabled = true;
       try {

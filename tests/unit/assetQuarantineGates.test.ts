@@ -31,6 +31,39 @@ const assetsSrc = readFileSync(resolve(__dirname, "../../public/js/assets.js"), 
 const appSrc = readFileSync(resolve(__dirname, "../../public/js/app.js"), "utf8");
 const assetsHtml = readFileSync(resolve(__dirname, "../../public/assets.html"), "utf8");
 
+describe("quarantine reason dialog", () => {
+  // Three desktop paths can start a quarantine — the row menu, the bulk bar and
+  // the asset-details Quarantine tab — and each carried its own window.prompt
+  // with slightly different wording. They now share _promptQuarantineReason so
+  // the warning, the 500-char cap (the route's own limit) and the
+  // null-vs-empty-string cancel contract are identical wherever an operator
+  // lands. window.prompt is also unstyled, absent in the mobile PWA and
+  // suppressed by some browsers, which for a containment action means the
+  // operator silently cannot act.
+  it("is defined once and used by all three desktop paths", () => {
+    expect(assetsSrc).toMatch(/function _promptQuarantineReason\(assetCount\)/);
+    const calls = assetsSrc.match(/_promptQuarantineReason\(/g) ?? [];
+    // One declaration + three call sites.
+    expect(calls.length).toBe(4);
+  });
+
+  it("caps the reason at the route's own limit", () => {
+    // The route validates z.string().max(500); a looser cap here would let the
+    // operator type a reason the server then rejects.
+    expect(assetsSrc).toMatch(/maxLength: 500, \/\/ matches the route's/);
+  });
+
+  it("no quarantine path still uses window.prompt", () => {
+    for (const marker of [
+      "Reason for quarantine (optional):",
+      "Reason for quarantine (optional, applies to all selected):",
+    ]) {
+      expect(assetsSrc, marker).not.toContain(`window.prompt("${marker}")`);
+      expect(assetsSrc, marker).not.toContain(`window.prompt('${marker}')`);
+    }
+  });
+});
+
 describe("quarantine UI gates", () => {
   it("app.js exposes canQuarantineAssets bound to the assetsQuarantine key", () => {
     expect(appSrc).toMatch(/function canQuarantineAssets\(\)\s*\{\s*return permAtLeast\("assetsQuarantine",\s*"write"\)/);
