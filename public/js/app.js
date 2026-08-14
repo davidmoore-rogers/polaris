@@ -120,6 +120,13 @@ function isAssetsAdmin() { return currentUserRole === "assetsadmin"; }
 // hardcoded-role behavior. Custom roles with the relevant grant pass.
 function canManageNetworks() { return permAtLeast("subnets", "fullwrite"); }
 function canManageAssets() { return permAtLeast("assets", "write"); }
+// Quarantine is its OWN function key, not part of `assets` — a role can manage
+// asset records without being allowed to push MAC blocks to FortiGates, and
+// (per the built-in matrix) vice versa. Every server route under
+// /assets/:id/quarantine* gates on assetsQuarantine, so anything offering those
+// verbs in the UI must check this and not canManageAssets(), or the control
+// appears for operators whose click can only 403.
+function canQuarantineAssets() { return permAtLeast("assetsQuarantine", "write"); }
 function canManageMaintenance() { return permAtLeast("maintenanceManagement", "fullwrite"); }
 function isUserOrAbove() { return permAtLeast("subnets", "write") || permAtLeast("reservations", "write"); }
 function canReviewConflicts() { return permAtLeast("discoveryConflicts", "write"); }
@@ -2583,6 +2590,11 @@ function hideAdminOnlyElements() {
   });
   document.querySelectorAll("[data-manage-assets]").forEach(function (el) {
     if (!canManageAssets()) el.style.display = "none";
+  });
+  // Separate from data-manage-assets: quarantine is its own function key, so a
+  // control that pushes a MAC block must not ride the asset-editing gate.
+  document.querySelectorAll("[data-quarantine-assets]").forEach(function (el) {
+    if (!canQuarantineAssets()) el.style.display = "none";
   });
   document.querySelectorAll("[data-maintenance-mgmt]").forEach(function (el) {
     if (!canManageMaintenance()) el.style.display = "none";

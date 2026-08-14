@@ -1400,12 +1400,17 @@ function _assetsUpdateBulkBar() {
   var bMerge = document.getElementById("assets-bulk-merge-btn");
   if (bMerge) bMerge.style.display = count === 2 && isAdmin() ? "" : "none";
 
-  // Show quarantine/release buttons only for assets-admins. Determine which
-  // buttons are relevant based on the statuses of the selected assets.
-  // Infrastructure types (firewall/switch/access_point) are excluded from the
-  // Quarantine button — they can't be quarantined — but stay eligible for
-  // Release in case one was quarantined before this guard was added.
-  if (canManageAssets()) {
+  // Show quarantine/release buttons only to roles holding assetsQuarantine —
+  // its own function key, NOT `assets` (see canQuarantineAssets() in app.js).
+  // Determine which buttons are relevant based on the statuses of the selected
+  // assets. Infrastructure types (firewall/switch/access_point) are excluded
+  // from the Quarantine button — they can't be quarantined — but stay eligible
+  // for Release in case one was quarantined before this guard was added.
+  //
+  // This `if` is load-bearing: without the key the block never runs, so the
+  // buttons keep the display:none that the data-quarantine-assets applier set
+  // at page load. Removing the guard would let a selection re-show them.
+  if (canQuarantineAssets()) {
     // Use the remembered selection metadata (not _assetsData, which is only the
     // current page) so the buttons stay correct across paged-away selections.
     var selected = Object.keys(_assetsSelectedMeta)
@@ -4478,7 +4483,10 @@ async function openViewModal(id) {
     // Ordered right after Processes.
     var isInfraQ = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
     var hasMac = !!(a.macAddress || (a.macAddresses && a.macAddresses.length));
-    if (canManageAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ))) {
+    // Gated on assetsQuarantine, NOT assets — see canQuarantineAssets() in
+    // app.js. A role may hold either key without the other, and every route the
+    // tab calls checks the quarantine key.
+    if (canQuarantineAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ))) {
       tabs.push({ key: "quarantine", label: a.status === "quarantined" ? "Quarantine ⚠" : "Quarantine", html: _assetQuarantineTabHTML(a) });
     }
     // Events tab — audit history scoped to this asset (resourceType=asset,
@@ -4572,7 +4580,7 @@ async function openViewModal(id) {
     }
     _syncAssetFooterButtons();
     if (showSnmpWalkTab) _wireSnmpWalkTab(a);
-    if (canManageAssets()) _wireQuarantineTab(a);
+    if (canQuarantineAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
     if (a.assetType === "switch") _wireAssetMacTableTab(a.id);
     if (!isInfraProc) _wireAssetServicesTab(a);
