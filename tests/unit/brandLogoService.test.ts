@@ -13,7 +13,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const REAL_LOGO = readFileSync(join(process.cwd(), "public", "logo.png"));
-const REAL_SYMBOL = readFileSync(join(process.cwd(), "public", "img", "brand", "polaris-symbol.png"));
+const REAL_SYMBOL_DARK = readFileSync(join(process.cwd(), "public", "img", "brand", "polaris-symbol-dark.png"));
+const REAL_SYMBOL_LIGHT = readFileSync(join(process.cwd(), "public", "img", "brand", "polaris-symbol-light.png"));
 
 /** Virtual filesystem: anything not registered here ENOENTs. */
 const files = new Map<string, Buffer>();
@@ -47,8 +48,10 @@ vi.mock("../../src/services/brandingService.js", async (importOriginal) => {
   return { ...actual, getBranding: vi.fn(async () => branding) };
 });
 
-const { accentGeometry, renderAccentedLogo, ACCENT_SYMBOL_PATH, MAX_RENDER_PX, __resetBrandLogoCacheForTests } =
-  await import("../../src/services/brandLogoService.js");
+const {
+  accentGeometry, renderAccentedLogo, normalizeBrandTheme,
+  ACCENT_SYMBOL_PATHS, MAX_RENDER_PX, __resetBrandLogoCacheForTests,
+} = await import("../../src/services/brandLogoService.js");
 const { UPLOADS_DIR } = await import("../../src/utils/paths.js");
 
 const CUSTOM_LOGO_PATH = join(UPLOADS_DIR, "custom-logo.png");
@@ -56,7 +59,8 @@ const CUSTOM_LOGO_PATH = join(UPLOADS_DIR, "custom-logo.png");
 beforeEach(() => {
   files.clear();
   files.set(CUSTOM_LOGO_PATH, REAL_LOGO);
-  files.set(ACCENT_SYMBOL_PATH, REAL_SYMBOL);
+  files.set(ACCENT_SYMBOL_PATHS.dark, REAL_SYMBOL_DARK);
+  files.set(ACCENT_SYMBOL_PATHS.light, REAL_SYMBOL_LIGHT);
   branding.logoAccent = true;
   branding.logoUrl = "/uploads/custom-logo.png";
   __resetBrandLogoCacheForTests();
@@ -99,6 +103,18 @@ describe("accentGeometry", () => {
   });
 });
 
+describe("normalizeBrandTheme", () => {
+  it("accepts only the two known themes, defaulting to dark", () => {
+    expect(normalizeBrandTheme("light")).toBe("light");
+    expect(normalizeBrandTheme("LIGHT")).toBe("light");
+    expect(normalizeBrandTheme("dark")).toBe("dark");
+    // Query strings are untrusted and reach a filesystem path lookup.
+    expect(normalizeBrandTheme("../../etc/passwd")).toBe("dark");
+    expect(normalizeBrandTheme(undefined)).toBe("dark");
+    expect(normalizeBrandTheme(["light", "dark"])).toBe("dark");
+  });
+});
+
 describe("renderAccentedLogo", () => {
   it("composites a PNG and memoizes it", async () => {
     const first = await renderAccentedLogo();
@@ -108,6 +124,23 @@ describe("renderAccentedLogo", () => {
 
     const second = await renderAccentedLogo();
     expect(second!.buf).toBe(first!.buf); // same object = cache hit, not a re-render
+  });
+
+  it("renders a distinct composite per theme, and caches both", async () => {
+    const dark = await renderAccentedLogo("dark");
+    const light = await renderAccentedLogo("light");
+    // Different symbol art in, different bytes and different ETag out — a
+    // shared ETag would let one theme's render revalidate into the other's.
+    expect(dark!.buf.equals(light!.buf)).toBe(false);
+    expect(dark!.etag).not.toBe(light!.etag);
+    // Neither evicted the other.
+    expect((await renderAccentedLogo("dark"))!.buf).toBe(dark!.buf);
+    expect((await renderAccentedLogo("light"))!.buf).toBe(light!.buf);
+  });
+
+  it("defaults to the dark variant", async () => {
+    const explicit = await renderAccentedLogo("dark");
+    expect((await renderAccentedLogo())!.buf).toBe(explicit!.buf);
   });
 
   it("returns null when the accent is switched off", async () => {
@@ -126,8 +159,10 @@ describe("renderAccentedLogo", () => {
   });
 
   it("returns null when the symbol art is missing", async () => {
-    files.delete(ACCENT_SYMBOL_PATH);
-    expect(await renderAccentedLogo()).toBeNull();
+    files.delete(ACCENT_SYMBOL_PATHS.dark);
+    expect(await renderAccentedLogo("dark")).toBeNull();
+    // The other theme's art is still there, so that variant still renders.
+    expect(await renderAccentedLogo("light")).not.toBeNull();
   });
 
   it("returns null for a WebP logo — resvg cannot embed it", async () => {

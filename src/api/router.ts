@@ -70,8 +70,12 @@ router.get("/server-settings/branding", async (_req, res, next) => {
 // serverSettings router, so there is exactly one definition of the path.
 router.get("/server-settings/branding/logo-accent.png", async (req, res, next) => {
   try {
-    const { renderAccentedLogo } = await import("../services/brandLogoService.js");
-    const rendered = await renderAccentedLogo();
+    const { renderAccentedLogo, normalizeBrandTheme } = await import("../services/brandLogoService.js");
+    // ?theme= picks the symbol variant: its wedges are white on the dark one
+    // and navy on the light one, so the wrong variant loses half the mark
+    // against the page behind it. Narrowed to the two known values — this is
+    // an unauthenticated route reaching the filesystem.
+    const rendered = await renderAccentedLogo(normalizeBrandTheme(req.query.theme));
     if (!rendered) {
       // Accent off, no custom logo, or an unrenderable one — send the caller to
       // whatever the plain logo is instead of 404-ing a live <img>.

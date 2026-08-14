@@ -28,17 +28,17 @@ function jpegBuffer(width: number, height: number, opts: { sofMarker?: number } 
 
 describe("pngSize", () => {
   it("reads the shipped brand art", () => {
-    expect(pngSize(brand("polaris-symbol.png"))).toEqual({ width: 512, height: 512 });
+    expect(pngSize(brand("polaris-symbol-dark.png"))).toEqual({ width: 512, height: 512 });
     expect(pngSize(brand("polaris-horiz-dark.png"))).toEqual({ width: 900, height: 180 });
   });
 
   it("rejects a non-PNG and a truncated header", () => {
     expect(pngSize(Buffer.from("GIF89a not a png at all", "ascii"))).toBeNull();
-    expect(pngSize(brand("polaris-symbol.png").subarray(0, 20))).toBeNull();
+    expect(pngSize(brand("polaris-symbol-dark.png").subarray(0, 20))).toBeNull();
   });
 
   it("rejects a PNG signature whose first chunk isn't IHDR", () => {
-    const buf = Buffer.from(brand("polaris-symbol.png"));
+    const buf = Buffer.from(brand("polaris-symbol-dark.png"));
     buf.write("IDAT", 12, "ascii");
     expect(pngSize(buf)).toBeNull();
   });
