@@ -48,6 +48,9 @@ import { prisma } from "../../src/db.js";
 const FLOOR = {
   intervalSeconds:            60,
   failureThreshold:           3,
+  // Fast-confirm re-probe cadence (business rule 30). Neither tier below sets
+  // it, so every resolved shape carries the floor's 10s.
+  fastConfirmIntervalSec:     10,
   probeTimeoutMs:             5000,
   cpuMemoryTimeoutMs:         10000,
   temperatureTimeoutMs:       10000,
@@ -96,6 +99,7 @@ const FLOOR = {
 const TUNED_TIER = {
   intervalSeconds:            120,
   failureThreshold:           5,
+  fastConfirmIntervalSec:     10,
   probeTimeoutMs:             7500,
   // Tuned tier doesn't set the new timeout fields — they fall through to the
   // hardcoded floor (10000 ms each) per the resolver's tierFromJson default.

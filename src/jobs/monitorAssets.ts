@@ -40,6 +40,7 @@ import {
   runMonitorPass,
   runRetentionPrune,
   resolveMonitorSettings,
+  resolveProbeIntervalSec,
   MONITOR_CANDIDATE_WHERE,
   type MonitorCadence,
 } from "../services/monitoringService.js";
@@ -121,6 +122,9 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       // comment in monitoringService.runMonitorPass.
       discoveredByIntegration: { select: { type: true, config: true } },
       monitorStatus: true,
+      // Both counters feed the fast-confirm re-probe (business rule 30) via the
+      // shared resolveProbeIntervalSec — the cursor path selects them too.
+      consecutiveFailures: true, consecutiveSuccesses: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, cpuMemoryIntervalSec: true, temperatureIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
@@ -160,13 +164,13 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       discoveredByIntegrationType: a.discoveredByIntegration?.type ?? null,
     });
     // Probe cadence: 2× the resolved interval when dependency-suppressed
-    // (parent down) — otherwise base cadence so recovery is detected within
-    // one tick. Disabled streams stay disabled regardless of suppression.
-    // See the matching block in monitoringService.runMonitorPass.
-    const probeIntervalSec =
-      a.dependencySuppressed && eff.responseTimePolling !== "disabled"
-        ? eff.intervalSeconds * 2
-        : eff.intervalSeconds;
+    // (parent down), the fast-confirm cadence while a failure/recovery run is
+    // being confirmed (business rule 30), otherwise base cadence so recovery is
+    // detected within one tick. ONE implementation shared with the cursor path
+    // (monitoringService.computeDueWork) — the two due-sets are contractually
+    // identical, and a second copy of this arithmetic is exactly how they'd
+    // drift.
+    const probeIntervalSec = resolveProbeIntervalSec(a, eff);
     const probe      = isDue(a.lastMonitorAt,    probeIntervalSec);
     // Pragmatic stream-split: cpuMemoryIntervalSeconds drives the unified
     // telemetry tick; collectTelemetry covers temperature in the same

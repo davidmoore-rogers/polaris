@@ -32,6 +32,7 @@ function cand(over: Partial<MonitorPassCandidate> & { id?: string } = {}): Monit
     discoveredByIntegration: null,
     monitorStatus: "up",
     consecutiveFailures: 0,
+    consecutiveSuccesses: 3,
     lastMonitorAt: null,
     monitorIntervalSec: null,
     lastTelemetryAt: null,
@@ -183,5 +184,58 @@ dbDescribe("computeDueWork", () => {
     expect(probeOnly.telemetries).toEqual([]);
     expect(probeOnly.systemInfos).toEqual([]);
     expect(probeOnly.processesWork).toEqual([]);
+  });
+});
+
+// ─── Fast-confirm re-probe (business rule 30) ────────────────────────────────
+// The confirmation phase no longer waits a full interval per miss: an asset
+// mid-run is due again after the fast-confirm cadence. The arithmetic itself is
+// unit-tested in tests/unit/probeCadence.test.ts; these pin that computeDueWork
+// actually applies it to the due-set.
+
+dbDescribe("fast-confirm re-probe", () => {
+  it("re-probes a warning asset inside its normal interval", async () => {
+    const midRun = cand({
+      monitorStatus: "warning",
+      consecutiveFailures: 1,
+      consecutiveSuccesses: 0,
+      // A quarter of the way into the configured cadence: not due normally.
+      lastMonitorAt: ago(Math.max(15, Math.floor(probeSec / 4))),
+    });
+    const steady = cand({ id: "steady", lastMonitorAt: ago(Math.max(15, Math.floor(probeSec / 4))) });
+
+    const due = await computeDueWork([midRun, steady], ALL, now);
+    expect(due.probes.map((p) => p.id)).toEqual(["cand-1"]);
+  });
+
+  it("re-probes an unconfirmed recovery the same way, but not a confirmed one", async () => {
+    const recovering = cand({
+      monitorStatus: "recovering",
+      consecutiveFailures: 0,
+      consecutiveSuccesses: 1,
+      lastMonitorAt: ago(Math.max(15, Math.floor(probeSec / 4))),
+    });
+    const confirmed = cand({
+      id: "confirmed",
+      monitorStatus: "up",
+      consecutiveFailures: 0,
+      consecutiveSuccesses: 99,
+      lastMonitorAt: ago(Math.max(15, Math.floor(probeSec / 4))),
+    });
+
+    const due = await computeDueWork([recovering, confirmed], ALL, now);
+    expect(due.probes.map((p) => p.id)).toEqual(["cand-1"]);
+  });
+
+  it("does not accelerate a down asset — there is nothing left to confirm", async () => {
+    const down = cand({
+      monitorStatus: "down",
+      consecutiveFailures: 12,
+      consecutiveSuccesses: 0,
+      lastMonitorAt: ago(Math.max(15, Math.floor(probeSec / 4))),
+    });
+
+    const due = await computeDueWork([down], ALL, now);
+    expect(due.probes).toEqual([]);
   });
 });

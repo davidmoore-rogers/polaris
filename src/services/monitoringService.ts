@@ -216,6 +216,17 @@ export interface AssetMonitorSnapshot {
 export interface MonitorTierSettings {
   intervalSeconds:           number;
   failureThreshold:          number;
+  /**
+   * Re-probe spacing (seconds) while a failure or recovery run is being
+   * confirmed — the fast-confirm cadence of business rule 30. Default 10
+   * (SolarWinds NPM's rapid re-poll default). Range 5..300, and the resolver
+   * additionally floors it at the probe's own timeout + the probe loop's tick,
+   * so a value below either is raised rather than silently ignored. Like
+   * `failureThreshold` it lives at tier-2 and above — there is no per-asset
+   * column, because the pair are read together and one asset wanting its own
+   * confirmation policy is a class, not an exception.
+   */
+  fastConfirmIntervalSec:    number;
   /** Probe TCP/UDP/HTTP timeout in milliseconds. Default 5000. Range 100..60000. */
   probeTimeoutMs:            number;
   /**
@@ -349,6 +360,7 @@ export type ResolvedMonitorSettings = MonitorTierSettings;
 const HARDCODED_FLOOR: MonitorTierSettings = {
   intervalSeconds:           60,
   failureThreshold:          3,
+  fastConfirmIntervalSec:    10,
   probeTimeoutMs:            5000,
   cpuMemoryTimeoutMs:        10_000,
   temperatureTimeoutMs:      10_000,
@@ -642,6 +654,7 @@ function tierFromJson(v: Record<string, unknown> | null | undefined): MonitorTie
   return {
     intervalSeconds:            toPositiveInt(o.intervalSeconds,           HARDCODED_FLOOR.intervalSeconds),
     failureThreshold:           toPositiveInt(o.failureThreshold,          HARDCODED_FLOOR.failureThreshold),
+    fastConfirmIntervalSec:     toPositiveInt(o.fastConfirmIntervalSec,    HARDCODED_FLOOR.fastConfirmIntervalSec),
     probeTimeoutMs:             toPositiveInt(o.probeTimeoutMs,            HARDCODED_FLOOR.probeTimeoutMs),
     cpuMemoryTimeoutMs:         toPositiveInt(o.cpuMemoryTimeoutMs,        legacyTimeout  ?? HARDCODED_FLOOR.cpuMemoryTimeoutMs),
     temperatureTimeoutMs:       toPositiveInt(o.temperatureTimeoutMs,      legacyTimeout  ?? HARDCODED_FLOOR.temperatureTimeoutMs),
@@ -847,9 +860,10 @@ type ClassStreamCells = {
   timeoutMs:         keyof MonitorTierSettings;
   mibId?:            keyof MonitorTierSettings;
   failureThreshold?: keyof MonitorTierSettings;
+  fastConfirmIntervalSec?: keyof MonitorTierSettings;
 };
 const CLASS_STREAM_FIELD_MAP: Record<ClassStreamKey, ClassStreamCells> = {
-  responseTime: { polling: "responseTimePolling", credentialId: "responseTimeCredentialId", intervalSeconds: "intervalSeconds",            timeoutMs: "probeTimeoutMs",        mibId: "responseTimeMibId", failureThreshold: "failureThreshold" },
+  responseTime: { polling: "responseTimePolling", credentialId: "responseTimeCredentialId", intervalSeconds: "intervalSeconds",            timeoutMs: "probeTimeoutMs",        mibId: "responseTimeMibId", failureThreshold: "failureThreshold", fastConfirmIntervalSec: "fastConfirmIntervalSec" },
   cpuMemory:    { polling: "cpuMemoryPolling",    credentialId: "cpuMemoryCredentialId",    intervalSeconds: "cpuMemoryIntervalSeconds",   timeoutMs: "cpuMemoryTimeoutMs",    mibId: "cpuMemoryMibId" },
   temperature:  { polling: "temperaturePolling",  credentialId: "temperatureCredentialId",  intervalSeconds: "temperatureIntervalSeconds", timeoutMs: "temperatureTimeoutMs",  mibId: "temperatureMibId" },
   interfaces:   { polling: "interfacesPolling",   credentialId: "interfacesCredentialId",   intervalSeconds: "systemInfoIntervalSeconds",  timeoutMs: "systemInfoTimeoutMs",   mibId: "interfacesMibId" },
@@ -878,6 +892,7 @@ function walkClassStreams(
     if ("timeoutMs" in stream && typeof stream.timeoutMs === "number" && stream.timeoutMs > 0) visit(cells.timeoutMs, stream.timeoutMs);
     if (cells.mibId && "mibId" in stream && typeof stream.mibId === "string" && stream.mibId.length > 0) visit(cells.mibId, stream.mibId);
     if (cells.failureThreshold && "failureThreshold" in stream && typeof stream.failureThreshold === "number" && stream.failureThreshold > 0) visit(cells.failureThreshold, stream.failureThreshold);
+    if (cells.fastConfirmIntervalSec && "fastConfirmIntervalSec" in stream && typeof stream.fastConfirmIntervalSec === "number" && stream.fastConfirmIntervalSec > 0) visit(cells.fastConfirmIntervalSec, stream.fastConfirmIntervalSec);
   }
 }
 
@@ -1004,6 +1019,7 @@ async function loadClassOverride(
     select: {
       intervalSeconds:            true,
       failureThreshold:           true,
+      fastConfirmIntervalSec:     true,
       probeTimeoutMs:             true,
       cpuMemoryTimeoutMs:         true,
       temperatureTimeoutMs:       true,
@@ -1046,6 +1062,7 @@ async function loadClassOverride(
     result = {};
     if (row.intervalSeconds            != null) result.intervalSeconds            = row.intervalSeconds;
     if (row.failureThreshold           != null) result.failureThreshold           = row.failureThreshold;
+    if (row.fastConfirmIntervalSec     != null) result.fastConfirmIntervalSec     = row.fastConfirmIntervalSec;
     if (row.probeTimeoutMs             != null) result.probeTimeoutMs             = row.probeTimeoutMs;
     if (row.cpuMemoryTimeoutMs         != null) result.cpuMemoryTimeoutMs         = row.cpuMemoryTimeoutMs;
     if (row.temperatureTimeoutMs       != null) result.temperatureTimeoutMs       = row.temperatureTimeoutMs;
@@ -1269,6 +1286,7 @@ async function resolveMonitorSettingsCore(asset: AssetMonitorContext): Promise<R
   const provenance: Record<keyof MonitorTierSettings, ProvenanceTier> = {
     intervalSeconds:            tier3Source,
     failureThreshold:           tier3Source,
+    fastConfirmIntervalSec:     tier3Source,
     probeTimeoutMs:             tier3Source,
     cpuMemoryTimeoutMs:         tier3Source,
     temperatureTimeoutMs:       tier3Source,
@@ -1317,6 +1335,7 @@ async function resolveMonitorSettingsCore(asset: AssetMonitorContext): Promise<R
   if (classOverride) {
     if (classOverride.intervalSeconds            != null) { merged.intervalSeconds            = classOverride.intervalSeconds;            provenance.intervalSeconds            = "class"; }
     if (classOverride.failureThreshold           != null) { merged.failureThreshold           = classOverride.failureThreshold;           provenance.failureThreshold           = "class"; }
+    if (classOverride.fastConfirmIntervalSec     != null) { merged.fastConfirmIntervalSec     = classOverride.fastConfirmIntervalSec;     provenance.fastConfirmIntervalSec     = "class"; }
     if (classOverride.probeTimeoutMs             != null) { merged.probeTimeoutMs             = classOverride.probeTimeoutMs;             provenance.probeTimeoutMs             = "class"; }
     if (classOverride.cpuMemoryTimeoutMs         != null) { merged.cpuMemoryTimeoutMs         = classOverride.cpuMemoryTimeoutMs;         provenance.cpuMemoryTimeoutMs         = "class"; }
     if (classOverride.temperatureTimeoutMs       != null) { merged.temperatureTimeoutMs       = classOverride.temperatureTimeoutMs;       provenance.temperatureTimeoutMs       = "class"; }
@@ -10109,7 +10128,10 @@ export async function loadMonitorPassCandidates() {
       // resolver maps every candidate to "manual" and the cadence calculation
       // silently drifts.
       discoveredByIntegration: { select: { type: true } },
-      monitorStatus: true, consecutiveFailures: true,
+      // Both counters: the fast-confirm re-probe (business rule 30) reads the
+      // run in progress, and consecutiveSuccesses is what tells a recovery
+      // being confirmed apart from a steady-up asset.
+      monitorStatus: true, consecutiveFailures: true, consecutiveSuccesses: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, cpuMemoryIntervalSec: true, temperatureIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
@@ -10137,6 +10159,69 @@ export type MonitorPassCandidate = Awaited<ReturnType<typeof loadMonitorPassCand
 
 export type MonitorWorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes";
 export type MonitorWork = { id: string; kind: MonitorWorkKind };
+/**
+ * Floor on any re-probe spacing, in seconds — the period of the probe loop's
+ * own tick (`PROBE_TICK_MS` in jobs/monitorAssets.ts; kept as a literal here
+ * because a service importing a job would pull that file's `setInterval`s into
+ * every process). A due-check that runs every 5s cannot honor a 1s cadence: the
+ * setting would silently mean 5. If that tick ever changes, change this too.
+ */
+const PROBE_LOOP_TICK_SEC = 5;
+
+/**
+ * How fast to re-probe an asset whose monitor state machine is MID-CONFIRMATION
+ * — a failure run that hasn't reached `failureThreshold` yet, or a recovery run
+ * that hasn't confirmed. Business rule 30.
+ *
+ * Returns the effective probe spacing in seconds. Three clamps, in order:
+ *
+ *   - dependency-suppressed wins outright (parent is dark — 2× the interval,
+ *     never accelerate into an outage upstream);
+ *   - the fast interval never exceeds the configured cadence (a 5s-cadence
+ *     asset is already faster than any confirmation burst);
+ *   - and it is never faster than the probe's OWN timeout or the loop tick.
+ *     A failing probe occupies its worker for up to `probeTimeoutMs`, and
+ *     `lastMonitorAt` only advances once the result flushes, so re-queueing
+ *     inside that window would run two probes at one host and double-count the
+ *     failure — declaring down after two real misses instead of three.
+ */
+export function resolveProbeIntervalSec(
+  a: {
+    dependencySuppressed: boolean;
+    consecutiveFailures?: number | null;
+    consecutiveSuccesses?: number | null;
+  },
+  eff: Pick<MonitorTierSettings, "intervalSeconds" | "failureThreshold" | "probeTimeoutMs" | "fastConfirmIntervalSec"> & {
+    responseTimePolling: string | null;
+  },
+): number {
+  if (a.dependencySuppressed && eff.responseTimePolling !== "disabled") return eff.intervalSeconds * 2;
+
+  // Agent-driven and disabled streams are excluded: their counters move on
+  // agent pushes (or not at all), so accelerating a server-side probe would
+  // spin without ever confirming anything.
+  const serverDriven =
+    eff.responseTimePolling !== null &&
+    eff.responseTimePolling !== "agent" &&
+    eff.responseTimePolling !== "disabled";
+  if (!serverDriven) return eff.intervalSeconds;
+
+  // Bounded BY CONSTRUCTION, which is why there's no window or counter to keep:
+  // each side needs at most (failureThreshold - 1) fast probes to resolve, and a
+  // probe result zeroes the opposite counter, so a steady up/down asset never
+  // qualifies. A FLAPPING asset alternates — one fast probe after each failure,
+  // then back to base cadence on the next success — so the worst case is a
+  // modest rate increase, not a hot loop.
+  const cf = a.consecutiveFailures ?? 0;
+  const cs = a.consecutiveSuccesses ?? 0;
+  const threshold = eff.failureThreshold;
+  const confirming = (cf > 0 && cf < threshold && cs === 0) || (cs > 0 && cs < threshold && cf === 0);
+  if (!confirming) return eff.intervalSeconds;
+
+  const floor = Math.max(PROBE_LOOP_TICK_SEC, Math.ceil(eff.probeTimeoutMs / 1000));
+  return Math.min(eff.intervalSeconds, Math.max(eff.fastConfirmIntervalSec, floor));
+}
+
 export interface DueMonitorWork {
   probes: MonitorWork[];
   fastFiltereds: MonitorWork[];
@@ -10175,19 +10260,35 @@ export async function computeDueWork(
       ...a,
       discoveredByIntegrationType: a.discoveredByIntegration?.type ?? null,
     });
-    // Probe cadence is just the resolved intervalSeconds — no backoff for
-    // down hosts. Down-host suppression below stops heavy cadences regardless;
-    // the cheap response-time probe keeps firing at base cadence so recovery
-    // is detected within one tick. EXCEPT when dependency suppression is
-    // active (parent is down): the probe slows to 2× the configured interval
-    // since the asset is unlikely to answer until the parent recovers, but
-    // we still poll at half-rate to catch cases where it answers via a
-    // redundant L3 path or out-of-band management. Disabled streams stay
-    // disabled regardless of suppression — there's nothing to slow down.
-    const probeIntervalSec =
-      a.dependencySuppressed && eff.responseTimePolling !== "disabled"
-        ? eff.intervalSeconds * 2
-        : eff.intervalSeconds;
+    // Probe cadence is the resolved intervalSeconds — no backoff for down
+    // hosts. Down-host suppression below stops heavy cadences regardless; the
+    // cheap response-time probe keeps firing at base cadence so recovery is
+    // detected within one tick. Two exceptions:
+    //
+    // (1) dependency suppression active (parent is down): the probe slows to
+    //     2× the configured interval since the asset is unlikely to answer
+    //     until the parent recovers, but we still poll at half-rate to catch
+    //     cases where it answers via a redundant L3 path or out-of-band
+    //     management. Disabled streams stay disabled regardless of
+    //     suppression — there's nothing to slow down. Checked FIRST: an
+    //     unreachable-because-the-parent-is-dark asset must not be hammered.
+    //
+    // (2) the state machine is MID-CONFIRMATION (fast re-probe, 2026-08): a
+    //     failure run has started but hasn't reached failureThreshold, or a
+    //     recovery run hasn't confirmed yet. Time-to-down was previously
+    //     failureThreshold × interval — 3 minutes at a 60s cadence, 15 at
+    //     300s — because a device that just stopped answering waited a full
+    //     interval for each of its remaining confirmations. This is the
+    //     SolarWinds/Nagios pattern (rapid re-poll during the warning window,
+    //     `retry_interval` on a soft state): confirmations happen in seconds,
+    //     so detection latency stops being a function of the operator's
+    //     cadence choice. See business rule 30.
+    //
+    // Both live in `resolveProbeIntervalSec` (shared with the pg-boss
+    // publisher's mirrored due-calc in jobs/monitorAssets.ts, which must stay
+    // byte-identical in behavior — the two paths' due-sets are contractually
+    // the same).
+    const probeIntervalSec = resolveProbeIntervalSec(a, eff);
     const probe      = isDue(a.lastMonitorAt,    probeIntervalSec);
     // Pragmatic stream-split: the dispatcher tick treats CPU/memory's
     // cadence as the unified "telemetry due" trigger. collectTelemetry

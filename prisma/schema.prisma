@@ -372,6 +372,10 @@ model MonitorClassOverride {
   assetType                     String // matches Asset.assetType — "firewall" | "switch" | "access_point" | "server" | "workstation" | "router" | "printer" | "other"
   intervalSeconds               Int?
   failureThreshold              Int?
+  // Fast-confirm re-probe spacing (seconds) while a failure/recovery run is
+  // being confirmed — business rule 30. null = inherit. 5..300; the resolver
+  // floors it at the probe timeout and the probe loop's own tick.
+  fastConfirmIntervalSec        Int?
   probeTimeoutMs                Int?
   // Per-request timeout (ms) for the CPU+memory collector. 1000..120000;
   // null = inherit from the tier below. Applied to FortiOS REST + SNMP

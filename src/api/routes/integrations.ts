@@ -291,6 +291,9 @@ const ClassStreamSchema = z.object({
   intervalSeconds:  z.number().int().min(1).max(86400).nullable().optional(),
   timeoutMs:        z.number().int().min(100).max(120000).nullable().optional(),
   failureThreshold: z.number().int().min(1).max(100).nullable().optional(),
+  // Fast-confirm re-probe cadence (business rule 30) — responseTime only, same
+  // as failureThreshold: they're one policy ("how many confirmations, how fast").
+  fastConfirmIntervalSec: z.number().int().min(5).max(300).nullable().optional(),
   mibId:            z.string().nullable().optional(),
 }).partial();
 

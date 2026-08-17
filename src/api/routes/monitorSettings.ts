@@ -67,6 +67,12 @@ const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "d
 const TierSettingsSchema = z.object({
   intervalSeconds:            z.number().int().min(1).max(86400),
   failureThreshold:           z.number().int().min(1).max(100),
+  // Fast-confirm re-probe cadence (business rule 30). Nullable/optional rather
+  // than required so a pre-feature client's PUT doesn't 400 — absent means
+  // "inherit the floor" (10s). The 5s minimum is the probe loop's own tick;
+  // the resolver additionally floors it at the probe timeout, so a legal-but-
+  // tighter-than-the-timeout value is raised rather than silently ignored.
+  fastConfirmIntervalSec:     z.number().int().min(5).max(300).nullable().optional(),
   probeTimeoutMs:             z.number().int().min(100).max(60000),
   // CPU/memory + temperature + system-info collectors. Range deliberately
   // wider than the response-time probe (1s..120s) — these endpoints can be
@@ -129,6 +135,7 @@ const TierSettingsIntegrationSchema = TierSettingsSchema.extend({
 const OverrideSettingsSchema = z.object({
   intervalSeconds:            z.number().int().min(1).max(86400).nullable().optional(),
   failureThreshold:           z.number().int().min(1).max(100).nullable().optional(),
+  fastConfirmIntervalSec:     z.number().int().min(5).max(300).nullable().optional(),
   probeTimeoutMs:             z.number().int().min(100).max(60000).nullable().optional(),
   cpuMemoryTimeoutMs:         z.number().int().min(1000).max(120000).nullable().optional(),
   temperatureTimeoutMs:       z.number().int().min(1000).max(120000).nullable().optional(),
