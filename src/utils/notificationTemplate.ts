@@ -73,6 +73,7 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{asset.type}", label: "Asset type", description: "Asset type (e.g. firewall)", group: "asset" },
   { token: "{asset.status}", label: "Asset status", description: "Lifecycle status (e.g. active)", group: "asset" },
   { token: "{asset.location}", label: "Asset location", description: "Location (operator-set, falling back to learned)", group: "asset" },
+  { token: "{asset.description}", label: "Asset description", description: "The device's description — operator-typed, or adopted from the device when description sync is on (empty when unset)", group: "asset" },
   { token: "{asset.manufacturer}", label: "Manufacturer", description: "Asset manufacturer", group: "asset" },
   { token: "{asset.model}", label: "Model", description: "Asset model", group: "asset" },
   { token: "{asset.serial}", label: "Serial", description: "Asset serial number", group: "asset" },
@@ -109,6 +110,14 @@ export interface AssetTemplateDetail {
   status?: string | null;
   location?: string | null;
   learnedLocation?: string | null;
+  /**
+   * The device's description. Operator-typed, or adopted from the device's own
+   * admin description when description sync is on (business rule 14) — which is
+   * where a site's "what is this box for" text usually already lives, and the
+   * reason it belongs in an alert body: "Front-office PoE switch, closet B"
+   * tells the reader what broke in a way a hostname does not.
+   */
+  description?: string | null;
   manufacturer?: string | null;
   model?: string | null;
   serialNumber?: string | null;
@@ -226,6 +235,7 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "asset.type": str(a?.assetType),
     "asset.status": str(a?.status),
     "asset.location": str(a?.location ?? a?.learnedLocation),
+    "asset.description": str(a?.description),
     "asset.manufacturer": str(a?.manufacturer),
     "asset.model": str(a?.model),
     "asset.serial": str(a?.serialNumber),

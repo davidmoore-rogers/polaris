@@ -1773,7 +1773,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - `mode: "recipients"` is explicit-only (never a default) and audits at `warning` level, because it reaches real people.
 - Dispatch EXTENDS the existing drain (`drainPendingDeliveries({notificationId})`) rather than cloning `dispatch()`, which owns retries, permanent-fail classification, dead-push pruning and the summary Event. A 20s budget bounds it so a dead SMTP host can't pin an HTTP worker.
 
-**When changing this:** any new recipient field on `notifyActionSchema` must be added to the self-mode rewrite (it lists what it KEEPS, so a new field is dropped by default — verify that stays true). If a new action type can act on the outside world, filter it here too.
+**When changing this:** any new recipient field on `notifyActionSchema` must be added to the self-mode rewrite (it lists what it KEEPS, so a new field is dropped by default — verify that stays true). If a new action type can act on the outside world, filter it here too. This file carries its OWN copy of the asset-detail select (a local `detailSelect`, deliberately not imported — the engine's `ASSET_DETAIL_SELECT` is private to its hot path), so a new asset-sourced `{asset.*}` token needs the column added in BOTH places or the test email mails a blank row for a fact the real alert prints.
 
 ---
 ## services/alertChartService.ts

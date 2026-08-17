@@ -183,7 +183,7 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
   // operator about what a real alert looks like.
   const detailSelect = {
     id: true, hostname: true, tags: true, ipAddress: true, macAddress: true, assetType: true,
-    status: true, location: true, learnedLocation: true, manufacturer: true, model: true,
+    status: true, location: true, learnedLocation: true, description: true, manufacturer: true, model: true,
     serialNumber: true, os: true, osVersion: true, department: true, assignedTo: true,
     lastSeenSwitch: true, lastSeenAp: true,
   } as const;

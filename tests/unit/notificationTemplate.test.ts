@@ -44,6 +44,7 @@ const FULL_PARTS: TemplateContextParts = {
     status: "active",
     location: "Atlanta DC",
     learnedLocation: "fgt-atl",
+    description: "Edge firewall — Atlanta DC, rack B4",
     manufacturer: "Fortinet",
     model: "FGT-100F",
     serialNumber: "FG100F123",

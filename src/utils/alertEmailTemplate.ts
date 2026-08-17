@@ -47,6 +47,7 @@ export const DEFAULT_ALERT_TEXT = [
   "Switch:     {asset.connectedSwitch}",
   "AP:         {asset.connectedAp}",
   "Location:   {asset.location}",
+  "Description: {asset.description}",
   "Event:      {event.action}",
   "Resource:   {event.resource}",
   "Triggered by: {event.actor}",
@@ -114,6 +115,10 @@ export const DEFAULT_ALERT_HTML = [
   fact("Connected AP", "{asset.connectedAp}"),
   fact("Location", "{asset.location}"),
   fact("Model", "{asset.manufacturer} {asset.model}"),
+  // Last of the asset rows, and deliberately so: it's the only free-text one,
+  // so a paragraph-long description can't push IP / switch / location out of
+  // the reader's first glance. Prunes away like the rest when unset.
+  fact("Description", "{asset.description}"),
   // Event-path rows. An event automation usually fires on something that is
   // NOT a device (an integration, a user, the host), so the asset rows above
   // prune away and these are the only facts the reader gets. They prune away

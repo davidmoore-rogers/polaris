@@ -33,6 +33,7 @@ const CTX = buildTemplateContext({
     lastSeenSwitch: "FS-248E-01/port15",
     lastSeenAp: null,
     location: "Bullitt County",
+    description: "Warehouse mezzanine AP — north bay",
     manufacturer: "Fortinet",
     model: "FAP-431F",
   },
@@ -45,6 +46,20 @@ describe("the default alert email is a template, not string building", () => {
     expect(html).toContain("10.20.30.40");
     expect(html).toContain("FS-248E-01/port15");
     expect(html).toContain("packet loss at 93.8%");
+    // The description is usually where a site already states what the device is
+    // FOR — and on a description-synced install it's the device's own text.
+    expect(html).toContain("Warehouse mezzanine AP — north bay");
+    expect(renderNotificationTemplate(DEFAULT_ALERT_TEXT, CTX)).toContain("Warehouse mezzanine AP — north bay");
+  });
+
+  it("drops the description row on a device that has none", () => {
+    // Most workstations carry no description; a blank "Description" cell reads
+    // as a broken email rather than as "not applicable".
+    const bare = buildTemplateContext({ asset: "wks-1", assetDetail: { id: "a-2", ipAddress: "10.0.0.9" } });
+    const html = pruneEmptyRows(renderNotificationTemplate(DEFAULT_ALERT_HTML, bare, { html: true, unknown: "blank" }));
+    expect(html).not.toContain("Description");
+    expect(pruneEmptyTextLines(renderNotificationTemplate(DEFAULT_ALERT_TEXT, bare, { unknown: "blank" })))
+      .not.toContain("Description:");
   });
 
   it("offers Acknowledge and Open device as real links", () => {

@@ -2048,7 +2048,7 @@ const ASSET_DETAIL_SELECT = {
   // alert email can say WHERE the device hangs for the cost of nothing.
   id: true,
   hostname: true, ipAddress: true, macAddress: true, assetType: true, status: true,
-  location: true, learnedLocation: true, manufacturer: true, model: true,
+  location: true, learnedLocation: true, description: true, manufacturer: true, model: true,
   serialNumber: true, os: true, osVersion: true, department: true, assignedTo: true,
   tags: true, dependencySuppressed: true, lastSeenSwitch: true, lastSeenAp: true,
 } as const;
