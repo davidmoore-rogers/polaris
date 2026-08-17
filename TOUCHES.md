@@ -4420,6 +4420,30 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/discoveredHostnameService.ts
+
+**What it owns:** The answer to "what hostname would this asset have if the operator pin were cleared?" — a batched read of `AssetSource.observed` run through `projectAssetFromSources`, keyed by assetId. It exists because `Asset.hostnameOverride` makes the pinned value THE `hostname` column (the assets PUT writes both, the src/db.ts guard re-asserts the pin over every projection write), so the discovered name is persisted nowhere on the Asset row.
+
+**Public API:** `projectHostnamesFromSourceRows(rows)` (pure — groups by assetId + projects each group), `getDiscoveredHostnames(assetIds)`, `getDiscoveredHostname(assetId)`
+
+**Cross-service deps:** `utils/assetProjection.ts` (`projectAssetFromSources`) + prisma.assetSource. No writes at all.
+
+**Used by:** `api/routes/assets.ts` — `enrichAssetList` (list rows, ids filtered to those carrying `hostnameOverride`) and `GET /assets/:id` (only when the row is pinned). Both surface it as the wire field `hostnameDiscovered`; `public/js/assets.js` `hostnameOriginalLineHTML()` renders it as the subdued second line in the Hostname cell and in the slide-over Hostname row.
+
+**Invariants:**
+- **Read-only and never called for unpinned rows.** The caller filters the id set, so a page with no overridden hostnames issues no extra query; otherwise it is ONE indexed `assetId IN (...)` scan of `asset_sources` per request.
+- **Deliberately uncapped id set.** The bound is how many hostnames an operator has hand-pinned (a per-device manual act), and a silent top-N would blank the sub-line on arbitrary rows — the "no silent caps" rule.
+- **Computed, not stashed.** A `hostnameDiscovered` column written by the db.ts guard was the alternative; projecting on read keeps the value LIVE (what discovery says today, not what it said when the pin was typed) and makes it retroactive for assets pinned before the feature, with no migration and no backfill job.
+- Null means "there is no original" (manually created asset, or only `inferred` phase-1 skeleton sources) and an id with no source rows is simply absent from the map. The frontend renders nothing in both cases, and also when the projection AGREES with the pin — a duplicate line says nothing.
+- Same projection function as the pin-clear path in `assets.ts` (`loadProjection().projected.hostname`), so what the sub-line shows is exactly what clearing the pin would write.
+
+**When changing this:**
+- Hostname priority rule changes in `assetProjection.ts` change what this prints — the two are the same function on purpose; don't fork it.
+- Adding a caller: pass only pinned ids (the query cost is proportional to the id set), and keep `hostnameDiscovered` as the wire field name — the frontend helper keys on it plus `hostnameOverride`.
+- `ASSET_LIST_SELECT` must keep `hostnameOverride`: it is both the render gate and the id filter.
+
+---
+
 ## services/projectionDriftService.ts
 
 **What it owns:** Best-effort fire-and-forget shadow drift detection after successful AssetSource upserts; logs disagreements only (observability, no behavior change).

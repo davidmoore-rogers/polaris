@@ -1302,6 +1302,7 @@ function renderAssetsPage() {
       '<td><button type="button" class="row-menu-trigger asset-menu" data-asset-id="' + a.id + '" ' +
         'aria-haspopup="menu" aria-expanded="false" title="Actions for this asset">' +
         '<strong>' + escapeHtml(a.hostname || "-") + '</strong></button>' +
+        hostnameOriginalLineHTML(a) +
         (a.assetTag ? '<br><span class="asset-tag-label">' + escapeHtml(a.assetTag) + '</span>' : '') +
       '</td>' +
       '<td class="mono">' + ipCellHTML(a) + '</td>' +
@@ -2894,6 +2895,22 @@ function assetMonitorBadge(asset) {
   // unknown / null / unrecognized → Pending. Same blue treatment as
   // Recovering (different label).
   return '<span class="badge badge-monitor-recovering' + clickCls + '"' + title + toggleAttrs + '>Pending</span>';
+}
+
+// Second line under a PINNED hostname: what discovery still calls the device.
+// `hostnameOverride` makes the operator's value the effective hostname, so the
+// discovered name lives nowhere on the asset row — the list endpoint projects it
+// from the AssetSource blobs as `hostnameDiscovered` for pinned rows only. Empty
+// when nothing is pinned, when no source has a hostname opinion (a manually
+// created asset has no original), or when discovery happens to agree with the
+// pin — a duplicate line would say nothing.
+function hostnameOriginalLineHTML(asset) {
+  if (!asset.hostnameOverride) return "";
+  var orig = asset.hostnameDiscovered;
+  if (!orig || orig === asset.hostname) return "";
+  return '<br><span class="hostname-original" title="Hostname manually overridden. ' +
+    'Discovery reports this device as &quot;' + escapeHtml(orig) + '&quot; — clear the Hostname ' +
+    'field in Edit to resume the discovered value.">' + escapeHtml(orig) + '</span>';
 }
 
 function ipCellHTML(asset) {
@@ -4736,7 +4753,7 @@ function _assetGeneralTabHTML(a) {
       (a.ipAddress && !a.hostname
         ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value">- <button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\')" title="Reverse DNS lookup (PTR record)">PTR Lookup</button></span></div>'
         : (a.hostnameOverride
-          ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value"><span class="copy-cell" title="Click to copy" data-copy="' + escapeHtml(a.hostname || "") + '">' + escapeHtml(a.hostname || "-") + '</span><span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#6b728018;color:#9ca3af;border:1px solid #6b728030;margin-left:6px" title="Hostname manually overridden — discovery will not change it. Clear the Hostname field in Edit to resume the discovered value.">overridden</span></span></div>'
+          ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value"><span class="copy-cell" title="Click to copy" data-copy="' + escapeHtml(a.hostname || "") + '">' + escapeHtml(a.hostname || "-") + '</span><span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#6b728018;color:#9ca3af;border:1px solid #6b728030;margin-left:6px" title="Hostname manually overridden — discovery will not change it. Clear the Hostname field in Edit to resume the discovered value.">overridden</span>' + hostnameOriginalLineHTML(a) + '</span></div>'
           : viewRow("Hostname", a.hostname, false, false, true))) +
       viewRow("DNS Name", a.dnsName, false, false, true) +
       ipViewRow(a) +

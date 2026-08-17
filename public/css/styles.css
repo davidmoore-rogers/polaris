@@ -2790,6 +2790,15 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   color: var(--color-text-tertiary);
   letter-spacing: 0.5px;
 }
+/* Discovery's hostname, printed under an operator-pinned one (assets list
+   Hostname cell + the asset slide-over's Hostname row). Same subdued treatment
+   as .asset-tag-label — the pinned name is the row's identity, this is the
+   value that returns if the pin is cleared. */
+.hostname-original {
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+  cursor: help;
+}
 .asset-view-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

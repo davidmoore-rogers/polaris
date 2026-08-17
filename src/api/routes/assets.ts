@@ -32,6 +32,7 @@ import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } 
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { deriveAssetSourceState } from "../../utils/assetSourceState.js";
 import { resolvePendingIpOverrideConflicts } from "../../services/ipOverrideService.js";
+import { getDiscoveredHostnames, getDiscoveredHostname } from "../../services/discoveredHostnameService.js";
 import { shapeMacRows, MAC_ROW_SELECT } from "../../utils/macAddresses.js";
 import { csvParam } from "../../utils/text.js";
 import { buildPrismaTextFilter, TEXT_FILTER_OPS } from "../../utils/prismaTextFilter.js";
@@ -425,6 +426,9 @@ function monitorClause(v: string): Record<string, unknown> | null {
 const ASSET_LIST_SELECT = {
   id: true,
   hostname: true,
+  // Operator hostname pin. The list needs it to mark the cell as overridden and
+  // to know which rows to look up a discovered hostname for (enrichAssetList).
+  hostnameOverride: true,
   dnsName: true,
   assetTag: true,
   ipAddress: true,
@@ -670,6 +674,17 @@ async function enrichAssetList(
   assets: Array<{ ipAddress: string | null; associatedIpRows: unknown; macAddressRows: unknown; fortinetTopology?: unknown } & Record<string, unknown>>,
   ipCtx: Map<string, IpContext>,
 ) {
+  // `hostnameDiscovered` — what discovery says the hostname is, for the rows
+  // where an operator pin is currently overriding it (the list renders it as a
+  // second line under the pinned name). Only pinned rows are looked up, so a
+  // page with no overrides pays no query at all.
+  const overriddenIds = assets
+    .filter((a) => typeof a.hostnameOverride === "string" && a.hostnameOverride)
+    .map((a) => a.id as string);
+  const discoveredHostnames = overriddenIds.length
+    ? await getDiscoveredHostnames(overriddenIds)
+    : new Map<string, string | null>();
+
   return Promise.all(assets.map(async ({
     associatedIpRows, macAddressRows, fortinetTopology,
     // Strip the raw resolver inputs from the wire shape — only the reduced
@@ -681,6 +696,7 @@ async function enrichAssetList(
     ...a,
     associatedIps: shapeAssociatedIps(associatedIpRows as never),
     macAddresses: shapeMacRows(macAddressRows as never),
+    hostnameDiscovered: discoveredHostnames.get(a.id as string) ?? null,
     ipContext: a.ipAddress ? (ipCtx.get(a.ipAddress) || null) : null,
     ha: shapeHaInfo(fortinetTopology),
     monitoringMethods: await computeMonitoringMethods({
@@ -993,10 +1009,16 @@ router.get("/:id", requirePermission("assets", "read"), async (req, res, next) =
     }
     const { config: _omit, ...integrationLite } = (asset.discoveredByIntegration as { config?: unknown } | null) || {};
     const { associatedIpRows, macAddressRows, ...assetRest } = asset;
+    // Same second line as the list's hostname cell: what discovery says, for a
+    // row whose hostname is currently pinned. Only queried when pinned.
+    const hostnameDiscovered = asset.hostnameOverride
+      ? await getDiscoveredHostname(asset.id)
+      : null;
     const safeAsset = {
       ...assetRest,
       associatedIps: shapeAssociatedIps(associatedIpRows),
       macAddresses:  shapeMacRows(macAddressRows),
+      hostnameDiscovered,
       discoveredByIntegration: asset.discoveredByIntegration
         ? { ...integrationLite, useProxy: integrationUseProxy, syncDescriptions: integrationSyncDescriptions }
         : null,
