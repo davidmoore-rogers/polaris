@@ -857,9 +857,12 @@ export async function getHighestTemperature(limit: number | null = 100, assetIds
  *
  * Assets at 100% loss (zero successful probes in the window) are excluded —
  * that's a hard-down node, already surfaced by the Down Nodes widget, and
- * listing it here as "packet loss" is redundant noise. The HAVING requires
- * at least one failure AND at least one success, so only genuinely lossy
- * (intermittent) assets qualify.
+ * listing it here as "packet loss" is redundant noise. The shared query keeps
+ * only assets with at least one success and the HAVING adds at least one
+ * failure, so only genuinely lossy (intermittent) assets qualify. Loss is
+ * counted from each asset's first successful probe in the window, so a node
+ * recovering from an outage drops off this list on its next clean probe rather
+ * than topping it for a full window (probeLossQuery's header explains why).
  */
 export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 15, assetIds: string[] | null = null): Promise<TopNRow[]> {
   const rows = await queryProbeLossRatios({ sinceMinutes, assetIds, onlyLossy: true, limit });

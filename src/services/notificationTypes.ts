@@ -1832,6 +1832,16 @@ export function isAssetScopedTrigger(trigger: Trigger): boolean {
 
 // ─── Display metadata (builder UI only; engine validates via the Zod schemas) ──
 // Human label + unit per metric, for both asset_metric and host_metric.
+/**
+ * Metrics that are a RATIO OVER A WINDOW rather than a reading with an optional
+ * aggregation — the window is the measurement itself. The builder uses this to
+ * relabel its one time field as "History", hide the (ignored) aggregation
+ * control, and skip per-severity-tier hold clocks; the engine uses the window
+ * exactly instead of applying its `latest`-sample lookback floor. Exposed on
+ * /automations/schema as `windowedRatioMetrics`.
+ */
+export const WINDOWED_RATIO_METRICS = ["probeLossPct"] as const;
+
 export const METRIC_META: Record<string, { label: string; unit: string }> = {
   // asset_metric
   cpuPct: { label: "CPU utilization", unit: "%" },
@@ -1844,8 +1854,10 @@ export const METRIC_META: Record<string, { label: string; unit: string }> = {
   // the same computation as the dashboard Packet Loss widget — works for ANY
   // monitored asset (switch/AP/server), not just SD-WAN. Windowed ratio: the
   // window is the measurement interval, so aggregation doesn't apply. Alert
-  // with ">", e.g. > 25%. Fully-down assets (no successful probe) produce no
-  // reading — they're the asset-down condition, not packet loss.
+  // with ">", e.g. > 25%. This metric reports ONLY on a device that is
+  // currently answering (monitorStatus up/warning), and only from its first
+  // successful probe inside the window — an outage is the asset-down condition,
+  // not packet loss, so one outage raises one alert (business rule 29).
   probeLossPct: { label: "Packet loss (probe)", unit: "%" },
   hwSensorValue: { label: "Hardware sensor value", unit: "(sensor unit)" },
   // The device's OWN alarm bit for the sensor, not a threshold Polaris
@@ -1977,6 +1989,10 @@ export function buildSchemaCatalog() {
     // instead of a threshold box and hides the numeric-only surfaces (severity
     // bands, hysteresis, unit hints).
     booleanMetrics: BOOLEAN_METRICS,
+    // Metrics that ARE a ratio over their window (packet loss), so the builder
+    // labels its one time field "History", drops the meaningless aggregation
+    // control, and gives severity tiers no hold clock of their own.
+    windowedRatioMetrics: WINDOWED_RATIO_METRICS,
     // Per-metric state names, so a boolean metric with no probe behind it still
     // renders "is Alarm" rather than "is true".
     booleanMetricLabels: BOOLEAN_METRIC_LABELS,

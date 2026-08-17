@@ -235,6 +235,13 @@ function makeAutomationSentences(s) {
     stateProbeId: "for probe {value}", stateRowPattern: "on rows matching {value}",
   }, s.dimensionPhrases || {});
 
+  // Windowed-ratio metrics: the window is the measurement, mirrored from the
+  // server's `windowedRatioMetrics` with the same built-in fallback the other
+  // catalogs use so the factory reads correctly against a partial payload.
+  var RATIO_WINDOW_DEFAULT_SEC = 900;
+  function isWindowedRatio(m) {
+    return (s.windowedRatioMetrics || ["probeLossPct"]).indexOf(m) !== -1;
+  }
   function humanDuration(sec) {
     if (!sec || sec <= 0) return "";
     if (sec % 3600 === 0) { var h = sec / 3600; return h + (h === 1 ? " hour" : " hours"); }
@@ -248,8 +255,13 @@ function makeAutomationSentences(s) {
     }
     if (isBooleanMetric(leaf.metric)) return stateLeafClause(leaf);
     var unit = leafUnit(leaf.metric, leaf.dimensionFilter); unit = unit ? " " + unit : "";
-    var agg = leaf.aggregation && leaf.aggregation !== "latest" && leaf.windowSec
-      ? " (" + (AGG_PHRASE[leaf.aggregation] || leaf.aggregation) + " " + humanDuration(leaf.windowSec) + ")" : "";
+    // A windowed ratio IS its window, so it says so plainly instead of borrowing
+    // an aggregation phrase it doesn't have ("avg over 15 minutes" would be a
+    // second average on top of a percentage).
+    var agg = isWindowedRatio(leaf.metric)
+      ? " (over the last " + (humanDuration(leaf.windowSec) || humanDuration(RATIO_WINDOW_DEFAULT_SEC)) + " of probe history, from the first successful probe)"
+      : leaf.aggregation && leaf.aggregation !== "latest" && leaf.windowSec
+        ? " (" + (AGG_PHRASE[leaf.aggregation] || leaf.aggregation) + " " + humanDuration(leaf.windowSec) + ")" : "";
     var thr = leaf.threshold == null || isNaN(leaf.threshold) ? "…" : leaf.threshold;
     var out = (leaf.type === "host_metric" ? "the Polaris host's " : "") + metricLabel(leaf.metric) + agg + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + thr + unit;
     var df = leaf.dimensionFilter || {};
@@ -425,6 +437,12 @@ function makeAutomationSentences(s) {
       (leaf.type === "host_metric" ? "host " + metricLabel(leaf.metric) : metricLabel(leaf.metric));
     var agg = leaf.aggregation || "latest";
     var fn = (flag ? FORMULA_STATE_AGG[agg] : FORMULA_AGG[agg]) || agg;
+    // `loss(probes, 15m since first ok)` — the window is inside the term because
+    // it's the measurement, and there is never a hold clause outside it.
+    if (isWindowedRatio(leaf.metric)) {
+      return "loss(probes" + formulaDims(leaf, false) + ", " +
+        compactDuration(leaf.windowSec > 0 ? leaf.windowSec : RATIO_WINDOW_DEFAULT_SEC) + " since first ok)";
+    }
     // `latest` reads one sample, so it takes no window argument — that absence is
     // the whole point of the view. Every other aggregation always prints one,
     // falling back to the floor when the trigger carries no window at all (which
@@ -1914,6 +1932,7 @@ async function openAutomationWizard(existing, opts) {
         '<button type="button" class="btn btn-sm btn-danger scr-remove" title="Remove condition">&times;</button>' +
       '</div>';
     var line2 = "";
+    var ratio = !isState && !!leaf && isWindowedRatioMetric(leaf.metric);
     if (!isState) {
       var dims = kind === "host" ? [] : ((s.metricDimensions && s.metricDimensions[leaf.metric]) || []);
       var df = leaf.dimensionFilter || {};
@@ -1928,6 +1947,13 @@ async function openAutomationWizard(existing, opts) {
             return v === "latest" ? "current state" : v === "max" ? "at any point in the period" : "throughout the period";
           }) + '</select>'
         : '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + opt(s.aggregations, leaf.aggregation || "latest") + '</select>';
+      // A windowed ratio has nothing to aggregate — it's already a percentage
+      // over the window. The select stays in the DOM (collectors read .tgl-agg)
+      // but hidden, replaced by a phrase naming what the window actually does.
+      if (ratio) {
+        aggControl = '<select class="tgl-agg" data-ratio="1" style="display:none">' + opt(s.aggregations, "latest") + '</select>' +
+          '<span style="font-size:0.8rem">over the History window below, counting from the first successful probe</span>';
+      }
       // No per-condition window input: an aggregation's measurement period IS
       // the "Sustained for (minutes)" field below the tree (see tgStampWindows).
       // Two time boxes meaning almost the same thing is what this removes.
@@ -1938,7 +1964,7 @@ async function openAutomationWizard(existing, opts) {
           (dims.some(function (d) { return DIM_PICKERS[d]; }) ? '<span class="tgl-dim-note" style="flex-basis:100%;font-size:0.78rem"></span>' : "") +
         '</div>';
     }
-    return '<div class="scr-row" style="margin:4px 0;padding:4px;border:1px solid var(--color-border);border-radius:6px">' + line1 + line2 + '</div>';
+    return '<div class="scr-row"' + (ratio ? ' data-ratio="1"' : "") + ' style="margin:4px 0;padding:4px;border:1px solid var(--color-border);border-radius:6px">' + line1 + line2 + '</div>';
   }
   function tgGroupHtml(group, depth, kind) {
     group = group || { op: "and", children: [] };
@@ -2076,11 +2102,17 @@ async function openAutomationWizard(existing, opts) {
   // for the base tier (moved inside the base condition group in multi mode by
   // injectBaseSeverity) and for every added tier.
   var DUR_PLACEHOLDER_OPTIONAL = "0 = fire as soon as the value reaches this level";
+  // Default History for a windowed-ratio trigger, and the floor the engine
+  // enforces on it. Mirrors PROBE_LOSS_DEFAULT/MIN_WINDOW_SEC server-side.
+  var RATIO_WINDOW_DEFAULT_MIN = 15;
+  var RATIO_WINDOW_MIN_MIN = 5;
+  var RATIO_WINDOW_MAX_MIN = 1440;
   function durationFieldHtml(attr, mins) {
     // The asterisk is hidden until an aggregated condition makes the field
     // mandatory (syncDurationRequirement) — avg / median / min / max have no
     // period to measure over without it.
-    return '<div class="form-group aw-dur" style="margin:0.5rem 0 0">' +
+    var hidden = String(attr || "").indexOf('data-ratio-hidden="1"') !== -1;
+    return '<div class="form-group aw-dur" style="margin:0.5rem 0 0' + (hidden ? ";display:none" : "") + '">' +
       '<label style="font-size:0.8rem">Sustained for (minutes)<span class="aw-dur-req" style="display:none;color:var(--color-danger);font-weight:700;margin-left:2px">*</span></label>' +
       '<input type="number" ' + attr + ' min="0" value="' + mins + '" placeholder="' + DUR_PLACEHOLDER_OPTIONAL + '">' +
       '<p class="aw-dur-note" style="display:none;margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>';
@@ -2103,15 +2135,36 @@ async function openAutomationWizard(existing, opts) {
     var star = wrap.querySelector(".aw-dur-req");
     var note = wrap.querySelector(".aw-dur-note");
     var input = wrap.querySelector("#tf-duration-min");
-    if (star) star.style.display = aggregated ? "" : "none";
+    // A windowed-ratio condition (packet loss) relabels the field outright: it
+    // is HISTORY, not a hold clock, and calling it "sustained for" is what let a
+    // 60 here mean "measured over 15 minutes, held for 60".
+    var ratio = !!(root && root.querySelector('.scr-row[data-ratio="1"]'));
+    var label = wrap.querySelector("label");
+    if (label) {
+      label.innerHTML = (ratio ? "History (minutes)" : "Sustained for (minutes)") +
+        '<span class="aw-dur-req" style="' + (aggregated || ratio ? "" : "display:none;") + 'color:var(--color-danger);font-weight:700;margin-left:2px">*</span>';
+      star = label.querySelector(".aw-dur-req");
+    }
+    if (star) star.style.display = aggregated || ratio ? "" : "none";
     if (note) {
-      note.style.display = aggregated ? "" : "none";
-      note.textContent = aggregated ? "Required — this is the period the value is measured over." : "";
+      note.style.display = aggregated || ratio ? "" : "none";
+      note.textContent = ratio
+        ? "Required — loss is failed probes / total probes over this period, counting from the device's first successful probe in it. " +
+          "A short window is more sensitive but coarser: at a 60-second poll interval " + RATIO_WINDOW_MIN_MIN +
+          " minutes is about " + RATIO_WINDOW_MIN_MIN + " probes, so loss can only read in steps of " +
+          Math.round(100 / RATIO_WINDOW_MIN_MIN) + "%."
+        : aggregated ? "Required — this is the period the value is measured over." : "";
     }
     if (input) {
-      input.placeholder = aggregated ? "e.g. 5" : DUR_PLACEHOLDER_OPTIONAL;
-      if (aggregated) input.setAttribute("required", "required");
+      input.placeholder = ratio ? "e.g. " + RATIO_WINDOW_DEFAULT_MIN : aggregated ? "e.g. 5" : DUR_PLACEHOLDER_OPTIONAL;
+      input.setAttribute("min", ratio ? String(RATIO_WINDOW_MIN_MIN) : "0");
+      if (ratio) input.setAttribute("max", String(RATIO_WINDOW_MAX_MIN));
+      else input.removeAttribute("max");
+      if (aggregated || ratio) input.setAttribute("required", "required");
       else input.removeAttribute("required");
+      // An empty field on a fresh loss automation lands on the default rather
+      // than 0, which would save a window the engine has to invent.
+      if (ratio && (input.value === "" || Number(input.value) === 0)) input.value = String(RATIO_WINDOW_DEFAULT_MIN);
     }
   }
   function step3Html() {
@@ -2233,9 +2286,32 @@ async function openAutomationWizard(existing, opts) {
     if (baseSel) draft.severity = baseSel.value;
     collectBands(panel); // severity tiers live with the trigger (step 3)
   }
+  /**
+   * A WINDOWED-RATIO metric (today just probeLossPct) is a percentage computed
+   * over a period — failed probes / total probes — so the window isn't a choice
+   * layered on top of a reading, it IS the reading. Consequences here: the
+   * aggregation control is meaningless (the engine ignores it), the one time
+   * field means the measurement window and is mandatory, and severity tiers
+   * share that window like any other sampling setting (rule 19).
+   */
+  function isWindowedRatioMetric(m) {
+    return (s.windowedRatioMetrics || ["probeLossPct"]).indexOf(m) !== -1;
+  }
+  function tgLeafWindowedRatio(leaf) {
+    return !!(leaf && leaf.type !== "asset_state" && isWindowedRatioMetric(leaf.metric));
+  }
+  /** Same question of a whole trigger, which may be a single metric OR the
+   *  1-leaf composite the wizard builds before the server collapses it. */
+  function triggerIsWindowedRatio(tr) {
+    if (!tr) return false;
+    if (tr.type === "composite") return (tgLeaves(tr) || []).some(tgLeafWindowedRatio);
+    return tgLeafWindowedRatio(tr);
+  }
   /** True when this leaf measures over a period rather than reading the latest
-   *  sample — the case that needs a window, and so needs the duration field. */
+   *  sample — the case that needs a window, and so needs the duration field.
+   *  A windowed-ratio leaf always counts, whatever its (ignored) aggregation. */
   function tgLeafAggregated(leaf) {
+    if (tgLeafWindowedRatio(leaf)) return true;
     return !!(leaf && leaf.type !== "asset_state" && leaf.aggregation && leaf.aggregation !== "latest");
   }
   /**
@@ -2274,6 +2350,16 @@ async function openAutomationWizard(existing, opts) {
     // An aggregation with no window has nothing to average / scan over, and the
     // engine would fall back to its own default lookback — so require the period
     // rather than quietly measuring something the operator never chose.
+    if (tgLeafWindowedRatio(leaf)) {
+      var mins = Math.round((Number(leaf.windowSec) || 0) / 60);
+      if (!(mins >= RATIO_WINDOW_MIN_MIN)) {
+        return label + ": packet loss is measured over a period — set History to at least " + RATIO_WINDOW_MIN_MIN + " minutes.";
+      }
+      if (mins > RATIO_WINDOW_MAX_MIN) {
+        return label + ": History can be at most " + RATIO_WINDOW_MAX_MIN + " minutes (24 hours).";
+      }
+      return null;
+    }
     if (tgLeafAggregated(leaf) && !(Number(leaf.windowSec) > 0)) {
       return label + ': "' + leaf.aggregation + '" measures over a period — set "Sustained for (minutes)" to 1 or more.';
     }
@@ -3021,6 +3107,15 @@ async function openAutomationWizard(existing, opts) {
     var base = tgCollectLeaf(rows[0], kind);
     if (base.type === "asset_state") return;
     var sig = bandSampleSig(base);
+    // Packet loss (any windowed ratio): tiers share the base's History window, so
+    // their own hold boxes hide — and switching BACK to a regular metric brings
+    // them straight back, which is why they're hidden rather than omitted.
+    var ratio = tgLeafWindowedRatio(base);
+    host.querySelectorAll(":scope > .aw-band .band-duration").forEach(function (el) {
+      var wrap = el.parentNode;
+      while (wrap && !(wrap.classList && wrap.classList.contains("aw-dur"))) wrap = wrap.parentNode;
+      if (wrap) wrap.style.display = ratio ? "none" : "";
+    });
     host.querySelectorAll(":scope > .aw-band").forEach(function (row) {
       if (row._sampleSig === sig) return;
       var cur = row.querySelector(".band-cond .scr-row");
@@ -3072,7 +3167,12 @@ async function openAutomationWizard(existing, opts) {
       '</div>' +
       '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
       '<div class="band-cond scg-children"></div>' +
-      durationFieldHtml('class="band-duration"', bandDurMin) +
+      // Severity tiers share the trigger's sampling (rule 19), and for a windowed
+      // ratio that includes the History window — a per-tier hold on top of it
+      // would be the same two-knobs confusion the base field just shed. Rendered
+      // but HIDDEN for those; syncBandsToBase toggles it as the metric changes,
+      // which an omitted element couldn't come back from.
+      durationFieldHtml('class="band-duration"' + (triggerIsWindowedRatio(draft.trigger) ? ' data-ratio-hidden="1"' : ""), bandDurMin) +
       '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>';
     host.appendChild(row);
     renderBandCond(row, panel, tierLeaf, kind);
@@ -4340,7 +4440,13 @@ async function openAutomationWizard(existing, opts) {
       // Per-tier sustained duration — the value must hold in THIS tier for this
       // long before the alert takes its severity (0 = as soon as it reaches it).
       var dEl = row.querySelector(".band-duration");
-      var dMins = dEl && dEl.value !== "" ? Number(dEl.value) : 0;
+      // Hidden for a windowed-ratio trigger (tiers share its History window), and
+      // a control the operator can't see must not contribute a value.
+      var dHidden = false;
+      var dWrap = dEl && dEl.parentNode;
+      while (dWrap && !(dWrap.classList && dWrap.classList.contains("aw-dur"))) dWrap = dWrap.parentNode;
+      if (dWrap && dWrap.style && dWrap.style.display === "none") dHidden = true;
+      var dMins = dEl && !dHidden && dEl.value !== "" ? Number(dEl.value) : 0;
       var band = {
         threshold: leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : null,
         severity: row.querySelector(".band-severity").value,

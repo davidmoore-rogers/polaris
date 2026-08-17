@@ -89,6 +89,13 @@ import {
 const LAST_EVENT_SETTING_KEY = "notificationEngine.lastEventCursor";
 const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000; // window to find the "latest" sample
 
+// probeLossPct is a windowed RATIO, so its window is the measurement rather than
+// a lookback (business rule 29). Default matches the wizard's History default;
+// the minimum keeps a percentage from being computed off one or two probes,
+// where it could only ever read 0% or 100%.
+const PROBE_LOSS_DEFAULT_WINDOW_SEC = 15 * 60;
+const PROBE_LOSS_MIN_WINDOW_SEC = 5 * 60;
+
 // ─── A rule as loaded from the DB (normalized to shape v2) ──────────────────
 interface DbRule {
   id: string;
@@ -261,6 +268,46 @@ export function isSuppressedForNotifications(a: { status: string; dependencySupp
   return String(a.status) === "maintenance" || a.dependencySuppressed === true;
 }
 
+/**
+ * Is the device currently ANSWERING us? — the gate on packet-loss alerting
+ * (business rule 29). Reads the five-state monitor machine, which is driven by
+ * consecutiveFailures/Successes against `failureThreshold` (default 3):
+ *
+ *   up         → answering. Alerts.
+ *   warning    → answering, with 1..threshold-1 failures behind it. ALERTS, and
+ *                deliberately so: intermittent loss on a device that still
+ *                replies IS the thing packet loss is meant to catch, and it is
+ *                the state a lossy-but-alive device sits in (an alternating
+ *                pass/fail device never reaches `down`). Gating on `up` alone
+ *                would silence the feature's whole reason for existing.
+ *   down       → not answering. The outage is asset-down's alert, not a second
+ *                one about the probes it swallowed.
+ *   recovering → came back but hasn't held for threshold successes; asset-down
+ *                is still live, so this is the tail of that same outage.
+ *   unknown    → never probed (UI "Pending") — nothing measured yet.
+ *
+ * A null status is treated as not answering: it means the same thing `unknown`
+ * does on a row written before the column existed.
+ */
+export function assetIsAnsweringProbes(a: { monitorStatus: string | null }): boolean {
+  return a.monitorStatus === "up" || a.monitorStatus === "warning";
+}
+
+/**
+ * Metrics whose readings only mean something while the device answers, so a
+ * non-answering device produces none. Just `probeLossPct` today: its INPUT is
+ * failed probes, which is what makes it the one metric that can fire about an
+ * outage the asset-down alert already owns. Every other metric is derived from
+ * SUCCESSFUL polls, so a dark device simply stops producing readings and its
+ * alerts freeze rather than newly firing.
+ */
+const ANSWERING_ONLY_METRICS = new Set<string>(["probeLossPct"]);
+
+/** Does this trigger's metric need an answering device (see above)? */
+function triggerNeedsAnsweringDevice(trigger: Trigger): boolean {
+  return trigger.type === "asset_metric" && ANSWERING_ONLY_METRICS.has(trigger.metric);
+}
+
 function regionSnapshot(tags: string[]): string[] {
   return tags
     .filter((t) => t.toLowerCase().startsWith(REGION_TAG_PREFIX))
@@ -342,12 +389,35 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
       // One grouped aggregate (1 row per asset), not a fetch-all — stays cheap
       // at 2000 assets on the 60s engine tick. The window is windowSec,
       // floored at DEFAULT_LOOKBACK (15m) — the widget's window.
-      const sinceMinutes = Math.max(trigger.windowSec, DEFAULT_LOOKBACK_MS / 1000) / 60;
-      const rows = await queryProbeLossRatios({ sinceMinutes, assetIds: ids });
+      // ONLY devices that are currently answering (up / warning) produce a loss
+      // reading — a down or recovering device's failures are its outage, and
+      // asset-down alerts on that (business rule 29, assetIsAnsweringProbes).
+      // Filtered here rather than at the caller so the composite-trigger path
+      // gets the same gate from the same place; evaluateThresholdRule
+      // separately clears any live loss alert on the assets this drops.
+      const answering = assets.filter(assetIsAnsweringProbes).map((a) => a.id);
+      if (answering.length === 0) return [];
+      // `windowSec` IS the measurement period here (the wizard calls it History),
+      // so the 15-minute DEFAULT_LOOKBACK floor every other metric needs — to be
+      // sure a `latest` reading finds a recent sample — must NOT apply: it would
+      // silently measure a 5-minute History over 15. Use the configured window
+      // exactly, floored only at PROBE_LOSS_MIN_WINDOW_SEC so a ratio always has
+      // a few probes behind it, and defaulted when the trigger carries none
+      // (pre-History rules, where the minutes went to forDurationSec instead,
+      // and hand-written ones).
+      const lossWindowSec = trigger.windowSec > 0
+        ? Math.max(trigger.windowSec, PROBE_LOSS_MIN_WINDOW_SEC)
+        : PROBE_LOSS_DEFAULT_WINDOW_SEC;
+      const sinceMinutes = lossWindowSec / 60;
+      const rows = await queryProbeLossRatios({ sinceMinutes, assetIds: answering });
       // Emit the true ratio for every asset with at least one successful probe,
       // INCLUDING 0% (no failures) so an auto-clear/hysteresis rule recovers.
-      // Fully-down assets (0 successes) are dropped by the HAVING — asset-down
-      // owns them, matching the widget.
+      // Fully-down assets (0 successes) are dropped by the shared query —
+      // asset-down owns them, matching the widget. The ratio is measured from
+      // that asset's FIRST SUCCESSFUL probe in the window rather than the
+      // window's edge (see probeLossQuery's header), so a device recovering
+      // from an outage reads 0% on its first clean probe instead of reading the
+      // outage back as loss for a whole window's worth of ticks.
       return rows.map((r): Reading | null => {
         const a = index.get(r.assetId);
         if (!a) return null;
@@ -858,6 +928,9 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
   const suppressedIds = new Set<string>();
   // Assets carved out this tick by a more-specific same-signature automation.
   const shadowedIds = new Set<string>();
+  // Assets whose device isn't answering, on a rule whose metric needs it to be
+  // (packet loss — business rule 29). Handed off to asset-down alerting.
+  const notAnsweringIds = new Set<string>();
   // Every asset the scope resolved this tick (incl. suppressed/shadowed);
   // null for host rules, which have no asset scope to leave.
   let scopeIds: Set<string> | null = null;
@@ -873,10 +946,12 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     const sig = shadowIndex ? triggerSignature(rule.trigger) : null;
     const rank = sig ? scopeRank(rule.scope) : 0;
     const shadowable = !!(sig && shadowIndex && (shadowIndex.maxRankBySig.get(sig) ?? 0) > rank);
+    const needsAnswering = triggerNeedsAnsweringDevice(trigger);
     const active: ScopeAssetRow[] = [];
     for (const a of assets) {
       if (isSuppressedForNotifications(a)) suppressedIds.add(a.id);
       else if (shadowable && isAssetShadowed(shadowIndex!, rule, sig!, rank, a)) shadowedIds.add(a.id);
+      else if (needsAnswering && !assetIsAnsweringProbes(a)) notAnsweringIds.add(a.id);
       else active.push(a);
     }
     readings = trigger.type === "asset_metric"
@@ -1041,12 +1116,46 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     }
   }
 
+  // Devices that stopped answering, on a rule that needs them to (packet loss):
+  // a handoff to asset-down alerting, so — like the carve-out and unlike
+  // maintenance — the live alert CLEARS rather than freezing. Freezing is what
+  // used to leave a packet-loss alert sitting next to the asset-down alert for
+  // the whole outage, which is the duplicate operators were seeing.
+  //
+  // Deliberately no reset actions (matching the carve-out): the alert isn't
+  // recovering, and mailing "packet loss resolved" about a device that just went
+  // dark would be worse than saying nothing. The Event is the audit trail.
+  for (const st of states) {
+    if (!st.assetId || !notAnsweringIds.has(st.assetId)) continue;
+    if (st.state === "firing") {
+      await clearActiveNotification(st, "system:device-down");
+      await prisma.notificationRuleState.update({
+        where: { id: st.id },
+        data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull },
+      });
+      await logEvent({
+        action: "notification.superseded",
+        resourceType: "notification",
+        resourceId: st.notificationId ?? undefined,
+        resourceName: rule.name,
+        actor: "system:notification-engine",
+        message: `Cleared: ${rule.name} — the device is no longer answering, so its outage is the asset-down alert`,
+        details: { ruleId: rule.id, assetId: st.assetId, reason: "device-down" },
+      }).catch(() => {});
+    } else if (st.state === "pending") {
+      await prisma.notificationRuleState.update({
+        where: { id: st.id },
+        data: { state: "clear", conditionMetSince: null, bandMetSince: Prisma.DbNull },
+      });
+    }
+  }
+
   // Vanished states: assets that left the scope or dimensions that stopped
   // being reported — the readings loop never sees them, so clear them here
   // (suppressed assets stay frozen, in-scope assets with no readings at all
   // stay frozen; see clearVanishedStates).
   if (scopeIds) {
-    const handled = new Set([...suppressedIds, ...shadowedIds]);
+    const handled = new Set([...suppressedIds, ...shadowedIds, ...notAnsweringIds]);
     const assetsWithReadings = new Set(readings.map((r) => r.assetId).filter(Boolean));
     await clearVanishedStates(rule, states, seen, scopeIds, handled, assetsWithReadings);
   }

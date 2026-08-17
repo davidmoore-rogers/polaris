@@ -434,11 +434,13 @@ describe("automation wizard DOM render", () => {
     const win = g.window as InstanceType<typeof Window>;
     const rule = {
       id: "r-sustain",
-      name: "Packet loss",
+      // cpuPct, not packet loss: per-tier sustain is the thing under test, and a
+      // windowed-ratio metric deliberately has no per-tier hold (business rule 29).
+      name: "High CPU",
       description: null,
       enabled: true,
       severity: "warning",
-      trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 900, operator: ">", threshold: 5, forDurationSec: 1800 },
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 1800 },
       scope: { allAssets: true },
       reset: { mode: "auto" },
       cooldownSec: null,
@@ -724,11 +726,13 @@ describe("automation wizard DOM render", () => {
     savedPayloads.length = 0;
     await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
       id: "r-sustain-only",
-      name: "Loss",
+      // Again cpuPct: `latest` keeps its sustain clock, but packet loss is always
+      // a window and is covered by its own tests below.
+      name: "High CPU",
       description: null,
       enabled: true,
       severity: "warning",
-      trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 600 },
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 600 },
       scope: { allAssets: true },
       reset: { mode: "auto" },
       cooldownSec: null,
@@ -841,5 +845,142 @@ describe("automation wizard DOM render", () => {
     type.dispatchEvent(new win.Event("change", { bubbles: true }));
     await new Promise((r) => setTimeout(r, 20));
     expect((doc.querySelector("#aw-trigger-formula") as unknown as { style: { display: string } }).style.display).toBe("none");
+  });
+  // -- Packet loss: History, not "sustained for" (business rule 29) -----------
+  // probeLossPct is a ratio over its window, so the wizard's one time field IS
+  // the measurement period. Before this, `latest` + 60 minutes stored a 60-minute
+  // HOLD while the engine measured over its 15-minute floor -- the automation
+  // said one thing and did another.
+  //
+  // ENVIRONMENT NOTE: happy-dom mis-parses `<option selected>` -- a select whose
+  // selected option isn't the first reports the option AFTER it -- so a stored
+  // metric doesn't survive into `select.value` the way it does in a browser
+  // (which is why renderBandCond assigns select values instead of trusting the
+  // markup). These tests therefore PICK the metric the way an operator would,
+  // with a change event, and assert from there.
+  async function pickMetric(metric: string) {
+    const win = g.window as InstanceType<typeof Window>;
+    const sel = doc.querySelector("#aw-trig-root .tgl-what") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    sel.value = "m:" + metric;
+    sel.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    // The change handler re-renders the row from the model, which re-introduces
+    // the happy-dom parse bug on the freshly-written markup — so re-pin the new
+    // select (no event this time; the row is already built for this metric).
+    const after = doc.querySelector("#aw-trig-root .tgl-what") as unknown as { value: string };
+    after.value = "m:" + metric;
+    const agg = doc.querySelector("#aw-trig-root .tgl-agg") as unknown as { value: string } | null;
+    if (agg) agg.value = "latest";
+    // Switching metric deliberately clears the threshold (a value for one metric
+    // rarely means anything for another), so re-enter it — and let THAT event be
+    // what re-runs the panel-level syncs, now that the metric select is pinned.
+    const thr = doc.querySelector("#aw-trig-root .tgl-threshold") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    thr.value = "10";
+    thr.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 20));
+  }
+
+  const LOSS_BASE = {
+    description: null,
+    enabled: true,
+    severity: "warning",
+    trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 10, forDurationSec: 0 },
+    scope: { allAssets: true },
+    cooldownSec: null,
+    messageTemplate: null,
+    actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+    escalation: null,
+  };
+
+  it("relabels the time field as History for packet loss and stamps it as the window", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      ...LOSS_BASE, id: "r-loss-history", name: "High packet loss",
+      reset: { mode: "auto" }, severityBands: null, bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await pickMetric("probeLossPct");
+
+    // The field renames itself and becomes mandatory...
+    const label = doc.querySelector(".aw-dur label") as unknown as { textContent: string };
+    expect(label.textContent).toContain("History");
+    expect(label.textContent).not.toContain("Sustained");
+    expect((doc.querySelector(".aw-dur .aw-dur-req") as unknown as { style: { display: string } }).style.display).toBe("");
+    // ...defaults rather than leaving a window the engine has to invent...
+    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("15");
+    // ...and the aggregation control is hidden, since a ratio has nothing to aggregate.
+    expect((doc.querySelector('#aw-trig-root .tgl-agg[data-ratio="1"]') as unknown as { style: { display: string } }).style.display).toBe("none");
+
+    // An operator-typed 60 saves as the WINDOW, with no hold clock on top.
+    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "60";
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.trigger.metric).toBe("probeLossPct");
+    expect(saved.trigger.windowSec).toBe(3600);
+    expect(saved.trigger.forDurationSec).toBe(0);
+  });
+
+  it("refuses a History shorter than the engine's minimum window", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      ...LOSS_BASE, id: "r-loss-short", name: "High packet loss",
+      reset: { mode: "auto" }, severityBands: null, bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await pickMetric("probeLossPct");
+    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "2";
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    // Refused rather than quietly measured over the engine's floor.
+    expect(savedPayloads.length).toBe(0);
+    expect(toastErrors.join(" ")).toContain("History");
+  });
+
+  it("gives packet-loss severity tiers no hold clock of their own", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      ...LOSS_BASE, id: "r-loss-bands", name: "High packet loss",
+      reset: { mode: "auto", clearThreshold: 5 },
+      severityBands: [
+        { threshold: 20, severity: "serious", actions: [] },
+        { threshold: 30, severity: "critical", actions: [] },
+      ],
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" },
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // A non-ratio metric keeps its per-tier hold boxes visible...
+    const bandDurWraps = () => Array.from(doc.querySelectorAll("#aw-bands .band-duration"))
+      .map((el) => ((el as unknown as { closest: (q: string) => { style: { display: string } } }).closest(".aw-dur")).style.display);
+    expect(bandDurWraps().length).toBeGreaterThan(0);
+    expect(bandDurWraps().every((d) => d !== "none")).toBe(true);
+    await pickMetric("probeLossPct");
+    // ...and switching to packet loss hides them: tiers share the History window.
+    expect(bandDurWraps().every((d) => d === "none")).toBe(true);
+    // The ladder itself survives, sharing that one window.
+    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "15";
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.severityBands.map((b: any) => [b.threshold, b.severity])).toEqual([[20, "serious"], [30, "critical"]]);
+    expect(saved.trigger.windowSec).toBe(900);
+    expect(saved.severityBands.every((b: any) => !b.forDurationSec)).toBe(true);
   });
 });

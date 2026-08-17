@@ -256,10 +256,23 @@ describe("getPacketLoss", () => {
     rawUnsafe.mockResolvedValueOnce([]);
     await noc.getPacketLoss();
     const sql = rawUnsafe.mock.calls[0][0] as string;
-    // At least one failure AND at least one success — a window with zero
-    // successful probes is a down node, not a lossy one.
+    // At least one failure (HAVING) AND at least one success — the latter now
+    // comes from the first-success anchor, which drops an asset with no
+    // successful probe outright: a window with zero successes is a down node,
+    // not a lossy one.
     expect(sql).toContain(`count(*) FILTER (WHERE NOT "success") > 0`);
-    expect(sql).toContain(`count(*) FILTER (WHERE "success") > 0`);
+    expect(sql).toContain(`"firstOk" IS NOT NULL`);
+  });
+
+  it("measures from the first successful probe, not the window's leading edge", async () => {
+    // A device recovering from an outage must not read the outage back as loss
+    // (probeLossQuery's header). The anchor is what keeps the pre-recovery
+    // failures out of the denominator.
+    rawUnsafe.mockResolvedValueOnce([]);
+    await noc.getPacketLoss();
+    const sql = rawUnsafe.mock.calls[0][0] as string;
+    expect(sql).toContain(`min("timestamp") FILTER (WHERE "success") OVER (PARTITION BY "assetId")`);
+    expect(sql).toContain(`"timestamp" >= "firstOk"`);
   });
 
   it("bounds the window with a timezone-proof now() (naive-UTC columns vs server TimeZone)", async () => {

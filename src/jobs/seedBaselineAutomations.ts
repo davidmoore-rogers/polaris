@@ -149,12 +149,23 @@ const BASELINE_RULES: Record<string, unknown>[] = [
     reset: { mode: "auto", clearThreshold: 200 },
     messageTemplate: "{asset} response time at {value}ms (fires above {threshold}ms)",
   },
+  // Packet loss climbs a severity ladder rather than firing one flat alert: loss
+  // is a spectrum, so 12% and 45% on the same switch are different problems and
+  // an operator wants them paged differently. Tiers share the 15-minute history
+  // window (rule 19 — sampling is per trigger, only threshold/severity vary);
+  // "truly down" is deliberately NOT the top rung, because it's a different
+  // measurement — consecutive total failures, minutes faster than any window can
+  // be — and the Asset down rule above owns it (business rule 29).
   {
     name: "High packet loss",
     description:
-      "Fires when an asset's probe packet loss (failed probes / total probes over 15 min) exceeds 25% and clears below 5%. Mirrors the Packet Loss widget — works for any monitored asset. Baseline example — edit or delete freely.",
-    severity: "serious",
-    trigger: { type: "asset_metric", metric: "probeLossPct", windowSec: 900, operator: ">", threshold: 25 },
+      "Fires at three levels over the last 15 minutes of probe history: warning above 10% loss, serious above 20%, critical above 30%, clearing below 5%. Only devices that are currently answering are measured, counting from their first successful probe in the window — a full outage alerts as Asset down instead, so one outage never raises two alerts. Mirrors the Packet Loss widget — works for any monitored asset. Baseline example — edit or delete freely.",
+    severity: "warning",
+    trigger: { type: "asset_metric", metric: "probeLossPct", windowSec: 900, operator: ">", threshold: 10 },
+    severityBands: [
+      { threshold: 20, severity: "serious" },
+      { threshold: 30, severity: "critical" },
+    ],
     scope: { allAssets: true },
     reset: { mode: "auto", clearThreshold: 5 },
     messageTemplate: "{asset} packet loss at {value}% (fires above {threshold}%)",
