@@ -55,6 +55,7 @@
  */
 
 import { normalizeManufacturer } from "./manufacturerNormalize.js";
+import { normalizeWindowsOs } from "./osNormalize.js";
 import { isValidGeoCoord } from "./geo.js";
 import {
   contributedLocation,
@@ -607,6 +608,18 @@ export function projectAssetFromSources(
   apply("model", MODEL_RULES);
   apply("os", OS_RULES);
   apply("osVersion", OS_VERSION_RULES);
+  // Every source above reads the Windows product name from the registry key
+  // Microsoft froze at "Windows 10" when Windows 11 shipped, so the winning
+  // value is wrong on every Windows 11 client regardless of which source won.
+  // Corrected here rather than only on the way to the DB so this function's
+  // output is what projectionDriftService compares against the stored row —
+  // normalizing one side only would report permanent drift every cycle.
+  // No-op for non-Windows, Windows Server, and undeterminable builds.
+  {
+    const fixed = normalizeWindowsOs({ os: projected.os, osVersion: projected.osVersion });
+    projected.os = fixed.os;
+    projected.osVersion = fixed.osVersion;
+  }
   apply(
     "learnedLocation",
     opts?.learnedLocation

@@ -30,6 +30,14 @@
  *      override releases the pin in the same write; a different staged IP is
  *      rewritten back to the override and an ip-override Conflict is raised
  *      (fire-and-forget, via ipOverrideService) for the operator to resolve.
+ *   5. Asset writes staging `os` are run through normalizeOsInData() so a
+ *      Windows 11 client stops being reported as "Windows 10" — the registry
+ *      ProductName key every discovery source reads was frozen at "Windows
+ *      10" when Windows 11 shipped, so the build number is the authority.
+ *      Here for the same catch-all reason as the guards above: the projection
+ *      normalizes its own output, but discoveryEngine's fortigate-endpoint
+ *      path, the agents system-info route, conflictResolutionService and the
+ *      assets PUT route all write `os` inline. See utils/osNormalize.ts.
  * The base client (_base) is reused for the history + source writes to
  * avoid a circular import.
  */
@@ -40,6 +48,7 @@ import { PrismaClient } from "./generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { normalizeManufacturer } from "./utils/manufacturerNormalize.js";
 import { applyHostnameOverride, applyIpOverride, type IpOverrideOutcome } from "./utils/assetInvariants.js";
+import { normalizeOsInData } from "./utils/osNormalize.js";
 import { deriveAssetSources, type AssetSnapshot } from "./utils/assetSourceDerivation.js";
 import { sealValue, openValue, isSealed } from "./utils/secretBox.js";
 import {
@@ -512,6 +521,7 @@ function _buildClient(base: PrismaClient) {
       asset: {
         async create({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.data);
+          normalizeOsInData(args?.data);
           clampMonitoredForStatus(args?.data);
           const result = await query(args);
           const d = args.data as Record<string, unknown> | undefined;
@@ -530,6 +540,7 @@ function _buildClient(base: PrismaClient) {
         },
         async update({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.data);
+          normalizeOsInData(args?.data);
           clampMonitoredForStatus(args?.data);
           const overrideOutcome = await enforceOperatorOverrides(base, args?.where, args?.data);
           const result = await query(args);
@@ -559,6 +570,7 @@ function _buildClient(base: PrismaClient) {
         },
         async updateMany({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.data);
+          normalizeOsInData(args?.data);
           clampMonitoredForStatus(args?.data);
           // updateMany: skip shadow-write. Rare on identity fields, and the
           // backfill job sweeps any drift on next startup. Same logic for the
@@ -568,6 +580,8 @@ function _buildClient(base: PrismaClient) {
         async upsert({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.create);
           normalizeManufacturerInData(args?.update);
+          normalizeOsInData(args?.create);
+          normalizeOsInData(args?.update);
           clampMonitoredForStatus(args?.create);
           clampMonitoredForStatus(args?.update);
           // Create branch needs no guard — a brand-new row can't carry an

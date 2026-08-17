@@ -175,7 +175,10 @@ describe("projectAssetFromSources — os + osVersion", () => {
       src("ad", { operatingSystem: "Windows 11 Pro", operatingSystemVersion: "10.0 (22621)" }),
     ]);
     expect(projected.os).toBe("Windows 11 Pro");
-    expect(projected.osVersion).toBe("10.0.26100");
+    // The winning raw value is "10.0.26100"; normalizeWindowsOs then labels the
+    // build with its marketing release (see utils/osNormalize.ts). Provenance
+    // still names the source the raw value came from.
+    expect(projected.osVersion).toBe("24H2 (10.0.26100)");
     expect(provenance.os).toBe("ad");
     expect(provenance.osVersion).toBe("intune");
   });
@@ -429,7 +432,7 @@ describe("projectAssetFromSources — hybrid Windows laptop (full integration sc
       manufacturer: "LENOVO",
       model: "83DG",
       os: "Windows 11 Pro", // ad wins (edition info)
-      osVersion: "10.0.26200.8246", // intune wins (specific build)
+      osVersion: "25H2 (10.0.26200.8246)", // intune wins (specific build), then release-labeled
       learnedLocation: "OU=HQ/OU=Workstations", // ad
       ipAddress: null, // no source carries endpoint IP
       latitude: null,

@@ -4759,7 +4759,11 @@ function _assetGeneralTabHTML(a) {
       (a.snmpLocation ? viewRow("SNMP Location", a.snmpLocation) : "") +
       viewRow("Department", a.department) +
       viewRow("Assigned To", a.assignedTo) +
-      viewRow("OS / Firmware", a.osVersion || a.os) +
+      // Same os + osVersion join the table column uses (and the mobile sheet).
+      // This row previously showed osVersion ALONE, which on a Windows client
+      // read as a bare "10.0.22631.7219" with the edition dropped; on Fortinet
+      // infra (os null, osVersion "7.4.4") the join is identical to before.
+      viewRow("OS / Firmware", [a.os, a.osVersion].filter(Boolean).join(" ")) +
       haTopologyHTML(a) +
       // Upstream-sighting rows name what the asset is connected BEHIND, so they
       // say nothing about a firewall — a FortiGate is the thing doing the
