@@ -65,10 +65,28 @@ import { runInstrumentedJob } from "./_metrics.js";
       select: {
         id: true, hostname: true, macAddress: true, ipAddress: true, ipSource: true,
         os: true, osVersion: true, manufacturer: true, model: true, assetType: true,
-        learnedLocation: true, lastSeenSwitch: true, lastSeenAp: true,
+        lastSeenSwitch: true, lastSeenAp: true,
         discoveredByIntegrationId: true, lastSeen: true,
       },
     });
+
+    // Which FortiGate sighted each candidate. Read from the sighting table —
+    // the only FortiGate-owned record of it — NOT from `Asset.learnedLocation`,
+    // which is the projection's merged output and on a domain-joined machine
+    // holds AD's OU path (stamping that here made this source claim the gate
+    // had said it; see discoveryEngine's buildFortigateEndpointObservedBlob).
+    // Ascending lastSeen so the freshest sighting is the one left in the map.
+    const gateByAsset = new Map<string, string>();
+    if (candidates.length > 0) {
+      const sightings = await prisma.assetFortigateSighting.findMany({
+        where: { assetId: { in: candidates.map((a) => a.id) } },
+        select: { assetId: true, fortigateDevice: true },
+        orderBy: { lastSeen: "asc" },
+      });
+      for (const s of sightings) {
+        if (s.fortigateDevice?.trim()) gateByAsset.set(s.assetId, s.fortigateDevice.trim());
+      }
+    }
 
     let stamped = 0;
     let manualSwept = 0;
@@ -89,12 +107,11 @@ import { runInstrumentedJob } from "./_metrics.js";
         osVersion: asset.osVersion ?? null,
         hardwareVendor: asset.manufacturer ?? null,
         model: asset.model ?? null,
-        // Bare device name — see buildFortigateEndpointObservedBlob: the Asset
-        // field may already carry the Sources card's "<integration>:" render,
-        // and stamping that back into the blob it projects from compounds it.
-        learnedLocation: asset.learnedLocation
-          ? bareFortinetDeviceName(asset.learnedLocation.trim()) || null
-          : null,
+        // The sighting FortiGate, bare (a stored name may carry the Sources
+        // card's "<integration>:" render). Null when no sighting row exists —
+        // the next discovery run's Phase 10 flush fills it from the pathway
+        // that touches the asset, which is better than a guess.
+        learnedLocation: bareFortinetDeviceName(gateByAsset.get(asset.id) ?? "") || null,
         lastSeenSwitch: asset.lastSeenSwitch ?? null,
         lastSeenAp: asset.lastSeenAp ?? null,
         discoveredVia: integrationType,

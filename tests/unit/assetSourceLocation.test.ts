@@ -30,14 +30,27 @@ describe("assetSourceLocation — catalogue", () => {
     });
   });
 
-  it("keeps the pre-feature field order at the top of the default", () => {
-    // Regression guard: the default must reproduce the hardcoded
-    // LEARNED_LOCATION_RULES order this feature replaced, or every existing
-    // install silently re-labels its assets on the next discovery run.
-    const fieldOrder = DEFAULT_LOCATION_ORDER.filter((k) =>
-      ["ad", "fortiswitch", "fortiap", "fortigate-endpoint"].includes(k));
-    expect(fieldOrder).toEqual(["ad", "fortiswitch", "fortiap", "fortigate-endpoint"]);
-    expect(DEFAULT_LOCATION_ORDER.indexOf("arc")).toBe(DEFAULT_LOCATION_ORDER.indexOf("ad") + 1);
+  it("pins the default order — closest-to-a-place first", () => {
+    // Deliberate, and load-bearing for every install that never opens the
+    // Sources card. See the catalogue's header comment for the reasoning.
+    expect(DEFAULT_LOCATION_ORDER).toEqual([
+      "fortigate-endpoint",
+      "arc",
+      "intune",
+      "entra",
+      "arc-k8s",
+      "vcenter-vm",
+      "vcenter-host",
+      "ad",
+      "fortiswitch",
+      "fortiap",
+    ]);
+    // The two that carry the most weight, stated as properties rather than
+    // positions: the sighting gate is the only contributor naming a physical
+    // place, and an OU path is org structure that must not beat it.
+    expect(DEFAULT_LOCATION_ORDER[0]).toBe("fortigate-endpoint");
+    expect(DEFAULT_LOCATION_ORDER.indexOf("ad"))
+      .toBeGreaterThan(DEFAULT_LOCATION_ORDER.indexOf("fortigate-endpoint"));
   });
 
   it("resolves a contributor by kind, and nothing for unknown kinds", () => {

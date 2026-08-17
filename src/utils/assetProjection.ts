@@ -377,11 +377,22 @@ const OS_VERSION_RULES: FieldRule[] = [
  *   - Firewalls contribute nothing: a firewall's location label is its own
  *     hostname, already on Asset.hostname, so learnedLocation stays null for
  *     them and the legacy "set when null" inline rule keeps working.
- *   - The fortigate-endpoint rule is suppressed when a fortigate-firewall
- *     source exists, whatever the operator's order says. A firewall's site
- *     label is itself — the gate that happened to sight it as a DHCP client
- *     pre-adoption is not its location. That's an invariant, not a preference.
+ *   - The fortigate-endpoint rule is suppressed on any asset that ALSO has a
+ *     Fortinet infrastructure source (fortigate-firewall / fortiswitch /
+ *     fortiap), whatever the operator's order says. A managed device's site
+ *     label is its own identity or its controller — the gate that happened to
+ *     sight it as a DHCP client pre-adoption is not its location, and that
+ *     stale endpoint row outlives the adoption. An invariant, not a
+ *     preference: it held by accident while the default order happened to put
+ *     fortiswitch/fortiap above fortigate-endpoint, and has to be stated now
+ *     that the sighting gate leads that order.
  */
+const LOCATION_SUPPRESSING_INFRA_SOURCES: AssetSourceKind[] = [
+  "fortigate-firewall",
+  "fortiswitch",
+  "fortiap",
+];
+
 function buildLearnedLocationRules(config: SourceLocationPriority): FieldRule[] {
   return config.order
     .filter((kind) => locationContributor(kind))
@@ -391,7 +402,8 @@ function buildLearnedLocationRules(config: SourceLocationPriority): FieldRule[] 
         pick: (o) => contributedLocation(kind, o, { integrationPrefix: config.integrationPrefix }),
       };
       if (kind === "fortigate-endpoint") {
-        rule.applies = (sources) => !hasSource(sources, "fortigate-firewall");
+        rule.applies = (sources) =>
+          !LOCATION_SUPPRESSING_INFRA_SOURCES.some((k) => hasSource(sources, k));
       }
       return rule;
     });

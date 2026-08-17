@@ -201,13 +201,23 @@ describe("projectAssetFromSources — os + osVersion", () => {
 });
 
 describe("projectAssetFromSources — learnedLocation", () => {
-  it("AD ouPath wins for endpoints", () => {
+  it("AD ouPath answers when it is the only field contributor", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("ad", { ouPath: "OU=HQ/OU=Workstations" }),
+    ]);
+    expect(projected.learnedLocation).toBe("OU=HQ/OU=Workstations");
+    expect(provenance.learnedLocation).toBe("ad");
+  });
+
+  it("by default a cloud source outranks AD's OU path", () => {
+    // An OU path is org structure, not a place — the default order says so.
+    // An operator who wants the OU reorders the Sources card.
     const { projected, provenance } = projectAssetFromSources([
       src("ad", { ouPath: "OU=HQ/OU=Workstations" }),
       src("entra", { displayName: "WS-01" }),
     ]);
-    expect(projected.learnedLocation).toBe("OU=HQ/OU=Workstations");
-    expect(provenance.learnedLocation).toBe("ad");
+    expect(projected.learnedLocation).toBe("Microsoft Entra ID");
+    expect(provenance.learnedLocation).toBe("entra");
   });
 
   it("FortiSwitch reports controllerFortigate as location", () => {
@@ -225,17 +235,19 @@ describe("projectAssetFromSources — learnedLocation", () => {
       src("arc", { resourceGroup: "rg-prod" }),
       src("fortigate-endpoint", { learnedLocation: "FW-NASH" }),
     ];
+    // Default: the sighting gate — the only one of the three naming a place.
     const byDefault = projectAssetFromSources(sources);
-    expect(byDefault.projected.learnedLocation).toBe("OU=HQ");
+    expect(byDefault.projected.learnedLocation).toBe("FW-NASH");
+    expect(byDefault.provenance.learnedLocation).toBe("fortigate-endpoint");
 
-    const fortinetFirst = projectAssetFromSources(sources, {
+    const adFirst = projectAssetFromSources(sources, {
       learnedLocation: {
-        order: ["fortigate-endpoint", "arc", "intune", "entra", "ad"],
+        order: ["ad", "fortigate-endpoint", "arc", "intune", "entra"],
         integrationPrefix: false,
       },
     });
-    expect(fortinetFirst.projected.learnedLocation).toBe("FW-NASH");
-    expect(fortinetFirst.provenance.learnedLocation).toBe("fortigate-endpoint");
+    expect(adFirst.projected.learnedLocation).toBe("OU=HQ");
+    expect(adFirst.provenance.learnedLocation).toBe("ad");
 
     const arcFirst = projectAssetFromSources(sources, {
       learnedLocation: { order: ["arc", "ad"], integrationPrefix: false },
@@ -253,9 +265,11 @@ describe("projectAssetFromSources — learnedLocation", () => {
     }).projected.learnedLocation).toBe("FW-NASH");
   });
 
-  it("a firewall source suppresses the endpoint sighting whatever the operator order says", () => {
-    // Invariant, not a preference: a firewall's site label is its own hostname.
-    // The gate that sighted it as a DHCP client pre-adoption is not its location.
+  it("a Fortinet infra source suppresses the endpoint sighting whatever the operator order says", () => {
+    // Invariant, not a preference: a firewall's site label is its own hostname
+    // and a switch/AP's is its controller. The gate that sighted the device as
+    // a DHCP client pre-adoption is not its location, and that stale endpoint
+    // row survives the adoption.
     const { projected } = projectAssetFromSources(
       [
         src("fortigate-firewall", { hostname: "FW-NASH", serial: "FGT001" }),
@@ -264,6 +278,17 @@ describe("projectAssetFromSources — learnedLocation", () => {
       { learnedLocation: { order: ["fortigate-endpoint", "ad"], integrationPrefix: false } },
     );
     expect(projected.learnedLocation).toBeNull();
+
+    for (const infra of [
+      src("fortiswitch", { serial: "S124", controllerFortigate: "FW-NASH" }),
+      src("fortiap", { serial: "FP231", controllerFortigate: "FW-NASH" }),
+    ]) {
+      const adopted = projectAssetFromSources(
+        [infra, src("fortigate-endpoint", { learnedLocation: "FW-MEMPHIS" })],
+        { learnedLocation: { order: ["fortigate-endpoint", "fortiswitch", "fortiap"], integrationPrefix: false } },
+      );
+      expect(adopted.projected.learnedLocation).toBe("FW-NASH");
+    }
   });
 
   it("label-only sources answer when nothing else does", () => {
@@ -433,7 +458,7 @@ describe("projectAssetFromSources — hybrid Windows laptop (full integration sc
       model: "83DG",
       os: "Windows 11 Pro", // ad wins (edition info)
       osVersion: "25H2 (10.0.26200.8246)", // intune wins (specific build), then release-labeled
-      learnedLocation: "OU=HQ/OU=Workstations", // ad
+      learnedLocation: "Microsoft Intune", // default order ranks the cloud sources above AD's OU path
       ipAddress: null, // no source carries endpoint IP
       latitude: null,
       longitude: null,
@@ -443,7 +468,7 @@ describe("projectAssetFromSources — hybrid Windows laptop (full integration sc
     expect(provenance.hostname).toBe("ad");
     expect(provenance.os).toBe("ad");
     expect(provenance.osVersion).toBe("intune");
-    expect(provenance.learnedLocation).toBe("ad");
+    expect(provenance.learnedLocation).toBe("intune");
   });
 });
 
@@ -583,12 +608,12 @@ describe("projectAssetFromSources — vCenter priority", () => {
     expect(projected.model).toBe("AGENT-MODEL");
   });
 
-  it("arc contributes \"Azure Arc\" as its location but loses to an AD OU path", () => {
+  it("arc contributes \"Azure Arc\" as its location, and by default outranks an AD OU path", () => {
     const withAd = projectAssetFromSources([
       src("arc", { resourceGroup: "rg-arc-onboarding" }),
       src("ad", { ouPath: "OU=Servers,DC=corp,DC=local" }),
     ]);
-    expect(withAd.projected.learnedLocation).toBe("OU=Servers,DC=corp,DC=local");
+    expect(withAd.projected.learnedLocation).toBe("Azure Arc");
 
     // The resource group is a billing/management container whose name says
     // nothing about where the machine is ("updatemanager", "rg-prod"), so the

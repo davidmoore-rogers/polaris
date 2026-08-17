@@ -1966,6 +1966,27 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // (firewall/switch/access_point) — those have dedicated source kinds.
   const fortigateEndpointAssetIds = new Set<string>();
 
+  // Which FortiGate each of those assets was sighted ON, recorded at the touch
+  // site from the pathway's OWN device name (DHCP entry.device, inventory
+  // inv.device, switch-MAC / ARP row.fortigateDevice). This is the ONLY thing
+  // the fortigate-endpoint blob's `learnedLocation` may be built from.
+  //
+  // It used to be read back off `Asset.learnedLocation` at flush time, which is
+  // the PROJECTION's output — a merge of every source. On a domain-joined
+  // laptop that field holds AD's OU path, so the flush laundered "OU=Computer
+  // Workstation2" into the blob as if the FortiGate had said it, and an
+  // operator who ranked fortigate-endpoint first then read an OU path in the
+  // Sources column (prefixed with the FMG integration name, since the prefix
+  // option only fires on this contributor). Same class of bug as the runaway
+  // prefix that bareFortinetDeviceName exists for, and the same root cause:
+  // a source blob must never be built from the projection it feeds.
+  const fortigateEndpointDeviceByAsset = new Map<string, string>();
+  const noteEndpointGate = (assetId: string, device: unknown): void => {
+    if (typeof device !== "string") return;
+    const name = device.trim();
+    if (name) fortigateEndpointDeviceByAsset.set(assetId, name);
+  };
+
   // Blocks sorted by prefix length descending (most specific first) for matching
   const blocksSorted = [...blocks].sort((a, b) => {
     const pa = parseInt(a.cidr.split("/")[1], 10);
@@ -4756,6 +4777,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // device-inventory. End-of-sync flush below upserts the row.
         if (!isInfraAsset) {
           fortigateEndpointAssetIds.add(asset.id);
+          noteEndpointGate(asset.id, entry.device);
         }
       }
 
@@ -5109,6 +5131,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             inventoryAssets.push(`${existingAsset.hostname || normalizedMac} (updated)`);
             if (existingAsset.assetType !== "firewall" && existingAsset.assetType !== "switch" && existingAsset.assetType !== "access_point") {
               fortigateEndpointAssetIds.add(existingAsset.id);
+              noteEndpointGate(existingAsset.id, inv.device);
             }
           } catch (err: any) {
             syncLog("error", `Failed to update inventory asset ${existingAsset.hostname || normalizedMac}: ${err.message || "Unknown error"}`);
@@ -5163,6 +5186,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           });
           if (newAsset.assetType !== "firewall" && newAsset.assetType !== "switch" && newAsset.assetType !== "access_point") {
             fortigateEndpointAssetIds.add(newAsset.id);
+            noteEndpointGate(newAsset.id, inv.device);
           }
         } catch (err: any) {
           syncLog("error", `Failed to create inventory asset ${inv.hostname || normalizedMac || inv.ipAddress}: ${err.message || "Unknown error"}`);
@@ -5272,7 +5296,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     // Walk again, picking the lowest-rank port per asset. lastSeen-style
     // tiebreaker isn't applied — when two ports tie, the first to win
     // sticks (deterministic from row order).
-    const assetBestPort = new Map<string /* assetId */, { portLabel: string; rank: number }>();
+    const assetBestPort = new Map<string /* assetId */, { portLabel: string; rank: number; fortigateDevice: string }>();
     for (const row of result.switchMacTable || []) {
       if (row.isFortilinkPeer) continue;
       if (!row.mac || !row.switchId || !row.portName) continue;
@@ -5287,7 +5311,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const rank = portMacCounts.get(portLabel)?.size ?? 1;
       const best = assetBestPort.get(asset.id);
       if (!best || rank < best.rank) {
-        assetBestPort.set(asset.id, { portLabel, rank });
+        assetBestPort.set(asset.id, { portLabel, rank, fortigateDevice: row.fortigateDevice || "" });
       }
     }
     for (const [assetId, pick] of assetBestPort) {
@@ -5302,6 +5326,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // managed switch's port.
       if (asset.assetType !== "firewall" && asset.assetType !== "switch" && asset.assetType !== "access_point") {
         fortigateEndpointAssetIds.add(asset.id);
+        // The switch's own controller gate — the MAC-table row carries it, so
+        // a switch-port-only touch still names a real FortiGate rather than
+        // leaving the flush to guess.
+        noteEndpointGate(asset.id, pick.fortigateDevice);
       }
     }
 
@@ -5316,6 +5344,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       assetIdx.reindex(asset);
       if (asset.assetType !== "firewall" && asset.assetType !== "switch" && asset.assetType !== "access_point") {
         fortigateEndpointAssetIds.add(asset.id);
+        noteEndpointGate(asset.id, row.fortigateDevice);
       }
     }
 
@@ -5548,12 +5577,33 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   let endpointSourcesStamped = 0;
   if (fortigateEndpointAssetIds.size > 0) {
     const flushedAt = new Date(now);
+    // Gate name fallback for the rare touch that carried none (a device-
+    // inventory row with no `device`): keep whatever this source last said
+    // rather than nulling it. One bulk read, mirroring Phase 11's — and NOT
+    // shared with it, because Phase 11 must see the rows this phase writes.
+    const priorGateByAsset = new Map<string, string>();
+    try {
+      const priorRows = await prisma.assetSource.findMany({
+        where: { sourceKind: "fortigate-endpoint", assetId: { in: [...fortigateEndpointAssetIds] } },
+        select: { assetId: true, observed: true },
+      });
+      for (const row of priorRows) {
+        const prior = (row.observed as Record<string, unknown> | null)?.learnedLocation;
+        if (typeof prior !== "string" || !prior.trim()) continue;
+        priorGateByAsset.set(row.assetId, bareFortinetDeviceName(prior.trim()));
+      }
+    } catch (err: any) {
+      syncLog("error", `fortigate-endpoint AssetSource: prior-gate preload failed (${err?.message || "unknown"})`);
+    }
     const results = await batchSettled(
       Array.from(fortigateEndpointAssetIds),
       async (assetId: string) => {
         const asset = assetIdx.findById(assetId);
         if (!asset || !asset.macAddress) return false;
-        await upsertFortigateEndpointSource(assetId, integrationId, asset, integrationType, asset.lastSeen ?? flushedAt, integrationName);
+        const gateName = fortigateEndpointDeviceByAsset.get(assetId)
+          ?? priorGateByAsset.get(assetId)
+          ?? null;
+        await upsertFortigateEndpointSource(assetId, integrationId, asset, integrationType, asset.lastSeen ?? flushedAt, integrationName, gateName);
         return true;
       },
     );
@@ -7533,6 +7583,7 @@ function buildFortigateEndpointObservedBlob(
   asset: any,
   integrationType: "fortimanager" | "fortigate" | string,
   integrationName: string | null,
+  gateName: string | null,
 ): Record<string, unknown> {
   return {
     mac: typeof asset.macAddress === "string" ? asset.macAddress.toUpperCase() : null,
@@ -7543,14 +7594,16 @@ function buildFortigateEndpointObservedBlob(
     osVersion: asset.osVersion ?? null,
     hardwareVendor: asset.manufacturer ?? null,
     model: asset.model ?? null,
-    // BARE device name only. `asset.learnedLocation` is the PROJECTION's own
-    // output, so with the Sources card's `integrationPrefix` on it already
-    // reads "<integration>:<gate>" — stamping that verbatim fed the render back
-    // into its own input and the projection prefixed it again next cycle
-    // (prod: a laptop accumulated 32 "FMG1:" segments, 2026-08). See
-    // utils/assetSourceLocation.bareFortinetDeviceName.
-    learnedLocation: typeof asset.learnedLocation === "string" && asset.learnedLocation.trim()
-      ? bareFortinetDeviceName(asset.learnedLocation.trim())
+    // The FortiGate that sighted this device, supplied by the CALLER from the
+    // pathway's own device name (see fortigateEndpointDeviceByAsset). Never
+    // read `asset.learnedLocation` here: that's the projection's OUTPUT, a
+    // merge of every source, so on a domain-joined laptop it holds AD's OU
+    // path and stamping it back in makes this source claim the FortiGate said
+    // it. It also fed the runaway "<integration>:" prefix growth (prod: 32
+    // segments, 2026-08). Bare here anyway as a belt-and-braces read of a
+    // caller-supplied value — see utils/assetSourceLocation.bareFortinetDeviceName.
+    learnedLocation: gateName && gateName.trim()
+      ? bareFortinetDeviceName(gateName.trim())
       : null,
     lastSeenSwitch: asset.lastSeenSwitch ?? null,
     lastSeenAp: asset.lastSeenAp ?? null,
@@ -7580,11 +7633,13 @@ async function upsertFortigateEndpointSource(
   integrationType: string,
   lastSeen: Date,
   integrationName: string | null,
+  /** The FortiGate that sighted it, from the touching pathway — see the blob builder. */
+  gateName: string | null,
 ): Promise<void> {
   if (!asset?.macAddress) return;
   const externalId = String(asset.macAddress).trim().toUpperCase();
   if (!externalId) return;
-  const observed = buildFortigateEndpointObservedBlob(asset, integrationType, integrationName);
+  const observed = buildFortigateEndpointObservedBlob(asset, integrationType, integrationName, gateName);
   const now = new Date();
   await prisma.assetSource.upsert({
     where: { sourceKind_externalId: { sourceKind: "fortigate-endpoint", externalId } },
