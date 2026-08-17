@@ -353,6 +353,177 @@ function makeAutomationSentences(s) {
     }
     return out + tail + ".";
   }
+  // ── Formula view ────────────────────────────────────────────────────────
+  // The machine-readable twin of triggerSentence, rendered under it on step 3.
+  //
+  // It exists because the sentence reads loosest exactly where the semantics get
+  // subtle: the wizard has ONE "Sustained for (minutes)" field, and it means two
+  // different things (tgStampWindows). With an aggregation it is the MEASUREMENT
+  // WINDOW — the value is reduced over the period, so a dip inside it averages
+  // away. With `latest` it is a HOLD CLOCK — the newest sample must qualify at
+  // every 60s check across the period, and one that doesn't restarts it. The
+  // formula puts the window INSIDE the term and the hold OUTSIDE it, so the two
+  // can't read alike.
+  //
+  // Returns PLAIN TEXT (the caller escapes and renders it monospaced), as
+  // { lines, note }: severity bands are one line per tier aligned under the
+  // shared term, and `note` carries the sampling-floor caveat below. Event and
+  // change triggers return no lines — they carry no aggregation and no window,
+  // so their English sentence is already exact and a formula would only add
+  // syntax.
+
+  // The engine reads samples over `max(windowSec, 15 min)` and reduces every row
+  // it fetched (notificationEngine.resolveAssetMetricReadings), so a window
+  // under the floor is really measured over the floor. The formula prints the
+  // window the operator configured and says so in the note rather than quietly
+  // showing either number as if it were the whole truth.
+  var SAMPLING_FLOOR_SEC = 900;
+  var FORMULA_AGG = Object.assign({ latest: "latest", avg: "avg", median: "median", min: "min", max: "max" }, s.formulaAggregations || {});
+  // Over a 0/1 flag, min/max are "did it ever" / "was it always" — reading them
+  // as min()/max() of a boolean is the same unreadability the state labels fix.
+  var FORMULA_STATE_AGG = { latest: "latest", max: "any", min: "all", avg: "avg", median: "median" };
+  var FORMULA_DIM = Object.assign({
+    sensorClass: "class=", sensorNamePattern: "name~", ifNamePattern: "if~",
+    mountPathPattern: "mount~", healthCheck: "health=", link: "member=",
+    tunnelName: "tunnel=", widgetId: "widget=", processNamePattern: "process~",
+    stateProbeId: "probe=", stateRowPattern: "row~",
+  }, s.formulaDimensions || {});
+
+  /** "15m" / "2h" / "45s" — the compact form, since a formula line is dense. */
+  function compactDuration(sec) {
+    if (!sec || sec <= 0) return "";
+    if (sec % 3600 === 0) return (sec / 3600) + "h";
+    if (sec % 60 === 0) return (sec / 60) + "m";
+    return sec + "s";
+  }
+  function spaces(n) { return n > 0 ? new Array(n + 1).join(" ") : ""; }
+
+  /** `[class="temperature", name~"CPU ON-DIE"]`, or "" with no filter. */
+  function formulaDims(leaf, skipProbe) {
+    var df = leaf.dimensionFilter || {};
+    var parts = [];
+    Object.keys(df).forEach(function (k) {
+      if (!df[k]) return;
+      if (k === "stateProbeId" && skipProbe) return; // the probe is the subject
+      var v = df[k];
+      if (k === "stateProbeId") {
+        var p = stateProbeOf(v);
+        if (p && p.name) v = p.name;
+      }
+      parts.push((FORMULA_DIM[k] || (k + "=")) + '"' + v + '"');
+    });
+    return parts.length ? "[" + parts.join(", ") + "]" : "";
+  }
+
+  /** The value side: `median(CPU usage[if~"wan"], 15m)`. */
+  function formulaTerm(leaf) {
+    if (leaf.type === "asset_state") return fieldLabel(leaf.field);
+    var df = leaf.dimensionFilter || {};
+    var flag = isBooleanMetric(leaf.metric);
+    var probeName = flag ? stateMapOf(leaf.metric, df).name : "";
+    var subject = probeName ||
+      (leaf.type === "host_metric" ? "host " + metricLabel(leaf.metric) : metricLabel(leaf.metric));
+    var agg = leaf.aggregation || "latest";
+    var fn = (flag ? FORMULA_STATE_AGG[agg] : FORMULA_AGG[agg]) || agg;
+    // `latest` reads one sample, so it takes no window argument — that absence is
+    // the whole point of the view. Every other aggregation always prints one,
+    // falling back to the floor when the trigger carries no window at all (which
+    // the wizard refuses to save, but a hand-written rule can).
+    var win = agg === "latest" ? "" : ", " + compactDuration(leaf.windowSec > 0 ? leaf.windowSec : SAMPLING_FLOOR_SEC);
+    return fn + "(" + subject + formulaDims(leaf, !!probeName) + win + ")";
+  }
+  /** The comparison side: `>= 65 °C`, or `== "Alarm"` for a flag. */
+  function formulaCompare(leaf, operator, threshold) {
+    var op = operator || leaf.operator;
+    if (leaf.type === "asset_state") {
+      return op + ' "' + (leaf.value == null || leaf.value === "" ? "…" : leaf.value) + '"';
+    }
+    if (isBooleanMetric(leaf.metric)) {
+      return op + ' "' + stateValueLabel(leaf.metric, leaf.dimensionFilter || {}, threshold == null ? leaf.threshold : threshold) + '"';
+    }
+    var thr = threshold == null ? leaf.threshold : threshold;
+    var unit = leafUnit(leaf.metric, leaf.dimensionFilter); unit = unit ? " " + unit : "";
+    return op + " " + (thr == null || isNaN(thr) ? "…" : thr) + unit;
+  }
+  function formulaLeafLine(leaf) { return formulaTerm(leaf) + " " + formulaCompare(leaf); }
+
+  /** A nested group renders inline — `(a AND b)` — so the tree never indents
+   *  past one level and the lines stay scannable. */
+  function formulaInline(node) {
+    var parts = (node.children || []).map(function (c) {
+      if (c && c.type === undefined && Array.isArray(c.children)) return "(" + formulaInline(c) + ")";
+      return formulaLeafLine(c);
+    });
+    return parts.join(node.op === "or" ? " OR " : " AND ");
+  }
+
+  /** " ⇒ warning", or "" when the caller didn't pass the ladder. */
+  function sevArrow(sev) { return sev ? "  ⇒ " + sev : ""; }
+  function holdClause(sec) { return sec > 0 ? "  held " + compactDuration(sec) : ""; }
+
+  function triggerFormula(tr, opts) {
+    var out = { lines: [], note: "" };
+    if (!tr || !tr.type) return out;
+    var sev = (opts && opts.severity) || "";
+    var hold = tr.forDurationSec > 0 ? tr.forDurationSec : 0;
+
+    if (tr.type === "composite") {
+      var kids = tr.children || [];
+      var op = tr.op === "or" ? "OR" : "AND";
+      var pad = spaces(op.length + 1);
+      kids.forEach(function (c, i) {
+        var body = c && c.type === undefined && Array.isArray(c.children) ? "(" + formulaInline(c) + ")" : formulaLeafLine(c);
+        out.lines.push((i === 0 ? pad : op + " ") + body);
+      });
+      // The hold applies to the whole tree, so it gets its own line rather than
+      // hanging off whichever condition happens to be last.
+      if (hold || sev) out.lines.push(pad + (hold ? "held " + compactDuration(hold) : "") + sevArrow(sev));
+      out.note = formulaNote(tr);
+      return out;
+    }
+
+    if (tr.type !== "asset_metric" && tr.type !== "host_metric" && tr.type !== "asset_state") return out;
+
+    var term = formulaTerm(tr);
+    out.lines.push(term + " " + formulaCompare(tr) + holdClause(hold) + sevArrow(sev));
+
+    // Severity bands: same term, one line per tier, aligned under it. Mirrors
+    // severityLadderPhrase's applicability test — bands riding along on a state
+    // metric or a non-numeric trigger describe a threshold that can't exist.
+    var banded = (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
+    var bands = (banded && sev && opts.severityBands ? opts.severityBands : []).filter(function (b) { return b && b.severity; });
+    bands.forEach(function (b) {
+      var dur = b.forDurationSec == null ? hold : b.forDurationSec;
+      out.lines.push(spaces(term.length) + " " + formulaCompare(tr, b.operator || tr.operator, b.threshold) +
+        holdClause(dur) + sevArrow(b.severity));
+    });
+    out.note = formulaNote(tr);
+    return out;
+  }
+
+  /** The sampling-floor caveat, when any aggregated term asks for less than the
+   *  floor (or carries no window at all). Empty when every window is honest. */
+  function formulaNote(tr) {
+    var flagged = false;
+    function visit(leaf) {
+      if (!leaf || leaf.type === "asset_state" || !leaf.metric) return;
+      var agg = leaf.aggregation || "latest";
+      if (agg === "latest") return;
+      if (!(leaf.windowSec >= SAMPLING_FLOOR_SEC)) flagged = true;
+    }
+    function walk(node) {
+      (node.children || []).forEach(function (c) {
+        if (c && c.type === undefined && Array.isArray(c.children)) walk(c);
+        else visit(c);
+      });
+    }
+    if (tr.type === "composite") walk(tr); else visit(tr);
+    if (!flagged) return "";
+    return "Samples are read over a " + compactDuration(SAMPLING_FLOOR_SEC) +
+      " floor, so a shorter measurement window is still reduced over the last " +
+      humanDuration(SAMPLING_FLOOR_SEC) + ".";
+  }
+
   function resetSentence(reset, tr, cooldownSec) {
     var out;
     reset = reset || { mode: "manual" };
@@ -390,6 +561,7 @@ function makeAutomationSentences(s) {
     fieldLabel: fieldLabel, changeLabel: changeLabel, humanDuration: humanDuration,
     tgLeafPhrase: tgLeafPhrase, tgTreePhrase: tgTreePhrase,
     triggerSentence: triggerSentence, severityLadderPhrase: severityLadderPhrase, resetSentence: resetSentence,
+    triggerFormula: triggerFormula, compactDuration: compactDuration,
     CMP_PHRASE: CMP_PHRASE, INV_CMP: INV_CMP, AGG_PHRASE: AGG_PHRASE, DIM_PHRASE: DIM_PHRASE,
   };
 }
@@ -664,7 +836,8 @@ async function openAutomationWizard(existing, opts) {
       metricLabel = _sent.metricLabel, metricUnit = _sent.metricUnit, leafUnit = _sent.leafUnit,
       fieldLabel = _sent.fieldLabel, changeLabel = _sent.changeLabel,
       humanDuration = _sent.humanDuration, tgTreePhrase = _sent.tgTreePhrase,
-      triggerSentence = _sent.triggerSentence, resetSentence = _sent.resetSentence,
+      triggerSentence = _sent.triggerSentence, triggerFormula = _sent.triggerFormula,
+      resetSentence = _sent.resetSentence,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
   var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
@@ -1949,6 +2122,9 @@ async function openAutomationWizard(existing, opts) {
     var multi = !!(draft.severityBands && draft.severityBands.length);
     return '<h3 id="aw-step3-heading" style="margin:0 0 0.25rem">When should it fire?</h3>' +
       '<div class="aw-sentence" id="aw-trigger-sentence">…</div>' +
+      // The same trigger as a formula — where the window sits versus where the
+      // hold sits is what the sentence can't show at a glance.
+      '<div class="aw-formula" id="aw-trigger-formula" style="display:none"></div>' +
       '<div class="form-group"><label><input type="checkbox" id="aw-multi-sev"' + (multi ? " checked" : "") + '> Use multiple severity levels (escalate severity as the value climbs)</label></div>' +
       '<div class="form-group" id="aw-single-sev-wrap"><label>Alert severity</label><select id="aw-trigger-severity" class="sev-select sev-' + escapeHtml(draft.severity || "warning") + '">' + sevOpt(draft.severity || "warning") + '</select></div>' +
       '<div class="form-group"><label>Trigger type</label><select id="aw-trigger-type">' + typeOpts + '</select></div>' +
@@ -2161,6 +2337,18 @@ async function openAutomationWizard(existing, opts) {
     if (!el) return;
     collectStep3();
     el.innerHTML = triggerSentence(draft.trigger, draftLadder());
+    refreshTriggerFormula();
+  }
+  /** The formula block under the sentence. Hidden entirely for the trigger types
+   *  that have no value to compute (event / change), rather than shown empty. */
+  function refreshTriggerFormula() {
+    var el = document.getElementById("aw-trigger-formula");
+    if (!el) return;
+    var f = triggerFormula(draft.trigger, draftLadder());
+    if (!f.lines.length) { el.style.display = "none"; el.innerHTML = ""; return; }
+    el.style.display = "";
+    el.innerHTML = '<pre>' + escapeHtml(f.lines.join("\n")) + '</pre>' +
+      (f.note ? '<p class="aw-formula-note">' + escapeHtml(f.note) + '</p>' : "");
   }
   /** What the sentence needs to name every severity this trigger can raise —
    *  the base tier plus each band, so the summary doesn't stop at tier 0. */

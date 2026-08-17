@@ -4779,6 +4779,31 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .aw-sentence strong { color: var(--color-text-primary); font-style: normal; }
 
+/* The trigger sentence's formula twin (wizard step 3). Monospace so the severity
+   tiers align under the shared term; scrolls in its own box because a dimension
+   filter can make one line long and the wizard body must not scroll sideways. */
+.aw-formula {
+  border-left: 3px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  border-radius: 0 6px 6px 0;
+  padding: 0.5rem 0.9rem;
+  margin: -0.6rem 0 1rem;
+}
+.aw-formula pre {
+  margin: 0;
+  overflow-x: auto;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  white-space: pre;
+}
+.aw-formula-note {
+  margin: 0.35rem 0 0;
+  font-size: 0.76rem;
+  color: var(--color-text-tertiary);
+}
+
 /* Step-5 review summary card (label/value rows, setup.html's review-grid
    promoted). */
 .review-grid {

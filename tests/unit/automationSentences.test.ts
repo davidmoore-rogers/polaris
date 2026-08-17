@@ -16,8 +16,10 @@ interface Ladder { severity?: string; severityBands?: Array<Record<string, unkno
 
 let make: (s: Record<string, unknown>) => {
   triggerSentence: (tr: Record<string, unknown> | null, opts?: Ladder) => string;
+  triggerFormula: (tr: Record<string, unknown> | null, opts?: Ladder) => { lines: string[]; note: string };
   resetSentence: (reset: Record<string, unknown> | null, tr: Record<string, unknown> | null, cooldownSec?: number) => string;
   humanDuration: (sec: number) => string;
+  compactDuration: (sec: number) => string;
   leafUnit: (metric: string, df?: Record<string, string>) => string;
   isTriggerScoped: (tr: Record<string, unknown> | null) => boolean;
 };
@@ -338,5 +340,220 @@ describe("makeAutomationSentences", () => {
     const out = s.triggerSentence({ type: "event", actionPattern: "<img src=x>" });
     expect(out).not.toContain("<img");
     expect(out).toContain("&lt;img src=x&gt;");
+  });
+
+  // ── Formula view ────────────────────────────────────────────────────────
+  // The point of the formula is that the wizard's one "Sustained for (minutes)"
+  // field means two different things: a MEASUREMENT WINDOW under an aggregation
+  // (inside the term) versus a HOLD CLOCK under `latest` (outside it). These pin
+  // that distinction, since a formula that blurred it would be worse than none.
+  describe("triggerFormula", () => {
+    it("puts a `latest` trigger's minutes outside the term, as a hold", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula({
+        type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90,
+        aggregation: "latest", windowSec: 0, forDurationSec: 600,
+      }, { severity: "warning" });
+      expect(f.lines).toEqual(["latest(CPU usage) > 90 %  held 10m  ⇒ warning"]);
+      // `latest` reads one sample, so it takes no window argument and the
+      // sampling floor is irrelevant to it.
+      expect(f.note).toBe("");
+    });
+
+    it("puts an aggregated trigger's minutes inside the term, as a window", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula({
+        type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 80,
+        aggregation: "avg", windowSec: 900, forDurationSec: 0,
+      }, { severity: "warning" });
+      expect(f.lines).toEqual(["avg(CPU usage, 15m) >= 80 %  ⇒ warning"]);
+      expect(f.note).toBe("");
+    });
+
+    it("flags a window under the engine's 15-minute sampling floor", () => {
+      const s = make(SCHEMA as never);
+      const short = s.triggerFormula({
+        type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 80,
+        aggregation: "median", windowSec: 300,
+      });
+      // The window the operator configured is what prints — the note carries the
+      // truth rather than silently substituting 15m for the typed 5m.
+      expect(short.lines[0]).toContain("median(CPU usage, 5m)");
+      expect(short.note).toContain("15m floor");
+      // An aggregated trigger with no window at all falls back to the floor.
+      const none = s.triggerFormula({
+        type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 80, aggregation: "avg", windowSec: 0,
+      });
+      expect(none.lines[0]).toContain("avg(CPU usage, 15m)");
+      expect(none.note).toContain("15m floor");
+    });
+
+    it("renders dimension filters as subscripts and resolves the sensor unit", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula({
+        type: "asset_metric", metric: "hwSensorValue", operator: ">=", threshold: 65,
+        aggregation: "median", windowSec: 900,
+        dimensionFilter: { sensorClass: "temperature", sensorNamePattern: "CPU ON-DIE" },
+      });
+      expect(f.lines[0]).toBe('median(Hardware sensor[class="temperature", name~"CPU ON-DIE"], 15m) >= 65 °C');
+    });
+
+    it("prefixes a host metric so it can't be read as a device's", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula({
+        type: "host_metric", metric: "cpuPct", operator: ">", threshold: 95, aggregation: "latest",
+      });
+      expect(f.lines[0]).toBe("latest(host CPU usage) > 95 %");
+    });
+
+    it("stacks severity bands as aligned lines under the shared term", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula(
+        {
+          type: "asset_metric", metric: "hwSensorValue", operator: ">=", threshold: 65,
+          aggregation: "median", windowSec: 900, forDurationSec: 900,
+          dimensionFilter: { sensorClass: "temperature" },
+        },
+        {
+          severity: "warning",
+          severityBands: [
+            { severity: "serious", threshold: 80 },                                  // inherits the base hold
+            { severity: "critical", threshold: 90, operator: ">", forDurationSec: 300 }, // own operator + hold
+          ],
+        },
+      );
+      expect(f.lines).toHaveLength(3);
+      const term = 'median(Hardware sensor[class="temperature"], 15m)';
+      expect(f.lines[0]).toBe(term + " >= 65 °C  held 15m  ⇒ warning");
+      // Continuation lines are blank-padded to the term's width so the tiers
+      // line up in the monospace block.
+      expect(f.lines[1]).toBe(" ".repeat(term.length) + " >= 80 °C  held 15m  ⇒ serious");
+      expect(f.lines[2]).toBe(" ".repeat(term.length) + " > 90 °C  held 5m  ⇒ critical");
+    });
+
+    it("a 0-second band drops the hold clause entirely", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula(
+        { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 80, aggregation: "latest", forDurationSec: 600 },
+        { severity: "warning", severityBands: [{ severity: "critical", threshold: 95, forDurationSec: 0 }] },
+      );
+      expect(f.lines[1]).toContain("> 95 %  ⇒ critical");
+      expect(f.lines[1]).not.toContain("held");
+    });
+
+    it("omits the severity arrow when the caller passes no ladder", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula({ type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90, aggregation: "latest" });
+      expect(f.lines).toEqual(["latest(CPU usage) > 90 %"]);
+    });
+
+    it("renders a composite as one line per condition with the hold on its own line", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula({
+        type: "composite", kind: "asset", op: "and", forDurationSec: 300,
+        children: [
+          { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
+          { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 20, aggregation: "avg", windowSec: 900 },
+        ],
+      }, { severity: "critical" });
+      expect(f.lines).toEqual([
+        '    Monitor status == "down"',
+        "AND avg(CPU usage, 15m) > 20 %",
+        "    held 5m  ⇒ critical",
+      ]);
+    });
+
+    it("keeps a nested sub-group inline rather than indenting a second level", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula({
+        type: "composite", kind: "asset", op: "or",
+        children: [
+          { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90, aggregation: "latest" },
+          { op: "and", children: [
+            { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
+            { type: "asset_metric", metric: "cpuPct", operator: "<", threshold: 5, aggregation: "latest" },
+          ] },
+        ],
+      });
+      expect(f.lines[1]).toBe('OR (Monitor status == "down" AND latest(CPU usage) < 5 %)');
+    });
+
+    it("a composite's short window is flagged from inside a nested group too", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula({
+        type: "composite", kind: "asset", op: "and",
+        children: [
+          { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90, aggregation: "latest" },
+          { op: "or", children: [{ type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 50, aggregation: "avg", windowSec: 60 }] },
+        ],
+      });
+      expect(f.note).toContain("15m floor");
+    });
+
+    it("renders a state metric with the probe's name and its own state label", () => {
+      const s = make(STATE_SCHEMA as never);
+      const f = s.triggerFormula({
+        type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+        aggregation: "latest", windowSec: 0, forDurationSec: 300,
+        dimensionFilter: { stateProbeId: "p1", stateRowPattern: "TMP1" },
+      }, { severity: "critical" });
+      expect(f.lines[0]).toBe('latest(Hardware sensor alarm[row~"TMP1"]) == "Alarm"  held 5m  ⇒ critical');
+      // The bare 1 and the probe id never surface — same contract as the sentence.
+      expect(f.lines[0]).not.toContain("== 1");
+      expect(f.lines[0]).not.toContain("p1");
+    });
+
+    it("reads min/max over a flag as all/any rather than min()/max() of a boolean", () => {
+      const s = make(STATE_SCHEMA as never);
+      const base = {
+        type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+        dimensionFilter: { stateProbeId: "p1" }, windowSec: 900,
+      };
+      expect(s.triggerFormula({ ...base, aggregation: "max" }).lines[0]).toBe('any(Hardware sensor alarm, 15m) == "Alarm"');
+      expect(s.triggerFormula({ ...base, aggregation: "min" }).lines[0]).toBe('all(Hardware sensor alarm, 15m) == "Alarm"');
+    });
+
+    it("ignores bands on a state metric — a threshold ladder over two values is meaningless", () => {
+      const s = make(STATE_SCHEMA as never);
+      const f = s.triggerFormula(
+        { type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1, aggregation: "latest", dimensionFilter: { stateProbeId: "p1" } },
+        { severity: "warning", severityBands: [{ severity: "critical", threshold: 1 }] },
+      );
+      expect(f.lines).toHaveLength(1);
+      expect(f.lines[0]).not.toContain("critical");
+    });
+
+    it("keeps an unresolved probe visible as a filter rather than dropping it", () => {
+      const s = make(STATE_SCHEMA as never);
+      const f = s.triggerFormula({
+        type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1,
+        aggregation: "latest", dimensionFilter: { stateProbeId: "gone" },
+      });
+      expect(f.lines[0]).toContain('probe="gone"');
+    });
+
+    it("returns no lines for the trigger types that compute no value", () => {
+      const s = make(SCHEMA as never);
+      // event / change carry no aggregation and no window, so their English
+      // sentence is already exact — a formula would add syntax and no meaning.
+      expect(s.triggerFormula({ type: "event", actionPattern: "integration.*" }).lines).toEqual([]);
+      expect(s.triggerFormula({ type: "change", changeType: "new_asset" }).lines).toEqual([]);
+      expect(s.triggerFormula(null).lines).toEqual([]);
+      expect(s.triggerFormula({}).lines).toEqual([]);
+    });
+
+    it("renders a missing threshold as an ellipsis rather than NaN", () => {
+      const s = make(SCHEMA as never);
+      const f = s.triggerFormula({ type: "asset_metric", metric: "cpuPct", operator: ">", aggregation: "latest" });
+      expect(f.lines[0]).toBe("latest(CPU usage) > … %");
+    });
+
+    it("compactDuration abbreviates hours, minutes and seconds", () => {
+      const s = make(SCHEMA as never);
+      expect(s.compactDuration(7200)).toBe("2h");
+      expect(s.compactDuration(900)).toBe("15m");
+      expect(s.compactDuration(45)).toBe("45s");
+      expect(s.compactDuration(0)).toBe("");
+    });
   });
 });

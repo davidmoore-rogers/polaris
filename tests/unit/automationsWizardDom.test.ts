@@ -785,4 +785,61 @@ describe("automation wizard DOM render", () => {
     expect(savedPayloads).toHaveLength(0);
     expect(toastErrors.join(" ")).toContain("Sustained for (minutes)");
   });
+
+  it("the formula block under the sentence moves the minutes when the aggregation changes", async () => {
+    doc.body.innerHTML = "";
+    const win = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-formula",
+      name: "Loss",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 600 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: null,
+      bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const box = doc.querySelector("#aw-trigger-formula") as unknown as { style: { display: string }; textContent: string };
+    // `latest`: the minutes are the hold, outside the term, and there's no window
+    // argument at all — nothing for the sampling floor to qualify.
+    expect(box.style.display).not.toBe("none");
+    expect(box.textContent).toContain("latest(");
+    expect(box.textContent).toContain("held 10m");
+    expect(box.textContent).not.toContain("floor");
+    // The formula and the sentence are twins of one draft, so they must name the
+    // same severity — asserted against each other rather than against a literal.
+    const sentence = (doc.querySelector("#aw-trigger-sentence") as unknown as { textContent: string }).textContent;
+    const sev = (box.textContent.split("⇒ ")[1] || "").trim();
+    expect(sev).toBeTruthy();
+    expect(sentence).toContain(sev);
+
+    // Switching to an aggregation moves the same minutes INSIDE the term, and
+    // 10 minutes is under the engine's 15-minute floor, so the note appears.
+    const agg = doc.querySelector(".scr-row .tgl-agg") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    agg.value = "median";
+    agg.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(box.textContent).toContain("median(");
+    expect(box.textContent).toContain("10m)");
+    expect(box.textContent).not.toContain("held");
+    expect(box.textContent).toContain("floor");
+
+    // An event trigger computes no value — the block hides rather than showing
+    // an empty formula.
+    const type = doc.querySelector("#aw-trigger-type") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    type.value = "event";
+    type.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect((doc.querySelector("#aw-trigger-formula") as unknown as { style: { display: string } }).style.display).toBe("none");
+  });
 });
