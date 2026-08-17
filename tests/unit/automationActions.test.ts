@@ -64,7 +64,9 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
-const CTX = { asset: "sw-core-1", value: "95", threshold: "90", severity: "warning", message: "hot" };
+// "trigger.summary" is what the shared default body leads with; {message} is
+// deliberately not printed under it (on a fire the two said the same thing).
+const CTX = { asset: "sw-core-1", value: "95", threshold: "90", severity: "warning", message: "hot", "trigger.summary": "CPU utilization is 95%" };
 
 describe("executeActions", () => {
   it("notify: per-action emailComposition wins, rule-level is the fallback", async () => {
@@ -94,7 +96,7 @@ describe("executeActions", () => {
     const composed = (expandDeliveriesMock.mock.calls[0] as any[])[2].composedEmail;
     expect(composed).toBeDefined();
     expect(composed.subject).toContain("sw-core-1");
-    expect(composed.text).toContain("hot"); // the message still leads
+    expect(composed.text).toContain("CPU utilization is 95%"); // what fired leads
     // Deferred tokens survive compose: filled per recipient / per delivery.
     expect(composed.text).toContain("{ack}");
     expect(composed.html).toContain("Acknowledge alert");

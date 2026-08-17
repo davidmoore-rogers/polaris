@@ -63,6 +63,8 @@ const CTX = {
   "severity.upper": "WARNING",
   link: "",
   message: "cpu hot",
+  // What the shared body leads with — the message is not printed under it.
+  "trigger.summary": "CPU utilization is 95%",
 };
 
 function seedRule(overrides: Record<string, unknown> = {}) {
@@ -150,8 +152,9 @@ describe("legacy email-tier output parity", () => {
     // name renders blank and the dangling separator is trimmed rather than
     // mailed as "sw-core-1 — {rule}". The tier prefix still leads.
     expect(db.deliveries[0].meta.subject).toBe("[ESCALATION 1] [WARNING] sw-core-1");
-    // Default body = the shared rich alert template: the message leads.
-    expect(db.deliveries[0].meta.text).toContain("cpu hot");
+    // Default body = the shared rich alert template, led by what fired.
+    expect(db.deliveries[0].meta.text).toContain("CPU utilization is 95%");
+    expect(db.deliveries[0].meta.text).toContain("Subject:    sw-core-1");
     // This tier mails a RAW ADDRESS, which earns no acknowledge token — only a
     // configured Polaris user can acknowledge. So the whole Acknowledge line
     // is stripped rather than mailed as a label with nothing behind it, and

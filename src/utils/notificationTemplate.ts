@@ -65,6 +65,7 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{event.resource}", label: "Event resource", description: "Event-triggered alerts: what it happened to — the integration, user or device name", group: "notification" },
   { token: "{event.resourceType}", label: "Event resource type", description: "Event-triggered alerts: the kind of thing it happened to (integration / asset / user …)", group: "notification" },
   { token: "{event.actor}", label: "Event actor", description: "Event-triggered alerts: who or what caused it (an operator, or a system: actor)", group: "notification" },
+  { token: "{event.message}", label: "Event detail", description: "Event-triggered alerts: the audit event's own text — the REASON, e.g. \"Discovery failed: RPC -11 no valid session\". Empty on every other trigger type", group: "notification" },
   { token: "{event.level}", label: "Event level", description: "Event-triggered alerts: the audit level of the source event (info / warning / error)", group: "notification" },
   { token: "{rule}", label: "Rule name", description: "Name of the triggering rule", group: "rule" },
   { token: "{rule.description}", label: "Rule description", description: "Description of the triggering rule", group: "rule" },
@@ -157,6 +158,16 @@ export interface TemplateContextParts {
     resourceType?: string | null;
     resourceName?: string | null;
     actor?: string | null;
+    /**
+     * The Event's own message — the REASON, which the action name alone never
+     * gives ("integration.discover.error" vs "Discovery failed: RPC -11 no
+     * valid session"). It reaches the email as its own facts row rather than
+     * through `{message}`, so it survives an operator replacing the rule's
+     * message template — and the 12 seeded event automations, which set
+     * `messageTemplate: "{value}"` precisely to surface this text, no longer
+     * depend on that indirection to say why anything failed.
+     */
+    message?: string | null;
   } | null;
   assetDetail?: AssetTemplateDetail | null;
   escalationTier?: number;
@@ -230,6 +241,7 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "event.resource": str(parts.event?.resourceName),
     "event.resourceType": str(parts.event?.resourceType),
     "event.actor": str(parts.event?.actor),
+    "event.message": str(parts.event?.message),
     "asset.ip": str(a?.ipAddress),
     "asset.mac": str(a?.macAddress),
     "asset.type": str(a?.assetType),
@@ -252,6 +264,25 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     "escalation.tier": parts.escalationTier !== undefined ? String(parts.escalationTier) : "",
     "escalation.elapsed": str(parts.escalationElapsed),
   };
+}
+
+/**
+ * Stamp a recovery sentence into BOTH the headline slot and `{message}`.
+ *
+ * The default alert body leads with `{trigger.summary}` — "what this email is
+ * about" — and deliberately prints no `{message}` line under it, because on a
+ * FIRE the two say the same thing. On a RECOVERY they don't: the trigger
+ * sentence would re-render the recovered reading ("Response time … is 120 ms"),
+ * which under a green "resolved" header reads like a fresh alert about a healthy
+ * device — and the one sentence that says it came back would appear nowhere.
+ *
+ * So the recovery sentence takes the headline as well. `{message}` keeps it too,
+ * which leaves the in-app card, the chat/push bodies and any operator template
+ * that prints `{message}` exactly as they were.
+ */
+export function setRecoverySentence(ctx: Record<string, string>, sentence: string): void {
+  ctx["message"] = sentence;
+  ctx["trigger.summary"] = sentence;
 }
 
 const TOKEN_RE = /\{([a-zA-Z][\w.]*)\}/g;

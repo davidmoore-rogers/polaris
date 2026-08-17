@@ -119,7 +119,7 @@ async function runResetActionsForCleared(ids: string[], actor: string): Promise<
 
   // Imported lazily: notificationService is imported BY the recipient service
   // (stripRegionPrefix), so a top-level import here would close the cycle.
-  const [{ executeActions }, { buildTemplateContext }, { scopeRegionTagsOf }] = await Promise.all([
+  const [{ executeActions }, { buildTemplateContext, setRecoverySentence }, { scopeRegionTagsOf }] = await Promise.all([
     import("./automationActionService.js"),
     import("../utils/notificationTemplate.js"),
     import("./notificationRecipientService.js"),
@@ -132,8 +132,11 @@ async function runResetActionsForCleared(ids: string[], actor: string): Promise<
       severity: "resolved",
       time: new Date(),
       ruleName: rule.name,
-      message: `Resolved: ${rule.name} — ${n.assetHostname ?? "alert"} cleared by ${actor}`,
     });
+    // Headline AND {message}: this context has no reading behind it, so without
+    // the headline the email would state the severity and the hostname and
+    // nothing about what happened.
+    setRecoverySentence(ctx, `Resolved: ${rule.name} — ${n.assetHostname ?? "alert"} cleared by ${actor}`);
     await executeActions(n.id, rule.resetActions as never, ctx, {
       scopeRegionTags: scopeRegionTagsOf(rule.scope as never),
       assetId: n.assetId,

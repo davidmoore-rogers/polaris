@@ -57,6 +57,10 @@ describe("buildComposedEmail", () => {
     threshold: "90",
     severity: "critical",
     message: "High CPU: fw-atl-01",
+    // What the body actually leads with. Every current fire stamps it; the
+    // message is deliberately NOT printed under it (the two said the same
+    // thing), so assertions about the body's content probe this.
+    triggerSummary: "CPU utilization is 97.5%",
     link: "https://polaris.example.com/notifications.html",
     ruleName: "High CPU",
   });
@@ -68,7 +72,7 @@ describe("buildComposedEmail", () => {
     // where it hangs, and how to acknowledge.
     const c = buildComposedEmail({}, ctx);
     expect(c.subject).toBe("[CRITICAL] fw-atl-01 — High CPU");
-    expect(c.text).toContain("High CPU: fw-atl-01"); // the message still leads
+    expect(c.text).toContain("CPU utilization is 97.5%"); // what fired leads
     expect(c.text).toContain("Acknowledge:");
     expect(c.html).toContain("Acknowledge alert");
     expect(c.html).toContain("fw-atl-01");
@@ -100,7 +104,7 @@ describe("buildComposedEmail", () => {
     const c = buildComposedEmail({}, ctx); // ctx carries no assetDetail at all
     expect(c.text).not.toMatch(/^(Switch|AP|IP):\s*$/m);
     expect(c.html).not.toContain("Connected AP");
-    expect(c.html).toContain("High CPU: fw-atl-01");
+    expect(c.html).toContain("CPU utilization is 97.5%");
   });
 
   it("never leaks a literal token from OUR default when the context predates it", () => {

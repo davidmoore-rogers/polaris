@@ -51,6 +51,7 @@ export const DEFAULT_ALERT_TEXT = [
   "Event:      {event.action}",
   "Resource:   {event.resource}",
   "Triggered by: {event.actor}",
+  "Detail:     {event.message}",
   "Severity:   {severity}",
   // {time.local} rather than {time}: the ISO-8601 form is what a machine wants,
   // and "2026-08-12T18:46:01.561Z" is also a 24-character unbreakable string
@@ -132,6 +133,11 @@ export const DEFAULT_ALERT_HTML = [
   fact("Event", "{event.action}"),
   fact("{event.resourceType}", "{event.resource}"),
   fact("Triggered by", "{event.actor}"),
+  // The event's own text — the REASON. "integration.discover.error" names what
+  // broke and this says why ("Discovery failed: RPC -11 no valid session"). It
+  // rides its own row rather than {message} so it survives whatever the rule's
+  // message template says; last of the event rows because it's the long one.
+  fact("Detail", "{event.message}"),
   fact("Automation", "{rule}"),
   fact("Raised", "{time.local}"),
   "</table>",

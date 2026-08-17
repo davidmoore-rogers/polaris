@@ -74,6 +74,32 @@ describe("the default alert email is a template, not string building", () => {
     expect(html).not.toContain("packet loss at 93.8%");
   });
 
+  it("still carries an event's REASON, as its own facts row", () => {
+    // The 12 seeded event automations set messageTemplate "{value}" precisely to
+    // surface the event's own text, so dropping {message} from the body would
+    // have left "integration.discover.error on FMG-Nashville" with no reason.
+    // {event.message} is its own row instead — which also survives an operator
+    // replacing the message template, as "{value}" never did.
+    const ev = buildTemplateContext({
+      asset: "FMG-Nashville",
+      severity: "serious",
+      triggerSummary: "integration.discover.error on FMG-Nashville",
+      event: {
+        action: "integration.discover.error",
+        resourceType: "integration",
+        resourceName: "FMG-Nashville",
+        actor: "system:scheduler",
+        message: "Discovery failed: RPC -11 no valid session",
+      },
+    });
+    const html = pruneEmptyRows(renderNotificationTemplate(DEFAULT_ALERT_HTML, ev, { html: true, unknown: "blank" }));
+    expect(html).toContain("Detail");
+    expect(html).toContain("Discovery failed: RPC -11 no valid session");
+    // And it prunes away on a metric alert, which has no event behind it.
+    const metric = pruneEmptyRows(renderNotificationTemplate(DEFAULT_ALERT_HTML, CTX, { html: true, unknown: "blank" }));
+    expect(metric).not.toContain("Detail");
+  });
+
   it("offers Acknowledge and Open device as real links", () => {
     expect(DEFAULT_ALERT_HTML).toContain('href="{ack}"');
     expect(DEFAULT_ALERT_HTML).toContain('href="{asset.link}"');

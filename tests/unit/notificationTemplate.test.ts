@@ -17,6 +17,7 @@ import {
   formatElapsed,
   formatLocalTime,
   isDeferredToken,
+  setRecoverySentence,
   type TemplateContextParts,
 } from "../../src/utils/notificationTemplate.js";
 import { DEFAULT_ALERT_TEXT, DEFAULT_ALERT_HTML, DEFAULT_ALERT_SUBJECT } from "../../src/utils/alertEmailTemplate.js";
@@ -63,6 +64,7 @@ const FULL_PARTS: TemplateContextParts = {
     resourceType: "integration",
     resourceName: "FMG-Nashville",
     actor: "system:scheduler",
+    message: "Discovery failed: RPC -11 no valid session",
   },
   escalationTier: 2,
   escalationElapsed: "1h 30m",
@@ -167,6 +169,22 @@ describe("buildTemplateContext", () => {
     expect(empty["asset.ip"]).toBe("");
     expect(empty["escalation.tier"]).toBe("");
     expect(empty["asset.tags"]).toBe("");
+  });
+});
+
+describe("setRecoverySentence", () => {
+  it("stamps the headline as well as {message}", () => {
+    // The body prints no {message} line (it repeated the trigger sentence on a
+    // fire), so a recovery whose only text lived there would have mailed a
+    // severity colour, a hostname, and nothing about what happened.
+    const ctx = buildTemplateContext({ asset: "fw-atl-01", severity: "resolved", triggerSummary: "Response time is 120 ms" });
+    setRecoverySentence(ctx, "Resolved: High CPU — fw-atl-01 recovered");
+    expect(ctx["message"]).toBe("Resolved: High CPU — fw-atl-01 recovered");
+    // It REPLACES the trigger sentence: re-rendering the recovered reading under
+    // a green "resolved" header reads like a fresh alert about a healthy device.
+    expect(ctx["trigger.summary"]).toBe("Resolved: High CPU — fw-atl-01 recovered");
+    expect(renderNotificationTemplate(DEFAULT_ALERT_TEXT, ctx, { unknown: "blank" }))
+      .toContain("Resolved: High CPU — fw-atl-01 recovered");
   });
 });
 

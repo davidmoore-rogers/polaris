@@ -80,6 +80,7 @@ import {
   buildTemplateContext,
   renderNotificationTemplate,
   templateNeedsAsset,
+  setRecoverySentence,
   notificationsPageUrl,
   type AssetTemplateDetail,
   type TemplateContextParts,
@@ -1671,7 +1672,7 @@ async function fireResolved(
   const parts = readingContextParts(rule, reading, now);
   parts.severity = "resolved";
   const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
-  ctx["message"] = `Resolved: ${rule.name} — ${ctx["asset"] ?? reading.hostname ?? ""} recovered`;
+  setRecoverySentence(ctx, `Resolved: ${rule.name} — ${ctx["asset"] ?? reading.hostname ?? ""} recovered`);
   await enqueueAlertActions(st.notificationId, actions, ctx, rule, reading);
 }
 
@@ -1719,7 +1720,7 @@ async function fireReset(
   // uses for a severity-band recovery.
   parts.severity = "resolved";
   const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
-  ctx["message"] = `Resolved: ${rule.name} — ${ctx["asset"] || reading.hostname || "device"} ${reason}`;
+  setRecoverySentence(ctx, `Resolved: ${rule.name} — ${ctx["asset"] || reading.hostname || "device"} ${reason}`);
   await enqueueAlertActions(st.notificationId, actions, ctx, rule, reading);
 }
 
@@ -1975,6 +1976,11 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
           resourceType: ev.resourceType,
           resourceName: ev.resourceName,
           actor: ev.actor,
+          // Why it happened, as its own token: the email prints it as a facts
+          // row, so the reason survives whatever the rule's messageTemplate
+          // says (the 12 seeded event automations use "{value}" to surface
+          // exactly this text, and the body no longer relies on that).
+          message: ev.message,
         },
         triggerSummary: triggerSummary({
           trigger: c.rule.trigger as never,
