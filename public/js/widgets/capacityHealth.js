@@ -7,13 +7,29 @@
 
 (function () {
   var SEVERITY_PILL = { ok: "widget-pill-ok", watch: "widget-pill-watch", amber: "widget-pill-amber", red: "widget-pill-red" };
+  // Capacity's own ladder, most severe first — deliberately NOT the automation
+  // alert ladder (see setHeaderTierCounts): "red" here is a disk-space tier, not
+  // a notification severity, and the two must not rank against each other.
+  var SEVERITY_ORDER = ["red", "amber", "watch", "ok"];
 
   function renderInstance(el, payload) {
     var capacity = payload && payload.capacity;
-    if (!capacity) { el.innerHTML = '<p class="empty-state">Capacity data unavailable</p>'; return; }
+    if (!capacity) {
+      PolarisWidgets.setHeaderPills(el, []);
+      el.innerHTML = '<p class="empty-state">Capacity data unavailable</p>';
+      return;
+    }
     var sev = capacity.severity || "ok";
     var pillCls = SEVERITY_PILL[sev] || "widget-pill-watch";
     var reasons = (capacity.reasons || []).slice(0, 5);
+    // Header breakdown of the reasons on screen (the same five this renders),
+    // so the title reads "2 red, 1 amber" without counting the list by eye.
+    PolarisWidgets.setHeaderTierCounts(el, reasons, {
+      keyOf: function (r) { return r.severity; },
+      order: SEVERITY_ORDER,
+      classOf: function (k) { return SEVERITY_PILL[k] || "widget-pill-watch"; },
+      noun: "reason(s)",
+    });
     var reasonsHtml = reasons.length
       ? '<ul style="list-style:none;padding:0;margin:8px 0 0;display:flex;flex-direction:column;gap:6px">' +
           reasons.map(function (r) {

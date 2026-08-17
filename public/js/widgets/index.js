@@ -287,6 +287,13 @@
   // reads "2 critical, 12 serious" off the title instead of one number colored
   // to the worst of them.
   //
+  // CONVENTION (2026-08): callers pass the rows they are ABOUT TO RENDER — post
+  // severity filter, post row limit / horizon / red guarantee — so the pills
+  // count what is on screen at that moment. That deliberately differs from the
+  // CSV export provider, which stays on the full matched set (its own menu
+  // states the tier counts), and it means a row limit shrinks the pills: a
+  // 10-row panel over a 40-node outage reads 10, not 40.
+  //
   // opts.unalerted decides what happens to rows carrying no active alert:
   //   "neutral" (default) — a trailing grey pill counts them, so the pills
   //     still sum to the row total (Down Nodes / Down Interfaces, where the
@@ -314,6 +321,37 @@
       }
     }
     window.PolarisWidgets.setHeaderPills(el, pills);
+  };
+
+  // The same breakdown for a widget whose rows carry their OWN severity
+  // vocabulary rather than the automation-alert ladder (Capacity Health's
+  // ok/watch/amber/red reasons). Kept generic instead of teaching
+  // ALERT_SEVERITY_RANK a second ladder — those two vocabularies must not blend,
+  // or a capacity "red" would start ranking against an automation "critical" in
+  // the minimum-severity filter and the export tiers.
+  //
+  // opts: { keyOf(row) → tier key, order: [most severe … least], classOf(key) →
+  // widget-pill-* class, noun: "…" for the pill tooltip }. Tiers absent from the
+  // set get no pill; an unknown key is ignored (same posture as the alert
+  // ladder's unknown-severity drop).
+  window.PolarisWidgets.setHeaderTierCounts = function (el, rows, opts) {
+    opts = opts || {};
+    var keyOf = opts.keyOf || function (r) { return r && r.severity; };
+    var order = opts.order || [];
+    var classOf = opts.classOf || function () { return "widget-pill-watch"; };
+    var counts = {};
+    (rows || []).forEach(function (r) {
+      var k = keyOf(r);
+      if (!k || order.indexOf(k) === -1) return;
+      counts[k] = (counts[k] || 0) + 1;
+    });
+    window.PolarisWidgets.setHeaderPills(el, order.filter(function (k) { return counts[k]; }).map(function (k) {
+      return {
+        text: counts[k],
+        className: classOf(k),
+        title: counts[k] + " " + (opts.noun ? opts.noun + " " : "") + "at " + k,
+      };
+    }));
   };
 
   // ─── Severity-tier CSV export (widget header ⤓ button) ───────────────────

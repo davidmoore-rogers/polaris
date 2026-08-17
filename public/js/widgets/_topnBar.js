@@ -4,8 +4,8 @@
  * Disk Usage, Highest Temperature). These are structurally identical: a ranked
  * list of { id, hostname, ipAddress, value, detail?, site? }
  * rows drawn as a name + utilization bar + value, with per-widget units, color
- * thresholds (overridden by an alerting row's own severity color), an optional
- * value floor, and an optional Group-by-Site view
+ * thresholds (overridden by an alerting row's own severity color) and an
+ * optional Group-by-Site view
  * (gear option; buckets the ranked rows under site headers, groups ordered
  * by their hottest row). Underscore-prefixed = internal helper; it registers
  * no widget of its own.
@@ -33,19 +33,15 @@
    * el       — widget body
    * rows     — [{ id, hostname, ipAddress, value }]
    * opts     — { unit:"%"|"ms"|"°C", thresholds, baseColor, emptyText, config,
-   *              fillTo, headerSeverityCounts }
-   *            config: { rowLimit, threshold }
-   *            headerSeverityCounts: stamp per-severity count pills on the
-   *            widget header title (Highest Temperature). Opt-in per widget.
+   *              fillTo }
+   *            config: { rowLimit }
    *            fillTo: red-guarantee mode (Highest Avg CPU/Memory, Disk, Slowest
    *            Response). The operator's Row limit governs how many rows show
    *            (top-N by value), EXCEPT that every RED row (at/above the top
    *            color threshold, thresholds[0].over) is always shown even past
    *            the limit — an alert must never be clipped away. fillTo is the
    *            fallback row count when the config carries no usable rowLimit.
-   *            The gear "Hide below" threshold does NOT apply in this mode.
-   *            Omit fillTo to leave the threshold as a hard filter + rowLimit
-   *            as a plain cap (e.g. Packet Loss).
+   *            Omit fillTo to leave rowLimit as a plain cap (e.g. Packet Loss).
    */
   function renderRows(el, rows, opts) {
     opts = opts || {};
@@ -61,15 +57,7 @@
       var d = (b.alertRank || 0) - (a.alertRank || 0);
       return d !== 0 ? d : (b.value || 0) - (a.value || 0);
     });
-    // Header severity breakdown (opt-in per widget): one pill per active-alert
-    // severity in the ranked set. Stamped from `sorted` — post the minimum-
-    // severity filter, PRE the row limit / red guarantee, so the numbers match
-    // the export and don't shrink with the visible rows — and before the empty
-    // return below so the pills clear when the set empties. Unalerted rows get
-    // no bucket here: a top-N list's row count is the operator's Row limit, not
-    // a fleet total, so counting the quiet rows would be noise.
-    if (opts.headerSeverityCounts) PolarisWidgets.setHeaderSeverityCounts(el, sorted, { unalerted: "omit" });
-    // Header export: the full ranked set (pre threshold/row-limit, post the
+    // Header export: the full ranked set (pre row-limit, post the
     // gear's minimum-severity filter), severity-tiered on each asset's active
     // automation alert. The filename defaults from the widget's data-type
     // (topCpu → polaris-top-cpu-…).
@@ -93,11 +81,16 @@
       var limitN = parseInt(cfg.rowLimit, 10);
       if (isNaN(limitN) || limitN <= 0) limitN = opts.fillTo;
       shown = sorted.filter(function (r, i) { return i < limitN || (r.value || 0) >= redOver; });
-    } else if (cfg.threshold != null) {
-      shown = PolarisWidgets.clip(sorted.filter(function (r) { return (r.value || 0) >= cfg.threshold; }), cfg.rowLimit);
     } else {
       shown = PolarisWidgets.clip(sorted, cfg.rowLimit);
     }
+    // Header severity breakdown — one pill per active-alert severity among the
+    // rows about to be RENDERED (post minimum-severity filter, post row limit /
+    // red guarantee), so the title counts what's on screen. Stamped before the
+    // empty return below so the pills clear when the set empties. Unalerted rows
+    // get no bucket here: a top-N list's row count is the operator's Row limit,
+    // not a fleet total, so counting the quiet rows would be noise.
+    PolarisWidgets.setHeaderSeverityCounts(el, shown, { unalerted: "omit" });
     if (!shown.length) {
       // A widget emptied by the severity filter says so, rather than reading as
       // "nothing is wrong".
@@ -141,8 +134,8 @@
 
     // Group by site (gear option, default off): bucket the already-ranked
     // rows preserving first-seen order, so groups sort by their hottest row
-    // — the site with the worst offender leads. Row limit / red guarantee /
-    // threshold were all applied BEFORE grouping (grouping only changes
+    // — the site with the worst offender leads. Row limit / red guarantee
+    // were both applied BEFORE grouping (grouping only changes
     // presentation, never which rows qualify). Same group-header markup as
     // Down Nodes / Down Interfaces, with a neutral count pill (these are
     // rankings, not alarms).
@@ -168,9 +161,10 @@
   }
 
   /**
-   * Shared gear config: row limit + an optional numeric threshold floor.
-   * opts.thresholdOptions — [{ value, label }] for the threshold select; omit
-   * to hide the threshold control entirely.
+   * Shared gear config: group-by + row limit (+ the shared minimum-severity
+   * filter). There is deliberately no per-widget value floor: the gear's
+   * Minimum severity control is the display filter, and a second numeric
+   * "hide below" knob only gave two ways to make the same row disappear.
    * opts.sampleControl — true adds an "Average over" select (config key
    * `sampleCount`, default 10): how many of each asset's most-recent samples
    * the server averages before ranking (Highest Avg CPU/Memory; 1 = rank on
@@ -187,7 +181,7 @@
   function renderConfig(el, config, onChange, opts) {
     opts = opts || {};
     // Group-by (site buckets, default off) + row-limit control (defaults to
-    // the 20-row NOC view) plus the optional threshold floor.
+    // the 20-row NOC view).
     var html =
       '<label>Group by</label>' +
       '<select data-k="groupBy">' +
@@ -206,22 +200,11 @@
           }).join("") +
         '</select>';
     }
-    if (opts.thresholdOptions) {
-      html +=
-        '<label>' + escapeHtml(opts.thresholdLabel || "Hide below") + '</label>' +
-        '<select data-k="threshold">' +
-          opts.thresholdOptions.map(function (o) {
-            return '<option value="' + o.value + '"' + ((config.threshold == null ? "" : String(config.threshold)) === String(o.value) ? " selected" : "") + '>' + escapeHtml(o.label) + '</option>';
-          }).join("") +
-        '</select>';
-    }
     el.innerHTML = html;
     el.querySelectorAll("[data-k]").forEach(function (s) {
       s.addEventListener("change", function () {
         var k = s.getAttribute("data-k");
-        if (k === "threshold") {
-          onChange("threshold", s.value === "" ? null : parseFloat(s.value));
-        } else if (k === "groupBy") {
+        if (k === "groupBy") {
           onChange("groupBy", s.value);
         } else if (k === "sampleCount") {
           onChange("sampleCount", parseInt(s.value, 10));

@@ -34,23 +34,19 @@
   }
 
   // `data` is { nodes, total } — total is the server's TRUE down count
-  // (uncapped), stamped on the widget header as a red pill so the operator
-  // gets one overall number without summing the per-group pills.
+  // (uncapped). The header now carries a per-severity breakdown of the RENDERED
+  // rows instead of that one number, so the pills answer "what am I looking
+  // at?"; the uncapped total still reaches the operator through the export
+  // menu's tier counts, which stay on the full fetched set. `total` is still
+  // fetched (it's part of the feed's shape and the cheapest thing to re-surface
+  // if the header ever wants an overflow cue) but nothing renders it now.
   function render(el, data, config) {
     var nodes = (data && data.nodes) || [];
-    var total = (data && data.total != null) ? data.total : nodes.length;
     // Gear "Minimum severity": narrow to nodes carrying an active alert at or
-    // above the configured tier, before the count / export / clip. With a filter
-    // on, the server's uncapped down total no longer describes what's shown, so
-    // the header pill counts the filtered rows instead.
+    // above the configured tier, before the count / export / clip.
     if (PolarisWidgets.minSeverityRank(config)) {
       nodes = PolarisWidgets.filterByMinSeverity(nodes, config);
-      total = nodes.length;
     }
-    // Header pill takes its color from the most severe active alert among the
-    // fetched nodes (the feed is severity-first server-side, so the cap keeps
-    // the worst ones) — a fleet of `serious` nodes reads orange, not red.
-    PolarisWidgets.setHeaderCount(el, total, PolarisWidgets.maxAlertSeverity(nodes));
     // Header export: the full fetched list (pre-clip), severity-tiered on each
     // node's active automation alert (alertSeverity).
     PolarisWidgets.setHeaderExport(el, {
@@ -65,13 +61,17 @@
       ],
       rows: nodes,
     });
-    if (!nodes.length) {
+    var groupBy = (config && config.groupBy) || "site";
+    var clipped = PolarisWidgets.clip(nodes, config && config.rowLimit);
+    // Header severity breakdown of the rows on screen, plus a trailing grey pill
+    // for the rendered nodes carrying no active alert — so the pills sum to what
+    // the panel shows. Stamped before the empty return so they clear with it.
+    PolarisWidgets.setHeaderSeverityCounts(el, clipped);
+    if (!clipped.length) {
       var empty = PolarisWidgets.minSeverityEmptyText(config) || "No nodes down";
       el.innerHTML = '<p class="empty-state">' + escapeHtml(empty) + '</p>';
       return;
     }
-    var groupBy = (config && config.groupBy) || "site";
-    var clipped = PolarisWidgets.clip(nodes, config && config.rowLimit);
 
     if (groupBy === "none") {
       el.innerHTML = clipped.map(nodeRowHTML).join("");

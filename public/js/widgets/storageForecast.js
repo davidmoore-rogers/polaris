@@ -56,6 +56,11 @@
     var limitN = parseInt(config.rowLimit, 10);
     if (isNaN(limitN) || limitN <= 0) limitN = 20;
     var shown = sorted.filter(function (r, i) { return i < limitN || (r.value || 0) <= RED_DAYS; });
+    // Header severity breakdown of the volumes actually rendered (post severity
+    // filter, horizon and red guarantee). Unalerted volumes get no bucket — the
+    // row count here is the operator's Row limit, not a fleet total (_topnBar's
+    // rule). Stamped before the empty return so the pills clear with it.
+    PolarisWidgets.setHeaderSeverityCounts(el, shown, { unalerted: "omit" });
     if (!shown.length) {
       el.innerHTML = '<p class="empty-state">' + escapeHtml(PolarisWidgets.minSeverityEmptyText(config) || EMPTY) + '</p>';
       return;

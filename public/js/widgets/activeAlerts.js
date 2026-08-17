@@ -50,12 +50,20 @@
       ],
       rows: filtered,
     });
+    // Header severity breakdown of the events on screen — the 25-row display
+    // slice, not the whole configured-severity listing. severityOf is the
+    // audit-Event level (info/warning/error), which the shared ladder colors at
+    // its informational/warning/critical ranks, so the pills match the per-row
+    // level pills below. Every row here HAS a level, so nothing lands in a grey
+    // bucket and "omit" only guards a row with an unknown level.
+    var displayed = filtered.slice(0, 25);
+    PolarisWidgets.setHeaderSeverityCounts(el, displayed, { unalerted: "omit", severityOf: severityOf });
     if (!filtered.length) {
       var empty = rows.length ? PolarisWidgets.minSeverityEmptyText({ minSeverity: PolarisWidgets.severityTierForRank(min) }) : null;
       el.innerHTML = '<p class="empty-state">' + escapeHtml(empty || "No active alerts") + '</p>';
       return;
     }
-    el.innerHTML = filtered.slice(0, 25).map(function (r) {
+    el.innerHTML = displayed.map(function (r) {
       var sev = r.severity || "info";
       var pillCls = LEVEL_PILL[sev] || "widget-pill-watch";
       var bar = LEVEL_BAR[sev] || "#4fc3f7";

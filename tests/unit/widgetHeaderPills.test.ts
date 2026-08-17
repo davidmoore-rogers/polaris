@@ -27,6 +27,12 @@ let W: {
   setHeaderCount: (el: unknown, count: number, severity?: string | null) => void;
   alertSeverityCounts: <T>(rows: T[] | null, sevOf?: (r: T) => string | undefined) => Array<{ severity: string; count: number }>;
   setHeaderSeverityCounts: <T>(el: unknown, rows: T[] | null, opts?: { unalerted?: string; severityOf?: (r: T) => string | undefined }) => void;
+  setHeaderTierCounts: <T>(el: unknown, rows: T[] | null, opts: {
+    keyOf?: (r: T) => string | undefined;
+    order: string[];
+    classOf?: (k: string) => string;
+    noun?: string;
+  }) => void;
 };
 const g = globalThis as Record<string, unknown>;
 let doc: Window["document"];
@@ -185,6 +191,39 @@ describe("setHeaderSeverityCounts", () => {
     W.setHeaderSeverityCounts(el, rows());
     expect(host()).not.toBeNull();
     W.setHeaderSeverityCounts(el, []);
+    expect(host()).toBeNull();
+  });
+});
+
+// Capacity Health's ok/watch/amber/red reasons — a ladder of its own that must
+// NOT be folded into ALERT_SEVERITY_RANK (a capacity "red" is a disk tier, not a
+// notification severity).
+describe("setHeaderTierCounts", () => {
+  const CAP = {
+    order: ["red", "amber", "watch", "ok"],
+    classOf: (k: string) => "widget-pill-" + k,
+    noun: "reason(s)",
+  };
+  const reasons = (): Array<{ severity: string }> => [
+    { severity: "amber" }, { severity: "red" }, { severity: "watch" }, { severity: "amber" },
+  ];
+
+  it("counts each tier in the caller's order, most severe first", () => {
+    const { el, pills } = mountWidget();
+    W.setHeaderTierCounts(el, reasons(), CAP);
+    expect(pills()).toEqual([
+      { text: "1", cls: "widget-pill-red", title: "1 reason(s) at red" },
+      { text: "2", cls: "widget-pill-amber", title: "2 reason(s) at amber" },
+      { text: "1", cls: "widget-pill-watch", title: "1 reason(s) at watch" },
+    ]);
+  });
+
+  it("ignores tiers outside the caller's ladder and clears on an empty set", () => {
+    const { el, pills, host } = mountWidget();
+    W.setHeaderTierCounts(el, [{ severity: "critical" }, { severity: "" }], CAP);
+    expect(pills()).toEqual([]);
+    expect(host()).toBeNull();
+    W.setHeaderTierCounts(el, null, CAP);
     expect(host()).toBeNull();
   });
 });

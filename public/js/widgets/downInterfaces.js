@@ -101,11 +101,6 @@
     // alert at/above the configured tier, before the header count / export /
     // clip so all three agree.
     rows = PolarisWidgets.filterByMinSeverity(rows, config);
-    // Header severity breakdown — one pill per active-alert severity in the set
-    // (most severe first, colored to that severity), plus a trailing grey pill
-    // for the rows carrying no alert, so the pills still sum to the down total.
-    // Pre-clip, so the row-limit doesn't shrink the numbers.
-    PolarisWidgets.setHeaderSeverityCounts(el, rows);
     // Header export: the merged interface + tunnel list (pre-clip),
     // severity-tiered on the owning asset's active automation alert.
     PolarisWidgets.setHeaderExport(el, {
@@ -123,13 +118,18 @@
       ],
       rows: rows,
     });
-    if (!rows.length) {
+    var groupBy = (config && config.groupBy) || "gate";
+    var clipped = PolarisWidgets.clip(rows, config && config.rowLimit);
+    // Header severity breakdown — one pill per active-alert severity among the
+    // RENDERED rows (most severe first, colored to that severity), plus a
+    // trailing grey pill for the rendered rows carrying no alert, so the pills
+    // sum to what's on screen. Stamped before the empty return so they clear.
+    PolarisWidgets.setHeaderSeverityCounts(el, clipped);
+    if (!clipped.length) {
       var empty = PolarisWidgets.minSeverityEmptyText(config) || "No interfaces or tunnels down";
       el.innerHTML = '<p class="empty-state">' + escapeHtml(empty) + '</p>';
       return;
     }
-    var groupBy = (config && config.groupBy) || "gate";
-    var clipped = PolarisWidgets.clip(rows, config && config.rowLimit);
 
     if (groupBy === "none") {
       el.innerHTML = clipped.slice().sort(byName).map(rowHTML).join("");

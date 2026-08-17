@@ -7,6 +7,12 @@
 (function () {
   function render(el, rows) {
     rows = rows || [];
+    // Header severity breakdown of the rows on screen — these rows arrive
+    // already clipped to the Row limit (fetchData clips), so `rows` IS the
+    // rendered set. Severity here is the reboot-relevant active alert the feed
+    // attaches (eventRel "device.reboot"); a device that rebooted with no such
+    // automation firing gets no bucket, so a quiet reboot list shows no pills.
+    PolarisWidgets.setHeaderSeverityCounts(el, rows, { unalerted: "omit" });
     if (!rows.length) { el.innerHTML = '<p class="empty-state">No recent reboots</p>'; return; }
     el.innerHTML = rows.map(function (r) {
       var name = r.hostname || r.ipAddress || "(unnamed)";
