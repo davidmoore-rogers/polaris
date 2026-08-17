@@ -46,7 +46,7 @@ import {
 } from "../../services/monitoringService.js";
 import { getCredential } from "../../services/credentialService.js";
 import { resolveConnectionPath } from "../../services/connectionPathService.js";
-import { propagateAfterStatusChange } from "../../services/dependencyTreeService.js";
+import { propagateAfterStatusChange, FORTINET_INFRA_ASSET_TYPES } from "../../services/dependencyTreeService.js";
 import { pickSampleTierForAsset } from "../../services/sampleQueryRouter.js";
 import {
   readMonitorHistory,
@@ -4185,6 +4185,12 @@ const dependencyOverrideBodySchema = z.object({
 // inline copies of the same binding-rule walk; they now share
 // loadBoundChildRows.
 
+// Payload caps for the asset-details tree. The endpoint half of the DAG made a
+// site FortiGate's child set fleet-sized, and this endpoint feeds a modal.
+const DEP_INFRA_CHILD_CAP = 300;
+const DEP_ENDPOINT_CHILD_CAP = 100;
+const DEP_GRANDCHILD_CAP = 500;
+
 // Stable display order: type (firewall→switch→ap→other), then hostname.
 const DEP_TYPE_ORDER: Record<string, number> = { firewall: 1, switch: 2, access_point: 3 };
 function byDepTypeThenHostname(a: { assetType: string; hostname: string | null }, b: { assetType: string; hostname: string | null }): number {
@@ -4211,14 +4217,32 @@ interface BoundChildRow {
 /**
  * Every asset BOUND to one of `parentIds` as a dependency child. Binding
  * resolution per child: if the child has ANY override row, only its override
- * rows count; otherwise only its computed rows count — the same rule the
- * parents view applies. Rows come back in (source asc, createdAt asc) order;
- * callers own dedupe/grouping/sorting.
+ * rows count; otherwise every NON-override row counts — the same rule
+ * `loadEffectiveParents` applies in the reconciler. (It used to test
+ * `source === "computed"` literally, which silently hid the two other
+ * discovery-written sources from the tree: `vcenter` VM→host edges and, since
+ * 2026-08, the `endpoint` half.) Rows come back in (source asc, createdAt asc)
+ * order; callers own dedupe/grouping/sorting.
+ *
+ * `opts.assetTypes` / `opts.excludeAssetTypes` narrow the child types and
+ * `opts.take` caps the read. They exist because the endpoint half made a
+ * FortiGate's child set fleet-sized — a site gate can be the last-seen device
+ * for hundreds of endpoints, and the asset-details tree is a summary, not a
+ * browsable inventory. Note `take` applies BEFORE the per-child binding filter
+ * below, so a caller wanting a specific slice must express it in the where.
  */
-async function loadBoundChildRows(parentIds: string[]): Promise<BoundChildRow[]> {
+async function loadBoundChildRows(
+  parentIds: string[],
+  opts?: { assetTypes?: string[]; excludeAssetTypes?: string[]; take?: number },
+): Promise<BoundChildRow[]> {
   if (parentIds.length === 0) return [];
   const rows = await prisma.assetDependencyParent.findMany({
-    where: { parentAssetId: { in: parentIds } },
+    where: {
+      parentAssetId: { in: parentIds },
+      ...(opts?.assetTypes ? { asset: { assetType: { in: opts.assetTypes } } } : {}),
+      ...(opts?.excludeAssetTypes ? { asset: { assetType: { notIn: opts.excludeAssetTypes } } } : {}),
+    },
+    ...(opts?.take ? { take: opts.take } : {}),
     include: {
       asset: {
         select: {
@@ -4247,7 +4271,7 @@ async function loadBoundChildRows(parentIds: string[]): Promise<BoundChildRow[]>
   const out: BoundChildRow[] = [];
   for (const r of rows) {
     const childHasOverride = overrideMap.get(r.assetId) === true;
-    const isBinding = childHasOverride ? r.source === "override" : r.source === "computed";
+    const isBinding = childHasOverride ? r.source === "override" : r.source !== "override";
     if (!isBinding) continue;
     out.push({
       parentAssetId:        r.parentAssetId,
@@ -4358,7 +4382,12 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
       };
     }
 
-    const computedParents = rows.filter(r => r.source === "computed").map(shape);
+    // Every non-override source is part of the computed set — `computed` (the
+    // Fortinet infra half), `endpoint` (the leaf edge an endpoint hangs off its
+    // last-seen switch / AP / FortiGate by) and `vcenter` (VM→ESXi placement).
+    // Filtering on the literal "computed" hid the other two from the tree even
+    // though the reconciler was suppressing on them.
+    const computedParents = rows.filter(r => r.source !== "override").map(shape);
     const overrideParents = rows.filter(r => r.source === "override").map(shape);
     // When at least one override row exists, the override set is the effective
     // set (even if it ends up filtering down to the same parents as computed).
@@ -4368,7 +4397,26 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
     // Direct children — every asset bound to THIS asset as an effective
     // parent (loadBoundChildRows applies the override-wins binding rule per
     // child). Dedupe by child id keeping the first binding row.
-    const boundChildren = await loadBoundChildRows([id]);
+    //
+    // Read in two capped halves so the infra children are never crowded out by
+    // the endpoint half: a controller FortiGate can carry hundreds of managed
+    // switches/APs AND be the last-seen gate for every endpoint at the site, and
+    // an uncapped single read would put the whole site in one modal payload.
+    // Both halves are type-filtered in SQL. Filtering the endpoint half in
+    // memory instead would be wrong, not just slower: with `take` applied
+    // before the filter, a gate with 300 switch children could fill the whole
+    // read with infra rows and report zero endpoints.
+    const [boundInfraChildren, boundEndpointChildren] = await Promise.all([
+      loadBoundChildRows([id], { assetTypes: [...FORTINET_INFRA_ASSET_TYPES], take: DEP_INFRA_CHILD_CAP + 1 }),
+      loadBoundChildRows([id], { excludeAssetTypes: [...FORTINET_INFRA_ASSET_TYPES], take: DEP_ENDPOINT_CHILD_CAP + 1 }),
+    ]);
+    const boundChildren = [
+      ...boundInfraChildren.slice(0, DEP_INFRA_CHILD_CAP),
+      ...boundEndpointChildren.slice(0, DEP_ENDPOINT_CHILD_CAP),
+    ];
+    const childrenTruncated =
+      boundInfraChildren.length > DEP_INFRA_CHILD_CAP ||
+      boundEndpointChildren.length > DEP_ENDPOINT_CHILD_CAP;
     const seenChildIds = new Set<string>();
     const children: Array<Omit<BoundChildRow, "parentAssetId">> = [];
     for (const r of boundChildren) {
@@ -4383,8 +4431,16 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
     // render firewall → switch → AP without click-through. Same binding rule;
     // dedupe per (parentId, childId) so an MCLAG pair doesn't render twice
     // under one parent.
+    //
+    // INFRA-ONLY, which is exactly what this returned before the endpoint half
+    // existed: a firewall's grandchildren are its switches' APs. Letting
+    // endpoints in would multiply the payload by every endpoint on every switch
+    // at the site for a row nobody reads two levels down.
     const grandchildrenByParent = new Map<string, Array<Omit<BoundChildRow, "parentAssetId">>>();
-    const boundGrandchildren = await loadBoundChildRows(children.map(c => c.id));
+    const boundGrandchildren = await loadBoundChildRows(children.map(c => c.id), {
+      assetTypes: [...FORTINET_INFRA_ASSET_TYPES],
+      take: DEP_GRANDCHILD_CAP,
+    });
     const seenGc = new Set<string>();
     for (const r of boundGrandchildren) {
       const dedupeKey = r.parentAssetId + "|" + r.id;
@@ -4398,9 +4454,24 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
     for (const list of grandchildrenByParent.values()) {
       list.sort(byDepTypeThenHostname);
     }
+
+    // Total bound-child count per rendered child + for this asset itself, so the
+    // tree can say "+N more" instead of implying the capped list is everything.
+    // One indexed groupBy on parentAssetId; cheaper than fetching the rows we
+    // deliberately didn't render.
+    const countScopeIds = [id, ...children.map(c => c.id)];
+    const childCountRows = await prisma.assetDependencyParent.groupBy({
+      by: ["parentAssetId"],
+      where: { parentAssetId: { in: countScopeIds }, source: { not: "override" } },
+      _count: { _all: true },
+    });
+    const childCountByParent = new Map<string, number>();
+    for (const r of childCountRows) childCountByParent.set(r.parentAssetId, r._count._all);
+
     const childrenWithGrandchildren = children.map(c => ({
       ...c,
       grandchildren: grandchildrenByParent.get(c.id) ?? [],
+      childCount:    childCountByParent.get(c.id) ?? 0,
     }));
 
     res.json({
@@ -4421,6 +4492,8 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
       overrideParents,
       hasOverride,
       children: childrenWithGrandchildren,
+      childrenTruncated,
+      childCount: childCountByParent.get(id) ?? 0,
       haPeer,
     });
   } catch (err) {

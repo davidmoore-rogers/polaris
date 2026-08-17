@@ -15831,13 +15831,41 @@ function _depTreeStatusPip(node) {
 
 var _DEP_TREE_TYPE_LABEL = { firewall: "firewall", switch: "switch", access_point: "access point" };
 
+// How the edge to this node's parent was detected, in operator words. The three
+// endpoint-half values matter most: an edge that silences alerts should say out
+// loud which signal put it there. "controller"/"interface"/"lldp"/"mesh" are the
+// Fortinet infra half; "hypervisor" is a vCenter VM→host placement.
+var _DEP_TREE_VIA_LABEL = {
+  "switch-port": "last-seen switch port",
+  wireless:      "last-seen access point",
+  sighting:      "last-seen firewall",
+  hypervisor:    "hypervisor placement",
+  controller:    "controller",
+  interface:     "interface",
+  lldp:          "LLDP",
+  mesh:          "wireless mesh",
+  manual:        "operator override"
+};
+var _DEP_TREE_VIA_TITLE = {
+  "switch-port": "Detected from the FortiSwitch port this device was last seen on",
+  wireless:      "Detected from the FortiAP this device was last associated with",
+  sighting:      "Detected from the FortiGate that last saw this device (DHCP lease / reservation / ARP)",
+  hypervisor:    "Detected from the vCenter host this VM is placed on"
+};
+
+// Humanize a raw assetType for the tree ("kubernetes_cluster" → "kubernetes cluster").
+function _depTreeTypeLabel(assetType) {
+  if (_DEP_TREE_TYPE_LABEL[assetType]) return _DEP_TREE_TYPE_LABEL[assetType];
+  return String(assetType || "asset").replace(/_/g, " ");
+}
+
 // Click target: hostname becomes a button that pivots openViewModal to that
 // asset. When the hostname is missing we fall through to the asset id.
 function _depTreeNodeRow(node, opts) {
   opts = opts || {};
   var name = node.hostname || node.id;
   var safeName = escapeHtml(name);
-  var typeLabel = _DEP_TREE_TYPE_LABEL[node.assetType] || node.assetType || "asset";
+  var typeLabel = _depTreeTypeLabel(node.assetType);
   var pip = _depTreeStatusPip(node);
   // Caller-supplied annotation tag (e.g. the HA-peer row's "HA standby") —
   // reuses the override-tag styling.
@@ -15858,6 +15886,18 @@ function _depTreeNodeRow(node, opts) {
     hostHTML = '<button type="button" class="dep-tree-link" data-asset-id="' + escapeHtml(node.id) + '" title="Open ' + safeName + '">' + safeName + '</button>';
   }
   var sourceTag = (node.source === "override") ? ' <span class="dep-tree-source-tag" title="Operator override">override</span>' : "";
+  // How the edge was detected. Shown for the endpoint-half signals and the
+  // hypervisor one — for the Fortinet infra signals it's implied by the shape of
+  // the tree and would just add noise to every row.
+  var viaTag = "";
+  if (!opts.self && opts.via && _DEP_TREE_VIA_TITLE[opts.via]) {
+    viaTag = ' <span class="dep-tree-source-tag" title="' + escapeHtml(_DEP_TREE_VIA_TITLE[opts.via]) + '">' +
+      escapeHtml(_DEP_TREE_VIA_LABEL[opts.via] || opts.via) + '</span>';
+  }
+  // "+N more" hint for a node whose own children were capped out of the payload.
+  var moreTag = (opts.moreCount > 0)
+    ? ' <span class="dep-tree-level" title="' + opts.moreCount + ' more child device(s) not shown here — open this device to see them">+' + opts.moreCount + '</span>'
+    : "";
   var depthClass = opts.depth ? ' dep-tree-row-depth-' + opts.depth : '';
   return '<div class="dep-tree-row' + (opts.self ? ' dep-tree-row-self' : '') + depthClass + '">' +
     pip + ' ' + hostHTML +
@@ -15865,6 +15905,8 @@ function _depTreeNodeRow(node, opts) {
     // Self node already prints "— level N" inline, so skip the tag there.
     (opts.self ? '' : levelBit) +
     sourceTag +
+    viaTag +
+    moreTag +
     extraTag +
     '</div>';
 }
@@ -15883,14 +15925,20 @@ function renderDependencyTreeBlock(payload, selfId) {
   // way the tree shows the cluster's second box.
   var haPeer   = payload.haPeer || null;
   if (parents.length === 0 && children.length === 0 && !haPeer) {
-    // Only show "standalone" messaging for Fortinet infra types; endpoint
-    // assets (workstations, printers, etc.) shouldn't see the block at all
-    // since they're never in the dependency tree.
+    // Endpoints joined the tree in 2026-08 (they hang off their last-seen
+    // switch / AP / FortiGate), so the block now renders for every asset type.
+    // An endpoint landing here has no resolvable upstream device, which is worth
+    // saying plainly: it's also the reason dependency suppression can't apply,
+    // so this row alerts on its own probe state even when its site is dark.
     var infraTypes = ["firewall", "switch", "access_point"];
-    if (infraTypes.indexOf(self.assetType) === -1) return "";
+    var isInfra = infraTypes.indexOf(self.assetType) !== -1;
     return '<div class="dep-tree-block">' +
       '<div class="dep-tree-header">Dependency Tree</div>' +
-      '<div class="dep-tree-empty">Standalone — not part of any discovered dependency chain.</div>' +
+      '<div class="dep-tree-empty">' +
+        (isInfra
+          ? 'Standalone — not part of any discovered dependency chain.'
+          : 'No upstream device identified — no last-seen switch, access point or FortiGate resolves to a monitored device, so dependency suppression can\'t apply to this asset.') +
+      '</div>' +
       '</div>';
   }
 
@@ -15910,7 +15958,7 @@ function renderDependencyTreeBlock(payload, selfId) {
       dependencyLayer: p.parent.dependencyLayer, monitorStatus: p.parent.monitorStatus,
       monitored: p.parent.monitored, dependencySuppressed: false /* we don't have it on parent */, source: p.source,
       dependencyTestUntil: p.parent.dependencyTestUntil,
-    }); }).join("");
+    }, { via: p.detectedVia }); }).join("");
     parentsHTML += '<div class="dep-tree-connector">│</div>';
   }
   var selfHTML = _depTreeNodeRow({
@@ -15940,12 +15988,21 @@ function renderDependencyTreeBlock(payload, selfId) {
   if (children.length > 0) {
     childrenHTML += '<div class="dep-tree-connector">│</div>';
     childrenHTML += children.map(function (c) {
-      var row = _depTreeNodeRow(c, { depth: 1 });
+      // Only infra grandchildren come down in the payload, so a switch's
+      // endpoint children show as a "+N" count on its row rather than as rows.
       var gcs = Array.isArray(c.grandchildren) ? c.grandchildren : [];
+      var more = (typeof c.childCount === "number") ? Math.max(0, c.childCount - gcs.length) : 0;
+      var row = _depTreeNodeRow(c, { depth: 1, via: c.detectedVia, moreCount: more });
       if (gcs.length === 0) return row;
-      var gcRows = gcs.map(function (gc) { return _depTreeNodeRow(gc, { depth: 2 }); }).join("");
+      var gcRows = gcs.map(function (gc) { return _depTreeNodeRow(gc, { depth: 2, via: gc.detectedVia }); }).join("");
       return row + gcRows;
     }).join("");
+    if (payload.childrenTruncated) {
+      var shown = children.length;
+      var total = (typeof payload.childCount === "number") ? payload.childCount : 0;
+      childrenHTML += '<div class="dep-tree-empty" style="margin-top:0.35rem">Showing ' + shown +
+        ' of ' + (total > shown ? total : shown) + ' dependent devices.</div>';
+    }
   }
 
   var overrideTag = payload.hasOverride

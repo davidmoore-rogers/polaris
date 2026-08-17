@@ -1,7 +1,7 @@
 /**
  * src/services/dependencyTreeService.ts
  *
- * Dependency-aware monitoring suppression for Fortinet infrastructure.
+ * Dependency-aware monitoring suppression.
  *
  * Two layers, separated cleanly:
  *
@@ -17,16 +17,29 @@
  *      optimization). Suppression fires only on the confirmed-down edge:
  *      `warning` and `recovering` flapping does NOT propagate.
  *
+ * The DAG has two halves. The Fortinet INFRA half (firewall / switch /
+ * access_point) is layered by BFS from the FortiGate roots — see
+ * `buildDependencyEdgesFromInputs` + `assignLayers`. The ENDPOINT half
+ * (everything else: servers, workstations, cameras, printers, ESXi hosts)
+ * hangs one leaf edge off that infra tree via `buildEndpointDependencyEdges`
+ * / `syncEndpointDependencyEdges` — added 2026-08 because before it an
+ * endpoint had NO parent, and "no parents" means "never suppressed": a
+ * camera-station server behind a dead FortiGate alerted as plain Down while
+ * every switch and AP behind the same gate correctly read "Dep. Down".
+ *
  * Multi-parent semantics ("all-down"): a switch with redundant uplinks
  * suppresses only when EVERY effective parent is down or itself
  * suppressed. Unmonitored parents are transparent (an un-monitored
  * mid-chain switch doesn't block recovery — we walk up to its parents).
  *
  * The pure helpers (`buildDependencyEdgesFromInputs`, `assignLayers`,
- * `evaluateSuppression`) are exported for unit testing.
+ * `buildEndpointDependencyEdges`, `evaluateSuppression`) are exported for
+ * unit testing.
  */
 
 import { prisma } from "../db.js";
+import { EXCLUDED_LIFECYCLE_STATUSES } from "../utils/assetInvariants.js";
+import { bareFortinetDeviceName } from "../utils/assetSourceLocation.js";
 import {
   buildInfraParentIndex,
   resolveInfraParentAsset,
@@ -41,8 +54,34 @@ import { logger } from "../utils/logger.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type DependencyDetectedVia = "controller" | "interface" | "lldp" | "mesh" | "manual";
-export type DependencySource = "computed" | "override";
+export type DependencyDetectedVia =
+  | "controller"
+  | "interface"
+  | "lldp"
+  | "mesh"
+  | "manual"
+  // Endpoint-half signals (see buildEndpointDependencyEdges).
+  | "switch-port"
+  | "wireless"
+  | "sighting";
+export type DependencySource = "computed" | "override" | "endpoint" | "vcenter";
+
+/**
+ * The Fortinet infra types the BFS-layered half of the DAG is built from.
+ * Everything else is an "endpoint" — a leaf that hangs off this tree.
+ */
+export const FORTINET_INFRA_ASSET_TYPES = ["firewall", "switch", "access_point"] as const;
+
+/**
+ * `source` on the endpoint half's rows. Its own value (rather than another
+ * `computed` row) for three reasons: the infra recompute's delete-replace is
+ * scoped to infra `assetId`s and must not see these; a distinct source makes
+ * the whole feature revertible with one DELETE; and it mirrors how the vCenter
+ * VM→host edges already carve out `source="vcenter"`. `loadEffectiveParents`
+ * buckets everything that isn't `override` together, so these participate in
+ * suppression exactly like a computed row.
+ */
+export const ENDPOINT_DEPENDENCY_SOURCE = "endpoint";
 
 /** Pure-function input — one Fortinet infra asset. */
 export interface DepAsset {
@@ -426,6 +465,114 @@ export function assignLayers(
   return { layers, keptEdges, unresolved };
 }
 
+// ─── Endpoint half of the DAG ───────────────────────────────────────────────
+
+/**
+ * Pure-function input — one non-infra asset and every upstream signal Polaris
+ * already records for it. No new collection: all three come from columns
+ * discovery has always written.
+ */
+export interface DepEndpoint {
+  id: string;
+  /** `Asset.lastSeenSwitch` — "<switch-id-or-hostname>/<port>". */
+  lastSeenSwitch: string | null;
+  /** `Asset.lastSeenAp` — the FortiAP's name. */
+  lastSeenAp: string | null;
+  /**
+   * Candidate FortiGate names from `AssetFortigateSighting.fortigateDevice`,
+   * MOST RECENTLY SEEN FIRST. The caller orders them; this function just takes
+   * the first that resolves to a firewall asset.
+   */
+  sightedFortigates: string[];
+}
+
+/** One resolved endpoint parent. */
+export interface EndpointParentResolution {
+  parentAssetId: string;
+  detectedVia: Extract<DependencyDetectedVia, "switch-port" | "wireless" | "sighting">;
+}
+
+/** The switch half of a `lastSeenSwitch` value ("FS-248E-01/port15" → "FS-248E-01"). */
+export function switchNameFromLastSeenSwitch(v: string | null | undefined): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  if (!t) return null;
+  const slash = t.indexOf("/");
+  const name = (slash === -1 ? t : t.slice(0, slash)).trim();
+  return name || null;
+}
+
+/**
+ * Resolve the ONE upstream device an endpoint hangs off, most-specific first:
+ * wired switch port → wireless AP → the FortiGate that last saw it.
+ *
+ * SINGLE parent, not a union of everything that resolves — and that is the
+ * load-bearing decision here. The evaluator's multi-parent rule is "all-down"
+ * (built for a switch with redundant uplinks), but a switch and the gate above
+ * it are in SERIES, not parallel: listing both would mean a dead access switch
+ * with a healthy gate satisfies "some parent is ok" and the endpoint keeps
+ * alerting — the exact case an operator expects to be suppressed. Taking only
+ * the most specific parent gets the series behavior for free, because the
+ * switch is itself suppressed when its gate goes down, so `isParentOk(switch)`
+ * is already false. Gate down ⇒ suppressed; gate up and switch down ⇒
+ * suppressed; both up ⇒ the endpoint's own probe state stands.
+ *
+ * An unmonitored intermediate is transparent to the evaluator (it walks up to
+ * the grandparents), so pinning an endpoint to an unmonitored access switch
+ * still yields gate-driven suppression rather than silence.
+ *
+ * Returns null when nothing resolves — treat as "no parent", i.e. this endpoint
+ * never suppresses. That's the safe direction: an unresolvable upstream must
+ * leave alerting exactly as it was.
+ */
+export function resolveEndpointParent(
+  index: ReturnType<typeof buildInfraParentIndex>,
+  endpoint: DepEndpoint,
+): EndpointParentResolution | null {
+  const switchName = switchNameFromLastSeenSwitch(endpoint.lastSeenSwitch);
+  if (switchName) {
+    const sw = resolveInfraParentAsset(index, { name: switchName }, "switch");
+    if (sw) return { parentAssetId: sw.id, detectedVia: "switch-port" };
+  }
+
+  const apName = typeof endpoint.lastSeenAp === "string" ? endpoint.lastSeenAp.trim() : "";
+  if (apName) {
+    const ap = resolveInfraParentAsset(index, { name: apName }, "access_point");
+    if (ap) return { parentAssetId: ap.id, detectedVia: "wireless" };
+  }
+
+  for (const name of endpoint.sightedFortigates) {
+    if (!name) continue;
+    const fg = resolveInfraParentAsset(index, { name }, "firewall");
+    if (fg) return { parentAssetId: fg.id, detectedVia: "sighting" };
+  }
+
+  return null;
+}
+
+/**
+ * Build the endpoint half of the DAG — at most one edge per endpoint.
+ *
+ * `infra` is the same firewall/switch/AP inventory the infra half walks, so
+ * parent resolution reuses `fortinetParentKey`'s serial → FMG-device-name →
+ * hostname precedence rather than matching a stamp against `Asset.hostname`
+ * (the mismatch that silently unparented every switch on this install once —
+ * see utils/fortinetParentKey.ts).
+ */
+export function buildEndpointDependencyEdges(
+  endpoints: DepEndpoint[],
+  infra: DepAsset[],
+): DependencyEdge[] {
+  const index = buildInfraParentIndex(infra);
+  const out: DependencyEdge[] = [];
+  for (const e of endpoints) {
+    const hit = resolveEndpointParent(index, e);
+    if (!hit || hit.parentAssetId === e.id) continue;
+    out.push({ childAssetId: e.id, parentAssetId: hit.parentAssetId, detectedVia: hit.detectedVia });
+  }
+  return out;
+}
+
 /**
  * Evaluate desired `dependencySuppressed` state for every asset given the
  * current per-asset effective-parent set and per-asset state.
@@ -594,6 +741,8 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
   scoped: number;
   edgesWritten: number;
   unresolved: number;
+  /** Endpoint-half edges currently persisted (see syncEndpointDependencyEdges). */
+  endpointEdges: number;
 }> {
   // Always pull the global Fortinet inventory. Even when `integrationId`
   // narrows the scope, parent edges may cross integration boundaries (e.g.
@@ -603,7 +752,7 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
   // graph we walk.
   const inventory = await prisma.asset.findMany({
     where: {
-      assetType: { in: ["firewall", "switch", "access_point"] },
+      assetType: { in: [...FORTINET_INFRA_ASSET_TYPES] },
     },
     select: {
       id: true,
@@ -614,7 +763,7 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
       discoveredByIntegrationId: true,
     },
   });
-  if (inventory.length === 0) return { scoped: 0, edgesWritten: 0, unresolved: 0 };
+  if (inventory.length === 0) return { scoped: 0, edgesWritten: 0, unresolved: 0, endpointEdges: 0 };
 
   const inScope = integrationId
     ? new Set(inventory.filter(a => a.discoveredByIntegrationId === integrationId).map(a => a.id))
@@ -770,6 +919,33 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
     }
   });
 
+  // Endpoint half. Deliberately NOT narrowed by `integrationId`: an endpoint's
+  // upstream device is resolved from its own columns against the GLOBAL infra
+  // inventory, so the answer doesn't depend on which integration triggered the
+  // run — and most endpoints belong to an AD / Entra / vCenter integration that
+  // never calls this at all, so a scoped pass would leave them permanently
+  // unparented. Writes are diffed rather than delete-replaced, which keeps two
+  // integrations finalizing at once from churning each other's rows.
+  let endpointEdges = 0;
+  try {
+    const ep = await syncEndpointDependencyEdges(depAssets, layers);
+    endpointEdges = ep.edges;
+    if (ep.added > 0 || ep.removed > 0 || ep.retyped > 0) {
+      logger.debug(
+        { event: "dependency.endpoints", ...ep },
+        "Refreshed endpoint dependency edges",
+      );
+    }
+  } catch (err: any) {
+    // Never let the endpoint half fail the infra recompute — the infra tree is
+    // the part discovery's callers report on, and this pass is idempotent so
+    // the next cycle retries.
+    logger.warn(
+      { event: "dependency.endpoints.failed", err: err?.message ?? String(err) },
+      "Endpoint dependency-edge refresh failed (next recompute retries)",
+    );
+  }
+
   logger.debug(
     {
       event:        "dependency.recompute",
@@ -777,6 +953,7 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
       scoped:        inScope.size,
       edgesWritten:  scopedKept.length,
       unresolved:    unresolved.length,
+      endpointEdges,
     },
     "Recomputed dependency tree",
   );
@@ -785,6 +962,184 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
     scoped:       inScope.size,
     edgesWritten: scopedKept.length,
     unresolved:   unresolved.length,
+    endpointEdges,
+  };
+}
+
+// ─── Endpoint-half writeback ────────────────────────────────────────────────
+
+/** Chunk ids so no statement carries a pathological IN list. */
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Refresh every `source="endpoint"` row from the current endpoint columns.
+ *
+ * Fleet-wide but cheap: four reads, then a DIFF (insert missing / delete gone /
+ * update a changed `detectedVia`) instead of the infra half's delete-replace.
+ * At 2000 assets a delete-replace on every discovery finalize would rewrite the
+ * whole table several times an hour, and these rows change only when a device
+ * moves ports — dead-tuple churn the capacity advisor would then report on.
+ *
+ * `Asset.dependencyLayer` is stamped to parent-layer + 1 (null when the parent
+ * itself is unlayered) so the asset-details tree can print the endpoint's level.
+ */
+export async function syncEndpointDependencyEdges(
+  infra: DepAsset[],
+  layers: Map<string, number>,
+): Promise<{ endpoints: number; edges: number; added: number; removed: number; retyped: number }> {
+  const endpointRows = await prisma.asset.findMany({
+    where: {
+      assetType: { notIn: [...FORTINET_INFRA_ASSET_TYPES] },
+      status:    { notIn: EXCLUDED_LIFECYCLE_STATUSES },
+    },
+    select: { id: true, lastSeenSwitch: true, lastSeenAp: true, dependencyLayer: true },
+  });
+  const endpointIds = new Set(endpointRows.map(r => r.id));
+
+  // Every sighting, filtered in memory rather than through a 2000-element IN
+  // (the table is bounded by assets × gates-that-saw-them, and infra rows are a
+  // rounding error on top).
+  const sightings = await prisma.assetFortigateSighting.findMany({
+    select: { assetId: true, fortigateDevice: true, lastSeen: true },
+  });
+  const sightedByAsset = new Map<string, Array<{ device: string; at: number }>>();
+  for (const s of sightings) {
+    if (!endpointIds.has(s.assetId)) continue;
+    const device = (s.fortigateDevice ?? "").trim();
+    if (!device) continue;
+    const list = sightedByAsset.get(s.assetId);
+    const entry = { device, at: s.lastSeen ? s.lastSeen.getTime() : 0 };
+    if (list) list.push(entry);
+    else sightedByAsset.set(s.assetId, [entry]);
+  }
+
+  // An asset already parented by the hypervisor it runs on keeps that edge and
+  // gets none of ours. The VM's network path IS its host, so the placement edge
+  // is the more specific truth — and unioning the two would break the existing
+  // vCenter behavior under all-down semantics (host down + switch up would stop
+  // suppressing).
+  const vcenterParented = new Set(
+    (await prisma.assetDependencyParent.findMany({
+      where:  { source: "vcenter" },
+      select: { assetId: true },
+    })).map(r => r.assetId),
+  );
+
+  const endpoints: DepEndpoint[] = [];
+  for (const r of endpointRows) {
+    if (vcenterParented.has(r.id)) continue;
+    const sighted = (sightedByAsset.get(r.id) ?? [])
+      .sort((a, b) => b.at - a.at)
+      .flatMap(s => {
+        // Try the stored value, then its bare form — `fortigateDevice` should
+        // already be bare, but a prefixed "<integration>:<gate>" row must not
+        // silently resolve to nothing. Raw first so a gate whose real name
+        // contains a colon still matches itself.
+        const bare = bareFortinetDeviceName(s.device);
+        return bare && bare !== s.device ? [s.device, bare] : [s.device];
+      });
+    endpoints.push({
+      id:                r.id,
+      lastSeenSwitch:    r.lastSeenSwitch,
+      lastSeenAp:        r.lastSeenAp,
+      sightedFortigates: [...new Set(sighted)],
+    });
+  }
+
+  const desiredEdges = buildEndpointDependencyEdges(endpoints, infra);
+  const desiredByKey = new Map<string, DependencyEdge>();
+  for (const e of desiredEdges) desiredByKey.set(`${e.childAssetId}|${e.parentAssetId}`, e);
+
+  const existing = await prisma.assetDependencyParent.findMany({
+    where:  { source: ENDPOINT_DEPENDENCY_SOURCE },
+    select: { id: true, assetId: true, parentAssetId: true, detectedVia: true },
+  });
+
+  const staleIds: string[] = [];
+  const retypeByVia = new Map<string, string[]>();
+  const keptKeys = new Set<string>();
+  for (const row of existing) {
+    const key = `${row.assetId}|${row.parentAssetId}`;
+    const want = desiredByKey.get(key);
+    if (!want || keptKeys.has(key)) {
+      staleIds.push(row.id);
+      continue;
+    }
+    keptKeys.add(key);
+    if (row.detectedVia !== want.detectedVia) {
+      const list = retypeByVia.get(want.detectedVia);
+      if (list) list.push(row.id);
+      else retypeByVia.set(want.detectedVia, [row.id]);
+    }
+  }
+  const toInsert = [...desiredByKey.entries()].filter(([key]) => !keptKeys.has(key)).map(([, e]) => e);
+
+  // Layer stamp — only where it actually differs, so a steady fleet writes zero
+  // rows here.
+  const desiredLayerById = new Map<string, number | null>();
+  for (const r of endpointRows) desiredLayerById.set(r.id, null);
+  for (const e of desiredEdges) {
+    const parentLayer = layers.get(e.parentAssetId);
+    desiredLayerById.set(e.childAssetId, parentLayer == null ? null : parentLayer + 1);
+  }
+  const layerBuckets = new Map<number | null, string[]>();
+  for (const r of endpointRows) {
+    const want = desiredLayerById.get(r.id) ?? null;
+    if (want === r.dependencyLayer) continue;
+    const list = layerBuckets.get(want);
+    if (list) list.push(r.id);
+    else layerBuckets.set(want, [r.id]);
+  }
+
+  await prisma.$transaction(async tx => {
+    for (const ids of chunk(staleIds, 500)) {
+      await tx.assetDependencyParent.deleteMany({ where: { id: { in: ids } } });
+    }
+    for (const batch of chunk(toInsert, 1000)) {
+      await tx.assetDependencyParent.createMany({
+        data: batch.map(e => ({
+          assetId:       e.childAssetId,
+          parentAssetId: e.parentAssetId,
+          source:        ENDPOINT_DEPENDENCY_SOURCE,
+          detectedVia:   e.detectedVia,
+        })),
+        skipDuplicates: true,
+      });
+    }
+    for (const [via, ids] of retypeByVia) {
+      for (const batch of chunk(ids, 500)) {
+        await tx.assetDependencyParent.updateMany({ where: { id: { in: batch } }, data: { detectedVia: via } });
+      }
+    }
+    for (const [layer, ids] of layerBuckets) {
+      for (const batch of chunk(ids, 500)) {
+        // The "don't rewrite what already matches" guard has to spell out the
+        // NULL case: `dependencyLayer <> 3` is NULL — not true — for a row whose
+        // layer is NULL, so a bare `not` silently skips every endpoint that has
+        // never been layered, which is all of them on the first run.
+        await tx.asset.updateMany({
+          where: {
+            id: { in: batch },
+            ...(layer === null
+              ? { dependencyLayer: { not: null } }
+              : { OR: [{ dependencyLayer: null }, { dependencyLayer: { not: layer } }] }),
+          },
+          data: { dependencyLayer: layer },
+        });
+      }
+    }
+  });
+
+  return {
+    endpoints: endpoints.length,
+    edges:     desiredByKey.size,
+    added:     toInsert.length,
+    removed:   staleIds.length,
+    retyped:   [...retypeByVia.values()].reduce((n, l) => n + l.length, 0),
   };
 }
 

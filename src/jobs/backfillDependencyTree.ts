@@ -32,6 +32,7 @@ async function backfillDependencyTree(): Promise<void> {
             assets:        result.scoped,
             edges:         result.edgesWritten,
             unresolved:    result.unresolved,
+            endpointEdges: result.endpointEdges,
             elapsedMs:     Date.now() - start,
           },
           "Backfilled dependency tree on startup",

@@ -13,7 +13,10 @@ import {
   buildDependencyEdgesFromInputs,
   assignLayers,
   evaluateSuppression,
+  buildEndpointDependencyEdges,
+  switchNameFromLastSeenSwitch,
   type DepAsset,
+  type DepEndpoint,
   type DepInterfaceEdge,
   type DepLldpEdge,
   type SuppressionAssetState,
@@ -725,5 +728,168 @@ describe("evaluateSuppression — vCenter cluster hosts", () => {
       parents,
     );
     expect(out.get("vm")).toBe(true);
+  });
+});
+
+// ─── Endpoint half of the DAG ───────────────────────────────────────────────
+// Before 2026-08 only firewalls / switches / APs were in the tree, so every
+// other asset had zero parents — and "no parents" means "never suppressed". A
+// camera-station server behind a dead FortiGate alerted as plain Down while the
+// switches and APs behind that same gate correctly read "Dep. Down".
+
+describe("switchNameFromLastSeenSwitch", () => {
+  it("takes the switch half of the '<switch>/<port>' value", () => {
+    expect(switchNameFromLastSeenSwitch("FS-248E-01/port15")).toBe("FS-248E-01");
+  });
+  it("accepts a bare switch name with no port", () => {
+    expect(switchNameFromLastSeenSwitch("FS-248E-01")).toBe("FS-248E-01");
+  });
+  it("returns null for empty / missing values", () => {
+    expect(switchNameFromLastSeenSwitch(null)).toBeNull();
+    expect(switchNameFromLastSeenSwitch("")).toBeNull();
+    expect(switchNameFromLastSeenSwitch("   ")).toBeNull();
+    expect(switchNameFromLastSeenSwitch("/port3")).toBeNull();
+  });
+});
+
+describe("buildEndpointDependencyEdges", () => {
+  function endpoint(id: string, over: Partial<DepEndpoint> = {}): DepEndpoint {
+    return { id, lastSeenSwitch: null, lastSeenAp: null, sightedFortigates: [], ...over };
+  }
+
+  const infra: DepAsset[] = [
+    fg("fg1", "FG-NASHVILLE-01"),
+    sw("sw1", "FS-248E-01", "FG-NASHVILLE-01"),
+    ap("ap1", "FAP-431F-07", "FS-248E-01"),
+  ];
+
+  it("hangs a wired endpoint off the switch port it was last seen on", () => {
+    const edges = buildEndpointDependencyEdges([endpoint("srv", { lastSeenSwitch: "FS-248E-01/port15" })], infra);
+    expect(edges).toEqual([{ childAssetId: "srv", parentAssetId: "sw1", detectedVia: "switch-port" }]);
+  });
+
+  it("hangs a wireless endpoint off its last-seen access point", () => {
+    const edges = buildEndpointDependencyEdges([endpoint("tab", { lastSeenAp: "FAP-431F-07" })], infra);
+    expect(edges).toEqual([{ childAssetId: "tab", parentAssetId: "ap1", detectedVia: "wireless" }]);
+  });
+
+  it("falls back to the FortiGate that last saw the device", () => {
+    const edges = buildEndpointDependencyEdges([endpoint("cam", { sightedFortigates: ["FG-NASHVILLE-01"] })], infra);
+    expect(edges).toEqual([{ childAssetId: "cam", parentAssetId: "fg1", detectedVia: "sighting" }]);
+  });
+
+  // Most-specific-wins, and ONE parent only. Listing the switch AND the gate
+  // would break the operator's expectation under all-down semantics: a dead
+  // access switch with a healthy gate would satisfy "some parent is ok" and the
+  // endpoint would keep alerting. The series relationship instead comes from the
+  // switch being suppressed by its own gate.
+  it("prefers the switch over the gate when both resolve, emitting a single edge", () => {
+    const edges = buildEndpointDependencyEdges(
+      [endpoint("srv", { lastSeenSwitch: "FS-248E-01/port15", lastSeenAp: "FAP-431F-07", sightedFortigates: ["FG-NASHVILLE-01"] })],
+      infra,
+    );
+    expect(edges).toEqual([{ childAssetId: "srv", parentAssetId: "sw1", detectedVia: "switch-port" }]);
+  });
+
+  it("prefers the AP over the gate when there is no wired sighting", () => {
+    const edges = buildEndpointDependencyEdges(
+      [endpoint("tab", { lastSeenAp: "FAP-431F-07", sightedFortigates: ["FG-NASHVILLE-01"] })],
+      infra,
+    );
+    expect(edges[0].parentAssetId).toBe("ap1");
+  });
+
+  it("skips to the next signal when the more specific one names an unknown device", () => {
+    const edges = buildEndpointDependencyEdges(
+      [endpoint("srv", { lastSeenSwitch: "FS-GONE-99/port1", sightedFortigates: ["FG-NASHVILLE-01"] })],
+      infra,
+    );
+    expect(edges).toEqual([{ childAssetId: "srv", parentAssetId: "fg1", detectedVia: "sighting" }]);
+  });
+
+  it("takes the first sighting that resolves (caller orders them freshest-first)", () => {
+    const edges = buildEndpointDependencyEdges(
+      [endpoint("cam", { sightedFortigates: ["FG-RETIRED-04", "FG-NASHVILLE-01"] })],
+      infra,
+    );
+    expect(edges).toEqual([{ childAssetId: "cam", parentAssetId: "fg1", detectedVia: "sighting" }]);
+  });
+
+  it("emits nothing when no signal resolves — an unparented endpoint must keep alerting", () => {
+    expect(buildEndpointDependencyEdges([endpoint("srv")], infra)).toEqual([]);
+    expect(buildEndpointDependencyEdges([endpoint("srv", { sightedFortigates: ["FG-UNKNOWN"] })], infra)).toEqual([]);
+  });
+
+  // The stamp-vs-hostname trap that unparented every switch on a live install
+  // (utils/fortinetParentKey.ts): the gate a sighting names is FortiManager's
+  // DEVICE NAME, which need not equal the gate's configured hostname.
+  it("resolves a sighting against the gate's FMG device name, not just its hostname", () => {
+    const gates: DepAsset[] = [
+      {
+        id: "fg9",
+        hostname: "nash-edge-01.corp",
+        serialNumber: "FG100F0009",
+        assetType: "firewall",
+        fortinetTopology: { deviceName: "FGT-NASH-01" },
+      },
+    ];
+    const edges = buildEndpointDependencyEdges([endpoint("cam", { sightedFortigates: ["FGT-NASH-01"] })], gates);
+    expect(edges).toEqual([{ childAssetId: "cam", parentAssetId: "fg9", detectedVia: "sighting" }]);
+  });
+
+  it("never resolves a switch signal to a firewall", () => {
+    const edges = buildEndpointDependencyEdges([endpoint("srv", { lastSeenSwitch: "FG-NASHVILLE-01/wan1" })], infra);
+    expect(edges).toEqual([]);
+  });
+
+  it("refuses a self-edge", () => {
+    const selfInfra: DepAsset[] = [sw("srv", "FS-248E-01", "FG-NASHVILLE-01")];
+    expect(buildEndpointDependencyEdges([endpoint("srv", { lastSeenSwitch: "FS-248E-01/port1" })], selfInfra)).toEqual([]);
+  });
+});
+
+// The behavior the operator asked for, end to end through the pure evaluator: an
+// endpoint under a switch suppresses both when the switch itself is down and
+// when the switch is fine but the gate above it is down.
+describe("evaluateSuppression — endpoint leaves", () => {
+  const parents = new Map([["sw", ["fg"]], ["srv", ["sw"]]]);
+  function s(id: string, layer: number | null, monitorStatus: string | null, monitored = true): SuppressionAssetState {
+    return { id, layer, monitorStatus, monitored, currentlySuppressed: false };
+  }
+
+  it("suppresses the endpoint when its gate is down (through the switch)", () => {
+    const out = evaluateSuppression([s("fg", 1, "down"), s("sw", 2, "down"), s("srv", 3, "down")], parents);
+    expect(out.get("sw")).toBe(true);
+    expect(out.get("srv")).toBe(true);
+  });
+
+  it("suppresses the endpoint when only its switch is down", () => {
+    const out = evaluateSuppression([s("fg", 1, "up"), s("sw", 2, "down"), s("srv", 3, "down")], parents);
+    expect(out.get("srv")).toBe(true);
+  });
+
+  it("leaves the endpoint alerting when everything above it is up", () => {
+    const out = evaluateSuppression([s("fg", 1, "up"), s("sw", 2, "up"), s("srv", 3, "down")], parents);
+    expect(out.get("srv")).toBe(false);
+  });
+
+  // An unmonitored access switch is transparent, so gate state still decides —
+  // pinning an endpoint to gear nobody polls must not silence it.
+  it("walks through an unmonitored switch to the gate", () => {
+    let out = evaluateSuppression([s("fg", 1, "down"), s("sw", 2, null, false), s("srv", 3, "down")], parents);
+    expect(out.get("srv")).toBe(true);
+    out = evaluateSuppression([s("fg", 1, "up"), s("sw", 2, null, false), s("srv", 3, "down")], parents);
+    expect(out.get("srv")).toBe(false);
+  });
+
+  it("suppresses an endpoint hung directly off a gate in a maintenance window", () => {
+    const out = evaluateSuppression(
+      [
+        { id: "fg", layer: 1, monitorStatus: "up", monitored: true, currentlySuppressed: false, status: "maintenance" },
+        s("cam", 2, "down"),
+      ],
+      new Map([["cam", ["fg"]]]),
+    );
+    expect(out.get("cam")).toBe(true);
   });
 });

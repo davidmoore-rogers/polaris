@@ -5681,7 +5681,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     try {
       const dep = await recomputeDependencyTree(integrationId);
       if (dep.scoped > 0) {
-        syncLog("info", `Dependency tree: ${dep.edgesWritten} edge(s) across ${dep.scoped} asset(s)${dep.unresolved > 0 ? `, ${dep.unresolved} unresolved` : ""}`);
+        syncLog("info", `Dependency tree: ${dep.edgesWritten} edge(s) across ${dep.scoped} asset(s)${dep.unresolved > 0 ? `, ${dep.unresolved} unresolved` : ""}${dep.endpointEdges > 0 ? `; ${dep.endpointEdges} endpoint edge(s)` : ""}`);
       }
     } catch (err: any) {
       syncLog("error", `Dependency tree recompute failed: ${err?.message || "Unknown error"}`);
