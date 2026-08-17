@@ -5690,13 +5690,18 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     phaseMark("13");
     // Phase 13 — Reconcile map-region tags. Add-only pass: any firewall
     // whose lat/lng now falls inside an operator-drawn region (or any
-    // FortiSwitch / FortiAP whose controllerFortigate matches one) gets
-    // its `region:<name>` tag stamped. Best-effort, gated to
-    // mode in {full, finalize} mirroring Phase 12.
+    // FortiSwitch / FortiAP whose controllerFortigate matches one, or any
+    // subnet one of those firewalls serves) gets its `region:<name>` tag
+    // stamped. Best-effort, gated to mode in {full, finalize} mirroring
+    // Phase 12.
     try {
       const summary = await reconcileMapRegions();
-      if (summary.added > 0) {
-        syncLog("info", `Map region tags: +${summary.added} on ${summary.assetsTouched} asset(s)`);
+      if (summary.added > 0 || summary.subnetsAdded > 0) {
+        syncLog(
+          "info",
+          `Map region tags: +${summary.added} on ${summary.assetsTouched} asset(s), ` +
+            `+${summary.subnetsAdded} on ${summary.subnetsTouched} network(s)`,
+        );
       }
     } catch (err: any) {
       syncLog("error", `Map region reconcile failed: ${err?.message || "Unknown error"}`);

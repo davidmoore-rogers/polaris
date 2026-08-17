@@ -17,6 +17,20 @@ import { requirePermission } from "../middleware/permissions.js";
 
 const router = Router();
 
+/**
+ * One phrasing for the reconcile Event, shared by the create + update paths.
+ * Region tags land on assets AND on the subnets an enclosed gate serves, so the
+ * message has to name both — an edit can touch only networks.
+ */
+function reconcileMessage(summary: service.ReconcileSummary): string {
+  const assets = `${summary.assetsTouched} asset${summary.assetsTouched === 1 ? "" : "s"}`;
+  const nets = `${summary.subnetsTouched} network${summary.subnetsTouched === 1 ? "" : "s"}`;
+  return (
+    `Region tags reconciled: assets +${summary.added} / -${summary.removed} (${assets} touched), ` +
+    `networks +${summary.subnetsAdded} / -${summary.subnetsRemoved} (${nets} touched)`
+  );
+}
+
 const PolygonSchema = z
   .array(z.tuple([z.number(), z.number()]))
   .min(3, "Polygon must have at least 3 vertices")
@@ -62,16 +76,18 @@ router.post("/", requirePermission("mapRegions", "write"), async (req, res, next
       resourceId: created.id,
       resourceName: created.name,
       actor: req.session?.username,
-      message: `Map region "${created.name}" created (${summary.added} asset${summary.added === 1 ? "" : "s"} tagged)`,
-      details: { vertices: created.polygon.length, added: summary.added },
+      message:
+        `Map region "${created.name}" created (${summary.added} asset${summary.added === 1 ? "" : "s"}, ` +
+        `${summary.subnetsAdded} network${summary.subnetsAdded === 1 ? "" : "s"} tagged)`,
+      details: { vertices: created.polygon.length, added: summary.added, subnetsAdded: summary.subnetsAdded },
     });
-    if (summary.added > 0) {
+    if (summary.added > 0 || summary.subnetsAdded > 0) {
       logEvent({
         action: "region.tags_reconciled",
         resourceType: "map-region",
         resourceId: created.id,
         resourceName: created.name,
-        message: `Region tags reconciled: +${summary.added} / -${summary.removed} (${summary.assetsTouched} asset${summary.assetsTouched === 1 ? "" : "s"} touched)`,
+        message: reconcileMessage(summary),
         details: summary,
       });
     }
@@ -110,13 +126,13 @@ router.put("/:id", requirePermission("mapRegions", "write"), async (req, res, ne
         ...summary,
       },
     });
-    if (summary.assetsTouched > 0) {
+    if (summary.assetsTouched > 0 || summary.subnetsTouched > 0) {
       logEvent({
         action: "region.tags_reconciled",
         resourceType: "map-region",
         resourceId: result.region.id,
         resourceName: result.region.name,
-        message: `Region tags reconciled: +${summary.added} / -${summary.removed} (${summary.assetsTouched} asset${summary.assetsTouched === 1 ? "" : "s"} touched)`,
+        message: reconcileMessage(summary),
         details: summary,
       });
     }
@@ -138,7 +154,9 @@ router.delete("/:id", requirePermission("mapRegions", "write"), async (req, res,
       resourceId: removed.id,
       resourceName: removed.name,
       actor: req.session?.username,
-      message: `Map region "${removed.name}" deleted (${summary.removed} asset${summary.removed === 1 ? "" : "s"} untagged)`,
+      message:
+        `Map region "${removed.name}" deleted (${summary.removed} asset${summary.removed === 1 ? "" : "s"}, ` +
+        `${summary.subnetsRemoved} network${summary.subnetsRemoved === 1 ? "" : "s"} untagged)`,
       details: summary,
     });
     res.status(204).send();

@@ -31,11 +31,13 @@ async function tick(): Promise<void> {
   try {
     await runInstrumentedJob("reconcileMapRegions", async () => {
       const summary = await reconcileMapRegions();
-      if (summary.assetsTouched > 0) {
+      if (summary.assetsTouched > 0 || summary.subnetsTouched > 0) {
         logEvent({
           action: "region.tags_reconciled",
           resourceType: "map-region",
-          message: `Periodic region reconcile: +${summary.added} on ${summary.assetsTouched} asset${summary.assetsTouched === 1 ? "" : "s"}`,
+          message:
+            `Periodic region reconcile: +${summary.added} on ${summary.assetsTouched} asset${summary.assetsTouched === 1 ? "" : "s"}, ` +
+            `+${summary.subnetsAdded} on ${summary.subnetsTouched} network${summary.subnetsTouched === 1 ? "" : "s"}`,
           details: summary,
         });
       }

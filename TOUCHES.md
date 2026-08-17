@@ -977,7 +977,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `public/js/assets.js` bulk-edit modal — calls `PUT /assets/:id` per row with "Add" / "Replace" semantics.
 
 **System writers (managed namespaces):**
-- `src/services/mapRegionService.ts` — owns the `region:` prefix. Adds `region:<name>` to in-polygon firewalls + cascaded FortiSwitches/FortiAPs; only strips on rename/delete (never on polygon edit). Sees its own tags via the prefix; never touches operator-set tags. Mirrored to the `Tag` registry under category "Map Regions".
+- `src/services/mapRegionService.ts` — owns the `region:` prefix. Adds `region:<name>` to in-polygon firewalls + cascaded FortiSwitches/FortiAPs + subnet-propagated assets, **and to the `Subnet` rows an enclosed gate serves** (the only writer of region tags onto `Subnet.tags`); only strips on rename/delete (never on polygon edit). Sees its own tags via the prefix; never touches operator-set tags. Mirrored to the `Tag` registry under category "Map Regions".
 - ~~`firewall:` prefix~~ — retired 2026-08 (firewallTagService deleted after its DISABLED hold; leftover `firewall:*` tags on existing installs are plain operator-managed tags now, visible and deletable in the picker).
 - `src/services/tagAssignmentService.ts` — owns criteria-based auto-assigned tags. Unlike `region:`/`firewall:`, these use NO reserved prefix (they're ordinary operator-named tags), so collision is policed by the `TagAutoAssignment` provenance table instead: a tag is added/removed only on assets matching a `Tag.criteria` rule set, and removed only where the engine itself applied it (provenance row exists) — hand-applied copies survive. Managed sync (add AND remove on drift), fired inline on tag CRUD + asset writes + end-of-discovery (Phase 13.65) + a 6h job. NOT prefix-hidden in the manual picker.
 - Discovery breadcrumb tags — `src/services/discovery/discoveryEngine.ts` legacy paths still write `entra-disabled`, `ad-disabled`, `prev-*` markers. Some of these (sid:, ad-guid:) are being retired by the multi-source asset model.
@@ -2014,11 +2014,11 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ## services/mapRegionService.ts
 
-**What it owns:** Operator-drawn map regions (polygons on the Device Map). CRUD on Setting JSON blob keyed `mapRegions`. Tag-mutation primitives that add `region:<name>` to in-polygon firewalls + cascaded FortiSwitches/FortiAPs + **subnet-propagated assets** (any asset whose primary IPv4 falls in a `Subnet` whose `fortigateDevice` is an enclosed firewall's hostname — gives coordinate-less servers/workstations a region) and strip it on rename/delete. Tag-registry mirroring (upserts a `Tag` row at `region:<name>` under category "Map Regions" so the asset edit modal's tag picker shows it).
+**What it owns:** Operator-drawn map regions (polygons on the Device Map). CRUD on Setting JSON blob keyed `mapRegions`. Tag-mutation primitives that add `region:<name>` to in-polygon firewalls + cascaded FortiSwitches/FortiAPs + **the subnets an enclosed gate serves** (`Subnet.fortigateDevice` matching any of that gate's `controllerIdentityKeys` — this is what makes the IPAM Networks list, whose Sources column IS that column, filterable by region) + **subnet-propagated assets** (any asset whose primary IPv4 falls in one of those subnets — gives coordinate-less servers/workstations a region) and strip it on rename/delete. Tag-registry mirroring (upserts a `Tag` row at `region:<name>` under category "Map Regions" so the asset edit modal's tag picker shows it).
 
 **Public API:** MapRegion, SaveRegionInput, ReconcileSummary, listRegions, getRegion, createRegion, updateRegion, deleteRegion, applyRename, applyDelete, applyOneRegion, reconcileMapRegions.
 
-**Cross-service deps:** `src/utils/geo.ts:pointInPolygon`, `src/utils/cidr.ts:cidrContains` (subnet propagation), `prisma.tag` (registry mirror), `prisma.subnet` (`fortigateDevice` → CIDR list for subnet propagation), `prisma.asset` (membership compute + tag mutations).
+**Cross-service deps:** `src/utils/geo.ts:pointInPolygon`, `src/utils/cidr.ts:cidrContains` (subnet propagation), `prisma.tag` (registry mirror), `prisma.subnet` (`fortigateDevice` → id + CIDR list; the ids get the tag, the CIDRs drive asset propagation), `prisma.asset` (membership compute + tag mutations).
 
 **Used by:**
 - `src/api/routes/mapRegions.ts` — all CRUD endpoints (`GET / POST / PUT / DELETE /map/regions`); each call awaits the appropriate apply* helper before responding.
@@ -2032,10 +2032,12 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - Reconciler is **add-only**: only the rename + delete CRUD paths strip a region tag. Manual operator attachments to out-of-polygon assets persist across runs.
 - Manually removing a region tag from an in-polygon asset will be re-added on the next reconcile (polygon membership is authoritative in the additive direction).
 - Tag-registry rows under category "Map Regions" stay in 1:1 correspondence with region names (create upserts; rename rotates; delete removes).
+- Subnet region tags obey the SAME add-only contract as asset tags, and `Subnet.tags` has no other system writer (`tagAssignmentService` targets assets only; `subnet` is a criteria FIELD there, not a target) — an operator editing a network in the IPAM form can drop the inherited tag, and the next reconcile re-adds it.
 
 **When changing this:**
 - If the tag prefix or category constants change, also update CLAUDE.md "Map Regions" section + the assets edit modal's tag picker label conventions.
 - Membership resolves each in-polygon firewall to its `controllerIdentityKeys` (serial + `fortinetTopology.deviceName` + hostname, `utils/fortinetParentKey.ts`) and matches infra children on `controllerSerial` first, then `controllerFortigate` against any of those keys. It previously compared `controllerFortigate` to the hostname ALONE — which is the one key that is NOT it, since children stamp FortiManager's device NAME — so on installs where the two differ NO switch/AP inherited its gate's region. The same keys feed the `Subnet.fortigateDevice` lookup for subnet propagation (that column also holds the device name, so the hostname-only comparison meant no server/workstation inherited a region either). If discovery ever stops setting those fields, the cascade silently breaks.
+- The subnet half of membership is a plain `fortigateDevice IN (controllerIdentityKeys)` match, so a subnet whose serving gate is unknown/blank NEVER inherits a region — that is correct (no gate, no polygon) and must not be widened to CIDR containment against a region-tagged subnet, which would make one region bleed into overlapping RFC1918 space behind a different gate.
 - Polygon antimeridian crossings are documented out-of-scope; if Polaris ever supports global polygons, audit `pointInPolygon` for that case.
 
 ---

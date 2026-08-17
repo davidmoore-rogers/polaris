@@ -10,6 +10,14 @@
  *     (Subnet.fortigateDevice = the firewall hostname) — this is how servers /
  *     workstations / other non-geolocated assets inherit a region.
  *
+ * **Subnets carry the tag too.** A `Subnet` served by an enclosed firewall
+ * inherits `region:<name>` from that gate — the same match that propagates the
+ * region to the subnet's assets, applied to the subnet row itself. Without it
+ * the IPAM Networks list (whose Sources column IS `fortigateDevice`) had no way
+ * to filter address space by region even though every asset inside it was
+ * already tagged. Subnet tags follow the identical additive contract as asset
+ * tags: added by membership, stripped only on rename/delete.
+ *
  * Storage: single JSON blob in Setting under SETTING_KEY (mirrors the
  * allocationTemplateService pattern).
  *
@@ -64,9 +72,16 @@ export interface SaveRegionInput {
 
 export interface ReconcileSummary extends Record<string, unknown> {
   regionId?: string;
+  /** Assets that gained the region tag. */
   added: number;
+  /** Assets that lost it (rename / delete paths only). */
   removed: number;
   assetsTouched: number;
+  /** Subnets that gained the region tag (inherited from their serving gate). */
+  subnetsAdded: number;
+  /** Subnets that lost it (rename / delete paths only). */
+  subnetsRemoved: number;
+  subnetsTouched: number;
 }
 
 // --- Persistence helpers ---
@@ -192,13 +207,21 @@ function readTopology(raw: unknown): TopologyMeta {
   return {};
 }
 
+export interface RegionMembership {
+  /** Asset IDs that should carry the region tag. */
+  assetIds: Set<string>;
+  /** Subnet IDs that should carry it — those served by an enclosed gate. */
+  subnetIds: Set<string>;
+}
+
 /**
- * Compute the set of asset IDs that should currently carry the given region's
- * tag: every firewall whose pin is inside the polygon, plus every FortiSwitch
- * / FortiAP whose `fortinetTopology.controllerFortigate` matches one of those
- * firewalls' `hostname`.
+ * Compute what should currently carry the given region's tag: every firewall
+ * whose pin is inside the polygon, every FortiSwitch / FortiAP whose
+ * `fortinetTopology.controllerFortigate` matches one of those firewalls, every
+ * subnet those firewalls serve, and every asset addressed out of one of those
+ * subnets.
  */
-async function computeMembership(region: MapRegion): Promise<Set<string>> {
+async function computeMembership(region: MapRegion): Promise<RegionMembership> {
   const firewalls = await prisma.asset.findMany({
     where: {
       assetType: "firewall",
@@ -237,7 +260,7 @@ async function computeMembership(region: MapRegion): Promise<Set<string>> {
   const enclosedSerials = new Set<string>(
     enclosedFirewalls.map((f) => (f.serial || "").trim()).filter((s) => s.length > 0),
   );
-  if (enclosedKeys.size === 0) return memberIds;
+  if (enclosedKeys.size === 0) return { assetIds: memberIds, subnetIds: new Set<string>() };
 
   const infra = await prisma.asset.findMany({
     where: {
@@ -253,9 +276,11 @@ async function computeMembership(region: MapRegion): Promise<Set<string>> {
     if (ctrl && enclosedKeys.has(ctrl)) memberIds.add(a.id);
   }
 
-  // Subnet propagation: any asset whose IP falls in a subnet served by an
-  // enclosed firewall inherits the region. This is how servers / workstations /
-  // standalone assets — which have no coordinates — get a region.
+  // Subnet propagation: the subnets an enclosed firewall serves inherit the
+  // region themselves, and so does any asset whose IP falls inside one. The
+  // subnet half is what gives the IPAM Networks list a region to filter on; the
+  // asset half is how servers / workstations / standalone assets — which have
+  // no coordinates — get a region.
   //
   // `Subnet.fortigateDevice` holds the discovery-time device NAME (FMG's name,
   // or the standalone gate's), NOT the gate's configured hostname — so the
@@ -264,8 +289,9 @@ async function computeMembership(region: MapRegion): Promise<Set<string>> {
   // `enclosedKeys` includes the device name.
   const regionSubnets = await prisma.subnet.findMany({
     where: { fortigateDevice: { in: Array.from(enclosedKeys) } },
-    select: { cidr: true },
+    select: { id: true, cidr: true },
   });
+  const subnetIds = new Set<string>(regionSubnets.map((s) => s.id));
   if (regionSubnets.length > 0) {
     const ipAssets = await prisma.asset.findMany({
       where: { ipAddress: { not: null } },
@@ -281,7 +307,7 @@ async function computeMembership(region: MapRegion): Promise<Set<string>> {
       }
     }
   }
-  return memberIds;
+  return { assetIds: memberIds, subnetIds };
 }
 
 // --- Tag mutation primitives ---
@@ -304,6 +330,44 @@ async function addTagToAssets(assetIds: string[], tag: string): Promise<number> 
     );
   }
   return updates.length;
+}
+
+async function addTagToSubnets(subnetIds: string[], tag: string): Promise<number> {
+  if (subnetIds.length === 0) return 0;
+  const rows = await prisma.subnet.findMany({
+    where: { id: { in: subnetIds } },
+    select: { id: true, tags: true },
+  });
+  const updates: { id: string; tags: string[] }[] = [];
+  for (const row of rows) {
+    const tags = Array.isArray(row.tags) ? row.tags : [];
+    if (tags.includes(tag)) continue;
+    updates.push({ id: row.id, tags: [...tags, tag] });
+  }
+  if (updates.length > 0) {
+    await prisma.$transaction(
+      updates.map((u) => prisma.subnet.update({ where: { id: u.id }, data: { tags: u.tags } })),
+    );
+  }
+  return updates.length;
+}
+
+async function removeTagFromAllSubnets(tag: string): Promise<number> {
+  const rows = await prisma.subnet.findMany({
+    where: { tags: { has: tag } },
+    select: { id: true, tags: true },
+  });
+  if (rows.length === 0) return 0;
+  await prisma.$transaction(
+    rows.map((row) => {
+      const tags = Array.isArray(row.tags) ? row.tags : [];
+      return prisma.subnet.update({
+        where: { id: row.id },
+        data: { tags: tags.filter((t) => t !== tag) },
+      });
+    }),
+  );
+  return rows.length;
 }
 
 async function removeTagFromAllAssets(tag: string): Promise<number> {
@@ -420,10 +484,21 @@ export async function applyRename(
   region: MapRegion,
   previousName: string,
 ): Promise<ReconcileSummary> {
-  const removed = await removeTagFromAllAssets(regionTag(previousName));
+  const oldTag = regionTag(previousName);
+  const removed = await removeTagFromAllAssets(oldTag);
+  const subnetsRemoved = await removeTagFromAllSubnets(oldTag);
   const members = await computeMembership(region);
-  const added = await addTagToAssets(Array.from(members), regionTag(region.name));
-  return { regionId: region.id, added, removed, assetsTouched: removed + added };
+  const added = await addTagToAssets(Array.from(members.assetIds), regionTag(region.name));
+  const subnetsAdded = await addTagToSubnets(Array.from(members.subnetIds), regionTag(region.name));
+  return {
+    regionId: region.id,
+    added,
+    removed,
+    assetsTouched: removed + added,
+    subnetsAdded,
+    subnetsRemoved,
+    subnetsTouched: subnetsRemoved + subnetsAdded,
+  };
 }
 
 /**
@@ -431,8 +506,18 @@ export async function applyRename(
  * the final reconcile (which then doesn't need to add anything for this id).
  */
 export async function applyDelete(region: MapRegion): Promise<ReconcileSummary> {
-  const removed = await removeTagFromAllAssets(regionTag(region.name));
-  return { regionId: region.id, added: 0, removed, assetsTouched: removed };
+  const tag = regionTag(region.name);
+  const removed = await removeTagFromAllAssets(tag);
+  const subnetsRemoved = await removeTagFromAllSubnets(tag);
+  return {
+    regionId: region.id,
+    added: 0,
+    removed,
+    assetsTouched: removed,
+    subnetsAdded: 0,
+    subnetsRemoved,
+    subnetsTouched: subnetsRemoved,
+  };
 }
 
 /**
@@ -440,9 +525,19 @@ export async function applyDelete(region: MapRegion): Promise<ReconcileSummary> 
  * create and after polygon-only edits.
  */
 export async function applyOneRegion(region: MapRegion): Promise<ReconcileSummary> {
+  const tag = regionTag(region.name);
   const members = await computeMembership(region);
-  const added = await addTagToAssets(Array.from(members), regionTag(region.name));
-  return { regionId: region.id, added, removed: 0, assetsTouched: added };
+  const added = await addTagToAssets(Array.from(members.assetIds), tag);
+  const subnetsAdded = await addTagToSubnets(Array.from(members.subnetIds), tag);
+  return {
+    regionId: region.id,
+    added,
+    removed: 0,
+    assetsTouched: added,
+    subnetsAdded,
+    subnetsRemoved: 0,
+    subnetsTouched: subnetsAdded,
+  };
 }
 
 /**
@@ -457,10 +552,14 @@ export async function reconcileMapRegions(): Promise<ReconcileSummary> {
   const regions = await listRegions();
   let added = 0;
   let touched = 0;
+  let subnetsAdded = 0;
+  let subnetsTouched = 0;
   for (const region of regions) {
     const summary = await applyOneRegion(region);
     added += summary.added;
     touched += summary.assetsTouched;
+    subnetsAdded += summary.subnetsAdded;
+    subnetsTouched += summary.subnetsTouched;
   }
-  return { added, removed: 0, assetsTouched: touched };
+  return { added, removed: 0, assetsTouched: touched, subnetsAdded, subnetsRemoved: 0, subnetsTouched };
 }
