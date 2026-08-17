@@ -26,7 +26,10 @@
         <table>
           <thead>
             <tr>
-              <th style="width:24px" data-col-id="avatar" data-col-required="true"></th>
+              <!-- Online-status dot: a fixed-size token, so static-width — it
+                   keeps its declared 24px instead of taking a share of the
+                   leftover the column-fit pass spreads across the table. -->
+              <th style="width:24px" data-col-id="avatar" data-col-required="true" data-col-no-resize="true"></th>
               <th data-sf-key="username"        data-sf-type="string">Username</th>
               <th data-sf-key="authProvider"    data-sf-type="string">Auth</th>
               <th data-sf-key="role.name"       data-sf-type="string">Role</th>

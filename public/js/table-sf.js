@@ -980,7 +980,7 @@ function setupColumnLayout(tableEl, options) {
     var anyWidth = false;
     colIds.forEach(function (id, i) {
       if (i === lastIdx) {
-        // Auto-fill column: its width is owned by pinAutoFillColumn
+        // Auto-fill column: its width is owned by fitColumnsToContainer
         // (scheduled below), which computes it arithmetically. Never clear it
         // here — a transient un-sizing shrinks the table for one layout pass,
         // and when the table overflows horizontally that clamps the wrapper's
@@ -1001,17 +1001,50 @@ function setupColumnLayout(tableEl, options) {
       if (handle) handle.style.display = (i === lastIdx) ? "none" : "";
     });
     tableEl.style.tableLayout = anyWidth ? "fixed" : "";
-    scheduleAutoFillPin();
+    scheduleColumnFit();
   }
 
-  // Sizes the auto-fill (rightmost visible resizable) column to an explicit
-  // pinned width = container width − Σ other visible columns, so its right
-  // edge meets the table border. Computed arithmetically — NEVER by clearing
-  // the width and measuring the auto-fill result: a transient clear shrinks
-  // the table for one layout pass, and when the table overflows horizontally
-  // that clamps the wrapper's scrollLeft and yanks the view back left (the
-  // drag-while-scrolled bug). Always pinning also covers both fixed-layout
-  // quirks in one place:
+  var MIN_LAST_COL_W = 40;
+  var fitScheduled = false;
+
+  /**
+   * A column's BASE width — the operator's dragged / seeded / declared width,
+   * never a stretched render. The fit pass below writes stretched widths onto
+   * the <col> elements, so reading those back as the input would make its own
+   * arithmetic self-fulfilling (every pass would treat the last result as the
+   * new base and the distribution would never converge on the same answer).
+   */
+  function baseWidthOf(i) {
+    var w = widths[colIds[i]];
+    if (typeof w === "number" && w > 0) return w;
+    var spec = parseFloat(cols[i].style.width);
+    if (spec > 0) return spec;
+    return ths[i].getBoundingClientRect().width || 0;
+  }
+
+  function setColWidth(i, px) {
+    // Write only on change so the ResizeObserver below doesn't re-fire on
+    // every pass.
+    var next = px + "px";
+    if (cols[i].style.width !== next) cols[i].style.width = next;
+  }
+
+  // Sizes the visible columns so their sum is EXACTLY the container's content
+  // width, leaving no trailing gap at the table's right border. When the base
+  // widths sum narrower than the container, the leftover is distributed across
+  // every resizable column in proportion to its base width — not dumped whole
+  // onto the rightmost one, which is what left a narrow table (Users, Roles,
+  // Group Mappings) with cramped columns and one enormous last column holding
+  // all the blank space. Columns pinned to a declared width — utility (cb/fav)
+  // and static-width (`data-col-no-resize`) — are the "honor the declared
+  // width" tier and never stretch; they're subtracted from the budget first.
+  //
+  // Computed arithmetically — NEVER by clearing a width and measuring the
+  // auto-fill result: a transient clear shrinks the table for one layout pass,
+  // and when the table overflows horizontally that clamps the wrapper's
+  // scrollLeft and yanks the view back left (the drag-while-scrolled bug).
+  // Always writing explicit widths also covers both fixed-layout quirks in one
+  // place:
   //  - colspan first <tbody> row (interfaces table's section header): an
   //    auto-width column has no per-column width basis, so fixed layout
   //    strands the leftover as a trailing gap instead of growing the column.
@@ -1020,11 +1053,7 @@ function setupColumnLayout(tableEl, options) {
   //    its header content painting past the table border into overflow the
   //    wrapper's scrollbar can't reach. Rescue with the column's
   //    saved/measured width so the table grows and the scrollbar covers it.
-  // Writes only when the value actually changes so the ResizeObserver below
-  // doesn't re-fire on every pass.
-  var MIN_LAST_COL_W = 40;
-  var pinScheduled = false;
-  function pinAutoFillColumn() {
+  function fitColumnsToContainer() {
     var lastIdx = lastVisibleResizableIdx();
     if (lastIdx < 0) return;
     var tableRect = tableEl.getBoundingClientRect();
@@ -1036,32 +1065,81 @@ function setupColumnLayout(tableEl, options) {
       var pcs = getComputedStyle(parent);
       availW = parent.clientWidth - (parseFloat(pcs.paddingLeft) || 0) - (parseFloat(pcs.paddingRight) || 0);
     }
-    var used = 0;
-    cols.forEach(function (c, i) {
-      if (i === lastIdx || hidden[colIds[i]]) return;
-      // Sum SPECIFIED widths, not rendered ones: when the specified columns
-      // sum narrower than the table's 100% width, fixed layout distributes
-      // the leftover across every column, so rendered widths would make this
-      // computation circular (target == whatever the last column currently
-      // renders at). Rendered width is only the fallback for columns with no
-      // explicit width yet.
-      used += parseFloat(c.style.width) || c.getBoundingClientRect().width;
+    // Walked in DISPLAY order so the rounding residual lands on the column the
+    // operator actually sees last (== lastIdx, by construction).
+    var flex = [], flexSum = 0, fixedSum = 0;
+    displayIds().forEach(function (id) {
+      if (hidden[id]) return;
+      var i = srcIdxOf[id];
+      var w = baseWidthOf(i);
+      if (isResizableCol(id)) { flex.push(i); flexSum += w; }
+      else fixedSum += w;
     });
-    var target = Math.floor(availW - used);
+    if (!flex.length) return;
+    var budget = Math.floor(availW - fixedSum);     // px the resizable columns share
+
+    if (flexSum > 0 && budget - flexSum >= 1) {
+      // Slack to spread: scale every resizable column up proportionally.
+      var scale = budget / flexSum;
+      var assigned = 0;
+      for (var k = 0; k < flex.length - 1; k++) {
+        var base = baseWidthOf(flex[k]);
+        // A zero base means the column was never measurable (nothing seeded,
+        // nothing saved) — scaling it keeps it at 0px, i.e. invisible. Give it
+        // the 40px floor instead; the last column absorbs the difference.
+        var w = base > 0 ? Math.floor(base * scale) : MIN_LAST_COL_W;
+        setColWidth(flex[k], w);
+        assigned += w;
+      }
+      setColWidth(flex[flex.length - 1], Math.max(MIN_LAST_COL_W, budget - assigned));
+      return;
+    }
+
+    // Exactly filled or over-committed: base widths stand and the last column
+    // takes what's left. Rewritten rather than left alone because this pass
+    // also runs on its own from the ResizeObserver — a container SHRINK has to
+    // roll back the stretched widths an earlier pass wrote.
+    var others = 0;
+    flex.forEach(function (i) {
+      if (i === lastIdx) return;
+      var bw = baseWidthOf(i);
+      // Written raw, not rounded, so the string matches what `applyWidths` puts
+      // on the same <col> — otherwise the two passes would trade 137.5px for
+      // 138px on every render.
+      setColWidth(i, bw);
+      others += bw;
+    });
+    var target = Math.floor(availW - fixedSum - others);
     if (target < MIN_LAST_COL_W) {
       // Crushed: no leftover to fill. Use the column's saved/measured width
       // (40px floor) instead of letting it collapse.
       var savedW = widths[colIds[lastIdx]];
       target = Math.max(MIN_LAST_COL_W, (typeof savedW === "number" && savedW > 0) ? savedW : 0);
     }
-    var next = target + "px";
-    if (cols[lastIdx].style.width !== next) cols[lastIdx].style.width = next;
+    setColWidth(lastIdx, target);
   }
-  function scheduleAutoFillPin() {
-    if (typeof requestAnimationFrame !== "function") { pinAutoFillColumn(); return; }
-    if (pinScheduled) return;
-    pinScheduled = true;
-    requestAnimationFrame(function () { pinScheduled = false; pinAutoFillColumn(); });
+  function scheduleColumnFit() {
+    if (typeof requestAnimationFrame !== "function") { fitColumnsToContainer(); return; }
+    if (fitScheduled) return;
+    fitScheduled = true;
+    requestAnimationFrame(function () { fitScheduled = false; fitColumnsToContainer(); });
+  }
+
+  /**
+   * Fold the widths the fit pass stretched back into `widths`, so they become
+   * the base for what follows. Called at the start of a resize drag: the stored
+   * base can sum narrower than the container, and a drag that moved a base
+   * pixel would then move the divider by more than one screen pixel. After
+   * committing, the base sums to the container width, so the drag tracks the
+   * pointer 1:1 and creates no new slack for the fit pass to redistribute —
+   * an operator narrowing a column widens its neighbour, never everything.
+   */
+  function commitStretchedWidths() {
+    colIds.forEach(function (id, i) {
+      if (hidden[id] || !isResizableCol(id)) return;
+      var spec = parseFloat(cols[i].style.width);
+      if (spec > 0) widths[id] = Math.round(spec);
+    });
   }
 
   function ensureAllWidthsMeasured() {
@@ -1094,6 +1172,7 @@ function setupColumnLayout(tableEl, options) {
       // on the border, so its handle does nothing — bail before starting a drag.
       if (i === lastVisibleResizableIdx()) return;
       ensureAllWidthsMeasured();
+      commitStretchedWidths();   // drag against what's on screen, 1:1
       var id = colIds[i];
       var startX = e.clientX;
       var startW = widths[id] || ths[i].getBoundingClientRect().width;
@@ -1164,21 +1243,21 @@ function setupColumnLayout(tableEl, options) {
     applyWidths();
   })();
 
-  // Re-pin the auto-fill column when the table becomes measurable (revealed
-  // from an inactive tab) or the container resizes. The parent is observed
-  // too: with the auto-fill column pinned to an explicit width, a container
-  // SHRINK doesn't change the table's own size (fixed layout keeps the column
-  // sum), so only the parent resize reveals that the last column should give
-  // space back. Self-disconnects once the table is detached (every re-render
-  // builds a fresh table + observer), so observers don't accumulate across
-  // the interface table's refresh ticks.
+  // Re-fit the columns when the table becomes measurable (revealed from an
+  // inactive tab) or the container resizes. The parent is observed too: with
+  // every column pinned to an explicit width, a container SHRINK doesn't
+  // change the table's own size (fixed layout keeps the column sum), so only
+  // the parent resize reveals that the stretch has to be given back.
+  // Self-disconnects once the table is detached (every re-render builds a
+  // fresh table + observer), so observers don't accumulate across the
+  // interface table's refresh ticks.
   if (typeof ResizeObserver === "function") {
-    var autoFillRo = new ResizeObserver(function () {
-      if (!tableEl.isConnected) { autoFillRo.disconnect(); return; }
-      scheduleAutoFillPin();
+    var columnFitRo = new ResizeObserver(function () {
+      if (!tableEl.isConnected) { columnFitRo.disconnect(); return; }
+      scheduleColumnFit();
     });
-    autoFillRo.observe(tableEl);
-    if (tableEl.parentElement) autoFillRo.observe(tableEl.parentElement);
+    columnFitRo.observe(tableEl);
+    if (tableEl.parentElement) columnFitRo.observe(tableEl.parentElement);
   }
 
   // Floating gear pinned to the top-right CORNER of the table's scroll
