@@ -109,7 +109,10 @@
                 <th style="width:90px"  data-col-no-resize="true" data-sf-key="vlan" data-sf-type="number">VLAN</th>
                 <th style="width:120px" data-col-no-resize="true" data-sf-key="status" data-sf-type="string" data-sf-options="available|reserved|deprecated">Status</th>
                 <th data-sf-key="tags" data-sf-type="array">Tags</th>
-                <th data-sf-key="fortigateDevice" data-sf-type="string">Server</th>
+                <!-- "Sources" matches the assets page's column of the same name.
+                     data-sf-key stays `fortigateDevice` so saved column layouts
+                     and filter presets keep working across the rename. -->
+                <th data-sf-key="fortigateDevice" data-sf-type="string">Sources</th>
                 <th data-sf-key="_integration" data-sf-type="string" data-sf-options="">Integration</th>
                 <th data-sf-key="createdBy" data-sf-type="string" data-sf-options="">Creator</th>
                 <th style="width:120px" data-col-no-resize="true" data-sf-key="_count.reservations" data-sf-type="number">Reservations</th>

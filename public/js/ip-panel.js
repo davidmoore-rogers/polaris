@@ -165,7 +165,7 @@ function _renderPanelHeader(data) {
   }
   if (s.vlan) meta += '<span class="badge badge-vlan">VLAN ' + s.vlan + '</span>';
   if (s.integration) meta += '<span style="font-size:0.78rem;color:var(--color-text-secondary)">Integration: <strong>' + escapeHtml(s.integration.name) + '</strong></span>';
-  if (s.fortigateDevice && (!s.integration || s.integration.type !== 'windowsserver')) meta += '<span style="font-size:0.78rem;color:var(--color-text-secondary)">Server: <strong>' + escapeHtml(s.fortigateDevice) + '</strong></span>';
+  if (s.fortigateDevice && (!s.integration || s.integration.type !== 'windowsserver')) meta += '<span style="font-size:0.78rem;color:var(--color-text-secondary)">Sources: <strong>' + escapeHtml(s.fortigateDevice) + '</strong></span>';
   // "Discovered N minutes ago from <integration> DHCP" replaces the static
   // purpose string when we have both a lastDiscoveredAt timestamp and an
   // integration. Static `s.purpose` still renders for non-integration subnets

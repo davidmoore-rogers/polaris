@@ -1079,7 +1079,7 @@ function generateNetworkPdf(networks, label) {
   doc.setTextColor(120, 120, 120);
   doc.text("Generated: " + timestamp + "  |  Scope: " + label + "  |  Count: " + networks.length, 40, 52);
 
-  var head = [["Name", "Network", "Block", "Purpose", "VLAN", "Status", "Server", "Integration", "Reservations"]];
+  var head = [["Name", "Network", "Block", "Purpose", "VLAN", "Status", "Sources", "Integration", "Reservations"]];
   var body = networks.map(function (s) {
     return [
       s.name || "-",
@@ -1122,7 +1122,7 @@ function generateNetworkPdf(networks, label) {
 }
 
 function generateNetworkCsv(networks) {
-  var headers = ["Name", "Network", "Block", "Purpose", "VLAN", "Status", "Tags", "Server", "Integration", "Reservations"];
+  var headers = ["Name", "Network", "Block", "Purpose", "VLAN", "Status", "Tags", "Sources", "Integration", "Reservations"];
   var rows = networks.map(function (s) {
     return [
       s.name || "", s.cidr || "", s.block ? s.block.name : "",

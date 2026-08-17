@@ -122,7 +122,7 @@ function _renderBlockSubnetList(subnets) {
     '<th>Name</th>' +
     '<th>Network</th>' +
     '<th>Status</th>' +
-    '<th>Server</th>' +
+    '<th>Sources</th>' +
     '<th>Integration</th>' +
     '<th>Reservations</th>' +
     (showActions ? '<th style="width:100px">Actions</th>' : '') +
