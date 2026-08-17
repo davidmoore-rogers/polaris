@@ -45,7 +45,6 @@ describe("the default alert email is a template, not string building", () => {
     expect(html).toContain("BULLITT-222E-4");
     expect(html).toContain("10.20.30.40");
     expect(html).toContain("FS-248E-01/port15");
-    expect(html).toContain("packet loss at 93.8%");
     // The description is usually where a site already states what the device is
     // FOR — and on a description-synced install it's the device's own text.
     expect(html).toContain("Warehouse mezzanine AP — north bay");
@@ -60,6 +59,19 @@ describe("the default alert email is a template, not string building", () => {
     expect(html).not.toContain("Description");
     expect(pruneEmptyTextLines(renderNotificationTemplate(DEFAULT_ALERT_TEXT, bare, { unknown: "blank" })))
       .not.toContain("Description:");
+  });
+
+  it("says what fired ONCE — the message is not repeated under the headline", () => {
+    // "Monitor status is down" (from the trigger) followed by a grey
+    // "PEORIA-61F-1 is down" (the message) said the same thing twice. The
+    // message keeps its real homes — the in-app alert card, and the chat/push
+    // bodies, which carry no trigger sentence — so this is about the EMAIL only.
+    for (const body of [DEFAULT_ALERT_HTML, DEFAULT_ALERT_TEXT]) {
+      expect(body).not.toContain("{message}");
+      expect(body).toContain("{trigger.summary}");
+    }
+    const html = renderNotificationTemplate(DEFAULT_ALERT_HTML, CTX, { html: true });
+    expect(html).not.toContain("packet loss at 93.8%");
   });
 
   it("offers Acknowledge and Open device as real links", () => {
@@ -152,12 +164,12 @@ describe("pruneEmptyRows", () => {
   });
 
   it("prunes the real body when the device knows little about itself", () => {
-    const bare = buildTemplateContext({ asset: "host-9", message: "down", severity: "warning" });
+    const bare = buildTemplateContext({ asset: "host-9", triggerSummary: "Monitor status is down", severity: "warning" });
     const out = pruneEmptyRows(renderNotificationTemplate(DEFAULT_ALERT_HTML, bare, { html: true }));
     expect(out).not.toContain("Connected switch");
     expect(out).not.toContain("Connected AP");
-    // The message and the scaffolding survive.
-    expect(out).toContain("down");
+    // What fired, and the scaffolding, survive.
+    expect(out).toContain("Monitor status is down");
     expect(out).toContain("Acknowledge alert");
   });
 

@@ -36,8 +36,8 @@ export const DEFAULT_ALERT_SUBJECT = "[{severity.upper}] {asset} — {rule}";
 export const DEFAULT_ALERT_TEXT = [
   "{severity.upper}: {trigger.summary}",
   "",
-  "{message}",
-  "",
+  // No {message} line here either — same redundancy, and the two bodies must
+  // stay in step or an operator editing one wonders why the other differs.
   // "Subject", not "Device": plenty of alerts are about Polaris itself (a
   // capacity escalation, a failed backup, the host's own CPU) rather than
   // about a monitored device, and labelling the Polaris server as a "Device"
@@ -105,7 +105,13 @@ export const DEFAULT_ALERT_HTML = [
   // the operator wrote the automation in — the raw message underneath it reads
   // like a log line.
   '<div style="font-size:16px;font-weight:600;color:{severity.color};margin-top:8px">{trigger.summary}</div>',
-  '<div style="font-size:14px;color:#6b7280;margin-top:4px">{message}</div>',
+  // {message} is deliberately NOT printed under it. The two say the same thing:
+  // the sentence above is generated from the automation's own trigger, and the
+  // message — whether the generated default or a template like "{asset} is
+  // down" — restates it, so a "Monitor status is down" headline was followed by
+  // a grey "PEORIA-61F-1 is down". The message keeps its real homes (the in-app
+  // alert card, and every chat / push body, which have no trigger sentence),
+  // and {message} stays catalogued for an operator who wants it back.
   "</td></tr>",
   // Facts
   '<tr><td style="padding:10px 22px 0">',
