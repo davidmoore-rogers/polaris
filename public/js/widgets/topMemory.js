@@ -20,7 +20,7 @@
     description: "Monitored assets with the highest average memory usage (averaged over the last N polls — gear-configurable, default 10).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 20, threshold: null, regionScope: "mine", sampleCount: 10 },
+    defaultConfig: { rowLimit: 20, regionScope: "mine", sampleCount: 10 },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {

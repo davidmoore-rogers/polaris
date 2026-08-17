@@ -21,7 +21,7 @@
     description: "Monitored assets with the highest average response time (last 10 probes).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 20, threshold: null, regionScope: "mine" },
+    defaultConfig: { rowLimit: 20, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {

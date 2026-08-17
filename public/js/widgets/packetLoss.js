@@ -1,7 +1,10 @@
 /**
  * widgets/packetLoss.js — top-N monitored assets by recent probe packet loss
  * (failed-probe ratio %, computed server-side). Shares the _topnBar renderer;
- * data from noc-summary packetLoss[]. Defaults to hiding rows below 1%.
+ * data from noc-summary packetLoss[]. No "Hide below %" control: the gear's
+ * Minimum severity filter is the display filter, and a second numeric floor
+ * was just another way to hide the same row (a stored `threshold` from before
+ * that control was removed is ignored).
  * Fully-down assets (100% loss — zero successful probes in the window) are
  * excluded server-side; those belong to the Down Nodes widget.
  */
@@ -23,7 +26,7 @@
     description: "Monitored assets with the highest recent probe loss (failed-probe ratio). Fully-down assets (100% loss) are excluded — see Down Nodes.",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 1000, threshold: 1, regionScope: "mine" },
+    defaultConfig: { rowLimit: 1000, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
@@ -39,7 +42,7 @@
     },
 
     renderPreview: function (el) {
-      render(el, { rowLimit: 3, threshold: 1 }, [
+      render(el, { rowLimit: 3 }, [
         { id: "p1", hostname: "branch-fw-22", value: 40 },
         { id: "p2", hostname: "wan-rtr-03", value: 12.5 },
         { id: "p3", hostname: "ap-lobby-07", value: 3 },
@@ -47,10 +50,7 @@
     },
 
     renderConfig: function (el, config, onChange) {
-      PolarisTopN.renderConfig(el, config, onChange, {
-        thresholdLabel: "Hide below %",
-        thresholdOptions: [{ value: "", label: "Show all" }, { value: 1, label: "1%" }, { value: 5, label: "5%" }, { value: 25, label: "25%" }],
-      });
+      PolarisTopN.renderConfig(el, config, onChange, {});
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });
