@@ -19078,7 +19078,6 @@ async function _loadAssetMacTable(assetId) {
   try {
     var data = await api.assets.macTable(assetId);
     var entries = (data && data.entries) || [];
-    var counts = (data && data.portCounts) || {};
     if (entries.length === 0) {
       mount.innerHTML = '<span class="empty-state">No forwarding-database entries. ' +
         'This is collected over SNMP on the system-info cadence; a switch polled ' +
@@ -19086,28 +19085,28 @@ async function _loadAssetMacTable(assetId) {
       return;
     }
 
-    // Uplink/access summary first — it is the reading of this table that
-    // matters most, and it is a single number per port.
-    var portRows = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
-    var summary = portRows.length === 0 ? "" :
-      '<h4 style="margin:0 0 0.4rem">MACs per port</h4>' +
-      '<div class="table-wrapper" style="margin-bottom:1rem;max-height:220px;overflow:auto">' +
-      '<table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-        '<th>Interface</th><th>Learned MACs</th><th>Reads as</th>' +
-      '</tr></thead><tbody>' +
-      portRows.map(function (p) {
-        var n = counts[p];
-        // One learned MAC is a directly-attached endpoint; many means the port
-        // faces other switches. This is a HINT, not a claim — a port with an
-        // IP phone and a PC behind it also shows two.
-        var reads = n === 1 ? "access port (one device)" : "uplink / trunk (" + n + " devices behind it)";
-        return '<tr><td class="mono">' + escapeHtml(p) + '</td>' +
-          '<td class="mono">' + n + '</td>' +
-          '<td style="color:var(--color-text-secondary)">' + escapeHtml(reads) + '</td></tr>';
-      }).join("") +
-      '</tbody></table></div>';
-
     var dash = '<span style="color:var(--color-text-secondary)">—</span>';
+
+    // The table reads port-first: an operator asks "what is on port 32", not
+    // "where is this MAC". So the interface IS the row, with its MACs nested
+    // under it — which also puts the per-port count (the single most useful
+    // number here) on the same line as the port instead of in a second table
+    // above. Toggle glyphs + the child prefix follow the Interfaces table's
+    // conventions; the group header row follows the SD-WAN zone header's.
+    function groupsFrom(rows) {
+      var byKey = {};
+      rows.forEach(function (e) {
+        // Unresolved rows group by their raw basePort — see the note below on
+        // why they exist at all.
+        var key = e.ifName || ("base port " + (e.basePort != null ? e.basePort : "?"));
+        (byKey[key] = byKey[key] || { key: key, resolved: !!e.ifName, entries: [] }).entries.push(e);
+      });
+      return Object.keys(byKey).map(function (k) { return byKey[k]; }).sort(function (a, b) {
+        // Resolved ports first, then natural order so port7 precedes port32.
+        if (a.resolved !== b.resolved) return a.resolved ? -1 : 1;
+        return a.key.localeCompare(b.key, undefined, { numeric: true, sensitivity: "base" });
+      });
+    }
 
     // Rows whose basePort never resolved to an interface. On a FortiSwitch
     // these are the trunk/LAG pseudo-ports (base port 32768 and up), which
@@ -19121,7 +19120,8 @@ async function _loadAssetMacTable(assetId) {
     var showUnattributed = false;
 
     function renderTable() {
-      var shown = showUnattributed ? attributed.concat(unattributed) : attributed;
+      var shown  = showUnattributed ? attributed.concat(unattributed) : attributed;
+      var groups = groupsFrom(shown);
       var note = unattributed.length === 0 ? "" :
         '<div style="margin:0 0 0.5rem;font-size:0.82rem;color:var(--color-text-secondary)">' +
           unattributed.length + ' entr' + (unattributed.length === 1 ? "y" : "ies") +
@@ -19130,39 +19130,75 @@ async function _loadAssetMacTable(assetId) {
             (showUnattributed ? "Hide" : "Show") +
           '</button>' +
         '</div>';
-      var body = shown.length === 0
+      var body = groups.length === 0
         ? '<div class="empty-state">No entries on a resolved port.</div>'
         : '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-            '<th>MAC</th><th>VLAN</th><th>Interface</th><th>Status</th><th>Device</th>' +
-          '</tr></thead><tbody>' + rowsHtml(shown) + '</tbody></table></div>';
-      mount.innerHTML = summary +
+            '<th>Interface / MAC</th><th>VLAN</th><th>Status</th><th>Device</th>' +
+          '</tr></thead><tbody>' + groups.map(groupHtml).join("") + '</tbody></table></div>';
+      mount.innerHTML =
         '<h4 style="margin:0 0 0.4rem">Forwarding database ' +
-          '<span style="font-weight:400;color:var(--color-text-secondary)">(' + shown.length + ' entries)</span>' +
+          '<span style="font-weight:400;color:var(--color-text-secondary)">(' + shown.length +
+            ' entries on ' + groups.length + ' interface' + (groups.length === 1 ? "" : "s") + ')</span>' +
         '</h4>' + note + body;
       var toggle = document.getElementById("mactable-toggle-" + assetId);
       if (toggle) toggle.addEventListener("click", function () {
         showUnattributed = !showUnattributed;
         renderTable();
       });
+      wireGroupToggles();
     }
 
-    function rowsHtml(rows) {
-      return rows.map(function (e) {
-        var dev = e.matchedAsset
-          ? '<a href="#" class="asset-link" data-asset-id="' + escapeHtml(e.matchedAsset.id) + '">' +
-              escapeHtml(e.matchedAsset.hostname || e.matchedAsset.ipAddress || e.matchedAsset.id) + '</a>'
-          : dash;
-        return '<tr>' +
-          '<td class="mono">' + escapeHtml(e.macAddress) + '</td>' +
-          '<td class="mono">' + (e.vlanId != null ? e.vlanId : dash) + '</td>' +
-          // basePort is shown when the ifIndex join failed, so the entry stays
-          // identifiable rather than looking like it belongs to no port.
-          '<td class="mono">' + (e.ifName ? escapeHtml(e.ifName)
-            : (e.basePort != null ? '<span style="color:var(--color-text-secondary)">base port ' + e.basePort + '</span>' : dash)) + '</td>' +
-          '<td>' + escapeHtml(e.status) + '</td>' +
-          '<td>' + dev + '</td>' +
-        '</tr>';
-      }).join("");
+    function groupHtml(g) {
+      // Only `learned` rows say what is reachable through the port: `self` is
+      // the bridge's own address and `mgmt` a configured static entry, so both
+      // are shown but neither counts toward the access-vs-uplink reading.
+      var learned = g.entries.filter(function (e) { return e.status === "learned"; }).length;
+      var reads = !g.resolved ? "unresolved port — every MAC behind the trunk lands here"
+        : learned === 0 ? ""
+        : learned === 1 ? "access port (one device)"
+        : "uplink / trunk (" + learned + " devices behind it)";
+      var head = '<tr class="mactable-group"><td colspan="4" style="padding:5px 8px;font-weight:600;' +
+        'background:var(--color-bg-primary);color:var(--color-text-secondary)">' +
+        '<button type="button" class="mactable-group-toggle" data-group="' + escapeHtml(g.key) + '" ' +
+          'style="background:none;border:none;cursor:pointer;color:var(--color-text-secondary);' +
+          'padding:0 3px 0 0;font-size:0.75rem;vertical-align:middle;line-height:1" ' +
+          'title="Collapse entries">▼</button>' +
+        '<span class="mono" style="color:var(--color-text-primary)">' + escapeHtml(g.key) + '</span> ' +
+        '<span style="font-weight:400">· ' + g.entries.length + ' MAC' + (g.entries.length === 1 ? "" : "s") +
+          (reads ? " · " + escapeHtml(reads) : "") + '</span>' +
+        '</td></tr>';
+      return head + g.entries.map(function (e) { return entryHtml(e, g.key); }).join("");
+    }
+
+    function entryHtml(e, groupKey) {
+      var dev = e.matchedAsset
+        ? '<a href="#" class="asset-link" data-asset-id="' + escapeHtml(e.matchedAsset.id) + '">' +
+            escapeHtml(e.matchedAsset.hostname || e.matchedAsset.ipAddress || e.matchedAsset.id) + '</a>'
+        : dash;
+      return '<tr class="mactable-entry" data-group="' + escapeHtml(groupKey) + '">' +
+        '<td class="mono" style="padding-left:1.4rem">' +
+          '<span style="color:var(--color-text-secondary);opacity:0.5;margin-right:3px;font-size:0.8rem">└</span>' +
+          escapeHtml(e.macAddress) +
+        '</td>' +
+        '<td class="mono">' + (e.vlanId != null ? e.vlanId : dash) + '</td>' +
+        '<td>' + escapeHtml(e.status) + '</td>' +
+        '<td>' + dev + '</td>' +
+      '</tr>';
+    }
+
+    // Per-group show/hide toggles rows in place rather than re-rendering, so
+    // an open group survives the unattributed Show/Hide flip above it.
+    function wireGroupToggles() {
+      mount.querySelectorAll(".mactable-group-toggle").forEach(function (tog) {
+        tog.addEventListener("click", function () {
+          var key = tog.getAttribute("data-group");
+          var expanded = tog.textContent.trim() === "▼";
+          tog.textContent = expanded ? "▶" : "▼";
+          tog.title = expanded ? "Expand entries" : "Collapse entries";
+          mount.querySelectorAll('.mactable-entry[data-group="' + CSS.escape(key) + '"]')
+            .forEach(function (row) { row.style.display = expanded ? "none" : ""; });
+        });
+      });
     }
 
     renderTable();
