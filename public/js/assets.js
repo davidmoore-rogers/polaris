@@ -17239,15 +17239,18 @@ function openLogFlagRulesModal(asset, processName, onChange) {
 // Asset-details Alerts tab: active alerts for this asset + the automations
 // whose scope matches it. Both loaded by _loadAssetNotificationsTab.
 function _assetNotificationsTabHTML() {
-  // The Acknowledged column doubles as the action column: an unacknowledged
-  // row offers the button, an acknowledged one names who did it. Until now
-  // this table was read-only and api.alerts.acknowledge had no caller at all,
-  // which left escalation chains set to stopOn:"acknowledge" unstoppable.
+  // Actions column: an unacknowledged row offers Acknowledge (alerts:write),
+  // an acknowledged one names who did it, and Clear (alerts:fullwrite) sits
+  // beside either. Until this tab grew them, api.alerts.acknowledge had no
+  // caller at all, which left escalation chains set to stopOn:"acknowledge"
+  // unstoppable, and clearing an alert was desktop-Automations-page-only.
   var canAck = permAtLeast("alerts", "write");
+  var canClear = permAtLeast("alerts", "fullwrite");
+  var actionW = canAck && canClear ? "240" : (canAck || canClear ? "200" : "160");
   return '<div class="section-block">' +
     '<h4 style="margin:0 0 0.5rem">Active alerts</h4>' +
     '<div class="table-wrapper"><table><thead><tr>' +
-      '<th style="width:160px">Time</th><th style="width:80px">Severity</th><th>Message</th><th style="width:' + (canAck ? "200" : "160") + 'px">Acknowledged</th>' +
+      '<th style="width:160px">Time</th><th style="width:80px">Severity</th><th>Message</th><th style="width:' + actionW + 'px">Actions</th>' +
     '</tr></thead><tbody id="asset-notif-active-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>' +
     '<h4 style="margin:1rem 0 0.5rem">Automations that can trigger for this asset</h4>' +
     '<div class="table-wrapper"><table><thead><tr>' +
@@ -17287,26 +17290,36 @@ function _loadAssetNotificationsTab(assetId) {
     var aTbody = document.getElementById("asset-notif-active-tbody");
     if (aTbody) {
       var canAck = permAtLeast("alerts", "write");
+      var canClear = permAtLeast("alerts", "fullwrite");
       aTbody.innerHTML = active.length ? active.map(function (n) {
         var ts = new Date(n.triggeredAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-        var ack;
+        // Acknowledge OR the acknowledgement itself, then Clear — the two are
+        // separate permission levels (write vs fullwrite), so a row can carry
+        // either, both, or neither.
+        var parts = [];
         if (n.acknowledged) {
           var when = n.acknowledgedAt
             ? new Date(n.acknowledgedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
             : "";
-          ack = escapeHtml(n.acknowledgedBy || "yes") +
-            (when ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">' + escapeHtml(when) + '</span>' : "");
+          parts.push('<span style="font-size:0.82rem">' + escapeHtml(n.acknowledgedBy || "acknowledged") +
+            (when ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">' + escapeHtml(when) + '</span>' : "") + '</span>');
         } else if (canAck) {
-          ack = '<button class="btn btn-sm btn-secondary asset-alert-ack" data-id="' + escapeHtml(n.id) + '">Acknowledge</button>';
-        } else {
-          ack = '<span style="color:var(--color-text-tertiary)">—</span>';
+          parts.push('<button class="btn btn-sm btn-secondary asset-alert-ack" data-id="' + escapeHtml(n.id) + '">Acknowledge</button>');
         }
+        if (canClear) {
+          parts.push('<button class="btn btn-sm btn-secondary asset-alert-clear" data-id="' + escapeHtml(n.id) + '">Clear</button>');
+        }
+        if (!parts.length) parts.push('<span style="color:var(--color-text-tertiary)">—</span>');
         return '<tr><td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ts) + '</td>' +
           '<td><span class="badge badge-level-' + escapeHtml(n.severity || "info") + '">' + escapeHtml((n.severity || "info").toUpperCase()) + '</span></td>' +
-          '<td>' + escapeHtml(n.message || "") + '</td><td>' + ack + '</td></tr>';
+          '<td>' + escapeHtml(n.message || "") + '</td>' +
+          '<td><div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">' + parts.join("") + '</div></td></tr>';
       }).join("") : '<tr><td colspan="4" class="empty-state">No active alerts</td></tr>';
       aTbody.querySelectorAll(".asset-alert-ack").forEach(function (btn) {
         btn.addEventListener("click", function () { _acknowledgeAssetAlert(btn, assetId); });
+      });
+      aTbody.querySelectorAll(".asset-alert-clear").forEach(function (btn) {
+        btn.addEventListener("click", function () { _clearAssetAlert(btn, assetId); });
       });
     }
     var rTbody = document.getElementById("asset-notif-rules-tbody");
@@ -17342,6 +17355,30 @@ async function _acknowledgeAssetAlert(btn, assetId) {
     _loadAssetNotificationsTab(assetId);
   } catch (err) {
     showToast(err.message || "Couldn't acknowledge the alert", "error");
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+/**
+ * Clear one alert from the asset's Alerts tab (alerts:fullwrite). Confirmed
+ * first because clearing is the operator's "this outage is handled" statement:
+ * it ends the alert, runs the automation's reset actions and stops escalation,
+ * and an auto-reset rule whose condition is still true will simply raise a new
+ * one — so a mis-click is noise, not a silent loss.
+ */
+async function _clearAssetAlert(btn, assetId) {
+  var ok = await showConfirm("Clear this alert? It stops escalation and runs the automation's reset actions. A still-true condition can raise a new alert.");
+  if (!ok) return;
+  btn.disabled = true;
+  var old = btn.textContent;
+  btn.textContent = "…";
+  try {
+    await api.alerts.clear([btn.dataset.id]);
+    showToast("Alert cleared", "success");
+    _loadAssetNotificationsTab(assetId);
+  } catch (err) {
+    showToast(err.message || "Couldn't clear the alert", "error");
     btn.disabled = false;
     btn.textContent = old;
   }
