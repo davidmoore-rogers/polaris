@@ -17265,20 +17265,64 @@ function openLogFlagRulesModal(asset, processName, onChange) {
 
 // Asset-details Alerts tab: active alerts for this asset + the automations
 // whose scope matches it. Both loaded by _loadAssetNotificationsTab.
+
+/**
+ * The active-alerts table's shape, resolved from the viewer's permissions in
+ * ONE place so the header markup and the loader's empty-state colspan can't
+ * drift apart. Selection exists only for an operator who can actually act on
+ * a batch — checkboxes that lead nowhere are worse than no checkboxes.
+ */
+function _assetAlertTableShape() {
+  var canAck = permAtLeast("alerts", "write");
+  var canClear = permAtLeast("alerts", "fullwrite");
+  var canSelect = canAck || canClear;
+  return {
+    canAck: canAck,
+    canClear: canClear,
+    canSelect: canSelect,
+    // Time, Severity, Detail, Message, Actions (+ the checkbox column).
+    colspan: 5 + (canSelect ? 1 : 0),
+  };
+}
+
 function _assetNotificationsTabHTML() {
   // Actions column: an unacknowledged row offers Acknowledge (alerts:write),
   // an acknowledged one names who did it, and Clear (alerts:fullwrite) sits
   // beside either. Until this tab grew them, api.alerts.acknowledge had no
   // caller at all, which left escalation chains set to stopOn:"acknowledge"
   // unstoppable, and clearing an alert was desktop-Automations-page-only.
-  var canAck = permAtLeast("alerts", "write");
-  var canClear = permAtLeast("alerts", "fullwrite");
-  var actionW = canAck && canClear ? "240" : (canAck || canClear ? "200" : "160");
+  var shape = _assetAlertTableShape();
+  var actionW = shape.canAck && shape.canClear ? "240" : (shape.canAck || shape.canClear ? "200" : "160");
+  // Bulk bar, always rendered and idle until something is selected (the
+  // Automations View tab's precedent). One switch losing its uplink raises one
+  // alert per pinned interface, so a per-row-only tab means a dozen prompts
+  // and a dozen confirms to close out a single outage.
+  var bulkBar = shape.canSelect
+    ? '<div class="bulk-bar bulk-bar-idle" id="asset-alert-bulkbar">' +
+        '<span class="bulk-bar-count" id="asset-alert-selcount">None selected</span>' +
+        (shape.canAck ? '<button class="btn btn-sm btn-secondary" id="asset-alert-bulk-ack" disabled>Acknowledge selected</button>' : "") +
+        (shape.canClear ? '<button class="btn btn-sm btn-secondary" id="asset-alert-bulk-clear" disabled>Clear selected</button>' : "") +
+      '</div>'
+    : "";
   return '<div class="section-block">' +
-    '<h4 style="margin:0 0 0.5rem">Active alerts</h4>' +
-    '<div class="table-wrapper"><table><thead><tr>' +
-      '<th style="width:160px">Time</th><th style="width:80px">Severity</th><th>Message</th><th style="width:' + actionW + 'px">Actions</th>' +
-    '</tr></thead><tbody id="asset-notif-active-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>' +
+    '<h4 style="margin:0 0 0.5rem">Active alerts <span id="asset-notif-active-count" style="color:var(--color-text-tertiary);font-weight:400"></span></h4>' +
+    bulkBar +
+    // Self-bounding sticky header (max-height set here, no JS sizer — see the
+    // .table-wrapper-modal-sticky note in styles.css): a device whose gate went
+    // down fills this table, and the header scrolling away took with it the
+    // only thing that said which column was which.
+    '<div class="table-wrapper table-wrapper-modal-sticky" style="max-height:42vh"><table><thead><tr>' +
+      (shape.canSelect ? '<th class="cb-col"><input type="checkbox" id="asset-alert-selall" title="Select all"></th>' : "") +
+      '<th style="width:160px">Time</th><th style="width:80px">Severity</th>' +
+      // The dimension the alert was raised FOR — an interface, a sensor, a
+      // mount. Without it every alert one per-interface automation raises on
+      // one device renders the same sentence at the same minute, which is
+      // exactly what a switch losing its uplink produces: two dozen rows an
+      // operator cannot tell apart, and no way to know whether clearing one
+      // did anything.
+      '<th style="width:150px">Detail</th>' +
+      '<th>Message</th><th style="width:' + actionW + 'px">Actions</th>' +
+    '</tr></thead><tbody id="asset-notif-active-tbody"><tr><td colspan="' + shape.colspan + '" class="empty-state">Loading…</td></tr></tbody></table></div>' +
     '<h4 style="margin:1rem 0 0.5rem">Automations that can trigger for this asset</h4>' +
     '<div class="table-wrapper"><table><thead><tr>' +
       '<th style="width:200px">Name</th><th>Trigger</th><th style="width:180px">Scope</th>' +
@@ -17309,15 +17353,33 @@ function _assetRuleSentences() {
   return _assetRuleSentencesP;
 }
 
+/**
+ * Order the active list for reading, not just for recency. Every alert of one
+ * outage carries the same triggeredAt to the second, so the server's
+ * triggeredAt-desc leaves the rows that differ only by dimension in arbitrary
+ * order; sorting equal timestamps by dimension (numerically, so port2 precedes
+ * port10) puts the ports in the order the operator thinks about them.
+ */
+function _sortAssetAlerts(active) {
+  return active.slice().sort(function (a, b) {
+    var d = new Date(b.triggeredAt || 0).getTime() - new Date(a.triggeredAt || 0).getTime();
+    if (d) return d;
+    return String(a.dimension || "").localeCompare(String(b.dimension || ""), undefined, { numeric: true, sensitivity: "base" });
+  });
+}
+
 function _loadAssetNotificationsTab(assetId) {
   var sentencesReady = _assetRuleSentences();
   api.assets.alerts(assetId).then(function (data) {
-    var active = (data && data.active) || [];
+    var active = _sortAssetAlerts((data && data.active) || []);
     var rules = (data && data.matchingRules) || [];
     var aTbody = document.getElementById("asset-notif-active-tbody");
     if (aTbody) {
-      var canAck = permAtLeast("alerts", "write");
-      var canClear = permAtLeast("alerts", "fullwrite");
+      var shape = _assetAlertTableShape();
+      // The count is what makes a clear visible: with two dozen rows reading
+      // the same sentence, removing one changes nothing an eye can catch.
+      var countEl = document.getElementById("asset-notif-active-count");
+      if (countEl) countEl.textContent = active.length ? "(" + active.length + ")" : "";
       aTbody.innerHTML = active.length ? active.map(function (n) {
         var ts = new Date(n.triggeredAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
         // Acknowledge OR the acknowledgement itself, then Clear — the two are
@@ -17330,24 +17392,38 @@ function _loadAssetNotificationsTab(assetId) {
             : "";
           parts.push('<span style="font-size:0.82rem">' + escapeHtml(n.acknowledgedBy || "acknowledged") +
             (when ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">' + escapeHtml(when) + '</span>' : "") + '</span>');
-        } else if (canAck) {
+        } else if (shape.canAck) {
           parts.push('<button class="btn btn-sm btn-secondary asset-alert-ack" data-id="' + escapeHtml(n.id) + '">Acknowledge</button>');
         }
-        if (canClear) {
+        if (shape.canClear) {
           parts.push('<button class="btn btn-sm btn-secondary asset-alert-clear" data-id="' + escapeHtml(n.id) + '">Clear</button>');
         }
         if (!parts.length) parts.push('<span style="color:var(--color-text-tertiary)">—</span>');
-        return '<tr><td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ts) + '</td>' +
+        var sel = shape.canSelect
+          ? '<td class="cb-col"><input type="checkbox" class="asset-alert-sel" data-id="' + escapeHtml(n.id) + '" aria-label="Select this alert"></td>'
+          : "";
+        // The metric rides the cell title rather than a column of its own: it
+        // is the same value on every row of one automation, so it identifies
+        // nothing, but it says what the dimension IS on the rows where the
+        // bare name ("port12", "TMP1") could be several things.
+        var detailTitle = n.metric ? ' title="' + escapeHtml(n.metric) + '"' : "";
+        var detail = n.dimension
+          ? '<span style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(n.dimension) + '</span>'
+          : '<span style="color:var(--color-text-tertiary)">—</span>';
+        return '<tr>' + sel +
+          '<td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ts) + '</td>' +
           '<td><span class="badge badge-level-' + escapeHtml(n.severity || "info") + '">' + escapeHtml((n.severity || "info").toUpperCase()) + '</span></td>' +
+          '<td' + detailTitle + '>' + detail + '</td>' +
           '<td>' + escapeHtml(n.message || "") + '</td>' +
           '<td><div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">' + parts.join("") + '</div></td></tr>';
-      }).join("") : '<tr><td colspan="4" class="empty-state">No active alerts</td></tr>';
+      }).join("") : '<tr><td colspan="' + shape.colspan + '" class="empty-state">No active alerts</td></tr>';
       aTbody.querySelectorAll(".asset-alert-ack").forEach(function (btn) {
         btn.addEventListener("click", function () { _acknowledgeAssetAlert(btn, assetId); });
       });
       aTbody.querySelectorAll(".asset-alert-clear").forEach(function (btn) {
         btn.addEventListener("click", function () { _clearAssetAlert(btn, assetId); });
       });
+      _wireAssetAlertSelection(assetId);
     }
     var rTbody = document.getElementById("asset-notif-rules-tbody");
     if (!rTbody) return;
@@ -17357,11 +17433,72 @@ function _loadAssetNotificationsTab(assetId) {
       _renderAssetRuleRows(rTbody, rules, sent, assetId);
     });
   }).catch(function () {
+    var shape = _assetAlertTableShape();
     var aTbody = document.getElementById("asset-notif-active-tbody");
-    if (aTbody) aTbody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load</td></tr>';
+    if (aTbody) aTbody.innerHTML = '<tr><td colspan="' + shape.colspan + '" class="empty-state">Failed to load</td></tr>';
     var rTbody = document.getElementById("asset-notif-rules-tbody");
     if (rTbody) rTbody.innerHTML = '<tr><td colspan="3" class="empty-state">Failed to load</td></tr>';
   });
+}
+
+/**
+ * Wire the select-all box, the row checkboxes and the two bulk buttons after a
+ * render.
+ *
+ * The tbody is rebuilt on every load but the thead's select-all and the bulk
+ * bar's buttons are NOT — they live in the tab shell — so each of the three
+ * persistent nodes is replaced by a fresh clone before its listener goes on.
+ * Without that, a tab that reloads after every acknowledge accumulates one
+ * handler per reload and the third click fires three batches.
+ */
+function _wireAssetAlertSelection(assetId) {
+  function fresh(el) {
+    if (!el || !el.parentNode) return el;
+    var c = el.cloneNode(true);
+    el.parentNode.replaceChild(c, el);
+    return c;
+  }
+  var bar = document.getElementById("asset-alert-bulkbar");
+  if (!bar) return; // viewer can't act on alerts — no selection column rendered
+  var boxes = Array.prototype.slice.call(document.querySelectorAll(".asset-alert-sel"));
+  var all = fresh(document.getElementById("asset-alert-selall"));
+  var ackBtn = fresh(document.getElementById("asset-alert-bulk-ack"));
+  var clearBtn = fresh(document.getElementById("asset-alert-bulk-clear"));
+  var label = document.getElementById("asset-alert-selcount");
+
+  function selectedIds() {
+    return boxes.filter(function (b) { return b.checked; }).map(function (b) { return b.getAttribute("data-id"); });
+  }
+  function sync() {
+    var n = selectedIds().length;
+    if (label) label.textContent = n ? n + " selected" : "None selected";
+    bar.classList.toggle("bulk-bar-idle", n === 0);
+    if (ackBtn) ackBtn.disabled = n === 0;
+    if (clearBtn) clearBtn.disabled = n === 0;
+    if (all) {
+      all.checked = n > 0 && n === boxes.length;
+      // Partial selection reads as neither on nor off, so one more click on
+      // the header box means "take all of them" rather than "drop what I just
+      // picked".
+      all.indeterminate = n > 0 && n < boxes.length;
+      all.disabled = boxes.length === 0;
+    }
+  }
+  boxes.forEach(function (b) { b.addEventListener("change", sync); });
+  if (all) {
+    all.addEventListener("change", function () {
+      boxes.forEach(function (b) { b.checked = all.checked; });
+      sync();
+    });
+  }
+  if (ackBtn) ackBtn.addEventListener("click", function () { _bulkAcknowledgeAssetAlerts(selectedIds(), assetId, ackBtn); });
+  if (clearBtn) clearBtn.addEventListener("click", function () { _bulkClearAssetAlerts(selectedIds(), assetId, clearBtn); });
+  sync();
+}
+
+/** "1 alert" / "3 alerts" — used in every prompt, confirm and toast below. */
+function _alertCountLabel(n) {
+  return n + " alert" + (n === 1 ? "" : "s");
 }
 
 /**
@@ -17377,8 +17514,12 @@ async function _acknowledgeAssetAlert(btn, assetId) {
   var old = btn.textContent;
   btn.textContent = "…";
   try {
-    await api.alerts.acknowledge([btn.dataset.id], note.trim() || undefined);
-    showToast("Alert acknowledged", "success");
+    var res = await api.alerts.acknowledge([btn.dataset.id], note.trim() || undefined);
+    // Report what the SERVER did, not what was asked for: the route skips rows
+    // already acknowledged, and a success toast over a no-op is how "I clicked
+    // it and nothing happened" starts.
+    var n = res && typeof res.acknowledged === "number" ? res.acknowledged : 1;
+    showToast(n ? "Alert acknowledged" : "Already acknowledged", n ? "success" : "error");
     _loadAssetNotificationsTab(assetId);
   } catch (err) {
     showToast(err.message || "Couldn't acknowledge the alert", "error");
@@ -17401,11 +17542,62 @@ async function _clearAssetAlert(btn, assetId) {
   var old = btn.textContent;
   btn.textContent = "…";
   try {
-    await api.alerts.clear([btn.dataset.id]);
-    showToast("Alert cleared", "success");
+    var res = await api.alerts.clear([btn.dataset.id]);
+    var n = res && typeof res.cleared === "number" ? res.cleared : 1;
+    showToast(n ? "Alert cleared" : "That alert was already cleared", n ? "success" : "error");
     _loadAssetNotificationsTab(assetId);
   } catch (err) {
     showToast(err.message || "Couldn't clear the alert", "error");
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+/**
+ * Acknowledge every selected alert in ONE request. The note is prompted once
+ * for the batch because the route takes one shared note by design — and
+ * because nobody types a per-interface note for the twelve ports that went
+ * down together.
+ */
+async function _bulkAcknowledgeAssetAlerts(ids, assetId, btn) {
+  if (!ids.length) return;
+  var note = window.prompt("Acknowledge " + _alertCountLabel(ids.length) + ". Add a note (optional):", "");
+  if (note === null) return; // cancelled
+  btn.disabled = true;
+  var old = btn.textContent;
+  btn.textContent = "…";
+  try {
+    var res = await api.alerts.acknowledge(ids, note.trim() || undefined);
+    var n = res && typeof res.acknowledged === "number" ? res.acknowledged : ids.length;
+    showToast(n ? "Acknowledged " + _alertCountLabel(n) : "Nothing to acknowledge — already acknowledged", n ? "success" : "error");
+    _loadAssetNotificationsTab(assetId);
+  } catch (err) {
+    showToast(err.message || "Couldn't acknowledge the alerts", "error");
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+/**
+ * Clear every selected alert in ONE request (alerts:fullwrite). The confirm
+ * names the count, since the whole point of the selection is that the rows can
+ * read identically — "clear this alert" over twenty of them says nothing about
+ * how many are going.
+ */
+async function _bulkClearAssetAlerts(ids, assetId, btn) {
+  if (!ids.length) return;
+  var ok = await showConfirm("Clear " + _alertCountLabel(ids.length) + "? Clearing stops escalation and runs each automation's reset actions. A still-true condition can raise a new alert.");
+  if (!ok) return;
+  btn.disabled = true;
+  var old = btn.textContent;
+  btn.textContent = "…";
+  try {
+    var res = await api.alerts.clear(ids);
+    var n = res && typeof res.cleared === "number" ? res.cleared : ids.length;
+    showToast(n ? "Cleared " + _alertCountLabel(n) : "Nothing cleared — they were already cleared", n ? "success" : "error");
+    _loadAssetNotificationsTab(assetId);
+  } catch (err) {
+    showToast(err.message || "Couldn't clear the alerts", "error");
     btn.disabled = false;
     btn.textContent = old;
   }

@@ -1562,11 +1562,14 @@ code {
    Interfaces table sits mid-tab, so a distance-to-bottom bound would change on
    every panel scroll). */
 .table-wrapper-panel-sticky { overflow: auto; }
-/* Modal variant (Application Map → Discovery): same sticky thead + internal
-   scroll, but SELF-BOUNDING — the caller sets its own max-height, so there is
-   deliberately no JS sizer. Don't reach for .table-wrapper-sticky here:
-   sizeStickyTableWrappers() would stamp a viewport-derived inline max-height
-   over the modal's own bound on every resize / page-control render. */
+/* Self-bounding variant (Application Map → Discovery picker, in a modal; the
+   asset-details Alerts tab's active list, in a slide-over): same sticky thead +
+   internal scroll, but the CALLER sets its own max-height, so there is
+   deliberately no JS sizer. Reach for this over the two sized variants whenever
+   a fixed bound is right — .table-wrapper-sticky's sizeStickyTableWrappers()
+   would stamp a viewport-derived inline max-height over that bound on every
+   resize / page-control render, and the panel variant's sizers measure rects
+   that are garbage while the tab is display:none. */
 .table-wrapper-modal-sticky { overflow: auto; }
 .table-wrapper-sticky thead th,
 .table-wrapper-panel-sticky thead th,
