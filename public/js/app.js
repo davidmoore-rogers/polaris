@@ -2125,18 +2125,28 @@ function showRowMenu(anchor, items, opts) {
     else if (e.key === "End") { e.preventDefault(); buttons[buttons.length - 1].focus(); }
   }
   // Capture-phase scroll so a scroll inside the table wrapper closes it too —
-  // the menu is fixed and cannot track its anchor.
+  // the menu is fixed and cannot track its anchor. But only a scroll that
+  // MOVED the anchor is a reason to close: the dashboard's NOC auto-scroll
+  // creeps every overflowing widget body by a pixel every 80ms, and closing on
+  // those made the account menu flash open and vanish on that page. A scroll in
+  // a container that doesn't hold the anchor leaves the menu correctly placed.
+  function onScroll(e) {
+    var t = e && e.target;
+    // Document-level scroll (target is the Document node) moves everything.
+    if (!t || t.nodeType === 9 || typeof t.contains !== "function") { closeRowMenu(); return; }
+    if (t.contains(anchor)) closeRowMenu();
+  }
   function onScrollOrResize() { closeRowMenu(); }
 
   document.addEventListener("pointerdown", onDocPointerDown, true);
   document.addEventListener("keydown", onKeyDown, true);
-  window.addEventListener("scroll", onScrollOrResize, true);
+  window.addEventListener("scroll", onScroll, true);
   window.addEventListener("resize", onScrollOrResize);
 
   _rowMenuTeardown = function (o) {
     document.removeEventListener("pointerdown", onDocPointerDown, true);
     document.removeEventListener("keydown", onKeyDown, true);
-    window.removeEventListener("scroll", onScrollOrResize, true);
+    window.removeEventListener("scroll", onScroll, true);
     window.removeEventListener("resize", onScrollOrResize);
     if (menu.parentNode) menu.parentNode.removeChild(menu);
     _rowMenuTeardown = null;

@@ -187,6 +187,27 @@ describe("showRowMenu — dismissal", () => {
     expect(menu()).toBeFalsy();
   });
 
+  it("closes when a container HOLDING the anchor scrolls", () => {
+    const wrap = doc.createElement("div");
+    doc.body.appendChild(wrap);
+    wrap.appendChild(anchor);
+    showRowMenu(anchor, [{ label: "Open", onSelect: () => {} }]);
+    wrap.dispatchEvent(new win.Event("scroll", { bubbles: true }));
+    expect(menu()).toBeFalsy();
+  });
+
+  it("survives a scroll in a container that does NOT hold the anchor", () => {
+    // The dashboard's NOC auto-scroll creeps every overflowing widget body a
+    // pixel every 80 ms. Closing on those made the page-header account menu
+    // flash open and vanish; the anchor never moved, so the menu is still
+    // correctly placed.
+    const elsewhere = doc.createElement("div");
+    doc.body.appendChild(elsewhere);
+    showRowMenu(anchor, [{ label: "Logout", onSelect: () => {} }]);
+    elsewhere.dispatchEvent(new win.Event("scroll", { bubbles: true }));
+    expect(menu()).toBeTruthy();
+  });
+
   it("closes on resize", () => {
     showRowMenu(anchor, [{ label: "Open", onSelect: () => {} }]);
     win.dispatchEvent(new win.Event("resize"));
