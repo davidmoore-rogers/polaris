@@ -15916,8 +15916,10 @@ function _depTreeNodeRow(node, opts) {
       escapeHtml(_DEP_TREE_VIA_LABEL[opts.via] || opts.via) + '</span>';
   }
   // "+N more" hint for a node whose own children were capped out of the payload.
+  // Infra-only, like the tree itself — this can never be a count of downstream
+  // workstations or printers.
   var moreTag = (opts.moreCount > 0)
-    ? ' <span class="dep-tree-level" title="' + opts.moreCount + ' more child device(s) not shown here — open this device to see them">+' + opts.moreCount + '</span>'
+    ? ' <span class="dep-tree-level" title="' + opts.moreCount + ' more switch(es) / access point(s) below this device, not shown here — open it to see them">+' + opts.moreCount + '</span>'
     : "";
   var depthClass = opts.depth ? ' dep-tree-row-depth-' + opts.depth : '';
   return '<div class="dep-tree-row' + (opts.self ? ' dep-tree-row-self' : '') + depthClass + '">' +
@@ -15951,13 +15953,18 @@ function renderDependencyTreeBlock(payload, selfId) {
     // An endpoint landing here has no resolvable upstream device, which is worth
     // saying plainly: it's also the reason dependency suppression can't apply,
     // so this row alerts on its own probe state even when its site is dark.
+    //
+    // The infra wording names switches / APs specifically rather than claiming
+    // "no dependency chain at all", because the downward view is infra-only: a
+    // gate with endpoints sighted on it but no managed switches lands here, and
+    // it does have dependents — they're just not this tree's subject.
     var infraTypes = ["firewall", "switch", "access_point"];
     var isInfra = infraTypes.indexOf(self.assetType) !== -1;
     return '<div class="dep-tree-block">' +
       '<div class="dep-tree-header">Dependency Tree</div>' +
       '<div class="dep-tree-empty">' +
         (isInfra
-          ? 'Standalone — not part of any discovered dependency chain.'
+          ? 'Standalone — no upstream or downstream switches / access points discovered.'
           : 'No upstream device identified — no last-seen switch, access point or FortiGate resolves to a monitored device, so dependency suppression can\'t apply to this asset.') +
       '</div>' +
       '</div>';
@@ -16009,8 +16016,9 @@ function renderDependencyTreeBlock(payload, selfId) {
   if (children.length > 0) {
     childrenHTML += '<div class="dep-tree-connector">│</div>';
     childrenHTML += children.map(function (c) {
-      // Only infra grandchildren come down in the payload, so a switch's
-      // endpoint children show as a "+N" count on its row rather than as rows.
+      // Both downward layers are infra-only (see GET /:id/dependencies), so a
+      // "+N" here means switches/APs the grandchild cap left out — never the
+      // workstations and printers that hang off this switch.
       var gcs = Array.isArray(c.grandchildren) ? c.grandchildren : [];
       var more = (typeof c.childCount === "number") ? Math.max(0, c.childCount - gcs.length) : 0;
       var row = _depTreeNodeRow(c, { depth: 1, via: c.detectedVia, moreCount: more });
@@ -16022,7 +16030,7 @@ function renderDependencyTreeBlock(payload, selfId) {
       var shown = children.length;
       var total = (typeof payload.childCount === "number") ? payload.childCount : 0;
       childrenHTML += '<div class="dep-tree-empty" style="margin-top:0.35rem">Showing ' + shown +
-        ' of ' + (total > shown ? total : shown) + ' dependent devices.</div>';
+        ' of ' + (total > shown ? total : shown) + ' downstream switches / access points.</div>';
     }
   }
 

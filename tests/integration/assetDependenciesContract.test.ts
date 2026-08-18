@@ -123,6 +123,45 @@ d("GET /assets/:id/dependencies contract", () => {
     expect(resp.body.children).toEqual([]);
   });
 
+  // The downward view is the INFRA chain (firewall → switch → AP). The endpoint
+  // half of the DAG makes every workstation / server / printer a child of the
+  // switch, AP or gate that last saw it, and a site gate is the last-seen device
+  // for the whole site — so those rows are deliberately excluded here even
+  // though they're real dependency edges the reconciler suppresses on. The
+  // endpoint's own General tab is where its dependency is shown, as its parent.
+  it("excludes endpoint children from the downward view while keeping them upward", async () => {
+    await prisma.assetDependencyParent.create({
+      data: { assetId: otherId, parentAssetId: fwId, source: "endpoint", detectedVia: "sighting" } as never,
+    });
+
+    // Downward: the server does NOT appear among the gate's children.
+    const down = await getDeps(fwId);
+    expect(down.status).toBe(200);
+    expect(down.body.children.map((c: any) => c.id)).toEqual([swId]);
+
+    // Upward: the same edge IS the server's effective parent, and it reports the
+    // signal that produced it so the UI can name it.
+    const up = await getDeps(otherId);
+    expect(up.status).toBe(200);
+    expect(up.body.hasOverride).toBe(false);
+    expect(up.body.effectiveParents.map((p: any) => p.parent.id)).toEqual([fwId]);
+    expect(up.body.effectiveParents[0].source).toBe("endpoint");
+    expect(up.body.effectiveParents[0].detectedVia).toBe("sighting");
+    expect(up.body.children).toEqual([]);
+  });
+
+  // The "+N more" hint must never become an endpoint tally — it counts only the
+  // infra children the caps left out, matching what the tree actually renders.
+  it("counts only infra children in childCount", async () => {
+    await prisma.assetDependencyParent.create({
+      data: { assetId: otherId, parentAssetId: fwId, source: "endpoint", detectedVia: "sighting" } as never,
+    });
+    const resp = await getDeps(fwId);
+    expect(resp.status).toBe(200);
+    expect(resp.body.childCount).toBe(1); // the switch, not the switch + the server
+    expect(resp.body.childrenTruncated).toBe(false);
+  });
+
   it("renders one grandchild layer under each bound child, type-then-hostname ordered", async () => {
     const resp = await getDeps(fwId);
     expect(resp.status).toBe(200);

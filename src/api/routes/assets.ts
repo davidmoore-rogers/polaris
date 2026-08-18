@@ -4207,10 +4207,11 @@ const dependencyOverrideBodySchema = z.object({
 // inline copies of the same binding-rule walk; they now share
 // loadBoundChildRows.
 
-// Payload caps for the asset-details tree. The endpoint half of the DAG made a
-// site FortiGate's child set fleet-sized, and this endpoint feeds a modal.
+// Payload caps for the asset-details tree, which feeds a modal. Both layers of
+// the downward view are infra-only, so these bound a controller FortiGate with
+// hundreds of managed switches and APs — not the endpoint half, which is
+// filtered out of the children read entirely.
 const DEP_INFRA_CHILD_CAP = 300;
-const DEP_ENDPOINT_CHILD_CAP = 100;
 const DEP_GRANDCHILD_CAP = 500;
 
 // Stable display order: type (firewall→switch→ap→other), then hostname.
@@ -4246,23 +4247,22 @@ interface BoundChildRow {
  * 2026-08, the `endpoint` half.) Rows come back in (source asc, createdAt asc)
  * order; callers own dedupe/grouping/sorting.
  *
- * `opts.assetTypes` / `opts.excludeAssetTypes` narrow the child types and
- * `opts.take` caps the read. They exist because the endpoint half made a
- * FortiGate's child set fleet-sized — a site gate can be the last-seen device
- * for hundreds of endpoints, and the asset-details tree is a summary, not a
- * browsable inventory. Note `take` applies BEFORE the per-child binding filter
- * below, so a caller wanting a specific slice must express it in the where.
+ * `opts.assetTypes` narrows the child types and `opts.take` caps the read. Both
+ * exist because the endpoint half made a FortiGate's child set fleet-sized — a
+ * site gate is the last-seen device for every endpoint at the site, and the
+ * asset-details tree is a summary of the infra chain, not a browsable inventory.
+ * Note `take` applies BEFORE the per-child binding filter below, so a caller
+ * wanting a specific slice must express it in the where.
  */
 async function loadBoundChildRows(
   parentIds: string[],
-  opts?: { assetTypes?: string[]; excludeAssetTypes?: string[]; take?: number },
+  opts?: { assetTypes?: string[]; take?: number },
 ): Promise<BoundChildRow[]> {
   if (parentIds.length === 0) return [];
   const rows = await prisma.assetDependencyParent.findMany({
     where: {
       parentAssetId: { in: parentIds },
       ...(opts?.assetTypes ? { asset: { assetType: { in: opts.assetTypes } } } : {}),
-      ...(opts?.excludeAssetTypes ? { asset: { assetType: { notIn: opts.excludeAssetTypes } } } : {}),
     },
     ...(opts?.take ? { take: opts.take } : {}),
     include: {
@@ -4420,25 +4420,23 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
     // parent (loadBoundChildRows applies the override-wins binding rule per
     // child). Dedupe by child id keeping the first binding row.
     //
-    // Read in two capped halves so the infra children are never crowded out by
-    // the endpoint half: a controller FortiGate can carry hundreds of managed
-    // switches/APs AND be the last-seen gate for every endpoint at the site, and
-    // an uncapped single read would put the whole site in one modal payload.
-    // Both halves are type-filtered in SQL. Filtering the endpoint half in
-    // memory instead would be wrong, not just slower: with `take` applied
-    // before the filter, a gate with 300 switch children could fill the whole
-    // read with infra rows and report zero endpoints.
-    const [boundInfraChildren, boundEndpointChildren] = await Promise.all([
-      loadBoundChildRows([id], { assetTypes: [...FORTINET_INFRA_ASSET_TYPES], take: DEP_INFRA_CHILD_CAP + 1 }),
-      loadBoundChildRows([id], { excludeAssetTypes: [...FORTINET_INFRA_ASSET_TYPES], take: DEP_ENDPOINT_CHILD_CAP + 1 }),
-    ]);
-    const boundChildren = [
-      ...boundInfraChildren.slice(0, DEP_INFRA_CHILD_CAP),
-      ...boundEndpointChildren.slice(0, DEP_ENDPOINT_CHILD_CAP),
-    ];
-    const childrenTruncated =
-      boundInfraChildren.length > DEP_INFRA_CHILD_CAP ||
-      boundEndpointChildren.length > DEP_ENDPOINT_CHILD_CAP;
+    // **INFRA ONLY, both layers.** The endpoint half of the DAG made endpoints
+    // children of the switch / AP / gate that last saw them, and briefly they
+    // rendered here too — but the downward view exists to show the infra chain
+    // (firewall → switch → AP), and a site gate is the last-seen device for
+    // every workstation, printer and server at the site, so admitting them
+    // buries the two or three rows an operator opened the tree to read. An
+    // endpoint's dependency still shows on its OWN General tab, as the parent
+    // above it, which is where the suppression it drives is worth explaining.
+    // Type-filtered in SQL, not in memory: `take` applies before any in-memory
+    // filter, so a gate with 300 switch children would otherwise fill the read
+    // and report nothing.
+    const boundInfraChildren = await loadBoundChildRows([id], {
+      assetTypes: [...FORTINET_INFRA_ASSET_TYPES],
+      take: DEP_INFRA_CHILD_CAP + 1,
+    });
+    const boundChildren = boundInfraChildren.slice(0, DEP_INFRA_CHILD_CAP);
+    const childrenTruncated = boundInfraChildren.length > DEP_INFRA_CHILD_CAP;
     const seenChildIds = new Set<string>();
     const children: Array<Omit<BoundChildRow, "parentAssetId">> = [];
     for (const r of boundChildren) {
@@ -4477,18 +4475,31 @@ router.get("/:id/dependencies", requirePermission("assets", "read"), async (req,
       list.sort(byDepTypeThenHostname);
     }
 
-    // Total bound-child count per rendered child + for this asset itself, so the
-    // tree can say "+N more" instead of implying the capped list is everything.
-    // One indexed groupBy on parentAssetId; cheaper than fetching the rows we
-    // deliberately didn't render.
+    // INFRA child count per rendered child + for this asset itself, so the tree
+    // can say "+N more" instead of implying the capped list is everything.
+    // Counting infra only is what keeps that hint consistent with what the tree
+    // shows — a raw count would make "+312" on a switch row an endpoint tally,
+    // which is precisely the noise the type filter above exists to remove.
+    // Hence a findMany over the (indexed) parentAssetId with the relation type
+    // filter rather than a groupBy, which can't filter on a relation field.
     const countScopeIds = [id, ...children.map(c => c.id)];
-    const childCountRows = await prisma.assetDependencyParent.groupBy({
-      by: ["parentAssetId"],
-      where: { parentAssetId: { in: countScopeIds }, source: { not: "override" } },
-      _count: { _all: true },
+    const childCountRows = await prisma.assetDependencyParent.findMany({
+      where: {
+        parentAssetId: { in: countScopeIds },
+        source: { not: "override" },
+        asset: { assetType: { in: [...FORTINET_INFRA_ASSET_TYPES] } },
+      },
+      select: { parentAssetId: true, assetId: true },
     });
     const childCountByParent = new Map<string, number>();
-    for (const r of childCountRows) childCountByParent.set(r.parentAssetId, r._count._all);
+    const countedPairs = new Set<string>();
+    for (const r of childCountRows) {
+      // A pair can carry rows under several sources; count the child once.
+      const pair = r.parentAssetId + "|" + r.assetId;
+      if (countedPairs.has(pair)) continue;
+      countedPairs.add(pair);
+      childCountByParent.set(r.parentAssetId, (childCountByParent.get(r.parentAssetId) ?? 0) + 1);
+    }
 
     const childrenWithGrandchildren = children.map(c => ({
       ...c,
