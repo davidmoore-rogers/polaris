@@ -42,3 +42,33 @@ export function formatUptime(seconds: number | null | undefined): string {
   if (hours > 0) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
   return `${mins}m`;
 }
+
+/**
+ * Render a duration in seconds at full precision — every unit from the
+ * most-significant non-zero one down to seconds ("18d 3h 21m 15s", "6m 57s",
+ * "47s"). Intermediate zero units are kept ("1d 0h 0m 1s") so the string is
+ * never read as a gap; only leading zero units are dropped.
+ *
+ * Unlike formatUptime (a compact two-unit display for the assets table), this
+ * keeps the seconds — it backs the device.reboot Event message, where the
+ * post-reboot uptime is routinely under a minute and "<1m" would erase the
+ * only interesting number in the line.
+ *
+ * Returns "—" for null / negative input, matching formatUptime.
+ */
+export function formatUptimeLong(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const s = Math.floor(seconds);
+
+  const days = Math.floor(s / 86400);
+  const hours = Math.floor((s % 86400) / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const secs = s % 60;
+
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (parts.length || hours > 0) parts.push(`${hours}h`);
+  if (parts.length || mins > 0) parts.push(`${mins}m`);
+  parts.push(`${secs}s`);
+  return parts.join(" ");
+}

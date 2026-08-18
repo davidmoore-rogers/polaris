@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { snmpTicksToSeconds, formatUptime } from "../../src/utils/uptime.js";
+import { snmpTicksToSeconds, formatUptime, formatUptimeLong } from "../../src/utils/uptime.js";
 
 // Pure helpers — no DB, no network.
 
@@ -52,5 +52,31 @@ describe("formatUptime", () => {
     expect(formatUptime(undefined)).toBe("—");
     expect(formatUptime(-1)).toBe("—");
     expect(formatUptime(NaN)).toBe("—");
+  });
+});
+
+describe("formatUptimeLong", () => {
+  it("renders every unit down to seconds", () => {
+    expect(formatUptimeLong(1567275)).toBe("18d 3h 21m 15s");
+    expect(formatUptimeLong(9464)).toBe("2h 37m 44s");
+    expect(formatUptimeLong(417)).toBe("6m 57s");
+  });
+
+  it("keeps intermediate zero units but drops leading ones", () => {
+    expect(formatUptimeLong(86401)).toBe("1d 0h 0m 1s");
+    expect(formatUptimeLong(3600)).toBe("1h 0m 0s");
+    expect(formatUptimeLong(60)).toBe("1m 0s");
+  });
+
+  it("keeps sub-minute readings, unlike formatUptime", () => {
+    expect(formatUptimeLong(47)).toBe("47s");
+    expect(formatUptimeLong(0)).toBe("0s");
+  });
+
+  it("returns em-dash for null / invalid", () => {
+    expect(formatUptimeLong(null)).toBe("—");
+    expect(formatUptimeLong(undefined)).toBe("—");
+    expect(formatUptimeLong(-1)).toBe("—");
+    expect(formatUptimeLong(NaN)).toBe("—");
   });
 });

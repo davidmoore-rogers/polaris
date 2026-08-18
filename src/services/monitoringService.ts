@@ -137,7 +137,7 @@ import {
 import { propagateAfterStatusChange } from "./dependencyTreeService.js";
 import { triggerRetryAfterStatusChange } from "./reservationService.js";
 import { recordIpHistoryEntries } from "./assetIpHistoryService.js";
-import { snmpTicksToSeconds } from "../utils/uptime.js";
+import { snmpTicksToSeconds, formatUptimeLong } from "../utils/uptime.js";
 
 export interface ProbeResult {
   success: boolean;
@@ -9226,7 +9226,7 @@ export async function recordProbeResult(
       resourceId: assetId,
       resourceName: asset.hostname || undefined,
       level: "warning",
-      message: `Reboot detected: ${asset.hostname || assetId} uptime ${prevUptimeSec}s → ${uptimeSec}s`,
+      message: `Reboot detected: ${asset.hostname || assetId} uptime ${formatUptimeLong(prevUptimeSec)} → ${formatUptimeLong(uptimeSec)}`,
       details: { hostname: asset.hostname ?? null, previousUptimeSec: prevUptimeSec, uptimeSec },
     });
   }
