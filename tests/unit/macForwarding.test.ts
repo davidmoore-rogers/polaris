@@ -7,6 +7,8 @@ import {
   macCountsByPort,
   macFromOidParts,
   parseFdbIndex,
+  macFromFdbAddressValue,
+  resolveFdbIdentity,
   type FdbEntry,
 } from "../../src/utils/macForwarding.js";
 
@@ -179,5 +181,55 @@ describe("inferDirectAttachments", () => {
 
   it("ignores rows whose port never resolved", () => {
     expect(inferDirectAttachments([mk(null, "AA:AA:AA:AA:AA:01", "asset-1")])).toEqual([]);
+  });
+});
+
+describe("macFromFdbAddressValue", () => {
+  it("decodes the 6-byte OctetString SNMP delivers", () => {
+    expect(macFromFdbAddressValue(Buffer.from([0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e])))
+      .toBe("00:1A:2B:3C:4D:5E");
+  });
+
+  it("accepts the textual forms some agents return", () => {
+    expect(macFromFdbAddressValue("00:1a:2b:3c:4d:5e")).toBe("00:1A:2B:3C:4D:5E");
+    expect(macFromFdbAddressValue("001a.2b3c.4d5e")).toBe("00:1A:2B:3C:4D:5E");
+  });
+
+  // An entry with no address is not an entry -- letting it through would put
+  // a junk row on a port and match nothing.
+  it("rejects absent, wrong-length and all-zero values", () => {
+    expect(macFromFdbAddressValue(null)).toBeNull();
+    expect(macFromFdbAddressValue(Buffer.from([0x00, 0x1a, 0x2b]))).toBeNull();
+    expect(macFromFdbAddressValue(Buffer.alloc(6))).toBeNull();
+    expect(macFromFdbAddressValue(42)).toBeNull();
+  });
+});
+
+describe("resolveFdbIdentity", () => {
+  // The whole reason the address column is walked: a FortiSwitch indexes
+  // dot1dTpFdbTable by a row NUMBER, so the index carries no MAC at all and
+  // an index-only decode drops every row on the switch.
+  it("decodes a row-number-indexed table from the address column", () => {
+    expect(resolveFdbIdentity("1", Buffer.from([0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e])))
+      .toEqual({ fdbId: null, macAddress: "00:1A:2B:3C:4D:5E" });
+  });
+
+  it("still decodes a conformant table with no address column", () => {
+    expect(resolveFdbIdentity("0.26.43.60.77.94", undefined))
+      .toEqual({ fdbId: null, macAddress: "00:1A:2B:3C:4D:5E" });
+    expect(resolveFdbIdentity("10.0.26.43.60.77.94", undefined))
+      .toEqual({ fdbId: 10, macAddress: "00:1A:2B:3C:4D:5E" });
+  });
+
+  // The FDB id lives nowhere but the index, so it survives even when the
+  // address is read from the column.
+  it("keeps the VLAN from the index while the column supplies the MAC", () => {
+    expect(resolveFdbIdentity("10.0.26.43.60.77.94", Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])))
+      .toEqual({ fdbId: 10, macAddress: "AA:BB:CC:DD:EE:FF" });
+  });
+
+  it("returns null only when neither source yields an address", () => {
+    expect(resolveFdbIdentity("1", undefined)).toBeNull();
+    expect(resolveFdbIdentity("not.an.index", "zzz")).toBeNull();
   });
 });

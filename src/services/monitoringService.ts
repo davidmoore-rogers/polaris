@@ -120,7 +120,7 @@ import {
 } from "../utils/hardwareSensors.js";
 import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
 import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
-import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, parseFdbIndex, type FdbEntry } from "../utils/macForwarding.js";
+import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, resolveFdbIdentity, type FdbEntry } from "../utils/macForwarding.js";
 import { matchTrunkPeer, parseTrunkPortMap, type TrunkPortEntry } from "../utils/fortiswitchTrunkMap.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
@@ -5319,9 +5319,14 @@ const OID = {
   // BRIDGE-MIB / Q-BRIDGE-MIB forwarding database (RFC 4188 / 4363).
   // dot1dBasePortIfIndex is the basePort -> ifIndex join BOTH FDB tables need:
   // dot1qTpFdbPort and dot1dTpFdbPort report a dot1dBasePort, never an ifIndex.
+  // The address COLUMN is walked alongside them because the index is not
+  // always the address: agents exist (FortiSwitch) that index the table by a
+  // row number and publish the MAC only here. See resolveFdbIdentity.
   dot1dBasePortIfIndex:   "1.3.6.1.2.1.17.1.4.1.2",
+  dot1qTpFdbAddress:      "1.3.6.1.2.1.17.7.1.2.2.1.1",
   dot1qTpFdbPort:         "1.3.6.1.2.1.17.7.1.2.2.1.2",
   dot1qTpFdbStatus:       "1.3.6.1.2.1.17.7.1.2.2.1.3",
+  dot1dTpFdbAddress:      "1.3.6.1.2.1.17.4.3.1.1",
   dot1dTpFdbPort:         "1.3.6.1.2.1.17.4.3.1.2",
   dot1dTpFdbStatus:       "1.3.6.1.2.1.17.4.3.1.3",
   entPhysicalClass:       "1.3.6.1.2.1.47.1.1.1.1.5",
@@ -5458,10 +5463,17 @@ function walkLoopError(baseOid: string, prevOid: string, oid: string): AppError 
 
 /**
  * Walk an OID subtree and return varbinds keyed by the index suffix that
- * follows `baseOid.`. Stops once SNMP_WALK_MAX rows have been collected, or
+ * follows `baseOid.`. Stops once `maxRows` rows have been collected, or
  * rejects if the agent stops advancing (walk loop).
+ *
+ * `maxRows` defaults to SNMP_WALK_MAX, which is sized for ifTable-shaped
+ * walks. The forwarding-database walks pass their own (larger) cap: a switch
+ * with more MACs than SNMP_WALK_MAX would otherwise be truncated here,
+ * SILENTLY and below the truncation warning MAC_TABLE_ROW_CAP exists to
+ * raise — and a partial FDB makes the per-port MAC counts, and any topology
+ * inference drawn from them, quietly wrong.
  */
-function snmpWalk(session: any, baseOid: string): Promise<Map<string, any>> {
+function snmpWalk(session: any, baseOid: string, maxRows: number = SNMP_WALK_MAX): Promise<Map<string, any>> {
   return new Promise((resolve, reject) => {
     const out = new Map<string, any>();
     const prefix = baseOid + ".";
@@ -5492,7 +5504,7 @@ function snmpWalk(session: any, baseOid: string): Promise<Map<string, any>> {
             if (!vb.oid.startsWith(prefix)) continue;
             const suffix = vb.oid.slice(prefix.length);
             out.set(suffix, vb.value);
-            if (out.size >= SNMP_WALK_MAX) {
+            if (out.size >= maxRows) {
               finish();
               return true;
             }
@@ -6485,22 +6497,29 @@ async function collectMacTableSnmp(
   }
   const ifNameByBasePort = basePortToIfName(basePortToIfIndex, ifNameByIndex);
 
-  let ports = await snmpWalk(session, OID.dot1qTpFdbPort).catch(() => new Map());
-  let statuses = await snmpWalk(session, OID.dot1qTpFdbStatus).catch(() => new Map());
+  // Each table is walked as a TRIPLE: port, status, and the address column.
+  // The address column is not redundant with the index — see resolveFdbIdentity
+  // in utils/macForwarding.ts for the agent that indexes by row number.
+  let ports = await snmpWalk(session, OID.dot1qTpFdbPort, MAC_TABLE_ROW_CAP).catch(() => new Map());
+  let statuses = await snmpWalk(session, OID.dot1qTpFdbStatus, MAC_TABLE_ROW_CAP).catch(() => new Map());
+  let addresses = await snmpWalk(session, OID.dot1qTpFdbAddress, MAC_TABLE_ROW_CAP).catch(() => new Map());
   if (ports.size === 0) {
-    ports = await snmpWalk(session, OID.dot1dTpFdbPort).catch(() => new Map());
-    statuses = await snmpWalk(session, OID.dot1dTpFdbStatus).catch(() => new Map());
+    ports = await snmpWalk(session, OID.dot1dTpFdbPort, MAC_TABLE_ROW_CAP).catch(() => new Map());
+    statuses = await snmpWalk(session, OID.dot1dTpFdbStatus, MAC_TABLE_ROW_CAP).catch(() => new Map());
+    addresses = await snmpWalk(session, OID.dot1dTpFdbAddress, MAC_TABLE_ROW_CAP).catch(() => new Map());
   }
   if (ports.size === 0) return undefined;
 
   const out: FdbEntry[] = [];
   const seen = new Set<string>();
   let dropped = 0;
+  let undecodable = 0;
+  let unusableStatus = 0;
   for (const [suffix, portVb] of ports.entries()) {
-    const parsed = parseFdbIndex(suffix);
-    if (!parsed) continue;
+    const parsed = resolveFdbIdentity(suffix, addresses.get(suffix));
+    if (!parsed) { undecodable++; continue; }
     const status = fdbStatusLabel(snmpVbToNumber(statuses.get(suffix)));
-    if (!fdbStatusIsUsable(status)) continue;
+    if (!fdbStatusIsUsable(status)) { unusableStatus++; continue; }
 
     // The unique key is (asset, mac, vlan) and NULLs compare distinct in a
     // Postgres unique index, so de-duplicate here rather than relying on it.
@@ -6520,8 +6539,19 @@ async function collectMacTableSnmp(
       status,
     });
   }
-  if (dropped > 0) {
-    logger.warn({ dropped, cap: MAC_TABLE_ROW_CAP }, "MAC forwarding table truncated");
+  if (dropped > 0 || ports.size >= MAC_TABLE_ROW_CAP) {
+    logger.warn({ dropped, rows: ports.size, cap: MAC_TABLE_ROW_CAP }, "MAC forwarding table truncated");
+  }
+  // A table that answered but decoded to NOTHING is a read failure, not an
+  // empty forwarding database, so preserve the stored rows rather than
+  // wiping them — and say so, loudly. Silence here is what made an
+  // index-shape mismatch look like a switch with nothing plugged into it.
+  if (out.length === 0) {
+    logger.warn(
+      { rows: ports.size, undecodable, unusableStatus },
+      "MAC forwarding table answered but no entries decoded",
+    );
+    return undefined;
   }
   return out;
 }

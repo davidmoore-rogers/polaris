@@ -16,8 +16,11 @@
  *      but it must actually be performed, and forgetting it silently attributes
  *      every MAC to the wrong interface.
  *
- * Dependency-free so the whole decision table unit-tests directly.
+ * Depends on nothing but the shared MAC normalizer, so the whole decision
+ * table unit-tests directly.
  */
+
+import { normalizeMacOrNull } from "./mac.js";
 
 /** `dot1dTpFdbStatus` / `dot1qTpFdbStatus`. */
 export function fdbStatusLabel(raw: number | null | undefined): string {
@@ -89,6 +92,55 @@ export function parseFdbIndex(suffix: string): FdbIndex | null {
     return mac ? { fdbId: null, macAddress: mac } : null;
   }
   return null;
+}
+
+/**
+ * Decode the MAC from a `dot1dTpFdbAddress` / `dot1qTpFdbAddress` COLUMN value.
+ *
+ * Exists because the index is not always the address. RFC 4188 defines
+ * `dot1dTpFdbEntry` as INDEX { dot1dTpFdbAddress } and RFC 4363 prefixes that
+ * with the FDB id, which is what `parseFdbIndex` above decodes — but agents in
+ * the field do not all honour it. A FortiSwitch (confirmed on a live switch,
+ * 2026-08) indexes the table by an arbitrary ROW NUMBER
+ * (`...17.4.3.1.3.1`, `.2`, `.3`) and publishes the address only as a column,
+ * so an index-only decode yields nothing at all on the very devices this table
+ * exists for.
+ *
+ * Accepts the OctetString shape SNMP actually delivers (a 6-byte Buffer, which
+ * is a Uint8Array) as well as the textual forms some agents return. All-zero
+ * is rejected by the shared normalizer: an entry with no address is not an
+ * entry, and letting it through would put a junk row on a port.
+ */
+export function macFromFdbAddressValue(v: unknown): string | null {
+  if (v == null) return null;
+  if (v instanceof Uint8Array) {
+    if (v.length !== 6) return null;
+    return normalizeMacOrNull(
+      Array.from(v).map((b) => b.toString(16).padStart(2, "0")).join(":"),
+    );
+  }
+  if (typeof v === "string") return normalizeMacOrNull(v);
+  return null;
+}
+
+/**
+ * Resolve one forwarding-database row's identity from BOTH sources: the walk
+ * suffix and the address column.
+ *
+ * The column WINS when it is readable — it is the agent stating the address
+ * outright, whereas the index is only the address on an agent that indexes the
+ * table the way the RFC says. The FDB id still comes from the index, since the
+ * Q-BRIDGE table carries it nowhere else; a row whose index doesn't decode
+ * keeps a null VLAN rather than a guessed one.
+ *
+ * Returns null only when NEITHER source yields an address, which is the one
+ * case where there is genuinely nothing to store.
+ */
+export function resolveFdbIdentity(suffix: string, addressValue: unknown): FdbIndex | null {
+  const fromIndex  = parseFdbIndex(suffix);
+  const fromColumn = macFromFdbAddressValue(addressValue);
+  if (fromColumn) return { fdbId: fromIndex?.fdbId ?? null, macAddress: fromColumn };
+  return fromIndex;
 }
 
 /**
