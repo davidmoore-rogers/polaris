@@ -123,9 +123,22 @@ function maintScheduleSummary(schedule) {
 
 // ─── Modal shell ────────────────────────────────────────────────────────────
 
-async function openMaintenanceModal() {
+/**
+ * Open the Maintenance modal.
+ *
+ * opts.assetIds — explicit device ids to pin as targets, from the Assets page
+ *   bulk bar ("select rows → Maintenance"). They land in
+ *   `_maintEditingAssetIds`, i.e. the same explicit-assetIds channel an edited
+ *   schedule's pins ride, so the preview, the explicit-includes line and the
+ *   save body need no selection-specific path. A name is prefilled (the
+ *   operator can overwrite it) but nothing is created until Save — unlike the
+ *   status-pill ad-hoc flow this is a normal named schedule, one-time or
+ *   recurring, and the operator may add filter rules on top of the pins.
+ */
+async function openMaintenanceModal(opts) {
+  var pinned = (opts && Array.isArray(opts.assetIds)) ? opts.assetIds.slice() : [];
   _maintEditingId = null;
-  _maintEditingAssetIds = [];
+  _maintEditingAssetIds = pinned;
   var body = _renderTabbedBody("maint", [
     { key: "create",   label: "Create Schedule", html: _maintEditorHTML() },
     { key: "list",     label: "Schedules",       html: '<div id="maint-list-body" class="empty-state">Loading…</div>' },
@@ -141,6 +154,20 @@ async function openMaintenanceModal() {
   _maintWireEditor();
   _maintWireCalendar();
   _maintReloadList();
+  // Pinned selection: _maintWireEditor() has just reset the editor's one-shot
+  // date fields, so prefill AFTER it — and paint the explicit-includes line
+  // here rather than in _maintEditorHTML(), which renders before the pins are
+  // known to the DOM.
+  if (pinned.length) {
+    var nameEl = document.getElementById("maint-name");
+    if (nameEl && !nameEl.value) {
+      nameEl.value = "Maintenance — " + pinned.length +
+        (pinned.length === 1 ? " device" : " devices");
+    }
+    _maintSyncExplicitLine();
+    _maintRefreshPreview();
+    if (nameEl) { nameEl.focus(); nameEl.select(); }
+  }
 }
 
 // ─── Tab 1 — schedule editor ────────────────────────────────────────────────
@@ -387,6 +414,11 @@ function _maintRefreshPreview() {
   if (!el) return;
   var criteria = _maintCollectCriteria();
   if (!criteria && !_maintEditingAssetIds.length) {
+    // Cancel any in-flight debounce before painting the placeholder — a
+    // pending timer from the previous state (e.g. the operator just clicked
+    // Remove on the explicit-includes line) would otherwise land ~400ms later
+    // and overwrite this line with a stale device list.
+    if (_maintPreviewTimer) { clearTimeout(_maintPreviewTimer); _maintPreviewTimer = null; }
     el.innerHTML = "Add a filter rule to preview matching devices.";
     return;
   }
@@ -434,9 +466,12 @@ function _maintSyncExplicitLine() {
   if (!el) return;
   if (!_maintEditingAssetIds.length) { el.style.display = "none"; return; }
   el.style.display = "";
-  el.innerHTML = "Also explicitly includes <strong>" + _maintEditingAssetIds.length + "</strong> asset" +
+  // Wording covers both sources of explicit pins: an edited schedule's stored
+  // assetIds and a bulk-bar selection carried in by openMaintenanceModal.
+  el.innerHTML = "Includes <strong>" + _maintEditingAssetIds.length + "</strong> explicitly selected device" +
     (_maintEditingAssetIds.length === 1 ? "" : "s") +
-    ' (ad-hoc selection) <button type="button" class="btn btn-secondary btn-sm" id="maint-clear-explicit">Remove</button>';
+    ' (only monitored devices are eligible) ' +
+    '<button type="button" class="btn btn-secondary btn-sm" id="maint-clear-explicit">Remove</button>';
   var btn = document.getElementById("maint-clear-explicit");
   if (btn) btn.addEventListener("click", function () {
     _maintEditingAssetIds = [];

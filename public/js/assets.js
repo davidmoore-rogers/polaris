@@ -475,6 +475,8 @@ document.addEventListener("DOMContentLoaded", async function () {
   if (bMerge) bMerge.addEventListener("click", bulkMergeSelectedAssets);
   var bAgent = document.getElementById("assets-bulk-agent-btn");
   if (bAgent) bAgent.addEventListener("click", openBulkAgentDeployModal);
+  var bMaint = document.getElementById("assets-bulk-maint-btn");
+  if (bMaint) bMaint.addEventListener("click", bulkMaintenanceSelectedAssets);
   _wireBulkBarDropdowns();
   var bQuarantine   = document.getElementById("assets-bulk-quarantine-btn");
   var bUnquarantine = document.getElementById("assets-bulk-unquarantine-btn");
@@ -1386,6 +1388,7 @@ function _assetsUpdateBulkBar() {
   ["assets-bulk-deselect-btn", "assets-bulk-type-btn", "assets-bulk-state-btn",
    "assets-bulk-monitor-btn", "assets-bulk-delete-btn",
    "assets-bulk-compare-btn", "assets-bulk-merge-btn", "assets-bulk-agent-btn",
+   "assets-bulk-maint-btn",
    "assets-bulk-quarantine-btn", "assets-bulk-unquarantine-btn"
   ].forEach(function (id) { var b = document.getElementById(id); if (b) b.disabled = count === 0; });
 
@@ -2332,6 +2335,30 @@ function bulkMergeSelectedAssets() {
     return;
   }
   openAssetMergeModal(ids[0], ids[1]);
+}
+
+// ─── Bulk maintenance — schedule a window over the selected assets ──────────
+// Opens the same Maintenance modal the toolbar button opens, with the
+// selection pinned as the schedule's explicit assetIds. Nothing is created
+// until the operator saves, so this is the named/recurring counterpart to the
+// status pill's single-asset ad-hoc window.
+//
+// MAINT_ASSET_IDS_MAX mirrors the server's `assetIds` cap in
+// src/api/routes/maintenanceSchedules.ts — refuse here with the number rather
+// than let the save 400 after the operator has filled the whole form in.
+var MAINT_ASSET_IDS_MAX = 500;
+
+function bulkMaintenanceSelectedAssets() {
+  if (typeof canManageMaintenance !== "function" || !canManageMaintenance()) return;
+  if (typeof openMaintenanceModal !== "function") return;
+  var ids = Array.from(_assetsSelected);
+  if (!ids.length) return;
+  if (ids.length > MAINT_ASSET_IDS_MAX) {
+    showToast("A schedule can pin at most " + MAINT_ASSET_IDS_MAX + " devices (" + ids.length +
+      " selected) — narrow the selection, or target them with filter rules instead.", "error");
+    return;
+  }
+  openMaintenanceModal({ assetIds: ids });
 }
 
 // ─── Bulk agent deploy — install the Polaris Agent on every selected asset ──
