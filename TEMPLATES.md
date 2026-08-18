@@ -899,6 +899,29 @@ Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree li
 
 ---
 
+## Deferred alert-email content (a body token filled at delivery, not at fire)
+
+**What it is:** Something the alert email should carry that cannot be a plain `{token}` — because it needs a DB read, or because its HTML and plain-text forms are different markup rather than the same string. Two exist: the inline **charts** and the **interface LLDP block**. They share one contract, and getting any part of it wrong fails silently (the token blanks at compose time and the delivery pass finds nothing to fill), so copy the shape rather than re-deriving it.
+
+**Canonical implementation:**
+- **Charts** (several tokens, one shared attachment set): [src/services/alertChartService.ts](src/services/alertChartService.ts) — `chartTokensIn(...)` → `buildAlertCharts(...)` → `substituteChartTokens(body, charts, {html})` → `attachmentsFor(charts, body)`.
+- **Interface facts** (one token, no attachments — the simpler one to copy): [src/services/alertInterfaceService.ts](src/services/alertInterfaceService.ts) — `interfaceTokensIn(...)` → `buildInterfaceLldpBlocks(assetId, metric, dimension)` → `substituteInterfaceTokens(body, block)`.
+- **Deferral**: `isDeferredToken` in [src/utils/notificationTemplate.ts](src/utils/notificationTemplate.ts) — matched by PREFIX (`chart.`, `interface.`), plus a catalog entry in `TEMPLATE_VARIABLES` so the wizard offers it.
+- **Wiring**: `emailMessageFor` in [src/services/notificationDeliveryService.ts](src/services/notificationDeliveryService.ts), on composed rows only.
+- **Default body**: the token in BOTH `DEFAULT_ALERT_HTML` and `DEFAULT_ALERT_TEXT` in [src/utils/alertEmailTemplate.ts](src/utils/alertEmailTemplate.ts).
+
+**Key conventions:**
+- **Deferred means deferred:** no key in `buildTemplateContext`, nothing on `Notification.templateCtx`, and `isDeferredToken` must return true — otherwise `renderNotificationTemplate` (which Polaris's own default body calls with `unknown:"blank"`) erases the token before delivery ever sees it. Use a prefix, not an enumerated name: `{chart.trigger}` shipped in the default body, was left out of the enumerated list, and silently never rendered.
+- **Read at delivery, not at fire.** The engine's fire path is transition-guarded and hot; the drain is a queue. It also means an escalation at T+90min re-reads instead of replaying a snapshot.
+- **Gate before querying.** Decide from `Notification.metric` / `dimension` whether the content applies at all and return empty without touching the DB — most alerts are not the kind this token is for.
+- **Expand to a complete block or to nothing.** Emit your own `<tr>` and your own heading so the empty case leaves nothing standing; that is what lets the charts, which cannot (they share one section heading), be the only thing needing a `pruneEmptyChartSection`-style pass.
+- **One read, both bodies.** Build the data once and render HTML and text from a shared field list, or the two bodies drift and an operator editing one wonders why the other differs.
+- **Escape in the HTML form only,** at render — the values are device/network-supplied and the renderer's own `html:true` escaping never sees them.
+- **Text form: no colons.** `pruneEmptyTextLines` deletes any `"Label:"` line with nothing after it, so a heading like `"LLDP neighbor on port2:"` deletes itself. Padded label columns read the same.
+- **Never fail the alert.** Every load is try/caught to an empty result: an email that sends without a chart beats an email that does not send.
+
+---
+
 ## Integration type (config + discovery + sync + frontend modal)
 
 **What it is:** A new external system that Polaris talks to: a firewall family (FortiGate, Palo Alto), a manager (FortiManager, Panorama), an identity provider (Entra ID, Active Directory), or a DHCP server (Windows Server). Adding a new integration type touches a ~30-callsite catalogue across backend dispatch, frontend modal tabs, polling-method compatibility, asset projection, and source-default polling. Without a single reference shape, each new type drifts on tab layout, config-blob keys, transport dispatch, and projection priority — operators see five different UIs for what should feel like the same thing.

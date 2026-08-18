@@ -70,6 +70,28 @@ export function chartTokenForMetric(metric: string | null | undefined): ChartTok
   }
 }
 
+/**
+ * Metrics whose alert is about ONE PORT, not the device — and which therefore
+ * get NO charts at all.
+ *
+ * A switch with a dead port is answering probes: that is how Polaris knows the
+ * port is down. So its CPU, memory, response-time and packet-loss graphs are
+ * all flat and healthy, and printing four of them under "Interface oper status
+ * on port2 is down" says nothing about the fault while burying the facts that
+ * do — the port's LLDP neighbour, which alertInterfaceService supplies in the
+ * charts' place.
+ *
+ * Only the STATE trio is here, deliberately, not every interface-dimensioned
+ * metric: a port that is DOWN is not a device condition, but a port erroring or
+ * saturating plausibly correlates with the device's own load, so an
+ * `ifInErrorRate` alert keeps its graphs.
+ */
+const PORT_SCOPED_METRICS: ReadonlySet<string> = new Set(["ifOperStatus", "ifAdminStatus", "poeStatus"]);
+
+export function isPortScopedAlert(metric: string | null | undefined): boolean {
+  return !!metric && PORT_SCOPED_METRICS.has(metric);
+}
+
 export const CHART_WINDOW_MS = 60 * 60 * 1000;
 
 /** Cap the plotted points: an agent host reports per-minute, but a busy
@@ -330,6 +352,11 @@ export async function buildAlertCharts(
   const aliasWanted = wanted.delete("chart.trigger");
   if (aliasWanted && primary) wanted.add(primary);
   const out = new Map<ChartToken, RenderedChart>();
+  // An alert about one port draws nothing — see PORT_SCOPED_METRICS. Returning
+  // the empty map (rather than filtering the token list) is what makes every
+  // chart token render away and `pruneEmptyChartSection` drop the "Last hour"
+  // heading with them, and it skips all four sample queries.
+  if (isPortScopedAlert(opts?.metric)) return out;
   // A sensor chart with no sensor has nothing to draw. Dropping it here (rather
   // than rendering "no data") is what keeps the token invisible on the ~all
   // alerts that aren't about a hardware sensor.

@@ -53,6 +53,7 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{chart.cpu}", label: "CPU chart", description: "Last hour of CPU as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
   { token: "{chart.memory}", label: "Memory chart", description: "Last hour of memory as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
   { token: "{chart.responseTime}", label: "Response-time chart", description: "Last hour of probe response time as an inline chart (HTML) or a now/avg/peak line (plain text)", group: "notification" },
+  { token: "{interface.lldp}", label: "Interface LLDP neighbors", description: "The LLDP neighbours on the INTERFACE this alert fired on — what was plugged into the port, its own port, management IP and when it last advertised. Renders away entirely unless the automation triggers on an interface (status, PoE, throughput, error rate) and the port has a neighbour", group: "notification" },
   { token: "{time}", label: "Time", description: "Trigger time (ISO-8601)", group: "notification" },
   { token: "{time.local}", label: "Time (readable)", description: "Trigger time in the Polaris server's own timezone, e.g. \"Aug 12, 2026, 1:46 PM CDT\" — what the default email prints", group: "notification" },
   { token: "{link}", label: "Link", description: "Notifications page URL (empty if POLARIS_PUBLIC_URL unset)", group: "notification" },
@@ -296,7 +297,12 @@ const TOKEN_RE = /\{([a-zA-Z][\w.]*)\}/g;
  * The renderer must leave these alone no matter what `unknown` says, or the
  * later pass finds nothing to substitute.
  *
- * The chart half is matched by PREFIX rather than by an enumerated list. An
+ * The interface half (`{interface.lldp}` — the LLDP neighbours on the port an
+ * alert is about, read at delivery by alertInterfaceService) is deferred for the
+ * same reason the charts are: it needs a DB read, and its HTML and plain-text
+ * forms are different markup, which one context string can't carry.
+ *
+ * Both halves are matched by PREFIX rather than by an enumerated list. An
  * enumerated one was wrong within a week: `{chart.trigger}` shipped in the
  * default body, wasn't added here, and was silently blanked at compose time —
  * the token vanished before the delivery pass that fills it, so the chart the
@@ -307,7 +313,7 @@ const TOKEN_RE = /\{([a-zA-Z][\w.]*)\}/g;
 const DEFERRED_TOKEN_NAMES: ReadonlySet<string> = new Set(["ack"]);
 
 export function isDeferredToken(name: string): boolean {
-  return DEFERRED_TOKEN_NAMES.has(name) || name.startsWith("chart.");
+  return DEFERRED_TOKEN_NAMES.has(name) || name.startsWith("chart.") || name.startsWith("interface.");
 }
 
 /**

@@ -34,6 +34,13 @@ export const DEFAULT_ALERT_SUBJECT = "[{severity.upper}] {asset} — {rule}";
  * rather than hidden behind anchors.
  */
 export const DEFAULT_ALERT_TEXT = [
+  // The letterhead's text form: "Polaris — Network Management Tool". No image
+  // here, so this is the only thing naming the sender, which is why it prints
+  // the app name even in the shipped-branding case where the HTML leaves that
+  // to the wordmark art. Renders away (and its blank line collapses) on an
+  // install that blanked both fields.
+  "{brand.header}",
+  "",
   "{severity.upper}: {trigger.summary}",
   "",
   // No {message} line here either — same redundancy, and the two bodies must
@@ -59,6 +66,12 @@ export const DEFAULT_ALERT_TEXT = [
   // operator templates that want the machine form.
   "Raised:     {time.local}",
   "",
+  // What was on the port, when the alert is about ONE port. Renders away for
+  // every other alert — and for a port that advertised no neighbour — so it
+  // costs a non-interface alert nothing. Above the charts because on an
+  // interface alert the charts render away entirely (alertInterfaceService).
+  "{interface.lldp}",
+  "",
   "{chart.trigger}",
   "{chart.sensor}",
   "{chart.probeLoss}",
@@ -83,7 +96,7 @@ export const DEFAULT_ALERT_TEXT = [
  * table past the card. `vertical-align:top` keeps a wrapped value's first line
  * level with its label.
  */
-const fact = (label: string, value: string): string =>
+export const factRow = (label: string, value: string): string =>
   `<tr><td width="140" style="width:140px;padding:3px 12px 3px 0;color:#6b7280;vertical-align:top;white-space:nowrap">${label}</td>` +
   `<td style="padding:3px 0;vertical-align:top;word-break:break-word">${value}</td></tr>`;
 
@@ -99,6 +112,13 @@ export const DEFAULT_ALERT_HTML = [
   // Severity bar + headline
   '<tr><td style="background:{severity.color};height:5px;line-height:5px;font-size:0">&nbsp;</td></tr>',
   '<tr><td style="padding:18px 22px 6px">',
+  // Two columns: the alert on the left, the install's letterhead on the right.
+  // A nested table rather than two floated divs — Outlook renders through Word,
+  // which has no float — and it doubles as the reason `pruneEmptyRows` can't
+  // touch this row: its pattern refuses any span containing a `<table>`, so the
+  // header can never be mistaken for a label/value pair and dropped.
+  '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>',
+  '<td style="vertical-align:top">',
   '<div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:{severity.color};font-weight:700">{severity} alert</div>',
   '<div style="font-size:19px;font-weight:600;color:#1f2430;margin-top:4px">{asset}</div>',
   // What fired, in the builder's own words, with the reading in it. This leads
@@ -113,35 +133,51 @@ export const DEFAULT_ALERT_HTML = [
   // a grey "PEORIA-61F-1 is down". The message keeps its real homes (the in-app
   // alert card, and every chat / push body, which have no trigger sentence),
   // and {message} stays catalogued for an operator who wants it back.
+  "</td>",
+  // The letterhead — logo, application name, subtitle — right-aligned opposite
+  // the headline. `{brand.header}` is DEFERRED (alertBrandService, at delivery
+  // like the charts) because the logo rides as an inline CID attachment, and it
+  // expands to the cell's whole contents or to nothing at all, so an install
+  // with no mark and no subtitle leaves an empty cell rather than a gap where
+  // text used to be. The fixed width keeps the headline's column from
+  // collapsing when a wide logo is in play.
+  '<td width="160" style="width:160px;padding-left:14px;vertical-align:top;text-align:right">{brand.header}</td>',
+  "</tr></table>",
   "</td></tr>",
   // Facts
   '<tr><td style="padding:10px 22px 0">',
   '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#374151;border-collapse:collapse">',
-  fact("IP address", "{asset.ip}"),
-  fact("Connected switch", "{asset.connectedSwitch}"),
-  fact("Connected AP", "{asset.connectedAp}"),
-  fact("Location", "{asset.location}"),
-  fact("Model", "{asset.manufacturer} {asset.model}"),
+  factRow("IP address", "{asset.ip}"),
+  factRow("Connected switch", "{asset.connectedSwitch}"),
+  factRow("Connected AP", "{asset.connectedAp}"),
+  factRow("Location", "{asset.location}"),
+  factRow("Model", "{asset.manufacturer} {asset.model}"),
   // Last of the asset rows, and deliberately so: it's the only free-text one,
   // so a paragraph-long description can't push IP / switch / location out of
   // the reader's first glance. Prunes away like the rest when unset.
-  fact("Description", "{asset.description}"),
+  factRow("Description", "{asset.description}"),
   // Event-path rows. An event automation usually fires on something that is
   // NOT a device (an integration, a user, the host), so the asset rows above
   // prune away and these are the only facts the reader gets. They prune away
   // in turn on a metric alert, which has no event behind it.
-  fact("Event", "{event.action}"),
-  fact("{event.resourceType}", "{event.resource}"),
-  fact("Triggered by", "{event.actor}"),
+  factRow("Event", "{event.action}"),
+  factRow("{event.resourceType}", "{event.resource}"),
+  factRow("Triggered by", "{event.actor}"),
   // The event's own text — the REASON. "integration.discover.error" names what
   // broke and this says why ("Discovery failed: RPC -11 no valid session"). It
   // rides its own row rather than {message} so it survives whatever the rule's
   // message template says; last of the event rows because it's the long one.
-  fact("Detail", "{event.message}"),
-  fact("Automation", "{rule}"),
-  fact("Raised", "{time.local}"),
+  factRow("Detail", "{event.message}"),
+  factRow("Automation", "{rule}"),
+  factRow("Raised", "{time.local}"),
   "</table>",
   "</td></tr>",
+  // The LLDP neighbours on the interface this alert is about — a complete <tr>
+  // with its own heading, or nothing at all. It is filled at DELIVERY time
+  // (alertInterfaceService, like the charts) and is the substance of an
+  // "interface down" email: the device is answering, so its own graphs explain
+  // nothing, and "what was plugged into port2" is the question being asked.
+  "{interface.lldp}",
   // Charts — the last hour of the metrics that explain most alerts. The sensor
   // chart leads because when it renders at all, it IS what the alert is about:
   // a hardware-sensor automation (value or alarm) charts the sensor it fired

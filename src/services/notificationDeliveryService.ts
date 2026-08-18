@@ -23,6 +23,7 @@ import { logger } from "../utils/logger.js";
 import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail } from "../utils/notificationTemplate.js";
 import { ackUrlFromMeta } from "./notificationRecipientService.js";
 import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor } from "./alertChartService.js";
+import { buildInterfaceLldpBlocks, interfaceTokensIn, substituteInterfaceTokens } from "./alertInterfaceService.js";
 import { pruneEmptyChartSection, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
 import { logEvent } from "./eventLogService.js";
 import { type ChannelType } from "./notificationTypes.js";
@@ -111,6 +112,22 @@ async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, ur
         html = pruneEmptyChartSection(substituteChartTokens(html, charts, { html: true }));
         attachments = attachmentsFor(charts, html);
       }
+    }
+
+    // The interface block rides the same contract: built here so an escalation
+    // re-reads the port rather than replaying a snapshot, and expanding to a
+    // complete block or to nothing — so a non-interface alert (or a port with
+    // no LLDP neighbour) needs no pruning pass of its own. One read serves both
+    // bodies; the empty case is free, since buildInterfaceLldpBlocks returns
+    // before querying unless the alert is about an interface.
+    if (interfaceTokensIn(text, html).size > 0) {
+      const lldp = await buildInterfaceLldpBlocks(
+        d.notification.assetId,
+        d.notification.metric,
+        d.notification.dimension,
+      );
+      text = pruneEmptyTextLines(substituteInterfaceTokens(text, lldp.text));
+      if (html) html = substituteInterfaceTokens(html, lldp.html);
     }
 
     return {
