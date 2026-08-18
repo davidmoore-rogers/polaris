@@ -1262,11 +1262,15 @@ code {
 }
 .table-tab-close {
   flex: 0 0 auto;
-  padding: 0 2px;
+  /* The glyph runs well ahead of the tab's own 0.84rem label: a bare x at label
+     size reads as a speck, and it is also the control that DISCARDS a view, so it
+     needs to be unmistakable before it is clicked. The horizontal padding grows
+     with it so the hit target tracks the glyph. */
+  padding: 0 4px;
   background: none;
   border: none;
   color: var(--color-text-tertiary);
-  font-size: 0.95rem;
+  font-size: 1.2rem;
   line-height: 1;
   cursor: pointer;
   opacity: 0;
@@ -1292,7 +1296,9 @@ code {
   border: none;
   border-radius: var(--radius-md);
   color: var(--color-text-tertiary);
-  font-size: 1rem;
+  /* Sits alone at the end of the strip with no adjacent label to size against,
+     so it goes a notch past the close x rather than matching it. */
+  font-size: 1.35rem;
   line-height: 1;
   cursor: pointer;
   transition: color 0.15s, background 0.15s;
