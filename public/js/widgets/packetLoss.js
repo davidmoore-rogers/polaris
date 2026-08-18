@@ -6,7 +6,7 @@
  * was just another way to hide the same row (a stored `threshold` from before
  * that control was removed is ignored).
  * Fully-down assets (100% loss — zero successful probes in the window) are
- * excluded server-side; those belong to the Down Nodes widget.
+ * excluded server-side; those belong to the Down Assets widget.
  */
 
 (function () {
@@ -23,7 +23,7 @@
     type: "packetLoss",
     category: "Monitoring",
     label: "Packet Loss",
-    description: "Monitored assets with the highest recent probe loss (failed-probe ratio). Fully-down assets (100% loss) are excluded — see Down Nodes.",
+    description: "Monitored assets with the highest recent probe loss (failed-probe ratio). Fully-down assets (100% loss) are excluded — see Down Assets.",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
     defaultConfig: { rowLimit: 1000, regionScope: "mine" },

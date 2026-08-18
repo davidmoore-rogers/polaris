@@ -46,10 +46,11 @@
     // so it also wins over dependency suppression and the unmonitored grey.
     if (site.status === "maintenance") return "maint";
     if (!site.monitored) return "unknown";
-    // Dependency-suppressed sites are excluded from the Down Nodes widget, so
-    // never paint them red here — show the distinct "dep" color instead, even
-    // when the suppressed device's own status is down. Keeps the map's red
-    // dots in lockstep with Down Nodes / Status Summary.
+    // Dependency-suppressed sites are out of the Down Assets widget by default,
+    // so never paint them red here — show the distinct "dep" color instead, even
+    // when the suppressed device's own status is down. Keeps the map's red dots
+    // in lockstep with Down Assets / Status Summary. (Down Assets can be toggled
+    // to include suppressed rows; it badges them, so the two still agree.)
     if (site.dependencySuppressed) return "dep";
     switch (site.monitorHealth) {
       case "up": return "up";

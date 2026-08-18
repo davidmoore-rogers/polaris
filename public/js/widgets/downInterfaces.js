@@ -2,7 +2,7 @@
  * widgets/downInterfaces.js — physical interfaces that are administratively up
  * but operationally down (only interfaces selected for monitoring — the asset's
  * pinned monitoredInterfaces list; unpinned ports are filtered server-side),
- * PLUS IPsec tunnels that are fully down, grouped by the gate they live on. Mirrors the Down Nodes widget: same dash-alert
+ * PLUS IPsec tunnels that are fully down, grouped by the gate they live on. Mirrors the Down Assets widget: same dash-alert
  * row markup, group-header + count-pill grouping, click a row to open the owning
  * asset. A down tunnel row shows the parent physical interface it rides (the
  * FortiOS phase1-interface WAN port). Data from noc-summary downInterfaces[] +

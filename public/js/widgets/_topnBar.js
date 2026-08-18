@@ -137,7 +137,7 @@
     // — the site with the worst offender leads. Row limit / red guarantee
     // were both applied BEFORE grouping (grouping only changes
     // presentation, never which rows qualify). Same group-header markup as
-    // Down Nodes / Down Interfaces, with a neutral count pill (these are
+    // Down Assets / Down Interfaces, with a neutral count pill (these are
     // rankings, not alarms).
     if ((cfg.groupBy || "none") === "site") {
       var groups = {};

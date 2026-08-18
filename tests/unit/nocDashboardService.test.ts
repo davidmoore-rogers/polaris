@@ -142,6 +142,30 @@ describe("getDownNodes", () => {
       where: expect.objectContaining({ monitorStatus: "down", status: { not: "maintenance" } }),
     }));
   });
+
+  it("excludes dependency-suppressed assets by default (one dead gate is one outage)", async () => {
+    findMany.mockResolvedValueOnce([]);
+    count.mockResolvedValueOnce(0);
+    await noc.getDownNodes();
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ dependencySuppressed: false }),
+    }));
+  });
+
+  it("includeDependencyDown drops the suppression filter and flags those rows", async () => {
+    findMany.mockResolvedValueOnce([
+      { id: "a", hostname: "gate", ipAddress: null, assetType: "firewall", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null, dependencySuppressed: false },
+      { id: "b", hostname: "sw", ipAddress: null, assetType: "switch", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null, dependencySuppressed: true },
+    ]);
+    count.mockResolvedValueOnce(2);
+    const r = await noc.getDownNodes(100, null, true);
+    // The absence of the key is the whole point: with it, the suppressed row
+    // can never come back.
+    const where = (findMany.mock.calls.at(-1)?.[0] as { where: Record<string, unknown> }).where;
+    expect(where).not.toHaveProperty("dependencySuppressed");
+    expect(where).toMatchObject({ monitorStatus: "down" });
+    expect(r.nodes.map((n) => n.dependencySuppressed)).toEqual([false, true]);
+  });
 });
 
 describe("getDownInterfaces", () => {
@@ -523,6 +547,21 @@ describe("getNocSummaryPayload", () => {
     expect(findMany).not.toHaveBeenCalled();
     expect(eventFindMany).not.toHaveBeenCalled();
     expect(rawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it("keys the downNodes cache on includeDependencyDown (a toggle can't be served a stale list)", async () => {
+    count.mockResolvedValue(0);
+    findMany.mockResolvedValue([]);
+    await noc.getNocSummaryPayload({ feeds: ["downNodes"], ...grantAll() });
+    await noc.getNocSummaryPayload({ feeds: ["downNodes"], ...grantAll(), includeDependencyDown: true });
+    expect(findMany).toHaveBeenCalledTimes(2);
+    expect((findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where)
+      .toMatchObject({ dependencySuppressed: false });
+    expect((findMany.mock.calls[1][0] as { where: Record<string, unknown> }).where)
+      .not.toHaveProperty("dependencySuppressed");
+    // Same request twice still shares the cache.
+    await noc.getNocSummaryPayload({ feeds: ["downNodes"], ...grantAll(), includeDependencyDown: true });
+    expect(findMany).toHaveBeenCalledTimes(2);
   });
 
   it("drops unknown feed names silently", async () => {

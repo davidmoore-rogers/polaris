@@ -1,8 +1,16 @@
 /**
- * widgets/downNodes.js — monitored assets currently down, grouped by site or
- * division (SolarWinds "Down Nodes" panel). Severity-first: nodes carrying an
- * active automation alert lead (feed sorts alertRank desc), then youngest
- * outage first (monitorStatusChangedAt desc — server-side, so the newest
+ * widgets/downNodes.js — "Down Assets": monitored assets currently down,
+ * grouped by site or division (SolarWinds "Down Nodes" panel). The registered
+ * type stays `downNodes` — saved dashboard layouts key on it.
+ *
+ * Dependency-suppressed assets (own probe failing, but a parent is down too)
+ * are OUT by default, so one dead gate reads as one outage instead of one per
+ * device behind it; the gear's "Include dependency-down assets" toggle brings
+ * them back for the operator sizing a blast radius, and those rows wear a
+ * "Dep. Down" badge so the two kinds stay tellable apart.
+ *
+ * Severity-first: nodes carrying an active automation alert lead (feed sorts
+ * alertRank desc), then youngest outage first (monitorStatusChangedAt desc — server-side, so the newest
  * outages survive the cap). Reuses the monitorAlerts row markup (dash-alert
  * classes + alert-severity pill). Data from noc-summary downNodes[].
  */
@@ -21,6 +29,11 @@
     var name = n.hostname || n.ipAddress || "(unnamed)";
     var sub = [escapeHtml(typeLabel)];
     if (n.ipAddress) sub.push('<span class="dash-alert-ip">' + escapeHtml(n.ipAddress) + '</span>');
+    // Only ever set when the gear toggle asked for these rows. Same slate badge
+    // the assets table uses, so the state reads identically on both surfaces.
+    if (n.dependencySuppressed) {
+      sub.push('<span class="badge badge-monitor-dep-down" title="Upstream parent is down — this outage is probably not its own">Dep. Down</span>');
+    }
     var href = '/assets.html#view=asset:' + encodeURIComponent(n.id);
     return '<a class="dash-alert-item" href="' + href + '" data-asset-id="' + escapeHtml(n.id) + '" style="text-decoration:none">' +
       '<div class="dash-alert-row" style="width:100%">' +
@@ -50,7 +63,7 @@
     // Header export: the full fetched list (pre-clip), severity-tiered on each
     // node's active automation alert (alertSeverity).
     PolarisWidgets.setHeaderExport(el, {
-      filename: "down-nodes",
+      filename: "down-assets",
       columns: [
         { header: "Hostname", get: function (n) { return n.hostname || ""; } },
         { header: "IP Address", get: function (n) { return n.ipAddress || ""; } },
@@ -58,6 +71,7 @@
         { header: "Site", get: function (n) { return n.site || ""; } },
         { header: "Division", get: function (n) { return n.division || ""; } },
         { header: "Down Since", get: function (n) { return n.monitorStatusChangedAt ? new Date(n.monitorStatusChangedAt).toISOString() : ""; } },
+        { header: "Dependency Down", get: function (n) { return n.dependencySuppressed ? "yes" : "no"; } },
       ],
       rows: nodes,
     });
@@ -68,7 +82,7 @@
     // the panel shows. Stamped before the empty return so they clear with it.
     PolarisWidgets.setHeaderSeverityCounts(el, clipped);
     if (!clipped.length) {
-      var empty = PolarisWidgets.minSeverityEmptyText(config) || "No nodes down";
+      var empty = PolarisWidgets.minSeverityEmptyText(config) || "No assets down";
       el.innerHTML = '<p class="empty-state">' + escapeHtml(empty) + '</p>';
       return;
     }
@@ -100,11 +114,11 @@
   PolarisWidgets.register({
     type: "downNodes",
     category: "Monitoring",
-    label: "Down Nodes",
-    description: "Monitored assets currently down — newest outages first, grouped by site or division.",
+    label: "Down Assets",
+    description: "Monitored assets currently down — newest outages first, grouped by site or division. Dependency-down assets are excluded unless the gear says otherwise.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { groupBy: "site", rowLimit: 10, regionScope: "mine" },
+    defaultConfig: { groupBy: "site", rowLimit: 10, regionScope: "mine", includeDependencyDown: false },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
@@ -154,7 +168,16 @@
           '<option value="none"' + (config.groupBy === "none" ? " selected" : "") + '>None</option>' +
         '</select>' +
         '<label>Row limit</label>' +
-        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>';
+        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>' +
+        '<label>Dependencies</label>' +
+        '<label class="widget-config-typeopt">' +
+          '<input type="checkbox" data-b="includeDependencyDown"' + (config.includeDependencyDown ? " checked" : "") + '>' +
+          ' Include dependency-down assets' +
+        '</label>' +
+        '<p class="widget-config-hint">Off (the default) hides assets whose parent is also down, so a dead gate counts as one outage rather than one per device behind it.</p>';
+      el.querySelectorAll("[data-b]").forEach(function (cb) {
+        cb.addEventListener("change", function () { onChange(cb.getAttribute("data-b"), cb.checked); });
+      });
       el.querySelectorAll("[data-k]").forEach(function (s) {
         s.addEventListener("change", function () {
           var k = s.getAttribute("data-k");

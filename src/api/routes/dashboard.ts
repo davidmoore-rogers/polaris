@@ -153,6 +153,11 @@ function parseCsvParam(raw: unknown): string[] | null {
   return csvParam(raw) ?? null;
 }
 
+// Query-string boolean: "1" / "true" / "yes" are true, everything else false.
+function boolParam(raw: unknown): boolean {
+  return typeof raw === "string" && (raw === "1" || raw.toLowerCase() === "true" || raw.toLowerCase() === "yes");
+}
+
 // Row cap for the summary's recentReservations feed. Absent/invalid → default
 // 10; otherwise the requested count clamped to the 1000-row ceiling.
 function parseRecentLimitParam(raw: unknown): number {
@@ -199,6 +204,11 @@ router.get("/noc-summary", async (req, res, next) => {
       ? Math.min(reqSamples, nocDashboardService.MAX_TOPN_SAMPLE_COUNT)
       : null;
 
+    // ?includeDependencyDown=1 -- the Down Assets widget's gear toggle. Absent
+    // (the default) keeps dependency-suppressed assets out, so one dead gate
+    // reads as one outage rather than one per device behind it.
+    const includeDependencyDown = boolParam(req.query.includeDependencyDown);
+
     res.json(await nocDashboardService.getNocSummaryPayload({
       feeds: parseCsvParam(req.query.feeds),
       canAssets,
@@ -208,6 +218,7 @@ router.get("/noc-summary", async (req, res, next) => {
       fortigateNames,
       capLimit,
       sampleCount,
+      includeDependencyDown,
     }));
   } catch (err) {
     next(err);

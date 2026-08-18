@@ -100,6 +100,10 @@
     // Avg CPU/Memory). Only sent when it differs from the server default (10)
     // so default-config widgets keep sharing one cached payload.
     if (opts.samples) parts.push("samples=" + encodeURIComponent(opts.samples));
+    // Down Assets only: ask the server to keep dependency-suppressed assets in
+    // the feed. Sent only when on, so the default-config widget keeps sharing
+    // the one cached payload.
+    if (opts.includeDependencyDown) parts.push("includeDependencyDown=1");
     return parts.join("&");
   }
 
@@ -178,6 +182,9 @@
       // option) request a larger server cap; ≤100 shares the default payload.
       limit: n > 100 ? n : undefined,
       samples: s > 0 && s !== 10 ? s : undefined,
+      // Only the Down Assets widget carries this key; every other widget's
+      // config leaves it undefined and sends no param.
+      includeDependencyDown: config.includeDependencyDown ? true : undefined,
     };
   };
 
@@ -222,7 +229,7 @@
   };
 
   // Stamp (or clear) a row of pills on the widget's header title — the same
-  // style the group headers use, so "Down Nodes (Firewall) [4]" reads as the
+  // style the group headers use, so "Down Assets (Firewall) [4]" reads as the
   // overall total. `el` is the widget body; resolves the shell header via
   // closest(). No-ops outside a dashboard shell (e.g. the widget library
   // preview renders without the .dashboard-widget wrapper). An empty list
@@ -296,7 +303,7 @@
   //
   // opts.unalerted decides what happens to rows carrying no active alert:
   //   "neutral" (default) — a trailing grey pill counts them, so the pills
-  //     still sum to the row total (Down Nodes / Down Interfaces, where the
+  //     still sum to the row total (Down Assets / Down Interfaces, where the
   //     total IS the headline). A set with NO alerting row at all keeps the
   //     plain red total pill rather than greying the whole count out.
   //   "omit" — dropped entirely (ranked top-N widgets, where the row count is
@@ -389,7 +396,7 @@
   // ─── Shared minimum-severity display filter ──────────────────────────────
   // `config.minSeverity` holds a SEVERITY_TIERS key ("all" = unset = show
   // everything). Every widget whose feed attaches an active-alert severity
-  // (Down Nodes, Down Interfaces, the top-N metric widgets, Storage Forecast)
+  // (Down Assets, Down Interfaces, the top-N metric widgets, Storage Forecast)
   // renders the control via renderMinSeverityConfig and filters through
   // filterByMinSeverity. Filtering happens on the FETCHED set — before the row
   // limit, the red-guarantee pass, the header count and the CSV export — so

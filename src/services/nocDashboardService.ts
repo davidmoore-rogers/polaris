@@ -376,6 +376,10 @@ export interface DownNode {
   division: string | null;
   monitorStatus: string | null;
   monitorStatusChangedAt: Date | null;
+  // True when the asset's own probe is failing but a parent is down as well, so
+  // the outage is upstream ("Dep. Down" in the assets table). Always present;
+  // only ever true when the caller asked for the suppressed rows.
+  dependencySuppressed: boolean;
   alertSeverity?: string;
   alertRank?: number;
 }
@@ -388,14 +392,28 @@ function siteOf(a: { location: string | null; learnedLocation: string | null; sn
  * Feed 2 — down nodes. One indexed findMany over the (small) down subset;
  * site coalesce done in JS because Prisma groupBy can't COALESCE three
  * nullable columns. dependencySuppressed:false so a down parent's suppressed
- * children don't show as independent outages. Ordered youngest outage first
+ * children don't show as independent outages — one dead gate is one outage,
+ * not one per device behind it. `includeDependencyDown` drops that filter for
+ * the operator who wants the full blast radius instead (the widget's gear
+ * toggle); the rows carry the flag so they stay tellable apart on screen.
+ * Ordered youngest outage first
  * (monitorStatusChangedAt desc) — the freshest state change is the one a NOC
  * operator needs to react to; nulls (unknown transition time) sink to the
  * bottom. The order matters at the cap too: when >limit nodes are down, the
  * newest outages are the ones kept.
  */
-export async function getDownNodes(limit: number | null = 100, assetIds: string[] | null = null): Promise<{ nodes: DownNode[]; total: number }> {
-  const where = { monitored: true, monitorStatus: "down", dependencySuppressed: false, ...NOT_IN_MAINTENANCE, ...idWhere(assetIds) };
+export async function getDownNodes(
+  limit: number | null = 100,
+  assetIds: string[] | null = null,
+  includeDependencyDown = false,
+): Promise<{ nodes: DownNode[]; total: number }> {
+  const where = {
+    monitored: true,
+    monitorStatus: "down",
+    ...(includeDependencyDown ? {} : { dependencySuppressed: false }),
+    ...NOT_IN_MAINTENANCE,
+    ...idWhere(assetIds),
+  };
   // `total` is the TRUE down count (indexed count over the same where), not
   // rows.length — the findMany is capped by `limit`, and the widget's header
   // pill must show the overall number even when the list is clipped.
@@ -406,6 +424,7 @@ export async function getDownNodes(limit: number | null = 100, assetIds: string[
         id: true, hostname: true, ipAddress: true, assetType: true,
         location: true, learnedLocation: true, snmpLocation: true,
         department: true, monitorStatus: true, monitorStatusChangedAt: true,
+        dependencySuppressed: true,
       },
       orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
       take: limit ?? undefined,
@@ -421,6 +440,7 @@ export async function getDownNodes(limit: number | null = 100, assetIds: string[
     division: a.department,
     monitorStatus: a.monitorStatus,
     monitorStatusChangedAt: a.monitorStatusChangedAt,
+    dependencySuppressed: a.dependencySuppressed,
   }));
   // Severity-first: alerted nodes float to the top; within a severity (and for
   // unalerted nodes) the youngest-outage order above holds (stable sort).
@@ -1201,6 +1221,8 @@ const EMPTY_STATUS: StatusSummary = {
  *             `samples` is the caller's per-asset averaging count (?samples=,
  *             default DEFAULT_TOPN_SAMPLE_COUNT) — only the usesSamples feeds
  *             consume it (and only those include it in their cache key)
+ *             `depDown` is the caller's include-dependency-down choice, on the
+ *             same terms: only the usesDepDown feed reads it or keys on it
  *   flatten — map the feed value onto response keys. Default is {[feed]: v};
  *             `status` fans out to three top-level keys and `downNodes`
  *             unwraps `.nodes`, both preserved from the pre-feeds response
@@ -1210,7 +1232,8 @@ const NOC_FEEDS: Record<NocFeedName, {
   gate: "assets" | "events";
   empty: unknown;
   usesSamples?: true;
-  run: (L: (n: number) => number | null, assetIds: string[] | null, samples: number) => Promise<unknown>;
+  usesDepDown?: true;
+  run: (L: (n: number) => number | null, assetIds: string[] | null, samples: number, depDown: boolean) => Promise<unknown>;
   flatten?: (value: unknown) => Record<string, unknown>;
 }> = {
   status: {
@@ -1225,7 +1248,8 @@ const NOC_FEEDS: Record<NocFeedName, {
   downNodes: {
     gate: "assets",
     empty: { nodes: [], total: 0 },
-    run: (L, ids) => getDownNodes(L(100), ids),
+    usesDepDown: true,
+    run: (L, ids, _samples, depDown) => getDownNodes(L(100), ids, depDown),
     // downNodesTotal is the TRUE down count (uncapped) for the widget's
     // header pill; downNodes[] stays the capped list (legacy key unchanged).
     flatten: (v) => {
@@ -1287,6 +1311,7 @@ export async function getNocSummaryPayload(opts: {
   fortigateNames?: string[] | null;
   capLimit: number | null;
   sampleCount?: number | null;
+  includeDependencyDown?: boolean;
 }): Promise<Record<string, unknown>> {
   const requested: NocFeedName[] = opts.feeds === null
     ? [...NOC_FEED_NAMES]
@@ -1307,14 +1332,16 @@ export async function getNocSummaryPayload(opts: {
 
   const L = (n: number): number | null => opts.capLimit ?? n;
   const samples = clampSampleCount(opts.sampleCount);
+  const depDown = opts.includeDependencyDown === true;
   const out: Record<string, unknown> = {};
   await Promise.all(requested.map(async (feed) => {
     const def = NOC_FEEDS[feed];
     // Only sample-averaged feeds key on `samples`, so a ?samples= request
     // doesn't fragment the cache for feeds the param can't affect.
-    const key = feed + "|" + (opts.capLimit ?? "") + "|" + (def.usesSamples ? samples : "") + "|" + fKey;
+    const key = feed + "|" + (opts.capLimit ?? "") + "|" + (def.usesSamples ? samples : "")
+      + "|" + (def.usesDepDown && depDown ? "dep" : "") + "|" + fKey;
     const value = allowed(def.gate)
-      ? await nocFeedCache.getOrCompute(key, () => def.run(L, assetIds, samples))
+      ? await nocFeedCache.getOrCompute(key, () => def.run(L, assetIds, samples, depDown))
       : def.empty;
     Object.assign(out, def.flatten ? def.flatten(value) : { [feed]: value });
   }));
