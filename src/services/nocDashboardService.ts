@@ -1022,32 +1022,69 @@ export async function getRecentReboots(sinceHours = 72, limit: number | null = 2
   return severityFirst(await attachAlertSeverity(out, (r) => r.id || null, eventRel("device.reboot")));
 }
 
-export interface AlertRow { id: string; hostname: string | null; message: string; severity: string; raisedAt: Date }
+export interface AlertRow {
+  id: string;
+  hostname: string | null;
+  message: string;
+  severity: string;
+  raisedAt: Date;
+  ruleName: string | null;
+  acknowledged: boolean;
+  acknowledgedBy: string | null;
+}
 
 /**
- * Feed 8 — active alerts. Recent warning/error Events (levelRank >= 1),
- * SEVERITY-FIRST (levelRank desc — errors above warnings), newest first within
- * a level. Backed by the [levelRank, timestamp] index; the 7-day Event
- * retention floors the scan automatically.
+ * Feed 8 — active alerts. The UNCLEARED `Notification` rows, severity-first
+ * (the automation ladder in ALERT_SEVERITY_RANK) then newest.
+ *
+ * This reads ALERTS, not Events — the distinction is the whole point of the
+ * feed. It previously listed every `Event` at levelRank >= 1, which made the
+ * widget wrong in both directions: raw discovery/sync failures nobody had
+ * written an automation for showed up as permanent "alerts" (nothing clears an
+ * Event, so they sat there for the full 7-day retention), while the severity
+ * pill came from `Event.level` — and `severityLevel()` in notificationEngine
+ * collapses critical AND serious into "error", so a `serious` automation
+ * displayed as "error". Reading the Notification row instead means an alert
+ * appears only because an automation raised it, carries that automation's own
+ * severity, disappears when it clears, and shows who acknowledged it.
+ *
+ * Severity ordering can't ride an index (severity is a string, not a rank
+ * column), so the uncleared set is fetched with a tight select and ordered in
+ * memory — the same posture as `activeAlertSeverityByAsset` above, which
+ * already reads that whole set on every pill decoration. `cleared: false` is
+ * covered by @@index([cleared, acknowledged]).
+ *
+ * `assetHostname` is snapshotted on the Notification, so a row still names its
+ * device after the asset is deleted. Host/system-scoped alerts (assetId null)
+ * drop out under an asset filter, mirroring the Event-sourced feeds.
  */
 export async function getRecentAlerts(limit: number | null = 30, assetIds: string[] | null = null): Promise<AlertRow[]> {
-  const events = await prisma.event.findMany({
+  const rows = await prisma.notification.findMany({
     where: {
-      levelRank: { gte: 1 },
-      // When filtered, scope to alerts about matching assets (resourceId =
-      // assetId). Non-asset events (integration/system) drop out under a filter.
-      ...(assetIds ? { resourceId: { in: assetIds } } : {}),
+      cleared: false,
+      ...(assetIds ? { assetId: { in: assetIds } } : {}),
     },
-    orderBy: [{ levelRank: "desc" }, { timestamp: "desc" }],
-    take: limit ?? undefined,
+    select: {
+      id: true, assetHostname: true, message: true, severity: true, triggeredAt: true,
+      acknowledged: true, acknowledgedBy: true, rule: { select: { name: true } },
+    },
+    orderBy: { triggeredAt: "desc" },
   });
-  return events.map((e) => ({
-    id: e.id,
-    hostname: e.resourceName ?? null,
-    message: e.message ?? e.action,
-    severity: e.level,
-    raisedAt: e.timestamp,
+  const out: AlertRow[] = rows.map((n) => ({
+    id: n.id,
+    hostname: n.assetHostname ?? null,
+    message: n.message,
+    severity: n.severity,
+    raisedAt: n.triggeredAt,
+    ruleName: n.rule?.name ?? null,
+    acknowledged: n.acknowledged,
+    acknowledgedBy: n.acknowledgedBy ?? null,
   }));
+  out.sort((a, b) => {
+    const d = (ALERT_SEVERITY_RANK[b.severity] ?? 0) - (ALERT_SEVERITY_RANK[a.severity] ?? 0);
+    return d !== 0 ? d : b.raisedAt.getTime() - a.raisedAt.getTime();
+  });
+  return limit === null ? out : out.slice(0, limit);
 }
 
 export interface SiteWithIssues {
@@ -1229,7 +1266,7 @@ const EMPTY_STATUS: StatusSummary = {
  *             shape so existing consumers (and the kiosk token) see no change.
  */
 const NOC_FEEDS: Record<NocFeedName, {
-  gate: "assets" | "events";
+  gate: "assets" | "events" | "alerts";
   empty: unknown;
   usesSamples?: true;
   usesDepDown?: true;
@@ -1269,7 +1306,7 @@ const NOC_FEEDS: Record<NocFeedName, {
   stalePolls:       { gate: "assets", empty: [], run: (L, ids) => getStalePolls(3, L(50), ids) },
   sitesWithIssues:  { gate: "assets", empty: [], run: (L, ids) => getSitesWithIssues(L(25), ids) },
   recentReboots:    { gate: "events", empty: [], run: (L, ids) => getRecentReboots(72, L(20), ids) },
-  activeAlerts:     { gate: "events", empty: [], run: (L, ids) => getRecentAlerts(L(30), ids) },
+  activeAlerts:     { gate: "alerts",  empty: [], run: (L, ids) => getRecentAlerts(L(30), ids) },
 };
 
 // 10s: below the frontend's 15s memo, so a widget's own refresh timer never
@@ -1306,6 +1343,7 @@ export async function getNocSummaryPayload(opts: {
   feeds: string[] | null;
   canAssets: boolean;
   canEvents: boolean;
+  canAlerts: boolean;
   assetTypes: string[] | null;
   regionNames: string[] | null;
   fortigateNames?: string[] | null;
@@ -1319,7 +1357,16 @@ export async function getNocSummaryPayload(opts: {
 
   const fortigateNames = opts.fortigateNames ?? null;
   const fKey = filterCacheKey(opts.assetTypes, opts.regionNames, fortigateNames);
-  const allowed = (gate: "assets" | "events") => (gate === "assets" ? opts.canAssets : opts.canEvents);
+  // `alerts` is the activeAlerts feed's gate — it reads Notification rows, so
+  // events:read has no claim on it. No caller loses the feed by the switch:
+  // migration 20260628000000 seeded `notifications: read` (renamed to `alerts`
+  // by 20260721000000) onto EVERY role missing it, the seeded api-* kiosk token
+  // roles included. A role an operator has since set to `alerts: none` is
+  // deliberately denied here even when it still holds events:read.
+  const allowed = (gate: "assets" | "events" | "alerts") =>
+    gate === "assets" ? opts.canAssets
+      : gate === "alerts" ? opts.canAlerts
+        : opts.canEvents;
 
   // Resolve the per-widget filter to asset ids once (cached — the id set backs
   // every feed sharing the filter). Skipped when no feed will run.

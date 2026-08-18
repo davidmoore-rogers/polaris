@@ -145,8 +145,9 @@ router.get("/summary", async (req, res, next) => {
  * own feed so it renders as soon as its data exists); absent = every feed in
  * one round-trip (legacy shape, still used by external kiosk consumers).
  * Same filter-don't-403 contract as /summary: asset-sourced sections gate on
- * assets:read, Event-sourced sections (active alerts, recent reboots) gate on
- * events:read; denied sections return empty/zero with the shape unchanged.
+ * assets:read, the Event-sourced section (recent reboots) on events:read, and
+ * the Notification-sourced one (active alerts) on alerts:read;
+ * denied sections return empty/zero with the shape unchanged.
  * Feed computation + caching live in nocDashboardService.getNocSummaryPayload.
  */
 function parseCsvParam(raw: unknown): string[] | null {
@@ -177,6 +178,10 @@ router.get("/noc-summary", async (req, res, next) => {
     // access → empty sections with the shape unchanged.
     const canAssets = hasPermission(req, "assets", "read");
     const canEvents = hasPermission(req, "events", "read");
+    // The activeAlerts feed reads Notification rows, so it gates on `alerts`.
+    // Every role was seeded that key at read (see the gate note in
+    // getNocSummaryPayload), so no existing kiosk token loses the feed.
+    const canAlerts = hasPermission(req, "alerts", "read");
 
     // Per-widget filters (optional): ?assetTypes=server,switch,... (the ENABLED
     // built-in types), ?regionTags=East,West (the caller's "My regions"
@@ -213,6 +218,7 @@ router.get("/noc-summary", async (req, res, next) => {
       feeds: parseCsvParam(req.query.feeds),
       canAssets,
       canEvents,
+      canAlerts,
       assetTypes,
       regionNames,
       fortigateNames,

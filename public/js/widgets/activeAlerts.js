@@ -1,18 +1,43 @@
 /**
- * widgets/activeAlerts.js — recent warning/error events as an alert feed
- * (SolarWinds "Needs Attention"). Each row carries a left severity color bar +
- * a level pill, newest first. Data from /dashboard/noc-summary activeAlerts[].
+ * widgets/activeAlerts.js — the ACTIVE ALERTS feed (SolarWinds "Needs
+ * Attention"). One row per uncleared Notification, severity-first then newest,
+ * each with a left severity color bar + a severity pill. Data from
+ * /dashboard/noc-summary activeAlerts[].
+ *
+ * These are ALERTS, not audit Events. The widget used to list every warning/
+ * error Event, which made it wrong twice over: raw discovery/sync failures no
+ * automation covered appeared as permanent alerts (nothing clears an Event, so
+ * they sat for the full 7-day retention), and the pill showed `Event.level`,
+ * which collapses critical AND serious into "error" — so a `serious` automation
+ * read as "error". A row now appears only because an automation raised it,
+ * wears that automation's own severity (notice / warning / serious / critical),
+ * and leaves when the alert clears.
  *
  * Severity filtering rides the shared "Minimum severity" gear control
- * (config.minSeverity), same as every other severity-carrying widget. These
- * rows hold the audit-Event level (info/warning/error), which the shared ladder
- * ranks at informational/warning/critical — so on this widget the notice and
- * serious tiers behave as informational and critical respectively.
+ * (config.minSeverity), same as every other severity-carrying widget — and now
+ * against the automation ladder these rows are actually built from, so
+ * "Serious and up" means serious-and-up rather than the Event-level
+ * approximation it used to.
  */
 
 (function () {
-  var LEVEL_PILL = { info: "widget-pill-watch", warning: "widget-pill-amber", error: "widget-pill-red" };
-  var LEVEL_BAR = { info: "#4fc3f7", warning: "#ffa726", error: "#ef5350" };
+  // The automation ladder's own pills/bars. Event levels stay mapped at their
+  // pill-equivalent ranks (index.js ALERT_SEVERITY_RANK / ALERT_SEV_PILL) so a
+  // pre-upgrade cached payload still renders.
+  var SEV_PILL = {
+    notice: "widget-pill-neutral",
+    informational: "widget-pill-watch", info: "widget-pill-watch",
+    warning: "widget-pill-amber",
+    serious: "widget-pill-orange",
+    critical: "widget-pill-red", error: "widget-pill-red",
+  };
+  var SEV_BAR = {
+    notice: "#9e9e9e",
+    informational: "#4fc3f7", info: "#4fc3f7",
+    warning: "#ffa726",
+    serious: "#ff7043",
+    critical: "#ef5350", error: "#ef5350",
+  };
   var RANK = PolarisWidgets.ALERT_SEVERITY_RANK;
   var DEFAULT_TIER = "warning"; // pre-control default was ["warning","error"]
 
@@ -38,24 +63,24 @@
     var min = minRankOf(config);
     var filtered = rows.filter(function (r) { return (RANK[severityOf(r)] || 0) >= min; });
     // Header export: the configured-severity listing pre the 25-row display
-    // slice. These rows carry the audit-Event level (info/warning/error) —
-    // ranked by the shared ladder, so "Critical only" = error events.
+    // slice. Severity is the raising automation's own tier, so "Critical only"
+    // = critical automations rather than the old error-level Events.
     PolarisWidgets.setHeaderExport(el, {
       filename: "active-alerts",
       severityOf: severityOf,
       columns: [
         { header: "Hostname", get: function (r) { return r.hostname || ""; } },
+        { header: "Automation", get: function (r) { return r.ruleName || ""; } },
         { header: "Message", get: function (r) { return r.message || ""; } },
+        { header: "Acknowledged By", get: function (r) { return r.acknowledgedBy || ""; } },
         { header: "Raised At", get: function (r) { return r.raisedAt ? new Date(r.raisedAt).toISOString() : ""; } },
       ],
       rows: filtered,
     });
-    // Header severity breakdown of the events on screen — the 25-row display
-    // slice, not the whole configured-severity listing. severityOf is the
-    // audit-Event level (info/warning/error), which the shared ladder colors at
-    // its informational/warning/critical ranks, so the pills match the per-row
-    // level pills below. Every row here HAS a level, so nothing lands in a grey
-    // bucket and "omit" only guards a row with an unknown level.
+    // Header severity breakdown of the alerts on screen — the 25-row display
+    // slice, not the whole configured-severity listing. Every alert HAS a
+    // severity, so nothing lands in a grey bucket and "omit" only guards a row
+    // with an unknown one.
     var displayed = filtered.slice(0, 25);
     PolarisWidgets.setHeaderSeverityCounts(el, displayed, { unalerted: "omit", severityOf: severityOf });
     if (!filtered.length) {
@@ -65,12 +90,23 @@
     }
     el.innerHTML = displayed.map(function (r) {
       var sev = r.severity || "info";
-      var pillCls = LEVEL_PILL[sev] || "widget-pill-watch";
-      var bar = LEVEL_BAR[sev] || "#4fc3f7";
-      var who = r.hostname ? '<span style="margin-right:6px">' + escapeHtml(r.hostname) + '</span>' : "";
-      return '<div class="recent-item" style="border-left:3px solid ' + bar + ';padding-left:8px;cursor:default">' +
+      var pillCls = SEV_PILL[sev] || "widget-pill-watch";
+      var bar = SEV_BAR[sev] || "#4fc3f7";
+      // The automation's name is the row's title — it says what KIND of problem
+      // this is, which the message alone often doesn't. The device follows it.
+      var title = r.ruleName ? '<span style="margin-right:6px">' + escapeHtml(r.ruleName) + '</span>' : "";
+      var who = r.hostname ? '<span style="margin-right:6px;color:var(--color-text-secondary)">' + escapeHtml(r.hostname) + '</span>' : "";
+      // An acknowledged alert is still active — hiding it would surprise, so it
+      // stays listed and says who has it, and the row dims to push the
+      // unhandled alerts forward on a wallboard.
+      var ack = r.acknowledged
+        ? '<span class="widget-pill widget-pill-neutral" style="margin-left:4px" title="' +
+          escapeHtml("Acknowledged" + (r.acknowledgedBy ? " by " + r.acknowledgedBy : "")) + '">ack</span>'
+        : "";
+      return '<div class="recent-item" style="border-left:3px solid ' + bar + ';padding-left:8px;cursor:default' +
+        (r.acknowledged ? ";opacity:.6" : "") + '">' +
         '<div style="flex:1;min-width:0">' +
-          '<div class="recent-item-title"><span class="widget-pill ' + pillCls + '" style="margin-right:6px">' + escapeHtml(sev) + '</span>' + who + '</div>' +
+          '<div class="recent-item-title"><span class="widget-pill ' + pillCls + '" style="margin-right:6px">' + escapeHtml(sev) + '</span>' + title + who + ack + '</div>' +
           '<div class="recent-item-meta">' + escapeHtml(r.message || "") + '</div>' +
         '</div>' +
         '<span class="recent-item-time">' + timeAgo(r.raisedAt) + '</span>' +
@@ -82,11 +118,13 @@
     type: "activeAlerts",
     category: "NOC",
     label: "Active Alerts",
-    description: "Recent warning/error events needing attention, newest first.",
+    description: "Alerts your automations have raised and nothing has cleared, most severe first.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
     defaultConfig: { minSeverity: DEFAULT_TIER, regionScope: "mine" },
-    requiredPermission: { key: "events", level: "read" },
+    // The feed reads Notification rows, so this is alerts:read, not events:read.
+    // Every role was seeded that key at read, so no dashboard loses the widget.
+    requiredPermission: { key: "alerts", level: "read" },
 
     fetchData: function (config) {
       return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["activeAlerts"]).then(function (d) { return (d && d.activeAlerts) || []; }).catch(function () { return []; });
@@ -103,8 +141,8 @@
     renderPreview: function (el) {
       var now = Date.now();
       render(el, [
-        { id: "a1", hostname: "fgt-branch-12", message: "Monitor: fgt-branch-12 up → down", severity: "warning", raisedAt: new Date(now - 6 * 60000).toISOString() },
-        { id: "a2", hostname: null, message: "FortiManager DC discovery aborted", severity: "error", raisedAt: new Date(now - 40 * 60000).toISOString() },
+        { id: "a1", hostname: "fgt-branch-12", ruleName: "Asset down", message: "fgt-branch-12 is down", severity: "critical", acknowledged: false, raisedAt: new Date(now - 6 * 60000).toISOString() },
+        { id: "a2", hostname: "core-sw-1", ruleName: "IPsec tunnel down", message: "core-sw-1: IPsec tunnel Overlay-2 is down", severity: "serious", acknowledged: true, acknowledgedBy: "dmoore", raisedAt: new Date(now - 40 * 60000).toISOString() },
       ], { minSeverity: DEFAULT_TIER });
     },
 
@@ -114,7 +152,7 @@
       // `severities` config renders as the tier it actually behaves like; the
       // first change writes `minSeverity` and the legacy key stops mattering.
       var seed = { minSeverity: PolarisWidgets.severityTierForRank(minRankOf(config)) };
-      PolarisWidgets.renderMinSeverityConfig(el, seed, onChange, "Only events at or above this level are listed.");
+      PolarisWidgets.renderMinSeverityConfig(el, seed, onChange, "Only alerts at or above this severity are listed.");
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });

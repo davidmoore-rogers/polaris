@@ -351,13 +351,78 @@ describe("getRecentReboots", () => {
 });
 
 describe("getRecentAlerts", () => {
-  it("maps events to {hostname, message, severity, raisedAt}", async () => {
+  it("maps UNCLEARED notifications to {hostname, message, severity, raisedAt, ruleName, acknowledged}", async () => {
     const t = new Date("2026-06-20T00:00:00Z");
-    eventFindMany.mockResolvedValueOnce([
-      { id: "e1", resourceName: "fw-1", message: "down", level: "warning", action: "monitor.status_changed", timestamp: t },
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([
+      {
+        id: "n1", assetHostname: "fw-1", message: "fw-1 is down", severity: "critical", triggeredAt: t,
+        acknowledged: true, acknowledgedBy: "dmoore", rule: { name: "Asset down" },
+      },
     ]);
     const r = await noc.getRecentAlerts();
-    expect(r[0]).toEqual({ id: "e1", hostname: "fw-1", message: "down", severity: "warning", raisedAt: t });
+    expect(r[0]).toEqual({
+      id: "n1", hostname: "fw-1", message: "fw-1 is down", severity: "critical", raisedAt: t,
+      ruleName: "Asset down", acknowledged: true, acknowledgedBy: "dmoore",
+    });
+    // It reads ALERTS, never audit Events — the whole point of the feed.
+    expect(eventFindMany).not.toHaveBeenCalled();
+    expect(notifFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ cleared: false }),
+    }));
+  });
+
+  it("reports a `serious` automation as serious, not the Event level's collapsed error", async () => {
+    // The reported bug: the baseline IPsec automation is `serious`, but the feed
+    // read `Event.level`, and severityLevel() folds critical AND serious into
+    // "error" — so the widget pill said error.
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([
+      {
+        id: "n1", assetHostname: "BULLITT-101F-1", message: "BULLITT-101F-1: IPsec tunnel Overlay-2 is down",
+        severity: "serious", triggeredAt: new Date("2026-06-20T00:00:00Z"),
+        acknowledged: false, acknowledgedBy: null, rule: { name: "IPsec tunnel down" },
+      },
+    ]);
+    const r = await noc.getRecentAlerts();
+    expect(r[0].severity).toBe("serious");
+  });
+
+  it("orders severity-first on the AUTOMATION ladder (serious above warning), newest within a tier", async () => {
+    const old = new Date("2026-06-20T00:00:00Z");
+    const recent = new Date("2026-06-20T01:00:00Z");
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([
+      { id: "warn-new", assetHostname: "a", message: "m", severity: "warning", triggeredAt: recent, acknowledged: false, acknowledgedBy: null, rule: { name: "r" } },
+      { id: "serious-old", assetHostname: "b", message: "m", severity: "serious", triggeredAt: old, acknowledged: false, acknowledgedBy: null, rule: { name: "r" } },
+      { id: "notice-new", assetHostname: "c", message: "m", severity: "notice", triggeredAt: recent, acknowledged: false, acknowledgedBy: null, rule: { name: "r" } },
+      { id: "serious-new", assetHostname: "d", message: "m", severity: "serious", triggeredAt: recent, acknowledged: false, acknowledgedBy: null, rule: { name: "r" } },
+    ]);
+    const r = await noc.getRecentAlerts();
+    expect(r.map((x) => x.id)).toEqual(["serious-new", "serious-old", "warn-new", "notice-new"]);
+  });
+
+  it("scopes to the filtered asset id set, and honors the row cap after ordering", async () => {
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([
+      { id: "w", assetHostname: "a", message: "m", severity: "warning", triggeredAt: new Date(2), acknowledged: false, acknowledgedBy: null, rule: { name: "r" } },
+      { id: "c", assetHostname: "b", message: "m", severity: "critical", triggeredAt: new Date(1), acknowledged: false, acknowledgedBy: null, rule: { name: "r" } },
+    ]);
+    const r = await noc.getRecentAlerts(1, ["asset-1"]);
+    // The cap slices the SORTED list, so the critical survives a limit of 1.
+    expect(r.map((x) => x.id)).toEqual(["c"]);
+    expect(notifFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ cleared: false, assetId: { in: ["asset-1"] } }),
+    }));
+  });
+
+  it("survives a rule-less alert (SetNull on rule delete) and a deleted asset", async () => {
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([
+      { id: "n1", assetHostname: null, message: "orphan", severity: "warning", triggeredAt: new Date(1), acknowledged: false, acknowledgedBy: null, rule: null },
+    ]);
+    const r = await noc.getRecentAlerts();
+    expect(r[0]).toMatchObject({ ruleName: null, hostname: null });
   });
 });
 
@@ -760,13 +825,6 @@ describe("alert-severity-aware ordering", () => {
     expect(r[1].value).toBe(88);
   });
 
-  it("getRecentAlerts orders severity-first (levelRank desc) then newest", async () => {
-    eventFindMany.mockResolvedValueOnce([]);
-    await noc.getRecentAlerts();
-    expect(eventFindMany).toHaveBeenCalledWith(expect.objectContaining({
-      orderBy: [{ levelRank: "desc" }, { timestamp: "desc" }],
-    }));
-  });
 });
 
 describe("per-widget alert relevance (pill only when a matching automation fires)", () => {
