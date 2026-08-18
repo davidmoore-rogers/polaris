@@ -91,6 +91,12 @@ beforeAll(() => {
   g._ruleRecipientUsers = null;
   g._looksLikeDeviceId = () => false;
 
+  // The devices-step tree builder lives in its own script, loaded BEFORE the
+  // wizard on every page that carries it — the wizard reads
+  // window.PolarisConditionBuilder while assembling the modal body, so a
+  // missing module here reproduces the "wizard silently fails to open" bug.
+  const cbSrc = readFileSync(resolve(__dirname, "../../public/js/condition-builder.js"), "utf8");
+  (0, eval)(cbSrc);
   const src = readFileSync(resolve(__dirname, "../../public/js/automations-wizard.js"), "utf8");
   (0, eval)(src);
 });
