@@ -1847,6 +1847,31 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 **When changing this:** the `{chart.*}` tokens are DEFERRED — they must stay out of `buildTemplateContext` and out of `Notification.templateCtx`, or the substitution here finds nothing. Deferral is matched by PREFIX (`isDeferredToken` in utils/notificationTemplate), so a new chart token is deferred automatically; an enumerated list was wrong within a week (`{chart.trigger}` shipped, wasn't listed, and was silently blanked at compose time). Adding a chart still means `CHART_TOKENS` + `TEMPLATE_VARIABLES` + a slot in the default body — `alertEmailTemplate.test.ts` asserts the body asks for the whole catalogue.
 
 ---
+## services/alertBrandService.ts
+
+**What it owns:** The install's letterhead in the top-right corner of an alert email — which artwork the email uses, whether the application name prints beside it, and both rendered forms of the block plus the inline attachment the HTML cites.
+
+**Public API:** `buildAlertBrandBlock()` (the whole delivery-time step — one branding read, one image load, both bodies, memoized 60s), `brandTokensIn(...templates)`, `substituteBrandTokens(body, block)`, `BRAND_LOGO_CID`, plus the pure pieces the tests drive: `renderBrandBlock({name, subtitle, logo}, {html})`, `fitLogo(size)`, `MAX_LOGO_WIDTH` / `MAX_LOGO_HEIGHT`, `EMAIL_LOGO_PATH`, `__resetAlertBrandCacheForTests()`.
+
+**Cross-service deps:** `brandingService.getBranding` + `displayAppName`, `brandLogoService.renderAccentedLogo("light")`, `appIconService.resolveBrandingLogoFile`, `utils/imageMagic.detectImageMagic`, `utils/imageSize.imageSize`, `utils/notificationTemplate.escapeHtml`.
+
+**Used by:** `src/services/notificationDeliveryService.ts` (the only caller — `emailMessageFor` on composed email rows, in the same pass as the charts and the LLDP block); `src/utils/alertEmailTemplate.ts` carries the `{brand.header}` token in both default bodies.
+
+**Invariants:**
+- **Which artwork is business rule 27's decision, not this file's.** The email card is white, so the LIGHT-inked variant is the only one that doesn't disappear — `polaris-horiz-light.png`, the horizontal lockup. Because that art already spells the product name, the app name is NOT printed beside it (rule 27's showName=false); an operator's own logo has no wordmark we know of, so it gets the name as its caption. Re-export the brand PNGs and this path changes with them.
+- The subtitle renders EITHER WAY — it is the operator's own line of copy, not a caption for the mark. An operator who blanked `appName` deliberately gets no name text at all (rule 27 again: an empty name is a legitimate stored value, which is why nothing here calls `displayAppName` for the visible caption).
+- `displayAppName` IS used for the `alt` text and for the plain-text form, because those are the only things naming the sender when images are blocked or when there is no HTML at all.
+- `{brand.header}` is a DEFERRED token (`isDeferredToken` matches the `brand.` PREFIX, like `chart.` and `interface.`). It must stay out of `buildTemplateContext` / `Notification.templateCtx`: a context key would render it to "" at compose time and leave this pass nothing to fill — and a fire-time snapshot would freeze the branding into every escalation email sent hours later.
+- The logo is an INLINE CID attachment. Not a remote URL (it would need an unauthenticated endpoint and most clients block remote images by default) and not a data: URI (Gmail and Outlook both drop those). The attachment is appended only when the substituted HTML actually cites `cid:polaris-brand-logo`, mirroring `attachmentsFor`.
+- **The header row must stay immune to `pruneEmptyRows`.** The two-column header is a two-cell row whose second cell is empty on an install with no letterhead — the exact label/value shape that pass deletes, and deleting it takes the severity line, the subject and the trigger sentence with it. The one-cell `<table>` wrapped around the token in `DEFAULT_ALERT_HTML` is the guard (a span containing a `<table>` never matches; a one-cell row is never a candidate). Any re-layout of that header has to preserve it.
+- PNG/JPEG only. A WebP upload has no accent path either (resvg cannot decode it) and mail clients handle it unevenly, so such an install gets the name-and-subtitle block with no image.
+- `fitLogo` never enlarges and caps at 150×46: an operator upload can be any size, and an unconstrained 900px banner scaled by the client pushes the headline into a two-word column. Both dimensions are emitted as HTML ATTRIBUTES because Outlook sizes from those, not from CSS.
+- Every failure rung degrades — unreadable branding, unresolvable logoUrl, failed accent composite, bad magic bytes, unreadable dimensions — dropping the logo, then the whole block. Nothing throws. Letterhead must never be the reason an alert does not arrive; failures log once per distinct reason (`warnOnce`), never per email.
+- Memoized 60s (`CACHE_TTL_MS`) because a drain sends up to `BATCH_SIZE` emails per tick and every one of them wants the identical block. Branding changes on an operator click, so a minute of staleness in letterhead costs nothing — but it means a test must call `__resetAlertBrandCacheForTests()`.
+
+**When changing this:** the block is rendered per body from one shared `parts` object, so a new element has to be added to `renderBrandBlock` (both branches) rather than to one of them. Adding a second `{brand.*}` token means widening `BRAND_TOKENS` + `substituteBrandTokens`; the deferred-token prefix already covers it. If the block can ever contain a `<table>` of its own, re-check the header's prune immunity — the guard is currently a static wrapper in the template, not something this file emits.
+
+---
 ## services/alertInterfaceService.ts
 
 **What it owns:** The per-INTERFACE block an alert email carries when the thing that broke is one port — the LLDP-neighbour lookup for that port and both rendered forms of it. It is the answer to what `alertChartService.isPortScopedAlert` removes: an interface-down email with no charts and no LLDP block would be a headline and nothing else.

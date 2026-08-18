@@ -113,10 +113,9 @@ export const DEFAULT_ALERT_HTML = [
   '<tr><td style="background:{severity.color};height:5px;line-height:5px;font-size:0">&nbsp;</td></tr>',
   '<tr><td style="padding:18px 22px 6px">',
   // Two columns: the alert on the left, the install's letterhead on the right.
-  // A nested table rather than two floated divs — Outlook renders through Word,
-  // which has no float — and it doubles as the reason `pruneEmptyRows` can't
-  // touch this row: its pattern refuses any span containing a `<table>`, so the
-  // header can never be mistaken for a label/value pair and dropped.
+  // A table rather than two floated divs — Outlook renders through Word, which
+  // has no float. (What keeps `pruneEmptyRows` off the two-cell row this opens
+  // is the one-cell table INSIDE the letterhead cell; see the note there.)
   '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>',
   '<td style="vertical-align:top">',
   '<div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:{severity.color};font-weight:700">{severity} alert</div>',
@@ -141,7 +140,24 @@ export const DEFAULT_ALERT_HTML = [
   // with no mark and no subtitle leaves an empty cell rather than a gap where
   // text used to be. The fixed width keeps the headline's column from
   // collapsing when a wide logo is in play.
-  '<td width="160" style="width:160px;padding-left:14px;vertical-align:top;text-align:right">{brand.header}</td>',
+  //
+  // The inner one-cell table is not decoration: it is what makes this row
+  // IMMUNE to `pruneEmptyRows`. The header is a two-cell row whose second cell
+  // is empty on an install with no letterhead — precisely the label/value shape
+  // that pass deletes, and deleting it would take the severity line, the
+  // subject and the trigger sentence with it. A row containing a `<table>`
+  // fails that pattern outright, and a one-cell row is never a candidate. It
+  // also right-aligns in Outlook, which honours `align` on a table where it
+  // ignores an auto margin.
+  // 168 = alertBrandService's MAX_LOGO_WIDTH (150) + this cell's 14px gutter,
+  // rounded up: a declared width narrower than the image it holds is a width
+  // the mail client silently overrides, widening the cell into the headline.
+  // The two numbers have to move together.
+  '<td width="168" style="width:168px;padding-left:14px;vertical-align:top;text-align:right">',
+  '<table role="presentation" cellpadding="0" cellspacing="0" align="right"><tr>',
+  '<td style="text-align:right">{brand.header}</td>',
+  "</tr></table>",
+  "</td>",
   "</tr></table>",
   "</td></tr>",
   // Facts

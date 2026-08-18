@@ -901,12 +901,13 @@ Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree li
 
 ## Deferred alert-email content (a body token filled at delivery, not at fire)
 
-**What it is:** Something the alert email should carry that cannot be a plain `{token}` — because it needs a DB read, or because its HTML and plain-text forms are different markup rather than the same string. Two exist: the inline **charts** and the **interface LLDP block**. They share one contract, and getting any part of it wrong fails silently (the token blanks at compose time and the delivery pass finds nothing to fill), so copy the shape rather than re-deriving it.
+**What it is:** Something the alert email should carry that cannot be a plain `{token}` — because it needs a DB read, or because its HTML and plain-text forms are different markup rather than the same string. Three exist: the inline **charts**, the **interface LLDP block**, and the **letterhead** (logo + application name + subtitle). They share one contract, and getting any part of it wrong fails silently (the token blanks at compose time and the delivery pass finds nothing to fill), so copy the shape rather than re-deriving it.
 
 **Canonical implementation:**
 - **Charts** (several tokens, one shared attachment set): [src/services/alertChartService.ts](src/services/alertChartService.ts) — `chartTokensIn(...)` → `buildAlertCharts(...)` → `substituteChartTokens(body, charts, {html})` → `attachmentsFor(charts, body)`.
 - **Interface facts** (one token, no attachments — the simpler one to copy): [src/services/alertInterfaceService.ts](src/services/alertInterfaceService.ts) — `interfaceTokensIn(...)` → `buildInterfaceLldpBlocks(assetId, metric, dimension)` → `substituteInterfaceTokens(body, block)`.
-- **Deferral**: `isDeferredToken` in [src/utils/notificationTemplate.ts](src/utils/notificationTemplate.ts) — matched by PREFIX (`chart.`, `interface.`), plus a catalog entry in `TEMPLATE_VARIABLES` so the wizard offers it.
+- **Letterhead** (one token, one attachment, and the only one that is per-INSTALL rather than per-alert — so it takes no arguments and is memoized for the whole drain): [src/services/alertBrandService.ts](src/services/alertBrandService.ts) — `brandTokensIn(...)` → `buildAlertBrandBlock()` → `substituteBrandTokens(body, block)`, appending `block.attachment` when the substituted HTML cites its cid.
+- **Deferral**: `isDeferredToken` in [src/utils/notificationTemplate.ts](src/utils/notificationTemplate.ts) — matched by PREFIX (`chart.`, `interface.`, `brand.`), plus a catalog entry in `TEMPLATE_VARIABLES` so the wizard offers it.
 - **Wiring**: `emailMessageFor` in [src/services/notificationDeliveryService.ts](src/services/notificationDeliveryService.ts), on composed rows only.
 - **Default body**: the token in BOTH `DEFAULT_ALERT_HTML` and `DEFAULT_ALERT_TEXT` in [src/utils/alertEmailTemplate.ts](src/utils/alertEmailTemplate.ts).
 
@@ -918,6 +919,7 @@ Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree li
 - **One read, both bodies.** Build the data once and render HTML and text from a shared field list, or the two bodies drift and an operator editing one wonders why the other differs.
 - **Escape in the HTML form only,** at render — the values are device/network-supplied and the renderer's own `html:true` escaping never sees them.
 - **Text form: no colons.** `pruneEmptyTextLines` deletes any `"Label:"` line with nothing after it, so a heading like `"LLDP neighbor on port2:"` deletes itself. Padded label columns read the same.
+- **A token in a LAYOUT cell must not let the layout be pruned.** `{brand.header}` sits in the second cell of the header's two-column row, which is exactly the label/value shape `pruneEmptyRows` deletes, and it renders empty on an install with no letterhead — so the template wraps it in a one-cell `<table>`, which fails that pass's pattern at the row. A token that expands to a whole `<tr>` of its own (the charts, the LLDP block) never has this problem; one that fills a cell inside an existing row does.
 - **Never fail the alert.** Every load is try/caught to an empty result: an email that sends without a chart beats an email that does not send.
 
 ---

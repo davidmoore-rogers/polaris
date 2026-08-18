@@ -24,6 +24,7 @@ import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail } from "../utils/
 import { ackUrlFromMeta } from "./notificationRecipientService.js";
 import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor } from "./alertChartService.js";
 import { buildInterfaceLldpBlocks, interfaceTokensIn, substituteInterfaceTokens } from "./alertInterfaceService.js";
+import { buildAlertBrandBlock, brandTokensIn, substituteBrandTokens, BRAND_LOGO_CID } from "./alertBrandService.js";
 import { pruneEmptyChartSection, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
 import { logEvent } from "./eventLogService.js";
 import { type ChannelType } from "./notificationTypes.js";
@@ -128,6 +129,24 @@ async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, ur
       );
       text = pruneEmptyTextLines(substituteInterfaceTokens(text, lldp.text));
       if (html) html = substituteInterfaceTokens(html, lldp.html);
+    }
+
+    // The letterhead. Built here rather than at fire time for the same reason
+    // the charts are — the logo is an inline attachment, and an escalation sent
+    // at T+90min should carry the install's CURRENT branding — but unlike them
+    // it needs no per-alert context at all, so one memoized read serves the
+    // whole drain. The attachment only rides along when the substituted HTML
+    // actually references it (the block degrades to text, or to nothing, when
+    // the logo can't be read).
+    if (brandTokensIn(text, html).size > 0) {
+      const brand = await buildAlertBrandBlock();
+      text = pruneEmptyTextLines(substituteBrandTokens(text, brand.text));
+      if (html) {
+        html = substituteBrandTokens(html, brand.html);
+        if (brand.attachment && html.includes(`cid:${BRAND_LOGO_CID}`)) {
+          attachments = [...(attachments ?? []), brand.attachment];
+        }
+      }
     }
 
     return {
