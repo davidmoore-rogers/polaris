@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { compareNum, compareValue, globToRegExp, readingMeets } from "../../src/services/notificationEngine.js";
+import { compareNum, compareValue, globToRegExp, readingMeets, interfaceIsPinned } from "../../src/services/notificationEngine.js";
 import { scopeMatchesAsset, type ScopeAsset } from "../../src/services/notificationRuleService.js";
 import { stripRegionPrefix } from "../../src/services/notificationService.js";
 import { ruleInputSchema, buildSchemaCatalog } from "../../src/services/notificationTypes.js";
@@ -76,6 +76,30 @@ describe("readingMeets", () => {
   it("event/change triggers never meet via the threshold path", () => {
     expect(readingMeets({ type: "event", actionPattern: "x" } as any, 1)).toBe(false);
     expect(readingMeets({ type: "change", changeType: "lldp_neighbor_added" } as any, 1)).toBe(false);
+  });
+});
+
+describe("interfaceIsPinned", () => {
+  it("admits only interfaces in the asset's pin set", () => {
+    const a = { monitoredInterfaces: ["port1", "wan1"] };
+    expect(interfaceIsPinned(a, "port1")).toBe(true);
+    expect(interfaceIsPinned(a, "wan1")).toBe(true);
+    // The gate every interface resolver applies: an unpinned port reports data
+    // but must never raise an alert, or one switch becomes a page of alerts
+    // about ports nobody selected.
+    expect(interfaceIsPinned(a, "port2")).toBe(false);
+  });
+  it("matches exactly — never by prefix or case", () => {
+    const a = { monitoredInterfaces: ["port1"] };
+    expect(interfaceIsPinned(a, "port10")).toBe(false);
+    expect(interfaceIsPinned(a, "Port1")).toBe(false);
+  });
+  it("no pins, or no asset at all, alerts on nothing", () => {
+    expect(interfaceIsPinned({ monitoredInterfaces: [] }, "port1")).toBe(false);
+    expect(interfaceIsPinned({}, "port1")).toBe(false);
+    // A reading whose asset fell out of the scope index is dropped rather than
+    // defaulting to allowed — fail closed, same as the resolvers' `index.get`.
+    expect(interfaceIsPinned(undefined, "port1")).toBe(false);
   });
 });
 

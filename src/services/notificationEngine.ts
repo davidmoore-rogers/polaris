@@ -153,7 +153,8 @@ interface ScopeAssetRow extends ScopeAsset {
   dependencySuppressed: boolean;
   quarantinedAt: Date | null;
   ipAddress: string | null;
-  // Read by the ifOperStatus/ifAdminStatus resolvers (pinned-interface gate).
+  // Read by every interface resolver — state trio AND counter metrics — for
+  // the pinned-interface gate (interfaceIsPinned).
   monitoredInterfaces?: string[];
 }
 
@@ -197,7 +198,7 @@ const SCOPE_SELECT = {
   // condition-tree evaluation reads these (manufacturer/model/os); small
   // string columns, still a tight select at 2000 assets.
   manufacturer: true, model: true, os: true,
-  // ifOperStatus/ifAdminStatus readings are restricted to PINNED interfaces.
+  // Every interface reading is restricted to PINNED interfaces.
   monitoredInterfaces: true,
 } as const;
 
@@ -306,6 +307,30 @@ const ANSWERING_ONLY_METRICS = new Set<string>(["probeLossPct"]);
 /** Does this trigger's metric need an answering device (see above)? */
 function triggerNeedsAnsweringDevice(trigger: Trigger): boolean {
   return trigger.type === "asset_metric" && ANSWERING_ONLY_METRICS.has(trigger.metric);
+}
+
+/**
+ * An interface alert only ever concerns a MONITORED interface — the pin set in
+ * `Asset.monitoredInterfaces` (the same join the Down Interfaces widget uses).
+ * A device reports every port it has, most of them idle or unplugged, so an
+ * ungated interface rule turns one switch into a page of alerts about ports
+ * nobody selected. The pin IS the operator's statement of which ports matter,
+ * so it is the default and there is no opt-out: an interface an operator cares
+ * about enough to alert on is one they pinned, and un-pinning is how alerting
+ * stops (the vanished-state sweep then clears the alert).
+ *
+ * The interface STATE trio (ifOperStatus / ifAdminStatus / poeStatus) has
+ * always gated here. The four COUNTER metrics did not: they read
+ * `AssetInterfaceSample`, which became pinned-only in the 2026-08 cutover, so
+ * they were gated incidentally by what the sampler writes rather than by any
+ * rule of their own — which leaves the window between un-pinning an interface
+ * and its last rows aging out (plus every pre-cutover row still inside the
+ * lookback) able to fire an alert about a port that is no longer monitored.
+ * Gating explicitly closes that and makes the rule one thing rather than a
+ * property of a storage decision that could change again.
+ */
+export function interfaceIsPinned(asset: { monitoredInterfaces?: string[] } | undefined, ifName: string): boolean {
+  return asset?.monitoredInterfaces?.includes(ifName) ?? false;
 }
 
 function regionSnapshot(tags: string[]): string[] {
@@ -535,7 +560,10 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
       const col = trigger.metric === "ifInBps" ? "inOctets" : trigger.metric === "ifOutBps" ? "outOctets" : trigger.metric === "ifInErrorRate" ? "inErrors" : "outErrors";
       const mult = trigger.metric === "ifInBps" || trigger.metric === "ifOutBps" ? 8 : 1; // octets→bits
       const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: { timestamp: "desc" }, select: { assetId: true, timestamp: true, ifName: true, inOctets: true, outOctets: true, inErrors: true, outErrors: true } });
-      const filtered = rows.filter((r) => substringMatch(r.ifName, df.ifNamePattern));
+      // Pinned interfaces only (interfaceIsPinned) — the same default the
+      // ifOperStatus/ifAdminStatus/poeStatus resolvers apply. See its header for
+      // why the pinned-only sample table isn't a gate by itself.
+      const filtered = rows.filter((r) => interfaceIsPinned(index.get(r.assetId), r.ifName) && substringMatch(r.ifName, df.ifNamePattern));
       return rateReadings(filtered, index, (r) => r.ifName, (r) => r.ifName, (r) => num((r as any)[col]), mult);
     }
     case "ipsecThroughputBps": {
@@ -607,7 +635,7 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
       // stops producing readings; the vanished-state sweep clears its alert.
       return rows.filter((r) => {
         const a = index.get(r.assetId);
-        if (!a?.monitoredInterfaces?.includes(r.ifName)) return false;
+        if (!interfaceIsPinned(a, r.ifName)) return false;
         if (trigger.field === "ifOperStatus" && r.adminStatus !== "up") return false;
         // A port with no PSE reports nothing — a null is "not a PoE port",
         // not "PoE is off", and a rule like `poeStatus is-not delivering`

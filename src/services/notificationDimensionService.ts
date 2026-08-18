@@ -157,19 +157,24 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
       })).map((r) => ({ value: r.sensorName, assetId: r.assetId })),
   },
   ifNamePattern: {
-    noun: "interfaces",
+    // Reads the PIN SET (`Asset.monitoredInterfaces`), which is what every
+    // interface resolver gates on (notificationEngine's interfaceIsPinned), so
+    // the picker offers exactly the interfaces a rule can actually fire about —
+    // offering an unpinned port would offer a filter that never matches. The
+    // pin set rather than the `AssetInterface` inventory for the same reason it
+    // isn't the sample table: a pin can exist before either has data (auto-
+    // monitor pins the cycle before the first scrape), and the operator's own
+    // selection is the thing being matched. `since` is unused — a pin has no
+    // time dimension. The noun says "monitored" so every operator-facing
+    // message the wizard builds from it ("report no monitored interfaces")
+    // names the gate instead of reading as "this device has no ports".
+    noun: "monitored interfaces",
     strict: false,
-    // Reads the CURRENT-STATE inventory, not the (pinned-only) sample table:
-    // an operator building a rule needs to pick an interface BEFORE it has any
-    // data, so narrowing this picker to pinned interfaces would be a
-    // regression. `since` is unused here — current state has no time
-    // dimension, and the inventory is delete-replaced per scrape so a stale
-    // interface is already gone.
     pairs: async (ids) =>
-      (await prisma.assetInterface.findMany({
-        where: { assetId: { in: ids } },
-        select: { ifName: true, assetId: true },
-      })).map((r) => ({ value: r.ifName, assetId: r.assetId })),
+      (await prisma.asset.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, monitoredInterfaces: true },
+      })).flatMap((a) => a.monitoredInterfaces.map((ifName) => ({ value: ifName, assetId: a.id }))),
   },
   mountPathPattern: {
     noun: "storage mounts",
