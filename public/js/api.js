@@ -448,7 +448,7 @@ const api = {
       if (opts && opts.recentLimit != null) parts.push("recentLimit=" + encodeURIComponent(opts.recentLimit));
       return request("GET", "/dashboard/summary" + (parts.length ? "?" + parts.join("&") : ""), undefined, timeoutSignal(DASHBOARD_FETCH_TIMEOUT_MS));
     },
-    // Feed endpoint for the NOC widgets (status tiles, down nodes, top
+    // Feed endpoint for the NOC widgets (status tiles, down assets, top
     // CPU/mem, slowest response, packet loss, stale polls, recent reboots,
     // active alerts, sites with issues). qs carries the per-widget filter +
     // feeds= subset (built by widgets/index.js getNocSummary).

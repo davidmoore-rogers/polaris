@@ -389,7 +389,7 @@ function siteOf(a: { location: string | null; learnedLocation: string | null; sn
 }
 
 /**
- * Feed 2 — down nodes. One indexed findMany over the (small) down subset;
+ * Feed 2 — down assets. One indexed findMany over the (small) down subset;
  * site coalesce done in JS because Prisma groupBy can't COALESCE three
  * nullable columns. dependencySuppressed:false so a down parent's suppressed
  * children don't show as independent outages — one dead gate is one outage,
@@ -464,7 +464,7 @@ export interface DownInterface {
  * The "gate" an interface lives on. For a FortiGate firewall the interface is
  * physically on the device itself → its hostname. For a managed FortiSwitch /
  * FortiAP (and other discovered gear) `learnedLocation` carries the parent
- * FortiGate device name — the same field the Down Nodes site grouping surfaces
+ * FortiGate device name — the same field the Down Assets site grouping surfaces
  * as the gate. Fall back to the remaining site fields, then "(unknown)".
  */
 function gateOf(a: { assetType: string; hostname: string | null; learnedLocation: string | null; location: string | null; snmpLocation: string | null }): string {
@@ -656,7 +656,7 @@ export interface TopNRow { id: string; hostname: string | null; ipAddress: strin
 
 // Hydrate a list of assetIds (preserving the incoming order) with display
 // names in ONE findMany — never a per-row lookup. `site` uses the same
-// location > learnedLocation > snmpLocation coalesce as Down Nodes so the
+// location > learnedLocation > snmpLocation coalesce as Down Assets so the
 // top-N widgets' "Group by: Site" buckets match across widgets.
 async function hydrateNames(ordered: Array<{ assetId: string; value: number }>): Promise<TopNRow[]> {
   if (ordered.length === 0) return [];
@@ -876,7 +876,7 @@ export async function getHighestTemperature(limit: number | null = 100, assetIds
  * (True per-probe loss% via multi-ping is a documented follow-up.)
  *
  * Assets at 100% loss (zero successful probes in the window) are excluded —
- * that's a hard-down node, already surfaced by the Down Nodes widget, and
+ * that's a hard-down asset, already surfaced by the Down Assets widget, and
  * listing it here as "packet loss" is redundant noise. The shared query keeps
  * only assets with at least one success and the HAVING adds at least one
  * failure, so only genuinely lossy (intermittent) assets qualify. Loss is

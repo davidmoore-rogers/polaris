@@ -408,7 +408,7 @@
   //
   // Note the semantics an operator gets above "All rows": a row with no active
   // alert ranks 0, so any real minimum hides un-alerted rows entirely. That's
-  // the point of the control (a down-nodes panel narrowed to what's actually
+  // the point of the control (a down-assets panel narrowed to what's actually
   // alerting), and the popover hint says so.
   window.PolarisWidgets.minSeverityRank = function (config) {
     if (!config || !config.minSeverity || config.minSeverity === "all") return 0;

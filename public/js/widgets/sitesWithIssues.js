@@ -33,7 +33,7 @@
     sorted = PolarisWidgets.clip(sorted, config && config.rowLimit);
     // Header severity breakdown of the SITES on screen: each site carries the
     // worst active monitorStatus alert among its own nodes (server-side), so a
-    // pill counts sites at that severity — not nodes. Sites whose down nodes
+    // pill counts sites at that severity — not nodes. Sites whose down assets
     // aren't alerting get no bucket (the down/warn counts already live on the
     // row). Stamped before the empty return so the pills clear with it.
     PolarisWidgets.setHeaderSeverityCounts(el, sorted, { unalerted: "omit" });

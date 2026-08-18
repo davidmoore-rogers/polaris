@@ -58,11 +58,11 @@ const SEED_ACTOR = "system:seed-baseline-automations";
 // fills every default (enabled, channels=["in_app"], aggregation, etc.) and
 // normalizes reset/actions to the canonical v2 shape.
 const BASELINE_RULES: Record<string, unknown>[] = [
-  // ── State conditions (mirror the Down Nodes / Down Interfaces widgets) ──
+  // ── State conditions (mirror the Down Assets / Down Interfaces widgets) ──
   {
     name: "Asset down",
     description:
-      "Fires when a monitored asset stops responding. Mirrors the dashboard's Down Nodes widget. Baseline example — edit or delete freely.",
+      "Fires when a monitored asset stops responding. Mirrors the dashboard's Down Assets widget. Baseline example — edit or delete freely.",
     severity: "critical",
     trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
     scope: { allAssets: true },
