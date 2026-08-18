@@ -19108,12 +19108,46 @@ async function _loadAssetMacTable(assetId) {
       '</tbody></table></div>';
 
     var dash = '<span style="color:var(--color-text-secondary)">—</span>';
-    mount.innerHTML = summary +
-      '<h4 style="margin:0 0 0.4rem">Forwarding database <span style="font-weight:400;color:var(--color-text-secondary)">(' + entries.length + ' entries)</span></h4>' +
-      '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-        '<th>MAC</th><th>VLAN</th><th>Interface</th><th>Status</th><th>Device</th>' +
-      '</tr></thead><tbody>' +
-      entries.map(function (e) {
+
+    // Rows whose basePort never resolved to an interface. On a FortiSwitch
+    // these are the trunk/LAG pseudo-ports (base port 32768 and up), which
+    // publish no dot1dBasePortIfIndex row — so every MAC behind the trunk
+    // lands here, unattributable, and swamps the real per-port entries.
+    // Hidden by DEFAULT rather than dropped: they are legitimate sightings,
+    // they just can't be placed on a port. The per-port summary above already
+    // excludes them (macCountsByPort requires an ifName).
+    var attributed   = entries.filter(function (e) { return !!e.ifName; });
+    var unattributed = entries.filter(function (e) { return !e.ifName; });
+    var showUnattributed = false;
+
+    function renderTable() {
+      var shown = showUnattributed ? attributed.concat(unattributed) : attributed;
+      var note = unattributed.length === 0 ? "" :
+        '<div style="margin:0 0 0.5rem;font-size:0.82rem;color:var(--color-text-secondary)">' +
+          unattributed.length + ' entr' + (unattributed.length === 1 ? "y" : "ies") +
+          ' on ports Polaris could not resolve (trunk / LAG pseudo-ports). ' +
+          '<button type="button" class="mactable-toggle-link" id="mactable-toggle-' + assetId + '">' +
+            (showUnattributed ? "Hide" : "Show") +
+          '</button>' +
+        '</div>';
+      var body = shown.length === 0
+        ? '<div class="empty-state">No entries on a resolved port.</div>'
+        : '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+            '<th>MAC</th><th>VLAN</th><th>Interface</th><th>Status</th><th>Device</th>' +
+          '</tr></thead><tbody>' + rowsHtml(shown) + '</tbody></table></div>';
+      mount.innerHTML = summary +
+        '<h4 style="margin:0 0 0.4rem">Forwarding database ' +
+          '<span style="font-weight:400;color:var(--color-text-secondary)">(' + shown.length + ' entries)</span>' +
+        '</h4>' + note + body;
+      var toggle = document.getElementById("mactable-toggle-" + assetId);
+      if (toggle) toggle.addEventListener("click", function () {
+        showUnattributed = !showUnattributed;
+        renderTable();
+      });
+    }
+
+    function rowsHtml(rows) {
+      return rows.map(function (e) {
         var dev = e.matchedAsset
           ? '<a href="#" class="asset-link" data-asset-id="' + escapeHtml(e.matchedAsset.id) + '">' +
               escapeHtml(e.matchedAsset.hostname || e.matchedAsset.ipAddress || e.matchedAsset.id) + '</a>'
@@ -19128,8 +19162,10 @@ async function _loadAssetMacTable(assetId) {
           '<td>' + escapeHtml(e.status) + '</td>' +
           '<td>' + dev + '</td>' +
         '</tr>';
-      }).join("") +
-      '</tbody></table></div>';
+      }).join("");
+    }
+
+    renderTable();
   } catch (err) {
     mount.innerHTML = '<span class="empty-state">Error: ' + escapeHtml(err.message || "failed to load") + '</span>';
   }
