@@ -2768,7 +2768,8 @@ Either counter resets to 0 on the opposite outcome, so an in-flight transition i
 Vanilla JavaScript SPA served from `/public/`. No build step — plain ES modules.
 
 - Multi-page layout with client-side navigation (`app.js`)
-- Light/dark theme toggle
+- Light/dark theme toggle — in the **account menu**, not the sidebar
+- **Account menu** (`renderUserBadge` / `openUserMenu` in `app.js`) — the page-header user badge is a real `<button>` (`.user-menu-trigger`, `aria-haspopup="menu"`) opening the shared `showRowMenu` right-aligned under itself: theme toggle, the Web Push row when push is on offer, then Logout. Items are rebuilt per open, so the theme label and the push state need nothing kept repainted. Before this the three lived at the bottom of the sidebar; `_setTheme` correspondingly no longer repaints a live toggle button.
 - **Per-user panel lock** (`app.js`) — a lock button sits left of the X on every modal and slide-over. Two app-wide switches (one for all modals, one for all slide-overs), saved per user in `localStorage` under `polaris.panellock.<username>`. **Locked** → a backdrop/off-panel click does NOT dismiss the panel (the X gets the same escalating glow + radial bloom as the modal X via the shared `flashModalCloseBtn`); **unlocked** (default) → an off-click closes it. The X and Escape always close regardless. Modals route through `openModal` (handled inline); slide-overs each wire their own backdrop-close, so a capture-phase document listener blocks that close when locked instead of editing every panel, and a `MutationObserver` injects the lock button into any newly-created panel (so new slide-overs get one for free). A hover tooltip explains the current state.
 - Real-time discovery progress polling (`integrations.js`)
 - Bulk operations (delete, release)

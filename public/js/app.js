@@ -28,13 +28,8 @@ function _getCurrentTheme() {
 function _setTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
   localStorage.setItem("polaris-theme", theme);
-  // Update toggle button label if it exists
-  var btn = document.getElementById("btn-theme-toggle");
-  if (btn) {
-    var isDark = theme === "dark";
-    btn.querySelector("svg").outerHTML = isDark ? _sunIcon() : _moonIcon();
-    btn.querySelector("span").textContent = isDark ? "Light Mode" : "Dark Mode";
-  }
+  // No live label to repaint: the toggle lives in the user menu, which is
+  // built from _getCurrentTheme() each time it opens.
 }
 
 function _sunIcon() {
@@ -157,77 +152,92 @@ const NAV_ITEMS = [
   { href: "/users.html",        label: "Users",        icon: "users", adminOnly: true },
 ];
 
+// Last known push status + in-flight guard. Module-level because the control
+// is rebuilt from scratch every time the user menu opens — there is no
+// long-lived button to repaint, so the state has to outlive the menu.
+var _pushState = null;
+var _pushBusy = false;
+
 /**
- * Sidebar "Push notifications" toggle + service-worker registration.
+ * Push enrollment state + service-worker registration for the user menu's
+ * "Enable push" / "Disable push" row.
  *
  * Gated on alerts:read, which is what the push routes themselves require —
  * pushSubscriptions.ts states the intent outright ("any viewer may opt into
  * push"). Previously the only control lived on /automations.html, which is
  * page-gated automationManagement:read, so a role with alerts but not
- * automation management could never enroll.
+ * automation management could never enroll. The user menu renders on every
+ * page, which preserves that.
  *
  * Registering the worker here (rather than lazily on first toggle) means the
  * push handler is live on every page for anyone who has already granted
  * permission, and reconcileSubscription repairs a rotated endpoint.
- *
- * The click handler branches off cached state and never awaits before
- * enable() — awaiting burns the click's transient user activation and Safari
- * then refuses the permission prompt. See the ordering comment in push.js.
  */
 function wirePushToggle() {
-  const wrap = document.getElementById("push-toggle-wrap");
-  const btn = document.getElementById("btn-push-toggle");
-  const label = document.getElementById("btn-push-label");
-  if (!wrap || !btn || !label) return;
   if (!window.polarisPush || !polarisPush.isSupported()) return;
   if (!permAtLeast("alerts", "read")) return;
-
-  let state = null;
-  let busy = false;
-
-  function paint(st) {
-    state = st;
-    // No Web Push channel configured server-side — hide rather than offer a
-    // control that can only error. Mirrors the Automations page.
-    if (!st || !st.enabledOnServer) { wrap.style.display = "none"; return; }
-    if (st.permission === "denied") {
-      // Sticky: requestPermission() resolves instantly with no UI once denied.
-      wrap.style.display = "";
-      label.textContent = "Push blocked in browser";
-      btn.disabled = true;
-      btn.title = "Notifications are blocked for this site in your browser settings.";
-      return;
-    }
-    wrap.style.display = "";
-    btn.disabled = false;
-    btn.title = "";
-    label.textContent = st.subscribed ? "Disable push" : "Enable push";
-  }
-
-  btn.addEventListener("click", function () {
-    if (busy || !state || state.permission === "denied") return;
-    busy = true;
-    const wasSubscribed = !!state.subscribed;
-    label.textContent = wasSubscribed ? "Disabling…" : "Enabling…";
-
-    const action = wasSubscribed ? polarisPush.disable() : polarisPush.enable({ surface: "desktop" });
-    action.then(function () {
-      if (typeof showToast === "function") {
-        showToast(wasSubscribed ? "Push notifications disabled" : "Push notifications enabled", wasSubscribed ? "info" : "success");
-      }
-    }).catch(function (err) {
-      if (typeof showToast === "function") showToast((err && err.message) || "Push action failed", "error");
-    }).then(function () {
-      busy = false;
-      return polarisPush.status().then(paint).catch(function () {});
-    });
-  });
 
   polarisPush.registerSW()
     .then(function () { return polarisPush.reconcileSubscription("desktop"); })
     .catch(function () { /* push is optional */ });
 
-  polarisPush.status().then(paint).catch(function () { wrap.style.display = "none"; });
+  polarisPush.status()
+    .then(function (st) { _pushState = st || null; })
+    .catch(function () { _pushState = null; });
+}
+
+/**
+ * The user menu's push row, or null when push isn't on offer — unsupported
+ * browser, a role below alerts:read, or no Web Push channel configured
+ * server-side (offering a control that can only error is worse than omitting
+ * it; mirrors the Automations page).
+ */
+function _pushMenuItem() {
+  if (!window.polarisPush || !polarisPush.isSupported()) return null;
+  if (!permAtLeast("alerts", "read")) return null;
+  if (!_pushState || !_pushState.enabledOnServer) return null;
+
+  if (_pushState.permission === "denied") {
+    // Sticky: requestPermission() resolves instantly with no UI once denied,
+    // so the row states the reason rather than pretending to be actionable.
+    return {
+      label: "Push blocked in browser",
+      icon: ICONS.bell,
+      disabled: true,
+      title: "Notifications are blocked for this site in your browser settings.",
+    };
+  }
+
+  var subscribed = !!_pushState.subscribed;
+  return {
+    label: subscribed ? "Disable push" : "Enable push",
+    icon: ICONS.bell,
+    onSelect: _togglePush,
+  };
+}
+
+/**
+ * Never await before enable() — awaiting burns the click's transient user
+ * activation and Safari then refuses the permission prompt. That's why this
+ * branches off the cached _pushState instead of re-reading status(). See the
+ * ordering comment in push.js.
+ */
+function _togglePush() {
+  if (_pushBusy || !_pushState || _pushState.permission === "denied") return;
+  _pushBusy = true;
+  var wasSubscribed = !!_pushState.subscribed;
+
+  var action = wasSubscribed ? polarisPush.disable() : polarisPush.enable({ surface: "desktop" });
+  action.then(function () {
+    if (typeof showToast === "function") {
+      showToast(wasSubscribed ? "Push notifications disabled" : "Push notifications enabled", wasSubscribed ? "info" : "success");
+    }
+  }).catch(function (err) {
+    if (typeof showToast === "function") showToast((err && err.message) || "Push action failed", "error");
+  }).then(function () {
+    _pushBusy = false;
+    return polarisPush.status().then(function (st) { _pushState = st || null; }).catch(function () {});
+  });
 }
 
 const ICONS = {
@@ -297,35 +307,14 @@ function renderNav() {
       ${(isAdmin() || canManageAssets()) ? `<div style="padding:0.5rem 0.5rem 0;border-top:1px solid var(--color-border-light)">
         <a href="/server-settings.html" class="sidebar-bottom-link${current === '/server-settings.html' ? ' active' : ''}">${ICONS.settings}<span>Server Settings</span></a>
       </div>` : ''}
-      <div style="padding:${(isAdmin() || canManageAssets()) ? '0.25rem' : '0.5rem'} 0.5rem 0;${(isAdmin() || canManageAssets()) ? '' : 'border-top:1px solid var(--color-border-light);'}">
-        <button id="btn-theme-toggle" class="theme-toggle">${_getCurrentTheme() === 'dark' ? _sunIcon() : _moonIcon()}<span>${_getCurrentTheme() === 'dark' ? 'Light Mode' : 'Dark Mode'}</span></button>
-      </div>
-      <!-- Push enrollment lives here, not only on the Automations page. The
-           push routes gate on alerts:read ("any viewer may opt into push"),
-           but /automations.html is page-gated automationManagement:read — so
-           an alerts-focused role could not enroll at all. The sidebar renders
-           on every page, which also fixes discoverability. Hidden until
-           wirePushToggle() confirms browser support + a configured server
-           channel. -->
-      <div id="push-toggle-wrap" style="display:none;padding:0.25rem 0.5rem 0">
-        <button id="btn-push-toggle" class="theme-toggle">${ICONS.bell || ''}<span id="btn-push-label">Push notifications</span></button>
-      </div>
-      <div style="padding:0.25rem 0.5rem 0.75rem">
-        <a href="#" id="btn-logout" class="sidebar-bottom-link sidebar-bottom-link-logout">${ICONS.logout}<span>Logout</span></a>
-      </div>
+      <!-- Theme, push enrollment and logout used to sit here. They now live in
+           the user menu behind the page-header badge (renderUserBadge), which
+           renders on every page just as the sidebar does — push in particular
+           must stay reachable for an alerts:read role that cannot open
+           /automations.html, where the only enrollment control once lived. -->
       <div id="sidebar-version" style="padding:0 0.75rem 0.75rem;text-align:center;font-size:0.7rem;color:var(--color-text-tertiary);letter-spacing:0.02em"></div>
     </div>
   `;
-
-  document.getElementById("btn-theme-toggle").addEventListener("click", function () {
-    _setTheme(_getCurrentTheme() === "dark" ? "light" : "dark");
-  });
-
-  document.getElementById("btn-logout").addEventListener("click", async function (e) {
-    e.preventDefault();
-    try { await fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() }); } catch (_) {}
-    window.location.href = "/login.html";
-  });
 
   wirePushToggle();
 
@@ -1080,7 +1069,14 @@ function renderUserBadge() {
   // app.js; page-specific DOMContentLoaded handlers like map.js that re-run
   // renderNav after their own fetchCurrentUser).
   var existing = header.querySelectorAll(".user-badge");
-  for (var i = 0; i < existing.length; i++) existing[i].remove();
+  for (var i = 0; i < existing.length; i++) {
+    // An open account menu is body-mounted and fixed, so it would outlive the
+    // badge it hangs off. Close it here rather than leaving it anchored to a
+    // detached node — scoped to THIS badge so a re-render can't shut a row
+    // menu somewhere else on the page.
+    if (_rowMenuTeardown && _rowMenuTeardown.anchor === existing[i]) closeRowMenu({ silent: true });
+    existing[i].remove();
+  }
 
   var initials = _getUserInitials(currentUsername);
   var color = _getInitialsColor(currentUsername);
@@ -1093,14 +1089,57 @@ function renderUserBadge() {
     ? 'class="badge" style="font-size:0.7rem;padding:1px 6px;' + roleColorStyle + '"'
     : 'class="badge ' + _getRoleBadgeClass(currentUserRole) + '" style="font-size:0.7rem;padding:1px 6px"';
 
-  var badge = document.createElement("div");
-  badge.className = "user-badge";
+  // The badge is the account menu's trigger — theme, push enrollment and
+  // logout hang off it rather than off the sidebar bottom, so per-account
+  // actions sit with the account identity instead of with the navigation.
+  var badge = document.createElement("button");
+  badge.type = "button";
+  badge.className = "user-badge user-menu-trigger";
+  badge.setAttribute("aria-haspopup", "menu");
+  badge.setAttribute("aria-expanded", "false");
   badge.innerHTML =
     '<div class="user-badge-avatar" style="background:' + color + '">' + escapeHtml(initials) + '</div>' +
     '<span class="user-badge-name">' + escapeHtml(currentUsername) + '</span>' +
-    (roleLabel ? '<span ' + roleBadgeAttrs + '>' + escapeHtml(roleLabel) + '</span>' : '');
+    (roleLabel ? '<span ' + roleBadgeAttrs + '>' + escapeHtml(roleLabel) + '</span>' : '') +
+    '<svg class="user-badge-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
   badge.title = currentUsername + ' (' + roleLabel + ')';
+  badge.addEventListener("click", function () { openUserMenu(badge); });
   header.appendChild(badge);
+}
+
+/**
+ * The account menu behind the page-header user badge: theme, push enrollment,
+ * logout. Items are built per open so the theme label and the push row reflect
+ * current state without anything to keep repainted.
+ */
+function openUserMenu(anchor) {
+  if (typeof showRowMenu !== "function") return;
+
+  var isDark = _getCurrentTheme() === "dark";
+  var items = [
+    {
+      label: isDark ? "Light Mode" : "Dark Mode",
+      icon: isDark ? _sunIcon() : _moonIcon(),
+      onSelect: function () { _setTheme(isDark ? "light" : "dark"); },
+    },
+  ];
+
+  var push = _pushMenuItem();
+  if (push) items.push(push);
+
+  items.push({ separator: true });
+  items.push({
+    label: "Logout",
+    icon: ICONS.logout,
+    danger: true,
+    onSelect: function () {
+      fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() })
+        .catch(function () { /* log out locally regardless */ })
+        .then(function () { window.location.href = "/login.html"; });
+    },
+  });
+
+  showRowMenu(anchor, items, { label: "Account menu", align: "end" });
 }
 
 // ─── Branding ──────────────────────────────────────────────────────────────
@@ -2015,9 +2054,19 @@ function showRowMenu(anchor, items, opts) {
     var b = document.createElement("button");
     b.type = "button";
     b.setAttribute("role", "menuitem");
-    b.textContent = it.label;
+    // `icon` is developer-supplied SVG markup (ICONS / _sunIcon), never user
+    // data, so innerHTML is safe here; the label stays textContent regardless.
+    if (it.icon) {
+      b.innerHTML = it.icon;
+      var lbl = document.createElement("span");
+      lbl.textContent = it.label;
+      b.appendChild(lbl);
+      b.className = "has-icon" + (it.danger ? " danger" : "");
+    } else {
+      b.textContent = it.label;
+      if (it.danger) b.className = "danger";
+    }
     if (it.title) b.title = it.title;
-    if (it.danger) b.className = "danger";
     if (it.disabled) {
       b.disabled = true;
     } else {
@@ -2045,14 +2094,21 @@ function showRowMenu(anchor, items, opts) {
     var above = r.top - 4 - mh;
     top = above >= pad ? above : Math.max(pad, window.innerHeight - pad - mh);
   }
-  var left = r.left;
+  // Left-aligned to the anchor by default; `align:"end"` right-aligns it, which
+  // is what a trigger sitting at the right edge of the page header wants.
+  var left = (opts && opts.align === "end") ? r.right - mw : r.left;
   if (left + mw > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - pad - mw);
+  if (left < pad) left = pad;
   menu.style.top = top + "px";
   menu.style.left = left + "px";
 
   // ── Dismissal + keyboard ────────────────────────────────────────────────
   function onDocPointerDown(e) {
-    if (!menu.contains(e.target) && e.target !== anchor) closeRowMenu();
+    // `contains` on the anchor, not identity: a trigger with child elements
+    // (the account badge's avatar / name / caret) would otherwise close here
+    // on pointerdown and immediately re-open on the click, so a second click
+    // could never dismiss it.
+    if (!menu.contains(e.target) && !anchor.contains(e.target)) closeRowMenu();
   }
   function onKeyDown(e) {
     if (e.key === "Escape") { e.stopPropagation(); closeRowMenu(); return; }

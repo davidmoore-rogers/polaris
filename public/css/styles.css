@@ -981,6 +981,36 @@ code {
   white-space: nowrap;
 }
 
+/* The badge doubles as the account menu's trigger (theme / push / logout —
+   openUserMenu in app.js). It keeps the plain-badge look until hovered so the
+   page header still reads as identity rather than as another control. */
+.user-menu-trigger {
+  background: none;
+  border: none;
+  border-left: 1px solid var(--color-border);
+  font-family: inherit;
+  cursor: pointer;
+  padding: 0.2rem 0.4rem 0.2rem 0.75rem;
+  border-radius: var(--radius-md);
+  transition: background 0.12s;
+}
+.user-menu-trigger:hover,
+.user-menu-trigger[aria-expanded="true"] {
+  background: var(--color-bg-secondary);
+}
+.user-menu-trigger:hover .user-badge-name,
+.user-menu-trigger[aria-expanded="true"] .user-badge-name {
+  color: var(--color-text-primary);
+}
+.user-badge-caret {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.55;
+  color: var(--color-text-secondary);
+}
+.user-menu-trigger[aria-expanded="true"] .user-badge-caret { opacity: 1; }
+
 /* ─── Cards ────────────────────────────────────────────────────────────────── */
 .card {
   background: var(--color-bg-primary);
@@ -1163,6 +1193,20 @@ code {
 }
 .btn-dropdown-menu button:disabled:hover { background: none; }
 .btn-dropdown-menu button.danger { color: var(--color-danger, #c53030); }
+/* Icon rows (the account menu). Label stays a <span> so the SVG can't be
+   confused for text; icons are muted until the row is hovered. */
+.btn-dropdown-menu button.has-icon {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.btn-dropdown-menu button.has-icon svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  opacity: 0.65;
+}
+.btn-dropdown-menu button.has-icon:hover svg { opacity: 1; }
 
 /* ─── Row context menu ─────────────────────────────────────────────────────
    The list pages' per-row verbs (Open / Edit / Clone / Delete), opened from the

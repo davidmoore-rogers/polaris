@@ -33,6 +33,7 @@ interface MenuItem {
   title?: string;
   separator?: boolean;
   heading?: string;
+  icon?: string;
 }
 
 let win: InstanceType<typeof Window>;
@@ -115,6 +116,17 @@ describe("showRowMenu — rendering", () => {
     expect(menu()).toBeFalsy();
   });
 
+  it("renders an icon beside the label without swallowing the label", () => {
+    // The account menu (theme / push / logout) is the icon-bearing caller;
+    // the label has to stay real text so the row is still findable by name.
+    showRowMenu(anchor, [{ label: "Logout", icon: "<svg><path/></svg>", onSelect: () => {}, danger: true }]);
+    const b = doc.querySelector(".row-context-menu button")!;
+    expect(b.classList.contains("has-icon")).toBe(true);
+    expect(b.classList.contains("danger")).toBe(true);
+    expect(b.querySelector("svg")).toBeTruthy();
+    expect(b.textContent).toBe("Logout");
+  });
+
   it("mounts on <body>, not in the row — table wrappers clip overflow", () => {
     showRowMenu(anchor, [{ label: "Open", onSelect: () => {} }]);
     expect(menu()!.parentElement!.tagName).toBe("BODY");
@@ -185,6 +197,16 @@ describe("showRowMenu — dismissal", () => {
     showRowMenu(anchor, [{ label: "Open", onSelect: () => {} }]);
     showRowMenu(anchor, [{ label: "Open", onSelect: () => {} }]);
     expect(doc.querySelectorAll(".row-context-menu").length).toBe(0);
+  });
+
+  it("stays open on a pointerdown inside the anchor's own children", () => {
+    // The account badge's trigger wraps an avatar, a name and a caret. Closing
+    // here would let the click that follows re-open it, so a second click on
+    // the badge could never dismiss the menu.
+    anchor.innerHTML = '<span id="anchor-kid">david.moore</span>';
+    showRowMenu(anchor, [{ label: "Logout", onSelect: () => {} }]);
+    doc.querySelector("#anchor-kid")!.dispatchEvent(new win.Event("pointerdown", { bubbles: true }));
+    expect(menu()).toBeTruthy();
   });
 
   it("opening from a different anchor replaces the open menu", () => {
