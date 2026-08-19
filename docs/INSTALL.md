@@ -782,7 +782,10 @@ Server Settings → Web Server now shows the in-app nginx GUI: the
 button), an **nginx Proxy** card with the six controls (HTTPS port, HTTP/3
 toggle, TLS protocols, HSTS, Prometheus allow-list), the **Dash Wallboard**
 card (enable toggle + source-IP scope for the unauthenticated read-only
-`/dash` surface), and the **Trusted Certificate Authorities** card (unchanged).
+`/dash` surface), the **Local Login Access** card (optional source-IP
+restriction on the local login form and password endpoints — off by default;
+SSO sign-in is never restricted), and the **Trusted Certificate Authorities**
+card (unchanged).
 
 > **Upgrade note (Dash wallboard release):** the shipped nginx config gained
 > two `/dash` location blocks (5 → 7 locations). Installs in managed mode
