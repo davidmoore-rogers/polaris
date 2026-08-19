@@ -258,39 +258,61 @@ describe("device filter — the shared condition tree", () => {
     void editorDone;
     await flush(5);
   }
-  const radio = (v: string) => doc.querySelector('input[name="ab-own"][value="' + v + '"]') as unknown as
+  const allCb = () => doc.getElementById("ab-all-devices") as unknown as
     { checked: boolean; dispatchEvent: (e: unknown) => void };
-  function pick(v: string) {
-    const r = radio(v);
-    r.checked = true;
-    r.dispatchEvent(new win.Event("change", { bubbles: true }));
+  /** Tick or untick All devices, the way the operator does. */
+  function setAllDevices(on: boolean) {
+    const cb = allCb();
+    cb.checked = on;
+    cb.dispatchEvent(new win.Event("change", { bubbles: true }));
   }
   function save() { click(doc.querySelector('[data-ab="save"]')); }
 
-  it("offers the three ownership states, defaulting a new contact to none", async () => {
+  it("is the automations Devices control: All devices, checked by default", async () => {
     await openEditor(null);
-    expect(doc.querySelectorAll('input[name="ab-own"]')).toHaveLength(3);
-    expect(radio("none").checked).toBe(true);
-    // The builder is present but not shown until "filter" is chosen.
+    // Same two-state shape as the wizard's "All assets" — not a third radio.
+    expect(doc.querySelectorAll('input[name="ab-own"]')).toHaveLength(0);
+    expect(allCb().checked).toBe(true);
     expect((doc.getElementById("ab-filter-wrap") as unknown as { style: { display: string } }).style.display)
       .toBe("none");
   });
 
+  it("unchecking reveals the builder with a starter row", async () => {
+    await openEditor(null);
+    expect(doc.querySelectorAll("#ab-cond-root .scr-row")).toHaveLength(0);
+    setAllDevices(false);
+    expect((doc.getElementById("ab-filter-wrap") as unknown as { style: { display: string } }).style.display)
+      .not.toBe("none");
+    expect(doc.querySelectorAll("#ab-cond-root .scr-row").length).toBeGreaterThan(0);
+  });
+
+  it("unchecked with an empty filter means pins-only, not all devices", async () => {
+    // The one place contacts differ from automations, where an empty tree with
+    // All-assets unchecked is a validation error: a contact is useful as a bare
+    // address, so this saves as "no filter" rather than refusing.
+    await openEditor(null);
+    (doc.getElementById("ab-email") as unknown as { value: string }).value = "bare@example.com";
+    setAllDevices(false);
+    // Drop the seeded starter row entirely — a row left BLANK is refused with
+    // "give every condition a value" (the wizard's behaviour), so the pins-only
+    // state is reached by removing it, not by emptying it.
+    click(doc.querySelector("#ab-cond-root .scr-remove"));
+    save();
+    await flush();
+    expect(created).toHaveLength(1);
+    expect(created[0]!.assetAllDevices).toBeUndefined();
+    expect(created[0]!.assetCondition).toBeUndefined();
+    expect(created[0]!.assetCriteria).toBeUndefined();
+  });
+
   it("renders the tree with the WIDER vocabulary this surface carries", async () => {
     await openEditor(null);
-    pick("filter");
+    setAllDevices(false);
     const fields = Array.from(doc.querySelectorAll("#ab-cond-root .scr-field option"))
       .map((o) => (o as unknown as { value: string }).value);
     // "location" exists here and deliberately not in the automations scope.
     expect(fields).toContain("location");
     expect(fields).toContain("hostname");
-  });
-
-  it("seeds an editable row when the filter is revealed empty", async () => {
-    await openEditor(null);
-    expect(doc.querySelectorAll("#ab-cond-root .scr-row")).toHaveLength(0);
-    pick("filter");
-    expect(doc.querySelectorAll("#ab-cond-root .scr-row").length).toBeGreaterThan(0);
   });
 
   it("opens a stored condition into the builder", async () => {
@@ -302,7 +324,8 @@ describe("device filter — the shared condition tree", () => {
       assetFilterUnconvertible: [],
       assetIds: [],
     });
-    expect(radio("filter").checked).toBe(true);
+    // A stored filter opens with All devices UNCHECKED and the tree shown.
+    expect(allCb().checked).toBe(false);
     const vals = Array.from(doc.querySelectorAll("#ab-cond-root .scr-value"))
       .map((i) => (i as unknown as { value: string }).value);
     expect(vals).toContain("Nashville");
@@ -311,7 +334,7 @@ describe("device filter — the shared condition tree", () => {
   it("saves the tree as assetCondition, never as flat criteria", async () => {
     await openEditor(null);
     (doc.getElementById("ab-email") as unknown as { value: string }).value = "new@example.com";
-    pick("filter");
+    setAllDevices(false);
     (doc.querySelector("#ab-cond-root .scr-value") as unknown as { value: string }).value = "Nashville";
     (doc.querySelector("#ab-cond-root .scr-field") as unknown as { value: string }).value = "location";
     save();
@@ -324,7 +347,7 @@ describe("device filter — the shared condition tree", () => {
   it("sends the explicit all-devices flag rather than an empty tree", async () => {
     await openEditor(null);
     (doc.getElementById("ab-email") as unknown as { value: string }).value = "noc@example.com";
-    pick("all");
+    setAllDevices(true);
     save();
     await flush();
     expect(created[0]!.assetAllDevices).toBe(true);
@@ -340,8 +363,9 @@ describe("device filter — the shared condition tree", () => {
       id: "c8", email: "byint@example.com", assetCondition: null, assetConditionEffective: null,
       assetCriteria: legacy, assetFilterUnconvertible: ["integration"], assetIds: [],
     });
-    // The operator is told, and the radio doesn't read as "owns nothing".
-    expect(radio("filter").checked).toBe(true);
+    // The operator is told, and All devices stays UNCHECKED — ticking it would
+    // silently widen the contact from its legacy filter to the whole fleet.
+    expect(allCb().checked).toBe(false);
     expect((doc.querySelector("#ab-filter-wrap") as unknown as { textContent: string }).textContent)
       .toMatch(/can’t show/i);
     save();
@@ -358,13 +382,14 @@ describe("device filter — the shared condition tree", () => {
     await new Promise((r) => setTimeout(r, 500));
     previewed.length = 0;
 
-    pick("none");
+    setAllDevices(false);
+    click(doc.querySelector("#ab-cond-root .scr-remove"));
     await new Promise((r) => setTimeout(r, 500));
     expect(previewed).toHaveLength(0); // nothing to ask the server about
     expect((doc.getElementById("ab-preview") as unknown as { textContent: string }).textContent)
       .toMatch(/address-only/i);
 
-    pick("all");
+    setAllDevices(true);
     // The preview is debounced ~400ms — the wait is the point of the assertion.
     await new Promise((r) => setTimeout(r, 500));
     expect(previewed.some((b) => b.assetAllDevices === true)).toBe(true);
@@ -417,11 +442,38 @@ describe("picker selection", () => {
 
     click(doc.querySelector('[data-ab-tab="regions"]'));
     expect(pane.style.display).toBe("");
-    // The two dynamic entries come first — they need no catalogue at all.
-    const names = Array.from(pane.textContent.matchAll(/Asset’s [^<]*?(Region Users|Responsible Contacts)/g));
-    expect(names.length).toBe(2);
+    // Region users head the Regions list; responsible CONTACTS are people, so
+    // they head the People list instead (asserted below).
+    expect(pane.textContent).toContain("Region Users");
+    expect(pane.textContent).not.toContain("Responsible Contacts");
     expect(pane.textContent).toContain("Nashville");
     expect(pane.textContent).toContain("Memphis");
+  });
+
+  it("heads the PEOPLE list with the responsible-contacts entry", async () => {
+    (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<unknown> } })
+      .PolarisAddressBook.openPicker({ field: "to" });
+    await flush(5);
+    const rows = Array.from(doc.querySelectorAll('[data-ab-pane="people"] tbody tr'));
+    // First row, above the search results — it isn't a search hit, it's the
+    // standing answer to "whoever owns the device".
+    expect((rows[0] as unknown as { textContent: string }).textContent).toContain("Responsible Contacts");
+    expect((rows[1] as unknown as { textContent: string }).textContent).toContain("jane@example.com");
+  });
+
+  it("keeps the responsible-contacts entry when a search matches nobody", async () => {
+    (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<unknown> } })
+      .PolarisAddressBook.openPicker({ field: "to" });
+    await flush(5);
+    searchEntries = [];
+    const box = doc.getElementById("ab-pick-search") as unknown as
+      { value: string; dispatchEvent: (e: unknown) => void };
+    box.value = "nobodyxyz";
+    box.dispatchEvent(new win.Event("input", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    const pane = doc.querySelector('[data-ab-pane="people"]') as unknown as { textContent: string };
+    expect(pane.textContent).toContain("Responsible Contacts");
+    expect(pane.textContent).toMatch(/no people match/i);
   });
 
   it("returns a region and a dynamic entry with their own sources", async () => {
@@ -431,14 +483,14 @@ describe("picker selection", () => {
     click(doc.querySelector('[data-ab-tab="regions"]'));
 
     const boxes = Array.from(doc.querySelectorAll('[data-ab-pane="regions"] [data-ab-pick]'));
-    // deviceRegion, assetContacts, Nashville, Memphis — in that order.
-    expect(boxes.length).toBe(4);
+    // deviceRegion, Nashville, Memphis — assetContacts lives in People now.
+    expect(boxes.length).toBe(3);
     const tick = (el: unknown) => {
       (el as { checked: boolean }).checked = true;
       (el as { dispatchEvent: (e: unknown) => void }).dispatchEvent(new win.Event("change", { bubbles: true }));
     };
     tick(boxes[0]);
-    tick(boxes[2]);
+    tick(boxes[1]);
     click(doc.querySelector('[data-ab="add-cc"]'));
     await flush();
 

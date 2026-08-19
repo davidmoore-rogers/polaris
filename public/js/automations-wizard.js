@@ -2208,6 +2208,10 @@ async function openAutomationWizard(existing, opts) {
     collectStep3();
     el.innerHTML = triggerSentence(draft.trigger, draftLadder());
     refreshTriggerFormula();
+    // Adding or removing a condition changes which × belongs on screen, and it
+    // reaches us through the builder's onChange rather than an input event.
+    var panel = document.getElementById("aw-step-3");
+    if (panel && multiSevOn(panel)) syncBaseTierRemove(panel);
   }
   /** The formula block under the sentence. Hidden entirely for the trigger types
    *  that have no value to compute (event / change), rather than shown empty. */
@@ -2792,6 +2796,7 @@ async function openAutomationWizard(existing, opts) {
     }
     // Base severity + the first "+ Severity" live in the condition group header.
     injectBaseSeverity(panel, multi);
+    if (multi) syncBaseTierRemove(panel);
     applySevAccent(panel);
   }
   function sevSelectHtml(cls, sev) {
@@ -2800,6 +2805,25 @@ async function openAutomationWizard(existing, opts) {
   // In multi mode, inject a Base severity select into the condition group header
   // (before the AND/OR select) + a "+ Severity" button in the group's button row,
   // and accent the group border. Removed again in single mode. Idempotent.
+  /**
+   * One × per severity block. With a single condition the header's × stands in
+   * for the row's (matching the bands, whose × is right-aligned on the severity
+   * line); with several conditions each row keeps its own, because a header
+   * button could not say WHICH one it removes.
+   */
+  function syncBaseTierRemove(panel) {
+    var root = panel && panel.querySelector("#aw-trig-root > .scg-group");
+    if (!root) return;
+    var hx = root.querySelector(":scope > div > .scg-base-remove");
+    var rows = root.querySelectorAll(":scope > .scg-children > .scr-row");
+    var groups = root.querySelectorAll(":scope > .scg-children > .scg-group");
+    var single = rows.length === 1 && groups.length === 0;
+    if (hx) hx.style.display = single ? "" : "none";
+    root.querySelectorAll(":scope > .scg-children > .scr-row > .scr-remove").forEach(function (b) {
+      b.style.display = single ? "none" : "";
+    });
+  }
+
   function injectBaseSeverity(panel, multi) {
     var root = panel.querySelector("#aw-trig-root > .scg-group");
     if (!root) return;
@@ -2818,6 +2842,22 @@ async function openAutomationWizard(existing, opts) {
       if (existingAdd) existingAdd.remove();
       if (durGroup && root.contains(durGroup)) panel.querySelector("#aw-trigger-fields").appendChild(durGroup);
       root.style.borderLeftColor = "";
+      // Put the group's own chrome back: with one severity there is no tier to
+      // line up with, so the combinator shares the header row again and each
+      // condition keeps its own remove button.
+      var wrappedOp = header && header.querySelector(":scope > .scg-op");
+      if (wrappedOp) {
+        wrappedOp.style.flex = "1";
+        wrappedOp.style.width = "";
+        wrappedOp.style.order = "";
+        wrappedOp.style.marginTop = "";
+      }
+      if (header) header.style.cssText = "display:flex;gap:6px;align-items:center;margin-bottom:2px";
+      var baseX = header && header.querySelector(".scg-base-remove");
+      if (baseX) baseX.remove();
+      root.querySelectorAll(":scope > .scg-children > .scr-row > .scr-remove").forEach(function (b) {
+        b.style.display = "";
+      });
       return;
     }
     if (durGroup && btnRow && !root.contains(durGroup)) root.insertBefore(durGroup, btnRow);
@@ -2827,6 +2867,43 @@ async function openAutomationWizard(existing, opts) {
       wrap.style.cssText = "display:flex;align-items:center;gap:6px;margin-right:6px";
       wrap.innerHTML = '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' + sevSelectHtml("scg-sev", draft.severity || "warning");
       header.insertBefore(wrap, header.firstChild);
+      // Take the BANDS' layout: severity alone on the header line with the
+      // remove × right-aligned, and the AND/OR select on its own line below. The
+      // base tier is a severity block like the others, so it should not be the
+      // one that reads differently — and the combinator sharing a line with the
+      // severity select made it look like a property OF that severity.
+      header.style.cssText = "display:flex;gap:6px;align-items:center;margin-bottom:2px;flex-wrap:wrap";
+      // WRAPPED, not moved: `tgCollectGroup` reads this group's combinator as
+      // `:scope > div > .scg-op`, so relocating the select out of the header
+      // makes collection throw — which silently broke Next and the tier
+      // mirroring. Full-basis + flex order puts it on the second line while it
+      // stays exactly where the collector looks for it.
+      var opSel = header.querySelector(":scope > .scg-op");
+      if (opSel) {
+        opSel.style.flex = "0 0 100%";
+        opSel.style.width = "100%";
+        opSel.style.order = "2";
+        opSel.style.marginTop = "2px";
+      }
+      // The × is the CONDITION's own remove button, proxied up into the header so
+      // it sits where every band's × sits. A proxy rather than a move: the
+      // builder's delegated handler resolves `closest(".scr-row")`, which a
+      // relocated button would no longer find. syncBaseTierRemove keeps exactly
+      // one × on screen — the header's while the base tier holds a single
+      // condition (the only shape multi-severity mode allows, since the tiers
+      // mirror one metric), each row's own once there are several to tell apart.
+      var hx = document.createElement("button");
+      hx.type = "button";
+      hx.className = "btn btn-sm btn-danger scg-base-remove";
+      hx.title = "Remove condition";
+      hx.innerHTML = "&times;";
+      hx.style.marginLeft = "auto"; // right-aligned on the severity line
+      hx.style.order = "1";          // ...which the wrapped combinator follows
+      hx.addEventListener("click", function () {
+        var real = root.querySelector(".scg-children > .scr-row .scr-remove");
+        if (real) real.click();
+      });
+      header.appendChild(hx);
       var sel = wrap.querySelector(".scg-sev");
       sel.value = draft.severity || "warning"; // don't rely on the markup's selected attr
       sel.addEventListener("change", function () {

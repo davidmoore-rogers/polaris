@@ -155,35 +155,32 @@
   }
 
   /**
-   * Which of the three ownership states a stored contact is in. A contact —
-   * unlike an automation — may legitimately own NOTHING (an address-only entry,
-   * which is most of them), so the wizard's two-state All-assets checkbox
-   * becomes three radios here. "All devices" is a real choice for a NOC mailbox,
-   * and the server only ever produces it from an explicit flag.
+   * Is this contact responsible for EVERY device? Drives the All-devices
+   * checkbox, which is the automations Devices step's control exactly — same
+   * default-checked two-state shape, so "which devices?" is asked the same way in
+   * both places.
+   *
+   * A NEW contact starts checked (`c` null). Unchecking reveals the builder, and
+   * an empty builder means "no filter" — only the pinned devices below, which is
+   * the address-only state most contacts are in. That last part is where contacts
+   * differ from automations, where an empty tree with All-assets unchecked is a
+   * validation error: an automation must select something to be worth saving,
+   * while a contact is perfectly useful as a bare address.
    */
-  function ownershipModeOf(c) {
-    if (!c) return "none";
-    if (c.assetAllDevices) return "all";
+  function allDevicesOf(c) {
+    if (!c) return true;
+    if (c.assetAllDevices) return true;
     var cond = c.assetConditionEffective || c.assetCondition;
-    if (cond && (cond.children || []).length === 0) return "all"; // the all-devices marker
-    if (cond) return "filter";
-    // A legacy blob the builder can't render still counts as a filter, so the
-    // radio doesn't read as "owns nothing" while the contact keeps matching.
-    if ((c.assetFilterUnconvertible || []).length) return "filter";
-    return "none";
+    // The all-devices marker is an empty AND group (true for every asset by
+    // boolean identity); anything else is a real filter.
+    return !!cond && (cond.children || []).length === 0;
   }
 
   function editorBodyHtml(c, builder) {
-    var mode = ownershipModeOf(c);
+    var allDevices = allDevicesOf(c);
     var stuck = (c && c.assetFilterUnconvertible) || [];
     var cond = (c && (c.assetConditionEffective || c.assetCondition)) || null;
     var root = cond && (cond.children || []).length ? cond : { op: "and", children: [] };
-    var radio = function (value, label, hint) {
-      return '<label class="appmap-check" style="display:block;margin:4px 0">' +
-        '<input type="radio" name="ab-own" value="' + value + '"' + (mode === value ? " checked" : "") + '> ' +
-        escapeHtml(label) + '</label>' +
-        (hint ? '<p class="hint" style="margin:0 0 6px 24px">' + hint + '</p>' : "");
-    };
     return '' +
       '<div class="form-group">' +
         '<label for="ab-email">Email address</label>' +
@@ -206,10 +203,12 @@
         '<p class="hint" style="margin-top:0">An automation whose Notify action routes to ' +
           '“the contacts responsible for the triggering device” reaches this address for any device below. ' +
           'Pinned devices are added on top of whatever the filter matches.</p>' +
-        radio("none", "No filter", "Only the devices pinned below, if any — otherwise this contact is reachable just by being named in an automation.") +
-        radio("filter", "Devices matching a filter") +
-        radio("all", "All devices", "Every device in the inventory, including ones discovered later.") +
-        '<div id="ab-filter-wrap"' + (mode === "filter" ? "" : ' style="display:none"') + '>' +
+        '<div class="form-group" style="margin-bottom:0.5rem">' +
+          '<label style="font-weight:600"><input type="checkbox" id="ab-all-devices"' + (allDevices ? " checked" : "") + '> All devices</label>' +
+          '<p class="hint" style="margin:2px 0 0 24px">Every device in the inventory, including ones discovered later. ' +
+            'Uncheck to filter which devices this contact is responsible for — leave the filter empty and only the pinned devices below count.</p>' +
+        '</div>' +
+        '<div id="ab-filter-wrap"' + (allDevices ? ' style="display:none"' : "") + '>' +
           (stuck.length
             ? '<p class="hint" style="color:var(--color-warning);margin:0 0 8px">This contact’s filter uses ' +
                 escapeHtml(stuck.join(", ")) + ', which this builder can’t show. It still applies — ' +
@@ -282,38 +281,36 @@
       function q(sel) { return root.querySelector(sel); }
 
       // ── Device filter (the shared condition tree) ──
-      // Read the radios by PROPERTY rather than with a `:checked` selector:
+      // Read the checkbox by PROPERTY rather than with a `:checked` selector:
       // happy-dom resolves `:checked` from the attribute, so a selector here
       // would make the DOM tests assert the engine's behaviour instead of ours
       // (the same trap as <option selected> — see TEMPLATES.md).
-      function ownershipMode() {
-        var radios = root.querySelectorAll('input[name="ab-own"]');
-        for (var i = 0; i < radios.length; i++) if (radios[i].checked) return radios[i].value;
-        return "none";
+      function allDevicesChecked() {
+        var cb = q("#ab-all-devices");
+        return !!(cb && cb.checked);
       }
 
-      /** The device-ownership half of the request body, in all three modes. */
+      /** The device-ownership half of the request body. */
       function filterBody() {
-        var mode = ownershipMode();
-        if (mode === "all") return { assetAllDevices: true, assetIds: pins };
-        if (mode === "none") return { assetIds: pins };
+        if (allDevicesChecked()) return { assetAllDevices: true, assetIds: pins };
         var rootGroup = root.querySelector("#ab-cond-root > .scg-group");
         var tree = rootGroup ? condBuilder.collect(rootGroup) : null;
         if (tree && (tree.children || []).length) return { assetCondition: tree, assetIds: pins };
-        // Filter mode with nothing built: preserve a legacy blob we couldn't
-        // render, else there is simply no filter.
+        // Unchecked with nothing built: preserve a legacy blob we couldn't
+        // render, else there is simply no filter — only the pins.
         return stuckCriteria ? { assetCriteria: stuckCriteria, assetIds: pins } : { assetIds: pins };
       }
 
-      root.addEventListener("change", function (ev) {
-        if (!ev.target.closest || !ev.target.closest('input[name="ab-own"]')) return;
-        var filtering = ownershipMode() === "filter";
-        q("#ab-filter-wrap").style.display = filtering ? "" : "none";
-        // Revealed empty: seed a starter row so the operator lands on something
-        // editable (the wizard's All-assets untick does the same).
-        if (filtering) condBuilder.seedIfEmpty(q("#ab-cond-root"));
-        refreshPreview();
-      });
+      var allCb = q("#ab-all-devices");
+      if (allCb) {
+        allCb.addEventListener("change", function () {
+          q("#ab-filter-wrap").style.display = allCb.checked ? "none" : "";
+          // Revealed empty: seed a starter row so the operator lands on something
+          // editable (the wizard's All-assets untick does the same).
+          if (!allCb.checked) condBuilder.seedIfEmpty(q("#ab-cond-root"));
+          refreshPreview();
+        });
+      }
 
       // Rows, groups, the value combobox and the grip drag all live in the
       // shared module; the preview debounce rides its onChange.
@@ -542,19 +539,27 @@
    * under the wizard's recipient fields, which asked "who gets this?" in two
    * places; here they sit in the same list as everyone else and come back as
    * pills. `id` is fixed because one of each is meaningful.
+   *
+   * They live in DIFFERENT panes, by what they resolve to: responsible contacts
+   * are people out of this very address book, so they head the People list;
+   * region users are reached BY region, so they head the Regions list. Each sits
+   * at the top of its pane rather than in the results, because it isn't a search
+   * hit — it's the standing answer to "whoever owns the device".
    */
-  var DYNAMIC_RECIPIENTS = [
-    {
-      source: "deviceRegion",
-      id: "deviceRegion",
-      name: "Asset’s Region Users",
-      description: "Every user whose region tags match the triggering device’s own region: tag",
-    },
+  var PEOPLE_DYNAMIC = [
     {
       source: "assetContacts",
       id: "assetContacts",
       name: "Asset’s Responsible Contacts",
       description: "The address-book contacts whose device filter covers the triggering device",
+    },
+  ];
+  var REGION_DYNAMIC = [
+    {
+      source: "deviceRegion",
+      id: "deviceRegion",
+      name: "Asset’s Region Users",
+      description: "Every user whose region tags match the triggering device’s own region: tag",
     },
   ];
 
@@ -575,8 +580,8 @@
         '<div id="ab-pick-results"><p class="empty-state">Loading…</p></div>' +
       '</div>' +
       '<div data-ab-pane="regions" style="display:none">' +
-        '<p class="hint" style="margin-top:0">Pick a region to reach every user tagged with it, or one of the two ' +
-          '<strong>dynamic</strong> entries, which resolve from the device that triggered the alert.</p>' +
+        '<p class="hint" style="margin-top:0">Pick a region to reach every user tagged with it, or ' +
+          '<strong>Asset’s Region Users</strong>, which resolves from the region of the device that triggered the alert.</p>' +
         '<div id="ab-pick-regions"><p class="empty-state">Loading…</p></div>' +
       '</div>';
   }
@@ -658,11 +663,11 @@
 
       function render() {
         var box = q("#ab-pick-results");
-        if (!entries.length) {
-          box.innerHTML = '<p class="empty-state">No matches.</p>';
-          return;
-        }
-        box.innerHTML = pickTable(entries.map(pickRow));
+        // The dynamic entry heads the list unconditionally — it is not a search
+        // result, so a query that matches nobody must not hide it.
+        var rows = PEOPLE_DYNAMIC.map(pickRow).concat(entries.map(pickRow));
+        box.innerHTML = pickTable(rows) +
+          (entries.length ? "" : '<p class="hint" style="margin:8px 0 0">No people match that search.</p>');
       }
 
       /**
@@ -673,7 +678,7 @@
       function renderRegions() {
         var box = q("#ab-pick-regions");
         if (!box) return;
-        var rows = DYNAMIC_RECIPIENTS.map(pickRow).concat(regionEntries.map(pickRow));
+        var rows = REGION_DYNAMIC.map(pickRow).concat(regionEntries.map(pickRow));
         box.innerHTML = pickTable(rows) +
           (regionEntries.length
             ? ""
@@ -719,7 +724,7 @@
         var key = cb.getAttribute("data-ab-pick");
         // Both panes' pools, so a selection survives switching tabs — every
         // paint re-reads the checkbox state from `chosen`.
-        var pool = entries.concat(DYNAMIC_RECIPIENTS, regionEntries);
+        var pool = entries.concat(PEOPLE_DYNAMIC, REGION_DYNAMIC, regionEntries);
         var entry = null;
         for (var i = 0; i < pool.length; i++) if (pickKey(pool[i]) === key) entry = pool[i];
         if (cb.checked && entry) chosen[key] = entry;
