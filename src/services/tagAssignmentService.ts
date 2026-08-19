@@ -404,6 +404,23 @@ export function collectCidrs(criteria: TagCriteria): string[] {
   return cidrs;
 }
 
+/**
+ * Every distinct tag currently applied to an asset — the value list behind a
+ * `tag` picker in either device-filter builder. Same computation the
+ * `GET /assets/tags` route does inline; here so a route that isn't allowed to
+ * assume `assets:read` (the address book's filter schema) doesn't have to reach
+ * for a second gated endpoint or grow inline Prisma of its own.
+ */
+export async function listAssetTags(): Promise<string[]> {
+  const rows = await prisma.asset.findMany({
+    where: { NOT: { tags: { isEmpty: true } } },
+    select: { tags: true },
+  });
+  const set = new Set<string>();
+  for (const r of rows) for (const t of r.tags) set.add(t);
+  return Array.from(set).sort();
+}
+
 // ─── Matcher (pure predicate) ─────────────────────────────────────────────────
 
 type CidrMatch = (ip: string | null, cidrs: string[]) => boolean;

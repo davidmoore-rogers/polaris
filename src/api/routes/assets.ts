@@ -1603,7 +1603,7 @@ router.get("/:id/maintenance-info", requirePermission("assets", "read"), async (
 });
 
 // GET /assets/:id/contacts — the address-book entries RESPONSIBLE for this
-// device (Contact.assetCriteria ∪ Contact.assetIds), for the slide-over's
+// device (Contact.assetCondition ∪ Contact.assetIds), for the slide-over's
 // Contacts row. Chained gate: reading it exposes address-book content, so the
 // caller needs `contacts:read` on top of `assets:read`.
 router.get(

@@ -43,10 +43,20 @@ vi.mock("../../src/services/eventLogService.js", () => ({ logEvent: vi.fn() }));
 
 import {
   bumpContactCache,
+  conditionMeansAllDevices,
+  createContact,
+  normalizeContactCondition,
   normalizeContactEmail,
+  previewContactAssets,
   resolveContactsForAsset,
   searchAddressBook,
 } from "../../src/services/contactService.js";
+
+/** A condition tree in the stored (`assetCondition`) shape. */
+const COND = (field: string, operator: string, value: string) => ({
+  op: "and",
+  children: [{ field, operator, value }],
+});
 
 const CRITERIA = (field: string, value: string) => ({
   version: 1,
@@ -231,5 +241,215 @@ describe("resolveContactsForAsset", () => {
     prismaMock.asset.findUnique.mockResolvedValue(null);
     const out = await resolveContactsForAsset("a1");
     expect(out.map((c) => c.email)).toEqual(["pin@example.com"]);
+  });
+});
+
+// ─── Condition-tree device filter (the shape that superseded assetCriteria) ───
+
+describe("normalizeContactCondition", () => {
+  it("accepts the wider device-filter vocabulary", () => {
+    expect(normalizeContactCondition(COND("location", "contains", "Nashville"))).toBeTruthy();
+    expect(normalizeContactCondition(COND("fortigate", "contains", "PLVCOR"))).toBeTruthy();
+    expect(normalizeContactCondition(COND("hostname", "matches", "PLV*"))).toBeTruthy();
+  });
+
+  it("reads an empty tree as no filter, never as every device", () => {
+    expect(normalizeContactCondition(null)).toBeNull();
+    expect(normalizeContactCondition({ op: "and", children: [] })).toBeNull();
+    expect(normalizeContactCondition({ op: "and", children: [{ op: "or", children: [] }] })).toBeNull();
+  });
+
+  it("rejects a malformed tree with a 400", () => {
+    expect(() => normalizeContactCondition({ op: "nope", children: [] })).toThrow(/invalid/i);
+    expect(() => normalizeContactCondition(COND("hostname", "isExactly", "x"))).toThrow(/invalid/i);
+    expect(() => normalizeContactCondition(COND("nosuchfield", "equals", "x"))).toThrow(/invalid/i);
+  });
+
+  it("refuses a tree nested past the cap", () => {
+    let node: unknown = { field: "hostname", operator: "contains", value: "x" };
+    for (let i = 0; i < 8; i++) node = { op: "and", children: [node] };
+    expect(() => normalizeContactCondition(node)).toThrow(/nest at most/i);
+  });
+});
+
+describe("resolveContactsForAsset — condition trees", () => {
+  it("matches a stored condition against the one triggering asset", async () => {
+    prismaMock.contact.findMany.mockResolvedValue([
+      contactRow({ id: "c1", email: "nash@example.com", assetCondition: COND("location", "contains", "nashville") }),
+      contactRow({ id: "c2", email: "knox@example.com", assetCondition: COND("location", "contains", "knoxville") }),
+    ]);
+    prismaMock.asset.findUnique.mockResolvedValue({ id: "a1", location: "Nashville Plant", ipAddress: null });
+
+    const out = await resolveContactsForAsset("a1");
+    expect(out.map((c) => c.email)).toEqual(["nash@example.com"]);
+    expect(prismaMock.asset.findMany).not.toHaveBeenCalled();
+  });
+
+  it("matches on the FortiGate a device is sighted behind", async () => {
+    prismaMock.contact.findMany.mockResolvedValue([
+      contactRow({ assetCondition: COND("fortigate", "contains", "nash-edge") }),
+    ]);
+    prismaMock.asset.findUnique.mockResolvedValue({
+      id: "a1",
+      learnedLocation: "PLVCORFGT1",
+      fortigateSightings: [{ fortigateDevice: "NASH-EDGE-01" }],
+      ipAddress: null,
+    });
+    expect((await resolveContactsForAsset("a1")).length).toBe(1);
+  });
+
+  it("does its own CIDR math — no containment query for a subnet condition", async () => {
+    prismaMock.contact.findMany.mockResolvedValue([
+      contactRow({ assetCondition: COND("subnet", "inCidr", "10.20.0.0/16") }),
+    ]);
+    prismaMock.asset.findUnique.mockResolvedValue({ id: "a1", ipAddress: "10.20.3.7" });
+    expect((await resolveContactsForAsset("a1")).length).toBe(1);
+    // The tree evaluates ipInCidr in memory; only the legacy predicate defers
+    // containment to the database.
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it("treats the all-devices marker as owning every device", async () => {
+    prismaMock.contact.findMany.mockResolvedValue([
+      contactRow({ email: "everything@example.com", assetCondition: { op: "and", children: [] } }),
+    ]);
+    prismaMock.asset.findUnique.mockResolvedValue({ id: "a1", assetType: "printer", ipAddress: null });
+    expect((await resolveContactsForAsset("a1")).map((c) => c.email)).toEqual(["everything@example.com"]);
+  });
+
+  it("folds a legacy flat criteria forward and matches through the tree", async () => {
+    prismaMock.contact.findMany.mockResolvedValue([
+      contactRow({ email: "legacy@example.com", assetCriteria: CRITERIA("location", "Nashville Plant") }),
+    ]);
+    prismaMock.asset.findUnique.mockResolvedValue({ id: "a1", location: "Nashville Plant", ipAddress: null });
+    expect((await resolveContactsForAsset("a1")).length).toBe(1);
+  });
+
+  it("keeps matching a legacy criteria the tree cannot express", async () => {
+    // `integration` has no condition-tree equivalent, so this row must stay on
+    // the flat predicate rather than silently losing the rule.
+    prismaMock.contact.findMany.mockResolvedValue([
+      contactRow({
+        email: "byint@example.com",
+        assetCriteria: { version: 1, match: "all", rules: [{ field: "integration", op: "exact", values: ["int-1"] }] },
+      }),
+    ]);
+    prismaMock.asset.findUnique.mockResolvedValue({
+      id: "a1",
+      discoveredByIntegrationId: "int-1",
+      sources: [],
+      ipAddress: null,
+    });
+    expect((await resolveContactsForAsset("a1")).length).toBe(1);
+  });
+
+  it("ignores a stored condition that no longer validates instead of throwing", async () => {
+    prismaMock.contact.findMany.mockResolvedValue([
+      contactRow({ email: "broken@example.com", assetCondition: { op: "and", children: [{ field: "gone", operator: "equals", value: "x" }] } }),
+    ]);
+    prismaMock.asset.findUnique.mockResolvedValue({ id: "a1", ipAddress: null });
+    // No filter → owns nothing, and the list still resolves.
+    expect(await resolveContactsForAsset("a1")).toEqual([]);
+  });
+});
+
+describe("writes normalize the filter to one live shape", () => {
+  beforeEach(() => {
+    prismaMock.contact.findUnique.mockResolvedValue(null); // no email clash
+    prismaMock.contact.create.mockImplementation(({ data }: any) => ({
+      id: "new",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...data,
+    }));
+  });
+
+  const createdData = () => prismaMock.contact.create.mock.calls[0]![0].data;
+
+  it("stores a posted condition and leaves the legacy column unset", async () => {
+    await createContact({ email: "a@example.com", assetCondition: COND("location", "contains", "nash") }, "dmoore");
+    expect(createdData().assetCondition).toEqual(COND("location", "contains", "nash"));
+    expect(createdData().assetCriteria).toBeUndefined();
+  });
+
+  it("folds a posted flat criteria forward rather than storing it", async () => {
+    await createContact({ email: "a@example.com", assetCriteria: CRITERIA("assetType", "switch") }, "dmoore");
+    expect(createdData().assetCondition).toEqual({
+      op: "and",
+      children: [{ field: "assetType", operator: "equals", value: "switch" }],
+    });
+    expect(createdData().assetCriteria).toBeUndefined();
+  });
+
+  it("keeps a flat criteria the tree cannot express as legacy", async () => {
+    await createContact(
+      {
+        email: "a@example.com",
+        assetCriteria: { version: 1, match: "all", rules: [{ field: "integration", op: "exact", values: ["int-1"] }] },
+      },
+      "dmoore",
+    );
+    expect(createdData().assetCondition).toBeUndefined();
+    expect(createdData().assetCriteria).toBeTruthy();
+  });
+
+  it("only produces the all-devices marker from the explicit flag", async () => {
+    await createContact({ email: "a@example.com", assetAllDevices: true }, "dmoore");
+    expect(conditionMeansAllDevices(createdData().assetCondition)).toBe(true);
+
+    prismaMock.contact.create.mockClear();
+    // An empty tree is NOT a way in — that would hand the contact the fleet.
+    await createContact({ email: "b@example.com", assetCondition: { op: "and", children: [] } }, "dmoore");
+    expect(createdData().assetCondition).toBeUndefined();
+  });
+});
+
+describe("previewContactAssets", () => {
+  beforeEach(() => {
+    prismaMock.asset.findMany.mockResolvedValue([]);
+  });
+
+  it("evaluates a condition over the fleet and counts the matches", async () => {
+    prismaMock.asset.findMany
+      .mockResolvedValueOnce([
+        { id: "a1", location: "Nashville Plant" },
+        { id: "a2", location: "Knoxville Yard" },
+      ])
+      // the sample read for the matched ids
+      .mockResolvedValueOnce([{ id: "a1", hostname: "SW1", ipAddress: null, assetType: "switch" }]);
+
+    const out = await previewContactAssets({ assetCondition: COND("location", "contains", "nashville") });
+    expect(out.matchCount).toBe(1);
+    expect(out.sample.map((s) => s.id)).toEqual(["a1"]);
+  });
+
+  it("joins the FortiGate sighting relation only when a condition asks for it", async () => {
+    await previewContactAssets({ assetCondition: COND("location", "contains", "x") });
+    expect(prismaMock.asset.findMany.mock.calls[0]![0].select.fortigateSightings).toBeUndefined();
+
+    prismaMock.asset.findMany.mockClear();
+    prismaMock.asset.findMany.mockResolvedValue([]);
+    await previewContactAssets({ assetCondition: COND("fortigate", "contains", "x") });
+    expect(prismaMock.asset.findMany.mock.calls[0]![0].select.fortigateSightings).toBeTruthy();
+  });
+
+  it("reads an address-only contact as covering nothing, with no fleet read", async () => {
+    const out = await previewContactAssets({});
+    expect(out).toEqual({ matchCount: 0, sample: [] });
+    expect(prismaMock.asset.findMany).not.toHaveBeenCalled();
+  });
+
+  it("unions explicit pins with the condition matches", async () => {
+    prismaMock.asset.findMany
+      .mockResolvedValueOnce([{ id: "a1", location: "Nashville" }])
+      .mockResolvedValueOnce([
+        { id: "a1", hostname: "SW1", ipAddress: null, assetType: "switch" },
+        { id: "pinned", hostname: "SRV9", ipAddress: null, assetType: "server" },
+      ]);
+    const out = await previewContactAssets({
+      assetCondition: COND("location", "contains", "nashville"),
+      assetIds: ["pinned"],
+    });
+    expect(out.matchCount).toBe(2);
   });
 });

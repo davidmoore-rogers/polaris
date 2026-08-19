@@ -9,17 +9,26 @@
  *   1. A durable label for an address that has no Polaris account behind it —
  *      a distribution list, an on-call rotation, a vendor NOC. Before this,
  *      such an address could only be retyped into every automation.
- *   2. Device ownership. `assetCriteria` (the tagAssignmentService vocabulary)
- *      unioned with explicit `assetIds` pins says which devices a contact is
- *      responsible for — the MaintenanceSchedule target shape exactly. A notify
+ *   2. Device ownership. `assetCondition` — the SAME nested AND/OR condition
+ *      tree the automations device filter uses — unioned with explicit
+ *      `assetIds` pins says which devices a contact is responsible for. A notify
  *      action carrying `recipientAssetContacts` resolves that at fire time, so
  *      "email whoever owns this box" needs no per-rule recipient list.
  *
- * Fire-time matching (`resolveContactsForAsset`) evaluates each contact's
- * criteria against the ONE triggering asset via the pure `assetMatchesCriteria`
- * predicate — never a fleet scan. Cost is bounded by contact count, not asset
- * count, and the contact list itself rides a short-TTL cache so a delivery
- * expansion doesn't re-read the table per alert.
+ * FILTER SHAPE. `assetCondition` superseded the flat `assetCriteria`
+ * (tagAssignmentService vocabulary) so operators are not asked "which devices?"
+ * in two different languages. Both columns are still READ — a row written before
+ * the cutover keeps matching through the legacy predicate until it folds forward
+ * — but only one is ever live on a row: a write of the condition nulls the
+ * criteria. Readers go through `contactFilterOf`, and `criteriaToCondition` is
+ * the fold-forward (persisted by the migrateContactFilterShape one-shot, the
+ * migrateAutomationRuleShape precedent).
+ *
+ * Fire-time matching (`resolveContactsForAsset`) evaluates each contact's filter
+ * against the ONE triggering asset — the pure `evaluateScopeCondition` for a
+ * tree, `assetMatchesCriteria` for a legacy blob — never a fleet scan. Cost is
+ * bounded by contact count, not asset count, and the contact list itself rides a
+ * short-TTL cache so a delivery expansion doesn't re-read the table per alert.
  *
  * Ownership: `createdBy` backs the `contacts` function key's ownership
  * dimension (write = your own rows, fullwrite = anyone's), the same mechanism
@@ -39,6 +48,17 @@ import {
   SINGLE_ASSET_CANDIDATE_SELECT,
   type TagCriteria,
 } from "./tagAssignmentService.js";
+import {
+  deviceFilterConditionSchema,
+  conditionFields,
+  evaluateScopeCondition,
+  scopeConditionStats,
+  SCOPE_CONDITION_MAX_DEPTH,
+  SCOPE_CONDITION_MAX_RULES,
+  type ScopeConditionAsset,
+  type ScopeConditionGroup,
+} from "./notificationTypes.js";
+import { criteriaToCondition } from "../utils/criteriaToCondition.js";
 import { listRecipientUsers } from "./notificationRecipientService.js";
 import { logEvent } from "./eventLogService.js";
 import { logger } from "../utils/logger.js";
@@ -51,7 +71,21 @@ export interface ContactRow {
   email: string;
   name: string | null;
   description: string | null;
+  /** The live filter shape. */
+  assetCondition: ScopeConditionGroup | null;
+  /** Legacy flat filter — null on any row written since the cutover. */
   assetCriteria: TagCriteria | null;
+  /**
+   * DERIVED, read-only: the filter as a tree whatever it is stored as, so the
+   * editor renders one shape and a legacy row still opens in the new builder.
+   */
+  assetConditionEffective: ScopeConditionGroup | null;
+  /**
+   * DERIVED, read-only: fields in a legacy blob the tree can't express. Non-empty
+   * means the builder cannot SHOW this row's filter — the editor warns and posts
+   * the blob back untouched rather than replacing it with an empty tree.
+   */
+  assetFilterUnconvertible: string[];
   assetIds: string[];
   createdBy: string | null;
   createdAt: Date;
@@ -62,9 +96,31 @@ export interface ContactInput {
   email: string;
   name?: string | null;
   description?: string | null;
+  assetCondition?: unknown;
+  /**
+   * Accepted so an API caller (and the pre-cutover UI) can still post a flat
+   * blob. It is folded forward to a condition on write when the tree can say
+   * everything it says, and stored as legacy criteria only when it can't (an
+   * `integration` rule) — never silently narrowed.
+   */
   assetCriteria?: unknown;
+  /**
+   * "Responsible for EVERY device." Its own boolean rather than an empty
+   * condition group: `and([])` is true by boolean identity, so a malformed or
+   * half-built tree arriving empty would quietly make a contact own the whole
+   * fleet and take every alert. An explicit flag is the only way in; anything
+   * empty normalizes to "owns nothing", which is the safe reading and the state
+   * every address-only contact is in.
+   */
+  assetAllDevices?: boolean;
   assetIds?: string[];
 }
+
+/** Just the device-ownership half — what the preview dry-run posts. */
+export type ContactFilterInput = Pick<
+  ContactInput,
+  "assetCondition" | "assetCriteria" | "assetAllDevices" | "assetIds"
+>;
 
 /**
  * One row in the unified address-book search. `source` says where the entry
@@ -110,6 +166,60 @@ function trimOrNull(raw: unknown): string | null {
   return v ? v : null;
 }
 
+/**
+ * "Owns every device" — the stored form of the editor's All-devices checkbox.
+ * `and([])` is true for any asset by boolean identity, which is exactly the
+ * semantics wanted; see ContactInput.assetAllDevices for why nothing else may
+ * produce it.
+ */
+const ALL_DEVICES_CONDITION: ScopeConditionGroup = { op: "and", children: [] };
+
+/** Does this stored condition mean "every device"? */
+export function conditionMeansAllDevices(cond: ScopeConditionGroup | null): boolean {
+  return !!cond && cond.op === "and" && cond.children.length === 0;
+}
+
+/**
+ * Validate a posted condition tree against the DEVICE_FILTER vocabulary (the
+ * automations scope fields plus the four the flat builder carried). An empty
+ * tree is "no filter", never "all devices".
+ */
+export function normalizeContactCondition(raw: unknown): ScopeConditionGroup | null {
+  if (raw == null) return null;
+  const parsed = deviceFilterConditionSchema.safeParse(raw);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    throw new AppError(400, `Device filter is invalid${first ? `: ${first.message}` : ""}`);
+  }
+  const cond = parsed.data;
+  const { depth, rules } = scopeConditionStats(cond);
+  if (depth > SCOPE_CONDITION_MAX_DEPTH) {
+    throw new AppError(400, `Device filter groups nest at most ${SCOPE_CONDITION_MAX_DEPTH} deep`);
+  }
+  if (rules > SCOPE_CONDITION_MAX_RULES) {
+    throw new AppError(400, `At most ${SCOPE_CONDITION_MAX_RULES} conditions per device filter`);
+  }
+  return rules === 0 ? null : cond;
+}
+
+/**
+ * The ONE filter a contact row matches by. A stored condition wins; otherwise a
+ * legacy flat criteria blob is folded forward on the fly, so every consumer sees
+ * a tree whether or not the row has been rewritten yet — and a criteria blob the
+ * tree can't express (an `integration` rule) keeps matching through the flat
+ * predicate instead of being half-converted.
+ */
+export function contactFilterOf(
+  contact: Pick<ContactRow, "assetCondition" | "assetCriteria">,
+): { condition: ScopeConditionGroup | null; criteria: TagCriteria | null } {
+  if (contact.assetCondition) return { condition: contact.assetCondition, criteria: null };
+  if (!contact.assetCriteria) return { condition: null, criteria: null };
+  const { condition, unconvertible } = criteriaToCondition(contact.assetCriteria);
+  return unconvertible.length > 0
+    ? { condition: null, criteria: contact.assetCriteria }
+    : { condition: condition as ScopeConditionGroup | null, criteria: null };
+}
+
 function normalizeAssetIds(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   const out = Array.from(
@@ -126,19 +236,66 @@ function rowToContact(row: {
   email: string;
   name: string | null;
   description: string | null;
+  assetCondition: unknown;
   assetCriteria: unknown;
   assetIds: string[];
   createdBy: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): ContactRow {
+  const assetCondition = safeStoredCondition(row.assetCondition, row.id);
+  const assetCriteria = normalizeCriteria(row.assetCriteria);
+  const folded = assetCondition ? null : criteriaToCondition(assetCriteria);
   return {
     ...row,
-    // Stored blobs are re-normalized on read rather than trusted: a criteria
-    // shape written before a vocabulary change would otherwise reach the
-    // matcher unvalidated.
-    assetCriteria: normalizeCriteria(row.assetCriteria),
+    // Stored blobs are re-normalized on read rather than trusted: a shape
+    // written before a vocabulary change would otherwise reach the matcher
+    // unvalidated. A stored condition that no longer validates is dropped to
+    // null rather than throwing — one bad row must not 500 the whole list.
+    assetCondition,
+    assetCriteria,
+    // A blob that can't be represented reports NO effective tree, so the editor
+    // can't mistake "we couldn't convert it" for "there is no filter".
+    assetConditionEffective:
+      assetCondition ?? (folded && folded.unconvertible.length === 0 ? (folded.condition as ScopeConditionGroup | null) : null),
+    assetFilterUnconvertible: folded?.unconvertible ?? [],
   };
+}
+
+function safeStoredCondition(raw: unknown, contactId: string): ScopeConditionGroup | null {
+  if (raw == null) return null;
+  // The all-devices marker has zero rules, so normalizeContactCondition would
+  // read it as "no filter" — it's the one empty tree that means something.
+  if (conditionMeansAllDevices(raw as ScopeConditionGroup)) return ALL_DEVICES_CONDITION;
+  try {
+    return normalizeContactCondition(raw);
+  } catch (err) {
+    logger.warn({ err, contactId }, "Stored contact device filter is invalid; treating as no filter");
+    return null;
+  }
+}
+
+/**
+ * Resolve what a write should store for the two filter columns. Exactly one is
+ * live: a condition (or the folded-forward form of a posted flat blob) nulls the
+ * criteria, and a blob carrying a rule the tree can't express stays flat.
+ */
+function resolveWrittenFilter(input: ContactFilterInput): {
+  condition: ScopeConditionGroup | null;
+  criteria: TagCriteria | null;
+} {
+  if (input.assetAllDevices) return { condition: ALL_DEVICES_CONDITION, criteria: null };
+
+  const condition = normalizeContactCondition(input.assetCondition ?? null);
+  if (condition) return { condition, criteria: null };
+
+  // No tree posted — accept a flat blob and fold it forward where possible.
+  const criteria = normalizeCriteria(input.assetCriteria ?? null);
+  if (!criteria) return { condition: null, criteria: null };
+  const folded = criteriaToCondition(criteria);
+  return folded.unconvertible.length === 0 && folded.condition
+    ? { condition: folded.condition as ScopeConditionGroup, criteria: null }
+    : { condition: null, criteria };
 }
 
 // ─── Cache ──────────────────────────────────────────────────────────────────
@@ -175,7 +332,7 @@ export async function getContact(id: string): Promise<ContactRow | null> {
 
 export async function createContact(input: ContactInput, createdBy: string | null): Promise<ContactRow> {
   const email = normalizeContactEmail(input.email);
-  const assetCriteria = normalizeCriteria(input.assetCriteria ?? null);
+  const { condition: assetCondition, criteria: assetCriteria } = resolveWrittenFilter(input);
   const assetIds = normalizeAssetIds(input.assetIds);
 
   const existing = await prisma.contact.findUnique({ where: { email }, select: { id: true, name: true } });
@@ -188,6 +345,7 @@ export async function createContact(input: ContactInput, createdBy: string | nul
       email,
       name: trimOrNull(input.name),
       description: trimOrNull(input.description),
+      assetCondition: (assetCondition ?? undefined) as never,
       assetCriteria: (assetCriteria ?? undefined) as never,
       assetIds,
       createdBy,
@@ -200,22 +358,32 @@ export async function createContact(input: ContactInput, createdBy: string | nul
     resourceId: row.id,
     resourceName: row.email,
     actor: createdBy ?? undefined,
-    message: `Added ${row.name ? `"${row.name}" <${row.email}>` : row.email} to the address book${describeTargets(assetCriteria, assetIds)}`,
+    message: `Added ${row.name ? `"${row.name}" <${row.email}>` : row.email} to the address book${describeTargets(assetCondition, assetCriteria, assetIds)}`,
   });
   return rowToContact(row);
 }
 
-/** " (covering N pinned devices + a filter)" — audit detail, "" when untargeted. */
-function describeTargets(criteria: TagCriteria | null, assetIds: string[]): string {
+/** " (device ownership: 3 conditions + 2 pinned devices)" — "" when untargeted. */
+function describeTargets(
+  condition: ScopeConditionGroup | null,
+  criteria: TagCriteria | null,
+  assetIds: string[],
+): string {
   const parts: string[] = [];
-  if (criteria) parts.push(`${criteria.rules.length} filter rule${criteria.rules.length === 1 ? "" : "s"}`);
+  if (conditionMeansAllDevices(condition)) parts.push("all devices");
+  else if (condition) {
+    const { rules } = scopeConditionStats(condition);
+    parts.push(`${rules} condition${rules === 1 ? "" : "s"}`);
+  } else if (criteria) {
+    parts.push(`${criteria.rules.length} legacy filter rule${criteria.rules.length === 1 ? "" : "s"}`);
+  }
   if (assetIds.length) parts.push(`${assetIds.length} pinned device${assetIds.length === 1 ? "" : "s"}`);
   return parts.length ? ` (device ownership: ${parts.join(" + ")})` : "";
 }
 
 export async function updateContact(id: string, input: ContactInput, actor?: string): Promise<ContactRow> {
   const email = normalizeContactEmail(input.email);
-  const assetCriteria = normalizeCriteria(input.assetCriteria ?? null);
+  const { condition: assetCondition, criteria: assetCriteria } = resolveWrittenFilter(input);
   const assetIds = normalizeAssetIds(input.assetIds);
 
   const clash = await prisma.contact.findUnique({ where: { email }, select: { id: true } });
@@ -229,8 +397,11 @@ export async function updateContact(id: string, input: ContactInput, actor?: str
       email,
       name: trimOrNull(input.name),
       description: trimOrNull(input.description),
-      // null must be written explicitly — `undefined` would leave a stale
-      // criteria blob in place when the operator clears the filter.
+      // Both nulls must be written explicitly — `undefined` would leave a stale
+      // blob in place when the operator clears the filter, and leaving the
+      // legacy column behind a new condition would resurrect the old filter on
+      // any reader that checks criteria first.
+      assetCondition: (assetCondition ?? null) as never,
       assetCriteria: (assetCriteria ?? null) as never,
       assetIds,
     },
@@ -242,7 +413,7 @@ export async function updateContact(id: string, input: ContactInput, actor?: str
     resourceId: row.id,
     resourceName: row.email,
     actor,
-    message: `Updated address-book entry ${row.name ? `"${row.name}" <${row.email}>` : row.email}${describeTargets(assetCriteria, assetIds)}`,
+    message: `Updated address-book entry ${row.name ? `"${row.name}" <${row.email}>` : row.email}${describeTargets(assetCondition, assetCriteria, assetIds)}`,
   });
   return rowToContact(row);
 }
@@ -277,14 +448,15 @@ export interface ContactAssetPreview {
  * still has an owner worth emailing (an event/change automation can fire on it).
  */
 export async function previewContactAssets(
-  rawCriteria: unknown,
-  rawAssetIds: unknown,
+  input: ContactFilterInput,
 ): Promise<ContactAssetPreview> {
-  const criteria = normalizeCriteria(rawCriteria);
-  const assetIds = normalizeAssetIds(rawAssetIds);
+  const { condition, criteria } = resolveWrittenFilter(input);
+  const assetIds = normalizeAssetIds(input.assetIds);
 
   const union = new Set<string>(assetIds);
-  if (criteria) {
+  if (condition) {
+    for (const id of await resolveAssetIdsForCondition(condition)) union.add(id);
+  } else if (criteria) {
     for (const id of await resolveMatchingAssetIds(criteria)) union.add(id);
   }
   if (union.size === 0) return { matchCount: 0, sample: [] };
@@ -296,6 +468,45 @@ export async function previewContactAssets(
     take: 100,
   });
   return { matchCount: union.size, sample };
+}
+
+/**
+ * Which assets a condition tree covers right now — the editor's live preview.
+ *
+ * In-memory over a fleet read, deliberately with no SQL prefilter: an OR / NONE
+ * / notAll group makes any narrowing `WHERE` unsound, and unlike the flat
+ * criteria (whose rules are always ANDed, which is what lets
+ * buildPrefilterWhere exist) there is no safe superset to ask the DB for. The
+ * cost is one findMany of scalar columns, operator-triggered — not a tick — and
+ * the sighting relation is joined ONLY when a rule actually asks about the
+ * FortiGate, which is the expensive half at 2000 assets.
+ */
+async function resolveAssetIdsForCondition(cond: ScopeConditionGroup): Promise<Set<string>> {
+  const fields = conditionFields(cond);
+  const rows = await prisma.asset.findMany({
+    select: {
+      id: true,
+      assetType: true,
+      manufacturer: true,
+      model: true,
+      hostname: true,
+      os: true,
+      osVersion: true,
+      department: true,
+      location: true,
+      status: true,
+      ipAddress: true,
+      tags: true,
+      ...(fields.has("fortigate")
+        ? { learnedLocation: true, fortigateSightings: { select: { fortigateDevice: true } } }
+        : {}),
+    },
+  });
+  const out = new Set<string>();
+  for (const row of rows) {
+    if (evaluateScopeCondition(cond, row as ScopeConditionAsset)) out.add(row.id);
+  }
+  return out;
 }
 
 /**
@@ -315,23 +526,35 @@ export async function resolveContactsForAsset(assetId: string): Promise<ContactR
 
   // Pinned-only contacts need no asset load at all.
   const byPin = contacts.filter((c) => c.assetIds.includes(assetId));
-  const withCriteria = contacts.filter((c) => c.assetCriteria != null);
-  if (withCriteria.length === 0) return byPin;
+  const filtered = contacts
+    .map((c) => ({ contact: c, ...contactFilterOf(c) }))
+    .filter((f) => f.condition != null || f.criteria != null);
+  if (filtered.length === 0) return byPin;
 
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: SINGLE_ASSET_CANDIDATE_SELECT,
+    // `tags` on top of the flat-criteria select: the condition tree has a `tag`
+    // field, which that vocabulary never had.
+    select: { ...SINGLE_ASSET_CANDIDATE_SELECT, tags: true },
   });
   if (!asset) return byPin;
 
-  const allCidrs = withCriteria.flatMap((c) => collectCidrs(c.assetCriteria as TagCriteria));
-  const matchedCidrs = await cidrsContainingIp(asset.ipAddress, allCidrs);
+  // Only the LEGACY predicate needs the inet round-trip — it defers containment
+  // to the caller. The tree does its own CIDR math in memory (ipInCidr), so a
+  // fleet that has folded forward makes no extra query at all.
+  const legacyCidrs = filtered.flatMap((f) => (f.criteria ? collectCidrs(f.criteria) : []));
+  const matchedCidrs = legacyCidrs.length
+    ? await cidrsContainingIp(asset.ipAddress, legacyCidrs)
+    : new Set<string>();
 
   const out = new Map<string, ContactRow>();
   for (const c of byPin) out.set(c.id, c);
-  for (const c of withCriteria) {
-    if (out.has(c.id)) continue; // already covered by a pin
-    if (assetMatchesCriteria(asset, c.assetCriteria as TagCriteria, matchedCidrs)) out.set(c.id, c);
+  for (const f of filtered) {
+    if (out.has(f.contact.id)) continue; // already covered by a pin
+    const hit = f.condition
+      ? evaluateScopeCondition(f.condition, asset as ScopeConditionAsset)
+      : assetMatchesCriteria(asset, f.criteria as TagCriteria, matchedCidrs);
+    if (hit) out.set(f.contact.id, f.contact);
   }
   return Array.from(out.values());
 }

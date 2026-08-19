@@ -1,0 +1,22 @@
+-- Contact device ownership moves to the SAME nested AND/OR condition tree the
+-- automations device filter uses, so "which devices?" is asked one way
+-- everywhere. `assetCondition` holds a ScopeConditionGroup, evaluated by
+-- evaluateScopeCondition against the wider DEVICE_FILTER vocabulary (the
+-- automations scope fields plus osVersion / department / location / "behind
+-- FortiGate" and a wildcard operator, all of which the flat criteria builder
+-- already had — so nothing an operator could express is lost).
+--
+-- The old `assetCriteria` column stays for now and is NOT dropped here: rows
+-- written before this keep matching through the legacy path until they fold
+-- forward, which happens on next edit or via the `migrateContactFilterShape`
+-- one-shot (the migrateAutomationRuleShape precedent — a data transform this
+-- shape is far cheaper to express in TypeScript than in SQL, and it has to be
+-- able to DECLINE a row whose criteria carries an `integration` rule the tree
+-- can't say). Exactly one of the two is live per row: a write of the condition
+-- nulls the criteria.
+--
+-- No backfill and no index: the column is read only for the ONE triggering asset
+-- at fire time (resolveContactsForAsset tests each contact in memory, never a
+-- fleet scan) and for the editor, so there is nothing to index on.
+
+ALTER TABLE "contacts" ADD COLUMN "assetCondition" JSONB;

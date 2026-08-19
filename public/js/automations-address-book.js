@@ -1,4 +1,4 @@
-/* global api, escapeHtml, showToast, showConfirm, collectTagCriteria, _trapFocus, _focusFirstIn, permAtLeast, _ensureLockButton, isPanelLocked, flashModalCloseBtn */
+/* global api, escapeHtml, showToast, showConfirm, _trapFocus, _focusFirstIn, permAtLeast, _ensureLockButton, isPanelLocked, flashModalCloseBtn */
 /**
  * public/js/automations-address-book.js
  *
@@ -27,32 +27,29 @@
   var Z_PICKER = 1300;
   var Z_EDITOR = 1320;
 
-  // Criteria vocabulary — mirrors the maintenance + discovery-rule builders.
-  // The RENDER half is deliberately per-page (they diverge); only the DOM →
-  // wire-shape walker is shared, via collectTagCriteria in api.js.
-  var AB_FIELDS = [
-    { value: "hostname",     label: "Hostname",         kind: "string" },
-    { value: "subnet",       label: "IP / Subnet",      kind: "subnet" },
-    { value: "assetType",    label: "Asset type",       kind: "assetType" },
-    { value: "manufacturer", label: "Manufacturer",     kind: "string" },
-    { value: "model",        label: "Model",            kind: "string" },
-    { value: "os",           label: "Operating system", kind: "string" },
-    { value: "osVersion",    label: "OS version",       kind: "string" },
-    { value: "department",   label: "Department",       kind: "string" },
-    { value: "location",     label: "Location",         kind: "string" },
-    { value: "status",       label: "Status",           kind: "status" },
-    { value: "fortigate",    label: "Behind FortiGate", kind: "string" },
-  ];
-  var AB_STRING_OPS = [
-    { value: "contains", label: "contains" },
-    { value: "exact",    label: "is" },
-    { value: "pattern",  label: "matches (wildcard *)" },
-  ];
-  var AB_STATUSES = ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"];
+  // ── Device-filter vocabulary ──────────────────────────────────────────────
+  // A contact's "devices this contact is responsible for" is the SAME nested
+  // AND/OR condition tree the automation wizard's Devices step builds — same
+  // module (public/js/condition-builder.js), same stored shape, same server-side
+  // evaluator. The flat comma-separated criteria rows this replaced asked the
+  // one question in a second language.
+  //
+  // The vocabulary comes from GET /contacts/filter-schema rather than being
+  // written out here: it's the wizard's field set plus the four this surface has
+  // always carried (OS version / Department / Location / Behind FortiGate) and a
+  // wildcard operator, and a client-side copy is how the builder would come to
+  // offer a field the server refuses. `_filterSchema` caches it per page load.
+  var _filterSchema = null;
 
-  function fieldKind(field) {
-    for (var i = 0; i < AB_FIELDS.length; i++) if (AB_FIELDS[i].value === field) return AB_FIELDS[i].kind;
-    return "string";
+  function loadFilterSchema() {
+    if (_filterSchema) return Promise.resolve(_filterSchema);
+    return api.contacts.filterSchema().then(function (r) {
+      _filterSchema = {
+        meta: (r && r.scopeCondition) || { fields: [], groupOps: ["and", "or"], maxDepth: 5 },
+        options: (r && r.options) || {},
+      };
+      return _filterSchema;
+    });
   }
 
   function canWrite() { return permAtLeast("contacts", "write"); }
@@ -128,50 +125,65 @@
 
   // ─── Editor (add / edit one contact) ──────────────────────────────────────
 
-  function ruleCellsHTML(field, op, valueStr) {
-    var kind = fieldKind(field);
-    if (kind === "subnet") {
-      return '<span style="color:var(--color-text-secondary);font-size:0.82rem">in</span>' +
-        '<input type="text" class="input ab-rule-input" style="flex:1" ' +
-               'placeholder="10.2.0.0/16, 10.3.4.5" value="' + escapeHtml(valueStr) + '">';
-    }
-    if (kind === "assetType" || kind === "status") {
-      var listId = kind === "assetType" ? "ab-assettype-list" : "ab-status-list";
-      return '<span style="color:var(--color-text-secondary);font-size:0.82rem">is</span>' +
-        '<input type="text" class="input ab-rule-input" style="flex:1" list="' + listId + '" ' +
-               'placeholder="comma-separated" value="' + escapeHtml(valueStr) + '">';
-    }
-    var opSel = AB_STRING_OPS.map(function (o) {
-      return '<option value="' + o.value + '"' + (o.value === op ? " selected" : "") + '>' + escapeHtml(o.label) + '</option>';
-    }).join("");
-    return '<select class="input ab-rule-op" style="width:auto">' + opSel + '</select>' +
-      '<input type="text" class="input ab-rule-input" style="flex:1" ' +
-             'placeholder="comma-separated" value="' + escapeHtml(valueStr) + '">';
+  /**
+   * Value suggestions per field, from the schema payload — the wizard's
+   * scValueOptions with the same `optionsFrom` contract, so a field the server
+   * adds to the catalog gets its picker here with no client change.
+   */
+  function valueOptionsFor(schema) {
+    var fields = schema.meta.fields || [];
+    var opts = schema.options || {};
+    return function (field) {
+      var fm = null;
+      for (var i = 0; i < fields.length; i++) if (fields[i].field === field) fm = fields[i];
+      if (!fm) return [];
+      if (fm.values) return fm.values.map(function (v) { return { value: v, label: v }; });
+      var plain = function (list) {
+        return (list || []).map(function (v) { return { value: v, label: v }; });
+      };
+      switch (fm.optionsFrom) {
+        case "assetTypes":
+          return (opts.assetTypes || []).map(function (t) { return { value: t.name, label: t.label || t.name }; });
+        case "manufacturers": return plain(opts.manufacturers);
+        case "models": return plain(opts.models);
+        case "tags": return plain(opts.tags);
+        case "subnets":
+          return (opts.subnets || []).map(function (sn) { return { value: sn.cidr, label: sn.name + " — " + sn.cidr }; });
+        default: return [];
+      }
+    };
   }
 
-  function ruleRowHTML(rule) {
-    var field = (rule && rule.field) || "hostname";
-    var op = (rule && rule.op) || "contains";
-    var valueStr = "";
-    if (rule) {
-      if (rule.field === "subnet") valueStr = (rule.cidrs || []).join(", ");
-      else valueStr = (rule.values || []).join(", ");
-    }
-    var fieldSel = AB_FIELDS.map(function (f) {
-      return '<option value="' + f.value + '"' + (f.value === field ? " selected" : "") + '>' + escapeHtml(f.label) + '</option>';
-    }).join("");
-    return '<div class="ab-rule" style="display:flex;gap:6px;align-items:center;margin-bottom:6px">' +
-      '<select class="input ab-rule-field" style="width:auto">' + fieldSel + '</select>' +
-      '<span class="ab-rule-cells" style="display:flex;gap:6px;align-items:center;flex:1">' +
-        ruleCellsHTML(field, op, valueStr) +
-      '</span>' +
-      '<button type="button" class="btn-icon ab-rule-remove" aria-label="Remove condition" title="Remove condition">&times;</button>' +
-    '</div>';
+  /**
+   * Which of the three ownership states a stored contact is in. A contact —
+   * unlike an automation — may legitimately own NOTHING (an address-only entry,
+   * which is most of them), so the wizard's two-state All-assets checkbox
+   * becomes three radios here. "All devices" is a real choice for a NOC mailbox,
+   * and the server only ever produces it from an explicit flag.
+   */
+  function ownershipModeOf(c) {
+    if (!c) return "none";
+    if (c.assetAllDevices) return "all";
+    var cond = c.assetConditionEffective || c.assetCondition;
+    if (cond && (cond.children || []).length === 0) return "all"; // the all-devices marker
+    if (cond) return "filter";
+    // A legacy blob the builder can't render still counts as a filter, so the
+    // radio doesn't read as "owns nothing" while the contact keeps matching.
+    if ((c.assetFilterUnconvertible || []).length) return "filter";
+    return "none";
   }
 
-  function editorBodyHtml(c) {
-    var rules = (c && c.assetCriteria && c.assetCriteria.rules) || [];
-    var hasFilter = rules.length > 0;
+  function editorBodyHtml(c, builder) {
+    var mode = ownershipModeOf(c);
+    var stuck = (c && c.assetFilterUnconvertible) || [];
+    var cond = (c && (c.assetConditionEffective || c.assetCondition)) || null;
+    var root = cond && (cond.children || []).length ? cond : { op: "and", children: [] };
+    var radio = function (value, label, hint) {
+      return '<label class="appmap-check" style="display:block;margin:4px 0">' +
+        '<input type="radio" name="ab-own" value="' + value + '"' + (mode === value ? " checked" : "") + '> ' +
+        escapeHtml(label) + '</label>' +
+        (hint ? '<p class="hint" style="margin:0 0 6px 24px">' + hint + '</p>' : "");
+    };
     return '' +
       '<div class="form-group">' +
         '<label for="ab-email">Email address</label>' +
@@ -191,14 +203,20 @@
       '</div>' +
       '<div class="section-block">' +
         '<div class="section-label">Devices this contact is responsible for</div>' +
-        '<p class="hint" style="margin-top:0">Optional. When set, an automation whose Notify action routes to ' +
-          '“the contacts responsible for the triggering device” will reach this address for any device below. ' +
-          'Conditions are ANDed; pinned devices are added on top.</p>' +
-        '<label class="appmap-check" style="display:block;margin:8px 0">' +
-          '<input type="checkbox" id="ab-has-filter"' + (hasFilter ? " checked" : "") + '> Match devices with a filter</label>' +
-        '<div id="ab-filter-wrap"' + (hasFilter ? "" : ' style="display:none"') + '>' +
-          '<div id="ab-rules">' + (rules.length ? rules.map(ruleRowHTML).join("") : ruleRowHTML(null)) + '</div>' +
-          '<button type="button" class="btn btn-secondary btn-sm" id="ab-add-rule">+ Add condition</button>' +
+        '<p class="hint" style="margin-top:0">An automation whose Notify action routes to ' +
+          '“the contacts responsible for the triggering device” reaches this address for any device below. ' +
+          'Pinned devices are added on top of whatever the filter matches.</p>' +
+        radio("none", "No filter", "Only the devices pinned below, if any — otherwise this contact is reachable just by being named in an automation.") +
+        radio("filter", "Devices matching a filter") +
+        radio("all", "All devices", "Every device in the inventory, including ones discovered later.") +
+        '<div id="ab-filter-wrap"' + (mode === "filter" ? "" : ' style="display:none"') + '>' +
+          (stuck.length
+            ? '<p class="hint" style="color:var(--color-warning);margin:0 0 8px">This contact’s filter uses ' +
+                escapeHtml(stuck.join(", ")) + ', which this builder can’t show. It still applies — ' +
+                'saving without adding conditions below leaves it exactly as it is.</p>'
+            : "") +
+          '<p class="hint" style="margin:0 0 8px">Drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move a condition into another group or reorder groups.</p>' +
+          '<div id="ab-cond-root">' + builder.groupHtml(root, 0) + '</div>' +
         '</div>' +
         '<div class="form-group" style="margin-top:12px">' +
           '<label>Pinned devices</label>' +
@@ -213,27 +231,47 @@
           '<label>Devices covered right now</label>' +
           '<div id="ab-preview" class="hint">—</div>' +
         '</div>' +
-      '</div>' +
-      '<datalist id="ab-assettype-list"></datalist>' +
-      '<datalist id="ab-status-list">' +
-        AB_STATUSES.map(function (s) { return '<option value="' + escapeHtml(s) + '"></option>'; }).join("") +
-      '</datalist>';
+      '</div>';
+    // No datalists: the builder's value control is the shared click-to-suggest
+    // combobox, fed by /contacts/filter-schema. (A <datalist> was tried in the
+    // wizard and confirmed nothing — see TEMPLATES.md.)
   }
 
   /**
    * Add/edit modal. `contact` null = create. Resolves to the saved contact, or
    * null if the operator dismissed it.
    */
-  function openEditor(contact) {
+  async function openEditor(contact) {
+    // The vocabulary has to be in hand BEFORE the body is assembled: the builder
+    // renders its field/operator selects from it, and the wizard's own comment
+    // says the same about creating its instance above the modal call.
+    var schema;
+    try {
+      schema = await loadFilterSchema();
+    } catch (err) {
+      showToast((err && err.message) || "Couldn’t load the device-filter options", "error");
+      return null;
+    }
     return new Promise(function (resolve) {
       var pins = ((contact && contact.assetIds) || []).slice();
       var pinLabels = {};
       var settled = null;
+      // A legacy filter this builder can't render is carried through the save
+      // untouched (see the warning in the body) rather than being replaced by
+      // whatever the empty tree collects to.
+      var stuckCriteria = ((contact && (contact.assetFilterUnconvertible || []).length) && contact.assetCriteria) || null;
+
+      var CB = window.PolarisConditionBuilder;
+      var condBuilder = CB.create({
+        meta: schema.meta,
+        valueOptions: valueOptionsFor(schema),
+        onChange: function () { refreshPreview(); },
+      });
 
       var ui = buildOverlay(
         Z_EDITOR,
         contact ? "Edit contact" : "Add contact",
-        editorBodyHtml(contact),
+        editorBodyHtml(contact, condBuilder),
         '<button class="btn btn-secondary" type="button" data-ab="cancel">Cancel</button>' +
         '<button class="btn btn-primary" type="button" data-ab="save">' + (contact ? "Save" : "Add contact") + '</button>',
         function () { resolve(settled); },
@@ -243,55 +281,43 @@
 
       function q(sel) { return root.querySelector(sel); }
 
-      // Asset-type datalist — best-effort; a failure just loses autocomplete.
-      api.assetTypes.list().then(function (r) {
-        var dl = q("#ab-assettype-list");
-        if (!dl) return;
-        dl.innerHTML = ((r && r.assetTypes) || []).map(function (t) {
-          return '<option value="' + escapeHtml(t.name) + '"></option>';
-        }).join("");
-      }).catch(function () {});
-
-      // ── Criteria rows ──
-      function collectCriteria() {
-        if (!q("#ab-has-filter").checked) return null;
-        return collectTagCriteria({
-          rowSelector: "#ab-rules .ab-rule",
-          fieldSel: ".ab-rule-field",
-          integrationSel: ".ab-rule-integration",
-          opSel: ".ab-rule-op",
-          inputSel: ".ab-rule-input",
-        });
+      // ── Device filter (the shared condition tree) ──
+      // Read the radios by PROPERTY rather than with a `:checked` selector:
+      // happy-dom resolves `:checked` from the attribute, so a selector here
+      // would make the DOM tests assert the engine's behaviour instead of ours
+      // (the same trap as <option selected> — see TEMPLATES.md).
+      function ownershipMode() {
+        var radios = root.querySelectorAll('input[name="ab-own"]');
+        for (var i = 0; i < radios.length; i++) if (radios[i].checked) return radios[i].value;
+        return "none";
       }
 
-      q("#ab-has-filter").addEventListener("change", function () {
-        q("#ab-filter-wrap").style.display = this.checked ? "" : "none";
+      /** The device-ownership half of the request body, in all three modes. */
+      function filterBody() {
+        var mode = ownershipMode();
+        if (mode === "all") return { assetAllDevices: true, assetIds: pins };
+        if (mode === "none") return { assetIds: pins };
+        var rootGroup = root.querySelector("#ab-cond-root > .scg-group");
+        var tree = rootGroup ? condBuilder.collect(rootGroup) : null;
+        if (tree && (tree.children || []).length) return { assetCondition: tree, assetIds: pins };
+        // Filter mode with nothing built: preserve a legacy blob we couldn't
+        // render, else there is simply no filter.
+        return stuckCriteria ? { assetCriteria: stuckCriteria, assetIds: pins } : { assetIds: pins };
+      }
+
+      root.addEventListener("change", function (ev) {
+        if (!ev.target.closest || !ev.target.closest('input[name="ab-own"]')) return;
+        var filtering = ownershipMode() === "filter";
+        q("#ab-filter-wrap").style.display = filtering ? "" : "none";
+        // Revealed empty: seed a starter row so the operator lands on something
+        // editable (the wizard's All-assets untick does the same).
+        if (filtering) condBuilder.seedIfEmpty(q("#ab-cond-root"));
         refreshPreview();
       });
-      q("#ab-add-rule").addEventListener("click", function () {
-        q("#ab-rules").insertAdjacentHTML("beforeend", ruleRowHTML(null));
-      });
-      // Delegated: field change re-renders that row's cells; remove drops it.
-      root.addEventListener("change", function (ev) {
-        var f = ev.target.closest && ev.target.closest(".ab-rule-field");
-        if (f) {
-          var row = f.closest(".ab-rule");
-          row.querySelector(".ab-rule-cells").innerHTML = ruleCellsHTML(f.value, "contains", "");
-        }
-        if (ev.target.closest && ev.target.closest(".ab-rule")) refreshPreview();
-      });
-      root.addEventListener("click", function (ev) {
-        var rm = ev.target.closest && ev.target.closest(".ab-rule-remove");
-        if (rm) {
-          var rows = root.querySelectorAll("#ab-rules .ab-rule");
-          if (rows.length > 1) rm.closest(".ab-rule").remove();
-          else rm.closest(".ab-rule").querySelector(".ab-rule-input").value = "";
-          refreshPreview();
-        }
-      });
-      root.addEventListener("input", function (ev) {
-        if (ev.target.closest && ev.target.closest(".ab-rule")) refreshPreview();
-      });
+
+      // Rows, groups, the value combobox and the grip drag all live in the
+      // shared module; the preview debounce rides its onChange.
+      condBuilder.wire(root, "#ab-cond-root");
 
       // ── Pinned devices ──
       function renderPins() {
@@ -349,11 +375,14 @@
         clearTimeout(previewTimer);
         var el = q("#ab-preview");
         if (!el) return;
-        var criteria = collectCriteria();
-        if (!criteria && !pins.length) { el.textContent = "No devices — this contact is address-only."; return; }
+        var body = filterBody();
+        if (!body.assetCondition && !body.assetCriteria && !body.assetAllDevices && !pins.length) {
+          el.textContent = "No devices — this contact is address-only.";
+          return;
+        }
         el.textContent = "Checking…";
         previewTimer = setTimeout(function () {
-          api.contacts.preview({ assetCriteria: criteria, assetIds: pins }).then(function (r) {
+          api.contacts.preview(body).then(function (r) {
             var n = r.matchCount || 0;
             if (!n) { el.textContent = "No devices match."; return; }
             var names = (r.sample || []).slice(0, 8).map(function (a) { return a.hostname || a.ipAddress || a.id; });
@@ -370,14 +399,20 @@
       root.querySelector('[data-ab="cancel"]').addEventListener("click", function () { ui.close(); });
       root.querySelector('[data-ab="save"]').addEventListener("click", async function () {
         var btn = this;
+        var filter = filterBody();
         var body = {
           email: q("#ab-email").value.trim(),
           name: q("#ab-name").value.trim() || null,
           description: q("#ab-desc").value.trim() || null,
-          assetCriteria: collectCriteria(),
-          assetIds: pins,
         };
+        Object.keys(filter).forEach(function (k) { body[k] = filter[k]; });
         if (!body.email) { showToast("Enter an email address", "error"); return; }
+        // Same words wherever the builder is used — validate() moved into the
+        // shared module for exactly this.
+        if (body.assetCondition) {
+          var problem = condBuilder.validate(body.assetCondition);
+          if (problem) { showToast(problem, "error"); return; }
+        }
         btn.disabled = true;
         try {
           var res = contact
@@ -396,10 +431,26 @@
 
   // ─── Row rendering (shared by the tab and the picker) ─────────────────────
 
+  /** Count the leaf conditions in a tree (groups don't count as conditions). */
+  function conditionCount(cond) {
+    if (!cond) return 0;
+    var n = 0;
+    (cond.children || []).forEach(function (child) {
+      n += child.op ? conditionCount(child) : 1;
+    });
+    return n;
+  }
+
   function targetSummary(c) {
     var bits = [];
-    if (c.assetCriteria && c.assetCriteria.rules) {
-      bits.push(c.assetCriteria.rules.length + " filter rule" + (c.assetCriteria.rules.length === 1 ? "" : "s"));
+    var cond = c.assetConditionEffective || c.assetCondition;
+    if (cond && (cond.children || []).length === 0) bits.push("all devices");
+    else if (cond) {
+      var n = conditionCount(cond);
+      bits.push(n + " condition" + (n === 1 ? "" : "s"));
+    } else if ((c.assetFilterUnconvertible || []).length) {
+      // Still matching, just not renderable here — say so rather than "—".
+      bits.push("a legacy filter");
     }
     if ((c.assetIds || []).length) {
       bits.push(c.assetIds.length + " pinned device" + (c.assetIds.length === 1 ? "" : "s"));

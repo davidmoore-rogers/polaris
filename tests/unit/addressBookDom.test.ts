@@ -32,7 +32,9 @@ let contacts: Record<string, unknown>[];
 let searchEntries: Record<string, unknown>[];
 let deleted: string[];
 let created: Record<string, unknown>[];
+let updated: Record<string, unknown>[];
 let toasts: string[];
+let previewed: Record<string, unknown>[];
 let confirmAnswer = true;
 let level = "fullwrite";
 
@@ -75,15 +77,30 @@ beforeAll(() => {
   g._focusFirstIn = () => {};
   g.currentUsername = "alice";
   (win as unknown as Record<string, unknown>).currentUsername = "alice";
-  g.collectTagCriteria = () => null;
 
   g.api = {
     contacts: {
       list: async () => ({ contacts }),
       search: async () => ({ entries: searchEntries }),
-      preview: async () => ({ matchCount: 0, sample: [] }),
+      preview: async (body: Record<string, unknown>) => { previewed.push(body); return { matchCount: 0, sample: [] }; },
+      // The device-filter builder's vocabulary. Deliberately includes one field
+      // automations doesn't have (location) so a drift there shows up here.
+      filterSchema: async () => ({
+        scopeCondition: {
+          groupOps: ["and", "or", "none", "notAll"],
+          groupOpLabels: { and: "AND", or: "OR", none: "NONE", notAll: "NOT ALL" },
+          operatorLabels: { equals: "is equal to", contains: "contains", matches: "matches (wildcard *)" },
+          fields: [
+            { field: "hostname", label: "Hostname", ops: ["equals", "contains", "matches"], optionsFrom: null },
+            { field: "location", label: "Location", ops: ["equals", "contains", "matches"], optionsFrom: null },
+          ],
+          maxDepth: 5,
+          maxRules: 100,
+        },
+        options: {},
+      }),
       create: async (body: Record<string, unknown>) => { created.push(body); return { contact: { id: "new", ...body } }; },
-      update: async (_id: string, body: Record<string, unknown>) => ({ contact: { id: _id, ...body } }),
+      update: async (_id: string, body: Record<string, unknown>) => { updated.push(body); return { contact: { id: _id, ...body } }; },
       delete: async (id: string) => { deleted.push(id); },
     },
     assetTypes: { list: async () => ({ assetTypes: [] }) },
@@ -91,6 +108,9 @@ beforeAll(() => {
   };
 
   doc.body.innerHTML = PAGE_HTML;
+  // The shared condition builder must be on window before the editor assembles
+  // its body — a missing tag doesn't error, the dialog just fails to open.
+  (0, eval)(readFileSync(resolve(__dirname, "../../public/js/condition-builder.js"), "utf8"));
   const src = readFileSync(resolve(__dirname, "../../public/js/automations-address-book.js"), "utf8");
   (0, eval)(src);
 });
@@ -98,12 +118,19 @@ beforeAll(() => {
 beforeEach(() => {
   deleted = [];
   created = [];
+  updated = [];
   toasts = [];
+  previewed = [];
   confirmAnswer = true;
   level = "fullwrite";
   contacts = [
-    { id: "c1", email: "mine@example.com", name: "Mine", description: "d1", assetCriteria: null, assetIds: [], createdBy: "alice" },
-    { id: "c2", email: "theirs@example.com", name: "Theirs", description: "d2", assetCriteria: { version: 1, match: "all", rules: [{ field: "hostname", op: "contains", values: ["prod"] }] }, assetIds: ["a1", "a2"], createdBy: "bob" },
+    { id: "c1", email: "mine@example.com", name: "Mine", description: "d1", assetCondition: null, assetConditionEffective: null, assetFilterUnconvertible: [], assetIds: [], createdBy: "alice" },
+    {
+      id: "c2", email: "theirs@example.com", name: "Theirs", description: "d2",
+      assetCondition: { op: "and", children: [{ field: "hostname", operator: "contains", value: "prod" }] },
+      assetConditionEffective: { op: "and", children: [{ field: "hostname", operator: "contains", value: "prod" }] },
+      assetFilterUnconvertible: [], assetIds: ["a1", "a2"], createdBy: "bob",
+    },
   ];
   searchEntries = [
     { source: "user", id: "u1", email: "jane@example.com", name: "Jane Doe", description: "Polaris user account", kind: "person" },
@@ -121,8 +148,8 @@ describe("renderTab", () => {
     expect(rows).toHaveLength(2);
     const text = (doc.getElementById("contacts-list") as unknown as { textContent: string }).textContent;
     expect(text).toContain("mine@example.com");
-    // Criteria + pins are summarized rather than dumped.
-    expect(text).toContain("1 filter rule + 2 pinned devices");
+    // The filter + pins are summarized rather than dumped.
+    expect(text).toContain("1 condition + 2 pinned devices");
   });
 
   it("shows an empty state rather than a bare table", async () => {
@@ -213,6 +240,134 @@ describe("stacked overlay contract", () => {
     const to = doc.querySelector('[data-ab="add-to"]') as unknown as { className: string };
     expect(bcc.className).toContain("btn-primary");
     expect(to.className).toContain("btn-secondary");
+  });
+});
+
+describe("device filter — the shared condition tree", () => {
+  type AB = { openEditor: (c: unknown) => Promise<unknown> };
+  const ab = () => (window as unknown as { PolarisAddressBook: AB }).PolarisAddressBook;
+
+  /**
+   * Open the editor and let its schema fetch + body assembly settle. The
+   * module's promise resolves only when the dialog CLOSES, so it is deliberately
+   * not awaited — awaiting it here would hang every test.
+   */
+  let editorDone: Promise<unknown> | null = null;
+  async function openEditor(contact: unknown) {
+    editorDone = ab().openEditor(contact);
+    void editorDone;
+    await flush(5);
+  }
+  const radio = (v: string) => doc.querySelector('input[name="ab-own"][value="' + v + '"]') as unknown as
+    { checked: boolean; dispatchEvent: (e: unknown) => void };
+  function pick(v: string) {
+    const r = radio(v);
+    r.checked = true;
+    r.dispatchEvent(new win.Event("change", { bubbles: true }));
+  }
+  function save() { click(doc.querySelector('[data-ab="save"]')); }
+
+  it("offers the three ownership states, defaulting a new contact to none", async () => {
+    await openEditor(null);
+    expect(doc.querySelectorAll('input[name="ab-own"]')).toHaveLength(3);
+    expect(radio("none").checked).toBe(true);
+    // The builder is present but not shown until "filter" is chosen.
+    expect((doc.getElementById("ab-filter-wrap") as unknown as { style: { display: string } }).style.display)
+      .toBe("none");
+  });
+
+  it("renders the tree with the WIDER vocabulary this surface carries", async () => {
+    await openEditor(null);
+    pick("filter");
+    const fields = Array.from(doc.querySelectorAll("#ab-cond-root .scr-field option"))
+      .map((o) => (o as unknown as { value: string }).value);
+    // "location" exists here and deliberately not in the automations scope.
+    expect(fields).toContain("location");
+    expect(fields).toContain("hostname");
+  });
+
+  it("seeds an editable row when the filter is revealed empty", async () => {
+    await openEditor(null);
+    expect(doc.querySelectorAll("#ab-cond-root .scr-row")).toHaveLength(0);
+    pick("filter");
+    expect(doc.querySelectorAll("#ab-cond-root .scr-row").length).toBeGreaterThan(0);
+  });
+
+  it("opens a stored condition into the builder", async () => {
+    await openEditor({
+      id: "c9",
+      email: "nash@example.com",
+      assetCondition: { op: "and", children: [{ field: "location", operator: "contains", value: "Nashville" }] },
+      assetConditionEffective: { op: "and", children: [{ field: "location", operator: "contains", value: "Nashville" }] },
+      assetFilterUnconvertible: [],
+      assetIds: [],
+    });
+    expect(radio("filter").checked).toBe(true);
+    const vals = Array.from(doc.querySelectorAll("#ab-cond-root .scr-value"))
+      .map((i) => (i as unknown as { value: string }).value);
+    expect(vals).toContain("Nashville");
+  });
+
+  it("saves the tree as assetCondition, never as flat criteria", async () => {
+    await openEditor(null);
+    (doc.getElementById("ab-email") as unknown as { value: string }).value = "new@example.com";
+    pick("filter");
+    (doc.querySelector("#ab-cond-root .scr-value") as unknown as { value: string }).value = "Nashville";
+    (doc.querySelector("#ab-cond-root .scr-field") as unknown as { value: string }).value = "location";
+    save();
+    await flush();
+    expect(created).toHaveLength(1);
+    expect(created[0]!.assetCriteria).toBeUndefined();
+    expect(created[0]!.assetCondition).toMatchObject({ op: "and" });
+  });
+
+  it("sends the explicit all-devices flag rather than an empty tree", async () => {
+    await openEditor(null);
+    (doc.getElementById("ab-email") as unknown as { value: string }).value = "noc@example.com";
+    pick("all");
+    save();
+    await flush();
+    expect(created[0]!.assetAllDevices).toBe(true);
+    expect(created[0]!.assetCondition).toBeUndefined();
+  });
+
+  it("carries a legacy filter it cannot render through the save untouched", async () => {
+    // The one filter shape the builder can't show. Saving must not replace it
+    // with the empty tree the builder collects — that would silently widen who
+    // the contact is responsible for.
+    const legacy = { version: 1, match: "all", rules: [{ field: "integration", op: "exact", values: ["int-1"] }] };
+    await openEditor({
+      id: "c8", email: "byint@example.com", assetCondition: null, assetConditionEffective: null,
+      assetCriteria: legacy, assetFilterUnconvertible: ["integration"], assetIds: [],
+    });
+    // The operator is told, and the radio doesn't read as "owns nothing".
+    expect(radio("filter").checked).toBe(true);
+    expect((doc.querySelector("#ab-filter-wrap") as unknown as { textContent: string }).textContent)
+      .toMatch(/can’t show/i);
+    save();
+    await flush();
+    expect(updated).toHaveLength(1);
+    expect(updated[0]!.assetCriteria).toEqual(legacy);
+    expect(updated[0]!.assetCondition).toBeUndefined();
+  });
+
+  it("previews from the filter body, and calls nothing for an address-only contact", async () => {
+    await openEditor(null);
+    // Drain any debounced preview an earlier test scheduled before counting —
+    // the timer outlives its test.
+    await new Promise((r) => setTimeout(r, 500));
+    previewed.length = 0;
+
+    pick("none");
+    await new Promise((r) => setTimeout(r, 500));
+    expect(previewed).toHaveLength(0); // nothing to ask the server about
+    expect((doc.getElementById("ab-preview") as unknown as { textContent: string }).textContent)
+      .toMatch(/address-only/i);
+
+    pick("all");
+    // The preview is debounced ~400ms — the wait is the point of the assertion.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(previewed.some((b) => b.assetAllDevices === true)).toBe(true);
   });
 });
 

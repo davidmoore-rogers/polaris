@@ -11,6 +11,7 @@
 
 import { z } from "zod";
 import { isValidCidr, isValidIpAddress, ipInCidr } from "../utils/cidr.js";
+import { compileWildcard } from "../utils/wildcard.js";
 import { TEMPLATE_VARIABLES } from "../utils/notificationTemplate.js";
 import { defaultAlertEmailTemplate } from "../utils/alertEmailTemplate.js";
 import { SENSOR_CLASS_UNITS } from "../utils/hardwareSensors.js";
@@ -538,6 +539,60 @@ export const SCOPE_FIELD_OPS: Record<string, readonly string[]> = {
 };
 export const SCOPE_FIELDS = Object.keys(SCOPE_FIELD_OPS);
 
+/**
+ * Shell-style wildcard comparison ("PLV*-61F-?"), compiled by the shared
+ * utils/wildcard.ts. Offered only in the DEVICE_FILTER vocabulary below: the
+ * flat tag-criteria builder has always had it, so without it a stored contact
+ * filter couldn't fold forward into a tree without losing a rule.
+ */
+const WILDCARD_OP = "matches";
+
+/** String ops plus the wildcard — the device-filter flavour of STRING_OPS. */
+const STRING_OPS_WITH_WILDCARD = [...STRING_OPS, WILDCARD_OP] as const;
+
+/**
+ * The DEVICE-FILTER vocabulary: a strict SUPERSET of the automations scope
+ * fields, used by the address book's "devices this contact is responsible for".
+ *
+ * Contacts share the automations tree — the same builder, the same evaluator,
+ * the same stored shape — but they came from the flat `TagCriteria` builder,
+ * which carried four fields and a wildcard operator the automations scope never
+ * had. Dropping them in the swap would be a regression in exactly the dimension
+ * device OWNERSHIP cares about ("whoever looks after the Nashville switches"),
+ * so the vocabulary widens rather than the feature narrowing.
+ *
+ * Why a second map instead of widening SCOPE_FIELD_OPS: `fortigate` reads the
+ * sighting relation, and the notification engine's scope filter runs over the
+ * whole fleet on every tick — putting that join on the hot path would cost far
+ * more than the field is worth there. The three plain columns are withheld from
+ * automations for the same reason the map exists at all: one surface asked for
+ * them. `matchScopeRule` evaluates the superset, so a caller that validates
+ * against SCOPE_FIELD_OPS simply can't produce the extra fields.
+ */
+export const DEVICE_FILTER_FIELD_OPS: Record<string, readonly string[]> = {
+  ...Object.fromEntries(
+    Object.entries(SCOPE_FIELD_OPS).map(([field, ops]) => [
+      field,
+      // Only the free-string fields take a wildcard; assetType / status / tag /
+      // subnet are closed or CIDR-shaped, and the flat builder never offered a
+      // pattern there either.
+      ops.includes("contains") ? STRING_OPS_WITH_WILDCARD : ops,
+    ]),
+  ),
+  osVersion: STRING_OPS_WITH_WILDCARD,
+  department: STRING_OPS_WITH_WILDCARD,
+  location: STRING_OPS_WITH_WILDCARD,
+  // "Behind FortiGate" — matched against Asset.learnedLocation OR any
+  // AssetFortigateSighting device name, so `contains` on a site prefix covers
+  // every gate at the site. Mirrors the tagAssignmentService rule of the same
+  // name; a negative operator means NONE of those names satisfy it.
+  fortigate: STRING_OPS_WITH_WILDCARD,
+};
+export const DEVICE_FILTER_FIELDS = Object.keys(DEVICE_FILTER_FIELD_OPS);
+
+/** Fields the extended vocabulary adds — the ones automations can't produce. */
+export const DEVICE_FILTER_ONLY_FIELDS = DEVICE_FILTER_FIELDS.filter((f) => !SCOPE_FIELDS.includes(f));
+
 export interface ScopeConditionRule {
   field: string;
   operator: string;
@@ -548,31 +603,66 @@ export interface ScopeConditionGroup {
   children: (ScopeConditionGroup | ScopeConditionRule)[];
 }
 
-const scopeConditionRuleSchema = z
-  .object({
-    field: z.enum(SCOPE_FIELDS as [string, ...string[]]),
-    operator: z.string().min(1).max(30),
-    value: z.string().min(1).max(200),
-  })
-  .strict()
-  .superRefine((r, ctx) => {
-    const ops = SCOPE_FIELD_OPS[r.field] ?? [];
-    if (!ops.includes(r.operator)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `operator "${r.operator}" is not valid for field "${r.field}"` });
-    }
-    if (r.field === "subnet" && !isValidCidr(r.value) && !isValidIpAddress(r.value)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `"${r.value}" must be a CIDR (e.g. 10.20.0.0/16) or an IP address` });
-    }
-  });
-
-export const scopeConditionSchema: z.ZodType<ScopeConditionGroup> = z.lazy(() =>
-  z
+/**
+ * Build a condition-tree schema over one field vocabulary. Parameterized so the
+ * automations scope and the wider device filter validate the SAME tree shape
+ * against different field sets — the evaluator handles the superset, and which
+ * fields a surface may actually store is decided here.
+ */
+function makeScopeConditionSchema(
+  fieldOps: Record<string, readonly string[]>,
+): z.ZodType<ScopeConditionGroup> {
+  const ruleSchema = z
     .object({
-      op: z.enum(SCOPE_GROUP_OPS),
-      children: z.array(z.union([scopeConditionRuleSchema, scopeConditionSchema])).max(50),
+      field: z.enum(Object.keys(fieldOps) as [string, ...string[]]),
+      operator: z.string().min(1).max(30),
+      value: z.string().min(1).max(200),
     })
-    .strict(),
-) as z.ZodType<ScopeConditionGroup>;
+    .strict()
+    .superRefine((r, ctx) => {
+      const ops = fieldOps[r.field] ?? [];
+      if (!ops.includes(r.operator)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `operator "${r.operator}" is not valid for field "${r.field}"` });
+      }
+      if (r.field === "subnet" && !isValidCidr(r.value) && !isValidIpAddress(r.value)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `"${r.value}" must be a CIDR (e.g. 10.20.0.0/16) or an IP address` });
+      }
+      // A malformed wildcard must be a 400 at save time, not a throw inside the
+      // fire-time matcher — the same reason tag criteria compile theirs on write.
+      if (r.operator === WILDCARD_OP) {
+        try {
+          compileWildcard(r.value);
+        } catch (err) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: (err as Error)?.message || `"${r.value}" is not a valid wildcard` });
+        }
+      }
+    });
+
+  const groupSchema: z.ZodType<ScopeConditionGroup> = z.lazy(() =>
+    z
+      .object({
+        op: z.enum(SCOPE_GROUP_OPS),
+        children: z.array(z.union([ruleSchema, groupSchema])).max(50),
+      })
+      .strict(),
+  ) as z.ZodType<ScopeConditionGroup>;
+  return groupSchema;
+}
+
+/** Automations `scope.condition` — the narrow vocabulary. */
+export const scopeConditionSchema: z.ZodType<ScopeConditionGroup> = makeScopeConditionSchema(SCOPE_FIELD_OPS);
+
+/** Contact device ownership — the same tree over DEVICE_FILTER_FIELD_OPS. */
+export const deviceFilterConditionSchema: z.ZodType<ScopeConditionGroup> =
+  makeScopeConditionSchema(DEVICE_FILTER_FIELD_OPS);
+
+/**
+ * Depth + rule caps for a condition tree. Exported because the published
+ * builder catalog states them and the schema enforces them — two copies of the
+ * number is how the builder comes to allow a nesting the server refuses.
+ */
+export const SCOPE_CONDITION_MAX_DEPTH = 5;
+export const SCOPE_CONDITION_MAX_RULES = 100;
 
 /** Depth/size guard for a condition tree (defense against pathological input). */
 export function scopeConditionStats(cond: ScopeConditionGroup): { depth: number; rules: number } {
@@ -587,7 +677,32 @@ export function scopeConditionStats(cond: ScopeConditionGroup): { depth: number;
   return { depth, rules };
 }
 
-/** The asset fields the condition evaluator reads (matcher + engine select). */
+/**
+ * Every field a tree actually references. Lets a caller decide what to SELECT
+ * before evaluating — the contact preview only joins the FortiGate sighting
+ * relation when a rule asks about it (the 2000-asset rule; the flat
+ * vocabulary's buildCandidateSelect does the same thing).
+ */
+export function conditionFields(cond: ScopeConditionGroup): Set<string> {
+  const out = new Set<string>();
+  const walk = (g: ScopeConditionGroup): void => {
+    for (const c of g.children) {
+      if ("op" in c) walk(c as ScopeConditionGroup);
+      else out.add((c as ScopeConditionRule).field);
+    }
+  };
+  walk(cond);
+  return out;
+}
+
+/**
+ * The asset fields the condition evaluator reads (matcher + engine select).
+ *
+ * The last four back DEVICE_FILTER_FIELD_OPS only, and are optional for a
+ * reason: the notification engine never selects them, so an automations rule —
+ * which can't carry those fields past its own schema — costs nothing for them
+ * being here.
+ */
 export interface ScopeConditionAsset {
   id: string;
   assetType?: string | null;
@@ -598,6 +713,65 @@ export interface ScopeConditionAsset {
   tags?: string[];
   ipAddress?: string | null;
   status?: string | null;
+  osVersion?: string | null;
+  department?: string | null;
+  location?: string | null;
+  learnedLocation?: string | null;
+  fortigateSightings?: { fortigateDevice: string | null }[];
+}
+
+/** The asset value a string-op rule compares against, lower-cased. */
+function scopeStringField(field: string, asset: ScopeConditionAsset): string {
+  const raw =
+    field === "manufacturer" ? asset.manufacturer
+      : field === "model" ? asset.model
+        : field === "hostname" ? asset.hostname
+          : field === "os" ? asset.os
+            : field === "osVersion" ? asset.osVersion
+              : field === "department" ? asset.department
+                : field === "location" ? asset.location
+                  : null;
+  return (raw ?? "").toLowerCase();
+}
+
+/**
+ * Every name that could identify the FortiGate an asset sits behind: its
+ * projected learnedLocation plus each recorded sighting. Mirrors the
+ * tagAssignmentService `fortigate` rule — `contains` on a site prefix is meant
+ * to cover every gate at that site.
+ */
+function fortigateNames(asset: ScopeConditionAsset): string[] {
+  const out: string[] = [];
+  if (asset.learnedLocation) out.push(asset.learnedLocation.toLowerCase());
+  for (const s of asset.fortigateSightings ?? []) {
+    if (s.fortigateDevice) out.push(s.fortigateDevice.toLowerCase());
+  }
+  return out;
+}
+
+/** Apply one string operator. `matches` is a shell-style wildcard. */
+function compareString(operator: string, haystack: string, needle: string): boolean {
+  switch (operator) {
+    case "equals": return haystack === needle;
+    case "notEquals": return haystack !== needle;
+    case "contains": return haystack.includes(needle);
+    case "notContains": return !haystack.includes(needle);
+    case "startsWith": return haystack.startsWith(needle);
+    case "endsWith": return haystack.endsWith(needle);
+    case WILDCARD_OP: {
+      // Compiled per call rather than cached: the fire-time contact path runs
+      // this over ONE asset, and the preview's fleet pass is operator-triggered.
+      // A bad pattern was already refused at save, so this can only throw on a
+      // row written before the operator was validated — false, not an exception.
+      try { return compileWildcard(needle).test(haystack); } catch { return false; }
+    }
+    default: return false;
+  }
+}
+
+/** Is `operator` one that asserts ABSENCE? Those must hold for every candidate. */
+function isNegativeStringOp(operator: string): boolean {
+  return operator === "notEquals" || operator === "notContains";
 }
 
 function matchScopeRule(rule: ScopeConditionRule, asset: ScopeConditionAsset): boolean {
@@ -628,22 +802,25 @@ function matchScopeRule(rule: ScopeConditionRule, asset: ScopeConditionAsset): b
       }
       return rule.operator === "notInCidr" ? !inside : inside;
     }
-    default: { // manufacturer / model / hostname / os — string ops
-      const raw = str(
-        rule.field === "manufacturer" ? asset.manufacturer
-          : rule.field === "model" ? asset.model
-            : rule.field === "hostname" ? asset.hostname
-              : asset.os,
-      );
-      switch (rule.operator) {
-        case "equals": return raw === v;
-        case "notEquals": return raw !== v;
-        case "contains": return raw.includes(v);
-        case "notContains": return !raw.includes(v);
-        case "startsWith": return raw.startsWith(v);
-        case "endsWith": return raw.endsWith(v);
-        default: return false;
+    case "fortigate": {
+      // One rule against SEVERAL candidate names. A positive operator is
+      // satisfied by any of them; a negative one has to hold for all, or
+      // "not behind PLVCORFMG1" would be true for a device sighted behind it
+      // as soon as it was also sighted somewhere else.
+      const names = fortigateNames(asset);
+      if (names.length === 0) {
+        // Nothing known about where it sits: a positive claim fails, and an
+        // absence claim holds — the same reading `notHas` gives an untagged
+        // asset.
+        return isNegativeStringOp(rule.operator);
       }
+      return isNegativeStringOp(rule.operator)
+        ? names.every((n) => compareString(rule.operator, n, v))
+        : names.some((n) => compareString(rule.operator, n, v));
+    }
+    default: { // manufacturer / model / hostname / os (+ the device-filter
+      // extras: osVersion / department / location) — string ops
+      return compareString(rule.operator, scopeStringField(rule.field, asset), v);
     }
   }
 }
@@ -698,8 +875,8 @@ export const scopeSchema = z
   .superRefine((sc, ctx) => {
     if (sc.condition) {
       const { depth, rules } = scopeConditionStats(sc.condition);
-      if (depth > 5) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["condition"], message: "condition groups nest at most 5 deep" });
-      if (rules > 100) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["condition"], message: "at most 100 rules per condition tree" });
+      if (depth > SCOPE_CONDITION_MAX_DEPTH) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["condition"], message: `condition groups nest at most ${SCOPE_CONDITION_MAX_DEPTH} deep` });
+      if (rules > SCOPE_CONDITION_MAX_RULES) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["condition"], message: `at most ${SCOPE_CONDITION_MAX_RULES} rules per condition tree` });
     }
   });
 
@@ -2113,48 +2290,84 @@ export function buildSchemaCatalog() {
       stateRowPattern: "on rows matching {value}",
     },
     // ── Scope condition-tree vocabulary (the device-filter builder) ────────
-    scopeCondition: {
-      groupOps: SCOPE_GROUP_OPS,
-      groupOpLabels: {
-        and: "All child conditions must be satisfied (AND)",
-        or: "At least one child condition must be satisfied (OR)",
-        none: "All child conditions must NOT be satisfied",
-        notAll: "At least one child condition must NOT be satisfied",
-      },
-      operatorLabels: {
-        equals: "is equal to",
-        notEquals: "is not equal to",
-        contains: "contains",
-        notContains: "does not contain",
-        startsWith: "starts with",
-        endsWith: "ends with",
-        has: "is applied",
-        notHas: "is not applied",
-        inCidr: "is in subnet",
-        notInCidr: "is not in subnet",
-      },
-      // Per-field: label, valid operators, and which option list feeds the
-      // value suggestions ("assetTypes" | "manufacturers" | "models" | "tags"
-      // | "subnets" from /scope-options + the registry; null = free text).
-      fields: [
-        { field: "assetType", label: "Device type", ops: SCOPE_FIELD_OPS.assetType, optionsFrom: "assetTypes" },
-        { field: "manufacturer", label: "Manufacturer", ops: SCOPE_FIELD_OPS.manufacturer, optionsFrom: "manufacturers" },
-        { field: "model", label: "Model", ops: SCOPE_FIELD_OPS.model, optionsFrom: "models" },
-        { field: "hostname", label: "Hostname", ops: SCOPE_FIELD_OPS.hostname, optionsFrom: null },
-        { field: "os", label: "Operating system", ops: SCOPE_FIELD_OPS.os, optionsFrom: null },
-        { field: "tag", label: "Tag", ops: SCOPE_FIELD_OPS.tag, optionsFrom: "tags" },
-        { field: "subnet", label: "Subnet / IP", ops: SCOPE_FIELD_OPS.subnet, optionsFrom: "subnets" },
-        { field: "status", label: "Lifecycle status", ops: SCOPE_FIELD_OPS.status, optionsFrom: null, values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
-        // NOTE: `assetId` remains a valid field for saved rules (SCOPE_FIELD_OPS
-        // + matchScopeRule still handle it) but is intentionally not offered as
-        // a new builder choice — a raw id targets one device with no precedence
-        // meaning; use hostname instead.
-      ],
-      maxDepth: 5,
-      maxRules: 100,
-      // Precedence ladder (least → most specific). Drives the wizard's
-      // "Specificity" indicator; the carve-out engine ranks scopes by it.
-      specificity: SCOPE_RANK_LADDER,
+    scopeCondition: scopeConditionMeta(SCOPE_FIELD_OPS),
+  };
+}
+
+// ─── Condition-tree builder vocabulary (published to the UI) ────────────────
+
+/**
+ * Per-field presentation: the label the builder shows and which option list
+ * feeds its value suggestions ("assetTypes" | "manufacturers" | "models" |
+ * "tags" | "subnets" from /scope-options + the registry; null = free text).
+ *
+ * One catalog for both vocabularies so "Behind FortiGate" can't come out named
+ * one thing in the address book and another in the wizard.
+ */
+const SCOPE_FIELD_META: Record<string, { label: string; optionsFrom: string | null; values?: string[] }> = {
+  assetType: { label: "Device type", optionsFrom: "assetTypes" },
+  manufacturer: { label: "Manufacturer", optionsFrom: "manufacturers" },
+  model: { label: "Model", optionsFrom: "models" },
+  hostname: { label: "Hostname", optionsFrom: null },
+  os: { label: "Operating system", optionsFrom: null },
+  tag: { label: "Tag", optionsFrom: "tags" },
+  subnet: { label: "Subnet / IP", optionsFrom: "subnets" },
+  status: {
+    label: "Lifecycle status",
+    optionsFrom: null,
+    values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"],
+  },
+  osVersion: { label: "OS version", optionsFrom: null },
+  department: { label: "Department", optionsFrom: null },
+  location: { label: "Location", optionsFrom: null },
+  fortigate: { label: "Behind FortiGate", optionsFrom: null },
+  // NOTE: `assetId` remains a valid field for saved rules (SCOPE_FIELD_OPS +
+  // matchScopeRule still handle it) but is deliberately absent here, so it is
+  // not offered as a new builder choice — a raw id targets one device with no
+  // precedence meaning; use hostname instead.
+};
+
+/**
+ * The builder catalog for one field vocabulary. `specificity` is meaningful only
+ * for automations (it drives the carve-out ladder), so it rides the caller's
+ * choice of field set rather than being unconditional.
+ */
+export function scopeConditionMeta(fieldOps: Record<string, readonly string[]>) {
+  return {
+    groupOps: SCOPE_GROUP_OPS,
+    groupOpLabels: {
+      and: "All child conditions must be satisfied (AND)",
+      or: "At least one child condition must be satisfied (OR)",
+      none: "All child conditions must NOT be satisfied",
+      notAll: "At least one child condition must NOT be satisfied",
     },
+    operatorLabels: {
+      equals: "is equal to",
+      notEquals: "is not equal to",
+      contains: "contains",
+      notContains: "does not contain",
+      startsWith: "starts with",
+      endsWith: "ends with",
+      has: "is applied",
+      notHas: "is not applied",
+      inCidr: "is in subnet",
+      notInCidr: "is not in subnet",
+      [WILDCARD_OP]: "matches (wildcard *)",
+    },
+    fields: Object.keys(fieldOps)
+      .filter((field) => SCOPE_FIELD_META[field])
+      .map((field) => ({
+        field,
+        label: SCOPE_FIELD_META[field]!.label,
+        ops: fieldOps[field],
+        optionsFrom: SCOPE_FIELD_META[field]!.optionsFrom,
+        ...(SCOPE_FIELD_META[field]!.values ? { values: SCOPE_FIELD_META[field]!.values } : {}),
+      })),
+    maxDepth: SCOPE_CONDITION_MAX_DEPTH,
+    maxRules: SCOPE_CONDITION_MAX_RULES,
+    // Precedence ladder (least → most specific). Drives the wizard's
+    // "Specificity" indicator; the carve-out engine ranks scopes by it. Only
+    // automations have a precedence model, so it's omitted elsewhere.
+    ...(fieldOps === SCOPE_FIELD_OPS ? { specificity: SCOPE_RANK_LADDER } : {}),
   };
 }

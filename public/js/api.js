@@ -878,6 +878,10 @@ const api = {
     // (live lookup, nothing persisted).
     search:  (q, directory) => request("GET", "/contacts/search" + toQuery({ q, directory: directory ? 1 : undefined })),
     preview: (body)  => request("POST", "/contacts/preview", body),
+    // Vocabulary + value suggestions for the device-filter condition tree. Its
+    // own route because /automations/schema + /scope-options are gated
+    // automationManagement:read, which browsing the address book must not need.
+    filterSchema: () => request("GET", "/contacts/filter-schema"),
     create:  (body)  => request("POST", "/contacts", body),
     update:  (id, b) => request("PUT", `/contacts/${id}`, b),
     delete:  (id)    => request("DELETE", `/contacts/${id}`),

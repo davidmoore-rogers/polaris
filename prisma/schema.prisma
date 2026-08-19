@@ -4000,8 +4000,15 @@ model Contact {
   email         String   @unique // normalized: trimmed + lower-cased on write
   name          String?
   description   String?
-  assetCriteria Json? // tagAssignmentService criteria shape; null = pins only
-  assetIds      String[] @default([]) // explicit pins, unioned with criteria matches
+  // Device ownership, two shapes, one live at a time. assetCondition is the
+  // nested AND/OR tree the automations device filter uses (evaluated by
+  // evaluateScopeCondition over the wider DEVICE_FILTER vocabulary);
+  // assetCriteria is the original flat tagAssignmentService shape, kept only so
+  // pre-cutover rows keep matching until they fold forward (criteriaToCondition
+  // + the migrateContactFilterShape one-shot). A write of one clears the other.
+  assetCondition Json? // ScopeConditionGroup; null = no filter (see assetCriteria)
+  assetCriteria  Json? // LEGACY flat criteria; null once folded forward
+  assetIds       String[] @default([]) // explicit pins, unioned with filter matches
   createdBy     String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt

@@ -2,20 +2,22 @@
  * src/api/routes/contacts.ts — address-book CRUD + unified recipient search.
  *
  * Mounted at /api/v1/contacts.
- *   GET    /          contacts:read    (list)
- *   GET    /search    contacts:read    (users ∪ contacts, typeahead-ranked)
- *   POST   /preview   contacts:read    (dry-run a contact's device filter)
- *   POST   /          contacts:write   (create — createdBy stamped to the caller)
- *   PUT    /:id       contacts:write   (edit own; fullwrite edits anyone's)
- *   DELETE /:id       contacts:write   (delete own; fullwrite deletes anyone's)
+ *   GET    /                contacts:read    (list)
+ *   GET    /search          contacts:read    (users ∪ contacts, typeahead-ranked)
+ *   POST   /preview         contacts:read    (dry-run a contact's device filter)
+ *   GET    /filter-schema   contacts:read    (device-filter builder vocabulary)
+ *   POST   /                contacts:write   (create — createdBy stamped to the caller)
+ *   PUT    /:id             contacts:write   (edit own; fullwrite edits anyone's)
+ *   DELETE /:id             contacts:write   (delete own; fullwrite deletes anyone's)
  *
  * The write verbs use the ownership dimension the `contacts` function key
  * declares — the same mechanism subnets/reservations use. requireOwnership
  * asserts "at least write" and stamps req.permissionLevel; assertOwnership then
  * compares the row's createdBy to the caller unless they hold fullwrite.
  *
- * `/search` and `/preview` are declared BEFORE "/:id" so the literal paths
- * aren't captured as ids (the deliveryChannels `/web-push` precedent).
+ * `/search`, `/preview` and `/filter-schema` are declared BEFORE "/:id" so the
+ * literal paths aren't captured as ids (the deliveryChannels `/web-push`
+ * precedent).
  */
 
 import { Router } from "express";
@@ -25,6 +27,10 @@ import { requestActor } from "../middleware/auth.js";
 import { AppError } from "../../utils/errors.js";
 import { contactSearchLimiter } from "../middleware/rateLimits.js";
 import { directorySearchAvailable } from "../../services/directorySearchService.js";
+import { DEVICE_FILTER_FIELD_OPS, scopeConditionMeta } from "../../services/notificationTypes.js";
+import { listScopeOptions } from "../../services/notificationRuleService.js";
+import { listAssetTypes } from "../../services/assetTypeService.js";
+import { listAssetTags } from "../../services/tagAssignmentService.js";
 import {
   createContact,
   deleteContact,
@@ -35,20 +41,26 @@ import {
   updateContact,
 } from "../../services/contactService.js";
 
+// The device-ownership half, shared by the write verbs and the preview dry-run.
+// Both blob fields stay `unknown` here and are validated in contactService —
+// `assetCondition` against the DEVICE_FILTER condition-tree schema,
+// `assetCriteria` (legacy, still accepted from API callers) via
+// normalizeCriteria — the same split maintenance schedules use.
+const filterInputFields = {
+  assetCondition: z.unknown().optional(),
+  assetCriteria: z.unknown().optional(),
+  assetAllDevices: z.boolean().optional(),
+  assetIds: z.array(z.string()).max(500).optional(),
+};
+
 const contactInputSchema = z.object({
   email: z.string().min(1).max(320),
   name: z.string().max(200).nullish(),
   description: z.string().max(1000).nullish(),
-  // Validated in contactService via normalizeCriteria (the shared
-  // tagAssignmentService vocabulary), same split as maintenance schedules.
-  assetCriteria: z.unknown().optional(),
-  assetIds: z.array(z.string()).max(500).optional(),
+  ...filterInputFields,
 });
 
-const previewInputSchema = z.object({
-  assetCriteria: z.unknown().optional(),
-  assetIds: z.array(z.string()).max(500).optional(),
-});
+const previewInputSchema = z.object(filterInputFields);
 
 export const contactsRouter = Router();
 
@@ -76,7 +88,39 @@ contactsRouter.get("/search", contactSearchLimiter, requirePermission("contacts"
 contactsRouter.post("/preview", requirePermission("contacts", "read"), async (req, res, next) => {
   try {
     const input = previewInputSchema.parse(req.body);
-    res.json(await previewContactAssets(input.assetCriteria ?? null, input.assetIds ?? []));
+    res.json(await previewContactAssets(input));
+  } catch (err) { next(err); }
+});
+
+/**
+ * The device-filter builder's vocabulary + value suggestions, so the address
+ * book renders the SAME nested condition tree the automation wizard does.
+ *
+ * Its own route rather than reusing `/automations/schema` + `/scope-options`:
+ * those are gated `automationManagement:read`, and browsing the address book
+ * must not require permission to edit automations. The catalog is built from one
+ * shared source (scopeConditionMeta), so the two can't drift — this one carries
+ * the wider DEVICE_FILTER field set.
+ */
+contactsRouter.get("/filter-schema", requirePermission("contacts", "read"), async (_req, res, next) => {
+  try {
+    // assetTypes + tags ride this payload for the same reason regions and roles
+    // ride /scope-options: their own endpoints are gated `assets:read`, which a
+    // caller managing the address book need not hold, and the value pickers
+    // would silently degrade to free text.
+    const [options, assetTypes, tags] = await Promise.all([
+      listScopeOptions(),
+      listAssetTypes(),
+      listAssetTags(),
+    ]);
+    res.json({
+      scopeCondition: scopeConditionMeta(DEVICE_FILTER_FIELD_OPS),
+      options: {
+        ...options,
+        assetTypes: assetTypes.map((t) => ({ name: t.name, label: t.label || t.name })),
+        tags,
+      },
+    });
   } catch (err) { next(err); }
 });
 
