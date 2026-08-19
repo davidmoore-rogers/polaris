@@ -840,6 +840,10 @@ const api = {
     // them as instants (see listOccurrences).
     occurrences: (from, to) =>
       request("GET", `/maintenance-schedules/occurrences?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+    // The server's wall clock + zone. Every maintenance window is picked in
+    // SERVER-local time, so the browser must prefill/validate/label from this
+    // rather than from its own clock — see serverClockInfo.
+    serverTime: () => request("GET", "/maintenance-schedules/server-time"),
     preview: (body)  => request("POST", "/maintenance-schedules/preview", body),
     create:  (body)  => request("POST", "/maintenance-schedules", body),
     update:  (id, b) => request("PUT", `/maintenance-schedules/${id}`, b),

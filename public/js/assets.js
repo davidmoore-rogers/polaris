@@ -494,6 +494,14 @@ document.addEventListener("DOMContentLoaded", async function () {
   // Class Overrides) — the standalone Asset Settings modal was folded in.
   var monsetBtn = document.getElementById("btn-monitoring-settings");
   if (monsetBtn) monsetBtn.addEventListener("click", openMonitoringSettingsModal);
+  // Warm the server-clock skew once per page load. The status-pill maintenance
+  // popover paints synchronously and prefills an "until" time the SERVER reads
+  // in its own zone, so the value has to be in server time before the operator
+  // sees it — an unwarmed cache falls back to the browser clock, which on a
+  // UTC-clocked host produces a window that is already over.
+  if (typeof window.maintLoadServerClock === "function") {
+    window.maintLoadServerClock().catch(function () { /* best-effort */ });
+  }
   // Maintenance modal lives in assets-maintenance.js (loaded after this file).
   var maintBtn = document.getElementById("btn-maintenance");
   if (maintBtn) maintBtn.addEventListener("click", function () {
@@ -1140,15 +1148,27 @@ function _showMonitorDisableConfirm(anchorEl, onConfirm, maintOpts) {
 
   var maintHtml = "";
   if (offerMaintenance) {
+    // The end time is read by the server as ITS wall clock, so prefill from the
+    // server's clock and name the zone — a browser-clock "+2h" on a UTC-clocked
+    // host is already in the server's past and the window closes on the next
+    // reconcile. maintServerNow falls back to the browser clock until the skew
+    // read lands, which is why the read is kicked off before the popover paints.
+    var maintNowMs = typeof window.maintServerNow === "function"
+      ? window.maintServerNow().getTime() : Date.now();
     var defaultUntil = typeof window.maintLocalIso === "function"
-      ? window.maintLocalIso(new Date(Date.now() + 2 * 60 * 60 * 1000))
+      ? window.maintLocalIso(new Date(maintNowMs + 2 * 60 * 60 * 1000))
       : "";
+    var tzLabel = typeof window.maintServerClockLabel === "function"
+      ? window.maintServerClockLabel() : "";
     maintHtml =
       '<div class="mcp-message" style="margin-top:8px;border-top:1px solid var(--color-border);padding-top:8px">Or enter maintenance mode until:</div>' +
       '<div class="mcp-actions" style="align-items:center;gap:6px">' +
         '<input type="datetime-local" class="mcp-maint-until" value="' + escapeHtml(defaultUntil) + '" style="font-size:0.82rem">' +
         '<button type="button" class="mcp-confirm mcp-maint-enter">Enter</button>' +
       '</div>' +
+      (tzLabel
+        ? '<div class="mcp-message" style="font-size:0.78rem">Server time: ' + escapeHtml(tzLabel) + '</div>'
+        : "") +
       '<label class="mcp-message" style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:6px" title="Devices behind this asset go into dependency suppression (notifications paused) for the window. Uncheck when they stay reachable and should keep alerting.">' +
         '<input type="checkbox" class="mcp-maint-suppress" checked style="width:auto"> Mark dependent devices as down' +
       '</label>';
@@ -1168,7 +1188,8 @@ function _showMonitorDisableConfirm(anchorEl, onConfirm, maintOpts) {
   });
   if (offerMaintenance) {
     ctl.popover.querySelector(".mcp-maint-enter").addEventListener("click", async function () {
-      var check = window.maintValidateAdhocEnd(ctl.popover.querySelector(".mcp-maint-until").value, Date.now());
+      // Omit nowMs so the validator uses the server clock (see its header).
+      var check = window.maintValidateAdhocEnd(ctl.popover.querySelector(".mcp-maint-until").value);
       if (!check.ok) { showToast(check.error, "error"); return; }
       var suppressCb = ctl.popover.querySelector(".mcp-maint-suppress");
       var suppress = !suppressCb || suppressCb.checked;
@@ -3668,7 +3689,7 @@ function assetMaintenanceFormHTML(asset) {
             '<input type="checkbox" id="f-maint-suppress" checked style="width:auto">' +
             '<span>Mark dependent devices as down</span>' +
           '</label>' +
-          '<p class="hint">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time. Both the date AND the time are required.</p>'
+          '<p class="hint" id="f-maint-tz">Creates a one-time maintenance schedule for this asset starting now (listed under Assets &rarr; Maintenance). Polling and notifications pause until the end time. Both the date AND the time are required, in the Polaris server&rsquo;s timezone.</p>'
         : mayMaint
           ? '<p class="hint">Maintenance scheduling isn’t loaded on this page — use Assets &rarr; Maintenance.</p>'
           : '<p class="hint">You don’t have permission to change maintenance windows.</p>') +
@@ -3691,8 +3712,10 @@ function _readAdhocMaintenanceRequest() {
   var raw = String(untilEl.value || "").trim();
   if (!chk.checked && !raw) return { requested: false };
   var suppressEl = document.getElementById("f-maint-suppress");
+  // No nowMs: the validator judges "in the past" against the SERVER's clock,
+  // which is the clock the value is read in.
   var check = typeof window.maintValidateAdhocEnd === "function"
-    ? window.maintValidateAdhocEnd(raw, Date.now())
+    ? window.maintValidateAdhocEnd(raw)
     : { ok: !!raw, value: raw, error: "Pick the date and time maintenance should end." };
   if (!check.ok) return { requested: true, error: check.error };
   return {
@@ -3726,6 +3749,18 @@ function _wireMaintenanceEditSection(asset) {
   var enterChk = document.getElementById("f-maint-enter");
   var untilEl = document.getElementById("f-maint-until");
   var clearBtn = document.getElementById("f-maint-clear");
+
+  // Name the server's zone + current time beside the picker. Kicked here rather
+  // than at page load because this is the first surface that needs it; the skew
+  // is cached module-side, so the popover path picks it up for free afterwards.
+  if (typeof window.maintLoadServerClock === "function") {
+    window.maintLoadServerClock().then(function () {
+      var tzEl = document.getElementById("f-maint-tz");
+      var label = typeof window.maintServerClockLabel === "function"
+        ? window.maintServerClockLabel() : "";
+      if (tzEl && label) tzEl.innerHTML += ' <strong>' + escapeHtml(label) + '</strong>.';
+    });
+  }
   if (enterChk && untilEl) {
     // Ticking the box seeds a valid default (now + 2h) so the common case is
     // one click; clearing the box clears the date so the two controls can
@@ -3733,7 +3768,11 @@ function _wireMaintenanceEditSection(asset) {
     enterChk.addEventListener("change", function () {
       if (enterChk.checked) {
         if (!untilEl.value && typeof window.maintLocalIso === "function") {
-          untilEl.value = window.maintLocalIso(new Date(Date.now() + 2 * 60 * 60 * 1000));
+          // Server clock, not the browser's — the value is read as the server's
+          // wall clock (see maintValidateAdhocEnd).
+          var seedMs = typeof window.maintServerNow === "function"
+            ? window.maintServerNow().getTime() : Date.now();
+          untilEl.value = window.maintLocalIso(new Date(seedMs + 2 * 60 * 60 * 1000));
         }
       } else {
         untilEl.value = "";

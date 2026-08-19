@@ -64,6 +64,14 @@ var _maintPreviewTimer = null;
 var _maintAssetTypesCache = null;
 var _maintIntegrationsCache = null; // [{id, name, type}] for the Integration rule select
 var _maintFortigateNamesCache = null; // firewall hostnames for the Behind-FortiGate datalist
+// Server-clock skew (ms to ADD to a browser wall clock to reach the server's).
+// Null until the first /server-time read resolves; 0 once it does and the two
+// clocks agree. See _maintLoadServerClock.
+var _maintClockSkewMs = null;
+var _maintServerTz = "";
+// Has the operator typed in either one-shot field? Gates the async re-prefill
+// so a late clock read can never overwrite a time they picked themselves.
+var _maintOneshotTouched = false;
 
 // ─── Local-time formatting ──────────────────────────────────────────────────
 
@@ -73,6 +81,86 @@ function _maintPad(n) { return (n < 10 ? "0" : "") + n; }
 function _maintLocalIso(d) {
   return d.getFullYear() + "-" + _maintPad(d.getMonth() + 1) + "-" + _maintPad(d.getDate()) +
     "T" + _maintPad(d.getHours()) + ":" + _maintPad(d.getMinutes());
+}
+
+// ─── Server clock ───────────────────────────────────────────────────────────
+//
+// Maintenance windows are picked in the SERVER's local wall clock — the
+// recurrence engine runs there and the shapes carry no offset (see
+// serverClockInfo in src/utils/maintenanceRecurrence.ts). Prefilling a
+// datetime-local from the BROWSER's clock therefore posts the operator's digits
+// for the server to read as its own: on a UTC-clocked host with a Central
+// operator a "now → now + 2h" window lands 5-6 hours in the server's past and
+// has already ENDED, so the schedule saves cleanly and no asset ever enters
+// maintenance. Everything below picks, validates and labels in server time.
+
+/** Parse "YYYY-MM-DDTHH:MM" treating the digits as BROWSER-local. */
+function _maintParseLocalIso(iso) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(iso || ""));
+  if (!m) return null;
+  var d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * A Date whose BROWSER-local wall-clock digits equal the server's wall clock
+ * right now — i.e. exactly what _maintLocalIso must be fed to produce a value
+ * the server will read back as the same moment. Falls back to the browser's own
+ * clock while the skew is unknown (unread, or the read failed): that is the
+ * pre-fix behaviour, which is right whenever the two clocks agree and no worse
+ * than it ever was when they don't.
+ */
+function maintServerNow() {
+  return new Date(Date.now() + (_maintClockSkewMs || 0));
+}
+
+/**
+ * Read the server's clock once per page and cache the skew.
+ *
+ * The skew folds timezone difference AND plain clock drift into one number,
+ * which is all the callers need. It is rounded to the minute because the
+ * pickers are minute-granular and the round trip contributes sub-second error.
+ */
+async function _maintLoadServerClock() {
+  if (_maintClockSkewMs !== null) return;
+  try {
+    var info = await api.maintenanceSchedules.serverTime();
+    var serverWall = _maintParseLocalIso(info && info.now);
+    if (!serverWall) return;
+    var raw = serverWall.getTime() - Date.now();
+    _maintClockSkewMs = Math.round(raw / 60000) * 60000;
+    _maintServerTz = (info && info.timeZone) || "";
+  } catch (err) {
+    // Best-effort: leave the skew unknown so maintServerNow falls back.
+  }
+}
+
+/** Human label for the server clock: "America/Chicago — now Aug 19 2026 14:30". */
+function maintServerClockLabel() {
+  if (_maintClockSkewMs === null) return "";
+  var nowIso = _maintLocalIso(maintServerNow());
+  return (_maintServerTz ? _maintServerTz + " — " : "") + "server time now " + _maintFmtLocal(nowIso);
+}
+
+/**
+ * Paint the live server clock into the editor's When hint, and re-prefill the
+ * one-shot fields from it unless the operator has already typed a time.
+ */
+function _maintApplyServerClock() {
+  var hint = document.getElementById("maint-tz-hint");
+  if (hint) {
+    var label = maintServerClockLabel();
+    hint.textContent = "Times are the Polaris server’s local wall-clock" +
+      (label ? " (" + label + ")" : "") +
+      ". An end time at or before the start time spans midnight into the next day.";
+  }
+  if (_maintOneshotTouched || _maintEditingId) return;
+  var startEl = document.getElementById("maint-start");
+  var endEl = document.getElementById("maint-end");
+  if (!startEl || !endEl) return;
+  var now = maintServerNow();
+  startEl.value = _maintLocalIso(now);
+  endEl.value = _maintLocalIso(new Date(now.getTime() + 2 * 60 * 60 * 1000));
 }
 
 var _MAINT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -279,7 +367,7 @@ function _maintEditorHTML() {
 
     '<div class="form-group" style="border-top:1px solid var(--color-border);padding-top:12px">' +
       '<label>When</label>' +
-      '<p class="hint">Times are the Polaris server’s local wall-clock. An end time at or before the start time spans midnight into the next day.</p>' +
+      '<p class="hint" id="maint-tz-hint">Times are the Polaris server’s local wall-clock. An end time at or before the start time spans midnight into the next day.</p>' +
       '<label style="display:inline-flex;align-items:center;gap:6px;margin-right:16px;cursor:pointer">' +
         '<input type="radio" name="maint-kind" id="maint-kind-oneshot" value="oneshot" checked style="width:auto"> One-time window' +
       '</label>' +
@@ -533,10 +621,20 @@ function _maintWireEditor() {
   // live the moment the modal paints.
   _maintLoadEditorLookups().catch(function () { /* best-effort */ });
 
-  // Sensible one-shot defaults: now → now + 2h.
-  var now = new Date();
+  // Sensible one-shot defaults: now → now + 2h, in the SERVER's wall clock.
+  // maintServerNow falls back to the browser clock until the skew read lands;
+  // _maintApplyServerClock re-prefills (and labels the zone) when it does.
+  _maintOneshotTouched = false;
+  var now = maintServerNow();
   document.getElementById("maint-start").value = _maintLocalIso(now);
   document.getElementById("maint-end").value = _maintLocalIso(new Date(now.getTime() + 2 * 60 * 60 * 1000));
+  _maintApplyServerClock();
+  _maintLoadServerClock().then(_maintApplyServerClock);
+
+  // An operator-typed time is never overwritten by the async re-prefill.
+  ["maint-start", "maint-end"].forEach(function (id) {
+    document.getElementById(id).addEventListener("input", function () { _maintOneshotTouched = true; });
+  });
 
   document.getElementById("maint-add-rule").addEventListener("click", function () {
     document.getElementById("maint-rules").insertAdjacentHTML("beforeend", _maintRuleRowHTML(null));
@@ -581,9 +679,11 @@ function _maintResetEditor() {
   document.getElementById("maint-kind-oneshot").checked = true;
   document.getElementById("maint-freq").value = "days";
   document.querySelectorAll(".maint-dow").forEach(function (cb) { cb.checked = true; });
-  var now = new Date();
+  _maintOneshotTouched = false;
+  var now = maintServerNow();
   document.getElementById("maint-start").value = _maintLocalIso(now);
   document.getElementById("maint-end").value = _maintLocalIso(new Date(now.getTime() + 2 * 60 * 60 * 1000));
+  _maintApplyServerClock();
   document.getElementById("maint-edit-banner").style.display = "none";
   document.getElementById("maint-save").textContent = "Create Schedule";
   document.getElementById("maint-cancel-edit").style.display = "none";
@@ -611,6 +711,8 @@ function _maintLoadIntoEditor(row) {
   document.getElementById("maint-kind-oneshot").checked = oneshot;
   document.getElementById("maint-kind-recurring").checked = !oneshot;
   if (oneshot) {
+    // Stored times are already server-local wall clock — load verbatim.
+    _maintOneshotTouched = true;
     document.getElementById("maint-start").value = String(s.startAt || "").slice(0, 16);
     document.getElementById("maint-end").value = String(s.endAt || "").slice(0, 16);
   } else {
@@ -935,11 +1037,15 @@ async function _maintCalOpenSchedule(scheduleId) {
  */
 function _maintCalNewOnDay(dayKey) {
   _maintResetEditor();
-  var now = new Date();
+  // The grid's day keys are server-local (occurrences are expanded server-side),
+  // so "is this cell today?" is a question about the SERVER's date.
+  var now = maintServerNow();
   var p = dayKey.split("-").map(Number);
   var start = _maintDayKey(now) === dayKey
     ? now
     : new Date(p[0], p[1] - 1, p[2], 20, 0, 0, 0);
+  // An operator-picked day is a deliberate time — never re-prefilled.
+  _maintOneshotTouched = true;
   document.getElementById("maint-kind-oneshot").checked = true;
   document.getElementById("maint-kind-recurring").checked = false;
   document.getElementById("maint-start").value = _maintLocalIso(start);
@@ -1026,6 +1132,11 @@ async function _maintRenderCalendar() {
  * sees a filled-in date and Polaris sees nothing. Both ad-hoc entry points
  * (status pill, edit modal) run through this so that case, and an end time
  * already in the past, are refused with a reason instead of silently dropped.
+ *
+ * "In the past" is judged against the SERVER's clock, because that is what the
+ * value is read as: on a UTC-clocked host a Central operator's "+2h" end time
+ * is already hours behind the server, and the window it produces closes on the
+ * very next reconcile. Callers may pass nowMs to pin it.
  */
 function maintValidateAdhocEnd(value, nowMs) {
   var raw = String(value == null ? "" : value).trim();
@@ -1034,7 +1145,7 @@ function maintValidateAdhocEnd(value, nowMs) {
   if (!m) return { ok: false, error: "Enter a full end date and time." };
   var when = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0);
   if (isNaN(when.getTime())) return { ok: false, error: "Enter a full end date and time." };
-  if (when.getTime() <= (nowMs == null ? Date.now() : nowMs)) {
+  if (when.getTime() <= (nowMs == null ? maintServerNow().getTime() : nowMs)) {
     return { ok: false, error: "The end time must be in the future." };
   }
   return { ok: true, value: raw.slice(0, 16) };
@@ -1070,6 +1181,11 @@ window.maintCreateAdhoc = maintCreateAdhoc;
 window.maintScheduleSummary = maintScheduleSummary;
 window.maintLocalIso = _maintLocalIso;
 window.maintValidateAdhocEnd = maintValidateAdhocEnd;
+// Server-clock helpers: the ad-hoc surfaces in assets.js prefill and label
+// their "until" pickers in server time through these.
+window.maintServerNow = maintServerNow;
+window.maintLoadServerClock = _maintLoadServerClock;
+window.maintServerClockLabel = maintServerClockLabel;
 // Calendar internals, exported for unit tests (day bucketing is the part with
 // real edge cases: midnight-spanning and all-day windows).
 window._maintOccurrenceDays = _maintOccurrenceDays;

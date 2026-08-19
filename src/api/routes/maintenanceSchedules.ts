@@ -7,6 +7,9 @@
  *   GET  /occurrences   maintenanceManagement:read  (calendar tab — every
  *                  schedule's occurrences expanded over a ?from/?to day range,
  *                  returned as server-local wall-clock strings)
+ *   GET  /server-time   maintenanceManagement:read  (the server's wall clock +
+ *                  zone, so the browser prefills/validates/labels the window
+ *                  pickers in the zone the recurrence engine actually uses)
  *   POST /preview  maintenanceManagement:fullwrite  (dry-run the target filter
  *                  → capped device list + total; only monitored assets)
  *   POST / PUT/:id / DELETE/:id   maintenanceManagement:fullwrite  (CRUD)
@@ -30,6 +33,7 @@ import {
   previewTargets,
   listOccurrences,
 } from "../../services/maintenanceScheduleService.js";
+import { serverClockInfo } from "../../utils/maintenanceRecurrence.js";
 
 const scheduleInputSchema = z.object({
   name: z.string().min(1).max(200),
@@ -66,6 +70,16 @@ maintenanceSchedulesRouter.get("/occurrences", requirePermission("maintenanceMan
     const q = occurrencesQuerySchema.parse(req.query);
     res.json(await listOccurrences(q));
   } catch (err) { next(err); }
+});
+
+// Static path BEFORE any "/:id" so it isn't captured as an id.
+//
+// The window pickers are server-local wall clock with no offset (see
+// serverClockInfo). A browser prefilling them from its OWN clock posts the
+// operator's digits for the server to read as its own, which on a UTC-clocked
+// host silently produces a window that has already ended.
+maintenanceSchedulesRouter.get("/server-time", requirePermission("maintenanceManagement", "read"), (_req, res) => {
+  res.json(serverClockInfo());
 });
 
 // Static path BEFORE any "/:id" so it isn't captured as an id.

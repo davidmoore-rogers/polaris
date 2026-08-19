@@ -14,6 +14,7 @@ import { describe, it, expect } from "vitest";
 import {
   validateScheduleShape,
   resolveStartNow,
+  serverClockInfo,
   formatLocalIsoMinute,
   isInWindow,
   currentWindow,
@@ -308,5 +309,34 @@ describe("expandOccurrences", () => {
 describe("parseLocalDay", () => {
   it("parses a day string as server-local midnight", () => {
     expect(parseLocalDay("2026-07-12").getTime()).toBe(at(2026, 7, 12).getTime());
+  });
+});
+
+describe("serverClockInfo", () => {
+  it("reports the wall clock as the local-ISO minute the shapes carry", () => {
+    const now = new Date(2026, 7, 19, 14, 30, 45, 123);
+    expect(serverClockInfo(now).now).toBe("2026-08-19T14:30");
+  });
+
+  it("reports the offset east-positive, opposite getTimezoneOffset's sign", () => {
+    const now = new Date(2026, 7, 19, 14, 30);
+    expect(serverClockInfo(now).offsetMinutes).toBe(-now.getTimezoneOffset());
+  });
+
+  it("round-trips: parsing the reported wall clock back yields the same minute", () => {
+    // This is the property the browser relies on to compute its skew — the
+    // string must be re-readable as a wall clock, not as an instant.
+    const now = new Date(2026, 1, 3, 9, 5);
+    const parsed = validateScheduleShape({
+      version: 1, kind: "oneshot",
+      startAt: serverClockInfo(now).now,
+      endAt: "2030-01-01T00:00",
+    });
+    expect((parsed as { startAt: string }).startAt).toBe("2026-02-03T09:05");
+  });
+
+  it("always names a zone or an empty string, never undefined", () => {
+    const info = serverClockInfo(new Date(2026, 7, 19, 14, 30));
+    expect(typeof info.timeZone).toBe("string");
   });
 });

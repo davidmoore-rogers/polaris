@@ -14,6 +14,8 @@
  *     (endReason "operator") without the scheduler re-entering
  *   - delete → windows closed ("deleted") + status restored
  *   - GET /assets/:id/maintenance-windows range filtering + maintenance-info
+ *   - GET /server-time: the wall clock + zone the pickers must be filled in,
+ *     usable as a one-shot startAt verbatim (the browser-clock bug)
  *
  * Skips cleanly when DATABASE_URL isn't reachable; see _helpers.ts.
  */
@@ -120,6 +122,52 @@ d("maintenance-schedules RBAC", () => {
       .set("X-CSRF-Token", csrf)
       .send({ name: "RBAC OK", assetIds: [asset.id], schedule: activeOneshot() });
     expect(adminPost.status).toBe(201);
+  });
+});
+
+d("GET /maintenance-schedules/server-time", () => {
+  it("reports a wall clock the pickers can use verbatim, plus the zone", async () => {
+    const { agent } = await authedAgent(app);
+    const res = await agent.get("/api/v1/maintenance-schedules/server-time");
+    expect(res.status).toBe(200);
+    // The exact shape the browser computes its skew from.
+    expect(res.body.now).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+    expect(typeof res.body.timeZone).toBe("string");
+    expect(typeof res.body.offsetMinutes).toBe("number");
+    expect(res.body.offsetMinutes).toBe(-new Date().getTimezoneOffset());
+  });
+
+  it("is not captured by the /:id route", async () => {
+    // Declared above "/:id" — a capture would 404 as a missing schedule.
+    const { agent } = await authedAgent(app);
+    const res = await agent.get("/api/v1/maintenance-schedules/server-time");
+    expect(res.status).toBe(200);
+    expect(res.body.now).toBeTruthy();
+  });
+
+  it("the reported wall clock is accepted as a one-shot startAt and enters immediately", async () => {
+    // The property the fix rests on: a window prefilled from THIS value is
+    // open on the server, whereas one prefilled from a browser in another zone
+    // may already have ended. Round-tripping it proves the string is read back
+    // as the same wall clock the server reported.
+    const { agent, csrf } = await authedAgent(app);
+    const clock = await agent.get("/api/v1/maintenance-schedules/server-time");
+    const asset = await seedAsset("server-time-roundtrip");
+    const end = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const p = (n: number) => String(n).padStart(2, "0");
+    const endAt = `${end.getFullYear()}-${p(end.getMonth() + 1)}-${p(end.getDate())}T` +
+      `${p(end.getHours())}:${p(end.getMinutes())}`;
+    const res = await agent
+      .post("/api/v1/maintenance-schedules")
+      .set("X-CSRF-Token", csrf)
+      .send({
+        name: "From server clock",
+        assetIds: [asset.id],
+        schedule: { version: 1, kind: "oneshot", startAt: clock.body.now, endAt },
+      });
+    expect(res.status).toBe(201);
+    const after = await prisma.asset.findUnique({ where: { id: asset.id } });
+    expect(after?.status).toBe("maintenance");
   });
 });
 

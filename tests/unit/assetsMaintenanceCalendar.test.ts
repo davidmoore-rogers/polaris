@@ -27,6 +27,12 @@ const g = globalThis as Record<string, unknown>;
 let occurrenceDays: (occ: Occ) => string[];
 let chipTime: (occ: Occ, dayKey: string) => string;
 let validateEnd: (v: unknown, nowMs?: number) => { ok: boolean; value?: string; error?: string };
+let serverNow: () => Date;
+let loadServerClock: () => Promise<void>;
+let serverClockLabel: () => string;
+let localIso: (d: Date) => string;
+/** What the stubbed /server-time read answers with; null = read fails. */
+let serverNowIso: string | null = null;
 
 beforeAll(() => {
   const win = new Window();
@@ -47,10 +53,18 @@ beforeAll(() => {
     _maintOccurrenceDays: typeof occurrenceDays;
     _maintChipTime: typeof chipTime;
     maintValidateAdhocEnd: typeof validateEnd;
+    maintServerNow: typeof serverNow;
+    maintLoadServerClock: typeof loadServerClock;
+    maintServerClockLabel: typeof serverClockLabel;
+    maintLocalIso: typeof localIso;
   };
   occurrenceDays = w._maintOccurrenceDays;
   chipTime = w._maintChipTime;
   validateEnd = w.maintValidateAdhocEnd;
+  serverNow = w.maintServerNow;
+  loadServerClock = w.maintLoadServerClock;
+  serverClockLabel = w.maintServerClockLabel;
+  localIso = w.maintLocalIso;
 });
 
 describe("calendar day bucketing", () => {
@@ -210,5 +224,83 @@ describe("calendar grid", () => {
       .dispatchEvent(new g2.window.Event("click", { bubbles: true }));
     expect((doc.getElementById("maint-start") as HTMLInputElement).value).toBe("2026-08-12T09:00");
     expect((doc.getElementById("maint-end") as HTMLInputElement).value).toBe("2026-08-12T11:00");
+  });
+});
+
+/**
+ * The reported bug: a bulk-selected batch of switches/APs was put into a
+ * maintenance window and none of them ever entered it.
+ *
+ * Every maintenance time is SERVER-local wall clock with no offset. The editor
+ * prefilled its one-shot pickers from the BROWSER's clock and posted those
+ * digits for the server to read as its own, so on a UTC-clocked host with a
+ * Central operator a "now → now + 2h" window mapped onto one that started five
+ * hours ago and had ALREADY ENDED: the schedule saved cleanly, isInWindow was
+ * false forever, and the assets kept showing Down. These pin the skew math the
+ * fix routes every picker through.
+ */
+describe("server-clock skew", () => {
+  // Own the shared globals for this suite: the calendar describe above replaces
+  // globalThis.api wholesale and installs fake timers, and the skew loader needs
+  // a real clock plus its own /server-time stub.
+  beforeEach(() => {
+    // Pinned to an exact minute boundary. The skew is rounded to the minute (the
+    // pickers are minute-granular and the round trip adds sub-second noise), so
+    // racing the real clock would make these assertions flap by a minute.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 7, 19, 9, 0, 0, 0));
+    g.api = {
+      maintenanceSchedules: {
+        // serverNowIso is the server's wall clock; null makes the read fail so
+        // the browser-clock fallback is exercised.
+        serverTime: async () => {
+          if (serverNowIso === null) throw new Error("unreachable");
+          return { now: serverNowIso, timeZone: "America/Chicago", offsetMinutes: -300 };
+        },
+      },
+    };
+  });
+
+  it("falls back to the browser clock before the read lands", () => {
+    // The skew cache is module-level and unread at this point.
+    expect(Math.abs(serverNow().getTime() - Date.now())).toBeLessThan(2000);
+    expect(serverClockLabel()).toBe("");
+  });
+
+  it("shifts server-now by the whole browser↔server difference", async () => {
+    // Browser reads 09:00 Central; the server is UTC-clocked, so its wall clock
+    // reads 14:00 — the exact shape of the reported bug.
+    serverNowIso = "2026-08-19T14:00";
+    await loadServerClock();
+    // maintServerNow's browser-local digits must now equal the server's.
+    expect(localIso(serverNow())).toBe("2026-08-19T14:00");
+  });
+
+  it("labels the zone and the current server time once known", () => {
+    const label = serverClockLabel();
+    expect(label).toContain("America/Chicago");
+    expect(label).toContain("server time now");
+  });
+
+  it("caches: a second read cannot move an established skew", async () => {
+    const before = localIso(serverNow());
+    serverNowIso = "1999-01-01T00:00";
+    await loadServerClock();
+    expect(localIso(serverNow())).toBe(before);
+  });
+
+  it("judges an end time against the SERVER clock, not the browser's", () => {
+    // Skew is +5h from the test above. "Now + 2h" in the BROWSER is 11:00, which
+    // is 3h BEHIND the server's 14:00 — exactly the end time that used to be
+    // accepted and then closed the window on the very next reconcile.
+    expect(validateEnd("2026-08-19T11:00").ok).toBe(false);
+    // Ahead of the SERVER's clock is accepted.
+    expect(validateEnd("2026-08-19T15:00").ok).toBe(true);
+  });
+
+  it("still honours an explicitly passed nowMs", () => {
+    const pinned = new Date(2030, 0, 1, 12, 0);
+    expect(validateEnd("2030-01-01T13:00", pinned.getTime()).ok).toBe(true);
+    expect(validateEnd("2030-01-01T11:00", pinned.getTime()).ok).toBe(false);
   });
 });

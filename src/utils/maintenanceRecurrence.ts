@@ -112,6 +112,50 @@ export function formatLocalIsoMinute(d: Date): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+export interface ServerClockInfo {
+  /** Server wall clock as the local-ISO minute string every shape here carries. */
+  now: string;
+  /** IANA zone name the server resolves to ("UTC", "America/Chicago", …). */
+  timeZone: string;
+  /** Server UTC offset in minutes, east-positive (Central DST = -300). */
+  offsetMinutes: number;
+}
+
+/**
+ * The server's wall clock, for browsers that must PICK a time in it.
+ *
+ * Every time in this module is server-local wall clock with no offset — a
+ * 22:00 nightly window means 22:00 at the site, which is the only reading that
+ * survives DST. That contract silently breaks the other way for a browser: a
+ * `datetime-local` field prefilled from `new Date()` in the BROWSER posts the
+ * operator's wall clock, and the server reads those same digits as its own. On
+ * a UTC-clocked host with a Central operator that maps a "now → now + 2h"
+ * window onto one that started 5–6 hours ago and has ALREADY ENDED, so the
+ * schedule saves cleanly, `isInWindow` is false forever, and nothing ever
+ * enters maintenance. (`resolveStartNow` covers only the START of the ad-hoc
+ * path; every operator-picked end time had the same hole.)
+ *
+ * Handing the browser this block lets it prefill, validate and LABEL in the
+ * server's zone instead of guessing that the two agree.
+ */
+export function serverClockInfo(now: Date = new Date()): ServerClockInfo {
+  let timeZone = "";
+  try {
+    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    // Intl is always present on supported Node, but a resolved zone is not
+    // guaranteed on a stripped container image — the offset still is.
+    timeZone = "";
+  }
+  return {
+    now: formatLocalIsoMinute(now),
+    timeZone,
+    // getTimezoneOffset is west-positive; flip it so the sign reads the way
+    // operators write offsets (Central DST = -300, not +300).
+    offsetMinutes: -now.getTimezoneOffset(),
+  };
+}
+
 /**
  * Pre-validation resolution for the ad-hoc `startNow` marker: a oneshot blob
  * carrying `startNow: true` gets `startAt` stamped from the SERVER clock (the
