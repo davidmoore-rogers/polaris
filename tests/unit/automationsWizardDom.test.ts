@@ -434,9 +434,94 @@ describe("automation wizard DOM render", () => {
     expect(p.escalation).toEqual(rule.escalation);
     expect(p.severityBands).toHaveLength(1);
     expect(p.severityBands[0].actions).toEqual(rule.severityBands[0].actions);
-    expect(p.bandNotify).toEqual(rule.bandNotify);
+    // bandNotify does NOT round-trip verbatim any more: the band-level resolved
+    // policy is retired on load (recovery is announced once, by the reset
+    // actions), and what it announced is adopted into them.
+    expect(p.bandNotify).toEqual({ onIncrease: true, onDecrease: false, onResolved: false });
+    expect(p.resetActions).toHaveLength(1);
     // And the payload passes the real server-side schema.
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
+  it("retires the band 'Resolved' notify and moves what it announced into the reset actions", async () => {
+    // Recovery is announced ONCE, by the reset actions. The band-level resolved
+    // policy was a second mechanism for the same event and the engine ran both
+    // (fireResolved, then fireReset from recover()), so a banded automation with
+    // reset actions told people twice. Removing the control must not make a
+    // stored rule that relied on it go silent — hence the adoption.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-res",
+      name: "Banded",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">=", threshold: 80, forDurationSec: 300 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.invalid"] }],
+      severityBands: [{ threshold: 95, severity: "critical", actions: [] }],
+      // The retired policy: announce recovery by reusing the alert's actions,
+      // with no reset actions of its own.
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" },
+      resetActions: null,
+    });
+    // The control is gone from the notify policy...
+    (doc.querySelector('.stepper-step[data-step="3"]') as unknown as { click: () => void }).click();
+    expect(doc.querySelector("#aw-bn-resolved")).toBeFalsy();
+    expect(doc.querySelector("#aw-bn-resolved-mode")).toBeFalsy();
+    // ...and the two that remain are untouched.
+    expect(doc.querySelector("#aw-bn-increase")).toBeTruthy();
+    expect(doc.querySelector("#aw-bn-decrease")).toBeTruthy();
+    // ...and the step says where recovery is announced instead.
+    expect((doc.querySelector("#aw-band-notify") as unknown as { textContent: string }).textContent)
+      .toMatch(/When this resets/i);
+
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const p = savedPayloads[0]! as Record<string, any>;
+    // Written FALSE, not omitted: the server defaults it true, so omitting it
+    // would keep the duplicate.
+    expect(p.bandNotify.onResolved).toBe(false);
+    expect(p.bandNotify.resolvedActions).toBeUndefined();
+    // What "reuse the alert's actions" announced now rides the reset actions.
+    expect(p.resetActions).toHaveLength(1);
+    expect(p.resetActions[0]).toMatchObject({ type: "notify", channelId: "c1" });
+    // An escalation would be meaningless on a recovery (and the server rejects it).
+    expect(p.resetActions[0].escalation).toBeUndefined();
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
+  it("leaves reset actions the operator already wrote alone", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-res2",
+      name: "Banded2",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">=", threshold: 80, forDurationSec: 300 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.invalid"] }],
+      severityBands: [{ threshold: 95, severity: "critical", actions: [] }],
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "dedicated", resolvedActions: [{ type: "event" }] },
+      // The operator has already said what recovery does — adoption must not
+      // overwrite it.
+      resetActions: [{ type: "notify", channelId: "c1", addresses: ["ops@example.invalid"] }],
+    });
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const p = savedPayloads[0]! as Record<string, any>;
+    expect(p.resetActions).toHaveLength(1);
+    expect(p.resetActions[0].addresses).toEqual(["ops@example.invalid"]);
+    expect(p.bandNotify.onResolved).toBe(false);
   });
 
   it("severity blocks fold, and the fold survives a re-render", async () => {

@@ -886,6 +886,10 @@ async function openAutomationWizard(existing, opts) {
     // _awDraftFromRule deep-copies every branch and carries no id, so a clone
     // draft is already fully detached from the row it came from.
     draft = _awDraftFromRule(existing);
+    // Retire the band-level resolved policy on the DRAFT, not just when step 3
+    // renders: in edit mode an unvisited step keeps whatever the record carried,
+    // so a rule saved from step 1 would otherwise keep sending recovery twice.
+    retireBandResolved();
   } else if (_awDraftStash && await showConfirm("Restore your unsaved automation draft?")) {
     draft = _awDraftStash;
   } else {
@@ -1136,6 +1140,29 @@ async function openAutomationWizard(existing, opts) {
   // an operator never collapsed reads as missing.
   var _awCollapsed = {};
 
+  /**
+   * What a FOLDED severity block says about itself: "is at or above 85 for 5 min".
+   * Read from the block's own controls, so it can't drift from what saves — and
+   * shared by the base tier and the added ones, which is the whole point: the
+   * base showed nothing while the bands showed this, so the first block read as a
+   * different kind of thing.
+   *
+   * `scopeEl` is the block. The hold field is a class on a band row and an id on
+   * the base tier (the base's own "Sustained for" is MOVED into the group in
+   * multi-severity mode), hence the two-selector lookup.
+   */
+  function tierSummaryText(scopeEl) {
+    if (!scopeEl) return "";
+    var op = scopeEl.querySelector(".tgl-op");
+    var val = scopeEl.querySelector(".tgl-threshold");
+    var mins = scopeEl.querySelector(".band-duration, #tf-duration-min");
+    if (!op && !val) return "";
+    var opText = op ? ((s.comparatorPhrases || {})[op.value] || op.value) : "";
+    var valText = val && val.value !== "" ? val.value : "?";
+    var held = mins && Number(mins.value) > 0 ? " for " + Number(mins.value) + " min" : "";
+    return (opText ? opText + " " : "") + valText + held;
+  }
+
   function collapseBtnHtml(key) {
     var on = !!_awCollapsed[key];
     // Size and colour live in .aw-collapse (styles.css) rather than inline: the
@@ -1159,7 +1186,10 @@ async function openAutomationWizard(existing, opts) {
     // severity group's children are read by selector (`tgCollectGroup` walks
     // `:scope > .scg-children`), so moving them into a wrapper would break
     // collection the way relocating the combinator did.
-    container.querySelectorAll(":scope > .aw-collapse-part").forEach(function (b) {
+    // Direct children AND parts inside the header: the base tier's combinator
+    // select has to stay in the header (tgCollectGroup reads it as
+    // `:scope > div > .scg-op`) but must still fold away with everything else.
+    container.querySelectorAll(":scope > .aw-collapse-part, :scope > .aw-collapse-head > .aw-collapse-part").forEach(function (b) {
       b.style.display = on ? "none" : "";
     });
     var btn = container.querySelector(':scope [data-collapse="' + key + '"]');
@@ -2269,6 +2299,8 @@ async function openAutomationWizard(existing, opts) {
         if (!betiers[be].actions.length) return bn + ", escalation " + (be + 1) + ": add at least one action (or remove it).";
       }
     }
+    // Only reachable on a stored rule the wizard hasn't re-saved yet — the
+    // builder no longer produces dedicated resolved actions.
     if (draft.bandNotify && draft.bandNotify.onResolved && draft.bandNotify.resolvedMode === "dedicated") {
       var ra = draft.bandNotify.resolvedActions || [];
       for (var r = 0; r < ra.length; r++) {
@@ -2788,13 +2820,12 @@ async function openAutomationWizard(existing, opts) {
         '<label style="font-weight:600;font-size:0.82rem;display:block;margin:0 0 4px">Notify on</label>' +
         '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-increase" checked> Severity increase (re-notify with the new band’s actions)</label>' +
         '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-decrease"> Severity decrease (run the lower band’s actions)</label>' +
-        '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-resolved" checked> Resolved (below the base tier)</label>' +
-        '<div id="aw-bn-resolved-wrap" style="margin:6px 0 0 1.2rem">' +
-          '<label style="font-size:0.8rem">Resolved actions</label> ' +
-          '<select id="aw-bn-resolved-mode" style="width:auto"><option value="reuse">Reuse the alert’s actions</option><option value="dedicated">Run dedicated actions</option></select>' +
-          '<div id="aw-bn-resolved-actions" style="margin-top:6px;display:none"></div>' +
-          '<button type="button" class="btn btn-sm btn-secondary" id="aw-bn-resolved-add" style="margin-top:4px;display:none">+ Add resolved action</button>' +
-        '</div>' +
+        // No "Resolved" row: recovery is announced ONCE, by the reset actions on
+        // the Actions step ("When this resets"), which every automation has —
+        // banded or not. This checkbox was a second mechanism for the same event
+        // and the engine ran BOTH (fireResolved for the band, then fireReset from
+        // recover()), so a banded automation with reset actions told people twice.
+        '<p class="hint" style="margin:6px 0 0">Recovery below the base tier is announced by <strong>“When this resets”</strong> on the Actions step.</p>' +
       '</div>' +
     '</div>';
   }
@@ -2815,24 +2846,43 @@ async function openAutomationWizard(existing, opts) {
     var bn = draft.bandNotify || {};
     panel.querySelector("#aw-bn-increase").checked = bn.onIncrease !== false;
     panel.querySelector("#aw-bn-decrease").checked = bn.onDecrease === true;
-    panel.querySelector("#aw-bn-resolved").checked = bn.onResolved !== false;
-    var modeSel = panel.querySelector("#aw-bn-resolved-mode");
-    modeSel.value = bn.resolvedMode === "dedicated" ? "dedicated" : "reuse";
-    var resActionsHost = panel.querySelector("#aw-bn-resolved-actions");
-    var resAddBtn = panel.querySelector("#aw-bn-resolved-add");
-    var syncResolved = function () {
-      var on = panel.querySelector("#aw-bn-resolved").checked;
-      var dedicated = on && modeSel.value === "dedicated";
-      panel.querySelector("#aw-bn-resolved-wrap").style.display = on ? "block" : "none";
-      resActionsHost.style.display = dedicated ? "block" : "none";
-      resAddBtn.style.display = dedicated ? "inline-block" : "none";
-    };
-    (bn.resolvedActions || []).forEach(function (a) { addActionRow(resActionsHost, a); });
-    panel.querySelector("#aw-bn-resolved").addEventListener("change", syncResolved);
-    modeSel.addEventListener("change", syncResolved);
-    resAddBtn.addEventListener("click", function () { addActionRow(resActionsHost, null); });
     syncNotify();
-    syncResolved();
+  }
+
+  /**
+   * A stored rule may still carry the retired band-level resolved policy. Saving
+   * it now writes `onResolved:false`, so anything it announced on recovery would
+   * go silent — unless it moves to the reset actions, which is where recovery is
+   * announced from. So it does, once, and only into an EMPTY list:
+   *
+   *   resolvedMode "dedicated" → its own resolvedActions, verbatim.
+   *   resolvedMode "reuse"     → the trigger's notify actions, which is what
+   *                              "reuse the alert's actions" resolved to anyway.
+   *
+   * An operator who already wrote their own reset actions is left alone — they've
+   * said what recovery should do.
+   */
+  function retireBandResolved() {
+    adoptLegacyResolvedActions();
+    if (draft.bandNotify) {
+      draft.bandNotify.onResolved = false;
+      delete draft.bandNotify.resolvedMode;
+      delete draft.bandNotify.resolvedActions;
+    }
+  }
+
+  function adoptLegacyResolvedActions() {
+    var bn = draft.bandNotify || {};
+    if (bn.onResolved === false) return;
+    if ((draft.resetActions || []).length) return;
+    var adopted = bn.resolvedMode === "dedicated"
+      ? (bn.resolvedActions || []).slice()
+      : mirroredResetActions(draft.actions, []);
+    if (!adopted.length) return;
+    draft.resetActions = adopted;
+    // The toggle carries its OWN state (see the Actions step) — set it too, or a
+    // re-render would untick it out from under the rows it just adopted.
+    draft.resetOn = true;
   }
   // Severity colors (mirror styles.css .sev-select palette) for the accent.
   var SEV_COLORS = { notice: "var(--color-sev-notice)", informational: "var(--color-accent)", warning: "var(--color-warning)", serious: "var(--color-sev-serious)", critical: "var(--color-danger)" };
@@ -2964,6 +3014,7 @@ async function openAutomationWizard(existing, opts) {
       // base tier is a severity block like the others, so it should not be the
       // one that reads differently — and the combinator sharing a line with the
       // severity select made it look like a property OF that severity.
+      header.classList.add("aw-collapse-head"); // applyCollapsed reveals the summary through this
       header.style.cssText = "display:flex;gap:6px;align-items:center;margin-bottom:2px;flex-wrap:wrap";
       // WRAPPED, not moved: `tgCollectGroup` reads this group's combinator as
       // `:scope > div > .scg-op`, so relocating the select out of the header
@@ -3017,10 +3068,7 @@ async function openAutomationWizard(existing, opts) {
       wireCollapsibles(root);
       var syncBaseSummary = function () {
         var el = header.querySelector(".aw-collapse-summary");
-        if (!el) return;
-        var leaf = root.querySelector(".scg-children .scr-row");
-        var kind2 = (panel.querySelector("#aw-trigger-type") || {}).value === "host" ? "host" : "asset";
-        el.textContent = leaf ? tgLeafPhrase(tgCollectLeaf(leaf, kind2)) : "";
+        if (el) el.textContent = tierSummaryText(root);
       };
       syncBaseSummary();
       root.addEventListener("input", syncBaseSummary);
@@ -3190,14 +3238,7 @@ async function openAutomationWizard(existing, opts) {
     // can't drift from what will be saved.
     var syncBandSummary = function () {
       var el = row.querySelector(".aw-collapse-summary");
-      if (!el) return;
-      var op = row.querySelector(".tgl-op");
-      var val = row.querySelector(".tgl-threshold");
-      var mins = row.querySelector(".band-duration");
-      var opText = op ? ((s.comparatorPhrases || {})[op.value] || op.value) : "";
-      var parts = [opText, val && val.value !== "" ? val.value : "?"].filter(Boolean).join(" ");
-      var held = mins && Number(mins.value) > 0 ? " for " + Number(mins.value) + " min" : "";
-      el.textContent = parts ? parts + held : "";
+      if (el) el.textContent = tierSummaryText(row);
     };
     syncBandSummary();
     row.addEventListener("input", syncBandSummary);
@@ -4627,16 +4668,15 @@ async function openAutomationWizard(existing, opts) {
     });
     draft.severityBands = bands.length ? bands : null;
     if (!bands.length) { draft.bandNotify = null; return; }
-    var np = {
+    // onResolved is written FALSE rather than omitted: the server defaults it to
+    // true, so leaving it out would keep the duplicate recovery notification the
+    // reset actions already send. The stored shape keeps the field (the engine
+    // still honours it on rules this wizard hasn't touched).
+    draft.bandNotify = {
       onIncrease: panel.querySelector("#aw-bn-increase").checked,
       onDecrease: panel.querySelector("#aw-bn-decrease").checked,
-      onResolved: panel.querySelector("#aw-bn-resolved").checked,
-      resolvedMode: panel.querySelector("#aw-bn-resolved-mode").value,
+      onResolved: false,
     };
-    if (np.onResolved && np.resolvedMode === "dedicated") {
-      np.resolvedActions = collectActionsFrom(panel.querySelector("#aw-bn-resolved-actions"));
-    }
-    draft.bandNotify = np;
   }
   // A 0/1 state metric is excluded: severity bands are a threshold ladder, and a
   // flag has only two values (the server rejects them too — validateSeverityBands).
