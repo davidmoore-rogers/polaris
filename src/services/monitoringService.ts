@@ -121,6 +121,7 @@ import {
 import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
 import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
 import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, resolveFdbIdentity, type FdbEntry } from "../utils/macForwarding.js";
+import { decodePortList, derivePortVlans, isVlanId, type PortVlanConfig, type VlanMembership } from "../utils/portVlans.js";
 import { matchTrunkPeer, parseTrunkPortMap, type TrunkPortEntry } from "../utils/fortiswitchTrunkMap.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
@@ -3918,8 +3919,13 @@ async function overlayFortiswitchCmdbOntoSnmp(
         if (desc && !iface.description) iface.description = desc;
         const cfg = portsForSwitch.vlanByPort.get(iface.ifName);
         if (!cfg) continue;
-        iface.nativeVlan     = cfg.nativeVlan;
-        iface.taggedVlans    = cfg.taggedVlans;
+        // Config truth wins over the SNMP-derived values -- but only where it
+        // actually says something. A port the controller lists with no native
+        // VLAN and no allow-list must not blank out what dot1qPvid reported;
+        // that is the difference between "the CMDB disagrees" and "the CMDB is
+        // silent about this port".
+        if (cfg.nativeVlan != null) iface.nativeVlan = cfg.nativeVlan;
+        if (cfg.taggedVlans.length > 0 || cfg.trunksAllVlans) iface.taggedVlans = cfg.taggedVlans;
         iface.trunksAllVlans = cfg.trunksAllVlans;
         overlaid++;
       }
@@ -5329,6 +5335,19 @@ const OID = {
   dot1dTpFdbAddress:      "1.3.6.1.2.1.17.4.3.1.1",
   dot1dTpFdbPort:         "1.3.6.1.2.1.17.4.3.1.2",
   dot1dTpFdbStatus:       "1.3.6.1.2.1.17.4.3.1.3",
+  // Q-BRIDGE-MIB per-port VLAN config (RFC 4363). dot1qPvid is the port's
+  // native/untagged VLAN, indexed by dot1dBasePort like the FDB tables above.
+  // The two member columns are PortList BITMAPS indexed by VLAN id -- see
+  // utils/portVlans.ts for the bit order, and for why the untagged column is
+  // believed only when it is a strict subset of egress.
+  dot1qPvid:                    "1.3.6.1.2.1.17.7.1.4.5.1.1",
+  dot1qVlanStaticEgressPorts:   "1.3.6.1.2.1.17.7.1.4.3.1.2",
+  dot1qVlanStaticUntaggedPorts: "1.3.6.1.2.1.17.7.1.4.3.1.4",
+  // dot1qVlanCurrentTable is the fallback for an agent that keeps its VLANs
+  // out of the static table. Its INDEX is { dot1qVlanTimeMark, dot1qVlanIndex },
+  // so the VLAN id is the LAST index component, not the whole suffix.
+  dot1qVlanCurrentEgressPorts:   "1.3.6.1.2.1.17.7.1.4.2.1.4",
+  dot1qVlanCurrentUntaggedPorts: "1.3.6.1.2.1.17.7.1.4.2.1.5",
   entPhysicalClass:       "1.3.6.1.2.1.47.1.1.1.1.5",
   entPhysicalName:        "1.3.6.1.2.1.47.1.1.1.1.7",
   entPhysicalHardwareRev: "1.3.6.1.2.1.47.1.1.1.1.8",
@@ -6471,6 +6490,30 @@ async function persistPhysicalEntities(assetId: string, rows: PhysicalEntitySamp
 const MAC_TABLE_ROW_CAP = 4000;
 
 /**
+ * Walk `dot1dBasePortIfIndex` and fold it into dot1dBasePort -> ifName.
+ *
+ * Both switch-class walks that follow report a dot1dBasePort rather than an
+ * ifIndex -- the forwarding database and the Q-BRIDGE VLAN bitmaps -- and both
+ * need this same join, so it is walked once per pass and handed to each. The
+ * join is defined by the MIB (unlike the PoE correlation), so it is reliable;
+ * what is not optional is performing it, since attributing a row to whatever
+ * interface sits at that number is reliably wrong wherever the two numbering
+ * schemes differ.
+ */
+async function collectBasePortIfNames(
+  session: any,
+  ifNameByIndex: ReadonlyMap<string, string>,
+): Promise<Map<number, string>> {
+  const basePortWalk = await snmpWalk(session, OID.dot1dBasePortIfIndex).catch(() => new Map());
+  const basePortToIfIndex = new Map<string, number>();
+  for (const [basePort, vb] of basePortWalk.entries()) {
+    const idx = snmpVbToNumber(vb);
+    if (idx != null) basePortToIfIndex.set(basePort, idx);
+  }
+  return basePortToIfName(basePortToIfIndex, ifNameByIndex);
+}
+
+/**
  * Walk the switch forwarding database.
  *
  * Prefers Q-BRIDGE-MIB `dot1qTpFdbTable`, which a VLAN-aware switch populates
@@ -6484,19 +6527,8 @@ const MAC_TABLE_ROW_CAP = 4000;
  */
 async function collectMacTableSnmp(
   session: any,
-  ifNameByIndex: ReadonlyMap<string, string>,
+  ifNameByBasePort: ReadonlyMap<number, string>,
 ): Promise<FdbEntry[] | undefined> {
-  // The basePort -> ifIndex join both tables depend on. Without it every MAC
-  // would be attributed to whatever interface sits at that ifIndex, which is
-  // reliably wrong wherever the two numbering schemes differ.
-  const basePortWalk = await snmpWalk(session, OID.dot1dBasePortIfIndex).catch(() => new Map());
-  const basePortToIfIndex = new Map<string, number>();
-  for (const [basePort, vb] of basePortWalk.entries()) {
-    const idx = snmpVbToNumber(vb);
-    if (idx != null) basePortToIfIndex.set(basePort, idx);
-  }
-  const ifNameByBasePort = basePortToIfName(basePortToIfIndex, ifNameByIndex);
-
   // Each table is walked as a TRIPLE: port, status, and the address column.
   // The address column is not redundant with the index — see resolveFdbIdentity
   // in utils/macForwarding.ts for the agent that indexes by row number.
@@ -6550,6 +6582,84 @@ async function collectMacTableSnmp(
     logger.warn(
       { rows: ports.size, undecodable, unusableStatus },
       "MAC forwarding table answered but no entries decoded",
+    );
+    return undefined;
+  }
+  return out;
+}
+
+/**
+ * Walk per-port VLAN membership out of Q-BRIDGE-MIB.
+ *
+ * The native VLAN comes from `dot1qPvid` (one value per port, stated directly).
+ * The tagged set is derived from the per-VLAN member bitmaps, with the caveat
+ * that the untagged column is often an unusable copy of the egress column --
+ * `derivePortVlans` in utils/portVlans.ts holds that decision table.
+ *
+ * Returns keyed by ifName so the caller can join it onto the interface list
+ * without knowing about dot1dBasePorts, and `undefined` -- not an empty map --
+ * when the device answers `dot1qPvid` with nothing, which is how an agent that
+ * omits the q-bridge subtree entirely reads. The caller leaves the interface
+ * rows untouched in that case, so the controller-CMDB overlay that runs
+ * afterwards is still the one deciding.
+ */
+async function collectPortVlansSnmp(
+  session: any,
+  ifNameByBasePort: ReadonlyMap<number, string>,
+): Promise<Map<string, PortVlanConfig> | undefined> {
+  // The PVID walk is the gate: it is one row per port and every VLAN-aware
+  // agent answers it, so an empty result means the member bitmaps are not
+  // worth two more walks.
+  const pvidWalk = await snmpWalk(session, OID.dot1qPvid).catch(() => new Map());
+  if (pvidWalk.size === 0) return undefined;
+
+  const pvidByBasePort = new Map<number, number>();
+  for (const [basePortRaw, vb] of pvidWalk.entries()) {
+    const basePort = Number(basePortRaw);
+    const pvid = snmpVbToNumber(vb);
+    if (!Number.isInteger(basePort) || pvid == null) continue;
+    pvidByBasePort.set(basePort, pvid);
+  }
+
+  let [egressWalk, untaggedWalk] = await Promise.all([
+    snmpWalk(session, OID.dot1qVlanStaticEgressPorts).catch(() => new Map()),
+    snmpWalk(session, OID.dot1qVlanStaticUntaggedPorts).catch(() => new Map()),
+  ]);
+  // An agent that keeps its VLANs out of the static table still publishes the
+  // current one. Only reached when static answered nothing, so the common case
+  // pays for no extra walk -- the same answered-nothing fallback the
+  // forwarding-database walk makes from Q-BRIDGE to BRIDGE-MIB.
+  if (egressWalk.size === 0) {
+    [egressWalk, untaggedWalk] = await Promise.all([
+      snmpWalk(session, OID.dot1qVlanCurrentEgressPorts).catch(() => new Map()),
+      snmpWalk(session, OID.dot1qVlanCurrentUntaggedPorts).catch(() => new Map()),
+    ]);
+  }
+  const memberships: VlanMembership[] = [];
+  for (const [suffix, egressVb] of egressWalk.entries()) {
+    // The static table's suffix IS the VLAN id; the current table's is
+    // `<timeMark>.<vlanId>`. Taking the last component reads both.
+    const vlanId = Number(String(suffix).split(".").pop());
+    if (!isVlanId(vlanId)) continue;
+    memberships.push({
+      vlanId,
+      egress:   decodePortList(egressVb),
+      untagged: decodePortList(untaggedWalk.get(suffix)),
+    });
+  }
+
+  const byPort = derivePortVlans(pvidByBasePort, memberships);
+  const out = new Map<string, PortVlanConfig>();
+  let unjoined = 0;
+  for (const [basePort, cfg] of byPort.entries()) {
+    const ifName = ifNameByBasePort.get(basePort);
+    if (!ifName) { unjoined++; continue; }
+    out.set(ifName, cfg);
+  }
+  if (out.size === 0) {
+    logger.warn(
+      { pvidRows: pvidWalk.size, vlans: memberships.length, unjoined },
+      "Q-BRIDGE port VLANs answered but none joined to an interface",
     );
     return undefined;
   }
@@ -6840,7 +6950,28 @@ async function collectSystemInfoSnmp(
       // table, but a server or firewall would return nothing useful for a
       // walk that can run to thousands of rows, so the cost is not spent.
       if (opts.assetType === "switch") {
-        macTable = await collectMacTableSnmp(session, poeIfNames).catch(() => undefined);
+        // dot1dBasePortIfIndex is the join both walks below need; walk it once.
+        const ifNameByBasePort = await collectBasePortIfNames(session, poeIfNames);
+        macTable = await collectMacTableSnmp(session, ifNameByBasePort).catch(() => undefined);
+        // Per-port VLAN membership. On a managed FortiSwitch the parent
+        // FortiGate's CMDB is the better source (it is config truth, and the
+        // only place `allowed-vlans all` exists as a concept) and overlays on
+        // top of this afterwards -- but that overlay needs a resolvable
+        // controller and the SNMP interfaces path, so it reaches only a subset
+        // of switches. This is what every other switch gets.
+        const endQbridge = startPhase("systeminfo.snmp.qbridge_vlan_walk");
+        const portVlans = await collectPortVlansSnmp(session, ifNameByBasePort).catch(() => undefined);
+        let vlanOverlaid = 0;
+        if (portVlans) {
+          for (const iface of interfaces) {
+            const cfg = portVlans.get(iface.ifName);
+            if (!cfg) continue;
+            iface.nativeVlan  = cfg.nativeVlan;
+            iface.taggedVlans = cfg.taggedVlans;
+            vlanOverlaid++;
+          }
+        }
+        endQbridge({ ports: portVlans?.size ?? null, overlaid: vlanOverlaid, total: interfaces.length });
         // Trunk map: one scalar GET, so it costs nothing next to the FDB walk.
         // Undefined (not []) when the device doesn't publish the object at all,
         // so a non-Fortinet switch preserves rather than wipes.
