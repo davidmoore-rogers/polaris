@@ -46,8 +46,7 @@ import weatherRouter from "../api/routes/weather.js";
 import { errorHandler } from "../api/middleware/errorHandler.js";
 import { requirePermission } from "../api/middleware/permissions.js";
 import { dashWeatherLimiter, makeRateLimiter } from "../api/middleware/rateLimits.js";
-import { isPrivateOrLoopbackIp } from "../utils/cidr.js";
-import { ipMatchesAllowlist } from "../utils/ipAllowlist.js";
+import { ipInScope } from "../utils/ipScope.js";
 import { getDashSettings, type DashSettings } from "../services/dashSettingsService.js";
 import {
   getReadonlyRoleIdentity,
@@ -90,15 +89,16 @@ const API_PREFIX_ALLOWLIST = ["/weather/"];
  * Is this source IP allowed under the current scope? "all" → always; "custom"
  * → matches one of the allow-list CIDRs; "rfc1918" (default) → RFC1918 or
  * loopback. The `enabled` flag is checked separately by the caller.
+ *
+ * Delegates to the shared resolver in utils/ipScope.ts, which local login
+ * access (loginAccessService) gates on too. The subtleties are what must not
+ * drift between the two surfaces: allowedCidrs are save-time-normalized IPv4
+ * CIDRs, so the general v4+v6 matcher unwraps mapped ::ffff: sources, never
+ * matches a real IPv6 source against a v4 entry, and fails closed on an empty
+ * or invalid list.
  */
 export function isSourceAllowed(ip: string, settings: DashSettings): boolean {
-  if (settings.ipScope === "all") return true;
-  // allowedCidrs are save-time-normalized IPv4 CIDRs (normalizeAllowlistCidr),
-  // so the general v4+v6 allowlist matcher behaves exactly like the retired
-  // IPv4-only ipMatchesAnyCidr did here: mapped ::ffff: sources unwrap, real
-  // IPv6 sources never match a v4 entry, fail closed on empty/invalid.
-  if (settings.ipScope === "custom") return ipMatchesAllowlist(ip, settings.allowedCidrs);
-  return isPrivateOrLoopbackIp(ip);
+  return ipInScope(ip, settings.ipScope, settings.allowedCidrs);
 }
 
 /**
