@@ -5738,19 +5738,24 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
 
     phaseMark("13");
-    // Phase 13 — Reconcile map-region tags. Add-only pass: any firewall
-    // whose lat/lng now falls inside an operator-drawn region (or any
-    // FortiSwitch / FortiAP whose controllerFortigate matches one, or any
-    // subnet one of those firewalls serves) gets its `region:<name>` tag
-    // stamped. Best-effort, gated to mode in {full, finalize} mirroring
+    // Phase 13 — Re-evaluate map-region tags. Any firewall whose lat/lng now
+    // falls inside an operator-drawn region (or any FortiSwitch / FortiAP whose
+    // controllerFortigate matches one, or any subnet one of those firewalls
+    // serves) gets its `region:<name>` tag stamped — and a target that has
+    // MOVED out since we tagged it has the tag stripped, bounded by the
+    // RegionTagAssignment provenance rows so hand-applied tags survive. Running
+    // here is what makes a device re-pinned or re-parented by THIS discovery
+    // run land in the right region without waiting for the 6-hour tick; the
+    // cost is that a transiently-absent gate pin churns its subtree's tags for
+    // one pass. Best-effort, gated to mode in {full, finalize} mirroring
     // Phase 12.
     try {
       const summary = await reconcileMapRegions();
-      if (summary.added > 0 || summary.subnetsAdded > 0) {
+      if (summary.assetsTouched > 0 || summary.subnetsTouched > 0) {
         syncLog(
           "info",
-          `Map region tags: +${summary.added} on ${summary.assetsTouched} asset(s), ` +
-            `+${summary.subnetsAdded} on ${summary.subnetsTouched} network(s)`,
+          `Map region tags: +${summary.added}/-${summary.removed} on ${summary.assetsTouched} asset(s), ` +
+            `+${summary.subnetsAdded}/-${summary.subnetsRemoved} on ${summary.subnetsTouched} network(s)`,
         );
       }
     } catch (err: any) {

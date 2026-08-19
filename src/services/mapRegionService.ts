@@ -21,12 +21,21 @@
  * Storage: single JSON blob in Setting under SETTING_KEY (mirrors the
  * allocationTemplateService pattern).
  *
- * Reconciler is **additive**: it adds region tags to in-polygon assets and
- * only strips a tag when the region is renamed or deleted. Manual operator
- * attachments (e.g. an endpoint server hand-tagged with `region:Atlanta`)
- * survive across runs. Manually *removing* a region tag from an in-polygon
- * asset will be re-added on the next reconcile — that direction is
- * authoritative by design so polygon membership always implies the tag.
+ * **The reconciler re-evaluates membership in both directions, bounded by
+ * provenance.** Devices move: a firewall is re-pinned, a switch is repointed to
+ * a controller in another region, a subnet is re-served by a different gate.
+ * Every add is recorded in `RegionTagAssignment` (one row per (region, target)
+ * pair this service tagged — the `TagAutoAssignment` pattern), so a later
+ * reconcile can strip the tag off a target that has drifted OUT of the region
+ * while never touching the same tag where an operator attached it by hand: no
+ * provenance row means operator-owned, left alone forever. That is also why
+ * tags already stale before this feature shipped are never cleaned — they are
+ * indistinguishable from a hand-applied tag, so they stay until an operator
+ * removes them.
+ *
+ * Manually *removing* a region tag from an in-polygon asset will be re-added on
+ * the next reconcile — that direction stays authoritative by design so polygon
+ * membership always implies the tag.
  */
 
 import { randomUUID } from "node:crypto";
@@ -34,7 +43,7 @@ import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { pointInPolygon, type LatLng } from "../utils/geo.js";
-import { cidrContains } from "../utils/cidr.js";
+import { buildCidrMatcher } from "../utils/cidr.js";
 import { controllerIdentityKeys, readFirewallDeviceName } from "../utils/fortinetParentKey.js";
 
 const SETTING_KEY = "mapRegions";
@@ -74,12 +83,16 @@ export interface ReconcileSummary extends Record<string, unknown> {
   regionId?: string;
   /** Assets that gained the region tag. */
   added: number;
-  /** Assets that lost it (rename / delete paths only). */
+  /**
+   * Assets that lost it — a member that drifted out of the region (provenance
+   * says we tagged it, membership no longer includes it), plus the wholesale
+   * strips on the rename / delete paths.
+   */
   removed: number;
   assetsTouched: number;
   /** Subnets that gained the region tag (inherited from their serving gate). */
   subnetsAdded: number;
-  /** Subnets that lost it (rename / delete paths only). */
+  /** Subnets that lost it — drifted-out members, plus rename / delete strips. */
   subnetsRemoved: number;
   subnetsTouched: number;
 }
@@ -297,14 +310,14 @@ async function computeMembership(region: MapRegion): Promise<RegionMembership> {
       where: { ipAddress: { not: null } },
       select: { id: true, ipAddress: true },
     });
+    // Parse each subnet once, not once per asset: this loop is every
+    // IP-carrying asset in the fleet, per region. IPv4 only (Netmask) — IPv6
+    // assets simply match nothing.
+    const inRegionSubnet = buildCidrMatcher(regionSubnets.map((s) => s.cidr));
     for (const a of ipAssets) {
       if (memberIds.has(a.id)) continue;
       const ip = (a.ipAddress || "").split("/")[0].trim();
-      if (!ip) continue;
-      for (const sub of regionSubnets) {
-        // cidrContains is IPv4 (Netmask) — IPv6 assets throw and are skipped.
-        if (cidrContains(sub.cidr, ip + "/32")) { memberIds.add(a.id); break; }
-      }
+      if (ip && inRegionSubnet(ip)) memberIds.add(a.id);
     }
   }
   return { assetIds: memberIds, subnetIds };
@@ -386,6 +399,135 @@ async function removeTagFromAllAssets(tag: string): Promise<number> {
     }),
   );
   return rows.length;
+}
+
+/**
+ * Strip the tag from the NAMED assets only — the drift path. Unlike
+ * `removeTagFromAllAssets` (rename / delete, where every copy of the old tag is
+ * going away) this is scoped to ids the caller has already confirmed carry a
+ * provenance row, so a hand-applied copy elsewhere is untouched.
+ */
+async function removeTagFromAssets(assetIds: string[], tag: string): Promise<number> {
+  if (assetIds.length === 0) return 0;
+  const rows = await prisma.asset.findMany({
+    where: { id: { in: assetIds }, tags: { has: tag } },
+    select: { id: true, tags: true },
+  });
+  if (rows.length === 0) return 0;
+  for (const chunk of chunk50(rows)) {
+    await prisma.$transaction(
+      chunk.map((row) => {
+        const tags = Array.isArray(row.tags) ? row.tags : [];
+        return prisma.asset.update({
+          where: { id: row.id },
+          data: { tags: tags.filter((t) => t !== tag) },
+        });
+      }),
+    );
+  }
+  return rows.length;
+}
+
+/** Subnet half of `removeTagFromAssets`. */
+async function removeTagFromSubnets(subnetIds: string[], tag: string): Promise<number> {
+  if (subnetIds.length === 0) return 0;
+  const rows = await prisma.subnet.findMany({
+    where: { id: { in: subnetIds }, tags: { has: tag } },
+    select: { id: true, tags: true },
+  });
+  if (rows.length === 0) return 0;
+  for (const chunk of chunk50(rows)) {
+    await prisma.$transaction(
+      chunk.map((row) => {
+        const tags = Array.isArray(row.tags) ? row.tags : [];
+        return prisma.subnet.update({
+          where: { id: row.id },
+          data: { tags: tags.filter((t) => t !== tag) },
+        });
+      }),
+    );
+  }
+  return rows.length;
+}
+
+function chunk50<T>(rows: T[]): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < rows.length; i += 50) out.push(rows.slice(i, i + 50));
+  return out;
+}
+
+// --- Provenance (RegionTagAssignment) ---
+
+/**
+ * Diff what a region should currently cover against what this service last
+ * recorded itself as having tagged. Pure — the whole re-evaluation decision in
+ * one testable function.
+ *
+ * `toRemove` is deliberately derived from PROVENANCE rather than from "every
+ * row carrying the tag": a target that holds the tag with no provenance row was
+ * tagged by an operator (or predates provenance) and must survive.
+ */
+export function diffRegionMembership(
+  expected: Iterable<string>,
+  provenance: Iterable<string>,
+): { toAdd: string[]; toRemove: string[] } {
+  const want = new Set(expected);
+  const have = new Set(provenance);
+  const toAdd: string[] = [];
+  const toRemove: string[] = [];
+  for (const id of want) if (!have.has(id)) toAdd.push(id);
+  for (const id of have) if (!want.has(id)) toRemove.push(id);
+  return { toAdd, toRemove };
+}
+
+interface RegionProvenance {
+  assetIds: Set<string>;
+  subnetIds: Set<string>;
+}
+
+async function loadProvenance(regionId: string): Promise<RegionProvenance> {
+  const rows = await prisma.regionTagAssignment.findMany({
+    where: { regionId },
+    select: { targetType: true, targetId: true },
+  });
+  const assetIds = new Set<string>();
+  const subnetIds = new Set<string>();
+  for (const r of rows) {
+    if (r.targetType === "subnet") subnetIds.add(r.targetId);
+    else assetIds.add(r.targetId);
+  }
+  return { assetIds, subnetIds };
+}
+
+async function recordProvenance(
+  regionId: string,
+  targetType: "asset" | "subnet",
+  targetIds: string[],
+): Promise<void> {
+  if (targetIds.length === 0) return;
+  for (const chunk of chunk50(targetIds)) {
+    await prisma.regionTagAssignment.createMany({
+      data: chunk.map((targetId) => ({ regionId, targetType, targetId })),
+      skipDuplicates: true,
+    });
+  }
+}
+
+async function dropProvenance(
+  regionId: string,
+  targetType: "asset" | "subnet",
+  targetIds: string[],
+): Promise<void> {
+  if (targetIds.length === 0) return;
+  for (const chunk of chunk50(targetIds)) {
+    await prisma.regionTagAssignment.deleteMany({
+      where: { regionId, targetType, targetId: { in: chunk } },
+    });
+  }
+}
+
+async function dropAllProvenance(regionId: string): Promise<void> {
+  await prisma.regionTagAssignment.deleteMany({ where: { regionId } });
 }
 
 // --- Public API ---
@@ -487,17 +629,19 @@ export async function applyRename(
   const oldTag = regionTag(previousName);
   const removed = await removeTagFromAllAssets(oldTag);
   const subnetsRemoved = await removeTagFromAllSubnets(oldTag);
-  const members = await computeMembership(region);
-  const added = await addTagToAssets(Array.from(members.assetIds), regionTag(region.name));
-  const subnetsAdded = await addTagToSubnets(Array.from(members.subnetIds), regionTag(region.name));
+  // Provenance is keyed by region id, not by tag name, so it survives the
+  // rename untouched -- and the sync's add pass is idempotent against the
+  // tags[] array rather than against provenance, so every current member picks
+  // up the NEW tag string even though its provenance row already exists.
+  const synced = await applyOneRegion(region);
   return {
     regionId: region.id,
-    added,
-    removed,
-    assetsTouched: removed + added,
-    subnetsAdded,
-    subnetsRemoved,
-    subnetsTouched: subnetsRemoved + subnetsAdded,
+    added: synced.added,
+    removed: removed + synced.removed,
+    assetsTouched: removed + synced.assetsTouched,
+    subnetsAdded: synced.subnetsAdded,
+    subnetsRemoved: subnetsRemoved + synced.subnetsRemoved,
+    subnetsTouched: subnetsRemoved + synced.subnetsTouched,
   };
 }
 
@@ -509,6 +653,9 @@ export async function applyDelete(region: MapRegion): Promise<ReconcileSummary> 
   const tag = regionTag(region.name);
   const removed = await removeTagFromAllAssets(tag);
   const subnetsRemoved = await removeTagFromAllSubnets(tag);
+  // The region is gone, so every pair we recorded for it is meaningless -- drop
+  // them rather than leaving rows no future region id could ever match.
+  await dropAllProvenance(region.id);
   return {
     regionId: region.id,
     added: 0,
@@ -521,45 +668,85 @@ export async function applyDelete(region: MapRegion): Promise<ReconcileSummary> 
 }
 
 /**
- * Add-pass for one region: tag its current members, never strip. Used after
- * create and after polygon-only edits.
+ * Re-evaluate one region: tag its current members AND strip the tag from
+ * targets that have drifted out of it since we tagged them. Used after create,
+ * after a polygon edit, by the periodic job, and at the end of discovery.
+ *
+ * The strip half is bounded by provenance -- see `diffRegionMembership`. A
+ * target we never tagged is never stripped, so the add pass is what earns the
+ * right to remove later.
+ *
+ * Note what running on the discovery-end hook implies: membership is read from
+ * whatever coordinates and controller stamps discovery has just finished
+ * writing. A gate whose pin is transiently absent takes its whole subtree out
+ * of the region for that pass and back in on the next one, which surfaces as
+ * tag churn rather than as a wrong steady state.
  */
 export async function applyOneRegion(region: MapRegion): Promise<ReconcileSummary> {
   const tag = regionTag(region.name);
   const members = await computeMembership(region);
+  const prov = await loadProvenance(region.id);
+
+  const assets = diffRegionMembership(members.assetIds, prov.assetIds);
+  const subnets = diffRegionMembership(members.subnetIds, prov.subnetIds);
+
+  // Add the tag first, then record provenance -- a crash between the two leaves
+  // a tagged target with no provenance row, which reads as operator-owned. The
+  // reverse order would record a tag we never wrote and strip it next pass.
   const added = await addTagToAssets(Array.from(members.assetIds), tag);
+  await recordProvenance(region.id, "asset", Array.from(members.assetIds));
   const subnetsAdded = await addTagToSubnets(Array.from(members.subnetIds), tag);
+  await recordProvenance(region.id, "subnet", Array.from(members.subnetIds));
+
+  const removed = await removeTagFromAssets(assets.toRemove, tag);
+  await dropProvenance(region.id, "asset", assets.toRemove);
+  const subnetsRemoved = await removeTagFromSubnets(subnets.toRemove, tag);
+  await dropProvenance(region.id, "subnet", subnets.toRemove);
+
   return {
     regionId: region.id,
     added,
-    removed: 0,
-    assetsTouched: added,
+    removed,
+    assetsTouched: added + removed,
     subnetsAdded,
-    subnetsRemoved: 0,
-    subnetsTouched: subnetsAdded,
+    subnetsRemoved,
+    subnetsTouched: subnetsAdded + subnetsRemoved,
   };
 }
 
 /**
- * Full reconcile pass over every region. Add-only — does NOT strip tags from
- * assets that have drifted out of the polygon (those become operator-owned).
- * Renames and deletes are handled by their dedicated CRUD paths, so by the
- * time this runs there are no stale region tags to clean up.
+ * Full re-evaluation pass over every region -- adds current members and strips
+ * the ones that have moved out (provenance-bounded, so hand-applied tags and
+ * tags predating provenance survive). Renames and deletes keep their dedicated
+ * CRUD paths for the wholesale tag rotation.
  *
- * Used by the periodic job and by the discovery-end hook.
+ * Used by the periodic job and by the discovery-end hook. One region failing
+ * must not stop the rest: a region whose membership query throws is logged and
+ * skipped, leaving its tags exactly as they were.
  */
 export async function reconcileMapRegions(): Promise<ReconcileSummary> {
   const regions = await listRegions();
   let added = 0;
+  let removed = 0;
   let touched = 0;
   let subnetsAdded = 0;
+  let subnetsRemoved = 0;
   let subnetsTouched = 0;
   for (const region of regions) {
-    const summary = await applyOneRegion(region);
-    added += summary.added;
-    touched += summary.assetsTouched;
-    subnetsAdded += summary.subnetsAdded;
-    subnetsTouched += summary.subnetsTouched;
+    try {
+      const summary = await applyOneRegion(region);
+      added += summary.added;
+      removed += summary.removed;
+      touched += summary.assetsTouched;
+      subnetsAdded += summary.subnetsAdded;
+      subnetsRemoved += summary.subnetsRemoved;
+      subnetsTouched += summary.subnetsTouched;
+    } catch (err: any) {
+      logger.warn(
+        { err: err?.message ?? String(err), regionId: region.id, region: region.name },
+        "mapRegion: reconcile failed for one region (non-fatal)",
+      );
+    }
   }
-  return { added, removed: 0, assetsTouched: touched, subnetsAdded, subnetsRemoved: 0, subnetsTouched };
+  return { added, removed, assetsTouched: touched, subnetsAdded, subnetsRemoved, subnetsTouched };
 }

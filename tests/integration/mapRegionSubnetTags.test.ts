@@ -19,6 +19,10 @@
  *   - Add-pass is idempotent and never disturbs operator-set tags.
  *   - Rename rotates the tag on subnets; delete strips it.
  *   - The summary counts subnets separately from assets.
+ *   - DRIFT: re-pointing a subnet's serving gate out of the region strips the
+ *     inherited tag on the next reconcile (provenance-bounded — the unit suite
+ *     in tests/unit/mapRegionDrift.test.ts covers the full matrix; this one
+ *     exercises the real RegionTagAssignment table).
  */
 
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
@@ -63,7 +67,16 @@ async function wipe(): Promise<void> {
   await prisma.subnet.deleteMany({ where: { cidr: { in: [IN_SUBNET, OUT_SUBNET] } } });
   await prisma.ipBlock.deleteMany({ where: { cidr: BLOCK_CIDR } });
   await prisma.asset.deleteMany({ where: { serialNumber: { in: [IN_SERIAL, "FGTTEST0000000002"] } } });
-  // Region rows live in one Setting blob; drop any left by a previous run.
+  // Region rows live in one Setting blob; drop any left by a previous run —
+  // and the provenance rows keyed by those regions' ids, which would otherwise
+  // accumulate as orphans (they're inert: fresh runs mint fresh region UUIDs).
+  const blob = await prisma.setting.findUnique({ where: { key: "mapRegions" } });
+  const staleIds = Array.isArray(blob?.value)
+    ? (blob!.value as Array<{ id?: string }>).map((r) => r.id).filter((id): id is string => !!id)
+    : [];
+  if (staleIds.length > 0) {
+    await prisma.regionTagAssignment.deleteMany({ where: { regionId: { in: staleIds } } });
+  }
   await prisma.setting.deleteMany({ where: { key: "mapRegions" } });
   await prisma.tag.deleteMany({ where: { name: { in: [`region:${REGION_NAME}`, `region:${RENAMED}`] } } });
 }
@@ -194,5 +207,36 @@ d("mapRegionService — subnet region tags", () => {
     expect(summary.added).toBeGreaterThanOrEqual(1);
     expect(summary.subnetsAdded).toBe(1);
     expect(summary.subnetsTouched).toBe(1);
+  });
+
+  it("strips the inherited tag when the subnet's serving gate leaves the region (drift)", async () => {
+    await applyOneRegion(region);
+    expect(await tagsOf(inSubnetId)).toContain(`region:${REGION_NAME}`);
+
+    // The subnet is re-served by the out-of-polygon gate — the "device moved"
+    // event the daily re-evaluation exists for.
+    await prisma.subnet.update({
+      where: { id: inSubnetId },
+      data: { fortigateDevice: OUT_DEVICE_NAME },
+    });
+    const summary = await applyOneRegion(region);
+    expect(summary.subnetsRemoved).toBe(1);
+    const tags = await tagsOf(inSubnetId);
+    expect(tags).not.toContain(`region:${REGION_NAME}`);
+    // The operator's own tag is not ours to strip.
+    expect(tags).toContain("operator-set");
+  });
+
+  it("never strips a hand-applied region tag (no provenance row)", async () => {
+    // Tag the OUT-of-region subnet by hand, then reconcile: no provenance row
+    // exists for it, so the re-evaluation must leave it alone.
+    const handTag = `region:${REGION_NAME}`;
+    const row = await prisma.subnet.findUnique({ where: { id: outSubnetId }, select: { tags: true } });
+    await prisma.subnet.update({
+      where: { id: outSubnetId },
+      data: { tags: [...(row?.tags ?? []), handTag] },
+    });
+    await applyOneRegion(region);
+    expect(await tagsOf(outSubnetId)).toContain(handTag);
   });
 });

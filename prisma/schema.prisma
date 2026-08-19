@@ -2962,6 +2962,36 @@ model TagAutoAssignment {
   @@map("tag_auto_assignments")
 }
 
+// Provenance for map-region tag propagation — the TagAutoAssignment pattern,
+// applied to `region:<name>` tags. One row per (region, target) pair that
+// mapRegionService itself tagged, so a reconcile can strip a region tag off a
+// device that has MOVED out of the polygon without destroying the same tag name
+// where an operator attached it by hand (no provenance row = operator-owned,
+// left alone forever). Two target kinds because a region propagates to both
+// halves: `asset` (in-polygon firewalls, their managed switches/APs, and
+// anything addressed out of a subnet an enclosed gate serves) and `subnet`
+// (rows whose fortigateDevice is an enclosed gate) — which is also why this
+// can't reuse tag_auto_assignments, whose PK is (tagId, assetId).
+//
+// Keyed by `regionId`, NOT by tag name: a rename changes the tag string but not
+// membership, so provenance survives it untouched. Regions live in a Setting
+// JSON blob rather than a table, so there is no FK to hang here (and none to
+// Asset/Subnet either — same denormalized-tags rationale as TagAutoAssignment).
+// Rows are cleaned on region delete and on drift; a row whose target was
+// deleted outright is inert and self-heals on the next reconcile.
+model RegionTagAssignment {
+  regionId   String
+  /// "asset" | "subnet"
+  targetType String
+  targetId   String
+  createdAt  DateTime @default(now())
+
+  @@id([regionId, targetType, targetId])
+  @@index([regionId])
+  @@index([targetId])
+  @@map("region_tag_assignments")
+}
+
 // Manufacturer alias map. Normalizes inbound manufacturer strings (from OUI
 // lookups, discovery, manual entry, MIB upload) to a single canonical form so
 // "Fortinet, Inc." and "Fortinet" don't split into two entries everywhere.

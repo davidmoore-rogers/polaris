@@ -1,14 +1,20 @@
 /**
  * src/jobs/reconcileMapRegions.ts
  *
- * Periodic safety net for the map-region tag reconciler.
+ * Periodic re-evaluation of map-region tags.
  *
  * The CRUD endpoints reconcile inline on every region edit, and end-of-FMG/
  * FortiGate discovery calls the reconciler too — this 6-hour tick is the
  * out-of-band catch for anything those paths missed (server restart mid-edit,
- * a firewall whose coords were updated outside discovery, etc.). Add-only:
- * never strips a tag — renames and deletes are handled by the dedicated
- * service paths so by the time this runs there's nothing stale to clean up.
+ * a firewall whose coords were updated outside discovery, etc.).
+ *
+ * **Devices move**, which is the other half of what this tick is for: a gate
+ * re-pinned onto the map, a switch repointed to a controller in another region,
+ * a subnet re-served by a different gate. `reconcileMapRegions` therefore adds
+ * AND removes, bounded by the `RegionTagAssignment` provenance rows — it strips
+ * only pairs the service itself tagged, so a hand-applied `region:` tag (and
+ * any tag predating provenance) is never destroyed. Renames and deletes still
+ * rotate tags wholesale through their own service paths.
  *
  * Independent `running` guard. Failures are logged at debug and never thrown.
  *
@@ -32,12 +38,15 @@ async function tick(): Promise<void> {
     await runInstrumentedJob("reconcileMapRegions", async () => {
       const summary = await reconcileMapRegions();
       if (summary.assetsTouched > 0 || summary.subnetsTouched > 0) {
+        // Report adds and removes separately: a run that only strips tags is a
+        // fleet where devices MOVED, which reads very differently from a run
+        // that only adds, and one net-zero number would hide both.
         logEvent({
           action: "region.tags_reconciled",
           resourceType: "map-region",
           message:
-            `Periodic region reconcile: +${summary.added} on ${summary.assetsTouched} asset${summary.assetsTouched === 1 ? "" : "s"}, ` +
-            `+${summary.subnetsAdded} on ${summary.subnetsTouched} network${summary.subnetsTouched === 1 ? "" : "s"}`,
+            `Periodic region reconcile: +${summary.added}/-${summary.removed} on ${summary.assetsTouched} asset${summary.assetsTouched === 1 ? "" : "s"}, ` +
+            `+${summary.subnetsAdded}/-${summary.subnetsRemoved} on ${summary.subnetsTouched} network${summary.subnetsTouched === 1 ? "" : "s"}`,
           details: summary,
         });
       }

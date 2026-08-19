@@ -21,6 +21,7 @@ import {
   ipToPtrName,
   isPrivateOrLoopbackIp,
   normalizeAllowlistCidr,
+  buildCidrMatcher,
 } from "../../src/utils/cidr.js";
 
 describe("normalizeCidr", () => {
@@ -64,6 +65,42 @@ describe("cidrContains", () => {
 
   it("returns true for identical CIDRs", () => {
     expect(cidrContains("10.0.0.0/8", "10.0.0.0/8")).toBe(true);
+  });
+
+  // Netmask leaves `broadcast` undefined for /31 and /32 — the old
+  // `innerBlock.broadcast!` threw on those and every host route reported
+  // "not contained", which silently broke region-tag propagation to assets
+  // addressed out of an enclosed gate's subnets.
+  it("handles a /32 inner (host route)", () => {
+    expect(cidrContains("10.88.1.0/24", "10.88.1.20/32")).toBe(true);
+    expect(cidrContains("10.88.1.0/24", "10.88.2.20/32")).toBe(false);
+  });
+
+  it("handles a /31 inner (point-to-point)", () => {
+    expect(cidrContains("10.88.1.0/24", "10.88.1.20/31")).toBe(true);
+    // Straddles the boundary: .254-.255 of one /24 vs the next.
+    expect(cidrContains("10.88.1.0/24", "10.88.1.254/31")).toBe(true);
+    expect(cidrContains("10.88.1.0/24", "10.88.2.0/31")).toBe(false);
+  });
+});
+
+describe("buildCidrMatcher", () => {
+  it("returns the first matching CIDR and null for a miss", () => {
+    const match = buildCidrMatcher(["10.0.0.0/24", "10.0.1.0/24"]);
+    expect(match("10.0.1.7")).toBe("10.0.1.0/24");
+    expect(match("192.168.1.1")).toBeNull();
+  });
+
+  it("skips unparseable CIDRs without blinding the rest", () => {
+    const match = buildCidrMatcher(["not-a-cidr", "10.0.0.0/24"]);
+    expect(match("10.0.0.9")).toBe("10.0.0.0/24");
+  });
+
+  it("matches nothing for empty input, IPv6, or an empty ip", () => {
+    expect(buildCidrMatcher([])("10.0.0.1")).toBeNull();
+    const match = buildCidrMatcher(["10.0.0.0/8"]);
+    expect(match("2001:db8::1")).toBeNull();
+    expect(match("")).toBeNull();
   });
 });
 

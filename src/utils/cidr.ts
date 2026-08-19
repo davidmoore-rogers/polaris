@@ -159,11 +159,19 @@ export function cidrContains(outer: string, inner: string): boolean {
   try {
     const outerBlock = new Netmask(outer);
     const innerBlock = new Netmask(inner);
-    // inner must start at or after outer's base and end at or before outer's broadcast
-    return (
-      outerBlock.contains(innerBlock.base) &&
-      outerBlock.contains(innerBlock.broadcast!)
-    );
+    // inner must start at or after outer's base and end at or before its last
+    // address. `broadcast` is UNDEFINED for a /31 and a /32 (there is no
+    // broadcast address in a point-to-point or host route), and the previous
+    // non-null assertion made `contains(undefined)` throw straight into the
+    // catch below — so every /31 and /32 inner reported "not contained",
+    // silently. That took out the two callers that pass a host route: the
+    // region-tag propagation to assets addressed out of an enclosed gate's
+    // subnet, and the sighting-to-subnet enrichment on the asset panel; it
+    // would also have refused a /32 subnet inside its own block. `last` is the
+    // last address for those prefixes and the last USABLE host for wider ones,
+    // so prefer `broadcast` where it exists to keep the wider case unchanged.
+    const innerEnd = innerBlock.broadcast ?? innerBlock.last;
+    return outerBlock.contains(innerBlock.base) && outerBlock.contains(innerEnd);
   } catch {
     return false;
   }
@@ -193,6 +201,43 @@ export function ipInCidr(ip: string, cidr: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Pre-compile a list of CIDRs into a reusable "which of these contains this IP?"
+ * test, returning the first matching CIDR or null.
+ *
+ * Exists for the loops that ask the question once per asset: `ipInCidr` builds a
+ * fresh Netmask per call, so testing n assets against m subnets constructs n*m
+ * of them — at 2000 assets and a few hundred subnets that is the dominant cost
+ * of a map-region reconcile, and it repeats per region. Parsing each CIDR once
+ * makes the inner loop a pair of integer comparisons.
+ *
+ * Unparseable CIDRs are dropped rather than throwing: the caller is matching
+ * against discovery-supplied rows, and one bad row must not blind the rest.
+ * IPv4 only (Netmask), same as `ipInCidr` — an IPv6 address simply matches
+ * nothing.
+ */
+export function buildCidrMatcher(cidrs: string[]): (ip: string) => string | null {
+  const blocks: Array<{ cidr: string; block: Netmask }> = [];
+  for (const cidr of cidrs) {
+    try {
+      blocks.push({ cidr, block: new Netmask(cidr) });
+    } catch {
+      /* skip unparseable */
+    }
+  }
+  return (ip: string): string | null => {
+    if (!ip) return null;
+    for (const b of blocks) {
+      try {
+        if (b.block.contains(ip)) return b.cidr;
+      } catch {
+        /* not an IPv4 address this block can evaluate */
+      }
+    }
+    return null;
+  };
 }
 
 /**
