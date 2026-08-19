@@ -4370,6 +4370,99 @@ function _currentIpsecRange() {
   return (btn && btn.getAttribute("data-range")) || "1h";
 }
 
+// --- Asset panel back/forward history ---------------------------------------
+// The slide-over is walkable: a dependency-tree row, an HA peer, an LLDP
+// neighbour, a MAC-table match and the Application Map rail all pivot the OPEN
+// panel to another asset (openViewModal swaps the body in place rather than
+// stacking a second panel). Before this there was no way back — the operator
+// lost the device they started from and had to find it in the table again — so
+// the panel keeps a browser-style history of the assets visited since it
+// opened, walked by the header's ‹ / › buttons or Alt+Left / Alt+Right.
+//
+// The stack lives for ONE panel session (closeAssetPanel resets it): back means
+// back to the device I came from, not to something looked at an hour ago.
+var _assetPanelHistory    = { entries: [], idx: -1 };
+var _assetPanelWalkDelta  = 0;       // -1/+1 while a back/forward press is re-opening; consumed synchronously by openViewModal
+var ASSET_HISTORY_MAX     = 50;
+
+// Pure: what the history becomes when `id` is opened. `fresh` = no session yet
+// (the panel was closed), so that asset becomes the only entry. Re-opening the
+// CURRENT asset is a REFRESH — the footer Refresh button, every post-save
+// re-render and the monitor-pill flip all call openViewModal(sameId) — and must
+// not push a duplicate, or a refreshed panel would need two ‹ presses to escape.
+function _assetHistoryOpen(state, id, fresh) {
+  if (fresh) return { entries: [{ id: id, label: null }], idx: 0 };
+  var cur = state.entries[state.idx];
+  if (cur && cur.id === id) return state;
+  // Opening from mid-history drops whatever was ahead of it, like a browser.
+  var entries = state.entries.slice(0, state.idx + 1);
+  entries.push({ id: id, label: null });
+  if (entries.length > ASSET_HISTORY_MAX) entries = entries.slice(entries.length - ASSET_HISTORY_MAX);
+  return { entries: entries, idx: entries.length - 1 };
+}
+
+// Pure: the entry a back/forward press lands on, or null when that direction is
+// spent (which is what disables the button).
+function _assetHistoryTarget(state, delta) {
+  var i = state.idx + delta;
+  if (i < 0 || i >= state.entries.length) return null;
+  return { idx: i, entry: state.entries[i] };
+}
+
+// Pure: label every entry for this asset once its hostname is known, so the
+// tooltips name the device instead of an opaque id. One id can hold several
+// entries (walked away and back), hence the sweep.
+function _assetHistoryLabel(state, id, label) {
+  for (var i = 0; i < state.entries.length; i++) {
+    if (state.entries[i].id === id) state.entries[i].label = label || null;
+  }
+  return state;
+}
+
+// Paint the header pair from the current stack. Hidden entirely until there is
+// somewhere to go, so a panel opened once and never walked doesn't grow two
+// permanently-dead buttons.
+function _renderAssetPanelNav() {
+  var wrap = document.getElementById("asset-panel-nav");
+  if (!wrap) return;
+  wrap.hidden = _assetPanelHistory.entries.length < 2;
+  var specs = [
+    { el: document.getElementById("asset-panel-back"), delta: -1, verb: "Back", keys: "Alt+Left" },
+    { el: document.getElementById("asset-panel-fwd"),  delta:  1, verb: "Forward", keys: "Alt+Right" },
+  ];
+  for (var i = 0; i < specs.length; i++) {
+    var s = specs[i];
+    if (!s.el) continue;
+    var t = _assetHistoryTarget(_assetPanelHistory, s.delta);
+    s.el.disabled = !t;
+    s.el.title = t
+      ? s.verb + " to " + ((t.entry && t.entry.label) || "the previous asset") + " (" + s.keys + ")"
+      : "No " + s.verb.toLowerCase() + " history";
+  }
+}
+
+// Walk the stack. The index moves here and openViewModal is told to leave the
+// stack alone — otherwise stepping back would itself push an entry and the
+// operator could never reach the start.
+// Keep the keyboard on the pair while walking: openViewModal otherwise
+// focuses the panel, so a second press would need the mouse again. When the
+// direction just ran out, hand focus to the opposite button rather than to a
+// disabled one.
+function _focusAssetPanelNav(delta) {
+  var mine  = document.getElementById(delta < 0 ? "asset-panel-back" : "asset-panel-fwd");
+  var other = document.getElementById(delta < 0 ? "asset-panel-fwd"  : "asset-panel-back");
+  var pick = mine && !mine.disabled ? mine : (other && !other.disabled ? other : null);
+  if (pick) { try { pick.focus(); } catch (_) { /* detached */ } }
+}
+
+function _assetPanelGo(delta) {
+  var t = _assetHistoryTarget(_assetPanelHistory, delta);
+  if (!t) return;
+  _assetPanelHistory.idx = t.idx;
+  _assetPanelWalkDelta = delta;
+  openViewModal(t.entry.id);
+}
+
 function _ensureAssetPanelDOM() {
   if (document.getElementById("asset-panel-overlay")) return;
   var overlay = document.createElement("div");
@@ -4380,7 +4473,13 @@ function _ensureAssetPanelDOM() {
       '<div class="slideover-resize-handle"></div>' +
       '<div class="slideover-header">' +
         '<div class="slideover-header-top">' +
-          '<h3 id="asset-panel-title">Asset Details</h3>' +
+          '<div class="slideover-header-lead">' +
+            '<div class="slideover-nav" id="asset-panel-nav" hidden>' +
+              '<button type="button" class="slideover-nav-btn" id="asset-panel-back" aria-label="Back to the previously viewed asset" disabled>&lsaquo;</button>' +
+              '<button type="button" class="slideover-nav-btn" id="asset-panel-fwd" aria-label="Forward to the next viewed asset" disabled>&rsaquo;</button>' +
+            '</div>' +
+            '<h3 id="asset-panel-title">Asset Details</h3>' +
+          '</div>' +
           '<button class="btn-icon" id="asset-panel-close" title="Close" aria-label="Close asset details">&times;</button>' +
         '</div>' +
         '<div class="slideover-meta" id="asset-panel-meta"></div>' +
@@ -4394,6 +4493,8 @@ function _ensureAssetPanelDOM() {
     if (e.target === overlay) closeAssetPanel();
   });
   document.getElementById("asset-panel-close").addEventListener("click", closeAssetPanel);
+  document.getElementById("asset-panel-back").addEventListener("click", function () { _assetPanelGo(-1); });
+  document.getElementById("asset-panel-fwd").addEventListener("click", function () { _assetPanelGo(1); });
 
   // The System-tab status pill is rendered by assetMonitorBadge with the
   // same data-monitor-toggle attributes as the table pills — delegate the
@@ -4415,6 +4516,18 @@ function _ensureAssetPanelDOM() {
     closeAssetPanel();
   });
 
+  // Alt+Left / Alt+Right walk the panel history, mirroring the browser chord.
+  // Gated exactly like Escape above: only while the asset panel is the topmost
+  // layer, so an open drilldown or a stacked modal keeps the keys for itself.
+  document.addEventListener("keydown", function (e) {
+    if (!e.altKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+    if (!overlay.classList.contains("open")) return;
+    if (document.querySelector(".slideover-overlay.slideover-nested.open")) return;
+    if (document.getElementById("modal-overlay") && document.getElementById("modal-overlay").classList.contains("open")) return;
+    e.preventDefault();
+    _assetPanelGo(e.key === "ArrowLeft" ? -1 : 1);
+  });
+
   initSlideoverResize(document.getElementById("asset-panel"), "polaris.panel.width.asset");
 }
 
@@ -4425,6 +4538,10 @@ function closeAssetPanel() {
   if (overlay) overlay.classList.remove("open");
   _clearAssetRefreshTimers();
   _currentAssetForRefresh = null;
+  // History is per panel session — reopening from the table starts over.
+  _assetPanelHistory = { entries: [], idx: -1 };
+  _assetPanelWalkDelta = 0;
+  _renderAssetPanelNav();
   if (_assetPanelReturnFocus && typeof _assetPanelReturnFocus.focus === "function") {
     try { _assetPanelReturnFocus.focus(); } catch (_) { /* element gone */ }
   }
@@ -4453,9 +4570,22 @@ window.openAssetBySerial = async function (serial) {
 
 async function openViewModal(id) {
   _ensureAssetPanelDOM();
+  // Back/forward bookkeeping. The walk direction is consumed SYNCHRONOUSLY
+  // here, before any await, so a walk can't leak into whatever opens next.
+  // "Fresh" is an empty stack rather than a closed overlay: the overlay only
+  // gains .open on the next frame, so two fast opens would otherwise read as
+  // two separate sessions.
+  var _walk  = _assetPanelWalkDelta;
+  _assetPanelWalkDelta = 0;
+  var _fresh = _assetPanelHistory.entries.length === 0;
+  if (!_walk) _assetPanelHistory = _assetHistoryOpen(_assetPanelHistory, id, _fresh);
+  _renderAssetPanelNav();
+  if (_walk) _focusAssetPanelNav(_walk);
   // Remember the trigger (table row action, search hit, etc.) so closing the
-  // panel returns focus there.
-  _assetPanelReturnFocus = document.activeElement;
+  // panel returns focus there. Only the FIRST open of a session sets it: every
+  // later open is a pivot or a walk whose activeElement is a control inside the
+  // panel, and returning focus to a hidden button loses it to <body>.
+  if (_fresh) _assetPanelReturnFocus = document.activeElement;
   var titleEl  = document.getElementById("asset-panel-title");
   var metaEl   = document.getElementById("asset-panel-meta");
   var bodyEl   = document.getElementById("asset-panel-body");
@@ -4468,7 +4598,7 @@ async function openViewModal(id) {
     var ov = document.getElementById("asset-panel-overlay");
     ov.classList.add("open");
     var panel = document.getElementById("asset-panel");
-    if (panel) panel.focus();
+    if (panel && !_walk) panel.focus();
   });
 
   try {
@@ -4568,6 +4698,10 @@ async function openViewModal(id) {
     var sdwanMembers = wave[11].members;
 
     _currentAssetForRefresh = a;
+    // Name the entry now that the hostname is known, so the tooltips read
+    // "Back to PEORIA-61F-1" instead of a uuid.
+    _assetHistoryLabel(_assetPanelHistory, a.id, a.hostname || a.dnsName || a.ipAddress || null);
+    _renderAssetPanelNav();
     var generalHTML = _assetGeneralTabHTML(a);
 
     var monitoringHTML = assetMonitoringViewHTML(a);
