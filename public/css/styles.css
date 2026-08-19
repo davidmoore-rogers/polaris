@@ -4962,6 +4962,43 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
    a bare ▾ reads as punctuation rather than something to press, and it is the
    only affordance on that header line. Hover/focus lift the colour so it answers
    to the pointer, and the hit area is padded past the glyph. */
+/* Severity-tier header parts, shared by the trigger step's tier rows and the
+   actions step's per-severity sections. They live here rather than inline
+   because the two surfaces MUST read as the same object: a tier's heading and
+   its condition phrase looked like different kinds of thing on the two steps.
+
+   The summary previously borrowed `.hint`, which is scoped `.form-group .hint`
+   — true on the actions step (its sections ARE form-groups) and false on the
+   trigger step (#aw-bands is not), so the identical span rendered 0.72rem grey
+   on one step and full-size body text on the other. Styling the class directly
+   makes it ancestry-independent. */
+.aw-tier-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.aw-tier-label .aw-tier-qual {
+  font-weight: 400;
+  color: var(--color-text-tertiary);
+}
+/* Two classes, one appearance, different jobs: `.aw-collapse-summary` is what a
+   FOLDED block says about itself (the trigger step's condition, the actions
+   step's action count), while `.aw-tier-cond` is the actions step's condition,
+   which must show at all times because that step has no controls to read it off.
+   Identical styling is the point — the same tier has to look the same on both
+   steps. */
+.aw-collapse-summary,
+.aw-tier-cond {
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+  margin: 0;
+}
+/* When a folded actions section shows both, the count is a second fact rather
+   than a continuation of the condition. */
+.aw-tier-cond + .aw-collapse-summary::before {
+  content: " b7";
+  margin-right: 0.35rem;
+}
+
 .aw-collapse {
   font-size: 1.15rem;
   line-height: 1;

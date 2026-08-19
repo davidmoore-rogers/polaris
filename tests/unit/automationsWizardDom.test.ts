@@ -443,6 +443,70 @@ describe("automation wizard DOM render", () => {
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
   });
 
+  it("action rows fold to their summary, closed by default — and a row you ADD opens", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    const w = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-fold5",
+      name: "Folded actions",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">=", threshold: 80, forDurationSec: 300 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      actions: [
+        { type: "event" },
+        { type: "notify", channelId: "c1", addresses: ["noc@example.invalid"] },
+      ],
+      severityBands: [{ threshold: 95, severity: "critical", actions: [{ type: "notify", channelId: "c1", addresses: ["oncall@example.invalid"] }] }],
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: false },
+    });
+    (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+
+    const rows = Array.from(doc.querySelectorAll("#aw-step-5 .aw-action"));
+    expect(rows.length).toBeGreaterThan(1);
+    // Every stored row lands folded: a per-severity ladder is several action
+    // lists deep, each with a channel picker, recipients, an email body and an
+    // escalation footer.
+    rows.forEach((r) => {
+      expect(r.querySelector(":scope > .aw-collapse")).toBeFalsy();      // it's in the header
+      expect(r.querySelector(":scope > div > .aw-collapse")).toBeTruthy();
+      const fields = r.querySelector(":scope > .aw-action-fields") as unknown as { style: { display: string } };
+      expect(fields.style.display).toBe("none");
+    });
+    // The summary is what a folded row shows, so it has to say something.
+    const notifyRow = rows.find((r) =>
+      (r.querySelector(".aw-action-type") as HTMLSelectElement | null)?.value === "notify")!;
+    expect((notifyRow.querySelector(".aw-action-summary") as unknown as { textContent: string }).textContent!.length)
+      .toBeGreaterThan(0);
+
+    // The chevron opens it.
+    (notifyRow.querySelector(":scope > div > .aw-collapse") as unknown as { dispatchEvent: (e: unknown) => void })
+      .dispatchEvent(new w.Event("click", { bubbles: true }));
+    expect((notifyRow.querySelector(":scope > .aw-action-fields") as unknown as { style: { display: string } }).style.display)
+      .not.toBe("none");
+
+    // A row the operator ADDS opens — you don't create an action to read its summary.
+    const before = doc.querySelectorAll("#aw-step-5 #aw-actions .aw-action").length;
+    (doc.querySelector("#aw-add-action") as unknown as { click: () => void }).click();
+    const added = Array.from(doc.querySelectorAll("#aw-step-5 #aw-actions .aw-action"));
+    expect(added.length).toBe(before + 1);
+    const fresh = added[added.length - 1]!;
+    expect((fresh.querySelector(":scope > .aw-action-fields") as unknown as { style: { display: string } }).style.display)
+      .not.toBe("none");
+
+    // Folding is presentation only — the payload is unchanged.
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const p = savedPayloads[0]! as Record<string, any>;
+    expect(p.actions.map((a: { type: string }) => a.type)).toContain("notify");
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
   it("retires the band 'Resolved' notify and moves what it announced into the reset actions", async () => {
     // Recovery is announced ONCE, by the reset actions. The band-level resolved
     // policy was a second mechanism for the same event and the engine ran both
@@ -523,6 +587,76 @@ describe("automation wizard DOM render", () => {
     expect(p.resetActions).toHaveLength(1);
     expect(p.resetActions[0].addresses).toEqual(["ops@example.invalid"]);
     expect(p.bandNotify.onResolved).toBe(false);
+  });
+
+  it("words a tier's condition identically on the trigger and actions steps", async () => {
+    // The two severity surfaces used to phrase the same tier differently: step 3
+    // said "is at or above 95 for 1 min" while step 5 said "(value is at or above
+    // 95)" and dropped the hold entirely, so the same tier read as two different
+    // conditions depending on which step you were on. One shared builder now
+    // produces both, and this pins that they agree — including the per-tier hold
+    // override, which step 5 did not show at all.
+    doc.body.innerHTML = "";
+    const w = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-phrase",
+      name: "Phrase",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">=", threshold: 70, forDurationSec: 300 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.invalid"] }],
+      severityBands: [
+        { threshold: 85, severity: "serious", actions: [] },
+        // Its OWN hold, shorter than the base — the case step 5 was silent about.
+        { threshold: 95, severity: "critical", forDurationSec: 60, actions: [{ type: "event" }] },
+      ],
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" },
+    });
+
+    // Step 3: fold each tier so it states its own condition.
+    (doc.querySelector('.stepper-step[data-step="3"]') as unknown as { click: () => void }).click();
+    const phraseFor = (el: Element): string => {
+      (el.querySelector("[data-collapse]") as unknown as { dispatchEvent: (e: unknown) => void })
+        .dispatchEvent(new w.Event("click", { bubbles: true }));
+      const txt = (el.querySelector(".aw-collapse-summary") as unknown as { textContent: string }).textContent.trim();
+      (el.querySelector("[data-collapse]") as unknown as { dispatchEvent: (e: unknown) => void })
+        .dispatchEvent(new w.Event("click", { bubbles: true }));
+      return txt;
+    };
+    const trigBase = phraseFor(doc.querySelector("#aw-trig-root > .scg-group")!);
+    const trigTiers = Array.from(doc.querySelectorAll("#aw-step-3 .aw-band")).map(phraseFor);
+    // The base states the 5 minutes from its own duration field. `serious`
+    // inherits nothing — an AGGREGATED trigger's minutes are its measurement
+    // WINDOW, not a hold (rule 19: tiers share the sampling), so a tier without
+    // its own hold shows none. `critical` overrides with 1 min. What matters for
+    // this test is that step 5 says the SAME three things.
+    expect(trigBase).toBe("is at or above 70 for 5 min");
+    expect(trigTiers).toEqual(["is at or above 85", "is at or above 95 for 1 min"]);
+
+    // Step 5: the same phrases, from the draft rather than the DOM controls, and
+    // visible without folding (there are no controls there to read them off).
+    (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+    const multi = doc.querySelector("#aw-band-actions-multi") as unknown as
+      { checked: boolean; dispatchEvent: (e: unknown) => void };
+    if (!multi.checked) {
+      multi.checked = true;
+      multi.dispatchEvent(new w.Event("change", { bubbles: true }));
+    }
+    const actionPhrases = Array.from(doc.querySelectorAll("#aw-step-5 [data-collapse-key]"))
+      .map((sec) => {
+        const el = sec.querySelector(".aw-tier-cond") as unknown as { textContent: string } | null;
+        return el ? el.textContent.trim() : "";
+      });
+    expect(actionPhrases).toEqual([trigBase, trigTiers[0], trigTiers[1]]);
+
+    // The old wording is gone from the actions step: no parenthesised "value"
+    // restatement competing with the shared phrase.
+    expect((doc.querySelector("#aw-step-5") as unknown as { textContent: string }).textContent)
+      .not.toMatch(/\(value is at or above/);
   });
 
   it("severity blocks fold, and the fold survives a re-render", async () => {

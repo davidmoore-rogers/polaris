@@ -1151,16 +1151,32 @@ async function openAutomationWizard(existing, opts) {
    * the base tier (the base's own "Sustained for" is MOVED into the group in
    * multi-severity mode), hence the two-selector lookup.
    */
+  /**
+   * THE canonical wording for what one severity tier tests: "is at or above 85
+   * for 5 min". Both severity surfaces render through this — the trigger step's
+   * folded-tier summary (from live DOM controls) and the actions step's
+   * per-severity headings (from the draft) — because two hand-built phrasings of
+   * the same tier drifted apart: the actions step said "(value is at or above
+   * 85)" and dropped the hold entirely, so the same tier read as two different
+   * conditions depending on which step you were on.
+   *
+   * Operator and threshold only; the metric is named once per step and repeating
+   * it on every tier row is noise (rule 19: tiers share the trigger's sampling).
+   */
+  function tierConditionPhrase(operator, threshold, minutes) {
+    var opText = operator ? ((s.comparatorPhrases || {})[operator] || operator) : "";
+    var valText = threshold != null && threshold !== "" ? String(threshold) : "?";
+    var mins = Number(minutes) || 0;
+    return (opText ? opText + " " : "") + valText + (mins > 0 ? " for " + mins + " min" : "");
+  }
+
   function tierSummaryText(scopeEl) {
     if (!scopeEl) return "";
     var op = scopeEl.querySelector(".tgl-op");
     var val = scopeEl.querySelector(".tgl-threshold");
     var mins = scopeEl.querySelector(".band-duration, #tf-duration-min");
     if (!op && !val) return "";
-    var opText = op ? ((s.comparatorPhrases || {})[op.value] || op.value) : "";
-    var valText = val && val.value !== "" ? val.value : "?";
-    var held = mins && Number(mins.value) > 0 ? " for " + Number(mins.value) + " min" : "";
-    return (opText ? opText + " " : "") + valText + held;
+    return tierConditionPhrase(op ? op.value : "", val ? val.value : "", mins ? mins.value : 0);
   }
 
   function collapseBtnHtml(key) {
@@ -2626,13 +2642,23 @@ async function openAutomationWizard(existing, opts) {
       html += '<div class="form-group"><label><input type="checkbox" id="aw-band-actions-multi"' + (perSev ? " checked" : "") + '> Use different actions for each severity level</label>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 1.4rem">Leave this off to run the same actions whenever the alert changes severity.</p></div>';
     }
+    // Same shape the trigger step's tiers use: heading, then the tier's own
+    // condition in the shared summary style. The base tier showed no condition at
+    // all here, which made it read as a different kind of block from the ones
+    // below it — the exact mismatch the trigger step already fixed.
+    var basePhrase = tierConditionPhrase(
+      draft.trigger && draft.trigger.operator,
+      draft.trigger && draft.trigger.threshold,
+      triggerDurationMinutes(draft.trigger),
+    );
     var baseLabel = perSev
-      ? 'Actions at <span style="color:' + sevColor(draft.severity) + '">' + escapeHtml(draft.severity) + '</span> (base severity)'
+      ? 'Actions at <span style="color:' + sevColor(draft.severity) + '">' + escapeHtml(draft.severity) + '</span> <span class="aw-tier-qual">(base severity)</span>'
       : "Actions when this fires";
     html += '<div class="form-group"' + (perSev ? ' data-collapse-key="t5:base"' : "") + ' style="' + (perSev ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
       '<div class="aw-collapse-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
         (perSev ? collapseBtnHtml("t5:base") : "") +
-        '<label style="font-weight:600;margin:0">' + baseLabel + '</label>' +
+        '<label class="aw-tier-label" style="margin:0">' + baseLabel + '</label>' +
+        (perSev && basePhrase ? '<span class="aw-tier-cond">' + escapeHtml(basePhrase) + '</span>' : "") +
       '</div>' +
       '<div class="aw-collapse-body">' +
       (perSev ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These actions also run at higher severities that don’t define their own.</p>'
@@ -2642,15 +2668,30 @@ async function openAutomationWizard(existing, opts) {
       '</div>' +
     '</div>';
     bands.forEach(function (b, i) {
-      var opPhrase = ((s.comparatorPhrases || {})[b.operator || (draft.trigger && draft.trigger.operator)] || "").toString();
+      // A tier may override the comparison and the hold; both belong in the
+      // phrase, or "for 1 min" on a critical tier is invisible on this step.
+      var bandPhrase = tierConditionPhrase(
+        b.operator || (draft.trigger && draft.trigger.operator),
+        b.threshold,
+        // EXACTLY addBandRow's `bandDurMin`: a tier with no hold of its own
+        // inherits the trigger's `forDurationSec`, which an AGGREGATED trigger
+        // does not have (its minutes are the measurement window and live in
+        // `windowSec` — rule 19 has tiers share the sampling). Using
+        // `triggerDurationMinutes` here would print "for 5 min" on this step
+        // where the trigger step correctly prints no hold at all.
+        b.forDurationSec != null
+          ? Math.round(b.forDurationSec / 60)
+          : Math.round((((draft.trigger || {}).forDurationSec) || 0) / 60),
+      );
       var bandCount = ((b.actions || []).length);
       html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" data-collapse-key="t5:' + escapeHtml(b.severity) + '" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem' + (perSev ? "" : ";display:none") + '">' +
         '<div class="aw-collapse-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
           collapseBtnHtml("t5:" + b.severity) +
-          '<label style="font-weight:600;margin:0">Actions at <span style="color:' + sevColor(b.severity) + '">' + escapeHtml(b.severity) + '</span> <span style="font-weight:400;color:var(--color-text-tertiary)">(value ' + escapeHtml(opPhrase || "meets") + ' ' + escapeHtml(String(b.threshold != null ? b.threshold : "?")) + ')</span></label>' +
+          '<label class="aw-tier-label" style="margin:0">Actions at <span style="color:' + sevColor(b.severity) + '">' + escapeHtml(b.severity) + '</span></label>' +
+          '<span class="aw-tier-cond">' + escapeHtml(bandPhrase) + '</span>' +
           // A folded section still says how much is inside it, so "no actions
           // here" (which falls back to the base) is visible without unfolding.
-          '<span class="aw-collapse-summary hint" style="margin:0;display:none">' +
+          '<span class="aw-collapse-summary" style="margin:0;display:none">' +
             (bandCount ? bandCount + " action" + (bandCount === 1 ? "" : "s") : "no actions of its own") +
           '</span>' +
         '</div>' +
@@ -2697,7 +2738,7 @@ async function openAutomationWizard(existing, opts) {
     var host = panel.querySelector("#aw-actions");
     (draft.actions || []).forEach(function (a) { addActionRow(host, a, true); });
     panel.querySelector("#aw-add-action").addEventListener("click", function () {
-      addActionRow(host, null, true);
+      foldActionRow(addActionRow(host, null, true), false);
       syncResetMirror(panel);
     });
     // The reset list follows the trigger list as it is BUILT: picking a channel
@@ -2714,7 +2755,7 @@ async function openAutomationWizard(existing, opts) {
     panel.querySelectorAll(".aw-band-actions").forEach(function (sec, i) {
       var bHost = sec.querySelector(".ba-actions");
       (((draft.severityBands || [])[i] || {}).actions || []).forEach(function (a) { addActionRow(bHost, a, true); });
-      sec.querySelector(".ba-add").addEventListener("click", function () { addActionRow(bHost, null, true); });
+      sec.querySelector(".ba-add").addEventListener("click", function () { foldActionRow(addActionRow(bHost, null, true), false); });
     });
     // Reset list: hydrate, then keep it following the trigger actions.
     var resetHost = panel.querySelector("#aw-reset-actions");
@@ -2723,7 +2764,7 @@ async function openAutomationWizard(existing, opts) {
       : (draft.resetActions || []);                         // stored, or explicitly off
     renderResetRows(panel, resetSeed);
     panel.querySelector("#aw-reset-add").addEventListener("click", function () {
-      addActionRow(resetHost, null);
+      foldActionRow(addActionRow(resetHost, null), false);
       refreshMirrorNote(panel);
     });
     panel.querySelector("#aw-reset-actions-on").addEventListener("change", function () {
@@ -2789,7 +2830,7 @@ async function openAutomationWizard(existing, opts) {
       var row = addTierRow(tiersHost, null, sync);
       // Seed a notify action so the channel + recipient fields are right
       // there — an escalation without an action can't do anything anyway.
-      addActionRow(row.querySelector(".tier-actions"), null);
+      foldActionRow(addActionRow(row.querySelector(".tier-actions"), null), false);
       sync();
     });
   }
@@ -3007,7 +3048,7 @@ async function openAutomationWizard(existing, opts) {
       var wrap = document.createElement("span");
       wrap.className = "scg-sev-wrap";
       wrap.style.cssText = "display:flex;align-items:center;gap:6px;margin-right:6px";
-      wrap.innerHTML = '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' + sevSelectHtml("scg-sev", draft.severity || "warning");
+      wrap.innerHTML = '<label class="aw-tier-label" style="margin:0">severity</label>' + sevSelectHtml("scg-sev", draft.severity || "warning");
       header.insertBefore(wrap, header.firstChild);
       // Take the BANDS' layout: severity alone on the header line with the
       // remove × right-aligned, and the AND/OR select on its own line below. The
@@ -3043,7 +3084,11 @@ async function openAutomationWizard(existing, opts) {
       header.insertBefore(chev.firstChild, header.firstChild);
       root.setAttribute("data-collapse-key", "t3:base");
       var sum = document.createElement("span");
-      sum.className = "aw-collapse-summary hint";
+      // `.aw-collapse-summary` carries its own size/colour now; `.hint` is scoped
+      // `.form-group .hint` and this header is not inside one, which is exactly
+      // why the trigger step's summaries used to render at full body size while
+      // the identical span on the actions step came out small and grey.
+      sum.className = "aw-collapse-summary";
       sum.style.cssText = "margin:0;display:none";
       header.insertBefore(sum, wrap.nextSibling);
       // Everything below the header line folds. Marked in place — see
@@ -3214,11 +3259,11 @@ async function openAutomationWizard(existing, opts) {
     row.innerHTML =
       '<div class="aw-collapse-head" style="display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap">' +
         collapseBtnHtml("t3:" + sev0) +
-        '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' +
+        '<label class="aw-tier-label" style="margin:0">severity</label>' +
         sevSelectHtml("band-severity", sev0) +
         // What the tier says, for when it's folded shut. Filled by
         // syncBandSummary from the row's own inputs.
-        '<span class="aw-collapse-summary hint" style="margin:0;display:none"></span>' +
+        '<span class="aw-collapse-summary" style="margin:0;display:none"></span>' +
         '<button type="button" class="btn btn-sm btn-danger band-remove" title="Remove severity" style="margin-left:auto">&times;</button>' +
       '</div>' +
       '<div class="aw-collapse-body">' +
@@ -3591,6 +3636,34 @@ async function openAutomationWizard(existing, opts) {
   // escalatable: top-level + per-severity-band action rows get their own
   // "Escalate if unhandled" chain (action.escalation). Tier-hosted rows and
   // band resolved-action rows don't (the server schema keeps those bare).
+  /**
+   * Fold one action row down to its header — the type select, the summary line and
+   * Remove. A per-severity ladder is three or four action lists deep, each row
+   * carrying a channel picker, To/Cc/Bcc, an email body and an escalation
+   * footer; expanded, the step is unreadable. The summary already says what the
+   * row does, so it IS the collapsed state.
+   *
+   * State lives on the ELEMENT, not in the keyed `_awCollapsed` map: an action has
+   * no stable identity to key on (rows are positional, and removing one shifts
+   * the rest), and closed-by-default means a re-render has nothing to restore
+   * anyway. The cost is that a row an operator opened re-folds when the step
+   * re-renders, which is the same thing "closed by default" asks for.
+   */
+  function foldActionRow(row, collapsed) {
+    row._awFolded = !!collapsed;
+    row.querySelectorAll(":scope > .aw-action-fields, :scope > .aw-esc-sec").forEach(function (el) {
+      el.style.display = collapsed ? "none" : "";
+    });
+    var btn = row.querySelector(":scope > div > .aw-collapse");
+    if (btn) {
+      btn.innerHTML = collapsed ? "&#x25B8;" : "&#x25BE;";
+      btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      var label = collapsed ? "Expand this action" : "Collapse this action";
+      btn.setAttribute("title", label);
+      btn.setAttribute("aria-label", label);
+    }
+  }
+
   function addActionRow(host, action, escalatable) {
     action = action || { type: "notify", channelId: channels.length ? channels[0].id : "" };
     var types = availableActionTypes();
@@ -3602,6 +3675,8 @@ async function openAutomationWizard(existing, opts) {
     }).join("");
     row.innerHTML =
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+        '<button type="button" class="btn-icon aw-collapse" aria-expanded="false" ' +
+          'title="Expand this action" aria-label="Expand this action">&#x25B8;</button>' +
         '<select class="aw-action-type" style="width:auto">' + typeOpts + '</select>' +
         '<span class="aw-action-summary" style="flex:1;font-size:0.8rem;color:var(--color-text-tertiary)"></span>' +
         '<button type="button" class="btn btn-sm btn-danger aw-action-remove">Remove</button>' +
@@ -3626,7 +3701,8 @@ async function openAutomationWizard(existing, opts) {
       var host2 = row.parentNode;
       var anchor = row.nextSibling;
       row.remove();
-      addActionRow(host2, next === "event" ? { type: "event" } : { type: next, escalation: esc }, escalatable);
+      var rebuilt = addActionRow(host2, next === "event" ? { type: "event" } : { type: next, escalation: esc }, escalatable);
+      foldActionRow(rebuilt, false); // mid-edit: the operator just changed its type
       // addActionRow appends; move the rebuilt row back to where it was.
       if (anchor) host2.insertBefore(host2.lastChild, anchor);
     });
@@ -3636,6 +3712,13 @@ async function openAutomationWizard(existing, opts) {
     // idempotent — it marks what it has already bound).
     wireTokenPalette(row);
     if (escalatable && action.type !== "event") wireEscSection(row.querySelector(":scope > .aw-esc-sec"), action.escalation || null);
+    row.querySelector(":scope > div > .aw-collapse").addEventListener("click", function () {
+      foldActionRow(row, !row._awFolded);
+    });
+    // Closed by default. A row the operator just ADDED is opened by its caller —
+    // you don't create an action in order to look at its summary.
+    foldActionRow(row, true);
+    return row;
   }
   // ─── Recipient token fields (To / Cc / Bcc) ────────────────────────────
   //
@@ -4496,7 +4579,7 @@ async function openAutomationWizard(existing, opts) {
     // the server schema rejects it).
     var actionsHost = row.querySelector(".tier-actions");
     (tier.actions || []).forEach(function (a) { addActionRow(actionsHost, a); });
-    row.querySelector(".tier-add-action").addEventListener("click", function () { addActionRow(actionsHost, null); });
+    row.querySelector(".tier-add-action").addEventListener("click", function () { foldActionRow(addActionRow(actionsHost, null), false); });
     return row;
   }
 
