@@ -2820,12 +2820,12 @@ async function openAutomationWizard(existing, opts) {
         '<label style="font-weight:600;font-size:0.82rem;display:block;margin:0 0 4px">Notify on</label>' +
         '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-increase" checked> Severity increase (re-notify with the new band’s actions)</label>' +
         '<label style="font-size:0.82rem;display:block"><input type="checkbox" id="aw-bn-decrease"> Severity decrease (run the lower band’s actions)</label>' +
-        // No "Resolved" row: recovery is announced ONCE, by the reset actions on
-        // the Actions step ("When this resets"), which every automation has —
-        // banded or not. This checkbox was a second mechanism for the same event
-        // and the engine ran BOTH (fireResolved for the band, then fireReset from
-        // recover()), so a banded automation with reset actions told people twice.
-        '<p class="hint" style="margin:6px 0 0">Recovery below the base tier is announced by <strong>“When this resets”</strong> on the Actions step.</p>' +
+        // No "Resolved" row, and no note about where recovery went either: this
+        // list is what to notify on as the severity MOVES, and the reset actions
+        // are self-explanatory on the step that owns them. The checkbox was a
+        // second mechanism for one event and the engine ran BOTH (fireResolved for
+        // the band, then fireReset from recover()), so a banded automation with
+        // reset actions told people twice.
       '</div>' +
     '</div>';
   }

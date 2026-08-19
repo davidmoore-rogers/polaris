@@ -472,12 +472,13 @@ describe("automation wizard DOM render", () => {
     (doc.querySelector('.stepper-step[data-step="3"]') as unknown as { click: () => void }).click();
     expect(doc.querySelector("#aw-bn-resolved")).toBeFalsy();
     expect(doc.querySelector("#aw-bn-resolved-mode")).toBeFalsy();
-    // ...and the two that remain are untouched.
+    // ...and the two that remain are untouched. Nothing replaces it: this list is
+    // what to notify on as the severity MOVES, and pointing at another step from
+    // here would be a note explaining a control that is no longer there.
     expect(doc.querySelector("#aw-bn-increase")).toBeTruthy();
     expect(doc.querySelector("#aw-bn-decrease")).toBeTruthy();
-    // ...and the step says where recovery is announced instead.
     expect((doc.querySelector("#aw-band-notify") as unknown as { textContent: string }).textContent)
-      .toMatch(/When this resets/i);
+      .not.toMatch(/resolved|when this resets/i);
 
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
