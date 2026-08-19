@@ -1057,12 +1057,82 @@ async function openAutomationWizard(existing, opts) {
       " have no push-enabled device (" + names + more + ") — they will receive nothing from this action.") +
       '</p>';
   }
-  function tokenPaletteHtml(id) {
+  // ── Collapsible severity blocks ────────────────────────────────────────
+  //
+  // A four-tier automation is four condition groups plus four action lists, and
+  // an operator editing the top one shouldn't have to scroll past the three
+  // below it. Every severity block therefore folds.
+  //
+  // State lives in a module map keyed by a STABLE string rather than on the
+  // element, because step 5 rebuilds its sections from the draft on every toggle
+  // and step 3 re-renders when the base sampling changes — a flag on the node
+  // would be lost each time. The key carries the SEVERITY, not an index, so
+  // removing a tier doesn't slide another tier's state onto it. Session-scoped:
+  // a freshly opened wizard shows everything expanded, since a collapsed block
+  // an operator never collapsed reads as missing.
+  var _awCollapsed = {};
+
+  function collapseBtnHtml(key) {
+    var on = !!_awCollapsed[key];
+    return '<button type="button" class="btn-icon aw-collapse" data-collapse="' + escapeHtml(key) + '" ' +
+      'aria-expanded="' + (on ? "false" : "true") + '" title="' + (on ? "Expand" : "Collapse") + '" ' +
+      'style="padding:0 4px;line-height:1">' + (on ? "&#x25B8;" : "&#x25BE;") + "</button>";
+  }
+
+  /** Paint one block from the stored state (also used right after a render). */
+  function applyCollapsed(container) {
+    var key = container.getAttribute("data-collapse-key");
+    if (!key) return;
+    var on = !!_awCollapsed[key];
+    container.querySelectorAll(":scope > .aw-collapse-body").forEach(function (b) {
+      b.style.display = on ? "none" : "";
+    });
+    var btn = container.querySelector(':scope [data-collapse="' + key + '"]');
+    if (btn) {
+      btn.innerHTML = on ? "&#x25B8;" : "&#x25BE;";
+      btn.setAttribute("aria-expanded", on ? "false" : "true");
+      btn.setAttribute("title", on ? "Expand" : "Collapse");
+    }
+    var sum = container.querySelector(":scope > .aw-collapse-head .aw-collapse-summary");
+    if (sum) sum.style.display = on ? "" : "none";
+  }
+
+  /**
+   * Wire every collapsible block under `root`. Idempotent — a re-render calls it
+   * again over nodes that may already be bound.
+   */
+  function wireCollapsibles(root) {
+    if (!root) return;
+    // The ROOT may be the collapsible itself (addBandRow wires the tier it just
+    // built) — querySelectorAll only sees descendants, so include it explicitly.
+    var blocks = Array.prototype.slice.call(root.querySelectorAll("[data-collapse-key]"));
+    if (root.getAttribute && root.getAttribute("data-collapse-key")) blocks.unshift(root);
+    blocks.forEach(function (container) {
+      applyCollapsed(container);
+      var btn = container.querySelector(':scope [data-collapse]');
+      if (!btn || btn._awCollapseWired) return;
+      btn._awCollapseWired = true;
+      btn.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        var key = container.getAttribute("data-collapse-key");
+        _awCollapsed[key] = !_awCollapsed[key];
+        applyCollapsed(container);
+      });
+    });
+  }
+
+  /** The clickable token chips. Insert into whichever .tpl-field was focused
+   *  last (wireTokenPalette tracks it), so one palette serves several fields. */
+  function tokenChipsHtml() {
     var vars = s.templateVariables || [];
     if (!vars.length) return "";
-    var chips = vars.map(function (v) {
+    return vars.map(function (v) {
       return '<button type="button" class="btn btn-sm btn-secondary tpl-token" data-token="' + escapeHtml(v.token) + '" title="' + escapeHtml(v.description) + '" style="margin:2px 4px 2px 0;font-family:var(--font-mono);font-size:0.72rem;padding:1px 6px">' + escapeHtml(v.token) + '</button>';
     }).join("");
+  }
+  function tokenPaletteHtml(id) {
+    var chips = tokenChipsHtml();
+    if (!chips) return "";
     return '<details id="' + id + '" style="margin:2px 0 6px"><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Insert variable…</summary><div style="margin-top:4px">' + chips + '</div></details>';
   }
   function scriptById(id) { return (_awScripts || []).find(function (x) { return x.id === id; }); }
@@ -2447,20 +2517,36 @@ async function openAutomationWizard(existing, opts) {
     var baseLabel = perSev
       ? 'Actions at <span style="color:' + sevColor(draft.severity) + '">' + escapeHtml(draft.severity) + '</span> (base severity)'
       : "Actions when this fires";
-    html += '<div class="form-group" style="' + (perSev ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
-      '<label style="font-weight:600">' + baseLabel + '</label>' +
+    html += '<div class="form-group"' + (perSev ? ' data-collapse-key="t5:base"' : "") + ' style="' + (perSev ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
+      '<div class="aw-collapse-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+        (perSev ? collapseBtnHtml("t5:base") : "") +
+        '<label style="font-weight:600;margin:0">' + baseLabel + '</label>' +
+      '</div>' +
+      '<div class="aw-collapse-body">' +
       (perSev ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These actions also run at higher severities that don’t define their own.</p>'
         : bands.length ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These run at every severity level — each time the alert climbs or eases into a new one.</p>' : "") +
       '<div id="aw-actions"></div>' +
       '<button type="button" class="btn btn-sm btn-secondary" id="aw-add-action" style="margin-top:6px">+ Add action</button>' +
+      '</div>' +
     '</div>';
     bands.forEach(function (b, i) {
       var opPhrase = ((s.comparatorPhrases || {})[b.operator || (draft.trigger && draft.trigger.operator)] || "").toString();
-      html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem' + (perSev ? "" : ";display:none") + '">' +
-        '<label style="font-weight:600">Actions at <span style="color:' + sevColor(b.severity) + '">' + escapeHtml(b.severity) + '</span> <span style="font-weight:400;color:var(--color-text-tertiary)">(value ' + escapeHtml(opPhrase || "meets") + ' ' + escapeHtml(String(b.threshold != null ? b.threshold : "?")) + ')</span></label>' +
+      var bandCount = ((b.actions || []).length);
+      html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" data-collapse-key="t5:' + escapeHtml(b.severity) + '" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem' + (perSev ? "" : ";display:none") + '">' +
+        '<div class="aw-collapse-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+          collapseBtnHtml("t5:" + b.severity) +
+          '<label style="font-weight:600;margin:0">Actions at <span style="color:' + sevColor(b.severity) + '">' + escapeHtml(b.severity) + '</span> <span style="font-weight:400;color:var(--color-text-tertiary)">(value ' + escapeHtml(opPhrase || "meets") + ' ' + escapeHtml(String(b.threshold != null ? b.threshold : "?")) + ')</span></label>' +
+          // A folded section still says how much is inside it, so "no actions
+          // here" (which falls back to the base) is visible without unfolding.
+          '<span class="aw-collapse-summary hint" style="margin:0;display:none">' +
+            (bandCount ? bandCount + " action" + (bandCount === 1 ? "" : "s") : "no actions of its own") +
+          '</span>' +
+        '</div>' +
+        '<div class="aw-collapse-body">' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">' + escapeHtml((s.bandMeta && s.bandMeta.emptyBandNote) || "Leave empty to run the base actions at this severity.") + '</p>' +
         '<div class="ba-actions"></div>' +
         '<button type="button" class="btn btn-sm btn-secondary ba-add" style="margin-top:6px">+ Add action</button>' +
+        '</div>' +
       '</div>';
     });
     // ── When this resets ────────────────────────────────────────────────
@@ -2551,6 +2637,7 @@ async function openAutomationWizard(existing, opts) {
       });
     }
     wireTokenPalette(panel);
+    wireCollapsibles(panel);
   }
   /** Whether the per-severity action sections are in play. Explicit once the
    *  operator touches the toggle; inferred from the record otherwise, so an
@@ -2873,12 +2960,21 @@ async function openAutomationWizard(existing, opts) {
     // section) — stashed on the row so collectBands round-trips them.
     row._bandActions = (band.actions && band.actions.length ? band.actions : []) || [];
     row._bandEscalation = band.escalation || null;
+    // Keyed by severity: tiers carry strictly-increasing distinct severities, so
+    // this is unique, and re-picking a severity carries the fold state with the
+    // tier it belongs to.
+    row.setAttribute("data-collapse-key", "t3:" + sev0);
     row.innerHTML =
-      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap">' +
+      '<div class="aw-collapse-head" style="display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap">' +
+        collapseBtnHtml("t3:" + sev0) +
         '<label style="margin:0;font-size:0.8rem;font-weight:600">severity</label>' +
         sevSelectHtml("band-severity", sev0) +
+        // What the tier says, for when it's folded shut. Filled by
+        // syncBandSummary from the row's own inputs.
+        '<span class="aw-collapse-summary hint" style="margin:0;display:none"></span>' +
         '<button type="button" class="btn btn-sm btn-danger band-remove" title="Remove severity" style="margin-left:auto">&times;</button>' +
       '</div>' +
+      '<div class="aw-collapse-body">' +
       '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
       '<div class="band-cond scg-children"></div>' +
       // Severity tiers share the trigger's sampling (rule 19), and for a windowed
@@ -2887,9 +2983,39 @@ async function openAutomationWizard(existing, opts) {
       // but HIDDEN for those; syncBandsToBase toggles it as the metric changes,
       // which an omitted element couldn't come back from.
       durationFieldHtml('class="band-duration"' + (triggerIsWindowedRatio(draft.trigger) ? ' data-ratio-hidden="1"' : ""), bandDurMin) +
-      '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>';
+      '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>' +
+      '</div>';
     host.appendChild(row);
     renderBandCond(row, panel, tierLeaf, kind);
+    // What a folded tier says about itself, read from its own controls so it
+    // can't drift from what will be saved.
+    var syncBandSummary = function () {
+      var el = row.querySelector(".aw-collapse-summary");
+      if (!el) return;
+      var op = row.querySelector(".tgl-op");
+      var val = row.querySelector(".tgl-threshold");
+      var mins = row.querySelector(".band-duration");
+      var opText = op ? ((s.comparatorPhrases || {})[op.value] || op.value) : "";
+      var parts = [opText, val && val.value !== "" ? val.value : "?"].filter(Boolean).join(" ");
+      var held = mins && Number(mins.value) > 0 ? " for " + Number(mins.value) + " min" : "";
+      el.textContent = parts ? parts + held : "";
+    };
+    syncBandSummary();
+    row.addEventListener("input", syncBandSummary);
+    row.addEventListener("change", syncBandSummary);
+    // Re-key on severity change so a folded tier keeps its own state instead of
+    // adopting whatever the severity it moved to had.
+    var recollapse = function (nextSev) {
+      var oldKey = row.getAttribute("data-collapse-key");
+      var newKey = "t3:" + nextSev;
+      if (oldKey === newKey) return;
+      if (_awCollapsed[oldKey]) { _awCollapsed[newKey] = true; delete _awCollapsed[oldKey]; }
+      row.setAttribute("data-collapse-key", newKey);
+      var b = row.querySelector("[data-collapse]");
+      if (b) b.setAttribute("data-collapse", newKey);
+      applyCollapsed(row);
+    };
+    wireCollapsibles(row);
     row.querySelector(".band-add-sev").addEventListener("click", function () { addBandRow(host, null); syncBandNotify(panel); });
     // Per-tier accent + "only increase severity" guard: a tier can't be set at
     // or below the tier before it (or the base).
@@ -2906,6 +3032,7 @@ async function openAutomationWizard(existing, opts) {
       }
       sevSel.className = "band-severity sev-select sev-" + sevSel.value;
       row.style.borderLeftColor = sevColor(sevSel.value);
+      recollapse(sevSel.value);
       syncBandAddButtons(panel);
     });
     row.querySelector(".band-remove").addEventListener("click", function () {
@@ -3264,6 +3391,10 @@ async function openAutomationWizard(existing, opts) {
       if (anchor) host2.insertBefore(host2.lastChild, anchor);
     });
     renderActionFields(row, action);
+    // The composition block carries its own token chips, and a row added after
+    // the panel render would otherwise have unwired ones (wireTokenPalette is
+    // idempotent — it marks what it has already bound).
+    wireTokenPalette(row);
     if (escalatable && action.type !== "event") wireEscSection(row.querySelector(":scope > .aw-esc-sec"), action.escalation || null);
   }
   // ─── Recipient token fields (To / Cc / Bcc) ────────────────────────────
@@ -3628,6 +3759,11 @@ async function openAutomationWizard(existing, opts) {
     row.querySelector(".aw-action-summary").textContent = actionSummary(action);
     if (t === "notify") {
       var comp = action.emailComposition || null;
+      // Checked only when the STORED action actually carries its own templates.
+      // A new action starts unchecked (= the default email), with the fields
+      // prefilled from that same default so ticking the box shows the real text
+      // to edit rather than an empty page.
+      var customEmail = !!(comp && (comp.subjectTemplate || comp.bodyTextTemplate || comp.bodyHtmlTemplate));
       var html =
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
           '<label style="margin:0;font-size:0.8rem">Channel</label>' +
@@ -3641,19 +3777,48 @@ async function openAutomationWizard(existing, opts) {
         // when they're blank), so the operator reads and edits exactly what
         // will be sent instead of guessing at a hidden default. A stored
         // action keeps whatever it saved.
-        '<details class="na-comp"' + (comp && (comp.subjectTemplate || comp.bodyTextTemplate || comp.bodyHtmlTemplate) ? " open" : "") + '><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Customize the email (subject / body)…</summary>' +
-          '<div style="margin-top:6px">' +
+        // A CHECKBOX, not a disclosure. A `<details>` says "there's more to read
+        // here"; the real question is whether this action sends the default email
+        // or a bespoke one, and that is a decision with two states. Unchecked
+        // stores no templates at all, so the action follows the shared default
+        // for good — including future changes to it — rather than freezing a
+        // copy the operator never asked to own. (The old disclosure prefilled
+        // the fields and collected them regardless of whether it was open, so a
+        // new action silently stored its own snapshot of the default.)
+        '<div class="na-comp">' +
+          '<label style="font-size:0.8rem;display:block;margin-top:4px"><input type="checkbox" class="na-comp-enable"' + (customEmail ? " checked" : "") + '> Customize the email (subject / body)</label>' +
+          '<p class="hint" style="margin:2px 0 6px 22px">Unchecked, this action sends the default Polaris alert email.</p>' +
+          '<div class="na-comp-body"' + (customEmail ? "" : ' style="display:none"') + '>' +
             '<p class="hint" style="margin:0 0 6px">This is the email Polaris sends. Edit it freely — ' +
               '<code>{ack}</code> becomes the recipient’s one-click acknowledge link, <code>{asset.link}</code> opens the device, and ' +
               '<code>{chart.cpu}</code> / <code>{chart.memory}</code> / <code>{chart.responseTime}</code> embed the last hour as charts, and ' +
               '<code>{interface.lldp}</code> lists what LLDP saw on the port an interface alert fired on. ' +
               '<button type="button" class="na-comp-reset" style="background:none;border:0;padding:0;color:var(--color-primary);cursor:pointer;font:inherit;text-decoration:underline">Reset to the default</button></p>' +
             '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject</label><input type="text" class="na-subject tpl-field" value="' + escapeHtml(compValue(comp, "subjectTemplate")) + '" placeholder="[{severity.upper}] {asset} — {metric} = {value}"></div>' +
-            '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body (plain text)</label><textarea class="na-body tpl-field" rows="8" style="width:100%">' + escapeHtml(compValue(comp, "bodyTextTemplate")) + '</textarea></div>' +
-            '<label style="font-size:0.8rem;display:block"><input type="checkbox" class="na-html-enable"' + (compValue(comp, "bodyHtmlTemplate") ? " checked" : "") + '> Send an HTML body (values are HTML-escaped)</label>' +
-            '<textarea class="na-html tpl-field" rows="10" style="width:100%;display:' + (compValue(comp, "bodyHtmlTemplate") ? "block" : "none") + ';margin-top:4px">' + escapeHtml(compValue(comp, "bodyHtmlTemplate")) + '</textarea>' +
+            // ONE body editor with a view toggle. Both bodies are still stored
+            // and both are still sent — a mail client picks which part it shows,
+            // and the default template ships both deliberately. The toggle only
+            // chooses which one is on screen; showing two big textareas at once
+            // made the panel unreadable and implied a choice that isn't there.
+            '<div class="form-group" style="margin-bottom:6px">' +
+              '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">' +
+                '<label style="font-size:0.8rem;margin:0">Body</label>' +
+                '<span class="na-body-mode">' +
+                  '<button type="button" class="btn btn-sm btn-primary na-mode" data-mode="text">Plain text</button>' +
+                  '<button type="button" class="btn btn-sm btn-secondary na-mode" data-mode="html">HTML</button>' +
+                '</span>' +
+                '<span class="hint" style="margin:0">Both are sent — HTML for clients that render it, plain text for the rest.</span>' +
+              '</div>' +
+              // The variables stay visible in BOTH modes: they're the whole
+              // vocabulary of the field being edited, and hiding them behind a
+              // second disclosure inside a disclosure is what made them
+              // undiscoverable.
+              '<div style="margin:0 0 4px">' + tokenChipsHtml() + '</div>' +
+              '<textarea class="na-body tpl-field" data-body-mode="text" rows="10" style="width:100%">' + escapeHtml(compValue(comp, "bodyTextTemplate")) + '</textarea>' +
+              '<textarea class="na-html tpl-field" data-body-mode="html" rows="14" style="width:100%;display:none;font-family:var(--font-mono);font-size:0.8rem">' + escapeHtml(compValue(comp, "bodyHtmlTemplate")) + '</textarea>' +
+            '</div>' +
           '</div>' +
-        '</details>';
+        '</div>';
       box.innerHTML = html;
       var renderRecipients = function () {
         var ch = chanById(row.querySelector(".na-channel").value);
@@ -3792,8 +3957,31 @@ async function openAutomationWizard(existing, opts) {
           syncPush();
         }
       };
-      box.querySelector(".na-html-enable").addEventListener("change", function () {
-        box.querySelector(".na-html").style.display = this.checked ? "block" : "none";
+      var compEnable = box.querySelector(".na-comp-enable");
+      if (compEnable) {
+        compEnable.addEventListener("change", function () {
+          box.querySelector(".na-comp-body").style.display = this.checked ? "" : "none";
+          // Nothing is cleared on un-tick: the typed text stays in the DOM and is
+          // simply not collected, so a mis-click doesn't destroy an edit the
+          // operator can restore by ticking the box again.
+          row.querySelector(".aw-action-summary").textContent =
+            actionSummary(collectActionCore("notify", box) || { type: "notify", channelId: "" });
+        });
+      }
+      // Body view toggle: swap which textarea is on screen, and which button
+      // reads as selected. Neither value is touched — this is a view switch.
+      box.querySelectorAll(".na-mode").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var mode = btn.getAttribute("data-mode");
+          box.querySelectorAll(".na-mode").forEach(function (b) {
+            var on = b === btn;
+            b.classList.toggle("btn-primary", on);
+            b.classList.toggle("btn-secondary", !on);
+          });
+          box.querySelectorAll("[data-body-mode]").forEach(function (ta) {
+            ta.style.display = ta.getAttribute("data-body-mode") === mode ? "" : "none";
+          });
+        });
       });
       var compReset = box.querySelector(".na-comp-reset");
       if (compReset) {
@@ -3802,9 +3990,6 @@ async function openAutomationWizard(existing, opts) {
           box.querySelector(".na-subject").value = d.subjectTemplate || "";
           box.querySelector(".na-body").value = d.bodyTextTemplate || "";
           box.querySelector(".na-html").value = d.bodyHtmlTemplate || "";
-          var en = box.querySelector(".na-html-enable");
-          en.checked = !!d.bodyHtmlTemplate;
-          box.querySelector(".na-html").style.display = en.checked ? "block" : "none";
         });
       }
       row.querySelector(".na-channel").addEventListener("change", function () {
@@ -3966,10 +4151,17 @@ async function openAutomationWizard(existing, opts) {
       var ch = chanById(a.channelId);
       if (ch && isEmailType(ch.type)) {
         var c = {};
-        var subj = (box.querySelector(".na-subject") || {}).value || ""; if (subj.trim()) c.subjectTemplate = subj.trim();
-        var bodyTxt = (box.querySelector(".na-body") || {}).value || ""; if (bodyTxt.trim()) c.bodyTextTemplate = bodyTxt;
-        var htmlOn = box.querySelector(".na-html-enable");
-        if (htmlOn && htmlOn.checked) { var h = (box.querySelector(".na-html") || {}).value || ""; if (h.trim()) c.bodyHtmlTemplate = h; }
+        // Only when the operator asked to customize. Unchecked stores NO
+        // templates, so buildComposedEmail falls back to the shared default for
+        // every piece — the action tracks the default instead of freezing a copy.
+        var compOn = box.querySelector(".na-comp-enable");
+        if (compOn && compOn.checked) {
+          var subj = (box.querySelector(".na-subject") || {}).value || ""; if (subj.trim()) c.subjectTemplate = subj.trim();
+          var bodyTxt = (box.querySelector(".na-body") || {}).value || ""; if (bodyTxt.trim()) c.bodyTextTemplate = bodyTxt;
+          // Both bodies are stored: the toggle is a view switch, not a choice of
+          // which one to send. A blank one still falls back per field.
+          var h = (box.querySelector(".na-html") || {}).value || ""; if (h.trim()) c.bodyHtmlTemplate = h;
+        }
         // Cc/Bcc ride emailComposition (unchanged storage), but now carry user
         // ids as well as raw addresses — emailRecipientsSchema always allowed
         // both; only the old UI couldn't produce them.

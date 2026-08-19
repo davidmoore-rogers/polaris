@@ -439,6 +439,192 @@ describe("automation wizard DOM render", () => {
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
   });
 
+  it("severity blocks fold, and the fold survives a re-render", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    const w = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-fold",
+      name: "Fold",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">=", threshold: 80, forDurationSec: 300 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.com"] }],
+      severityBands: [
+        { threshold: 90, severity: "serious", actions: [] },
+        { threshold: 95, severity: "critical", actions: [{ type: "event" }] },
+      ],
+      bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" },
+    });
+
+    // ── Step 3: each tier folds ──
+    (doc.querySelector('.stepper-step[data-step="3"]') as unknown as { click: () => void }).click();
+    const tiers = Array.from(doc.querySelectorAll("#aw-step-3 .aw-band"));
+    expect(tiers.length).toBe(2);
+    // Keyed by SEVERITY, not index — removing a tier must not slide another
+    // tier's fold state onto it.
+    expect(tiers.map((t) => t.getAttribute("data-collapse-key"))).toEqual(["t3:serious", "t3:critical"]);
+
+    const tier = tiers[1]!;
+    const body = tier.querySelector(".aw-collapse-body") as unknown as { style: { display: string } };
+    const summary = tier.querySelector(".aw-collapse-summary") as unknown as
+      { style: { display: string }; textContent: string };
+    expect(body.style.display).not.toBe("none");
+    // The summary describes the tier from its own controls, so a folded block
+    // still says what it does.
+    expect(summary.textContent).toContain("95");
+
+    (tier.querySelector("[data-collapse]") as unknown as { dispatchEvent: (e: unknown) => void })
+      .dispatchEvent(new w.Event("click", { bubbles: true }));
+    expect(body.style.display).toBe("none");
+    expect(summary.style.display).not.toBe("none");
+    // The base tier is untouched by folding a band.
+    expect((tiers[0]!.querySelector(".aw-collapse-body") as unknown as { style: { display: string } }).style.display)
+      .not.toBe("none");
+
+    // ── Step 5: per-severity action sections fold, and step 3's fold survived
+    // the panel renders in between (the state is keyed, not held on the node) ──
+    (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+    const multi = doc.querySelector("#aw-band-actions-multi") as unknown as
+      { checked: boolean; dispatchEvent: (e: unknown) => void };
+    if (!multi.checked) {
+      multi.checked = true;
+      multi.dispatchEvent(new w.Event("change", { bubbles: true }));
+    }
+    const sections = Array.from(doc.querySelectorAll("#aw-step-5 [data-collapse-key]"));
+    expect(sections.map((x) => x.getAttribute("data-collapse-key")))
+      .toEqual(["t5:base", "t5:serious", "t5:critical"]);
+    // A band with no actions of its own says so while folded — that's the state
+    // that falls back to the base actions.
+    const serious = sections[1]!;
+    expect((serious.querySelector(".aw-collapse-summary") as unknown as { textContent: string }).textContent)
+      .toMatch(/no actions of its own/i);
+
+    (doc.querySelector('.stepper-step[data-step="3"]') as unknown as { click: () => void }).click();
+    const criticalAgain = Array.from(doc.querySelectorAll("#aw-step-3 .aw-band"))
+      .find((t) => t.getAttribute("data-collapse-key") === "t3:critical")!;
+    expect((criticalAgain.querySelector(".aw-collapse-body") as unknown as { style: { display: string } }).style.display)
+      .toBe("none");
+
+    // Folding changes nothing about what saves.
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const p = savedPayloads[0]! as Record<string, any>;
+    expect(p.severityBands).toHaveLength(2);
+    expect(p.severityBands.map((b: { severity: string }) => b.severity)).toEqual(["serious", "critical"]);
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
+  it("email customization is a checkbox: unchecked stores NO templates", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-mail",
+      name: "Mail",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.com"] }],
+    });
+    (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+
+    const comp = doc.querySelector("#aw-step-5 .na-comp")!;
+    const enable = comp.querySelector(".na-comp-enable") as unknown as
+      { checked: boolean; dispatchEvent: (e: unknown) => void };
+    // A stored action carrying no templates opens UNCHECKED — it follows the
+    // shared default rather than owning a frozen copy of it.
+    expect(enable.checked).toBe(false);
+    expect((comp.querySelector(".na-comp-body") as unknown as { style: { display: string } }).style.display)
+      .toBe("none");
+    // The old disclosure is gone.
+    expect(doc.querySelector("#aw-step-5 details.na-comp")).toBeFalsy();
+    // ...but the fields ARE prefilled from the default, so ticking shows real text.
+    expect(((comp.querySelector(".na-subject") as unknown as { value: string }).value || "").length)
+      .toBeGreaterThan(0);
+
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const p = savedPayloads[0]! as Record<string, any>;
+    const comp0 = p.actions[0].emailComposition;
+    // No templates collected while unchecked (cc/bcc would still ride here).
+    expect(comp0?.subjectTemplate).toBeUndefined();
+    expect(comp0?.bodyTextTemplate).toBeUndefined();
+    expect(comp0?.bodyHtmlTemplate).toBeUndefined();
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
+  it("checked, it stores BOTH bodies; the Plain/HTML control is a view switch", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-mail2",
+      name: "Mail2",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      // Carries its own subject → the box opens checked.
+      actions: [{
+        type: "notify",
+        channelId: "c1",
+        addresses: ["noc@example.com"],
+        emailComposition: { subjectTemplate: "MINE {asset}" },
+      }],
+    });
+    (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+
+    const comp = doc.querySelector("#aw-step-5 .na-comp")!;
+    expect((comp.querySelector(".na-comp-enable") as unknown as { checked: boolean }).checked).toBe(true);
+    expect((comp.querySelector(".na-comp-body") as unknown as { style: { display: string } }).style.display)
+      .not.toBe("none");
+    // The "Send an HTML body" checkbox is gone — it never controlled whether
+    // HTML was sent (a blank template already fell back to the default HTML).
+    expect(comp.querySelector(".na-html-enable")).toBeFalsy();
+
+    const text = comp.querySelector('[data-body-mode="text"]') as unknown as
+      { style: { display: string }; value: string };
+    const html = comp.querySelector('[data-body-mode="html"]') as unknown as
+      { style: { display: string }; value: string };
+    expect(text.style.display).not.toBe("none");
+    expect(html.style.display).toBe("none");
+    // Variables are visible in both modes rather than hidden behind a second
+    // disclosure — the palette sits above the editor.
+    expect(comp.querySelectorAll(".tpl-token").length).toBeGreaterThan(0);
+
+    const w = g.window as InstanceType<typeof Window>;
+    const modes = Array.from(comp.querySelectorAll(".na-mode"));
+    (modes[1] as unknown as { dispatchEvent: (e: unknown) => void })
+      .dispatchEvent(new w.Event("click", { bubbles: true }));
+    expect(text.style.display).toBe("none");
+    expect(html.style.display).not.toBe("none");
+    // A view switch touches no value.
+    text.value = "PLAIN {asset}";
+    html.value = "<p>HTML {asset}</p>";
+
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const c = (savedPayloads[0]! as Record<string, any>).actions[0].emailComposition;
+    // BOTH bodies stored: the toggle chose which one was on screen, not which
+    // one gets sent.
+    expect(c.bodyTextTemplate).toBe("PLAIN {asset}");
+    expect(c.bodyHtmlTemplate).toBe("<p>HTML {asset}</p>");
+    expect(() => ruleInputSchema.parse(savedPayloads[0])).not.toThrow();
+  });
+
   it("per-tier sustain rides the payload; unticking per-severity actions strips them", async () => {
     doc.body.innerHTML = "";
     savedPayloads.length = 0;
