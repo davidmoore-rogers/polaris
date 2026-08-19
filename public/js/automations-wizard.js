@@ -1138,9 +1138,13 @@ async function openAutomationWizard(existing, opts) {
 
   function collapseBtnHtml(key) {
     var on = !!_awCollapsed[key];
+    // Size and colour live in .aw-collapse (styles.css) rather than inline: the
+    // glyph is the only affordance on a severity block's header line, so it has
+    // to read as a control at a glance.
     return '<button type="button" class="btn-icon aw-collapse" data-collapse="' + escapeHtml(key) + '" ' +
-      'aria-expanded="' + (on ? "false" : "true") + '" title="' + (on ? "Expand" : "Collapse") + '" ' +
-      'style="padding:0 4px;line-height:1">' + (on ? "&#x25B8;" : "&#x25BE;") + "</button>";
+      'aria-expanded="' + (on ? "false" : "true") + '" title="' + (on ? "Expand this severity" : "Collapse this severity") + '" ' +
+      'aria-label="' + (on ? "Expand this severity" : "Collapse this severity") + '">' +
+      (on ? "&#x25B8;" : "&#x25BE;") + "</button>";
   }
 
   /** Paint one block from the stored state (also used right after a render). */
@@ -1162,7 +1166,8 @@ async function openAutomationWizard(existing, opts) {
     if (btn) {
       btn.innerHTML = on ? "&#x25B8;" : "&#x25BE;";
       btn.setAttribute("aria-expanded", on ? "false" : "true");
-      btn.setAttribute("title", on ? "Expand" : "Collapse");
+      btn.setAttribute("title", on ? "Expand this severity" : "Collapse this severity");
+      btn.setAttribute("aria-label", on ? "Expand this severity" : "Collapse this severity");
     }
     var sum = container.querySelector(":scope > .aw-collapse-head .aw-collapse-summary");
     if (sum) sum.style.display = on ? "" : "none";

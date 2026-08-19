@@ -4956,6 +4956,21 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   flex: 0 0 auto;
 }
 .aw-grip:active { cursor: grabbing; }
+
+/* Fold chevrons on the severity blocks (trigger tiers + per-severity action
+   sections). Larger than the surrounding 0.8rem labels ON PURPOSE: at label size
+   a bare ▾ reads as punctuation rather than something to press, and it is the
+   only affordance on that header line. Hover/focus lift the colour so it answers
+   to the pointer, and the hit area is padded past the glyph. */
+.aw-collapse {
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 0 6px;
+  color: var(--color-text-secondary);
+  flex: 0 0 auto;
+}
+.aw-collapse:hover,
+.aw-collapse:focus-visible { color: var(--color-text); }
 .aw-drop-before { box-shadow: inset 0 3px 0 0 var(--color-accent); }
 .aw-drop-after { box-shadow: inset 0 -3px 0 0 var(--color-accent); }
 .aw-drop-into { box-shadow: inset 0 0 0 2px var(--color-accent); border-radius: 6px; }
