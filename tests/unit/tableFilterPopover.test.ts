@@ -92,6 +92,24 @@ describe("filter popover close wiring", () => {
     expect(isOpen()).toBe(false);
   });
 
+  // The dashboard's NOC auto-scroll creeps every overflowing widget body by a
+  // pixel every 80ms. Those scroll events don't move a filter button sitting in
+  // the asset-details slide-over, and closing on them made its dropdowns
+  // disappear the instant they opened.
+  it("stays open when a container that doesn't hold the button scrolls", () => {
+    const other = doc.createElement("div");
+    doc.body.appendChild(other);
+    openPopover();
+    fire("scroll", other);
+    expect(isOpen()).toBe(true);
+  });
+
+  it("still closes on a document-level scroll", () => {
+    openPopover();
+    fire("scroll", doc);
+    expect(isOpen()).toBe(false);
+  });
+
   it("still closes on an outside click, a resize, and Escape", () => {
     openPopover();
     fire("click", doc.body);

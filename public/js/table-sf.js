@@ -177,9 +177,21 @@ TableSF._wireDocClose = function () {
     pressInPopover = false;
     if (!skip) closeAll();
   });
+  // Only a scroll that MOVED the popover's button is a reason to close it (the
+  // showRowMenu precedent in app.js): the dashboard's NOC auto-scroll creeps
+  // every overflowing widget body by a pixel every 80ms, and closing on those
+  // made a filter dropdown in the asset-details slide-over vanish the instant
+  // it opened while a dashboard sat behind the panel. A scroll in a container
+  // that doesn't hold the button leaves the popover correctly placed.
   window.addEventListener("scroll", function (e) {
-    if (inPopover(e.target)) return;
-    closeAll();
+    var t = e && e.target;
+    if (inPopover(t)) return;
+    // Document-level scroll (target is the Document node) moves everything.
+    var docLevel = !t || t.nodeType === 9 || typeof t.contains !== "function";
+    document.querySelectorAll(".sf-multi-popover").forEach(function (p) {
+      if (p.hasAttribute("hidden")) return;
+      if (docLevel || t.contains(TableSF._popoverAnchor(p))) p.setAttribute("hidden", "");
+    });
   }, true);
   window.addEventListener("resize", closeAll);
   document.addEventListener("keydown", function (e) {
@@ -437,7 +449,15 @@ TableSF._fixedHost = function (el) {
   return null;
 };
 
+// The element a popover is anchored to, for the scroll-close containment test.
+// Stamped by every open path; falls back to the popover's own parent, which for
+// the in-header filters holds both the button and the popover.
+TableSF._popoverAnchor = function (pop) {
+  return (pop && pop._sfAnchor) || (pop && pop.parentElement) || pop;
+};
+
 TableSF.prototype._positionPopover = function (btn, pop) {
+  pop._sfAnchor = btn;
   var r = btn.getBoundingClientRect();
   var top  = r.bottom + 2;
   var left = r.left;
@@ -1533,6 +1553,7 @@ function setupColumnLayout(tableEl, options) {
     document.querySelectorAll(".sf-multi-popover").forEach(function (p) { p.setAttribute("hidden", ""); });
     chooserPop.removeAttribute("hidden");
     var anchor = triggerEl || options.chooserButton || tableEl;
+    chooserPop._sfAnchor = anchor;   // scroll-close containment test
     var r = anchor.getBoundingClientRect();
     chooserPop.style.position = "fixed";
     chooserPop.style.top  = (r.bottom + 4) + "px";
