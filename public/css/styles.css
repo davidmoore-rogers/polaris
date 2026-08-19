@@ -4995,7 +4995,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 /* When a folded actions section shows both, the count is a second fact rather
    than a continuation of the condition. */
 .aw-tier-cond + .aw-collapse-summary::before {
-  content: " b7";
+  content: "·";
   margin-right: 0.35rem;
 }
 

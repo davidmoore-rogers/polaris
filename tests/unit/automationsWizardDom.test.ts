@@ -277,13 +277,17 @@ describe("automation wizard DOM render", () => {
     // schema gives it no escalation key.
     expect(eventRow!.querySelector(":scope > .aw-esc-sec")).toBeFalsy();
 
-    // Escalation is PER ITEM now: the mandatory card hosts the alert's
-    // (rule-level) chain, each action row hosts its own. The old bottom
+    // Escalation is PER SEVERITY: the base actions section hosts the rule-level
+    // chain, each band section its own. NOT the in-app card (it isn't about the
+    // alert record) and NOT an action row ("if this alert stays unhandled" is a
+    // fact about the alert at this severity, not about one email). The old bottom
     // escalation box is gone entirely.
     expect(doc.querySelector("#aw-esc-enable")).toBeFalsy();
     expect(doc.querySelector("#aw-esc-add")).toBeFalsy();
     expect(doc.querySelector("#aw-esc-tiers")).toBeFalsy();
-    const cardEsc = doc.querySelector("#aw-inapp-card .aw-esc-sec")!;
+    expect(doc.querySelector("#aw-inapp-card .aw-esc-sec")).toBeFalsy();
+    expect(doc.querySelector("#aw-step-5 .aw-action > .aw-esc-sec")).toBeFalsy();
+    const cardEsc = doc.querySelector("#aw-actions")!.closest(".form-group")!.querySelector(".aw-esc-sec")!;
     expect(cardEsc).toBeTruthy();
     expect(cardEsc.querySelector(".aesc-add")!.textContent).toContain("Escalate if unhandled");
     expect((cardEsc.querySelector(".aesc-config") as unknown as { style: { display: string } }).style.display).toBe("none");
@@ -322,23 +326,22 @@ describe("automation wizard DOM render", () => {
     perSevCb.dispatchEvent(new win5.Event("change", { bubbles: true }));
     expect((doc.querySelector("#aw-step-5 .aw-band-actions") as unknown as { style: { display: string } }).style.display).toBe("");
 
-    // Multi-severity carries into Actions: a per-severity section per band,
-    // whose action rows get their own "Escalate if unhandled" footer.
+    // Multi-severity carries into Actions: a per-severity section per band, and
+    // the SECTION owns the escalation chain — its action rows carry none.
     const bandSec = doc.querySelector("#aw-step-5 .aw-band-actions")!;
     expect(bandSec).toBeTruthy();
     expect(bandSec.textContent).toContain("critical");
     expect(bandSec.textContent).toContain("base actions"); // empty-band fallback note
+    expect(bandSec.querySelector(".aw-esc-sec .aesc-add")).toBeTruthy(); // the BAND's chain
     (bandSec.querySelector(".ba-add") as unknown as { click: () => void }).click();
     const bandAction = bandSec.querySelector(".ba-actions .aw-action")!;
     expect(bandAction).toBeTruthy();
-    expect(bandAction.querySelector(".aw-esc-sec .aesc-add")).toBeTruthy(); // per-action chain
-    // Top-level action rows are escalatable too. Take the LAST row — the one
-    // just added: the first is the default audit-Event action, which
-    // deliberately has no escalation footer.
+    expect(bandAction.querySelector(":scope > .aw-esc-sec")).toBeFalsy(); // not per action
+    // Same for a top-level row: the base SECTION carries the chain.
     (doc.querySelector("#aw-add-action") as unknown as { click: () => void }).click();
     const baseRows = doc.querySelectorAll("#aw-actions .aw-action");
     const baseAction = baseRows[baseRows.length - 1]!;
-    expect(baseAction.querySelector(".aw-esc-sec .aesc-add")).toBeTruthy();
+    expect(baseAction.querySelector(":scope > .aw-esc-sec")).toBeFalsy();
     // Remove both again so step-5 validation (notify needs a recipient) passes.
     (bandAction.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
     (baseAction.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
@@ -430,8 +433,14 @@ describe("automation wizard DOM render", () => {
     expect(p.messageTemplate).toBe("{asset} cpu {value}");
     expect(p.actions).toHaveLength(1);
     expect(p.actions[0].recipientDeviceRegion).toBe(true);
-    expect(p.actions[0].escalation).toEqual(chain);
-    expect(p.escalation).toEqual(rule.escalation);
+    // Escalation is per SEVERITY now, so a stored per-ACTION chain is hoisted and
+    // MERGED into the rule-level one rather than dropped: both ladders existed for
+    // the base severity, and each tier carries its own actions, so one ladder in
+    // time order delivers exactly what two did.
+    expect(p.actions[0].escalation).toBeUndefined();
+    expect(p.escalation.stopOn).toBe("acknowledge"); // the LEVEL's answer wins
+    expect(p.escalation.tiers.map((t: { afterMin: number }) => t.afterMin)).toEqual([15, 20]);
+    expect(p.escalation.tiers[1].actions[0]).toMatchObject({ type: "api_call", url: "https://pager.example.com/x" });
     expect(p.severityBands).toHaveLength(1);
     expect(p.severityBands[0].actions).toEqual(rule.severityBands[0].actions);
     // bandNotify does NOT round-trip verbatim any more: the band-level resolved
@@ -741,6 +750,14 @@ describe("automation wizard DOM render", () => {
     const sections = Array.from(doc.querySelectorAll("#aw-step-5 [data-collapse-key]"));
     expect(sections.map((x) => x.getAttribute("data-collapse-key")))
       .toEqual(["t5:base", "t5:serious", "t5:critical"]);
+    // Folded on arrival: with a ladder this step is three action lists, and each
+    // header's summary says enough to choose between them. (Step 3's tiers stay
+    // open — their content is the condition being edited.)
+    sections.forEach((sec) => {
+      expect(sec.getAttribute("data-collapse-default")).toBe("closed");
+      expect((sec.querySelector(".aw-collapse-body") as unknown as { style: { display: string } }).style.display)
+        .toBe("none");
+    });
     // A band with no actions of its own says so while folded — that's the state
     // that falls back to the base actions.
     const serious = sections[1]!;

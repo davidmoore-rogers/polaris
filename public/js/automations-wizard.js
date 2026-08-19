@@ -890,6 +890,7 @@ async function openAutomationWizard(existing, opts) {
     // renders: in edit mode an unvisited step keeps whatever the record carried,
     // so a rule saved from step 1 would otherwise keep sending recovery twice.
     retireBandResolved();
+    hoistEscalationsToSeverities();
   } else if (_awDraftStash && await showConfirm("Restore your unsaved automation draft?")) {
     draft = _awDraftStash;
   } else {
@@ -1225,11 +1226,19 @@ async function openAutomationWizard(existing, opts) {
    */
   function wireCollapsibles(root) {
     if (!root) return;
+    // `data-collapse-default="closed"` seeds the fold state ONCE. A key absent
+    // from _awCollapsed means "the operator has never touched this block", and an
+    // explicit true/false written by the toggle below survives every later
+    // re-render — so seeding on absence can't undo a deliberate expand.
     // The ROOT may be the collapsible itself (addBandRow wires the tier it just
     // built) — querySelectorAll only sees descendants, so include it explicitly.
     var blocks = Array.prototype.slice.call(root.querySelectorAll("[data-collapse-key]"));
     if (root.getAttribute && root.getAttribute("data-collapse-key")) blocks.unshift(root);
     blocks.forEach(function (container) {
+      var k = container.getAttribute("data-collapse-key");
+      if (k && _awCollapsed[k] === undefined && container.getAttribute("data-collapse-default") === "closed") {
+        _awCollapsed[k] = true;
+      }
       applyCollapsed(container);
       var btn = container.querySelector(':scope [data-collapse]');
       if (!btn || btn._awCollapseWired) return;
@@ -2623,11 +2632,6 @@ async function openAutomationWizard(existing, opts) {
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">' + cardHelp + '</p>' +
         tokenPaletteHtml("aw-token-palette") +
         '<input type="text" id="aw-msg" class="tpl-field" value="' + escapeHtml(draft.messageTemplate || "") + '" placeholder="' + (isEC ? "{rule}: {value}" : "{asset} {metric} = {value} (threshold {threshold})") + '" style="width:100%;margin-top:4px">' +
-        // The rule-LEVEL escalation chain lives on the mandatory card: "if the
-        // alert stays unhandled, do more" — it fires regardless of which
-        // actions exist, exactly like the stored rule-level escalation (chain
-        // key ""), so pre-redesign rules render here with no migration.
-        escSectionHtml() +
       '</div>';
 
     // Per-severity action sections: with severity bands, each tier CAN get its
@@ -2654,7 +2658,11 @@ async function openAutomationWizard(existing, opts) {
     var baseLabel = perSev
       ? 'Actions at <span style="color:' + sevColor(draft.severity) + '">' + escapeHtml(draft.severity) + '</span> <span class="aw-tier-qual">(base severity)</span>'
       : "Actions when this fires";
-    html += '<div class="form-group"' + (perSev ? ' data-collapse-key="t5:base"' : "") + ' style="' + (perSev ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
+    // Folded on arrival: with a severity ladder this step is three or four action
+    // lists, and the summary line on each header says enough to choose between
+    // them. Step 3's tiers stay OPEN by contrast — their content is the condition
+    // being edited, not a list to skim.
+    html += '<div class="form-group"' + (perSev ? ' data-collapse-key="t5:base" data-collapse-default="closed"' : "") + ' style="' + (perSev ? "border-left:3px solid " + sevColor(draft.severity) + ";padding-left:0.6rem" : "") + '">' +
       '<div class="aw-collapse-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
         (perSev ? collapseBtnHtml("t5:base") : "") +
         '<label class="aw-tier-label" style="margin:0">' + baseLabel + '</label>' +
@@ -2665,6 +2673,13 @@ async function openAutomationWizard(existing, opts) {
         : bands.length ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">These run at every severity level — each time the alert climbs or eases into a new one.</p>' : "") +
       '<div id="aw-actions"></div>' +
       '<button type="button" class="btn btn-sm btn-secondary" id="aw-add-action" style="margin-top:6px">+ Add action</button>' +
+      // Escalation belongs to the SEVERITY, not to one action inside it: "if
+      // this alert stays unhandled, do more" is a fact about the alert at this
+      // severity, and hanging it off a single Notify row made it read as "if
+      // this email goes unanswered" while the same chain fired for the whole
+      // tier. The base section's chain IS the rule-level `escalation` — which is
+      // what the engine resolves for an alert sitting at the base severity.
+      escSectionHtml() +
       '</div>' +
     '</div>';
     bands.forEach(function (b, i) {
@@ -2684,7 +2699,7 @@ async function openAutomationWizard(existing, opts) {
           : Math.round((((draft.trigger || {}).forDurationSec) || 0) / 60),
       );
       var bandCount = ((b.actions || []).length);
-      html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" data-collapse-key="t5:' + escapeHtml(b.severity) + '" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem' + (perSev ? "" : ";display:none") + '">' +
+      html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" data-collapse-key="t5:' + escapeHtml(b.severity) + '" data-collapse-default="closed" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem' + (perSev ? "" : ";display:none") + '">' +
         '<div class="aw-collapse-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
           collapseBtnHtml("t5:" + b.severity) +
           '<label class="aw-tier-label" style="margin:0">Actions at <span style="color:' + sevColor(b.severity) + '">' + escapeHtml(b.severity) + '</span></label>' +
@@ -2699,6 +2714,9 @@ async function openAutomationWizard(existing, opts) {
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 6px">' + escapeHtml((s.bandMeta && s.bandMeta.emptyBandNote) || "Leave empty to run the base actions at this severity.") + '</p>' +
         '<div class="ba-actions"></div>' +
         '<button type="button" class="btn btn-sm btn-secondary ba-add" style="margin-top:6px">+ Add action</button>' +
+        // The band's own chain (severityBands[i].escalation) — the one the sweep
+        // resolves while the alert sits in THIS band.
+        escSectionHtml() +
         '</div>' +
       '</div>';
     });
@@ -2733,12 +2751,21 @@ async function openAutomationWizard(existing, opts) {
     panel.innerHTML = html;
 
     // Mandatory-card escalation = the rule-level chain.
-    wireEscSection(panel.querySelector("#aw-inapp-card > .aw-esc-sec"), esc);
+    // One chain per severity section: the base section carries the rule-level
+    // chain, each band section its own.
+    var baseSec = panel.querySelector("#aw-actions") && panel.querySelector("#aw-actions").closest(".form-group");
+    if (baseSec) wireEscSection(baseSec.querySelector(":scope > .aw-collapse-body > .aw-esc-sec, :scope > .aw-esc-sec"), esc);
+    panel.querySelectorAll(".aw-band-actions").forEach(function (sec, i) {
+      var band = (draft.severityBands || [])[i] || {};
+      wireEscSection(sec.querySelector(":scope > .aw-collapse-body > .aw-esc-sec, :scope > .aw-esc-sec"), band.escalation || null);
+    });
 
     var host = panel.querySelector("#aw-actions");
-    (draft.actions || []).forEach(function (a) { addActionRow(host, a, true); });
+    // escalatable=false: the chain lives on the section now (see escSectionHtml
+    // above), so an action row carries no footer of its own.
+    (draft.actions || []).forEach(function (a) { addActionRow(host, a, false); });
     panel.querySelector("#aw-add-action").addEventListener("click", function () {
-      foldActionRow(addActionRow(host, null, true), false);
+      foldActionRow(addActionRow(host, null, false), false);
       syncResetMirror(panel);
     });
     // The reset list follows the trigger list as it is BUILT: picking a channel
@@ -2754,8 +2781,8 @@ async function openAutomationWizard(existing, opts) {
 
     panel.querySelectorAll(".aw-band-actions").forEach(function (sec, i) {
       var bHost = sec.querySelector(".ba-actions");
-      (((draft.severityBands || [])[i] || {}).actions || []).forEach(function (a) { addActionRow(bHost, a, true); });
-      sec.querySelector(".ba-add").addEventListener("click", function () { foldActionRow(addActionRow(bHost, null, true), false); });
+      (((draft.severityBands || [])[i] || {}).actions || []).forEach(function (a) { addActionRow(bHost, a, false); });
+      sec.querySelector(".ba-add").addEventListener("click", function () { foldActionRow(addActionRow(bHost, null, false), false); });
     });
     // Reset list: hydrate, then keep it following the trigger actions.
     var resetHost = panel.querySelector("#aw-reset-actions");
@@ -2903,6 +2930,58 @@ async function openAutomationWizard(existing, opts) {
    * An operator who already wrote their own reset actions is left alone — they've
    * said what recovery should do.
    */
+  /**
+   * Hoist per-ACTION escalation chains up to the severity that owns them.
+   *
+   * The builder no longer offers a chain on an action row, so a stored one would
+   * be invisible — and leaving it in place would ALSO double-fire, since the
+   * sweep walks the level chain plus one chain per action. Both halves are
+   * therefore done together: adopt, then strip.
+   *
+   * Tiers carry their own actions, so concatenating several actions' tiers and
+   * sorting by `afterMin` reproduces the same deliveries at the same times —
+   * "at 10 minutes mail the NOC, at 20 page the on-call" survives whether those
+   * two tiers came from one action's chain or two. `stopOn` takes the first
+   * chain's value; the alternative is inventing a precedence between two
+   * operator choices that were never meant to disagree.
+   *
+   * A level that ALREADY has its own chain is left alone — that's the operator's
+   * explicit answer for this severity — and the action chains are stripped so the
+   * total number of escalations doesn't grow.
+   */
+  function hoistActionEscalations(actions, levelEsc) {
+    var chains = [];
+    (actions || []).forEach(function (a) {
+      if (a && a.escalation && (a.escalation.tiers || []).length) chains.push(a.escalation);
+      if (a) delete a.escalation;
+    });
+    if (!chains.length) return levelEsc || null;
+    // MERGE rather than pick: dropping a chain because the level already had one
+    // would lose "at 20 minutes page the on-call" outright. Every tier that used
+    // to exist for this severity becomes one ladder in time order, and since each
+    // tier carries its own actions the deliveries and their timings are unchanged.
+    var tiers = ((levelEsc && levelEsc.tiers) || []).slice();
+    chains.forEach(function (c) { tiers = tiers.concat(c.tiers || []); });
+    tiers.sort(function (x, y) { return (x.afterMin || 0) - (y.afterMin || 0); });
+    // The level's stopOn wins when it has one — it is the operator's
+    // severity-wide answer, and the alternative is inventing a precedence
+    // between two settings that were never meant to disagree.
+    return { stopOn: (levelEsc && levelEsc.stopOn) || chains[0].stopOn || "acknowledge", tiers: tiers };
+  }
+
+  /** Run the hoist over every severity: the rule level, then each band. */
+  function hoistEscalationsToSeverities() {
+    draft.escalation = hoistActionEscalations(draft.actions, draft.escalation);
+    (draft.severityBands || []).forEach(function (b) {
+      if (!b) return;
+      var next = hoistActionEscalations(b.actions, b.escalation);
+      if (next) b.escalation = next; else delete b.escalation;
+    });
+    // Reset actions are never escalatable (there is nothing to chase about a
+    // recovery), so they only need the strip.
+    (draft.resetActions || []).forEach(function (a) { if (a) delete a.escalation; });
+  }
+
   function retireBandResolved() {
     adoptLegacyResolvedActions();
     if (draft.bandNotify) {
@@ -4606,8 +4685,12 @@ async function openAutomationWizard(existing, opts) {
     // The alert/event message rides the mandatory in-app card on this step.
     var msgEl = panel.querySelector("#aw-msg");
     if (msgEl) draft.messageTemplate = msgEl.value.trim() || null;
-    // The card's "Escalate if unhandled" chain IS the rule-level escalation.
-    draft.escalation = collectEscSection(panel.querySelector("#aw-inapp-card > .aw-esc-sec"));
+    // The BASE severity section's chain is the rule-level escalation (the engine
+    // resolves it for an alert sitting at the base severity).
+    var baseSecC = panel.querySelector("#aw-actions") && panel.querySelector("#aw-actions").closest(".form-group");
+    draft.escalation = baseSecC
+      ? collectEscSection(baseSecC.querySelector(":scope > .aw-collapse-body > .aw-esc-sec, :scope > .aw-esc-sec"))
+      : null;
     draft.actions = collectActionsFrom(host);
     // Per-severity sections write back onto their bands — and onto the step-3
     // band DOM rows' stash, so a later step-3 re-collect (collectBands) can't
@@ -4620,7 +4703,12 @@ async function openAutomationWizard(existing, opts) {
       var band = (draft.severityBands || [])[i];
       if (!band) return;
       band.actions = collectActionsFrom(sec.querySelector(".ba-actions"));
-      if (bandRows[i]) bandRows[i]._bandActions = band.actions;
+      var bandEsc = collectEscSection(sec.querySelector(":scope > .aw-collapse-body > .aw-esc-sec, :scope > .aw-esc-sec"));
+      if (bandEsc) band.escalation = bandEsc; else delete band.escalation;
+      if (bandRows[i]) {
+        bandRows[i]._bandActions = band.actions;
+        bandRows[i]._bandEscalation = bandEsc || null;
+      }
     });
     var resetHost = panel.querySelector("#aw-reset-actions");
     if (resetHost) {
