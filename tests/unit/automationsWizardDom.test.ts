@@ -497,6 +497,10 @@ describe("automation wizard DOM render", () => {
     const fresh = added[added.length - 1]!;
     expect((fresh.querySelector(":scope > .aw-action-fields") as unknown as { style: { display: string } }).style.display)
       .not.toBe("none");
+    // Drop it again: an empty notify has no recipients, so saving with it would
+    // (correctly) fail validation — and toastErrors is module-scoped in this
+    // suite, so a deliberate error here leaks into every later test.
+    (fresh.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
 
     // Folding is presentation only — the payload is unchanged.
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
