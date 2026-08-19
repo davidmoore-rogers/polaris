@@ -325,7 +325,7 @@ const processCrashTotal = new Counter({
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-export type Cadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes";
+export type Cadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes" | "lossSample";
 export type WorkOutcome = "success" | "failure" | "crash";
 export type ProbeOutcome = "success" | "failure";
 
@@ -384,6 +384,7 @@ export function setQueueDepth(depths: Partial<Record<Cadence, number>>): void {
   if (depths.lldp         !== undefined) monitorQueueDepth.set({ cadence: "lldp" }, depths.lldp);
   if (depths.storage      !== undefined) monitorQueueDepth.set({ cadence: "storage" }, depths.storage);
   if (depths.processes    !== undefined) monitorQueueDepth.set({ cadence: "processes" }, depths.processes);
+  if (depths.lossSample   !== undefined) monitorQueueDepth.set({ cadence: "lossSample" }, depths.lossSample);
 }
 
 export function setPgbossQueueJobs(queue: string, state: string, count: number): void {

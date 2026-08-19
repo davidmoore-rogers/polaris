@@ -121,7 +121,12 @@ export async function fetchRecentSampleStats(
   await Promise.all(
     assetIds.map(async (id) => {
       const rows = await prisma.assetMonitorSample.findMany({
-        where: { assetId: id },
+        // Response-time poll only. This window is a fixed COUNT, not a
+        // duration, so counting the ICMP loss sampler's 10s rows would shrink
+        // the span these 10 samples cover from ~10 minutes to ~100 seconds
+        // exactly when an asset is in trouble — the traffic light would start
+        // reporting a different thing than it does the rest of the time.
+        where: { assetId: id, OR: [{ probeKind: null }, { probeKind: "primary" }] },
         orderBy: { timestamp: "desc" },
         take: 10,
         select: { success: true },

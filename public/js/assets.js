@@ -18599,6 +18599,9 @@ function _credentialOptionsForAny(selectedId) {
 var MON_TIER_DEFAULTS = {
   intervalSeconds:           60,
   failureThreshold:          3,
+  // Dormant since 2026-08-19 (the fast-confirm re-probe was removed; in-run
+  // resolution is the ICMP loss sampler's job and feeds packet loss only). Kept
+  // to mirror the server's floor so a stored value still renders as inherited.
   fastConfirmIntervalSec:    10,
   probeTimeoutMs:            5000,
   cpuMemoryTimeoutMs:        10000,
@@ -19002,7 +19005,6 @@ async function _monsetSaveManual() {
     // Fast-confirm re-probe cadence (business rule 30). The input itself is
     // rendered by the SHARED _classStreamSubtabHTML from integrations.js, so the
     // manual tier picks it up with no markup of its own.
-    fastConfirmIntervalSec:    _monsetReadField("f-manual-mon-fastConfirmIntervalSec",    MON_TIER_DEFAULTS.fastConfirmIntervalSec),
     probeTimeoutMs:            _monsetReadField("f-manual-mon-probeTimeoutMs",            MON_TIER_DEFAULTS.probeTimeoutMs),
     cpuMemoryTimeoutMs:        _monsetReadField("f-manual-mon-cpuMemoryTimeoutMs",        MON_TIER_DEFAULTS.cpuMemoryTimeoutMs),
     temperatureTimeoutMs:      _monsetReadField("f-manual-mon-temperatureTimeoutMs",      MON_TIER_DEFAULTS.temperatureTimeoutMs),
@@ -19075,6 +19077,8 @@ function _monsetOverrideSummary(o) {
   var labels = {
     intervalSeconds:           "probe",
     failureThreshold:          "threshold",
+    // Dormant field — kept in the label map so an install that stored this
+    // override before 2026-08-19 still gets a readable summary chip for it.
     fastConfirmIntervalSec:    "confirm-reprobe",
     probeTimeoutMs:            "probe-timeout",
     cpuMemoryTimeoutMs:        "cpu-mem-timeout",
@@ -19276,7 +19280,6 @@ async function _monsetSaveOverride(existing) {
   var fields = {
     intervalSeconds:           readOptional("monset-ov-intervalSeconds"),
     failureThreshold:          readOptional("monset-ov-failureThreshold"),
-    fastConfirmIntervalSec:    readOptional("monset-ov-fastConfirmIntervalSec"),
     probeTimeoutMs:            readOptional("monset-ov-probeTimeoutMs"),
     cpuMemoryTimeoutMs:        readOptional("monset-ov-cpuMemoryTimeoutMs"),
     temperatureTimeoutMs:      readOptional("monset-ov-temperatureTimeoutMs"),

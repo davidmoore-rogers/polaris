@@ -50,6 +50,12 @@ import { persistInterfaces } from "./interfaceInventoryService.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
 import {
+  lossSamplerAppliesTo,
+  lossSampleIsDue,
+  lossSamplerTarget,
+  LOSS_SAMPLER_TIMEOUT_MS,
+} from "../utils/lossSampler.js";
+import {
   fortiosBool,
   parseFortiosMemberList,
   buildFortiswitchTrunkMembers,
@@ -9422,9 +9428,11 @@ interface RunStats {
   fastFiltered: { collected: number; failed: number };
   /** Agentless (ssh/winrm) processes cadence — cursor mode only. */
   processes:    { collected: number; failed: number };
+  /** ICMP packet-loss sampler (warning/recovering assets only). */
+  lossSample:   { collected: number; failed: number };
 }
 
-export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes";
+export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes" | "lossSample";
 
 /**
  * Per-cadence outcome tally returned by the runFooFor() functions. Used by
@@ -10166,6 +10174,87 @@ export async function runProcessesFor(assetId: string, labels: WorkItemLabels): 
 }
 
 /**
+ * ICMP packet-loss sampler for ONE asset. See `utils/lossSampler.ts` for the
+ * window rule (warning / recovering only) and why it exists.
+ *
+ * Three properties this runner must keep:
+ *
+ * 1. It NEVER calls `recordProbeResult`. The sample row is enqueued directly, so
+ *    nothing here can move `consecutiveFailures` / `consecutiveSuccesses` or
+ *    `monitorStatus`. Down stays a statement about the operator's configured
+ *    transport at the operator's configured cadence.
+ *
+ * 2. `responseTimeMs` is written as NULL, not as elapsed wall-clock. We spawn
+ *    the system `ping`, so the measured time is dominated by process spawn and
+ *    is not an RTT worth recording — and NULL makes the row inert to any RTT
+ *    reader that forgets to filter on `probeKind` (belt to the braces of the
+ *    column itself). Loss only ever needs success/failure.
+ *
+ * 3. `lastLossSampleAt` is stamped on EVERY attempt, success or failure. A
+ *    ping-blocked or unresolvable host must not be re-queued on every 5s tick.
+ *
+ * The window is re-checked here rather than trusted from the due-set: under
+ * pg-boss the job can be picked up seconds later, by which time the asset may
+ * have reached `down` (where an uncorroborated ICMP reply is exactly what we
+ * refuse to record) or recovered to `up`.
+ */
+export async function runLossSampleFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("lossSample", labels);
+  try {
+    const asset = await prisma.asset.findUnique({
+      where: { id: assetId },
+      select: {
+        id: true, monitored: true, status: true, monitorStatus: true,
+        dependencySuppressed: true, lastLossSampleAt: true,
+        ipAddress: true, dnsName: true, hostname: true,
+        assetType: true, discoveredByIntegrationId: true,
+        responseTimePolling: true, monitorIntervalSec: true, probeTimeoutMs: true,
+        discoveredByIntegration: { select: { type: true } },
+      },
+    });
+    if (!asset || !asset.monitored) {
+      recordWorkOutcome("lossSample", "failure", labels);
+      return "failure";
+    }
+    const effective = await resolveMonitorSettings({
+      ...asset,
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    } as any);
+    // Re-check the window + cadence against current state (see the doc above).
+    // Not an error — the asset simply left the window between queue and pickup.
+    if (!lossSamplerAppliesTo(asset, effective) || !lossSampleIsDue(asset.lastLossSampleAt, new Date())) {
+      recordWorkOutcome("lossSample", "success", labels);
+      return "success";
+    }
+    const target = lossSamplerTarget(asset);
+    if (!target) {
+      recordWorkOutcome("lossSample", "failure", labels);
+      return "failure";
+    }
+    const now = new Date();
+    const r = await pingHost(target, LOSS_SAMPLER_TIMEOUT_MS);
+    enqueueMonitorSample({
+      assetId,
+      timestamp: now,
+      success: r.success,
+      responseTimeMs: null,
+      error: r.success ? null : (r.error ?? "ping failed"),
+      probeKind: "icmp",
+    });
+    // Stamped unconditionally — the anchor is "we tried", not "it answered".
+    await prisma.asset.update({ where: { id: assetId }, data: { lastLossSampleAt: now } });
+    recordWorkOutcome("lossSample", "success", labels);
+    return "success";
+  } catch (err) {
+    logger.debug({ err, assetId }, "ICMP loss sample crashed");
+    recordWorkOutcome("lossSample", "crash", labels);
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
+/**
  * Storage-only SNMP walk. Same shape as the storage portion of
  * collectSystemInfoSnmp — hrStorageTable first, vendor disk scalar pair as
  * fallback. Used by `runStorageFor` to walk just the storage table without
@@ -10294,6 +10383,12 @@ export async function loadMonitorPassCandidates() {
       // being confirmed apart from a steady-up asset.
       monitorStatus: true, consecutiveFailures: true, consecutiveSuccesses: true,
       lastMonitorAt: true, monitorIntervalSec: true,
+      // ICMP loss-sampler inputs: its own cadence anchor, and the addressable
+      // identity to ping (ipAddress, else the DNS name — a directory-discovered
+      // host often carries only the latter, and `ping` resolves a name fine).
+      // `status` is belt-and-braces: MONITOR_CANDIDATE_WHERE already excludes
+      // maintenance, and the sampler predicate re-checks it anyway.
+      lastLossSampleAt: true, ipAddress: true, dnsName: true, hostname: true, status: true,
       lastTelemetryAt: true, cpuMemoryIntervalSec: true, temperatureIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
       probeTimeoutMs: true,
@@ -10318,69 +10413,39 @@ export async function loadMonitorPassCandidates() {
 }
 export type MonitorPassCandidate = Awaited<ReturnType<typeof loadMonitorPassCandidates>>[number];
 
-export type MonitorWorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes";
+export type MonitorWorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes" | "lossSample";
 export type MonitorWork = { id: string; kind: MonitorWorkKind };
 /**
- * Floor on any re-probe spacing, in seconds — the period of the probe loop's
- * own tick (`PROBE_TICK_MS` in jobs/monitorAssets.ts; kept as a literal here
- * because a service importing a job would pull that file's `setInterval`s into
- * every process). A due-check that runs every 5s cannot honor a 1s cadence: the
- * setting would silently mean 5. If that tick ever changes, change this too.
- */
-const PROBE_LOOP_TICK_SEC = 5;
-
-/**
- * How fast to re-probe an asset whose monitor state machine is MID-CONFIRMATION
- * — a failure run that hasn't reached `failureThreshold` yet, or a recovery run
- * that hasn't confirmed. Business rule 30.
+ * Effective probe spacing in seconds for one asset.
  *
- * Returns the effective probe spacing in seconds. Three clamps, in order:
+ * ONE clamp: a dependency-suppressed asset (its parent is dark) drops to 2× the
+ * configured interval. It is unlikely to answer until the parent recovers, but
+ * half-rate polling still catches the cases where it answers over a redundant
+ * L3 path or out-of-band management. A `disabled` stream has nothing to slow.
  *
- *   - dependency-suppressed wins outright (parent is dark — 2× the interval,
- *     never accelerate into an outage upstream);
- *   - the fast interval never exceeds the configured cadence (a 5s-cadence
- *     asset is already faster than any confirmation burst);
- *   - and it is never faster than the probe's OWN timeout or the loop tick.
- *     A failing probe occupies its worker for up to `probeTimeoutMs`, and
- *     `lastMonitorAt` only advances once the result flushes, so re-queueing
- *     inside that window would run two probes at one host and double-count the
- *     failure — declaring down after two real misses instead of three.
+ * Otherwise the response-time poll runs at EXACTLY the configured cadence —
+ * including while a failure or recovery run is being confirmed. There is
+ * deliberately no acceleration: `down` is declared by `failureThreshold`
+ * consecutive misses of the configured method at the configured cadence, so
+ * time-to-down is `failureThreshold × intervalSeconds` and the figure an
+ * operator reads off the monitor-settings card is the figure they get.
+ *
+ * The fast-confirm re-probe that used to live here (business rule 30,
+ * 2026-08-17) was removed alongside the ICMP loss sampler change. Extra
+ * resolution during a run is now the sampler's job (`utils/lossSampler.ts`),
+ * and it feeds packet-loss statistics ONLY — it never touches the counters,
+ * because ICMP cannot authenticate the device it reaches and a second transport
+ * voting on `down` would make the state mean whichever of the two answered
+ * last. `fastConfirmIntervalSec` stays on the settings tiers as a dormant
+ * column (dropping it would cost an irreversible migration for no gain) and is
+ * now read by nothing.
  */
 export function resolveProbeIntervalSec(
-  a: {
-    dependencySuppressed: boolean;
-    consecutiveFailures?: number | null;
-    consecutiveSuccesses?: number | null;
-  },
-  eff: Pick<MonitorTierSettings, "intervalSeconds" | "failureThreshold" | "probeTimeoutMs" | "fastConfirmIntervalSec"> & {
-    responseTimePolling: string | null;
-  },
+  a: { dependencySuppressed: boolean },
+  eff: Pick<MonitorTierSettings, "intervalSeconds"> & { responseTimePolling: string | null },
 ): number {
   if (a.dependencySuppressed && eff.responseTimePolling !== "disabled") return eff.intervalSeconds * 2;
-
-  // Agent-driven and disabled streams are excluded: their counters move on
-  // agent pushes (or not at all), so accelerating a server-side probe would
-  // spin without ever confirming anything.
-  const serverDriven =
-    eff.responseTimePolling !== null &&
-    eff.responseTimePolling !== "agent" &&
-    eff.responseTimePolling !== "disabled";
-  if (!serverDriven) return eff.intervalSeconds;
-
-  // Bounded BY CONSTRUCTION, which is why there's no window or counter to keep:
-  // each side needs at most (failureThreshold - 1) fast probes to resolve, and a
-  // probe result zeroes the opposite counter, so a steady up/down asset never
-  // qualifies. A FLAPPING asset alternates — one fast probe after each failure,
-  // then back to base cadence on the next success — so the worst case is a
-  // modest rate increase, not a hot loop.
-  const cf = a.consecutiveFailures ?? 0;
-  const cs = a.consecutiveSuccesses ?? 0;
-  const threshold = eff.failureThreshold;
-  const confirming = (cf > 0 && cf < threshold && cs === 0) || (cs > 0 && cs < threshold && cf === 0);
-  if (!confirming) return eff.intervalSeconds;
-
-  const floor = Math.max(PROBE_LOOP_TICK_SEC, Math.ceil(eff.probeTimeoutMs / 1000));
-  return Math.min(eff.intervalSeconds, Math.max(eff.fastConfirmIntervalSec, floor));
+  return eff.intervalSeconds;
 }
 
 export interface DueMonitorWork {
@@ -10389,6 +10454,7 @@ export interface DueMonitorWork {
   telemetries: MonitorWork[];
   systemInfos: MonitorWork[];
   processesWork: MonitorWork[];
+  lossSamples: MonitorWork[];
 }
 
 /**
@@ -10397,6 +10463,12 @@ export interface DueMonitorWork {
  * DB-READ-ONLY: resolves each candidate's effective settings (cached) and
  * applies the cadence + eligibility gates — no transports are touched.
  */
+/**
+ * Ceiling on ICMP loss samples queued by ONE cursor-mode pass. See the guard at
+ * the end of computeDueWork for why dropping beats queueing.
+ */
+export const LOSS_SAMPLES_MAX_PER_PASS = 200;
+
 export async function computeDueWork(
   candidates: MonitorPassCandidate[],
   enabled: Set<MonitorCadence>,
@@ -10413,6 +10485,7 @@ export async function computeDueWork(
   const telemetries: MonitorWork[]  = [];
   const systemInfos: MonitorWork[]  = [];
   const processesWork: MonitorWork[] = [];
+  const lossSamples: MonitorWork[] = [];
   for (const a of candidates) {
     // Resolve effective settings through the four-tier hierarchy. Internally
     // memoized — first asset in a (integration|manual, assetType) bucket
@@ -10422,30 +10495,21 @@ export async function computeDueWork(
       discoveredByIntegrationType: a.discoveredByIntegration?.type ?? null,
     });
     // Probe cadence is the resolved intervalSeconds — no backoff for down
-    // hosts. Down-host suppression below stops heavy cadences regardless; the
-    // cheap response-time probe keeps firing at base cadence so recovery is
-    // detected within one tick. Two exceptions:
+    // hosts, and no acceleration while a failure/recovery run is being
+    // confirmed. Down-host suppression below stops heavy cadences regardless;
+    // the cheap response-time probe keeps firing at base cadence so recovery is
+    // detected within one tick. ONE exception: dependency suppression active
+    // (parent is down) slows the probe to 2× the configured interval, since the
+    // asset is unlikely to answer until the parent recovers, but we still poll
+    // at half-rate to catch cases where it answers via a redundant L3 path or
+    // out-of-band management. Disabled streams stay disabled regardless of
+    // suppression — there's nothing to slow down.
     //
-    // (1) dependency suppression active (parent is down): the probe slows to
-    //     2× the configured interval since the asset is unlikely to answer
-    //     until the parent recovers, but we still poll at half-rate to catch
-    //     cases where it answers via a redundant L3 path or out-of-band
-    //     management. Disabled streams stay disabled regardless of
-    //     suppression — there's nothing to slow down. Checked FIRST: an
-    //     unreachable-because-the-parent-is-dark asset must not be hammered.
+    // Extra resolution DURING a run is the ICMP loss sampler's job
+    // (utils/lossSampler.ts, queued below): it feeds packet-loss statistics
+    // only and never touches the state machine's counters.
     //
-    // (2) the state machine is MID-CONFIRMATION (fast re-probe, 2026-08): a
-    //     failure run has started but hasn't reached failureThreshold, or a
-    //     recovery run hasn't confirmed yet. Time-to-down was previously
-    //     failureThreshold × interval — 3 minutes at a 60s cadence, 15 at
-    //     300s — because a device that just stopped answering waited a full
-    //     interval for each of its remaining confirmations. This is the
-    //     SolarWinds/Nagios pattern (rapid re-poll during the warning window,
-    //     `retry_interval` on a soft state): confirmations happen in seconds,
-    //     so detection latency stops being a function of the operator's
-    //     cadence choice. See business rule 30.
-    //
-    // Both live in `resolveProbeIntervalSec` (shared with the pg-boss
+    // The clamp lives in `resolveProbeIntervalSec` (shared with the pg-boss
     // publisher's mirrored due-calc in jobs/monitorAssets.ts, which must stay
     // byte-identical in behavior — the two paths' due-sets are contractually
     // the same).
@@ -10563,8 +10627,34 @@ export async function computeDueWork(
         (procPins && isDue(a.lastProcessPinsAt, PROCESS_PINS_INTERVAL_SEC));
       if (processesDue) processesWork.push({ id: a.id, kind: "processes" });
     }
+    // ICMP packet-loss sampler: 10s side-probe while the state machine is
+    // mid-run (warning / recovering only — see utils/lossSampler.ts for why
+    // `down` is excluded). Independent of `probe` above: it has its own anchor
+    // and never touches the counters, so both can be due on the same tick.
+    if (enabled.has("lossSample") &&
+        lossSamplerAppliesTo(a, eff) &&
+        lossSampleIsDue(a.lastLossSampleAt, now)) {
+      lossSamples.push({ id: a.id, kind: "lossSample" });
+    }
   }
-  return { probes, fastFiltereds, telemetries, systemInfos, processesWork };
+  // Cursor-mode starvation guard. runMonitorPass awaits the WHOLE pass before
+  // returning and the light tick holds a `running` guard, so a site-wide outage
+  // that puts hundreds of assets into `warning` at once could make one pass long
+  // enough to delay the next tick — starving the response-time probes that
+  // decide whether those assets are actually down, which is the one thing this
+  // cadence must never do. Loss samples are best-effort resolution, so the
+  // honest response is to drop the excess rather than to queue it: the next tick
+  // recomputes the due-set anyway, and each asset's own 10s anchor means the
+  // ones that were dropped are the ones most likely to be picked next.
+  // pg-boss mode does not need this — it has its own pool and a 15s job expiry.
+  if (lossSamples.length > LOSS_SAMPLES_MAX_PER_PASS) {
+    logger.warn(
+      { due: lossSamples.length, cap: LOSS_SAMPLES_MAX_PER_PASS },
+      "loss-sample due-set truncated to protect probe cadence (cursor mode)",
+    );
+    lossSamples.length = LOSS_SAMPLES_MAX_PER_PASS;
+  }
+  return { probes, fastFiltereds, telemetries, systemInfos, processesWork, lossSamples };
 }
 
 export async function runMonitorPass(opts?: { concurrency?: number; cadences?: MonitorCadence[] }): Promise<RunStats> {
@@ -10626,11 +10716,14 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       lldp:         a.lldpPolling    || ifT,
       storage:      a.storagePolling || ifT,
       processes:    a.processesPolling || "not_delivered",
+      // The loss sampler is ICMP by definition, whatever the response-time
+      // stream uses — that IS the finding the label should carry.
+      lossSample:   "icmp",
     });
     assetTypeById.set(a.id, a.assetType ?? "unknown");
   }
 
-  const { probes, fastFiltereds, telemetries, systemInfos, processesWork } =
+  const { probes, fastFiltereds, telemetries, systemInfos, processesWork, lossSamples } =
     await computeDueWork(candidates, enabled, now);
 
   // Order matters: probes first so a saturated worker pool drains the cheap
@@ -10639,7 +10732,12 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   // pass, so they queue right behind probes. Telemetry and systemInfo bring
   // up the rear — those are what actually time out on dead hosts, and they
   // shouldn't get to block per-minute polling for the rest of the fleet.
-  const work: MonitorWork[] = [...probes, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork];
+  // Loss samples sit directly behind probes: they are single pings with a 5s
+  // timeout, and a sample delayed past its 10s cadence is worthless (the next
+  // one is already due), so queueing them behind the heavy walks would mean
+  // collecting nothing during exactly the incident they exist to measure.
+  // They still yield to probes, which decide whether the asset is down at all.
+  const work: MonitorWork[] = [...probes, ...lossSamples, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork];
 
   setQueueDepth({
     probe: probes.length,
@@ -10647,6 +10745,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     telemetry: telemetries.length,
     systemInfo: systemInfos.length,
     processes: processesWork.length,
+    lossSample: lossSamples.length,
   });
 
   const stats: RunStats = {
@@ -10655,6 +10754,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     systemInfo: { collected: 0, failed: 0 },
     fastFiltered: { collected: 0, failed: 0 },
     processes:  { collected: 0, failed: 0 },
+    lossSample: { collected: 0, failed: 0 },
   };
   if (work.length === 0) {
     endPassTimer();
@@ -10702,6 +10802,12 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
             const outcome = await runProcessesFor(w.id, labelFor("processes"));
             if (outcome === "success") stats.processes.collected++;
             else stats.processes.failed++;
+            break;
+          }
+          case "lossSample": {
+            const outcome = await runLossSampleFor(w.id, labelFor("lossSample"));
+            if (outcome === "success") stats.lossSample.collected++;
+            else stats.lossSample.failed++;
             break;
           }
         }

@@ -45,6 +45,7 @@ import {
   type MonitorCadence,
 } from "../services/monitoringService.js";
 import { getBootTimeMode, publishMonitorJob } from "../services/queueService.js";
+import { lossSamplerAppliesTo, lossSampleIsDue } from "../utils/lossSampler.js";
 import { setMonitoredAssets, setMonitorWorkers } from "../metrics.js";
 import { runInstrumentedJob } from "./_metrics.js";
 import { prisma } from "../db.js";
@@ -122,10 +123,12 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       // comment in monitoringService.runMonitorPass.
       discoveredByIntegration: { select: { type: true, config: true } },
       monitorStatus: true,
-      // Both counters feed the fast-confirm re-probe (business rule 30) via the
-      // shared resolveProbeIntervalSec — the cursor path selects them too.
+      // Both counters ride the pg-boss payload for the probe worker; the
+      // cursor path selects them too.
       consecutiveFailures: true, consecutiveSuccesses: true,
       lastMonitorAt: true, monitorIntervalSec: true,
+      // ICMP loss-sampler inputs — mirrors loadMonitorPassCandidates.
+      lastLossSampleAt: true, ipAddress: true, dnsName: true, hostname: true, status: true,
       lastTelemetryAt: true, cpuMemoryIntervalSec: true, temperatureIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
       // Phase 2 carve-out: LLDP + Storage each have their own cadence + queue.
@@ -164,12 +167,13 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       discoveredByIntegrationType: a.discoveredByIntegration?.type ?? null,
     });
     // Probe cadence: 2× the resolved interval when dependency-suppressed
-    // (parent down), the fast-confirm cadence while a failure/recovery run is
-    // being confirmed (business rule 30), otherwise base cadence so recovery is
-    // detected within one tick. ONE implementation shared with the cursor path
-    // (monitoringService.computeDueWork) — the two due-sets are contractually
-    // identical, and a second copy of this arithmetic is exactly how they'd
-    // drift.
+    // (parent down), otherwise the configured cadence — no acceleration while a
+    // failure/recovery run is being confirmed (that was the fast-confirm
+    // re-probe; extra resolution during a run is now the ICMP loss sampler's
+    // job, and it feeds packet loss only). ONE implementation shared with the
+    // cursor path (monitoringService.computeDueWork) — the two due-sets are
+    // contractually identical, and a second copy of this arithmetic is exactly
+    // how they'd drift.
     const probeIntervalSec = resolveProbeIntervalSec(a, eff);
     const probe      = isDue(a.lastMonitorAt,    probeIntervalSec);
     // Pragmatic stream-split: cpuMemoryIntervalSeconds drives the unified
@@ -285,6 +289,18 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
         await publishMonitorJob("processes", a.id, { transport: eff.processesPolling, assetType, verboseDebug });
       }
     }
+    // ICMP packet-loss sampler: 10s side-probe while the state machine is
+    // mid-run (warning / recovering only — utils/lossSampler.ts explains why
+    // `down` is excluded: an uncorroborated ICMP reply could be a squatter on
+    // the address, and a fully-down asset should read 100% loss). Deliberately
+    // NOT gated on isUp like the cadences above — the whole point is that it
+    // runs when the asset is NOT healthy. Keep in sync with the matching block
+    // in computeDueWork.
+    if (enabled.has("lossSample") &&
+        lossSamplerAppliesTo(a, eff) &&
+        lossSampleIsDue(a.lastLossSampleAt, now)) {
+      await publishMonitorJob("lossSample", a.id, { transport: "icmp", assetType, verboseDebug });
+    }
   }
 
   const total = candidates.length;
@@ -299,13 +315,13 @@ async function probeTick(): Promise<void> {
   try {
     await runInstrumentedJob("monitorAssets.probe", async () => {
       if (getBootTimeMode() === "pgboss") {
-        await publishDueWork(["probe", "fastFiltered"]);
+        await publishDueWork(["probe", "fastFiltered", "lossSample"]);
       } else {
         const stats = await runMonitorPass({
-          cadences: ["probe", "fastFiltered"],
+          cadences: ["probe", "fastFiltered", "lossSample"],
           concurrency: PROBE_CONCURRENCY,
         });
-        if (stats.probed > 0 || stats.fastFiltered.collected > 0) {
+        if (stats.probed > 0 || stats.fastFiltered.collected > 0 || stats.lossSample.collected > 0) {
           logger.debug({ stats }, "Light monitor pass complete");
         }
       }

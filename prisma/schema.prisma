@@ -741,6 +741,15 @@ model Asset {
   // the Dashboard's Monitor Alerts card. Null until the first transition.
   monitorStatusChangedAt   DateTime?
   lastMonitorAt            DateTime?
+  // Cadence anchor for the ICMP packet-loss sampler (utils/lossSampler.ts) —
+  // the 10s side-probe that runs ONLY while monitorStatus is "warning" or
+  // "recovering", to give probeLossPct more than a handful of samples to
+  // divide. Deliberately its own column rather than reusing lastMonitorAt:
+  // the sampler must not disturb the response-time poll's own due-check, and
+  // it never calls recordProbeResult (so it cannot move the counters or
+  // monitorStatus). Stamped on every attempt, success or failure, so a
+  // ping-blocked host can't be re-queued every tick. Null = never sampled.
+  lastLossSampleAt         DateTime?
   lastResponseTimeMs       Int?
   // Last device-uptime reading (whole seconds) captured on the probe path,
   // and the timestamp Polaris last detected that reading decrease (a reboot).
@@ -1008,6 +1017,18 @@ model AssetMonitorSample {
   success        Boolean
   responseTimeMs Int?
   error          String?  @db.Text
+  // Which probe produced this row. NULL (and the literal "primary") = the
+  // response-time poll on the asset's configured transport — the only rows that
+  // may inform response-time figures. "icmp" = the packet-loss sampler
+  // (utils/lossSampler.ts), whose RTTs are a DIFFERENT transport's and must
+  // never enter the responseTimeMs series: ICMP answers in ~1-5ms where SNMP
+  // takes 20-200ms, so mixing them would dent every response-time chart, shift
+  // the hourly/daily avgResponseTimeMs rollups, and drag a "slow response time"
+  // automation's reading down mid-incident. Loss (failed/total) counts EVERY
+  // kind — that is the whole point of the sampler. Nullable rather than
+  // defaulted so the add is free on the hypertable (the uptimeSec precedent);
+  // readers must treat NULL as primary, never as unknown.
+  probeKind      String?
   // Device sysUpTime at probe time, in whole seconds (SNMP probes only; null
   // for ICMP/TCP/REST probes that don't read sysUpTime). A decrease between
   // consecutive samples is the reboot signal — see Asset.lastRebootAt and the

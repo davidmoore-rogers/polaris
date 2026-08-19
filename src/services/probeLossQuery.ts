@@ -11,7 +11,18 @@
  *     dropped either way — asset-down owns them.
  *   - Widget mode (onlyLossy=true): additionally requires ≥1 FAILURE (a clean
  *     asset isn't "packet loss"), orders lossiest-first, and caps at `limit`
- *     (null = uncapped; Postgres treats LIMIT NULL as ALL).
+ *     (null = uncapped; Postgres treats LIMIT NULL as ALL). It also passes
+ *     `includeFullyDown`, so an asset with no success in the window reads 100%
+ *     instead of disappearing — see that option's doc for why the engine must
+ *     not.
+ *
+ * THIS QUERY COUNTS EVERY `probeKind`. It is one of only three readers of
+ * asset_monitor_samples that does (with alertChartService's loss chart);
+ * everything else filters to the response-time poll. That is the point of the
+ * ICMP loss sampler (utils/lossSampler.ts): a 10s side-probe during
+ * warning/recovering windows so a 15-minute ratio divides ~90 samples instead
+ * of ~15. The sampler's rows carry probeKind='icmp' and a NULL responseTimeMs,
+ * so they can only ever affect a ratio, never a timing.
  *
  * THE MEASUREMENT STARTS AT THE FIRST SUCCESSFUL PROBE IN THE WINDOW, not at
  * the window's leading edge (2026-08). Loss is failed/total over the samples
@@ -53,6 +64,19 @@ export async function queryProbeLossRatios(opts: {
   assetIds?: string[] | null;
   onlyLossy?: boolean;
   limit?: number | null;
+  /**
+   * DISPLAY ONLY. Report an asset with ZERO successful probes in the window as
+   * 100% loss instead of dropping it. Without this a device that was down for
+   * the whole window vanishes from the Packet Loss widget rather than pegging
+   * at 100%, which reads as "no loss" — the opposite of the truth.
+   *
+   * Deliberately NOT set by the notification engine: `assetIsAnsweringProbes`
+   * already keeps `down` / `recovering` assets out of its id list, and a 100%
+   * reading reaching a probeLossPct automation would fire a second alert about
+   * an outage that asset-down already owns (business rule 29's supersede). If
+   * this is ever passed on the engine path, that dedup is gone.
+   */
+  includeFullyDown?: boolean;
 }): Promise<ProbeLossRow[]> {
   const params: unknown[] = [String(opts.sinceMinutes)];
   let p = 1;
@@ -70,6 +94,14 @@ export async function queryProbeLossRatios(opts: {
   const having = opts.onlyLossy
     ? `HAVING count(*) FILTER (WHERE NOT "success") > 0`
     : "";
+
+  // The anchor trims everything before the asset's first successful probe (see
+  // the header). An asset with NO success has no anchor: engine mode drops it
+  // (asset-down owns a total outage), display mode keeps every row so the ratio
+  // comes out at 100%.
+  const anchorClause = opts.includeFullyDown
+    ? `(("firstOk" IS NOT NULL AND "timestamp" >= "firstOk") OR "firstOk" IS NULL)`
+    : `("firstOk" IS NOT NULL AND "timestamp" >= "firstOk")`;
 
   let tail = "";
   if (opts.onlyLossy) {
@@ -93,7 +125,7 @@ export async function queryProbeLossRatios(opts: {
        FROM "asset_monitor_samples"
        WHERE "timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
      ) w
-     WHERE "firstOk" IS NOT NULL AND "timestamp" >= "firstOk"
+     WHERE ${anchorClause}
      GROUP BY "assetId"
      ${having}${tail}`,
     ...params,

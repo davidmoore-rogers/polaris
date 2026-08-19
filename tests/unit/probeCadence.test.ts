@@ -3,20 +3,23 @@
  *
  * `resolveProbeIntervalSec` — the shared probe-spacing decision used by BOTH
  * monitor paths (the cursor pass's computeDueWork and the pg-boss publisher's
- * mirrored due-calc). Business rule 30: an asset whose failure/recovery run is
- * still being confirmed is re-probed at the fast-confirm cadence instead of
- * waiting a full interval, so time-to-down stops being a multiple of the
- * operator's cadence choice.
+ * mirrored due-calc). The two due-sets are contractually identical, so this is
+ * the one place the arithmetic is pinned.
+ *
+ * The response-time poll runs at exactly the configured cadence, with ONE
+ * clamp: a dependency-suppressed asset drops to 2× the interval. There is
+ * deliberately NO acceleration while a failure or recovery run is being
+ * confirmed — the fast-confirm re-probe was removed 2026-08-19, and extra
+ * resolution during a run is the ICMP loss sampler's job (lossSampler.test.ts),
+ * which feeds packet-loss statistics only and never the state machine. So
+ * time-to-down is `failureThreshold × intervalSeconds`, which is what the
+ * monitor-settings card reports.
  *
  * Coverage:
- *   - steady up / steady down keep base cadence (no acceleration, no backoff).
- *   - a failure run under the threshold accelerates; the run that REACHES the
- *     threshold does not (the asset is down — there's nothing left to confirm).
- *   - a recovery run accelerates the same way.
- *   - dependency suppression wins over acceleration (2× base).
- *   - agent / disabled streams never accelerate.
- *   - the floor: never faster than the probe timeout or the loop tick, and
- *     never slower than the configured cadence.
+ *   - the cadence is returned as configured in every counter state, so nothing
+ *     can quietly re-introduce a mid-run acceleration.
+ *   - dependency suppression doubles it.
+ *   - a disabled stream is not slowed by suppression (nothing to slow).
  */
 
 import { describe, it, expect } from "vitest";
@@ -27,67 +30,43 @@ type Eff = Parameters<typeof resolveProbeIntervalSec>[1];
 function eff(over: Partial<Eff> = {}): Eff {
   return {
     intervalSeconds: 300,
-    failureThreshold: 3,
-    probeTimeoutMs: 5000,
-    fastConfirmIntervalSec: 10,
     responseTimePolling: "icmp",
     ...over,
   } as Eff;
 }
 
-function asset(cf: number, cs: number, dependencySuppressed = false) {
-  return { dependencySuppressed, consecutiveFailures: cf, consecutiveSuccesses: cs };
+function asset(dependencySuppressed = false) {
+  return { dependencySuppressed };
 }
 
 describe("resolveProbeIntervalSec", () => {
-  it("leaves a steady asset on its configured cadence", () => {
-    expect(resolveProbeIntervalSec(asset(0, 5), eff())).toBe(300);  // steady up
-    expect(resolveProbeIntervalSec(asset(9, 0), eff())).toBe(300);  // long down
-    // Exactly at the threshold is DOWN, not mid-confirmation.
-    expect(resolveProbeIntervalSec(asset(3, 0), eff())).toBe(300);
+  it("returns the configured cadence for a steady asset", () => {
+    expect(resolveProbeIntervalSec(asset(), eff())).toBe(300);
+    expect(resolveProbeIntervalSec(asset(), eff({ intervalSeconds: 60 }))).toBe(60);
   });
 
-  it("accelerates a failure run that hasn't reached the threshold", () => {
-    expect(resolveProbeIntervalSec(asset(1, 0), eff())).toBe(10);
-    expect(resolveProbeIntervalSec(asset(2, 0), eff())).toBe(10);
+  it("does not accelerate mid-run — down takes failureThreshold × interval", () => {
+    // The counters are no longer an input at all; every state gets base cadence.
+    // Pinned explicitly because re-introducing acceleration here would silently
+    // change what `down` means and double-count a miss inside a probe timeout.
+    for (const interval of [5, 60, 300]) {
+      expect(resolveProbeIntervalSec(asset(), eff({ intervalSeconds: interval }))).toBe(interval);
+    }
   });
 
-  it("accelerates an unconfirmed recovery run too", () => {
-    // A recovery needs failureThreshold successes; at a 300s cadence that's 15
-    // minutes of "recovering" before the down alert can clear.
-    expect(resolveProbeIntervalSec(asset(0, 1), eff())).toBe(10);
-    expect(resolveProbeIntervalSec(asset(0, 2), eff())).toBe(10);
-    expect(resolveProbeIntervalSec(asset(0, 3), eff())).toBe(300); // confirmed up
+  it("halves the rate for a dependency-suppressed asset (parent is dark)", () => {
+    expect(resolveProbeIntervalSec(asset(true), eff())).toBe(600);
+    expect(resolveProbeIntervalSec(asset(true), eff({ intervalSeconds: 60 }))).toBe(120);
   });
 
-  it("gives dependency suppression precedence over acceleration", () => {
-    // Parent is dark: half-rate, never hammer.
-    expect(resolveProbeIntervalSec(asset(1, 0, true), eff())).toBe(600);
-    expect(resolveProbeIntervalSec(asset(0, 0, true), eff())).toBe(600);
-    // …except a disabled stream, which has nothing to slow down.
-    expect(resolveProbeIntervalSec(asset(1, 0, true), eff({ responseTimePolling: "disabled" }))).toBe(300);
+  it("leaves a disabled stream alone even when suppressed", () => {
+    expect(resolveProbeIntervalSec(asset(true), eff({ responseTimePolling: "disabled" }))).toBe(300);
   });
 
-  it("never accelerates a stream the server doesn't drive", () => {
-    // Agent hosts advance their counters on pushes, so a fast server-side probe
-    // would spin without ever confirming anything.
-    expect(resolveProbeIntervalSec(asset(1, 0), eff({ responseTimePolling: "agent" }))).toBe(300);
-    expect(resolveProbeIntervalSec(asset(1, 0), eff({ responseTimePolling: "disabled" }))).toBe(300);
-    expect(resolveProbeIntervalSec(asset(1, 0), eff({ responseTimePolling: null }))).toBe(300);
-  });
-
-  it("floors the fast cadence at the probe timeout and the loop tick", () => {
-    // A 30s SNMP timeout means a 10s re-probe would overlap its own predecessor
-    // and double-count the failure — raised to 30s.
-    expect(resolveProbeIntervalSec(asset(1, 0), eff({ probeTimeoutMs: 30_000 }))).toBe(30);
-    // Below the 5s probe-loop tick is not deliverable, so 1s becomes 5s.
-    expect(resolveProbeIntervalSec(asset(1, 0), eff({ fastConfirmIntervalSec: 1, probeTimeoutMs: 1000 }))).toBe(5);
-    // And it never SLOWS a cadence that's already tighter than the fast value.
-    expect(resolveProbeIntervalSec(asset(1, 0), eff({ intervalSeconds: 5, probeTimeoutMs: 1000 }))).toBe(5);
-    expect(resolveProbeIntervalSec(asset(1, 0), eff({ intervalSeconds: 30, fastConfirmIntervalSec: 60, probeTimeoutMs: 1000 }))).toBe(30);
-  });
-
-  it("treats missing counters as zero (a candidate row that predates them)", () => {
-    expect(resolveProbeIntervalSec({ dependencySuppressed: false }, eff())).toBe(300);
+  it("applies the suppression clamp regardless of transport", () => {
+    for (const m of ["icmp", "snmp", "rest_api", "winrm", "ssh", "agent"]) {
+      expect(resolveProbeIntervalSec(asset(true), eff({ responseTimePolling: m }))).toBe(600);
+      expect(resolveProbeIntervalSec(asset(), eff({ responseTimePolling: m }))).toBe(300);
+    }
   });
 });
