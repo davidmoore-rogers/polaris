@@ -177,13 +177,21 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
       })).flatMap((a) => a.monitoredInterfaces.map((ifName) => ({ value: ifName, assetId: a.id }))),
   },
   mountPathPattern: {
-    noun: "storage mounts",
+    // The operator-pinned set (`Asset.monitoredStorage`), mirroring
+    // ifNamePattern. Unlike interfaces this narrows what is OFFERED without
+    // narrowing what can fire: the storage stream walks every mountpath and
+    // stamps unpinned rows `cadence:"slow"` (24h retention, never rolled up), so
+    // the engine has no pin gate here and a stored rule on an unpinned mount
+    // still evaluates. Offering those mounts is the problem — a 7-day average
+    // over a 24-hour retention window reads almost nothing, so the picker steers
+    // to the mounts that actually keep history.
+    noun: "monitored storage mounts",
     strict: false,
-    pairs: async (ids, since) =>
-      (await prisma.assetStorageSample.groupBy({
-        by: ["mountPath", "assetId"],
-        where: { assetId: { in: ids }, timestamp: { gte: since } },
-      })).map((r) => ({ value: r.mountPath, assetId: r.assetId })),
+    pairs: async (ids) =>
+      (await prisma.asset.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, monitoredStorage: true },
+      })).flatMap((a) => a.monitoredStorage.map((mountPath) => ({ value: mountPath, assetId: a.id }))),
   },
   healthCheck: {
     noun: "SD-WAN health checks",

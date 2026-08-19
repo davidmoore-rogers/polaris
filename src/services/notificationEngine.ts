@@ -156,6 +156,9 @@ interface ScopeAssetRow extends ScopeAsset {
   // Read by every interface resolver — state trio AND counter metrics — for
   // the pinned-interface gate (interfaceIsPinned).
   monitoredInterfaces?: string[];
+  // Read ONLY by the builder's device-list preview (optional so the pseudo-host
+  // row can omit it). The engine never filters on it — see SCOPE_SELECT.
+  monitored?: boolean;
 }
 
 /** A single evaluated reading for a (asset, dimension). */
@@ -200,6 +203,11 @@ const SCOPE_SELECT = {
   manufacturer: true, model: true, os: true,
   // Every interface reading is restricted to PINNED interfaces.
   monitoredInterfaces: true,
+  // Read by the BUILDER's device preview only, which reports monitored devices
+  // separately from the unmonitored remainder. The engine never FILTERS on it:
+  // event and change triggers fire on unmonitored devices by design, and a
+  // contact still owns a device nobody polls.
+  monitored: true,
 } as const;
 
 /** Build a Prisma where from a scope, or null if the scope matches nothing.
@@ -2323,6 +2331,9 @@ export interface PreviewResult {
    *  wizard must not report that as "48 devices". Absent for host-only drafts
    *  (no asset scope) and for the unsupported event/change note. */
   totalAssets?: number;
+  /** Scope matches that are NOT monitored — counted, never listed. Only the
+   *  device-list preview sets it; a metric preview has no readings for them. */
+  unmonitoredCount?: number;
   matches: PreviewMatch[];
   /** Rendered sample of the composed email (first match), when the draft has emailComposition. */
   emailPreview?: { subject: string; text: string; html?: string };
@@ -2452,11 +2463,17 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
   let readings: Reading[] = [];
 
   if (!trigger) {
-    const assets = await loadScopeAssets(input.scope);
+    // Device-list preview: MONITORED devices are what the operator is choosing
+    // between, so they're what the list and the count report. The unmonitored
+    // remainder is stated rather than hidden — the filter still selects those
+    // devices, and an event or change automation does fire on them.
+    const all = await loadScopeAssets(input.scope);
+    const assets = all.filter((a) => a.monitored);
     return {
       supported: true,
       totalEvaluated: assets.length,
       totalAssets: assets.length,
+      unmonitoredCount: all.length - assets.length,
       matches: assets.slice(0, 200).map((a) => ({
         assetId: a.id,
         hostname: a.hostname,

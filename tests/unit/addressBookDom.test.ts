@@ -97,7 +97,7 @@ beforeAll(() => {
           maxDepth: 5,
           maxRules: 100,
         },
-        options: {},
+        options: { regions: ["Nashville", "Memphis"] },
       }),
       create: async (body: Record<string, unknown>) => { created.push(body); return { contact: { id: "new", ...body } }; },
       update: async (_id: string, body: Record<string, unknown>) => { updated.push(body); return { contact: { id: _id, ...body } }; },
@@ -401,6 +401,70 @@ describe("picker selection", () => {
     await flush();
     expect(toasts.join(" ")).toMatch(/select at least one/i);
     expect(overlays()).toHaveLength(1); // still open
+  });
+
+  it("offers a Regions tab holding the two dynamic entries and the catalogue", async () => {
+    (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<unknown> } })
+      .PolarisAddressBook.openPicker({ field: "to" });
+    await flush(5);
+
+    // People is the landing pane; Regions is hidden but present, so switching
+    // keeps the search term and the current selection.
+    const pane = doc.querySelector('[data-ab-pane="regions"]') as unknown as
+      { style: { display: string }; textContent: string };
+    expect(pane).toBeTruthy();
+    expect(pane.style.display).toBe("none");
+
+    click(doc.querySelector('[data-ab-tab="regions"]'));
+    expect(pane.style.display).toBe("");
+    // The two dynamic entries come first — they need no catalogue at all.
+    const names = Array.from(pane.textContent.matchAll(/Asset’s [^<]*?(Region Users|Responsible Contacts)/g));
+    expect(names.length).toBe(2);
+    expect(pane.textContent).toContain("Nashville");
+    expect(pane.textContent).toContain("Memphis");
+  });
+
+  it("returns a region and a dynamic entry with their own sources", async () => {
+    const p = (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<{ field: string; entries: { source: string; id: string }[] } | null> } })
+      .PolarisAddressBook.openPicker({ field: "cc" });
+    await flush(5);
+    click(doc.querySelector('[data-ab-tab="regions"]'));
+
+    const boxes = Array.from(doc.querySelectorAll('[data-ab-pane="regions"] [data-ab-pick]'));
+    // deviceRegion, assetContacts, Nashville, Memphis — in that order.
+    expect(boxes.length).toBe(4);
+    const tick = (el: unknown) => {
+      (el as { checked: boolean }).checked = true;
+      (el as { dispatchEvent: (e: unknown) => void }).dispatchEvent(new win.Event("change", { bubbles: true }));
+    };
+    tick(boxes[0]);
+    tick(boxes[2]);
+    click(doc.querySelector('[data-ab="add-cc"]'));
+    await flush();
+
+    const res = await p;
+    expect(res!.field).toBe("cc");
+    expect(res!.entries.map((e) => e.source).sort()).toEqual(["deviceRegion", "region"]);
+    expect(res!.entries.find((e) => e.source === "region")!.id).toBe("Nashville");
+  });
+
+  it("keeps a People selection when the operator looks at Regions", async () => {
+    const p = (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<{ entries: { source: string }[] } | null> } })
+      .PolarisAddressBook.openPicker({ field: "to" });
+    await flush(5);
+
+    const person = doc.querySelector('[data-ab-pane="people"] [data-ab-pick]') as unknown as
+      { checked: boolean; dispatchEvent: (e: unknown) => void };
+    person.checked = true;
+    person.dispatchEvent(new win.Event("change", { bubbles: true }));
+
+    click(doc.querySelector('[data-ab-tab="regions"]'));
+    click(doc.querySelector('[data-ab-tab="people"]'));
+    click(doc.querySelector('[data-ab="add-to"]'));
+    await flush();
+
+    const res = await p;
+    expect(res!.entries).toHaveLength(1);
   });
 
   it("resolves null when dismissed", async () => {

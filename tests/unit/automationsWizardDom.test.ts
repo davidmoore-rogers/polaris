@@ -292,10 +292,15 @@ describe("automation wizard DOM render", () => {
     expect(tier.querySelector(".tier-after")).toBeTruthy(); // minutes-before field
     expect(tier.querySelector(".tier-actions .aw-action")).toBeTruthy(); // seeded notify action
     expect(tier.querySelector(".na-channel")).toBeTruthy(); // channel select → recipients render from it
-    // Recipient sources: device-region replaces the scope-region checkbox
-    // (legacy scope-region renders only on actions that already carry it).
-    expect(tier.querySelector(".na-device-region")).toBeTruthy();
+    // Recipient sources on an EMAIL channel are all pills in the To field —
+    // device-region and asset-contacts became recipients you can see rather than
+    // checkboxes beside the field (the checkbox survives only on Web Push, which
+    // has no token field to hold a pill). Legacy scope-region renders only on
+    // actions that already carry it.
+    expect(tier.querySelector(".na-device-region")).toBeFalsy();
+    expect(tier.querySelector(".na-asset-contacts")).toBeFalsy();
     expect(tier.querySelector(".na-scope-region")).toBeFalsy();
+    expect(tier.querySelector('.na-recip-box[data-field="to"]')).toBeTruthy();
     // No chains inside chains: the tier-hosted action row has no footer.
     expect(tier.querySelector(".tier-actions .aw-action .aw-esc-sec")).toBeFalsy();
     expect((cardEsc.querySelector(".aesc-config") as unknown as { style: { display: string } }).style.display).toBe("block");

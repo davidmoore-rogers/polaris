@@ -437,7 +437,16 @@ export async function deleteContact(id: string, actor?: string): Promise<void> {
 // ─── Asset targeting ────────────────────────────────────────────────────────
 
 export interface ContactAssetPreview {
+  /** MONITORED devices the filter covers — what the editor lists and counts. */
   matchCount: number;
+  /**
+   * Covered devices that are NOT monitored. Counted, never listed: the filter
+   * genuinely selects them and an event/change automation does fire on them, so
+   * hiding them would understate the contact's reach — but they're not what an
+   * operator is choosing between, and they'd swamp the list on a fleet with a
+   * large unmonitored inventory.
+   */
+  unmonitoredCount: number;
   sample: Array<{ id: string; hostname: string | null; ipAddress: string | null; assetType: string }>;
 }
 
@@ -459,15 +468,21 @@ export async function previewContactAssets(
   } else if (criteria) {
     for (const id of await resolveMatchingAssetIds(criteria)) union.add(id);
   }
-  if (union.size === 0) return { matchCount: 0, sample: [] };
+  if (union.size === 0) return { matchCount: 0, unmonitoredCount: 0, sample: [] };
 
-  const sample = await prisma.asset.findMany({
+  // One read for both halves: the count of monitored matches and the sample come
+  // from the same rows, so they can't disagree.
+  const rows = await prisma.asset.findMany({
     where: { id: { in: Array.from(union) } },
-    select: { id: true, hostname: true, ipAddress: true, assetType: true },
+    select: { id: true, hostname: true, ipAddress: true, assetType: true, monitored: true },
     orderBy: { hostname: "asc" },
-    take: 100,
   });
-  return { matchCount: union.size, sample };
+  const monitored = rows.filter((r) => r.monitored);
+  return {
+    matchCount: monitored.length,
+    unmonitoredCount: rows.length - monitored.length,
+    sample: monitored.slice(0, 100).map(({ monitored: _m, ...rest }) => rest),
+  };
 }
 
 /**

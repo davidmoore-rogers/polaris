@@ -242,17 +242,25 @@ export async function listScopeOptions(): Promise<{
   regions: string[];
   roles: { id: string; name: string }[];
 }> {
+  // MONITORED devices only. These lists exist to be picked from, and a
+  // manufacturer or model that only unmonitored inventory reports is a choice
+  // that can't produce a metric alert — offering it is how an operator builds a
+  // filter, sees it match nothing, and distrusts the picker. Deliberately NOT
+  // applied to matching: `scopeWhere` still selects unmonitored devices, because
+  // event and change triggers fire on them. The subnet list is IPAM, not
+  // inventory, so it is unfiltered by the same reasoning.
+  const monitoredOnly = { monitored: true } as const;
   const [mfrRows, modelRows, subnets, regions, roles] = await Promise.all([
     prisma.asset.findMany({
       select: { manufacturer: true },
       distinct: ["manufacturer"],
-      where: { manufacturer: { not: null } },
+      where: { ...monitoredOnly, manufacturer: { not: null } },
       orderBy: { manufacturer: "asc" },
     }),
     prisma.asset.findMany({
       select: { model: true },
       distinct: ["model"],
-      where: { model: { not: null } },
+      where: { ...monitoredOnly, model: { not: null } },
       orderBy: { model: "asc" },
     }),
     prisma.subnet.findMany({
@@ -352,9 +360,14 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
       notifyRefs.push({
         label,
         channelId: action.channelId,
-        // The three broadcast modes are Web-Push-only; flagged here so the
+        // The two BROADCAST modes are Web-Push-only; flagged here so the
         // channel-type check below can reject them without a second walk.
-        broadcast: !!(action.recipientAllUsers || action.recipientAllRegions || action.recipientRegions?.length),
+        // `recipientRegions` is deliberately NOT in this set any more: naming
+        // specific regions is now a recipient TOKEN the address-book picker
+        // offers on every routed channel, so an email rule holding one is a
+        // state the builder renders and can edit back out — which was the whole
+        // reason for the restriction.
+        broadcast: !!(action.recipientAllUsers || action.recipientAllRegions),
       });
     } else if (action.type === "api_call") {
       let host = "";
@@ -405,7 +418,7 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
     if (ref.broadcast && known.get(ref.channelId) !== "web_push") {
       throw new AppError(
         400,
-        `${ref.label}: "all users" / region broadcast is only available on a Web Push channel — pick recipients explicitly for email and chat channels`,
+        `${ref.label}: "all users" / "all regions" broadcast is only available on a Web Push channel — pick recipients (people, roles or named regions) explicitly for email and chat channels`,
       );
     }
   }

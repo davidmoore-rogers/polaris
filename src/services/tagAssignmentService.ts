@@ -413,7 +413,11 @@ export function collectCidrs(criteria: TagCriteria): string[] {
  */
 export async function listAssetTags(): Promise<string[]> {
   const rows = await prisma.asset.findMany({
-    where: { NOT: { tags: { isEmpty: true } } },
+    // MONITORED devices only — the same reasoning as listScopeOptions: a tag
+    // that only unmonitored inventory carries is a filter value that can't
+    // produce a metric alert. (`GET /assets/tags`, which feeds the assets-page
+    // filter rather than a builder, deliberately keeps its own unfiltered read.)
+    where: { monitored: true, NOT: { tags: { isEmpty: true } } },
     select: { tags: true },
   });
   const set = new Set<string>();

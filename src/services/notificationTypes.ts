@@ -1008,6 +1008,10 @@ const emailRecipientsSchema = z
     recipientUserIds: z.array(z.string().max(100)).max(500).optional(), // Polaris users → their emails
     addresses: z.array(z.string().email().max(320)).max(100).optional(), // custom email addresses
     recipientRoles: z.array(z.string().max(100)).max(50).optional(), // Role IDS → every user holding them
+    // Map-region NAMES → every user tagged with one. Here as well as on the
+    // action because the To/Cc/Bcc token fields treat a pill the same wherever
+    // it is dropped — the same reason roles are resolvable in Cc/Bcc.
+    recipientRegions: z.array(z.string().max(100)).max(200).optional(),
   })
   .strict();
 

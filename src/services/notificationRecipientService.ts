@@ -319,9 +319,15 @@ export async function resolveEmailRecipients(r: EmailRecipients | null | undefin
     if (u.email) out.add(u.email.trim().toLowerCase());
   }
   // Roles are resolvable in Cc/Bcc too — the token fields treat a role pill the
-  // same wherever it's dropped, so the wire shape has to as well.
+  // same wherever it's dropped, so the wire shape has to as well. Region pills
+  // are the same story: a region resolves to users, and users have addresses.
   for (const u of await resolveUsersByRoles(r.recipientRoles)) {
     if (u.email) out.add(u.email.trim().toLowerCase());
+  }
+  if (r.recipientRegions?.length) {
+    for (const u of await resolveUsersByRegions(r.recipientRegions)) {
+      if (u.email) out.add(u.email.trim().toLowerCase());
+    }
   }
   return Array.from(out);
 }

@@ -21,7 +21,14 @@ import { resolve } from "node:path";
 import vm from "node:vm";
 
 type Pill = { kind: string; value: string; label: string; unknown?: boolean };
-type Recipients = { recipientUserIds?: string[]; addresses?: string[]; recipientRoles?: string[] };
+type Recipients = {
+  recipientUserIds?: string[];
+  addresses?: string[];
+  recipientRoles?: string[];
+  recipientRegions?: string[];
+  recipientDeviceRegion?: boolean;
+  recipientAssetContacts?: boolean;
+};
 
 let pillsToRecipients: (p: Pill[]) => Recipients;
 let recipientsToPills: (r: Recipients | null | undefined, users: unknown[], roles?: unknown[]) => Pill[];
@@ -177,5 +184,64 @@ describe("role pills", () => {
       addresses: ["noc@example.com"],
     };
     expect(pillsToRecipients(recipientsToPills(before, USERS, ROLES))).toEqual(before);
+  });
+});
+
+/**
+ * Regions and the two DYNAMIC recipients. These were checkboxes beside the
+ * recipient fields, which asked "who gets this alert?" in two places at once;
+ * as pills they round-trip through the same mapping as everyone else.
+ */
+describe("region + dynamic pills", () => {
+  it("maps a region pill to recipientRegions, deduped", () => {
+    expect(pillsToRecipients([
+      { kind: "region", value: "Nashville", label: "Nashville" },
+      { kind: "region", value: "Nashville", label: "Nashville" },
+      { kind: "region", value: "Memphis", label: "Memphis" },
+    ])).toEqual({ recipientRegions: ["Nashville", "Memphis"] });
+  });
+
+  it("does NOT lower-case a region — it is a catalogue name, not an address", () => {
+    // Addresses normalize; a region name is matched against stored region tags.
+    expect(pillsToRecipients([{ kind: "region", value: "Nashville", label: "Nashville" }]))
+      .toEqual({ recipientRegions: ["Nashville"] });
+  });
+
+  it("maps each dynamic pill to its flag", () => {
+    expect(pillsToRecipients([{ kind: "deviceRegion", value: "1", label: "x" }]))
+      .toEqual({ recipientDeviceRegion: true });
+    expect(pillsToRecipients([{ kind: "assetContacts", value: "1", label: "x" }]))
+      .toEqual({ recipientAssetContacts: true });
+  });
+
+  it("renders the dynamic flags back as pills, broadest first", () => {
+    const out = recipientsToPills(
+      { recipientDeviceRegion: true, recipientAssetContacts: true, recipientUserIds: ["u1"] },
+      USERS,
+      ROLES,
+    );
+    expect(out.map((p) => p.kind)).toEqual(["deviceRegion", "assetContacts", "user"]);
+    // The labels are what the operator reads in the To field.
+    expect(out[0].label).toMatch(/region/i);
+    expect(out[1].label).toMatch(/contact/i);
+  });
+
+  it("round-trips every kind at once", () => {
+    const before: Recipients = {
+      recipientDeviceRegion: true,
+      recipientAssetContacts: true,
+      recipientRegions: ["Nashville"],
+      recipientRoles: ["r-noc"],
+      recipientUserIds: ["u1"],
+      addresses: ["noc@example.com"],
+    };
+    expect(pillsToRecipients(recipientsToPills(before, USERS, ROLES))).toEqual(before);
+  });
+
+  it("omits a false flag rather than storing it", () => {
+    // A dropped pill must leave the key absent — `false` and absent mean the
+    // same thing to the server, but absent is what an untouched rule looks like.
+    expect(recipientsToPills({ recipientDeviceRegion: false }, USERS, ROLES)).toEqual([]);
+    expect(pillsToRecipients([])).toEqual({});
   });
 });

@@ -409,18 +409,40 @@ describe("previewContactAssets", () => {
     prismaMock.asset.findMany.mockResolvedValue([]);
   });
 
-  it("evaluates a condition over the fleet and counts the matches", async () => {
+  it("evaluates a condition over the fleet and counts the MONITORED matches", async () => {
     prismaMock.asset.findMany
       .mockResolvedValueOnce([
         { id: "a1", location: "Nashville Plant" },
         { id: "a2", location: "Knoxville Yard" },
       ])
       // the sample read for the matched ids
-      .mockResolvedValueOnce([{ id: "a1", hostname: "SW1", ipAddress: null, assetType: "switch" }]);
+      .mockResolvedValueOnce([
+        { id: "a1", hostname: "SW1", ipAddress: null, assetType: "switch", monitored: true },
+      ]);
 
     const out = await previewContactAssets({ assetCondition: COND("location", "contains", "nashville") });
     expect(out.matchCount).toBe(1);
+    expect(out.unmonitoredCount).toBe(0);
     expect(out.sample.map((s) => s.id)).toEqual(["a1"]);
+    // `monitored` is a filter input, not something the caller renders.
+    expect(out.sample[0]).not.toHaveProperty("monitored");
+  });
+
+  it("counts unmonitored matches separately and keeps them out of the list", async () => {
+    // The filter DOES cover them — an event/change automation fires on an
+    // unmonitored device — so they're reported, just not offered as choices.
+    prismaMock.asset.findMany
+      .mockResolvedValueOnce([{ id: "a1" }, { id: "a2" }, { id: "a3" }])
+      .mockResolvedValueOnce([
+        { id: "a1", hostname: "SW1", ipAddress: null, assetType: "switch", monitored: true },
+        { id: "a2", hostname: "OLD1", ipAddress: null, assetType: "server", monitored: false },
+        { id: "a3", hostname: "OLD2", ipAddress: null, assetType: "server", monitored: false },
+      ]);
+
+    const out = await previewContactAssets({ assetCondition: COND("status", "notEquals", "decommissioned") });
+    expect(out.matchCount).toBe(1);
+    expect(out.unmonitoredCount).toBe(2);
+    expect(out.sample.map((s) => s.hostname)).toEqual(["SW1"]);
   });
 
   it("joins the FortiGate sighting relation only when a condition asks for it", async () => {
@@ -435,7 +457,7 @@ describe("previewContactAssets", () => {
 
   it("reads an address-only contact as covering nothing, with no fleet read", async () => {
     const out = await previewContactAssets({});
-    expect(out).toEqual({ matchCount: 0, sample: [] });
+    expect(out).toEqual({ matchCount: 0, unmonitoredCount: 0, sample: [] });
     expect(prismaMock.asset.findMany).not.toHaveBeenCalled();
   });
 
@@ -443,8 +465,8 @@ describe("previewContactAssets", () => {
     prismaMock.asset.findMany
       .mockResolvedValueOnce([{ id: "a1", location: "Nashville" }])
       .mockResolvedValueOnce([
-        { id: "a1", hostname: "SW1", ipAddress: null, assetType: "switch" },
-        { id: "pinned", hostname: "SRV9", ipAddress: null, assetType: "server" },
+        { id: "a1", hostname: "SW1", ipAddress: null, assetType: "switch", monitored: true },
+        { id: "pinned", hostname: "SRV9", ipAddress: null, assetType: "server", monitored: true },
       ]);
     const out = await previewContactAssets({
       assetCondition: COND("location", "contains", "nashville"),

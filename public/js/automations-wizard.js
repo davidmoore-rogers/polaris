@@ -63,22 +63,35 @@ function _looksLikeDeviceId(tag) {
 // nothing, so tests/unit/automationRecipientPills.test.ts can pull them off
 // window.PolarisAutomationRecipients (the PolarisAutomationSentences idiom).
 
+/**
+ * The two DYNAMIC recipient kinds: they name no address or account, they name a
+ * RULE for finding one at fire time from the triggering asset. They were
+ * checkboxes sitting under the recipient fields, which put "who gets this" in
+ * two places at once; as pills they read in the same list as everyone else.
+ * Their `value` is a constant — one of each is meaningful, so the pill's
+ * identity IS its kind.
+ */
+var DYNAMIC_PILL_KINDS = { deviceRegion: "recipientDeviceRegion", assetContacts: "recipientAssetContacts" };
+
 /** Pills → the payload halves. Order preserved, duplicates dropped. */
 function pillsToRecipients(pills) {
-  var userIds = [], addresses = [], roles = [];
+  var userIds = [], addresses = [], roles = [], regions = [];
+  var out = {};
   (pills || []).forEach(function (p) {
     if (!p || !p.value) return;
+    if (DYNAMIC_PILL_KINDS[p.kind]) { out[DYNAMIC_PILL_KINDS[p.kind]] = true; return; }
     if (p.kind === "user") { if (userIds.indexOf(p.value) === -1) userIds.push(p.value); }
     else if (p.kind === "role") { if (roles.indexOf(p.value) === -1) roles.push(p.value); }
+    else if (p.kind === "region") { if (regions.indexOf(p.value) === -1) regions.push(p.value); }
     else {
       var a = String(p.value).trim().toLowerCase();
       if (a && addresses.indexOf(a) === -1) addresses.push(a);
     }
   });
-  var out = {};
   if (userIds.length) out.recipientUserIds = userIds;
   if (addresses.length) out.addresses = addresses;
   if (roles.length) out.recipientRoles = roles;
+  if (regions.length) out.recipientRegions = regions;
   return out;
 }
 
@@ -91,6 +104,18 @@ function recipientsToPills(rec, users, roles) {
   var roleById = {};
   (roles || []).forEach(function (r) { roleById[r.id] = r; });
   var out = [];
+  // Dynamic entries first: they're the broadest thing in the list, and reading
+  // "everyone in the device's region, plus Jane" in that order matches how an
+  // operator describes it.
+  if (rec && rec.recipientDeviceRegion) {
+    out.push({ kind: "deviceRegion", value: "1", label: "Asset’s Region Users" });
+  }
+  if (rec && rec.recipientAssetContacts) {
+    out.push({ kind: "assetContacts", value: "1", label: "Asset’s Responsible Contacts" });
+  }
+  ((rec && rec.recipientRegions) || []).forEach(function (name) {
+    out.push({ kind: "region", value: name, label: name });
+  });
   ((rec && rec.recipientRoles) || []).forEach(function (id) {
     // Roles are stored by ID, so a renamed role keeps routing; a DELETED one
     // survives as an unknown pill rather than vanishing on the next save.
@@ -1247,7 +1272,14 @@ async function openAutomationWizard(existing, opts) {
       var rows = (res.matches || []).slice(0, 15).map(function (m) {
         return '<tr><td>' + escapeHtml(m.hostname || m.assetId || "") + '</td></tr>';
       }).join("");
-      box.innerHTML = '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> device(s) match this filter.</p>' +
+      // MONITORED devices are what the list and the count report — those are
+      // what an operator is choosing between. The unmonitored remainder is
+      // stated rather than hidden: the filter does select them, and event and
+      // change triggers fire on them.
+      var un = res.unmonitoredCount || 0;
+      box.innerHTML = '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> monitored device(s) match this filter.' +
+          (un ? ' <span style="color:var(--color-text-tertiary)">(+' + un + ' unmonitored — only event and change triggers fire on those.)</span>' : "") +
+        '</p>' +
         (rows ? '<div class="table-wrapper" style="max-height:180px;overflow:auto"><table><tbody>' + rows + '</tbody></table></div>' +
           (res.totalEvaluated > 15 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 15) + ' more.</p>' : "") : "");
     } catch (err) {
@@ -3264,13 +3296,23 @@ async function openAutomationWizard(existing, opts) {
   function canReadContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "read"); }
   function canAddContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "write"); }
 
+  // What each pill kind prints ahead of its label, and what its tooltip says.
+  // The qualifier is what keeps a region called "Nashville" from reading like a
+  // person called "Nashville" in a list that mixes both.
+  var PILL_QUALIFIER = { role: "role:", region: "region:", deviceRegion: "dynamic:", assetContacts: "dynamic:" };
+  var PILL_TITLE = {
+    region: "Every user tagged with this region",
+    deviceRegion: "At fire time: the users whose region tags match the TRIGGERING device’s region",
+    assetContacts: "At fire time: the address-book contacts whose device filter covers the TRIGGERING device",
+  };
+
   function pillHtml(p) {
     var cls = "tag-chip" + (p.unknown ? " na-unknown" : "");
     var title = p.kind === "user"
       ? (p.unknown ? "This user account no longer exists" : "Polaris user account")
       : p.kind === "role"
         ? (p.unknown ? "This role no longer exists" : "Every user holding this role")
-        : p.value;
+        : PILL_TITLE[p.kind] || p.value;
     // The save affordance only makes sense for a typed address that isn't
     // already in the book, and only for someone who may add one.
     var showSave = p.kind === "address" && canAddContacts() &&
@@ -3279,13 +3321,41 @@ async function openAutomationWizard(existing, opts) {
         'data-value="' + escapeHtml(p.value) + '" data-label="' + escapeHtml(p.label) + '" ' +
         (p.unknown ? 'data-unknown="1" ' : "") +
         'title="' + escapeHtml(title) + '">' +
-      (p.kind === "role" ? '<span style="opacity:.6;font-size:.85em">role:</span> ' : "") +
+      (PILL_QUALIFIER[p.kind]
+        ? '<span style="opacity:.6;font-size:.85em">' + PILL_QUALIFIER[p.kind] + '</span> '
+        : "") +
       escapeHtml(p.label) +
       (showSave
         ? '<button type="button" class="na-chip-save" data-na-save title="Save to address book" aria-label="Save to address book">&plus;</button>'
         : "") +
       '<button type="button" class="tag-chip-delete" data-na-del aria-label="Remove recipient">&times;</button>' +
     "</span>";
+  }
+
+  /**
+   * May a pill of this kind live in this field? The two dynamic kinds are
+   * To-only: the wire shape has no per-field slot for them (they're flags on the
+   * ACTION, while Cc/Bcc are EmailRecipients lists), and at fire time the
+   * expander folds contact addresses into the To owner map. Allowing the drop
+   * would look like it worked and then send to nobody.
+   */
+  function pillAllowedInField(kind, field) {
+    return !DYNAMIC_PILL_KINDS[kind] || field === "to";
+  }
+
+  /**
+   * One address-book picker entry → a pill. The picker's `source` is the
+   * vocabulary: `user` and the address-shaped sources it always had, plus the
+   * Regions tab's `region` and the two dynamic entries.
+   */
+  function pickerEntryToPill(e) {
+    if (!e) return null;
+    if (e.source === "region") return { kind: "region", value: e.id, label: e.id };
+    if (e.source === "deviceRegion") return { kind: "deviceRegion", value: "1", label: e.name };
+    if (e.source === "assetContacts") return { kind: "assetContacts", value: "1", label: e.name };
+    if (e.source === "user") return { kind: "user", value: e.id, label: e.name || e.email };
+    if (!e.email) return null;
+    return { kind: "address", value: e.email, label: e.name ? e.name + " <" + e.email + ">" : e.email };
   }
 
   function recipBoxHtml(field, label, pills, withBook) {
@@ -3477,12 +3547,16 @@ async function openAutomationWizard(existing, opts) {
         if (!res) return;
         var dest = host.querySelector('.na-recip-box[data-field="' + res.field + '"]');
         if (!dest) return;
-        var added = 0;
+        var added = 0, refused = 0;
         res.entries.forEach(function (e) {
-          if (addPill(dest, e.source === "user"
-            ? { kind: "user", value: e.id, label: e.name || e.email }
-            : { kind: "address", value: e.email, label: e.name ? e.name + " <" + e.email + ">" : e.email })) added++;
+          var p = pickerEntryToPill(e);
+          if (!p) return;
+          if (!pillAllowedInField(p.kind, res.field)) { refused++; return; }
+          if (addPill(dest, p)) added++;
         });
+        if (refused) {
+          showToast("“Asset’s …” recipients can only go in To — they resolve per alert, and Cc/Bcc are fixed lists", "error");
+        }
         if (added) onChange();
       }
     });
@@ -3509,6 +3583,9 @@ async function openAutomationWizard(existing, opts) {
       // Scoped to THIS action's fields — a pill must not jump between two
       // Notify actions, whose recipients are unrelated.
       if (!box || !host.contains(box) || !_naDragEl || _naDragEl.parentNode === box) return;
+      // No cue for a field this kind can't live in, so the drop is refused
+      // before the operator lets go rather than after.
+      if (!pillAllowedInField(_naDragEl.getAttribute("data-kind"), box.getAttribute("data-field"))) return;
       ev.preventDefault();
       ev.dataTransfer.dropEffect = "move";
       if (_naDragCue !== box) {
@@ -3527,6 +3604,13 @@ async function openAutomationWizard(existing, opts) {
         label: _naDragEl.getAttribute("data-label") || "",
         unknown: _naDragEl.hasAttribute("data-unknown"),
       };
+      if (!pillAllowedInField(p.kind, box.getAttribute("data-field"))) {
+        // Keep the pill where it was: it resolves per alert, and Cc/Bcc are
+        // fixed lists with no slot for it in the wire shape.
+        showToast("“" + p.label + "” can only be a To recipient", "error");
+        naClearDrag();
+        return;
+      }
       var moved = addPill(box, p);
       _naDragEl.remove();       // a move, not a copy — remove either way, since
       naClearDrag();            // a duplicate in the destination means it's there
@@ -3629,15 +3713,20 @@ async function openAutomationWizard(existing, opts) {
             '<p class="hint na-reach" style="margin:4px 0 0"></p>' +
             "</div>";
         }
-        // Device-region routing: match users' region tags against the
-        // TRIGGERING asset's own region: tag(s) at fire time — works with any
-        // device filter (no region: tag needed on the scope).
-        h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-device-region"' + (action.recipientDeviceRegion ? " checked" : "") + '> …or users associated with the triggering device’s region (its region: tag)</label>';
-        // Address-book ownership: the contacts whose device filter covers the
-        // triggering asset. Email only — a contact is an address, not an
-        // account, so there is no push endpoint behind it.
-        if (isEmailType(ch.type)) {
-          h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-asset-contacts"' + (action.recipientAssetContacts ? " checked" : "") + '> …or the contacts responsible for the triggering device (Address Book)</label>';
+        // Device-region routing (match users' region tags against the TRIGGERING
+        // asset's own region: tag at fire time) and address-book ownership (the
+        // contacts whose device filter covers it) are RECIPIENTS, so on email
+        // they're pills in the To field alongside everyone else — added from the
+        // address-book picker's Regions tab. They were checkboxes here, which
+        // split "who gets this alert" across two controls and left the To field
+        // looking empty when the answer was "whoever owns the box".
+        //
+        // Push keeps the device-region CHECKBOX: that branch has no token field
+        // to put a pill in, and its recipients are the account multi-select.
+        // Asset contacts stay email-only either way — a contact is an address,
+        // not an account, so there is no push endpoint behind it.
+        if (!isEmailType(ch.type)) {
+          h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-device-region"' + (action.recipientDeviceRegion ? " checked" : "") + '> …or users associated with the triggering device’s region (its region: tag)</label>';
         }
         // Legacy scope-region routing (replaced by device-region in the
         // builder): rendered ONLY when the edited action already carries it,
@@ -3839,6 +3928,11 @@ async function openAutomationWizard(existing, opts) {
         if (to.recipientUserIds) a.recipientUserIds = to.recipientUserIds;
         if (to.addresses) a.addresses = to.addresses;
         if (to.recipientRoles) a.recipientRoles = to.recipientRoles;
+        if (to.recipientRegions) a.recipientRegions = to.recipientRegions;
+        // The two dynamic pills — on an email action these REPLACE the old
+        // checkboxes, so they're collected from the To field and nowhere else.
+        if (to.recipientDeviceRegion) a.recipientDeviceRegion = true;
+        if (to.recipientAssetContacts) a.recipientAssetContacts = true;
       }
       // Push broadcast modes. "All users" subsumes everything, so the narrower
       // pickers aren't collected under it — persisting a stale user list the UI
@@ -3861,10 +3955,9 @@ async function openAutomationWizard(existing, opts) {
         var pushRoles = collectRoles(box);
         if (pushRoles.length) a.recipientRoles = pushRoles;
       }
+      // Push only — the email branch carries this as a To pill (above).
       var devRegEl = box.querySelector(".na-device-region");
       if (devRegEl && devRegEl.checked) a.recipientDeviceRegion = true;
-      var acEl = box.querySelector(".na-asset-contacts");
-      if (acEl && acEl.checked) a.recipientAssetContacts = true;
       // Legacy scope-region checkbox renders only on actions that already
       // carried the flag — unchecking it drops the flag deliberately.
       var regEl = box.querySelector(".na-scope-region");

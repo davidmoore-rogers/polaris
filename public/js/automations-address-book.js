@@ -384,10 +384,22 @@
         previewTimer = setTimeout(function () {
           api.contacts.preview(body).then(function (r) {
             var n = r.matchCount || 0;
-            if (!n) { el.textContent = "No devices match."; return; }
+            var un = r.unmonitoredCount || 0;
+            // The unmonitored remainder is stated, not hidden: the filter does
+            // cover those devices, and an event or change automation fires on
+            // them — they're just not what the operator is choosing between.
+            var extra = un
+              ? ' <span class="hint">(+' + un + " unmonitored device" + (un === 1 ? "" : "s") + " also covered)</span>"
+              : "";
+            if (!n) {
+              el.innerHTML = un
+                ? "No monitored devices match." + extra
+                : "No devices match.";
+              return;
+            }
             var names = (r.sample || []).slice(0, 8).map(function (a) { return a.hostname || a.ipAddress || a.id; });
-            el.innerHTML = '<strong>' + n + '</strong> device' + (n === 1 ? "" : "s") + " — " +
-              escapeHtml(names.join(", ")) + (n > names.length ? ", …" : "");
+            el.innerHTML = '<strong>' + n + '</strong> monitored device' + (n === 1 ? "" : "s") + " — " +
+              escapeHtml(names.join(", ")) + (n > names.length ? ", …" : "") + extra;
           }).catch(function (err) { el.textContent = (err && err.message) || "Preview failed."; });
         }, 400);
       }
@@ -524,18 +536,69 @@
 
   // ─── Picker surface (opened from the wizard's recipient fields) ───────────
 
+  /**
+   * The two DYNAMIC recipients — entries that name no address but a RULE for
+   * finding one from the triggering device at fire time. They were checkboxes
+   * under the wizard's recipient fields, which asked "who gets this?" in two
+   * places; here they sit in the same list as everyone else and come back as
+   * pills. `id` is fixed because one of each is meaningful.
+   */
+  var DYNAMIC_RECIPIENTS = [
+    {
+      source: "deviceRegion",
+      id: "deviceRegion",
+      name: "Asset’s Region Users",
+      description: "Every user whose region tags match the triggering device’s own region: tag",
+    },
+    {
+      source: "assetContacts",
+      id: "assetContacts",
+      name: "Asset’s Responsible Contacts",
+      description: "The address-book contacts whose device filter covers the triggering device",
+    },
+  ];
+
   function pickerBodyHtml() {
     return '' +
-      '<div class="form-group" style="margin-bottom:8px">' +
-        '<input type="text" class="input" id="ab-pick-search" autocomplete="off" spellcheck="false" ' +
-               'placeholder="Search people, contacts and lists…">' +
+      // Two tabs rather than one merged list: people are SEARCHED (typeahead over
+      // users, contacts and the directory) while regions are BROWSED (a short
+      // fixed catalogue), and a search box over a dozen region names is noise.
+      '<div class="page-tabs" id="ab-pick-tabs" style="margin-bottom:10px">' +
+        '<button type="button" class="page-tab active" data-ab-tab="people">People</button>' +
+        '<button type="button" class="page-tab" data-ab-tab="regions">Regions</button>' +
       '</div>' +
-      '<div id="ab-pick-results"><p class="empty-state">Loading…</p></div>';
+      '<div data-ab-pane="people">' +
+        '<div class="form-group" style="margin-bottom:8px">' +
+          '<input type="text" class="input" id="ab-pick-search" autocomplete="off" spellcheck="false" ' +
+                 'placeholder="Search people, contacts and lists…">' +
+        '</div>' +
+        '<div id="ab-pick-results"><p class="empty-state">Loading…</p></div>' +
+      '</div>' +
+      '<div data-ab-pane="regions" style="display:none">' +
+        '<p class="hint" style="margin-top:0">Pick a region to reach every user tagged with it, or one of the two ' +
+          '<strong>dynamic</strong> entries, which resolve from the device that triggered the alert.</p>' +
+        '<div id="ab-pick-regions"><p class="empty-state">Loading…</p></div>' +
+      '</div>';
   }
 
   function sourceBadge(src) {
-    var label = src === "user" ? "Polaris user" : src === "contact" ? "Contact" : src === "entra" ? "Entra" : "Directory";
+    var label = src === "user" ? "Polaris user"
+      : src === "contact" ? "Contact"
+        : src === "entra" ? "Entra"
+          : src === "region" ? "Region"
+            : (src === "deviceRegion" || src === "assetContacts") ? "Dynamic"
+              : "Directory";
     return '<span class="badge" style="font-size:0.7rem">' + escapeHtml(label) + "</span>";
+  }
+
+  /**
+   * Stable selection key. People key on the ADDRESS (so the same mailbox reached
+   * as a user and as a contact is one selection, which is what the search's own
+   * dedupe already assumes); region and dynamic entries have no address, so they
+   * key on source + id.
+   */
+  function pickKey(e) {
+    return e.email ? String(e.email).toLowerCase() : e.source + "|" + e.id;
   }
 
   /**
@@ -546,9 +609,10 @@
   function openPicker(opts) {
     var field = (opts && opts.field) || "to";
     return new Promise(function (resolve) {
-      var chosen = {};       // email → entry
+      var chosen = {};       // pickKey → entry
       var settled = null;
-      var entries = [];
+      var entries = [];       // People pane (search results)
+      var regionEntries = []; // Regions pane (one row per map region)
 
       var ui = buildOverlay(
         Z_PICKER,
@@ -570,30 +634,50 @@
       var defBtn = root.querySelector('[data-ab="add-' + field + '"]');
       if (defBtn) { defBtn.classList.remove("btn-secondary"); defBtn.classList.add("btn-primary"); }
 
+      /** One selectable row, shared by both panes so a region reads like a person. */
+      function pickRow(en) {
+        var key = pickKey(en);
+        return '<tr>' +
+          '<td><input type="checkbox" data-ab-pick="' + escapeHtml(key) + '"' + (chosen[key] ? " checked" : "") + "></td>" +
+          "<td>" + escapeHtml(en.name || "—") + "</td>" +
+          '<td class="mono">' + escapeHtml(en.email || "") + "</td>" +
+          "<td>" + escapeHtml(en.description || "") + "</td>" +
+          "<td>" + sourceBadge(en.source) + "</td>" +
+          "<td>" + (en.source === "contact" && en.owned !== false && canWrite()
+            ? '<button class="btn btn-secondary btn-sm" data-ab-pedit="' + escapeHtml(en.id) + '">Edit</button>'
+            : "") + "</td>" +
+        "</tr>";
+      }
+
+      function pickTable(rows) {
+        return '<div class="table-wrapper"><table><thead><tr>' +
+          '<th style="width:36px"></th><th style="width:220px">Name</th><th style="width:250px">Email</th>' +
+          '<th>Description</th><th style="width:110px">Source</th><th style="width:110px"></th>' +
+          '</tr></thead><tbody>' + rows.join("") + "</tbody></table></div>";
+      }
+
       function render() {
         var box = q("#ab-pick-results");
         if (!entries.length) {
           box.innerHTML = '<p class="empty-state">No matches.</p>';
           return;
         }
-        box.innerHTML = '<div class="table-wrapper"><table><thead><tr>' +
-          '<th style="width:36px"></th><th style="width:200px">Name</th><th style="width:250px">Email</th>' +
-          '<th>Description</th><th style="width:110px">Source</th><th style="width:110px"></th>' +
-          '</tr></thead><tbody>' +
-          entries.map(function (e) {
-            var on = !!chosen[e.email.toLowerCase()];
-            return '<tr>' +
-              '<td><input type="checkbox" data-ab-pick="' + escapeHtml(e.email) + '"' + (on ? " checked" : "") + "></td>" +
-              "<td>" + escapeHtml(e.name || "—") + "</td>" +
-              '<td class="mono">' + escapeHtml(e.email) + "</td>" +
-              "<td>" + escapeHtml(e.description || "") + "</td>" +
-              "<td>" + sourceBadge(e.source) + "</td>" +
-              "<td>" + (e.source === "contact" && e.owned !== false && canWrite()
-                ? '<button class="btn btn-secondary btn-sm" data-ab-pedit="' + escapeHtml(e.id) + '">Edit</button>'
-                : "") + "</td>" +
-            "</tr>";
-          }).join("") +
-          "</tbody></table></div>";
+        box.innerHTML = pickTable(entries.map(pickRow));
+      }
+
+      /**
+       * The Regions pane: the two dynamic entries first — they're what an
+       * operator reaches for most, and they need no region catalogue at all —
+       * then one row per operator-drawn map region.
+       */
+      function renderRegions() {
+        var box = q("#ab-pick-regions");
+        if (!box) return;
+        var rows = DYNAMIC_RECIPIENTS.map(pickRow).concat(regionEntries.map(pickRow));
+        box.innerHTML = pickTable(rows) +
+          (regionEntries.length
+            ? ""
+            : '<p class="hint" style="margin:8px 0 0">No map regions are defined yet — draw them on the Device Map to route by region.</p>');
       }
 
       async function load(term) {
@@ -608,6 +692,20 @@
         render();
       }
 
+      // Tab switching. Both panes stay in the DOM, so the People search term and
+      // the current selection survive a look at the Regions list.
+      root.querySelectorAll("[data-ab-tab]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var want = btn.getAttribute("data-ab-tab");
+          root.querySelectorAll("[data-ab-tab]").forEach(function (b) {
+            b.classList.toggle("active", b === btn);
+          });
+          root.querySelectorAll("[data-ab-pane]").forEach(function (pane) {
+            pane.style.display = pane.getAttribute("data-ab-pane") === want ? "" : "none";
+          });
+        });
+      });
+
       var timer = null;
       q("#ab-pick-search").addEventListener("input", function () {
         var term = this.value.trim();
@@ -618,10 +716,14 @@
       root.addEventListener("change", function (ev) {
         var cb = ev.target.closest && ev.target.closest("[data-ab-pick]");
         if (!cb) return;
-        var email = cb.getAttribute("data-ab-pick");
-        var entry = entries.find(function (e) { return e.email === email; });
-        if (cb.checked && entry) chosen[email.toLowerCase()] = entry;
-        else delete chosen[email.toLowerCase()];
+        var key = cb.getAttribute("data-ab-pick");
+        // Both panes' pools, so a selection survives switching tabs — every
+        // paint re-reads the checkbox state from `chosen`.
+        var pool = entries.concat(DYNAMIC_RECIPIENTS, regionEntries);
+        var entry = null;
+        for (var i = 0; i < pool.length; i++) if (pickKey(pool[i]) === key) entry = pool[i];
+        if (cb.checked && entry) chosen[key] = entry;
+        else delete chosen[key];
       });
 
       root.addEventListener("click", async function (ev) {
@@ -649,13 +751,24 @@
       ["to", "cc", "bcc"].forEach(function (f) {
         root.querySelector('[data-ab="add-' + f + '"]').addEventListener("click", function () {
           var picked = Object.keys(chosen).map(function (k) { return chosen[k]; });
-          if (!picked.length) { showToast("Select at least one address", "error"); return; }
+          if (!picked.length) { showToast("Select at least one recipient", "error"); return; }
           settled = { field: f, entries: picked };
           ui.close();
         });
       });
 
       load("");
+      // The region catalogue rides the filter-schema payload (which already
+      // carries options.regions from listScopeOptions), so the picker needs no
+      // second endpoint and no permission the address book lacks.
+      loadFilterSchema().then(function (schema) {
+        regionEntries = ((schema.options && schema.options.regions) || []).map(function (name) {
+          return { source: "region", id: name, name: name, description: "Every user tagged with this region" };
+        });
+        renderRegions();
+      }).catch(function () {
+        renderRegions(); // degrade to the two dynamic entries — they need no catalogue
+      });
     });
   }
 
