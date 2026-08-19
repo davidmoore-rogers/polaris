@@ -964,6 +964,11 @@ const api = {
     // Dash wallboard (unauthenticated read-only /dash surface) toggle + IP scope.
     dashGet:              ()      => request("GET",  "/server-settings/dash"),
     dashPut:              (body)  => request("PUT",  "/server-settings/dash", body),
+    // Local login source-IP restriction (login form + password endpoints).
+    // The GET also reports the caller's IP as Polaris resolves it, which is
+    // what reveals a trust-proxy misconfiguration before the scope is trusted.
+    loginAccessGet:       ()      => request("GET",  "/server-settings/login-access"),
+    loginAccessPut:       (body)  => request("PUT",  "/server-settings/login-access", body),
     // nginx GUI (proxy mode is now the only mode). Six controls + cert rotation.
     proxyGet:             ()      => request("GET",  "/server-settings/proxy"),
     proxyPut:             (body)  => request("PUT",  "/server-settings/proxy", body),

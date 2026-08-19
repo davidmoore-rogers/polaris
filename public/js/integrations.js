@@ -1492,9 +1492,8 @@ function _classSettingsOverlay(flatSettings, classStreams) {
     if (fields.mib && Object.prototype.hasOwnProperty.call(cell, "mibId")            && cell.mibId  != null) out[fields.mib]      = cell.mibId;
     if (fields.cred && Object.prototype.hasOwnProperty.call(cell, "credentialId")    && cell.credentialId != null) out[fields.cred] = cell.credentialId;
     if (fields.failure && Object.prototype.hasOwnProperty.call(cell, "failureThreshold") && cell.failureThreshold != null) out[fields.failure] = cell.failureThreshold;
-    if (fields.fastConfirm && Object.prototype.hasOwnProperty.call(cell, "fastConfirmIntervalSec") && cell.fastConfirmIntervalSec != null) out[fields.fastConfirm] = cell.fastConfirmIntervalSec;
   }
-  pickStream("responseTime", { poll: "responseTimePolling", interval: "intervalSeconds",            timeout: "probeTimeoutMs",       mib: "responseTimeMibId", cred: "responseTimeCredentialId", failure: "failureThreshold", fastConfirm: "fastConfirmIntervalSec" });
+  pickStream("responseTime", { poll: "responseTimePolling", interval: "intervalSeconds",            timeout: "probeTimeoutMs",       mib: "responseTimeMibId", cred: "responseTimeCredentialId", failure: "failureThreshold" });
   pickStream("cpuMemory",    { poll: "cpuMemoryPolling",    interval: "cpuMemoryIntervalSeconds",   timeout: "cpuMemoryTimeoutMs",   mib: "cpuMemoryMibId",    cred: "cpuMemoryCredentialId" });
   pickStream("temperature",  { poll: "temperaturePolling",  interval: "temperatureIntervalSeconds", timeout: "temperatureTimeoutMs", mib: "temperatureMibId",  cred: "temperatureCredentialId" });
   pickStream("interfaces",   { poll: "interfacesPolling",   interval: "systemInfoIntervalSeconds",  timeout: "systemInfoTimeoutMs",  mib: "interfacesMibId",   cred: "interfacesCredentialId" });
@@ -1683,15 +1682,14 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
     // input events so the readout tracks any of the three fields live.
     var daCalc = window._polarisMonDownAfterCalc(
       settings.failureThreshold != null ? settings.failureThreshold : 3,
-      settings.fastConfirmIntervalSec != null ? settings.fastConfirmIntervalSec : 10,
+      settings[stream.intervalField] != null ? settings[stream.intervalField] : 60,
       settings.probeTimeoutMs != null ? settings.probeTimeoutMs : 5000);
     failureHtml = '<div class="mon-downafter-group" data-mon-idprefix="' + escapeHtml(isPrimary ? "f-mon-" : idPrefix) + '" oninput="window._polarisMonDownAfterSync &amp;&amp; window._polarisMonDownAfterSync(this, event)">' +
       '<div class="form-group"><label>Declare Down after (seconds without an answer)</label>' +
         '<input type="number" class="mon-downafter-input" min="5" max="3600" step="1" style="width:140px" value="' + daCalc.realSec + '">' +
         '<p class="hint mon-downafter-note">' + escapeHtml(daCalc.note) + '</p>' +
       '</div>' +
-      numInput("failureThreshold", "Failure threshold (consecutive misses)", settings.failureThreshold, 3, 1, 100, "Consecutive failed probes before the asset is marked Down — and successes needed to recover back to Up.", false) +
-      numInput("fastConfirmIntervalSec", "Confirmation re-probe (seconds)", settings.fastConfirmIntervalSec, 10, 5, 300, "While a failure or recovery is being confirmed, probe this often instead of waiting a full interval, so time-to-Down stops being a multiple of the poll interval. Raised automatically if it's tighter than the probe timeout.", false) +
+      numInput("failureThreshold", "Failure threshold (consecutive misses)", settings.failureThreshold, 3, 1, 100, "Consecutive failed probes before the asset is marked Down — and successes needed to recover back to Up. Each miss after the first waits a full poll interval, so this multiplies the interval above.", false) +
     '</div>';
   }
 
@@ -1741,7 +1739,7 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
 
 /**
  * Keep the derived "Declare Down after" field and the two stored fields
- * (failureThreshold + fastConfirmIntervalSec) in agreement, and state the real
+ * (failureThreshold + the stream's poll interval) in agreement, and state the real
  * resulting time in the hint. Called from the group container's inline oninput
  * (input events bubble) and once after render.
  *
@@ -1766,32 +1764,32 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
  * point — an operator with a 30s SNMP timeout should see that their 10s
  * confirmation re-probe is really 30s, before they wonder why Down took 90.
  */
-window._polarisMonDownAfterCalc = function (thr, fastSec, timeoutMs) {
+window._polarisMonDownAfterCalc = function (thr, intervalSec, timeoutMs) {
   thr = Math.min(100, Math.max(1, Number(thr) > 0 ? Math.round(Number(thr)) : 3));
-  var fast = Number(fastSec) > 0 ? Math.round(Number(fastSec)) : 10;
+  var interval = Number(intervalSec) > 0 ? Math.round(Number(intervalSec)) : 60;
   var timeoutSec = Math.ceil((Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000) / 1000);
-  var effFast = Math.max(fast, timeoutSec, 5);
-  // Only the misses AFTER the first wait for the confirmation cadence; each miss
-  // itself costs up to the probe timeout.
-  var realSec = effFast * Math.max(0, thr - 1) + timeoutSec;
-  var floored = effFast > fast
-    ? " The " + fast + "s confirmation re-probe is raised to " + effFast + "s here — it can't be tighter than the " + timeoutSec + "s probe timeout."
-    : "";
+  // Every miss after the first waits a FULL poll interval — there is no
+  // confirmation re-probe (that was the fast-confirm cadence, removed
+  // 2026-08-19; in-run resolution is the ICMP loss sampler's job now and it
+  // feeds packet loss only, never this decision). The first miss itself costs
+  // up to the probe timeout.
+  var realSec = interval * Math.max(0, thr - 1) + timeoutSec;
   return {
     threshold: thr,
-    effFast: effFast,
+    interval: interval,
     timeoutSec: timeoutSec,
     realSec: realSec,
     note: "= " + thr + " consecutive missed probe" + (thr === 1 ? "" : "s") +
-      " ≈ " + realSec + "s from the first miss (each miss takes up to the " + timeoutSec + "s timeout)." +
-      " Recovery needs the same number of successes." + floored +
-      " Measured from the first missed probe — the wait for that first probe is the poll interval, not this.",
+      " ≈ " + realSec + "s from the first miss" +
+      (thr > 1 ? " (" + (thr - 1) + " × the " + interval + "s interval, plus up to the " + timeoutSec + "s timeout on the first)" : " (up to the " + timeoutSec + "s probe timeout)") + "." +
+      " Recovery needs the same number of successes." +
+      " Measured from the first missed probe — the wait for that first probe is another poll interval on top.",
   };
 };
 
 /**
  * Keep the derived "Declare Down after" field and the two stored fields
- * (failureThreshold + fastConfirmIntervalSec) in agreement. Called from the
+ * (failureThreshold + the stream's poll interval) in agreement. Called from the
  * group container's inline oninput — input events bubble, so editing any of the
  * three refreshes the readout.
  *
@@ -1804,23 +1802,25 @@ window._polarisMonDownAfterSync = function (group, ev) {
   if (!group) return;
   var prefix = group.getAttribute("data-mon-idprefix") || "";
   var thrEl  = document.getElementById(prefix + "failureThreshold");
-  var fastEl = document.getElementById(prefix + "fastConfirmIntervalSec");
+  var intEl  = document.getElementById(prefix + "intervalSeconds");
   var toEl   = document.getElementById(prefix + "probeTimeoutMs");
   var durEl  = group.querySelector(".mon-downafter-input");
   var note   = group.querySelector(".mon-downafter-note");
-  if (!thrEl || !fastEl || !durEl) return;
+  if (!thrEl || !intEl || !durEl) return;
   var timeoutMs = toEl ? Number(toEl.value) : 5000;
   var fromDuration = !!(ev && ev.target === durEl);
   var thr = Number(thrEl.value);
   if (fromDuration) {
     // A single confirmation is the floor — "Down on the first miss" is a
     // legitimate, if twitchy, choice.
-    var pre = window._polarisMonDownAfterCalc(thr, Number(fastEl.value), timeoutMs);
+    var pre = window._polarisMonDownAfterCalc(thr, Number(intEl.value), timeoutMs);
     var want = Number(durEl.value);
-    thr = Math.min(100, Math.max(1, Math.round((want > 0 ? want : pre.effFast) / pre.effFast)));
+    // Invert realSec = interval × (thr - 1) + timeout. A duration at or below
+    // the timeout means one miss is enough.
+    thr = Math.min(100, Math.max(1, Math.round((Math.max(0, (want > 0 ? want : pre.realSec) - pre.timeoutSec)) / pre.interval) + 1));
     thrEl.value = String(thr);
   }
-  var calc = window._polarisMonDownAfterCalc(thr, Number(fastEl.value), timeoutMs);
+  var calc = window._polarisMonDownAfterCalc(thr, Number(intEl.value), timeoutMs);
   if (!fromDuration) durEl.value = String(calc.realSec);
   if (note) note.textContent = calc.note;
 };
@@ -3916,7 +3916,6 @@ function _readIntegrationCadenceForm() {
   var out = {
     intervalSeconds:           n("intervalSeconds"),
     failureThreshold:          n("failureThreshold"),
-    fastConfirmIntervalSec:    n("fastConfirmIntervalSec"),
     probeTimeoutMs:            n("probeTimeoutMs"),
     cpuMemoryTimeoutMs:        n("cpuMemoryTimeoutMs"),
     temperatureTimeoutMs:      n("temperatureTimeoutMs"),
@@ -4022,7 +4021,6 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
     if (opts.timeoutMs        !== undefined) out.timeoutMs        = opts.timeoutMs;
     if (opts.mibId            !== undefined) out.mibId            = opts.mibId;
     if (opts.failureThreshold !== undefined) out.failureThreshold = opts.failureThreshold;
-    if (opts.fastConfirmIntervalSec !== undefined) out.fastConfirmIntervalSec = opts.fastConfirmIntervalSec;
     return out;
   }
   var streams = {
@@ -4033,7 +4031,6 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
       timeoutMs:        numVal("probeTimeoutMs"),
       mibId:            mibVal("responseTime"),
       failureThreshold: numVal("failureThreshold"),
-      fastConfirmIntervalSec: numVal("fastConfirmIntervalSec"),
     }),
     cpuMemory: cell({
       polling:         pollVal("cpuMemoryPolling"),

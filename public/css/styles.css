@@ -3500,6 +3500,43 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   align-items: center;
   gap: 10px;
 }
+/* Leading group: the asset panel's back/forward pair sits left of the title,
+   where a browser puts it, while the close button keeps the right edge. */
+.slideover-header-lead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.slideover-nav {
+  display: flex;
+  gap: 2px;
+}
+.slideover-nav[hidden] { display: none; }
+/* Deliberately NOT .btn-icon: the header's .btn-icon:hover rule is the close
+   button's red flash, which on a navigation control would read as destructive. */
+.slideover-nav-btn {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  /* Chevrons are thin at body size; the pair has to be hittable and readable
+     next to a 1rem heading. */
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 8px;
+  transition: color 0.15s, background 0.15s;
+}
+.slideover-nav-btn:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  background: var(--color-surface);
+}
+.slideover-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
 .slideover-meta {
   display: flex;
   flex-wrap: wrap;

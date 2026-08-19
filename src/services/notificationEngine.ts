@@ -410,7 +410,11 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
       return reduceReadings(rows, index, () => "", () => "", pick, agg);
     }
     case "responseTimeMs": case "uptimeSec": {
-      const rows = await prisma.assetMonitorSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, select: { assetId: true, timestamp: true, responseTimeMs: true, uptimeSec: true } });
+      // Response-time poll only (probeKind): the ICMP loss sampler writes a
+      // NULL responseTimeMs and never reads uptime, so its rows would only add
+      // scan cost — and an automation on response time must never see another
+      // transport's timing.
+      const rows = await prisma.assetMonitorSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since }, OR: [{ probeKind: null }, { probeKind: "primary" }] }, select: { assetId: true, timestamp: true, responseTimeMs: true, uptimeSec: true } });
       return reduceReadings(rows, index, () => "", () => "", (r) => r[trigger.metric] ?? null, agg);
     }
     case "probeLossPct": {

@@ -61,6 +61,13 @@ export interface MonitorSampleRow {
   error: string | null;
   /** Device sysUpTime in whole seconds (SNMP probes only); null otherwise. */
   uptimeSec?: number | null;
+  /**
+   * Which probe produced the row: omitted/null/"primary" = the response-time
+   * poll on the asset's configured transport, "icmp" = the packet-loss sampler
+   * (utils/lossSampler.ts). Loss counts every kind; response-time readers must
+   * filter to primary. Flushed straight through by createMany.
+   */
+  probeKind?: string | null;
 }
 
 export interface TelemetrySampleRow {

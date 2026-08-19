@@ -102,7 +102,12 @@ export async function readMonitorHistory(
   const sinceMs = since.getTime();
   if (tier === "detail") {
     const rows = await prisma.assetMonitorSample.findMany({
-      where: { assetId, timestamp: { gte: queryFrom, lte: until } },
+      // Response-time poll only, matching the hourly/daily rollups this same
+      // function reads at coarser tiers — otherwise the panel's packet-loss
+      // and sample counts would change meaning as the operator widened the
+      // range. The dense ICMP sampler rows serve the probeLossPct metric, the
+      // NOC Packet Loss widget and the alert-email loss chart.
+      where: { assetId, timestamp: { gte: queryFrom, lte: until }, OR: [{ probeKind: null }, { probeKind: "primary" }] },
       orderBy: { timestamp: "asc" },
       select: { timestamp: true, success: true, responseTimeMs: true, error: true },
     });
@@ -196,7 +201,10 @@ export async function readMonitorHistory(
  */
 export async function readLastMonitorSuccessAt(assetId: string, since: Date): Promise<Date | null> {
   const row = await prisma.assetMonitorSample.findFirst({
-    where: { assetId, success: true, timestamp: { gte: since } },
+    // Response-time poll only: a device whose SNMP agent is dead still answers
+    // ping, and counting that as a success would report the monitored service
+    // as recently healthy when it has not answered in hours.
+    where: { assetId, success: true, timestamp: { gte: since }, OR: [{ probeKind: null }, { probeKind: "primary" }] },
     orderBy: { timestamp: "desc" },
     select: { timestamp: true },
   });

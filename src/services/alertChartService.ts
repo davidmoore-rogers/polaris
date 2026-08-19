@@ -257,7 +257,10 @@ export async function sensorReadingDisplay(
 
 async function loadResponseTimes(assetId: string, since: Date): Promise<SparkPoint[]> {
   const rows = await prisma.assetMonitorSample.findMany({
-    where: { assetId, timestamp: { gte: since }, success: true, responseTimeMs: { not: null } },
+    // Response-time poll only. The NULL responseTimeMs on ICMP loss-sampler
+    // rows already excludes them here; the explicit probeKind filter is the
+    // stated contract rather than a side effect of that.
+    where: { assetId, timestamp: { gte: since }, success: true, responseTimeMs: { not: null }, OR: [{ probeKind: null }, { probeKind: "primary" }] },
     orderBy: { timestamp: "asc" },
     select: { timestamp: true, responseTimeMs: true },
   });
@@ -281,6 +284,10 @@ const LOSS_BUCKET_MS = 2 * 60 * 1000;
  */
 async function loadProbeLoss(assetId: string, since: Date): Promise<SparkPoint[]> {
   const rows = await prisma.assetMonitorSample.findMany({
+    // EVERY probeKind, deliberately — this is a loss chart, and the ICMP
+    // sampler exists to give it resolution through the warning/recovering
+    // windows. One of only three all-kinds readers (with probeLossQuery's two
+    // modes); everything else is response-time-poll only.
     where: { assetId, timestamp: { gte: since } },
     orderBy: { timestamp: "asc" },
     select: { timestamp: true, success: true },

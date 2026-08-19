@@ -147,6 +147,22 @@ instead.
 | `npm run typecheck` / `npm run lint` | `tsc --noEmit` / eslint |
 | `npm run db:migrate` | `prisma migrate dev` (create + apply migrations) |
 | `npm run db:seed` | Seed example data |
+
+`npm run db:seed` creates the admin account and some IP space but **no assets**, so
+every device-filter preview reads "0 devices" and the monitored-vs-unmonitored split
+has nothing to show. `prisma/seed-review-assets.ts` adds a handful of SYNTHETIC
+devices for that — a mix of monitored and unmonitored, with manufacturers, OS
+versions, departments, locations, `region:` tags, a sighting FortiGate, pinned
+interfaces and storage mounts, i.e. one value per picker the automations and
+address-book device filters offer. It is deliberately NOT wired into `db:seed`
+(nobody wants invented devices in a database they are about to point at a real
+fleet); run it by hand, and re-run it freely — it keys on hostname and updates
+rather than duplicating:
+
+```bash
+node --env-file=.env --import tsx/esm prisma/seed-review-assets.ts
+```
+
 | `npm run db:reset` | Drop + re-migrate + re-seed |
 | `npm run db:studio` | Prisma Studio DB browser |
 | `npm run check:docs` | Doc-index structural check (also runs as a pre-commit hook) |

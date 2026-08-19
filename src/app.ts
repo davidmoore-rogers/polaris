@@ -28,6 +28,8 @@ import { validateRuntimeConfiguration } from "./utils/runtimeConfig.js";
 import { isProxyMode } from "./utils/proxyMode.js";
 import { UPLOADS_DIR } from "./utils/paths.js";
 import { isAzureSsoConfiguredAsync, getSsoSettings } from "./services/azureAuthService.js";
+import { isLoginSourceAllowed } from "./services/loginAccessService.js";
+import { logEvent } from "./services/eventLogService.js";
 import { isOidcEnabled } from "./services/oidcAuthService.js";
 import { isEntraProxyLoginAvailable } from "./services/entraProxyAuthService.js";
 import { stripUntrustedEntraProxyHeaders } from "./api/middleware/entraProxyHeaders.js";
@@ -412,6 +414,55 @@ app.use("/api/v1/auth/azure/login", loginLimiter);
 // /api/v1/auth/entra-proxy routes). Defense in depth — the login route
 // re-validates trust itself and never relies on stripping alone.
 app.use(stripUntrustedEntraProxyHeaders);
+
+// ─── Local login source-IP gate ─────────────────────────────────────────────
+// Optional, default OFF (`loginAccessConfig` — Server Settings → Web Server →
+// Local Login Access). When enabled, the local login FORM and the password
+// endpoints answer only to allowed source IPs.
+//
+// Why both halves: /login.html is deliberately not in protectedPages (it is
+// the anti-lockout path when SSO is down, and "Skip login page" only redirects
+// PROTECTED pages), so gating the page alone would be cosmetic — the form is a
+// plain POST to a JSON API that anyone could curl. The page gate is UX; the
+// endpoint gate is the control.
+//
+// Scope: POST /auth/login + /auth/login/totp only. Those carry local AND LDAP
+// credentials — both are restricted, by design. Every SSO route (SAML, OIDC,
+// App Proxy) is untouched: SSO is the path that must keep working from
+// anywhere, which is what makes restricting this one safe.
+//
+// An unauthorized page request is DROPPED (socket destroyed, no response) —
+// the dashServer posture, so a scanner gets no confirmation that a local login
+// path exists. The API answers the SAME generic 401 a wrong password gets, for
+// the same reason: "you are on the wrong network" is a fact worth learning.
+// Fails OPEN on a settings read error (isLoginSourceAllowed) — a DB blip must
+// not become the lockout this feature exists to prevent.
+const LOGIN_CREDENTIAL_PATHS = new Set(["/api/v1/auth/login", "/api/v1/auth/login/totp"]);
+app.use(async (req, res, next) => {
+  const isLoginPage = req.path === "/login.html";
+  const isCredentialPost = req.method === "POST" && LOGIN_CREDENTIAL_PATHS.has(req.path);
+  if (!isLoginPage && !isCredentialPost) return next();
+
+  if (await isLoginSourceAllowed(req.ip ?? "")) return next();
+
+  if (isLoginPage) {
+    try {
+      req.socket?.destroy();
+    } catch {
+      /* connection already torn down */
+    }
+    return;
+  }
+  logEvent({
+    action: "auth.login.blocked_source",
+    resourceType: "user",
+    resourceName: typeof req.body?.username === "string" ? req.body.username : undefined,
+    level: "warning",
+    message: "Local login refused — source IP outside the configured login-access scope",
+    details: { ip: req.ip, userAgent: req.get("user-agent") || undefined },
+  });
+  return res.status(401).json({ error: "Invalid username or password" });
+});
 
 // HTTP → HTTPS redirect lived here in pre-Phase-4 Node-HTTPS mode. After
 // Phase 4, nginx owns redirects (configured in deploy/nginx/polaris.conf

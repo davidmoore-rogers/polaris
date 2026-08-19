@@ -17,6 +17,10 @@
  *   - Engine mode keeps 0%-loss assets (hysteresis recovery); widget mode
  *     (onlyLossy) hides them and orders lossiest-first.
  *   - assetIds scoping + the window bound.
+ *   - includeFullyDown (DISPLAY only): a 0-success asset reads 100% instead of
+ *     dropping off the widget, while the engine path still drops it.
+ *   - probeKind: this query counts EVERY kind, which is the entire reason the
+ *     ICMP loss sampler exists.
  */
 
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
@@ -43,18 +47,40 @@ function ago(minutesAgo: number): Date {
  * success flag at (pattern.length - i) minutes ago. Reads like a timeline —
  * "F F F S S" is "failed three minutes, then came back".
  */
-async function seedProbes(assetId: string, pattern: boolean[]): Promise<void> {
+async function seedProbes(assetId: string, pattern: boolean[], probeKind?: string): Promise<void> {
   await prisma.assetMonitorSample.createMany({
     data: pattern.map((success, i) => ({
       assetId,
       timestamp: ago(pattern.length - i),
       success,
-      responseTimeMs: success ? 10 : null,
+      responseTimeMs: success && !probeKind ? 10 : null,
+      ...(probeKind ? { probeKind } : {}),
     })),
   });
 }
 
 const F = false, S = true;
+
+/**
+ * Seed explicit rows at second granularity. The two-transport cases need the
+ * ordering to be unambiguous: `seedProbes` above is minute-granular per call, so
+ * calling it twice for one asset interleaves rows onto identical timestamps and
+ * the first-success anchor lands somewhere the test didn't intend.
+ */
+async function seedAt(
+  assetId: string,
+  rows: Array<{ secondsAgo: number; success: boolean; probeKind?: string }>,
+): Promise<void> {
+  await prisma.assetMonitorSample.createMany({
+    data: rows.map((r) => ({
+      assetId,
+      timestamp: new Date(Date.now() - r.secondsAgo * 1000),
+      success: r.success,
+      responseTimeMs: r.success && !r.probeKind ? 10 : null,
+      ...(r.probeKind ? { probeKind: r.probeKind } : {}),
+    })),
+  });
+}
 
 beforeAll(async () => {
   if (!dbReachable) return;
@@ -161,5 +187,82 @@ d("queryProbeLossRatios — mode + scoping contracts", () => {
       ],
     });
     expect(await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] })).toHaveLength(0);
+  });
+});
+
+d("queryProbeLossRatios — includeFullyDown (display only)", () => {
+  it("reads 100% for an asset that answered nothing in the window", async () => {
+    // Before this flag such an asset was dropped by the anchor (no first
+    // success to anchor to), so it VANISHED from the Packet Loss widget — which
+    // reads as "no loss", the opposite of the truth.
+    await seedProbes(A, Array(20).fill(F));
+
+    const rows = await queryProbeLossRatios({
+      sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: null, includeFullyDown: true,
+    });
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].total)).toBe(20);
+    expect(Number(rows[0].failed)).toBe(20);
+  });
+
+  it("still drops the fully-down asset without the flag (the engine path)", async () => {
+    // The engine must never see 100% here: asset-down owns a total outage, and a
+    // loss alert on top of it is the double-alert business rule 29 forbids.
+    await seedProbes(A, Array(20).fill(F));
+
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(rows).toHaveLength(0);
+  });
+
+  it("does not change the anchored reading for an asset that DID answer", async () => {
+    // The flag only adds the no-anchor case; a recovering device still reads 0%.
+    await seedProbes(A, [...Array(50).fill(F), ...Array(5).fill(S)]);
+
+    const rows = await queryProbeLossRatios({
+      sinceMinutes: 60, assetIds: [A], includeFullyDown: true,
+    });
+    expect(Number(rows[0].total)).toBe(5);
+    expect(Number(rows[0].failed)).toBe(0);
+  });
+});
+
+d("queryProbeLossRatios — probeKind", () => {
+  it("counts ICMP loss-sampler rows alongside the response-time poll", async () => {
+    // The whole point of the sampler: a 15-minute ratio divides ~90 samples
+    // instead of ~15. A success leads (so the anchor keeps everything), then
+    // 3 primary polls (1 failed) and 6 sampler pings (3 failed) → 4/10, not 1/4.
+    await seedAt(A, [
+      { secondsAgo: 300, success: S },                     // anchor
+      { secondsAgo: 240, success: F },
+      { secondsAgo: 180, success: S },
+      { secondsAgo: 120, success: S },
+      { secondsAgo: 230, success: F, probeKind: "icmp" },
+      { secondsAgo: 220, success: F, probeKind: "icmp" },
+      { secondsAgo: 210, success: F, probeKind: "icmp" },
+      { secondsAgo: 200, success: S, probeKind: "icmp" },
+      { secondsAgo: 190, success: S, probeKind: "icmp" },
+      { secondsAgo: 170, success: S, probeKind: "icmp" },
+    ]);
+
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0].total)).toBe(10);
+    expect(Number(rows[0].failed)).toBe(4);
+  });
+
+  it("lets a sampler probe anchor the window like any other success", async () => {
+    // The anchor asks "did anything answer", not "which probe answered": the
+    // sampler's ping is the first success, so the primary failures before it are
+    // an outage rather than loss.
+    await seedAt(A, [
+      { secondsAgo: 300, success: F },
+      { secondsAgo: 240, success: F },
+      { secondsAgo: 180, success: F },
+      { secondsAgo: 120, success: S, probeKind: "icmp" },
+      { secondsAgo: 60,  success: S, probeKind: "icmp" },
+    ]);
+
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0].total)).toBe(2);
+    expect(Number(rows[0].failed)).toBe(0);
   });
 });

@@ -237,7 +237,16 @@ function sqlMonitorHourly(): string {
       MIN("responseTimeMs") FILTER (WHERE success AND "responseTimeMs" IS NOT NULL),
       MAX("responseTimeMs") FILTER (WHERE success AND "responseTimeMs" IS NOT NULL)
     FROM "asset_monitor_samples"
+    -- Response-time poll ONLY. The ICMP loss sampler's rows (probeKind='icmp')
+    -- are deliberately excluded from every rollup: they appear only during
+    -- warning/recovering windows, so folding them into 400-day aggregates would
+    -- make historical loss non-comparable across time (a quiet month and an
+    -- incident-heavy month would be counted at different sampling rates), and
+    -- their NULL responseTimeMs contributes nothing to the avg/min/max anyway.
+    -- The sampler's resolution serves the detail-tier loss metric and ages out
+    -- with the detail retention window.
     WHERE "timestamp" >= $1
+      AND ("probeKind" IS NULL OR "probeKind" = 'primary')
     GROUP BY "assetId", bucket_start
     ON CONFLICT ("bucketStart", "assetId") DO UPDATE SET
       "sampleCount"       = EXCLUDED."sampleCount",

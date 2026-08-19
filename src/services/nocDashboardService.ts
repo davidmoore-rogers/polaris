@@ -769,7 +769,8 @@ export async function getSlowestResponse(limit: number | null = 100, assetIds: s
               row_number() OVER (PARTITION BY "assetId" ORDER BY "timestamp" DESC) AS rn
        FROM "asset_monitor_samples"
        WHERE "timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval
-         AND "responseTimeMs" IS NOT NULL${idClause}
+         AND "responseTimeMs" IS NOT NULL
+         AND ("probeKind" IS NULL OR "probeKind" = 'primary')${idClause}
      )
      SELECT "assetId", avg("responseTimeMs")::float AS avg_ms
      FROM recent
@@ -885,7 +886,11 @@ export async function getHighestTemperature(limit: number | null = 100, assetIds
  * than topping it for a full window (probeLossQuery's header explains why).
  */
 export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 15, assetIds: string[] | null = null): Promise<TopNRow[]> {
-  const rows = await queryProbeLossRatios({ sinceMinutes, assetIds, onlyLossy: true, limit });
+  // includeFullyDown: a device that answered nothing in the window pegs at 100%
+  // rather than dropping off the widget (which would read as "no loss"). Display
+  // only — the engine path must not, or a loss automation would double-alert an
+  // outage asset-down already owns.
+  const rows = await queryProbeLossRatios({ sinceMinutes, assetIds, onlyLossy: true, limit, includeFullyDown: true });
   const ordered = rows.map((r) => ({
     assetId: r.assetId,
     value: Math.round((Number(r.failed) / Number(r.total)) * 1000) / 10,

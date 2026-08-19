@@ -7,6 +7,11 @@
  * query is scoped to successes at/after the window start and ordered newest
  * first, and that a window with no successful detail sample returns null so
  * the caller can fall back to the rollup-derived value.
+ *
+ * Also pins the `probeKind` scope: only the response-time poll counts. A device
+ * whose SNMP agent has died still answers the ICMP loss sampler, and treating
+ * one of those pings as a success would report the monitored service as
+ * recently healthy when it has not answered in hours.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -35,7 +40,13 @@ describe("readLastMonitorSuccessAt", () => {
     expect(await readLastMonitorSuccessAt("asset-1", since)).toEqual(at);
 
     const args = findFirst.mock.calls[0][0];
-    expect(args.where).toEqual({ assetId: "asset-1", success: true, timestamp: { gte: since } });
+    expect(args.where).toEqual({
+      assetId: "asset-1",
+      success: true,
+      timestamp: { gte: since },
+      // Response-time poll only — NULL is the pre-sampler value and means primary.
+      OR: [{ probeKind: null }, { probeKind: "primary" }],
+    });
     expect(args.orderBy).toEqual({ timestamp: "desc" });
   });
 

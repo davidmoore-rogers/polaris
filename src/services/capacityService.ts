@@ -488,6 +488,15 @@ interface WorkloadModelInputs {
 // match the prior single-tier defaults.
 const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: WorkloadModelInputs) => number> = {
   // Source tables — rate × extra-key multiplier
+  // One row per response-time poll. The ICMP loss sampler (utils/lossSampler.ts)
+  // writes additional rows at 10s, but ONLY while an asset sits in
+  // warning/recovering — so its volume is a function of how much of the day the
+  // fleet spends mid-incident, not of fleet size. Deliberately not modelled:
+  // assuming the worst case (every asset sampled continuously) would inflate
+  // every install's projection ~6-30x for rows that a healthy fleet never
+  // writes, and the projection's job is to size steady state. A fleet in
+  // sustained trouble will show it in the measured table size instead, which is
+  // what the advisor reads once there is history.
   asset_monitor_samples:       (c) => 86400 / c.sample,
   asset_telemetry_samples:     (c) => 86400 / c.telemetry,
   asset_hardware_sensor_samples: (c) => (86400 / c.telemetry)  * 12,  // ~12 sensors (FortiGates ~22)
