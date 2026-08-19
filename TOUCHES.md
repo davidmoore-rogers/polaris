@@ -4422,6 +4422,34 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/loginAccessService.ts
+
+**What it owns:** Persistence + the decision for the optional source-IP restriction on LOCAL LOGIN — the `loginAccessConfig` Setting row `{ enabled (default false), ipScope ("rfc1918"|"all"|"custom", default "rfc1918"), allowedCidrs }` — with a ~10s TTL in-process cache. Shape mirrors `dashConfig`, but the **polarity is inverted**: `enabled` false means NO restriction.
+
+**Why it exists:** With "Skip login page" on, unauthenticated visitors to a PROTECTED page are redirected straight to SSO — but `/login.html` is deliberately not in `protectedPages` (it is the anti-lockout path during an IdP outage), so the password form stays reachable to anyone who types the URL and the password endpoints to anyone who can POST. That is the right default; this setting is for installs that want the recovery path to exist only from inside the network.
+
+**Public API:** `getLoginAccessSettings`, `saveLoginAccessSettings`, `invalidateLoginAccessCache`, `defaultLoginAccessSettings`, `loginSourceAllowed` (pure), `isLoginSourceAllowed` (request path, fail-open), `LOGIN_ACCESS_SETTING_KEY`, `LoginAccessSettings`
+
+**Cross-service deps:** `src/utils/ipScope.ts` (`ipInScope`, shared with the dash gate), `src/utils/cidr.ts` (`normalizeAllowlistCidr`), `AppError` (prisma otherwise).
+
+**Used by:** `src/app.ts` (the gate middleware over `/login.html` + `POST /api/v1/auth/login` + `/auth/login/totp`), `src/api/routes/serverSettings.ts` (`GET/PUT /server-settings/login-access`, incl. the anti-lockout guard's use of the pure `loginSourceAllowed`).
+
+**Invariants:**
+- `enabled` defaults FALSE. Enabling REFUSES logins, so an upgrade must never start doing it on its own — the opposite reason to `dashConfig`'s safe-off default, same result.
+- `isLoginSourceAllowed` **FAILS OPEN**: a settings read that throws admits the request. A DB blip must not become the lockout this feature exists to prevent, and an attacker cannot induce one. (`loginSourceAllowed` is the pure form and does NOT swallow anything — the route's guard needs a real answer.)
+- The gate covers the local password path AND the **LDAP** path — both authenticate through `POST /auth/login`. Every SSO entry point (SAML / OIDC / App Proxy) is deliberately NOT gated: SSO is what must keep working from anywhere, which is what makes restricting this one safe.
+- `saveLoginAccessSettings` rejects an enabled+custom+EMPTY list (would block local login everywhere). Disabling is how you turn the restriction off.
+- The setting restricts new LOGINS, not existing sessions — which is how an operator who narrows the scope too far can still undo it.
+- Only as trustworthy as `req.ip`: behind two proxies with a one-hop `TRUST_PROXY`, `req.ip` is the INNER proxy's (RFC1918) address, so an "rfc1918" scope would admit the entire internet while reading as enforced. `GET /server-settings/login-access` returns `callerIp` and the card prints it for exactly this reason.
+
+**When changing this:**
+- New fields need a default + tolerant parse + merge handling, AND the Web-Server-tab card (`public/js/server-settings.js` `loginCardHtml`/`handleLoginAccessSave`) + the `PUT /server-settings/login-access` Zod schema + the route's anti-lockout guard updated in lockstep.
+- If you add another credential endpoint, add it to `LOGIN_CREDENTIAL_PATHS` in `src/app.ts` — the gate is an explicit path set, not a prefix, so a new one is unguarded by default.
+- Keep the two refusal shapes: the PAGE is dropped (socket destroy, no response — the dashServer stealth posture), the API returns the SAME generic 401 a wrong password gets. Neither may confirm "wrong network".
+- Coverage: `tests/unit/loginAccessService.test.ts`, `tests/integration/loginAccessGate.test.ts` (both halves + SSO-never-gated), `tests/integration/loginAccessRoutes.test.ts` (anti-lockout guard + audit).
+
+---
+
 ## services/dashRoleSnapshotService.ts
 
 **What it owns:** The Dash wallboard's permission identity: loads the seeded built-in `readonly` Role and materializes it via `snapshotFromRole()` (60s TTL cache) so `dashServer` can stamp `req.roleSnapshot` and every existing `requirePermission` / `hasPermission` / `ensureRoleSnapshot` gate resolves the anonymous caller as a readonly user with zero changes to `permissions.ts`.

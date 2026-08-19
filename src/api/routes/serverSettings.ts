@@ -24,6 +24,13 @@ import type { DnsSettings } from "../../services/dnsService.js";
 import { getOuiStatus, refreshOuiDatabase, getOuiOverrides, setOuiOverride, deleteOuiOverride, lookupOuiDetailed } from "../../services/ouiService.js";
 import { getReservationMacSettings, saveReservationMacSettings } from "../../services/reservationMacService.js";
 import { getDashSettings, saveDashSettings } from "../../services/dashSettingsService.js";
+import {
+  getLoginAccessSettings,
+  saveLoginAccessSettings,
+  loginSourceAllowed,
+} from "../../services/loginAccessService.js";
+import { describeIpScope, type IpScope } from "../../utils/ipScope.js";
+import { normalizeAllowlistCidr } from "../../utils/cidr.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { requestActor } from "../middleware/auth.js";
 import { logEvent } from "./events.js";
@@ -1389,10 +1396,84 @@ router.put("/dash", requirePermission("serverSettingsSystem", "fullwrite"), asyn
 });
 
 function describeDashScope(s: { ipScope: string; allowedCidrs: string[] }): string {
-  if (s.ipScope === "all") return "ALL source IPs";
-  if (s.ipScope === "custom") return `custom source IPs: ${s.allowedCidrs.join(", ") || "(none)"}`;
-  return "RFC1918 + loopback sources only";
+  return describeIpScope(s.ipScope as IpScope, s.allowedCidrs);
 }
+
+// ─── Local login access (source-IP scope) ───────────────────────────────────
+//
+// Optional restriction on who may reach the local login form + the password
+// endpoints (gate mounted in src/app.ts; see loginAccessService for why the
+// LDAP path is covered and every SSO path is not). Reads ride the blanket
+// serverSettingsSystem read gate; the PUT is fullwrite-gated because a bad
+// save can lock every operator out of the SSO-outage recovery path.
+
+const LoginAccessSchema = z.object({
+  enabled: z.boolean().optional(),
+  ipScope: z.enum(["rfc1918", "all", "custom"]).optional(),
+  // CIDR validation + normalization happens in saveLoginAccessSettings.
+  allowedCidrs: z.array(z.string()).max(200).optional(),
+});
+
+router.get("/login-access", async (req, res, next) => {
+  try {
+    // callerIp is the whole point of showing this in the UI: the gate compares
+    // req.ip, which is only the real client when `trust proxy` matches the
+    // deployment's hop count. Behind two proxies with one-hop trust it is the
+    // INNER proxy's (RFC1918) address — a scope that then admits the entire
+    // internet while reading as enforced. Surfacing the observed value is what
+    // lets an operator catch that before relying on the setting.
+    res.json({ loginAccess: await getLoginAccessSettings(), callerIp: req.ip ?? "" });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/login-access", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
+  try {
+    const input = LoginAccessSchema.parse(req.body ?? {});
+    const before = await getLoginAccessSettings();
+
+    // Anti-lockout guard, the analogue of the SSO-session requirement on
+    // "Skip login page": refuse to enable a scope that excludes the admin
+    // doing the enabling. Without it the save succeeds and the operator has
+    // already lost the local login path — from an address they can now only
+    // learn from this error message. Merge exactly as the service will, so
+    // the check tests the posture that is about to be stored.
+    const prospective = {
+      enabled: input.enabled ?? before.enabled,
+      ipScope: input.ipScope ?? before.ipScope,
+      allowedCidrs: input.allowedCidrs
+        ? input.allowedCidrs.map((c) => normalizeAllowlistCidr(c) ?? c)
+        : before.allowedCidrs,
+    };
+    const callerIp = req.ip ?? "";
+    if (prospective.enabled && !loginSourceAllowed(callerIp, prospective)) {
+      throw new AppError(
+        400,
+        `Your own source IP (${callerIp || "unknown"}) is outside that scope — saving it would lock you out of the local login page. ` +
+          "Add a network covering it, or apply the restriction from an allowed network.",
+      );
+    }
+
+    const updated = await saveLoginAccessSettings(input);
+    await logEvent({
+      // Enabling narrows a recovery path — warning level, same as the dash
+      // route flags its widest posture.
+      level: updated.enabled ? "warning" : "info",
+      action: "login_access.updated",
+      resourceType: "setting",
+      resourceName: "loginAccessConfig",
+      actor: req.session?.username,
+      message: updated.enabled
+        ? `Local login restricted to ${describeIpScope(updated.ipScope, updated.allowedCidrs)}`
+        : "Local login source-IP restriction disabled",
+      details: { before: before as any, after: updated as any, actorIp: callerIp },
+    });
+    res.json({ loginAccess: updated });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // ─── Agent OS event-log config ────────────────────────────────────────────
 //
