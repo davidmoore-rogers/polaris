@@ -86,7 +86,10 @@ describe("automations scope tooltip — filter row", () => {
   });
 
   it("describes an all-assets scope and falls back to the cell summary otherwise", () => {
-    expect(filterLine({ scope: { allAssets: true } })).toBe("Every asset Polaris knows about.");
+    // Shares the Devices COLUMN's summary since that column exists (one device
+    // description per automation, so the hover and the cell can't disagree) —
+    // hence the column's wording rather than the tooltip's old sentence.
+    expect(filterLine({ scope: { allAssets: true } })).toBe("All devices");
     expect(filterLine({ scope: { assetTypes: ["firewall"], tags: ["core"] } }))
       .toBe("types: firewall; tags: core");
     expect(filterLine({ scope: {} })).toBe("n/a");

@@ -226,7 +226,7 @@ var _rulesPage = 1;
       _rules = results[0].rules || [];
       renderRules();
     }).catch(function () {
-      document.getElementById("rules-tbody").innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load automations</td></tr>';
+      document.getElementById("rules-tbody").innerHTML = '<tr><td colspan="9" class="empty-state">Failed to load automations</td></tr>';
     });
   }
   window._reloadRules = loadRules;
@@ -361,18 +361,77 @@ var _rulesPage = 1;
     return text;
   }
 
-  function scopeTooltip(r) {
+  /**
+   * The automation described in its own words, one string per part of the
+   * builder — what the list's Devices / Trigger / Reset / Actions columns show.
+   *
+   * The trigger and reset strings come from `PolarisAutomationSentences`, the
+   * same pure factory the wizard renders its own steps from, so the list can't
+   * describe an automation differently from the editor that made it. They come
+   * back as HTML (the wizard bolds the values), and a table cell wants plain
+   * text: TableSF filters and sorts on these strings, so a `<strong>` in the
+   * value would be matched by a search for "strong" and would sort as markup.
+   */
+  var _sentCache = null;
+  function sentences() {
+    if (!_sentCache && window.PolarisAutomationSentences) {
+      // The factory tolerates a missing schema (every catalog lookup falls back),
+      // so a failed schema fetch degrades the wording instead of the column.
+      _sentCache = window.PolarisAutomationSentences.make(_ruleSchema || {});
+    }
+    return _sentCache;
+  }
+
+  /** HTML → text, entities and all. */
+  function plainText(html) {
+    var d = document.createElement("div");
+    d.innerHTML = String(html == null ? "" : html);
+    return (d.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function devicesSummary(r) {
     var scope = r.scope;
-    var filter;
-    if (scope && scope.condition) filter = condTooltipText(scope.condition) || "(no conditions)";
-    else if (scope && scope.allAssets) filter = "Every asset Polaris knows about.";
-    else filter = scopeSummary(scope);
-    return "Filter: " + filter + "\nActions: " + actionsTooltipText(r);
+    if (scope && scope.condition) return condTooltipText(scope.condition) || "(no conditions)";
+    if (scope && scope.allAssets) return "All devices";
+    return scopeSummary(scope);
+  }
+
+  function triggerSummary(r) {
+    var s = sentences();
+    if (!s) return String((r.trigger && r.trigger.type) || "");
+    try {
+      return plainText(s.triggerSentence(r.trigger, { severity: r.severity, severityBands: r.severityBands }));
+    } catch (_e) {
+      return String((r.trigger && r.trigger.type) || "");
+    }
+  }
+
+  function resetSummary(r) {
+    var s = sentences();
+    if (!s) return "";
+    try {
+      return plainText(s.resetSentence(r.reset, r.trigger, r.cooldownSec));
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  function scopeTooltip(r) {
+    return "Filter: " + devicesSummary(r) + "\nActions: " + actionsTooltipText(r);
   }
   // Exposed for the unit-test harness (automationsScopeTooltip.test.ts) — the
   // action tally walks four separate escalation/action locations and silently
   // under-reporting them is the failure mode worth pinning.
   window._scopeTooltip = scopeTooltip;
+  // The four list columns, for the unit harness (automationsListSummaries.test.ts).
+  // These are what an operator reads to tell two automations apart without
+  // opening either, so a summary that silently says nothing is the failure mode.
+  window._ruleSummaries = {
+    devices: devicesSummary,
+    trigger: triggerSummary,
+    reset: resetSummary,
+    actions: actionsTooltipText,
+  };
 
   function scopeSummary(scope) {
     if (!scope || typeof scope !== "object") return "-";
@@ -398,13 +457,16 @@ var _rulesPage = 1;
     var data = _rules.map(function (r) {
       return Object.assign({}, r, {
         triggerType: r.trigger && r.trigger.type ? r.trigger.type : "",
-        scopeSummary: scopeSummary(r.scope),
+        devicesSummary: devicesSummary(r),
+        triggerSummary: triggerSummary(r),
+        resetSummary: resetSummary(r),
+        actionsSummary: actionsTooltipText(r),
         scopeTooltip: scopeTooltip(r),
       });
     });
     if (_rulesSF) data = _rulesSF.apply(data);
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No automations yet' + (canEditRules ? ' — click "+ New automation" to create one.' : "") + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No automations yet' + (canEditRules ? ' — click "+ New automation" to create one.' : "") + '</td></tr>';
       clearPageControls("rules-pagination");
       return;
     }
@@ -428,6 +490,10 @@ var _rulesPage = 1;
         _saveRulesPrefs();
       });
 
+    var prose = function (text) {
+      var t = String(text == null ? "" : text);
+      return '<td class="rules-prose" style="font-size:0.82rem" title="' + escapeHtml(t) + '">' + escapeHtml(t) + '</td>';
+    };
     tbody.innerHTML = pageRows.map(function (r) {
       // The row's verbs live behind the name (Edit / Clone / Delete) instead of
       // an Actions column. Without edit rights there's nothing to offer, so the
@@ -449,7 +515,13 @@ var _rulesPage = 1;
         '<td><span class="badge">' + escapeHtml(r.triggerType) + '</span></td>' +
         '<td><span class="badge badge-level-' + escapeHtml(r.severity || "info") + '">' + escapeHtml((r.severity || "info").toUpperCase()) + '</span></td>' +
         '<td>' + enabledCell + '</td>' +
-        '<td style="font-size:0.85rem" title="' + escapeHtml(r.scopeTooltip) + '">' + escapeHtml(r.scopeSummary) + '</td>' +
+        // Each prose cell carries its own full text as the title: the columns
+        // are resizable and the sentences are long, so the hover is what makes a
+        // truncated cell readable without widening the table.
+        prose(r.devicesSummary) +
+        prose(r.triggerSummary) +
+        prose(r.resetSummary) +
+        prose(r.actionsSummary) +
         '<td>' + escapeHtml(r.createdBy || "-") + '</td>' +
         '</tr>';
     }).join("");

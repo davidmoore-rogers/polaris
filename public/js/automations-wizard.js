@@ -567,6 +567,63 @@ function makeAutomationSentences(s) {
       humanDuration(SAMPLING_FLOOR_SEC) + ".";
   }
 
+  /**
+   * The trigger's clause, inverted — what has to become true for an auto-reset to
+   * fire. Returns null for the trigger types with no single clause to invert.
+   *
+   * Numeric: the opposite comparator, at the hysteresis clear threshold when one
+   * is set and otherwise at the SAME threshold that raised the alert.
+   * 0/1 metrics: the VALUE flips rather than the comparator, because "is OK"
+   * reads as a state an operator can look for while "is not Alarm" reads as a
+   * double negative — and a flag has no dead band for a clear threshold to sit in.
+   */
+  function invertedLeaf(tr, reset) {
+    if (!tr) return null;
+    var t = tr.type;
+    if (t !== "asset_metric" && t !== "host_metric" && t !== "asset_state") return null;
+    var inv = {};
+    Object.keys(tr).forEach(function (k) { inv[k] = tr[k]; });
+    if (t !== "asset_state" && isBooleanMetric(tr.metric)) {
+      inv.threshold = Number(tr.threshold) === 0 ? 1 : 0;
+      inv.operator = tr.operator === "!=" ? "!=" : "==";
+      return inv;
+    }
+    inv.operator = INV_CMP[tr.operator] || tr.operator;
+    if (t !== "asset_state" && reset && reset.clearThreshold != null && !isNaN(reset.clearThreshold)) {
+      inv.threshold = reset.clearThreshold;
+    }
+    return inv;
+  }
+
+  /**
+   * The part an operator can't read off the clause. Two cases are worth saying
+   * out loud:
+   *
+   * A monitor-status alert clears at the FIRST successful probe, when the state
+   * is `recovering` — not when it has fully returned to `up`. "Anything other
+   * than down" is technically what happens, but nobody reads it that way, and the
+   * gap matters: it is the difference between "the device answered once" and "the
+   * device is healthy again".
+   *
+   * A numeric alert with no clear threshold resets at the very value that raised
+   * it, so a reading sitting on the line re-alerts. The dead-band control is
+   * right there on this step, so pointing at it is actionable.
+   */
+  function resetCaveat(tr, reset) {
+    if (!tr) return "";
+    if (tr.type === "asset_state" && tr.field === "monitorStatus" && String(tr.value) === "down") {
+      return " After an outage that happens at the <strong>first successful probe</strong>" +
+        " — the status reads <code>recovering</code> then, not <code>up</code>.";
+    }
+    var numeric = (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
+    var noBand = !reset || reset.clearThreshold == null || isNaN(reset.clearThreshold);
+    if (numeric && noBand && tr.threshold != null && tr.threshold !== "") {
+      return " That is the same value that raised it, so a reading hovering on the line can re-alert" +
+        " — set a clear threshold below it to add a dead band.";
+    }
+    return "";
+  }
+
   function resetSentence(reset, tr, cooldownSec) {
     var out;
     reset = reset || { mode: "manual" };
@@ -579,18 +636,21 @@ function makeAutomationSentences(s) {
       if (reset.sustainSec > 0) out += " and stays that way for <strong>" + humanDuration(reset.sustainSec) + "</strong>";
       out += ".";
     } else {
-      // A 0/1 metric has no dead band to sit in, so a clear threshold on one is
-      // meaningless — it resets when the flag flips back.
-      var numeric = tr && (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
-      if (numeric && reset.clearThreshold != null && !isNaN(reset.clearThreshold)) {
-        var invOp = INV_CMP[tr.operator] || "<";
-        var unit = leafUnit(tr.metric, tr.dimensionFilter); unit = unit ? " " + unit : "";
-        out = "Resets when the value <strong>" + (CMP_PHRASE[invOp] || invOp) + " " + escapeHtml(String(reset.clearThreshold)) + escapeHtml(unit) + "</strong>";
-      } else {
-        out = "Resets when <strong>the condition is no longer met</strong>";
-      }
+      // "The condition is no longer met" is true but says nothing an operator can
+      // check. Spell out the actual recovery clause by rendering the trigger
+      // INVERTED through the same phrase builder the trigger sentence uses — one
+      // renderer, so the two can't describe the same automation differently.
+      var inv = invertedLeaf(tr, reset);
+      out = inv
+        ? "Resets when <strong>" + escapeHtml(tgLeafPhrase(inv)) + "</strong>"
+        // Composite / event / change: there's no single clause to invert (a tree
+        // stops being satisfied in as many ways as it has branches).
+        : "Resets when <strong>the trigger conditions are no longer met</strong>";
+      // "stays there" rather than "stays that way": the clause names a value the
+      // reading has to sit at, which is a place, not a manner.
       if (reset.sustainSec > 0) out += " and stays there for <strong>" + humanDuration(reset.sustainSec) + "</strong>";
       out += ".";
+      out += resetCaveat(tr, reset);
     }
     if (cooldownSec > 0) out += " Won’t re-fire within <strong>" + humanDuration(cooldownSec) + "</strong> of the last alert.";
     return out;
@@ -604,6 +664,7 @@ function makeAutomationSentences(s) {
     fieldLabel: fieldLabel, changeLabel: changeLabel, humanDuration: humanDuration,
     tgLeafPhrase: tgLeafPhrase, tgTreePhrase: tgTreePhrase,
     triggerSentence: triggerSentence, severityLadderPhrase: severityLadderPhrase, resetSentence: resetSentence,
+    invertedLeaf: invertedLeaf, resetCaveat: resetCaveat,
     triggerFormula: triggerFormula, compactDuration: compactDuration,
     CMP_PHRASE: CMP_PHRASE, INV_CMP: INV_CMP, AGG_PHRASE: AGG_PHRASE, DIM_PHRASE: DIM_PHRASE,
   };
@@ -879,6 +940,9 @@ async function openAutomationWizard(existing, opts) {
       metricLabel = _sent.metricLabel, metricUnit = _sent.metricUnit, leafUnit = _sent.leafUnit,
       fieldLabel = _sent.fieldLabel, changeLabel = _sent.changeLabel,
       humanDuration = _sent.humanDuration, tgTreePhrase = _sent.tgTreePhrase,
+      // The folded base-severity block summarizes itself with the same leaf
+      // phrase the trigger sentence uses.
+      tgLeafPhrase = _sent.tgLeafPhrase,
       triggerSentence = _sent.triggerSentence, triggerFormula = _sent.triggerFormula,
       resetSentence = _sent.resetSentence,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
@@ -1085,6 +1149,13 @@ async function openAutomationWizard(existing, opts) {
     if (!key) return;
     var on = !!_awCollapsed[key];
     container.querySelectorAll(":scope > .aw-collapse-body").forEach(function (b) {
+      b.style.display = on ? "none" : "";
+    });
+    // A block that can't be re-wrapped marks its parts in place instead: the base
+    // severity group's children are read by selector (`tgCollectGroup` walks
+    // `:scope > .scg-children`), so moving them into a wrapper would break
+    // collection the way relocating the combinator did.
+    container.querySelectorAll(":scope > .aw-collapse-part").forEach(function (b) {
       b.style.display = on ? "none" : "";
     });
     var btn = container.querySelector(':scope [data-collapse="' + key + '"]');
@@ -2855,12 +2926,28 @@ async function openAutomationWizard(existing, opts) {
       if (header) header.style.cssText = "display:flex;gap:6px;align-items:center;margin-bottom:2px";
       var baseX = header && header.querySelector(".scg-base-remove");
       if (baseX) baseX.remove();
+      var baseChev = header && header.querySelector(".aw-collapse");
+      if (baseChev) baseChev.remove();
+      var baseSum = header && header.querySelector(".aw-collapse-summary");
+      if (baseSum) baseSum.remove();
+      root.removeAttribute("data-collapse-key");
+      root.querySelectorAll(".aw-collapse-part").forEach(function (el) {
+        el.classList.remove("aw-collapse-part");
+        el.style.display = "";
+      });
       root.querySelectorAll(":scope > .scg-children > .scr-row > .scr-remove").forEach(function (b) {
         b.style.display = "";
       });
       return;
     }
     if (durGroup && btnRow && !root.contains(durGroup)) root.insertBefore(durGroup, btnRow);
+    // The duration field and the +Condition row are moved in/marked on different
+    // ticks, so (re)mark whatever is currently there rather than assuming order.
+    if (multi) {
+      root.querySelectorAll(":scope > .scg-children, :scope > .aw-dur, :scope > .scg-btnrow").forEach(function (el) {
+        el.classList.add("aw-collapse-part");
+      });
+    }
     if (header && !existingSev) {
       var wrap = document.createElement("span");
       wrap.className = "scg-sev-wrap";
@@ -2892,6 +2979,24 @@ async function openAutomationWizard(existing, opts) {
       // one × on screen — the header's while the base tier holds a single
       // condition (the only shape multi-severity mode allows, since the tiers
       // mirror one metric), each row's own once there are several to tell apart.
+      // The chevron the added tiers have. Keyed "t3:base" rather than by
+      // severity: unlike a band, the base block IS the automation's own severity,
+      // so re-picking it must not look like a different block.
+      var chev = document.createElement("span");
+      chev.innerHTML = collapseBtnHtml("t3:base");
+      header.insertBefore(chev.firstChild, header.firstChild);
+      root.setAttribute("data-collapse-key", "t3:base");
+      var sum = document.createElement("span");
+      sum.className = "aw-collapse-summary hint";
+      sum.style.cssText = "margin:0;display:none";
+      header.insertBefore(sum, wrap.nextSibling);
+      // Everything below the header line folds. Marked in place — see
+      // applyCollapsed for why these can't be wrapped.
+      root.querySelectorAll(":scope > .scg-children, :scope > .aw-dur, :scope > .scg-btnrow").forEach(function (el) {
+        el.classList.add("aw-collapse-part");
+      });
+      if (opSel) opSel.classList.add("aw-collapse-part");
+
       var hx = document.createElement("button");
       hx.type = "button";
       hx.className = "btn btn-sm btn-danger scg-base-remove";
@@ -2904,6 +3009,18 @@ async function openAutomationWizard(existing, opts) {
         if (real) real.click();
       });
       header.appendChild(hx);
+      wireCollapsibles(root);
+      var syncBaseSummary = function () {
+        var el = header.querySelector(".aw-collapse-summary");
+        if (!el) return;
+        var leaf = root.querySelector(".scg-children .scr-row");
+        var kind2 = (panel.querySelector("#aw-trigger-type") || {}).value === "host" ? "host" : "asset";
+        el.textContent = leaf ? tgLeafPhrase(tgCollectLeaf(leaf, kind2)) : "";
+      };
+      syncBaseSummary();
+      root.addEventListener("input", syncBaseSummary);
+      root.addEventListener("change", syncBaseSummary);
+      root._awBaseSummary = syncBaseSummary;
       var sel = wrap.querySelector(".scg-sev");
       sel.value = draft.severity || "warning"; // don't rely on the markup's selected attr
       sel.addEventListener("change", function () {

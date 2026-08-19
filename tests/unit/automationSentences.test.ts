@@ -171,10 +171,71 @@ describe("makeAutomationSentences", () => {
       dimensionFilter: { stateProbeId: "p1" },
     };
     // clearThreshold rides along (a hand-written rule could carry one); the
-    // sentence must not claim a dead band a flag can't have.
+    // sentence must not claim a dead band a flag can't have — it names the OTHER
+    // state instead, which is what a flag recovering actually looks like.
     const out = s.resetSentence({ mode: "auto", clearThreshold: 0 }, tr);
-    expect(out).toContain("the condition is no longer met");
+    expect(out).toContain("Hardware sensor alarm is OK");
     expect(out).not.toContain("0</strong>");
+    // "is OK" rather than "is not Alarm": a state to look for, not a double negative.
+    expect(out).not.toContain("is not");
+  });
+
+  it("says what an auto reset actually waits for instead of 'the condition is no longer met'", () => {
+    const s = make(SCHEMA as never);
+    const out = s.resetSentence(
+      { mode: "auto" },
+      { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90, aggregation: "avg", windowSec: 300 },
+    );
+    // The trigger's own clause, inverted — same renderer as the trigger sentence.
+    expect(out).toContain("CPU usage (avg over 5 minutes) is at or below 90 %");
+    // With no dead band it resets at the value that raised it, which is worth
+    // saying out loud because the reading can sit on the line and re-alert.
+    expect(out).toMatch(/same value that raised it/i);
+    expect(out).toMatch(/clear threshold/i);
+  });
+
+  it("names the recovering state a monitor-status alert really clears at", () => {
+    const s = make(SCHEMA as never);
+    const out = s.resetSentence(
+      { mode: "auto" },
+      { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
+    );
+    expect(out).toContain("is not down");
+    // The gap that matters: the alert clears when the device answers ONCE, not
+    // when it is healthy again.
+    expect(out).toMatch(/first successful probe/i);
+    expect(out).toContain("recovering");
+  });
+
+  it("keeps the caveat off a state trigger that isn't about being down", () => {
+    const s = make(SCHEMA as never);
+    const out = s.resetSentence(
+      { mode: "auto" },
+      { type: "asset_state", field: "monitorStatus", operator: "==", value: "warning" },
+    );
+    // "not warning" can mean up OR down, so the recovering story doesn't apply.
+    expect(out).not.toMatch(/first successful probe/i);
+  });
+
+  it("falls back to a generic clause for a composite trigger", () => {
+    const s = make(SCHEMA as never);
+    const out = s.resetSentence({ mode: "auto" }, {
+      type: "composite", kind: "asset", op: "and",
+      children: [
+        { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 },
+        { type: "asset_metric", metric: "memPct", operator: ">", threshold: 80 },
+      ],
+    });
+    // A tree stops being satisfied in as many ways as it has branches, so there
+    // is no single clause to invert.
+    expect(out).toContain("the trigger conditions are no longer met");
+  });
+
+  it("invertedLeaf leaves the trigger untouched", () => {
+    const s = make(SCHEMA as never);
+    const tr = { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 };
+    s.invertedLeaf(tr, { mode: "auto", clearThreshold: 75 });
+    expect(tr).toEqual({ type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 });
   });
 
   it("names a probeless boolean metric's states from the metric-wide labels", () => {

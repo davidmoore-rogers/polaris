@@ -50,15 +50,29 @@
             <thead>
               <tr>
                 <th style="width:200px" data-col-id="name"     data-sf-key="name"      data-sf-type="string">Name</th>
-                <th style="width:130px" data-col-id="trigger"  data-sf-key="triggerType" data-sf-type="string">Trigger</th>
+                <!-- "Type" now that the four prose columns describe the automation:
+                     this one exists to FILTER by trigger kind, which the sentence
+                     can't do. Its data-sf-key is unchanged so stored per-user sort
+                     + filter prefs keep working. -->
+                <th style="width:110px" data-col-id="trigger"  data-sf-key="triggerType" data-sf-type="string">Type</th>
                 <th style="width:100px" data-col-no-resize="true" data-col-id="severity" data-sf-key="severity"  data-sf-type="string" data-sf-options="notice|informational|warning|serious|critical">Severity</th>
                 <th style="width:110px" data-col-no-resize="true" data-col-id="enabled"  data-sf-key="enabled"   data-sf-type="string" data-sf-options="true=Enabled|false=Disabled">Enabled</th>
-                <th                       data-col-id="scope"    data-sf-key="scopeSummary" data-sf-type="string">Scope</th>
+                <!-- The automation in its own words, one column per part of the
+                     builder. Each is the SAME sentence the wizard shows on that
+                     step (PolarisAutomationSentences), so the list and the editor
+                     can't describe one automation two ways. Filters are plain
+                     text-contains over the sentence, which is what makes "every
+                     automation that emails" or "everything about packet loss"
+                     answerable from the list. -->
+                <th style="width:240px" data-col-id="devices"  data-sf-key="devicesSummary" data-sf-type="string">Devices</th>
+                <th style="width:280px" data-col-id="trigsum"  data-sf-key="triggerSummary" data-sf-type="string">Trigger</th>
+                <th style="width:240px" data-col-id="resetsum" data-sf-key="resetSummary"   data-sf-type="string">Reset</th>
+                <th                       data-col-id="actsum"   data-sf-key="actionsSummary" data-sf-type="string">Actions</th>
                 <th style="width:120px" data-col-id="createdBy" data-sf-key="createdBy" data-sf-type="string">Created by</th>
               </tr>
             </thead>
             <tbody id="rules-tbody">
-              <tr><td colspan="6" class="empty-state">Loading...</td></tr>
+              <tr><td colspan="9" class="empty-state">Loading...</td></tr>
             </tbody>
           </table>
         </div>

@@ -463,6 +463,25 @@ describe("automation wizard DOM render", () => {
 
     // ── Step 3: each tier folds ──
     (doc.querySelector('.stepper-step[data-step="3"]') as unknown as { click: () => void }).click();
+    // The BASE block folds too — it was the one severity block without a
+    // chevron, which made it read as a different kind of thing.
+    const base = doc.querySelector("#aw-trig-root > .scg-group")!;
+    expect(base.getAttribute("data-collapse-key")).toBe("t3:base");
+    expect(base.querySelector(":scope > div > .aw-collapse")).toBeTruthy();
+    const baseParts = Array.from(base.querySelectorAll(":scope > .aw-collapse-part"));
+    expect(baseParts.length).toBeGreaterThan(0);
+    (base.querySelector("[data-collapse]") as unknown as { dispatchEvent: (e: unknown) => void })
+      .dispatchEvent(new w.Event("click", { bubbles: true }));
+    // Its parts hide in place rather than being moved into a wrapper — moving
+    // .scg-children would break tgCollectGroup.
+    baseParts.forEach((p) => {
+      expect((p as unknown as { style: { display: string } }).style.display).toBe("none");
+    });
+    expect((base.querySelector(".aw-collapse-summary") as unknown as { textContent: string }).textContent)
+      .toContain("80");
+    (base.querySelector("[data-collapse]") as unknown as { dispatchEvent: (e: unknown) => void })
+      .dispatchEvent(new w.Event("click", { bubbles: true }));
+
     const tiers = Array.from(doc.querySelectorAll("#aw-step-3 .aw-band"));
     expect(tiers.length).toBe(2);
     // Keyed by SEVERITY, not index — removing a tier must not slide another
