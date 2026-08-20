@@ -2547,19 +2547,14 @@ function _ensureTagCache() {
   });
 }
 
-// Auto-managed tag prefixes. These are reconciled by the backend (region tags
-// by mapRegionService) and must never be added or removed through the UI —
-// the picker hides them and getTagFieldValue preserves them from the existing
-// record on save. (firewall: was dropped 2026-08 with firewallTagService —
-// leftover firewall: tags are plain operator-managed tags now.)
-var PROTECTED_TAG_PREFIXES = ["region:"];
-
-function isProtectedTag(name) {
-  for (var i = 0; i < PROTECTED_TAG_PREFIXES.length; i++) {
-    if (name.indexOf(PROTECTED_TAG_PREFIXES[i]) === 0) return true;
-  }
-  return false;
-}
+// region: tags are editable like any other tag (2026-08). They used to be a
+// hidden "protected prefix" the picker filtered out and force-preserved on
+// save, because the add-only reconciler couldn't tell a hand-applied tag from
+// its own — but mapRegionService now records provenance (RegionTagAssignment),
+// so a tag added here is operator-owned and never auto-stripped, and removing
+// an auto-applied one on an in-region device just re-adds it next reconcile.
+// The Map Regions category carries a hint saying exactly that.
+var REGION_TAG_CATEGORY = "Map Regions";
 
 /**
  * Build tag field HTML. Call _ensureTagCache() before using this.
@@ -2568,7 +2563,6 @@ function isProtectedTag(name) {
 function _renderTagChips(selected) {
   var cats = {};
   _tagCache.tags.forEach(function (t) {
-    if (isProtectedTag(t.name)) return;
     var cat = t.category || "General";
     if (!cats[cat]) cats[cat] = [];
     cats[cat].push(t);
@@ -2592,6 +2586,13 @@ function _renderTagChips(selected) {
           escapeHtml(t.name) +
         '</label>';
       });
+      if (cat === REGION_TAG_CATEGORY) {
+        // These are also written by the Device Map region reconciler; say what
+        // an edit here actually does so a re-appearing tag isn't a mystery.
+        html += '<p class="hint" style="flex-basis:100%;margin:2px 0 0">' +
+          'Region tags are auto-applied to devices inside a Device Map region — removing one from a device still in the region re-adds it on the next reconcile. A tag you add here yourself is never auto-removed.' +
+        '</p>';
+      }
       html += '</div>';
     });
   }
@@ -2604,7 +2605,7 @@ function tagFieldHTML(selected, opts) {
 
   // Read-only: render selected tags as static badges, no checkboxes or "add new" row.
   if (opts.readOnly) {
-    var visibleSelected = selected.filter(function (n) { return !isProtectedTag(n); });
+    var visibleSelected = selected;
     if (visibleSelected.length === 0) {
       return '<div class="form-group"><label>Tags</label><p style="color:var(--color-text-tertiary);margin:0">—</p></div>';
     }
@@ -2619,16 +2620,8 @@ function tagFieldHTML(selected, opts) {
     return '<div class="form-group"><label>Tags</label><div class="tag-picker" style="pointer-events:none">' + chips + '</div></div>';
   }
 
-  // Stash protected tags from the original record on the picker element so
-  // getTagFieldValue can merge them back into the save payload — operators
-  // can neither add nor remove these through the UI.
-  var preservedTags = selected.filter(isProtectedTag);
-  var preservedAttr = preservedTags.length
-    ? ' data-preserved-tags="' + escapeHtml(JSON.stringify(preservedTags)) + '"'
-    : '';
-
   var html = '<div class="form-group"><label>Tags</label>' +
-    '<div class="tag-picker" id="f-tags-picker"' + preservedAttr + '>' +
+    '<div class="tag-picker" id="f-tags-picker">' +
     _renderTagChips(selected) +
     '</div>';
 
@@ -2656,25 +2649,12 @@ function tagFieldHTML(selected, opts) {
 
 /**
  * Read selected tags from the form — works for both enforced and free-text modes.
- * Auto-managed tags (region:) stashed on the picker at render time
- * are merged back in so a save can neither add nor remove them.
  */
 function getTagFieldValue() {
   var checked = [];
   document.querySelectorAll('input[name="f-tags-cb"]:checked').forEach(function (cb) {
     checked.push(cb.value);
   });
-  var picker = document.getElementById("f-tags-picker");
-  if (picker && picker.dataset.preservedTags) {
-    try {
-      var preserved = JSON.parse(picker.dataset.preservedTags);
-      if (Array.isArray(preserved)) {
-        preserved.forEach(function (name) {
-          if (checked.indexOf(name) === -1) checked.push(name);
-        });
-      }
-    } catch (_) {}
-  }
   return checked;
 }
 
