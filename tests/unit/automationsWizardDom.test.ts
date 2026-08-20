@@ -1303,11 +1303,14 @@ describe("automation wizard DOM render", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect((doc.querySelector("#aw-trigger-formula") as unknown as { style: { display: string } }).style.display).toBe("none");
   });
-  // -- Packet loss: History, not "sustained for" (business rule 29) -----------
-  // probeLossPct is a ratio over its window, so the wizard's one time field IS
-  // the measurement period. Before this, `latest` + 60 minutes stored a 60-minute
-  // HOLD while the engine measured over its 15-minute floor -- the automation
-  // said one thing and did another.
+  // -- Packet loss: History + a separate optional sustain (rule 29) -----------
+  // probeLossPct is a ratio over its window, so the wizard's base time field IS
+  // the measurement period ("History"). Before that rename, `latest` + 60
+  // minutes stored a 60-minute HOLD while the engine measured over its 15-minute
+  // floor -- the automation said one thing and did another. 2026-08-20 added the
+  // second axis back as its own field: an optional "Sustained for" hold
+  // (#tf-sustain-min → forDurationSec) on top of the History window, with
+  // severity tiers keeping their own hold boxes like any other numeric metric.
   //
   // ENVIRONMENT NOTE: happy-dom mis-parses `<option selected>` -- a select whose
   // selected option isn't the first reports the option AFTER it -- so a stored
@@ -1372,8 +1375,10 @@ describe("automation wizard DOM render", () => {
     expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("15");
     // ...and the aggregation control is hidden, since a ratio has nothing to aggregate.
     expect((doc.querySelector('#aw-trig-root .tgl-agg[data-ratio="1"]') as unknown as { style: { display: string } }).style.display).toBe("none");
+    // The ratio-only sustain field surfaces beside it (hidden for other metrics).
+    expect((doc.querySelector(".aw-ratio-sustain") as unknown as { style: { display: string } }).style.display).toBe("");
 
-    // An operator-typed 60 saves as the WINDOW, with no hold clock on top.
+    // An operator-typed 60 saves as the WINDOW; the untouched sustain stays 0.
     (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "60";
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
@@ -1382,6 +1387,58 @@ describe("automation wizard DOM render", () => {
     expect(saved.trigger.metric).toBe("probeLossPct");
     expect(saved.trigger.windowSec).toBe(3600);
     expect(saved.trigger.forDurationSec).toBe(0);
+  });
+
+  it("collects the ratio sustain field as the hold on top of the History window", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      ...LOSS_BASE, id: "r-loss-sustain", name: "High packet loss",
+      reset: { mode: "auto" }, severityBands: null, bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // The sustain field starts hidden for a non-ratio metric...
+    expect((doc.querySelector(".aw-ratio-sustain") as unknown as { style: { display: string } }).style.display).toBe("none");
+    await pickMetric("probeLossPct");
+    // ...and appears with the History relabel.
+    expect((doc.querySelector(".aw-ratio-sustain") as unknown as { style: { display: string } }).style.display).toBe("");
+
+    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "60";
+    (doc.querySelector("#tf-sustain-min") as unknown as { value: string }).value = "10";
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.trigger.windowSec).toBe(3600);
+    expect(saved.trigger.forDurationSec).toBe(600);
+  });
+
+  it("a legacy loss rule's minutes read back as History alone, never doubled into sustain", async () => {
+    // Pre-History loss rules stored their minutes on forDurationSec (windowSec
+    // 0). triggerDurationMinutes reads those back as the History the operator
+    // meant; the sustain field must NOT show the same minutes again, or one save
+    // would turn "measured over 10" into "measured over 10, then held 10".
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      ...LOSS_BASE, id: "r-loss-legacy",
+      name: "High packet loss",
+      trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 600 },
+      reset: { mode: "auto" }, severityBands: null, bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // The stored rule renders from the model, so the fields prefill without a
+    // metric re-pick (data-ratio rides the row markup).
+    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("10");
+    expect((doc.querySelector("#tf-sustain-min") as unknown as { value: string }).value).toBe("0");
   });
 
   it("refuses a History shorter than the engine's minimum window", async () => {
@@ -1405,7 +1462,12 @@ describe("automation wizard DOM render", () => {
     expect(toastErrors.join(" ")).toContain("History");
   });
 
-  it("gives packet-loss severity tiers no hold clock of their own", async () => {
+  it("packet-loss severity tiers keep their own hold clocks (rule 19's per-tier sustain)", async () => {
+    // "10% for 30 min = warning, 25% for 5 min = critical" is one automation:
+    // tiers share the base's History window (the sampling) but each holds its
+    // own sustain. The hold boxes were hidden while a ratio trigger had no
+    // sustain axis at all; with the dedicated sustain field they behave like
+    // every other numeric metric's.
     doc.body.innerHTML = "";
     savedPayloads.length = 0;
     toastErrors.length = 0;
@@ -1422,22 +1484,22 @@ describe("automation wizard DOM render", () => {
       (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
       await new Promise((r) => setTimeout(r, 20));
     }
-    // A non-ratio metric keeps its per-tier hold boxes visible...
     const bandDurWraps = () => Array.from(doc.querySelectorAll("#aw-bands .band-duration"))
       .map((el) => ((el as unknown as { closest: (q: string) => { style: { display: string } } }).closest(".aw-dur")).style.display);
     expect(bandDurWraps().length).toBeGreaterThan(0);
     expect(bandDurWraps().every((d) => d !== "none")).toBe(true);
     await pickMetric("probeLossPct");
-    // ...and switching to packet loss hides them: tiers share the History window.
-    expect(bandDurWraps().every((d) => d === "none")).toBe(true);
-    // The ladder itself survives, sharing that one window.
+    // Still visible after switching to packet loss.
+    expect(bandDurWraps().every((d) => d !== "none")).toBe(true);
+    // Tiers share the History window; each tier's hold collects independently.
     (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "15";
+    (doc.querySelector("#aw-bands .band-duration") as unknown as { value: string }).value = "5";
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(toastErrors).toEqual([]);
     const saved = savedPayloads[0]! as Record<string, any>;
     expect(saved.severityBands.map((b: any) => [b.threshold, b.severity])).toEqual([[20, "serious"], [30, "critical"]]);
     expect(saved.trigger.windowSec).toBe(900);
-    expect(saved.severityBands.every((b: any) => !b.forDurationSec)).toBe(true);
+    expect(saved.severityBands.map((b: any) => b.forDurationSec)).toEqual([300, 0]);
   });
 });

@@ -23,7 +23,7 @@
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { sparklineSvg, seriesStats, formatReading, type SparkPoint } from "../utils/sparklineSvg.js";
+import { sparklineSvg, seriesStats, formatReading, timeAxisLabel, type SparkPoint } from "../utils/sparklineSvg.js";
 import { alarmStatusToFlag, convertSensorForDisplay, sensorDisplayUnit } from "../utils/hardwareSensors.js";
 import { getBranding } from "./brandingService.js";
 import type { InlineAttachment } from "./notificationChannels/emailChannel.js";
@@ -273,6 +273,16 @@ async function loadResponseTimes(assetId: string, since: Date): Promise<SparkPoi
 const LOSS_BUCKET_MS = 2 * 60 * 1000;
 
 /**
+ * Bucket width for a loss chart over `windowMs`: the 2-minute floor (finer
+ * than the probe cadence would only draw 0%/100% spikes), scaled up so a long
+ * History still plots ~30 points — a 24-hour window gets 48-minute buckets
+ * rather than 720 slivers. Exported for tests.
+ */
+export function lossBucketMs(windowMs: number): number {
+  return Math.max(LOSS_BUCKET_MS, Math.round(windowMs / 30));
+}
+
+/**
  * Probe loss as a percentage over time: failed probes / total probes per
  * bucket, the same ratio the engine's `probeLossPct` metric and the dashboard
  * widget compute, just windowed for a chart instead of collapsed to one number.
@@ -282,7 +292,7 @@ const LOSS_BUCKET_MS = 2 * 60 * 1000;
  * keeps the loader shaped like its neighbours. Empty buckets are skipped
  * rather than plotted as 0%: no probes is not the same as no loss.
  */
-async function loadProbeLoss(assetId: string, since: Date): Promise<SparkPoint[]> {
+async function loadProbeLoss(assetId: string, since: Date, bucketMs: number = LOSS_BUCKET_MS): Promise<SparkPoint[]> {
   const rows = await prisma.assetMonitorSample.findMany({
     // EVERY probeKind, deliberately — this is a loss chart, and the ICMP
     // sampler exists to give it resolution through the warning/recovering
@@ -294,7 +304,7 @@ async function loadProbeLoss(assetId: string, since: Date): Promise<SparkPoint[]
   });
   const buckets = new Map<number, { total: number; failed: number }>();
   for (const r of rows) {
-    const key = Math.floor(r.timestamp.getTime() / LOSS_BUCKET_MS) * LOSS_BUCKET_MS;
+    const key = Math.floor(r.timestamp.getTime() / bucketMs) * bucketMs;
     const b = buckets.get(key) ?? { total: 0, failed: 0 };
     b.total++;
     if (!r.success) b.failed++;
@@ -319,10 +329,11 @@ async function rasterize(svg: string): Promise<Buffer | null> {
   }
 }
 
-function summaryLine(label: string, unit: string, points: SparkPoint[]): string {
+function summaryLine(label: string, unit: string, points: SparkPoint[], windowMs: number = CHART_WINDOW_MS): string {
+  const win = windowMs === CHART_WINDOW_MS ? "last hour" : `last ${timeAxisLabel(windowMs)}`;
   const s = seriesStats(points);
-  if (!s) return `${label} (last hour): no data`;
-  return `${label} (last hour): now ${formatReading(s.last, unit)}, avg ${formatReading(s.avg, unit)}, peak ${formatReading(s.max, unit)}`;
+  if (!s) return `${label} (${win}): no data`;
+  return `${label} (${win}): now ${formatReading(s.last, unit)}, avg ${formatReading(s.avg, unit)}, peak ${formatReading(s.max, unit)}`;
 }
 
 /**
@@ -350,6 +361,16 @@ export async function buildAlertCharts(
      * email — a response-time automation shows response time first.
      */
     metric?: string | null;
+    /**
+     * The automation's probe-loss History window in ms — the loss chart covers
+     * THIS span instead of the default last hour, so the graph shows exactly
+     * the period the alert's ratio was measured over (resolved from the rule's
+     * trigger via `probeLossWindowSecFromTrigger`). Absent/null (no loss
+     * condition on the rule, a deleted rule, a test alert) keeps the hour.
+     * Only the loss chart follows it: CPU / memory / response time stay
+     * last-hour context regardless.
+     */
+    lossWindowMs?: number | null;
   },
 ): Promise<Map<ChartToken, RenderedChart>> {
   const wanted = new Set(tokens);
@@ -372,6 +393,11 @@ export async function buildAlertCharts(
 
   const now = opts?.now ?? new Date();
   const since = new Date(now.getTime() - CHART_WINDOW_MS);
+  // The loss chart's window is the automation's History when the caller could
+  // resolve one — the chart then shows exactly the period the ratio that fired
+  // was measured over. Every other chart keeps the last-hour context window.
+  const lossWindowMs = opts?.lossWindowMs && opts.lossWindowMs > 0 ? opts.lossWindowMs : CHART_WINDOW_MS;
+  const lossSince = new Date(now.getTime() - lossWindowMs);
 
   let cpu: SparkPoint[] = [];
   let mem: SparkPoint[] = [];
@@ -391,7 +417,7 @@ export async function buildAlertCharts(
       wanted.has("chart.sensor")
         ? loadSensorSeries(assetId, opts!.sensorName!, since, displayUnit)
         : Promise.resolve(sensor),
-      wanted.has("chart.probeLoss") ? loadProbeLoss(assetId, since) : Promise.resolve([]),
+      wanted.has("chart.probeLoss") ? loadProbeLoss(assetId, lossSince, lossBucketMs(lossWindowMs)) : Promise.resolve([]),
     ]);
     cpu = tel.cpu;
     mem = tel.mem;
@@ -420,6 +446,7 @@ export async function buildAlertCharts(
     // the operator picked in the automation) and the unit the device reported,
     // after the display-unit swap.
     const isSensor = token === "chart.sensor";
+    const isLoss = token === "chart.probeLoss";
     const label = isSensor ? opts!.sensorName! : meta.label;
     const unit = isSensor ? (sensor.unit ? ` ${sensor.unit}` : "") : meta.unit;
     const svg = sparklineSvg(points, {
@@ -429,7 +456,7 @@ export async function buildAlertCharts(
       ...(meta.percent ? { yMin: 0, yMax: 100 } : {}),
       threshold: opts?.thresholds?.[token] ?? null,
       ...(isSensor && sensor.alarmSpans.length ? { alarmSpans: sensor.alarmSpans } : {}),
-      from: since.getTime(),
+      from: (isLoss ? lossSince : since).getTime(),
       to: now.getTime(),
     });
     const png = points.length > 0 ? await rasterize(svg) : null;
@@ -438,7 +465,7 @@ export async function buildAlertCharts(
       token,
       cid,
       hasData: points.length > 0,
-      summary: summaryLine(label, unit, points) +
+      summary: summaryLine(label, unit, points, isLoss ? lossWindowMs : CHART_WINDOW_MS) +
         // An alarm-triggered alert charts the VALUE; the bit itself is what the
         // automation fired on, so the text has to carry it too — image blocking
         // is on by default in plenty of clients.

@@ -67,6 +67,7 @@ import {
   scopeRank,
   scopeRankLabel,
   numMeets,
+  probeLossWindowSec,
 } from "./notificationTypes.js";
 import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
 import { ipInCidr } from "../utils/cidr.js";
@@ -90,11 +91,10 @@ const LAST_EVENT_SETTING_KEY = "notificationEngine.lastEventCursor";
 const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000; // window to find the "latest" sample
 
 // probeLossPct is a windowed RATIO, so its window is the measurement rather than
-// a lookback (business rule 29). Default matches the wizard's History default;
-// the minimum keeps a percentage from being computed off one or two probes,
-// where it could only ever read 0% or 100%.
-const PROBE_LOSS_DEFAULT_WINDOW_SEC = 15 * 60;
-const PROBE_LOSS_MIN_WINDOW_SEC = 5 * 60;
+// a lookback (business rule 29). The resolution (configured window floored at 5
+// min, defaulted to 15) lives in notificationTypes as `probeLossWindowSec`,
+// SHARED with the alert-email loss chart so the chart's window can never
+// disagree with the window the alert was measured over.
 
 // ─── A rule as loaded from the DB (normalized to shape v2) ──────────────────
 interface DbRule {
@@ -464,9 +464,7 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
       // a few probes behind it, and defaulted when the trigger carries none
       // (pre-History rules, where the minutes went to forDurationSec instead,
       // and hand-written ones).
-      const lossWindowSec = trigger.windowSec > 0
-        ? Math.max(trigger.windowSec, PROBE_LOSS_MIN_WINDOW_SEC)
-        : PROBE_LOSS_DEFAULT_WINDOW_SEC;
+      const lossWindowSec = probeLossWindowSec(trigger.windowSec);
       const sinceMinutes = lossWindowSec / 60;
       const rows = await queryProbeLossRatios({ sinceMinutes, assetIds: answering });
       // Emit the true ratio for every asset with at least one successful probe,

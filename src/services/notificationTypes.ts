@@ -266,10 +266,20 @@ export const CHANGE_TYPES = [
   "lldp_neighbor_added", "lldp_neighbor_removed",
   "process_started", "process_stopped",
   "sdwan_failover", "mclag_peer_lost", "wireless_station_connected",
+  "firmware_changed", "switch_port_changed", "wireless_ap_changed", "gateway_firewall_changed",
 ] as const;
 
 // Map a change type → the audit Event action the persist functions emit and
 // the event path matches on. Single source of truth for both ends.
+//
+// Two families here, and the difference matters when adding one. The `change.*`
+// rows are emitted through maybeEmitChangeEvents, which writes NOTHING unless a
+// rule subscribes (isChangeActionSubscribed) — they'd flood otherwise. The
+// `asset.*.changed` rows are written UNCONDITIONALLY by their write sites
+// (eventLogService's build*ChangedEvent builders): they're edge-triggered and
+// rare, and the operator wants them in the audit log whether or not an
+// automation watches. Their entry here only gives the wizard a picker over an
+// event that's always present.
 export const CHANGE_TYPE_ACTIONS: Record<(typeof CHANGE_TYPES)[number], string> = {
   lldp_neighbor_added: "change.lldp.neighbor_added",
   lldp_neighbor_removed: "change.lldp.neighbor_removed",
@@ -278,6 +288,10 @@ export const CHANGE_TYPE_ACTIONS: Record<(typeof CHANGE_TYPES)[number], string> 
   sdwan_failover: "change.sdwan.failover",
   mclag_peer_lost: "change.mclag.peer_lost",
   wireless_station_connected: "change.wireless.station_connected",
+  firmware_changed: "asset.firmware.changed",
+  switch_port_changed: "asset.switch_port.changed",
+  wireless_ap_changed: "asset.wireless_ap.changed",
+  gateway_firewall_changed: "asset.gateway_firewall.changed",
 };
 
 const dimensionFilterSchema = z
@@ -2016,12 +2030,60 @@ export function isAssetScopedTrigger(trigger: Trigger): boolean {
 /**
  * Metrics that are a RATIO OVER A WINDOW rather than a reading with an optional
  * aggregation — the window is the measurement itself. The builder uses this to
- * relabel its one time field as "History", hide the (ignored) aggregation
- * control, and skip per-severity-tier hold clocks; the engine uses the window
- * exactly instead of applying its `latest`-sample lookback floor. Exposed on
- * /automations/schema as `windowedRatioMetrics`.
+ * relabel its base time field as "History", hide the (ignored) aggregation
+ * control, and offer a SEPARATE optional "Sustained for" hold (2026-08-20 —
+ * History and sustain are two axes: how long each reading measures over, and
+ * how long readings must stay over the threshold; severity tiers keep their own
+ * holds per rule 19). The engine uses the window exactly instead of applying
+ * its `latest`-sample lookback floor. Exposed on /automations/schema as
+ * `windowedRatioMetrics`.
  */
 export const WINDOWED_RATIO_METRICS = ["probeLossPct"] as const;
+
+/**
+ * The probe-loss measurement window, resolved exactly the way the engine
+ * measures it: the configured `windowSec` floored at the 5-minute minimum (a
+ * ratio always needs a few probes behind it), defaulted to 15 minutes when the
+ * trigger carries none — pre-History rules, where the minutes went to
+ * `forDurationSec` instead, and hand-written ones. Shared by the engine's
+ * `probeLossPct` resolver and the alert-email loss chart, so the chart's window
+ * can never disagree with the window the alert was measured over.
+ */
+export const PROBE_LOSS_DEFAULT_WINDOW_SEC = 15 * 60;
+export const PROBE_LOSS_MIN_WINDOW_SEC = 5 * 60;
+
+export function probeLossWindowSec(windowSec: number | null | undefined): number {
+  return typeof windowSec === "number" && windowSec > 0
+    ? Math.max(windowSec, PROBE_LOSS_MIN_WINDOW_SEC)
+    : PROBE_LOSS_DEFAULT_WINDOW_SEC;
+}
+
+/**
+ * The History window of a stored rule's probe-loss condition, in seconds — or
+ * null when the trigger has no such condition (then a loss chart in its email,
+ * if any, keeps the default last-hour window). Walks the raw stored `trigger`
+ * JSON tolerantly: a flat `asset_metric` trigger or any `probeLossPct` leaf of
+ * a composite tree (the widest window wins when a tree improbably carries two).
+ * Never throws — this runs on the delivery drain, best-effort by contract.
+ */
+export function probeLossWindowSecFromTrigger(trigger: unknown): number | null {
+  let found: number | null = null;
+  const visit = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    const n = node as Record<string, unknown>;
+    if (n.type === "asset_metric" && n.metric === "probeLossPct") {
+      const w = probeLossWindowSec(typeof n.windowSec === "number" ? n.windowSec : null);
+      found = found === null ? w : Math.max(found, w);
+    } else if (n.type === "composite" && Array.isArray(n.children)) {
+      for (const c of n.children) visit(c);
+    } else if (Array.isArray(n.children)) {
+      // A nested group inside a composite tree has no `type` of its own.
+      for (const c of n.children) visit(c);
+    }
+  };
+  visit(trigger);
+  return found;
+}
 
 export const METRIC_META: Record<string, { label: string; unit: string }> = {
   // asset_metric
@@ -2102,6 +2164,10 @@ export const CHANGE_TYPE_META: Record<string, string> = {
   sdwan_failover: "SD-WAN failover (member changed)",
   mclag_peer_lost: "MCLAG peer lost",
   wireless_station_connected: "Wireless station connected",
+  firmware_changed: "Firmware / OS version changed",
+  switch_port_changed: "Switch port changed",
+  wireless_ap_changed: "Wireless AP changed (roam)",
+  gateway_firewall_changed: "Gateway FortiGate changed",
 };
 
 // Which dimensionFilter inputs are relevant per asset_metric metric, so the

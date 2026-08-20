@@ -52,6 +52,15 @@ describe("triggerSubject", () => {
       "CPU ON-DIE Temperature (temperature)",
     )).toBe("Hardware sensor value on CPU ON-DIE Temperature (temperature)");
   });
+
+  it("states a windowed ratio's History window — its aggregation is latest, so the ordinary clause would drop it", () => {
+    expect(triggerSubject({ type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 3600 }))
+      .toBe("Packet loss (probe) (over the last 1 hour of probe history)");
+    // A pre-History rule (no window) states what the engine actually measures
+    // over: its default, not nothing.
+    expect(triggerSubject({ type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 0 }))
+      .toBe("Packet loss (probe) (over the last 15 minutes of probe history)");
+  });
 });
 
 describe("triggerSummary", () => {
@@ -64,7 +73,7 @@ describe("triggerSummary", () => {
 
   it("rounds for reading rather than dumping a float", () => {
     expect(triggerSummary({ trigger: { type: "asset_metric", metric: "probeLossPct" }, value: 93.7529 }))
-      .toBe("Packet loss (probe) is 93.8 %");
+      .toBe("Packet loss (probe) (over the last 15 minutes of probe history) is 93.8 %");
   });
 
   it("states a hardware sensor's own unit, not the catalogue placeholder", () => {

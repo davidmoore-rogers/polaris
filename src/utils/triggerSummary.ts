@@ -20,7 +20,7 @@
  * should read the same phrase in the email it sends.
  */
 
-import { METRIC_META, FIELD_META, CHANGE_TYPE_META } from "../services/notificationTypes.js";
+import { METRIC_META, FIELD_META, CHANGE_TYPE_META, WINDOWED_RATIO_METRICS, probeLossWindowSec } from "../services/notificationTypes.js";
 
 /** "5 minutes" / "1 hour" / "45 seconds" — mirrors the wizard's humanDuration. */
 export function humanDuration(sec: number | null | undefined): string {
@@ -83,10 +83,16 @@ export function triggerSubject(trigger: SummarizableTrigger, dimensionLabel?: st
   const meta = trigger.metric ? METRIC_META[trigger.metric] : undefined;
   const base = meta?.label ?? trigger.metric ?? "The condition";
   const subject = trigger.type === "host_metric" ? `The Polaris host's ${base.toLowerCase()}` : base;
+  // A windowed ratio (packet loss) states its History window — the window IS
+  // the measurement, and its aggregation is "latest", so the ordinary clause
+  // below would silently drop it. Mirrors the wizard's tgLeafPhrase, including
+  // the default when a pre-History rule carries no window.
   const agg =
-    trigger.aggregation && trigger.aggregation !== "latest" && trigger.windowSec
-      ? ` (${AGG_PHRASE[trigger.aggregation] ?? trigger.aggregation} ${humanDuration(trigger.windowSec)})`
-      : "";
+    trigger.metric && (WINDOWED_RATIO_METRICS as readonly string[]).includes(trigger.metric)
+      ? ` (over the last ${humanDuration(probeLossWindowSec(trigger.windowSec))} of probe history)`
+      : trigger.aggregation && trigger.aggregation !== "latest" && trigger.windowSec
+        ? ` (${AGG_PHRASE[trigger.aggregation] ?? trigger.aggregation} ${humanDuration(trigger.windowSec)})`
+        : "";
   const on = dimensionLabel ? ` on ${dimensionLabel}` : "";
   return `${subject}${agg}${on}`;
 }

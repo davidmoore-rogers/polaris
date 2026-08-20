@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { sparklineSvg, seriesStats, formatReading, niceCeil, type SparkPoint } from "../../src/utils/sparklineSvg.js";
+import { sparklineSvg, seriesStats, formatReading, niceCeil, timeAxisLabel, type SparkPoint } from "../../src/utils/sparklineSvg.js";
 
 const T0 = Date.parse("2026-08-12T10:00:00Z");
 const series = (vals: number[]): SparkPoint[] => vals.map((v, i) => ({ t: T0 + i * 60_000, v }));
@@ -37,6 +37,27 @@ describe("niceCeil", () => {
   it("leaves nothing to round alone", () => {
     expect(niceCeil(0)).toBe(0);
     expect(niceCeil(-5)).toBe(-5);
+  });
+});
+
+describe("timeAxisLabel", () => {
+  it("labels the window the chart was actually given, minutes up to 90 then hours", () => {
+    // The left axis label was a hardcoded "-60 min" until the loss chart's
+    // window started following the automation's History.
+    expect(timeAxisLabel(60 * 60_000)).toBe("60 min");
+    expect(timeAxisLabel(15 * 60_000)).toBe("15 min");
+    expect(timeAxisLabel(89 * 60_000)).toBe("89 min");
+    expect(timeAxisLabel(90 * 60_000)).toBe("1.5 h");
+    expect(timeAxisLabel(120 * 60_000)).toBe("2 h");
+    // A 24-hour History must not print "-1440 min".
+    expect(timeAxisLabel(24 * 60 * 60_000)).toBe("24 h");
+  });
+
+  it("rides the rendered SVG's x-axis", () => {
+    const hour = sparklineSvg(series([10, 50, 90]), { label: "CPU", unit: "%", from: T0, to: T0 + 60 * 60_000 });
+    expect(hour).toContain(">-60 min<");
+    const quarter = sparklineSvg(series([10, 50, 90]), { label: "Loss", unit: "%", from: T0, to: T0 + 15 * 60_000 });
+    expect(quarter).toContain(">-15 min<");
   });
 });
 

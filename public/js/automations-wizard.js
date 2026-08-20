@@ -365,8 +365,14 @@ function makeAutomationSentences(s) {
       // phrase key. The builder only ever emits known keys, but a rule can also
       // be written straight to the API, so the fallback is arbitrary stored text
       // landing in a sentence the wizard assigns to innerHTML — escape it.
-      var agg = tr.aggregation && tr.aggregation !== "latest" && tr.windowSec
-        ? " (" + escapeHtml(AGG_PHRASE[tr.aggregation] || tr.aggregation) + " " + humanDuration(tr.windowSec) + ")" : "";
+      // A windowed ratio prints its History window (the measurement itself) the
+      // way tgLeafPhrase does — its aggregation is "latest", so the ordinary
+      // agg clause would silently drop the window from a stored (collapsed)
+      // loss rule's sentence.
+      var agg = isWindowedRatio(tr.metric)
+        ? " (over the last " + (humanDuration(tr.windowSec) || humanDuration(RATIO_WINDOW_DEFAULT_SEC)) + " of probe history, from the first successful probe)"
+        : tr.aggregation && tr.aggregation !== "latest" && tr.windowSec
+          ? " (" + escapeHtml(AGG_PHRASE[tr.aggregation] || tr.aggregation) + " " + humanDuration(tr.windowSec) + ")" : "";
       var thr = tr.threshold == null || isNaN(tr.threshold) ? "…" : tr.threshold;
       var unit = leafUnit(tr.metric, tr.dimensionFilter); unit = unit ? " " + unit : "";
       out = "When <strong>" + escapeHtml(subject) + agg + " " + escapeHtml(CMP_PHRASE[tr.operator] || tr.operator) + " " + escapeHtml(String(thr)) + escapeHtml(unit) + "</strong>";
@@ -463,7 +469,8 @@ function makeAutomationSentences(s) {
     var agg = leaf.aggregation || "latest";
     var fn = (flag ? FORMULA_STATE_AGG[agg] : FORMULA_AGG[agg]) || agg;
     // `loss(probes, 15m since first ok)` — the window is inside the term because
-    // it's the measurement, and there is never a hold clause outside it.
+    // it IS the measurement. A hold, when the operator sets one, prints outside
+    // it as "held 10m" like any other term's (the two axes, shown apart).
     if (isWindowedRatio(leaf.metric)) {
       return "loss(probes" + formulaDims(leaf, false) + ", " +
         compactDuration(leaf.windowSec > 0 ? leaf.windowSec : RATIO_WINDOW_DEFAULT_SEC) + " since first ok)";
@@ -2026,11 +2033,25 @@ async function openAutomationWizard(existing, opts) {
     // The asterisk is hidden until an aggregated condition makes the field
     // mandatory (syncDurationRequirement) — avg / median / min / max have no
     // period to measure over without it.
-    var hidden = String(attr || "").indexOf('data-ratio-hidden="1"') !== -1;
-    return '<div class="form-group aw-dur" style="margin:0.5rem 0 0' + (hidden ? ";display:none" : "") + '">' +
+    return '<div class="form-group aw-dur" style="margin:0.5rem 0 0">' +
       '<label style="font-size:0.8rem">Sustained for (minutes)<span class="aw-dur-req" style="display:none;color:var(--color-danger);font-weight:700;margin-left:2px">*</span></label>' +
       '<input type="number" ' + attr + ' min="0" value="' + mins + '" placeholder="' + DUR_PLACEHOLDER_OPTIONAL + '">' +
       '<p class="aw-dur-note" style="display:none;margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>';
+  }
+  /**
+   * The SECOND time field a windowed-ratio trigger gets (2026-08-20): the base
+   * field above it is the History window (the measurement itself), this is the
+   * optional hold — the ratio must stay over the threshold for this long before
+   * the alert fires. Rendered for every device/host trigger but hidden unless a
+   * ratio condition is present (syncDurationRequirement toggles it live), the
+   * same rendered-not-omitted pattern as the tiers' hold boxes.
+   */
+  function ratioSustainFieldHtml(tr) {
+    var show = triggerIsWindowedRatio(tr);
+    return '<div class="form-group aw-ratio-sustain" style="margin:0.5rem 0 0' + (show ? "" : ";display:none") + '">' +
+      '<label style="font-size:0.8rem">Sustained for (minutes)</label>' +
+      '<input type="number" id="tf-sustain-min" min="0" max="' + RATIO_WINDOW_MAX_MIN + '" value="' + triggerSustainMinutes(tr) + '" placeholder="' + DUR_PLACEHOLDER_OPTIONAL + '">' +
+      '<p style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)">Optional — how long the loss must stay over the threshold before the alert fires. Each reading still measures over the History window above.</p></div>';
   }
   /**
    * Show/hide the duration field's red asterisk + note for the BASE tree: with
@@ -2081,6 +2102,10 @@ async function openAutomationWizard(existing, opts) {
       // than 0, which would save a window the engine has to invent.
       if (ratio && (input.value === "" || Number(input.value) === 0)) input.value = String(RATIO_WINDOW_DEFAULT_MIN);
     }
+    // The ratio-only sustain field appears exactly when the History relabel
+    // does — switching the metric to/from packet loss toggles both together.
+    var sustainWrap = panel.querySelector(".aw-ratio-sustain");
+    if (sustainWrap) sustainWrap.style.display = ratio ? "" : "none";
   }
   function step3Html() {
     var cat = triggerCategoryOf(draft.trigger);
@@ -2114,7 +2139,8 @@ async function openAutomationWizard(existing, opts) {
       var tree = triggerToTree(tr, kind);
       html += '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Add conditions and combine them with AND/OR groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move them. ' + escapeHtml(tgMeta.anyDimensionNote || "") + '</p>' +
         '<div id="aw-trig-root">' + tgGroupHtml(tree, 0, kind) + '</div>' +
-        durationFieldHtml('id="tf-duration-min"', triggerDurationMinutes(tr));
+        durationFieldHtml('id="tf-duration-min"', triggerDurationMinutes(tr)) +
+        ratioSustainFieldHtml(tr);
       if (cat === "host") {
         html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">Polaris-host conditions aren’t tied to assets — the device filter from the previous step is ignored.</p>';
       }
@@ -2180,11 +2206,20 @@ async function openAutomationWizard(existing, opts) {
         var mins = dEl && dEl.value !== "" ? Number(dEl.value) : 0;
         if (isNaN(mins) || mins < 0) mins = 0;
         // One time knob: it's the window for an aggregated condition (which then
-        // needs no sustain on top), the sustain clock for a `latest` one.
+        // needs no sustain on top), the sustain clock for a `latest` one. A
+        // windowed RATIO is the exception with two: the field above is its
+        // History (→ windowSec via the stamp), and its own optional sustain
+        // rides the dedicated #tf-sustain-min field (hidden for everything
+        // else, so a non-ratio trigger can never pick a value up from it).
         var aggregated = tgStampWindows(tree, mins * 60);
+        var ratio = !!root.querySelector('.scr-row[data-ratio="1"]');
+        var sEl = panel.querySelector("#tf-sustain-min");
+        var sustainMins = ratio && sEl && sEl.value !== "" ? Number(sEl.value) : 0;
+        if (isNaN(sustainMins) || sustainMins < 0) sustainMins = 0;
+        if (sustainMins > RATIO_WINDOW_MAX_MIN) sustainMins = RATIO_WINDOW_MAX_MIN;
         draft.trigger = tgCollapse({
           type: "composite", kind: kind, op: tree.op, children: tree.children,
-          forDurationSec: aggregated ? 0 : mins * 60,
+          forDurationSec: aggregated ? (ratio ? Math.round(sustainMins) * 60 : 0) : mins * 60,
         });
       }
     } else if (cat === "event") {
@@ -2255,6 +2290,20 @@ async function openAutomationWizard(existing, opts) {
     var win = 0;
     leaves.forEach(function (l) { if (tgLeafAggregated(l)) win = Math.max(win, Number(l.windowSec) || 0); });
     return Math.round((win || Number(tr.forDurationSec) || 0) / 60);
+  }
+  /**
+   * Minutes for the ratio sustain field — the stored hold, but ONLY when the
+   * trigger also stores a window. A legacy loss rule (windowSec 0) carries its
+   * History in `forDurationSec` (the pre-History shape, which
+   * triggerDurationMinutes reads back as the window above): showing those same
+   * minutes here too would turn "measured over 60" into "measured over 60, then
+   * held another 60" on the next save.
+   */
+  function triggerSustainMinutes(tr) {
+    if (!tr || !triggerIsWindowedRatio(tr)) return 0;
+    var leaves = tr.type === "composite" ? tgLeaves(tr) : [tr];
+    var hasWindow = leaves.some(function (l) { return tgLeafWindowedRatio(l) && Number(l.windowSec) > 0; });
+    return hasWindow ? Math.round((Number(tr.forDurationSec) || 0) / 60) : 0;
   }
   function tgValidateLeaf(leaf, label) {
     if (leaf.type === "asset_state") {
@@ -3081,12 +3130,15 @@ async function openAutomationWizard(existing, opts) {
     // The base tier's "Sustained for" belongs WITH the base tier once every
     // added tier has its own — otherwise it reads as a rule-wide setting sitting
     // between the tiers. Moved (not re-created) so its value survives the swap.
+    // A ratio trigger's sustain field is the same kind of thing and rides along.
     var durGroup = panel.querySelector("#tf-duration-min");
     durGroup = durGroup && durGroup.closest(".aw-dur");
+    var sustainGroup = panel.querySelector(".aw-ratio-sustain");
     if (!multi) {
       if (existingSev) existingSev.remove();
       if (existingAdd) existingAdd.remove();
       if (durGroup && root.contains(durGroup)) panel.querySelector("#aw-trigger-fields").appendChild(durGroup);
+      if (sustainGroup && root.contains(sustainGroup)) panel.querySelector("#aw-trigger-fields").appendChild(sustainGroup);
       root.style.borderLeftColor = "";
       // Put the group's own chrome back: with one severity there is no tier to
       // line up with, so the combinator shares the header row again and each
@@ -3116,10 +3168,11 @@ async function openAutomationWizard(existing, opts) {
       return;
     }
     if (durGroup && btnRow && !root.contains(durGroup)) root.insertBefore(durGroup, btnRow);
+    if (sustainGroup && btnRow && !root.contains(sustainGroup)) root.insertBefore(sustainGroup, btnRow);
     // The duration field and the +Condition row are moved in/marked on different
     // ticks, so (re)mark whatever is currently there rather than assuming order.
     if (multi) {
-      root.querySelectorAll(":scope > .scg-children, :scope > .aw-dur, :scope > .scg-btnrow").forEach(function (el) {
+      root.querySelectorAll(":scope > .scg-children, :scope > .aw-dur, :scope > .aw-ratio-sustain, :scope > .scg-btnrow").forEach(function (el) {
         el.classList.add("aw-collapse-part");
       });
     }
@@ -3279,15 +3332,11 @@ async function openAutomationWizard(existing, opts) {
     var base = tgCollectLeaf(rows[0], kind);
     if (base.type === "asset_state") return;
     var sig = bandSampleSig(base);
-    // Packet loss (any windowed ratio): tiers share the base's History window, so
-    // their own hold boxes hide — and switching BACK to a regular metric brings
-    // them straight back, which is why they're hidden rather than omitted.
-    var ratio = tgLeafWindowedRatio(base);
-    host.querySelectorAll(":scope > .aw-band .band-duration").forEach(function (el) {
-      var wrap = el.parentNode;
-      while (wrap && !(wrap.classList && wrap.classList.contains("aw-dur"))) wrap = wrap.parentNode;
-      if (wrap) wrap.style.display = ratio ? "none" : "";
-    });
+    // Windowed-ratio triggers keep their tiers' hold boxes too (2026-08-20):
+    // tiers share the base's History window (the sampling), and each may hold
+    // its own sustain on top — "10% for 30 min = warning, 25% for 5 min =
+    // critical" is one automation (rule 19). They were hidden while a ratio
+    // trigger had no sustain axis at all.
     host.querySelectorAll(":scope > .aw-band").forEach(function (row) {
       if (row._sampleSig === sig) return;
       var cur = row.querySelector(".band-cond .scr-row");
@@ -3348,12 +3397,10 @@ async function openAutomationWizard(existing, opts) {
       '<div class="aw-collapse-body">' +
       '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
       '<div class="band-cond scg-children"></div>' +
-      // Severity tiers share the trigger's sampling (rule 19), and for a windowed
-      // ratio that includes the History window — a per-tier hold on top of it
-      // would be the same two-knobs confusion the base field just shed. Rendered
-      // but HIDDEN for those; syncBandsToBase toggles it as the metric changes,
-      // which an omitted element couldn't come back from.
-      durationFieldHtml('class="band-duration"' + (triggerIsWindowedRatio(draft.trigger) ? ' data-ratio-hidden="1"' : ""), bandDurMin) +
+      // Severity tiers share the trigger's sampling (rule 19) — for a windowed
+      // ratio that means the History window — but each tier keeps its OWN hold
+      // clock on top, ratio triggers included (2026-08-20).
+      durationFieldHtml('class="band-duration"', bandDurMin) +
       '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>' +
       '</div>';
     host.appendChild(row);

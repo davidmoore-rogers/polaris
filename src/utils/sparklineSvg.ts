@@ -76,6 +76,20 @@ export function niceCeil(v: number): number {
   return step * mag;
 }
 
+/**
+ * The x-axis window as an operator reads it: "60 min" up to 90 minutes, then
+ * hours ("2 h", "1.5 h") so a 24-hour loss History doesn't print "-1440 min".
+ * The left axis label was a hardcoded "-60 min" until the loss chart's window
+ * started following the automation's History (2026-08); every chart now labels
+ * whatever span it was actually given.
+ */
+export function timeAxisLabel(spanMs: number): string {
+  const mins = Math.round(spanMs / 60_000);
+  if (mins < 90) return `${mins} min`;
+  const hours = Math.round((mins / 60) * 10) / 10;
+  return `${Number.isInteger(hours) ? hours.toFixed(0) : hours.toFixed(1)} h`;
+}
+
 /** Trim to 1 decimal, then drop a trailing ".0" — "97" reads better than "97.0". */
 export function formatReading(v: number, unit = ""): string {
   const rounded = Math.round(v * 10) / 10;
@@ -205,7 +219,7 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
 
   const axis = `<line x1="${PAD_L}" y1="${PAD_T + plotH}" x2="${width - PAD_R}" y2="${PAD_T + plotH}" stroke="#d1d5db" stroke-width="1"/>`;
   const xLabels =
-    `<text x="${PAD_L}" y="${height - 5}" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">-60 min</text>` +
+    `<text x="${PAD_L}" y="${height - 5}" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">-${esc(timeAxisLabel(tSpan))}</text>` +
     `<text x="${width - PAD_R}" y="${height - 5}" text-anchor="end" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">now</text>`;
 
   return head + alarmBands + grid + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;

@@ -27,7 +27,7 @@ import { buildInterfaceLldpBlocks, interfaceTokensIn, substituteInterfaceTokens 
 import { buildAlertBrandBlock, brandTokensIn, substituteBrandTokens, BRAND_LOGO_CID } from "./alertBrandService.js";
 import { pruneEmptyChartSection, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
 import { logEvent } from "./eventLogService.js";
-import { type ChannelType } from "./notificationTypes.js";
+import { type ChannelType, probeLossWindowSecFromTrigger } from "./notificationTypes.js";
 import { sendSmtpEmail, sendM365Email, type EmailMessage } from "./notificationChannels/emailChannel.js";
 import { sendWebhook } from "./notificationChannels/webhookChannel.js";
 import { sendPushbullet } from "./notificationChannels/pushbulletChannel.js";
@@ -63,8 +63,31 @@ interface DeliveryRow {
     dimension: string | null;
     /** The metric that fired — puts its chart first in the body. */
     metric: string | null;
+    /** The automation — read back (lazily) for the loss chart's History window. */
+    ruleId: string | null;
     triggeredAt: Date;
   };
+}
+
+/**
+ * The probe-loss History window (ms) the alert's automation measures over, for
+ * the email's loss chart — so the graph spans exactly the period the ratio that
+ * fired was computed on, instead of a fixed hour. Null when there is nothing to
+ * follow: no rule (test alerts), a deleted rule, or a trigger with no loss
+ * condition. Best-effort by the chart contract — a read failure means the
+ * default window, never a failed delivery. One indexed read per delivery that
+ * actually embeds a loss chart; the drain is off the engine's hot path.
+ */
+async function lossChartWindowMs(ruleId: string | null): Promise<number | null> {
+  if (!ruleId) return null;
+  try {
+    const rule = await prisma.notificationRule.findUnique({ where: { id: ruleId }, select: { trigger: true } });
+    const sec = rule ? probeLossWindowSecFromTrigger(rule.trigger) : null;
+    return sec ? sec * 1000 : null;
+  } catch (err) {
+    logger.debug({ err: (err as Error)?.message, ruleId }, "loss chart window lookup failed — using the default");
+    return null;
+  }
 }
 
 function titleFor(n: DeliveryRow["notification"]): string {
@@ -101,7 +124,15 @@ async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, ur
     const wanted = chartTokensIn(text, html);
     if (wanted.size > 0) {
       const charts = d.notification.assetId
-        ? await buildAlertCharts(d.notification.assetId, wanted, { sensorName: d.notification.dimension, metric: d.notification.metric })
+        ? await buildAlertCharts(d.notification.assetId, wanted, {
+            sensorName: d.notification.dimension,
+            metric: d.notification.metric,
+            // The loss chart follows the automation's own History window; only
+            // resolved when the body embeds one, and only meaningful there.
+            lossWindowMs: wanted.has("chart.probeLoss") || wanted.has("chart.trigger")
+              ? await lossChartWindowMs(d.notification.ruleId)
+              : null,
+          })
         : new Map();
       // Charts render away individually (no samples) and collectively (an alert
       // about Polaris itself has no asset to chart), so both bodies get a tidy
@@ -293,7 +324,10 @@ export async function drainPendingDeliveries(
       attempts: true,
       // assetId is what the last-hour charts query against — the hostname is a
       // fire-time snapshot and can't be joined back to sample rows.
-      notification: { select: { id: true, message: true, severity: true, assetId: true, assetHostname: true, dimension: true, metric: true, triggeredAt: true } },
+      // ruleId feeds the loss chart's window: the automation's own History is
+      // what the chart should span (resolved lazily, only when a loss chart is
+      // actually in the body).
+      notification: { select: { id: true, message: true, severity: true, assetId: true, assetHostname: true, dimension: true, metric: true, ruleId: true, triggeredAt: true } },
     },
   })) as DeliveryRow[];
 
