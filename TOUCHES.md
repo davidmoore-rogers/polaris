@@ -5199,6 +5199,12 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - src/api/routes/auth.ts — DELETE /totp, consume backup code on disable
 - src/api/routes/auth.ts — DELETE /totp, verify code before disabling
 
+**Frontend surfaces** (the self-service flow — enroll QR + confirm, one-time backup codes, disable):
+- `public/js/totp-self.js` — `window.PolarisTotpSelf`, the ONLY copy of those modals. `open()` routes off `GET /auth/totp/status`; a non-`local` `authProvider` is refused client-side too, because `POST /totp/enroll` rejects it and a QR code that can never be confirmed is worse than the reason.
+- `public/js/app.js` — the page-header account menu’s two-factor row (`wireTotpState` / `_totpMenuItem` / `_openTotpSelf`, plus the shared `refreshTotpState` users.js calls after its own enroll/disable), offered on every page for `local` accounts. This is the reachability fix: /users.html is admin-gated, so before it a local user without `users` could not configure their own second factor at all.
+- `public/js/users.js` — the Users-table row menu (own row → `openTotpSelfModal`, which now delegates to the shared module and passes `onChange: loadUsers`; another user’s row → the admin `DELETE /users/:id/totp` reset).
+- Every page that loads `app.js` must also load `totp-self.js` (the row omits itself when the module is absent, so a missed script tag fails quiet).
+
 **Invariants:**
 - TOTP secret must be base32-encoded; verify operations accept ±1 step (30s drift tolerance) to absorb client/server clock skew.
 - Backup codes are 10 hex pairs (XXXX-XXXX format), argon2id-hashed on generation, never returned in plaintext after enrollment.

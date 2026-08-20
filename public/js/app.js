@@ -173,6 +173,12 @@ const NAV_ITEMS = [
 var _pushState = null;
 var _pushBusy = false;
 
+// Last known TOTP enrollment state for the account menu's two-factor row, and
+// a one-per-page-load fetch guard. Same reason as _pushState: the row is built
+// fresh every time the menu opens, so there's no control to repaint.
+var _totpState = null;
+var _totpFetched = false;
+
 /**
  * Push enrollment state + service-worker registration for the user menu's
  * "Enable push" / "Disable push" row.
@@ -255,6 +261,74 @@ function _togglePush() {
   });
 }
 
+/**
+ * Two-factor (TOTP) enrollment state for the user menu's row.
+ *
+ * Fetched once per page load — the account menu is the only surface that
+ * reads it, and it's rebuilt per open. Deliberately NOT gated on
+ * `currentUserAuthProvider`: renderNav also runs off the localStorage cache,
+ * which doesn't carry the provider (it defaults to "local"), so the row gates
+ * on the status payload's OWN authProvider instead. That's also the value the
+ * /auth/totp/* routes enforce against, so the menu can't offer a control the
+ * server will refuse.
+ */
+function wireTotpState() {
+  if (_totpFetched) return;
+  if (!window.PolarisTotpSelf || !window.api || !api.totp) return;
+  _totpFetched = true;
+  PolarisTotpSelf.status()
+    .then(function (st) { _totpState = st || null; })
+    .catch(function () { _totpState = null; });
+}
+
+/**
+ * The user menu's two-factor row, or null when it isn't on offer: no shared
+ * module on the page, state not read yet, or an SSO/LDAP account whose
+ * directory owns MFA (the enroll route rejects those outright).
+ *
+ * Local accounts get a self-service second factor here because /users.html —
+ * where this flow used to live exclusively — is admin-gated, so an ordinary
+ * local user could never reach it despite the routes being self-service.
+ */
+function _totpMenuItem() {
+  if (!window.PolarisTotpSelf) return null;
+  if (!_totpState || _totpState.authProvider !== "local") return null;
+
+  var label, title;
+  if (_totpState.enabled) {
+    label = "Disable two-factor auth";
+    title = "Requires a current authenticator code or a backup code"
+      + (_totpState.backupCodesRemaining ? " (" + _totpState.backupCodesRemaining + " backup codes left)" : "");
+  } else if (_totpState.enrolling) {
+    // A secret was minted but never confirmed — enroll() re-issues one, so
+    // the row resumes the flow rather than pretending nothing happened.
+    label = "Finish two-factor setup";
+    title = "Enrollment was started but never confirmed";
+  } else {
+    label = "Set up two-factor auth";
+    title = "Add an authenticator-app code to your login";
+  }
+  return { label: label, icon: ICONS.shield, title: title, onSelect: _openTotpSelf };
+}
+
+/**
+ * Re-read enrollment state so the row relabels after the flow changed it.
+ * Exposed because /users.html hosts the same flow off its own row menu — the
+ * cached row would otherwise still read "Set up two-factor auth" on the page
+ * where the operator just enabled it.
+ */
+function refreshTotpState() {
+  if (!window.PolarisTotpSelf) return;
+  PolarisTotpSelf.status()
+    .then(function (st) { _totpState = st || null; })
+    .catch(function () {});
+}
+
+/** Open the enroll/disable flow, refreshing the cached row state after. */
+function _openTotpSelf() {
+  PolarisTotpSelf.open({ onChange: refreshTotpState });
+}
+
 const ICONS = {
   grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
@@ -266,6 +340,7 @@ const ICONS = {
   plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 01-12 0V8h12z"/></svg>',
   users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>',
   bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>',
   share2: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>',
   zap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
   logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>',
@@ -334,6 +409,7 @@ function renderNav() {
   `;
 
   wirePushToggle();
+  wireTotpState();
 
   // Wire up query status indicator
   _onQueriesChanged = renderQueryStatus;
@@ -1126,8 +1202,9 @@ function renderUserBadge() {
 
 /**
  * The account menu behind the page-header user badge: theme, push enrollment,
- * logout. Items are built per open so the theme label and the push row reflect
- * current state without anything to keep repainted.
+ * two-factor enrollment, logout. Items are built per open so the theme label
+ * and the push / 2FA rows reflect current state without anything to keep
+ * repainted.
  */
 function openUserMenu(anchor) {
   if (typeof showRowMenu !== "function") return;
@@ -1143,6 +1220,9 @@ function openUserMenu(anchor) {
 
   var push = _pushMenuItem();
   if (push) items.push(push);
+
+  var totp = _totpMenuItem();
+  if (totp) items.push(totp);
 
   items.push({ separator: true });
   items.push({

@@ -41,7 +41,7 @@ interface Item {
   onSelect?: () => void;
 }
 
-function open(opts: { theme?: string; push?: Item | null } = {}) {
+function open(opts: { theme?: string; push?: Item | null; totp?: Item | null } = {}) {
   const captured: { items: Item[]; opts: Record<string, unknown>; anchor: unknown } =
     { items: [], opts: {}, anchor: null };
   const themeWrites: string[] = [];
@@ -56,8 +56,9 @@ function open(opts: { theme?: string; push?: Item | null } = {}) {
   g._sunIcon = () => "<svg id='sun'/>";
   g._moonIcon = () => "<svg id='moon'/>";
   g._pushMenuItem = () => (opts.push === undefined ? null : opts.push);
+  g._totpMenuItem = () => (opts.totp === undefined ? null : opts.totp);
   g._csrfHeaders = () => ({ "x-csrf-token": "t" });
-  g.ICONS = { logout: "<svg id='logout'/>", bell: "<svg id='bell'/>" };
+  g.ICONS = { logout: "<svg id='logout'/>", bell: "<svg id='bell'/>", shield: "<svg id='shield'/>" };
   g.fetch = vi.fn((url: string) => { fetches.push(url); return Promise.resolve({}); });
 
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
@@ -93,8 +94,26 @@ describe("openUserMenu", () => {
     expect(r.labels).toEqual(["Light Mode", "Enable push", "—", "Logout"]);
   });
 
+  it("slots the two-factor row after push, still above the separator", () => {
+    // The 2FA row is conditional for the same class of reason push is (local
+    // accounts only), so its absence must not disturb the unconditional rows.
+    const r = open({
+      push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} },
+      totp: { label: "Set up two-factor auth", icon: "<svg/>", onSelect: () => {} },
+    });
+    expect(r.labels).toEqual(["Light Mode", "Enable push", "Set up two-factor auth", "—", "Logout"]);
+  });
+
+  it("omits the two-factor row for an SSO account without disturbing the rest", () => {
+    const r = open({ totp: null });
+    expect(r.labels).toEqual(["Light Mode", "—", "Logout"]);
+  });
+
   it("marks logout destructive and gives every row an icon", () => {
-    const r = open({ push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} } });
+    const r = open({
+      push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} },
+      totp: { label: "Set up two-factor auth", icon: "<svg/>", onSelect: () => {} },
+    });
     const logout = r.items[r.items.length - 1];
     expect(logout.danger).toBe(true);
     expect(r.items.filter((i) => !i.separator).every((i) => Boolean(i.icon))).toBe(true);
