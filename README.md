@@ -82,7 +82,7 @@ Server Settings → Maintenance shows host CPU/RAM/disk, database size with samp
 
 ### Authentication & RBAC
 - **Local accounts** — argon2id-hashed passwords with strength rules and per-account temporary lockout.
-- **TOTP second factor** — RFC 6238 enrollment via QR code, single-use backup codes, admin reset for lost devices.
+- **TOTP second factor** — RFC 6238 enrollment via QR code, single-use backup codes, admin reset for lost devices. Local accounts enroll themselves from the account menu behind the page-header user badge, on any page — no admin involvement and no Users-page access needed.
 - **Azure SAML SSO** — auto-provisioning, single logout, optional skip-login-page redirect.
 - **OIDC, LDAP/AD, and Entra App Proxy SSO** — OpenID Connect (Auth-Code + PKCE), LDAP/Active Directory bind login, and header-based SSO for installs published through Microsoft Entra Application Proxy (source-IP-gated, unsigned-header trust model). IdP groups map to roles + region/other tags via Group Mappings (highest-privilege wins).
 - **Local login access** — optionally restrict the local login form (`/login.html`) and the password endpoints to chosen source networks (RFC1918 + loopback, all, or a custom CIDR allow-list), under Server Settings → Web Server → Local Login Access. Off by default. SSO sign-in is never restricted; the local *and* LDAP password path is. Disallowed page requests are dropped and credential posts get the same generic 401 a wrong password does. Enabling it is refused if it would exclude your own address, since `/login.html` is how you get back in when the identity provider is down.
