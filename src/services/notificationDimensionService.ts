@@ -218,13 +218,20 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
       })).map((r) => ({ value: r.link, assetId: r.assetId })),
   },
   tunnelName: {
-    noun: "IPsec tunnels",
+    // The pin set (`Asset.monitoredIpsecTunnels`), mirroring ifNamePattern:
+    // both IPsec resolvers now gate on it (notificationEngine's
+    // tunnelIsPinned), so an unpinned tunnel is a filter that can never fire —
+    // the sample table still carries every tunnel the gate reports (unpinned
+    // rows ride cadence="slow"), which is why the picker must not read it.
+    // The noun says "monitored" so the wizard's empty-state message names the
+    // gate instead of reading as "this gate has no tunnels".
+    noun: "monitored IPsec tunnels",
     strict: false,
-    pairs: async (ids, since) =>
-      (await prisma.assetIpsecTunnelSample.groupBy({
-        by: ["tunnelName", "assetId"],
-        where: { assetId: { in: ids }, timestamp: { gte: since } },
-      })).map((r) => ({ value: r.tunnelName, assetId: r.assetId })),
+    pairs: async (ids) =>
+      (await prisma.asset.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, monitoredIpsecTunnels: true },
+      })).flatMap((a) => a.monitoredIpsecTunnels.map((t) => ({ value: t, assetId: a.id }))),
   },
   // Which state probe (Manufacturer Profile → state widget). Strict: the stored
   // value is a registry id matched exactly by the engine, not a pattern, so free

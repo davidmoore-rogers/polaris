@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { compareNum, compareValue, globToRegExp, readingMeets, interfaceIsPinned } from "../../src/services/notificationEngine.js";
+import { compareNum, compareValue, globToRegExp, readingMeets, interfaceIsPinned, tunnelIsPinned } from "../../src/services/notificationEngine.js";
 import { scopeMatchesAsset, type ScopeAsset } from "../../src/services/notificationRuleService.js";
 import { stripRegionPrefix } from "../../src/services/notificationService.js";
 import { ruleInputSchema, buildSchemaCatalog } from "../../src/services/notificationTypes.js";
@@ -100,6 +100,29 @@ describe("interfaceIsPinned", () => {
     // A reading whose asset fell out of the scope index is dropped rather than
     // defaulting to allowed — fail closed, same as the resolvers' `index.get`.
     expect(interfaceIsPinned(undefined, "port1")).toBe(false);
+  });
+});
+
+describe("tunnelIsPinned", () => {
+  it("admits only tunnels in the asset's pin set", () => {
+    const a = { monitoredIpsecTunnels: ["to-hq", "to-dr"] };
+    expect(tunnelIsPinned(a, "to-hq")).toBe(true);
+    expect(tunnelIsPinned(a, "to-dr")).toBe(true);
+    // The IPsec sample stream still writes every tunnel the gate reports
+    // (unpinned rows ride cadence="slow"), so this gate is what keeps
+    // ipsecStatus/ipsecThroughputBps rules from alerting on tunnels nobody
+    // selected for monitoring.
+    expect(tunnelIsPinned(a, "to-branch")).toBe(false);
+  });
+  it("matches exactly — never by prefix or case", () => {
+    const a = { monitoredIpsecTunnels: ["to-hq"] };
+    expect(tunnelIsPinned(a, "to-hq2")).toBe(false);
+    expect(tunnelIsPinned(a, "To-HQ")).toBe(false);
+  });
+  it("no pins, or no asset at all, alerts on nothing", () => {
+    expect(tunnelIsPinned({ monitoredIpsecTunnels: [] }, "to-hq")).toBe(false);
+    expect(tunnelIsPinned({}, "to-hq")).toBe(false);
+    expect(tunnelIsPinned(undefined, "to-hq")).toBe(false);
   });
 });
 

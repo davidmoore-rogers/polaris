@@ -156,6 +156,9 @@ interface ScopeAssetRow extends ScopeAsset {
   // Read by every interface resolver — state trio AND counter metrics — for
   // the pinned-interface gate (interfaceIsPinned).
   monitoredInterfaces?: string[];
+  // Read by both IPsec resolvers (ipsecStatus / ipsecThroughputBps) for the
+  // pinned-tunnel gate (tunnelIsPinned).
+  monitoredIpsecTunnels?: string[];
   // Read ONLY by the builder's device-list preview (optional so the pseudo-host
   // row can omit it). The engine never filters on it — see SCOPE_SELECT.
   monitored?: boolean;
@@ -203,6 +206,8 @@ const SCOPE_SELECT = {
   manufacturer: true, model: true, os: true,
   // Every interface reading is restricted to PINNED interfaces.
   monitoredInterfaces: true,
+  // Every IPsec tunnel reading is restricted to PINNED tunnels (tunnelIsPinned).
+  monitoredIpsecTunnels: true,
   // Read by the BUILDER's device preview only, which reports monitored devices
   // separately from the unmonitored remainder. The engine never FILTERS on it:
   // event and change triggers fire on unmonitored devices by design, and a
@@ -339,6 +344,23 @@ function triggerNeedsAnsweringDevice(trigger: Trigger): boolean {
  */
 export function interfaceIsPinned(asset: { monitoredInterfaces?: string[] } | undefined, ifName: string): boolean {
   return asset?.monitoredInterfaces?.includes(ifName) ?? false;
+}
+
+/**
+ * The IPsec analogue of interfaceIsPinned: only tunnels the operator PINNED
+ * (`Asset.monitoredIpsecTunnels`) may produce readings. Unlike interfaces,
+ * whose sample table became pinned-only in the 2026-08 cutover, the IPsec
+ * stream still writes every tunnel the gate reports on the full system-info
+ * scrape (`cadence:"slow"`, 24h retention) — so without this gate an
+ * `ipsecStatus`/`ipsecThroughputBps` rule fires on tunnels nobody selected
+ * for monitoring, always, because those slow rows are refreshed every scrape
+ * and never age past the engine's lookback. The pin is the operator's
+ * statement of which tunnels may alert, same as ports. A tunnel that leaves
+ * the pin set stops producing readings; the vanished-state sweep clears its
+ * alert (`system:out-of-scope`).
+ */
+export function tunnelIsPinned(asset: { monitoredIpsecTunnels?: string[] } | undefined, tunnelName: string): boolean {
+  return asset?.monitoredIpsecTunnels?.includes(tunnelName) ?? false;
 }
 
 function regionSnapshot(tags: string[]): string[] {
@@ -580,7 +602,10 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
     }
     case "ipsecThroughputBps": {
       const rows = await prisma.assetIpsecTunnelSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: { timestamp: "desc" }, select: { assetId: true, timestamp: true, tunnelName: true, incomingBytes: true, outgoingBytes: true } });
-      const filtered = rows.filter((r) => substringMatch(r.tunnelName, df.tunnelName));
+      // Pinned tunnels only (tunnelIsPinned) — the sample table carries every
+      // tunnel the gate reports (unpinned rows ride cadence="slow"), so the
+      // gate has to live here, same as the interface resolvers.
+      const filtered = rows.filter((r) => tunnelIsPinned(index.get(r.assetId), r.tunnelName) && substringMatch(r.tunnelName, df.tunnelName));
       return rateReadings(filtered, index, (r) => r.tunnelName, (r) => r.tunnelName, (r) => { const i = num(r.incomingBytes); const o = num(r.outgoingBytes); return i === null && o === null ? null : (i ?? 0) + (o ?? 0); }, 8);
     }
     default:
@@ -664,7 +689,11 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
     case "ipsecStatus": {
       const since = new Date(Date.now() - DEFAULT_LOOKBACK_MS);
       const rows = await prisma.assetIpsecTunnelSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { tunnelName: "asc" }, { timestamp: "desc" }], distinct: ["assetId", "tunnelName"], select: { assetId: true, tunnelName: true, status: true } });
-      return rows.filter((r) => substringMatch(r.tunnelName, df.tunnelName)).map((r) => { const a = index.get(r.assetId)!; return mk(a, r.tunnelName, r.tunnelName, r.status); });
+      // Only PINNED tunnels produce readings (Asset.monitoredIpsecTunnels) —
+      // the full system-info scrape samples every tunnel the gate reports, and
+      // an unpinned tunnel is one nobody selected for monitoring, so a "tunnel
+      // down" rule must not alert on it. See tunnelIsPinned.
+      return rows.filter((r) => tunnelIsPinned(index.get(r.assetId), r.tunnelName) && substringMatch(r.tunnelName, df.tunnelName)).map((r) => { const a = index.get(r.assetId)!; return mk(a, r.tunnelName, r.tunnelName, r.status); });
     }
     case "sdwanRuleStatus": case "sdwanSelectedMember": {
       const rows = await prisma.assetSdwanRule.findMany({ where: { assetId: { in: ids } }, select: { assetId: true, ruleName: true, status: true, selectedMember: true } });
