@@ -140,15 +140,30 @@ function canEditReservation(reservation) {
 
 // ─── Sidebar Navigation ──────────────────────────────────────────────────────
 
+// `perm` hides the entry unless the role holds that function key at that
+// level; `anyPerm` hides it unless AT LEAST ONE of the listed pairs holds —
+// which is what a multi-tab page needs (IPAM is IP Blocks + Networks, and a
+// role granted only one of them still has somewhere to land; `reservations`
+// is deliberately NOT in IPAM's set — a reservation is only reachable through
+// its subnet's IP panel, so subnets:read is what makes the page usable).
+// Every entry whose page can 403 needs one of the two: without it the sidebar
+// advertises a page whose first fetch is the only thing that tells the
+// operator they can't be there. Dashboard is deliberately ungated — its
+// routes carry no permission gate and it's the post-login landing page.
 const NAV_ITEMS = [
   { href: "/",                label: "Dashboard",    icon: "grid" },
   { href: "/map.html",        label: "Device Map",   icon: "mapPin", perm: ["deviceMap", "read"] },
   { href: "/appmap.html",     label: "Application Map", icon: "share2", perm: ["applicationMap", "read"] },
-  { href: "/ipam.html",       label: "IPAM",         icon: "layers" },
-  { href: "/assets.html",         label: "Assets",       icon: "monitor" },
-  { href: "/events.html",         label: "Events",       icon: "activity" },
+  { href: "/ipam.html",       label: "IPAM",         icon: "layers", anyPerm: [["ipBlocks", "read"], ["subnets", "read"]] },
+  { href: "/assets.html",         label: "Assets",       icon: "monitor", perm: ["assets", "read"] },
+  { href: "/events.html",         label: "Events",       icon: "activity", perm: ["events", "read"] },
   { href: "/automations.html", label: "Automations", icon: "zap", perm: ["automationManagement", "read"] },
-  { href: "/integrations.html",  label: "Integrations", icon: "plug", networkAdmin: true },
+  // Was gated on canManageNetworks() (subnets:fullwrite) — the wrong key
+  // entirely: a role granted integrations couldn't see the page, and a role
+  // granted IP space but not integrations saw it and 403'd. No built-in role
+  // changes hands (readonly/user/assetsadmin hold integrations:none, and
+  // networkadmin holds :write).
+  { href: "/integrations.html",  label: "Integrations", icon: "plug", perm: ["integrations", "read"] },
   { href: "/users.html",        label: "Users",        icon: "users", adminOnly: true },
 ];
 
@@ -264,8 +279,10 @@ function renderNav() {
 
   const visibleItems = NAV_ITEMS.filter(function (item) {
     if (item.adminOnly) return isAdmin();
-    if (item.networkAdmin) return canManageNetworks();
     if (item.perm) return permAtLeast(item.perm[0], item.perm[1]);
+    if (item.anyPerm) {
+      return item.anyPerm.some(function (pair) { return permAtLeast(pair[0], pair[1]); });
+    }
     return true;
   });
 

@@ -23,6 +23,41 @@
 (function () {
   var activeTab = null;
 
+  // Per-tab read gate. IP Blocks lists /blocks (ipBlocks:read) and Networks
+  // lists /subnets (subnets:read), so a role holding only one of the two must
+  // not be offered — or defaulted onto — the other: its first fetch 403s and
+  // the page reads as broken rather than as out of scope.
+  //
+  // Fails OPEN when the permission matrix hasn't resolved yet (cold
+  // localStorage cache — app.js restores it synchronously before this handler
+  // runs, but only when there IS a cache). Hiding both tabs on a first-ever
+  // login would be worse than a 403 the operator can retry.
+  var TAB_PERM = { blocks: "ipBlocks", networks: "subnets" };
+
+  function permsResolved() {
+    return typeof currentRolePermissions === "object" && currentRolePermissions
+      && Object.keys(currentRolePermissions).length > 0;
+  }
+
+  function tabAllowed(name) {
+    if (!permsResolved() || typeof permAtLeast !== "function") return true;
+    var key = TAB_PERM[name];
+    return !key || permAtLeast(key, "read");
+  }
+
+  function allowedTabs() {
+    return ["blocks", "networks"].filter(tabAllowed);
+  }
+
+  // Hide the button for a tab the role can't read. Runs before the first
+  // mount so the strip never flashes a tab that's about to disappear.
+  function applyTabPermissions() {
+    Array.prototype.forEach.call(document.querySelectorAll("#ipam-tabs .page-tab"), function (btn) {
+      var name = btn.getAttribute("data-tab");
+      if (!tabAllowed(name)) btn.style.display = "none";
+    });
+  }
+
   function parseHash() {
     var h = (window.location.hash || "").replace(/^#/, "");
     var out = {};
@@ -36,8 +71,12 @@
 
   function currentTabFromHash() {
     var p = parseHash();
-    if (p.tab === "blocks" || p.tab === "networks") return p.tab;
-    return "networks";
+    var allowed = allowedTabs();
+    // A hash naming a tab the role can't read (a shared deep link, a stale
+    // bookmark) falls back to whatever it CAN read rather than 403-ing.
+    if ((p.tab === "blocks" || p.tab === "networks") && allowed.indexOf(p.tab) !== -1) return p.tab;
+    if (allowed.indexOf("networks") !== -1) return "networks";
+    return allowed[0] || "networks";
   }
 
   function tabButton(name) {
@@ -142,6 +181,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
+    applyTabPermissions();
     wireTabClicks();
     wireExport();
     mountTab(currentTabFromHash());

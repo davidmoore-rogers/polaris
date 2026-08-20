@@ -523,7 +523,18 @@ const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subn
 // the requisite permission bounces to "/". Pages not in the map are
 // reachable to any authenticated user (the per-tile cards / API requests
 // handle their own permission state).
-const pageRequiredPermission: Record<string, { key: string; level: "read" | "write" }> = {
+//
+// `anyOf` covers a page whose content spans several function keys and is
+// usable with any ONE of them — IPAM is IP Blocks + Networks, and a role
+// granted only one of the two still has a tab to land on (public/js/ipam.js
+// hides the other tab and refuses to default onto it). Keep each entry in
+// lockstep with the matching NAV_ITEMS gate in public/js/app.js: the nav gate
+// is what stops the sidebar advertising the page, this one is what stops a
+// typed URL or a stale bookmark landing on a shell that can only 403.
+type PagePermission =
+  | { key: string; level: "read" | "write" }
+  | { anyOf: { key: string; level: "read" | "write" }[] };
+const pageRequiredPermission: Record<string, PagePermission> = {
   "/users.html":           { key: "users",                level: "read" },
   "/integrations.html":    { key: "integrations",         level: "read" },
   // /notifications.html stays gated forever — already-delivered web-push
@@ -541,6 +552,13 @@ const pageRequiredPermission: Record<string, { key: string; level: "read" | "wri
   // 403s — the same "gate the page and the API it consumes together" rule the
   // rest of this map follows.
   "/map.html":             { key: "deviceMap",            level: "read" },
+  // Added 2026-08-20 with the sidebar nav gates. These three pages were
+  // advertised in the nav to every authenticated session and were reachable
+  // by URL regardless of the matrix, so a role with none on them loaded the
+  // shell and got a bare "Forbidden" from the first list fetch.
+  "/ipam.html":            { anyOf: [{ key: "ipBlocks", level: "read" }, { key: "subnets", level: "read" }] },
+  "/assets.html":          { key: "assets",               level: "read" },
+  "/events.html":          { key: "events",               level: "read" },
 };
 const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
 app.use(async (req, res, next) => {
@@ -587,8 +605,11 @@ app.use(async (req, res, next) => {
     const perms = (snap?.permissions ?? req.session.roleSnapshot?.permissions ?? {}) as Record<string, "none" | "read" | "write" | "fullwrite">;
     // permissionOf resolves pre-rename snapshot keys (notifications → alerts)
     // so live sessions survive the Automations RBAC rename without re-login.
-    const actual = permissionOf(perms, required.key);
-    if (PERM_RANK[actual] < PERM_RANK[required.level]) {
+    const alternatives = "anyOf" in required ? required.anyOf : [required];
+    const permitted = alternatives.some(
+      alt => PERM_RANK[permissionOf(perms, alt.key)] >= PERM_RANK[alt.level],
+    );
+    if (!permitted) {
       return res.redirect("/");
     }
   }
