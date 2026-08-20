@@ -282,17 +282,81 @@ export function lossBucketMs(windowMs: number): number {
   return Math.max(LOSS_BUCKET_MS, Math.round(windowMs / 30));
 }
 
+export interface ProbeLossSeries {
+  /** Per-bucket loss ratio, for the plotted line. */
+  points: SparkPoint[];
+  /**
+   * `failed / total` over the whole anchored window — the SAME quantity the
+   * engine's `probeLossPct` metric reports, so the chart's caption states the
+   * number the alert fired on. Null when the window held no probes at all.
+   */
+  ratioPct: number | null;
+}
+
 /**
- * Probe loss as a percentage over time: failed probes / total probes per
- * bucket, the same ratio the engine's `probeLossPct` metric and the dashboard
- * widget compute, just windowed for a chart instead of collapsed to one number.
+ * Probe loss over time, as both a bucketed line and the window's own ratio.
  *
- * Bucketed in JS rather than SQL because an hour of one asset's probes is ~120
- * rows — a grouped query would cost more to write than it saves, and this
- * keeps the loader shaped like its neighbours. Empty buckets are skipped
- * rather than plotted as 0%: no probes is not the same as no loss.
+ * Pure so the arithmetic that has to agree with the engine can be tested
+ * without a database. `rows` must be ascending by timestamp.
+ *
+ * TWO ratios come out of this, and conflating them is what made an alert read
+ * "18.3 %" over a chart captioned "avg 6.7 %": the per-bucket values are the
+ * line's shape, while `ratioPct` weighs every probe equally across the window.
+ * A 4-minute burst of total loss among 30 quiet 2-minute buckets is 2/30 ≈
+ * 6.7 % of BUCKETS but ~18 % of PROBES (the ICMP sampler used to add to that
+ * skew, and the poll cadence alone still produces it) — and it is the probe
+ * ratio the automation compares to its threshold, so that is what the caption
+ * must print.
+ *
+ * THE ANCHOR mirrors `probeLossQuery`'s DISPLAY mode: samples before the
+ * window's first successful probe are discarded, because a device that was
+ * unreachable for part of the window had no probes there to lose (business
+ * rule 29b) — that trim is what makes `ratioPct` equal the engine's reading.
+ * But an asset with NO success in the window keeps every row and reads 100 %,
+ * exactly as the NOC widget's `includeFullyDown` does: the alert body embeds a
+ * loss chart for asset-down alerts too, and a blank chart there would read as
+ * "no loss" when the truth is that nothing got through. The engine never sees
+ * this case (a loss alert only fires on an answering device), so there is no
+ * reading for it to disagree with.
+ *
+ * Empty buckets are skipped rather than plotted as 0 %: a gap in polling is not
+ * a period of perfect health.
  */
-async function loadProbeLoss(assetId: string, since: Date, bucketMs: number = LOSS_BUCKET_MS): Promise<SparkPoint[]> {
+export function probeLossSeriesFrom(
+  rows: Array<{ timestamp: Date; success: boolean }>,
+  bucketMs: number = LOSS_BUCKET_MS,
+): ProbeLossSeries {
+  const firstOkMs = rows.find((r) => r.success)?.timestamp.getTime() ?? null;
+  const considered = firstOkMs === null ? rows : rows.filter((r) => r.timestamp.getTime() >= firstOkMs);
+
+  const buckets = new Map<number, { total: number; failed: number }>();
+  let total = 0;
+  let failed = 0;
+  for (const r of considered) {
+    const key = Math.floor(r.timestamp.getTime() / bucketMs) * bucketMs;
+    const b = buckets.get(key) ?? { total: 0, failed: 0 };
+    b.total++;
+    total++;
+    if (!r.success) {
+      b.failed++;
+      failed++;
+    }
+    buckets.set(key, b);
+  }
+  const points = thin(
+    Array.from(buckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([t, b]) => ({ t, v: Math.round((b.failed / b.total) * 1000) / 10 })),
+  );
+  return { points, ratioPct: total ? Math.round((failed / total) * 1000) / 10 : null };
+}
+
+/**
+ * The DB half of the above: an hour of one asset's probes is ~120 rows, so this
+ * is bucketed in JS rather than SQL — a grouped query would cost more to write
+ * than it saves, and it keeps the loader shaped like its neighbours.
+ */
+async function loadProbeLoss(assetId: string, since: Date, bucketMs: number = LOSS_BUCKET_MS): Promise<ProbeLossSeries> {
   const rows = await prisma.assetMonitorSample.findMany({
     // EVERY probeKind, deliberately — this is a loss chart, and the ICMP
     // sampler exists to give it resolution through the warning/recovering
@@ -302,19 +366,7 @@ async function loadProbeLoss(assetId: string, since: Date, bucketMs: number = LO
     orderBy: { timestamp: "asc" },
     select: { timestamp: true, success: true },
   });
-  const buckets = new Map<number, { total: number; failed: number }>();
-  for (const r of rows) {
-    const key = Math.floor(r.timestamp.getTime() / bucketMs) * bucketMs;
-    const b = buckets.get(key) ?? { total: 0, failed: 0 };
-    b.total++;
-    if (!r.success) b.failed++;
-    buckets.set(key, b);
-  }
-  return thin(
-    Array.from(buckets.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([t, b]) => ({ t, v: Math.round((b.failed / b.total) * 1000) / 10 })),
-  );
+  return probeLossSeriesFrom(rows, bucketMs);
 }
 
 async function rasterize(svg: string): Promise<Buffer | null> {
@@ -329,11 +381,20 @@ async function rasterize(svg: string): Promise<Buffer | null> {
   }
 }
 
-function summaryLine(label: string, unit: string, points: SparkPoint[], windowMs: number = CHART_WINDOW_MS): string {
+function summaryLine(
+  label: string,
+  unit: string,
+  points: SparkPoint[],
+  windowMs: number = CHART_WINDOW_MS,
+  avgOverride?: number | null,
+): string {
   const win = windowMs === CHART_WINDOW_MS ? "last hour" : `last ${timeAxisLabel(windowMs)}`;
   const s = seriesStats(points);
   if (!s) return `${label} (${win}): no data`;
-  return `${label} (${win}): now ${formatReading(s.last, unit)}, avg ${formatReading(s.avg, unit)}, peak ${formatReading(s.max, unit)}`;
+  // Same substitution the SVG caption makes — the text fallback is what a
+  // recipient with images blocked reads, so the two must quote one number.
+  const avg = avgOverride ?? s.avg;
+  return `${label} (${win}): now ${formatReading(s.last, unit)}, avg ${formatReading(avg, unit)}, peak ${formatReading(s.max, unit)}`;
 }
 
 /**
@@ -402,7 +463,7 @@ export async function buildAlertCharts(
   let cpu: SparkPoint[] = [];
   let mem: SparkPoint[] = [];
   let rt: SparkPoint[] = [];
-  let loss: SparkPoint[] = [];
+  let loss: ProbeLossSeries = { points: [], ratioPct: null };
   let sensor: SensorSeries = { points: [], alarmSpans: [], unit: "", sensorClass: null };
   try {
     const needTelemetry = wanted.has("chart.cpu") || wanted.has("chart.memory");
@@ -417,7 +478,7 @@ export async function buildAlertCharts(
       wanted.has("chart.sensor")
         ? loadSensorSeries(assetId, opts!.sensorName!, since, displayUnit)
         : Promise.resolve(sensor),
-      wanted.has("chart.probeLoss") ? loadProbeLoss(assetId, lossSince, lossBucketMs(lossWindowMs)) : Promise.resolve([]),
+      wanted.has("chart.probeLoss") ? loadProbeLoss(assetId, lossSince, lossBucketMs(lossWindowMs)) : Promise.resolve(loss),
     ]);
     cpu = tel.cpu;
     mem = tel.mem;
@@ -433,7 +494,7 @@ export async function buildAlertCharts(
     // above and is filled in from that token's result at the end.
     "chart.trigger": [],
     "chart.sensor": sensor.points,
-    "chart.probeLoss": loss,
+    "chart.probeLoss": loss.points,
     "chart.cpu": cpu,
     "chart.memory": mem,
     "chart.responseTime": rt,
@@ -449,6 +510,10 @@ export async function buildAlertCharts(
     const isLoss = token === "chart.probeLoss";
     const label = isSensor ? opts!.sensorName! : meta.label;
     const unit = isSensor ? (sensor.unit ? ` ${sensor.unit}` : "") : meta.unit;
+    // The loss chart's caption quotes the window's PROBE ratio, not the mean of
+    // its buckets — the number the automation actually fired on. See
+    // probeLossSeriesFrom.
+    const avgOverride = isLoss ? loss.ratioPct : null;
     const svg = sparklineSvg(points, {
       label,
       unit,
@@ -458,6 +523,7 @@ export async function buildAlertCharts(
       ...(isSensor && sensor.alarmSpans.length ? { alarmSpans: sensor.alarmSpans } : {}),
       from: (isLoss ? lossSince : since).getTime(),
       to: now.getTime(),
+      avgOverride,
     });
     const png = points.length > 0 ? await rasterize(svg) : null;
     const cid = `polaris-${token.replace(".", "-")}@polaris`;
@@ -465,7 +531,7 @@ export async function buildAlertCharts(
       token,
       cid,
       hasData: points.length > 0,
-      summary: summaryLine(label, unit, points, isLoss ? lossWindowMs : CHART_WINDOW_MS) +
+      summary: summaryLine(label, unit, points, isLoss ? lossWindowMs : CHART_WINDOW_MS, avgOverride) +
         // An alarm-triggered alert charts the VALUE; the bit itself is what the
         // automation fired on, so the text has to carry it too — image blocking
         // is on by default in plenty of clients.

@@ -43,6 +43,18 @@ export interface SparklineOptions {
   from?: number;
   to?: number;
   /**
+   * Replace the caption's "avg" with a pre-computed one.
+   *
+   * For the packet-loss chart the plotted points are per-bucket RATIOS, and the
+   * mean of ratios is not the ratio over the window: a short burst of total
+   * loss among many quiet buckets averages far below the fraction of probes
+   * that actually failed — and that fraction is what the automation compared to
+   * its threshold, so an alert would state one number over a chart captioned
+   * another (prod 2026-08-20: "18.3 %" over "avg 6.7 %"). Charts whose points
+   * are already the quantity itself (CPU, memory, latency) leave this unset.
+   */
+  avgOverride?: number | null;
+  /**
    * Spans (epoch ms) to shade red behind the plot — where a hardware sensor's
    * own alarm bit was set. An alarm-triggered alert charts the sensor's VALUE,
    * and this is what ties the two together: it shows whether the device raised
@@ -213,9 +225,10 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
       ? `<line x1="${PAD_L}" y1="${y(opts.threshold).toFixed(1)}" x2="${width - PAD_R}" y2="${y(opts.threshold).toFixed(1)}" stroke="#dc2626" stroke-width="1" stroke-dasharray="4 3"/>`
       : "";
 
+  const captionAvg = opts.avgOverride ?? stats.avg;
   const caption =
     `<text x="${width - PAD_R}" y="14" text-anchor="end" font-family="Helvetica,Arial,sans-serif" font-size="11" fill="#4b5563">` +
-    `now ${esc(formatReading(stats.last, unit))} · avg ${esc(formatReading(stats.avg, unit))} · peak ${esc(formatReading(stats.max, unit))}</text>`;
+    `now ${esc(formatReading(stats.last, unit))} · avg ${esc(formatReading(captionAvg, unit))} · peak ${esc(formatReading(stats.max, unit))}</text>`;
 
   const axis = `<line x1="${PAD_L}" y1="${PAD_T + plotH}" x2="${width - PAD_R}" y2="${PAD_T + plotH}" stroke="#d1d5db" stroke-width="1"/>`;
   const xLabels =

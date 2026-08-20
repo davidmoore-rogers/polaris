@@ -61,6 +61,27 @@ describe("timeAxisLabel", () => {
   });
 });
 
+describe("avgOverride", () => {
+  it("replaces only the caption's avg, leaving now and peak from the series", () => {
+    // The packet-loss chart plots per-bucket RATIOS, whose mean is not the
+    // ratio over the window — and the window's ratio is what the automation
+    // fired on, so the caption has to quote that instead (prod 2026-08-20:
+    // an alert reading "18.3 %" over a chart captioned "avg 6.7 %").
+    const svg = sparklineSvg(series([0, 100, 0]), { label: "Packet loss", unit: "%", yMin: 0, yMax: 100, avgOverride: 18.3 });
+    expect(svg).toContain("avg 18.3%");
+    expect(svg).toContain("now 0%");
+    expect(svg).toContain("peak 100%");
+    // Without it the mean of the points is printed, as every other chart wants.
+    const plain = sparklineSvg(series([0, 100, 0]), { label: "Packet loss", unit: "%", yMin: 0, yMax: 100 });
+    expect(plain).toContain("avg 33.3%");
+  });
+
+  it("falls back to the series mean when null (no ratio to state)", () => {
+    const svg = sparklineSvg(series([10, 20, 30]), { label: "CPU", unit: "%", avgOverride: null });
+    expect(svg).toContain("avg 20%");
+  });
+});
+
 describe("seriesStats", () => {
   it("summarizes what the caption and the text fallback both quote", () => {
     expect(seriesStats(series([10, 30, 20]))).toEqual({ min: 10, max: 30, avg: 20, last: 20, count: 3 });
