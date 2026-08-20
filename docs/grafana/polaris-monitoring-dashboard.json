@@ -635,7 +635,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Node.js event-loop lag p99. Healthy: under 25 ms. Watch: 25\u201350 ms. Pressure: 50\u2013100 ms. Saturated: 100 ms+. Polaris tested at 15 ms p99 on the Rogers Group fleet (1844 monitored assets).",
+      "description": "Node.js event-loop lag p99. Healthy: under 25 ms. Watch: 25\u201350 ms. Pressure: 50\u2013100 ms. Saturated: 100 ms+. Polaris tested at 15 ms p99 on a production fleet of roughly 1,800 monitored assets.",
       "fieldConfig": {
         "defaults": {
           "color": {

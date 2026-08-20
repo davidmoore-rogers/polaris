@@ -357,13 +357,13 @@ describe("getRecentAlerts", () => {
     notifFindMany.mockResolvedValueOnce([
       {
         id: "n1", assetHostname: "fw-1", message: "fw-1 is down", severity: "critical", triggeredAt: t,
-        acknowledged: true, acknowledgedBy: "dmoore", rule: { name: "Asset down" },
+        acknowledged: true, acknowledgedBy: "jsmith", rule: { name: "Asset down" },
       },
     ]);
     const r = await noc.getRecentAlerts();
     expect(r[0]).toEqual({
       id: "n1", hostname: "fw-1", message: "fw-1 is down", severity: "critical", raisedAt: t,
-      ruleName: "Asset down", acknowledged: true, acknowledgedBy: "dmoore",
+      ruleName: "Asset down", acknowledged: true, acknowledgedBy: "jsmith",
     });
     // It reads ALERTS, never audit Events — the whole point of the feed.
     expect(eventFindMany).not.toHaveBeenCalled();
@@ -379,7 +379,7 @@ describe("getRecentAlerts", () => {
     notifFindMany.mockReset();
     notifFindMany.mockResolvedValueOnce([
       {
-        id: "n1", assetHostname: "BULLITT-101F-1", message: "BULLITT-101F-1: IPsec tunnel Overlay-2 is down",
+        id: "n1", assetHostname: "PINERUN-101F-1", message: "PINERUN-101F-1: IPsec tunnel Overlay-2 is down",
         severity: "serious", triggeredAt: new Date("2026-06-20T00:00:00Z"),
         acknowledged: false, acknowledgedBy: null, rule: { name: "IPsec tunnel down" },
       },
@@ -531,7 +531,7 @@ describe("getFilterOptions", () => {
       // 2nd findMany: distinct firewall learnedLocation values (unsorted from
       // the DB) + each gate's tags (region: prefix stripped, others dropped)
       .mockResolvedValueOnce([
-        { learnedLocation: "JEFFERSON-FG", tags: ["region:Central Kentucky", "site:quarry"] },
+        { learnedLocation: "RIVERBEND-FG", tags: ["region:Central Kentucky", "site:quarry"] },
         { learnedLocation: "ATLANTA-FG", tags: [] },
       ]);
     rawQuery.mockResolvedValueOnce([{ region: "East" }, { region: "West" }]);
@@ -540,7 +540,7 @@ describe("getFilterOptions", () => {
     expect(r.regions).toEqual(["East", "West"]);
     expect(r.fortigates).toEqual([
       { name: "ATLANTA-FG", regions: [] },
-      { name: "JEFFERSON-FG", regions: ["Central Kentucky"] },
+      { name: "RIVERBEND-FG", regions: ["Central Kentucky"] },
     ]); // sorted by name; regions = the gate's own region tags for picker narrowing
     // The FortiGate list is firewall learnedLocation values (the device name
     // switches/APs/endpoints reference), live assets only.
@@ -652,12 +652,12 @@ describe("getNocSummaryPayload", () => {
     rawUnsafe.mockResolvedValue([]);
     findMany.mockResolvedValue([]);
 
-    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), fortigateNames: ["JEFFERSON-FG"] });
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), fortigateNames: ["RIVERBEND-FG"] });
     expect(rawUnsafe).toHaveBeenCalledTimes(1);
     // Same gate = cache hit; different gate (or none) = fresh computation.
-    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), fortigateNames: ["JEFFERSON-FG"] });
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), fortigateNames: ["RIVERBEND-FG"] });
     expect(rawUnsafe).toHaveBeenCalledTimes(1);
-    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), fortigateNames: ["NASHVILLE-FG"] });
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), fortigateNames: ["ASHFIELD-FG"] });
     expect(rawUnsafe).toHaveBeenCalledTimes(2);
     await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll() });
     expect(rawUnsafe).toHaveBeenCalledTimes(3);
@@ -718,19 +718,19 @@ describe("resolveFilteredAssetIds", () => {
 
   it("filters by FortiGate names across both haystacks (learnedLocation OR sighting rows, exact-insensitive)", async () => {
     findMany.mockResolvedValueOnce([{ id: "sw1" }]);
-    const r = await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null, fortigateNames: ["JEFFERSON-FG"] });
+    const r = await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null, fortigateNames: ["RIVERBEND-FG"] });
     expect(r).toEqual(["sw1"]);
     const where = (findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
     expect(where.OR).toEqual([
-      { learnedLocation: { equals: "JEFFERSON-FG", mode: "insensitive" } },
-      { fortigateSightings: { some: { fortigateDevice: { equals: "JEFFERSON-FG", mode: "insensitive" } } } },
+      { learnedLocation: { equals: "RIVERBEND-FG", mode: "insensitive" } },
+      { fortigateSightings: { some: { fortigateDevice: { equals: "RIVERBEND-FG", mode: "insensitive" } } } },
     ]);
   });
 
   it("__none__ sentinel matches gate-less assets (no sightings, learnedLocation not a known gate name)", async () => {
     findMany
       // 1st findMany: the known-gate name lookup (firewall learnedLocations)
-      .mockResolvedValueOnce([{ learnedLocation: "JEFFERSON-FG" }])
+      .mockResolvedValueOnce([{ learnedLocation: "RIVERBEND-FG" }])
       // 2nd findMany: the id-set resolution
       .mockResolvedValueOnce([{ id: "standalone-sw" }]);
     const r = await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null, fortigateNames: ["__none__"] });
@@ -739,7 +739,7 @@ describe("resolveFilteredAssetIds", () => {
     expect(where.OR).toEqual([
       {
         AND: [
-          { OR: [{ learnedLocation: null }, { learnedLocation: { notIn: ["JEFFERSON-FG"] } }] },
+          { OR: [{ learnedLocation: null }, { learnedLocation: { notIn: ["RIVERBEND-FG"] } }] },
           { fortigateSightings: { none: {} } },
         ],
       },
@@ -750,7 +750,7 @@ describe("resolveFilteredAssetIds", () => {
     findMany
       .mockResolvedValueOnce([]) // no known gates on record
       .mockResolvedValueOnce([]);
-    await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null, fortigateNames: ["JEFFERSON-FG", "__none__"] });
+    await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null, fortigateNames: ["RIVERBEND-FG", "__none__"] });
     const where = (findMany.mock.calls[1][0] as { where: Record<string, unknown> }).where;
     const or = where.OR as unknown[];
     expect(or.length).toBe(3); // 2 haystacks for the named gate + 1 gate-less arm
@@ -762,7 +762,7 @@ describe("resolveFilteredAssetIds", () => {
     await noc.resolveFilteredAssetIds({
       assetTypes: ["switch", "access_point"],
       regionNames: null,
-      fortigateNames: ["JEFFERSON-FG", "NASHVILLE-FG"],
+      fortigateNames: ["RIVERBEND-FG", "ASHFIELD-FG"],
     });
     const where = (findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
     // Both dimensions present as sibling keys = implicit Prisma AND.

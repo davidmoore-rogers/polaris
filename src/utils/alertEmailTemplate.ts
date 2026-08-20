@@ -129,7 +129,7 @@ export const DEFAULT_ALERT_HTML = [
   // the sentence above is generated from the automation's own trigger, and the
   // message — whether the generated default or a template like "{asset} is
   // down" — restates it, so a "Monitor status is down" headline was followed by
-  // a grey "PEORIA-61F-1 is down". The message keeps its real homes (the in-app
+  // a grey "HARBOR-61F-1 is down". The message keeps its real homes (the in-app
   // alert card, and every chat / push body, which have no trigger sentence),
   // and {message} stays catalogued for an operator who wants it back.
   "</td>",

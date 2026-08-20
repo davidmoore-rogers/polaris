@@ -196,7 +196,7 @@ Per-pattern sections:
 
 ## Nested condition tree (AND/OR device filter)
 
-**What it is:** A SolarWinds-style filter builder — a root group with a combinator (AND / OR / NONE / NOT-ALL), rows of `[field][operator][value]`, nested sub-groups, and grip drag-and-drop between them. Use it wherever an operator picks *which devices* something applies to and a flat ANDed list would be a lie about what they meant ("switches in Nashville OR anything tagged critical").
+**What it is:** A SolarWinds-style filter builder — a root group with a combinator (AND / OR / NONE / NOT-ALL), rows of `[field][operator][value]`, nested sub-groups, and grip drag-and-drop between them. Use it wherever an operator picks *which devices* something applies to and a flat ANDed list would be a lie about what they meant ("switches in Ashfield OR anything tagged critical").
 
 **Three consumers today:** the automation wizard's Devices step (`automations-wizard.js`, narrow `SCOPE_FIELD_OPS` vocabulary, two-state "All assets" checkbox), the address book's "devices this contact is responsible for" (`automations-address-book.js`, the wider `DEVICE_FILTER_FIELD_OPS` from `GET /contacts/filter-schema`, three radios because a contact may own nothing), and the Assets → Settings → **Mass Pinning** section (`assets-masspin.js`, narrow vocabulary from `GET /assets/pin-filter-schema`, "All assets" defaults UNCHECKED so opening the modal never queues a fleet-wide inventory load). All three inject their own `meta` + `valueOptions` and share the evaluator server-side — copy that split rather than growing a second builder.
 

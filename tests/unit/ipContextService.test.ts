@@ -25,7 +25,7 @@ function reservation(over: Partial<IpContextReservation> = {}): IpContextReserva
 }
 
 function firewall(asset: IpContextFirewall["asset"]): IpContextFirewall {
-  return { deviceName: "PLVCORFMG1", source: "subnet", asset };
+  return { deviceName: "CENTRALFMG1", source: "subnet", asset };
 }
 
 describe("pickNamedGate", () => {
@@ -62,7 +62,7 @@ describe("buildSuggestions", () => {
       reservation: null,
       firewall: firewall({
         id: "fw1", hostname: "plv-fgt", location: "Pleasant View Plant",
-        learnedLocation: "PLVCORFMG1", latitude: null, longitude: null,
+        learnedLocation: "CENTRALFMG1", latitude: null, longitude: null,
       }),
     });
     expect(out.location).toBe("Pleasant View Plant");
@@ -74,10 +74,10 @@ describe("buildSuggestions", () => {
       reservation: null,
       firewall: firewall({
         id: "fw1", hostname: "plv-fgt", location: null,
-        learnedLocation: "PLVCORFMG1", latitude: null, longitude: null,
+        learnedLocation: "CENTRALFMG1", latitude: null, longitude: null,
       }),
     });
-    expect(out.location).toBe("PLVCORFMG1");
+    expect(out.location).toBe("CENTRALFMG1");
   });
 
   it("suggests coordinates only as a complete pair", () => {
@@ -86,7 +86,7 @@ describe("buildSuggestions", () => {
       reservation: null,
       firewall: firewall({
         id: "fw1", hostname: "plv-fgt", location: null, learnedLocation: null,
-        latitude: 36.1627, longitude: null,
+        latitude: 40.7128, longitude: null,
       }),
     });
     expect(half.latitude).toBeUndefined();
@@ -97,10 +97,10 @@ describe("buildSuggestions", () => {
       reservation: null,
       firewall: firewall({
         id: "fw1", hostname: "plv-fgt", location: null, learnedLocation: null,
-        latitude: 36.1627, longitude: -86.7816,
+        latitude: 40.7128, longitude: -74.0060,
       }),
     });
-    expect(both).toEqual({ latitude: 36.1627, longitude: -86.7816 });
+    expect(both).toEqual({ latitude: 40.7128, longitude: -74.0060 });
   });
 
   it("emits nothing for a gate name with no asset behind it", () => {

@@ -48,9 +48,9 @@ const LOGO: BrandLogoImage = {
 };
 
 const CTX = buildTemplateContext({
-  asset: "CKY2012.rogersgroupinc.com",
+  asset: "LAKE2012.example.com",
   severity: "critical",
-  message: "CKY2012.rogersgroupinc.com is down",
+  message: "LAKE2012.example.com is down",
   triggerSummary: "Monitor status is down",
   time: new Date("2026-08-18T15:00:00Z"),
   ruleName: "Asset down",
@@ -66,10 +66,10 @@ function compose(): string {
 
 describe("renderBrandBlock", () => {
   it("captions an operator's own logo with the app name and subtitle", () => {
-    const html = renderBrandBlock({ name: "Rogers Group", subtitle: "Network Management", logo: LOGO }, { html: true });
+    const html = renderBrandBlock({ name: "Acme Corp", subtitle: "Network Management", logo: LOGO }, { html: true });
     expect(html).toContain(`src="cid:${BRAND_LOGO_CID}"`);
     expect(html).toContain('width="150" height="30"');
-    expect(html).toContain("Rogers Group");
+    expect(html).toContain("Acme Corp");
     expect(html).toContain("Network Management");
   });
 
@@ -146,7 +146,7 @@ describe("the two-column header", () => {
   it("puts the letterhead in a right-aligned cell opposite the headline", () => {
     const html = compose();
     const headerRow = /<td style="vertical-align:top">[\s\S]*?<\/tr>/.exec(html)?.[0] ?? "";
-    expect(headerRow).toContain("CKY2012.rogersgroupinc.com");
+    expect(headerRow).toContain("LAKE2012.example.com");
     expect(headerRow).toContain("Monitor status is down");
     expect(headerRow).toContain("text-align:right");
     // The headline column comes first, the letterhead second — "top right".
@@ -159,20 +159,20 @@ describe("the two-column header", () => {
     // early and put the buttons outside the box. The nested <table> is what
     // fails the pattern at this row instead.
     const composed = compose();
-    expect(composed).toContain("CKY2012.rogersgroupinc.com");
+    expect(composed).toContain("LAKE2012.example.com");
     expect(composed).toContain("{brand.header}");
 
     // An install whose logo can't be read and which blanked both text fields:
     // the block renders empty at delivery, and the headline must still be there.
     const delivered = substituteBrandTokens(composed, "");
-    expect(pruneEmptyRows(delivered)).toContain("CKY2012.rogersgroupinc.com");
+    expect(pruneEmptyRows(delivered)).toContain("LAKE2012.example.com");
     expect(pruneEmptyRows(delivered)).toContain("Acknowledge alert");
   });
 
   it("keeps the card's structure intact — one opening tag per closing tag", () => {
     // The specific failure this guards: a prune that eats a `<table>` opening
     // tag leaves the matching `</table>` to close the 600px card early.
-    const html = substituteBrandTokens(compose(), renderBrandBlock({ name: "RGI", subtitle: "NOC", logo: LOGO }, { html: true }));
+    const html = substituteBrandTokens(compose(), renderBrandBlock({ name: "Acme", subtitle: "NOC", logo: LOGO }, { html: true }));
     expect((html.match(/<table/g) ?? []).length).toBe((html.match(/<\/table>/g) ?? []).length);
     expect((html.match(/<tr[ >]/g) ?? []).length).toBe((html.match(/<\/tr>/g) ?? []).length);
   });
@@ -186,7 +186,7 @@ describe("the two-column header", () => {
   });
 
   it("still ships no remote images — the logo is an inline attachment", () => {
-    const html = substituteBrandTokens(compose(), renderBrandBlock({ name: "RGI", subtitle: "NOC", logo: LOGO }, { html: true }));
+    const html = substituteBrandTokens(compose(), renderBrandBlock({ name: "Acme", subtitle: "NOC", logo: LOGO }, { html: true }));
     expect(html).not.toMatch(/<img[^>]+src="https?:/i);
     expect(html).not.toMatch(/<img[^>]+src="data:/i);
     expect(html).toMatch(/<img[^>]+src="cid:/);

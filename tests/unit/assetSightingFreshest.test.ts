@@ -56,7 +56,7 @@ describe("computeFreshestGateChanges", () => {
   it("treats an integration-prefixed device name as the same gate", () => {
     expect(
       computeFreshestGateChanges(
-        [{ assetId: "a1", fortigateDevice: "PLVCORFMG1:GATE-A", lastSeen: t(0) }],
+        [{ assetId: "a1", fortigateDevice: "CENTRALFMG1:GATE-A", lastSeen: t(0) }],
         [{ assetId: "a1", fortigateDevice: "GATE-A", seenAt: t(10) }],
       ),
     ).toEqual([]);

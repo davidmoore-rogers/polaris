@@ -3131,7 +3131,7 @@ function assetFormHTML(defaults) {
   '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
   '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Asset Details</p>' +
   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
-    '<div class="form-group"><label>Asset Tag</label><input type="text" id="f-assetTag" value="' + escapeHtml(d.assetTag || "") + '" placeholder="e.g. RGI-00421"></div>' +
+    '<div class="form-group"><label>Asset Tag</label><input type="text" id="f-assetTag" value="' + escapeHtml(d.assetTag || "") + '" placeholder="e.g. ACME-00421"></div>' +
     '<div class="form-group"><label>Manufacturer</label><input type="text" id="f-manufacturer" value="' + escapeHtml(d.manufacturer || "") + '" placeholder="e.g. Dell, Cisco, HP"></div>' +
     '<div class="form-group"><label>Model</label><input type="text" id="f-model" value="' + escapeHtml(d.model || "") + '" placeholder="e.g. PowerEdge R740"></div>' +
     '<div class="form-group"><label>Type' + (isAssetTypeLocked(d) ? ' <span style="font-weight:normal;color:var(--color-text-tertiary);font-size:0.75rem">(locked — discovered by integration)</span>' : '') + '</label><select id="f-assetType"' + (isAssetTypeLocked(d) ? ' disabled' : '') + '>' +
@@ -3157,8 +3157,8 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Department</label><input type="text" id="f-department" value="' + escapeHtml(d.department || "") + '" placeholder="e.g. Infrastructure"></div>' +
     '<div class="form-group"><label>Assigned To</label><input type="text" id="f-assignedTo" value="' + escapeHtml(d.assignedTo || "") + '" placeholder="e.g. platform-team"></div>' +
     '<div class="form-group"><label>Operating System</label><input type="text" id="f-os" value="' + escapeHtml(d.os || "") + '" placeholder="e.g. RHEL 9, Windows Server 2022"></div>' +
-    '<div class="form-group"><label>Latitude</label><input type="number" step="any" min="-90" max="90" id="f-latitude" value="' + (d.latitude != null ? String(d.latitude) : "") + '" placeholder="e.g. 36.1627"></div>' +
-    '<div class="form-group"><label>Longitude</label><input type="number" step="any" min="-180" max="180" id="f-longitude" value="' + (d.longitude != null ? String(d.longitude) : "") + '" placeholder="e.g. -86.7816"></div>' +
+    '<div class="form-group"><label>Latitude</label><input type="number" step="any" min="-90" max="90" id="f-latitude" value="' + (d.latitude != null ? String(d.latitude) : "") + '" placeholder="e.g. 40.7128"></div>' +
+    '<div class="form-group"><label>Longitude</label><input type="number" step="any" min="-180" max="180" id="f-longitude" value="' + (d.longitude != null ? String(d.longitude) : "") + '" placeholder="e.g. -74.0060"></div>' +
     (d.coordSource === "manual"
       ? '<p class="hint" style="grid-column:1 / -1;margin-top:-0.5rem">Coordinates are manually pinned — clear both fields to resume discovered values.</p>'
       : (d.latitude != null
@@ -4796,7 +4796,7 @@ async function openViewModal(id) {
 
     _currentAssetForRefresh = a;
     // Name the entry now that the hostname is known, so the tooltips read
-    // "Back to PEORIA-61F-1" instead of a uuid.
+    // "Back to HARBOR-61F-1" instead of a uuid.
     _assetHistoryLabel(_assetPanelHistory, a.id, a.hostname || a.dnsName || a.ipAddress || null);
     _renderAssetPanelNav();
     var generalHTML = _assetGeneralTabHTML(a);
@@ -19061,8 +19061,8 @@ function _monsetSourcesSectionHTML(sp) {
     '<label style="display:flex;align-items:flex-start;gap:0.5rem;margin:0.85rem 0 0.25rem;cursor:pointer">' +
       '<input type="checkbox" id="f-monset-src-prefix"' + (sp.integrationPrefix ? " checked" : "") + ' style="margin-top:0.2rem">' +
       '<span>Prefix FortiGate names with the integration that manages them' +
-        '<span class="hint" style="display:block">Renders as <code class="mono">FortiManager-Prod:RGI-FW-NASHVILLE</code> instead of ' +
-        '<code class="mono">RGI-FW-NASHVILLE</code>. Useful when several FortiManagers manage gates with overlapping names. ' +
+        '<span class="hint" style="display:block">Renders as <code class="mono">FortiManager-Prod:ACME-FW-ASHFIELD</code> instead of ' +
+        '<code class="mono">ACME-FW-ASHFIELD</code>. Useful when several FortiManagers manage gates with overlapping names. ' +
         'Applies to FortiSwitch, FortiAP and FortiGate-sighted endpoints; devices discovered before this setting existed keep the bare name until their next discovery run.</span>' +
       '</span>' +
     '</label>' +

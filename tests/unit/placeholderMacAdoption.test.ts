@@ -17,7 +17,7 @@ function row(over: Partial<AdoptionCandidateRow> = {}): AdoptionCandidateRow {
     macAddress: "02:0f:5e:aa:bb:cc",
     pushStatus: "synced",
     subnetDiscoveredBy: INTEGRATION,
-    subnetFortigateDevice: "FGT-Nashville",
+    subnetFortigateDevice: "FGT-Ashfield",
     ...over,
   };
 }
@@ -39,11 +39,11 @@ describe("buildMacEvidenceIndex", () => {
 
   it("matches case-insensitively on the device but keeps the original for the DB filter", () => {
     const idx = buildMacEvidenceIndex(
-      [{ fortigateDevice: "FGT-Nashville", ip: "10.0.0.5", mac: REAL_MAC }],
+      [{ fortigateDevice: "FGT-Ashfield", ip: "10.0.0.5", mac: REAL_MAC }],
       [],
     );
-    const hit = idx.get("fgt-nashville|10.0.0.5");
-    expect(hit?.device).toBe("FGT-Nashville");
+    const hit = idx.get("fgt-ashfield|10.0.0.5");
+    expect(hit?.device).toBe("FGT-Ashfield");
   });
 
   it("prefers ARP over device inventory for the same address", () => {

@@ -121,35 +121,35 @@ const { diffRegionMembership, applyOneRegion, applyDelete } = await import(
   "../../src/services/mapRegionService.js"
 );
 
-// A square around Nashville-ish. "Inside" sits at the centre; "outside" is a
+// A square around (40.71, -74.01). "Inside" sits at the centre; "outside" is a
 // whole degree away, well clear of the edge.
 const POLYGON: Array<[number, number]> = [
-  [36.10, -86.85],
-  [36.10, -86.70],
-  [36.25, -86.70],
-  [36.25, -86.85],
+  [40.65, -74.08],
+  [40.65, -73.93],
+  [40.80, -73.93],
+  [40.80, -74.08],
 ];
-const INSIDE: [number, number] = [36.16, -86.78];
+const INSIDE: [number, number] = [40.71, -74.01];
 const OUTSIDE: [number, number] = [33.75, -84.39];
 
 const REGION: MapRegion = {
   id: "region-1",
-  name: "Nashville",
+  name: "Ashfield",
   polygon: POLYGON,
   color: "#4fc3f7",
   createdBy: "test",
   createdAt: "2026-08-19T00:00:00.000Z",
   updatedAt: "2026-08-19T00:00:00.000Z",
 };
-const TAG = "region:Nashville";
+const TAG = "region:Ashfield";
 
-const DEVICE_NAME = "FGT-NASHVILLE";
+const DEVICE_NAME = "FGT-ASHFIELD";
 
 function seed(): void {
   store.assets = [
     {
       id: "gate",
-      hostname: "fgt-nash-01",
+      hostname: "fgt-ashf-01",
       serialNumber: "FGT0001",
       assetType: "firewall",
       latitude: INSIDE[0],
@@ -160,7 +160,7 @@ function seed(): void {
     },
     {
       id: "switch",
-      hostname: "sw-nash-01",
+      hostname: "sw-ashf-01",
       serialNumber: "S1240001",
       assetType: "switch",
       latitude: null,
@@ -171,7 +171,7 @@ function seed(): void {
     },
     {
       id: "server",
-      hostname: "srv-nash-01",
+      hostname: "srv-ashf-01",
       serialNumber: null,
       assetType: "server",
       latitude: null,
@@ -296,7 +296,7 @@ describe("applyOneRegion — drift", () => {
     // attachment case. It has no provenance row, so it is not ours to remove.
     store.assets.push({
       id: "manual",
-      hostname: "printer-nash",
+      hostname: "printer-ashf",
       serialNumber: null,
       assetType: "printer",
       latitude: null,

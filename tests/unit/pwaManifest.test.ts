@@ -11,7 +11,7 @@ describe("shortNameFor", () => {
 
   it("falls back to the first word, then a hard truncation", () => {
     // Android home-screen labels clip around 12 chars.
-    expect(shortNameFor("Rogers Group Network Manager")).toBe("Rogers");
+    expect(shortNameFor("Acme Corp Network Manager")).toBe("Acme");
     expect(shortNameFor("Supercalifragilistic")).toBe("Supercalifra");
     expect(shortNameFor("Supercalifragilistic Expialidocious")).toBe("Supercalifra");
   });
@@ -48,8 +48,8 @@ describe("buildManifest", () => {
   });
 
   it("takes name, short_name and description from branding", () => {
-    const branded = buildManifest({ appName: "Rogers Group Network Manager", subtitle: "IP + asset management" }, "v1");
-    expect(branded.name).toBe("Rogers Group Network Manager");
+    const branded = buildManifest({ appName: "Acme Corp Network Manager", subtitle: "IP + asset management" }, "v1");
+    expect(branded.name).toBe("Acme Corp Network Manager");
     expect(String(branded.short_name).length).toBeLessThanOrEqual(12);
     expect(branded.description).toBe("IP + asset management");
   });

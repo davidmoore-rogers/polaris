@@ -114,11 +114,11 @@ d("GET /manifest.webmanifest", () => {
   it("takes its name from branding", async () => {
     await prisma.setting.upsert({
       where: { key: "branding" },
-      update: { value: { appName: "Rogers Group NetOps", subtitle: "IP + asset management", logoUrl: "/logo.png" } },
-      create: { key: "branding", value: { appName: "Rogers Group NetOps", subtitle: "IP + asset management", logoUrl: "/logo.png" } },
+      update: { value: { appName: "Acme NetOps", subtitle: "IP + asset management", logoUrl: "/logo.png" } },
+      create: { key: "branding", value: { appName: "Acme NetOps", subtitle: "IP + asset management", logoUrl: "/logo.png" } },
     });
     const res = await request(app).get("/manifest.webmanifest");
-    expect(res.body.name).toBe("Rogers Group NetOps");
+    expect(res.body.name).toBe("Acme NetOps");
     expect(res.body.description).toBe("IP + asset management");
     expect(String(res.body.short_name).length).toBeLessThanOrEqual(12);
     await prisma.setting.deleteMany({ where: { key: "branding" } });

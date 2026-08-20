@@ -24,7 +24,7 @@ const MAPPINGS = [
   { provider: "oidc", enabled: true, groupKey: "Engineering", roleId: "role-net", regionTags: ["eu"], otherTags: [] },
   // entra-proxy keys are stored pre-normalized (lowercased GUID), as
   // createGroupMapping's normalizeGroupKey would persist them.
-  { provider: "entra-proxy", enabled: true, groupKey: "5f2cded1-40d9-43a4-a091-b92a80a3c7bb", roleId: "role-net", regionTags: ["hq"], otherTags: [] },
+  { provider: "entra-proxy", enabled: true, groupKey: "7c9e6b10-4a3d-4f21-9c0e-1b2d3e4f5a60", roleId: "role-net", regionTags: ["hq"], otherTags: [] },
 ];
 
 const ROLES = [
@@ -65,7 +65,7 @@ describe("normalizeGroupKey", () => {
     expect(normalizeGroupKey("saml", "Engineering")).toBe("Engineering");
   });
   it("lowercases + trims entra-proxy group GUIDs", () => {
-    expect(normalizeGroupKey("entra-proxy", " 5F2CDED1-40D9-43A4-A091-B92A80A3C7BB ")).toBe("5f2cded1-40d9-43a4-a091-b92a80a3c7bb");
+    expect(normalizeGroupKey("entra-proxy", " 7C9E6B10-4A3D-4F21-9C0E-1B2D3E4F5A60 ")).toBe("7c9e6b10-4a3d-4f21-9c0e-1b2d3e4f5a60");
   });
   it("returns empty for blanks / non-strings", () => {
     expect(normalizeGroupKey("ldap", "   ")).toBe("");
@@ -119,9 +119,9 @@ describe("resolveGroupsToAccess", () => {
   });
 
   it("entra-proxy matches group GUIDs case-insensitively", async () => {
-    const r = await resolveGroupsToAccess("entra-proxy", ["5F2CDED1-40D9-43A4-A091-B92A80A3C7BB"]);
+    const r = await resolveGroupsToAccess("entra-proxy", ["7C9E6B10-4A3D-4F21-9C0E-1B2D3E4F5A60"]);
     expect(r.roleId).toBe("role-net");
     expect(r.regionTags).toEqual(["hq"]);
-    expect(r.matchedGroups).toEqual(["5f2cded1-40d9-43a4-a091-b92a80a3c7bb"]);
+    expect(r.matchedGroups).toEqual(["7c9e6b10-4a3d-4f21-9c0e-1b2d3e4f5a60"]);
   });
 });

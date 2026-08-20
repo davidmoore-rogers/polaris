@@ -3198,7 +3198,7 @@ function matchesInventoryFilter(interfaceName: string, config: FortiManagerConfi
   const excludeList = config.inventoryExcludeInterfaces ?? [];
 
   // Plain patterns (no wildcards) also match VLAN sub-interfaces:
-  // "RGIGuest" matches "RGIGuest.100", "dmz" matches "dmz.10"
+  // "AcmeGuest" matches "AcmeGuest.100", "dmz" matches "dmz.10"
   function matches(pattern: string, iface: string): boolean {
     if (matchesWildcard(pattern, iface)) return true;
     if (!pattern.includes("*") && iface.toLowerCase().startsWith(pattern.toLowerCase() + ".")) return true;

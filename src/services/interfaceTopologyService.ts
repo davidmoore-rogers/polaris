@@ -212,7 +212,7 @@ export async function inferInterfaceTopology(
         matchVia = "hostname";
       } else {
         // 0 hits: probably a generic port name we let through the loose
-        // pattern (e.g. `8FFTV23025884` with no matching peer in inventory).
+        // pattern (e.g. `8FFTV23000001` with no matching peer in inventory).
         // >1 hits: ambiguous; refuse rather than draw a misleading edge.
         continue;
       }

@@ -116,26 +116,26 @@ describe("parseFortiapMonitorRow lldpNeighbors pass-through", () => {
       lldp: [
         {
           local_port: "lan1",
-          chassis_id: "mac e0:23:ff:36:26:ee",
-          system_name: "MORGAN-148E-1",
+          chassis_id: "mac e0:23:ff:00:00:01",
+          system_name: "CEDARS-148E-1",
           system_description: "FortiSwitch-148E-POE v7.4.8,build0929,250909 (GA)",
           port_id: "port9",
         },
         {
           local_port: "wbh1",
-          chassis_id: "mac 80:80:2c:ae:99:58",
-          system_name: "MORGAN-234F-1",
+          chassis_id: "mac 80:80:2c:00:00:01",
+          system_name: "CEDARS-234F-1",
           system_description: "FortiAP-234F v7.4.6,build0771,250814 (GA)",
-          port_id: "80:80:2c:ae:99:58",
+          port_id: "80:80:2c:00:00:01",
         },
       ],
     });
     // Summary still distills the FortiSwitch uplink only…
-    expect(parsed.peerSwitch).toBe("MORGAN-148E-1");
+    expect(parsed.peerSwitch).toBe("CEDARS-148E-1");
     expect(parsed.peerPort).toBe("port9");
     // …while lldpNeighbors carries every entry, mesh peer included.
     expect(parsed.lldpNeighbors).toHaveLength(2);
-    expect(parsed.lldpNeighbors![1].systemName).toBe("MORGAN-234F-1");
+    expect(parsed.lldpNeighbors![1].systemName).toBe("CEDARS-234F-1");
   });
 
   it("omits lldpNeighbors entirely when the row has no lldp array (don't-wipe signal)", () => {
@@ -157,14 +157,14 @@ describe("parseFortiapMonitorRow mesh-leaf uplink inversion", () => {
   // (the switch would render uplinked to the FortiGate instead of hanging
   // behind the AP on the Device Map).
   const meshLeafRow = {
-    name: "FP234FTF21009379",
+    name: "FP234FTF21000002",
     mesh_uplink: "mesh",
     parent_wtp_id: "FP234FTF21001111",
     lldp: [
       {
         local_port: "eth0",
-        chassis_id: "mac 94:ff:3c:39:31:06",
-        system_name: "S108EFTQ21003618",
+        chassis_id: "mac 94:ff:3c:00:00:01",
+        system_name: "S108EFTQ21000001",
         system_description: "FortiSwitch-108E-POE v7.4.8,build0929,250909 (GA)",
         port_id: "port8",
       },
@@ -183,14 +183,14 @@ describe("parseFortiapMonitorRow mesh-leaf uplink inversion", () => {
   it("still carries the bridged switch in lldpNeighbors for bridge-edge detection", () => {
     const parsed = parseFortiapMonitorRow(meshLeafRow);
     expect(parsed.lldpNeighbors).toHaveLength(1);
-    expect(parsed.lldpNeighbors![0].systemName).toBe("S108EFTQ21003618");
+    expect(parsed.lldpNeighbors![0].systemName).toBe("S108EFTQ21000001");
     expect(parsed.lldpNeighbors![0].portId).toBe("port8");
   });
 
   it("keeps stamping peerSwitch for an ethernet-uplink AP", () => {
     const parsed = parseFortiapMonitorRow({ ...meshLeafRow, mesh_uplink: "ethernet", parent_wtp_id: "" });
     expect(parsed.meshUplink).toBe("ethernet");
-    expect(parsed.peerSwitch).toBe("S108EFTQ21003618");
+    expect(parsed.peerSwitch).toBe("S108EFTQ21000001");
     expect(parsed.peerPort).toBe("port8");
     expect(parsed.peerSource).toBe("lldp");
   });
@@ -198,7 +198,7 @@ describe("parseFortiapMonitorRow mesh-leaf uplink inversion", () => {
   it("keeps stamping peerSwitch when mesh_uplink is absent (firmware omits the field)", () => {
     const { mesh_uplink: _m, parent_wtp_id: _p, ...bare } = meshLeafRow;
     const parsed = parseFortiapMonitorRow(bare);
-    expect(parsed.peerSwitch).toBe("S108EFTQ21003618");
+    expect(parsed.peerSwitch).toBe("S108EFTQ21000001");
     expect(parsed.peerSource).toBe("lldp");
   });
 });
@@ -233,7 +233,7 @@ describe("parseFortiapMonitorRow osVersion (cached-fallback rejection)", () => {
   // firmware in Polaris.
   it("prefers the canonical live os_version", () => {
     const parsed = parseFortiapMonitorRow({
-      serial: "FP432FTF22003666",
+      serial: "FP432FTF22000001",
       os_version: "FP432F-v7.6.5-build1105",
       version: "7.4.5 Build 0734",
     });
@@ -242,7 +242,7 @@ describe("parseFortiapMonitorRow osVersion (cached-fallback rejection)", () => {
 
   it("rejects a cached display-format fallback when os_version is absent", () => {
     const parsed = parseFortiapMonitorRow({
-      serial: "FP432FTF22003666",
+      serial: "FP432FTF22000001",
       version: "7.4.5 Build 0734",
       firmware_version: "7.4.5 Build 0734",
     });
@@ -250,13 +250,13 @@ describe("parseFortiapMonitorRow osVersion (cached-fallback rejection)", () => {
   });
 
   it("rejects the bare 'FortiAP' placeholder some rows carry", () => {
-    const parsed = parseFortiapMonitorRow({ serial: "FP231K5N2509B5EE", version: "FortiAP" });
+    const parsed = parseFortiapMonitorRow({ serial: "FP231K5N250000AE", version: "FortiAP" });
     expect(parsed.osVersion).toBe("");
   });
 
   it("accepts a canonical-shaped fallback when os_version is absent", () => {
     const parsed = parseFortiapMonitorRow({
-      serial: "FP231K5N2509B5EH",
+      serial: "FP231K5N250000AH",
       firmware_version: "FP231K-v7.6.5-build1105",
     });
     expect(parsed.osVersion).toBe("FP231K-v7.6.5-build1105");

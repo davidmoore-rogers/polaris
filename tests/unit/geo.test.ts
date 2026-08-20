@@ -64,18 +64,18 @@ describe("manualCoordPatchError", () => {
   });
 
   it("accepts a valid pair", () => {
-    expect(manualCoordPatchError(36.1627, -86.7816)).toBeNull();
+    expect(manualCoordPatchError(40.7128, -74.0060)).toBeNull();
     expect(manualCoordPatchError(-90, 180)).toBeNull();
   });
 
   it("rejects one provided without the other", () => {
-    expect(manualCoordPatchError(36.16, undefined)).toMatch(/together/);
-    expect(manualCoordPatchError(undefined, -86.78)).toMatch(/together/);
+    expect(manualCoordPatchError(40.71, undefined)).toMatch(/together/);
+    expect(manualCoordPatchError(undefined, -74.01)).toMatch(/together/);
   });
 
   it("rejects one set with the other cleared", () => {
-    expect(manualCoordPatchError(36.16, null)).toMatch(/both/);
-    expect(manualCoordPatchError(null, -86.78)).toMatch(/both/);
+    expect(manualCoordPatchError(40.71, null)).toMatch(/both/);
+    expect(manualCoordPatchError(null, -74.01)).toMatch(/both/);
   });
 
   it("rejects out-of-range values", () => {

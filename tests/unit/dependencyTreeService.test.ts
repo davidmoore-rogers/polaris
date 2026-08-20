@@ -205,12 +205,12 @@ describe("buildDependencyEdgesFromInputs", () => {
     // depends on the AP via LLDP.
     const meshLeaf: DepAsset = {
       id: "apLeaf",
-      hostname: "FP234FTF21009379",
+      hostname: "FP234FTF21000002",
       serialNumber: null,
       assetType: "access_point",
-      fortinetTopology: { role: "fortiap", parentSwitch: "S108EFTQ21003618", controllerFortigate: "FG-EDGE-01", meshUplink: "mesh" },
+      fortinetTopology: { role: "fortiap", parentSwitch: "S108EFTQ21000001", controllerFortigate: "FG-EDGE-01", meshUplink: "mesh" },
     };
-    const assets = [fg("fg1", "FG-EDGE-01"), sw("swBridge", "S108EFTQ21003618", "FG-EDGE-01"), meshLeaf];
+    const assets = [fg("fg1", "FG-EDGE-01"), sw("swBridge", "S108EFTQ21000001", "FG-EDGE-01"), meshLeaf];
     const lldpEdges = [{ assetId: "apLeaf", matchedAssetId: "swBridge" }];
     const edges = buildDependencyEdgesFromInputs(assets, [], lldpEdges, [], new Set(["swBridge"]));
     // No backwards leaf→bridged-switch controller edge…
@@ -357,10 +357,10 @@ describe("assignLayers", () => {
     // should still resolve via the controller-fallback simple-path
     // detection so 148F-2 attaches under 148F-1 and 148F-3 under 148F-2.
     const assets = [
-      fg("fg",   "CKYSMA-91G-1"),
-      sw("sw1",  "CKYSMA-148F-1", "CKYSMA-91G-1"),
-      sw("sw2",  "CKYSMA-148F-2", "CKYSMA-91G-1"),
-      sw("sw3",  "CKYSMA-148F-3", "CKYSMA-91G-1"),
+      fg("fg",   "LAKESIDE-91G-1"),
+      sw("sw1",  "LAKESIDE-148F-1", "LAKESIDE-91G-1"),
+      sw("sw2",  "LAKESIDE-148F-2", "LAKESIDE-91G-1"),
+      sw("sw3",  "LAKESIDE-148F-3", "LAKESIDE-91G-1"),
     ];
     const candidate = buildDependencyEdgesFromInputs(
       assets,
@@ -758,8 +758,8 @@ describe("buildEndpointDependencyEdges", () => {
   }
 
   const infra: DepAsset[] = [
-    fg("fg1", "FG-NASHVILLE-01"),
-    sw("sw1", "FS-248E-01", "FG-NASHVILLE-01"),
+    fg("fg1", "FG-ASHFIELD-01"),
+    sw("sw1", "FS-248E-01", "FG-ASHFIELD-01"),
     ap("ap1", "FAP-431F-07", "FS-248E-01"),
   ];
 
@@ -774,7 +774,7 @@ describe("buildEndpointDependencyEdges", () => {
   });
 
   it("falls back to the FortiGate that last saw the device", () => {
-    const edges = buildEndpointDependencyEdges([endpoint("cam", { sightedFortigates: ["FG-NASHVILLE-01"] })], infra);
+    const edges = buildEndpointDependencyEdges([endpoint("cam", { sightedFortigates: ["FG-ASHFIELD-01"] })], infra);
     expect(edges).toEqual([{ childAssetId: "cam", parentAssetId: "fg1", detectedVia: "sighting" }]);
   });
 
@@ -785,7 +785,7 @@ describe("buildEndpointDependencyEdges", () => {
   // switch being suppressed by its own gate.
   it("prefers the switch over the gate when both resolve, emitting a single edge", () => {
     const edges = buildEndpointDependencyEdges(
-      [endpoint("srv", { lastSeenSwitch: "FS-248E-01/port15", lastSeenAp: "FAP-431F-07", sightedFortigates: ["FG-NASHVILLE-01"] })],
+      [endpoint("srv", { lastSeenSwitch: "FS-248E-01/port15", lastSeenAp: "FAP-431F-07", sightedFortigates: ["FG-ASHFIELD-01"] })],
       infra,
     );
     expect(edges).toEqual([{ childAssetId: "srv", parentAssetId: "sw1", detectedVia: "switch-port" }]);
@@ -793,7 +793,7 @@ describe("buildEndpointDependencyEdges", () => {
 
   it("prefers the AP over the gate when there is no wired sighting", () => {
     const edges = buildEndpointDependencyEdges(
-      [endpoint("tab", { lastSeenAp: "FAP-431F-07", sightedFortigates: ["FG-NASHVILLE-01"] })],
+      [endpoint("tab", { lastSeenAp: "FAP-431F-07", sightedFortigates: ["FG-ASHFIELD-01"] })],
       infra,
     );
     expect(edges[0].parentAssetId).toBe("ap1");
@@ -801,7 +801,7 @@ describe("buildEndpointDependencyEdges", () => {
 
   it("skips to the next signal when the more specific one names an unknown device", () => {
     const edges = buildEndpointDependencyEdges(
-      [endpoint("srv", { lastSeenSwitch: "FS-GONE-99/port1", sightedFortigates: ["FG-NASHVILLE-01"] })],
+      [endpoint("srv", { lastSeenSwitch: "FS-GONE-99/port1", sightedFortigates: ["FG-ASHFIELD-01"] })],
       infra,
     );
     expect(edges).toEqual([{ childAssetId: "srv", parentAssetId: "fg1", detectedVia: "sighting" }]);
@@ -809,7 +809,7 @@ describe("buildEndpointDependencyEdges", () => {
 
   it("takes the first sighting that resolves (caller orders them freshest-first)", () => {
     const edges = buildEndpointDependencyEdges(
-      [endpoint("cam", { sightedFortigates: ["FG-RETIRED-04", "FG-NASHVILLE-01"] })],
+      [endpoint("cam", { sightedFortigates: ["FG-RETIRED-04", "FG-ASHFIELD-01"] })],
       infra,
     );
     expect(edges).toEqual([{ childAssetId: "cam", parentAssetId: "fg1", detectedVia: "sighting" }]);
@@ -827,23 +827,23 @@ describe("buildEndpointDependencyEdges", () => {
     const gates: DepAsset[] = [
       {
         id: "fg9",
-        hostname: "nash-edge-01.corp",
+        hostname: "ashf-edge-01.corp",
         serialNumber: "FG100F0009",
         assetType: "firewall",
-        fortinetTopology: { deviceName: "FGT-NASH-01" },
+        fortinetTopology: { deviceName: "FGT-ASHF-01" },
       },
     ];
-    const edges = buildEndpointDependencyEdges([endpoint("cam", { sightedFortigates: ["FGT-NASH-01"] })], gates);
+    const edges = buildEndpointDependencyEdges([endpoint("cam", { sightedFortigates: ["FGT-ASHF-01"] })], gates);
     expect(edges).toEqual([{ childAssetId: "cam", parentAssetId: "fg9", detectedVia: "sighting" }]);
   });
 
   it("never resolves a switch signal to a firewall", () => {
-    const edges = buildEndpointDependencyEdges([endpoint("srv", { lastSeenSwitch: "FG-NASHVILLE-01/wan1" })], infra);
+    const edges = buildEndpointDependencyEdges([endpoint("srv", { lastSeenSwitch: "FG-ASHFIELD-01/wan1" })], infra);
     expect(edges).toEqual([]);
   });
 
   it("refuses a self-edge", () => {
-    const selfInfra: DepAsset[] = [sw("srv", "FS-248E-01", "FG-NASHVILLE-01")];
+    const selfInfra: DepAsset[] = [sw("srv", "FS-248E-01", "FG-ASHFIELD-01")];
     expect(buildEndpointDependencyEdges([endpoint("srv", { lastSeenSwitch: "FS-248E-01/port1" })], selfInfra)).toEqual([]);
   });
 });

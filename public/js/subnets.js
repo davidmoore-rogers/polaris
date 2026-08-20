@@ -345,7 +345,7 @@ async function openAllocateModal(initialState) {
       '<p class="hint">' + (canEditTemplates ? 'Pick a saved template to pre-fill the rows below, or build one from scratch.' : 'Pick a saved template to pre-fill the rows below.') + '</p>' +
     '</div>' +
     '<div class="alloc-two-col">' +
-      '<div class="form-group"><label>Site Name</label><input type="text" id="f-site" placeholder="e.g. Jefferson" value="' + escapeHtml(initialSite) + '"><p class="hint">Required to Allocate; prepended to each row name (e.g. <code>Jefferson_Hardware</code>). Not required to save a template.</p></div>' +
+      '<div class="form-group"><label>Site Name</label><input type="text" id="f-site" placeholder="e.g. Riverbend" value="' + escapeHtml(initialSite) + '"><p class="hint">Required to Allocate; prepended to each row name (e.g. <code>Riverbend_Hardware</code>). Not required to save a template.</p></div>' +
       '<div class="form-group"><label>Anchor Prefix</label><input type="number" id="f-anchor" min="8" max="32" value="' + initialAnchor + '"><p class="hint">Minimum alignment for the group. Defaults to /24 and is remembered for you. If the template needs more space, a larger anchor is used automatically.</p></div>' +
     '</div>' +
     '<div class="form-group">' +
@@ -542,7 +542,7 @@ function _addAllocEntryRow(entry) {
       '<button type="button" class="btn btn-sm btn-icon alloc-row-remove" title="Remove row">&times;</button>';
   } else {
     row.innerHTML =
-      '<input type="text" class="alloc-entry-name" placeholder="e.g. RGIHardware" value="' + escapeHtml(entry.name || "") + '">' +
+      '<input type="text" class="alloc-entry-name" placeholder="e.g. AcmeHardware" value="' + escapeHtml(entry.name || "") + '">' +
       '<input type="number" class="alloc-entry-prefix" min="8" max="32" placeholder="e.g. 25" value="' + prefixVal + '">' +
       '<input type="number" class="alloc-entry-vlan" min="1" max="4094" placeholder="Optional" value="' + (entry.vlan != null && entry.vlan !== "" ? entry.vlan : "") + '">' +
       '<button type="button" class="btn btn-sm btn-icon alloc-row-remove" title="Remove row">&times;</button>';

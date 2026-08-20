@@ -417,12 +417,12 @@ systemctl daemon-reload
 
 # ─── 10. Configure nginx ────────────────────────────────────────────────────
 info "Installing nginx config (server_name=$HOSTNAME_FROM_URL, prometheus_ip=$PROMETHEUS_IP)..."
-# The shipped polaris.conf hardcodes polaris.rogersgroupinc.com as the
+# The shipped polaris.conf hardcodes polaris.example.com as the
 # server_name and <PROMETHEUS_IP> as the allowlist placeholder. Substitute
 # both for this install's values. Operators can replace later by editing the
 # drop-in at /etc/nginx/conf.d/polaris-local.conf (don't edit polaris.conf
 # directly — the in-app updater syncs it on every release).
-sed "s|polaris\\.rogersgroupinc\\.com|$HOSTNAME_FROM_URL|g; s|<PROMETHEUS_IP>|$PROMETHEUS_IP|g" \
+sed "s|polaris\\.example\\.com|$HOSTNAME_FROM_URL|g; s|<PROMETHEUS_IP>|$PROMETHEUS_IP|g" \
   "$APP_DIR/deploy/nginx/polaris.conf" > "$NGINX_CONF_DEST"
 
 info "Validating nginx config..."

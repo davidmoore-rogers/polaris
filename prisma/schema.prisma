@@ -560,7 +560,7 @@ model Asset {
   dnsName               String? // FQDN from PTR lookup, e.g. "server01.corp.local"
   dnsNameFetchedAt      DateTime? // When the last PTR lookup ran (success or failure)
   dnsNameTtl            Int? // TTL (seconds) from the PTR record; null = unknown (standard mode)
-  assetTag              String?     @unique // Internal tracking tag, e.g. "RGI-00421"
+  assetTag              String?     @unique // Internal tracking tag, e.g. "ACME-00421"
   serialNumber          String?
   manufacturer          String?
   model                 String?
@@ -2032,7 +2032,7 @@ model AssetTrunkMember {
   assetId String
   asset   Asset  @relation("AssetTrunkMembers", fields: [assetId], references: [id], onDelete: Cascade)
 
-  /// Trunk name exactly as published, e.g. "8EF5920008350-0".
+  /// Trunk name exactly as published, e.g. "8EF5920000001-0".
   trunkName      String
   /// Local physical port the trunk uses, e.g. "port23".
   localPort      String

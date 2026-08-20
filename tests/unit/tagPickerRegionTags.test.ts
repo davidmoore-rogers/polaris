@@ -30,7 +30,7 @@ const APP_SRC = readFileSync(resolve(__dirname, "../../public/js/app.js"), "utf8
 
 const TAGS = [
   { name: "Production", category: "Environment", color: "#f87171" },
-  { name: "region:Nashville", category: "Map Regions", color: "#4fc3f7" },
+  { name: "region:Ashfield", category: "Map Regions", color: "#4fc3f7" },
   { name: "region:Atlanta", category: "Map Regions", color: "#4ade80" },
 ];
 
@@ -81,14 +81,14 @@ function chipInput(name: string) {
 
 describe("tag picker — region tags are editable", () => {
   it("renders the Map Regions category with selectable chips", () => {
-    render(["region:Nashville"]);
+    render(["region:Ashfield"]);
     const labels = Array.from(doc.querySelectorAll(".tag-picker-cat-label")).map((e) => e.textContent);
     expect(labels).toContain("Map Regions");
-    const nash = chipInput("region:Nashville");
+    const ashf = chipInput("region:Ashfield");
     const atl = chipInput("region:Atlanta");
-    expect(nash, "region chip missing — the protected-prefix filter is back").toBeTruthy();
+    expect(ashf, "region chip missing — the protected-prefix filter is back").toBeTruthy();
     expect(atl).toBeTruthy();
-    expect(nash!.checked).toBe(true);
+    expect(ashf!.checked).toBe(true);
     expect(atl!.checked).toBe(false);
   });
 
@@ -99,10 +99,10 @@ describe("tag picker — region tags are editable", () => {
   });
 
   it("getTagFieldValue reflects the checkboxes — unchecking a region tag removes it", () => {
-    render(["region:Nashville", "Production"]);
-    expect(getTagFieldValue().sort()).toEqual(["Production", "region:Nashville"]);
+    render(["region:Ashfield", "Production"]);
+    expect(getTagFieldValue().sort()).toEqual(["Production", "region:Ashfield"]);
 
-    chipInput("region:Nashville")!.checked = false;
+    chipInput("region:Ashfield")!.checked = false;
     expect(getTagFieldValue()).toEqual(["Production"]);
 
     chipInput("region:Atlanta")!.checked = true;
@@ -110,25 +110,25 @@ describe("tag picker — region tags are editable", () => {
   });
 
   it("no longer stashes preserved tags on the picker element", () => {
-    render(["region:Nashville"]);
+    render(["region:Ashfield"]);
     const picker = doc.getElementById("f-tags-picker") as unknown as HTMLElement;
     expect(picker.getAttribute("data-preserved-tags")).toBeNull();
   });
 
   it("read-only render shows region tags instead of hiding them", () => {
-    render(["region:Nashville"], { readOnly: true });
-    expect((doc.getElementById("host") as unknown as HTMLElement).textContent).toContain("region:Nashville");
+    render(["region:Ashfield"], { readOnly: true });
+    expect((doc.getElementById("host") as unknown as HTMLElement).textContent).toContain("region:Ashfield");
   });
 
   it("unselected chips are dimmed on all three channels, not just background", () => {
     // The old style differed only in background alpha (44 vs 11) — border and
     // text stayed full-strength color, so every chip read as "active" (the
     // 2026-08 report against the Map Regions row). Pin the three-channel split.
-    render(["region:Nashville"]);
+    render(["region:Ashfield"]);
     const styleOf = (name: string) =>
       (chipInput(name)!.parentElement as unknown as HTMLElement).getAttribute("style") ?? "";
 
-    const on = styleOf("region:Nashville"); // color #4fc3f7
+    const on = styleOf("region:Ashfield"); // color #4fc3f7
     expect(on).toContain("background:#4fc3f744");
     expect(on).toContain("border-color:#4fc3f7;");
     expect(on).toContain("color:#4fc3f7");

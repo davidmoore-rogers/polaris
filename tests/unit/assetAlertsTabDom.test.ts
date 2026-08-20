@@ -63,9 +63,9 @@ const FN_NAMES = [
 /** Two ports of one switch, down together — the shape that motivated all this. */
 function makeAlerts() {
   return [
-    { id: "n2", severity: "serious", message: "CKYSMA-148F-1: a monitored interface is down", dimension: "port10", metric: "ifOperStatus", triggeredAt: "2026-07-23T14:50:00Z", acknowledged: false },
-    { id: "n1", severity: "serious", message: "CKYSMA-148F-1: a monitored interface is down", dimension: "port2", metric: "ifOperStatus", triggeredAt: "2026-07-23T14:50:00Z", acknowledged: false },
-    { id: "n0", severity: "warning", message: "CKYSMA-148F-1 is down", dimension: null, metric: "monitorStatus", triggeredAt: "2026-07-22T14:50:00Z", acknowledged: true, acknowledgedBy: "dmoore", acknowledgedAt: "2026-07-22T15:00:00Z" },
+    { id: "n2", severity: "serious", message: "LAKESIDE-148F-1: a monitored interface is down", dimension: "port10", metric: "ifOperStatus", triggeredAt: "2026-07-23T14:50:00Z", acknowledged: false },
+    { id: "n1", severity: "serious", message: "LAKESIDE-148F-1: a monitored interface is down", dimension: "port2", metric: "ifOperStatus", triggeredAt: "2026-07-23T14:50:00Z", acknowledged: false },
+    { id: "n0", severity: "warning", message: "LAKESIDE-148F-1 is down", dimension: null, metric: "monitorStatus", triggeredAt: "2026-07-22T14:50:00Z", acknowledged: true, acknowledgedBy: "jsmith", acknowledgedAt: "2026-07-22T15:00:00Z" },
   ];
 }
 

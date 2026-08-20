@@ -15,8 +15,8 @@ import { scopeRegionTagsOf, dedupeEmailRecipients } from "../../src/services/not
 
 describe("scopeRegionTagsOf", () => {
   it("extracts only region: tags from a scope", () => {
-    expect(scopeRegionTagsOf({ tags: ["region:Atlanta", "prod", "firewall:fgt-1", "region:Nashville"] }))
-      .toEqual(["region:Atlanta", "region:Nashville"]);
+    expect(scopeRegionTagsOf({ tags: ["region:Atlanta", "prod", "firewall:fgt-1", "region:Ashfield"] }))
+      .toEqual(["region:Atlanta", "region:Ashfield"]);
   });
   it("returns [] for no scope / no region tags", () => {
     expect(scopeRegionTagsOf(null)).toEqual([]);

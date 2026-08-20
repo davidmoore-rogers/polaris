@@ -42,7 +42,7 @@ import {
 } from "../../src/utils/alertEmailTemplate.js";
 
 const neighbor = (over: Partial<AlertLldpNeighbor> = {}): AlertLldpNeighbor => ({
-  name: "OLDHAM-124F-2",
+  name: "WESTON-124F-2",
   matchedType: "switch",
   port: "port1 (Uplink to core)",
   managementIp: "172.23.13.125",
@@ -104,7 +104,7 @@ describe("the LLDP block", () => {
   it("names the neighbour, its port, and when it last advertised", () => {
     const text = renderInterfaceLldp("port2", [neighbor()], { html: false });
     expect(text).toContain("LLDP neighbor on port2");
-    expect(text).toContain("OLDHAM-124F-2 (switch)");
+    expect(text).toContain("WESTON-124F-2 (switch)");
     expect(text).toContain("port1 (Uplink to core)");
     expect(text).toContain("172.23.13.125");
     expect(text).toContain("bridge, router");
@@ -122,7 +122,7 @@ describe("the LLDP block", () => {
     // deletes, so a colon there would delete the block's own heading.
     const body = pruneEmptyTextLines(`Severity:   serious\n\n${renderInterfaceLldp("port2", [neighbor()], { html: false })}`);
     expect(body).toContain("LLDP neighbor on port2");
-    expect(body).toContain("Neighbor        OLDHAM-124F-2 (switch)");
+    expect(body).toContain("Neighbor        WESTON-124F-2 (switch)");
   });
 
   it("pluralizes and caps, summarizing the rest", () => {

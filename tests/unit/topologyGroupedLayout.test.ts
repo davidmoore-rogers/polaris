@@ -53,7 +53,7 @@ function disjoint(a: ReturnType<typeof box>, b: ReturnType<typeof box>) {
   return a.x2 < b.x1 || b.x2 < a.x1 || a.y2 < b.y1 || b.y2 < a.y1;
 }
 
-// A JEFFERSON-shaped miniature: FG in Scale House; a deep chain into the
+// A RIVERBEND-shaped miniature: FG in Scale House; a deep chain into the
 // Mine building whose members sit far right in GLOBAL depth; a mid-chain
 // untagged switch; a small QC Lab building; a FortiLink fallback.
 const site = (): El[] => {

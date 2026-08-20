@@ -15,10 +15,10 @@ describe("extractMetavarCoordsFromFmgDevice", () => {
 
   it("reads default Latitude / Longitude (exact case)", () => {
     const r = extractMetavarCoordsFromFmgDevice({
-      "meta fields": { Latitude: "36.1627", Longitude: "-86.7816" },
+      "meta fields": { Latitude: "40.7128", Longitude: "-74.0060" },
     });
-    expect(r.latitude).toBeCloseTo(36.1627, 4);
-    expect(r.longitude).toBeCloseTo(-86.7816, 4);
+    expect(r.latitude).toBeCloseTo(40.7128, 4);
+    expect(r.longitude).toBeCloseTo(-74.0060, 4);
     expect(r.address).toBeUndefined();
   });
 
@@ -51,12 +51,12 @@ describe("extractMetavarCoordsFromFmgDevice", () => {
   });
 
   it("extracts the address metavar only when a name is supplied", () => {
-    const meta = { "meta fields": { Address: "123 Main St, Nashville TN", Latitude: "36" } };
+    const meta = { "meta fields": { Address: "123 Main St, Ashfield TN", Latitude: "36" } };
     // No addrName → address ignored.
     expect(extractMetavarCoordsFromFmgDevice(meta).address).toBeUndefined();
     // addrName supplied → trimmed string returned.
     const r = extractMetavarCoordsFromFmgDevice(meta, "Latitude", "Longitude", "Address");
-    expect(r.address).toBe("123 Main St, Nashville TN");
+    expect(r.address).toBe("123 Main St, Ashfield TN");
   });
 
   it("ignores a blank / whitespace-only address metavar value", () => {

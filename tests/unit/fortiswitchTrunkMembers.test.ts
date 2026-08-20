@@ -95,8 +95,8 @@ describe("buildFortiswitchTrunkMembers", () => {
     // each ISL port names a different peer-serial trunk; `members` is empty).
     const ports = [
       accessPort("port1"),
-      islPort("port50", "8FFTF25005384-0", "S148FFTF25005384", "port51"),
-      islPort("port52", "8FFTF25005352-0", "S148FFTF25005352", "port51"),
+      islPort("port50", "8FFTF25005384-0", "S148FFTF25000002", "port51"),
+      islPort("port52", "8FFTF25005352-0", "S148FFTF25000001", "port51"),
     ];
     const map = buildFortiswitchTrunkMembers(ports);
     expect(map.get("8FFTF25005384-0")).toEqual(["port50"]);
@@ -116,7 +116,7 @@ describe("buildFortiswitchTrunkMembers", () => {
   it("handles a switch carrying both an LACP bundle and an auto-ISL uplink", () => {
     const ports = [
       lacpTrunkPort("Trunk1", ["port1", "port2"]),
-      islPort("port51", "8FFTF25011393-0", "S148FFTF25011393", "port52"),
+      islPort("port51", "8FFTF25011393-0", "S148FFTF25000003", "port52"),
     ];
     const map = buildFortiswitchTrunkMembers(ports);
     expect(map.get("Trunk1")).toEqual(["port1", "port2"]);
@@ -128,7 +128,7 @@ describe("buildFortiswitchTrunkMembers", () => {
     // as the edge endpoint; the overlay must stamp ifParent on port50 so the
     // topology layer's preferPhysical swaps the label to the physical port.
     const trunkMembers = buildFortiswitchTrunkMembers([
-      islPort("port50", "8FFTF25005384-0", "S148FFTF25005384", "port51"),
+      islPort("port50", "8FFTF25005384-0", "S148FFTF25000002", "port51"),
     ]);
     const ifaces: InterfaceSample[] = [
       { ifName: "8FFTF25005384-0", ifType: null, operStatus: "up" }, // trunk as IF-MIB surfaced it
@@ -153,8 +153,8 @@ describe("findFortiswitchUplinkPorts", () => {
     // TESTSWITCH-1: port47 is the FGT uplink; port51 is an ISL to TESTSWITCH-2.
     const ports = [
       accessPort("port1"),
-      islPort("port51", "8FFTF25011393-0", "S148FFTF25011393", "port52"),
-      fgtUplinkPort("port47", "FGT91GTK25008577"),
+      islPort("port51", "8FFTF25011393-0", "S148FFTF25000003", "port52"),
+      fgtUplinkPort("port47", "FGT91GTK25000001"),
     ];
     expect(findFortiswitchUplinkPorts(ports)).toEqual(["port47"]);
   });
@@ -163,8 +163,8 @@ describe("findFortiswitchUplinkPorts", () => {
     // TESTSWITCH-2/3 reach the FGT over ISL trunks only — no fortilink-port.
     const ports = [
       accessPort("port1"),
-      islPort("port50", "8FFTF25005384-0", "S148FFTF25005384", "port51"),
-      islPort("port52", "8FFTF25005352-0", "S148FFTF25005352", "port51"),
+      islPort("port50", "8FFTF25005384-0", "S148FFTF25000002", "port51"),
+      islPort("port52", "8FFTF25005352-0", "S148FFTF25000001", "port51"),
     ];
     expect(findFortiswitchUplinkPorts(ports)).toEqual([]);
   });
@@ -240,7 +240,7 @@ describe("parseFortiswitchMclagPeers", () => {
 
   it("ignores ports that aren't mclag-icl-port (plain auto-ISL uplinks)", () => {
     const ports = [
-      islPort("port50", "8FFTF25005384-0", "S148FFTF25005384", "port51"),
+      islPort("port50", "8FFTF25005384-0", "S148FFTF25000002", "port51"),
       lacpTrunkPort("Trunk1", ["port1", "port2"]),
       accessPort("port3"),
     ];
@@ -286,14 +286,14 @@ describe("overlayFortiswitchTrunkMembers", () => {
 
   it("stamps ifParent on the member and marks the trunk an aggregate", () => {
     const ifaces: InterfaceSample[] = [
-      mk("G101FTK23018814", { ifType: null }), // the serial-named uplink trunk
+      mk("G101FTK23000001", { ifType: null }), // the serial-named uplink trunk
       mk("port52"),
     ];
-    const links = overlayFortiswitchTrunkMembers(ifaces, new Map([["G101FTK23018814", ["port52"]]]));
+    const links = overlayFortiswitchTrunkMembers(ifaces, new Map([["G101FTK23000001", ["port52"]]]));
     expect(links).toBe(1);
-    expect(ifaces.find((i) => i.ifName === "G101FTK23018814")!.ifType).toBe("aggregate");
+    expect(ifaces.find((i) => i.ifName === "G101FTK23000001")!.ifType).toBe("aggregate");
     const member = ifaces.find((i) => i.ifName === "port52")!;
-    expect(member.ifParent).toBe("G101FTK23018814");
+    expect(member.ifParent).toBe("G101FTK23000001");
     expect(member.ifType).toBe("physical");
   });
 

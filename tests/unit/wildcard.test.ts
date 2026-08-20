@@ -22,8 +22,8 @@ describe("compileWildcard", () => {
   it("treats regex metacharacters as literals", () => {
     // The reason a device filter can safely take operator text: "." is a dot,
     // not "any character", and "[1]" is not a character class.
-    expect(compileWildcard("nashville.plant").test("nashville.plant")).toBe(true);
-    expect(compileWildcard("nashville.plant").test("nashvilleXplant")).toBe(false);
+    expect(compileWildcard("ashfield.plant").test("ashfield.plant")).toBe(true);
+    expect(compileWildcard("ashfield.plant").test("ashfieldXplant")).toBe(false);
     expect(compileWildcard("port[1]").test("port[1]")).toBe(true);
     expect(compileWildcard("port[1]").test("port1")).toBe(false);
   });

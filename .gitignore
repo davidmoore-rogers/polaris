@@ -46,3 +46,6 @@ state/
 # Temp files the automation-script runner writes before execFile'ing them
 # (0600, unlinked after the run; a killed run can leave one behind).
 data/automation-scripts-tmp/
+
+# Local audit / review output — never commit (embeds local paths + findings)
+findings.json

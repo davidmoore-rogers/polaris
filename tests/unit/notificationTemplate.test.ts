@@ -62,7 +62,7 @@ const FULL_PARTS: TemplateContextParts = {
     action: "integration.discover.error",
     level: "error",
     resourceType: "integration",
-    resourceName: "FMG-Nashville",
+    resourceName: "FMG-Ashfield",
     actor: "system:scheduler",
     message: "Discovery failed: RPC -11 no valid session",
   },

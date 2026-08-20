@@ -11,7 +11,7 @@
  * until an operator manually clicked Test. This job keeps lastTestOk fresh, so
  * a transient outage self-heals on the next 10-min tick.
  *
- * Sequential, not parallel — at Rogers Group, FortiManager drops parallel
+ * Sequential, not parallel — in the reference deployment, FortiManager drops parallel
  * connections above ~1-2, so we test integrations one at a time. For the same
  * reason, any integration currently in an active discovery run is skipped —
  * a fresh login session during a long-running FMG discovery would collide
@@ -37,7 +37,7 @@ async function testAllIntegrations(): Promise<void> {
     });
 
     for (const intg of integrations) {
-      // Skip integrations with an active discovery run. The FMG at Rogers Group
+      // Skip integrations with an active discovery run. The FMG in that deployment
       // drops parallel connections above ~1-2, so a fresh login session while
       // discovery is mid-proxy gets rejected and stamps a false-positive
       // `lastTestOk=false`. A test result during a run also adds no signal —

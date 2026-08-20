@@ -2659,7 +2659,7 @@
   // FortiLink interface on the FortiGate side; the relationship it
   // represents is already encoded in the FG→switch edge itself, so
   // displaying it as a label is redundant. Real port names like "port49"
-  // or aggregate serial-fragments like "8FFTV23025884-0" still pass through.
+  // or aggregate serial-fragments like "8FFTV23000001-0" still pass through.
   function displayableUplink(name) {
     if (!name) return "";
     return String(name).toLowerCase() === "fortilink" ? "" : name;

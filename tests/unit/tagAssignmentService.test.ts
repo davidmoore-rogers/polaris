@@ -82,8 +82,8 @@ describe("normalizeCriteria", () => {
     const i = normalizeCriteria({ rules: [{ field: "integration", op: "exact", values: ["id-1"] }] })!;
     expect(i.rules[0]).toEqual({ field: "integration", op: "exact", values: ["id-1"] });
 
-    const f = normalizeCriteria({ rules: [{ field: "fortigate", op: "contains", values: ["JEFFERSON"] }] })!;
-    expect(f.rules[0]).toEqual({ field: "fortigate", op: "contains", values: ["JEFFERSON"] });
+    const f = normalizeCriteria({ rules: [{ field: "fortigate", op: "contains", values: ["RIVERBEND"] }] })!;
+    expect(f.rules[0]).toEqual({ field: "fortigate", op: "contains", values: ["RIVERBEND"] });
     expect(() => normalizeCriteria({ rules: [{ field: "fortigate", op: "regex", values: ["x"] }] })).toThrow();
   });
 });
@@ -136,14 +136,14 @@ describe("assetMatchesCriteria (predicate)", () => {
   });
 
   it("fortigate matches learnedLocation OR any sighting, with string ops", () => {
-    const exact = normalizeCriteria({ rules: [{ field: "fortigate", op: "exact", values: ["JEFFERSON-FG"] }] })!;
-    expect(assetMatchesCriteria(asset({ learnedLocation: "jefferson-fg" }), exact)).toBe(true);
-    expect(assetMatchesCriteria(asset({ fortigateSightings: [{ fortigateDevice: "JEFFERSON-FG" }] }), exact)).toBe(true);
+    const exact = normalizeCriteria({ rules: [{ field: "fortigate", op: "exact", values: ["RIVERBEND-FG"] }] })!;
+    expect(assetMatchesCriteria(asset({ learnedLocation: "riverbend-fg" }), exact)).toBe(true);
+    expect(assetMatchesCriteria(asset({ fortigateSightings: [{ fortigateDevice: "RIVERBEND-FG" }] }), exact)).toBe(true);
     expect(assetMatchesCriteria(asset({ learnedLocation: "OTHER-FG" }), exact)).toBe(false);
 
     // contains covers a site prefix across every gate at the site.
-    const site = normalizeCriteria({ rules: [{ field: "fortigate", op: "contains", values: ["jefferson"] }] })!;
-    expect(assetMatchesCriteria(asset({ fortigateSightings: [{ fortigateDevice: "JEFFERSON-101F-1" }] }), site)).toBe(true);
+    const site = normalizeCriteria({ rules: [{ field: "fortigate", op: "contains", values: ["riverbend"] }] })!;
+    expect(assetMatchesCriteria(asset({ fortigateSightings: [{ fortigateDevice: "RIVERBEND-101F-1" }] }), site)).toBe(true);
     expect(assetMatchesCriteria(asset({ learnedLocation: "SALINE-FG" }), site)).toBe(false);
     expect(assetMatchesCriteria(asset({}), site)).toBe(false);
   });

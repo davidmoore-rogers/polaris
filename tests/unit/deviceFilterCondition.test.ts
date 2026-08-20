@@ -22,9 +22,9 @@ const ASSET: ScopeConditionAsset = {
   os: "FortiSwitch",
   osVersion: "7.4.2",
   department: "Plant Ops",
-  location: "Nashville Plant",
-  learnedLocation: "PLVCORFGT1",
-  fortigateSightings: [{ fortigateDevice: "NASH-EDGE-01" }],
+  location: "Ashfield Plant",
+  learnedLocation: "CENTRALFGT1",
+  fortigateSightings: [{ fortigateDevice: "ASHF-EDGE-01" }],
 };
 
 describe("the two condition vocabularies", () => {
@@ -56,10 +56,10 @@ describe("the two condition vocabularies", () => {
   });
 
   it("refuses the extra fields and the wildcard on an automations scope", () => {
-    expect(() => scopeConditionSchema.parse(one("location", "contains", "Nashville"))).toThrow();
+    expect(() => scopeConditionSchema.parse(one("location", "contains", "Ashfield"))).toThrow();
     expect(() => scopeConditionSchema.parse(one("hostname", "matches", "PLV*"))).toThrow();
     // Both are fine on the device filter.
-    expect(() => deviceFilterConditionSchema.parse(one("location", "contains", "Nashville"))).not.toThrow();
+    expect(() => deviceFilterConditionSchema.parse(one("location", "contains", "Ashfield"))).not.toThrow();
     expect(() => deviceFilterConditionSchema.parse(one("hostname", "matches", "PLV*"))).not.toThrow();
   });
 
@@ -78,7 +78,7 @@ describe("evaluateScopeCondition — device-filter fields", () => {
   it("matches the three plain columns", () => {
     expect(evaluateScopeCondition(one("osVersion", "startsWith", "7.4"), ASSET)).toBe(true);
     expect(evaluateScopeCondition(one("department", "equals", "plant ops"), ASSET)).toBe(true);
-    expect(evaluateScopeCondition(one("location", "contains", "nashville"), ASSET)).toBe(true);
+    expect(evaluateScopeCondition(one("location", "contains", "ashfield"), ASSET)).toBe(true);
     expect(evaluateScopeCondition(one("location", "contains", "knoxville"), ASSET)).toBe(false);
   });
 
@@ -92,28 +92,28 @@ describe("evaluateScopeCondition — device-filter fields", () => {
     expect(evaluateScopeCondition(one("hostname", "matches", "plv-*-sw?"), ASSET)).toBe(true);
     expect(evaluateScopeCondition(one("hostname", "matches", "plv-*-sw"), ASSET)).toBe(false); // anchored
     expect(evaluateScopeCondition(one("hostname", "matches", "*61f*"), ASSET)).toBe(true);
-    expect(evaluateScopeCondition(one("location", "matches", "nashville.plant"), ASSET)).toBe(false); // "." is literal
+    expect(evaluateScopeCondition(one("location", "matches", "ashfield.plant"), ASSET)).toBe(false); // "." is literal
   });
 
   describe("fortigate — one rule against several candidate names", () => {
     it("is satisfied by learnedLocation OR any sighting", () => {
-      expect(evaluateScopeCondition(one("fortigate", "contains", "plvcor"), ASSET)).toBe(true);
-      expect(evaluateScopeCondition(one("fortigate", "contains", "nash-edge"), ASSET)).toBe(true);
-      expect(evaluateScopeCondition(one("fortigate", "equals", "nash-edge-01"), ASSET)).toBe(true);
+      expect(evaluateScopeCondition(one("fortigate", "contains", "central"), ASSET)).toBe(true);
+      expect(evaluateScopeCondition(one("fortigate", "contains", "ashf-edge"), ASSET)).toBe(true);
+      expect(evaluateScopeCondition(one("fortigate", "equals", "ashf-edge-01"), ASSET)).toBe(true);
       expect(evaluateScopeCondition(one("fortigate", "contains", "memphis"), ASSET)).toBe(false);
     });
 
     it("requires a negative operator to hold for EVERY name", () => {
-      // Sighted behind NASH-EDGE-01, so "not behind nash" must be false even
+      // Sighted behind ASHF-EDGE-01, so "not behind ashf" must be false even
       // though the other candidate name doesn't contain it.
-      expect(evaluateScopeCondition(one("fortigate", "notContains", "nash"), ASSET)).toBe(false);
+      expect(evaluateScopeCondition(one("fortigate", "notContains", "ashf"), ASSET)).toBe(false);
       expect(evaluateScopeCondition(one("fortigate", "notContains", "memphis"), ASSET)).toBe(true);
     });
 
     it("reads no known gate as absence, not as a match", () => {
       const bare: ScopeConditionAsset = { id: "a3" };
-      expect(evaluateScopeCondition(one("fortigate", "contains", "plvcor"), bare)).toBe(false);
-      expect(evaluateScopeCondition(one("fortigate", "notContains", "plvcor"), bare)).toBe(true);
+      expect(evaluateScopeCondition(one("fortigate", "contains", "central"), bare)).toBe(false);
+      expect(evaluateScopeCondition(one("fortigate", "notContains", "central"), bare)).toBe(true);
     });
 
     it("ignores a sighting row with no device name", () => {

@@ -22,7 +22,7 @@ import { substituteChartTokens, chartTokensIn, attachmentsFor, CHART_TOKENS, typ
 import { renderNotificationTemplate, buildTemplateContext } from "../../src/utils/notificationTemplate.js";
 
 const CTX = buildTemplateContext({
-  asset: "BULLITT-222E-4",
+  asset: "PINERUN-222E-4",
   message: "packet loss at 93.8% (fires above 5%)",
   severity: "critical",
   time: new Date("2026-08-12T10:00:00Z"),
@@ -32,7 +32,7 @@ const CTX = buildTemplateContext({
     ipAddress: "10.20.30.40",
     lastSeenSwitch: "FS-248E-01/port15",
     lastSeenAp: null,
-    location: "Bullitt County",
+    location: "Pinerun County",
     description: "Warehouse mezzanine AP — north bay",
     manufacturer: "Fortinet",
     model: "FAP-431F",
@@ -42,7 +42,7 @@ const CTX = buildTemplateContext({
 describe("the default alert email is a template, not string building", () => {
   it("carries the device facts the old two-line email never had", () => {
     const html = renderNotificationTemplate(DEFAULT_ALERT_HTML, CTX, { html: true });
-    expect(html).toContain("BULLITT-222E-4");
+    expect(html).toContain("PINERUN-222E-4");
     expect(html).toContain("10.20.30.40");
     expect(html).toContain("FS-248E-01/port15");
     // The description is usually where a site already states what the device is
@@ -63,7 +63,7 @@ describe("the default alert email is a template, not string building", () => {
 
   it("says what fired ONCE — the message is not repeated under the headline", () => {
     // "Monitor status is down" (from the trigger) followed by a grey
-    // "PEORIA-61F-1 is down" (the message) said the same thing twice. The
+    // "HARBOR-61F-1 is down" (the message) said the same thing twice. The
     // message keeps its real homes — the in-app alert card, and the chat/push
     // bodies, which carry no trigger sentence — so this is about the EMAIL only.
     for (const body of [DEFAULT_ALERT_HTML, DEFAULT_ALERT_TEXT]) {
@@ -77,17 +77,17 @@ describe("the default alert email is a template, not string building", () => {
   it("still carries an event's REASON, as its own facts row", () => {
     // The 12 seeded event automations set messageTemplate "{value}" precisely to
     // surface the event's own text, so dropping {message} from the body would
-    // have left "integration.discover.error on FMG-Nashville" with no reason.
+    // have left "integration.discover.error on FMG-Ashfield" with no reason.
     // {event.message} is its own row instead — which also survives an operator
     // replacing the message template, as "{value}" never did.
     const ev = buildTemplateContext({
-      asset: "FMG-Nashville",
+      asset: "FMG-Ashfield",
       severity: "serious",
-      triggerSummary: "integration.discover.error on FMG-Nashville",
+      triggerSummary: "integration.discover.error on FMG-Ashfield",
       event: {
         action: "integration.discover.error",
         resourceType: "integration",
-        resourceName: "FMG-Nashville",
+        resourceName: "FMG-Ashfield",
         actor: "system:scheduler",
         message: "Discovery failed: RPC -11 no valid session",
       },

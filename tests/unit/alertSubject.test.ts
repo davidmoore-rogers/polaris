@@ -24,7 +24,7 @@ describe("eventSubjectLabel", () => {
   });
 
   it("prefers the resource's own name whenever the event carried one", () => {
-    expect(eventSubjectLabel("integration", "FMG-Nashville")).toBe("FMG-Nashville");
+    expect(eventSubjectLabel("integration", "FMG-Ashfield")).toBe("FMG-Ashfield");
     expect(eventSubjectLabel("asset", "sw-1")).toBe("sw-1");
     // Even on a system event: if it named something, that name is the subject.
     expect(eventSubjectLabel("system", "nightly-backup")).toBe("nightly-backup");

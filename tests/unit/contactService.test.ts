@@ -71,7 +71,7 @@ const contactRow = (over: Record<string, unknown> = {}) => ({
   description: null,
   assetCriteria: null,
   assetIds: [],
-  createdBy: "dmoore",
+  createdBy: "jsmith",
   createdAt: new Date(),
   updatedAt: new Date(),
   ...over,
@@ -159,10 +159,10 @@ describe("searchAddressBook", () => {
 
   it("flags rows the caller owns so the picker can offer Edit", async () => {
     prismaMock.contact.findMany.mockResolvedValue([
-      contactRow({ id: "c1", email: "mine@example.com", createdBy: "dmoore" }),
+      contactRow({ id: "c1", email: "mine@example.com", createdBy: "jsmith" }),
       contactRow({ id: "c2", email: "theirs@example.com", createdBy: "someone-else" }),
     ]);
-    const out = await searchAddressBook("", { callerUsername: "dmoore" });
+    const out = await searchAddressBook("", { callerUsername: "jsmith" });
     expect(out.find((e) => e.email === "mine@example.com")!.owned).toBe(true);
     expect(out.find((e) => e.email === "theirs@example.com")!.owned).toBe(false);
   });
@@ -248,8 +248,8 @@ describe("resolveContactsForAsset", () => {
 
 describe("normalizeContactCondition", () => {
   it("accepts the wider device-filter vocabulary", () => {
-    expect(normalizeContactCondition(COND("location", "contains", "Nashville"))).toBeTruthy();
-    expect(normalizeContactCondition(COND("fortigate", "contains", "PLVCOR"))).toBeTruthy();
+    expect(normalizeContactCondition(COND("location", "contains", "Ashfield"))).toBeTruthy();
+    expect(normalizeContactCondition(COND("fortigate", "contains", "CENTRAL"))).toBeTruthy();
     expect(normalizeContactCondition(COND("hostname", "matches", "PLV*"))).toBeTruthy();
   });
 
@@ -275,24 +275,24 @@ describe("normalizeContactCondition", () => {
 describe("resolveContactsForAsset — condition trees", () => {
   it("matches a stored condition against the one triggering asset", async () => {
     prismaMock.contact.findMany.mockResolvedValue([
-      contactRow({ id: "c1", email: "nash@example.com", assetCondition: COND("location", "contains", "nashville") }),
+      contactRow({ id: "c1", email: "ashf@example.com", assetCondition: COND("location", "contains", "ashfield") }),
       contactRow({ id: "c2", email: "knox@example.com", assetCondition: COND("location", "contains", "knoxville") }),
     ]);
-    prismaMock.asset.findUnique.mockResolvedValue({ id: "a1", location: "Nashville Plant", ipAddress: null });
+    prismaMock.asset.findUnique.mockResolvedValue({ id: "a1", location: "Ashfield Plant", ipAddress: null });
 
     const out = await resolveContactsForAsset("a1");
-    expect(out.map((c) => c.email)).toEqual(["nash@example.com"]);
+    expect(out.map((c) => c.email)).toEqual(["ashf@example.com"]);
     expect(prismaMock.asset.findMany).not.toHaveBeenCalled();
   });
 
   it("matches on the FortiGate a device is sighted behind", async () => {
     prismaMock.contact.findMany.mockResolvedValue([
-      contactRow({ assetCondition: COND("fortigate", "contains", "nash-edge") }),
+      contactRow({ assetCondition: COND("fortigate", "contains", "ashf-edge") }),
     ]);
     prismaMock.asset.findUnique.mockResolvedValue({
       id: "a1",
-      learnedLocation: "PLVCORFGT1",
-      fortigateSightings: [{ fortigateDevice: "NASH-EDGE-01" }],
+      learnedLocation: "CENTRALFGT1",
+      fortigateSightings: [{ fortigateDevice: "ASHF-EDGE-01" }],
       ipAddress: null,
     });
     expect((await resolveContactsForAsset("a1")).length).toBe(1);
@@ -319,9 +319,9 @@ describe("resolveContactsForAsset — condition trees", () => {
 
   it("folds a legacy flat criteria forward and matches through the tree", async () => {
     prismaMock.contact.findMany.mockResolvedValue([
-      contactRow({ email: "legacy@example.com", assetCriteria: CRITERIA("location", "Nashville Plant") }),
+      contactRow({ email: "legacy@example.com", assetCriteria: CRITERIA("location", "Ashfield Plant") }),
     ]);
-    prismaMock.asset.findUnique.mockResolvedValue({ id: "a1", location: "Nashville Plant", ipAddress: null });
+    prismaMock.asset.findUnique.mockResolvedValue({ id: "a1", location: "Ashfield Plant", ipAddress: null });
     expect((await resolveContactsForAsset("a1")).length).toBe(1);
   });
 
@@ -367,13 +367,13 @@ describe("writes normalize the filter to one live shape", () => {
   const createdData = () => prismaMock.contact.create.mock.calls[0]![0].data;
 
   it("stores a posted condition and leaves the legacy column unset", async () => {
-    await createContact({ email: "a@example.com", assetCondition: COND("location", "contains", "nash") }, "dmoore");
-    expect(createdData().assetCondition).toEqual(COND("location", "contains", "nash"));
+    await createContact({ email: "a@example.com", assetCondition: COND("location", "contains", "ashf") }, "jsmith");
+    expect(createdData().assetCondition).toEqual(COND("location", "contains", "ashf"));
     expect(createdData().assetCriteria).toBeUndefined();
   });
 
   it("folds a posted flat criteria forward rather than storing it", async () => {
-    await createContact({ email: "a@example.com", assetCriteria: CRITERIA("assetType", "switch") }, "dmoore");
+    await createContact({ email: "a@example.com", assetCriteria: CRITERIA("assetType", "switch") }, "jsmith");
     expect(createdData().assetCondition).toEqual({
       op: "and",
       children: [{ field: "assetType", operator: "equals", value: "switch" }],
@@ -387,19 +387,19 @@ describe("writes normalize the filter to one live shape", () => {
         email: "a@example.com",
         assetCriteria: { version: 1, match: "all", rules: [{ field: "integration", op: "exact", values: ["int-1"] }] },
       },
-      "dmoore",
+      "jsmith",
     );
     expect(createdData().assetCondition).toBeUndefined();
     expect(createdData().assetCriteria).toBeTruthy();
   });
 
   it("only produces the all-devices marker from the explicit flag", async () => {
-    await createContact({ email: "a@example.com", assetAllDevices: true }, "dmoore");
+    await createContact({ email: "a@example.com", assetAllDevices: true }, "jsmith");
     expect(conditionMeansAllDevices(createdData().assetCondition)).toBe(true);
 
     prismaMock.contact.create.mockClear();
     // An empty tree is NOT a way in — that would hand the contact the fleet.
-    await createContact({ email: "b@example.com", assetCondition: { op: "and", children: [] } }, "dmoore");
+    await createContact({ email: "b@example.com", assetCondition: { op: "and", children: [] } }, "jsmith");
     expect(createdData().assetCondition).toBeUndefined();
   });
 });
@@ -412,7 +412,7 @@ describe("previewContactAssets", () => {
   it("evaluates a condition over the fleet and counts the MONITORED matches", async () => {
     prismaMock.asset.findMany
       .mockResolvedValueOnce([
-        { id: "a1", location: "Nashville Plant" },
+        { id: "a1", location: "Ashfield Plant" },
         { id: "a2", location: "Knoxville Yard" },
       ])
       // the sample read for the matched ids
@@ -420,7 +420,7 @@ describe("previewContactAssets", () => {
         { id: "a1", hostname: "SW1", ipAddress: null, assetType: "switch", monitored: true },
       ]);
 
-    const out = await previewContactAssets({ assetCondition: COND("location", "contains", "nashville") });
+    const out = await previewContactAssets({ assetCondition: COND("location", "contains", "ashfield") });
     expect(out.matchCount).toBe(1);
     expect(out.unmonitoredCount).toBe(0);
     expect(out.sample.map((s) => s.id)).toEqual(["a1"]);
@@ -463,13 +463,13 @@ describe("previewContactAssets", () => {
 
   it("unions explicit pins with the condition matches", async () => {
     prismaMock.asset.findMany
-      .mockResolvedValueOnce([{ id: "a1", location: "Nashville" }])
+      .mockResolvedValueOnce([{ id: "a1", location: "Ashfield" }])
       .mockResolvedValueOnce([
         { id: "a1", hostname: "SW1", ipAddress: null, assetType: "switch", monitored: true },
         { id: "pinned", hostname: "SRV9", ipAddress: null, assetType: "server", monitored: true },
       ]);
     const out = await previewContactAssets({
-      assetCondition: COND("location", "contains", "nashville"),
+      assetCondition: COND("location", "contains", "ashfield"),
       assetIds: ["pinned"],
     });
     expect(out.matchCount).toBe(2);

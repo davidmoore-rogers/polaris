@@ -616,7 +616,7 @@
       return;
     }
     // NOC-style auto-scroll: when a widget's content overflows, slowly creep
-    // through it and loop (like noc.rogersgroupinc.com). Read-only only —
+    // through it and loop (like noc.example.com). Read-only only —
     // never while editing. Self-activates when/if content overflows.
     if (!state.editing) {
       unmountFns.push(startAutoScroll(body, article));
@@ -930,7 +930,7 @@
   }
 
   // ─── NOC-style auto-scroll ───────────────────────────────────────────────
-  // Mirrors the SolarWinds NOC wall display (noc.rogersgroupinc.com): pause
+  // Mirrors the SolarWinds NOC wall display (noc.example.com): pause
   // ~3s at the top, creep down 1px per tick, dwell ~3s at the bottom, reset to
   // the top (glide), repeat — but only while the content actually overflows.
   // NOC uses translateY on an inner wrapper; we drive scrollTop on the

@@ -196,7 +196,7 @@
       '<div class="form-group">' +
         '<label for="ab-desc">Description</label>' +
         '<textarea class="input" id="ab-desc" rows="2" maxlength="1000" ' +
-                  'placeholder="Rotates weekly; paged for anything at the Nashville plant">' + escapeHtml((c && c.description) || "") + '</textarea>' +
+                  'placeholder="Rotates weekly; paged for anything at the Ashfield plant">' + escapeHtml((c && c.description) || "") + '</textarea>' +
       '</div>' +
       '<div class="section-block">' +
         '<div class="section-label">Devices this contact is responsible for</div>' +

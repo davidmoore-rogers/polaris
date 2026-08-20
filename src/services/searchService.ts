@@ -83,8 +83,8 @@ function parseSearchScope(raw: string): { scope: SearchScope | null; query: stri
 /**
  * Split a (scope-stripped) query into search terms. Whitespace separates
  * terms; a double-quoted run is kept as a single term so an operator can
- * search for a value that itself contains spaces (e.g. `"rogers group" metro`
- * → ["rogers group", "metro"]). A dangling opening quote with no closer is
+ * search for a value that itself contains spaces (e.g. `"acme plant" metro`
+ * → ["acme plant", "metro"]). A dangling opening quote with no closer is
  * tolerated — everything after it becomes one phrase. Quote characters are
  * stripped from the returned terms; empty terms are dropped.
  *

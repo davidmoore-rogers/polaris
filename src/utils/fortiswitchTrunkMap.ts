@@ -6,7 +6,7 @@
  *
  * Observed on FortiSwitchOS 7.6.6 (FS-124E-FPOE):
  *
- *   8EF5920008350-0: port23 ::8EPTQ21000800-0: port27 ::GT61FTK21005819: port24 ::
+ *   8EF5920000001-0: port23 ::8EPTQ21000003-0: port27 ::GT61FTK21000002: port24 ::
  *
  * Each entry is `<trunk name>: <local physical port>`, separated by `::`. This
  * is the switch stating its own adjacencies — the trunk names are built from
@@ -19,8 +19,8 @@
  * **left-truncated to 15 characters**. That single rule explains what looks
  * like two different conventions:
  *
- *   S108EF5920008350 + "-0" = 18 chars → rightmost 15 → 8EF5920008350-0
- *   FGT61FTK21005819        = 16 chars → rightmost 15 → GT61FTK21005819
+ *   S108EF5920000001 + "-0" = 18 chars → rightmost 15 → 8EF5920000001-0
+ *   FGT61FTK21000002        = 16 chars → rightmost 15 → GT61FTK21000002
  *
  * A switch appears to lose three leading characters and a FortiGate only one,
  * purely because the `-0` consumes two of the fifteen.
@@ -36,13 +36,13 @@
 
 /** One `<trunk>: <port>` pair, exactly as the device reported it. */
 export interface TrunkPortEntry {
-  /** Trunk name as published, e.g. "8EF5920008350-0". */
+  /** Trunk name as published, e.g. "8EF5920000001-0". */
   trunkName: string;
   /** Local physical port the trunk uses, e.g. "port23". */
   localPort: string;
   /**
    * `trunkName` with any trailing `-<n>` removed — the fragment to suffix-match
-   * against an asset serial. For "8EF5920008350-0" this is "8EF5920008350".
+   * against an asset serial. For "8EF5920000001-0" this is "8EF5920000001".
    */
   peerSerialTail: string;
 }

@@ -572,7 +572,7 @@ const STRING_OPS_WITH_WILDCARD = [...STRING_OPS, WILDCARD_OP] as const;
  * the same stored shape — but they came from the flat `TagCriteria` builder,
  * which carried four fields and a wildcard operator the automations scope never
  * had. Dropping them in the swap would be a regression in exactly the dimension
- * device OWNERSHIP cares about ("whoever looks after the Nashville switches"),
+ * device OWNERSHIP cares about ("whoever looks after the Ashfield switches"),
  * so the vocabulary widens rather than the feature narrowing.
  *
  * Why a second map instead of widening SCOPE_FIELD_OPS: `fortigate` reads the
@@ -819,7 +819,7 @@ function matchScopeRule(rule: ScopeConditionRule, asset: ScopeConditionAsset): b
     case "fortigate": {
       // One rule against SEVERAL candidate names. A positive operator is
       // satisfied by any of them; a negative one has to hold for all, or
-      // "not behind PLVCORFMG1" would be true for a device sighted behind it
+      // "not behind CENTRALFMG1" would be true for a device sighted behind it
       // as soon as it was also sighted somewhere else.
       const names = fortigateNames(asset);
       if (names.length === 0) {

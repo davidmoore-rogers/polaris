@@ -53,7 +53,7 @@ describe("criteriaToCondition", () => {
     const tree = parsed({
       rules: [
         { field: "model", op: "exact", values: ["FS-108F"] },
-        { field: "location", op: "contains", values: ["Nashville"] },
+        { field: "location", op: "contains", values: ["Ashfield"] },
         { field: "hostname", op: "pattern", values: ["PLV*-61F-?"] },
       ],
     });
@@ -78,8 +78,8 @@ describe("criteriaToCondition", () => {
       rules: [
         { field: "osVersion", op: "contains", values: ["23H2"] },
         { field: "department", op: "exact", values: ["Plant Ops"] },
-        { field: "location", op: "contains", values: ["Nashville"] },
-        { field: "fortigate", op: "contains", values: ["PLVCOR"] },
+        { field: "location", op: "contains", values: ["Ashfield"] },
+        { field: "fortigate", op: "contains", values: ["CENTRAL"] },
       ],
     });
     expect((tree.children as any[]).map((c) => c.field)).toEqual([
@@ -119,15 +119,15 @@ describe("criteriaToCondition", () => {
     const tree = parsed({
       rules: [
         { field: "assetType", op: "exact", values: ["switch"] },
-        { field: "location", op: "contains", values: ["nashville", "murfreesboro"] },
+        { field: "location", op: "contains", values: ["ashfield", "murfreesboro"] },
       ],
     });
     const at = (assetType: string, location: string) =>
       evaluateScopeCondition(tree, { id: "a", assetType, location });
 
-    expect(at("switch", "Nashville Plant")).toBe(true);
+    expect(at("switch", "Ashfield Plant")).toBe(true);
     expect(at("switch", "Murfreesboro Quarry")).toBe(true);
     expect(at("switch", "Knoxville")).toBe(false); // neither value
-    expect(at("server", "Nashville Plant")).toBe(false); // AND leg fails
+    expect(at("server", "Ashfield Plant")).toBe(false); // AND leg fails
   });
 });

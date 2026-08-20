@@ -234,16 +234,16 @@ describe("pushDeviceDescription", () => {
   it("managed-switch target resolves a renamed switch-id by serial", async () => {
     callMock
       .mockResolvedValueOnce([
-        { "switch-id": "JEFFERSON-SW-01", sn: "SR12DPTD00000000", description: "old" },
+        { "switch-id": "RIVERBEND-SW-01", sn: "SR12DPTD00000000", description: "old" },
       ]) // full-table pre-read
       .mockResolvedValueOnce({}) // PUT
       .mockResolvedValueOnce([{ description: "IDF closet" }]); // verify
     const res = await pushDeviceDescription({
-      integration, deviceName: "JEFFERSON-101F-1",
+      integration, deviceName: "RIVERBEND-101F-1",
       target: { kind: "managed-switch", switchId: "SR12DPTD00000000" }, value: "IDF closet",
     });
     expect(res).toEqual({ ok: true, previousDeviceValue: "old" });
-    expect(callMock.mock.calls[1][2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01");
+    expect(callMock.mock.calls[1][2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/RIVERBEND-SW-01");
   });
 
   it("wtp target writes the AP location (AP Manager's field — not comment)", async () => {
@@ -284,23 +284,23 @@ describe("runDescriptionSyncForIntegration", () => {
   it("pushes to a switch whose switch-id is renamed (serial only on `sn`)", async () => {
     vi.mocked(prisma.asset.findMany).mockResolvedValue([{
       id: "a1",
-      hostname: "jefferson-sw-01",
+      hostname: "riverbend-sw-01",
       serialNumber: "SR12DPTD00000000",
       description: "IDF closet switch",
       descriptionSync: null,
-      fortinetTopology: { role: "fortiswitch", controllerFortigate: "JEFFERSON-101F-1" },
+      fortinetTopology: { role: "fortiswitch", controllerFortigate: "RIVERBEND-101F-1" },
     }] as any);
     vi.mocked(prisma.assetInterfaceOverride.findMany).mockResolvedValue([] as any);
     vi.mocked(prisma.asset.update).mockResolvedValue({} as any);
     callMock.mockImplementation(async (_t, method, path) => {
       if (method === "GET" && path === "/api/v2/cmdb/switch-controller/managed-switch") {
-        return [{ "switch-id": "JEFFERSON-SW-01", sn: "SR12DPTD00000000", description: "", ports: [] }];
+        return [{ "switch-id": "RIVERBEND-SW-01", sn: "SR12DPTD00000000", description: "", ports: [] }];
       }
-      if (method === "PUT" && path === "/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01") {
+      if (method === "PUT" && path === "/api/v2/cmdb/switch-controller/managed-switch/RIVERBEND-SW-01") {
         return {};
       }
-      if (method === "GET" && path === "/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01") {
-        return [{ "switch-id": "JEFFERSON-SW-01", description: "IDF closet switch" }];
+      if (method === "GET" && path === "/api/v2/cmdb/switch-controller/managed-switch/RIVERBEND-SW-01") {
+        return [{ "switch-id": "RIVERBEND-SW-01", description: "IDF closet switch" }];
       }
       throw new Error(`unexpected FortiOS call: ${method} ${path}`);
     });
@@ -313,7 +313,7 @@ describe("runDescriptionSyncForIntegration", () => {
     expect(summary.failed).toBe(0);
     expect(summary.skippedDevices).toBe(0);
     const put = callMock.mock.calls.find((c) => c[1] === "PUT");
-    expect(put?.[2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/JEFFERSON-SW-01");
+    expect(put?.[2]).toBe("/api/v2/cmdb/switch-controller/managed-switch/RIVERBEND-SW-01");
     expect(put?.[3]).toEqual({ description: "IDF closet switch" });
     // Central management not detected on this integration — no FMG DB calls.
     expect(fmgQueryMock).not.toHaveBeenCalled();
@@ -331,7 +331,7 @@ describe("runDescriptionSyncForIntegration", () => {
       serialNumber: "FP231FTF00000001",
       description: "lobby AP",
       descriptionSync: null,
-      fortinetTopology: { role: "fortiap", controllerFortigate: "JEFFERSON-101F-1" },
+      fortinetTopology: { role: "fortiap", controllerFortigate: "RIVERBEND-101F-1" },
     }] as any);
     vi.mocked(prisma.assetInterfaceOverride.findMany).mockResolvedValue([] as any);
     vi.mocked(prisma.asset.update).mockResolvedValue({} as any);
@@ -346,7 +346,7 @@ describe("runDescriptionSyncForIntegration", () => {
       throw new Error(`unexpected FortiOS call: ${method} ${path}`);
     });
     const fmgEnvelope = (data: unknown) => ({ result: [{ status: { code: 0 }, data }] });
-    const FMG_WTP = "/pm/config/device/JEFFERSON-101F-1/vdom/root/wireless-controller/wtp";
+    const FMG_WTP = "/pm/config/device/RIVERBEND-101F-1/vdom/root/wireless-controller/wtp";
     fmgQueryMock.mockImplementation(async (_cfg, method, params) => {
       const p = (params as Array<{ url: string; data?: unknown }>)[0];
       if (method === "get" && p.url === FMG_WTP) {
@@ -384,7 +384,7 @@ describe("runDescriptionSyncForIntegration", () => {
       serialNumber: "FP231FTF00000001",
       description: "lobby AP",
       descriptionSync: { status: "synced", value: "lobby AP" },
-      fortinetTopology: { role: "fortiap", controllerFortigate: "JEFFERSON-101F-1" },
+      fortinetTopology: { role: "fortiap", controllerFortigate: "RIVERBEND-101F-1" },
     }] as any);
     vi.mocked(prisma.assetInterfaceOverride.findMany).mockResolvedValue([] as any);
     vi.mocked(prisma.asset.update).mockResolvedValue({} as any);
@@ -395,7 +395,7 @@ describe("runDescriptionSyncForIntegration", () => {
       throw new Error(`unexpected FortiOS call: ${method} ${path}`);
     });
     const fmgEnvelope = (data: unknown) => ({ result: [{ status: { code: 0 }, data }] });
-    const FMG_WTP = "/pm/config/device/JEFFERSON-101F-1/vdom/root/wireless-controller/wtp";
+    const FMG_WTP = "/pm/config/device/RIVERBEND-101F-1/vdom/root/wireless-controller/wtp";
     fmgQueryMock.mockImplementation(async (_cfg, method, params) => {
       const p = (params as Array<{ url: string; data?: unknown }>)[0];
       if (method === "get" && p.url === FMG_WTP) {

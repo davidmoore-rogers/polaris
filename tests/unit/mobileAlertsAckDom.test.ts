@@ -17,8 +17,8 @@ const SRC = readFileSync(join(process.cwd(), "public", "js", "mobile", "more-tab
 const g = globalThis as any;
 
 const ALERTS = [
-  { id: "n1", severity: "critical", message: "packet loss at 93.8%", assetId: "a1", assetHostname: "BULLITT-222E-4", triggeredAt: "2026-08-12T10:00:00Z", acknowledged: false },
-  { id: "n2", severity: "warning", message: "cpu high", assetId: null, assetHostname: "sw-2", triggeredAt: "2026-08-12T09:00:00Z", acknowledged: true, acknowledgedBy: "dmoore" },
+  { id: "n1", severity: "critical", message: "packet loss at 93.8%", assetId: "a1", assetHostname: "PINERUN-222E-4", triggeredAt: "2026-08-12T10:00:00Z", acknowledged: false },
+  { id: "n2", severity: "warning", message: "cpu high", assetId: null, assetHostname: "sw-2", triggeredAt: "2026-08-12T09:00:00Z", acknowledged: true, acknowledgedBy: "jsmith" },
 ];
 
 async function render(opts?: { perm?: string; ackFails?: boolean; alerts?: any[] }) {
@@ -74,7 +74,7 @@ describe("mobile alerts acknowledge", () => {
 
   it("names who acknowledged the ones already handled", async () => {
     await render();
-    expect(document.body.textContent).toContain("acknowledged by dmoore");
+    expect(document.body.textContent).toContain("acknowledged by jsmith");
   });
 
   it("hides the control from a viewer who can only read alerts", async () => {

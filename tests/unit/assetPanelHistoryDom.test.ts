@@ -160,8 +160,8 @@ describe("asset panel history — reducer", () => {
 
   it("labels every entry for an asset, including a revisit", () => {
     const s = { entries: [{ id: "A", label: null }, { id: "B", label: null }, { id: "A", label: null }], idx: 2 };
-    g._assetHistoryLabel(s, "A", "PEORIA-61F-1");
-    expect(s.entries.map((e: any) => e.label)).toEqual(["PEORIA-61F-1", null, "PEORIA-61F-1"]);
+    g._assetHistoryLabel(s, "A", "HARBOR-61F-1");
+    expect(s.entries.map((e: any) => e.label)).toEqual(["HARBOR-61F-1", null, "HARBOR-61F-1"]);
   });
 });
 
@@ -179,10 +179,10 @@ describe("asset panel history — header pair", () => {
 
   it("disables each direction exactly when it is spent, and names the target", () => {
     mountPanel();
-    resetState([{ id: "A", label: "PEORIA-61F-1" }, { id: "B", label: "PEORIA-SW-2" }], 1);
+    resetState([{ id: "A", label: "HARBOR-61F-1" }, { id: "B", label: "HARBOR-SW-2" }], 1);
     g._renderAssetPanelNav();
     expect(backBtn().disabled).toBe(false);
-    expect(backBtn().title).toBe("Back to PEORIA-61F-1 (Alt+Left)");
+    expect(backBtn().title).toBe("Back to HARBOR-61F-1 (Alt+Left)");
     expect(fwdBtn().disabled).toBe(true);
     expect(fwdBtn().title).toBe("No forward history");
 
@@ -191,7 +191,7 @@ describe("asset panel history — header pair", () => {
     g._renderAssetPanelNav();
     expect(backBtn().disabled).toBe(true);
     expect(fwdBtn().disabled).toBe(false);
-    expect(fwdBtn().title).toBe("Forward to PEORIA-SW-2 (Alt+Right)");
+    expect(fwdBtn().title).toBe("Forward to HARBOR-SW-2 (Alt+Right)");
   });
 
   it("falls back to a generic label before the hostname has loaded", () => {

@@ -20,20 +20,20 @@ describe("parseSearchTerms", () => {
   });
 
   it("keeps a double-quoted phrase as one term", () => {
-    expect(parseSearchTerms('"rogers group"')).toEqual(["rogers group"]);
+    expect(parseSearchTerms('"acme plant"')).toEqual(["acme plant"]);
   });
 
   it("mixes quoted phrases and bare words", () => {
-    expect(parseSearchTerms('"rogers group" metro')).toEqual(["rogers group", "metro"]);
-    expect(parseSearchTerms('metro "rogers group" sw01')).toEqual([
+    expect(parseSearchTerms('"acme plant" metro')).toEqual(["acme plant", "metro"]);
+    expect(parseSearchTerms('metro "acme plant" sw01')).toEqual([
       "metro",
-      "rogers group",
+      "acme plant",
       "sw01",
     ]);
   });
 
   it("tolerates an unterminated opening quote (rest becomes one phrase)", () => {
-    expect(parseSearchTerms('metro "rogers group')).toEqual(["metro", "rogers group"]);
+    expect(parseSearchTerms('metro "acme plant')).toEqual(["metro", "acme plant"]);
   });
 
   it("drops empty quoted phrases", () => {

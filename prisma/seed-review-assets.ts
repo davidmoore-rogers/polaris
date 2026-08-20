@@ -43,29 +43,29 @@ interface Row {
 
 const ROWS: Row[] = [
   {
-    hostname: "NASH-CORE-SW1", ipAddress: "10.20.1.11", assetType: "switch",
+    hostname: "ASHF-CORE-SW1", ipAddress: "10.20.1.11", assetType: "switch",
     manufacturer: "Fortinet", model: "FS-448D", os: "FortiSwitch", osVersion: "7.4.2",
-    department: "Plant Ops", location: "Nashville Plant", tags: ["region:Nashville", "core"],
-    monitored: true, learnedLocation: "NASH-EDGE-FG1",
+    department: "Plant Ops", location: "Ashfield Plant", tags: ["region:Ashfield", "core"],
+    monitored: true, learnedLocation: "ASHF-EDGE-FG1",
     monitoredInterfaces: ["port1", "port2", "port47"],
   },
   {
-    hostname: "NASH-CORE-SW2", ipAddress: "10.20.1.12", assetType: "switch",
+    hostname: "ASHF-CORE-SW2", ipAddress: "10.20.1.12", assetType: "switch",
     manufacturer: "Fortinet", model: "FS-448D", os: "FortiSwitch", osVersion: "7.4.2",
-    department: "Plant Ops", location: "Nashville Plant", tags: ["region:Nashville", "core"],
-    monitored: true, learnedLocation: "NASH-EDGE-FG1",
+    department: "Plant Ops", location: "Ashfield Plant", tags: ["region:Ashfield", "core"],
+    monitored: true, learnedLocation: "ASHF-EDGE-FG1",
     monitoredInterfaces: ["port1", "port2"],
   },
   {
-    hostname: "NASH-EDGE-FG1", ipAddress: "10.20.1.1", assetType: "firewall",
+    hostname: "ASHF-EDGE-FG1", ipAddress: "10.20.1.1", assetType: "firewall",
     manufacturer: "Fortinet", model: "FG-101F", os: "FortiOS", osVersion: "7.4.4",
-    department: "IT", location: "Nashville Plant", tags: ["region:Nashville", "edge"],
+    department: "IT", location: "Ashfield Plant", tags: ["region:Ashfield", "edge"],
     monitored: true, monitoredInterfaces: ["wan1", "internal"],
   },
   {
-    hostname: "NASH-FILE-01", ipAddress: "10.20.4.20", assetType: "server",
+    hostname: "ASHF-FILE-01", ipAddress: "10.20.4.20", assetType: "server",
     manufacturer: "Dell Inc.", model: "PowerEdge R650", os: "Windows Server 2022", osVersion: "10.0.20348.2402",
-    department: "IT", location: "Nashville Plant", tags: ["region:Nashville", "file-server"],
+    department: "IT", location: "Ashfield Plant", tags: ["region:Ashfield", "file-server"],
     monitored: true, monitoredStorage: ["C:", "D:"], monitoredInterfaces: ["Ethernet0"],
   },
   {

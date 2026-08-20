@@ -14,16 +14,17 @@
  *      creates an interface named after the peer device's SERIAL NUMBER,
  *      truncated to fit the 15-char Linux ifname limit, with optional `-N`
  *      aggregate suffix. Truncation drops characters from the FRONT of the
- *      serial until the result + suffix fits. Verified examples:
+ *      serial until the result + suffix fits. Shape (the values below are
+ *      synthetic -- never paste real fleet serials into this file):
  *
  *        Asset serial         Interface name on peer switch
- *        FGT61FTK22002079  →  GT61FTK22002079        (drops "F",  16→15 chars)
- *        S108FFTV23025884  →  8FFTV23025884-0        (drops "S10", 16→13+suffix)
+ *        FGT61FTK22000001  →  GT61FTK22000001        (drops "F",  16→15 chars)
+ *        S108FFTV23000001  →  8FFTV23000001-0        (drops "S10", 16→13+suffix)
  *
  *   2. Operator-customized aggregates. When MCLAG / cross-stack uplinks are
  *      hand-built, operators commonly name the aggregate after the peer
- *      switch's HOSTNAME instead, e.g. `METROR2-T1024E` for a peer named
- *      `METROR2-T1024E`. These names usually contain internal dashes that
+ *      switch's HOSTNAME instead, e.g. `HILLTOP2-T1024E` for a peer named
+ *      `HILLTOP2-T1024E`. These names usually contain internal dashes that
  *      the FortiOS-auto path doesn't.
  *
  * Match strategy (resolved by the topology service, not this file):
@@ -43,7 +44,7 @@
 // interface": uppercase letters/digits with optional internal dashes,
 // 8–30 chars, must start and end with alnum (no leading/trailing dash).
 // The trailing `-N` aggregate suffix is split off in code, not in the regex,
-// so operator-named aggregates like `METROR2-T1024E` (no numeric suffix)
+// so operator-named aggregates like `HILLTOP2-T1024E` (no numeric suffix)
 // also match.
 const PEER_INTERFACE_NAME_RE = /^[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?$/;
 const MIN_LEN = 8;
@@ -120,8 +121,8 @@ export function serialMatchesPeerInterface(parsed: ParsedPeerInterface, assetSer
  *   - equal the fragment exactly (case-insensitive), or
  *   - start with the fragment followed by `-` or `.` (FQDN/suffix separator)
  *
- * The trailing-separator rule prevents `METROR2` from matching an unrelated
- * `METROR21` — operator-typed aggregate names should be a complete
+ * The trailing-separator rule prevents `HILLTOP2` from matching an unrelated
+ * `HILLTOP21` — operator-typed aggregate names should be a complete
  * hostname or a meaningful prefix, not a substring collision.
  */
 export function hostnameMatchesPeerInterface(parsed: ParsedPeerInterface, assetHostname: string | null | undefined): boolean {

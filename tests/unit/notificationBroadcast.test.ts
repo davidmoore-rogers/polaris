@@ -15,7 +15,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const userRows = [
   { id: "u-atl", email: "atl@example.com", displayName: "Atlanta Op", regionTags: ["Atlanta"], otherTags: [], ssoGroups: [], authProvider: "local", roleId: "r-noc", role: null },
-  { id: "u-nash", email: "nash@example.com", displayName: "Nashville Op", regionTags: ["Nashville"], otherTags: [], ssoGroups: [], authProvider: "local", roleId: "r-noc", role: null },
+  { id: "u-mem", email: "mem@example.com", displayName: "Memphis Op", regionTags: ["Memphis"], otherTags: [], ssoGroups: [], authProvider: "local", roleId: "r-noc", role: null },
   // The trap: "Atlanta" as an OTHER tag, not a region.
   { id: "u-trap", email: "trap@example.com", displayName: "Vendor", regionTags: [], otherTags: ["Atlanta"], ssoGroups: [], authProvider: "local", roleId: "r-ro", role: null },
   { id: "u-none", email: "none@example.com", displayName: "No Region", regionTags: [], otherTags: [], ssoGroups: [], authProvider: "local", roleId: "r-admin", role: null },
@@ -93,8 +93,8 @@ describe("resolveUsersByRegions", () => {
   });
 
   it("unions across several regions", async () => {
-    expect(emails(await resolveUsersByRegions(["Atlanta", "Nashville"])))
-      .toEqual(["atl@example.com", "nash@example.com"]);
+    expect(emails(await resolveUsersByRegions(["Atlanta", "Memphis"])))
+      .toEqual(["atl@example.com", "mem@example.com"]);
   });
 
   it("routes to nobody for an empty list", async () => {
@@ -106,7 +106,7 @@ describe("resolveUsersByRegions", () => {
 describe("resolveUsersInAnyRegion", () => {
   it("returns users carrying at least one region tag, and excludes region-less ones", async () => {
     const out = emails(await resolveUsersInAnyRegion());
-    expect(out).toEqual(["atl@example.com", "nash@example.com"]);
+    expect(out).toEqual(["atl@example.com", "mem@example.com"]);
     // u-trap has an "Atlanta" OTHER tag but no region; u-none has neither.
     expect(out).not.toContain("trap@example.com");
     expect(out).not.toContain("none@example.com");
@@ -130,7 +130,7 @@ describe("expandDeliveries broadcast modes", () => {
     // and specifically not a double-counted set.
     const n = await expandDeliveries(
       "n1",
-      [{ channelId: "c-push", recipientAllUsers: true, recipientUserIds: ["u-atl"], recipientRegions: ["Nashville"] }] as never,
+      [{ channelId: "c-push", recipientAllUsers: true, recipientUserIds: ["u-atl"], recipientRegions: ["Memphis"] }] as never,
       {},
     );
     expect(n).toBe(4);
@@ -139,12 +139,12 @@ describe("expandDeliveries broadcast modes", () => {
   it("recipientAllRegions reaches only the region-tagged users", async () => {
     const n = await expandDeliveries("n1", [{ channelId: "c-push", recipientAllRegions: true }] as never, {});
     expect(n).toBe(2);
-    expect(createdRows.map((r) => r.target).sort()).toEqual(["https://push/u-atl", "https://push/u-nash"]);
+    expect(createdRows.map((r) => r.target).sort()).toEqual(["https://push/u-atl", "https://push/u-mem"]);
   });
 
   it("recipientRegions narrows to the named regions", async () => {
-    await expandDeliveries("n1", [{ channelId: "c-push", recipientRegions: ["Nashville"] }] as never, {});
-    expect(createdRows.map((r) => r.target)).toEqual(["https://push/u-nash"]);
+    await expandDeliveries("n1", [{ channelId: "c-push", recipientRegions: ["Memphis"] }] as never, {});
+    expect(createdRows.map((r) => r.target)).toEqual(["https://push/u-mem"]);
   });
 
   it("unions named regions with explicitly picked users, deduped", async () => {
@@ -163,12 +163,12 @@ describe("expandDeliveries broadcast modes", () => {
 // rename must not silently reroute an alert.
 describe("resolveUsersByRoles", () => {
   it("returns every user holding the role", async () => {
-    expect(emails(await resolveUsersByRoles(["r-noc"]))).toEqual(["atl@example.com", "nash@example.com"]);
+    expect(emails(await resolveUsersByRoles(["r-noc"]))).toEqual(["atl@example.com", "mem@example.com"]);
   });
 
   it("unions across several roles, deduped by user", async () => {
     expect(emails(await resolveUsersByRoles(["r-noc", "r-admin"])))
-      .toEqual(["atl@example.com", "nash@example.com", "none@example.com"]);
+      .toEqual(["atl@example.com", "mem@example.com", "none@example.com"]);
   });
 
   it("routes to nobody for an empty or unknown role list", async () => {

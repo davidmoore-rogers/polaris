@@ -5,7 +5,7 @@ import { decodeCentralManagementFlags } from "../../src/services/fortimanagerSer
 // per-class central-management verdicts. Central is FMG's default — the
 // per_device_* flag being SET means per-device mode. The bit values come
 // from the /dvmdb/adom syntax dump rather than hardcoded constants. Pure —
-// no network. The fixture values are from a live FMG 7.x (ADOM "RGI":
+// no network. The fixture values are from a live FMG 7.x (ADOM "ACME":
 // flags=65600 = per_device_fsw(65536) + install_deselect_all(64), APs
 // centrally managed, switches per-device).
 

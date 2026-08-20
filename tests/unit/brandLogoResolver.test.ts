@@ -60,7 +60,7 @@ beforeAll(() => {
 
 const custom = (over: Branding = {}): Branding => ({
   appName: "Acme Networks",
-  subtitle: "Rogers Group",
+  subtitle: "Acme Corp",
   logoUrl: "/uploads/custom-logo.png",
   customLogo: true,
   ...over,

@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const userRows = [
   { id: "u-atl", email: "atl@example.com", displayName: "Atlanta Op", regionTags: ["Atlanta"], otherTags: [], ssoGroups: [], authProvider: "local", role: null },
-  { id: "u-nash", email: "nash@example.com", displayName: "Nashville Op", regionTags: ["Nashville"], otherTags: [], ssoGroups: [], authProvider: "local", role: null },
+  { id: "u-mem", email: "mem@example.com", displayName: "Memphis Op", regionTags: ["Memphis"], otherTags: [], ssoGroups: [], authProvider: "local", role: null },
   { id: "u-none", email: "none@example.com", displayName: "No Region", regionTags: [], otherTags: [], ssoGroups: [], authProvider: "local", role: null },
 ];
 
@@ -61,9 +61,9 @@ describe("recipientDeviceRegion routing", () => {
 
   it("a device in a different region reaches that region's users instead", async () => {
     await expandDeliveries("n1", [{ channelId: "c1", recipientDeviceRegion: true }], {
-      assetRegionTags: ["Nashville"],
+      assetRegionTags: ["Memphis"],
     });
-    expect(createdRows.map((r) => r.target)).toEqual(["nash@example.com"]);
+    expect(createdRows.map((r) => r.target)).toEqual(["mem@example.com"]);
   });
 
   it("no asset region tags → the flag contributes no recipients", async () => {
@@ -76,16 +76,16 @@ describe("recipientDeviceRegion routing", () => {
     await expandDeliveries(
       "n1",
       [{ channelId: "c1", recipientDeviceRegion: true, recipientScopeRegion: true }],
-      { assetRegionTags: ["Atlanta"], scopeRegionTags: ["region:Nashville"] },
+      { assetRegionTags: ["Atlanta"], scopeRegionTags: ["region:Memphis"] },
     );
-    expect(createdRows.map((r) => r.target).sort()).toEqual(["atl@example.com", "nash@example.com"]);
+    expect(createdRows.map((r) => r.target).sort()).toEqual(["atl@example.com", "mem@example.com"]);
   });
 
   it("scope-region alone ignores the asset snapshot (pre-feature behavior preserved)", async () => {
     await expandDeliveries("n1", [{ channelId: "c1", recipientScopeRegion: true }], {
       assetRegionTags: ["Atlanta"],
-      scopeRegionTags: ["region:Nashville"],
+      scopeRegionTags: ["region:Memphis"],
     });
-    expect(createdRows.map((r) => r.target)).toEqual(["nash@example.com"]);
+    expect(createdRows.map((r) => r.target)).toEqual(["mem@example.com"]);
   });
 });

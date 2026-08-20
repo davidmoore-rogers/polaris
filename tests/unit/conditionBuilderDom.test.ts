@@ -96,7 +96,7 @@ describe("condition-builder round-trip", () => {
         {
           op: "or",
           children: [
-            { field: "tag", operator: "has", value: "region:Nashville" },
+            { field: "tag", operator: "has", value: "region:Ashfield" },
             { field: "hostname", operator: "contains", value: "-61F-" },
           ],
         },

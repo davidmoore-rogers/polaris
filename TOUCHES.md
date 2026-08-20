@@ -2868,7 +2868,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **Invariants:**
 - **Containment goes through `buildIpContexts`, never a fresh `cidr >>= ip` query.** That helper is documented as the single implementation of the most-specific-containing-subnet SQL (`masklen DESC`); a second copy would let this surface disagree with the assets table's View-Lease button and the dns_resolved reconciler about which subnet an address belongs to.
-- **A gate NAME resolves through `utils/fortinetParentKey.ts`, never against `Asset.hostname`.** `Subnet.fortigateDevice` and `AssetFortigateSighting.fortigateDevice` both hold FortiManager's device name, and the hostname match is exactly the conflation that module exists to prevent. A name that resolves to no asset still NAMES the gate -- "behind PLVCORFMG1" is useful without an asset row, and dropping it would silently answer "no firewall".
+- **A gate NAME resolves through `utils/fortinetParentKey.ts`, never against `Asset.hostname`.** `Subnet.fortigateDevice` and `AssetFortigateSighting.fortigateDevice` both hold FortiManager's device name, and the hostname match is exactly the conflation that module exists to prevent. A name that resolves to no asset still NAMES the gate -- "behind CENTRALFMG1" is useful without an asset row, and dropping it would silently answer "no firewall".
 - **The gate ranking is by how directly the source observed THIS address:** ARP (live, and its gate is already an asset -- no name resolution at all) > subnet (config truth, and the only source that answers for an address nothing has ever seen) > sighting (historical; survives the device moving or the address being re-issued). The subnet-over-sighting half is the pure `pickNamedGate` so the ranking is stated once and tested.
 - **The subnet is resolved even for a caller without `subnets:read`** -- it is how the reservation is found and one of the three gate sources. Only the EMITTED `subnet` block is gated. The gate name it contributes is the same value `Asset.learnedLocation` already shows to any `assets:read` caller, so this leaks nothing new; the reservation, by contrast, is not queried at all without `reservations:read`.
 - **`visibility` must keep reporting which halves were consulted.** A hidden section has to render as "not shown"; collapsing it into an absent one would have the panel assert "no network contains this address" to a role that never looked.
@@ -4348,7 +4348,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - Run `npx tsx scripts/smoke-std-mibs.ts` to verify all 27 spot-checks still pass.
 - Run `npx vitest run tests/unit/stdMibLibrary.test.ts` for the formal 17 cases (includes a guard that every declared std MIB `.txt` exists on disk).
 - If adding a new std MIB: extend `STD_MIBS`, drop the text file in `stdMibs/`, add it to `MIBS` in `scripts/fetch-std-mibs.mjs`, add 2-4 spot-checks to `EXPECTED` in the smoke script, add at least one resolved-OID assertion to the unit test, and add the matching `{ id, label, oid }` entry to `_SNMP_STANDARD_MIBS` in `public/js/assets.js`.
-- The IEEE LLDP-MIB carries an IEEE copyright header (preserved verbatim in the file). Re-read the header text on every refresh per Rogers Group's "legal/compliance language requires human review" policy.
+- The IEEE LLDP-MIB carries an IEEE copyright header (preserved verbatim in the file). Re-read the header text on every refresh per the operator's "legal/compliance language requires human review" policy.
 
 ---
 

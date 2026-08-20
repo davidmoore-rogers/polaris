@@ -142,7 +142,7 @@
       var now = Date.now();
       render(el, [
         { id: "a1", hostname: "fgt-branch-12", ruleName: "Asset down", message: "fgt-branch-12 is down", severity: "critical", acknowledged: false, raisedAt: new Date(now - 6 * 60000).toISOString() },
-        { id: "a2", hostname: "core-sw-1", ruleName: "IPsec tunnel down", message: "core-sw-1: IPsec tunnel Overlay-2 is down", severity: "serious", acknowledged: true, acknowledgedBy: "dmoore", raisedAt: new Date(now - 40 * 60000).toISOString() },
+        { id: "a2", hostname: "core-sw-1", ruleName: "IPsec tunnel down", message: "core-sw-1: IPsec tunnel Overlay-2 is down", severity: "serious", acknowledged: true, acknowledgedBy: "jsmith", raisedAt: new Date(now - 40 * 60000).toISOString() },
       ], { minSeverity: DEFAULT_TIER });
     },
 

@@ -5,9 +5,9 @@
  * Fabricates the exact scenario from the screenshot so the Device Map
  * FortiLink edge tooltip can be eyeballed WITHOUT a live FortiGate:
  *
- *   JEFFERSON-101F-1 (FortiGate)  ──fortilink──  JEFFERSON-248E-3 (FortiSwitch)
+ *   RIVERBEND-101F-1 (FortiGate)  ──fortilink──  RIVERBEND-248E-3 (FortiSwitch)
  *
- *   - FG port14  ↔  switch FortiLink uplink trunk "G101FTK23018814" (= serial)
+ *   - FG port14  ↔  switch FortiLink uplink trunk "G101FTK23000001" (= serial)
  *   - the trunk's sole physical member is port52
  *
  * What it seeds:
@@ -16,15 +16,15 @@
  *     the FortiGate and whose uplinkInterface is the serial-named trunk
  *   - AssetInterfaceSample rows (timestamped NOW so they pass the topology
  *     endpoint's 1-hour freshness window): FG port14; switch trunk
- *     "G101FTK23018814" (ifType=aggregate) + port52 (ifType=physical,
+ *     "G101FTK23000001" (ifType=aggregate) + port52 (ifType=physical,
  *     ifParent=trunk) — this is the post-overlay state monitoringService
  *     would produce against a real device
  *   - one FG→switch LLDP neighbor (localIfName=port14) so the controller
  *     edge's FG-side backfills to port14, matching the screenshot
  *
  * Result in the UI: hover the fortilink edge → tooltip shows
- *   JEFFERSON-101F-1: port14 · 1 Gbps · up
- *   JEFFERSON-248E-3: port52 · 1 Gbps · up      ← was the opaque serial trunk
+ *   RIVERBEND-101F-1: port14 · 1 Gbps · up
+ *   RIVERBEND-248E-3: port52 · 1 Gbps · up      ← was the opaque serial trunk
  *
  * Idempotent: deletes any prior demo rows (by the two hostnames) first.
  * Refuses to run when NODE_ENV=production.
@@ -34,9 +34,9 @@
 
 import { prisma } from "../src/db.js";
 
-const FG_HOST = "JEFFERSON-101F-1";
-const SW_HOST = "JEFFERSON-248E-3";
-const SW_SERIAL = "G101FTK23018814"; // the FortiLink uplink trunk is auto-named after this
+const FG_HOST = "RIVERBEND-101F-1";
+const SW_HOST = "RIVERBEND-248E-3";
+const SW_SERIAL = "G101FTK23000001"; // the FortiLink uplink trunk is auto-named after this
 const FG_SERIAL = "FG101FTK20000001";
 const GBPS = 1_000_000_000n;
 
@@ -75,11 +75,11 @@ async function main(): Promise<void> {
       model: "FortiGate-101F",
       os: "FortiOS",
       ipAddress: "10.101.0.1",
-      latitude: 36.16,   // Nashville-ish — just needs to be non-null to render as a site
-      longitude: -86.78,
+      latitude: 40.71,   // arbitrary — just needs to be non-null to render as a site
+      longitude: -74.01,
       monitored: true,
       lastSeen: now,
-      learnedLocation: "Jefferson",
+      learnedLocation: "Riverbend",
       createdBy: "system:fortilink-demo",
       fortinetTopology: { role: "fortigate" },
     },
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
       ipAddress: "10.101.0.2",
       monitored: true,
       lastSeen: now,
-      learnedLocation: "Jefferson",
+      learnedLocation: "Riverbend",
       createdBy: "system:fortilink-demo",
       fortinetTopology: {
         role: "fortiswitch",
@@ -141,7 +141,7 @@ async function main(): Promise<void> {
     },
   });
 
-  console.log("Done. Open the Device Map, click the JEFFERSON-101F-1 site,");
+  console.log("Done. Open the Device Map, click the RIVERBEND-101F-1 site,");
   console.log("open its topology, and hover the 'fortilink' edge:");
   console.log(`  ${FG_HOST}: port14 · 1 Gbps · up`);
   console.log(`  ${SW_HOST}: port52 · 1 Gbps · up   (resolved from trunk ${SW_SERIAL})`);

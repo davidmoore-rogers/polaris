@@ -38,7 +38,7 @@ import {
   clearEntraProxySettingsCache,
 } from "../../src/services/entraProxyAuthService.js";
 
-const GUID = "5f2cded1-40d9-43a4-a091-b92a80a3c7bb";
+const GUID = "7c9e6b10-4a3d-4f21-9c0e-1b2d3e4f5a60";
 
 function seed(value: Record<string, unknown>): void {
   settingRow = { value };
@@ -147,16 +147,16 @@ describe("extractEntraProxyIdentity", () => {
     const id = await extractEntraProxyIdentity({
       headers: {
         "x-entra-object-id": GUID.toUpperCase(),
-        "x-entra-upn": "dmoore@rogersgroupinc.com",
-        "x-entra-email": "dmoore@rogersgroupinc.com",
-        "x-entra-display-name": "David Moore",
+        "x-entra-upn": "jsmith@example.com",
+        "x-entra-email": "jsmith@example.com",
+        "x-entra-display-name": "Jordan Smith",
         "x-entra-groups": `AAAAAAAA-0000-0000-0000-000000000001, ${GUID};  `,
       },
     });
     expect(id).not.toBeNull();
     expect(id!.objectId).toBe(GUID);
-    expect(id!.upn).toBe("dmoore@rogersgroupinc.com");
-    expect(id!.displayName).toBe("David Moore");
+    expect(id!.upn).toBe("jsmith@example.com");
+    expect(id!.displayName).toBe("Jordan Smith");
     expect(id!.groups).toEqual(["AAAAAAAA-0000-0000-0000-000000000001", GUID]);
   });
 

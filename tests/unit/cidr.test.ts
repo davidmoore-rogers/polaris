@@ -149,13 +149,13 @@ describe("findNextAvailableSubnet", () => {
 });
 
 describe("packTemplateEntries", () => {
-  it("packs the Jefferson template into a /23 span", () => {
+  it("packs the Riverbend template into a /23 span", () => {
     const result = packTemplateEntries([
-      { prefixLength: 25 }, // RGIHardware 128
-      { prefixLength: 25 }, // RGIUsers    128
-      { prefixLength: 26 }, // RGIVoice     64
+      { prefixLength: 25 }, // AcmeHardware 128
+      { prefixLength: 25 }, // AcmeUsers    128
+      { prefixLength: 26 }, // AcmeVoice     64
       { prefixLength: 26 }, // fortilink    64
-      { prefixLength: 26 }, // RGIPlant     64
+      { prefixLength: 26 }, // AcmePlant     64
     ]);
     expect(result.packed.map((p) => p.offset)).toEqual([0, 128, 256, 320, 384]);
     expect(result.totalSpan).toBe(448);
@@ -173,16 +173,16 @@ describe("packTemplateEntries", () => {
 });
 
 describe("packIntoAnchor (bulk allocation)", () => {
-  const jefferson = [
-    { name: "RGIHardware", prefixLength: 25 },
-    { name: "RGIUsers",    prefixLength: 25 },
-    { name: "RGIVoice",    prefixLength: 26 },
+  const riverbend = [
+    { name: "AcmeHardware", prefixLength: 25 },
+    { name: "AcmeUsers",    prefixLength: 25 },
+    { name: "AcmeVoice",    prefixLength: 26 },
     { name: "fortilink",   prefixLength: 26 },
-    { name: "RGIPlant",    prefixLength: 26 },
+    { name: "AcmePlant",    prefixLength: 26 },
   ];
 
   it("places the first site at the start of the block", () => {
-    const result = packIntoAnchor("172.23.0.0/16", [], jefferson, 24);
+    const result = packIntoAnchor("172.23.0.0/16", [], riverbend, 24);
     expect(result).not.toBeNull();
     expect(result!.effectiveAnchorPrefix).toBe(23); // template needs /23
     expect(result!.anchorCidr).toBe("172.23.0.0/23");
@@ -195,9 +195,9 @@ describe("packIntoAnchor (bulk allocation)", () => {
     ]);
   });
 
-  it("skips past an earlier Jefferson-shaped allocation to the next /23", () => {
-    // Jefferson occupies 172.23.0.0/23 (with a stray /26 hole at .1.64).
-    // Smith should land in the next /23, not fill Jefferson's gap.
+  it("skips past an earlier Riverbend-shaped allocation to the next /23", () => {
+    // Riverbend occupies 172.23.0.0/23 (with a stray /26 hole at .1.64).
+    // Smith should land in the next /23, not fill Riverbend's gap.
     const existing = [
       "172.23.0.0/25",
       "172.23.0.128/25",
@@ -205,7 +205,7 @@ describe("packIntoAnchor (bulk allocation)", () => {
       "172.23.1.128/26",
       "172.23.1.192/26",
     ];
-    const result = packIntoAnchor("172.23.0.0/16", existing, jefferson, 24);
+    const result = packIntoAnchor("172.23.0.0/16", existing, riverbend, 24);
     expect(result).not.toBeNull();
     expect(result!.anchorCidr).toBe("172.23.2.0/23");
     expect(result!.assignments[0].cidr).toBe("172.23.2.0/25");
@@ -227,21 +227,21 @@ describe("packIntoAnchor (bulk allocation)", () => {
 
   it("uses a larger effective anchor when the template exceeds the requested one", () => {
     // User asks for /24 anchor but template needs /23.
-    const result = packIntoAnchor("10.0.0.0/16", [], jefferson, 24);
+    const result = packIntoAnchor("10.0.0.0/16", [], riverbend, 24);
     expect(result!.effectiveAnchorPrefix).toBe(23);
   });
 
   it("reserves space for skip entries in the packed layout", () => {
-    // RGIVoice /26, skip /26, fortilink /26, RGIPlant /26 — the skip row
+    // AcmeVoice /26, skip /26, fortilink /26, AcmePlant /26 — the skip row
     // should push fortilink to 172.23.101.128/26 instead of .64/26.
     const result = packIntoAnchor(
       "172.23.0.0/16",
       [],
       [
-        { name: "RGIVoice",  prefixLength: 26 },
+        { name: "AcmeVoice",  prefixLength: 26 },
         { skip: true,        prefixLength: 26 },
         { name: "fortilink", prefixLength: 26 },
-        { name: "RGIPlant",  prefixLength: 26 },
+        { name: "AcmePlant",  prefixLength: 26 },
       ],
       24
     );

@@ -114,9 +114,9 @@ describe("projectAssetFromSources — hostname priority", () => {
 
   it("FortiGate firewall hostname when no other source contributes", () => {
     const { projected, provenance } = projectAssetFromSources([
-      src("fortigate-firewall", { hostname: "fw-jefferson", serial: "FGT60FTK22000001" }),
+      src("fortigate-firewall", { hostname: "fw-riverbend", serial: "FGT60FTK22000001" }),
     ]);
-    expect(projected.hostname).toBe("fw-jefferson");
+    expect(projected.hostname).toBe("fw-riverbend");
     expect(provenance.hostname).toBe("fortigate-firewall");
   });
 });
@@ -222,9 +222,9 @@ describe("projectAssetFromSources — learnedLocation", () => {
 
   it("FortiSwitch reports controllerFortigate as location", () => {
     const { projected } = projectAssetFromSources([
-      src("fortiswitch", { serial: "S001", controllerFortigate: "fw-jefferson" }),
+      src("fortiswitch", { serial: "S001", controllerFortigate: "fw-riverbend" }),
     ]);
-    expect(projected.learnedLocation).toBe("fw-jefferson");
+    expect(projected.learnedLocation).toBe("fw-riverbend");
   });
 
   it("operator priority reorders the winner, and an explicit order beats process state", () => {
@@ -308,7 +308,7 @@ describe("projectAssetFromSources — learnedLocation", () => {
     // learnedLocation null for firewalls so legacy "set when null"
     // behaviour continues to work.
     const { projected } = projectAssetFromSources([
-      src("fortigate-firewall", { hostname: "fw-jefferson", serial: "FGT001" }),
+      src("fortigate-firewall", { hostname: "fw-riverbend", serial: "FGT001" }),
     ]);
     expect(projected.learnedLocation).toBeNull();
   });
@@ -345,11 +345,11 @@ describe("projectAssetFromSources — ipAddress + lat/long", () => {
   it("fortigate-endpoint DHCP/ARP binding wins for plain endpoints (no infra source)", () => {
     const { projected, provenance } = projectAssetFromSources([
       src("intune", { deviceName: "LAPTOP-01" }),
-      src("fortigate-endpoint", { ipAddress: "10.0.200.55", learnedLocation: "CKYSMA-91G-1" }),
+      src("fortigate-endpoint", { ipAddress: "10.0.200.55", learnedLocation: "LAKESIDE-91G-1" }),
     ]);
     expect(projected.ipAddress).toBe("10.0.200.55");
     expect(provenance.ipAddress).toBe("fortigate-endpoint");
-    expect(projected.learnedLocation).toBe("CKYSMA-91G-1");
+    expect(projected.learnedLocation).toBe("LAKESIDE-91G-1");
   });
 
   it("infrastructure mgmtIp beats a stale pre-adoption fortigate-endpoint sighting", () => {
@@ -358,8 +358,8 @@ describe("projectAssetFromSources — ipAddress + lat/long", () => {
     // IP), then adopted into FMG (firewall source with the mgmt IP). The
     // mgmt IP must win or monitoring keeps probing the pre-adoption lease.
     const { projected, provenance } = projectAssetFromSources([
-      src("fortigate-endpoint", { ipAddress: "10.0.200.30", learnedLocation: "CKYSMA-91G-1", hostname: "JEFFERSON-201G-1" }),
-      src("fortigate-firewall", { serial: "FG2H1GT0000", mgmtIp: "10.255.250.201", hostname: "JEFFERSON-201G-1" }),
+      src("fortigate-endpoint", { ipAddress: "10.0.200.30", learnedLocation: "LAKESIDE-91G-1", hostname: "RIVERBEND-201G-1" }),
+      src("fortigate-firewall", { serial: "FG2H1GT0000", mgmtIp: "10.255.250.201", hostname: "RIVERBEND-201G-1" }),
     ]);
     expect(projected.ipAddress).toBe("10.255.250.201");
     expect(provenance.ipAddress).toBe("fortigate-firewall");
@@ -372,11 +372,11 @@ describe("projectAssetFromSources — ipAddress + lat/long", () => {
   it("adopted FortiSwitch: mgmtIp + controllerFortigate beat the endpoint sighting", () => {
     const { projected, provenance } = projectAssetFromSources([
       src("fortigate-endpoint", { ipAddress: "10.0.200.40", learnedLocation: "SOME-OTHER-GATE" }),
-      src("fortiswitch", { switchId: "SW-LAB", serial: "S124FLAB", mgmtIp: "10.255.250.60", controllerFortigate: "CKYSMA-91G-1" }),
+      src("fortiswitch", { switchId: "SW-LAB", serial: "S124FLAB", mgmtIp: "10.255.250.60", controllerFortigate: "LAKESIDE-91G-1" }),
     ]);
     expect(projected.ipAddress).toBe("10.255.250.60");
     expect(provenance.ipAddress).toBe("fortiswitch");
-    expect(projected.learnedLocation).toBe("CKYSMA-91G-1");
+    expect(projected.learnedLocation).toBe("LAKESIDE-91G-1");
     expect(provenance.learnedLocation).toBe("fortiswitch");
   });
 
@@ -405,9 +405,9 @@ describe("projectAssetFromSources — ipAddress + lat/long", () => {
 describe("projectAssetFromSources — learnedAddress", () => {
   it("comes from the fortigate-firewall metavarAddress", () => {
     const { projected, provenance } = projectAssetFromSources([
-      src("fortigate-firewall", { serial: "FGT001", metavarAddress: "421 Great Circle Rd, Nashville TN" }),
+      src("fortigate-firewall", { serial: "FGT001", metavarAddress: "421 Great Circle Rd, Ashfield TN" }),
     ]);
-    expect(projected.learnedAddress).toBe("421 Great Circle Rd, Nashville TN");
+    expect(projected.learnedAddress).toBe("421 Great Circle Rd, Ashfield TN");
     expect(provenance.learnedAddress).toBe("fortigate-firewall");
   });
 

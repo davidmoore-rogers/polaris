@@ -104,7 +104,7 @@ describe("parseNginxConfigText — drift detection", () => {
     const { contents } = renderNginxConfig({ config: cfg(), ...ENV });
     const tampered = contents.replace(
       "server_name polaris.example.com;",
-      "server_name polaris.example.com;\n  add_header X-Custom-Banner 'rogers' always;"
+      "server_name polaris.example.com;\n  add_header X-Custom-Banner 'acme' always;"
     );
     const { drift } = parseNginxConfigText(tampered);
     expect(drift.some((d) => d.includes("unknown add_header: X-Custom-Banner"))).toBe(true);

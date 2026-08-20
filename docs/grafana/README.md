@@ -144,7 +144,7 @@ In Grafana → **Dashboards → New → Import**:
 
 - **Refresh interval** — default 30 s. Change in the dashboard time-picker if you want faster or slower updates.
 - **Time range** — default last 1 hour. Set to "last 24h" if you're investigating a longer-running pattern.
-- **Thresholds** — the event-loop lag panel marks 50 ms as yellow and 100 ms as orange. These match the operational ranges Polaris is tuned for (15 ms p99 measured on the Rogers Group production fleet of 1,844 monitored assets). Adjust for your environment if needed.
+- **Thresholds** — the event-loop lag panel marks 50 ms as yellow and 100 ms as orange. These match the operational ranges Polaris is tuned for (15 ms p99 measured on a production fleet of roughly 1,800 monitored assets). Adjust for your environment if needed.
 
 ## Reading the dashboard
 

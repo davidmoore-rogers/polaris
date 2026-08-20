@@ -107,7 +107,7 @@ describe("computeTopologyColumns", () => {
   });
 
   it("packs a switch chain into consecutive columns with APs stacked below each switch", () => {
-    // Mirrors the real CKYSMA topology: FortiGate → three daisy-chained
+    // Mirrors the real LAKESIDE topology: FortiGate → three daisy-chained
     // FortiSwitches (verified uplinks), each switch carrying terminal APs.
     // The switches must land in tight consecutive even columns (0,2,4,6); each
     // switch's APs hang in the odd column immediately right of it (3,5,7); and

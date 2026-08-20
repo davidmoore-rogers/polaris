@@ -1963,7 +1963,7 @@ async function resolveControllerMgmtIp(
 // this, every worker that wakes up on the same 60s tick races past the
 // cache-miss check and fires its own fmgProxyRest call — N workers × 1
 // upstream request, hammering FMG (which drops parallel sessions above
-// ~1–2 at Rogers Group's deployment, surfacing as code -11 = "permission
+// ~1–2 in the reference deployment, surfacing as code -11 = "permission
 // denied / session limit"). The promise-singleton pattern below funnels N
 // concurrent callers into one upstream call; the cache then absorbs
 // follow-on calls within the 30 s TTL.
@@ -7345,8 +7345,8 @@ async function collectLldpNeighborsSnmp(session: any): Promise<LldpNeighborSampl
   // IF-MIB ifName fallback: rem-table-only agents (some FortiOS builds)
   // leave lldpLocPortTable empty but lldpRemLocalPortNum lines up with the
   // ifIndex of the physical port. Stamp any port number that the local-port
-  // pass didn't cover so neighbors render as e.g. "internal1 → CKYSMA-148F-1"
-  // instead of "port-2 → CKYSMA-148F-1".
+  // pass didn't cover so neighbors render as e.g. "internal1 → LAKESIDE-148F-1"
+  // instead of "port-2 → LAKESIDE-148F-1".
   for (const [ifIndex, nameVb] of ifNames.entries()) {
     if (localPortLabel.has(ifIndex)) continue;
     const name = snmpVbToString(nameVb).trim();
@@ -9125,9 +9125,9 @@ async function buildLldpAssetMatchIndex(): Promise<{
   const byHostname = new Map<string, string>();
   // Helper: index a hostname-shaped string under the asset id, including
   // the leftmost label when it's an FQDN. Symmetric coverage matters for
-  // LLDP matching: a FortiGate's `Asset.hostname` is "PEORIA-61F-1" (short
+  // LLDP matching: a FortiGate's `Asset.hostname` is "HARBOR-61F-1" (short
   // form, set by the fortigate-firewall source) but the device advertises
-  // itself via LLDP as "PEORIA-61F-1.rogersgroupinc.com" (FQDN). The
+  // itself via LLDP as "HARBOR-61F-1.example.com" (FQDN). The
   // lookup side already lowercases; we just need both forms in the index.
   const idxHostname = (raw: string | null, assetId: string) => {
     if (!raw) return;

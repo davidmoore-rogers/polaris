@@ -97,7 +97,7 @@ beforeAll(() => {
           maxDepth: 5,
           maxRules: 100,
         },
-        options: { regions: ["Nashville", "Memphis"] },
+        options: { regions: ["Ashfield", "Memphis"] },
       }),
       create: async (body: Record<string, unknown>) => { created.push(body); return { contact: { id: "new", ...body } }; },
       update: async (_id: string, body: Record<string, unknown>) => { updated.push(body); return { contact: { id: _id, ...body } }; },
@@ -318,9 +318,9 @@ describe("device filter — the shared condition tree", () => {
   it("opens a stored condition into the builder", async () => {
     await openEditor({
       id: "c9",
-      email: "nash@example.com",
-      assetCondition: { op: "and", children: [{ field: "location", operator: "contains", value: "Nashville" }] },
-      assetConditionEffective: { op: "and", children: [{ field: "location", operator: "contains", value: "Nashville" }] },
+      email: "ashf@example.com",
+      assetCondition: { op: "and", children: [{ field: "location", operator: "contains", value: "Ashfield" }] },
+      assetConditionEffective: { op: "and", children: [{ field: "location", operator: "contains", value: "Ashfield" }] },
       assetFilterUnconvertible: [],
       assetIds: [],
     });
@@ -328,14 +328,14 @@ describe("device filter — the shared condition tree", () => {
     expect(allCb().checked).toBe(false);
     const vals = Array.from(doc.querySelectorAll("#ab-cond-root .scr-value"))
       .map((i) => (i as unknown as { value: string }).value);
-    expect(vals).toContain("Nashville");
+    expect(vals).toContain("Ashfield");
   });
 
   it("saves the tree as assetCondition, never as flat criteria", async () => {
     await openEditor(null);
     (doc.getElementById("ab-email") as unknown as { value: string }).value = "new@example.com";
     setAllDevices(false);
-    (doc.querySelector("#ab-cond-root .scr-value") as unknown as { value: string }).value = "Nashville";
+    (doc.querySelector("#ab-cond-root .scr-value") as unknown as { value: string }).value = "Ashfield";
     (doc.querySelector("#ab-cond-root .scr-field") as unknown as { value: string }).value = "location";
     save();
     await flush();
@@ -446,7 +446,7 @@ describe("picker selection", () => {
     // they head the People list instead (asserted below).
     expect(pane.textContent).toContain("Region Users");
     expect(pane.textContent).not.toContain("Responsible Contacts");
-    expect(pane.textContent).toContain("Nashville");
+    expect(pane.textContent).toContain("Ashfield");
     expect(pane.textContent).toContain("Memphis");
   });
 
@@ -483,7 +483,7 @@ describe("picker selection", () => {
     click(doc.querySelector('[data-ab-tab="regions"]'));
 
     const boxes = Array.from(doc.querySelectorAll('[data-ab-pane="regions"] [data-ab-pick]'));
-    // deviceRegion, Nashville, Memphis — assetContacts lives in People now.
+    // deviceRegion, Ashfield, Memphis — assetContacts lives in People now.
     expect(boxes.length).toBe(3);
     const tick = (el: unknown) => {
       (el as { checked: boolean }).checked = true;
@@ -497,7 +497,7 @@ describe("picker selection", () => {
     const res = await p;
     expect(res!.field).toBe("cc");
     expect(res!.entries.map((e) => e.source).sort()).toEqual(["deviceRegion", "region"]);
-    expect(res!.entries.find((e) => e.source === "region")!.id).toBe("Nashville");
+    expect(res!.entries.find((e) => e.source === "region")!.id).toBe("Ashfield");
   });
 
   it("keeps a People selection when the operator looks at Regions", async () => {

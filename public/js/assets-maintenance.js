@@ -310,7 +310,7 @@ function _maintRuleCellsHTML(field, op, valueStr) {
   var placeholder, listAttr = "";
   if (kind === "subnet") placeholder = "10.1.0.0/16, 10.2.3.4/32";
   else if (kind === "assetType") { placeholder = "firewall, switch"; listAttr = ' list="maint-assettype-list"'; }
-  else if (kind === "fortigate") { placeholder = "JEFFERSON-FG, or a site prefix with contains"; listAttr = ' list="maint-fortigate-list"'; }
+  else if (kind === "fortigate") { placeholder = "RIVERBEND-FG, or a site prefix with contains"; listAttr = ' list="maint-fortigate-list"'; }
   else placeholder = "value, another value";
   return opHtml +
     '<input type="text" class="maint-rule-input" style="flex:1"' + listAttr +

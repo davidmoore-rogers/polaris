@@ -34,11 +34,11 @@ import {
   type InfraReservationRow,
 } from "../../src/utils/infraDhcpBinding.js";
 
-const leaseEntry: InfraDhcpEntry = { type: "dhcp-lease", macAddress: "48:3a:02:90:1b:68" };
-const reservedEntry: InfraDhcpEntry = { type: "dhcp-reservation", macAddress: "48:3a:02:90:1b:68" };
+const leaseEntry: InfraDhcpEntry = { type: "dhcp-lease", macAddress: "48:3a:02:00:00:01" };
+const reservedEntry: InfraDhcpEntry = { type: "dhcp-reservation", macAddress: "48:3a:02:00:00:01" };
 
 function apRow(over: Partial<InfraReservationRow> = {}): InfraReservationRow {
-  return { sourceType: "fortinap", macAddress: null, hostname: "APPOMATTOX-108F-3", dhcpBinding: null, ...over };
+  return { sourceType: "fortinap", macAddress: null, hostname: "STONEHAVEN-108F-3", dhcpBinding: null, ...over };
 }
 
 describe("isInfraSourceType", () => {
@@ -79,7 +79,7 @@ describe("isLeaseBackedInfraRow", () => {
 describe("decideInfraDhcpBinding", () => {
   it("records a lease-backed address and fills the MAC from the lease entry", () => {
     const patch = decideInfraDhcpBinding(apRow(), leaseEntry);
-    expect(patch).toEqual({ dhcpBinding: "lease", macAddress: "48:3A:02:90:1B:68" });
+    expect(patch).toEqual({ dhcpBinding: "lease", macAddress: "48:3A:02:00:00:01" });
   });
 
   it("records a real device-side reservation as such", () => {
@@ -109,26 +109,26 @@ describe("decideInfraDhcpBinding", () => {
   it("returns null in steady state so the hot path issues no write", () => {
     // This runs per DHCP entry per discovery cycle; at 2000 assets an
     // unconditional write here is the cost the surrounding code bulks to avoid.
-    const settled = apRow({ macAddress: "48:3A:02:90:1B:68", dhcpBinding: "lease" });
+    const settled = apRow({ macAddress: "48:3A:02:00:00:01", dhcpBinding: "lease" });
     expect(decideInfraDhcpBinding(settled, leaseEntry)).toBeNull();
   });
 
   it("still bumps presence when the entry is actively leased", () => {
-    const settled = apRow({ macAddress: "48:3A:02:90:1B:68", dhcpBinding: "lease" });
+    const settled = apRow({ macAddress: "48:3A:02:00:00:01", dhcpBinding: "lease" });
     expect(decideInfraDhcpBinding(settled, { ...leaseEntry, seenLeased: true }))
       .toEqual({ lastSeenLeased: true });
   });
 
   it("flips binding when the gate's state changes in either direction", () => {
-    const leased = apRow({ macAddress: "48:3A:02:90:1B:68", dhcpBinding: "lease" });
+    const leased = apRow({ macAddress: "48:3A:02:00:00:01", dhcpBinding: "lease" });
     expect(decideInfraDhcpBinding(leased, reservedEntry)).toEqual({ dhcpBinding: "reservation" });
-    const reserved = apRow({ macAddress: "48:3A:02:90:1B:68", dhcpBinding: "reservation" });
+    const reserved = apRow({ macAddress: "48:3A:02:00:00:01", dhcpBinding: "reservation" });
     expect(decideInfraDhcpBinding(reserved, leaseEntry)).toEqual({ dhcpBinding: "lease" });
   });
 
   it("normalizes the lease MAC into storage form", () => {
-    const patch = decideInfraDhcpBinding(apRow(), { type: "dhcp-lease", macAddress: "48-3a-02-90-1b-68" });
-    expect(patch?.macAddress).toBe("48:3A:02:90:1B:68");
+    const patch = decideInfraDhcpBinding(apRow(), { type: "dhcp-lease", macAddress: "48-3a-02-00-00-01" });
+    expect(patch?.macAddress).toBe("48:3A:02:00:00:01");
   });
 
   it("tolerates a lease entry with no MAC", () => {
@@ -144,21 +144,21 @@ describe("decideInfraDhcpBinding", () => {
 
 describe("reservationBelongsToInfraDevice", () => {
   it("matches on MAC", () => {
-    const row: InfraReservationRow = { sourceType: "manual", macAddress: "48:3a:02:90:1b:68", hostname: "typo-name" };
-    expect(reservationBelongsToInfraDevice(row, { mac: "48:3A:02:90:1B:68", name: "APPOMATTOX-108F-3" })).toBe(true);
+    const row: InfraReservationRow = { sourceType: "manual", macAddress: "48:3a:02:00:00:01", hostname: "typo-name" };
+    expect(reservationBelongsToInfraDevice(row, { mac: "48:3A:02:00:00:01", name: "STONEHAVEN-108F-3" })).toBe(true);
   });
 
   it("trusts MAC over hostname when both are known and MAC disagrees", () => {
     // Hostname collisions across sites are common; a MAC mismatch is decisive,
     // so this must stay a conflict rather than being waved through by the name.
     const row: InfraReservationRow = { sourceType: "manual", macAddress: "AA:BB:CC:DD:EE:FF", hostname: "AP-1" };
-    expect(reservationBelongsToInfraDevice(row, { mac: "48:3A:02:90:1B:68", name: "AP-1" })).toBe(false);
+    expect(reservationBelongsToInfraDevice(row, { mac: "48:3A:02:00:00:01", name: "AP-1" })).toBe(false);
   });
 
   it("falls back to hostname when either side has no MAC", () => {
-    const row: InfraReservationRow = { sourceType: "manual", macAddress: null, hostname: "appomattox-108f-3" };
-    expect(reservationBelongsToInfraDevice(row, { mac: null, name: "APPOMATTOX-108F-3" })).toBe(true);
-    expect(reservationBelongsToInfraDevice(row, { mac: "48:3A:02:90:1B:68", name: "APPOMATTOX-108F-3" })).toBe(true);
+    const row: InfraReservationRow = { sourceType: "manual", macAddress: null, hostname: "stonehaven-108f-3" };
+    expect(reservationBelongsToInfraDevice(row, { mac: null, name: "STONEHAVEN-108F-3" })).toBe(true);
+    expect(reservationBelongsToInfraDevice(row, { mac: "48:3A:02:00:00:01", name: "STONEHAVEN-108F-3" })).toBe(true);
   });
 
   it("accepts a Polaris-pushed row at the device's own address", () => {
@@ -170,24 +170,24 @@ describe("reservationBelongsToInfraDevice", () => {
     // An operator reserved this address for something else entirely — the
     // conflict card is the correct outcome and must survive.
     const row: InfraReservationRow = { sourceType: "manual", macAddress: null, hostname: "printer-3" };
-    expect(reservationBelongsToInfraDevice(row, { mac: "48:3A:02:90:1B:68", name: "AP-1" })).toBe(false);
+    expect(reservationBelongsToInfraDevice(row, { mac: "48:3A:02:00:00:01", name: "AP-1" })).toBe(false);
     expect(reservationBelongsToInfraDevice(row, { mac: null, name: null })).toBe(false);
   });
 
   it("is false for a missing row", () => {
-    expect(reservationBelongsToInfraDevice(null, { mac: "48:3A:02:90:1B:68", name: "AP-1" })).toBe(false);
+    expect(reservationBelongsToInfraDevice(null, { mac: "48:3A:02:00:00:01", name: "AP-1" })).toBe(false);
   });
 });
 
 describe("shouldReleaseInfraReservation", () => {
   const ap: InfraReleaseDevice = {
-    mac: "48:3A:02:90:1B:68",
-    name: "APPOMATTOX-108F-3",
+    mac: "48:3A:02:00:00:01",
+    name: "STONEHAVEN-108F-3",
     integrationId: "int-fmg",
-    controllerFortigate: "APPOMATTOX-101F-1",
+    controllerFortigate: "STONEHAVEN-101F-1",
   };
   function row(over: Partial<InfraReleaseCandidate> = {}): InfraReleaseCandidate {
-    return { sourceType: "fortinap", subnetDiscoveredBy: "int-fmg", subnetFortigateDevice: "APPOMATTOX-101F-1", ...over };
+    return { sourceType: "fortinap", subnetDiscoveredBy: "int-fmg", subnetFortigateDevice: "STONEHAVEN-101F-1", ...over };
   }
 
   it("releases the device's own infra row", () => {
@@ -203,7 +203,7 @@ describe("shouldReleaseInfraReservation", () => {
   });
 
   it("releases a Polaris-pushed row that belongs to this device", () => {
-    const pushed = row({ sourceType: "manual", pushedToId: "int-fmg", macAddress: "48:3a:02:90:1b:68" });
+    const pushed = row({ sourceType: "manual", pushedToId: "int-fmg", macAddress: "48:3a:02:00:00:01" });
     expect(shouldReleaseInfraReservation(ap, pushed)).toBe(true);
   });
 
@@ -223,7 +223,7 @@ describe("shouldReleaseInfraReservation", () => {
   });
 
   it("compares FortiGate names case-insensitively", () => {
-    expect(shouldReleaseInfraReservation(ap, row({ subnetFortigateDevice: "appomattox-101f-1" }))).toBe(true);
+    expect(shouldReleaseInfraReservation(ap, row({ subnetFortigateDevice: "stonehaven-101f-1" }))).toBe(true);
   });
 
   it("does not treat an unknown scope on either side as a mismatch", () => {

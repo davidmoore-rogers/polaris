@@ -25,15 +25,18 @@
  *      the structural setup that lets case (3) happen.
  *
  * Read-only. Run from the repo root:
- *   npx tsx scripts/diagnose-dhcp-create-conflicts.ts 10.0.85.42 10.0.213.13
+ *   npx tsx scripts/diagnose-dhcp-create-conflicts.ts <ip> [ip...]
  */
 
 import { prisma } from "../src/db.js";
 import { ipInCidr, cidrContains } from "../src/utils/cidr.js";
 
 async function main() {
-  const argvIps = process.argv.slice(2).filter((s) => /^[0-9.]+$/.test(s));
-  const targetIps = argvIps.length > 0 ? argvIps : ["10.0.85.42", "10.0.213.13"];
+  const targetIps = process.argv.slice(2).filter((s) => /^[0-9.]+$/.test(s));
+  if (targetIps.length === 0) {
+    console.error("Usage: npx tsx scripts/diagnose-dhcp-create-conflicts.ts <ip> [ip...]");
+    process.exit(1);
+  }
 
   // ── 1) Whole-table duplicates per (subnetId, ipAddress, status) ─────────
   console.log("─── 1) Duplicate (subnetId, ipAddress, status) tuples ───");

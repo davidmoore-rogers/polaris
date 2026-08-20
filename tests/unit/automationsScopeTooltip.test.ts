@@ -61,9 +61,9 @@ describe("automations scope tooltip — filter row", () => {
     expect(filterLine({
       scope: { condition: { op: "and", children: [
         { field: "assetType", operator: "equals", value: "access_point" },
-        { field: "tag", operator: "has", value: "region:nashville" },
+        { field: "tag", operator: "has", value: "region:ashfield" },
       ] } },
-    })).toBe("assetType equals access_point AND tag has region:nashville");
+    })).toBe("assetType equals access_point AND tag has region:ashfield");
   });
 
   it("renders each group operator, and parenthesizes nested groups", () => {

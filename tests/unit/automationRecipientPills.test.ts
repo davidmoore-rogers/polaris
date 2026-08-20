@@ -195,16 +195,16 @@ describe("role pills", () => {
 describe("region + dynamic pills", () => {
   it("maps a region pill to recipientRegions, deduped", () => {
     expect(pillsToRecipients([
-      { kind: "region", value: "Nashville", label: "Nashville" },
-      { kind: "region", value: "Nashville", label: "Nashville" },
+      { kind: "region", value: "Ashfield", label: "Ashfield" },
+      { kind: "region", value: "Ashfield", label: "Ashfield" },
       { kind: "region", value: "Memphis", label: "Memphis" },
-    ])).toEqual({ recipientRegions: ["Nashville", "Memphis"] });
+    ])).toEqual({ recipientRegions: ["Ashfield", "Memphis"] });
   });
 
   it("does NOT lower-case a region — it is a catalogue name, not an address", () => {
     // Addresses normalize; a region name is matched against stored region tags.
-    expect(pillsToRecipients([{ kind: "region", value: "Nashville", label: "Nashville" }]))
-      .toEqual({ recipientRegions: ["Nashville"] });
+    expect(pillsToRecipients([{ kind: "region", value: "Ashfield", label: "Ashfield" }]))
+      .toEqual({ recipientRegions: ["Ashfield"] });
   });
 
   it("maps each dynamic pill to its flag", () => {
@@ -230,7 +230,7 @@ describe("region + dynamic pills", () => {
     const before: Recipients = {
       recipientDeviceRegion: true,
       recipientAssetContacts: true,
-      recipientRegions: ["Nashville"],
+      recipientRegions: ["Ashfield"],
       recipientRoles: ["r-noc"],
       recipientUserIds: ["u1"],
       addresses: ["noc@example.com"],

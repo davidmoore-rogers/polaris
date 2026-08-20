@@ -141,8 +141,8 @@ describe("triggerSummary", () => {
     expect(triggerSummary({
       trigger: { type: "event", actionPattern: "integration.discover.*" },
       eventAction: "integration.discover.error",
-      eventResource: "FMG-Nashville",
-    })).toBe("integration.discover.error on FMG-Nashville");
+      eventResource: "FMG-Ashfield",
+    })).toBe("integration.discover.error on FMG-Ashfield");
     // No resource behind it — still the concrete action, not the pattern.
     expect(triggerSummary({
       trigger: { type: "event", actionPattern: "integration.discover.*" },

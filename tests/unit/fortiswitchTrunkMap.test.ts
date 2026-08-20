@@ -5,29 +5,29 @@ import {
 } from "../../src/utils/fortiswitchTrunkMap.js";
 
 // Verbatim from a FortiSwitch-124E-FPOE running v7.6.6.
-const REAL = "8EF5920008350-0: port23 ::8EPTQ21000800-0: port27 ::GT61FTK21005819: port24 ::";
+const REAL = "8EF5920000001-0: port23 ::8EPTQ21000003-0: port27 ::GT61FTK21000002: port24 ::";
 
 // The same site's inventory, as Polaris stores it.
 const SERIALS = new Map<string, string>([
-  ["S108EPTQ21000800", "asset-108e-1"],
-  ["S108EF5920008350", "asset-108e-2"],
-  ["S124EFTQ22002569", "asset-124e-1"],
-  ["FGT61FTK21005819", "asset-fortigate"],
+  ["S108EPTQ21000003", "asset-108e-1"],
+  ["S108EF5920000001", "asset-108e-2"],
+  ["S124EFTQ22000001", "asset-124e-1"],
+  ["FGT61FTK21000002", "asset-fortigate"],
 ]);
 
 describe("parseTrunkPortMap", () => {
   it("parses the real device string", () => {
     expect(parseTrunkPortMap(REAL)).toEqual([
-      { trunkName: "8EF5920008350-0", localPort: "port23", peerSerialTail: "8EF5920008350" },
-      { trunkName: "8EPTQ21000800-0", localPort: "port27", peerSerialTail: "8EPTQ21000800" },
-      { trunkName: "GT61FTK21005819", localPort: "port24", peerSerialTail: "GT61FTK21005819" },
+      { trunkName: "8EF5920000001-0", localPort: "port23", peerSerialTail: "8EF5920000001" },
+      { trunkName: "8EPTQ21000003-0", localPort: "port27", peerSerialTail: "8EPTQ21000003" },
+      { trunkName: "GT61FTK21000002", localPort: "port24", peerSerialTail: "GT61FTK21000002" },
     ]);
   });
 
   // A FortiGate trunk carries no -N suffix, so the tail is the whole name.
   it("leaves a suffix-less trunk name intact", () => {
-    const [e] = parseTrunkPortMap("GT61FTK21005819: port24 ::");
-    expect(e.peerSerialTail).toBe("GT61FTK21005819");
+    const [e] = parseTrunkPortMap("GT61FTK21000002: port24 ::");
+    expect(e.peerSerialTail).toBe("GT61FTK21000002");
   });
 
   // Only -0 has been seen in the field; the pattern is general so a future
@@ -65,7 +65,7 @@ describe("matchTrunkPeer", () => {
   });
 
   it("is case-insensitive", () => {
-    expect(matchTrunkPeer("8ef5920008350", SERIALS)).toBe("asset-108e-2");
+    expect(matchTrunkPeer("8ef5920000001", SERIALS)).toBe("asset-108e-2");
   });
 
   it("returns null when no serial ends with the tail", () => {
@@ -78,8 +78,8 @@ describe("matchTrunkPeer", () => {
   // wrong port — so an ambiguous tail resolves to nothing.
   it("refuses an ambiguous tail rather than picking one", () => {
     const ambiguous = new Map<string, string>([
-      ["S108EF5920008350", "asset-a"],
-      ["S999EF5920008350", "asset-b"],
+      ["S108EF5920000001", "asset-a"],
+      ["S999EF5920000001", "asset-b"],
     ]);
     expect(matchTrunkPeer("8350", ambiguous)).toBeNull();
     expect(matchTrunkPeer("EF5920008350", ambiguous)).toBeNull();
@@ -87,7 +87,7 @@ describe("matchTrunkPeer", () => {
 
   it("is not confused by the same asset appearing under two serials", () => {
     const dual = new Map<string, string>([
-      ["S108EF5920008350", "asset-a"],
+      ["S108EF5920000001", "asset-a"],
       ["ALTF5920008350", "asset-a"],
     ]);
     expect(matchTrunkPeer("F5920008350", dual)).toBe("asset-a");

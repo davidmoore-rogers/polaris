@@ -25,11 +25,11 @@ function candidate(over: Partial<InfraPushCandidateRow> = {}): InfraPushCandidat
   return {
     sourceType: "fortinap",
     dhcpBinding: "lease",
-    macAddress: "48:3A:02:90:1B:68",
+    macAddress: "48:3A:02:00:00:01",
     pushedToId: null,
     pushStatus: null,
     subnetDiscoveredBy: INT,
-    subnetFortigateDevice: "APPOMATTOX-101F-1",
+    subnetFortigateDevice: "STONEHAVEN-101F-1",
     ...over,
   };
 }

@@ -1666,7 +1666,7 @@ export interface ManagedDeviceSightings {
  * sighting must never vouch for a different serial. An RMA'd/replaced unit
  * keeps the old unit's hostname, and the former `seenBySerial || seenByHostname`
  * OR let the replacement's name shield the dead serial's asset from
- * decommission forever (prod 2026-08: three JEFFERSON-112F-7 switch assets,
+ * decommission forever (prod 2026-08: three RIVERBEND-112F-7 switch assets,
  * distinct serials, only one still on the gate — none ever decommissioned).
  * Hostname is consulted only for assets with no serial on file, and only
  * against sightings on the asset's OWN controller — same per-controller
@@ -1889,8 +1889,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // (Step 3d.4 runs offline by design), and a staged replacement gate's
   // cloned config can list another gate's whole fleet — fleet-wide
   // protection let exactly that shield ghost APs from the sweep forever
-  // (prod 2026-07: staged JEFFERSON-201G-1 vouched for a deleted AP owned
-  // by the live JEFFERSON-101F-1).
+  // (prod 2026-07: staged RIVERBEND-201G-1 vouched for a deleted AP owned
+  // by the live RIVERBEND-101F-1).
   const cmdbSwitchSerialsByDevice = new Map<string, Set<string>>();
   const cmdbApSerialsByDevice     = new Map<string, Set<string>>();
   for (const e of result.cmdbSwitchSerials || []) {
@@ -3599,8 +3599,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // old asset every cycle — resurrecting it out of decommissioned,
       // stamping the new unit's MAC onto it, and never getting an asset of
       // its own, while Phase 2b re-decommissions the old serial each
-      // finalize (prod flap loop, 2026-07: FP231FTF22099Q3E ↔
-      // FP231FTF22024874 at REOSTONE, one decommission Event every run).
+      // finalize (observed as a flap loop between an RMA'd AP's old and new
+      // serial at one site, one decommission Event every run).
       // Serial-less matches (orphan fortigate-endpoint adoption) still bind.
       if (existingAsset && ap.serial && existingAsset.serialNumber
           && String(existingAsset.serialNumber).toUpperCase() !== ap.serial.toUpperCase()) {

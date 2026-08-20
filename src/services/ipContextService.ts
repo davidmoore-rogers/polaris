@@ -320,7 +320,7 @@ export function pickNamedGate(
  * it needs no name resolution at all. The other two carry only a name, and that
  * name is FortiManager's -- hence the parent-key index rather than a hostname
  * match. A name that resolves to no asset still names the gate: "behind
- * PLVCORFMG1" reads perfectly well without Polaris holding a row for it.
+ * CENTRALFMG1" reads perfectly well without Polaris holding a row for it.
  */
 async function resolveFirewall(input: {
   arp: IpContextArpRow[];

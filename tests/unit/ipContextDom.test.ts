@@ -61,7 +61,7 @@ function ctx(over: Record<string, unknown> = {}) {
 
 const SUBNET = {
   id: "s1", cidr: "10.4.12.0/24", name: "Plant Floor", vlan: 12, status: "available",
-  tags: [], fortigateDevice: "PLVCORFMG1", lastDiscoveredAt: null,
+  tags: [], fortigateDevice: "CENTRALFMG1", lastDiscoveredAt: null,
   block: { id: "b1", name: "Corp", cidr: "10.0.0.0/8" }, integration: null,
 };
 
@@ -121,7 +121,7 @@ describe("buildFindings", () => {
 
     const viaSubnet = IPC.buildFindings(ctx({
       subnet: SUBNET,
-      firewall: { deviceName: "PLVCORFMG1", source: "subnet", asset: null },
+      firewall: { deviceName: "CENTRALFMG1", source: "subnet", asset: null },
     }));
     const line = byKind(viaSubnet, "firewall")!.text;
     expect(line).toContain("serves DHCP");
@@ -152,9 +152,9 @@ describe("buildFindings", () => {
 
   it("does not repeat the gate the firewall line already named", () => {
     const f = IPC.buildFindings(ctx({
-      firewall: { deviceName: "PLVCORFMG1", source: "sighting", asset: null },
+      firewall: { deviceName: "CENTRALFMG1", source: "sighting", asset: null },
       sightings: [
-        { fortigateDevice: "PLVCORFMG1", source: "dhcp_lease", lastSeen: "2026-08-20T00:00:00Z", asset: null },
+        { fortigateDevice: "CENTRALFMG1", source: "dhcp_lease", lastSeen: "2026-08-20T00:00:00Z", asset: null },
         { fortigateDevice: "OTHERGATE", source: "dhcp_lease", lastSeen: "2026-08-19T00:00:00Z", asset: null },
       ],
     }));
@@ -186,8 +186,8 @@ describe("applicableSuggestions", () => {
     hostname: "plv-cam-04",
     macAddress: "AA:BB:CC:DD:EE:FF",
     location: "Pleasant View Plant",
-    latitude: 36.1627,
-    longitude: -86.7816,
+    latitude: 40.7128,
+    longitude: -74.0060,
   };
 
   it("offers every suggestion into an empty form", () => {

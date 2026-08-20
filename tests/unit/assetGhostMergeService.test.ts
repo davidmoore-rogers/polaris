@@ -158,20 +158,20 @@ describe("mergeEndpointGhostIntoAsset", () => {
   it("adopts the ghost's MAC only when the canonical has none", async () => {
     seedMerge({
       canonical: { macAddress: null },
-      ghost: { macAddress: "48:3A:02:90:1B:68" },
+      ghost: { macAddress: "48:3A:02:00:00:01" },
     });
     const res = await mergeEndpointGhostIntoAsset(CANON, GHOST);
-    expect(res.adoptedMac).toBe("48:3A:02:90:1B:68");
+    expect(res.adoptedMac).toBe("48:3A:02:00:00:01");
     expect(tx.asset.update).toHaveBeenCalledWith({
       where: { id: CANON },
-      data: { macAddress: "48:3A:02:90:1B:68" },
+      data: { macAddress: "48:3A:02:00:00:01" },
     });
   });
 
   it("keeps the canonical's MAC when it already has one", async () => {
     seedMerge({
       canonical: { macAddress: "AA:AA:AA:AA:AA:AA" },
-      ghost: { macAddress: "48:3A:02:90:1B:68" },
+      ghost: { macAddress: "48:3A:02:00:00:01" },
     });
     const res = await mergeEndpointGhostIntoAsset(CANON, GHOST);
     expect(res.adoptedMac).toBeNull();

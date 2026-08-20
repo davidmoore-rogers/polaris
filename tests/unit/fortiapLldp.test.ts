@@ -19,16 +19,16 @@ describe("extractApLldpAndMesh", () => {
       lldp: [
         {
           local_port: "lan1",
-          chassis_id: "mac e0:23:ff:36:26:ee",
-          system_name: "MORGAN-148E-1",
+          chassis_id: "mac e0:23:ff:00:00:01",
+          system_name: "CEDARS-148E-1",
           system_description: "FortiSwitch-148E-POE v7.4.8,build0929,250909 (GA)",
           port_id: "port9",
-          port_description: "MORGAN-221E-1",
+          port_description: "CEDARS-221E-1",
         },
       ],
     };
     expect(extractApLldpAndMesh(row)).toEqual({
-      lldpUplinkSwitch: "MORGAN-148E-1",
+      lldpUplinkSwitch: "CEDARS-148E-1",
       lldpUplinkPort: "port9",
       lldpLocalPort: "lan1",
     });
@@ -42,16 +42,16 @@ describe("extractApLldpAndMesh", () => {
       lldp: [
         {
           local_port: "lan1",
-          chassis_id: "mac 1c:d1:1a:6d:50:47",
-          system_name: "JEFFERSON-112F-WASHPLANT",
+          chassis_id: "mac 1c:d1:1a:00:00:01",
+          system_name: "RIVERBEND-112F-WASHPLANT",
           system_description: "FortiSwitchRugged-112F-POE v7.6.5,build1136,251201 (GA)",
           port_id: "port7",
-          port_description: "JEFF-432F-WASHPLANT",
+          port_description: "RVBD-432F-WASHPLANT",
         },
       ],
     };
     expect(extractApLldpAndMesh(row)).toEqual({
-      lldpUplinkSwitch: "JEFFERSON-112F-WASHPLANT",
+      lldpUplinkSwitch: "RIVERBEND-112F-WASHPLANT",
       lldpUplinkPort: "port7",
       lldpLocalPort: "lan1",
     });
@@ -62,10 +62,10 @@ describe("extractApLldpAndMesh", () => {
       lldp: [
         {
           local_port: "wbh1",
-          chassis_id: "mac 80:80:2c:ae:99:58",
-          system_name: "MORGAN-234F-1",
+          chassis_id: "mac 80:80:2c:00:00:01",
+          system_name: "CEDARS-234F-1",
           system_description: "FortiAP-234F v7.4.6,build0771,250814 (GA)",
-          port_id: "80:80:2c:ae:99:58",
+          port_id: "80:80:2c:00:00:01",
           port_description: "m10.0",
         },
       ],
@@ -74,29 +74,29 @@ describe("extractApLldpAndMesh", () => {
   });
 
   it("picks the wired FortiSwitch row out of a mixed wired+mesh array", () => {
-    // MORGAN-234F-1 in real data has both a wired uplink (FortiSwitch) and a
+    // CEDARS-234F-1 in real data has both a wired uplink (FortiSwitch) and a
     // wireless backhaul peer (FortiAP). The extractor picks the FortiSwitch
     // and ignores the FortiAP.
     const row = {
       lldp: [
         {
           local_port: "lan1",
-          chassis_id: "mac 94:f3:92:f4:dd:88",
-          system_name: "MORGAN-124F-1",
+          chassis_id: "mac 94:f3:92:00:00:01",
+          system_name: "CEDARS-124F-1",
           system_description: "FortiSwitch-124F-POE v7.4.8,build0929,250909 (GA)",
           port_id: "port12",
         },
         {
           local_port: "w10.0",
-          chassis_id: "mac 80:80:2c:ae:d3:b8",
-          system_name: "MORGAN-234F-2",
+          chassis_id: "mac 80:80:2c:00:00:02",
+          system_name: "CEDARS-234F-2",
           system_description: "FortiAP-234F v7.4.6,build0771,250814 (GA)",
-          port_id: "80:80:2c:ae:d3:cf",
+          port_id: "80:80:2c:00:00:03",
         },
       ],
     };
     expect(extractApLldpAndMesh(row)).toEqual({
-      lldpUplinkSwitch: "MORGAN-124F-1",
+      lldpUplinkSwitch: "CEDARS-124F-1",
       lldpUplinkPort: "port12",
       lldpLocalPort: "lan1",
     });
@@ -119,11 +119,11 @@ describe("extractApLldpAndMesh", () => {
   it("captures mesh_uplink and parent_wtp_id for mesh leaves", () => {
     const row = {
       mesh_uplink: "mesh",
-      parent_wtp_id: "FP234FTF23008545",
+      parent_wtp_id: "FP234FTF23000001",
     };
     expect(extractApLldpAndMesh(row)).toEqual({
       meshUplink: "mesh",
-      parentApSerial: "FP234FTF23008545",
+      parentApSerial: "FP234FTF23000001",
     });
   });
 
@@ -142,24 +142,24 @@ describe("extractApLldpAndMesh", () => {
     expect(extractApLldpAndMesh(row)).toEqual({ meshUplink: "ethernet" });
   });
 
-  it("full mesh-leaf scenario (matches MORGAN-234F-2 in the real payload)", () => {
+  it("full mesh-leaf scenario (matches CEDARS-234F-2 in the real payload)", () => {
     const row = {
       mesh_uplink: "mesh",
-      parent_wtp_id: "FP234FTF23008545",
+      parent_wtp_id: "FP234FTF23000001",
       lldp: [
         {
           local_port: "lan1",
-          chassis_id: "mac e0:23:ff:ea:fb:38",
-          system_name: "MORGAN-108E-3",
+          chassis_id: "mac e0:23:ff:00:00:02",
+          system_name: "CEDARS-108E-3",
           system_description: "FortiSwitch-108E-POE v7.4.8,build0929,250909 (GA)",
           port_id: "port4",
         },
         {
           local_port: "wbh1",
-          chassis_id: "mac 80:80:2c:ae:99:58",
-          system_name: "MORGAN-234F-1",
+          chassis_id: "mac 80:80:2c:00:00:01",
+          system_name: "CEDARS-234F-1",
           system_description: "FortiAP-234F v7.4.6,build0771,250814 (GA)",
-          port_id: "80:80:2c:ae:99:58",
+          port_id: "80:80:2c:00:00:01",
         },
       ],
     };
@@ -167,11 +167,11 @@ describe("extractApLldpAndMesh", () => {
     // we still prefer the LLDP-resolved wired path. parentApSerial is the
     // mesh peer; the topology layer can render both edges.
     expect(extractApLldpAndMesh(row)).toEqual({
-      lldpUplinkSwitch: "MORGAN-108E-3",
+      lldpUplinkSwitch: "CEDARS-108E-3",
       lldpUplinkPort: "port4",
       lldpLocalPort: "lan1",
       meshUplink: "mesh",
-      parentApSerial: "FP234FTF23008545",
+      parentApSerial: "FP234FTF23000001",
     });
   });
 });
@@ -191,11 +191,11 @@ describe("parseApLldpNeighbors", () => {
       lldp: [
         {
           local_port: "lan1",
-          chassis_id: "mac e0:23:ff:36:26:ee",
-          system_name: "MORGAN-148E-1",
+          chassis_id: "mac e0:23:ff:00:00:01",
+          system_name: "CEDARS-148E-1",
           system_description: "FortiSwitch-148E-POE v7.4.8,build0929,250909 (GA)",
           port_id: "port9",
-          port_description: "MORGAN-221E-1",
+          port_description: "CEDARS-221E-1",
         },
       ],
     });
@@ -203,11 +203,11 @@ describe("parseApLldpNeighbors", () => {
       {
         localIfName:       "lan1",
         chassisIdSubtype:  "macAddress",
-        chassisId:         "E0:23:FF:36:26:EE",
+        chassisId:         "E0:23:FF:00:00:01",
         portIdSubtype:     "interfaceName",
         portId:            "port9",
-        portDescription:   "MORGAN-221E-1",
-        systemName:        "MORGAN-148E-1",
+        portDescription:   "CEDARS-221E-1",
+        systemName:        "CEDARS-148E-1",
         systemDescription: "FortiSwitch-148E-POE v7.4.8,build0929,250909 (GA)",
         managementIp:      null,
         capabilities:      [],
@@ -220,40 +220,40 @@ describe("parseApLldpNeighbors", () => {
       lldp: [
         {
           local_port: "lan1",
-          chassis_id: "mac 94:f3:92:f4:dd:88",
-          system_name: "MORGAN-124F-1",
+          chassis_id: "mac 94:f3:92:00:00:01",
+          system_name: "CEDARS-124F-1",
           system_description: "FortiSwitch-124F-POE v7.4.8,build0929,250909 (GA)",
           port_id: "port12",
         },
         {
           local_port: "wbh1",
-          chassis_id: "mac 80:80:2c:ae:99:58",
-          system_name: "MORGAN-234F-1",
+          chassis_id: "mac 80:80:2c:00:00:01",
+          system_name: "CEDARS-234F-1",
           system_description: "FortiAP-234F v7.4.6,build0771,250814 (GA)",
-          port_id: "80:80:2c:ae:99:58",
+          port_id: "80:80:2c:00:00:01",
         },
       ],
     });
     expect(rows).toHaveLength(2);
-    expect(rows![0].systemName).toBe("MORGAN-124F-1");
+    expect(rows![0].systemName).toBe("CEDARS-124F-1");
     // Mesh peer: bare-MAC port_id is inferred as macAddress and normalized
     // colon-uppercase so persist-time MAC matching can resolve the peer AP.
     expect(rows![1]).toMatchObject({
       localIfName:      "wbh1",
       chassisIdSubtype: "macAddress",
-      chassisId:        "80:80:2C:AE:99:58",
+      chassisId:        "80:80:2C:00:00:01",
       portIdSubtype:    "macAddress",
-      portId:           "80:80:2C:AE:99:58",
-      systemName:       "MORGAN-234F-1",
+      portId:           "80:80:2C:00:00:01",
+      systemName:       "CEDARS-234F-1",
     });
   });
 
   it("infers macAddress for a bare-MAC chassis_id (no FortiOS token prefix)", () => {
     const rows = parseApLldpNeighbors({
-      lldp: [{ local_port: "lan1", chassis_id: "e0-23-ff-36-26-ee", system_name: "SW1" }],
+      lldp: [{ local_port: "lan1", chassis_id: "e0-23-ff-00-00-01", system_name: "SW1" }],
     });
     expect(rows![0].chassisIdSubtype).toBe("macAddress");
-    expect(rows![0].chassisId).toBe("E0:23:FF:36:26:EE");
+    expect(rows![0].chassisId).toBe("E0:23:FF:00:00:01");
   });
 
   it("falls back to 'local' subtype for a non-MAC chassis_id (hostname-style)", () => {
@@ -271,7 +271,7 @@ describe("parseApLldpNeighbors", () => {
   it("skips entries with no local_port and entries with no identity fields", () => {
     const rows = parseApLldpNeighbors({
       lldp: [
-        { chassis_id: "mac e0:23:ff:36:26:ee", system_name: "NO-ANCHOR" }, // no local_port
+        { chassis_id: "mac e0:23:ff:00:00:01", system_name: "NO-ANCHOR" }, // no local_port
         { local_port: "lan1" },                                            // no identity at all
         { local_port: "lan1", system_name: "KEEP-ME" },
       ],

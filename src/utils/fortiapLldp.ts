@@ -87,7 +87,7 @@ function asString(v: unknown): string {
 const MAC_SHAPE = /^[0-9a-f]{2}([:\-][0-9a-f]{2}){5}$/i;
 
 // FortiOS managed_ap LLDP entries pack the subtype INTO the value string as
-// a leading word — real payloads show `chassis_id: "mac e0:23:ff:36:26:ee"`.
+// a leading word — payloads look like `chassis_id: "mac e0:23:ff:00:00:01"`.
 // Map the observed FortiOS tokens onto the canonical subtype names the rest
 // of the LLDP pipeline uses (persist-time asset matching keys on
 // `chassisIdSubtype === "macAddress"`; the Device Map's edge-label backfill

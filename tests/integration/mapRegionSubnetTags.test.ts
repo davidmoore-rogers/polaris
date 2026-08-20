@@ -45,21 +45,21 @@ const BLOCK_CIDR = "10.88.0.0/16";
 const IN_SUBNET = "10.88.1.0/24";
 const OUT_SUBNET = "10.88.2.0/24";
 
-// A tiny square around (36.16, -86.78) — Nashville-ish. The "inside" gate sits
-// at its center; the "outside" gate is a whole degree away.
+// A tiny square around (40.71, -74.01). The "inside" gate sits
+// at its center; the "outside" gate is far outside it.
 const POLYGON: [number, number][] = [
-  [36.10, -86.85],
-  [36.10, -86.70],
-  [36.25, -86.70],
-  [36.25, -86.85],
+  [40.65, -74.08],
+  [40.65, -73.93],
+  [40.80, -73.93],
+  [40.80, -74.08],
 ];
 
 const REGION_NAME = "Region Subnet Tag Test";
 const RENAMED = "Region Subnet Tag Test Renamed";
 
 /** Gate whose FMG device name differs from its configured hostname. */
-const IN_DEVICE_NAME = "FGT-TEST-NASHVILLE";
-const IN_HOSTNAME = "fgt-nashville-01";
+const IN_DEVICE_NAME = "FGT-TEST-ASHFIELD";
+const IN_HOSTNAME = "fgt-ashfield-01";
 const IN_SERIAL = "FGTTEST0000000001";
 const OUT_DEVICE_NAME = "FGT-TEST-ATLANTA";
 
@@ -110,8 +110,8 @@ async function makeFixtures(): Promise<{ inSubnetId: string; outSubnetId: string
       hostname: IN_HOSTNAME,
       assetType: "firewall",
       serialNumber: IN_SERIAL,
-      latitude: 36.16,
-      longitude: -86.78,
+      latitude: 40.71,
+      longitude: -74.01,
       fortinetTopology: { role: "fortigate", deviceName: IN_DEVICE_NAME },
     },
   });

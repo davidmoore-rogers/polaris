@@ -10,7 +10,7 @@
  * Background: the systemInfo cadence (interfaces + LLDP + storage + IPsec)
  * used to default to 600s across every monitored asset. On fleets with
  * dozens of switches and access points, the resulting per-interface sample
- * volume dominates DB size — observed 94 GB on production at Rogers Group.
+ * volume dominates DB size — observed 94 GB on one production install.
  * Linking the cadence to each integration's discovery `pollInterval` (1–24h,
  * default 4h) cuts that volume by 24× at the default while keeping a
  * single, intuitive operator knob.

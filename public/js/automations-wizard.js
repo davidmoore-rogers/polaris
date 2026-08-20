@@ -3877,8 +3877,8 @@ async function openAutomationWizard(existing, opts) {
   function canAddContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "write"); }
 
   // What each pill kind prints ahead of its label, and what its tooltip says.
-  // The qualifier is what keeps a region called "Nashville" from reading like a
-  // person called "Nashville" in a list that mixes both.
+  // The qualifier is what keeps a region called "Ashfield" from reading like a
+  // person called "Ashfield" in a list that mixes both.
   var PILL_QUALIFIER = { role: "role:", region: "region:", deviceRegion: "dynamic:", assetContacts: "dynamic:" };
   var PILL_TITLE = {
     region: "Every user tagged with this region",

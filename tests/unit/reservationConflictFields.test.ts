@@ -17,7 +17,7 @@ import { computeConflictFields } from "../../src/services/discovery/discoveryEng
 const VIP_ROW = {
   hostname: "HW030CPKGN33",
   owner: "fortimanager-vip",
-  projectRef: "VIP: BULLITT-101F-1",
+  projectRef: "VIP: PINERUN-101F-1",
 };
 const DHCP_PROPOSAL = {
   hostname: "HW030CPKGN33",

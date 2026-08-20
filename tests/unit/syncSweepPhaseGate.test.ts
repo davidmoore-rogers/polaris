@@ -37,10 +37,10 @@ describe("sweepPhaseEnabled — SyncMode × sweep-phase matrix", () => {
 // controller name (FMG device names vs FortiOS hostnames can disagree in case)
 // and must never match a child with no controllerFortigate stamp.
 describe("cascadeControllerOf — Phase 2a switch/AP cascade matcher", () => {
-  const stale = new Set(["jefferson-101f-1", "glenrose-61f-1"]);
+  const stale = new Set(["riverbend-101f-1", "glenrose-61f-1"]);
 
   it("matches a child whose controllerFortigate is a decommissioned gate, returning the stamped name", () => {
-    expect(cascadeControllerOf({ controllerFortigate: "JEFFERSON-101F-1" }, stale)).toBe("JEFFERSON-101F-1");
+    expect(cascadeControllerOf({ controllerFortigate: "RIVERBEND-101F-1" }, stale)).toBe("RIVERBEND-101F-1");
     expect(cascadeControllerOf({ controllerFortigate: "glenrose-61f-1" }, stale)).toBe("glenrose-61f-1");
   });
 
@@ -58,7 +58,7 @@ describe("cascadeControllerOf — Phase 2a switch/AP cascade matcher", () => {
   });
 
   it("matches nothing against an empty stale set (no gates decommissioned this run)", () => {
-    expect(cascadeControllerOf({ controllerFortigate: "JEFFERSON-101F-1" }, new Set())).toBeNull();
+    expect(cascadeControllerOf({ controllerFortigate: "RIVERBEND-101F-1" }, new Set())).toBeNull();
   });
 });
 
@@ -66,7 +66,7 @@ describe("cascadeControllerOf — Phase 2a switch/AP cascade matcher", () => {
 // on file. The regression this pins: a replaced (RMA'd) switch/AP keeps the
 // old unit's hostname, and the former `seenBySerial || seenByHostname` OR let
 // the replacement's live hostname sighting vouch for the dead serial's asset
-// forever (prod 2026-08: three JEFFERSON-112F-7 switch assets, distinct
+// forever (prod 2026-08: three RIVERBEND-112F-7 switch assets, distinct
 // serials, only one still on the gate — the stale two never decommissioned).
 describe("isVouchedManagedDevice — Phase 2b stale switch/AP sighting decision", () => {
   const sightings = (over: Partial<ManagedDeviceSightings> = {}): ManagedDeviceSightings => ({
@@ -77,38 +77,38 @@ describe("isVouchedManagedDevice — Phase 2b stale switch/AP sighting decision"
   });
 
   it("vouches for a serial seen in the live monitor query", () => {
-    const s = sightings({ seenSerials: new Set(["SR12FPTY26000391"]) });
-    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY26000391", hostname: "JEFFERSON-112F-7" }, "JEFFERSON-112F-1", s)).toBe(true);
+    const s = sightings({ seenSerials: new Set(["SR12FPTY26000001"]) });
+    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY26000001", hostname: "RIVERBEND-112F-7" }, "RIVERBEND-112F-1", s)).toBe(true);
   });
 
   it("does NOT let a same-hostname sighting vouch for a different serial (replaced-unit regression)", () => {
     // The replacement unit is live under the same hostname; the old serial is gone.
     const s = sightings({
-      seenSerials: new Set(["SR12FPTY26000391"]),
-      seenHostnamesByController: new Map([["jefferson-112f-1", new Set(["JEFFERSON-112F-7"])]]),
+      seenSerials: new Set(["SR12FPTY26000001"]),
+      seenHostnamesByController: new Map([["riverbend-112f-1", new Set(["RIVERBEND-112F-7"])]]),
     });
-    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY25017536", hostname: "JEFFERSON-112F-7" }, "JEFFERSON-112F-1", s)).toBe(false);
+    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY25000002", hostname: "RIVERBEND-112F-7" }, "RIVERBEND-112F-1", s)).toBe(false);
   });
 
   it("vouches via the OWN controller's CMDB roster (configured-but-offline protection)", () => {
-    const s = sightings({ cmdbSerialsByController: new Map([["jefferson-112f-1", new Set(["SR12FPTY25017445"])]]) });
-    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY25017445", hostname: null }, "JEFFERSON-112F-1", s)).toBe(true);
+    const s = sightings({ cmdbSerialsByController: new Map([["riverbend-112f-1", new Set(["SR12FPTY25000001"])]]) });
+    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY25000001", hostname: null }, "RIVERBEND-112F-1", s)).toBe(true);
   });
 
   it("ignores ANOTHER controller's CMDB roster (staged/offline gate must not vouch fleet-wide)", () => {
-    const s = sightings({ cmdbSerialsByController: new Map([["jefferson-201g-1", new Set(["SR12FPTY25017445"])]]) });
-    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY25017445", hostname: null }, "JEFFERSON-112F-1", s)).toBe(false);
+    const s = sightings({ cmdbSerialsByController: new Map([["riverbend-201g-1", new Set(["SR12FPTY25000001"])]]) });
+    expect(isVouchedManagedDevice({ serialNumber: "SR12FPTY25000001", hostname: null }, "RIVERBEND-112F-1", s)).toBe(false);
   });
 
   it("falls back to hostname ONLY when no serial is on file, scoped to the own controller, case-insensitive on the controller", () => {
-    const s = sightings({ seenHostnamesByController: new Map([["jefferson-112f-1", new Set(["JEFFERSON-112F-7"])]]) });
-    expect(isVouchedManagedDevice({ serialNumber: null, hostname: "JEFFERSON-112F-7" }, "Jefferson-112F-1", s)).toBe(true);
+    const s = sightings({ seenHostnamesByController: new Map([["riverbend-112f-1", new Set(["RIVERBEND-112F-7"])]]) });
+    expect(isVouchedManagedDevice({ serialNumber: null, hostname: "RIVERBEND-112F-7" }, "Riverbend-112F-1", s)).toBe(true);
     // Same hostname sighted behind a different gate does not vouch.
-    expect(isVouchedManagedDevice({ serialNumber: null, hostname: "JEFFERSON-112F-7" }, "GLENROSE-61F-1", s)).toBe(false);
+    expect(isVouchedManagedDevice({ serialNumber: null, hostname: "RIVERBEND-112F-7" }, "GLENROSE-61F-1", s)).toBe(false);
   });
 
   it("does not vouch for a serial-less, hostname-less asset (decommission proceeds)", () => {
-    const s = sightings({ seenHostnamesByController: new Map([["jefferson-112f-1", new Set(["JEFFERSON-112F-7"])]]) });
-    expect(isVouchedManagedDevice({ serialNumber: null, hostname: null }, "JEFFERSON-112F-1", s)).toBe(false);
+    const s = sightings({ seenHostnamesByController: new Map([["riverbend-112f-1", new Set(["RIVERBEND-112F-7"])]]) });
+    expect(isVouchedManagedDevice({ serialNumber: null, hostname: null }, "RIVERBEND-112F-1", s)).toBe(false);
   });
 });

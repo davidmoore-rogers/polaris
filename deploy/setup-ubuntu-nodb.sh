@@ -405,7 +405,7 @@ cp "$APP_DIR/deploy/nginx/polaris-nginx-dependency.conf" "$NGINX_DROPIN_DIR/ngin
 systemctl daemon-reload
 
 info "Installing nginx config..."
-sed "s|polaris\\.rogersgroupinc\\.com|$HOSTNAME_FROM_URL|g; s|<PROMETHEUS_IP>|$PROMETHEUS_IP|g" \
+sed "s|polaris\\.example\\.com|$HOSTNAME_FROM_URL|g; s|<PROMETHEUS_IP>|$PROMETHEUS_IP|g" \
   "$APP_DIR/deploy/nginx/polaris.conf" > "$NGINX_CONF_DEST"
 nginx -t
 

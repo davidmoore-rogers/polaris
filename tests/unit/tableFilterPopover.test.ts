@@ -26,7 +26,7 @@ const TABLE_HTML = `
       <th data-sf-key="resourceType" data-sf-type="string" data-sf-options="asset|integration|subnet">Resource</th>
       <th data-sf-key="resourceName" data-sf-type="string">Name</th>
     </tr></thead>
-    <tbody id="tb"><tr><td>integration</td><td>PLVCORFMG1</td></tr></tbody>
+    <tbody id="tb"><tr><td>integration</td><td>CENTRALFMG1</td></tr></tbody>
   </table>`;
 
 let win: Window;

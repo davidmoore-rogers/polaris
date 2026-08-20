@@ -14,7 +14,7 @@
  * Remediation and stops. Assignment — choosing which devices actually run a
  * script that grants fleet-wide administrative SSH — stays a human decision
  * made in the Intune console, which is the review gate the generated script
- * headers demand and Rogers Group policy requires for deployed code.
+ * headers demand and the operator's review policy requires for deployed code.
  *
  * If you are here to "finish" this by adding an /assign call: that is a
  * product decision with a security review attached, not an oversight.
