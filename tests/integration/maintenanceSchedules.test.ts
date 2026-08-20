@@ -134,7 +134,11 @@ d("GET /maintenance-schedules/server-time", () => {
     expect(res.body.now).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
     expect(typeof res.body.timeZone).toBe("string");
     expect(typeof res.body.offsetMinutes).toBe("number");
-    expect(res.body.offsetMinutes).toBe(-new Date().getTimezoneOffset());
+    // `|| 0` folds -0 to +0: on a UTC host getTimezoneOffset() is 0 and
+    // negating it yields -0, which toBe/toEqual (Object.is / chai deep-eq)
+    // both distinguish from the server's +0 — the test failed only on
+    // UTC-clocked runners (CI, the dev container) and passed elsewhere.
+    expect(res.body.offsetMinutes).toBe(-new Date().getTimezoneOffset() || 0);
   });
 
   it("is not captured by the /:id route", async () => {
