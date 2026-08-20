@@ -4805,8 +4805,10 @@ async function openViewModal(id) {
     // current-state process inventory into the same table. Lazy-loaded on first
     // click (see _wireAssetServicesTab). Not shown on Fortinet infrastructure
     // (firewall/switch/access_point) — those appliances report neither a unit
-    // list nor a host process table.
-    var isInfraProc = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
+    // list nor a host process table — nor on "other", the catch-all type an
+    // asset lands in when nothing identified it as a host (cameras, PDUs,
+    // sensors), which likewise reports no inventory.
+    var isInfraProc = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point" || a.assetType === "other";
     if (!isInfraProc) {
       tabs.push({ key: "services", label: "Services", html: _assetServicesTabHTML(a.id) });
     }
