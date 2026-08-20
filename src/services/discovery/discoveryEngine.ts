@@ -37,9 +37,13 @@ import { refreshProjectionPriority } from "../assetSourcePriorityService.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
 import {
   logEvent,
+  logEventsBatch,
   snapshotMaterialAssetFields,
   logDiscoveryAssetCreated,
   logDiscoveryAssetUpdated,
+  buildFirmwareChangedEvent,
+  buildConnectionChangedEvent,
+  type LogEventInput,
 } from "../eventLogService.js";
 import { getConfiguredResolver } from "../dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../ouiService.js";
@@ -1967,6 +1971,41 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // (firewall/switch/access_point) — those have dedicated source kinds.
   const fortigateEndpointAssetIds = new Set<string>();
 
+  // ── Per-asset change events: run-scoped baseline ──
+  //
+  // Records each tracked field's value at its FIRST touch this run; the flush
+  // after Phase 11 diffs that against the final in-memory value and emits one
+  // batch of asset.firmware.changed / asset.switch_port.changed /
+  // asset.wireless_ap.changed rows.
+  //
+  // Baseline-at-first-touch rather than event-at-each-write, because two write
+  // sequences legitimately ping-pong WITHIN a single run and inline emission
+  // would report both halves as changes, every run, forever:
+  //   • osVersion — Phase 7 stages FortiOS's coarse cached client fingerprint
+  //     ("10.0"), Phase 11's corrective projection puts the real MDM value
+  //     back ("10.0.19045").
+  //   • lastSeenSwitch — Phase 7 stages `${inv.switchName}/port${n}` while
+  //     Phase 7.5 stages `${row.switchId}/${row.portName}` for the SAME port.
+  // Diffing against the cycle boundary nets both to zero.
+  //
+  // INVARIANT: any new write of os / osVersion / lastSeenSwitch / lastSeenAp
+  // inside syncDhcpSubnets must call noteChangeBaseline() before staging it,
+  // or that change goes unaudited. (Fortinet infra os/osVersion is the one
+  // exclusion — it flows through projection + logDiscoveryAssetUpdated, which
+  // emits the firmware event itself; recording it here too would double-emit.)
+  type ChangeBaselineFields = "os" | "osVersion" | "lastSeenSwitch" | "lastSeenAp";
+  const changeBaseline = new Map<string, { name: string | null } & Partial<Record<ChangeBaselineFields, unknown>>>();
+  const noteChangeBaseline = (asset: any, fields: ChangeBaselineFields[]): void => {
+    if (!asset?.id) return;
+    let entry = changeBaseline.get(asset.id);
+    if (!entry) {
+      entry = { name: asset.hostname || asset.ipAddress || null };
+      changeBaseline.set(asset.id, entry);
+    }
+    // First touch wins — later phases overwrite the VALUE, never the baseline.
+    for (const f of fields) if (!(f in entry)) (entry as any)[f] = asset[f] ?? null;
+  };
+
   // Which FortiGate each of those assets was sighted ON, recorded at the touch
   // site from the pathway's OWN device name (DHCP entry.device, inventory
   // inv.device, switch-MAC / ARP row.fortigateDevice). This is the ONLY thing
@@ -3652,6 +3691,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // 7.5 itself rarely fires on APs because switches usually see the
         // AP's wired NIC MAC, not its baseMac which is what's indexed.
         if (ap.peerSwitch && ap.peerPort) {
+          noteChangeBaseline(existingAsset, ["lastSeenSwitch"]);
           updateData.lastSeenSwitch = `${ap.peerSwitch}/${ap.peerPort}`;
         }
         // Same correction as the FortiSwitch path — fix assetType if a prior
@@ -3682,6 +3722,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           integrationName, integrationId, sourceKind: "fortiap", actor,
         });
         if (resolvedIp) existingAsset.ipAddress = resolvedIp;
+        // Mirror the wired-uplink stamp in memory: later phases (and the
+        // end-of-run change-event flush) compare against this row, and without
+        // it the flush would read the pre-update value and re-report the same
+        // move every run.
+        if (updateData.lastSeenSwitch) existingAsset.lastSeenSwitch = updateData.lastSeenSwitch;
         if (existingAsset.status === "decommissioned" && apOnline) existingAsset.status = "active";
         if (existingAsset.discoveredByIntegrationId !== integrationId) existingAsset.discoveredByIntegrationId = integrationId;
         assetIdx.reindex(existingAsset);
@@ -4772,6 +4817,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           source: entry.type === "dhcp-reservation" ? "dhcp_reservation" : "dhcp_lease",
           integrationId,
           ipAddress: entry.ipAddress,
+          // Names the gateway-change audit row without a lookup — the asset is
+          // already in hand here.
+          assetHostname: asset.hostname || asset.ipAddress || null,
         });
         // Stamp this asset as a fortigate-endpoint source target — every
         // DHCP sighting counts even if the asset wasn't created via
@@ -5075,6 +5123,18 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (inv.device && !existingAsset.learnedLocation) updateData.learnedLocation = inv.device;
         if (switchConn) updateData.lastSeenSwitch = switchConn;
         if (apConn) updateData.lastSeenAp = apConn;
+        // Baseline BEFORE the Object.assign below mutates existingAsset. The
+        // os/osVersion half is skipped for Fortinet infra — those never reach
+        // this branch's staged writes (guarded above) and their firmware event
+        // comes from the projection path's logDiscoveryAssetUpdated.
+        {
+          const touched: ChangeBaselineFields[] = [];
+          if ("os" in updateData) touched.push("os");
+          if ("osVersion" in updateData) touched.push("osVersion");
+          if ("lastSeenSwitch" in updateData) touched.push("lastSeenSwitch");
+          if ("lastSeenAp" in updateData) touched.push("lastSeenAp");
+          if (touched.length) noteChangeBaseline(existingAsset, touched);
+        }
 
         if (inv.user) {
           const userList: Array<{user: string; domain?: string; lastSeen: string; source: string}> = Array.isArray(existingAsset.associatedUsers) ? [...(existingAsset.associatedUsers as any)] : [];
@@ -5319,6 +5379,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const asset = assetIdx.findById(assetId);
       if (!asset) continue;
       if (asset.lastSeenSwitch !== pick.portLabel) {
+        noteChangeBaseline(asset, ["lastSeenSwitch"]);
         queueUpdate(assetId, { lastSeenSwitch: pick.portLabel });
         asset.lastSeenSwitch = pick.portLabel;
       }
@@ -5747,6 +5808,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           corrections.ipSource = `${integrationType}:fortigate-endpoint`;
         }
         clampAcquiredToLastSeen(corrections, asset);
+        // Baseline before the in-memory assign: this pass is the one that
+        // corrects Phase 7's coarse osVersion back to the projected value, so
+        // for an asset Phase 7 already touched the baseline is ALREADY the
+        // pre-run value (first touch wins) and the round trip nets out.
+        {
+          const touched: ChangeBaselineFields[] = [];
+          if ("os" in corrections) touched.push("os");
+          if ("osVersion" in corrections) touched.push("osVersion");
+          if (touched.length) noteChangeBaseline(asset, touched);
+        }
         await prisma.asset.update({ where: { id: assetId }, data: corrections });
         Object.assign(asset, corrections);
         return true;
@@ -5760,6 +5831,55 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       syncLog("error", `fortigate-endpoint projection apply: corrected ${projectionCorrected}, ${projFailed} failed`);
     } else if (projectionCorrected > 0) {
       syncLog("info", `fortigate-endpoint projection apply: corrected ${projectionCorrected} of ${fortigateEndpointAssetIds.size} touched assets`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Phase 11.5 — Flush per-asset change events
+  //
+  // One batch per run, diffing each tracked field's first-touch baseline
+  // against its final in-memory value. Runs AFTER Phase 11 so the intra-run
+  // ping-pongs described at the changeBaseline declaration have settled — a
+  // steady fleet produces an empty array and writes nothing.
+  //
+  // Events are optimistic with respect to Phase 7.5's batchSettled flush (a
+  // write that failed there still reports here) — the same accepted caveat the
+  // Arc path carries.
+  if (changeBaseline.size > 0) {
+    try {
+      const changeEvents: LogEventInput[] = [];
+      for (const [assetId, baseline] of changeBaseline) {
+        const asset = assetIdx.findById(assetId);
+        if (!asset) continue;
+        const ctx = {
+          assetId,
+          assetName: baseline.name,
+          actor: actor || "system:discovery",
+          source: "fortigate-endpoint",
+          integrationId,
+          integrationName,
+        };
+        if ("os" in baseline || "osVersion" in baseline) {
+          const before: Record<string, unknown> = {};
+          const after: Record<string, unknown> = {};
+          if ("os" in baseline) { before.os = baseline.os; after.os = asset.os ?? null; }
+          if ("osVersion" in baseline) { before.osVersion = baseline.osVersion; after.osVersion = asset.osVersion ?? null; }
+          const ev = buildFirmwareChangedEvent(ctx, before, after);
+          if (ev) changeEvents.push(ev);
+        }
+        if ("lastSeenSwitch" in baseline) {
+          const ev = buildConnectionChangedEvent("switch", ctx, baseline.lastSeenSwitch as string | null, asset.lastSeenSwitch ?? null);
+          if (ev) changeEvents.push(ev);
+        }
+        if ("lastSeenAp" in baseline) {
+          const ev = buildConnectionChangedEvent("ap", ctx, baseline.lastSeenAp as string | null, asset.lastSeenAp ?? null);
+          if (ev) changeEvents.push(ev);
+        }
+      }
+      if (changeEvents.length > 0) await logEventsBatch(changeEvents);
+    } catch (err: any) {
+      // Audit rows must never fail the sync.
+      logger.warn({ integrationId, err: err?.message }, "discovery.change_events.flush_failed");
     }
   }
 

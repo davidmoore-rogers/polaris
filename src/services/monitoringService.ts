@@ -74,7 +74,7 @@ import {
   resolveDeviceMgmtIpViaFmg,
   type FortiManagerConfig,
 } from "./fortimanagerService.js";
-import { logEvent } from "./eventLogService.js";
+import { logEvent, logEventsBatch, buildConnectionChangedEvent } from "./eventLogService.js";
 import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEvents.js";
 import { isChangeActionSubscribed } from "./notificationRuleService.js";
 import { logger } from "../utils/logger.js";
@@ -8884,16 +8884,52 @@ async function persistWirelessStations(
   // txn vs the probe-patch bulk Asset UPDATE, which locks in its own order).
   // The op is idempotent (last-write-wins stamp) so re-run is safe.
   if (endpointStamps.size > 0) {
-    const orderedStamps = [...endpointStamps.entries()].sort(([a], [b]) =>
-      a < b ? -1 : a > b ? 1 : 0,
-    );
-    await retryOnDeadlock(() =>
-      prisma.$transaction(
-        orderedStamps.map(([endpointId, ap]) =>
-          prisma.asset.update({ where: { id: endpointId }, data: { lastSeenAp: ap } }),
+    // Read the endpoints' current AP first, then write only the ones that
+    // actually moved. Two payoffs: a steady set of stations stops issuing an
+    // UPDATE per scrape (less write volume + less lock contention on exactly
+    // the rows the deadlock note above is about), and the prior value is what
+    // makes the roam event below reportable.
+    const prior = await prisma.asset.findMany({
+      where: { id: { in: [...endpointStamps.keys()] } },
+      select: { id: true, lastSeenAp: true, hostname: true, ipAddress: true },
+    });
+    const priorById = new Map(prior.map((r) => [r.id, r]));
+    const orderedStamps = [...endpointStamps.entries()]
+      // Filtering preserves the sort below it — the id ordering is the
+      // deadlock fix and must survive any change to this block.
+      .filter(([endpointId, ap]) => {
+        const p = priorById.get(endpointId);
+        if (!p) return false; // asset vanished between match and stamp
+        return (p.lastSeenAp ?? "").trim().toLowerCase() !== ap.trim().toLowerCase();
+      })
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    if (orderedStamps.length > 0) {
+      await retryOnDeadlock(() =>
+        prisma.$transaction(
+          orderedStamps.map(([endpointId, ap]) =>
+            prisma.asset.update({ where: { id: endpointId }, data: { lastSeenAp: ap } }),
+          ),
         ),
-      ),
-    );
+      );
+      // Roam audit — AFTER the transaction commits, never inside it (an event
+      // write must not extend the lock window these rows are contended on).
+      const roamEvents = orderedStamps.flatMap(([endpointId, ap]) => {
+        const p = priorById.get(endpointId)!;
+        const ev = buildConnectionChangedEvent(
+          "ap",
+          {
+            assetId: endpointId,
+            assetName: p.hostname || p.ipAddress || null,
+            actor: "system:monitor",
+            source: "wireless-scrape",
+          },
+          p.lastSeenAp,
+          ap,
+        );
+        return ev ? [ev] : [];
+      });
+      if (roamEvents.length > 0) void logEventsBatch(roamEvents);
+    }
   }
 }
 

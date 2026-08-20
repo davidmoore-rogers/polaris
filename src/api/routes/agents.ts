@@ -55,6 +55,7 @@ import { persistAssetServices } from "../../services/serviceInventoryService.js"
 import { persistInterfaceRows } from "../../services/interfaceInventoryService.js";
 import { reconcileMacAddresses, reconcileInterfaceMacs } from "../../services/macAddressService.js";
 import { logEvent } from "./events.js";
+import { buildFirmwareChangedEvent } from "../../services/eventLogService.js";
 import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
 import { fetchPendingCommands, recordCommandResult } from "../../services/agentCommandService.js";
 import { SCRIPT_OUTPUT_CAP_BYTES } from "../../services/automationScriptService.js";
@@ -1138,6 +1139,16 @@ agentsRouter.post("/system-info", async (req, res, next) => {
 
       if (Object.keys(diff).length > 0) {
         await prisma.asset.update({ where: { id: assetId }, data: diff as any });
+        // The agent reads the RUNNING OS in-guest, so its firmware moves are
+        // the most trustworthy signal we get — audit them. `diff` is already
+        // the edge-triggered set (only fields whose value actually changed),
+        // so no extra comparison or query is needed here.
+        const firmwareEvent = buildFirmwareChangedEvent(
+          { assetId, assetName: current.hostname, actor: "system:agent", source: "polaris-agent" },
+          current,
+          diff,
+        );
+        if (firmwareEvent) void logEvent(firmwareEvent);
       }
     }
 

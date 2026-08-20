@@ -13,6 +13,7 @@ import { requirePermission } from "../middleware/permissions.js";
 import { requestActor } from "../middleware/auth.js";
 import { machineApiLimiter } from "../middleware/rateLimits.js";
 import { logEvent, buildChanges } from "./events.js";
+import { buildFirmwareChangedEvent, logEventsBatch, type LogEventInput } from "../../services/eventLogService.js";
 import { assetMatchesIntegrationFilter } from "../../utils/integrationFilter.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
@@ -3273,7 +3274,9 @@ async function applyAssetUpdateSideEffects(
   if (flags.ipOverrideTouched) {
     resolvePendingIpOverrideConflicts(id, actor ?? "manual").catch(() => {});
   }
-  const trackFields = ["hostname", "hostnameOverride", "ipAddress", "ipOverride", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
+  // `os` is in the tracked set; `osVersion` deliberately isn't, because
+  // UpdateAssetSchema doesn't accept it — firmware is discovery/agent-owned.
+  const trackFields = ["hostname", "hostnameOverride", "ipAddress", "ipOverride", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName", "os"] as const;
   const before: Record<string, unknown> = {};
   const after: Record<string, unknown> = {};
   for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
@@ -3306,6 +3309,21 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     const existing = await loadAssetForUpdate(id);
     if (!existing) throw new AppError(404, "Asset not found");
     const input = UpdateAssetSchema.parse(req.body);
+  // An operator retyping the OS is a firmware change like any other — same
+  // action string, so one automation covers operator and discovery edits alike.
+  if (input.os !== undefined) {
+    const firmwareEvent = buildFirmwareChangedEvent(
+      {
+        assetId: id,
+        assetName: asset.hostname || asset.ipAddress || null,
+        actor: actor ?? "manual",
+        source: "operator",
+      },
+      { os: (existing as any).os },
+      { os: (asset as any).os },
+    );
+    if (firmwareEvent) void logEvent(firmwareEvent);
+  }
     await validateAssetUpdate(id, existing, input);
     const actor = requestActor(req);
     const { data, ipOverrideTouched, coordChanged } = await buildAssetUpdatePatch(id, existing, input, actor);
@@ -3784,6 +3802,9 @@ router.post("/import-pdf", requirePermission("assets", "write"), async (req, res
           updated++;
         }
       } else {
+    // Accumulated so the loop makes one batched audit write rather than an
+    // awaited logEvent per imported row.
+    const firmwareEvents: LogEventInput[] = [];
         preview.push({ action: "create", serialNumber: serial, hostname: row.hostname || null, fields });
         if (!dryRun) {
           await prisma.asset.create({ data: { assetType: "other", status: "storage", statusChangedAt: new Date(), statusChangedBy: requestActor(req) ?? "manual", ...updateData } as any });
@@ -3809,6 +3830,17 @@ router.delete("/:id/macs/:mac", requirePermission("assets", "write"), async (req
     const normalized = String(req.params.mac || "").toUpperCase().replace(/-/g, ":");
 
     const existing = await prisma.asset.findUnique({
+          const firmwareEvent = buildFirmwareChangedEvent(
+            {
+              assetId: existing.id,
+              assetName: existing.hostname || existing.ipAddress || null,
+              actor: requestActor(req) ?? "manual",
+              source: "pdf-import",
+            },
+            { os: existing.os },
+            updateData,
+          );
+          if (firmwareEvent) firmwareEvents.push(firmwareEvent);
       where: { id },
       include: { macAddressRows: { select: MAC_ROW_SELECT } },
     });
@@ -3822,6 +3854,7 @@ router.delete("/:id/macs/:mac", requirePermission("assets", "write"), async (req
 
     // Compute the new primary `Asset.macAddress` scalar after removal:
     // most-recently-seen surviving MAC, or null if the deleted MAC was the
+    if (firmwareEvents.length > 0) void logEventsBatch(firmwareEvents);
     // last one. Side-table delete + scalar-column update run as a single
     // transaction so the asset never points at a MAC that no longer exists.
     let primary = existing.macAddress;

@@ -759,6 +759,38 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ---
 
+## cross-cutting/asset-change-events
+
+**What it is:** Four edge-triggered per-asset audit Events an operator reads on the asset slide-over's Events tab and can alert on: **`asset.firmware.changed`** (os / osVersion moved), **`asset.switch_port.changed`** (`lastSeenSwitch`), **`asset.wireless_ap.changed`** (`lastSeenAp`, every roam), **`asset.gateway_firewall.changed`** (the freshest `AssetFortigateSighting` flipped gate). All are `resourceType: "asset"` + `resourceId` + `details.changes[field].{from,to}` — the shape `public/js/events.js` renders — and all are written **unconditionally** by their write sites, never behind `maybeEmitChangeEvents`/`isChangeActionSubscribed` like the `change.*` family. They're rare by construction, so a steady fleet writes none.
+
+**The row builders are pure and centralized** in `src/services/eventLogService.ts` (`buildFirmwareChangedEvent` / `buildConnectionChangedEvent` / `buildFirewallChangedEvent`); a call site decides only WHEN it has a change, never how the row looks.
+
+**Writers:**
+- `src/services/eventLogService.ts → logDiscoveryAssetUpdated` — emits the firmware event whenever the material diff carries `os`/`osVersion`. **One seam covering all nine snapshot-based discovery paths** (FortiGate / FortiSwitch / FortiAP infra, Arc, Entra/Intune, AD, vCenter).
+- `src/services/discovery/discoveryEngine.ts → syncDhcpSubnets` — the `changeBaseline` map + `noteChangeBaseline()`, recorded at Phase 3b (FortiAP `lastSeenSwitch`), Phase 7 (device inventory: os / osVersion / lastSeenSwitch / lastSeenAp), Phase 7.5 (MAC-table `lastSeenSwitch`) and Phase 11 (corrective os / osVersion), flushed as ONE `logEventsBatch` at **Phase 11.5**.
+- `src/services/monitoringService.ts → persistWirelessStations` — roam events after the endpoint-stamp transaction commits.
+- `src/services/assetSightingService.ts → recordSightings` — gateway-change events (see that service's entry for `computeFreshestGateChanges` + the takeover guard).
+- `src/api/routes/agents.ts` (agent `/system-info` push, off its existing `diff`), `src/api/routes/assets.ts` (operator PUT when `input.os` changed; PDF import, batched).
+
+**Readers:** the asset slide-over Events tab (`resourceType=asset` + `resourceId`), the Events page, and `notificationEngine.runEventTail` — via either a generic `event` trigger glob or the four `CHANGE_TYPES` picker entries in `notificationTypes.ts` (`firmware_changed` / `switch_port_changed` / `wireless_ap_changed` / `gateway_firewall_changed`).
+
+**Invariants:**
+- **Discovery emits from the end-of-run baseline, never inline at the write.** Two write sequences legitimately ping-pong WITHIN one run, and inline emission would report both halves as changes every run forever: Phase 7 stages FortiOS's coarse cached fingerprint (`"10.0"`) which Phase 11 corrects back to the projected MDM value (`"10.0.19045"`); and Phase 7 stages `${inv.switchName}/port${n}` while Phase 7.5 stages `${row.switchId}/${row.portName}` for the SAME port. Baseline-at-first-touch (first touch wins per field) diffs against the cycle boundary and nets both to zero.
+- **Any new write of `os` / `osVersion` / `lastSeenSwitch` / `lastSeenAp` inside `syncDhcpSubnets` must call `noteChangeBaseline()` before staging it**, or that change goes unaudited.
+- **Fortinet-infra `os`/`osVersion` is never recorded in the baseline** — it reaches Asset through projection + `logDiscoveryAssetUpdated`, which emits the firmware event itself. Recording it here too double-emits. (Phase 7 already refuses to stage it for infra; Phase 11 excludes infra assets.)
+- The baseline compares against the **in-memory** asset row, so every write site that stages one of these fields must also mirror it onto the in-memory object — Phase 3b's FortiAP branch needed a `existingAsset.lastSeenSwitch = …` added for exactly this reason.
+- `persistWirelessStations` **must keep its id-sorted `$transaction` order** (documented 3-way deadlock fix): the change filter is applied BEFORE the sort's array is consumed, and filtering preserves order. Events are emitted only AFTER the transaction commits — never inside it.
+- Every emission path is best-effort (try/catch or `void`): an audit row must never fail a discovery run, a monitor scrape, or a sighting write.
+
+**When changing this:**
+- Renaming an action string means moving `CHANGE_TYPE_ACTIONS` in `notificationTypes.ts` in the same commit, or stored automations silently stop matching.
+- Adding a fifth change event: put the builder in `eventLogService.ts` (pure, returns `LogEventInput | undefined`), decide the null→value semantics deliberately (firmware suppresses a first learn; connection events report it), and add the `CHANGE_TYPES`/`CHANGE_TYPE_ACTIONS`/`CHANGE_TYPE_META` trio.
+- Scale-check at 2000 assets: one `logEventsBatch` per discovery run / per AP scrape / per sighting batch, never an awaited `logEvent` per row.
+
+**Known accepted noise:** an agent `/system-info` push landing between Phase 7's coarse osVersion and Phase 11's correction emits one self-describing spurious firmware event ("10.0 → 10.0.19045"); rare, and the alternative is not auditing the agent path. Discovery events are also optimistic with respect to Phase 7.5's `batchSettled` flush — the same caveat the Arc path already carries.
+
+---
+
 ## cross-cutting/reservation-push-lifecycle
 
 **What it is:** Two-way DHCP reservation ↔ FortiGate sync via pushReservations toggle on FMG/FortiGate integrations, sourceType flip (manual → dhcp_reservation on success), pushedScopeId/pushedEntryId tracking, and lease-release on free. **Transient device-side failures (FortiGate offline / FMG unreachable) at create time put the Polaris row in `pushStatus="pending"` and a 60s retry job + `monitor.status_changed → up` hook drive it to `synced` once the gate recovers.** Permanent failures (4xx, verify mismatch, auth) still abort-and-rollback the create.
@@ -2705,9 +2737,9 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** Records DHCP-only (asset, FortiGate) sightings to drive quarantine fan-out targeting.
 
-**Public API:** `recordSightings(), getSightingsForAsset(), getQuarantineCandidates(), getSightingSettings(), updateSightingSettings()`
+**Public API:** `recordSightings(), computeFreshestGateChanges(), getSightingsForAsset(), getQuarantineCandidates(), getSightingSettings(), updateSightingSettings()`
 
-**Cross-service deps:** None.
+**Cross-service deps:** `eventLogService` (`buildFirewallChangedEvent` + `logEventsBatch` — the `asset.gateway_firewall.changed` audit row), `utils/assetSourceLocation.bareFortinetDeviceName` (device-name normalization).
 
 **Used by:** `src/services/discovery/discoveryEngine.ts — batch-record sightings after DHCP discovery sync`, `src/api/routes/assets.ts — fetch sighting list for Quarantine tab`, `src/services/assetQuarantineService.ts — fan-out targeting within quarantineAsset()`
 
@@ -2716,6 +2748,9 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - `getQuarantineCandidates()` filters by `sightingMaxAgeDays` Setting (default 180; 0 = no filter); stored rows never auto-prune.
 - Only DHCP evidence qualifies (transit via System tab interface scrape intentionally excluded per design).
 - Every caller of `recordSightings()` must dedupe + normalize before passing; batch upsert handles dedup again for safety.
+- **Gateway-change audit** (`computeFreshestGateChanges`, pure + unit-tested): "freshest" is max `lastSeen` across the asset's rows — the SAME rule `syncEndpointDependencyEdges` uses to pick an endpoint's parent gate, so the event tracks the value that drives dependency suppression. A gate move INSERTS a row (the unique key includes `fortigateDevice`) and nothing prunes the old one, which is why the question is "which row is freshest" rather than "which exists". Three deliberate silences: no prior rows = first sighting, not a move; device names compare through `bareFortinetDeviceName` + case-fold; and the **takeover guard** — nothing is reported while the incumbent gate is ALSO refreshed in the same batch, because a device holding live leases on two gates has both rows stamped to ~now every run and would otherwise tie-flip an event every cycle forever. Cost of the guard: a real move reports once the old gate stops handing out the address, up to the old lease's life later.
+- `SightingInput.assetHostname` is supplied by the CALLER (which already holds the asset row) purely to name the audit event — this service must never query assets to label them.
+- Detection is wrapped in its own try/catch on both halves (pre-read and emit): `recordSightings` never throws, and an audit failure must not change that.
 
 **When changing this:**
 - Check `assetQuarantineService.ts` `quarantineAsset()` for sighting-filter logic (max-age, integration scoping).
@@ -3775,7 +3810,9 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** The shared audit-event writer. `logEvent` (never throws; drops rows below the operator-configured min level; stamps `levelRank` at write time), `buildChanges` (before/after diff for `.updated` events), `LogEventInput`. Plus the discovery per-asset audit helpers: `snapshotMaterialAssetFields` (capture material fields before a discovery branch mutates the in-memory asset), `computeMaterialAssetChanges` (pure diff over the material-field whitelist), `logDiscoveryAssetCreated` (`asset.discovered`), `logDiscoveryAssetUpdated` (`asset.discovery_updated` — fires only when a material field changed), `DiscoveryAuditContext`.
 
-**Public API:** `logEvent`, `buildChanges`, `LogEventInput`, `snapshotMaterialAssetFields`, `computeMaterialAssetChanges`, `logDiscoveryAssetCreated`, `logDiscoveryAssetUpdated`, `DiscoveryAuditContext`.
+Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFirmwareChangedEvent`, `buildConnectionChangedEvent`, `buildFirewallChangedEvent`, `AssetChangeEventContext`) behind `asset.firmware.changed` / `asset.switch_port.changed` / `asset.wireless_ap.changed` / `asset.gateway_firewall.changed`.
+
+**Public API:** `logEvent`, `logEventsBatch`, `buildChanges`, `LogEventInput`, `snapshotMaterialAssetFields`, `computeMaterialAssetChanges`, `logDiscoveryAssetCreated`, `logDiscoveryAssetUpdated`, `DiscoveryAuditContext`, `computeFirmwareChange`, `buildFirmwareChangedEvent`, `buildConnectionChangedEvent`, `buildFirewallChangedEvent`, `AssetChangeEventContext`.
 
 **Cross-service deps:** `eventArchiveService.getCachedRetentionSettings` (cached min-level read).
 
@@ -3788,7 +3825,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - The discovery audit MATERIAL_ASSET_FIELDS whitelist is the flood guard: discovery bumps `lastSeen` / fetched-at / monitor stamp every cycle on nearly every asset, so diffing those would write an event per asset per cycle (catastrophic at 2000 assets vs. 7-day Event retention). Only identity/classification/location fields are diffed; an unchanged pass emits nothing. The endpoint **update** path is intentionally NOT instrumented (it reassigns `macAddress` to the most-recently-sorted MAC each cycle → spurious diffs); only endpoint **create** is.
 
 **When changing this:**
-- The events.ts re-export must stay in lockstep (same symbol names) until the legacy importers are migrated.
+- The events.ts re-export must stay in lockstep (same symbol names) until the legacy importers are migrated. (It deliberately does NOT re-export the change-event builders — new code imports them from here.)
 - Anything that makes `logEvent` throw or block breaks every mutating route in the app — keep it best-effort.
 
 ---
@@ -3815,10 +3852,16 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **When changing this:**
 - Verify DiscoveryResult shape matches fortimanagerService exactly—sync pipeline expects field parity.
+- `lastSeenSwitch` / `lastSeenAp` are deliberately NOT in MATERIAL_ASSET_FIELDS: discovery Phase 7 writes them set-always, and Phase 7 vs 7.5 stage differently-formatted strings for the same port, so a generic staged-vs-before diff here could not stay quiet. Their dedicated events come from the builders instead.
+- **`logDiscoveryAssetUpdated` also emits `asset.firmware.changed`** when the material diff contains `os`/`osVersion`. This is the ONE seam covering all nine snapshot-based discovery paths (FortiGate / FortiSwitch / FortiAP infra, Arc, Entra/Intune, AD, vCenter) — don't re-emit firmware at those call sites, and don't record Fortinet-infra os/osVersion in discovery's change-baseline, or the event doubles.
+- The builders are **pure** (return `LogEventInput | undefined`, no Prisma) so discovery loops can accumulate into one `logEventsBatch` and the change decisions are unit-testable — see `tests/unit/assetChangeEvents.test.ts`.
+- **Firmware suppresses a null→value first learn** (Polaris learning what a device runs is identification, already covered by `asset.discovered`/`asset.discovery_updated`) and a value→null (a source going quiet is not a downgrade). **Connection events do the opposite for null→value**: first observed attachment IS the "where is this plugged in" record worth having. Both connection kinds compare trim + case-insensitively, because discovery writes `inv.apName` while the wireless scrape writes the AP asset's hostname and a pure case difference between the two writers would otherwise alternate an event every cycle.
+- These four actions are written UNCONDITIONALLY — never through `maybeEmitChangeEvents`/`isChangeActionSubscribed` like the `change.*` family. They're edge-triggered and rare, so a steady fleet writes none; their entries in `notificationTypes.CHANGE_TYPES` only give the automations wizard a picker over an always-present event.
 - Check monitoringService and both push services still call fgRequest with correct vdom/token/method signatures.
 - Confirm proxyQuery handles GET/POST/PUT/DELETE correctly for manual testing route.
 - Test discovery parallelism (no clamping unlike FMG proxy mode) with high per-device concurrency.
 - Ensure VDOM parameter threading is correct (default "root"; custom vdoms from config).
+- Renaming any of the four `asset.*.changed` action strings must move `CHANGE_TYPE_ACTIONS` in `notificationTypes.ts` in the same commit, or stored automations silently stop matching (`tests/unit/notificationChangeTypes.test.ts` pins the pairing).
 - Adding another per-FortiGate REST endpoint: add an 8th chain inside the Promise.all rather than appending after — keeps wall-clock at max(chain) instead of sum(chains).
 
 ---

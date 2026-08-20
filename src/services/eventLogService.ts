@@ -161,6 +161,16 @@ export function buildChanges(
 // 7-day Event table at 2000 assets. The whitelist below is the identity /
 // classification / location surface an operator actually wants an audit trail
 // for; an unchanged pass produces NO event. See CLAUDE.md scale-check rule.
+//
+// lastSeenSwitch / lastSeenAp stay OUT of this whitelist on purpose: Phase 7
+// of discovery writes them set-always (same value restated every cycle), and
+// Phase 7 vs Phase 7.5 stage differently-formatted strings for the same port,
+// so a generic staged-vs-before diff here could not be trusted to stay quiet.
+// Their dedicated change events (asset.switch_port.changed /
+// asset.wireless_ap.changed — see the builders at the bottom of this file)
+// are emitted edge-triggered by the write sites themselves; discovery nets
+// its intra-run ping-pong through the end-of-run change-baseline flush in
+// syncDhcpSubnets.
 const MATERIAL_ASSET_FIELDS = [
   "hostname",
   "ipAddress",
@@ -251,6 +261,29 @@ export function logDiscoveryAssetUpdated(
 ): void {
   const changes = computeMaterialAssetChanges(before, after);
   if (!changes) return; // nothing material changed → no event
+
+  // Firmware gets its OWN event on top of the generic diff. This is the single
+  // seam covering every snapshot-based discovery path (FortiGate / FortiSwitch
+  // / FortiAP infra, Arc, Entra/Intune, AD, vCenter) — they all funnel through
+  // here, so hooking it once beats patching nine call sites. The generic
+  // asset.discovery_updated row still carries os/osVersion in its changes map;
+  // this adds the findable, automatable action string.
+  if ("os" in changes || "osVersion" in changes) {
+    const firmwareEvent = buildFirmwareChangedEvent(
+      {
+        assetId,
+        assetName: name,
+        actor: ctx.actor,
+        source: ctx.sourceKind,
+        integrationId: ctx.integrationId,
+        integrationName: ctx.integrationName,
+      },
+      before,
+      after,
+    );
+    if (firmwareEvent) void logEvent(firmwareEvent);
+  }
+
   const label = name || assetId;
   const via = ctx.sourceKind ? ` (${ctx.sourceKind})` : "";
   void logEvent({
@@ -264,4 +297,184 @@ export function logDiscoveryAssetUpdated(
     message: `Asset "${label}" updated by ${ctx.integrationName} discovery${via}`,
     details: { changes, integrationId: ctx.integrationId, integrationName: ctx.integrationName, sourceKind: ctx.sourceKind },
   });
+}
+
+// ─── Per-asset change events: firmware + network attachment ──────────────────
+//
+// Four edge-triggered audit events an operator asked to be able to see on the
+// asset's Events tab and alert on:
+//
+//   asset.firmware.changed          os / osVersion moved
+//   asset.switch_port.changed       lastSeenSwitch moved
+//   asset.wireless_ap.changed       lastSeenAp moved (every roam)
+//   asset.gateway_firewall.changed  the freshest FortiGate sighting flipped
+//
+// Unlike the `change.*` family in notificationChangeEvents.ts these are written
+// UNCONDITIONALLY — never behind isChangeActionSubscribed. They're rare (a
+// steady fleet produces none) and the operator wants them in the audit log
+// whether or not an automation subscribes. They ARE listed in the automations
+// change-trigger picker (notificationTypes.CHANGE_TYPES) so a rule can watch
+// them; the picker entry just selects an always-present event.
+//
+// The builders below are PURE — they return a LogEventInput or undefined and
+// touch no Prisma — so callers in discovery loops can accumulate them into one
+// logEventsBatch, and the change-decision logic is unit-testable on its own.
+
+export interface AssetChangeEventContext {
+  assetId: string;
+  // hostname || ipAddress — the Events tab's resourceName column.
+  assetName?: string | null;
+  // Defaults per event to "system:discovery"; pass an operator username for
+  // operator-driven writes.
+  actor?: string | null;
+  // What drove the write: "fortigate-endpoint" | "fortiap" | "polaris-agent"
+  // | "wireless-scrape" | "dhcp-sighting" | "operator" | "pdf-import".
+  source?: string | null;
+  integrationId?: string | null;
+  integrationName?: string | null;
+}
+
+function changeDetails(
+  ctx: AssetChangeEventContext,
+  changes: Record<string, { from: unknown; to: unknown }>,
+): Record<string, unknown> {
+  return {
+    changes,
+    source: ctx.source ?? undefined,
+    integrationId: ctx.integrationId ?? undefined,
+    integrationName: ctx.integrationName ?? undefined,
+  };
+}
+
+function displayValue(v: unknown): string {
+  const s = typeof v === "string" ? v.trim() : v == null ? "" : String(v);
+  return s === "" ? "(none)" : s;
+}
+
+/**
+ * Pure firmware diff over os/osVersion. A field is considered only when the
+ * caller staged it (present in `after`), matching computeMaterialAssetChanges.
+ *
+ * A null→value transition is deliberately NOT a firmware change: that's Polaris
+ * learning what the device runs for the first time (a fresh discovery, a newly
+ * installed agent, a source that just started reporting), which is already
+ * covered by asset.discovered / asset.discovery_updated. Only a value→different
+ * value move means the device was actually upgraded or downgraded.
+ */
+export function computeFirmwareChange(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): Record<string, { from: unknown; to: unknown }> | undefined {
+  const changes: Record<string, { from: unknown; to: unknown }> = {};
+  for (const f of ["osVersion", "os"] as const) {
+    if (!(f in after)) continue;
+    const a = (before as any)[f] ?? null;
+    const b = (after as any)[f] ?? null;
+    if (a === null) continue; // first learn, not an upgrade
+    if (b === null) continue; // a source going quiet is not a downgrade
+    if (JSON.stringify(a) !== JSON.stringify(b)) changes[f] = { from: a, to: b };
+  }
+  return Object.keys(changes).length ? changes : undefined;
+}
+
+export function buildFirmwareChangedEvent(
+  ctx: AssetChangeEventContext,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): LogEventInput | undefined {
+  const changes = computeFirmwareChange(before, after);
+  if (!changes) return undefined;
+  const label = ctx.assetName || ctx.assetId;
+  const parts: string[] = [];
+  if (changes.osVersion) {
+    parts.push(`firmware changed: ${displayValue(changes.osVersion.from)} → ${displayValue(changes.osVersion.to)}`);
+  }
+  if (changes.os) {
+    // Reads as one sentence either way: "firmware changed: A → B; OS X → Y"
+    // when both moved, "OS changed: X → Y" when only the family did.
+    const lead = parts.length ? "OS" : "OS changed:";
+    parts.push(`${lead} ${displayValue(changes.os.from)} → ${displayValue(changes.os.to)}`);
+  }
+  return {
+    action: "asset.firmware.changed",
+    resourceType: "asset",
+    resourceId: ctx.assetId,
+    resourceName: ctx.assetName || undefined,
+    actor: ctx.actor || "system:discovery",
+    level: "info",
+    message: `Asset "${label}" ${parts.join("; ")}`,
+    details: changeDetails(ctx, changes),
+  };
+}
+
+/**
+ * Switch-port / wireless-AP attachment change.
+ *
+ * Comparison is trim + case-insensitive: the same attachment is written by more
+ * than one subsystem (discovery's device-inventory apName vs the wireless
+ * scrape's AP hostname), and a pure case difference between them would
+ * otherwise alternate an event every cycle.
+ *
+ * `to === null` returns undefined — the writers only ever stage a value they
+ * observed, so a null means "nothing seen this pass", not "detached". A
+ * `from === null` DOES emit: first observed attachment is exactly the
+ * "where is this device plugged in" record an operator wants.
+ */
+export function buildConnectionChangedEvent(
+  kind: "switch" | "ap",
+  ctx: AssetChangeEventContext,
+  from: string | null | undefined,
+  to: string | null | undefined,
+): LogEventInput | undefined {
+  const next = typeof to === "string" ? to.trim() : "";
+  if (!next) return undefined;
+  const prev = typeof from === "string" ? from.trim() : "";
+  if (prev.toLowerCase() === next.toLowerCase()) return undefined;
+
+  const field = kind === "switch" ? "lastSeenSwitch" : "lastSeenAp";
+  const changes = { [field]: { from: prev || null, to: next } };
+  const label = ctx.assetName || ctx.assetId;
+  const message =
+    kind === "switch"
+      ? `Asset "${label}" switch port changed: ${displayValue(prev)} → ${next}`
+      : prev
+        ? `Asset "${label}" roamed to AP "${next}" (was "${prev}")`
+        : `Asset "${label}" connected to AP "${next}"`;
+  return {
+    action: kind === "switch" ? "asset.switch_port.changed" : "asset.wireless_ap.changed",
+    resourceType: "asset",
+    resourceId: ctx.assetId,
+    resourceName: ctx.assetName || undefined,
+    actor: ctx.actor || "system:discovery",
+    level: "info",
+    message,
+    details: changeDetails(ctx, changes),
+  };
+}
+
+/**
+ * The FortiGate an asset currently sits behind changed — i.e. the freshest
+ * AssetFortigateSighting row now names a different gate. Callers decide WHEN
+ * that's true (see computeFreshestGateChanges in assetSightingService); this
+ * only shapes the row.
+ */
+export function buildFirewallChangedEvent(
+  ctx: AssetChangeEventContext,
+  from: string,
+  to: string,
+): LogEventInput | undefined {
+  const prev = (from ?? "").trim();
+  const next = (to ?? "").trim();
+  if (!next || prev.toLowerCase() === next.toLowerCase()) return undefined;
+  const label = ctx.assetName || ctx.assetId;
+  return {
+    action: "asset.gateway_firewall.changed",
+    resourceType: "asset",
+    resourceId: ctx.assetId,
+    resourceName: ctx.assetName || undefined,
+    actor: ctx.actor || "system:discovery",
+    level: "info",
+    message: `Asset "${label}" gateway FortiGate changed: ${displayValue(prev)} → ${next}`,
+    details: changeDetails(ctx, { seenFirewall: { from: prev || null, to: next } }),
+  };
 }
