@@ -8,7 +8,13 @@
  * them. A fully-down asset must read 100% loss rather than whatever answers its
  * address.
  *
+ * The sampler is currently DISABLED via the LOSS_SAMPLER_ENABLED kill switch
+ * (packet loss reads from the response-time poll alone); the window logic is
+ * exercised with an explicit `enabled: true` so it stays verified for when the
+ * feature is revisited, and the kill-switch block pins the shipped default.
+ *
  * Coverage:
+ *   - the kill switch: default-off, and off wins over an otherwise-eligible asset.
  *   - the window: warning/recovering sample; up / down / recovering-adjacent
  *     states and unknown/null do not.
  *   - dependency suppression excludes (never ping into an upstream outage).
@@ -23,6 +29,7 @@ import {
   lossSamplerAppliesTo,
   lossSampleIsDue,
   lossSamplerTarget,
+  LOSS_SAMPLER_ENABLED,
   LOSS_SAMPLER_INTERVAL_SEC,
   LOSS_SAMPLER_TIMEOUT_MS,
 } from "../../src/utils/lossSampler.js";
@@ -34,55 +41,67 @@ const asset = (over: Record<string, unknown> = {}) => ({
   ...over,
 }) as any;
 
-describe("lossSamplerAppliesTo — the window", () => {
-  it("samples while a failure run is being served (warning)", () => {
-    expect(lossSamplerAppliesTo(asset({ monitorStatus: "warning" }), eff())).toBe(true);
+describe("lossSamplerAppliesTo — kill switch", () => {
+  it("is shipped disabled: the default call refuses an otherwise-eligible asset", () => {
+    expect(LOSS_SAMPLER_ENABLED).toBe(false);
+    expect(lossSamplerAppliesTo(asset(), eff())).toBe(false);
   });
 
-  it("samples while a recovery run is being served (recovering)", () => {
-    expect(lossSamplerAppliesTo(asset({ monitorStatus: "recovering" }), eff())).toBe(true);
-  });
-
-  it("does NOT sample a down asset — uncorroborated ICMP could mask 100% loss", () => {
-    expect(lossSamplerAppliesTo(asset({ monitorStatus: "down" }), eff())).toBe(false);
-  });
-
-  it("does not sample a healthy asset (nothing to resolve — loss is 0%)", () => {
-    expect(lossSamplerAppliesTo(asset({ monitorStatus: "up" }), eff())).toBe(false);
-  });
-
-  it("does not sample an asset that has never been probed", () => {
-    expect(lossSamplerAppliesTo(asset({ monitorStatus: "unknown" }), eff())).toBe(false);
-    expect(lossSamplerAppliesTo(asset({ monitorStatus: null }), eff())).toBe(false);
+  it("an explicit enabled=false wins regardless of state", () => {
+    expect(lossSamplerAppliesTo(asset({ monitorStatus: "warning" }), eff(), false)).toBe(false);
+    expect(lossSamplerAppliesTo(asset({ monitorStatus: "recovering" }), eff(), false)).toBe(false);
   });
 });
 
-describe("lossSamplerAppliesTo — exclusions", () => {
+describe("lossSamplerAppliesTo — the window (enabled)", () => {
+  it("samples while a failure run is being served (warning)", () => {
+    expect(lossSamplerAppliesTo(asset({ monitorStatus: "warning" }), eff(), true)).toBe(true);
+  });
+
+  it("samples while a recovery run is being served (recovering)", () => {
+    expect(lossSamplerAppliesTo(asset({ monitorStatus: "recovering" }), eff(), true)).toBe(true);
+  });
+
+  it("does NOT sample a down asset — uncorroborated ICMP could mask 100% loss", () => {
+    expect(lossSamplerAppliesTo(asset({ monitorStatus: "down" }), eff(), true)).toBe(false);
+  });
+
+  it("does not sample a healthy asset (nothing to resolve — loss is 0%)", () => {
+    expect(lossSamplerAppliesTo(asset({ monitorStatus: "up" }), eff(), true)).toBe(false);
+  });
+
+  it("does not sample an asset that has never been probed", () => {
+    expect(lossSamplerAppliesTo(asset({ monitorStatus: "unknown" }), eff(), true)).toBe(false);
+    expect(lossSamplerAppliesTo(asset({ monitorStatus: null }), eff(), true)).toBe(false);
+  });
+});
+
+describe("lossSamplerAppliesTo — exclusions (enabled)", () => {
   it("never pings into an upstream outage", () => {
-    expect(lossSamplerAppliesTo(asset({ dependencySuppressed: true }), eff())).toBe(false);
+    expect(lossSamplerAppliesTo(asset({ dependencySuppressed: true }), eff(), true)).toBe(false);
     // ...and an explicit false is not treated as suppression.
-    expect(lossSamplerAppliesTo(asset({ dependencySuppressed: false }), eff())).toBe(true);
+    expect(lossSamplerAppliesTo(asset({ dependencySuppressed: false }), eff(), true)).toBe(true);
   });
 
   it("skips an asset in a maintenance window", () => {
-    expect(lossSamplerAppliesTo(asset({ status: "maintenance" }), eff())).toBe(false);
-    expect(lossSamplerAppliesTo(asset({ status: "active" }), eff())).toBe(true);
+    expect(lossSamplerAppliesTo(asset({ status: "maintenance" }), eff(), true)).toBe(false);
+    expect(lossSamplerAppliesTo(asset({ status: "active" }), eff(), true)).toBe(true);
   });
 
   it("skips streams the server does not drive", () => {
-    expect(lossSamplerAppliesTo(asset(), eff("agent"))).toBe(false);
-    expect(lossSamplerAppliesTo(asset(), eff("disabled"))).toBe(false);
-    expect(lossSamplerAppliesTo(asset(), eff(null))).toBe(false);
+    expect(lossSamplerAppliesTo(asset(), eff("agent"), true)).toBe(false);
+    expect(lossSamplerAppliesTo(asset(), eff("disabled"), true)).toBe(false);
+    expect(lossSamplerAppliesTo(asset(), eff(null), true)).toBe(false);
   });
 
   it("applies regardless of which transport the response-time stream uses", () => {
     for (const m of ["snmp", "icmp", "rest_api", "winrm", "ssh"]) {
-      expect(lossSamplerAppliesTo(asset(), eff(m))).toBe(true);
+      expect(lossSamplerAppliesTo(asset(), eff(m), true)).toBe(true);
     }
   });
 
   it("skips an asset with nothing to ping", () => {
-    expect(lossSamplerAppliesTo(asset({ ipAddress: null }), eff())).toBe(false);
+    expect(lossSamplerAppliesTo(asset({ ipAddress: null }), eff(), true)).toBe(false);
   });
 });
 

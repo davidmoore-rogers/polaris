@@ -5,7 +5,8 @@
  * cadence up-only gates, the per-method telemetry/systemInfo exclusions, the
  * fastFiltered skip-when-systemInfo-due rule, the agentless processes gating,
  * the absence of any mid-run probe acceleration, and the ICMP loss sampler's
- * warning/recovering-only window. Candidates are synthetic — computeDueWork touches the DB only
+ * disabled state (LOSS_SAMPLER_ENABLED kill switch — see utils/lossSampler.ts).
+ * Candidates are synthetic — computeDueWork touches the DB only
  * through the (cached) settings resolver -- which is why this lives in
  * tests/integration: the resolver reads the manual-tier Setting row.
  */
@@ -14,7 +15,6 @@ import { it, expect, beforeAll } from "vitest";
 import { dbDescribe, dbReachable } from "./_helpers.js";
 import {
   computeDueWork,
-  LOSS_SAMPLES_MAX_PER_PASS,
   resolveMonitorSettings,
   type MonitorPassCandidate,
   type MonitorCadence,
@@ -238,81 +238,31 @@ dbDescribe("probe cadence is not accelerated mid-run", () => {
 });
 
 // ─── ICMP packet-loss sampler (business rule 30) ──────────────────────────────
-// The 10s side-probe that replaced fast-confirm. It exists to give probeLossPct
-// resolution during a run and feeds NOTHING else — the predicate itself is
-// unit-tested in tests/unit/lossSampler.test.ts; these pin that computeDueWork
-// puts it in the due-set at the right times and, crucially, never for a `down`
-// asset (where an uncorroborated ICMP reply could mask a 100% loss reading).
+// The 10s side-probe that replaced fast-confirm — currently DISABLED via the
+// LOSS_SAMPLER_ENABLED kill switch in utils/lossSampler.ts (operator decision,
+// 2026-08-20: the non-uniform sampling bias made alert readings diverge from
+// the wall-clock chart average; packet loss reads from the response-time poll
+// alone for now). These pin the disabled state: an otherwise-eligible asset
+// collects nothing, and probes are untouched. The window predicate itself
+// stays verified in tests/unit/lossSampler.test.ts (explicit enabled=true);
+// the enabled-path due-set tests (window, 10s cadence, per-pass cap,
+// probe-independence) lived here before the switch — restore them from this
+// block's git history when the sampler is re-enabled.
 
-dbDescribe("loss-sample due-set", () => {
-  it("samples a warning asset and a recovering one", async () => {
+dbDescribe("loss-sample due-set (sampler disabled)", () => {
+  it("collects nothing even for warning/recovering assets while the kill switch is off", async () => {
     const warning = cand({ id: "warning", monitorStatus: "warning", consecutiveFailures: 1, consecutiveSuccesses: 0 });
     const recovering = cand({ id: "recovering", monitorStatus: "recovering", consecutiveFailures: 0, consecutiveSuccesses: 1 });
 
     const due = await computeDueWork([warning, recovering], ALL, now);
-    expect(due.lossSamples.map((w) => w.id).sort()).toEqual(["recovering", "warning"]);
-    expect(due.lossSamples.every((w) => w.kind === "lossSample")).toBe(true);
-  });
-
-  it("does not sample a down asset, an up asset, or one never probed", async () => {
-    const down = cand({ id: "down", monitorStatus: "down", consecutiveFailures: 9 });
-    const up = cand({ id: "up", monitorStatus: "up" });
-    const unknown = cand({ id: "unknown", monitorStatus: "unknown" });
-
-    const due = await computeDueWork([down, up, unknown], ALL, now);
     expect(due.lossSamples).toEqual([]);
   });
 
-  it("skips a suppressed asset — never ping into an upstream outage", async () => {
-    const suppressed = cand({ monitorStatus: "warning", consecutiveFailures: 1, dependencySuppressed: true });
+  it("leaves the probe cadence untouched — down detection is unaffected", async () => {
+    const warning = cand({ monitorStatus: "warning", consecutiveFailures: 1, lastMonitorAt: ago(probeSec), lastLossSampleAt: ago(30) });
 
-    const due = await computeDueWork([suppressed], ALL, now);
-    expect(due.lossSamples).toEqual([]);
-  });
-
-  it("skips an asset with nothing to ping", async () => {
-    const nameless = cand({ monitorStatus: "warning", consecutiveFailures: 1, ipAddress: null, dnsName: null, hostname: null });
-
-    const due = await computeDueWork([nameless], ALL, now);
-    expect(due.lossSamples).toEqual([]);
-  });
-
-  it("honours the 10s cadence", async () => {
-    const fresh = cand({ id: "fresh", monitorStatus: "warning", consecutiveFailures: 1, lastLossSampleAt: ago(4) });
-    const stale = cand({ id: "stale", monitorStatus: "warning", consecutiveFailures: 1, lastLossSampleAt: ago(11) });
-
-    const due = await computeDueWork([fresh, stale], ALL, now);
-    expect(due.lossSamples.map((w) => w.id)).toEqual(["stale"]);
-  });
-
-  it("is independent of the probe due-check — both can be due on one tick", async () => {
-    // Separate anchors: the sampler must not disturb the response-time cadence,
-    // and a warning asset whose interval has elapsed owes both.
-    const both = cand({ monitorStatus: "warning", consecutiveFailures: 1, lastMonitorAt: ago(probeSec), lastLossSampleAt: ago(30) });
-
-    const due = await computeDueWork([both], ALL, now);
+    const due = await computeDueWork([warning], ALL, now);
     expect(due.probes.map((p) => p.id)).toEqual(["cand-1"]);
-    expect(due.lossSamples.map((w) => w.id)).toEqual(["cand-1"]);
-  });
-
-  it("caps the due-set so one pass can never starve the probe cadence", async () => {
-    // A site outage puts hundreds of assets into warning at once. runMonitorPass
-    // awaits the whole pass, so an uncapped burst would delay the next light tick
-    // and with it the probes that decide whether those assets are really down.
-    const many = Array.from({ length: LOSS_SAMPLES_MAX_PER_PASS + 25 }, (_, i) =>
-      cand({ id: `w-${i}`, monitorStatus: "warning", consecutiveFailures: 1 }),
-    );
-
-    const due = await computeDueWork(many, ALL, now);
-    expect(due.lossSamples).toHaveLength(LOSS_SAMPLES_MAX_PER_PASS);
-    // Probes are unaffected by the cap — they are the cadence being protected.
-    expect(due.probes).toHaveLength(many.length);
-  });
-
-  it("collects nothing when the cadence is not enabled", async () => {
-    const warning = cand({ monitorStatus: "warning", consecutiveFailures: 1 });
-
-    const due = await computeDueWork([warning], new Set<MonitorCadence>(["probe"]), now);
     expect(due.lossSamples).toEqual([]);
   });
 });

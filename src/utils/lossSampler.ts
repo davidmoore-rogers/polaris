@@ -50,6 +50,18 @@
  * the monitor pool is busiest.
  */
 
+/**
+ * Master kill switch — the sampler is DISABLED for now (operator decision,
+ * 2026-08-20): packet loss reads from the response-time poll's own cadence
+ * alone. The non-uniform sampling bias (business rule 29d — the sampler runs
+ * BECAUSE probes fail, so failure periods are oversampled) made the alert
+ * reading diverge visibly from the wall-clock chart average, and until that's
+ * revisited the coarser but unbiased poll-only ratio is preferred. Flip to
+ * true to re-enable; everything downstream (due-sets, queue worker, chart and
+ * ratio readers) is still wired and needs no other change.
+ */
+export const LOSS_SAMPLER_ENABLED = false;
+
 /** Spacing between loss samples, in seconds. */
 export const LOSS_SAMPLER_INTERVAL_SEC = 10;
 
@@ -97,8 +109,18 @@ export function lossSamplerTarget(a: LossSamplerAsset): string | null {
  * Should the loss sampler run for this asset at all right now? Pure — the
  * caller supplies resolved settings. Cadence is a separate question
  * (`lossSampleIsDue`).
+ *
+ * `enabled` defaults to the module kill switch so every consumer (both
+ * due-set builders AND the worker's pickup re-check, which covers jobs
+ * already queued when a deploy lands) goes quiet through the one predicate;
+ * tests pass `true` to exercise the window logic underneath.
  */
-export function lossSamplerAppliesTo(a: LossSamplerAsset, eff: LossSamplerSettings): boolean {
+export function lossSamplerAppliesTo(
+  a: LossSamplerAsset,
+  eff: LossSamplerSettings,
+  enabled: boolean = LOSS_SAMPLER_ENABLED,
+): boolean {
+  if (!enabled) return false;
   if (!SAMPLED_STATES.has(String(a.monitorStatus ?? ""))) return false;
   if (a.dependencySuppressed === true) return false;
   if (String(a.status ?? "") === "maintenance") return false;
