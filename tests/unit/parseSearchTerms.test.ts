@@ -7,15 +7,15 @@ import { parseSearchTerms } from "../../src/services/searchService.js";
 
 describe("parseSearchTerms", () => {
   it("returns a single term for one word", () => {
-    expect(parseSearchTerms("rgihardware")).toEqual(["rgihardware"]);
+    expect(parseSearchTerms("acmehardware")).toEqual(["acmehardware"]);
   });
 
   it("splits space-separated words into multiple terms", () => {
-    expect(parseSearchTerms("rgihardware metro")).toEqual(["rgihardware", "metro"]);
+    expect(parseSearchTerms("acmehardware metro")).toEqual(["acmehardware", "metro"]);
   });
 
   it("collapses runs of whitespace and trims edges", () => {
-    expect(parseSearchTerms("  rgihardware    metro  ")).toEqual(["rgihardware", "metro"]);
+    expect(parseSearchTerms("  acmehardware    metro  ")).toEqual(["acmehardware", "metro"]);
     expect(parseSearchTerms("a\tb\nc")).toEqual(["a", "b", "c"]);
   });
 
