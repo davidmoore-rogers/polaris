@@ -119,4 +119,23 @@ describe("tag picker — region tags are editable", () => {
     render(["region:Nashville"], { readOnly: true });
     expect((doc.getElementById("host") as unknown as HTMLElement).textContent).toContain("region:Nashville");
   });
+
+  it("unselected chips are dimmed on all three channels, not just background", () => {
+    // The old style differed only in background alpha (44 vs 11) — border and
+    // text stayed full-strength color, so every chip read as "active" (the
+    // 2026-08 report against the Map Regions row). Pin the three-channel split.
+    render(["region:Nashville"]);
+    const styleOf = (name: string) =>
+      (chipInput(name)!.parentElement as unknown as HTMLElement).getAttribute("style") ?? "";
+
+    const on = styleOf("region:Nashville"); // color #4fc3f7
+    expect(on).toContain("background:#4fc3f744");
+    expect(on).toContain("border-color:#4fc3f7;");
+    expect(on).toContain("color:#4fc3f7");
+
+    const off = styleOf("region:Atlanta"); // color #4ade80
+    expect(off).toContain("background:#4ade8011");
+    expect(off).toContain("border-color:#4ade8040");
+    expect(off).toContain("color:#4ade8099");
+  });
 });

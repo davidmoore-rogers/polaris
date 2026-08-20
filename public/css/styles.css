@@ -3402,6 +3402,10 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .tag-picker-chip.selected {
   font-weight: 600;
 }
+/* Interactive picker only — the read-only render uses <span> chips, where every
+   chip is by definition applied. The glyph is the color-independent half of the
+   selected/unselected distinction (the dimming half is inline, per tag color). */
+label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .tag-picker-chip:hover { border-color: var(--color-accent); }
 
 .upload-area {

@@ -2556,6 +2556,19 @@ function _ensureTagCache() {
 // The Map Regions category carries a hint saying exactly that.
 var REGION_TAG_CATEGORY = "Map Regions";
 
+// Inline style for one tag chip. Selected/unselected must be tellable apart at
+// a glance for ANY tag color, so the distinction rides three channels — an
+// unselected chip dims its border and text as well as its background. Background
+// alpha alone (the old 44-vs-11 split) left every chip's full-strength border +
+// text looking equally "on" in a dark theme.
+function _tagChipStyle(color, checked) {
+  if (!color) return '';
+  var c = escapeHtml(color);
+  return checked
+    ? 'background:' + c + '44;border-color:' + c + ';color:' + c
+    : 'background:' + c + '11;border-color:' + c + '40;color:' + c + '99';
+}
+
 /**
  * Build tag field HTML. Call _ensureTagCache() before using this.
  * selected: array of currently selected tag names
@@ -2578,9 +2591,7 @@ function _renderTagChips(selected) {
         '<span class="tag-picker-cat-label">' + escapeHtml(cat) + '</span>';
       cats[cat].forEach(function (t) {
         var checked = selected.indexOf(t.name) !== -1;
-        var colorStyle = t.color
-          ? 'background:' + escapeHtml(t.color) + (checked ? '44' : '11') + ';border-color:' + escapeHtml(t.color) + ';color:' + escapeHtml(t.color)
-          : '';
+        var colorStyle = _tagChipStyle(t.color, checked);
         html += '<label class="tag-picker-chip' + (checked ? ' selected' : '') + '" style="' + colorStyle + '">' +
           '<input type="checkbox" name="f-tags-cb" value="' + escapeHtml(t.name) + '"' + (checked ? ' checked' : '') + '>' +
           escapeHtml(t.name) +
@@ -2613,8 +2624,7 @@ function tagFieldHTML(selected, opts) {
     _tagCache.tags.forEach(function (t) { tagsByName[t.name] = t; });
     var chips = visibleSelected.map(function (name) {
       var t = tagsByName[name];
-      var color = t && t.color ? t.color : '';
-      var style = color ? 'background:' + escapeHtml(color) + '44;border-color:' + escapeHtml(color) + ';color:' + escapeHtml(color) : '';
+      var style = _tagChipStyle(t && t.color ? t.color : '', true);
       return '<span class="tag-picker-chip selected" style="' + style + '">' + escapeHtml(name) + '</span>';
     }).join('');
     return '<div class="form-group"><label>Tags</label><div class="tag-picker" style="pointer-events:none">' + chips + '</div></div>';
@@ -2672,7 +2682,7 @@ function _wireChipListeners(container) {
       }
       var tag = _tagCache.tags.find(function (t) { return t.name === cb.value; });
       if (tag && tag.color) {
-        label.style.background = tag.color + (cb.checked ? '44' : '11');
+        label.style.cssText = _tagChipStyle(tag.color, cb.checked);
       }
     });
   });
