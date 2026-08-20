@@ -1296,6 +1296,45 @@ async function _handleMacDeleteClick(e) {
   }
 }
 
+// Render the list-controls row: page navigation, the "Show N" page-size
+// selector and the Refresh / Clear Filters buttons. Called on EVERY render,
+// including the zero-row ones — a filter matching nothing used to
+// clearPageControls() and take the whole row with it, which removed Clear
+// Filters in exactly the state that needs it (empty table, no way back but a
+// reload) along with the page size the operator had chosen.
+function _renderAssetsPageControls() {
+  // Nothing matched: there's no page to be on, so report page 1 rather than
+  // whatever high page the operator filtered down from — fetchAssetsPage's
+  // clamp only fires while the total is non-zero, so a stale page number would
+  // leave "Prev" enabled and paging backwards through empty results.
+  if (_assetsTotal === 0) _assetsPage = 1;
+  renderPageControls("pagination", _assetsTotal, _assetsPageSize, _assetsPage, function (p) {
+    _assetsPage = p;
+    fetchAssetsPage();
+  }, function (size) {
+    _assetsPageSize = size;
+    _assetsPage = 1;
+    fetchAssetsPage();
+    _saveAssetsPrefs();
+  }, {
+    actionButtons: [
+      {
+        label: "Refresh",
+        onClick: loadAssets,
+      },
+      {
+        label: "Clear Filters",
+        onClick: function () {
+          if (_assetsSF) _assetsSF.clearFilters();
+          _assetsPage = 1;
+          fetchAssetsPage();
+          _saveAssetsPrefs();
+        },
+      },
+    ],
+  });
+}
+
 function renderAssetsPage() {
   var tbody = document.getElementById("assets-tbody");
   tbody.removeEventListener("click", _handleCopyClick);
@@ -1311,7 +1350,7 @@ function renderAssetsPage() {
     tbody.innerHTML = hasFilters
       ? '<tr><td colspan="20" class="empty-state">No results match the current filters.</td></tr>'
       : '<tr><td colspan="20" class="empty-state">No assets found. Add one to get started.</td></tr>';
-    clearPageControls("pagination");
+    _renderAssetsPageControls();
     _assetsUpdateSelectAll();
     return;
   }
@@ -1352,31 +1391,7 @@ function renderAssetsPage() {
     el.addEventListener('mouseleave', _handleMacLeave);
   });
   _assetsUpdateSelectAll();
-  renderPageControls("pagination", _assetsTotal, _assetsPageSize, _assetsPage, function (p) {
-    _assetsPage = p;
-    fetchAssetsPage();
-  }, function (size) {
-    _assetsPageSize = size;
-    _assetsPage = 1;
-    fetchAssetsPage();
-    _saveAssetsPrefs();
-  }, {
-    actionButtons: [
-      {
-        label: "Refresh",
-        onClick: loadAssets,
-      },
-      {
-        label: "Clear Filters",
-        onClick: function () {
-          if (_assetsSF) _assetsSF.clearFilters();
-          _assetsPage = 1;
-          fetchAssetsPage();
-          _saveAssetsPrefs();
-        },
-      },
-    ],
-  });
+  _renderAssetsPageControls();
 }
 
 // Capture lightweight metadata for a selected asset from the current page, so
