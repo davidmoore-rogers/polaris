@@ -171,6 +171,9 @@
   <!-- Mass Pinning tab (Settings modal): needs condition-builder.js + api.js,
        both above. assets.js only reads window.PolarisMassPin lazily when the
        modal renders, so loading after assets.js is fine. -->
+  <!-- IP cross-reference panel in the Add Asset form (assets-ipcontext.js).
+       After assets.js, which mounts it from openCreateModal. -->
+  <script src="/js/assets-ipcontext.js"></script>
   <script src="/js/assets-masspin.js"></script>
 </body>
 </html>

@@ -3337,6 +3337,10 @@ model AssetFortigateSighting {
   @@index([assetId, lastSeen])
   @@index([integrationId])
   @@index([fortigateDevice])
+  // "which gate has seen THIS address" -- the Add Asset form's IP
+  // cross-reference (services/ipContextService.ts). Every other consumer comes
+  // in through assetId.
+  @@index([ipAddress])
   @@map("asset_fortigate_sightings")
 }
 

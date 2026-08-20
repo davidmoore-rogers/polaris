@@ -3115,6 +3115,16 @@ function assetFormHTML(defaults) {
         '<div class="form-group"><label>DNS Name</label><input type="text" id="f-dnsName" value="' + escapeHtml(d.dnsName || "") + '" placeholder="e.g. server-01.corp.local"></div>' +
         '<div class="form-group"><label>IP Address</label><input type="text" id="f-ipAddress" value="' + escapeHtml(d.ipAddress || "") + '" placeholder="e.g. 10.0.1.50"></div>' +
         '<div class="form-group"><label>MAC Address</label><input type="text" id="f-macAddress" value="' + escapeHtml(d.macAddress || "") + '" placeholder="e.g. 00:1A:2B:3C:4D:5E"></div>' +
+        // IP cross-reference (assets-ipcontext.js), create-only: a manually
+        // added asset has no discovery behind it, so the containing network,
+        // the lease/reservation on the address and the gate it sits behind are
+        // all facts the form would otherwise never surface. Full grid width —
+        // it sits under the IP/MAC row and can fill both. Placed after MAC so
+        // that row stays intact. Guarded: a page that didn't load the module
+        // renders the form exactly as before.
+        '<div style="grid-column:1 / -1">' +
+          (window.PolarisIpContext ? window.PolarisIpContext.panelHTML("f-ip-context") : "") +
+        '</div>' +
         '<div class="form-group"><label>Serial Number</label><input type="text" id="f-serialNumber" value="' + escapeHtml(d.serialNumber || "") + '" placeholder="e.g. SN-DELL-001"></div>' +
       '</div>';
   return identitySection +
@@ -4157,6 +4167,38 @@ function _wireModalTabs(prefix) {
   });
 }
 
+/**
+ * Wire the Add Asset form's IP cross-reference panel (assets-ipcontext.js).
+ *
+ * The module owns the lookup and the rendering; this supplies the two hooks
+ * that need to know the form — what the operator has already typed (so a
+ * suggestion never overwrites it) and how to write an accepted one back.
+ * Coordinates arrive as a pair or not at all, which is what getAssetFormData
+ * demands of them.
+ */
+function _wireIpContextPanel() {
+  if (!window.PolarisIpContext) return;
+  window.PolarisIpContext.mount({
+    inputId: "f-ipAddress",
+    panelId: "f-ip-context",
+    readForm: function () {
+      return {
+        hostname:   val("f-hostname"),
+        macAddress: val("f-macAddress"),
+        location:   val("f-location"),
+        latitude:   val("f-latitude"),
+        longitude:  val("f-longitude"),
+      };
+    },
+    applyValues: function (values) {
+      Object.keys(values).forEach(function (key) {
+        var el = document.getElementById("f-" + key);
+        if (el) el.value = values[key];
+      });
+    },
+  });
+}
+
 async function openCreateModal() {
   await _ensureTagCache();
   var body = _renderTabbedBody("asset-edit", [
@@ -4171,6 +4213,7 @@ async function openCreateModal() {
   wireTagPicker();
   _wireMonitorEditTab({});
   _populateUploadedMibsInDropdowns();
+  _wireIpContextPanel();
   document.getElementById("btn-save").addEventListener("click", async function () {
     var btn = this;
     btn.disabled = true;

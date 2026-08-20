@@ -542,6 +542,10 @@ const api = {
     bulkMonitor:          (body) => request("POST", "/assets/bulk-monitor", body),
     // Mass Pinning section (Assets → Settings): device-filter vocabulary, matched
     // inventory (mode:"count"|"full"), and the bulk pin/unpin apply.
+    // Add Asset form's IP cross-reference: the containing network, the lease /
+    // reservation on the address, the gate that has it, and any asset already
+    // carrying it. Read-only (assets-ipcontext.js).
+    ipContext:            (ip)  => request("GET",  "/assets/ip-context?ip=" + encodeURIComponent(ip)),
     pinFilterSchema:      ()    => request("GET",  "/assets/pin-filter-schema"),
     pinInventory:         (body) => request("POST", "/assets/pin-inventory", body),
     applyMassPins:        (body) => request("POST", "/assets/mass-pins", body),

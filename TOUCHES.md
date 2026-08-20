@@ -1124,7 +1124,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 4. The stamped name as a **serial** — a FortiSwitch's `switch-id` IS its serial, and that's what an AP's LLDP table reports as `parentSwitch`, while the switch's hostname may be an operator label.
 
 **Two classes of `controllerFortigate` consumer — do not mix them:**
-- **Asset identity** (route through this util): `dependencyTreeService`, `topologyGraphService.buildSiteTopology`, `routes/map.ts` topology search, `peerInferredLldpService`, `autoMonitorInterfacesService.loadInferredLldpByAsset`, `mapRegionService.computeMembership`, `connectionPathService.resolveTopologyFallback`.
+- **Asset identity** (route through this util): `ipContextService` (`Subnet.fortigateDevice` / a sighting's gate name → the firewall Asset behind an address, for the Add Asset IP cross-reference), `dependencyTreeService`, `topologyGraphService.buildSiteTopology`, `routes/map.ts` topology search, `peerInferredLldpService`, `autoMonitorInterfacesService.loadInferredLldpByAsset`, `mapRegionService.computeMembership`, `connectionPathService.resolveTopologyFallback`.
 - **FMG/FortiOS API addressing** (must keep using the device NAME — never "fix" these): `monitoringService`'s parent-FortiGate polling (4 sites), the discovery decommission sweeps comparing against the FMG roster, `utils/infraDhcpBinding` (name-to-name against `Subnet.fortigateDevice`), `descriptionSyncService`'s transport grouping (already correctly keys the firewall side on `deviceName`), and the Sources column (`utils/assetSourceLocation`, business rule 22 — showing the FMG name is deliberate).
 
 **Helpers:** `buildInfraParentIndex` / `resolveInfraParentAsset` (in-memory, for a pass that already loaded the inventory) · `readControllerStamp` / `readParentSwitchStamp` / `readFirewallDeviceName` (defensive JSON reads) · `controllerStampWhereOr` (children of one gate, Prisma JSON-path OR) · `topologyStampWhereOr` (one stamp key vs. several identities) · `parentAssetWhereOr` (the reverse — the gate named by one child stamp) · `controllerIdentityKeys` (plain string list, for in-memory compares and `Subnet.fortigateDevice` `in:` lookups).
@@ -2847,6 +2847,35 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - The index encoding (`devices: [{a, pinned}]` referencing `assets[]`) is a payload-size decision, not cosmetics: at the 1000-asset cap, repeating hostnames per row is megabytes. If you change the shape, change `assets-masspin.js`'s `devicePinned`/`sublistHTML` in lockstep.
 - Scale-check at 2000 assets: the inventory read is one indexed `assetInterface.findMany` (or one bounded `DISTINCT ON`) plus one `asset.findMany`; the apply is chunked `Promise.allSettled` in batches of 50 (per-asset arrays differ, so `updateMany` can't apply — the `applyAutoMonitorForClass` pattern). Don't reintroduce a per-row sequential `await`.
 - If a fourth pin array becomes bulk-editable, add it to `PinField`, the route's zod enum, `computeFinalPinArrays`' cap ladder, and the facet mapping in `fieldForRow` (client) together.
+
+---
+
+## services/ipContextService.ts
+
+**What it owns:** The one-address cross-reference behind the manual Add Asset form -- what Polaris already knows about an IP, gathered from tables other services write.
+
+**Public API:** `lookupIpContext(ip, { includeSubnets, includeReservations })`, the pure `pickNamedGate(subnetGate, sightingGate)` and `buildSuggestions({mac, reservation, firewall})`, plus the `IpContext*` result types.
+
+**Cross-service deps:** `subnetService` (`buildIpContexts` -- containment), `utils/cidr` (`isValidIpAddress`), `utils/fortinetParentKey` (`buildInfraParentIndex` / `resolveInfraParentAsset`).
+
+**Reads:** `Subnet` (+ its `IpBlock` and `Integration`), `Reservation`, `AssetArpEntry`, `AssetFortigateSighting`, `AssetMacTableEntry`, `Asset` (+ `AssetAssociatedIp` via `associatedIpRows`).
+
+**Writes:** nothing. No device I/O, no Events, no rows -- it is a lookup, and every mutation stays in the operator's hands.
+
+**Used by:**
+- `src/api/routes/assets.ts` -> `GET /assets/ip-context` -- the only caller. Gated `assets:read`, with `includeSubnets` / `includeReservations` resolved per request from `hasPermission(req, "subnets"|"reservations", "read")`.
+- `public/js/assets-ipcontext.js` -- renders the result under the Add Asset form's IP field.
+
+**Invariants:**
+- **Containment goes through `buildIpContexts`, never a fresh `cidr >>= ip` query.** That helper is documented as the single implementation of the most-specific-containing-subnet SQL (`masklen DESC`); a second copy would let this surface disagree with the assets table's View-Lease button and the dns_resolved reconciler about which subnet an address belongs to.
+- **A gate NAME resolves through `utils/fortinetParentKey.ts`, never against `Asset.hostname`.** `Subnet.fortigateDevice` and `AssetFortigateSighting.fortigateDevice` both hold FortiManager's device name, and the hostname match is exactly the conflation that module exists to prevent. A name that resolves to no asset still NAMES the gate -- "behind PLVCORFMG1" is useful without an asset row, and dropping it would silently answer "no firewall".
+- **The gate ranking is by how directly the source observed THIS address:** ARP (live, and its gate is already an asset -- no name resolution at all) > subnet (config truth, and the only source that answers for an address nothing has ever seen) > sighting (historical; survives the device moving or the address being re-issued). The subnet-over-sighting half is the pure `pickNamedGate` so the ranking is stated once and tested.
+- **The subnet is resolved even for a caller without `subnets:read`** -- it is how the reservation is found and one of the three gate sources. Only the EMITTED `subnet` block is gated. The gate name it contributes is the same value `Asset.learnedLocation` already shows to any `assets:read` caller, so this leaks nothing new; the reservation, by contrast, is not queried at all without `reservations:read`.
+- **`visibility` must keep reporting which halves were consulted.** A hidden section has to render as "not shown"; collapsing it into an absent one would have the panel assert "no network contains this address" to a role that never looked.
+- **Suggestions are advisory and never applied server-side**, and only ever carry a value some row actually supplied -- so an empty block means "nothing known". MAC prefers ARP over the reservation for the same reason placeholder-MAC adoption does (business rule 26): a live L2 binding is what the wire says, a reservation MAC is what somebody typed. Coordinates come from the GATE, because a gate's coordinates are the site's.
+- **Row caps are per source (`ROW_CAP` = 10).** An address resolving to more rows than that in any of these tables is itself a duplicate-address finding; the cap keeps a pathological one from filling the panel.
+
+**When changing this:** the frontend's `buildFindings` reads every field name in `IpContextResult` -- adding a source means a finding line in `public/js/assets-ipcontext.js` and a case in `tests/unit/ipContextDom.test.ts`. A new source that can name a gate belongs in the ranking (`pickNamedGate` or `resolveFirewall`), not in a fourth ad-hoc branch. Any new table joined by IP needs an index on its IP column -- this runs from a debounced keystroke handler (`asset_fortigate_sightings_ipAddress_idx`, migration `20260820000000_sighting_ip_index`, was added for exactly that). Pure halves are covered by `tests/unit/ipContextService.test.ts`.
 
 ---
 
@@ -5106,7 +5135,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 **Cross-service deps:** ipService (indirectly via cidrContains/cidrOverlaps from utils/cidr.ts).
 
-**Used by:** src/api/routes/subnets.ts (all operations), src/api/routes/assets.ts (buildIpContexts — per-row `ipContext` for the asset table's View Lease button), src/services/dnsResolvedReservationService.ts (buildIpContexts — target-subnet resolution in the reconciler), src/services/reservationService.ts (subnet lookups, status checks), src/services/utilizationService.ts (subnet status grouping).
+**Used by:** src/api/routes/subnets.ts (all operations), src/api/routes/assets.ts (buildIpContexts — per-row `ipContext` for the asset table's View Lease button), src/services/dnsResolvedReservationService.ts (buildIpContexts — target-subnet resolution in the reconciler), src/services/ipContextService.ts (buildIpContexts — the containing network behind the Add Asset IP cross-reference; deliberately reuses this rather than re-implementing the `cidr >>= ip` / `masklen DESC` query), src/services/reservationService.ts (subnet lookups, status checks), src/services/utilizationService.ts (subnet status grouping).
 
 **Invariants:**
 - Subnet must be contained within parent block CIDR

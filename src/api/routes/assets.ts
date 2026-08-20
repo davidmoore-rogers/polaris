@@ -9,7 +9,7 @@ import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { mapWithConcurrency } from "../../utils/concurrency.js";
-import { requirePermission } from "../middleware/permissions.js";
+import { requirePermission, hasPermission } from "../middleware/permissions.js";
 import { requestActor } from "../middleware/auth.js";
 import { machineApiLimiter } from "../middleware/rateLimits.js";
 import { logEvent, buildChanges } from "./events.js";
@@ -851,6 +851,33 @@ router.put("/source-priority", requirePermission("assets", "write"), async (req,
       await import("../../services/assetSourcePriorityService.js");
     await saveSourceLocationPriority(body, requestActor(req));
     res.json(await getSourcePrioritySettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/assets/ip-context?ip=10.4.12.63 — everything Polaris already
+// knows about one address, for the manual Add Asset form: the containing
+// network, the lease/reservation sitting on it, the gate ARP caches and
+// FortiGate sightings that have resolved it, the switch port its MAC shows up
+// on, and any asset already carrying it. Read-only; creates nothing. Before
+// /:id (a bare word would otherwise be captured as an asset id).
+//
+// Gated assets:read, with the two IPAM halves gated a second time on the
+// caller's own subnets/reservations access — the dashboard precedent. Which
+// sections were consulted rides back in `visibility`, so a role that can't see
+// networks reads "not shown" rather than a confident "no network found".
+router.get("/ip-context", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const ip = typeof req.query.ip === "string" ? req.query.ip : "";
+    const { lookupIpContext } = await import("../../services/ipContextService.js");
+    const result = await lookupIpContext(ip, {
+      includeSubnets: hasPermission(req, "subnets", "read"),
+      includeReservations: hasPermission(req, "reservations", "read"),
+    });
+    // A half-typed address is the normal case on a debounced keystroke, not an
+    // error — answer 200 with nothing found rather than 400-ing per character.
+    res.json(result ?? { ip: ip.trim(), unparseable: true });
   } catch (err) {
     next(err);
   }
