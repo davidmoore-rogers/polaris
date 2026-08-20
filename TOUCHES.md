@@ -4678,6 +4678,34 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/arpTableService.ts
+
+**What it owns:** Persistence of each FortiGate's layer-3 neighbour cache into `AssetArpEntry`, the current-state table behind the firewall asset's ARP Table tab. It does NOT collect — the rows already arrive on every FMG / standalone-FortiGate discovery cycle as `DiscoveryResult.arpTable` and, before this service, were consumed in memory by three passes and thrown away (Phase 7.5 empty-`ipAddress` enrichment, Phase 7.6 `Reservation.lastSeenArp` presence, Phase 7.7 placeholder-MAC adoption).
+
+**Public API:** `persistFortigateArpTables({ integrationId, rows, answeredDevices, deviceSerials, matchAssetByMac, log? })` → `{ assetsWritten, entriesWritten, truncated, unresolvedDevices }`. Pure shaping lives one layer down in `utils/arpTable.ts` (`prepareArpRows` / `arpRowKey` / `compareArpRows` / `groupArpRowsByDevice` / `ARP_ROWS_PER_ASSET_CAP`).
+
+**Used by:** `discoveryEngine.syncDhcpSubnets` Phase 7.5b, the only caller. Gated on `isFortinetIntegrationType` + a non-empty `result.arpQueriedDevices`, wrapped in a catch so a persist failure cannot poison a run whose subnets/reservations/assets already landed.
+
+**Writes:** `AssetArpEntry` (delete-replace per gate, inside one transaction per gate).
+
+**Reads:** `AssetSource` (`sourceKind="fortigate-firewall"`, one findMany for the whole batch) and the existing `AssetArpEntry` rows' `firstSeen` (one findMany for the whole batch).
+
+**Invariants:**
+- **Delete-replace is scoped to `answeredDevices`.** A gate absent from that list keeps its stored rows. The list comes from the per-device `didArpQuery` flag, set when the live read returned status 0 + a results array — BEFORE the row count is known, so an empty-but-real neighbour cache still replaces the table — and forced false for an offline FMG device. This is the AssetLldpNeighbor contract and it is load-bearing: the ARP read is a live monitor call that fails routinely (proxied read to an offline gate, admin profile without monitor scope, aborted run), and every failure looks identical to an empty table.
+- **The gate resolves name → serial → assetId**, never name → hostname. `utils/fortinetParentKey.ts` exists because that second hop is wrong on any install where the FMG device name differs from the firewall's configured hostname, and "no match" is a legitimate-looking state that hides the bug.
+- **`matchedAssetId` is MAC-only.** Joining on the IP would attribute the row to the very asset the row disproves — an ARP entry saying that address belongs to that MAC is the evidence that an asset still carrying the address under a different MAC is stale.
+- **Truncation is loud** (pino warn + a `warning`-level sync Event). A cut table reads on the tab as "Polaris has never seen that address," which is a different and wrong conclusion.
+- One gate's failed write is caught and logged; the rest of the fleet still gets its table, and the failed gate keeps its previous rows because the delete and the inserts shared a transaction.
+- Two fleet-wide reads for the whole batch, then one transaction per gate — the write cost tracks the FIREWALL count (tens), not the asset count.
+
+**When changing this:**
+- If a new caller appears, it must supply `answeredDevices` from a real per-device success flag. Deriving it from "which devices have rows" collapses the empty-vs-failed distinction this service is built around.
+- Raising `ARP_ROWS_PER_ASSET_CAP` means raising the `createMany` chunking headroom too — `INSERT_CHUNK` (1000) × 8 columns is what keeps each statement inside Postgres' 65535-parameter limit.
+- The tab and the writer share `utils/arpTable.ts`'s ordering; if you change `compareArpRows`, the cap starts slicing a different set of rows.
+- Keep it out of the monitor hot path. This is discovery-cadence work (minutes), and the ARP data it stores has a ~1–5 minute lifetime on the device anyway.
+
+---
+
 ## services/arpPrimeService.ts
 
 **What it owns:** The ARP-priming presence sweep — fire-and-forget UDP datagrams at reserved IPs so a FortiGate is forced to ARP-resolve each target right before discovery reads its ARP table. Owns the sweep constants (port 33434, batch 256 / pause 25ms, cap 4096, `ARP_SETTLE_MS` 2s). Sends packets; never reads or writes the DB.

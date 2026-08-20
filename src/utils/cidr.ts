@@ -149,6 +149,21 @@ export function ipToPtrName(ip: string): string {
   return ip.split(".").reverse().join(".") + ".in-addr.arpa";
 }
 
+/**
+ * Sort comparator putting IPv4 addresses in numeric order, so `.2` precedes
+ * `.10` instead of following it. Anything that is not a dotted quad (an IPv6
+ * address, a hostname that reached a list of addresses) sorts after every
+ * IPv4 address, then lexicographically among itself — a stable, arbitrary
+ * order beats throwing inside a sort.
+ */
+export function compareIpv4(a: string, b: string): number {
+  const aOk = isValidIpv4(a);
+  const bOk = isValidIpv4(b);
+  if (aOk && bOk) return ipToInt(a) - ipToInt(b);
+  if (aOk !== bOk) return aOk ? -1 : 1;
+  return a.localeCompare(b);
+}
+
 // ─── Containment & Overlap ────────────────────────────────────────────────────
 
 /**

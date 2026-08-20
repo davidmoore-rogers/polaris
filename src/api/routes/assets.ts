@@ -2012,6 +2012,51 @@ router.get("/:id/mac-table", requirePermission("assets", "read"), async (req, re
   }
 });
 
+/**
+ * GET /assets/:id/arp-table — the FortiGate's layer-3 neighbour cache.
+ *
+ * Current-state (delete-replaced per discovery cycle), so there is no time
+ * window to select. Returns the entries plus per-interface counts and the
+ * single timestamp the whole table was collected at — the tab leads with that,
+ * because an ARP cache is only meaningful next to its age.
+ */
+router.get("/:id/arp-table", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const rows = await prisma.assetArpEntry.findMany({
+      where: { assetId: id },
+      // Final ordering is the browser's (numeric IP within interface); this
+      // just keeps the payload stable.
+      orderBy: [{ ifName: "asc" }, { ipAddress: "asc" }],
+      include: {
+        matchedAsset: { select: { id: true, hostname: true, ipAddress: true, assetType: true } },
+      },
+    });
+    const interfaceCounts: Record<string, number> = {};
+    let collectedAt: Date | null = null;
+    for (const r of rows) {
+      if (r.ifName) interfaceCounts[r.ifName] = (interfaceCounts[r.ifName] ?? 0) + 1;
+      if (!collectedAt || r.lastSeen > collectedAt) collectedAt = r.lastSeen;
+    }
+    res.json({
+      entries: rows.map((r) => ({
+        ipAddress:  r.ipAddress,
+        macAddress: r.macAddress,
+        ifName:     r.ifName,
+        ageSec:     r.ageSec,
+        firstSeen:  r.firstSeen,
+        lastSeen:   r.lastSeen,
+        matchedAsset: r.matchedAsset,
+      })),
+      interfaceCounts,
+      collectedAt,
+      total: rows.length,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/:id/services", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;

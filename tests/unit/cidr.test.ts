@@ -10,6 +10,7 @@ import {
   cidrContains,
   cidrOverlaps,
   ipInCidr,
+  compareIpv4,
   usableHostCount,
   findNextAvailableSubnet,
   detectIpVersion,
@@ -373,5 +374,22 @@ describe("ipToPtrName", () => {
     expect(ipToPtrName("2001:db8::1")).toBe(
       "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa",
     );
+  });
+});
+
+describe("compareIpv4", () => {
+  it("orders dotted quads numerically, not lexicographically", () => {
+    const sorted = ["10.1.1.10", "10.1.1.2", "10.1.1.100", "9.1.1.1"].sort(compareIpv4);
+    expect(sorted).toEqual(["9.1.1.1", "10.1.1.2", "10.1.1.10", "10.1.1.100"]);
+  });
+
+  it("returns 0 for the same address", () => {
+    expect(compareIpv4("192.168.1.1", "192.168.1.1")).toBe(0);
+  });
+
+  it("sorts non-IPv4 values after every IPv4 address", () => {
+    const sorted = ["fe80::1", "10.0.0.1", "not-an-ip"].sort(compareIpv4);
+    expect(sorted[0]).toBe("10.0.0.1");
+    expect(sorted.slice(1).sort()).toEqual(["fe80::1", "not-an-ip"]);
   });
 });

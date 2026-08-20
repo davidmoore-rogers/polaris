@@ -339,6 +339,10 @@ interface FgtChainCtx {
     didVipQuery: boolean;
     didDhcpReservationsQuery: boolean;
     didDhcpLeasesQuery: boolean;
+    // Set only when the live /monitor/network/arp read came back clean. Kept
+    // separate from the row count so an empty-but-real neighbour cache still
+    // replaces the stored table — see DiscoveryResult.arpQueriedDevices.
+    didArpQuery: boolean;
   };
 }
 
@@ -716,7 +720,7 @@ async function fgtChainSwitchesAps(ctx: FgtChainCtx): Promise<void> {
 
 // Chain D: opt-in ARP presence sweep (3e.54) + the ARP table read (3e.55).
 async function fgtChainArp(ctx: FgtChainCtx): Promise<void> {
-  const { config, queryBase, signal, log, deviceName, deviceHostname, arpTable } = ctx;
+  const { config, queryBase, signal, log, deviceName, deviceHostname, arpTable, flags } = ctx;
       // Step 3e.54: ARP presence sweep (opt-in). Prime the gate's ARP cache
       // for every reserved IP, then settle briefly so resolutions land
       // before the table read below. Sweep targets come from the caller
@@ -739,6 +743,10 @@ async function fgtChainArp(ctx: FgtChainCtx): Promise<void> {
       // Shared row parse (utils/fortinetDetectedDevice) — identical to the
       // FMG-proxied path by requirement.
       processArpRows({ rows: arpResults, deviceName, displayName: deviceHostname, arpTable, log });
+      // Marked BEFORE the row count is known: a gate that genuinely holds no
+      // neighbours still answered, and the ARP-table writer needs to tell that
+      // apart from the read failing.
+      flags.didArpQuery = true;
     }
   } catch (err: any) {
     const isNotFound = err instanceof AppError && err.httpStatus === 404;
@@ -1021,7 +1029,7 @@ export async function discoverDhcpSubnets(
 
   // Stop early if aborted
   if (signal?.aborted) {
-    return { subnets: [], devices, interfaceIps, dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [deviceName], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
+    return { subnets: [], devices, interfaceIps, dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [deviceName], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
   }
 
   // Hoisted: dhcpInterfaceNames is built in Step 3 and read both by Step 3b
@@ -1042,6 +1050,7 @@ export async function discoverDhcpSubnets(
     didVipQuery: false,
     didDhcpReservationsQuery: false,
     didDhcpLeasesQuery: false,
+    didArpQuery: false,
   };
   const ctx: FgtChainCtx = {
     config, queryBase, signal, log, skipGeoLog,
@@ -1129,6 +1138,7 @@ export async function discoverDhcpSubnets(
     vips,
     switchMacTable,
     arpTable,
+    arpQueriedDevices: flags.didArpQuery ? [deviceName] : [],
     // Standalone FortiGate: the live monitor/switch-controller/managed-switch/
     // status query already returns disconnected switches with status="Disconnected"
     // (the FortiGate is its own CMDB and live source), so the CMDB roster

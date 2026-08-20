@@ -972,6 +972,10 @@ model Asset {
   interfaces             AssetInterface[]         @relation("AssetInterfaces")
   macTableEntries        AssetMacTableEntry[]     @relation("AssetMacTableEntries")
   macTableMatches        AssetMacTableEntry[]     @relation("AssetMacTableMatch")
+  // Layer-3 neighbour cache (when this asset is a FortiGate firewall) and the
+  // back-link for the endpoint each ARP row's MAC resolved to.
+  arpEntries             AssetArpEntry[]          @relation("AssetArpEntries")
+  arpMatches             AssetArpEntry[]          @relation("AssetArpMatch")
 
   trunkMembers       AssetTrunkMember[]       @relation("AssetTrunkMembers")
   trunkMemberMatches AssetTrunkMember[]       @relation("AssetTrunkMemberMatch")
@@ -1950,6 +1954,62 @@ model AssetMacTableEntry {
   @@index([macAddress])
   @@index([matchedAssetId])
   @@map("asset_mac_table_entries")
+}
+
+// The FortiGate's layer-3 neighbour cache (`/api/v2/monitor/network/arp`), one
+// row per (IP, MAC, interface) binding the gate currently holds. The L3 sibling
+// of AssetMacTableEntry: that table answers "what is plugged into port 7" from
+// a switch's forwarding database, this one answers "what is at 10.4.12.63" from
+// the router's own resolution of the address.
+//
+// CURRENT-STATE, delete-replaced per discovery cycle by
+// `persistFortigateArpTables` -- the AssetMacTableEntry / AssetLldpNeighbor
+// pattern. An ARP entry ages out of the FortiGate's cache within ~1-5 minutes,
+// so history here would answer a question the gate itself cannot.
+//
+// Written from DISCOVERY, not the monitor cadence: the rows are already read on
+// every FMG / standalone-FortiGate cycle (they feed the empty-ipAddress
+// enrichment, `Reservation.lastSeenArp` presence evidence and placeholder-MAC
+// adoption) and were previously consumed in memory and thrown away. A gate is
+// only wiped when its ARP query ANSWERED this cycle (`arpQueriedDevices`) --
+// a failed or proxied-to-an-offline-gate read preserves the stored rows, since
+// silence is not an empty neighbour cache.
+//
+// `matchedAssetId` resolves by MAC ONLY. Matching on the IP as well would be
+// the one join the row itself contradicts: an ARP entry asserting that address
+// belongs to that MAC is exactly the evidence that an asset still carrying the
+// address under a different MAC is stale.
+model AssetArpEntry {
+  id      String @id @default(uuid())
+  assetId String
+  asset   Asset  @relation("AssetArpEntries", fields: [assetId], references: [id], onDelete: Cascade)
+
+  /// IPv4 address as the gate reports it.
+  ipAddress  String
+  /// Normalized colon-uppercase (AA:BB:CC:DD:EE:FF), matching AssetMacTableEntry.
+  macAddress String
+  /// FortiGate interface the binding was learned on, e.g. "internal3". Empty
+  /// string from FortiOS is stored NULL.
+  ifName     String?
+  /// Entry age in seconds, when FortiOS exposes it. NULL otherwise -- absence
+  /// is "the firmware did not say", never zero.
+  ageSec     Int?
+
+  /// Resolved from the MAC against the asset inventory (the discovery run's own
+  /// AssetIndex). NULL for an address the gate knows and Polaris does not.
+  matchedAssetId String?
+  matchedAsset   Asset?  @relation("AssetArpMatch", fields: [matchedAssetId], references: [id], onDelete: SetNull)
+
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
+
+  @@unique([assetId, ipAddress, macAddress, ifName])
+  @@index([assetId])
+  @@index([assetId, ifName])
+  @@index([macAddress])
+  @@index([ipAddress])
+  @@index([matchedAssetId])
+  @@map("asset_arp_entries")
 }
 
 // FortiSwitch trunk -> local physical port, from the vendor OctetString at

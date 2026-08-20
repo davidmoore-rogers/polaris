@@ -4778,6 +4778,13 @@ async function openViewModal(id) {
     if (a.assetType === "switch") {
       tabs.push({ key: "mactable", label: "MAC Table", html: _assetMacTableTabHTML(a.id) });
     }
+    // ARP Table tab — the FortiGate's layer-3 neighbour cache, the L3 sibling
+    // of MAC Table. Firewall-class only, mirroring where discovery reads it;
+    // lazy-loaded on first click since a gate fronting a large site carries
+    // hundreds of rows.
+    if (a.assetType === "firewall") {
+      tabs.push({ key: "arptable", label: "ARP Table", html: _assetArpTableTabHTML(a.id) });
+    }
     // Services tab — merged unit + process inventory. Shows systemd units /
     // Windows services by default; an "Include processes" checkbox folds the
     // current-state process inventory into the same table. Lazy-loaded on first
@@ -4894,6 +4901,7 @@ async function openViewModal(id) {
     if (canQuarantineAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
     if (a.assetType === "switch") _wireAssetMacTableTab(a.id);
+    if (a.assetType === "firewall") _wireAssetArpTableTab(a.id);
     if (!isInfraProc) _wireAssetServicesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     if (permAtLeast("alerts", "read")) _loadAssetNotificationsTab(a.id);
@@ -19514,6 +19522,10 @@ async function _loadAssetMacTable(assetId) {
         renderTable();
       });
       wireGroupToggles();
+      // The Device column's links had no listener anywhere until the ARP Table
+      // tab arrived needing the same pivot — they rendered as anchors and did
+      // nothing when clicked.
+      _wireAssetPivotLinks(mount);
     }
 
     function groupHtml(g) {
@@ -19570,6 +19582,198 @@ async function _loadAssetMacTable(assetId) {
     }
 
     renderTable();
+  } catch (err) {
+    mount.innerHTML = '<span class="empty-state">Error: ' + escapeHtml(err.message || "failed to load") + '</span>';
+  }
+}
+
+
+// ─── ARP Table tab ─────────────────────────────────────────────────────────
+//
+// The FortiGate's layer-3 neighbour cache — the L3 sibling of the MAC Table
+// tab. That one answers "what is plugged into port 7" from a switch's
+// forwarding database; this one answers "what is at 10.4.12.63" from the
+// router's own resolution of the address, which is the question an operator
+// arrives with far more often. So unlike MAC Table this one leads with a
+// filter box.
+//
+// The rows come from discovery, not the monitor cadence, and the whole table
+// shares one collection timestamp — an ARP cache is only meaningful next to
+// its age, so that timestamp is in the header rather than a column.
+
+function _assetArpTableTabHTML(assetId) {
+  return '<div id="asset-arptable-mount-' + escapeHtml(assetId) + '">' +
+    '<span class="empty-state">Loading…</span></div>';
+}
+
+function _wireAssetArpTableTab(assetId) {
+  var btn = document.querySelector('#asset-view-tabs .page-tab[data-tab="arptable"]');
+  if (!btn) return;
+  var loaded = false;
+  btn.addEventListener("click", function () {
+    if (loaded) return;
+    loaded = true;
+    _loadAssetArpTable(assetId);
+  });
+}
+
+// "45s" / "12m" / "3h 04m". FortiOS reports the age in seconds; anything
+// non-numeric is absent rather than zero, so it renders as a dash.
+function _arpAgeLabel(sec) {
+  if (typeof sec !== "number" || !isFinite(sec) || sec < 0) return null;
+  if (sec < 60) return Math.round(sec) + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m";
+  var h = Math.floor(sec / 3600);
+  var m = Math.floor((sec % 3600) / 60);
+  return h + "h " + String(m).padStart(2, "0") + "m";
+}
+
+// Shared pivot wiring for the `.asset-link` anchors the MAC Table and ARP
+// Table tabs render. MAC Table emitted these from the day it shipped with
+// nothing listening, so its Device column looked clickable and did nothing.
+function _wireAssetPivotLinks(container) {
+  if (!container) return;
+  container.querySelectorAll(".asset-link").forEach(function (link) {
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      var id = link.getAttribute("data-asset-id");
+      if (id) openViewModal(id);
+    });
+  });
+}
+
+async function _loadAssetArpTable(assetId) {
+  var mount = document.getElementById("asset-arptable-mount-" + assetId);
+  if (!mount) return;
+  try {
+    var data = await api.assets.arpTable(assetId);
+    var entries = (data && data.entries) || [];
+    if (entries.length === 0) {
+      mount.innerHTML = '<span class="empty-state">No ARP entries. The neighbour cache is read ' +
+        'on every FortiManager / FortiGate discovery cycle, and a gate whose read FAILS keeps ' +
+        'whatever it had — so this is either a gate holding no neighbours, or one Polaris has ' +
+        'never had a successful read from.</span>';
+      return;
+    }
+
+    var dash = '<span style="color:var(--color-text-secondary)">—</span>';
+    var filter = "";
+
+    // Interface-first, matching the MAC Table tab: the interface is the
+    // network segment, and an operator scanning for an address wants to see
+    // which one it came back on.
+    function groupsFrom(rows) {
+      var byKey = {};
+      rows.forEach(function (e) {
+        var key = e.ifName || "(no interface reported)";
+        (byKey[key] = byKey[key] || { key: key, resolved: !!e.ifName, entries: [] }).entries.push(e);
+      });
+      return Object.keys(byKey).map(function (k) { return byKey[k]; }).sort(function (a, b) {
+        if (a.resolved !== b.resolved) return a.resolved ? -1 : 1;
+        return a.key.localeCompare(b.key, undefined, { numeric: true, sensitivity: "base" });
+      });
+    }
+
+    // Substring match across every identifying field, so one box answers
+    // "what is at .63", "where is that MAC" and "which port is PRINTER-4 on".
+    function matches(e) {
+      if (!filter) return true;
+      var hay = [
+        e.ipAddress, e.macAddress, e.ifName || "",
+        e.matchedAsset ? (e.matchedAsset.hostname || "") : "",
+      ].join(" ").toLowerCase();
+      return hay.indexOf(filter) !== -1;
+    }
+
+    function render() {
+      var shown  = entries.filter(matches);
+      var groups = groupsFrom(shown);
+      var matched = shown.filter(function (e) { return !!e.matchedAsset; }).length;
+      var stamp = data.collectedAt ? timeAgo(data.collectedAt) : null;
+
+      var head =
+        '<h4 style="margin:0 0 0.4rem">Neighbour cache ' +
+          '<span style="font-weight:400;color:var(--color-text-secondary)">(' +
+            shown.length + (filter ? " of " + entries.length : "") + ' entr' +
+            (shown.length === 1 ? "y" : "ies") + ' · ' + matched + ' matched to a known device' +
+            (stamp ? ' · read ' + escapeHtml(stamp) : "") +
+          ')</span>' +
+        '</h4>' +
+        '<div style="margin:0 0 0.5rem">' +
+          '<input type="text" id="arptable-filter-' + escapeHtml(assetId) + '" class="form-input" ' +
+            'placeholder="Filter by IP, MAC, interface or hostname" ' +
+            'style="max-width:22rem;font-size:0.82rem" value="' + escapeHtml(filter) + '">' +
+        '</div>';
+
+      var body = groups.length === 0
+        ? '<div class="empty-state">No entries match that filter.</div>'
+        : '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+            '<th>Interface / IP</th><th>MAC</th><th>Age</th><th>Device</th>' +
+          '</tr></thead><tbody>' + groups.map(groupHtml).join("") + '</tbody></table></div>';
+
+      mount.innerHTML = head + body;
+
+      var box = document.getElementById("arptable-filter-" + assetId);
+      if (box) {
+        box.addEventListener("input", function () {
+          filter = box.value.trim().toLowerCase();
+          var caret = box.selectionStart;
+          render();
+          var next = document.getElementById("arptable-filter-" + assetId);
+          if (next) { next.focus(); try { next.setSelectionRange(caret, caret); } catch (_) {} }
+        });
+      }
+      wireGroupToggles();
+      _wireAssetPivotLinks(mount);
+    }
+
+    function groupHtml(g) {
+      var head = '<tr class="arptable-group"><td colspan="4" style="padding:5px 8px;font-weight:600;' +
+        'background:var(--color-bg-primary);color:var(--color-text-secondary)">' +
+        '<button type="button" class="arptable-group-toggle" data-group="' + escapeHtml(g.key) + '" ' +
+          'style="background:none;border:none;cursor:pointer;color:var(--color-text-secondary);' +
+          'padding:0 3px 0 0;font-size:0.75rem;vertical-align:middle;line-height:1" ' +
+          'title="Collapse entries">▼</button>' +
+        '<span class="mono" style="color:var(--color-text-primary)">' + escapeHtml(g.key) + '</span> ' +
+        '<span style="font-weight:400">· ' + g.entries.length + ' address' +
+          (g.entries.length === 1 ? "" : "es") + '</span>' +
+        '</td></tr>';
+      return head + g.entries.map(function (e) { return entryHtml(e, g.key); }).join("");
+    }
+
+    function entryHtml(e, groupKey) {
+      var dev = e.matchedAsset
+        ? '<a href="#" class="asset-link" data-asset-id="' + escapeHtml(e.matchedAsset.id) + '">' +
+            escapeHtml(e.matchedAsset.hostname || e.matchedAsset.ipAddress || e.matchedAsset.id) + '</a>'
+        : dash;
+      var age = _arpAgeLabel(e.ageSec);
+      return '<tr class="arptable-entry" data-group="' + escapeHtml(groupKey) + '">' +
+        '<td class="mono" style="padding-left:1.4rem">' +
+          '<span style="color:var(--color-text-secondary);opacity:0.5;margin-right:3px;font-size:0.8rem">└</span>' +
+          escapeHtml(e.ipAddress) +
+        '</td>' +
+        '<td class="mono">' + escapeHtml(e.macAddress) + '</td>' +
+        '<td class="mono">' + (age ? escapeHtml(age) : dash) + '</td>' +
+        '<td>' + dev + '</td>' +
+      '</tr>';
+    }
+
+    // Toggles rows in place rather than re-rendering, so an open group
+    // survives — same approach as the MAC Table tab.
+    function wireGroupToggles() {
+      mount.querySelectorAll(".arptable-group-toggle").forEach(function (tog) {
+        tog.addEventListener("click", function () {
+          var key = tog.getAttribute("data-group");
+          var expanded = tog.textContent.trim() === "▼";
+          tog.textContent = expanded ? "▶" : "▼";
+          tog.title = expanded ? "Expand entries" : "Collapse entries";
+          mount.querySelectorAll('.arptable-entry[data-group="' + CSS.escape(key) + '"]')
+            .forEach(function (row) { row.style.display = expanded ? "none" : ""; });
+        });
+      });
+    }
+
+    render();
   } catch (err) {
     mount.innerHTML = '<span class="empty-state">Error: ' + escapeHtml(err.message || "failed to load") + '</span>';
   }

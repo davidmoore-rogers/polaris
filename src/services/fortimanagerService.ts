@@ -1268,6 +1268,13 @@ export interface DiscoveryResult {
   // internally; these arrays expose the same data to the sync layer.
   switchMacTable: DiscoveredSwitchMacEntry[];
   arpTable: DiscoveredArpEntry[];
+  // FortiGates whose ARP query ANSWERED this cycle (status 0 + a results
+  // array), regardless of how many rows came back. Persisting the ARP table is
+  // a delete-replace, so this is what separates "the neighbour cache is empty"
+  // from "the read failed": an offline gate, a missing monitor scope or an
+  // aborted run all return nothing, and wiping on that would blank a healthy
+  // gate's table. Same contract as `inventoryDevices` / AssetLldpNeighbor.
+  arpQueriedDevices: string[];
   // CMDB-known managed-switch / FortiAP rosters per FortiGate, queried
   // natively from FMG's CMDB (not via /sys/proxy/json — bypasses the
   // proxy-mode concurrency=1 throttle). Defensive: a switch/AP that's
@@ -1594,6 +1601,10 @@ interface FmgDeviceCtx {
     didVipQuery: boolean;
     didDhcpReservationsQuery: boolean;
     didDhcpLeasesQuery: boolean;
+    // Set only when the live /monitor/network/arp read came back clean. Kept
+    // separate from the row count so an empty-but-real neighbour cache still
+    // replaces the stored table.
+    didArpQuery: boolean;
   };
 }
 
@@ -2210,7 +2221,7 @@ async function fmgStepApPortMap(ctx: FmgDeviceCtx): Promise<void> {
 
 // Steps 3d.54 + 3d.55: opt-in ARP presence sweep, then the ARP table read. Offline gates skip.
 async function fmgStepArp(ctx: FmgDeviceCtx): Promise<void> {
-  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, arpSweepTargets, localArpTable } = ctx;
+  const { adom, baseUrl, apiUser, apiToken, verifySsl, signal, integrationId, log, deviceName, offline, arpSweepTargets, localArpTable, flags } = ctx;
     // Step 3d.55: FortiGate ARP table. Authoritative IP↔MAC binding for any
     // subnet the FortiGate routes for. Pairs with the macmap above —
     // detected-device tells us "MAC X is on FortiSwitch Y / port Z," ARP
@@ -2252,6 +2263,10 @@ async function fmgStepArp(ctx: FmgDeviceCtx): Promise<void> {
         // Shared row parse (utils/fortinetDetectedDevice) — identical to the
         // direct-REST path by requirement.
         processArpRows({ rows: arpResults, deviceName, displayName: deviceName, arpTable: localArpTable, log });
+        // Marked BEFORE the row count is known: a gate that genuinely holds no
+        // neighbours still answered, and the ARP-table writer needs to tell
+        // that apart from the read failing.
+        flags.didArpQuery = true;
       }
     } catch (err: any) {
       log("discover.arp", "info", `${deviceName}: ARP query skipped — ${err.message || "Unknown error"}`, deviceName);
@@ -2450,7 +2465,7 @@ export async function discoverDhcpSubnets(
     } else {
       log("discover.devices", "info", `No managed devices found in ADOM "${adom}"`);
     }
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
   }
 
   // Capture the full roster of configured devices (pre-filter, any conn_status).
@@ -2491,7 +2506,7 @@ export async function discoverDhcpSubnets(
     }
   }
   if (devicesData.length === 0) {
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames, fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames, fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
   }
 
   const discovered: DiscoveredSubnet[] = [];
@@ -2500,6 +2515,9 @@ export async function discoverDhcpSubnets(
   const dhcpEntries: DiscoveredDhcpEntry[] = [];
   const deviceInventory: DiscoveredInventoryDevice[] = [];
   const inventoryDevices = new Set<string>();
+  // Gates whose live ARP read answered — the delete-replace scope for
+  // persistFortigateArpTables. See DiscoveryResult.arpQueriedDevices.
+  const arpQueriedDevices = new Set<string>();
   const fortiSwitches: DiscoveredFortiSwitch[] = [];
   const fortiAps: DiscoveredFortiAP[] = [];
   const vips: DiscoveredVip[] = [];
@@ -2535,6 +2553,7 @@ export async function discoverDhcpSubnets(
     didVipQuery: boolean;
     didDhcpReservationsQuery: boolean;
     didDhcpLeasesQuery: boolean;
+    didArpQuery: boolean;
   };
   // Top-level aggregates used by syncDhcpSubnets to decommission stale
   // switches/APs only when their controller was reachable.
@@ -2748,6 +2767,7 @@ export async function discoverDhcpSubnets(
             didVipQuery:                 !!fgResult.vipInventoriedDevices                 && fgResult.vipInventoriedDevices.length                 > 0,
             didDhcpReservationsQuery:    !!fgResult.dhcpReservationsInventoriedDevices    && fgResult.dhcpReservationsInventoriedDevices.length    > 0,
             didDhcpLeasesQuery:          !!fgResult.dhcpLeasesInventoriedDevices          && fgResult.dhcpLeasesInventoriedDevices.length          > 0,
+            didArpQuery:                 !!fgResult.arpQueriedDevices                     && fgResult.arpQueriedDevices.length                     > 0,
           };
         } catch (err: any) {
           // Cache-miss fallback: only retry when the IP came from the warm
@@ -2835,6 +2855,7 @@ export async function discoverDhcpSubnets(
       flags: {
         didInventory: false, didSwitchQuery: false, didApQuery: false,
         didVipQuery: false, didDhcpReservationsQuery: false, didDhcpLeasesQuery: false,
+        didArpQuery: false,
       },
     };
     const { localSubnets, localInterfaceIps, localDhcpEntries, localInventory, localSwitches, localAps, localSwitchMacTable, localArpTable, localCmdbSwitchSerials, localCmdbApSerials, localVips, flags } = ctx;
@@ -2892,9 +2913,14 @@ export async function discoverDhcpSubnets(
       flags.didVipQuery = false;
       flags.didDhcpReservationsQuery = false;
       flags.didDhcpLeasesQuery = false;
+      // The ARP read is a LIVE monitor call, so an offline gate should never
+      // have set this in the first place — cleared anyway so the delete-replace
+      // in persistFortigateArpTables can only ever be driven by a gate that
+      // genuinely answered.
+      flags.didArpQuery = false;
     }
 
-    return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory: flags.didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips, switchMacTable: localSwitchMacTable, arpTable: localArpTable, cmdbSwitchSerials: localCmdbSwitchSerials, cmdbApSerials: localCmdbApSerials, didSwitchQuery: flags.didSwitchQuery, didApQuery: flags.didApQuery, didVipQuery: flags.didVipQuery, didDhcpReservationsQuery: flags.didDhcpReservationsQuery, didDhcpLeasesQuery: flags.didDhcpLeasesQuery };
+    return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory: flags.didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips, switchMacTable: localSwitchMacTable, arpTable: localArpTable, cmdbSwitchSerials: localCmdbSwitchSerials, cmdbApSerials: localCmdbApSerials, didSwitchQuery: flags.didSwitchQuery, didApQuery: flags.didApQuery, didVipQuery: flags.didVipQuery, didDhcpReservationsQuery: flags.didDhcpReservationsQuery, didDhcpLeasesQuery: flags.didDhcpLeasesQuery, didArpQuery: flags.didArpQuery };
   }
 
   // Process up to `concurrency` FortiGates in parallel.
@@ -2967,6 +2993,7 @@ export async function discoverDhcpSubnets(
       if (chunk.didVipQuery)                 vipInventoriedDevices.add(chunk.device.name);
       if (chunk.didDhcpReservationsQuery)    dhcpReservationsInventoriedDevices.add(chunk.device.name);
       if (chunk.didDhcpLeasesQuery)          dhcpLeasesInventoriedDevices.add(chunk.device.name);
+      if (chunk.didArpQuery)                 arpQueriedDevices.add(chunk.device.name);
 
       if (onDeviceComplete) {
         try {
@@ -2983,6 +3010,7 @@ export async function discoverDhcpSubnets(
             vips: chunk.vips,
             switchMacTable: chunk.switchMacTable,
             arpTable: chunk.arpTable,
+            arpQueriedDevices: chunk.didArpQuery ? [chunk.device.name] : [],
             cmdbSwitchSerials: chunk.cmdbSwitchSerials,
             cmdbApSerials: chunk.cmdbApSerials,
             switchInventoriedDevices: chunk.didSwitchQuery ? [chunk.device.name] : [],
@@ -3142,6 +3170,7 @@ export async function discoverDhcpSubnets(
     vips,
     switchMacTable,
     arpTable,
+    arpQueriedDevices: [...arpQueriedDevices],
     cmdbSwitchSerials,
     cmdbApSerials,
     switchInventoriedDevices: [...switchInventoriedDevices],

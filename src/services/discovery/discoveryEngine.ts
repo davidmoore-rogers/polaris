@@ -80,6 +80,7 @@ import { reconcileMapRegions } from "../mapRegionService.js";
 import { releaseAssetsForDecommission } from "../maintenanceScheduleService.js";
 import { releaseInfraReservationsForAssets } from "../reservationService.js";
 import { runInfraReservationPush } from "../infraReservationPushService.js";
+import { persistFortigateArpTables } from "../arpTableService.js";
 import {
   buildMacEvidenceIndex,
   createAdoptionBudget,
@@ -763,7 +764,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
     } else if (integration.type === "windowsserver") {
       const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
       const wsHost = (config as any).host as string;
-      discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
+      discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
       // Windows Server is a single host — no per-device iteration, sync the full result normally
       const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "full", ac.signal);
       syncTotals.created.push(...r.created);
@@ -1683,7 +1684,7 @@ export function isVouchedManagedDevice(
 }
 
 async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full", signal?: AbortSignal, adoptionBudget?: AdoptionBudget) {
-  const syncLog = (level: "info" | "error", message: string) => {
+  const syncLog = (level: "info" | "warning" | "error", message: string) => {
     logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
   };
   // Per-integration verbose-debug detection — when on, each Phase wrapped by
@@ -5356,6 +5357,57 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       let okCount = 0;
       for (const r of results) if (r.status === "fulfilled") okCount++;
       syncLog("info", `Enriched ${okCount} asset(s) from FortiSwitch macmap + FortiGate ARP (switch-port + IP)`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Phase 7.5b — Persist each FortiGate's ARP table
+  phaseMark("7.5b");
+  //
+  // The same rows Phase 7.5 just mined for empty-`ipAddress` enrichment, kept
+  // this time. Before this they were read on every cycle and discarded three
+  // times over (enrichment here, presence evidence in 7.6, MAC adoption in
+  // 7.7), which left the gate's own answer to "what is at this address"
+  // visible nowhere in the UI.
+  //
+  // Delete-replace is scoped to `arpQueriedDevices` — the gates whose live read
+  // ANSWERED — so a proxied read to an offline gate, a missing monitor scope or
+  // an aborted run preserves what was stored rather than blanking the tab. In
+  // per-device (incremental) mode the result carries one gate, so the scope is
+  // naturally that gate alone. Best-effort: a failure here must not poison a
+  // run whose real work (subnets, reservations, assets) already landed.
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  // No double-write on the finalize pass: the enclosing `mode === "full" ||
+  // mode === "skip-deprecation"` block already excludes it, so FMG writes each
+  // gate's table once as that gate lands and standalone writes once per run.
+  if (isFortinetIntegrationType(integrationType) && (result.arpQueriedDevices?.length ?? 0) > 0) {
+    try {
+      // Device NAME → serial. The ARP row names its gate the way FortiManager
+      // does, and the firewall asset is keyed by serial — resolving through the
+      // hostname instead is the mismatch utils/fortinetParentKey.ts exists to
+      // prevent.
+      const deviceSerials = new Map<string, string>();
+      for (const dev of result.devices || []) {
+        if (dev?.name && dev?.serial) deviceSerials.set(dev.name, dev.serial);
+      }
+      const arpResult = await persistFortigateArpTables({
+        integrationId,
+        rows: result.arpTable || [],
+        answeredDevices: result.arpQueriedDevices || [],
+        deviceSerials,
+        // MAC only — the run's own index, already built and warm.
+        matchAssetByMac: (mac) => assetIdx.findByMac(mac)?.id ?? null,
+        log: syncLog,
+      });
+      if (arpResult.unresolvedDevices.length > 0) {
+        // Expected on the very first cycle for a gate whose firewall asset is
+        // created later in the same run; persistent entries here mean the
+        // fortigate-firewall AssetSource never landed.
+        syncLog("info", `ARP tables: ${arpResult.unresolvedDevices.length} answering FortiGate(s) had no resolvable firewall asset — skipped`);
+      }
+    } catch (err: any) {
+      syncLog("error", `ARP table persist failed: ${err?.message || "Unknown error"}`);
     }
   }
 
