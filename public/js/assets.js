@@ -5411,6 +5411,44 @@ function _wireAssetChartRangeControls(a) {
         _loadSystemTabFor(a.id, { from: fromIso, to: toIso }, a, { chartOnly: true });
       });
     }
+    document.querySelectorAll(".asset-sessions-range-btn").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var range = b.getAttribute("data-range");
+        var panel = document.getElementById("asset-sessions-custom-panel");
+        if (range === "custom") {
+          if (!panel) return;
+          var willOpen = panel.style.display === "none";
+          panel.style.display = willOpen ? "flex" : "none";
+          if (willOpen) {
+            var toInput = document.getElementById("asset-sessions-to");
+            var fromInput = document.getElementById("asset-sessions-from");
+            if (toInput && !toInput.value) toInput.value = _toLocalDatetimeInput(new Date());
+            if (fromInput && !fromInput.value) fromInput.value = _toLocalDatetimeInput(new Date(Date.now() - 24 * 3600 * 1000));
+          }
+          return;
+        }
+        if (panel) panel.style.display = "none";
+        document.querySelectorAll(".asset-sessions-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+        b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+        _setChartRangePref("assetSessions", range);
+        _loadSessionsChartFor(a.id, range, a);
+      });
+    });
+    var sessionsApplyBtn = document.getElementById("btn-asset-sessions-custom-apply");
+    if (sessionsApplyBtn) {
+      sessionsApplyBtn.addEventListener("click", function () {
+        var fromInput = document.getElementById("asset-sessions-from");
+        var toInput   = document.getElementById("asset-sessions-to");
+        if (!fromInput.value || !toInput.value) { showToast("Enter both From and To", "error"); return; }
+        var fromIso = new Date(fromInput.value).toISOString();
+        var toIso   = new Date(toInput.value).toISOString();
+        if (new Date(fromIso) >= new Date(toIso)) { showToast("From must be before To", "error"); return; }
+        document.querySelectorAll(".asset-sessions-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+        var customBtn = document.getElementById("btn-asset-sessions-custom");
+        if (customBtn) { customBtn.classList.remove("btn-secondary"); customBtn.classList.add("btn-primary"); }
+        _loadSessionsChartFor(a.id, { from: fromIso, to: toIso }, a);
+      });
+    }
     document.querySelectorAll(".asset-monitor-range-btn").forEach(function (b) {
       b.addEventListener("click", function () {
         var range = b.getAttribute("data-range");
@@ -5467,7 +5505,13 @@ function _wireAssetChartRangeControls(a) {
       _loadSystemTabFor(a.id, { from: fromIso, to: toIso }, a, { chartOnly: true });
     };
     _wireChartDragSelect(document.getElementById("asset-system-chart"), systemDragApply);
-    _wireChartDragSelect(document.getElementById("asset-system-sessions-chart"), systemDragApply);
+    _wireChartDragSelect(document.getElementById("asset-system-sessions-chart"), function (fromIso, toIso) {
+      _applyCustomRangeSelection({
+        btnClass: "asset-sessions-range-btn", customBtnId: "btn-asset-sessions-custom",
+        panelId: "asset-sessions-custom-panel", fromId: "asset-sessions-from", toId: "asset-sessions-to",
+      }, fromIso, toIso);
+      _loadSessionsChartFor(a.id, { from: fromIso, to: toIso }, a);
+    });
 }
 
 // ─── Polaris Agent sub-panel (System tab) ─────────────────────────────────
@@ -6110,18 +6154,28 @@ function assetSystemViewHTML(a) {
     }
     return p === "rest_api";
   }());
-  function sectionHeader(title, badgeHTML, withRangeButtons) {
+  function sectionHeader(title, badgeHTML, rangeBtnsHTML) {
     return '<div style="display:flex;align-items:center;justify-content:space-between;margin:1.25rem 0 0.5rem">' +
       '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
         '<h4 style="margin:0">' + title + '</h4>' +
         (badgeHTML || '') +
       '</div>' +
-      (withRangeButtons ? ('<div style="display:flex;gap:6px">' + rangeBtns + '</div>') : '') +
+      (rangeBtnsHTML ? ('<div style="display:flex;gap:6px">' + rangeBtnsHTML + '</div>') : '') +
     '</div>';
   }
+  var sessionsRangeBtns = a.assetType === "firewall"
+    ? _chartRangeBtnsHTML("asset-sessions-range-btn", [
+        { value: "1h",  label: "1h" },
+        { value: "12h", label: "12h" },
+        { value: "24h", label: "24h" },
+        { value: "7d",  label: "7d" },
+        { value: "30d", label: "30d" },
+        { value: "custom", label: "Custom…", id: "btn-asset-sessions-custom" },
+      ], "assetSessions", "1h")
+    : "";
   return (
     '<div data-shot-section="cpuMemory" data-shot-label="CPU &amp; Memory" data-shot-chart="assetSystem">' +
-    sectionHeader("CPU &amp; Memory", telemetryBadgeFull, true) +
+    sectionHeader("CPU &amp; Memory", telemetryBadgeFull, rangeBtns) +
     '<div id="asset-system-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="asset-system-from" class="form-input" style="padding:2px 6px"></label>' +
       '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="asset-system-to" class="form-input" style="padding:2px 6px"></label>' +
@@ -6136,10 +6190,19 @@ function assetSystemViewHTML(a) {
     '</div>' +
     // Active Sessions chart — FortiGate firewalls only. Starts hidden;
     // _renderSessionsChart reveals it once the telemetry history carries
-    // sessionCount data (and re-hides it for assets that never report it).
+    // sessionCount data (and hides it for assets that never report it).
+    // Carries its OWN range selector (pref key "assetSessions"): the chart
+    // reads the same telemetry-history endpoint as CPU & Memory, but its
+    // window is selected independently — _loadSystemTabFor reuses the CPU
+    // & Memory payload only when the two selections happen to match.
     (a.assetType === "firewall"
-      ? '<div id="asset-system-sessions-section" data-shot-section="sessions" data-shot-label="Active Sessions" data-shot-chart="assetSystem" style="display:none">' +
-          sectionHeader("Active Sessions", telemetryBadgeFull, false) +
+      ? '<div id="asset-system-sessions-section" data-shot-section="sessions" data-shot-label="Active Sessions" data-shot-chart="assetSessions" style="display:none">' +
+          sectionHeader("Active Sessions", telemetryBadgeFull, sessionsRangeBtns) +
+          '<div id="asset-sessions-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+            '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="asset-sessions-from" class="form-input" style="padding:2px 6px"></label>' +
+            '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="asset-sessions-to" class="form-input" style="padding:2px 6px"></label>' +
+            '<button class="btn btn-sm btn-primary" id="btn-asset-sessions-custom-apply">Apply</button>' +
+          '</div>' +
           '<div id="asset-system-sessions-chart" style="background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
             'Loading samples…' +
           '</div>' +
@@ -6211,6 +6274,48 @@ function _currentSystemTabRange() {
   return chart.dataset.range || "24h";
 }
 
+// Active Sessions keeps its own window (pref key "assetSessions"), stamped
+// on its own container — before the chart's first load the stored pref is
+// the selection the range buttons already highlight.
+function _currentSessionsRange() {
+  var chart = document.getElementById("asset-system-sessions-chart");
+  if (chart) {
+    if (chart.dataset.from && chart.dataset.to) {
+      return { from: chart.dataset.from, to: chart.dataset.to };
+    }
+    if (chart.dataset.range) return chart.dataset.range;
+  }
+  return _getChartRangePref("assetSessions", "1h");
+}
+
+// Loads + renders the Active Sessions chart on its own window. The chart
+// reads the same telemetry-history rows as CPU & Memory, so a caller that
+// already holds a payload for the SAME window passes it via opts.tel and
+// skips the duplicate fetch (the common case — both selectors default to
+// the same range).
+async function _loadSessionsChartFor(assetId, range, asset, opts) {
+  var container = document.getElementById("asset-system-sessions-chart");
+  if (!container) return;
+  var silent = !!(opts && opts.silent);
+  var telOpts = (typeof range === "string" || !range) ? { range: range || "1h" } : range;
+  if (telOpts.from && telOpts.to) {
+    container.dataset.from = telOpts.from;
+    container.dataset.to = telOpts.to;
+    delete container.dataset.range;
+  } else {
+    container.dataset.range = telOpts.range || "1h";
+    delete container.dataset.from;
+    delete container.dataset.to;
+  }
+  if (!silent && !(opts && opts.tel)) container.textContent = "Loading samples…";
+  try {
+    var tel = (opts && opts.tel) || await api.assets.telemetryHistory(assetId, telOpts);
+    _renderSessionsChart(container, tel, asset);
+  } catch (err) {
+    if (!silent) container.textContent = "Error: " + (err.message || "failed to load");
+  }
+}
+
 async function _loadSystemTabFor(assetId, range, asset, opts) {
   // Cancel any pending auto-refresh — a manual range change, probe-now, or
   // re-render shouldn't race a scheduled tick.
@@ -6232,21 +6337,17 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
   if (!chart) return;
   // Accept a range string ("24h") or a { from, to } object for custom windows.
   var telOpts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
-  // The sessions chart shares the CPU & Memory selection — stamp both
-  // containers so screenshots/refreshes read the same window from either.
-  var sessionsChartEl = document.getElementById("asset-system-sessions-chart");
-  [chart, sessionsChartEl].forEach(function (el) {
-    if (!el) return;
-    if (telOpts.from && telOpts.to) {
-      el.dataset.from = telOpts.from;
-      el.dataset.to = telOpts.to;
-      delete el.dataset.range;
-    } else {
-      el.dataset.range = telOpts.range || "24h";
-      delete el.dataset.from;
-      delete el.dataset.to;
-    }
-  });
+  // The sessions chart keeps its OWN selection (stamped by
+  // _loadSessionsChartFor) — only the CPU & Memory container is stamped here.
+  if (telOpts.from && telOpts.to) {
+    chart.dataset.from = telOpts.from;
+    chart.dataset.to = telOpts.to;
+    delete chart.dataset.range;
+  } else {
+    chart.dataset.range = telOpts.range || "24h";
+    delete chart.dataset.from;
+    delete chart.dataset.to;
+  }
   if (!silent) {
     chart.textContent = "Loading samples…";
     if (!chartOnly) {
@@ -6278,7 +6379,17 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
 
     _renderSystemChart(chart, tel, asset, si);
     var sessionsChart = document.getElementById("asset-system-sessions-chart");
-    if (sessionsChart) _renderSessionsChart(sessionsChart, tel, asset);
+    if (sessionsChart) {
+      var sessionsSel = _currentSessionsRange();
+      var sameWindow = (typeof sessionsSel === "string")
+        ? (!telOpts.from && (telOpts.range || "24h") === sessionsSel)
+        : (!!telOpts.from && telOpts.from === sessionsSel.from && telOpts.to === sessionsSel.to);
+      // A custom sessions window is a fixed historical slice — skip it on
+      // silent auto-refresh ticks rather than refetching unchanging data.
+      if (!(silent && typeof sessionsSel !== "string" && !sameWindow)) {
+        await _loadSessionsChartFor(assetId, sessionsSel, asset, { tel: sameWindow ? tel : null, silent: silent });
+      }
+    }
     _renderSystemSummary(summary, tel, si);
     if (!chartOnly) {
       _renderInterfacesTable(ifaces, si, asset);
@@ -9466,6 +9577,14 @@ function _renderSessionsChart(container, data, asset) {
   var vals = samples.map(function (s) { return { s: s, v: typeof s.sessionCount === "number" ? s.sessionCount : null }; })
                     .filter(function (e) { return typeof e.v === "number"; });
   if (vals.length === 0) {
+    // Never revealed (asset doesn't report sessionCount) → stay hidden. A
+    // section the operator can already see instead shows an empty state:
+    // hiding it would take the range buttons with it, stranding whoever
+    // just picked the empty window.
+    if (section && section.style.display !== "none") {
+      container.textContent = "No session samples in this range.";
+      return;
+    }
     if (section) section.style.display = "none";
     return;
   }
@@ -13689,6 +13808,7 @@ function _collectShotSections(panel) {
 function _currentChartSelection(chartKey) {
   if (chartKey === "assetMonitor") return _currentMonitorSelection();
   if (chartKey === "assetSystem") return _currentSystemTabRange();
+  if (chartKey === "assetSessions") return _currentSessionsRange();
   if (chartKey === "assetSdwan") {
     var btn = document.querySelector(".sdwan-range-btn.btn-primary");
     return (btn && btn.getAttribute("data-range")) || _getChartRangePref("assetSdwan", "24h");
@@ -13731,6 +13851,8 @@ async function _captureWithChoicesInner(asset, choices) {
       await _loadMonitorHistoryFor(asset.id, selection, { silent: true });
     } else if (chartKey === "assetSystem") {
       await _loadSystemTabFor(asset.id, selection, asset, { chartOnly: !!_assetSystemSiCache, silent: true });
+    } else if (chartKey === "assetSessions") {
+      await _loadSessionsChartFor(asset.id, selection, asset, { silent: true });
     } else if (chartKey === "assetSdwan") {
       var st = _sdwanTabState;
       if (st && st.hcName) {
@@ -13757,9 +13879,10 @@ async function _captureWithChoicesInner(asset, choices) {
   // window — drop the buttons (and any open custom-range panel) from the
   // image for swapped charts only.
   var CHART_UI = {
-    assetMonitor: { btnSel: ".asset-monitor-range-btn", panelId: "asset-monitor-custom-panel" },
-    assetSystem:  { btnSel: ".asset-system-range-btn",  panelId: "asset-system-custom-panel" },
-    assetSdwan:   { btnSel: ".sdwan-range-btn",         panelId: null },
+    assetMonitor:  { btnSel: ".asset-monitor-range-btn",  panelId: "asset-monitor-custom-panel" },
+    assetSystem:   { btnSel: ".asset-system-range-btn",   panelId: "asset-system-custom-panel" },
+    assetSessions: { btnSel: ".asset-sessions-range-btn", panelId: "asset-sessions-custom-panel" },
+    assetSdwan:    { btnSel: ".sdwan-range-btn",          panelId: null },
   };
   charts.forEach(function (c) {
     var ui = CHART_UI[c.chartKey];
