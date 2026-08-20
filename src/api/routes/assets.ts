@@ -3282,6 +3282,21 @@ async function applyAssetUpdateSideEffects(
   for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
   const changes = buildChanges(before, after);
   logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor, message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated`, details: changes ? { changes } : undefined });
+  // An operator retyping the OS is a firmware change like any other — same
+  // action string, so one automation covers operator and discovery edits alike.
+  if (input.os !== undefined) {
+    const firmwareEvent = buildFirmwareChangedEvent(
+      {
+        assetId: id,
+        assetName: asset.hostname || asset.ipAddress || null,
+        actor: actor ?? "manual",
+        source: "operator",
+      },
+      { os: (existing as any).os },
+      { os: (asset as any).os },
+    );
+    if (firmwareEvent) void logEvent(firmwareEvent);
+  }
   // Description sync (Polaris-primary): a changed device description on a
   // Fortinet asset whose integration opted in is mirrored to the device.
   // Fire-and-forget — the Polaris row is authoritative and already saved;
@@ -3309,21 +3324,6 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     const existing = await loadAssetForUpdate(id);
     if (!existing) throw new AppError(404, "Asset not found");
     const input = UpdateAssetSchema.parse(req.body);
-  // An operator retyping the OS is a firmware change like any other — same
-  // action string, so one automation covers operator and discovery edits alike.
-  if (input.os !== undefined) {
-    const firmwareEvent = buildFirmwareChangedEvent(
-      {
-        assetId: id,
-        assetName: asset.hostname || asset.ipAddress || null,
-        actor: actor ?? "manual",
-        source: "operator",
-      },
-      { os: (existing as any).os },
-      { os: (asset as any).os },
-    );
-    if (firmwareEvent) void logEvent(firmwareEvent);
-  }
     await validateAssetUpdate(id, existing, input);
     const actor = requestActor(req);
     const { data, ipOverrideTouched, coordChanged } = await buildAssetUpdatePatch(id, existing, input, actor);
@@ -3775,6 +3775,9 @@ router.post("/import-pdf", requirePermission("assets", "write"), async (req, res
     const preview: PreviewRow[] = [];
     let created = 0;
     let updated = 0;
+    // Accumulated so the loop makes one batched audit write rather than an
+    // awaited logEvent per imported row.
+    const firmwareEvents: LogEventInput[] = [];
 
     for (const row of rows as any[]) {
       const serial = row.serialNumber ? String(row.serialNumber).trim() : null;
@@ -3800,11 +3803,19 @@ router.post("/import-pdf", requirePermission("assets", "write"), async (req, res
           }
           await prisma.asset.update({ where: { id: existing.id }, data: importUpdateData as any });
           updated++;
+          const firmwareEvent = buildFirmwareChangedEvent(
+            {
+              assetId: existing.id,
+              assetName: existing.hostname || existing.ipAddress || null,
+              actor: requestActor(req) ?? "manual",
+              source: "pdf-import",
+            },
+            { os: existing.os },
+            updateData,
+          );
+          if (firmwareEvent) firmwareEvents.push(firmwareEvent);
         }
       } else {
-    // Accumulated so the loop makes one batched audit write rather than an
-    // awaited logEvent per imported row.
-    const firmwareEvents: LogEventInput[] = [];
         preview.push({ action: "create", serialNumber: serial, hostname: row.hostname || null, fields });
         if (!dryRun) {
           await prisma.asset.create({ data: { assetType: "other", status: "storage", statusChangedAt: new Date(), statusChangedBy: requestActor(req) ?? "manual", ...updateData } as any });
@@ -3816,6 +3827,7 @@ router.post("/import-pdf", requirePermission("assets", "write"), async (req, res
     if (!dryRun && (created + updated) > 0) {
       logEvent({ action: "asset.import_pdf", resourceType: "asset", actor: requestActor(req), message: `PDF import: created ${created}, updated ${updated} asset(s)` });
     }
+    if (firmwareEvents.length > 0) void logEventsBatch(firmwareEvents);
 
     res.json({ preview, created, updated, dryRun: !!dryRun });
   } catch (err) {
@@ -3830,17 +3842,6 @@ router.delete("/:id/macs/:mac", requirePermission("assets", "write"), async (req
     const normalized = String(req.params.mac || "").toUpperCase().replace(/-/g, ":");
 
     const existing = await prisma.asset.findUnique({
-          const firmwareEvent = buildFirmwareChangedEvent(
-            {
-              assetId: existing.id,
-              assetName: existing.hostname || existing.ipAddress || null,
-              actor: requestActor(req) ?? "manual",
-              source: "pdf-import",
-            },
-            { os: existing.os },
-            updateData,
-          );
-          if (firmwareEvent) firmwareEvents.push(firmwareEvent);
       where: { id },
       include: { macAddressRows: { select: MAC_ROW_SELECT } },
     });
@@ -3854,7 +3855,6 @@ router.delete("/:id/macs/:mac", requirePermission("assets", "write"), async (req
 
     // Compute the new primary `Asset.macAddress` scalar after removal:
     // most-recently-seen surviving MAC, or null if the deleted MAC was the
-    if (firmwareEvents.length > 0) void logEventsBatch(firmwareEvents);
     // last one. Side-table delete + scalar-column update run as a single
     // transaction so the asset never points at a MAC that no longer exists.
     let primary = existing.macAddress;
