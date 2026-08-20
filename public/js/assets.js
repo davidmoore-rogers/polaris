@@ -12173,14 +12173,24 @@ function _sdwanMemberColor(name, members) {
 }
 
 // Compact green/red "Health Check Status" strip — one segment per recent scrape.
+//
+// The strip is pure color: its segments carry no text at all, which is invisible
+// to the table-screenshot renderer (a canvas re-draw of cell TEXT), so the
+// column came out blank in every image. data-shot-text/-color hand it the
+// summary the segments add up to instead.
 function _sdwanStatusStripHTML(recent) {
   if (!recent || !recent.length) return '<span style="color:var(--color-text-tertiary)">—</span>';
+  var up = 0;
   var segs = recent.map(function (r) {
+    if (r.up) up++;
     var c = r.up ? "#2ecc40" : "#e02020";
     return '<span title="' + escapeHtml(_fmtTooltipTs(r.timestamp)) + (r.up ? ' — up' : ' — down') +
       '" style="flex:1 1 auto;min-width:2px;height:16px;background:' + c + '"></span>';
   }).join("");
-  return '<span style="display:flex;gap:1px;align-items:stretch;min-width:120px;max-width:340px">' + segs + '</span>';
+  var allUp = up === recent.length;
+  return '<span data-shot-text="' + (allUp ? '▲ ' : '▼ ') + up + '/' + recent.length + ' up"' +
+    ' data-shot-color="' + (allUp ? MONITOR_STATE_COLORS.up : MONITOR_STATE_COLORS.down) + '"' +
+    ' style="display:flex;gap:1px;align-items:stretch;min-width:120px;max-width:340px">' + segs + '</span>';
 }
 
 // SD-WAN Members table body — canonical applyTableLayout column template.
@@ -12189,7 +12199,9 @@ function _sdwanStatusStripHTML(recent) {
 // reports a zone the table renders flat with no headers (unchanged behavior).
 function _sdwanMembersTableHTML(members) {
   function statusDot(up) {
-    return '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:' +
+    return '<span title="' + (up ? 'up' : 'down') + '" data-shot-text="' + (up ? '▲' : '▼') + '"' +
+      ' data-shot-color="' + (up ? MONITOR_STATE_COLORS.up : MONITOR_STATE_COLORS.down) + '"' +
+      ' style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:' +
       (up ? MONITOR_STATE_COLORS.up : MONITOR_STATE_COLORS.down) + '"></span>';
   }
   // One member row. `indented` adds a faint tree connector + indent in the
@@ -12204,7 +12216,8 @@ function _sdwanMembersTableHTML(members) {
         ' · jitter ' + (typeof h.jitterMs === "number" ? (Math.round(h.jitterMs * 100) / 100) + "ms" : "—") +
         ' · loss ' + (typeof h.packetLoss === "number" ? h.packetLoss + "%" : "—") +
         '" style="display:inline-block;margin:0 4px 2px 0;padding:1px 6px;border-radius:10px;font-size:0.74rem;background:var(--color-bg-primary);border:1px solid var(--color-border)">' +
-        '<span style="color:' + c + '">●</span> ' + escapeHtml(h.healthCheck) + ' ' + lat + '</span>';
+        '<span data-shot-text="' + (h.state === "up" ? '▲' : '▼') + '" style="color:' + c + '">●</span> ' +
+        escapeHtml(h.healthCheck) + ' ' + lat + '</span>';
     }).join("") || '<span style="color:var(--color-text-tertiary)">—</span>';
     var link = m.linkUp == null
       ? '<span style="color:var(--color-text-tertiary)">—</span>'
@@ -14082,6 +14095,86 @@ function _openScreenshotOptions(asset) {
   });
 }
 
+// ─── Table-screenshot cell readers ─────────────────────────────────────────
+// Lifted out of _screenshotTableEl so they can be unit-tested against real
+// table markup: the screenshot is a canvas re-draw of cell TEXT, so what these
+// return IS the image — a cell whose meaning lives in a color or a text-free
+// glyph disappears from it unless it says so with the data-shot-* pair below.
+
+// Extract a cell's text inserting a space at every element boundary so
+// visually-separated inline badges/pills — which are spaced only by CSS
+// margin, with no whitespace text node between them — don't run together in
+// the flattened text (e.g. the interface name link "a" + its "Physical" type
+// badge would otherwise read "aPhysical"). innerText only inserts breaks at
+// block boundaries, so inline siblings need this.
+//
+// `data-shot-text` is the escape hatch for cell content that carries its
+// meaning WITHOUT text — a colored status dot, a green/red per-scrape strip.
+// Those flatten to nothing here, so the column reads EMPTY in the image while
+// looking fine on screen (the SD-WAN Members up/down dot and its Health Check
+// Status strip both did). The attribute's value is drawn in the element's
+// place and its subtree skipped, so a 48-segment strip can state its own
+// summary ("46/48 up") instead of vanishing.
+function _shotCellText(el) {
+  var parts = [];
+  (function walk(node) {
+    node.childNodes.forEach(function (n) {
+      if (n.nodeType === 3) {            // text node
+        if (n.nodeValue) parts.push(n.nodeValue);
+      } else if (n.nodeType === 1) {     // element — pad both sides
+        parts.push(' ');
+        var shot = n.getAttribute && n.getAttribute('data-shot-text');
+        if (shot != null) parts.push(shot);   // stands in for the subtree
+        else walk(n);
+        parts.push(' ');
+      }
+    });
+  })(el);
+  return parts.join('').replace(/\s+/g, ' ').trim();
+}
+// The capture is a canvas re-draw, not a DOM rasterization, so a cell's color
+// has to be carried across explicitly — otherwise every cell paints in the
+// base text color and the image flattens the one thing a table screenshot is
+// often taken FOR (a red PoE "Fault", a down status pill, an alarming sensor:
+// in dark theme they all came out near-white). Resolution order matters: the
+// cell's OWN color first (the PoE cell colors the <td>, whose children include
+// a muted "· class3" suffix that would otherwise win), then the first
+// text-bearing descendant that differs from the base (status pills, type
+// badges, the interface-name link).
+function _shotCellColor(td, view, baseColor) {
+  // An explicit declaration wins: an element whose COLOR is the cell's state
+  // (a status dot with no text of its own) can't be found by the text-bearing
+  // walk below, since that walk deliberately ignores glyphs. It must be a
+  // RESOLVED color — canvas fillStyle silently ignores an unparseable value and
+  // keeps painting in the previous cell's color, so a raw "var(--x)" would leak
+  // one cell's state onto the next rather than degrading to the base color.
+  var declared = td.querySelector('[data-shot-color]');
+  if (declared) {
+    var dc = declared.getAttribute('data-shot-color');
+    if (dc && dc.indexOf('var(') !== 0) return dc;
+  }
+  var own = view.getComputedStyle(td).color;
+  if (own && own !== baseColor) return own;
+  var els = td.querySelectorAll('*');
+  for (var i = 0; i < els.length; i++) {
+    var t = (els[i].textContent || '').trim();
+    // Decorative glyphs (the ▼/▶ expand caret, the └ nesting bullet, a "·"
+    // separator) carry their own muted color and sit FIRST in the cell — they
+    // would otherwise mute the whole cell instead of the label doing the
+    // talking.
+    if (!t || !/[a-z0-9]/i.test(t)) continue;
+    if (!_shotVisible(els[i], view)) continue;
+    var c = view.getComputedStyle(els[i]).color;
+    if (c && c !== baseColor) return c;
+  }
+  return own;
+}
+/** display/visibility test — hidden columns, hidden rows, muted glyph colors. */
+function _shotVisible(el, view) {
+  var cs = view.getComputedStyle(el);
+  return !cs || (cs.display !== 'none' && cs.visibility !== 'hidden');
+}
+
 // Per-table screenshot (the camera button injected to the left of a table's
 // column-chooser gear by setupColumnLayout). Captures only that table — visible
 // columns + headers — titled with the table label and the current asset name,
@@ -14091,58 +14184,8 @@ function _screenshotTableEl(tableEl, label, opts) {
   opts = opts || {};
   var hiddenNoun = opts.hiddenNoun || "row";
   var view = (tableEl.ownerDocument && tableEl.ownerDocument.defaultView) || window;
-  function visible(el) {
-    var cs = view.getComputedStyle(el);
-    return !cs || (cs.display !== 'none' && cs.visibility !== 'hidden');
-  }
-  // Extract a cell's text inserting a space at every element boundary so
-  // visually-separated inline badges/pills — which are spaced only by CSS
-  // margin, with no whitespace text node between them — don't run together in
-  // the flattened text (e.g. the interface name link "a" + its "Physical" type
-  // badge would otherwise read "aPhysical"). innerText only inserts breaks at
-  // block boundaries, so inline siblings need this.
-  function cellText(el) {
-    var parts = [];
-    (function walk(node) {
-      node.childNodes.forEach(function (n) {
-        if (n.nodeType === 3) {            // text node
-          if (n.nodeValue) parts.push(n.nodeValue);
-        } else if (n.nodeType === 1) {     // element — pad both sides
-          parts.push(' ');
-          walk(n);
-          parts.push(' ');
-        }
-      });
-    })(el);
-    return parts.join('').replace(/\s+/g, ' ').trim();
-  }
-  // The capture is a canvas re-draw, not a DOM rasterization, so a cell's color
-  // has to be carried across explicitly — otherwise every cell paints in the
-  // base text color and the image flattens the one thing a table screenshot is
-  // often taken FOR (a red PoE "Fault", a down status pill, an alarming sensor:
-  // in dark theme they all came out near-white). Resolution order matters: the
-  // cell's OWN color first (the PoE cell colors the <td>, whose children include
-  // a muted "· class3" suffix that would otherwise win), then the first
-  // text-bearing descendant that differs from the base (status pills, type
-  // badges, the interface-name link).
+  function visible(el) { return _shotVisible(el, view); }
   var baseColor = view.getComputedStyle(tableEl).color;
-  function cellColor(td) {
-    var own = view.getComputedStyle(td).color;
-    if (own && own !== baseColor) return own;
-    var els = td.querySelectorAll('*');
-    for (var i = 0; i < els.length; i++) {
-      var t = (els[i].textContent || '').trim();
-      // Decorative glyphs (the ▼/▶ expand caret, the └ nesting bullet, a "·"
-      // separator) carry their own muted color and sit FIRST in the cell — they
-      // would otherwise mute the whole cell instead of the label doing the
-      // talking.
-      if (!t || !/[a-z0-9]/i.test(t)) continue;
-      if (!visible(els[i])) continue;
-      var c = view.getComputedStyle(els[i]).color;
-      if (c && c !== baseColor) return c;
-    }
-    return own;
-  }
   var ths = Array.prototype.slice.call(tableEl.querySelectorAll('thead th'));
   var visMask = ths.map(visible);
   var headers = [];
@@ -14169,8 +14212,8 @@ function _screenshotTableEl(tableEl, label, opts) {
     var colors = [];
     tr.querySelectorAll(':scope > td').forEach(function (td, i) {
       if (visMask[i] === false) return;   // skip hidden columns
-      row.push(cellText(td));
-      colors.push(cellColor(td));
+      row.push(_shotCellText(td));
+      colors.push(_shotCellColor(td, view, baseColor));
     });
     if (row.length) { rows.push(row); rowColors.push(colors); }
   });
