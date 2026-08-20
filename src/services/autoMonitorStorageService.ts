@@ -114,8 +114,11 @@ export function resolvePinnedStorage(
  * end of the storage cadence (up to 24h) plus a couple missed scrapes; a device
  * that hasn't reported in 3 days drops from the "By name" checklist, which is
  * the right behavior. The (assetId, mountPath, timestamp) index covers it.
+ *
+ * Exported for massPinService (the Assets-page Mass Pinning section), which
+ * needs the same mount inventory for an arbitrary asset-id set.
  */
-async function loadLatestStorage(assetIds: string[]): Promise<Map<string, ResolverMount[]>> {
+export async function loadLatestStorage(assetIds: string[]): Promise<Map<string, ResolverMount[]>> {
   const out = new Map<string, ResolverMount[]>();
   if (assetIds.length === 0) return out;
   const rows = await prisma.$queryRaw<Array<{ assetId: string; mountPath: string }>>`

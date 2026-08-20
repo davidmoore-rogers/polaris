@@ -420,7 +420,9 @@ export function mergeTunnelsIntoInterfaces(
  */
 const INTERFACE_STALE_MS = 72 * 60 * 60 * 1000;
 
-async function loadLatestInterfaces(
+// Exported for massPinService (the Assets-page Mass Pinning section), which
+// needs the same interface + IPsec-tunnel inventory for an arbitrary asset-id set.
+export async function loadLatestInterfaces(
   assetIds: string[],
   includeIpsecTunnels = false,
 ): Promise<Map<string, ResolverInterface[]>> {

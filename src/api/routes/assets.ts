@@ -25,7 +25,7 @@ import { cidrContains } from "../../utils/cidr.js";
 import { buildIpContexts, type IpContext } from "../../services/subnetService.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
 import { recomputeMonitorOverrideForAssets, getAddAsMonitoredFromConfig } from "../../services/monitorOverrideService.js";
-import { reconcileTagsForAsset } from "../../services/tagAssignmentService.js";
+import { reconcileTagsForAsset, listAssetTags } from "../../services/tagAssignmentService.js";
 import { manualCoordPatchError } from "../../utils/geo.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
 import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } from "../../services/assetMergeService.js";
@@ -61,7 +61,16 @@ import {
 } from "../../services/sampleHistoryService.js";
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
 import { getAssetNotifications } from "../../services/notificationService.js";
-import { getMetricSeverityTiers } from "../../services/notificationRuleService.js";
+import { getMetricSeverityTiers, listScopeOptions } from "../../services/notificationRuleService.js";
+import { SCOPE_FIELD_OPS, scopeConditionMeta, scopeConditionSchema } from "../../services/notificationTypes.js";
+import { loadScopeAssetIds } from "../../services/notificationEngine.js";
+import { listAssetTypes } from "../../services/assetTypeService.js";
+import {
+  applyMassPins,
+  getPinInventoryForAssets,
+  MASS_PIN_MAX_ASSETS,
+  MASS_PIN_MAX_DELTAS,
+} from "../../services/massPinService.js";
 import { operatorReleaseAsset, listAssetWindows, getAssetMaintenanceInfo } from "../../services/maintenanceScheduleService.js";
 import { resolveContactsForAsset } from "../../services/contactService.js";
 import { releaseInfraReservationsForAssets } from "../../services/reservationService.js";
@@ -938,6 +947,102 @@ router.post("/bulk-monitor", requirePermission("assets", "write"), async (req, r
       details: errors.length ? { errors } : undefined,
     });
     res.json({ updated: updatedCount, errors });
+  } catch (err) { next(err); }
+});
+
+// ─── Mass Pinning (Assets → Settings → Mass Pinning section) ─────────────────
+//
+// Manual bulk pin/unpin of fast-cadence targets (interfaces incl. IPsec
+// tunnels, storage mounts) across a condition-filtered device set. Three
+// endpoints; business logic lives in services/massPinService.ts. The UI button
+// is data-admin-only, but the endpoints are gated assets:read / assets:write
+// for API-token parity (the bulk-monitor posture).
+
+// The device-filter scope: the automations condition-tree vocabulary
+// (SCOPE_FIELD_OPS), or the explicit all-assets flag. One of the two is
+// required — a bare {} must never quietly mean "the whole fleet".
+const MassPinScopeSchema = z.object({
+  allAssets: z.boolean().optional(),
+  condition: scopeConditionSchema.optional(),
+}).refine((v) => v.allAssets === true || v.condition !== undefined, {
+  message: "Provide a condition or allAssets: true",
+});
+
+// GET /api/v1/assets/pin-filter-schema — the condition builder's vocabulary +
+// value suggestions for the Mass Pinning section. Its own route rather than
+// /automations/schema + /scope-options because those are gated
+// automationManagement:read, and pinning interfaces must not require
+// permission to edit automations (the contacts /filter-schema precedent).
+// Built from the same shared scopeConditionMeta so vocabularies can't drift —
+// this one carries the NARROW automations field set, matching what the
+// automation wizard's Devices step offers.
+router.get("/pin-filter-schema", requirePermission("assets", "read"), async (_req, res, next) => {
+  try {
+    const [options, assetTypes, tags] = await Promise.all([
+      listScopeOptions(),
+      listAssetTypes(),
+      listAssetTags(),
+    ]);
+    res.json({
+      scopeCondition: scopeConditionMeta(SCOPE_FIELD_OPS),
+      options: {
+        ...options,
+        assetTypes: assetTypes.map((t) => ({ name: t.name, label: t.label || t.name })),
+        tags,
+      },
+      maxAssets: MASS_PIN_MAX_ASSETS,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/assets/pin-inventory — resolve the device filter server-side
+// (the client never ships thousands of ids) and return the matched assets'
+// facet inventory aggregated by name, with per-device pinned state so the
+// client renders tri-state checkboxes from one call. mode:"count" is the
+// cheap half the debounced filter preview uses. Matched sets over
+// MASS_PIN_MAX_ASSETS refuse the full inventory (overCap) rather than
+// truncating — a cut device list would make "pinned on ALL devices" a lie.
+router.post("/pin-inventory", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const body = MassPinScopeSchema.and(z.object({
+      facet: z.enum(["interfaces", "storage"]),
+      mode:  z.enum(["count", "full"]).default("full"),
+    })).parse(req.body);
+
+    const ids = await loadScopeAssetIds(
+      body.allAssets === true ? { allAssets: true } : { condition: body.condition as any },
+    );
+    if (body.mode === "count") {
+      res.json({ matchedCount: ids.length });
+      return;
+    }
+    if (ids.length > MASS_PIN_MAX_ASSETS) {
+      res.json({ matchedCount: ids.length, overCap: true });
+      return;
+    }
+    const inventory = await getPinInventoryForAssets(ids, body.facet);
+    res.json({ matchedCount: ids.length, overCap: false, inventory });
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/assets/mass-pins — apply staged pin/unpin deltas. Deltas (not
+// final arrays) so a concurrent hand-pin of an unrelated name on the same
+// asset is never clobbered; the 64-per-array cap is re-enforced per asset in
+// the service (overflow = per-asset skip with reason, never a batch 400).
+router.post("/mass-pins", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const DeltaSchema = z.object({
+      assetId: z.string().uuid(),
+      name:    z.string().min(1).max(256),
+      field:   z.enum(["interfaces", "ipsecTunnels", "storage"]),
+    });
+    const body = z.object({
+      pin:   z.array(DeltaSchema).max(MASS_PIN_MAX_DELTAS).default([]),
+      unpin: z.array(DeltaSchema).max(MASS_PIN_MAX_DELTAS).default([]),
+    }).refine((b) => b.pin.length + b.unpin.length > 0, { message: "No pin changes supplied" })
+      .parse(req.body);
+
+    res.json(await applyMassPins(body, requestActor(req) ?? "unknown"));
   } catch (err) { next(err); }
 });
 

@@ -540,6 +540,11 @@ const api = {
     getSourcePriority:    ()    => request("GET",  "/assets/source-priority"),
     updateSourcePriority: (body) => request("PUT",  "/assets/source-priority", body),
     bulkMonitor:          (body) => request("POST", "/assets/bulk-monitor", body),
+    // Mass Pinning section (Assets → Settings): device-filter vocabulary, matched
+    // inventory (mode:"count"|"full"), and the bulk pin/unpin apply.
+    pinFilterSchema:      ()    => request("GET",  "/assets/pin-filter-schema"),
+    pinInventory:         (body) => request("POST", "/assets/pin-inventory", body),
+    applyMassPins:        (body) => request("POST", "/assets/mass-pins", body),
     monitorHistory:       (id, opts) => {
       // Accepts a range string ("24h") or { range } / { from, to } object.
       if (typeof opts === "string") opts = { range: opts };

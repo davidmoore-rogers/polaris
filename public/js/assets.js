@@ -18901,8 +18901,13 @@ function _monsetRender() {
   var sourcesBody   = _monsetSourcesSectionHTML(_monsetSourcePriority);
   var manualBody    = _monsetManualSectionHTML(_monsetManualValues);
   var overridesBody = _monsetOverridesSectionHTML(_monsetOverrides);
+  // Mass Pinning renders as a section like the rest ("" when its module didn't
+  // load, which drops the section and its rule the same way an absent Sources
+  // payload does).
+  var massPinBody   = window.PolarisMassPin ? window.PolarisMassPin.sectionHTML() : "";
   var hr = '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">';
-  var body = lifecycleBody + (sourcesBody ? hr + sourcesBody : "") + hr + manualBody + hr + overridesBody;
+  var body = lifecycleBody + (sourcesBody ? hr + sourcesBody : "") + hr + manualBody + hr + overridesBody +
+    (massPinBody ? hr + massPinBody : "");
   openModal(
     "Settings",
     body,
@@ -18911,6 +18916,9 @@ function _monsetRender() {
   );
   document.getElementById("btn-monset-save-lifecycle").addEventListener("click", _monsetSaveLifecycle);
   if (sourcesBody) _monsetWireSources();
+  // Mass Pinning mounts its own condition builder + fetches its vocabulary;
+  // idempotent per render via a dataset stamp that dies with the section DOM.
+  if (massPinBody) window.PolarisMassPin.init();
 
   // Wire the Manual Monitoring stream-subtab tab strip so clicking a stream
   // tab activates its panel. Same shared helper the integration Monitoring
