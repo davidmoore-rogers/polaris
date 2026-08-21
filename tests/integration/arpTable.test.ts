@@ -11,7 +11,7 @@
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { app } from "../../src/app.js";
 import { prisma } from "../../src/db.js";
-import { persistFortigateArpTables } from "../../src/services/arpTableService.js";
+import { persistFortigateArpTables, persistAssetArpNeighbors } from "../../src/services/arpTableService.js";
 import { authedAgent, dbDescribe, dbReachable, ensureTestUser } from "./_helpers.js";
 
 const d = dbDescribe;
@@ -72,7 +72,7 @@ const persist = (rows: any[], answered: string[], matchByMac: (m: string) => str
   });
 
 d("persistFortigateArpTables (real DB)", () => {
-  it("writes one gate's table and leaves a silent gate's rows untouched", async () => {
+  it("accumulates rather than replacing: a silent gate keeps its rows, and so does a gate that reports nothing", async () => {
     await persist([
       row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01"),
       row("FGT-B", "10.1.0.1", "AA:BB:CC:DD:EE:02"),
@@ -80,17 +80,37 @@ d("persistFortigateArpTables (real DB)", () => {
     expect(await prisma.assetArpEntry.count({ where: { assetId: gateA } })).toBe(1);
     expect(await prisma.assetArpEntry.count({ where: { assetId: gateB } })).toBe(1);
 
-    // Next cycle: only A answers, and it answers with nothing.
-    const result = await persist([], ["FGT-A"]);
-    expect(result.assetsWritten).toBe(1);
-    expect(await prisma.assetArpEntry.count({ where: { assetId: gateA } })).toBe(0);
-    // B did not answer, so B keeps what it had — the whole point of the scoping.
+    // Next cycle: only A answers, and it answers with nothing. Neither gate
+    // loses anything — retention is the only thing that removes a row.
+    await persist([], ["FGT-A"]);
+    expect(await prisma.assetArpEntry.count({ where: { assetId: gateA } })).toBe(1);
     expect(await prisma.assetArpEntry.count({ where: { assetId: gateB } })).toBe(1);
   });
 
+  it("bumps lastSeen on a binding that is still there instead of duplicating it", async () => {
+    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")], ["FGT-A"]);
+    const first = await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA } });
+
+    await new Promise((r) => setTimeout(r, 15));
+    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")], ["FGT-A"]);
+
+    const rows = await prisma.assetArpEntry.findMany({ where: { assetId: gateA } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].firstSeen.getTime()).toBe(first.firstSeen.getTime());
+    expect(rows[0].lastSeen.getTime()).toBeGreaterThan(first.lastSeen.getTime());
+  });
+
+  it("keeps a binding that has gone away, so history can still answer for it", async () => {
+    await persist([
+      row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01"),
+      row("FGT-A", "10.0.0.2", "AA:BB:CC:DD:EE:02"),
+    ], ["FGT-A"]);
+    // .2 unplugged; only .1 is in the cache now.
+    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")], ["FGT-A"]);
+    expect(await prisma.assetArpEntry.count({ where: { assetId: gateA } })).toBe(2);
+  });
+
   it("survives a duplicate binding in one payload rather than aborting the gate", async () => {
-    // Two identical rows would violate the unique index if the writer did not
-    // dedupe before createMany — and would take the whole transaction with them.
     const result = await persist([
       row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "internal1", 300),
       row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "internal1", 12),
@@ -100,51 +120,74 @@ d("persistFortigateArpTables (real DB)", () => {
     expect(stored?.ageSec).toBe(12);
   });
 
-  it("carries firstSeen forward across a re-write of the same binding", async () => {
-    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")], ["FGT-A"]);
-    const first = await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA } });
+  it("does not duplicate an UNATTRIBUTED row across scrapes", async () => {
+    // The reason ifName is "" and not NULL: Postgres treats NULLs as distinct
+    // in a unique index, so a nullable column would insert a fresh row here on
+    // every single poll.
+    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "")], ["FGT-A"]);
+    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "")], ["FGT-A"]);
+    const rows = await prisma.assetArpEntry.findMany({ where: { assetId: gateA } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ifName).toBe("");
+  });
 
+  it("treats the same binding on two interfaces as two rows", async () => {
     await persist([
-      row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01"),
-      row("FGT-A", "10.0.0.9", "AA:BB:CC:DD:EE:09"),
+      row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "internal1"),
+      row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "internal2"),
     ], ["FGT-A"]);
-    const again = await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA, ipAddress: "10.0.0.1" } });
-    const fresh = await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA, ipAddress: "10.0.0.9" } });
-
-    expect(again.firstSeen.getTime()).toBe(first.firstSeen.getTime());
-    expect(again.lastSeen.getTime()).toBeGreaterThanOrEqual(first.lastSeen.getTime());
-    expect(fresh.firstSeen.getTime()).toBeGreaterThanOrEqual(first.firstSeen.getTime());
+    expect(await prisma.assetArpEntry.count({ where: { assetId: gateA } })).toBe(2);
   });
 
-  it("stores a NULL ifName for an unattributed row and keeps it addressable", async () => {
-    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "")], ["FGT-A"]);
-    const stored = await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA } });
-    expect(stored.ifName).toBeNull();
-    // The NULL row must survive its own re-write — the unique index cannot
-    // catch it (Postgres NULLs are distinct), so the writer's dedupe is what
-    // keeps the delete-replace from doubling it.
-    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "")], ["FGT-A"]);
-    expect(await prisma.assetArpEntry.count({ where: { assetId: gateA } })).toBe(1);
-  });
-
-  it("links matchedAssetId and lets the endpoint be deleted without taking the row", async () => {
+  it("fills in matchedAssetId but never clears one a previous run resolved", async () => {
     await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")], ["FGT-A"], () => endpoint);
     expect((await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA } })).matchedAssetId).toBe(endpoint);
 
-    await prisma.asset.delete({ where: { id: endpoint } });
-    const orphan = await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA } });
-    expect(orphan.matchedAssetId).toBeNull();
+    // A later run whose resolver cannot match the MAC (the monitor pass has no
+    // warm asset index) must not undo the discovery run's work.
+    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")], ["FGT-A"], () => null);
+    expect((await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA } })).matchedAssetId).toBe(endpoint);
   });
 
-  it("cascades away with the FortiGate asset", async () => {
-    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")], ["FGT-A"]);
+  it("releases the match when the endpoint asset is deleted, and cascades with the gate", async () => {
+    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")], ["FGT-A"], () => endpoint);
+    await prisma.asset.delete({ where: { id: endpoint } });
+    expect((await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA } })).matchedAssetId).toBeNull();
+
     await prisma.asset.delete({ where: { id: gateA } });
     expect(await prisma.assetArpEntry.count({ where: { assetId: gateA } })).toBe(0);
   });
 });
 
+d("persistAssetArpNeighbors (the monitor-cadence entry point)", () => {
+  it("lands collector rows on the same table as discovery, and converges with them", async () => {
+    await persistAssetArpNeighbors(gateA, [
+      { ipAddress: "10.0.0.1", macAddress: "AA:BB:CC:DD:EE:01", ifName: "internal1", ageSec: 5 },
+      { ipAddress: "10.0.0.2", macAddress: "AA:BB:CC:DD:EE:02", ifName: null,        ageSec: null },
+    ]);
+    const rows = await prisma.assetArpEntry.findMany({ where: { assetId: gateA }, orderBy: { ipAddress: "asc" } });
+    expect(rows).toHaveLength(2);
+    expect(rows[1].ifName).toBe("");
+
+    // The discovery writer seeing the same binding is a bump, not a duplicate
+    // — which is what makes two writers on different cadences safe.
+    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "internal1", 90)], ["FGT-A"]);
+    expect(await prisma.assetArpEntry.count({ where: { assetId: gateA } })).toBe(2);
+    const bumped = await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA, ipAddress: "10.0.0.1" } });
+    expect(bumped.ageSec).toBe(90);
+  });
+
+  it("carries an IPv6 neighbour, which only the SNMP transport can supply", async () => {
+    await persistAssetArpNeighbors(gateA, [
+      { ipAddress: "fe80::21a:2bff:fe3c:4d5e", macAddress: "00:1A:2B:3C:4D:5E", ifName: "wan1", ageSec: null },
+    ]);
+    const stored = await prisma.assetArpEntry.findFirstOrThrow({ where: { assetId: gateA } });
+    expect(stored.ipAddress).toBe("fe80::21a:2bff:fe3c:4d5e");
+  });
+});
+
 d("GET /assets/:id/arp-table", () => {
-  it("returns the entries, per-interface counts, and one collection timestamp", async () => {
+  it("returns entries, per-interface counts, the collection stamp and the cadence facts", async () => {
     await persist([
       row("FGT-A", "10.0.0.2",  "AA:BB:CC:DD:EE:02", "internal1", 30),
       row("FGT-A", "10.0.0.10", "AA:BB:CC:DD:EE:0A", "internal1"),
@@ -157,12 +200,48 @@ d("GET /assets/:id/arp-table", () => {
     expect(res.body.total).toBe(3);
     expect(res.body.interfaceCounts).toEqual({ internal1: 2, wan1: 1 });
     expect(res.body.collectedAt).toBeTruthy();
+    expect(res.body.range).toBe("current");
+    // The disclaimer is built from these two, so they must always be present.
+    expect(res.body).toHaveProperty("retentionDays");
+    expect(res.body).toHaveProperty("pollIntervalSec");
 
     const matched = res.body.entries.find((e: any) => e.ipAddress === "10.0.0.2");
     expect(matched.matchedAsset.hostname).toBe("PRINTER-4");
     expect(matched.ageSec).toBe(30);
-    // A row the firmware gave no age for reports null, never 0.
     expect(res.body.entries.find((e: any) => e.ipAddress === "10.0.0.10").ageSec).toBeNull();
+  });
+
+  it("maps the empty-string interface sentinel back to null", async () => {
+    await persist([row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "")], ["FGT-A"]);
+    const { agent } = await authedAgent(app);
+    const res = await agent.get(`/api/v1/assets/${gateA}/arp-table`);
+    expect(res.body.entries[0].ifName).toBeNull();
+  });
+
+  it("filters by range on lastSeen", async () => {
+    await persist([
+      row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01"),
+      row("FGT-A", "10.0.0.2", "AA:BB:CC:DD:EE:02"),
+    ], ["FGT-A"]);
+    // Age one row out of the short windows.
+    await prisma.assetArpEntry.updateMany({
+      where: { assetId: gateA, ipAddress: "10.0.0.2" },
+      data:  { lastSeen: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) },
+    });
+
+    const { agent } = await authedAgent(app);
+    const recent = await agent.get(`/api/v1/assets/${gateA}/arp-table?range=1h`);
+    expect(recent.body.entries.map((e: any) => e.ipAddress)).toEqual(["10.0.0.1"]);
+
+    const week = await agent.get(`/api/v1/assets/${gateA}/arp-table?range=7d`);
+    expect(week.body.entries.map((e: any) => e.ipAddress).sort()).toEqual(["10.0.0.1", "10.0.0.2"]);
+    expect(week.body.range).toBe("7d");
+  });
+
+  it("rejects a range it does not offer instead of silently widening", async () => {
+    const { agent } = await authedAgent(app);
+    const res = await agent.get(`/api/v1/assets/${gateA}/arp-table?range=90d`);
+    expect(res.status).toBe(400);
   });
 
   it("answers empty rather than 404 for a gate that has never been read", async () => {

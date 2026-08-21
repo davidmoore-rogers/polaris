@@ -41,6 +41,7 @@
  * detail/hourly/daily would be meaningless. Today that's:
  *
  *   appMapConnections — asset_process_connections   (Application Map socket facts)
+ *   arpEntries        — asset_arp_entries           (FortiGate IP neighbour cache)
  *
  * They carry a single `{ days }` window using the same encoding as a tier, and
  * they also bound what the reading surface can show — the Application Map's
@@ -187,9 +188,9 @@ export const RETENTION_ENTITIES: RetentionEntity[] = [
 
 /** Entities with a single window instead of detail/hourly/daily tiers — see the
  *  "FLAT entities" note in the file header. */
-export type FlatRetentionEntity = "appMapConnections";
+export type FlatRetentionEntity = "appMapConnections" | "arpEntries";
 
-export const FLAT_RETENTION_ENTITIES: FlatRetentionEntity[] = ["appMapConnections"];
+export const FLAT_RETENTION_ENTITIES: FlatRetentionEntity[] = ["appMapConnections", "arpEntries"];
 
 export interface FlatRetention {
   days: number;
@@ -243,6 +244,11 @@ export function defaultSampleRetention(): SampleRetention {
     perfSla:     defaultTier(),
     process:     defaultTier(),
     appMapConnections: { days: defaultAppMapConnDays() },
+    // How far back the ARP Table tab's range selector can reach. 30 days
+    // matches its widest option and the appMapConnections precedent; the table
+    // is interval-per-binding, so this bounds distinct bindings retained, not
+    // scrapes.
+    arpEntries: { days: 30 },
   };
 }
 
@@ -370,4 +376,14 @@ export function getRetentionDays(
  */
 export async function getAppMapConnectionRetentionDays(): Promise<number> {
   return (await getSampleRetention()).appMapConnections.days;
+}
+
+/**
+ * Configured window (days) for the ARP Table tab's neighbour rows. Same two
+ * callers and the same reason as the Application Map's: the nightly prune, and
+ * the tab endpoint — which reports it so the range selector cannot offer
+ * "last 30 days" on an install that only keeps 7.
+ */
+export async function getArpEntryRetentionDays(): Promise<number> {
+  return (await getSampleRetention()).arpEntries.days;
 }

@@ -2025,6 +2025,14 @@ var SAMPLE_RETENTION_FLAT_ENTITIES = [
           "Application Map's “Seen within” filter can reach.",
     def: 30,
   },
+  {
+    key: "arpEntries",
+    label: "ARP / neighbour cache",
+    hint: "IP→MAC bindings read from each FortiGate. Rows accumulate (one per distinct " +
+          "binding, not one per poll) and age out on this window; capped at 4000 per device. " +
+          "Also sets how far back the ARP Table tab’s range selector can reach.",
+    def: 30,
+  },
 ];
 var SAMPLE_RETENTION_TIERS   = [
   { key: "detail", label: "Detail"      },

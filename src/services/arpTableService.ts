@@ -31,13 +31,15 @@
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { chunkArray } from "../utils/chunk.js";
+import { randomUUID } from "node:crypto";
 import {
   prepareArpRows,
   groupArpRowsByDevice,
-  arpRowKey,
   ARP_ROWS_PER_ASSET_CAP,
   type PreparedArpRow,
+  type RawArpRow,
 } from "../utils/arpTable.js";
+import type { ArpNeighborEntry } from "../utils/arpNeighbors.js";
 
 /** Rows per `createMany` statement — well inside Postgres' 65535-parameter cap. */
 const INSERT_CHUNK = 1000;
@@ -71,6 +73,97 @@ export interface PersistArpTablesOpts {
   matchAssetByMac: (mac: string) => string | null | undefined;
   /** Discovery's own progress logger, so the counts land in the run log. */
   log?: (level: "info" | "warning", message: string) => void;
+}
+
+/**
+ * Accumulate one asset's neighbour rows: bump what is still there, insert what
+ * is new, touch nothing else.
+ *
+ * ONE round-trip regardless of row count. `INSERT … ON CONFLICT DO UPDATE` is
+ * what makes two writers on different cadences safe — the monitor pass and
+ * discovery can both land the same binding and the second is a no-op bump
+ * rather than a duplicate or a wipe. `firstSeen` is deliberately NOT in the
+ * update list, so "this address has been on this gate since…" survives.
+ *
+ * `ifName` is "" (never NULL) for an unattributed row because it is part of
+ * the conflict target and Postgres treats NULLs as distinct — a nullable column
+ * would insert a fresh duplicate per scrape for exactly those rows.
+ */
+export async function upsertArpNeighbors(
+  assetId: string,
+  rows: readonly PreparedArpRow[],
+  matchAssetByMac?: (mac: string) => string | null | undefined,
+): Promise<number> {
+  if (rows.length === 0) return 0;
+
+  let written = 0;
+  for (const batch of chunkArray(rows, INSERT_CHUNK)) {
+    const now = new Date().toISOString();
+    const params: unknown[] = [assetId, now];
+    const groups: string[] = [];
+    for (const r of batch) {
+      const idP    = params.push(randomUUID());
+      const ipP    = params.push(r.ipAddress);
+      const macP   = params.push(r.macAddress);
+      const ifP    = params.push(r.ifName ?? "");
+      const ageP   = params.push(r.ageSec);
+      const matchP = params.push(matchAssetByMac?.(r.macAddress) ?? null);
+      groups.push(`($${idP}, $1, $${ipP}, $${macP}, $${ifP}, $${ageP}::int, $${matchP}, $2::timestamp, $2::timestamp)`);
+    }
+    try {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "asset_arp_entries"
+           ("id", "assetId", "ipAddress", "macAddress", "ifName", "ageSec", "matchedAssetId", "firstSeen", "lastSeen")
+         VALUES ${groups.join(", ")}
+         ON CONFLICT ("assetId", "ipAddress", "macAddress", "ifName") DO UPDATE SET
+           "lastSeen"       = EXCLUDED."lastSeen",
+           "ageSec"         = EXCLUDED."ageSec",
+           -- Only ever fill in a match, never clear one: the resolver is fed
+           -- from whichever caller is running, and discovery's index is warm
+           -- while the monitor pass may not resolve the same MAC.
+           "matchedAssetId" = COALESCE(EXCLUDED."matchedAssetId", "asset_arp_entries"."matchedAssetId")`,
+        ...params,
+      );
+      written += batch.length;
+    } catch (err: any) {
+      logger.warn(
+        { phase: "arp_table.upsert_failed", assetId, rows: batch.length, err: err?.message },
+        "ARP neighbour upsert failed",
+      );
+    }
+  }
+  return written;
+}
+
+/**
+ * Persist one asset's freshly-collected neighbour cache. The monitor-cadence
+ * entry point (system-info pass, REST or SNMP); discovery goes through
+ * `persistFortigateArpTables`, which resolves gates to assets first and then
+ * lands here per gate.
+ */
+export async function persistAssetArpNeighbors(
+  assetId: string,
+  rows: readonly ArpNeighborEntry[],
+  matchAssetByMac?: (mac: string) => string | null | undefined,
+): Promise<{ written: number; truncated: number }> {
+  // Back onto the raw shape so the collector path gets the same normalization,
+  // freshest-wins dedupe, ordering and cap the discovery path does -- one
+  // definition of what a stored row looks like, not two.
+  const raw: RawArpRow[] = rows.map((r) => ({
+    ip:        r.ipAddress,
+    mac:       r.macAddress,
+    interface: r.ifName ?? "",
+    age:       r.ageSec ?? undefined,
+  }));
+  const { entries, truncated } = prepareArpRows(raw, ARP_ROWS_PER_ASSET_CAP);
+  if (truncated > 0) {
+    logger.warn(
+      { phase: "arp_table.truncated", assetId, kept: entries.length, dropped: truncated },
+      "ARP table truncated at the per-asset cap",
+    );
+  }
+  const written = await upsertArpNeighbors(assetId, entries, matchAssetByMac);
+  return { written, truncated };
 }
 
 export interface PersistArpTablesResult {
@@ -140,55 +233,25 @@ export async function persistFortigateArpTables(
 
   // firstSeen carry-forward: "this address has been on this gate since..." has
   // to survive the delete-replace, so the existing rows are read once for the
-  // whole batch and keyed on the same business key the writer inserts under.
-  const assetIds = targets.map((t) => t.assetId);
-  const existing = await prisma.assetArpEntry.findMany({
-    where: { assetId: { in: assetIds } },
-    select: { assetId: true, ipAddress: true, macAddress: true, ifName: true, firstSeen: true },
-  });
-  const priorFirstSeen = new Map<string, Date>();
-  for (const e of existing) {
-    priorFirstSeen.set(`${e.assetId}|${arpRowKey(e)}`, e.firstSeen);
-  }
-
-  const now = new Date();
+  // whole batch. Nothing is read up front any more: the upsert preserves
+  // firstSeen in SQL (it is simply absent from the DO UPDATE list), so the
+  // read-then-carry-forward the delete-replace version needed is gone.
   let assetsWritten  = 0;
   let entriesWritten = 0;
   let truncatedTotal = 0;
 
   for (const target of targets) {
-    const data = target.prepared.map((r) => ({
-      assetId:        target.assetId,
-      ipAddress:      r.ipAddress,
-      macAddress:     r.macAddress,
-      ifName:         r.ifName,
-      ageSec:         r.ageSec,
-      matchedAssetId: matchAssetByMac(r.macAddress) ?? null,
-      firstSeen:      priorFirstSeen.get(`${target.assetId}|${arpRowKey(r)}`) ?? now,
-      lastSeen:       now,
-    }));
-
-    try {
-      await prisma.$transaction([
-        prisma.assetArpEntry.deleteMany({ where: { assetId: target.assetId } }),
-        ...chunkArray(data, INSERT_CHUNK).map((batch) =>
-          prisma.assetArpEntry.createMany({ data: batch }),
-        ),
-      ]);
-    } catch (err: any) {
-      // One gate's write failing must not cost the rest of the fleet its
-      // table; the previous rows survive, since the delete and the inserts
-      // shared a transaction.
-      logger.warn(
-        { phase: "arp_table.persist_failed", device: target.deviceKey, assetId: target.assetId, err: err?.message },
-        "ARP table persist failed for one FortiGate",
-      );
-      log?.("warning", `ARP table: write failed for ${target.deviceKey} — ${err?.message || "Unknown error"}`);
+    const written = await upsertArpNeighbors(target.assetId, target.prepared, matchAssetByMac);
+    if (written === 0 && target.prepared.length > 0) {
+      // upsertArpNeighbors logs the cause; surface it in the run log too, since
+      // a gate silently contributing nothing looks like a gate with no
+      // neighbours.
+      log?.("warning", `ARP table: write failed for ${target.deviceKey}`);
       continue;
     }
 
     assetsWritten++;
-    entriesWritten += data.length;
+    entriesWritten += written;
     truncatedTotal += target.truncated;
 
     if (target.truncated > 0) {
@@ -196,15 +259,15 @@ export async function persistFortigateArpTables(
       // seen that address", which is a different and wrong conclusion.
       logger.warn(
         { phase: "arp_table.truncated", device: target.deviceKey, assetId: target.assetId,
-          kept: data.length, dropped: target.truncated },
+          kept: written, dropped: target.truncated },
         "ARP table truncated at the per-asset cap",
       );
-      log?.("warning", `ARP table: ${target.deviceKey} reported ${data.length + target.truncated} entries — stored ${data.length}, dropped ${target.truncated} at the cap`);
+      log?.("warning", `ARP table: ${target.deviceKey} reported ${written + target.truncated} entries — stored ${written}, dropped ${target.truncated} at the cap`);
     }
   }
 
   if (assetsWritten > 0) {
-    log?.("info", `ARP tables: ${entriesWritten} entr${entriesWritten === 1 ? "y" : "ies"} stored across ${assetsWritten} FortiGate${assetsWritten === 1 ? "" : "s"}`);
+    log?.("info", `ARP tables: ${entriesWritten} entr${entriesWritten === 1 ? "y" : "ies"} recorded across ${assetsWritten} FortiGate${assetsWritten === 1 ? "" : "s"}`);
   }
   return { assetsWritten, entriesWritten, truncated: truncatedTotal, unresolvedDevices };
 }

@@ -19994,7 +19994,7 @@ function _wireAssetArpTableTab(assetId) {
   btn.addEventListener("click", function () {
     if (loaded) return;
     loaded = true;
-    _loadAssetArpTable(assetId);
+    _loadAssetArpTable(assetId, _assetArpRange[assetId] || "current");
   });
 }
 
@@ -20023,22 +20023,101 @@ function _wireAssetPivotLinks(container) {
   });
 }
 
-async function _loadAssetArpTable(assetId) {
+// Per-asset tab state, keyed by asset id so switching devices in the panel
+// history doesn't carry one gate's range or filter onto another.
+var _assetArpRange  = {};
+var _assetArpFilter = {};
+
+// Range selector. "Current" is the last poll's answer; the rest ask what the
+// device held at ANY point in the window, which the accumulate+age table can
+// answer because a binding is one row with a lastSeen rather than one row per
+// poll. Options past the configured retention are disabled rather than hidden,
+// so an operator can see that 30 days exists and is simply not being kept.
+var _ARP_RANGES = [
+  { id: "current", label: "Current",      days: 0     },
+  { id: "1h",      label: "Last hour",    days: 1 / 24 },
+  { id: "12h",     label: "Last 12 hours", days: 0.5  },
+  { id: "24h",     label: "Last 24 hours", days: 1    },
+  { id: "7d",      label: "Last 7 days",  days: 7     },
+  { id: "30d",     label: "Last 30 days", days: 30    },
+];
+
+// "every 10 minutes" / "every 12 hours" — the cadence sentence is the whole
+// point of the disclaimer, so it reads in the units an operator thinks in.
+function _arpCadenceLabel(sec) {
+  if (typeof sec !== "number" || !isFinite(sec) || sec <= 0) return null;
+  if (sec < 60)   return sec + " seconds";
+  if (sec < 3600) {
+    var m = Math.round(sec / 60);
+    return m === 1 ? "minute" : m + " minutes";
+  }
+  var h = Math.round(sec / 3600);
+  return h === 1 ? "hour" : h + " hours";
+}
+
+async function _loadAssetArpTable(assetId, range) {
   var mount = document.getElementById("asset-arptable-mount-" + assetId);
   if (!mount) return;
+  var activeRange = range || _assetArpRange[assetId] || "current";
+  _assetArpRange[assetId] = activeRange;
   try {
-    var data = await api.assets.arpTable(assetId);
+    var data = await api.assets.arpTable(assetId, activeRange);
     var entries = (data && data.entries) || [];
-    if (entries.length === 0) {
-      mount.innerHTML = '<span class="empty-state">No ARP entries. The neighbour cache is read ' +
-        'on every FortiManager / FortiGate discovery cycle, and a gate whose read FAILS keeps ' +
-        'whatever it had — so this is either a gate holding no neighbours, or one Polaris has ' +
-        'never had a successful read from.</span>';
-      return;
+    var dash = '<span style="color:var(--color-text-secondary)">—</span>';
+    var filter = _assetArpFilter[assetId] || "";
+    var cadence = _arpCadenceLabel(data && data.pollIntervalSec);
+    var retentionDays = (data && typeof data.retentionDays === "number") ? data.retentionDays : null;
+
+    // The disclaimer. Two separate facts, and the second is the one that
+    // actually matters: a poll is a SNAPSHOT of a cache whose entries expire in
+    // minutes, so anything that came and went between two polls was never
+    // visible to Polaris at all. Without saying so, an absent device reads as
+    // "it was never on the network", which is a stronger claim than the data
+    // supports.
+    function disclaimerHtml() {
+      var when = cadence
+        ? 'This device’s neighbour cache is read <strong>every ' + escapeHtml(cadence) + '</strong>.'
+        : 'This device’s neighbour cache is only read when discovery runs.';
+      var keep = retentionDays == null ? ""
+        : retentionDays < 0 ? " Entries are kept indefinitely."
+        : retentionDays === 0 ? " Entries are not retained."
+        : " Entries are kept for " + retentionDays + " day" + (retentionDays === 1 ? "" : "s") + ".";
+      return '<div class="empty-state" style="margin:0 0 0.6rem;padding:6px 9px;border-radius:4px;' +
+        'background:var(--color-bg-primary);border:1px solid var(--color-border);font-size:0.78rem;' +
+        'line-height:1.5;text-align:left">' +
+        when + ' Each read is a snapshot, and a FortiGate ages entries out of its own cache in ' +
+        'roughly 1–5 minutes — so <strong>short-lived entries can be missing entirely</strong>, ' +
+        'and an address absent here was not necessarily absent from the network.' +
+        keep +
+        '</div>';
     }
 
-    var dash = '<span style="color:var(--color-text-secondary)">—</span>';
-    var filter = "";
+    function rangeControlHtml() {
+      var opts = _ARP_RANGES.map(function (r) {
+        var beyond = retentionDays != null && retentionDays >= 0 && r.days > retentionDays;
+        return '<option value="' + escapeHtml(r.id) + '"' +
+          (r.id === activeRange ? " selected" : "") +
+          (beyond ? " disabled" : "") + '>' +
+          escapeHtml(r.label) + (beyond ? " (beyond retention)" : "") +
+        '</option>';
+      }).join("");
+      return '<label style="display:inline-flex;align-items:center;gap:5px;font-size:0.82rem">' +
+        'Show <select id="arptable-range-' + escapeHtml(assetId) + '" class="form-input" ' +
+          'style="font-size:0.82rem;padding:2px 6px;width:auto">' + opts + '</select>' +
+      '</label>';
+    }
+
+    if (entries.length === 0) {
+      mount.innerHTML = disclaimerHtml() +
+        '<div style="margin:0 0 0.6rem">' + rangeControlHtml() + '</div>' +
+        '<span class="empty-state">' +
+          (activeRange === "current"
+            ? 'No ARP entries. Either this device holds no neighbours, or Polaris has never had a successful read from it.'
+            : 'No ARP entries seen in this window.') +
+        '</span>';
+      wireRange();
+      return;
+    }
 
     // Interface-first, matching the MAC Table tab: the interface is the
     // network segment, and an operator scanning for an address wants to see
@@ -20066,6 +20145,11 @@ async function _loadAssetArpTable(assetId) {
       return hay.indexOf(filter) !== -1;
     }
 
+    // On a historical range the newest read is not "now", so every row carries
+    // its own last-seen. On Current they are all the same instant and the
+    // column would just repeat the header.
+    var showLastSeen = activeRange !== "current";
+
     function render() {
       var shown  = entries.filter(matches);
       var groups = groupsFrom(shown);
@@ -20077,19 +20161,23 @@ async function _loadAssetArpTable(assetId) {
           '<span style="font-weight:400;color:var(--color-text-secondary)">(' +
             shown.length + (filter ? " of " + entries.length : "") + ' entr' +
             (shown.length === 1 ? "y" : "ies") + ' · ' + matched + ' matched to a known device' +
-            (stamp ? ' · read ' + escapeHtml(stamp) : "") +
+            (stamp ? ' · newest read ' + escapeHtml(stamp) : "") +
           ')</span>' +
         '</h4>' +
-        '<div style="margin:0 0 0.5rem">' +
+        disclaimerHtml() +
+        '<div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;margin:0 0 0.5rem">' +
+          rangeControlHtml() +
           '<input type="text" id="arptable-filter-' + escapeHtml(assetId) + '" class="form-input" ' +
             'placeholder="Filter by IP, MAC, interface or hostname" ' +
-            'style="max-width:22rem;font-size:0.82rem" value="' + escapeHtml(filter) + '">' +
+            'style="max-width:22rem;font-size:0.82rem;flex:1 1 14rem" value="' + escapeHtml(filter) + '">' +
         '</div>';
 
       var body = groups.length === 0
         ? '<div class="empty-state">No entries match that filter.</div>'
         : '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-            '<th>Interface / IP</th><th>MAC</th><th>Age</th><th>Device</th>' +
+            '<th>Interface / IP</th><th>MAC</th><th>Age</th>' +
+            (showLastSeen ? '<th>Last seen</th>' : '') +
+            '<th>Device</th>' +
           '</tr></thead><tbody>' + groups.map(groupHtml).join("") + '</tbody></table></div>';
 
       mount.innerHTML = head + body;
@@ -20098,25 +20186,40 @@ async function _loadAssetArpTable(assetId) {
       if (box) {
         box.addEventListener("input", function () {
           filter = box.value.trim().toLowerCase();
+          _assetArpFilter[assetId] = filter;
           var caret = box.selectionStart;
           render();
           var next = document.getElementById("arptable-filter-" + assetId);
           if (next) { next.focus(); try { next.setSelectionRange(caret, caret); } catch (_) {} }
         });
       }
+      wireRange();
       wireGroupToggles();
       _wireAssetPivotLinks(mount);
     }
 
+    // Changing the range is a re-fetch, not a client-side filter: the window
+    // is applied in SQL against an index, and a 30-day payload is not
+    // something to ship on the chance the operator wants it.
+    function wireRange() {
+      var sel = document.getElementById("arptable-range-" + assetId);
+      if (!sel) return;
+      sel.addEventListener("change", function () {
+        mount.innerHTML = '<span class="empty-state">Loading…</span>';
+        _loadAssetArpTable(assetId, sel.value);
+      });
+    }
+
     function groupHtml(g) {
-      var head = '<tr class="arptable-group"><td colspan="4" style="padding:5px 8px;font-weight:600;' +
+      var cols = showLastSeen ? 5 : 4;
+      var head = '<tr class="arptable-group"><td colspan="' + cols + '" style="padding:5px 8px;font-weight:600;' +
         'background:var(--color-bg-primary);color:var(--color-text-secondary)">' +
         '<button type="button" class="arptable-group-toggle" data-group="' + escapeHtml(g.key) + '" ' +
           'style="background:none;border:none;cursor:pointer;color:var(--color-text-secondary);' +
           'padding:0 3px 0 0;font-size:0.75rem;vertical-align:middle;line-height:1" ' +
-          'title="Collapse entries">▼</button>' +
+          'title="Collapse entries">&#9660;</button>' +
         '<span class="mono" style="color:var(--color-text-primary)">' + escapeHtml(g.key) + '</span> ' +
-        '<span style="font-weight:400">· ' + g.entries.length + ' address' +
+        '<span style="font-weight:400">&middot; ' + g.entries.length + ' address' +
           (g.entries.length === 1 ? "" : "es") + '</span>' +
         '</td></tr>';
       return head + g.entries.map(function (e) { return entryHtml(e, g.key); }).join("");
@@ -20130,17 +20233,20 @@ async function _loadAssetArpTable(assetId) {
       var age = _arpAgeLabel(e.ageSec);
       return '<tr class="arptable-entry" data-group="' + escapeHtml(groupKey) + '">' +
         '<td class="mono" style="padding-left:1.4rem">' +
-          '<span style="color:var(--color-text-secondary);opacity:0.5;margin-right:3px;font-size:0.8rem">└</span>' +
+          '<span style="color:var(--color-text-secondary);opacity:0.5;margin-right:3px;font-size:0.8rem">&#9492;</span>' +
           escapeHtml(e.ipAddress) +
         '</td>' +
         '<td class="mono">' + escapeHtml(e.macAddress) + '</td>' +
         '<td class="mono">' + (age ? escapeHtml(age) : dash) + '</td>' +
+        (showLastSeen
+          ? '<td title="' + escapeHtml(e.lastSeen || "") + '">' + (e.lastSeen ? escapeHtml(timeAgo(e.lastSeen)) : dash) + '</td>'
+          : '') +
         '<td>' + dev + '</td>' +
       '</tr>';
     }
 
     // Toggles rows in place rather than re-rendering, so an open group
-    // survives — same approach as the MAC Table tab.
+    // survives - same approach as the MAC Table tab.
     function wireGroupToggles() {
       mount.querySelectorAll(".arptable-group-toggle").forEach(function (tog) {
         tog.addEventListener("click", function () {

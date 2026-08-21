@@ -1962,18 +1962,27 @@ model AssetMacTableEntry {
 // a switch's forwarding database, this one answers "what is at 10.4.12.63" from
 // the router's own resolution of the address.
 //
-// CURRENT-STATE, delete-replaced per discovery cycle by
-// `persistFortigateArpTables` -- the AssetMacTableEntry / AssetLldpNeighbor
-// pattern. An ARP entry ages out of the FortiGate's cache within ~1-5 minutes,
-// so history here would answer a question the gate itself cannot.
+// ACCUMULATE + AGE, not delete-replace (the AssetProcessConnection pattern): a
+// binding still present just has its lastSeen bumped, firstSeen is preserved,
+// and rows age out on the flat `arpEntries` retention window. That is what lets
+// the tab answer "who was at this address last Tuesday" rather than only "right
+// now", at one row per distinct binding instead of one per scrape -- the
+// snapshot alternative is ~52M rows/month across a 40-gate fleet at the 600s
+// cadence. History is therefore an INTERVAL, not a timeline: a MAC that flips
+// away and back between two scrapes is invisible, and a binding recurring after
+// a gap collapses into one row spanning it.
 //
-// Written from DISCOVERY, not the monitor cadence: the rows are already read on
-// every FMG / standalone-FortiGate cycle (they feed the empty-ipAddress
-// enrichment, `Reservation.lastSeenArp` presence evidence and placeholder-MAC
-// adoption) and were previously consumed in memory and thrown away. A gate is
-// only wiped when its ARP query ANSWERED this cycle (`arpQueriedDevices`) --
-// a failed or proxied-to-an-offline-gate read preserves the stored rows, since
-// silence is not an empty neighbour cache.
+// TWO WRITERS, which the accumulate model makes safe (a partial view bumps what
+// it saw and touches nothing else -- under delete-replace the same pair would
+// wipe each other):
+//   1. the monitor system-info pass (600s default) for MONITORED firewalls,
+//      over FortiOS REST or IP-MIB SNMP per the resolved polling method;
+//   2. discovery Phase 7.5b (pollInterval, 12h default), which covers gates
+//      that are unmonitored or have system-info off, and costs nothing extra
+//      because those rows are already read for the Reservation.lastSeenArp
+//      presence stamp and placeholder-MAC adoption.
+// Neither can express "the cache is empty" -- nothing here is ever wiped by a
+// scrape, only aged out by retention.
 //
 // `matchedAssetId` resolves by MAC ONLY. Matching on the IP as well would be
 // the one join the row itself contradicts: an ARP entry asserting that address
@@ -1988,9 +1997,12 @@ model AssetArpEntry {
   ipAddress  String
   /// Normalized colon-uppercase (AA:BB:CC:DD:EE:FF), matching AssetMacTableEntry.
   macAddress String
-  /// FortiGate interface the binding was learned on, e.g. "internal3". Empty
-  /// string from FortiOS is stored NULL.
-  ifName     String?
+  /// Interface the binding was learned on, e.g. "internal3". "" means the
+  /// device attributed it to no interface -- NOT nullable, because this is part
+  /// of the business key and Postgres treats NULLs as DISTINCT in a unique
+  /// index, so a nullable column would let every unattributed binding insert a
+  /// duplicate per scrape. The route maps "" back to null on the way out.
+  ifName     String  @default("")
   /// Entry age in seconds, when FortiOS exposes it. NULL otherwise -- absence
   /// is "the firmware did not say", never zero.
   ageSec     Int?
@@ -2006,6 +2018,10 @@ model AssetArpEntry {
   @@unique([assetId, ipAddress, macAddress, ifName])
   @@index([assetId])
   @@index([assetId, ifName])
+  /// Range filter ("seen in the last 12 hours") reads per asset; the retention
+  /// prune reads fleet-wide.
+  @@index([assetId, lastSeen])
+  @@index([lastSeen])
   @@index([macAddress])
   @@index([ipAddress])
   @@index([matchedAssetId])

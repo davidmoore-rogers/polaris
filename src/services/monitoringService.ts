@@ -103,7 +103,7 @@ import {
 } from "../metrics.js";
 import pg from "pg";
 import { dropChunks, getEffectiveCompressAfterDays } from "./timescaleService.js";
-import { getSampleRetention, getAppMapConnectionRetentionDays, FOREVER, unselectedSlowPruneWindow, tieredPruneWindow } from "./sampleRetentionService.js";
+import { getSampleRetention, getAppMapConnectionRetentionDays, getArpEntryRetentionDays, FOREVER, unselectedSlowPruneWindow, tieredPruneWindow } from "./sampleRetentionService.js";
 import { getDirectDatabaseUrl } from "../utils/dbConnections.js";
 import {
   enqueueMonitorSample,
@@ -127,6 +127,8 @@ import {
 import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
 import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
 import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, resolveFdbIdentity, type FdbEntry } from "../utils/macForwarding.js";
+import { buildArpNeighbors, arpNeighborsFromFortiosRest, type ArpNeighborEntry } from "../utils/arpNeighbors.js";
+import { persistAssetArpNeighbors } from "./arpTableService.js";
 import { decodePortList, derivePortVlans, isVlanId, type PortVlanConfig, type VlanMembership } from "../utils/portVlans.js";
 import { matchTrunkPeer, parseTrunkPortMap, type TrunkPortEntry } from "../utils/fortiswitchTrunkMap.js";
 import { joinStateRows } from "../utils/stateProbes.js";
@@ -3364,6 +3366,8 @@ export interface SystemInfoSample {
    * a bridge that currently has nothing in its table.
    */
   macTable?: FdbEntry[];
+  /** IP neighbour cache (ARP / NDP). Firewall-class only; see collectArpNeighborsSnmp. */
+  arpNeighbors?: ArpNeighborEntry[];
   /**
    * FortiSwitch trunk -> local-port map. Same undefined/[] contract.
    */
@@ -4182,6 +4186,8 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
           includeIpsec: true,
           includeLldp:  lldpPolling === "rest_api",
           includeSdwan: ((integration as any)?.config as any)?.pullSdwan === true,
+          // Firewall-class only, matching where the SNMP branch gates it.
+          includeArp:   asset.assetType === "firewall",
           timeoutMs:    sysInfoTimeout,
         });
         endRest({ interfaces: data.interfaces.length, ipsec: data.ipsecTunnels?.length ?? null, lldp: data.lldpNeighbors?.length ?? null, perfSla: data.perfSla?.length ?? null, sdwanRules: data.sdwanRules?.length ?? null });
@@ -4525,7 +4531,7 @@ export function backfillFortiAggregateMembers(
 async function collectSystemInfoFortinet(
   host: string,
   integration: { type: string; config: Record<string, unknown> },
-  opts: { includeIpsec?: boolean; includeLldp?: boolean; includeSdwan?: boolean; timeoutMs?: number } = {},
+  opts: { includeIpsec?: boolean; includeLldp?: boolean; includeSdwan?: boolean; includeArp?: boolean; timeoutMs?: number } = {},
 ): Promise<SystemInfoSample> {
   const fg = buildFortinetConfig(host, integration);
   if ("error" in fg) throw new AppError(409, fg.error);
@@ -4579,13 +4585,27 @@ async function collectSystemInfoFortinet(
           .then((sdwan) => { endSdwan({ perfSla: sdwan.perfSla.length, rules: sdwan.sdwanRules.length }); return sdwan; });
       })()
     : Promise.resolve<{ perfSla: PerfSlaSample[]; sdwanRules: SdwanRuleSample[] } | undefined>(undefined);
+  // IP neighbour cache. Same endpoint discovery already reads per gate, called
+  // here so a monitored firewall refreshes it on the system-info cadence
+  // instead of once per discovery interval. IPv4 only -- FortiOS exposes no
+  // NDP equivalent over REST, which the SNMP path does cover.
+  const arpPromise = opts.includeArp
+    ? (() => {
+        const endArp = startPhase("systeminfo.rest.arp");
+        return fgRequest<any[]>(fg, "GET", "/api/v2/monitor/network/arp", { timeoutMs })
+          .then((rows) => (Array.isArray(rows) ? arpNeighborsFromFortiosRest(rows) : undefined))
+          .catch(() => undefined)
+          .then((rows) => { endArp({ entries: rows?.length ?? null }); return rows; });
+      })()
+    : Promise.resolve<ArpNeighborEntry[] | undefined>(undefined);
 
-  const [cmdbRes, monitorOutcome, ipsecTunnels, lldpNeighbors, sdwan] = await Promise.all([
+  const [cmdbRes, monitorOutcome, ipsecTunnels, lldpNeighbors, sdwan, arpNeighbors] = await Promise.all([
     cmdbInterfacePromise,
     monitorInterfacePromise,
     ipsecPromise,
     lldpPromise,
     sdwanPromise,
+    arpPromise,
   ]);
 
   const cmdbByName = parseFortiCmdbInterfaceTable(cmdbRes);
@@ -4625,6 +4645,7 @@ async function collectSystemInfoFortinet(
     lldpSource: opts.includeLldp !== false ? "fortios" : undefined,
     perfSla:    sdwan?.perfSla,
     sdwanRules: sdwan?.sdwanRules,
+    arpNeighbors,
     fortilinkInterfaces,
   };
 }
@@ -5334,6 +5355,19 @@ const OID = {
   // The address COLUMN is walked alongside them because the index is not
   // always the address: agents exist (FortiSwitch) that index the table by a
   // row number and publish the MAC only here. See resolveFdbIdentity.
+  // IP-MIB neighbour cache (RFC 4293), bundled as `std:ip`. Two generations:
+  // ipNetToPhysicalTable is current and covers IPv4 ARP *and* IPv6 NDP;
+  // ipNetToMediaTable is the deprecated RFC 1213 predecessor, IPv4 only, kept
+  // as the fallback for agents that never implemented the successor. On the
+  // MODERN table the ifIndex and the address live only in the OID index (the
+  // index objects are not-accessible), which is why utils/arpNeighbors.ts
+  // decodes the suffix rather than walking them.
+  ipNetToPhysicalPhysAddress: "1.3.6.1.2.1.4.35.1.4",
+  ipNetToPhysicalLastUpdated: "1.3.6.1.2.1.4.35.1.5",
+  ipNetToPhysicalType:        "1.3.6.1.2.1.4.35.1.6",
+  ipNetToPhysicalState:       "1.3.6.1.2.1.4.35.1.7",
+  ipNetToMediaPhysAddress:    "1.3.6.1.2.1.4.22.1.2",
+  ipNetToMediaType:           "1.3.6.1.2.1.4.22.1.4",
   dot1dBasePortIfIndex:   "1.3.6.1.2.1.17.1.4.1.2",
   dot1qTpFdbAddress:      "1.3.6.1.2.1.17.7.1.2.2.1.1",
   dot1qTpFdbPort:         "1.3.6.1.2.1.17.7.1.2.2.1.2",
@@ -6531,6 +6565,71 @@ async function collectBasePortIfNames(
  * distinguish "not a bridge" from "a bridge with an empty table" — the same
  * undefined-preserves / []-wipes contract LLDP uses.
  */
+/**
+ * The device's IP neighbour cache over SNMP (IP-MIB, bundled as `std:ip`).
+ *
+ * Modern table first, deprecated table as fallback -- the dot1qTpFdbTable ->
+ * dot1dTpFdbTable shape. The modern one is preferred for two reasons beyond
+ * being current: it carries IPv6 neighbour-discovery entries, which the FortiOS
+ * REST `/monitor/network/arp` endpoint does not expose at all, and its
+ * `LastUpdated` column is what makes a real per-entry age possible.
+ *
+ * Decoding is pure and lives in utils/arpNeighbors.ts. Returns `undefined`
+ * when nothing decoded -- a router always has neighbours, so zero rows is
+ * far more likely "this agent does not implement IP-MIB" than "the cache is
+ * empty", and the writer accumulates rather than replacing, so preserving
+ * costs nothing.
+ */
+async function collectArpNeighborsSnmp(
+  session: any,
+  ifNameByIndex: Map<number, string>,
+): Promise<ArpNeighborEntry[] | undefined> {
+  // sysUpTime is needed to turn ipNetToPhysicalLastUpdated (a stamp, not an
+  // age) into seconds. Walked rather than GET so this uses the same helper as
+  // everything else here; the scalar returns a single row keyed "0".
+  const sysUpTimeTicks = await snmpWalk(session, "1.3.6.1.2.1.1.3")
+    .then((m) => { for (const v of m.values()) return snmpVbToNumber(v); return null; })
+    .catch(() => null);
+
+  const physAddress = await snmpWalk(session, OID.ipNetToPhysicalPhysAddress).catch(() => new Map());
+  if (physAddress.size > 0) {
+    const [type, state, lastUpdated] = await Promise.all([
+      snmpWalk(session, OID.ipNetToPhysicalType).catch(() => new Map()),
+      snmpWalk(session, OID.ipNetToPhysicalState).catch(() => new Map()),
+      snmpWalk(session, OID.ipNetToPhysicalLastUpdated).catch(() => new Map()),
+    ]);
+    const rows = buildArpNeighbors({
+      physAddress, type, state, lastUpdated, sysUpTimeTicks,
+      ifNameByIndex, variant: "physical", toNumber: snmpVbToNumber,
+    });
+    if (rows.length > 0) return rows;
+    // The table answered and every row was dropped -- worth saying out loud,
+    // the same way the FDB collector reports an undecodable walk, because the
+    // silent version looks exactly like a gate with no neighbours.
+    logger.warn(
+      { phase: "arp.snmp.undecodable", table: "ipNetToPhysical", walked: physAddress.size },
+      "IP-MIB neighbour walk answered but no row survived decoding",
+    );
+  }
+
+  // Deprecated table. No state column and no LastUpdated, so no age.
+  const mediaAddress = await snmpWalk(session, OID.ipNetToMediaPhysAddress).catch(() => new Map());
+  if (mediaAddress.size === 0) return undefined;
+  const mediaType = await snmpWalk(session, OID.ipNetToMediaType).catch(() => new Map());
+  const rows = buildArpNeighbors({
+    physAddress: mediaAddress, type: mediaType,
+    ifNameByIndex, variant: "media", toNumber: snmpVbToNumber,
+  });
+  if (rows.length === 0) {
+    logger.warn(
+      { phase: "arp.snmp.undecodable", table: "ipNetToMedia", walked: mediaAddress.size },
+      "IP-MIB neighbour walk answered but no row survived decoding",
+    );
+    return undefined;
+  }
+  return rows;
+}
+
 async function collectMacTableSnmp(
   session: any,
   ifNameByBasePort: ReadonlyMap<number, string>,
@@ -6862,6 +6961,7 @@ async function collectSystemInfoSnmp(
     const interfaces: InterfaceSample[] = [];
     let physicalEntities: PhysicalEntitySample[] | undefined;
     let macTable: FdbEntry[] | undefined;
+    let arpNeighbors: ArpNeighborEntry[] | undefined;
     let trunkMembers: TrunkPortEntry[] | undefined;
     const endIfaces = startPhase("systeminfo.snmp.interfaces_walk");
     try {
@@ -6952,6 +7052,21 @@ async function collectSystemInfoSnmp(
       physicalEntities = await collectPhysicalEntitiesSnmp(session)
         .catch(() => undefined);
 
+      // IP neighbour cache — firewall-class only, mirroring where the MAC
+      // table is gated. A switch's neighbour table holds its own management
+      // peers and nothing an operator asks about; the router's is the answer
+      // to "what is at this address", which is why it earns the walk here.
+      if (opts.assetType === "firewall") {
+        const endArp = startPhase("systeminfo.snmp.arp_walk");
+        const ifNameByIndex = new Map<number, string>();
+        for (const [idx, name] of poeIfNames) {
+          const n = Number(idx);
+          if (Number.isInteger(n)) ifNameByIndex.set(n, name);
+        }
+        arpNeighbors = await collectArpNeighborsSnmp(session, ifNameByIndex).catch(() => undefined);
+        endArp({ entries: arpNeighbors?.length ?? null });
+      }
+
       // Forwarding database — switch-class only. Every bridge answers this
       // table, but a server or firewall would return nothing useful for a
       // walk that can run to thousands of rows, so the cost is not spent.
@@ -7022,6 +7137,7 @@ async function collectSystemInfoSnmp(
       storage,
       physicalEntities,
       macTable,
+      arpNeighbors,
       trunkMembers,
       lldpNeighbors,
       lldpSource: opts.includeLldp !== false ? "snmp" : undefined,
@@ -7987,6 +8103,19 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     const endMac = startPhase("systeminfo.persist.mac_table");
     await persistMacTable(assetId, d.macTable);
     endMac({ entries: d.macTable.length });
+    stopWrite();
+  }
+  // IP neighbour cache. NOT the undefined/[] contract the tables above use:
+  // this one ACCUMULATES, so there is nothing to wipe and an empty array is
+  // simply nothing to record. Matching is left to the discovery writer's warm
+  // index -- resolving MACs here would mean a fleet-wide asset read on the
+  // system-info hot path, and COALESCE in the upsert keeps a match already
+  // resolved by discovery rather than clearing it.
+  if (Array.isArray(d.arpNeighbors) && d.arpNeighbors.length > 0) {
+    const stopWrite = startSampleWriteTimer("asset_arp_entries");
+    const endArp = startPhase("systeminfo.persist.arp_neighbors");
+    const { written } = await persistAssetArpNeighbors(assetId, d.arpNeighbors);
+    endArp({ entries: written });
     stopWrite();
   }
   // Trunk membership. Same undefined/[] contract.
@@ -11001,7 +11130,7 @@ export async function pruneSystemInfoSamples(): Promise<number> {
   const r = await getSampleRetention();
   const [
     iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily,
-    psDetail, psHourly, psDaily, lldp, customWidget, stateProbe, processLog, processConn,
+    psDetail, psHourly, psDaily, lldp, customWidget, stateProbe, processLog, processConn, arpEntries,
   ] = await Promise.all([
     // interfaces — detail is selection-aware. Nothing WRITES unselected
     // (cadence="slow") interface rows any more (see persistInterfaceSampleStream:
@@ -11048,9 +11177,12 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     // Application Map connection rows (plain accumulate+age table) — the FLAT
     // `appMapConnections` retention entity (single window, no tiers).
     pruneProcessConnections(),
+    // ARP neighbour rows — the other accumulate+age table, on its own flat
+    // `arpEntries` window. Same encoding as a tier (FOREVER = never prune).
+    pruneArpEntries(),
   ]);
   return iDetail + iHourly + iDaily + sDetail + sHourly + sDaily + ipDetail + ipHourly + ipDaily
-    + psDetail + psHourly + psDaily + lldp + customWidget + stateProbe + processLog + processConn;
+    + psDetail + psHourly + psDaily + lldp + customWidget + stateProbe + processLog + processConn + arpEntries;
 }
 
 async function pruneLldpNeighbors(days: number): Promise<number> {
@@ -11066,6 +11198,18 @@ async function pruneLldpNeighbors(days: number): Promise<number> {
 // tier (FOREVER = never prune, <= 0 = drop everything), so this mirrors
 // pruneLldpNeighbors exactly. POLARIS_PROCESS_CONN_RETENTION_DAYS is now only the
 // default seed for that setting, not the authority.
+// ARP neighbour rows. Accumulate+age like the connection rows above, so
+// retention is the ONLY thing that ever removes a row -- no scrape wipes it.
+// Pruned on lastSeen, which is exactly what the tab's range selector filters
+// on, so "last 30 days" and "kept for 30 days" mean the same window.
+async function pruneArpEntries(): Promise<number> {
+  const days = await getArpEntryRetentionDays();
+  if (days === FOREVER) return 0;
+  const cutoff = days <= 0 ? new Date() : new Date(Date.now() - days * DAY_MS);
+  const { count } = await prisma.assetArpEntry.deleteMany({ where: { lastSeen: { lt: cutoff } } });
+  return count;
+}
+
 async function pruneProcessConnections(): Promise<number> {
   const days = await getAppMapConnectionRetentionDays();
   if (days === FOREVER) return 0;

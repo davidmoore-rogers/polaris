@@ -10,18 +10,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // vi.mock is hoisted above the module graph, so the spies have to be created in
 // a hoisted block too.
-const { sourceFindMany, arpFindMany, arpDeleteMany, arpCreateMany, transaction } = vi.hoisted(() => ({
+const { sourceFindMany, executeRaw } = vi.hoisted(() => ({
   sourceFindMany: vi.fn(),
-  arpFindMany:    vi.fn(),
-  arpDeleteMany:  vi.fn(),
-  arpCreateMany:  vi.fn(),
-  transaction:    vi.fn(),
+  executeRaw:     vi.fn(),
 }));
 vi.mock("../../src/db.js", () => ({
   prisma: {
-    assetSource:   { findMany: sourceFindMany },
-    assetArpEntry: { findMany: arpFindMany, deleteMany: arpDeleteMany, createMany: arpCreateMany },
-    $transaction:  transaction,
+    assetSource:      { findMany: sourceFindMany },
+    $executeRawUnsafe: executeRaw,
   },
 }));
 vi.mock("../../src/utils/logger.js", () => ({
@@ -33,20 +29,37 @@ import { persistFortigateArpTables } from "../../src/services/arpTableService.js
 const row = (device: string, ip: string, mac: string, iface = "internal1", age?: number) =>
   ({ fortigateDevice: device, ip, mac, interface: iface, age });
 
-// The delete/createMany stubs return marker objects; $transaction just resolves
-// the array it is handed, so the assertions read the calls the writer made.
 function resetPrisma() {
   sourceFindMany.mockReset().mockResolvedValue([{ assetId: "asset-gate-a", externalId: "FG100F0001" }]);
-  arpFindMany.mockReset().mockResolvedValue([]);
-  arpDeleteMany.mockReset().mockImplementation((args: unknown) => ({ op: "delete", args }));
-  arpCreateMany.mockReset().mockImplementation((args: unknown) => ({ op: "create", args }));
-  transaction.mockReset().mockImplementation(async (ops: unknown[]) => ops);
+  executeRaw.mockReset().mockResolvedValue(1);
 }
 
-/** Every row handed to createMany across all chunks/gates. */
-function createdRows(): any[] {
-  return arpCreateMany.mock.calls.flatMap((c) => (c[0] as any).data);
+/**
+ * The writer builds ONE parameterized INSERT per chunk: `sql` first, then the
+ * flat param list (assetId, now, then nine per row). Reading the params back
+ * into row objects is what lets these assertions talk about rows rather than
+ * about SQL text.
+ */
+const ROW_PARAMS = 6; // id, ip, mac, ifName, ageSec, matchedAssetId
+function insertedRows(): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const call of executeRaw.mock.calls) {
+    const [, assetId, , ...rest] = call as unknown[];
+    for (let i = 0; i + ROW_PARAMS <= rest.length; i += ROW_PARAMS) {
+      out.push({
+        assetId,
+        ipAddress:      rest[i + 1],
+        macAddress:     rest[i + 2],
+        ifName:         rest[i + 3],
+        ageSec:         rest[i + 4],
+        matchedAssetId: rest[i + 5],
+      });
+    }
+  }
+  return out;
 }
+/** The SQL text of the first statement, for the ON CONFLICT assertions. */
+const sqlText = () => String(executeRaw.mock.calls[0]?.[0] ?? "");
 
 const baseOpts = {
   integrationId: "int-1",
@@ -56,7 +69,7 @@ const baseOpts = {
 
 beforeEach(resetPrisma);
 
-describe("persistFortigateArpTables — which gates get wiped", () => {
+describe("persistFortigateArpTables — which gates it records", () => {
   it("does nothing at all when no gate answered", async () => {
     const result = await persistFortigateArpTables({
       ...baseOpts,
@@ -65,22 +78,19 @@ describe("persistFortigateArpTables — which gates get wiped", () => {
     });
     expect(result.assetsWritten).toBe(0);
     expect(sourceFindMany).not.toHaveBeenCalled();
-    expect(transaction).not.toHaveBeenCalled();
+    expect(executeRaw).not.toHaveBeenCalled();
   });
 
-  it("REPLACES an answering gate that reported zero rows — empty is a real cache", async () => {
-    const result = await persistFortigateArpTables({
-      ...baseOpts,
-      rows: [],
-      answeredDevices: ["FGT-A"],
-    });
-    expect(result.assetsWritten).toBe(1);
+  it("writes nothing for an answering gate that reported zero rows", async () => {
+    // Under the old delete-replace writer this WIPED the gate. Accumulate+age
+    // has no way to express "the cache is empty" and must not invent one:
+    // retention is the only thing that removes a row.
+    const result = await persistFortigateArpTables({ ...baseOpts, rows: [], answeredDevices: ["FGT-A"] });
     expect(result.entriesWritten).toBe(0);
-    expect(arpDeleteMany).toHaveBeenCalledWith({ where: { assetId: "asset-gate-a" } });
-    expect(arpCreateMany).not.toHaveBeenCalled();
+    expect(executeRaw).not.toHaveBeenCalled();
   });
 
-  it("leaves a non-answering gate's table alone even when other gates answered", async () => {
+  it("records only the gates that answered", async () => {
     sourceFindMany.mockResolvedValue([
       { assetId: "asset-gate-a", externalId: "FG100F0001" },
       { assetId: "asset-gate-b", externalId: "FG100F0002" },
@@ -91,10 +101,9 @@ describe("persistFortigateArpTables — which gates get wiped", () => {
       rows: [row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01"), row("FGT-B", "10.1.0.1", "AA:BB:CC:DD:EE:02")],
       answeredDevices: ["FGT-A"],
     });
-    const deleted = arpDeleteMany.mock.calls.map((c) => (c[0] as any).where.assetId);
-    expect(deleted).toEqual(["asset-gate-a"]);
-    // ...and B's row is not smuggled into A's table.
-    expect(createdRows().map((r) => r.ipAddress)).toEqual(["10.0.0.1"]);
+    const rows = insertedRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ assetId: "asset-gate-a", ipAddress: "10.0.0.1" });
   });
 
   it("matches the answering device case-insensitively", async () => {
@@ -103,7 +112,7 @@ describe("persistFortigateArpTables — which gates get wiped", () => {
       rows: [row("fgt-a", "10.0.0.1", "AA:BB:CC:DD:EE:01")],
       answeredDevices: ["FGT-A"],
     });
-    expect(createdRows()).toHaveLength(1);
+    expect(insertedRows()).toHaveLength(1);
   });
 });
 
@@ -121,7 +130,7 @@ describe("persistFortigateArpTables — resolving the gate to an asset", () => {
         externalId: { in: ["FG100F0001"] },
       }),
     }));
-    expect(createdRows()[0].assetId).toBe("asset-gate-a");
+    expect(insertedRows()[0].assetId).toBe("asset-gate-a");
   });
 
   it("reports a gate with no firewall asset instead of writing anything for it", async () => {
@@ -133,7 +142,7 @@ describe("persistFortigateArpTables — resolving the gate to an asset", () => {
     });
     expect(result.assetsWritten).toBe(0);
     expect(result.unresolvedDevices).toEqual(["fgt-a"]);
-    expect(transaction).not.toHaveBeenCalled();
+    expect(executeRaw).not.toHaveBeenCalled();
   });
 
   it("reports a gate whose name never resolved to a serial", async () => {
@@ -158,7 +167,7 @@ describe("persistFortigateArpTables — row content", () => {
       matchAssetByMac: (mac) => { seen.push(mac); return "asset-endpoint"; },
     });
     expect(seen).toEqual(["AA:BB:CC:DD:EE:01"]);
-    expect(createdRows()[0].matchedAssetId).toBe("asset-endpoint");
+    expect(insertedRows()[0].matchedAssetId).toBe("asset-endpoint");
   });
 
   it("stores null rather than undefined for an unmatched MAC", async () => {
@@ -168,64 +177,41 @@ describe("persistFortigateArpTables — row content", () => {
       answeredDevices: ["FGT-A"],
       matchAssetByMac: () => undefined,
     });
-    expect(createdRows()[0].matchedAssetId).toBeNull();
+    expect(insertedRows()[0].matchedAssetId).toBeNull();
   });
 
-  it("carries firstSeen forward for a binding that is still there", async () => {
-    const old = new Date("2026-01-01T00:00:00Z");
-    arpFindMany.mockResolvedValue([
-      { assetId: "asset-gate-a", ipAddress: "10.0.0.1", macAddress: "AA:BB:CC:DD:EE:01", ifName: "internal1", firstSeen: old },
-    ]);
+  it("writes the empty-string sentinel, never NULL, for an unattributed row", async () => {
+    // NULL here would defeat the ON CONFLICT target and insert a duplicate on
+    // every scrape, since Postgres treats NULLs as distinct.
     await persistFortigateArpTables({
       ...baseOpts,
-      rows: [
-        row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01"),
-        row("FGT-A", "10.0.0.2", "AA:BB:CC:DD:EE:02"),
-      ],
+      rows: [row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "")],
       answeredDevices: ["FGT-A"],
     });
-    const rows = createdRows();
-    expect(rows.find((r) => r.ipAddress === "10.0.0.1").firstSeen).toEqual(old);
-    // A binding seen for the first time starts its own clock.
-    expect(rows.find((r) => r.ipAddress === "10.0.0.2").firstSeen).not.toEqual(old);
+    expect(insertedRows()[0].ifName).toBe("");
   });
 
-  it("does not carry firstSeen across a change of interface — that is a different binding", async () => {
-    const old = new Date("2026-01-01T00:00:00Z");
-    arpFindMany.mockResolvedValue([
-      { assetId: "asset-gate-a", ipAddress: "10.0.0.1", macAddress: "AA:BB:CC:DD:EE:01", ifName: "internal1", firstSeen: old },
-    ]);
-    await persistFortigateArpTables({
-      ...baseOpts,
-      rows: [row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01", "internal2")],
-      answeredDevices: ["FGT-A"],
-    });
-    expect(createdRows()[0].firstSeen).not.toEqual(old);
-  });
-
-  it("gives every row of one write the same lastSeen — the table has one collection time", async () => {
-    await persistFortigateArpTables({
-      ...baseOpts,
-      rows: [
-        row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01"),
-        row("FGT-A", "10.0.0.2", "AA:BB:CC:DD:EE:02"),
-      ],
-      answeredDevices: ["FGT-A"],
-    });
-    const stamps = new Set(createdRows().map((r) => r.lastSeen.getTime()));
-    expect(stamps.size).toBe(1);
-  });
-
-  it("puts the delete and the inserts in ONE transaction, delete first", async () => {
+  it("upserts rather than deleting: no wipe, and firstSeen is absent from the update", async () => {
     await persistFortigateArpTables({
       ...baseOpts,
       rows: [row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")],
       answeredDevices: ["FGT-A"],
     });
-    expect(transaction).toHaveBeenCalledTimes(1);
-    const ops = transaction.mock.calls[0][0] as any[];
-    expect(ops[0].op).toBe("delete");
-    expect(ops[1].op).toBe("create");
+    const sql = sqlText();
+    expect(sql).toContain("ON CONFLICT");
+    expect(sql).not.toMatch(/DELETE/i);
+    const update = sql.slice(sql.indexOf("DO UPDATE"));
+    expect(update).not.toContain('"firstSeen"');
+    expect(update).toContain('"lastSeen"');
+  });
+
+  it("never clears an existing match, only fills one in", async () => {
+    await persistFortigateArpTables({
+      ...baseOpts,
+      rows: [row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01")],
+      answeredDevices: ["FGT-A"],
+    });
+    expect(sqlText()).toContain('COALESCE(EXCLUDED."matchedAssetId"');
   });
 });
 
@@ -236,10 +222,10 @@ describe("persistFortigateArpTables — failure isolation", () => {
       { assetId: "asset-gate-b", externalId: "FG100F0002" },
     ]);
     let call = 0;
-    transaction.mockImplementation(async (ops: unknown[]) => {
+    executeRaw.mockImplementation(async () => {
       call++;
       if (call === 1) throw new Error("deadlock detected");
-      return ops;
+      return 1;
     });
     const result = await persistFortigateArpTables({
       ...baseOpts,
@@ -247,7 +233,7 @@ describe("persistFortigateArpTables — failure isolation", () => {
       rows: [row("FGT-A", "10.0.0.1", "AA:BB:CC:DD:EE:01"), row("FGT-B", "10.1.0.1", "AA:BB:CC:DD:EE:02")],
       answeredDevices: ["FGT-A", "FGT-B"],
     });
-    expect(transaction).toHaveBeenCalledTimes(2);
+    expect(executeRaw).toHaveBeenCalledTimes(2);
     expect(result.assetsWritten).toBe(1);
     expect(result.entriesWritten).toBe(1);
   });

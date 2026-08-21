@@ -46,6 +46,7 @@ import {
   resolveMonitorSettings,
   resolveMonitorSettingsWithProvenance,
 } from "../../services/monitoringService.js";
+import { getArpEntryRetentionDays } from "../../services/sampleRetentionService.js";
 import { getCredential } from "../../services/credentialService.js";
 import { resolveConnectionPath } from "../../services/connectionPathService.js";
 import { propagateAfterStatusChange, FORTINET_INFRA_ASSET_TYPES } from "../../services/dependencyTreeService.js";
@@ -2153,11 +2154,82 @@ router.get("/:id/mac-table", requirePermission("assets", "read"), async (req, re
  * single timestamp the whole table was collected at — the tab leads with that,
  * because an ARP cache is only meaningful next to its age.
  */
+/**
+ * The ARP Table tab's range selector. `current` is not a time window — it
+ * means "whatever the last poll found", which is the newest lastSeen rather
+ * than a fixed span, and is resolved client-side against `collectedAt`.
+ */
+const ARP_RANGE_SECONDS: Record<string, number | null> = {
+  current: null,
+  "1h":    60 * 60,
+  "12h":   12 * 60 * 60,
+  "24h":   24 * 60 * 60,
+  "7d":    7 * 24 * 60 * 60,
+  "30d":   30 * 24 * 60 * 60,
+};
+
+const ArpTableQuerySchema = z.object({
+  range: z.enum(["current", "1h", "12h", "24h", "7d", "30d"]).optional().default("current"),
+});
+
+/**
+ * How often THIS device's neighbour cache is actually refreshed, in seconds.
+ *
+ * Two cadences can write it and they differ by two orders of magnitude, so the
+ * tab cannot state one number for the fleet: a monitored firewall refreshes on
+ * the system-info pass (600 s by default), while an unmonitored one — or one
+ * with system info off — only gets the rows discovery already reads on its
+ * integration's pollInterval (12 h by default for both Fortinet types).
+ *
+ * Returns null when neither applies, which the tab renders as "on discovery
+ * only" rather than inventing a figure.
+ */
+async function resolveArpPollIntervalSec(assetId: string): Promise<number | null> {
+  const asset = await prisma.asset.findUnique({
+    where: { id: assetId },
+    select: {
+      id: true, assetType: true, monitored: true, status: true,
+      discoveredByIntegrationId: true, monitorOverride: true,
+      discoveredByIntegration: { select: { type: true, pollInterval: true } },
+    },
+  });
+  if (!asset) return null;
+
+  const discoverySec = asset.discoveredByIntegration?.pollInterval
+    ? asset.discoveredByIntegration.pollInterval * 3600
+    : null;
+  // A device that isn't being polled can only be refreshed by discovery.
+  if (!asset.monitored || asset.status === "decommissioned" || asset.status === "disabled") {
+    return discoverySec;
+  }
+  try {
+    const resolved = await resolveMonitorSettings({
+      ...(asset as any),
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    } as any);
+    const sec = (resolved as any)?.systemInfoIntervalSeconds;
+    return typeof sec === "number" && sec > 0 ? sec : discoverySec;
+  } catch {
+    return discoverySec;
+  }
+}
+
 router.get("/:id/arp-table", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
+    const parsed = ArpTableQuerySchema.safeParse(req.query);
+    if (!parsed.success) throw new AppError(400, "Invalid range");
+    const { range } = parsed.data;
+
+    // Retention bounds what any range can actually reach, so it is reported
+    // rather than assumed: offering "last 30 days" on an install that keeps 7
+    // promises history that was pruned days ago.
+    const retentionDays = await getArpEntryRetentionDays();
+    const windowSec = ARP_RANGE_SECONDS[range];
+    const since = windowSec == null ? null : new Date(Date.now() - windowSec * 1000);
+
     const rows = await prisma.assetArpEntry.findMany({
-      where: { assetId: id },
+      where: { assetId: id, ...(since ? { lastSeen: { gte: since } } : {}) },
       // Final ordering is the browser's (numeric IP within interface); this
       // just keeps the payload stable.
       orderBy: [{ ifName: "asc" }, { ipAddress: "asc" }],
@@ -2165,17 +2237,27 @@ router.get("/:id/arp-table", requirePermission("assets", "read"), async (req, re
         matchedAsset: { select: { id: true, hostname: true, ipAddress: true, assetType: true } },
       },
     });
+
     const interfaceCounts: Record<string, number> = {};
     let collectedAt: Date | null = null;
     for (const r of rows) {
       if (r.ifName) interfaceCounts[r.ifName] = (interfaceCounts[r.ifName] ?? 0) + 1;
       if (!collectedAt || r.lastSeen > collectedAt) collectedAt = r.lastSeen;
     }
+
+    // How often this device's neighbour cache is actually refreshed. The tab
+    // states it verbatim, because the poll interval is the whole reason a
+    // short-lived entry can be missing and an operator has no other way to
+    // know which cadence THIS device is on.
+    const pollIntervalSec = await resolveArpPollIntervalSec(id);
+
     res.json({
       entries: rows.map((r) => ({
         ipAddress:  r.ipAddress,
         macAddress: r.macAddress,
-        ifName:     r.ifName,
+        // "" is the storage sentinel for "the device attributed this to no
+        // interface" (see the model comment); it never leaves the API as "".
+        ifName:     r.ifName === "" ? null : r.ifName,
         ageSec:     r.ageSec,
         firstSeen:  r.firstSeen,
         lastSeen:   r.lastSeen,
@@ -2184,6 +2266,9 @@ router.get("/:id/arp-table", requirePermission("assets", "read"), async (req, re
       interfaceCounts,
       collectedAt,
       total: rows.length,
+      range,
+      retentionDays,
+      pollIntervalSec,
     });
   } catch (err) {
     next(err);

@@ -54,9 +54,13 @@ describe("sampleRetentionService — entity model + encoding", () => {
     expect(getRetentionDays(r, "interfaces", "daily")).toBe(FOREVER);
   });
 
-  it("exposes appMapConnections as a FLAT entity defaulting to 30 days", () => {
-    expect(FLAT_RETENTION_ENTITIES).toEqual(["appMapConnections"]);
+  it("exposes the FLAT entities, each defaulting to 30 days", () => {
+    // Flat = one window instead of detail/hourly/daily, for the two
+    // accumulate+age tables (Application Map sockets, ARP neighbour cache)
+    // rather than tiered time-series.
+    expect(FLAT_RETENTION_ENTITIES).toEqual(["appMapConnections", "arpEntries"]);
     expect(defaultSampleRetention().appMapConnections).toEqual({ days: 30 });
+    expect(defaultSampleRetention().arpEntries).toEqual({ days: 30 });
   });
 });
 
