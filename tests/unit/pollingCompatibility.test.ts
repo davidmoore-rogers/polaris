@@ -21,14 +21,14 @@ import {
 } from "../../src/utils/pollingCompatibility.js";
 
 describe("compatibility matrix — locked values per asset source", () => {
-  it("FortiManager: REST API + SNMP + SSH + ICMP + Disabled, no WinRM or Agent", () => {
-    expect(compatibleMethodsFor("fortimanager")).toEqual(["rest_api", "snmp", "ssh", "icmp", "disabled"]);
+  it("FortiManager: REST API + HTTP + SNMP + SSH + ICMP + Disabled, no WinRM or Agent", () => {
+    expect(compatibleMethodsFor("fortimanager")).toEqual(["rest_api", "http", "snmp", "ssh", "icmp", "disabled"]);
     expect(isPollingMethodCompatible("fortimanager", "winrm")).toBe(false);
     expect(isPollingMethodCompatible("fortimanager", "agent")).toBe(false);
     expect(isPollingMethodCompatible("fortimanager", "disabled")).toBe(true);
   });
   it("FortiGate: same as FortiManager", () => {
-    expect(compatibleMethodsFor("fortigate")).toEqual(["rest_api", "snmp", "ssh", "icmp", "disabled"]);
+    expect(compatibleMethodsFor("fortigate")).toEqual(["rest_api", "http", "snmp", "ssh", "icmp", "disabled"]);
     expect(isPollingMethodCompatible("fortigate", "winrm")).toBe(false);
     expect(isPollingMethodCompatible("fortigate", "agent")).toBe(false);
     expect(isPollingMethodCompatible("fortigate", "disabled")).toBe(true);
@@ -37,7 +37,7 @@ describe("compatibility matrix — locked values per asset source", () => {
     // "vcenter" is allowed on the directory sources because a VM those
     // integrations discovered FIRST can be vCenter-merged; the vcenter-vm
     // AssetSource requirement is enforced at save/collect time.
-    expect(compatibleMethodsFor("activedirectory")).toEqual(["winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
+    expect(compatibleMethodsFor("activedirectory")).toEqual(["http", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
     expect(isPollingMethodCompatible("activedirectory", "rest_api")).toBe(false);
     expect(isPollingMethodCompatible("activedirectory", "snmp")).toBe(false);
     expect(isPollingMethodCompatible("activedirectory", "winrm")).toBe(true);
@@ -69,7 +69,7 @@ describe("compatibility matrix — locked values per asset source", () => {
     // Locked as an exact ordered array: a source kind missing from
     // COMPATIBILITY silently resolves to "manual" (the most permissive
     // matrix), which would offer REST API and SNMP on a Windows host.
-    expect(compatibleMethodsFor("azurearc")).toEqual(["winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
+    expect(compatibleMethodsFor("azurearc")).toEqual(["http", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
     expect(isPollingMethodCompatible("azurearc", "rest_api")).toBe(false);
     expect(isPollingMethodCompatible("azurearc", "snmp")).toBe(false);
     expect(isPollingMethodCompatible("azurearc", "winrm")).toBe(true);
@@ -79,7 +79,7 @@ describe("compatibility matrix — locked values per asset source", () => {
     expect(isPollingMethodCompatible("azurearc", "vcenter")).toBe(true);
   });
   it("vCenter: ICMP + SNMP + WinRM + SSH + Agent + vCenter (VMs are guest OSes; ESXi answers SNMP/SSH)", () => {
-    expect(compatibleMethodsFor("vcenter")).toEqual(["snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
+    expect(compatibleMethodsFor("vcenter")).toEqual(["http", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
     expect(isPollingMethodCompatible("vcenter", "rest_api")).toBe(false);
     expect(isPollingMethodCompatible("vcenter", "vcenter")).toBe(true);
   });
@@ -88,7 +88,7 @@ describe("compatibility matrix — locked values per asset source", () => {
     expect(isPollingMethodCompatible("fortigate", "vcenter")).toBe(false);
   });
   it("Manual: every method valid", () => {
-    expect(compatibleMethodsFor("manual")).toEqual(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
+    expect(compatibleMethodsFor("manual")).toEqual(["rest_api", "http", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
     allPollingMethods().forEach((m) => {
       expect(isPollingMethodCompatible("manual", m)).toBe(true);
     });
@@ -115,7 +115,7 @@ describe("integrationType -> AssetSourceKind mapping", () => {
 
 describe("isPollingMethod type guard", () => {
   it("accepts every valid polling method", () => {
-    ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"].forEach((m) => {
+    ["rest_api", "http", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"].forEach((m) => {
       expect(isPollingMethod(m)).toBe(true);
     });
   });
@@ -134,15 +134,31 @@ describe("isPollingMethod type guard", () => {
 });
 
 describe("per-stream method restrictions (cross-transport streams)", () => {
-  it("original six streams impose no per-stream restriction beyond the vcenter cpuMemory-only rule", () => {
+  it("original six streams impose no per-stream restriction beyond the vcenter / http stream-scoped rules", () => {
     (["responseTime", "cpuMemory", "temperature", "interfaces", "lldp", "storage"] as const).forEach((s) => {
       allPollingMethods().forEach((m) => {
-        const expected = m === "vcenter" ? s === "cpuMemory" : true;
+        const expected = m === "vcenter" ? s === "cpuMemory"
+          : m === "http" ? s === "responseTime"
+          : true;
         expect(isMethodValidForStream(s, m), `${s}/${m}`).toBe(expected);
       });
     });
-    expect(methodsForStream("cpuMemory")).toEqual(allPollingMethods());
+    expect(methodsForStream("cpuMemory")).toEqual(allPollingMethods().filter((m) => m !== "http"));
     expect(methodsForStream("responseTime")).toEqual(allPollingMethods().filter((m) => m !== "vcenter"));
+  });
+
+  it("http is a responseTime-only method (a GET carries no telemetry, interface, sensor or mount data)", () => {
+    expect(isMethodValidForStream("responseTime", "http")).toBe(true);
+    (["cpuMemory", "temperature", "interfaces", "lldp", "storage", "processes", "eventLog"] as const).forEach((s) => {
+      expect(isMethodValidForStream(s, "http"), s).toBe(false);
+    });
+  });
+
+  it("http is offered on every asset source — appliances serve pages too", () => {
+    (["fortimanager", "fortigate", "activedirectory", "entraid", "windowsserver", "azurearc", "vcenter", "manual"] as const)
+      .forEach((src) => {
+        expect(isPollingMethodCompatible(src, "http"), src).toBe(true);
+      });
   });
 
   it("vcenter is a cpuMemory-only method (quickStats carry no other stream's data)", () => {

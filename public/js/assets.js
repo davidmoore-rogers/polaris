@@ -2977,6 +2977,7 @@ function assetHaInfo(asset) {
 // on this page) so the Assets table stays self-contained.
 var _MONITORED_VIA_LABELS = {
   agent:    "Agent",
+  http:     "HTTP Check",
   snmp:     "SNMP",
   ssh:      "SSH",
   winrm:    "WinRM",
@@ -3485,6 +3486,12 @@ function getAssetFormData() {
       data.lldpPolling         = polling.lldpPolling;
       data.storagePolling      = polling.storagePolling;
     }
+    // HTTP-check path override. Sent whenever the input exists — including when
+    // it is hidden and blank, which is how switching AWAY from the http method
+    // clears a stale override instead of leaving a path attached to an asset
+    // that no longer runs an HTTP check. The route trims "" to null.
+    var httpPathEl = document.getElementById("f-httpCheckPath");
+    if (httpPathEl) data.httpCheckPath = httpPathEl.value.trim() || null;
     // Per-stream credential overrides. Empty string → null (source default).
     // A picker whose stream is on "Inherit" is left UNPOPULATED by
     // refreshStreamCred (no options, hidden) — its .value reads "" even when
@@ -3557,6 +3564,18 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   var tempCredId = (asset && asset.temperatureCredentialId)   || "";
   var ifCredId   = (asset && asset.interfacesCredentialId)    || "";
   var lldpCredId = (asset && asset.lldpCredentialId)          || "";
+
+  // Per-asset HTTP-check path override, plus the selected credential's own path
+  // for the input's placeholder. The hint is best-effort: the credential list is
+  // cached for the picker anyway, and if the id isn't in it (a class-tier
+  // credential, or a cache that hasn't loaded) the placeholder falls back to "/"
+  // rather than the modal blocking on a fetch to caption one field.
+  var httpCheckPath = (asset && asset.httpCheckPath) || "";
+  var httpCredPathHint = "";
+  (function () {
+    var cred = (_credentialCache.list || []).filter(function (c) { return c.id === rtCredId; })[0];
+    if (cred && cred.type === "http" && cred.config && cred.config.path) httpCredPathHint = cred.config.path;
+  })();
 
   // Per-stream MIB IDs (null = Automatic).
   var rtMibId   = (asset && asset.responseTimeMibId)  || "";
@@ -3661,8 +3680,22 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   // cadence with Interfaces at the asset tier (Asset row has no separate
   // lldpIntervalSec / storageIntervalSec columns); their subtabs link to
   // Interfaces for those inputs.
+  // Per-asset request-path override for the HTTP Check method. Rendered inside
+  // the Response Time subtab and shown only while that stream resolves to
+  // "http" (refreshStreamCred). Placeholder shows the credential's own path so
+  // the operator can see what they'd be overriding; blank means "no override",
+  // which is why the hint says so explicitly — an empty box next to a URL-ish
+  // placeholder otherwise reads as "requests /".
+  function httpPathInput() {
+    return '<div class="form-group" id="f-httpCheckPath-wrap" style="display:none;margin-top:0.5rem">' +
+      '<label>HTTP check path override</label>' +
+      '<input type="text" id="f-httpCheckPath" maxlength="1024" value="' + escapeHtml(httpCheckPath) + '" placeholder="' + escapeHtml(httpCredPathHint || "/") + '" style="max-width:360px">' +
+      '<p class="hint">Overrides the path on the selected HTTP Check credential, for a device whose health endpoint sits somewhere else. Leave blank to use the credential\'s path.</p>' +
+    '</div>';
+  }
   function bodyResponseTime() {
     return streamPollingBlock("responseTime", "f-responseTimePolling", "f-responseTimeCredential", "f-responseTimeMib", pollingCurrent.responseTimePolling, rtCredId, rtMibId, _autoMibNames.responseTime) +
+      httpPathInput() +
       intervalInput("f-monitorInterval", "Poll Interval Override (seconds)", interval, 5, 86400, "Minimum 5 seconds. Inherits from the resolved tier when blank.") +
       probeTimeoutInput() +
       failureThresholdInput();
@@ -3978,6 +4011,10 @@ function _credTypeForPolling(method) {
   if (method === "winrm")    return "winrm";
   if (method === "ssh")      return "ssh";
   if (method === "rest_api") return "restapi";
+  // The http method's whole definition (path, expected status, expected body,
+  // auth) lives on its credential, so unlike the others this picker is not
+  // optional — without a selection the probe has nothing to request.
+  if (method === "http")     return "http";
   return null;
 }
 
@@ -4050,6 +4087,13 @@ async function _wireMonitorEditTab(asset) {
     // MIB sub-row appears only when the stream is set to SNMP. Streams that
     // don't carry a MIB picker (storage) have no wrap div to toggle.
     if (mibWrap && streamDef.mibId) mibWrap.style.display = (method === "snmp") ? "flex" : "none";
+    // HTTP-check path override lives on the Response Time subtab only, and only
+    // while that stream is on the http method. Hidden rather than removed so a
+    // typed-then-reconsidered value survives a method flip-flop before save.
+    if (streamDef.pollId === "f-responseTimePolling") {
+      var httpWrap = document.getElementById("f-httpCheckPath-wrap");
+      if (httpWrap) httpWrap.style.display = (method === "http") ? "block" : "none";
+    }
   }
 
   function refresh() {
@@ -9865,6 +9909,7 @@ function _probeMethodLabel(a) {
     case "winrm":    return "WinRM";
     case "ssh":      return "SSH";
     case "icmp":     return "ICMP ping";
+    case "http":     return "HTTP check";
     default:         return polling;
   }
 }
@@ -9947,7 +9992,7 @@ function _assetMonitorStreamSource(asset, stream) {
   // operator a quick visual confirmation of which credential the probe is
   // about to use without opening the edit modal.
   var cred = asset.monitorCredential;
-  if ((resolved === "snmp" || resolved === "winrm" || resolved === "ssh" || resolved === "rest_api") && cred && cred.name) {
+  if ((resolved === "snmp" || resolved === "winrm" || resolved === "ssh" || resolved === "rest_api" || resolved === "http") && cred && cred.name) {
     polling += " · " + cred.name;
   }
   return { polling: polling, source: sourceName };
@@ -19600,13 +19645,15 @@ function _monsetOpenOverrideEditor(existing) {
   // sub-rows rendered by _classStreamSubtabHTML. Sub-row visibility rules:
   //   - credential row for a credtype shows when the picked method needs that
   //     credtype (snmp → snmp credrow, ssh → ssh credrow, winrm → winrm
-  //     credrow; rest_api / icmp / disabled → no credrow)
+  //     credrow, http → HTTP Check credrow; rest_api / icmp / disabled → no
+  //     credrow)
   //   - MIB row shows when picked method is snmp
   var STREAMS_FULL = ["responseTime", "cpuMemory", "temperature", "interfaces", "lldp", "storage"];
   function _credtypeForMethod(method) {
     if (method === "snmp")  return "snmp";
     if (method === "ssh")   return "ssh";
     if (method === "winrm") return "winrm";
+    if (method === "http")  return "http";
     return null;
   }
   function _ovPollFieldFor(streamKey) {
@@ -19625,7 +19672,7 @@ function _monsetOpenOverrideEditor(existing) {
       var pollEl = document.getElementById(pollId);
       var method = pollEl ? pollEl.value : "";
       // Per-credtype rows are siblings: <pollId>-credrow-<credtype>
-      ["snmp", "ssh", "winrm"].forEach(function (credType) {
+      ["snmp", "ssh", "winrm", "http"].forEach(function (credType) {
         var row = document.getElementById(pollId + "-credrow-" + credType);
         if (!row) return;
         row.style.display = (_credtypeForMethod(method) === credType) ? "" : "none";

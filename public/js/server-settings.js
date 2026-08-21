@@ -6115,6 +6115,7 @@ function credTypeLabel(t) {
   if (t === "winrm")   return "WinRM";
   if (t === "ssh")     return "SSH";
   if (t === "restapi") return "REST API";
+  if (t === "http")    return "HTTP Check";
   return t;
 }
 
@@ -6138,6 +6139,22 @@ function credSummary(c) {
     var url = cfg.baseUrl || "";
     var verifyTls = cfg.verifyTls === true ? "verify TLS" : "skip TLS";
     return escapeHtml(url) + " · " + verifyTls;
+  }
+  if (c.type === "http") {
+    // Lead with the request line and the expectation, because that IS the
+    // credential — an operator scanning this list is asking "which check is
+    // this?", not "what auth does it use".
+    var scheme = cfg.useHttps === true ? "https" : "http";
+    var port = cfg.port ? ":" + cfg.port : "";
+    var line = scheme + "://<device>" + port + escapeHtml(cfg.path || "/");
+    var want = cfg.expectStatus ? String(cfg.expectStatus) : "2xx";
+    if (cfg.expectBody) {
+      want += " + " + (cfg.matchMode === "regex" ? "regex" : "text") + ' "' + escapeHtml(cfg.expectBody) + '"';
+      // Only worth saying when it changes the verdict — the strict reading is
+      // the default, so name the loose one.
+      if (cfg.failOnMismatch === false) want += " (advisory)";
+    }
+    return line + " · expect " + want;
   }
   return "";
 }
@@ -6451,6 +6468,7 @@ async function openCredentialModal(id, initialState) {
         '<option value="winrm"'   + (formType === "winrm"   ? ' selected' : '') + '>WinRM</option>' +
         '<option value="ssh"'     + (formType === "ssh"     ? ' selected' : '') + '>SSH</option>' +
         '<option value="restapi"' + (formType === "restapi" ? ' selected' : '') + '>REST API</option>' +
+        '<option value="http"'    + (formType === "http"    ? ' selected' : '') + '>HTTP Check</option>' +
       '</select>' +
       (isNew ? '<p class="hint">Type cannot be changed after creation.</p>' : '') +
     '</div>' +
@@ -6474,6 +6492,7 @@ async function openCredentialModal(id, initialState) {
     else if (t === "winrm")  host.innerHTML = credWinrmForm(cfg);
     else if (t === "ssh")    host.innerHTML = credSshForm(cfg);
     else if (t === "restapi") host.innerHTML = credRestApiForm(cfg);
+    else if (t === "http")    host.innerHTML = credHttpForm(cfg);
     if (t === "snmp") wireSnmpVersionToggle();
   }
   document.getElementById("f-cred-type").addEventListener("change", function () {
@@ -6519,6 +6538,67 @@ async function openCredentialModal(id, initialState) {
 // Back returns to the credential modal with the operator's in-flight edits
 // preserved (including any freshly-typed password) so the test result can
 // inform their next save.
+/**
+ * The response an HTTP Check credential actually got back, rendered so the
+ * operator can TAILOR the check against it. This is the whole reason the test
+ * flow exists for this type: an HTTP check's expectation is a string that has to
+ * be picked OUT of the device's response, and pass/fail gives you nothing to
+ * pick from. The body is shown verbatim (escaped) in a selectable block.
+ *
+ * The match verdict is stated separately from the pass/fail above it, because
+ * with `failOnMismatch` off those two legitimately disagree — the probe
+ * succeeds while the content did not match, and that is exactly the case an
+ * operator needs to see spelled out rather than inferred.
+ */
+function credHttpDiagnosticsHTML(diag, cfg) {
+  if (!diag) return "";
+  var muted = "color:var(--color-text-secondary)";
+  function row(label, value) {
+    return '<div style="display:flex;gap:0.5rem;font-size:0.8rem;margin-top:0.15rem">' +
+      '<span style="' + muted + ';min-width:104px;flex-shrink:0">' + escapeHtml(label) + '</span>' +
+      '<span style="word-break:break-all">' + escapeHtml(String(value)) + '</span>' +
+    '</div>';
+  }
+
+  // Match verdict. null = nothing configured yet, which is the state an operator
+  // is in on the first test — say so and point at the next step instead of
+  // rendering a neutral dash they have to interpret.
+  var verdict;
+  if (diag.matched === null || diag.matched === undefined) {
+    verdict = '<div style="font-size:0.8rem;margin-top:0.4rem;' + muted + '">' +
+      'No expected content set — judged on the status code alone. Pick a distinctive string out of the body below and paste it into <strong>Expected content</strong>.' +
+    '</div>';
+  } else if (diag.matched === true) {
+    verdict = '<div style="font-size:0.8rem;margin-top:0.4rem;color:var(--color-success,#27ae60)">' +
+      '✓ Expected content found in the response body.' +
+    '</div>';
+  } else {
+    var lenient = cfg && cfg.failOnMismatch === false;
+    verdict = '<div style="font-size:0.8rem;margin-top:0.4rem;color:var(--color-warning,#d68910)">' +
+      '⚠ Expected content NOT found in the response body' +
+      (lenient ? ' — the probe still counts as up, because "treat a content mismatch as down" is off.' : '.') +
+    '</div>';
+  }
+
+  var size = diag.bytesRead + ' bytes' +
+    (diag.bodyTruncatedAtCap ? ' (device sent more — read capped)' : '');
+
+  return '<div style="margin-top:0.75rem;padding:0.75rem;border:1px solid var(--color-border);border-radius:4px">' +
+      '<div style="font-weight:600;font-size:0.85rem">Response</div>' +
+      row("Requested", diag.url) +
+      row("Status", diag.statusCode) +
+      (diag.contentType ? row("Content-Type", diag.contentType) : "") +
+      row("Body size", size) +
+      verdict +
+      '<div style="font-size:0.78rem;' + muted + ';margin-top:0.6rem">Body' +
+        (diag.excerptTruncated ? ' (first ' + diag.excerpt.length + ' characters)' : '') +
+      '</div>' +
+      '<pre style="margin:0.2rem 0 0;padding:0.5rem;max-height:260px;overflow:auto;background:var(--color-surface-alt,rgba(127,127,127,0.08));border-radius:3px;font-size:0.78rem;white-space:pre-wrap;word-break:break-word;user-select:text">' +
+        (diag.excerpt ? escapeHtml(diag.excerpt) : '<span style="' + muted + '">(empty body)</span>') +
+      '</pre>' +
+    '</div>';
+}
+
 function openCredentialTestModal(state) {
   var typeLabel = credTypeLabel(state.type);
   var title = "Test Credential" + (state.name ? " — " + state.name : "");
@@ -6526,6 +6606,9 @@ function openCredentialTestModal(state) {
     '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin:0 0 0.75rem">' +
       'Pick an asset to test this ' + escapeHtml(typeLabel) + ' credential against. The asset\'s IP supplies the host; ' +
       'its monitor settings are ignored — the form values you entered are what gets exercised.' +
+      (state.type === 'http'
+        ? ' The response body comes back below, so you can pick your <strong>Expected content</strong> string out of what the device actually returns. A per-asset path override is not applied here — this tests the credential.'
+        : '') +
     '</p>' +
     '<div class="form-group"><label>Search asset</label>' +
       '<input type="search" id="f-cred-test-search" autocomplete="off" spellcheck="false" placeholder="hostname, IP, or MAC (min 2 chars)">' +
@@ -6660,7 +6743,8 @@ function openCredentialTestModal(state) {
           '<div style="font-weight:600;color:' + color + '">' + icon + ' ' + label + '</div>' +
           '<div style="font-size:0.85rem;margin-top:0.25rem">' + escapeHtml(detail) + '</div>' +
           (res.host ? '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.25rem">Host: ' + escapeHtml(res.host) + '</div>' : '') +
-        '</div>';
+        '</div>' +
+        credHttpDiagnosticsHTML(res.httpDiagnostics, state.config);
     } catch (err) {
       resultBox.innerHTML =
         '<div style="margin-top:0.75rem;padding:0.75rem;border:1px solid var(--color-danger,#c0392b);border-radius:4px">' +
@@ -6834,6 +6918,80 @@ function credRestApiForm(cfg) {
   );
 }
 
+/**
+ * HTTP Check credential form. Unlike the other four this is mostly NOT auth —
+ * it's the definition of a health check (where to GET, what counts as up), with
+ * auth as an optional tail. The host deliberately isn't here: it comes from the
+ * asset being probed, which is what lets one credential cover a fleet.
+ */
+function credHttpForm(cfg) {
+  var mode = cfg.matchMode === "regex" ? "regex" : "contains";
+  // failOnMismatch defaults TRUE server-side, so an absent value must render as
+  // checked — otherwise the form would show the loose reading while the stored
+  // credential enforces the strict one.
+  var strict = cfg.failOnMismatch !== false;
+  return (
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+        '<input type="checkbox" id="f-http-https"' + (cfg.useHttps === true ? " checked" : "") + '>' +
+        '<span>Use HTTPS</span>' +
+      '</label>' +
+    '</div>' +
+    '<div class="form-group"><label>Port</label>' +
+      '<input type="number" id="f-http-port" min="1" max="65535" value="' + escapeHtml(cfg.port ? String(cfg.port) : "") + '" placeholder="default (80 / 443)" style="max-width:200px">' +
+    '</div>' +
+    '<div class="form-group"><label>Path</label>' +
+      '<input type="text" id="f-http-path" value="' + escapeHtml(cfg.path || "") + '" placeholder="/healthz">' +
+      '<p class="hint">Requested against each monitored device\'s own address — the host is never part of the credential, which is what lets one check cover a whole fleet. A single device whose endpoint differs can override just this path on its Monitoring tab.</p>' +
+    '</div>' +
+    '<div class="form-group"><label>Expected status code</label>' +
+      '<input type="number" id="f-http-status" min="100" max="599" value="' + escapeHtml(cfg.expectStatus ? String(cfg.expectStatus) : "") + '" placeholder="any 2xx" style="max-width:200px">' +
+      '<p class="hint">Leave blank to accept any 2xx. Redirects are never followed, so set this to 301/302 only if the redirect itself is the healthy answer.</p>' +
+    '</div>' +
+    '<div class="form-group"><label>Expected content</label>' +
+      '<input type="text" id="f-http-body" value="' + escapeHtml(cfg.expectBody || "") + '" placeholder="e.g. OK">' +
+      '<p class="hint">Text the response body must carry. This is what separates "the web server answered" from "the service still works" — a device serving an error page still returns 200. Leave blank to judge on the status code alone.</p>' +
+    '</div>' +
+    '<div class="form-group"><label>Match</label>' +
+      '<select id="f-http-matchmode" style="max-width:240px">' +
+        '<option value="contains"' + (mode === "contains" ? " selected" : "") + '>Contains this text</option>' +
+        '<option value="regex"' + (mode === "regex" ? " selected" : "") + '>Matches this regular expression</option>' +
+      '</select>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+        '<input type="checkbox" id="f-http-casesensitive"' + (cfg.caseSensitive === true ? " checked" : "") + '>' +
+        '<span>Case sensitive</span>' +
+      '</label>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+        '<input type="checkbox" id="f-http-failonmismatch"' + (strict ? " checked" : "") + '>' +
+        '<span>Treat a content mismatch as down</span>' +
+      '</label>' +
+      '<p class="hint">On (recommended): a 200 whose body doesn\'t match counts as down, and the probe error names the missing content. Off: any accepted status counts as up and the mismatch is advisory only — reachability semantics, close to what ICMP already gives you.</p>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+        '<input type="checkbox" id="f-http-verifytls"' + (cfg.verifyTls === true ? " checked" : "") + '>' +
+        '<span>Verify TLS certificate</span>' +
+      '</label>' +
+      '<p class="hint">Only applies with HTTPS. Off by default — device management certs are usually self-signed.</p>' +
+    '</div>' +
+    '<div class="form-group"><label>Bearer token <span class="hint" style="font-weight:normal">(optional)</span></label>' +
+      '<input type="password" id="f-http-token" value="' + escapeHtml(cfg.apiToken || "") + '">' +
+      '<p class="hint">Sent as <code>Authorization: Bearer &lt;token&gt;</code>. Most health endpoints need nothing here.</p>' +
+    '</div>' +
+    '<div class="form-group"><label>Basic auth username <span class="hint" style="font-weight:normal">(optional)</span></label>' +
+      '<input type="text" id="f-http-user" value="' + escapeHtml(cfg.username || "") + '">' +
+    '</div>' +
+    '<div class="form-group"><label>Basic auth password</label>' +
+      '<input type="password" id="f-http-pass" value="' + escapeHtml(cfg.password || "") + '">' +
+      '<p class="hint">Ignored when a bearer token is set.</p>' +
+    '</div>'
+  );
+}
+
 function readCredentialForm(type) {
   function num(v) { v = (v || "").trim(); return v ? Number(v) : undefined; }
   if (type === "snmp") {
@@ -6873,6 +7031,27 @@ function readCredentialForm(type) {
       apiToken: document.getElementById("f-rest-token").value,
       verifyTls: document.getElementById("f-rest-verifytls").checked,
     };
+  }
+  if (type === "http") {
+    var h = {
+      useHttps:       document.getElementById("f-http-https").checked,
+      path:           (document.getElementById("f-http-path").value || "").trim(),
+      expectBody:     document.getElementById("f-http-body").value,
+      matchMode:      document.getElementById("f-http-matchmode").value,
+      caseSensitive:  document.getElementById("f-http-casesensitive").checked,
+      failOnMismatch: document.getElementById("f-http-failonmismatch").checked,
+      verifyTls:      document.getElementById("f-http-verifytls").checked,
+      apiToken:       document.getElementById("f-http-token").value,
+      username:       (document.getElementById("f-http-user").value || "").trim(),
+      password:       document.getElementById("f-http-pass").value,
+    };
+    // Blank port / status mean "use the default" and "any 2xx" — send null
+    // rather than 0 or "", which the validator would reject as out of range.
+    var hp = num(document.getElementById("f-http-port").value);
+    h.port = hp === undefined ? null : hp;
+    var hs = num(document.getElementById("f-http-status").value);
+    h.expectStatus = hs === undefined ? null : hs;
+    return h;
   }
   var s = {
     username: document.getElementById("f-ssh-user").value,

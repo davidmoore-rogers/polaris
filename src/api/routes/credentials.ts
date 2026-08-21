@@ -14,10 +14,11 @@ import { requirePermission } from "../middleware/permissions.js";
 import { logEvent } from "./events.js";
 import { AppError } from "../../utils/errors.js";
 import { probeCredentialAgainstHost } from "../../services/monitoringService.js";
+import type { HttpProbeDiagnostics } from "../../utils/httpCheck.js";
 
 const router = Router();
 
-const CredentialTypeEnum = z.enum(["snmp", "winrm", "ssh", "restapi"]);
+const CredentialTypeEnum = z.enum(["snmp", "winrm", "ssh", "restapi", "http"]);
 
 const CreateSchema = z.object({
   name:   z.string().min(1),
@@ -161,7 +162,12 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
       return;
     }
 
-    const result = await probeCredentialAgainstHost(host || "", input.type, config);
+    // `http` credentials get diagnostics back — the request line, status,
+    // content-type and a body excerpt — because an HTTP check's whole point is
+    // a string the operator has to pick OUT of the response, and pass/fail
+    // alone gives them nothing to pick from. Nothing else fills this.
+    const probeOut: { diag?: HttpProbeDiagnostics } = {};
+    const result = await probeCredentialAgainstHost(host || "", input.type, config, probeOut);
     const label = asset.hostname || asset.ipAddress || asset.id;
     logEvent({
       action: "credential.tested",
@@ -172,9 +178,18 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
       message: result.success
         ? `Credential test succeeded against ${label} (${result.responseTimeMs} ms)`
         : `Credential test failed against ${label}: ${result.error || "unknown error"}`,
-      details: { assetId: input.assetId, host, type: input.type },
+      // The response BODY is deliberately not in the Event: it is arbitrary
+      // device output of unbounded sensitivity, it would land in every pg_dump
+      // and every syslog forward, and the operator who needs it is already
+      // looking at it in the modal. Only the shape of the answer is audited.
+      details: {
+        assetId: input.assetId, host, type: input.type,
+        ...(probeOut.diag
+          ? { httpStatus: probeOut.diag.statusCode, httpUrl: probeOut.diag.url, httpMatched: probeOut.diag.matched }
+          : {}),
+      },
     });
-    res.json({ ...result, host });
+    res.json({ ...result, host, ...(probeOut.diag ? { httpDiagnostics: probeOut.diag } : {}) });
   } catch (err) { next(err); }
 });
 
