@@ -55,6 +55,7 @@ import {
   lossSamplerTarget,
   LOSS_SAMPLER_TIMEOUT_MS,
 } from "../utils/lossSampler.js";
+import { stampsRecoveryAnchor } from "../utils/probeLossAnchor.js";
 import {
   fortiosBool,
   parseFortiosMemberList,
@@ -9503,6 +9504,16 @@ export async function recordProbeResult(
     consecutiveFailures: newCf,
     consecutiveSuccesses: newCs,
     monitorStatusChangedAt: previousStatus !== nextStatus ? now : undefined,
+    // The packet-loss anchor (business rule 29b): the success that ended an
+    // outage. "down"/"unknown" are the only states a device leaves on a
+    // success without having been answering, so this stamps exactly the
+    // recovery entry — whether it lands in "recovering" or (threshold 1) goes
+    // straight to "up". A warning->up recovery deliberately does NOT stamp: a
+    // flapping device passes through warning constantly, and anchoring there
+    // would collapse its loss window to the last few probes and read 0%.
+    // Undefined otherwise, so the flush's COALESCE keeps the prior stamp until
+    // the next outage ends.
+    recoveryStartedAt: stampsRecoveryAnchor(previousStatus, result.success) ? now : undefined,
     // Advance the stored uptime to this reading (undefined leaves it
     // untouched on probes that didn't report uptime — see the COALESCE in
     // probePatchBuffer); stamp the reboot timestamp only when a drop was

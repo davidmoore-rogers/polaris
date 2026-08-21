@@ -134,6 +134,41 @@ describe("probeLossSeriesFrom", () => {
     expect(s.points.every((p) => p.t >= min(40).getTime() - 2 * 60_000)).toBe(true);
   });
 
+  it("anchors at the recovery when the outage STARTED mid-window (the first-success anchor's blind spot)", () => {
+    // 10 clean minutes, 30 dark, then 20 clean again. The window's first
+    // success is minute 0 — BEFORE the outage — so the first-success anchor is
+    // inert and the ratio would read 50 % about a device that has been
+    // answering every probe for 20 minutes. `recoveryMs` (Asset.
+    // recoveryStartedAt) is the success that ended the outage, at minute 40.
+    const rows = probes(60, Array.from({ length: 30 }, (_, i) => 10 + i));
+    expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(50);
+    const s = probeLossSeriesFrom(rows, 2 * 60_000, min(40).getTime());
+    expect(s.ratioPct).toBe(0);
+    // And the outage is off the chart too, so the picture matches the caption.
+    expect(s.points.every((p) => p.t >= min(40).getTime() - 2 * 60_000)).toBe(true);
+  });
+
+  it("takes the LATER of the two anchors, and a stale recovery stamp is inert", () => {
+    const rows = probes(60, Array.from({ length: 40 }, (_, i) => i));
+    // Recovery stamp older than the window (a device that recovered long ago
+    // and has been flapping since): every row already sits after it, so the
+    // first-success anchor decides — 0 %, as without the stamp.
+    expect(probeLossSeriesFrom(rows, 2 * 60_000, T0 - 3_600_000).ratioPct).toBe(0);
+    // Stamp inside the window but before the first success (cannot happen in
+    // practice — the stamp IS a success — but the max() must not widen the
+    // window backwards if it ever did).
+    expect(probeLossSeriesFrom(rows, 2 * 60_000, min(10).getTime()).ratioPct).toBe(0);
+  });
+
+  it("keeps every row when nothing answered, whatever the recovery stamp says", () => {
+    // includeFullyDown semantics: an asset-down alert's chart must read 100 %,
+    // and a stamp from an earlier recovery must not trim it to nothing.
+    const rows = probes(30, Array.from({ length: 30 }, (_, i) => i));
+    const s = probeLossSeriesFrom(rows, 2 * 60_000, min(20).getTime());
+    expect(s.ratioPct).toBe(100);
+    expect(s.points.length).toBeGreaterThan(0);
+  });
+
   it("skips empty buckets rather than plotting a polling gap as perfect health", () => {
     const rows = [
       { timestamp: min(0), success: true },

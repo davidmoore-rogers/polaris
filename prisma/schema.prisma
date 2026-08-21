@@ -740,6 +740,19 @@ model Asset {
   // up<->down). Drives the "how long has this been warning/down" duration on
   // the Dashboard's Monitor Alerts card. Null until the first transition.
   monitorStatusChangedAt   DateTime?
+  // The first successful probe that ended the last outage — the moment
+  // monitorStatus left "down"/"unknown" for "recovering" (or straight to "up"
+  // when failureThreshold is 1). NOT stamped on a warning->up recovery, which
+  // is the whole point: it is the packet-loss ratio's second anchor (business
+  // rule 29b). probeLossQuery measures loss from GREATEST(first success in the
+  // window, this stamp), so an outage that ended mid-window leaves the
+  // denominator even when the window ALSO holds healthy samples from before it
+  // — the case the first-success anchor cannot see, because that first success
+  // sits before the outage. Flapping is untouched: a warning->up device never
+  // stamps, so its whole window still counts. Written only by
+  // recordProbeResult (through probePatchBuffer); never cleared — it ages out
+  // of the window on its own and the next outage's recovery overwrites it.
+  recoveryStartedAt        DateTime?
   lastMonitorAt            DateTime?
   // Cadence anchor for the ICMP packet-loss sampler (utils/lossSampler.ts) —
   // the 10s side-probe that runs ONLY while monitorStatus is "warning" or

@@ -295,8 +295,20 @@ describe("getPacketLoss", () => {
     rawUnsafe.mockResolvedValueOnce([]);
     await noc.getPacketLoss();
     const sql = rawUnsafe.mock.calls[0][0] as string;
-    expect(sql).toContain(`min("timestamp") FILTER (WHERE "success") OVER (PARTITION BY "assetId")`);
-    expect(sql).toContain(`"timestamp" >= "firstOk"`);
+    expect(sql).toContain(`min(s."timestamp") FILTER (WHERE s."success") OVER (PARTITION BY s."assetId")`);
+    expect(sql).toContain(`"timestamp" >= GREATEST("firstOk", "recoveredAt")`);
+  });
+
+  it("also measures from the end of an outage that started mid-window", async () => {
+    // The second anchor (business rule 29b): the first-success anchor is inert
+    // once a healthy sample precedes the outage, so the window ALSO starts no
+    // earlier than Asset.recoveryStartedAt. Joined per asset, LEFT so a sample
+    // row whose asset is gone still counts.
+    rawUnsafe.mockResolvedValueOnce([]);
+    await noc.getPacketLoss();
+    const sql = rawUnsafe.mock.calls[0][0] as string;
+    expect(sql).toContain(`LEFT JOIN "assets" a ON a."id" = s."assetId"`);
+    expect(sql).toContain(`a."recoveryStartedAt" AS "recoveredAt"`);
   });
 
   it("bounds the window with a timezone-proof now() (naive-UTC columns vs server TimeZone)", async () => {

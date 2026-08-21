@@ -45,6 +45,25 @@
  * first success. Flapping is unaffected — an early success anchors near the
  * window edge, so nearly the whole window still counts.
  *
+ * A SECOND ANCHOR COVERS THE OUTAGE THAT STARTED MID-WINDOW (2026-08). The
+ * first-success anchor only helps while the outage is still running at the
+ * window's leading edge; once the device has been back long enough for a
+ * healthy sample to precede the outage, that first success sits BEFORE it and
+ * the anchor goes inert — the whole outage stays in the denominator, so the
+ * device reads heavily lossy for a full window *because* it recovered. That is
+ * the same false alert the first anchor exists to prevent (and the engine's
+ * device-down supersede only covers the outage itself, not the window after
+ * it). So the measurement also starts no earlier than `Asset.recoveryStartedAt`
+ * — the success that ended the last outage, i.e. the moment monitorStatus left
+ * down/unknown for recovering. Effective anchor = GREATEST(first success,
+ * recoveryStartedAt); Postgres's GREATEST ignores NULLs, so a device that has
+ * not recovered inside the window behaves exactly as before.
+ *
+ * Only an outage-ending recovery stamps that column — a warning→up recovery
+ * never does. That is what keeps flapping measurable: a lossy device passes
+ * through warning constantly, and anchoring on those recoveries would restart
+ * the window every few probes and report ~0% forever.
+ *
  * The window is anchored to UTC wall-clock (`now() AT TIME ZONE 'UTC'`)
  * rather than a bound JS Date to avoid tz skew against the hypertable's
  * naive timestamps. All SQL fragments are compile-time literals; user data
@@ -83,7 +102,9 @@ export async function queryProbeLossRatios(opts: {
 
   let idClause = "";
   if (opts.assetIds) {
-    idClause = ` AND "assetId" = ANY($${++p}::text[])`;
+    // Qualified: the subquery joins assets, and an unqualified column there is
+    // one schema change away from being ambiguous.
+    idClause = ` AND s."assetId" = ANY($${++p}::text[])`;
     params.push(opts.assetIds);
   }
 
@@ -95,13 +116,16 @@ export async function queryProbeLossRatios(opts: {
     ? `HAVING count(*) FILTER (WHERE NOT "success") > 0`
     : "";
 
-  // The anchor trims everything before the asset's first successful probe (see
-  // the header). An asset with NO success has no anchor: engine mode drops it
-  // (asset-down owns a total outage), display mode keeps every row so the ratio
-  // comes out at 100%.
+  // The anchor trims everything before the LATER of the asset's first
+  // successful probe and the end of its last outage (see the header).
+  // GREATEST ignores NULLs, so an asset that hasn't recovered inside the
+  // window falls back to the first-success anchor alone. An asset with NO
+  // success has no anchor at all: engine mode drops it (asset-down owns a
+  // total outage), display mode keeps every row so the ratio comes out at 100%.
+  const anchor = `GREATEST("firstOk", "recoveredAt")`;
   const anchorClause = opts.includeFullyDown
-    ? `(("firstOk" IS NOT NULL AND "timestamp" >= "firstOk") OR "firstOk" IS NULL)`
-    : `("firstOk" IS NOT NULL AND "timestamp" >= "firstOk")`;
+    ? `(("firstOk" IS NOT NULL AND "timestamp" >= ${anchor}) OR "firstOk" IS NULL)`
+    : `("firstOk" IS NOT NULL AND "timestamp" >= ${anchor})`;
 
   let tail = "";
   if (opts.onlyLossy) {
@@ -112,18 +136,24 @@ export async function queryProbeLossRatios(opts: {
   }
 
   // One pass: the partitioned min() stamps each asset's first successful probe
-  // onto its own rows, the outer WHERE trims everything before it, and the
-  // grouped aggregate counts what's left. Scale note — this reads the same rows
-  // the plain aggregate did (an hour of 2000 assets' probes is ~240k rows on the
-  // 60s engine tick) but now sorts/hashes them by assetId for the partition;
-  // it stays one query with one scan, never a per-asset lookup.
+  // onto its own rows, the LEFT JOIN carries its recovery anchor alongside, the
+  // outer WHERE trims everything before the later of the two, and the grouped
+  // aggregate counts what's left. Scale note — this reads the same rows the
+  // plain aggregate did (an hour of 2000 assets' probes is ~240k rows on the
+  // 60s engine tick) but now sorts/hashes them by assetId for the partition; it
+  // stays one query with one scan, never a per-asset lookup. The join is to a
+  // ~2000-row dimension table on its primary key, and it must stay a LEFT JOIN:
+  // the sample tables have no FK to assets (hypertables), so rows whose asset
+  // row is gone — or, in tests, was never created — must still count.
   return prisma.$queryRawUnsafe<ProbeLossRow[]>(
     `SELECT "assetId", count(*) AS total, count(*) FILTER (WHERE NOT "success") AS failed
      FROM (
-       SELECT "assetId", "success", "timestamp",
-              min("timestamp") FILTER (WHERE "success") OVER (PARTITION BY "assetId") AS "firstOk"
-       FROM "asset_monitor_samples"
-       WHERE "timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
+       SELECT s."assetId", s."success", s."timestamp",
+              min(s."timestamp") FILTER (WHERE s."success") OVER (PARTITION BY s."assetId") AS "firstOk",
+              a."recoveryStartedAt" AS "recoveredAt"
+       FROM "asset_monitor_samples" s
+       LEFT JOIN "assets" a ON a."id" = s."assetId"
+       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
      ) w
      WHERE ${anchorClause}
      GROUP BY "assetId"

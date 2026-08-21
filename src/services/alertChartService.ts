@@ -25,6 +25,7 @@ import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { sparklineSvg, seriesStats, formatReading, timeAxisLabel, type SparkPoint } from "../utils/sparklineSvg.js";
 import { alarmStatusToFlag, convertSensorForDisplay, sensorDisplayUnit } from "../utils/hardwareSensors.js";
+import { effectiveLossAnchorMs } from "../utils/probeLossAnchor.js";
 import { getBranding } from "./brandingService.js";
 import type { InlineAttachment } from "./notificationChannels/emailChannel.js";
 
@@ -309,9 +310,13 @@ export interface ProbeLossSeries {
  * must print.
  *
  * THE ANCHOR mirrors `probeLossQuery`'s DISPLAY mode: samples before the
- * window's first successful probe are discarded, because a device that was
- * unreachable for part of the window had no probes there to lose (business
- * rule 29b) — that trim is what makes `ratioPct` equal the engine's reading.
+ * window's first successful probe — and before `recoveryStartedAt`, the end of
+ * an outage that started mid-window, passed in as `recoveryMs` — are discarded,
+ * because a device that was unreachable for part of the window had no probes
+ * there to lose (business rule 29b). That trim is what makes `ratioPct` equal
+ * the engine's reading, so both halves of it have to be here: charting the
+ * outage the engine excluded would put a wall of loss under a caption reading
+ * 0 %.
  * But an asset with NO success in the window keeps every row and reads 100 %,
  * exactly as the NOC widget's `includeFullyDown` does: the alert body embeds a
  * loss chart for asset-down alerts too, and a blank chart there would read as
@@ -325,9 +330,19 @@ export interface ProbeLossSeries {
 export function probeLossSeriesFrom(
   rows: Array<{ timestamp: Date; success: boolean }>,
   bucketMs: number = LOSS_BUCKET_MS,
+  /**
+   * `Asset.recoveryStartedAt` as epoch ms — the success that ended the last
+   * outage. The later of it and the first success is the anchor, matching
+   * SQL's `GREATEST("firstOk", "recoveredAt")`. Null/absent (no recovery on
+   * record) leaves the first-success anchor alone; a stamp older than the
+   * window is inert, since every row already sits after it.
+   */
+  recoveryMs: number | null = null,
 ): ProbeLossSeries {
   const firstOkMs = rows.find((r) => r.success)?.timestamp.getTime() ?? null;
-  const considered = firstOkMs === null ? rows : rows.filter((r) => r.timestamp.getTime() >= firstOkMs);
+  // Same arithmetic as the query's GREATEST("firstOk", "recoveredAt").
+  const anchorMs = effectiveLossAnchorMs(firstOkMs, recoveryMs);
+  const considered = anchorMs === null ? rows : rows.filter((r) => r.timestamp.getTime() >= anchorMs);
 
   const buckets = new Map<number, { total: number; failed: number }>();
   let total = 0;
@@ -357,16 +372,22 @@ export function probeLossSeriesFrom(
  * than it saves, and it keeps the loader shaped like its neighbours.
  */
 async function loadProbeLoss(assetId: string, since: Date, bucketMs: number = LOSS_BUCKET_MS): Promise<ProbeLossSeries> {
-  const rows = await prisma.assetMonitorSample.findMany({
-    // EVERY probeKind, deliberately — this is a loss chart, and the ICMP
-    // sampler exists to give it resolution through the warning/recovering
-    // windows. One of only three all-kinds readers (with probeLossQuery's two
-    // modes); everything else is response-time-poll only.
-    where: { assetId, timestamp: { gte: since } },
-    orderBy: { timestamp: "asc" },
-    select: { timestamp: true, success: true },
-  });
-  return probeLossSeriesFrom(rows, bucketMs);
+  // The recovery anchor lives on the asset row, so the chart needs it too —
+  // one narrow select, and null (a deleted asset, a device that has never
+  // recovered) degrades to the first-success anchor alone.
+  const [asset, rows] = await Promise.all([
+    prisma.asset.findUnique({ where: { id: assetId }, select: { recoveryStartedAt: true } }),
+    prisma.assetMonitorSample.findMany({
+      // EVERY probeKind, deliberately — this is a loss chart, and the ICMP
+      // sampler exists to give it resolution through the warning/recovering
+      // windows. One of only three all-kinds readers (with probeLossQuery's two
+      // modes); everything else is response-time-poll only.
+      where: { assetId, timestamp: { gte: since } },
+      orderBy: { timestamp: "asc" },
+      select: { timestamp: true, success: true },
+    }),
+  ]);
+  return probeLossSeriesFrom(rows, bucketMs, asset?.recoveryStartedAt?.getTime() ?? null);
 }
 
 async function rasterize(svg: string): Promise<Buffer | null> {

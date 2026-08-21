@@ -1,0 +1,17 @@
+-- Asset.recoveryStartedAt -- the first successful probe that ended the last
+-- outage (monitorStatus leaving "down"/"unknown"), stamped by
+-- recordProbeResult through probePatchBuffer.
+--
+-- The packet-loss ratio's second anchor (business rule 29b). The first-success
+-- anchor already trims an outage that was still running at the window's
+-- leading edge, but it is inert for an outage that STARTED mid-window: the
+-- window's first success sits before the outage, so every failed probe of the
+-- outage stayed in the denominator and a device that had just come back read
+-- as heavily lossy -- the second alert about one outage that rule 29 exists to
+-- prevent. probeLossQuery now measures from GREATEST(first success, this
+-- stamp).
+--
+-- NULL on every existing row and never backfilled: the stamp only matters
+-- while it sits inside a loss window (minutes to hours), and NULL reads as
+-- "no recovery in this window", which is the pre-feature behaviour.
+ALTER TABLE "assets" ADD COLUMN IF NOT EXISTS "recoveryStartedAt" TIMESTAMP(3);

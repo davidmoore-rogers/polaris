@@ -21,6 +21,8 @@
  *     dropping off the widget, while the engine path still drops it.
  *   - probeKind: this query counts EVERY kind, which is the entire reason the
  *     ICMP loss sampler exists.
+ *   - RECOVERY ANCHOR: an outage that STARTED mid-window is excluded via
+ *     Asset.recoveryStartedAt, the case the first-success anchor cannot see.
  */
 
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
@@ -32,7 +34,10 @@ const d = dbDescribe;
 
 // Fixed ids keep the GROUP BY deterministic and scope the cleanup. The sample
 // tables carry assetId but no FK to Asset (TimescaleDB hypertables — see
-// CLAUDE.md tiered-sample-retention), so no real Asset rows are needed.
+// CLAUDE.md tiered-sample-retention), so no real Asset rows are needed — the
+// query's join to assets is a LEFT JOIN precisely so a sample row whose asset
+// is gone still counts. The recovery-anchor block below creates real rows,
+// because the anchor lives on one.
 const A = "00000000-0000-0000-0000-0000000000b1";
 const B = "00000000-0000-0000-0000-0000000000b2";
 const ALL = [A, B];
@@ -90,13 +95,22 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!dbReachable) return;
   await prisma.assetMonitorSample.deleteMany({ where: { assetId: { in: ALL } } });
+  await prisma.asset.deleteMany({ where: { id: { in: ALL } } });
   await prisma.$disconnect();
 });
 
 beforeEach(async () => {
   if (!dbReachable) return;
   await prisma.assetMonitorSample.deleteMany({ where: { assetId: { in: ALL } } });
+  await prisma.asset.deleteMany({ where: { id: { in: ALL } } });
 });
+
+/** A real Asset row carrying the recovery anchor the query joins for. */
+async function seedAssetWithRecovery(assetId: string, recoveryStartedAt: Date | null): Promise<void> {
+  await prisma.asset.create({
+    data: { id: assetId, hostname: `loss-${assetId.slice(-2)}`, assetType: "server", status: "active", recoveryStartedAt },
+  });
+}
 
 d("queryProbeLossRatios — anchoring at the first successful probe", () => {
   it("excludes the outage that preceded recovery (the 92%-on-a-healthy-device case)", async () => {
@@ -137,6 +151,89 @@ d("queryProbeLossRatios — anchoring at the first successful probe", () => {
     expect(Number(byId.get(A)!.total)).toBe(1);
     expect(Number(byId.get(B)!.failed)).toBe(2);
     expect(Number(byId.get(B)!.total)).toBe(5);
+  });
+});
+
+d("queryProbeLossRatios — the recovery anchor (an outage that started mid-window)", () => {
+  // 10 clean minutes, then 20 dark, then 5 clean: the window's FIRST success is
+  // at minute -35, before the outage, so the first-success anchor is inert here.
+  const acrossOutage = [...Array(10).fill(S), ...Array(20).fill(F), ...Array(5).fill(S)];
+  // The success that ended it sits 5 minutes back. The stamp is set a half
+  // minute earlier so it lands between that success and the last failure —
+  // `ago()` is relative to its own call, so aiming exactly at the sample's
+  // timestamp would land a few ms past it and trim the anchor row itself.
+  const recoveredAt = () => ago(5.5);
+
+  it("excludes the outage, so a device that just came back reads 0% instead of 57%", async () => {
+    await seedProbes(A, acrossOutage);
+    await seedAssetWithRecovery(A, recoveredAt());
+
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0].total)).toBe(5);
+    expect(Number(rows[0].failed)).toBe(0);
+  });
+
+  it("without the stamp the same samples read the outage back as loss (the bug)", async () => {
+    // Pins WHY the column exists: the first-success anchor alone keeps every
+    // failed probe of a mid-window outage in the denominator, so the device
+    // alerts *because* it recovered — for a whole window.
+    await seedProbes(A, acrossOutage);
+    await seedAssetWithRecovery(A, null);
+
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0].total)).toBe(35);
+    expect(Number(rows[0].failed)).toBe(20);
+  });
+
+  it("is inert once the recovery falls out of the window (flapping stays measurable)", async () => {
+    // A device that recovered two hours ago and has been dropping probes since:
+    // the stamp is older than every row, so GREATEST picks the first success and
+    // the whole window counts. This is also the warning->up case by construction
+    // — that transition never stamps at all.
+    await seedProbes(A, [S, F, S, F, S, F, S, F, S, F]);
+    await seedAssetWithRecovery(A, ago(120));
+
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0].total)).toBe(10);
+    expect(Number(rows[0].failed)).toBe(5);
+  });
+
+  it("anchors per asset — one device's recovery doesn't trim another's window", async () => {
+    await seedProbes(A, acrossOutage);
+    await seedAssetWithRecovery(A, recoveredAt());
+    await seedProbes(B, acrossOutage);
+    await seedAssetWithRecovery(B, null);
+
+    const byId = new Map(
+      (await queryProbeLossRatios({ sinceMinutes: 60, assetIds: ALL })).map((r) => [r.assetId, r]),
+    );
+    expect(Number(byId.get(A)!.total)).toBe(5);
+    expect(Number(byId.get(B)!.total)).toBe(35);
+  });
+
+  it("drops the recovered device from the Packet Loss widget instead of topping it", async () => {
+    // Widget mode: the trimmed window holds no failures, so HAVING hides it —
+    // a device that is answering every probe is not "lossy".
+    await seedProbes(A, acrossOutage);
+    await seedAssetWithRecovery(A, recoveredAt());
+
+    const rows = await queryProbeLossRatios({
+      sinceMinutes: 60, assetIds: ALL, onlyLossy: true, limit: null, includeFullyDown: true,
+    });
+    expect(rows).toHaveLength(0);
+  });
+
+  it("still reads 100% for a device that answered nothing, stamp or no stamp", async () => {
+    // The stamp is from a recovery attempt that failed — includeFullyDown's
+    // keep-every-row branch must win, or the widget loses the outage entirely.
+    await seedProbes(A, Array(20).fill(F));
+    await seedAssetWithRecovery(A, ago(10));
+
+    const rows = await queryProbeLossRatios({
+      sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: null, includeFullyDown: true,
+    });
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].failed)).toBe(20);
   });
 });
 

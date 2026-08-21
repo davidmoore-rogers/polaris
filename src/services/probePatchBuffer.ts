@@ -77,6 +77,10 @@ export interface ProbePatch {
   lastUptimeSec?: number;
   /** Set only when a reboot was detected this tick; undefined preserves the prior stamp. */
   lastRebootAt?: Date;
+  /** Set only on the success that ended an outage (down/unknown -> answering);
+   *  undefined preserves the prior stamp. The packet-loss ratio's recovery
+   *  anchor — see Asset.recoveryStartedAt and business rule 29b. */
+  recoveryStartedAt?: Date;
   /** Set only on a SUCCESSFUL probe — advances Asset.lastSeen/lastSeenSource so
    *  polling is the authority for presence on monitored assets. Undefined on a
    *  failed probe so a down asset's lastSeen freezes at its last success
@@ -136,6 +140,10 @@ export function enqueueProbePatch(assetId: string, patch: ProbePatch): void {
       // uptime/reboot stamps.
       lastUptimeSec: patch.lastUptimeSec ?? existing.lastUptimeSec,
       lastRebootAt: patch.lastRebootAt ?? existing.lastRebootAt,
+      // Same preserve-on-absent rule: an ordinary probe merging onto the
+      // recovery probe in the same 2s window must not erase the recovery
+      // anchor, or the loss ratio silently keeps counting the outage.
+      recoveryStartedAt: patch.recoveryStartedAt ?? existing.recoveryStartedAt,
       // A failed probe (no lastSeen) merging onto a successful one in the same
       // window must not erase the success's presence stamp.
       lastSeen: patch.lastSeen ?? existing.lastSeen,
@@ -201,7 +209,8 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
     tuples.push(
       `($${p++}::text, $${p++}::text, $${p++}::timestamp, ` +
       `$${p++}::int, $${p++}::int, $${p++}::int, $${p++}::timestamp, ` +
-      `$${p++}::int, $${p++}::timestamp, $${p++}::timestamp, $${p++}::text)`,
+      `$${p++}::int, $${p++}::timestamp, $${p++}::timestamp, $${p++}::text, ` +
+      `$${p++}::timestamp)`,
     );
     params.push(
       id,
@@ -217,6 +226,7 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
       patch.lastRebootAt ? patch.lastRebootAt.toISOString() : null,
       patch.lastSeen ? patch.lastSeen.toISOString() : null,
       patch.lastSeenSource ?? null,
+      patch.recoveryStartedAt ? patch.recoveryStartedAt.toISOString() : null,
     );
   }
   const sql =
@@ -234,9 +244,10 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
     `"lastUptimeSec"          = COALESCE(v.uptime_sec, t."lastUptimeSec"), ` +
     `"lastRebootAt"           = COALESCE(v.reboot_at, t."lastRebootAt"), ` +
     `"lastSeen"               = COALESCE(v.last_seen, t."lastSeen"), ` +
-    `"lastSeenSource"         = COALESCE(v.last_seen_source, t."lastSeenSource") ` +
+    `"lastSeenSource"         = COALESCE(v.last_seen_source, t."lastSeenSource"), ` +
+    `"recoveryStartedAt"      = COALESCE(v.recovery_started_at, t."recoveryStartedAt") ` +
     `FROM (VALUES ${tuples.join(", ")}) ` +
-    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at, uptime_sec, reboot_at, last_seen, last_seen_source) ` +
+    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at, uptime_sec, reboot_at, last_seen, last_seen_source, recovery_started_at) ` +
     `WHERE t."id" = v.id`;
   await prisma.$executeRawUnsafe(sql, ...params);
 }
