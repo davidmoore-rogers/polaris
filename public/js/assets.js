@@ -3268,8 +3268,8 @@ function assetFormHTML(defaults) {
       assetTypeOptionsHTML(d.assetType) +
     '</select></div>' +
     '<div class="form-group"><label>Status</label><select id="f-status">' +
-      '<option value="storage"' + (d.status === "storage" || !d.status ? " selected" : "") + '>Storage</option>' +
-      '<option value="active"' + (d.status === "active" ? " selected" : "") + '>Active</option>' +
+      '<option value="storage"' + (d.status === "storage" ? " selected" : "") + '>Storage</option>' +
+      '<option value="active"' + (d.status === "active" || !d.status ? " selected" : "") + '>Active</option>' +
       '<option value="maintenance"' + (d.status === "maintenance" ? " selected" : "") + '>Maintenance</option>' +
       '<option value="decommissioned"' + (d.status === "decommissioned" ? " selected" : "") + '>Decommissioned</option>' +
       '<option value="disabled"' + (d.status === "disabled" ? " selected" : "") + '>Disabled</option>' +

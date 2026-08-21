@@ -183,7 +183,7 @@ const CreateAssetSchema = z.object({
   manufacturer:  z.string().optional(),
   model:         z.string().optional(),
   assetType:     AssetTypeEnum.optional().default("other"),
-  status:        AssetStatusEnum.optional().default("storage"),
+  status:        AssetStatusEnum.optional().default("active"),
   location:      z.string().optional(),
   // Manual geo pin (decimal degrees). Travels as a pair — both numbers, both
   // null (clear), or both omitted; pair semantics enforced in the handlers
