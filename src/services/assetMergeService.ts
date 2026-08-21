@@ -27,8 +27,13 @@
  * history as the survivor):
  *   - Re-bound onto the survivor: AssetSource rows, AssetMacAddress,
  *     AssetAssociatedIp, AssetIpHistory, AssetFortigateSighting (all
- *     delete-on-conflict against the survivor's existing rows), and the
- *     ManagedAgent enrollment IFF the survivor has none.
+ *     delete-on-conflict against the survivor's existing rows), the
+ *     ManagedAgent enrollment IFF the survivor has none, and the
+ *     AssetDependencyParent edges (see `transferDependencyEdges` — dependents
+ *     always re-point to the survivor; the absorbed asset's own parent links
+ *     blank-fill, with an operator-chosen winner when BOTH sides have
+ *     parents, since one physical device has one real upstream and unioning
+ *     two parent sets would weaken all-down suppression).
  *   - `monitored` is OR-ed across the two rows: if either side was monitored,
  *     the survivor comes out monitored. Same intent as the automatic
  *     endpoint-ghost merge (`assetGhostMergeService.transferredMonitored`) —
@@ -41,8 +46,8 @@
  *     empty overrides. Business rule 10 still wins: a survivor whose merged
  *     status lands on decommissioned/disabled stays unmonitored.
  *   - Cascade-DELETED with the ghost (FK kept): LLDP neighbors, wireless
- *     stations, interface comment overrides, dependency edges, and pending
- *     Conflicts. The survivor keeps its own. Called out in the confirm dialog.
+ *     stations, interface comment overrides, and pending Conflicts. The
+ *     survivor keeps its own. Called out in the confirm dialog.
  *   - ORPHANED + aged out (no FK since migration 20260615000000): all
  *     monitoring/telemetry/interface/storage/temperature/IPsec/SD-WAN/custom-
  *     widget samples + every *Hourly/*Daily rollup. These are TimescaleDB
@@ -197,6 +202,12 @@ export interface MergeAssetsResult {
   carriedMonitoring: boolean;
   /** Monitoring config/pin fields adopted from the ghost alongside that flip. */
   monitorFieldsAdopted: string[];
+  /** Ghost's upstream dependency links now on the survivor. */
+  movedDependencyParents: number;
+  /** True when the ghost's parent set REPLACED a survivor set (operator picked the ghost side). */
+  replacedDependencyParents: boolean;
+  /** Downstream dependency edges (devices depending on the ghost) re-pointed at the survivor. */
+  movedDependents: number;
 }
 
 const ASSET_SELECT = {
@@ -224,6 +235,8 @@ const ASSET_SELECT = {
   warrantyExpiry: true,
   lastSeen: true,
   lastSeenSource: true,
+  lastSeenSwitch: true,
+  lastSeenAp: true,
   tags: true,
   monitored: true,
   // Monitoring config + pins, for the monitored-side carry-over below. Derived
@@ -286,7 +299,117 @@ export async function transferAssetSideTables(
   };
 }
 
-export interface AbsorbedRelationCounts extends SideTableTransferCounts {
+export type DependencyParentWinner = "canonical" | "ghost";
+
+export interface DependencyTransferCounts {
+  movedDependencyParents: number;
+  replacedDependencyParents: boolean;
+  movedDependents: number;
+}
+
+/**
+ * Carry the dependency DAG across a merge inside the caller's transaction.
+ * Before this existed every AssetDependencyParent edge cascade-deleted with
+ * the absorbed asset — including operator-pinned `override` rows nothing ever
+ * recomputes, and every downstream device's edge when the absorbed asset was
+ * their PARENT (a merged-away switch silently unparented its whole subtree
+ * until the next discovery finalize).
+ *
+ * Two halves with different rules:
+ *
+ *   - DOWNSTREAM (rows where the absorbed asset is the parent): always
+ *     re-pointed to the survivor — the two rows were one physical device, so
+ *     everything that depended on the absorbed record depends on the survivor.
+ *     A row whose child already holds the same (child, survivor, source) edge
+ *     is left to cascade (the child's existing edge wins the unique key), as
+ *     is a row whose child IS the survivor (re-pointing would self-edge).
+ *
+ *   - UPSTREAM (the absorbed asset's own parent links): blank-fill — moved
+ *     only when the survivor has no parent rows of its own. When BOTH sides
+ *     have parents, `parentWinner` decides WHOLESALE: one device has one real
+ *     upstream, and unioning two parent sets would weaken all-down suppression
+ *     (a dead parent from one record "covered" by a live parent from the
+ *     other). "canonical" (default — the conflict-absorb path's behavior)
+ *     keeps the survivor's set and lets the ghost's cascade; "ghost" deletes
+ *     the survivor's rows and moves the ghost's. The merge modal surfaces the
+ *     conflict and passes the operator's pick. A ghost row naming the survivor
+ *     as parent is never moved (self-edge).
+ *
+ * Both callers delete the absorbed asset afterwards, so "not moved" needs no
+ * explicit delete — the cascade handles it. Bounded by one asset's edges; the
+ * worst case (a site gate parenting every endpoint behind it) is a single
+ * set-based updateMany over the (indexed) parentAssetId.
+ */
+export async function transferDependencyEdges(
+  tx: any,
+  fromAssetId: string,
+  toAssetId: string,
+  parentWinner: DependencyParentWinner = "canonical",
+): Promise<DependencyTransferCounts> {
+  // ── Upstream half: the absorbed asset's own parent links ──
+  const [fromParents, toParents] = await Promise.all([
+    tx.assetDependencyParent.findMany({
+      where: { assetId: fromAssetId },
+      select: { id: true, parentAssetId: true },
+    }),
+    tx.assetDependencyParent.findMany({
+      where: { assetId: toAssetId },
+      select: { id: true },
+    }),
+  ]);
+
+  let movedDependencyParents = 0;
+  let replacedDependencyParents = false;
+  if (fromParents.length > 0 && (toParents.length === 0 || parentWinner === "ghost")) {
+    if (toParents.length > 0) {
+      await tx.assetDependencyParent.deleteMany({ where: { assetId: toAssetId } });
+      replacedDependencyParents = true;
+    }
+    const moveIds = fromParents
+      .filter((r: any) => r.parentAssetId !== toAssetId)
+      .map((r: any) => r.id);
+    if (moveIds.length > 0) {
+      const res = await tx.assetDependencyParent.updateMany({
+        where: { id: { in: moveIds } },
+        data: { assetId: toAssetId },
+      });
+      movedDependencyParents = res.count;
+    }
+  }
+
+  // ── Downstream half: devices depending on the absorbed asset ──
+  const [fromChildren, toChildren] = await Promise.all([
+    tx.assetDependencyParent.findMany({
+      where: { parentAssetId: fromAssetId },
+      select: { id: true, assetId: true, source: true },
+    }),
+    tx.assetDependencyParent.findMany({
+      where: { parentAssetId: toAssetId },
+      select: { assetId: true, source: true },
+    }),
+  ]);
+  const held = new Set(toChildren.map((r: any) => `${r.assetId}|${r.source}`));
+  const childMoveIds: string[] = [];
+  for (const r of fromChildren) {
+    if (r.assetId === toAssetId) continue; // would self-edge
+    const key = `${r.assetId}|${r.source}`;
+    if (held.has(key)) continue; // child already bound to the survivor
+    held.add(key);
+    childMoveIds.push(r.id);
+  }
+  let movedDependents = 0;
+  if (childMoveIds.length > 0) {
+    const res = await tx.assetDependencyParent.updateMany({
+      where: { id: { in: childMoveIds } },
+      data: { parentAssetId: toAssetId },
+    });
+    movedDependents = res.count;
+  }
+
+  return { movedDependencyParents, replacedDependencyParents, movedDependents };
+}
+
+export interface AbsorbedRelationCounts extends SideTableTransferCounts, DependencyTransferCounts {
   movedSources: number;
   movedManagedAgent: boolean;
 }
@@ -307,22 +430,31 @@ export interface AbsorbedRelationCounts extends SideTableTransferCounts {
  *   - ManagedAgent — 1:1 on assetId; re-bound only when the survivor has none,
  *     so the agent enrollment + its cert pins survive. If both sides have one,
  *     the absorbed asset's cascade-deletes (survivor keeps its own).
+ *   - AssetDependencyParent — via `transferDependencyEdges` (dependents always
+ *     re-point; the absorbed asset's own parent links blank-fill, with
+ *     `dependencyWinner` deciding when both sides have parents).
  *
  * Everything NOT listed here cascade-deletes with the absorbed row (LLDP
- * neighbors, wireless stations, interface overrides, dependency edges, pending
- * conflicts) and the sample hypertables' rows orphan + age out — see the file
- * header.
+ * neighbors, wireless stations, interface overrides, pending conflicts) and
+ * the sample hypertables' rows orphan + age out — see the file header.
  */
 export async function absorbAssetRelations(
   tx: any,
   fromAssetId: string,
   toAssetId: string,
+  opts?: { dependencyWinner?: DependencyParentWinner },
 ): Promise<AbsorbedRelationCounts> {
   const srcRes = await tx.assetSource.updateMany({
     where: { assetId: fromAssetId },
     data: { assetId: toAssetId },
   });
   const side = await transferAssetSideTables(tx, fromAssetId, toAssetId);
+  const deps = await transferDependencyEdges(
+    tx,
+    fromAssetId,
+    toAssetId,
+    opts?.dependencyWinner ?? "canonical",
+  );
 
   const agents = await tx.managedAgent.findMany({
     where: { assetId: { in: [fromAssetId, toAssetId] } },
@@ -336,7 +468,7 @@ export async function absorbAssetRelations(
     movedManagedAgent = true;
   }
 
-  return { movedSources: srcRes.count, ...side, movedManagedAgent };
+  return { movedSources: srcRes.count, ...side, ...deps, movedManagedAgent };
 }
 
 /**
@@ -407,12 +539,15 @@ export function resolveMonitoringCarry(
  * Merge `ghostId` into `canonicalId`. The canonical survives; the ghost is
  * deleted. `fieldWinners` maps a MERGEABLE_FIELDS key to which side wins; any
  * field not present defaults to blank-fill (keep canonical, fill from ghost
- * only when the canonical's value is empty).
+ * only when the canonical's value is empty). `dependencyWinner` resolves the
+ * upstream dependency-parent conflict when BOTH sides have parent links (see
+ * transferDependencyEdges) — omitted, the canonical keeps its own.
  */
 export async function mergeAssets(opts: {
   canonicalId: string;
   ghostId: string;
   fieldWinners?: Partial<Record<MergeableField, FieldWinner>>;
+  dependencyWinner?: DependencyParentWinner;
 }): Promise<MergeAssetsResult> {
   const { canonicalId, ghostId } = opts;
   const fieldWinners = opts.fieldWinners ?? {};
@@ -449,9 +584,26 @@ export async function mergeAssets(opts: {
   // lastSeen — always keep the more recent so the survivor reflects the
   // ghost's sightings (provenance label travels with it). tags — always
   // union, preserving the canonical order.
-  if (g.lastSeen && (!c.lastSeen || g.lastSeen > c.lastSeen)) {
+  const ghostSeenMoreRecently = !!g.lastSeen && (!c.lastSeen || (g.lastSeen as Date) > (c.lastSeen as Date));
+  if (ghostSeenMoreRecently) {
     update.lastSeen = g.lastSeen;
     if (g.lastSeenSource) update.lastSeenSource = g.lastSeenSource;
+  }
+  // lastSeenSwitch / lastSeenAp — system-learned connection facts (they also
+  // re-derive the endpoint dependency edge via resolveEndpointParent), carried
+  // with the same recency rule as lastSeen: blank-fill from the ghost, and
+  // when both sides have a value the more recently seen record's fact wins.
+  // Not winner-radio fields — there's no operator judgment to make about
+  // which port a device was last sighted on.
+  for (const field of ["lastSeenSwitch", "lastSeenAp"] as const) {
+    const gVal = g[field];
+    if (isEmpty(gVal)) continue;
+    if (isEmpty(c[field]) || ghostSeenMoreRecently) {
+      if (gVal !== c[field]) {
+        update[field] = gVal;
+        appliedFields.push(field);
+      }
+    }
   }
   const cTags = new Set(c.tags);
   const mergedTags = [...c.tags];
@@ -478,18 +630,26 @@ export async function mergeAssets(opts: {
   let movedIpHistory = 0;
   let movedSightings = 0;
   let movedManagedAgent = false;
+  let movedDependencyParents = 0;
+  let replacedDependencyParents = false;
+  let movedDependents = 0;
 
   await prisma.$transaction(async (tx) => {
-    // Sources / side tables / managed agent — re-bound onto the canonical so
-    // the ghost delete below can't cascade them away. Shared with the
-    // conflict-resolution ghost absorb.
-    const absorbed = await absorbAssetRelations(tx, g.id, c.id);
+    // Sources / side tables / dependency edges / managed agent — re-bound onto
+    // the canonical so the ghost delete below can't cascade them away. Shared
+    // with the conflict-resolution ghost absorb.
+    const absorbed = await absorbAssetRelations(tx, g.id, c.id, {
+      dependencyWinner: opts.dependencyWinner,
+    });
     movedSources = absorbed.movedSources;
     movedMacs = absorbed.movedMacs;
     movedIps = absorbed.movedIps;
     movedIpHistory = absorbed.movedIpHistory;
     movedSightings = absorbed.movedSightings;
     movedManagedAgent = absorbed.movedManagedAgent;
+    movedDependencyParents = absorbed.movedDependencyParents;
+    replacedDependencyParents = absorbed.replacedDependencyParents;
+    movedDependents = absorbed.movedDependents;
 
     if (Object.keys(update).length > 0) {
       await tx.asset.update({ where: { id: c.id }, data: update });
@@ -525,5 +685,8 @@ export async function mergeAssets(opts: {
     appliedFields,
     carriedMonitoring,
     monitorFieldsAdopted,
+    movedDependencyParents,
+    replacedDependencyParents,
+    movedDependents,
   };
 }

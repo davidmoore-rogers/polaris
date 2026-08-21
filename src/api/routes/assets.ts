@@ -4305,11 +4305,16 @@ router.get("/:id/polling-history", requirePermission("assets", "read"), async (r
 //   - fieldWinners: { <field>: "this" | "other" } — per-field overrides; any
 //     field omitted defaults to blank-fill (keep survivor, fill from absorbed
 //     only when the survivor's value is empty)
+//   - dependencyWinner: "this" | "other" — whose upstream dependency-parent
+//     links the merged asset keeps when BOTH sides have some (the modal shows
+//     the conflict); omitted, the survivor keeps its own. One-sided parent
+//     links blank-fill, and devices depending on the absorbed asset are always
+//     re-pointed at the survivor — see transferDependencyEdges.
 //
 // The absorbed asset's monitoring/telemetry sample history, interface comment
-// overrides, dependency edges, and pending conflicts cascade-delete with it —
-// the survivor keeps its own (the UI warns about this and surfaces which side
-// is monitored so the operator picks the right survivor).
+// overrides, and pending conflicts cascade-delete with it — the survivor keeps
+// its own (the UI warns about this and surfaces which side is monitored so the
+// operator picks the right survivor).
 //
 // `monitored` itself is OR-ed, not "survivor wins": if either side was
 // monitored the survivor comes out monitored, and when that flips the survivor
@@ -4320,11 +4325,12 @@ const mergeBodySchema = z.object({
   otherAssetId: z.string().min(1),
   survivor: z.enum(["this", "other"]).default("this"),
   fieldWinners: z.record(z.enum(["this", "other"])).optional(),
+  dependencyWinner: z.enum(["this", "other"]).optional(),
 });
 router.post("/:id/merge", requirePermission("assets", "write"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
-    const { otherAssetId, survivor, fieldWinners } = mergeBodySchema.parse(req.body);
+    const { otherAssetId, survivor, fieldWinners, dependencyWinner } = mergeBodySchema.parse(req.body);
     if (id === otherAssetId) throw new AppError(400, "Cannot merge an asset into itself");
 
     // Resolve survivor (canonical) vs. absorbed (ghost) from the operator's
@@ -4341,6 +4347,9 @@ router.post("/:id/merge", requirePermission("assets", "write"), async (req, res,
       resolvedWinners[field as MergeableField] =
         winnerIsThis === thisIsCanonical ? "canonical" : "ghost";
     }
+    const resolvedDependencyWinner = dependencyWinner
+      ? ((dependencyWinner === "this") === thisIsCanonical ? ("canonical" as const) : ("ghost" as const))
+      : undefined;
 
     const [survivorBefore, absorbedBefore] = await Promise.all([
       prisma.asset.findUnique({ where: { id: canonicalId }, select: { id: true, hostname: true } }),
@@ -4349,7 +4358,12 @@ router.post("/:id/merge", requirePermission("assets", "write"), async (req, res,
     if (!survivorBefore) throw new AppError(404, "Survivor asset not found");
     if (!absorbedBefore) throw new AppError(404, "Absorbed asset not found");
 
-    const result = await mergeAssets({ canonicalId, ghostId, fieldWinners: resolvedWinners });
+    const result = await mergeAssets({
+      canonicalId,
+      ghostId,
+      fieldWinners: resolvedWinners,
+      dependencyWinner: resolvedDependencyWinner,
+    });
 
     await logEvent({
       action: "asset.merged",
@@ -4359,7 +4373,9 @@ router.post("/:id/merge", requirePermission("assets", "write"), async (req, res,
       actor: requestActor(req),
       level: "info",
       message: `Merged asset ${absorbedBefore.hostname || result.absorbedId} into ${survivorBefore.hostname || result.survivorId} — moved ${result.movedSources} source(s)` +
-        (result.carriedMonitoring ? "; monitoring carried over from the absorbed asset" : ""),
+        (result.carriedMonitoring ? "; monitoring carried over from the absorbed asset" : "") +
+        (result.movedDependents > 0 ? `; re-pointed ${result.movedDependents} dependent device(s)` : "") +
+        (result.movedDependencyParents > 0 ? `; carried ${result.movedDependencyParents} dependency parent link(s)` : ""),
       details: {
         survivorId: result.survivorId,
         absorbedId: result.absorbedId,
@@ -4371,6 +4387,10 @@ router.post("/:id/merge", requirePermission("assets", "write"), async (req, res,
         movedIpHistory: result.movedIpHistory,
         movedSightings: result.movedSightings,
         movedManagedAgent: result.movedManagedAgent,
+        movedDependencyParents: result.movedDependencyParents,
+        replacedDependencyParents: result.replacedDependencyParents,
+        movedDependents: result.movedDependents,
+        dependencyWinner: resolvedDependencyWinner ?? null,
         appliedFields: result.appliedFields,
         fieldWinners: resolvedWinners,
       },

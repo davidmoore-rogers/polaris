@@ -1854,6 +1854,8 @@ var _mergeThisSources = [];
 var _mergeOtherSources = [];
 var _mergeThisHistory = null;      // GET /assets/:id/polling-history summary (null = unknown)
 var _mergeOtherHistory = null;
+var _mergeThisDeps = null;         // GET /assets/:id/dependencies (null = unknown)
+var _mergeOtherDeps = null;
 var _mergeSearchTimer = null;
 var _mergePreselected = false;     // true when opened from the bulk bar (both assets picked up front)
 
@@ -1874,6 +1876,7 @@ async function openAssetMergeModal(assetId, preselectOtherId) {
   _mergeThisAsset = null; _mergeOtherAsset = null;
   _mergeThisSources = []; _mergeOtherSources = [];
   _mergeThisHistory = null; _mergeOtherHistory = null;
+  _mergeThisDeps = null; _mergeOtherDeps = null;
   _mergePreselected = !!preselectOtherId;
 
   var intro = preselectOtherId
@@ -1907,11 +1910,13 @@ async function openAssetMergeModal(assetId, preselectOtherId) {
     var fetched = await Promise.all([
       api.assets.get(assetId),
       api.assets.getSources(assetId).catch(function () { return []; }),
-      api.assets.pollingHistory(assetId).catch(function () { return null; })
+      api.assets.pollingHistory(assetId).catch(function () { return null; }),
+      api.assets.getDependencies(assetId).catch(function () { return null; })
     ]);
     _mergeThisAsset = fetched[0];
     _mergeThisSources = Array.isArray(fetched[1]) ? fetched[1] : [];
     _mergeThisHistory = fetched[2];
+    _mergeThisDeps = fetched[3];
   } catch (err) {
     var rs = document.getElementById("merge-search-results");
     if (rs) rs.innerHTML = '<div class="empty-state" style="padding:1rem">Failed to load this asset: ' + escapeHtml(err.message || "error") + '</div>';
@@ -1962,11 +1967,13 @@ async function selectMergeTarget(otherId) {
     var fetched = await Promise.all([
       api.assets.get(otherId),
       api.assets.getSources(otherId).catch(function () { return []; }),
-      api.assets.pollingHistory(otherId).catch(function () { return null; })
+      api.assets.pollingHistory(otherId).catch(function () { return null; }),
+      api.assets.getDependencies(otherId).catch(function () { return null; })
     ]);
     _mergeOtherAsset = fetched[0];
     _mergeOtherSources = Array.isArray(fetched[1]) ? fetched[1] : [];
     _mergeOtherHistory = fetched[2];
+    _mergeOtherDeps = fetched[3];
   } catch (err) {
     if (cmp) cmp.innerHTML = '<div class="empty-state" style="padding:1rem">Failed to load asset: ' + escapeHtml(err.message || "error") + '</div>';
     return;
@@ -1979,7 +1986,7 @@ async function selectMergeTarget(otherId) {
 }
 
 function _mergeReopenSearch() {
-  _mergeOtherAsset = null; _mergeOtherSources = []; _mergeOtherHistory = null;
+  _mergeOtherAsset = null; _mergeOtherSources = []; _mergeOtherHistory = null; _mergeOtherDeps = null;
   var cmp = document.getElementById("merge-compare");
   if (cmp) cmp.innerHTML = "";
   var btn = document.getElementById("merge-confirm-btn");
@@ -2044,6 +2051,53 @@ function _mergeSourcesSummary(sources) {
   }).join("");
 }
 
+// ── Dependency helpers (merge comparison) ──
+// A merge re-points everything that DEPENDS ON the absorbed asset at the
+// survivor, and carries the absorbed asset's own upstream parent links when
+// the survivor has none. When BOTH sides have parents the sets can't be
+// unioned (one physical device has one real upstream; a union would weaken
+// all-down suppression), so that case renders as a conflict with Keep A/B
+// radios and the choice rides the merge body as `dependencyWinner`.
+
+// The effective parent rows (parent resolved) out of a GET /dependencies payload.
+function _mergeDepParents(deps) {
+  if (!deps || !Array.isArray(deps.effectiveParents)) return [];
+  return deps.effectiveParents.filter(function (p) { return p && p.parent; });
+}
+
+function _mergeDepParentNames(deps) {
+  return _mergeDepParents(deps).map(function (p) { return p.parent.hostname || p.parent.id; });
+}
+
+// Order-insensitive identity of a side's effective parent set.
+function _mergeDepParentsKey(deps) {
+  return _mergeDepParents(deps).map(function (p) { return p.parent.id; }).sort().join("|");
+}
+
+// Both sides have effective parents and the sets differ → the operator picks.
+function _mergeDepsConflict() {
+  var a = _mergeDepParents(_mergeThisDeps), b = _mergeDepParents(_mergeOtherDeps);
+  if (!a.length || !b.length) return false;
+  return _mergeDepParentsKey(_mergeThisDeps) !== _mergeDepParentsKey(_mergeOtherDeps);
+}
+
+function _mergeDepParentsCell(deps) {
+  if (!deps) return '<em style="color:var(--color-text-secondary)">unknown</em>';
+  var parents = _mergeDepParents(deps);
+  var html = parents.length
+    ? parents.map(function (p) {
+        var pinned = p.source === "override";
+        return escapeHtml(p.parent.hostname || p.parent.id) +
+          (pinned ? ' <span class="badge badge-active" title="Operator-pinned dependency override">pinned</span>' : '');
+      }).join(", ")
+    : '<em style="color:var(--color-text-secondary)">none</em>';
+  if (deps.childCount > 0) {
+    html += '<div style="font-size:0.78rem;color:var(--color-text-secondary)">' +
+      deps.childCount + ' infra device' + (deps.childCount === 1 ? '' : 's') + ' depend' + (deps.childCount === 1 ? 's' : '') + ' on it</div>';
+  }
+  return html;
+}
+
 function _renderMergeComparison() {
   var cmp = document.getElementById("merge-compare");
   if (!cmp || !_mergeThisAsset || !_mergeOtherAsset) return;
@@ -2073,9 +2127,10 @@ function _renderMergeComparison() {
           ' vs ' + escapeHtml(_mergeHistoryText(bHasLongerHistory ? _mergeThisHistory : _mergeOtherHistory)) + ') — ' +
           'the absorbed asset\'s history is permanently deleted. Pick the other option above to keep it instead.</p>'
         : '') +
-      '<p class="hint" style="margin:0.4rem 0 0">The survivor keeps its monitoring history, dependency edges and quarantine state. ' +
+      '<p class="hint" style="margin:0.4rem 0 0">The survivor keeps its monitoring history and quarantine state. ' +
         'The absorbed asset\'s sample/telemetry history and interface-comment overrides are <strong>permanently deleted</strong>. ' +
-        'Discovery sources, MAC / IP / sighting history from both assets are combined onto the survivor. ' +
+        'Discovery sources, MAC / IP / sighting history and dependency links from both assets are combined onto the survivor ' +
+        '(devices that depended on either asset depend on the merged one). ' +
         'If <strong>either</strong> asset is monitored the survivor comes out monitored — when that turns the survivor on, ' +
         'the absorbed asset\'s polling methods, credentials and pinned interfaces / storage / processes come with it.</p>' +
     '</div>';
@@ -2097,6 +2152,29 @@ function _renderMergeComparison() {
     ctxRow("Sources", _mergeSourcesSummary(_mergeThisSources), _mergeSourcesSummary(_mergeOtherSources)) +
     ctxRow("Last Seen", escapeHtml(A.lastSeen ? formatDate(A.lastSeen) : "-"), escapeHtml(B.lastSeen ? formatDate(B.lastSeen) : "-")) +
     ctxRow("Tags", (A.tags && A.tags.length ? A.tags.map(escapeHtml).join(", ") : "-"), (B.tags && B.tags.length ? B.tags.map(escapeHtml).join(", ") : "-"));
+
+  // Dependency parents — context row that becomes a CONFLICT row (highlight +
+  // Keep A/B radios) when both sides have effective parents and they differ.
+  // One physical device has one real upstream, so the sets can't be unioned;
+  // the pick rides the merge body as `dependencyWinner`. Dependents (devices
+  // pointing at either asset) are combined regardless — no choice to make.
+  var depsConflict = _mergeDepsConflict();
+  var depWinnerCell = "";
+  if (depsConflict) {
+    depWinnerCell =
+      '<div style="display:flex;gap:0.5rem;white-space:nowrap">' +
+        '<label style="cursor:pointer"><input type="radio" name="mw-deps" value="this" checked> A</label>' +
+        '<label style="cursor:pointer"><input type="radio" name="mw-deps" value="other"> B</label>' +
+      '</div>';
+  }
+  contextRows +=
+    '<tr' + (depsConflict ? ' style="background:var(--color-warning-bg, rgba(255,193,7,0.12))"' : '') + '>' +
+      '<th style="text-align:left;padding:0.3rem 0.6rem 0.3rem 0;color:var(--color-text-secondary);font-weight:500;vertical-align:top;white-space:nowrap">Dependency parents' +
+        (depsConflict ? ' <span title="Both assets have dependency parents and they differ — pick whose the merged asset keeps">&#9679;</span>' : '') + '</th>' +
+      '<td style="padding:0.3rem 0.6rem;vertical-align:top;word-break:break-word">' + _mergeDepParentsCell(_mergeThisDeps) + '</td>' +
+      '<td style="padding:0.3rem 0.6rem;vertical-align:top;word-break:break-word">' + _mergeDepParentsCell(_mergeOtherDeps) + '</td>' +
+      '<td style="padding:0.3rem 0;vertical-align:top">' + depWinnerCell + '</td>' +
+    '</tr>';
 
   // Field rows — every mergeable field. Differences get a highlight + winner
   // radios; equal values render plainly. Empty-vs-value also counts as a diff.
@@ -2131,6 +2209,7 @@ function _renderMergeComparison() {
     survivorHTML +
     '<div style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:0.4rem">' +
       (diffCount === 0 ? 'No field differences — the two assets agree on every field.' : diffCount + ' field' + (diffCount === 1 ? '' : 's') + ' differ (highlighted). Pick the winning value for each.') +
+      (depsConflict ? ' <strong>Both assets have dependency parents and they differ</strong> — pick whose upstream links the merged asset keeps (devices depending on either asset are combined either way).' : '') +
     '</div>' +
     '<div style="overflow:auto">' +
       '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">' +
@@ -2157,12 +2236,14 @@ function _renderMergeComparison() {
 // value that differs from the survivor's current value. Picking the empty
 // side never blanks the survivor (the backend guards this), so we don't show
 // it as a change either.
-function _buildMergePlan(survivor, fieldWinners) {
+function _buildMergePlan(survivor, fieldWinners, dependencyWinner) {
   var survivorAsset = survivor === "this" ? _mergeThisAsset : _mergeOtherAsset;
   var absorbedAsset = survivor === "this" ? _mergeOtherAsset : _mergeThisAsset;
   var absorbedSources = survivor === "this" ? _mergeOtherSources : _mergeThisSources;
   var survivorHistory = survivor === "this" ? _mergeThisHistory : _mergeOtherHistory;
   var absorbedHistory = survivor === "this" ? _mergeOtherHistory : _mergeThisHistory;
+  var survivorDeps = survivor === "this" ? _mergeThisDeps : _mergeOtherDeps;
+  var absorbedDeps = survivor === "this" ? _mergeOtherDeps : _mergeThisDeps;
 
   var overwrites = [];
   _mergeCompareFields.forEach(function (f) {
@@ -2194,6 +2275,29 @@ function _buildMergePlan(survivor, fieldWinners) {
   var monitoringCarried = !!absorbedAsset.monitored && !survivorAsset.monitored &&
     mergedStatus !== "decommissioned" && mergedStatus !== "disabled";
 
+  // Dependency plan — mirrors transferDependencyEdges server-side. Dependents
+  // are always combined; the absorbed side's own parent links carry when the
+  // survivor has none, and when both sides have parents the operator's
+  // dependencyWinner ("this"/"other") decides — omitted = survivor keeps its own.
+  var survParentNames = _mergeDepParentNames(survivorDeps);
+  var absParentNames = _mergeDepParentNames(absorbedDeps);
+  var depParentsCarried = [];   // parent names landing on the survivor from the absorbed side
+  var depParentsDiscarded = []; // parent names dropped by the merge (the conflict's losing side)
+  if (absParentNames.length) {
+    if (!survParentNames.length) {
+      depParentsCarried = absParentNames;
+    } else if (_mergeDepParentsKey(survivorDeps) !== _mergeDepParentsKey(absorbedDeps)) {
+      var winnerAssetObj = dependencyWinner === "this" ? _mergeThisAsset : dependencyWinner === "other" ? _mergeOtherAsset : survivorAsset;
+      if (winnerAssetObj === absorbedAsset) {
+        depParentsCarried = absParentNames;
+        depParentsDiscarded = survParentNames;
+      } else {
+        depParentsDiscarded = absParentNames;
+      }
+    }
+  }
+  var absDependentCount = absorbedDeps && absorbedDeps.childCount > 0 ? absorbedDeps.childCount : 0;
+
   return {
     survivorAsset: survivorAsset,
     absorbedAsset: absorbedAsset,
@@ -2201,6 +2305,9 @@ function _buildMergePlan(survivor, fieldWinners) {
     overwrites: overwrites,
     tagsAdded: tagsAdded,
     monitoringCarried: monitoringCarried,
+    depParentsCarried: depParentsCarried,
+    depParentsDiscarded: depParentsDiscarded,
+    absDependentCount: absDependentCount,
     survivorHistory: survivorHistory,
     absorbedHistory: absorbedHistory,
     // The operator kept the side with LESS polling history — allowed (their
@@ -2212,9 +2319,9 @@ function _buildMergePlan(survivor, fieldWinners) {
 // Stacked confirmation modal (own overlay at a higher z-index, like
 // showConfirm) so the comparison modal underneath stays intact — "Back"
 // just dismisses this layer. Resolves true on confirm, false otherwise.
-function _showMergeReviewModal(survivor, fieldWinners) {
+function _showMergeReviewModal(survivor, fieldWinners, dependencyWinner) {
   return new Promise(function (resolve) {
-    var plan = _buildMergePlan(survivor, fieldWinners);
+    var plan = _buildMergePlan(survivor, fieldWinners, dependencyWinner);
     var survLabel = _mergeAssetLabel(plan.survivorAsset);
     var absLabel = _mergeAssetLabel(plan.absorbedAsset);
 
@@ -2247,6 +2354,18 @@ function _showMergeReviewModal(survivor, fieldWinners) {
       combinedBits.push(plan.absorbedSources.length + ' discovery source' + (plan.absorbedSources.length === 1 ? '' : 's') + ' (' + escapeHtml(kinds.join(", ")) + ')');
     }
     combinedBits.push('MAC, IP and firewall-sighting history');
+    // Dependency links. Dependents combine unconditionally; the parent-link
+    // line only appears when the absorbed side actually contributes some.
+    if (plan.absDependentCount > 0) {
+      combinedBits.push(plan.absDependentCount + ' infra device' + (plan.absDependentCount === 1 ? '' : 's') +
+        ' depending on ' + absLabel + ' (plus any endpoint devices behind it) re-pointed to ' + survLabel);
+    } else {
+      combinedBits.push('any devices depending on ' + absLabel + ' are re-pointed to ' + survLabel);
+    }
+    if (plan.depParentsCarried.length) {
+      combinedBits.push('dependency parent' + (plan.depParentsCarried.length === 1 ? '' : 's') + ' from ' + absLabel + ': ' +
+        plan.depParentsCarried.map(escapeHtml).join(", "));
+    }
     if (plan.tagsAdded.length) {
       combinedBits.push('tags: ' + plan.tagsAdded.map(escapeHtml).join(", "));
     }
@@ -2283,6 +2402,10 @@ function _showMergeReviewModal(survivor, fieldWinners) {
               ? ' — <strong>' + escapeHtml(_mergeHistoryText(plan.absorbedHistory)) + '</strong>'
               : (plan.absorbedHistory ? ' (none recorded)' : '')) +
             ' and interface-comment overrides</li>' +
+          (plan.depParentsDiscarded.length
+            ? '<li>The <strong>losing side\'s dependency parent link' + (plan.depParentsDiscarded.length === 1 ? '' : 's') + '</strong> (' +
+              plan.depParentsDiscarded.map(escapeHtml).join(", ") + ') — the merged asset keeps the side you picked</li>'
+            : '') +
         '</ul>' +
         (plan.losingLongerHistory
           ? '<p style="margin:0.5rem 0 0;font-size:0.82rem;color:var(--color-danger)"><strong>Note:</strong> the absorbed asset holds <strong>more</strong> polling history than the survivor (' +
@@ -2327,23 +2450,30 @@ async function _confirmMerge() {
     var sel = document.querySelector('input[name="mw-' + f.key + '"]:checked');
     if (sel) fieldWinners[f.key] = sel.value; // "this" | "other"
   });
+  // Dependency-parent conflict pick — only rendered when both sides have
+  // differing parent sets; undefined otherwise (server default: survivor's).
+  var depSel = document.querySelector('input[name="mw-deps"]:checked');
+  var dependencyWinner = depSel ? depSel.value : undefined; // "this" | "other"
 
   // Open the review modal: it shows exactly what will be overwritten on the
   // survivor (given the per-field winners), what gets combined, and what is
   // permanently deleted. Returns true only when the operator confirms.
-  var ok = await _showMergeReviewModal(survivor, fieldWinners);
+  var ok = await _showMergeReviewModal(survivor, fieldWinners, dependencyWinner);
   if (!ok) return;
 
   var btn = document.getElementById("merge-confirm-btn");
   if (btn) btn.disabled = true;
   try {
-    var result = await api.assets.merge(_mergeThisAsset.id, {
+    var body = {
       otherAssetId: _mergeOtherAsset.id,
       survivor: survivor,
       fieldWinners: fieldWinners
-    });
+    };
+    if (dependencyWinner) body.dependencyWinner = dependencyWinner;
+    var result = await api.assets.merge(_mergeThisAsset.id, body);
     closeModal();
-    showToast('Assets merged — moved ' + result.movedSources + ' source(s)');
+    showToast('Assets merged — moved ' + result.movedSources + ' source(s)' +
+      (result.movedDependents ? ', re-pointed ' + result.movedDependents + ' dependent(s)' : ''));
     // The absorbed asset no longer exists — drop it from the bulk selection
     // (it may be selected when the merge came from the bulk bar).
     _assetsSelected.delete(result.absorbedId);

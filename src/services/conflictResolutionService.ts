@@ -423,6 +423,10 @@ async function acceptAssetConflict(
     blankFillFromGhost("ipAddress");
     blankFillFromGhost("dnsName");
     blankFillFromGhost("learnedLocation");
+    // Connection facts — they also re-derive the endpoint dependency edge
+    // (resolveEndpointParent reads lastSeenSwitch → lastSeenAp → sightings).
+    blankFillFromGhost("lastSeenSwitch");
+    blankFillFromGhost("lastSeenAp");
     blankFillFromGhost("snmpLocation");
     blankFillFromGhost("learnedAddress");
     blankFillFromGhost("department");
