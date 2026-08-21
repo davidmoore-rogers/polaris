@@ -15750,6 +15750,7 @@ var _SNMP_STANDARD_MIBS = [
   { id: "std:bridge",         label: "Bridge — MAC forwarding + STP (RFC 4188)", oid: "1.3.6.1.2.1.17" },
   { id: "std:q-bridge",       label: "Bridge — VLAN-aware forwarding (RFC 4363)", oid: "1.3.6.1.2.1.17.7" },
   { id: "std:rstp",           label: "Rapid Spanning Tree (RFC 4318)", oid: "1.3.6.1.2.1.134"        },
+  { id: "std:ip",             label: "IP — addresses + neighbour cache (RFC 4293)", oid: "1.3.6.1.2.1.4" },
 ];
 
 function _snmpCredentialOptions(selectedId) {

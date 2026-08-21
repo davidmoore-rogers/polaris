@@ -77,6 +77,21 @@ const EXPECTED: Record<string, Record<string, string>> = {
     dot1dStpVersion:         "1.3.6.1.2.1.17.2.16",
     dot1dStpExtPortTable:    "1.3.6.1.2.1.17.2.19",
   },
+  "std:ip": {
+    // The neighbour cache, both generations. ipNetToPhysical is RFC 4293's
+    // replacement for the RFC 1213 ipNetToMedia table, which IP-MIB still
+    // carries as deprecated -- a collector wants the new one and the old one
+    // as fallback, so both have to resolve.
+    ipNetToPhysicalPhysAddress: "1.3.6.1.2.1.4.35.1.4",
+    ipNetToPhysicalLastUpdated: "1.3.6.1.2.1.4.35.1.5",
+    ipNetToPhysicalState:       "1.3.6.1.2.1.4.35.1.7",
+    ipNetToMediaPhysAddress:    "1.3.6.1.2.1.4.22.1.2",
+    ipNetToMediaNetAddress:     "1.3.6.1.2.1.4.22.1.3",
+    ipNetToMediaType:           "1.3.6.1.2.1.4.22.1.4",
+    // Not the neighbour cache, but the other reason to bundle this module:
+    // the addresses the device itself holds.
+    ipAdEntNetMask:             "1.3.6.1.2.1.4.20.1.3",
+  },
 };
 
 let pass = 0;

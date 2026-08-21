@@ -66,6 +66,11 @@ export const STD_MIBS: readonly StdMibDef[] = [
   { key: "std:bridge",         label: "Bridge — MAC forwarding + STP (RFC 4188)", moduleName: "BRIDGE-MIB",     rootOid: "1.3.6.1.2.1.17", filename: "BRIDGE-MIB.txt" },
   { key: "std:q-bridge",       label: "Bridge — VLAN-aware forwarding (RFC 4363)", moduleName: "Q-BRIDGE-MIB",  rootOid: "1.3.6.1.2.1.17.7", filename: "Q-BRIDGE-MIB.txt" },
   { key: "std:rstp",           label: "Rapid Spanning Tree (RFC 4318)",         moduleName: "RSTP-MIB",         rootOid: "1.3.6.1.2.1.134", filename: "RSTP-MIB.txt" },
+  // The ip group. Carries ipNetToPhysicalTable (the neighbour cache -- ARP for
+  // IPv4, NDP for IPv6) and its deprecated RFC 1213 predecessor
+  // ipNetToMediaTable: the layer-3 counterpart to BRIDGE-MIB's forwarding
+  // database, and the SNMP route to a FortiGate's ARP table.
+  { key: "std:ip",             label: "IP — addresses + neighbour cache (RFC 4293)", moduleName: "IP-MIB",   rootOid: "1.3.6.1.2.1.4",  filename: "IP-MIB.txt" },
 ];
 
 const STD_MIBS_DIR = join(dirname(fileURLToPath(import.meta.url)), "stdMibs");

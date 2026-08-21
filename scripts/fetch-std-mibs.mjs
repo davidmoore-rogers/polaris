@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * scripts/fetch-std-mibs.mjs — pull the eleven canonical standard MIB
- * modules used by the SNMP Walk tab's browse tree.
+ * modules backing the twelve browse-tree keys in the SNMP Walk tab. Modules
+ * and keys are not 1:1: IF-MIB serves both std:interfaces and std:if-ext.
  *
  * Each module is written to src/services/stdMibs/ and a SHA-256 line is
  * appended to SOURCES.md alongside the source URL it actually came from.
@@ -43,6 +44,7 @@ const MIBS = [
   { module: "POWER-ETHERNET-MIB", stdKey: "std:poe",           mirror: "netdisco", rootOid: "1.3.6.1.2.1.105", description: "RFC 3621 — pethPsePortTable (per-port PoE detection status + power class) / pethMainPseTable (per-PSE consumption watts). No per-port wattage object exists in this MIB." },
   { module: "BRIDGE-MIB",       stdKey: "std:bridge",          mirror: "netdisco", rootOid: "1.3.6.1.2.1.17",  description: "RFC 4188 — dot1dTpFdbTable (MAC forwarding), dot1dBasePortIfIndex (the basePort→ifIndex join), dot1dStp (spanning tree). Q-BRIDGE-MIB and RSTP-MIB both anchor on symbols from here." },
   { module: "Q-BRIDGE-MIB",     stdKey: "std:q-bridge",        mirror: "netdisco", rootOid: "1.3.6.1.2.1.17.7", description: "RFC 4363 — dot1qTpFdbTable, the VLAN-aware forwarding database a VLAN-aware switch populates instead of dot1dTpFdbTable." },
+  { module: "IP-MIB",           stdKey: "std:ip",              mirror: "pysnmp",   rootOid: "1.3.6.1.2.1.4",   description: "RFC 4293 — the ip group. ipNetToPhysicalTable (the neighbour cache: ARP for IPv4, NDP for IPv6) and its deprecated RFC 1213 predecessor ipNetToMediaTable, plus ipAddressTable and the IP counters. The neighbour tables are the L3 counterpart to BRIDGE-MIB's forwarding database." },
   { module: "RSTP-MIB",         stdKey: "std:rstp",            mirror: "netdisco", rootOid: "1.3.6.1.2.1.134", description: "RFC 4318 — dot1dStpExtPortTable (oper edge-port / point-to-point / protocol migration), the RSTP complement to BRIDGE-MIB's dot1dStp." },
 ];
 
@@ -80,7 +82,7 @@ async function main() {
     "These canonical MIB modules back the SNMP Walk tab's browse tree for",
     "built-in MIBs (`std:system`, `std:interfaces`, `std:if-ext`, `std:host-resources`,",
     "`std:entity`, `std:entity-sensor`, `std:lldp`, `std:poe`, `std:bridge`,",
-    "`std:q-bridge`, `std:rstp`). They are loaded by",
+    "`std:q-bridge`, `std:rstp`, `std:ip`). They are loaded by",
     "[../stdMibLibrary.ts](../stdMibLibrary.ts) at first use.",
     "",
     "Re-pull via:",
@@ -91,12 +93,15 @@ async function main() {
     "",
     "Source mirrors (per-module, see the `mirror` field in the fetch script):",
     "",
-    "- <https://mibs.pysnmp.com/> — tracks IETF + IEEE upstreams.",
-    "- <https://github.com/netdisco/netdisco-mibs> (`rfc/` tree) — used for the four",
-    "  switch physical-layer modules, whose download from pysnmp was returning HTTP 522.",
-    "  Each was verified post-download against its published RFC (envelope, RFC",
-    "  reference, LAST-UPDATED, IETF Trust copyright) and, decisively, by every symbol",
-    "  resolving to its canonical OID via `scripts/smoke-std-mibs.ts`.",
+    "- <https://mibs.pysnmp.com/> — tracks IETF + IEEE upstreams. Source of every",
+    "  module except the four below.",
+    "- <https://github.com/netdisco/netdisco-mibs> (`rfc/` tree) — source of the four",
+    "  switch physical-layer modules (POWER-ETHERNET / BRIDGE / Q-BRIDGE / RSTP),",
+    "  whose download from pysnmp was returning HTTP 522 when they were added. Each",
+    "  was verified after download: correct `<NAME> DEFINITIONS ::= BEGIN` envelope,",
+    "  an RFC reference and `LAST-UPDATED` matching the published RFC, IETF Trust",
+    "  copyright present, and — the check that actually matters — every expected",
+    "  symbol resolving to its canonical OID via `scripts/smoke-std-mibs.ts`.",
     "",
     "## Files",
     "",
@@ -109,7 +114,13 @@ async function main() {
     if (!buildUrl) throw new Error(`${m.module}: unknown mirror "${m.mirror}"`);
     const url = buildUrl(m.module);
     process.stdout.write(`Fetching ${m.module} (${m.mirror})… `);
-    const text = await fetch(url);
+    // Normalize to LF before writing AND hashing. `.gitattributes` has
+    // `* text=auto`, so a CRLF-served module (IP-MIB from pysnmp is one) is
+    // stored LF in the git blob regardless -- hashing the served bytes would
+    // record a SHA-256 that never matches the bundled file, defeating the one
+    // mechanism that makes a substituted MIB detectable. Every module already
+    // served LF, so no existing hash changes.
+    const text = (await fetch(url)).replace(/\r\n/g, "\n");
     const filename = `${m.module}.txt`;
     const outPath = join(outDir, filename);
     writeFileSync(outPath, text, "utf-8");
@@ -120,15 +131,52 @@ async function main() {
   }
 
   sourcesLines.push("");
+  // Everything below is hand-maintained prose that lives in the GENERATOR, not
+  // in the output file. It used to live only in SOURCES.md, where re-running
+  // this script silently deleted it (found 2026-08-21 while adding IP-MIB).
+  // Edit it here so a refresh reproduces the whole document.
+  sourcesLines.push("## Cross-module anchors");
+  sourcesLines.push("");
+  sourcesLines.push("`stdMibLibrary` resolves each module independently against `BUILT_IN_OIDS` —");
+  sourcesLines.push("there is no cross-MIB visibility between bundled modules. Two of these anchor on");
+  sourcesLines.push("a sibling's symbol via IMPORTS and therefore need that symbol seeded in");
+  sourcesLines.push("`oidRegistry.BUILT_IN_OIDS`, or they resolve to (almost) nothing:");
+  sourcesLines.push("");
+  sourcesLines.push("| Module | Anchors on | Seeded as | Without the seed |");
+  sourcesLines.push("|---|---|---|---|");
+  sourcesLines.push("| `Q-BRIDGE-MIB` | `dot1dBridge` (BRIDGE-MIB) | `1.3.6.1.2.1.17` | 0 of 129 assignments resolve |");
+  sourcesLines.push("| `RSTP-MIB` | `dot1dStp` (BRIDGE-MIB) | `1.3.6.1.2.1.17.2` | 9 of 19 assignments resolve |");
+  sourcesLines.push("");
+  sourcesLines.push("Check the IMPORTS of any newly-added module for symbols used as OID parents.");
+  sourcesLines.push("`IP-MIB` needs no seed: it hangs off `mib-2` like the rest, and its IMPORTS");
+  sourcesLines.push("(InetAddressType, InterfaceIndex, …) are textual conventions, not OID parents.");
+  sourcesLines.push("");
+  sourcesLines.push("## Known cosmetic gap");
+  sourcesLines.push("");
+  sourcesLines.push("`BRIDGE-MIB`'s `dot1dBasePort` and `LLDP-MIB`'s two `*ManAddrSubtype` symbols");
+  sourcesLines.push("render as \"(unresolved)\" in the browse tree. This is a pre-existing quirk of the");
+  sourcesLines.push("regex extractor in `oidRegistry.parseObjectAssignments`, which skips those");
+  sourcesLines.push("particular OBJECT-TYPE definitions; it is display-only and affects no collector,");
+  sourcesLines.push("since collectors use numeric OIDs. Notably `dot1dBasePortIfIndex` — the");
+  sourcesLines.push("basePort→ifIndex join every FDB and STP row depends on — resolves correctly.");
+  sourcesLines.push("Changing `ASSIGNMENT_RE` to close the gap is guarded by the 102 cases in");
+  sourcesLines.push("`tests/unit/mibParseStructured.test.ts`.");
+  sourcesLines.push("");
   sourcesLines.push("## Licensing");
   sourcesLines.push("");
   sourcesLines.push("- **IETF RFC-derived MIBs** (SNMPv2-MIB, IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB,");
-  sourcesLines.push("  ENTITY-SENSOR-MIB) carry the IETF Trust legal provisions — permissive, allows");
-  sourcesLines.push("  bundling and redistribution.");
+  sourcesLines.push("  ENTITY-SENSOR-MIB, POWER-ETHERNET-MIB, BRIDGE-MIB, Q-BRIDGE-MIB, RSTP-MIB,");
+  sourcesLines.push("  IP-MIB) carry the IETF Trust legal provisions — permissive, allows bundling");
+  sourcesLines.push("  and redistribution.");
   sourcesLines.push("- **LLDP-MIB** (IEEE 802.1AB) carries an IEEE-specific copyright header. IEEE");
   sourcesLines.push("  historically allows reproduction of standalone MIB modules; the boilerplate is");
   sourcesLines.push("  preserved in the file. Re-read the in-file header on every refresh and have a");
   sourcesLines.push("  human verify before committing significant version changes.");
+  sourcesLines.push("- **IEEE8021-* modules are deliberately NOT bundled** (e.g. IEEE8021-MSTP-MIB for");
+  sourcesLines.push("  per-MSTI spanning tree). They carry IEEE copyright and would need the same");
+  sourcesLines.push("  human licensing review LLDP-MIB got. Operators can upload them instead — the");
+  sourcesLines.push("  IEEE 802.1 anchor chain is seeded in `BUILT_IN_OIDS` so a single leaf module");
+  sourcesLines.push("  resolves without also uploading IEEE8021-TC-MIB.");
   sourcesLines.push("");
 
   writeFileSync(join(outDir, "SOURCES.md"), sourcesLines.join("\n"), "utf-8");

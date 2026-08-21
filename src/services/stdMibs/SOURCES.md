@@ -3,7 +3,7 @@
 These canonical MIB modules back the SNMP Walk tab's browse tree for
 built-in MIBs (`std:system`, `std:interfaces`, `std:if-ext`, `std:host-resources`,
 `std:entity`, `std:entity-sensor`, `std:lldp`, `std:poe`, `std:bridge`,
-`std:q-bridge`, `std:rstp`). They are loaded by
+`std:q-bridge`, `std:rstp`, `std:ip`). They are loaded by
 [../stdMibLibrary.ts](../stdMibLibrary.ts) at first use.
 
 Re-pull via:
@@ -14,8 +14,8 @@ node scripts/fetch-std-mibs.mjs
 
 Source mirrors (per-module, see the `mirror` field in the fetch script):
 
-- <https://mibs.pysnmp.com/> — tracks IETF + IEEE upstreams. Source of the first
-  seven modules.
+- <https://mibs.pysnmp.com/> — tracks IETF + IEEE upstreams. Source of every
+  module except the four below.
 - <https://github.com/netdisco/netdisco-mibs> (`rfc/` tree) — source of the four
   switch physical-layer modules (POWER-ETHERNET / BRIDGE / Q-BRIDGE / RSTP),
   whose download from pysnmp was returning HTTP 522 when they were added. Each
@@ -37,6 +37,7 @@ Source mirrors (per-module, see the `mirror` field in the fetch script):
 | `POWER-ETHERNET-MIB` | `std:poe` | `1.3.6.1.2.1.105` | <https://raw.githubusercontent.com/netdisco/netdisco-mibs/master/rfc/POWER-ETHERNET-MIB.txt> | `ddd60bc04d8e65fefd54625439de9f09b107b567fd69009bc7fc3c9ca4598865` | 21635 |
 | `BRIDGE-MIB` | `std:bridge` | `1.3.6.1.2.1.17` | <https://raw.githubusercontent.com/netdisco/netdisco-mibs/master/rfc/BRIDGE-MIB.txt> | `1e18de882086fca7be165e367d3b8e141379f5181fcaa3af0efe63f6710440da` | 50948 |
 | `Q-BRIDGE-MIB` | `std:q-bridge` | `1.3.6.1.2.1.17.7` | <https://raw.githubusercontent.com/netdisco/netdisco-mibs/master/rfc/Q-BRIDGE-MIB.txt> | `7cd2eac2dc24efc7c46d24aa153940ea442cc0d022c0c6776bd2f5f94976abc6` | 84011 |
+| `IP-MIB` | `std:ip` | `1.3.6.1.2.1.4` | <https://mibs.pysnmp.com/asn1/IP-MIB> | `2d97324114ccd19d16f81cbe1cfcc0692779512b2fe66e4d56f6d4b8a5109d16` | 186015 |
 | `RSTP-MIB` | `std:rstp` | `1.3.6.1.2.1.134` | <https://raw.githubusercontent.com/netdisco/netdisco-mibs/master/rfc/RSTP-MIB.txt> | `4b1d814fe48aaf85fc7b513c4382fb0b30db1742587fc736a55e7167f26199f5` | 10750 |
 
 ## Cross-module anchors
@@ -52,6 +53,8 @@ a sibling's symbol via IMPORTS and therefore need that symbol seeded in
 | `RSTP-MIB` | `dot1dStp` (BRIDGE-MIB) | `1.3.6.1.2.1.17.2` | 9 of 19 assignments resolve |
 
 Check the IMPORTS of any newly-added module for symbols used as OID parents.
+`IP-MIB` needs no seed: it hangs off `mib-2` like the rest, and its IMPORTS
+(InetAddressType, InterfaceIndex, …) are textual conventions, not OID parents.
 
 ## Known cosmetic gap
 
@@ -67,9 +70,9 @@ Changing `ASSIGNMENT_RE` to close the gap is guarded by the 102 cases in
 ## Licensing
 
 - **IETF RFC-derived MIBs** (SNMPv2-MIB, IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB,
-  ENTITY-SENSOR-MIB, POWER-ETHERNET-MIB, BRIDGE-MIB, Q-BRIDGE-MIB, RSTP-MIB)
-  carry the IETF Trust legal provisions — permissive, allows bundling and
-  redistribution.
+  ENTITY-SENSOR-MIB, POWER-ETHERNET-MIB, BRIDGE-MIB, Q-BRIDGE-MIB, RSTP-MIB,
+  IP-MIB) carry the IETF Trust legal provisions — permissive, allows bundling
+  and redistribution.
 - **LLDP-MIB** (IEEE 802.1AB) carries an IEEE-specific copyright header. IEEE
   historically allows reproduction of standalone MIB modules; the boilerplate is
   preserved in the file. Re-read the in-file header on every refresh and have a

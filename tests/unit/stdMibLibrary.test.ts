@@ -12,8 +12,28 @@ import {
 
 describe("stdMibLibrary", () => {
   describe("registry", () => {
-    it("lists 11 standard MIBs", () => {
-      expect(listStdMibs().length).toBe(11);
+    it("lists 12 standard MIBs", () => {
+      expect(listStdMibs().length).toBe(12);
+    });
+
+    // IP-MIB carries the neighbour cache in TWO generations: RFC 4293's
+    // ipNetToPhysicalTable and the deprecated RFC 1213 ipNetToMediaTable it
+    // replaced. A collector wants the new one with the old as fallback, so
+    // both have to resolve out of the bundled module.
+    it("resolves both generations of the IP neighbour cache", () => {
+      const s = getStdMibStructure("std:ip");
+      const oid = (name: string) => s.symbols.find((x) => x.name === name)?.fullOid ?? null;
+      expect(oid("ipNetToPhysicalPhysAddress")).toBe("1.3.6.1.2.1.4.35.1.4");
+      expect(oid("ipNetToPhysicalState")).toBe("1.3.6.1.2.1.4.35.1.7");
+      expect(oid("ipNetToMediaPhysAddress")).toBe("1.3.6.1.2.1.4.22.1.2");
+      expect(oid("ipNetToMediaNetAddress")).toBe("1.3.6.1.2.1.4.22.1.3");
+    });
+
+    // Unlike Q-BRIDGE / RSTP, IP-MIB hangs off mib-2 rather than a sibling
+    // module's symbol, so it needs nothing seeded in BUILT_IN_OIDS. If this
+    // ever regresses, the fix is a seed -- not a re-fetch.
+    it("resolves IP-MIB with no unresolved assignments", () => {
+      expect(getStdMibStructure("std:ip").unresolvedCount).toBe(0);
     });
 
     // Guards the build/deploy bug where the bundled .txt files never made it
