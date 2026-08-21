@@ -3512,6 +3512,28 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   gap: 10px;
   min-width: 0;
 }
+/* Per-asset action buttons in the panel header (asset details: Copy /
+   Screenshot | Export / Refresh / Open HTTPS / Open SSH). The header is
+   space-between, and _ensureLockButton (app.js) stamps margin-left:auto inline
+   on the lock so the lock + X pair hugs the right edge. With an actions group
+   present that free space belongs to the actions group instead — otherwise flex
+   splits it between the two auto margins and strands the lock mid-header — and
+   an inline style can only be beaten with !important. */
+.slideover-header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+  /* Never squeezed: a long hostname wraps the title (which the meta row
+     below repeats anyway) rather than clipping an action button. */
+  flex-shrink: 0;
+}
+/* Deliberately NOT hidden when empty (the loading state, before openViewModal
+   fills it): a zero-width flex item still owns the auto margin, which is what
+   keeps the lock + X pair flush right while the panel loads. */
+.slideover-header-actions ~ .panel-lock-btn { margin-left: 0 !important; }
 .slideover-nav {
   display: flex;
   gap: 2px;

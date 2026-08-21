@@ -4707,6 +4707,12 @@ function _ensureAssetPanelDOM() {
             '</div>' +
             '<h3 id="asset-panel-title">Asset Details</h3>' +
           '</div>' +
+          // Per-asset actions (Copy / Screenshot | Export / Refresh / Open
+          // HTTPS / Open SSH) live in the header, right-aligned, LEFT of the
+          // lock button _ensureLockButton injects in front of the X — see
+          // .slideover-header-actions in styles.css for how the two share the
+          // header's free space. Populated per open by openViewModal.
+          '<div class="slideover-header-actions" id="asset-panel-actions"></div>' +
           '<button class="btn-icon" id="asset-panel-close" title="Close" aria-label="Close asset details">&times;</button>' +
         '</div>' +
         '<div class="slideover-meta" id="asset-panel-meta"></div>' +
@@ -4817,10 +4823,14 @@ async function openViewModal(id) {
   var metaEl   = document.getElementById("asset-panel-meta");
   var bodyEl   = document.getElementById("asset-panel-body");
   var footerEl = document.getElementById("asset-panel-footer");
+  var actionsEl = document.getElementById("asset-panel-actions");
   titleEl.textContent = "Asset Details";
   metaEl.innerHTML = "";
   bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Loading...</p>';
   footerEl.innerHTML = "";
+  // Cleared alongside the footer so a walk to another asset can't leave the
+  // previous device's Open HTTPS / Open SSH buttons on screen while it loads.
+  if (actionsEl) actionsEl.innerHTML = "";
   requestAnimationFrame(function () {
     var ov = document.getElementById("asset-panel-overlay");
     ov.classList.add("open");
@@ -5045,16 +5055,16 @@ async function openViewModal(id) {
     // On the Events tab the Screenshot button gives way to an Export dropdown
     // (same page/all × CSV/PDF shape as the Events page export, scoped to
     // this asset). Both are rendered up front; _syncAssetFooterButtons flips
-    // visibility on tab clicks. The menu opens upward (drop-up) since the
-    // footer sits at the bottom of the viewport, and right-anchors (the
-    // default) so it stays inside the slide-over — this button group sits at
-    // the footer's right edge.
+    // visibility on tab clicks. The menu drops DOWN (the default) since this
+    // group lives in the panel HEADER, and right-anchors (also the default) so
+    // it stays inside the slide-over — the group sits at the header's right
+    // edge, left of the lock + close pair.
     var copyBtns =
       '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-copy">Copy</button>' +
       '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-screenshot">Screenshot</button>' +
       '<span class="btn-dropdown-wrap" id="asset-export-wrap" style="display:none">' +
         '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-export">Export &#9662;</button>' +
-        '<div class="btn-dropdown-menu drop-up" id="asset-export-menu">' +
+        '<div class="btn-dropdown-menu" id="asset-export-menu">' +
           '<div class="dropdown-heading">PDF</div>' +
           '<button data-export="page" data-fmt="pdf">Current page</button>' +
           '<button data-export="all" data-fmt="pdf">All events for this asset</button>' +
@@ -5069,12 +5079,16 @@ async function openViewModal(id) {
       // preserving the active tab. Sits between Screenshot and the
       // management-access (Open HTTPS / Open SSH) buttons.
       '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-refresh" title="Reload this asset\'s details">Refresh</button>';
-    // Close/Edit sit on the LEFT; the action group (Copy / Screenshot /
-    // Refresh / management access) on the RIGHT.
+    // The action group (Copy / Screenshot | Export / Refresh / management
+    // access) lives in the HEADER, right-aligned and left of the lock + close
+    // pair; the footer keeps only the dismiss pair (Close / Edit). Both are
+    // wired the same way either side of the move — every handler below finds
+    // its button by id, not by container.
     var actionBtns = copyBtns + _managementAccessButtonsHTML(a);
     var dismissBtns = '<button class="btn btn-sm btn-secondary" id="btn-asset-panel-close-btn">Close</button>' +
       (canManageAssets() ? '<button class="btn btn-sm btn-primary" id="btn-asset-panel-edit-btn">Edit</button>' : '');
-    footerEl.innerHTML = dismissBtns + '<span style="flex:1"></span>' + actionBtns;
+    if (actionsEl) actionsEl.innerHTML = actionBtns;
+    footerEl.innerHTML = dismissBtns;
 
     _wireModalTabs("asset-view");
     // Footer button swap (Screenshot ↔ Export) rides on every tab click;
@@ -14604,7 +14618,9 @@ function _managementAccessButtonsHTML(asset) {
         'title="Open an SSH session to ' + escapeHtml(info.mgmtIp) + '">Open SSH</button>' +
       '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-ssh-caret" ' +
         'title="SSH options" style="padding-left:6px;padding-right:6px">&#9662;</button>' +
-      '<div class="btn-dropdown-menu drop-up" id="asset-ssh-menu">' +
+      // Drops DOWN (the default): this group renders in the slide-over
+      // HEADER, not the footer it used to sit in.
+      '<div class="btn-dropdown-menu" id="asset-ssh-menu">' +
         hint +
         '<button data-ssh="uri">Open ssh:// link</button>' +
         '<button data-ssh="copy">Copy ssh command</button>' +
