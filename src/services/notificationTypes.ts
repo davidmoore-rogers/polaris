@@ -297,16 +297,26 @@ export const CHANGE_TYPE_ACTIONS: Record<(typeof CHANGE_TYPES)[number], string> 
 const dimensionFilterSchema = z
   .object({
     ifNamePattern: z.string().max(200).optional(),
-    // The asset's own hostname, substring-matched — available on EVERY asset
-    // metric and asset-state field (appended in METRIC_DIMENSIONS /
-    // FIELD_DIMENSIONS below). It exists for composite trees that mix
-    // host-specific branches in ONE automation ("interface down on CORE-SW OR
-    // storage full on BACKUP-01"); a single-condition automation can say the
-    // same thing with a hostname rule on the Devices step, and the engine
-    // treats the two identically (the reading set narrows either way). Rides
-    // triggerSignature like every other dimension, so two automations on the
-    // same metric with different hostname filters never carve each other out.
+    // ── Device-identifier dimensions (DEVICE_FILTER_DIMENSIONS below) ──────
+    // The asset's own identity — hostname / IP / MAC / manufacturer / model —
+    // available on EVERY asset metric and asset-state field. They narrow the
+    // ASSET SET (the engine's applyDeviceFilters), which is what lets one
+    // composite tree mix device-specific branches ("interface down on CORE-SW
+    // OR storage full on BACKUP-01"); a single-condition automation can say
+    // the same thing with rules on the Devices step, and the engine treats
+    // the two identically. The wizard authors these as "+ Condition" FILTER
+    // ROWS (compiled into sibling conditions' dimensionFilter at save), never
+    // as inline inputs. All ride triggerSignature like every other dimension,
+    // so two automations on the same metric with different device filters
+    // never carve each other out. hostname/manufacturer/model are plain
+    // substring; IP and MAC have their own matchers (ipDimensionMatch /
+    // macDimensionMatch — CIDR/prefix-aware and separator-insensitive
+    // respectively, because substring over those value shapes lies).
     hostnamePattern: z.string().max(200).optional(),
+    ipPattern: z.string().max(200).optional(),
+    macPattern: z.string().max(200).optional(),
+    manufacturerPattern: z.string().max(200).optional(),
+    modelPattern: z.string().max(200).optional(),
     // Closed enum — must stay in lockstep with HardwareSensorClass in
     // src/utils/hardwareSensors.ts. A class missing here is unselectable in the
     // wizard even once samples carry it, which is what makes "alert on optics"
@@ -2222,34 +2232,107 @@ export const METRIC_DIMENSIONS: Record<string, string[]> = {
   customWidgetValue: ["widgetId"],
   customStateValue: ["stateProbeId", "stateRowPattern"],
 };
-// Every asset metric additionally takes `hostnamePattern` (see the schema note
-// above) — appended last so the metric's own dimension stays the row's lead
-// input. Host metrics have no asset, so HOST_METRICS deliberately get nothing.
-for (const m of ASSET_METRICS) {
-  METRIC_DIMENSIONS[m] = [...(METRIC_DIMENSIONS[m] ?? []), "hostnamePattern"];
-}
-
 // Which dimensionFilter inputs apply per asset_state FIELD — the state twin of
 // METRIC_DIMENSIONS. The engine has honored ifNamePattern on the interface
 // state trio and tunnelName on ipsecStatus since the pin-gate work, but the
 // builder never rendered an input for them, so "Interface oper status is down
 // on interfaces matching wan" was expressible only through the raw API. The
 // SD-WAN pair carries no name filter because the engine has none for it (rules
-// alert per ruleName dimension already); every field takes hostnamePattern via
-// the shared asset filter.
+// alert per ruleName dimension already). Device-identifier dimensions are NOT
+// listed per metric/field — DEVICE_FILTER_DIMENSIONS below applies to every
+// asset leaf uniformly.
 export const FIELD_DIMENSIONS: Record<string, string[]> = {
-  monitorStatus: ["hostnamePattern"],
-  status: ["hostnamePattern"],
-  consecutiveFailures: ["hostnamePattern"],
-  dependencySuppressed: ["hostnamePattern"],
-  quarantined: ["hostnamePattern"],
-  ifOperStatus: ["ifNamePattern", "hostnamePattern"],
-  ifAdminStatus: ["ifNamePattern", "hostnamePattern"],
-  poeStatus: ["ifNamePattern", "hostnamePattern"],
-  ipsecStatus: ["tunnelName", "hostnamePattern"],
-  sdwanRuleStatus: ["hostnamePattern"],
-  sdwanSelectedMember: ["hostnamePattern"],
+  ifOperStatus: ["ifNamePattern"],
+  ifAdminStatus: ["ifNamePattern"],
+  poeStatus: ["ifNamePattern"],
+  ipsecStatus: ["tunnelName"],
 };
+
+// ── Device-identifier dimensions ─────────────────────────────────────────────
+// Applicable to EVERY asset_metric and asset_state trigger (never host_metric —
+// there is no asset). They filter the ASSET SET before any sample query runs
+// (notificationEngine.applyDeviceFilters); the wizard authors them as filter
+// rows in the condition tree. See the dimensionFilterSchema note above.
+export const DEVICE_FILTER_DIMENSIONS = [
+  "hostnamePattern", "ipPattern", "macPattern", "manufacturerPattern", "modelPattern",
+] as const;
+
+/**
+ * IP dimension matcher. Substring over dotted quads lies ("10.1.1.5" is inside
+ * "110.1.1.55"), so the pattern is: a CIDR ("/" present) → containment; a
+ * trailing-dot prefix ("10.4.1.") → startsWith; otherwise exact address OR an
+ * octet-boundary prefix ("10.4" matches 10.4.x.x, never 10.40.x.x). MIRRORED
+ * client-side by the wizard's match cue — keep the two in lockstep.
+ */
+export function ipDimensionMatch(ip: string | null | undefined, pattern?: string | null): boolean {
+  if (!pattern) return true;
+  const value = (ip ?? "").trim();
+  if (!value) return false;
+  const p = pattern.trim();
+  if (!p) return true;
+  if (p.includes("/")) {
+    try { return ipInCidr(value, p); } catch { return false; }
+  }
+  if (p.endsWith(".")) return value.startsWith(p);
+  return value === p || value.startsWith(p + ".");
+}
+
+/**
+ * MAC dimension matcher: separator-insensitive substring — "aa-bb-cc",
+ * "aabb.cc" and "AA:BB:CC" all select the same devices, because operators
+ * paste MACs in whatever shape their last tool printed. MIRRORED client-side
+ * by the wizard's match cue — keep the two in lockstep.
+ */
+export function macDimensionMatch(mac: string | null | undefined, pattern?: string | null): boolean {
+  if (!pattern) return true;
+  const strip = (v: string) => v.toLowerCase().replace(/[^0-9a-f]/g, "");
+  const needle = strip(pattern);
+  if (!needle) return true;
+  return strip(mac ?? "").includes(needle);
+}
+
+/** The asset fields the device-identifier dimensions read. */
+export interface DeviceFilterAsset {
+  hostname?: string | null;
+  ipAddress?: string | null;
+  macAddress?: string | null;
+  manufacturer?: string | null;
+  model?: string | null;
+}
+
+/**
+ * Does a trigger's dimensionFilter select this DEVICE? One predicate shared by
+ * the engine's asset-set narrowing (applyDeviceFilters) and the chart-shading
+ * lookup (getMetricSeverityTiers) — a second copy is how a chart comes to
+ * shade with thresholds that can't fire on that asset. No filter = everything.
+ */
+export function deviceFilterMatch(
+  df: { hostnamePattern?: string; ipPattern?: string; macPattern?: string; manufacturerPattern?: string; modelPattern?: string } | null | undefined,
+  asset: DeviceFilterAsset,
+): boolean {
+  if (!df) return true;
+  if (!dimensionSubstringMatch(asset.hostname, df.hostnamePattern)) return false;
+  if (!ipDimensionMatch(asset.ipAddress, df.ipPattern)) return false;
+  if (!macDimensionMatch(asset.macAddress, df.macPattern)) return false;
+  if (!dimensionSubstringMatch(asset.manufacturer, df.manufacturerPattern)) return false;
+  return dimensionSubstringMatch(asset.model, df.modelPattern);
+}
+
+/**
+ * Is `dimension` a valid dimensionFilter input for `metricOrField` (an
+ * ASSET_METRICS name, an ASSET_STATE_FIELDS name — the two share no name)?
+ * The dimension-values endpoint validates through this so a stale client gets
+ * a 400 rather than an empty list that reads as "these devices report none".
+ */
+export function triggerDimensionApplicable(metricOrField: string, dimension: string): boolean {
+  if (METRIC_DIMENSIONS[metricOrField]?.includes(dimension)) return true;
+  if (FIELD_DIMENSIONS[metricOrField]?.includes(dimension)) return true;
+  return (
+    (DEVICE_FILTER_DIMENSIONS as readonly string[]).includes(dimension) &&
+    ((ASSET_METRICS as readonly string[]).includes(metricOrField) ||
+      (ASSET_STATE_FIELDS as readonly string[]).includes(metricOrField))
+  );
+}
 
 /**
  * The catalog the builder UI reads from GET /notification-rules/schema, so the
@@ -2271,10 +2354,14 @@ export function buildSchemaCatalog() {
     changeTypeMeta: CHANGE_TYPE_META,
     metricDimensions: METRIC_DIMENSIONS,
     // The asset_state twin — which dimension inputs each state field takes
-    // (interface for the ifOper/ifAdmin/poe trio, tunnel for ipsecStatus,
-    // hostname everywhere). Absent on a pre-upgrade server; the wizard treats
-    // that as "state leaves take no dimensions", the old behavior.
+    // (interface for the ifOper/ifAdmin/poe trio, tunnel for ipsecStatus).
+    // Absent on a pre-upgrade server; the wizard treats that as "state leaves
+    // take no dimensions", the old behavior.
     fieldDimensions: FIELD_DIMENSIONS,
+    // Device-identifier dimensions, valid on every asset metric/state leaf —
+    // the wizard's "+ Condition → Device identifier" filter rows. Absent on a
+    // pre-upgrade server; the wizard then offers no identifier rows.
+    deviceFilterDimensions: DEVICE_FILTER_DIMENSIONS,
     // Metrics whose reading is a 0/1 flag, so the builder renders a state picker
     // instead of a threshold box and hides the numeric-only surfaces (severity
     // bands, hysteresis, unit hints).
@@ -2392,6 +2479,10 @@ export function buildSchemaCatalog() {
       sensorNamePattern: "on sensors matching {value}",
       ifNamePattern: "on interfaces matching {value}",
       hostnamePattern: "on devices whose hostname matches {value}",
+      ipPattern: "on devices whose IP matches {value}",
+      macPattern: "on devices whose MAC matches {value}",
+      manufacturerPattern: "on devices whose manufacturer matches {value}",
+      modelPattern: "on devices whose model matches {value}",
       mountPathPattern: "on mounts matching {value}",
       healthCheck: "for health check {value}",
       link: "on member {value}",

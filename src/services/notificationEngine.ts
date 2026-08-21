@@ -68,6 +68,9 @@ import {
   scopeRankLabel,
   numMeets,
   probeLossWindowSec,
+  DEVICE_FILTER_DIMENSIONS,
+  deviceFilterMatch,
+  type DeviceFilterAsset,
 } from "./notificationTypes.js";
 import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
 import { ipInCidr } from "../utils/cidr.js";
@@ -153,6 +156,8 @@ interface ScopeAssetRow extends ScopeAsset {
   dependencySuppressed: boolean;
   quarantinedAt: Date | null;
   ipAddress: string | null;
+  // Read by the device-identifier dimension filters (applyDeviceFilters).
+  macAddress?: string | null;
   // Read by every interface resolver — state trio AND counter metrics — for
   // the pinned-interface gate (interfaceIsPinned).
   monitoredInterfaces?: string[];
@@ -202,8 +207,10 @@ const SCOPE_SELECT = {
   monitorStatus: true, status: true, consecutiveFailures: true, dependencySuppressed: true,
   quarantinedAt: true, ipAddress: true,
   // condition-tree evaluation reads these (manufacturer/model/os); small
-  // string columns, still a tight select at 2000 assets.
-  manufacturer: true, model: true, os: true,
+  // string columns, still a tight select at 2000 assets. macAddress feeds the
+  // device-identifier dimension filters (applyDeviceFilters) alongside
+  // hostname / ipAddress / manufacturer / model.
+  manufacturer: true, model: true, os: true, macAddress: true,
   // Every interface reading is restricted to PINNED interfaces.
   monitoredInterfaces: true,
   // Every IPsec tunnel reading is restricted to PINNED tunnels (tunnelIsPinned).
@@ -378,21 +385,23 @@ function substringMatch(haystack: string | null, needle?: string): boolean {
 }
 
 /**
- * The `hostnamePattern` dimension: narrow the asset set to devices whose
- * hostname substring-matches, BEFORE any sample query runs. Every asset_metric
- * and asset_state trigger takes it (METRIC_DIMENSIONS / FIELD_DIMENSIONS) —
- * it's the one dimension that names the device rather than a sub-asset, and it
- * exists so a composite tree can mix host-specific branches in one automation.
- * No pattern = no filtering (the dimension is optional, like every *Pattern).
- * Exported for unit tests.
+ * The device-identifier dimensions (hostname / IP / MAC / manufacturer /
+ * model — DEVICE_FILTER_DIMENSIONS): narrow the ASSET SET before any sample
+ * query runs. Every asset_metric and asset_state trigger takes them — they
+ * name the device rather than a sub-asset, and they exist so a composite tree
+ * can mix device-specific branches in one automation. The predicate itself is
+ * notificationTypes.deviceFilterMatch, shared with getMetricSeverityTiers so
+ * chart shading can't disagree with what evaluates. No patterns set = no
+ * filtering (skipped without allocating). Exported for unit tests.
  */
-export function applyHostnameDimension<T extends { hostname: string | null }>(
+export function applyDeviceFilters<T extends DeviceFilterAsset>(
   assets: T[],
-  df: { hostnamePattern?: string } | null | undefined,
+  df: Parameters<typeof deviceFilterMatch>[0],
 ): T[] {
-  const pattern = df?.hostnamePattern;
-  if (!pattern) return assets;
-  return assets.filter((a) => substringMatch(a.hostname, pattern));
+  if (!df) return assets;
+  const rec = df as Record<string, string | undefined>;
+  if (!DEVICE_FILTER_DIMENSIONS.some((d) => rec[d])) return assets;
+  return assets.filter((a) => deviceFilterMatch(df, a));
 }
 
 /** Reduce sample rows to the latest per dimension key, or aggregate over window. */
@@ -436,10 +445,10 @@ function reduceReadings(
 
 async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "asset_metric" }>, assets: ScopeAssetRow[]): Promise<Reading[]> {
   const df = trigger.dimensionFilter ?? {};
-  // hostnamePattern narrows the ASSET set before any sample query — every
-  // metric takes it (the one dimension that names the device rather than a
-  // sub-asset), which is what lets a composite tree mix host-specific branches.
-  assets = applyHostnameDimension(assets, df);
+  // The device-identifier dimensions narrow the ASSET set before any sample
+  // query — every metric takes them (they name the device rather than a
+  // sub-asset), which is what lets a composite tree mix device-specific branches.
+  assets = applyDeviceFilters(assets, df);
   const ids = assets.map((a) => a.id);
   if (ids.length === 0) return [];
   const index = new Map(assets.map((a) => [a.id, a]));
@@ -666,7 +675,7 @@ function rateReadings(
 
 async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asset_state" }>, assets: ScopeAssetRow[]): Promise<Reading[]> {
   const df = trigger.dimensionFilter ?? {};
-  assets = applyHostnameDimension(assets, df); // same asset-set narrowing as the metric resolver
+  assets = applyDeviceFilters(assets, df); // same asset-set narrowing as the metric resolver
   const index = new Map(assets.map((a) => [a.id, a]));
   const ids = assets.map((a) => a.id);
   const mk = (a: ScopeAssetRow, dimKey: string, dimLabel: string, value: any): Reading => ({ assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey, dimLabel, value });

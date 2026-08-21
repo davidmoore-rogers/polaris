@@ -8,10 +8,10 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { compareNum, compareValue, globToRegExp, readingMeets, interfaceIsPinned, tunnelIsPinned, applyHostnameDimension } from "../../src/services/notificationEngine.js";
+import { compareNum, compareValue, globToRegExp, readingMeets, interfaceIsPinned, tunnelIsPinned, applyDeviceFilters } from "../../src/services/notificationEngine.js";
 import { scopeMatchesAsset, type ScopeAsset } from "../../src/services/notificationRuleService.js";
 import { stripRegionPrefix } from "../../src/services/notificationService.js";
-import { ruleInputSchema, buildSchemaCatalog } from "../../src/services/notificationTypes.js";
+import { ruleInputSchema, buildSchemaCatalog, triggerDimensionApplicable } from "../../src/services/notificationTypes.js";
 
 describe("compareNum", () => {
   it("evaluates every operator", () => {
@@ -222,62 +222,85 @@ describe("buildSchemaCatalog", () => {
   });
 });
 
-describe("applyHostnameDimension", () => {
+describe("applyDeviceFilters", () => {
   const fleet = [
-    { id: "1", hostname: "CORE-SW-01" },
-    { id: "2", hostname: "db-server-2" },
-    { id: "3", hostname: null },
+    { id: "1", hostname: "CORE-SW-01", ipAddress: "10.4.12.1", macAddress: "aa:bb:cc:00:00:01", manufacturer: "Fortinet Inc.", model: "FS-148F" },
+    { id: "2", hostname: "db-server-2", ipAddress: "10.9.0.5", macAddress: "00:50:56:aa:bb:02", manufacturer: "VMware, Inc.", model: "VMware7,1" },
+    { id: "3", hostname: null, ipAddress: null, macAddress: null, manufacturer: null, model: null },
   ];
-  it("narrows to devices whose hostname substring-matches, case-insensitively", () => {
-    expect(applyHostnameDimension(fleet, { hostnamePattern: "core" }).map((a) => a.id)).toEqual(["1"]);
-    expect(applyHostnameDimension(fleet, { hostnamePattern: "SERVER" }).map((a) => a.id)).toEqual(["2"]);
+  const ids = (df: Record<string, string>) => applyDeviceFilters(fleet, df).map((a) => a.id);
+
+  it("narrows by each identifier dimension", () => {
+    expect(ids({ hostnamePattern: "core" })).toEqual(["1"]);
+    expect(ids({ ipPattern: "10.4" })).toEqual(["1"]);
+    expect(ids({ ipPattern: "10.4.0.0/16" })).toEqual(["1"]);
+    expect(ids({ macPattern: "00-50-56" })).toEqual(["2"]); // separator-insensitive
+    expect(ids({ manufacturerPattern: "vmware" })).toEqual(["2"]);
+    expect(ids({ modelPattern: "FS-148" })).toEqual(["1"]);
   });
-  it("a device with no hostname never matches a pattern", () => {
-    expect(applyHostnameDimension(fleet, { hostnamePattern: "x" })).toEqual([]);
+
+  it("dimensions AND together, and a device missing the field never matches", () => {
+    expect(ids({ hostnamePattern: "0", ipPattern: "10.9." })).toEqual([]);
+    expect(ids({ manufacturerPattern: "VMware", ipPattern: "10.9." })).toEqual(["2"]);
+    expect(ids({ hostnamePattern: "x" })).toEqual([]); // null hostname is not a match
   });
-  it("no pattern (or no filter at all) passes the set through untouched", () => {
-    expect(applyHostnameDimension(fleet, {})).toBe(fleet);
-    expect(applyHostnameDimension(fleet, null)).toBe(fleet);
-    expect(applyHostnameDimension(fleet, undefined)).toBe(fleet);
-    expect(applyHostnameDimension(fleet, { hostnamePattern: "" })).toBe(fleet);
+
+  it("no identifier pattern set passes the set through untouched", () => {
+    expect(applyDeviceFilters(fleet, {})).toBe(fleet);
+    expect(applyDeviceFilters(fleet, null)).toBe(fleet);
+    expect(applyDeviceFilters(fleet, undefined)).toBe(fleet);
+    // Non-identifier dimensions on the same filter don't trigger a scan.
+    expect(applyDeviceFilters(fleet, { ifNamePattern: "wan" } as never)).toBe(fleet);
   });
 });
 
-describe("trigger dimension vocabulary (hostname + state fields)", () => {
-  it("every asset metric takes hostnamePattern, appended after its own dims", () => {
+describe("trigger dimension vocabulary (identifier + state-field dims)", () => {
+  it("publishes the device-identifier dimensions once, not per metric", () => {
     const catalog = buildSchemaCatalog();
+    expect(catalog.deviceFilterDimensions).toEqual([
+      "hostnamePattern", "ipPattern", "macPattern", "manufacturerPattern", "modelPattern",
+    ]);
+    // METRIC_DIMENSIONS stays metric-specific — identifiers are not repeated
+    // into every entry (the wizard's filter rows read deviceFilterDimensions).
     const md = catalog.metricDimensions as Record<string, string[]>;
-    for (const m of ["cpuPct", "responseTimeMs", "probeLossPct", "storageUsedPct", "ifInBps", "hwSensorValue", "customStateValue"]) {
-      expect(md[m], m).toBeDefined();
-      expect(md[m][md[m].length - 1], m).toBe("hostnamePattern");
-    }
-    // The metric's own dimension stays the lead input.
-    expect(md.storageUsedPct).toEqual(["mountPathPattern", "hostnamePattern"]);
-    expect(md.ifInBps).toEqual(["ifNamePattern", "hostnamePattern"]);
+    expect(md.storageUsedPct).toEqual(["mountPathPattern"]);
+    expect(md.ifInBps).toEqual(["ifNamePattern"]);
+    expect(md.cpuPct).toBeUndefined();
   });
-  it("state fields publish their dimension inputs (the wizard's fieldDimensions)", () => {
+  it("state fields publish their component-name dimensions (the wizard's fieldDimensions)", () => {
     const fd = buildSchemaCatalog().fieldDimensions as Record<string, string[]>;
     // The engine has honored these filters since the pin-gate work; the builder
     // finally offers them (interface on the state trio, tunnel on ipsecStatus).
-    expect(fd.ifOperStatus).toEqual(["ifNamePattern", "hostnamePattern"]);
-    expect(fd.ifAdminStatus).toEqual(["ifNamePattern", "hostnamePattern"]);
-    expect(fd.poeStatus).toEqual(["ifNamePattern", "hostnamePattern"]);
-    expect(fd.ipsecStatus).toEqual(["tunnelName", "hostnamePattern"]);
-    expect(fd.monitorStatus).toEqual(["hostnamePattern"]);
+    expect(fd.ifOperStatus).toEqual(["ifNamePattern"]);
+    expect(fd.ifAdminStatus).toEqual(["ifNamePattern"]);
+    expect(fd.poeStatus).toEqual(["ifNamePattern"]);
+    expect(fd.ipsecStatus).toEqual(["tunnelName"]);
+    expect(fd.monitorStatus).toBeUndefined();
   });
-  it("ruleInputSchema accepts hostnamePattern on metric AND state triggers", () => {
+  it("triggerDimensionApplicable admits metric dims, field dims, and identifiers on any asset leaf", () => {
+    expect(triggerDimensionApplicable("storageUsedPct", "mountPathPattern")).toBe(true);
+    expect(triggerDimensionApplicable("ifOperStatus", "ifNamePattern")).toBe(true);
+    expect(triggerDimensionApplicable("cpuPct", "hostnamePattern")).toBe(true);
+    expect(triggerDimensionApplicable("ipsecStatus", "macPattern")).toBe(true);
+    // Wrong pairings stay 400s at the dimension-values endpoint.
+    expect(triggerDimensionApplicable("cpuPct", "ifNamePattern")).toBe(false);
+    expect(triggerDimensionApplicable("ifOperStatus", "tunnelName")).toBe(false);
+    // Host metrics have no asset, so no identifier dims.
+    expect(triggerDimensionApplicable("loadAvg1", "hostnamePattern")).toBe(false);
+  });
+  it("ruleInputSchema accepts identifier dims on metric AND state triggers", () => {
     const base = { name: "t", severity: "warning", scope: { allAssets: true }, messageTemplate: "{message}" };
     expect(() => ruleInputSchema.parse({
       ...base,
-      trigger: { type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 90, dimensionFilter: { hostnamePattern: "db-" } },
+      trigger: { type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 90, dimensionFilter: { hostnamePattern: "db-", manufacturerPattern: "Dell" } },
     })).not.toThrow();
     expect(() => ruleInputSchema.parse({
       ...base,
-      trigger: { type: "asset_state", field: "ifOperStatus", operator: "==", value: "down", dimensionFilter: { ifNamePattern: "wan1", hostnamePattern: "CORE" } },
+      trigger: { type: "asset_state", field: "ifOperStatus", operator: "==", value: "down", dimensionFilter: { ifNamePattern: "wan1", ipPattern: "10.4.0.0/16", macPattern: "aa:bb" } },
     })).not.toThrow();
     expect(() => ruleInputSchema.parse({
       ...base,
-      trigger: { type: "asset_state", field: "ipsecStatus", operator: "!=", value: "up", dimensionFilter: { tunnelName: "to-hq" } },
+      trigger: { type: "asset_state", field: "ipsecStatus", operator: "!=", value: "up", dimensionFilter: { tunnelName: "to-hq", modelPattern: "FGT-60F" } },
     })).not.toThrow();
   });
 });

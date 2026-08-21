@@ -1510,14 +1510,15 @@ describe("automation wizard DOM render", () => {
   });
 });
 
-// ── State-leaf dimension inputs (interface / tunnel / hostname), 2026-08 ────
-// The engine has honored dimensionFilter on the state fields since the
-// pin-gate work (ifNamePattern on the ifOper/ifAdmin/poe trio, tunnelName on
-// ipsecStatus), but tgLeafRowHtml only rendered dimension controls for METRIC
-// leaves — so "Interface oper status is down on interfaces matching wan" was
-// expressible only through the raw API. These pin the new fieldDimensions
-// rendering + collection, plus the universal hostnamePattern dimension.
-describe("state-leaf dimension inputs", () => {
+// ── Trigger filter rows (device identifiers / component names), 2026-08 ─────
+// "+ Condition" offers Hostname / IP / MAC / Manufacturer / Model (device
+// identifiers) and Interface name / IPsec tunnel / Storage mount (component
+// names) as FILTER ROWS: "<what> matches <value>". The stored trigger never
+// carries them — tgFilterCompile folds each into its group's condition leaves
+// as dimensionFilter at save, and tgFilterLift re-derives the rows on edit.
+// These drive the DOM end of that round trip; the pure halves are pinned in
+// automationTriggerFilters.test.ts.
+describe("trigger filter rows", () => {
   const BASE = {
     description: null,
     enabled: true,
@@ -1537,7 +1538,7 @@ describe("state-leaf dimension inputs", () => {
     doc.body.innerHTML = "";
     savedPayloads.length = 0;
     toastErrors.length = 0;
-    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({ ...BASE, id, name: "state dims" });
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({ ...BASE, id, name: "filter rows" });
     for (let i = 0; i < 2; i++) {
       (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
       await new Promise((r) => setTimeout(r, 20));
@@ -1545,37 +1546,74 @@ describe("state-leaf dimension inputs", () => {
     expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
   }
 
-  /** Pick a state FIELD the way an operator would (same happy-dom re-pin dance
-   *  as pickMetric above — the change handler re-renders the row). */
-  async function pickField(field: string) {
+  /** Re-pin a row's what select after the change re-render (the same happy-dom
+   *  `<option selected>` dance as pickMetric above). */
+  async function pickWhat(row: Element, what: string) {
     const win = g.window as InstanceType<typeof Window>;
-    const sel = doc.querySelector("#aw-trig-root .tgl-what") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
-    sel.value = "f:" + field;
+    const sel = row.querySelector(".tgl-what") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    sel.value = what;
     sel.dispatchEvent(new win.Event("change", { bubbles: true }));
     await new Promise((r) => setTimeout(r, 20));
-    const after = doc.querySelector("#aw-trig-root .tgl-what") as unknown as { value: string };
-    after.value = "f:" + field;
+    const rows = Array.from(doc.querySelectorAll("#aw-trig-root .scr-row"));
+    const after = rows[rows.length - 1]!.querySelector(".tgl-what") as unknown as { value: string };
+    after.value = what;
   }
 
-  it("switching to Interface oper status renders interface + hostname dimension inputs", async () => {
-    await openAtStep3("r-state-dims-render");
-    // A metric leaf renders no state dims; cpuPct now carries the hostname input.
-    expect(doc.querySelector('#aw-trig-root .tgl-dim[data-dim="hostnamePattern"]')).toBeTruthy();
-    await pickField("ifOperStatus");
-    const ifInput = doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="ifNamePattern"]');
-    const hostInput = doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="hostnamePattern"]');
-    expect(ifInput).toBeTruthy();
-    expect(hostInput).toBeTruthy();
-    // No aggregation control on a state leaf — the row's second line is dims only.
-    expect(doc.querySelector("#aw-trig-root .tgl-agg")).toBeFalsy();
+  async function addRow(): Promise<Element> {
+    (doc.querySelector("#aw-trig-root .scg-add-rule") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    const rows = doc.querySelectorAll("#aw-trig-root .scr-row");
+    return rows[rows.length - 1] as unknown as Element;
+  }
+
+  function lastRow(): Element {
+    const rows = doc.querySelectorAll("#aw-trig-root .scr-row");
+    return rows[rows.length - 1] as unknown as Element;
+  }
+
+  it("offers identifier + component-name groups in the condition select, and no inline identifier boxes", async () => {
+    await openAtStep3("r-filter-offer");
+    const what = doc.querySelector("#aw-trig-root .tgl-what") as unknown as { innerHTML: string };
+    expect(what.innerHTML).toContain('label="Device identifier');
+    expect(what.innerHTML).toContain('label="Component name');
+    for (const d of ["hostnamePattern", "ipPattern", "macPattern", "manufacturerPattern", "modelPattern", "ifNamePattern", "tunnelName", "mountPathPattern"]) {
+      expect(what.innerHTML).toContain('value="d:' + d + '"');
+    }
+    // The clutter this UX replaced: a condition row renders NO always-visible
+    // identifier/name inputs (they appear only as unlifted-leftover fallbacks).
+    expect(doc.querySelector("#aw-trig-root .scr-row:not([data-filter-row]) .tgl-dim")).toBeFalsy();
   });
 
-  it("collects and saves a state trigger's dimension filter", async () => {
-    await openAtStep3("r-state-dims-save");
-    await pickField("ifOperStatus");
+  it("folds a hostname filter row into the condition and saves the shipped wire shape", async () => {
+    await openAtStep3("r-filter-hostname");
+    (doc.querySelector("#aw-trig-root .tgl-threshold") as unknown as { value: string }).value = "90";
+    const row = await addRow();
+    await pickWhat(row, "d:hostnamePattern");
+    const frow = lastRow();
+    expect((frow as unknown as { getAttribute: (a: string) => string | null }).getAttribute("data-filter-row")).toBe("1");
+    (frow.querySelector(".tgl-dim") as unknown as { value: string }).value = "CORE-SW";
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    // One condition + one filter collapses to the legacy single trigger, the
+    // filter riding as the dimensionFilter the engine already evaluates.
+    expect(saved.trigger.type).toBe("asset_metric");
+    expect(saved.trigger.metric).toBe("cpuPct");
+    expect(saved.trigger.dimensionFilter).toEqual({ hostnamePattern: "CORE-SW" });
+    expect(() => ruleInputSchema.parse(saved)).not.toThrow();
+  });
+
+  it("folds interface-name + hostname rows into a state condition", async () => {
+    await openAtStep3("r-filter-state");
+    await pickWhat(doc.querySelector("#aw-trig-root .scr-row") as unknown as Element, "f:ifOperStatus");
     (doc.querySelector("#aw-trig-root .tgl-value") as unknown as { value: string }).value = "down";
-    (doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="ifNamePattern"]') as unknown as { value: string }).value = "wan";
-    (doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="hostnamePattern"]') as unknown as { value: string }).value = "CORE";
+    const r1 = await addRow();
+    await pickWhat(r1, "d:ifNamePattern");
+    (lastRow().querySelector(".tgl-dim") as unknown as { value: string }).value = "wan";
+    const r2 = await addRow();
+    await pickWhat(r2, "d:hostnamePattern");
+    (lastRow().querySelector(".tgl-dim") as unknown as { value: string }).value = "CORE";
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(toastErrors).toEqual([]);
@@ -1583,38 +1621,55 @@ describe("state-leaf dimension inputs", () => {
     expect(saved.trigger.type).toBe("asset_state");
     expect(saved.trigger.field).toBe("ifOperStatus");
     expect(saved.trigger.dimensionFilter).toEqual({ ifNamePattern: "wan", hostnamePattern: "CORE" });
-    // The wire shape the wizard produced is one the server accepts verbatim.
     expect(() => ruleInputSchema.parse(saved)).not.toThrow();
   });
 
-  it("ipsecStatus offers the tunnel dimension; an untouched filter stores nothing", async () => {
-    await openAtStep3("r-state-dims-ipsec");
-    await pickField("ipsecStatus");
-    expect(doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="tunnelName"]')).toBeTruthy();
-    expect(doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="hostnamePattern"]')).toBeTruthy();
-    (doc.querySelector("#aw-trig-root .tgl-value") as unknown as { value: string }).value = "down";
+  it("refuses an empty filter and a filter no condition in the group can take", async () => {
+    await openAtStep3("r-filter-invalid");
+    (doc.querySelector("#aw-trig-root .tgl-threshold") as unknown as { value: string }).value = "90";
+    const row = await addRow();
+    await pickWhat(row, "d:tunnelName");
+    // Empty value first.
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
-    expect(toastErrors).toEqual([]);
-    const saved = savedPayloads[0]! as Record<string, any>;
-    expect(saved.trigger.field).toBe("ipsecStatus");
-    // Empty inputs must not stage an empty dimensionFilter object.
-    expect(saved.trigger.dimensionFilter).toBeUndefined();
+    expect(savedPayloads).toHaveLength(0);
+    expect(toastErrors.join(" ")).toContain("give it a value");
+    // A value, but no condition that takes tunnelName (cpuPct doesn't).
+    toastErrors.length = 0;
+    (lastRow().querySelector(".tgl-dim") as unknown as { value: string }).value = "to-hq";
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(savedPayloads).toHaveLength(0);
+    expect(toastErrors.join(" ")).toContain("no condition in its group can take it");
   });
 
-  it("a stored state trigger re-opens with its dimension filter in the inputs", async () => {
+  it("a stored trigger with a uniform dimensionFilter re-opens as filter rows", async () => {
     doc.body.innerHTML = "";
     savedPayloads.length = 0;
     toastErrors.length = 0;
     await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
-      ...BASE, id: "r-state-dims-reopen", name: "state dims stored",
+      ...BASE, id: "r-filter-reopen", name: "stored filters",
       trigger: { type: "asset_state", field: "ifOperStatus", operator: "==", value: "down", forDurationSec: 0, dimensionFilter: { ifNamePattern: "port1", hostnamePattern: "SW-A" } },
     });
     for (let i = 0; i < 2; i++) {
       (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
       await new Promise((r) => setTimeout(r, 20));
     }
-    expect((doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="ifNamePattern"]') as unknown as { value: string }).value).toBe("port1");
-    expect((doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="hostnamePattern"]') as unknown as { value: string }).value).toBe("SW-A");
+    const filterRows = Array.from(doc.querySelectorAll("#aw-trig-root .scr-row[data-filter-row]"));
+    expect(filterRows.length).toBe(2);
+    const byDim = new Map(filterRows.map((r) => [
+      (r.querySelector(".tgl-dim") as unknown as { getAttribute: (a: string) => string }).getAttribute("data-dim"),
+      (r.querySelector(".tgl-dim") as unknown as { value: string }).value,
+    ]));
+    expect(byDim.get("ifNamePattern")).toBe("port1");
+    expect(byDim.get("hostnamePattern")).toBe("SW-A");
+    // The condition row itself is clean — no inline leftovers.
+    expect(doc.querySelector("#aw-trig-root .scr-row:not([data-filter-row]) .tgl-dim")).toBeFalsy();
+    // And an untouched save round-trips the exact stored shape.
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.trigger.dimensionFilter).toEqual({ ifNamePattern: "port1", hostnamePattern: "SW-A" });
   });
 });

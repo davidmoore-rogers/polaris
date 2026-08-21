@@ -252,6 +252,10 @@ function makeAutomationSentences(s) {
     sensorClass: "for sensors of class {value}", sensorNamePattern: "on sensors matching {value}",
     ifNamePattern: "on interfaces matching {value}",
     hostnamePattern: "on devices whose hostname matches {value}",
+    ipPattern: "on devices whose IP matches {value}",
+    macPattern: "on devices whose MAC matches {value}",
+    manufacturerPattern: "on devices whose manufacturer matches {value}",
+    modelPattern: "on devices whose model matches {value}",
     mountPathPattern: "on mounts matching {value}", healthCheck: "for health check {value}",
     link: "on member {value}", tunnelName: "on tunnel {value}", widgetId: "for widget {value}",
     processNamePattern: "for processes matching {value}",
@@ -276,6 +280,11 @@ function makeAutomationSentences(s) {
   }
   function tgLeafPhrase(leaf) {
     if (!leaf || !leaf.type) return "…";
+    // Defensive: a filter row from an UNCOMPILED UI tree (the stored trigger
+    // never carries one — tgFilterCompile folds them away before save).
+    if (leaf.type === "asset_filter") {
+      return (DIM_PHRASE[leaf.dim] || leaf.dim + " = {value}").replace("{value}", String(leaf.value || "…"));
+    }
     if (leaf.type === "asset_state") {
       var sOut = fieldLabel(leaf.field) + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + String(leaf.value == null || leaf.value === "" ? "…" : leaf.value);
       // State leaves carry dimension filters too (interface for the ifOper
@@ -445,6 +454,7 @@ function makeAutomationSentences(s) {
     mountPathPattern: "mount~", healthCheck: "health=", link: "member=",
     tunnelName: "tunnel=", widgetId: "widget=", processNamePattern: "process~",
     stateProbeId: "probe=", stateRowPattern: "row~", hostnamePattern: "host~",
+    ipPattern: "ip~", macPattern: "mac~", manufacturerPattern: "mfr~", modelPattern: "model~",
   }, s.formulaDimensions || {});
 
   /** "15m" / "2h" / "45s" — the compact form, since a formula line is dense. */
@@ -733,9 +743,57 @@ function awDimSubstringMatch(value, query) {
   return String(value == null ? "" : value).toLowerCase().indexOf(String(query).toLowerCase()) !== -1;
 }
 
+/** Mirror of the server's `ipDimensionMatch` (notificationTypes) — substring
+ *  over dotted quads lies ("10.1.1.5" is inside "110.1.1.55"), so an IP
+ *  pattern is a CIDR ("/" present, containment), a trailing-dot prefix, or an
+ *  exact address / octet-boundary prefix. Keep in lockstep with the server —
+ *  the cue and the suggestion filter select with this, and a divergence makes
+ *  the cue lie about whether the filter will fire. */
+function awIpDimensionMatch(ip, pattern) {
+  if (!pattern) return true;
+  var value = String(ip == null ? "" : ip).trim();
+  if (!value) return false;
+  var p = String(pattern).trim();
+  if (!p) return true;
+  if (p.indexOf("/") !== -1) {
+    var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(p);
+    var v = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+    if (!m || !v) return false;
+    var bits = Number(m[5]);
+    if (bits > 32) return false;
+    var toNum = function (o) { return ((Number(o[1]) << 24) | (Number(o[2]) << 16) | (Number(o[3]) << 8) | Number(o[4])) >>> 0; };
+    if ([m, v].some(function (o) { return [o[1], o[2], o[3], o[4]].some(function (x) { return Number(x) > 255; }); })) return false;
+    var mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return (toNum(v) & mask) === (toNum(m) & mask);
+  }
+  if (p.charAt(p.length - 1) === ".") return value.indexOf(p) === 0;
+  return value === p || value.indexOf(p + ".") === 0;
+}
+
+/** Mirror of the server's `macDimensionMatch` — separator-insensitive
+ *  substring, so "aa-bb-cc", "aabb.cc" and "AA:BB:CC" select the same
+ *  devices. Keep in lockstep with the server. */
+function awMacDimensionMatch(mac, pattern) {
+  if (!pattern) return true;
+  var strip = function (v) { return String(v == null ? "" : v).toLowerCase().replace(/[^0-9a-f]/g, ""); };
+  var needle = strip(pattern);
+  if (!needle) return true;
+  return strip(mac).indexOf(needle) !== -1;
+}
+
+/** Which matcher selects readings for a dimension — the two identity dims with
+ *  value shapes substring can't honestly serve get their own; everything else
+ *  is the shared substring the engine uses. */
+function awDimMatcher(dim) {
+  if (dim === "ipPattern") return awIpDimensionMatch;
+  if (dim === "macPattern") return awMacDimensionMatch;
+  return awDimSubstringMatch;
+}
+
 /** Values a typed pattern selects out of what the scoped devices report. */
-function awDimHits(res, query) {
-  return ((res && res.values) || []).filter(function (v) { return awDimSubstringMatch(v.value, query); });
+function awDimHits(res, query, dim) {
+  var match = awDimMatcher(dim);
+  return ((res && res.values) || []).filter(function (v) { return match(v.value, query); });
 }
 
 var AW_DIM_SUGGEST_CAP = 60;
@@ -747,7 +805,7 @@ var AW_DIM_SUGGEST_CAP = 60;
  *  no way to tell a real sensor name from a typo, since a pattern dimension
  *  accepts free text by design. Item markup matches `.aw-suggest-item` so the
  *  Devices-step CSS and keyboard handling carry over. */
-function awDimSuggestHtml(res, query) {
+function awDimSuggestHtml(res, query, dim) {
   if (!res || res.loading) return '<div class="aw-suggest-empty">Checking what the selected devices report…</div>';
   if (res.error) return '<div class="aw-suggest-empty">Couldn’t load the reported values — typing a pattern still works.</div>';
   var noun = res.noun || "values";
@@ -755,7 +813,7 @@ function awDimSuggestHtml(res, query) {
     return '<div class="aw-suggest-empty">The selected devices report no ' + escapeHtml(noun + (res.narrowLabel || "")) + '.</div>';
   }
   var q = String(query == null ? "" : query).trim();
-  var hits = awDimHits(res, q);
+  var hits = awDimHits(res, q, dim);
   if (!hits.length) {
     return '<div class="aw-suggest-empty">None of the ' + res.values.length + ' reported ' + escapeHtml(noun) +
       ' contain “' + escapeHtml(q) + '”.</div>';
@@ -776,11 +834,11 @@ function awDimSuggestHtml(res, query) {
  *  partial like "CPU" is a legitimate filter over several sensors), so the
  *  answer is shown rather than enforced — including the case that matters, a
  *  typo that quietly matches nothing and would never fire. */
-function awDimMatchCue(res, value) {
+function awDimMatchCue(res, value, dim) {
   var q = String(value == null ? "" : value).trim();
   if (!q || !res || res.loading || res.error || !(res.values || []).length) return { text: "", warn: false };
   var noun = res.noun || "values";
-  var hits = awDimHits(res, q);
+  var hits = awDimHits(res, q, dim);
   if (!hits.length) {
     return { text: "✕ matches none of the " + res.values.length + " reported " + noun + " — this condition would never fire", warn: true };
   }
@@ -832,11 +890,112 @@ function awDimNote(res) {
   return { text: parts.join(" "), warn: false };
 }
 
+// ─── Trigger filter rows (compile ↔ lift) ───────────────────────────────────
+// A filter row is a "+ Condition" entry that names a device identifier
+// (hostname / IP / MAC / manufacturer / model) or a component name (interface
+// / IPsec tunnel / storage mount) instead of a metric: `{type: "asset_filter",
+// dim, value}` in the UI tree only. The STORED rule never carries them — at
+// save, `tgFilterCompile` folds each row into its group's condition leaves as
+// `dimensionFilter[dim]` (so the engine, signature, sentences and preview all
+// see the shape that already existed), and on edit `tgFilterLift` re-derives
+// the rows from a stored tree. Both are pure and exposed for unit tests.
+
+function awIsFilterLeaf(node) { return !!node && node.type === "asset_filter"; }
+function awIsGroup(node) { return !!node && node.type === undefined && Array.isArray(node.children); }
+
+/** Every condition (non-filter) leaf under a node, groups walked depth-first. */
+function awConditionLeaves(node) {
+  var out = [];
+  (function walk(n) {
+    if (!n) return;
+    if (awIsGroup(n)) { n.children.forEach(walk); return; }
+    if (!awIsFilterLeaf(n)) out.push(n);
+  })(node);
+  return out;
+}
+
+/**
+ * Fold filter rows into their group's condition leaves. A filter applies to
+ * every condition leaf UNDER its group (nested groups included) that supports
+ * the dimension, never overwriting a value a deeper row already set — so
+ * "AND [hostname X, OR [cpu, mem]]" narrows both branches, and a nested
+ * group's own filter wins over an outer one. Filters demand an AND group:
+ * under OR, "cpu high OR hostname X" has no honest meaning — the errors say
+ * to group the filter with its conditions. Returns {tree, errors}; the tree
+ * has no asset_filter leaves left.
+ */
+function tgFilterCompile(tree, supports, labelOf) {
+  var errors = [];
+  var label = labelOf || function (d) { return d; };
+  (function walk(group) {
+    if (!awIsGroup(group)) return;
+    var filters = group.children.filter(awIsFilterLeaf);
+    group.children = group.children.filter(function (c) { return !awIsFilterLeaf(c); });
+    group.children.forEach(walk); // depth-first: nested rows fold before outer ones
+    filters.forEach(function (f) {
+      var name = label(f.dim);
+      if (!String(f.value || "").trim()) {
+        errors.push(name + " filter: give it a value.");
+        return;
+      }
+      if ((group.op || "and") !== "and") {
+        errors.push(name + " filter: filters only make sense in an AND group — put the filter and the conditions it narrows together in one.");
+        return;
+      }
+      var applied = 0;
+      awConditionLeaves(group).forEach(function (leaf) {
+        if (!supports(leaf, f.dim)) return;
+        leaf.dimensionFilter = leaf.dimensionFilter || {};
+        if (!leaf.dimensionFilter[f.dim]) leaf.dimensionFilter[f.dim] = String(f.value).trim();
+        applied++;
+      });
+      if (!applied) {
+        errors.push(name + " filter: no condition in its group can take it — add the condition it narrows (or move the filter next to one).");
+      }
+    });
+  })(tree);
+  return { tree: tree, errors: errors };
+}
+
+/**
+ * The inverse, for rendering a stored tree: at each group (top-down), a
+ * dimension whose value is IDENTICAL on every supporting condition leaf below
+ * lifts out into one filter row (appended after the group's conditions, where
+ * the operator would have added it) and is stripped from the leaves; differing
+ * values recurse, so a sub-group that is internally uniform still lifts there.
+ * Whatever can't be lifted stays on the leaf, where the row renders it inline.
+ */
+function tgFilterLift(tree, supports, dims) {
+  (function walk(group) {
+    if (!awIsGroup(group)) return;
+    var lifted = [];
+    (dims || []).forEach(function (d) {
+      var supporting = awConditionLeaves(group).filter(function (l) { return supports(l, d); });
+      if (!supporting.length) return;
+      var first = (supporting[0].dimensionFilter || {})[d];
+      if (!first) return;
+      var uniform = supporting.every(function (l) { return ((l.dimensionFilter || {})[d]) === first; });
+      // Lifting from an OR group would compile back as an error — leave those inline.
+      if (!uniform || (group.op || "and") !== "and") return;
+      supporting.forEach(function (l) {
+        delete l.dimensionFilter[d];
+        if (!Object.keys(l.dimensionFilter).length) delete l.dimensionFilter;
+      });
+      lifted.push({ type: "asset_filter", dim: d, value: first });
+    });
+    group.children.forEach(walk);
+    lifted.forEach(function (f) { group.children.push(f); });
+  })(tree);
+  return tree;
+}
+
 if (typeof window !== "undefined") {
   window.PolarisAutomationDimensions = {
     optionsHtml: awDimOptionsHtml, suggestHtml: awDimSuggestHtml, matchCue: awDimMatchCue,
-    substringMatch: awDimSubstringMatch, note: awDimNote, narrow: awDimNarrow,
+    substringMatch: awDimSubstringMatch, ipMatch: awIpDimensionMatch, macMatch: awMacDimensionMatch,
+    note: awDimNote, narrow: awDimNarrow,
   };
+  window.PolarisTriggerFilters = { compile: tgFilterCompile, lift: tgFilterLift };
 }
 
 /**
@@ -976,7 +1135,7 @@ async function openAutomationWizard(existing, opts) {
       resetSentence = _sent.resetSentence,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { hostnamePattern: "any device — click to pick a hostname, or type to filter", ifNamePattern: "any interface — click to pick, or type to filter", sensorClass:"sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
+  var DIM_PLACEHOLDER = { hostnamePattern: "any device — click to pick a hostname, or type to filter", ipPattern: "click to pick an IP — a prefix like 10.4. or a CIDR like 10.4.0.0/16 also works", macPattern: "click to pick a MAC, or type one in any separator style", manufacturerPattern: "any manufacturer — click to pick, or type to filter", modelPattern: "any model — click to pick, or type to filter", ifNamePattern: "any interface — click to pick, or type to filter", sensorClass:"sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
   // populate and whether each is a closed enum (`strict` → select-only, e.g.
   // sensorClass) or a substring match (→ suggestions, typing still allowed);
@@ -984,6 +1143,73 @@ async function openAutomationWizard(existing, opts) {
   // OWN devices report. Empty for a stale server, in which case every dimension
   // falls back to the plain text input it always was.
   var DIM_PICKERS = s.dimensionPickers || {};
+  // ── Filter rows ("+ Condition → Device identifier / Component name") ─────
+  // Which dimensions render as FILTER ROWS in the condition tree instead of as
+  // inline inputs on a condition row. `rep` is the metric/field the value
+  // picker asks /dimension-values with — the values come from the DIMENSION's
+  // own source regardless, it only has to be a pair the server validates.
+  // Device-identifier entries are gated on the server actually knowing them
+  // (schema.deviceFilterDimensions — absent on a pre-upgrade server, in which
+  // case none of this renders and rows keep their old shape).
+  var TG_DEVICE_DIMS = s.deviceFilterDimensions || [];
+  var TG_FILTER_META = {
+    hostnamePattern: { label: "Hostname", rep: "cpuPct", device: true },
+    ipPattern: { label: "IP address", rep: "cpuPct", device: true },
+    macPattern: { label: "MAC address", rep: "cpuPct", device: true },
+    manufacturerPattern: { label: "Manufacturer", rep: "cpuPct", device: true },
+    modelPattern: { label: "Model", rep: "cpuPct", device: true },
+    ifNamePattern: { label: "Interface name", rep: "ifOperStatus" },
+    tunnelName: { label: "IPsec tunnel name", rep: "ipsecStatus" },
+    mountPathPattern: { label: "Storage mount", rep: "storageUsedPct" },
+  };
+  function tgFilterLabel(dim) { return (TG_FILTER_META[dim] && TG_FILTER_META[dim].label) || dim; }
+  /** Filter rows are offered only when the server publishes the device dims —
+   *  one gate for the whole surface, so a pre-upgrade server keeps the old UI. */
+  function tgFiltersAvailable() { return TG_DEVICE_DIMS.length > 0; }
+  /** Can this condition leaf take dimension `d`? Device identifiers apply to
+   *  every asset leaf; component names to whatever METRIC_DIMENSIONS /
+   *  FIELD_DIMENSIONS say (the server's own applicability rule). */
+  function tgSupportsDim(leaf, d) {
+    if (!leaf || leaf.type === "asset_filter" || leaf.type === "host_metric") return false;
+    if (TG_DEVICE_DIMS.indexOf(d) !== -1) return leaf.type === "asset_metric" || leaf.type === "asset_state";
+    if (leaf.type === "asset_state") return (((s.fieldDimensions || {})[leaf.field]) || []).indexOf(d) !== -1;
+    return (((s.metricDimensions || {})[leaf.metric]) || []).indexOf(d) !== -1;
+  }
+  /** Compile a collected UI tree's filter rows into its condition leaves —
+   *  the pure module-level tgFilterCompile with this wizard's vocabulary. */
+  function tgCompile(tree) { return tgFilterCompile(tree, tgSupportsDim, tgFilterLabel); }
+  function tgLiftableDims() {
+    return Object.keys(TG_FILTER_META).filter(function (d) {
+      return TG_FILTER_META[d].device ? TG_DEVICE_DIMS.indexOf(d) !== -1 : true;
+    });
+  }
+  /** Lift a stored tree's uniform dimension filters back out into filter rows
+   *  for rendering. Skipped wholesale on a pre-upgrade server (no rows offered
+   *  → nothing may be lifted into a shape the operator can't re-create). */
+  function tgLift(tree) {
+    return tgFiltersAvailable() ? tgFilterLift(tree, tgSupportsDim, tgLiftableDims()) : tree;
+  }
+  /** Which dimension inputs render INLINE on a condition row: everything that
+   *  is integral to the metric (sensor class/name, health-check, probe rows…)
+   *  always; a liftable (filter-row) dimension only as an UNLIFTED LEFTOVER —
+   *  a stored value tgFilterLift couldn't raise because siblings disagree —
+   *  since dropping it from the row would hide a filter that still evaluates.
+   *  On a pre-upgrade server (no filter rows) everything renders inline as
+   *  before. */
+  function tgInlineDims(baseDims, df) {
+    var out = (baseDims || []).filter(function (d) {
+      if (!tgFiltersAvailable() || !TG_FILTER_META[d]) return true;
+      return !!(df && df[d]);
+    });
+    TG_DEVICE_DIMS.forEach(function (d) {
+      if (df && df[d] && out.indexOf(d) === -1) out.push(d);
+    });
+    return out;
+  }
+  // Filter-placement problems from the LAST collect, surfaced by validateStep3 /
+  // validateStep4 (collect always runs right before validation on Next/Save).
+  var _tgFilterErrors = [];
+  var _rsFilterErrors = [];
   // key "metric|dimension|narrowJson|scopeJson" → {loading:true} | result |
   // {error:true}. Keyed by scope so re-picking devices on Step 2 re-asks rather
   // than showing the previous selection's sensors, and by the narrowing so
@@ -1533,14 +1759,16 @@ async function openAutomationWizard(existing, opts) {
       : { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: null };
   }
   function triggerToTree(tr, kind) {
+    // Both stored shapes render through tgLift, so a uniform dimensionFilter
+    // comes back as the filter row the operator authored it as.
     if (tr && tr.type === "composite" && (tr.kind || "asset") === kind) {
-      return { op: tr.op || "and", children: JSON.parse(JSON.stringify(tr.children || [])) };
+      return tgLift({ op: tr.op || "and", children: JSON.parse(JSON.stringify(tr.children || [])) });
     }
     var leafKinds = kind === "host" ? ["host_metric"] : ["asset_metric", "asset_state"];
     if (tr && leafKinds.indexOf(tr.type) !== -1) {
       var leaf = JSON.parse(JSON.stringify(tr));
       delete leaf.forDurationSec;
-      return { op: "and", children: [leaf] };
+      return tgLift({ op: "and", children: [leaf] });
     }
     return { op: "and", children: [tgDefaultLeaf(kind)] };
   }
@@ -1583,7 +1811,7 @@ async function openAutomationWizard(existing, opts) {
       var leaf = leaves[i];
       if (!leaf) return;
       var what = row.querySelector(".tgl-what");
-      if (what) what.value = leaf.type === "asset_state" ? "f:" + leaf.field : "m:" + leaf.metric;
+      if (what) what.value = leaf.type === "asset_filter" ? "d:" + leaf.dim : leaf.type === "asset_state" ? "f:" + leaf.field : "m:" + leaf.metric;
       var op = row.querySelector(".tgl-op");
       if (op && leaf.operator) op.value = leaf.operator;
       var agg = row.querySelector(".tgl-agg");
@@ -1617,13 +1845,27 @@ async function openAutomationWizard(existing, opts) {
     }
     var metrics = (findType("asset_metric") || {}).metrics || [];
     var fields = (findType("asset_state") || {}).fields || [];
-    return '<optgroup label="Metrics">' + metrics.map(function (m) {
+    var html = '<optgroup label="Metrics">' + metrics.map(function (m) {
       var v = "m:" + m;
       return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(metricLabel(m)) + '</option>';
     }).join("") + '</optgroup><optgroup label="Device state">' + fields.map(function (f) {
       var v = "f:" + f;
       return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(fieldLabel(f)) + '</option>';
     }).join("") + '</optgroup>';
+    // Filter rows: narrow the conditions in this group by who the device is
+    // (identifier) or which component the reading is about (name). Gated on the
+    // server publishing the vocabulary — see tgFiltersAvailable.
+    if (tgFiltersAvailable()) {
+      var filterOpt = function (d) {
+        var v = "d:" + d;
+        return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(tgFilterLabel(d)) + '</option>';
+      };
+      var idDims = tgLiftableDims().filter(function (d) { return TG_FILTER_META[d].device; });
+      var nameDims = tgLiftableDims().filter(function (d) { return !TG_FILTER_META[d].device; });
+      html += '<optgroup label="Device identifier (filters this group)">' + idDims.map(filterOpt).join("") + '</optgroup>' +
+        '<optgroup label="Component name (filters this group)">' + nameDims.map(filterOpt).join("") + '</optgroup>';
+    }
+    return html;
   }
   function tgStateValueControl(field, val) {
     var meta = s.fieldMeta && s.fieldMeta[field];
@@ -1688,6 +1930,10 @@ async function openAutomationWizard(existing, opts) {
     var row = el.closest(".scr-row");
     var what = row && row.querySelector(".tgl-what");
     var v = what ? String(what.value || "") : "";
+    // A filter row has no metric of its own — the picker asks with the
+    // dimension's representative pair (the values come from the dimension's
+    // source either way; the pair only has to validate server-side).
+    if (v.indexOf("d:") === 0) return (TG_FILTER_META[v.slice(2)] || {}).rep || "";
     return v.indexOf("m:") === 0 || v.indexOf("f:") === 0 ? v.slice(2) : "";
   }
   /** The row's current dimensionFilter, read live off its controls (mirrors
@@ -1719,7 +1965,7 @@ async function openAutomationWizard(existing, opts) {
     var combo = el.closest && el.closest(".aw-combo");
     var cue = combo && combo.nextElementSibling;
     if (!cue || !cue.classList || !cue.classList.contains("tgl-dim-cue")) return;
-    var c = awDimMatchCue(res, el.value);
+    var c = awDimMatchCue(res, el.value, el.getAttribute("data-dim"));
     cue.textContent = c.text;
     cue.style.color = c.warn ? "var(--color-warning, #d9a441)" : "var(--color-success, #3ba55d)";
   }
@@ -1733,9 +1979,15 @@ async function openAutomationWizard(existing, opts) {
     // loading→loaded transition fills them in without the operator re-clicking.
     paintDimCue(el, res);
     var sug = dimSuggestOf(el);
-    if (sug && sug.classList.contains("open")) sug.innerHTML = awDimSuggestHtml(res, el.value);
+    if (sug && sug.classList.contains("open")) sug.innerHTML = awDimSuggestHtml(res, el.value, d);
+    // A condition row's dims sit inside .tgl-line2; a filter row's input is on
+    // line 1 with its note below — fall back to the row-level lookup for it.
     var note = el.closest(".tgl-line2");
     note = note && note.querySelector(".tgl-dim-note");
+    if (!note) {
+      var frow = el.closest(".scr-row");
+      note = frow && frow.getAttribute("data-filter-row") ? frow.querySelector(".tgl-dim-note") : null;
+    }
     if (note) {
       var n = awDimNote(res);
       // Two pickers can share one row (SD-WAN health-check + member): a
@@ -1782,7 +2034,7 @@ async function openAutomationWizard(existing, opts) {
     var open = function (input) {
       var sug = dimSuggestOf(input);
       if (!sug || input.disabled) return;
-      sug.innerHTML = awDimSuggestHtml(dimResultOf(input), input.value);
+      sug.innerHTML = awDimSuggestHtml(dimResultOf(input), input.value, input.getAttribute("data-dim"));
       sug.classList.add("open");
     };
     panel.addEventListener("focusin", function (e) { if (isDim(e.target)) open(e.target); });
@@ -1880,6 +2132,26 @@ async function openAutomationWizard(existing, opts) {
   }
   function tgLeafRowHtml(leaf, kind) {
     leaf = leaf || tgDefaultLeaf(kind);
+    // A FILTER row: "<what> matches <value>". The value control is the same
+    // picker combobox a dimension input gets (same .tgl-dim classes, so the
+    // combobox / cue / note machinery applies unchanged); the fixed "matches"
+    // is honest — the stored dimensionFilter is a positive pattern, there is
+    // no negative to offer.
+    if (leaf.type === "asset_filter") {
+      var fdf = {}; fdf[leaf.dim] = leaf.value || "";
+      return '<div class="scr-row" data-filter-row="1" style="margin:4px 0;padding:4px;border:1px dashed var(--color-border);border-radius:6px">' +
+        '<div style="display:flex;gap:6px;align-items:center">' +
+          '<span class="aw-grip" draggable="true" title="Drag to move">&#x2842;</span>' +
+          '<select class="tgl-what" style="flex:0 1 220px;min-width:0">' + tgWhatOptions(kind, "d:" + leaf.dim) + '</select>' +
+          '<span style="font-size:0.85rem;white-space:nowrap">matches</span>' +
+          dimControlHtml(leaf.dim, fdf, (TG_FILTER_META[leaf.dim] || {}).rep || "") +
+          '<button type="button" class="btn btn-sm btn-danger scr-remove" title="Remove filter">&times;</button>' +
+        '</div>' +
+        '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
+          '<span class="tgl-dim-note" style="flex-basis:100%;font-size:0.78rem"></span>' +
+        '</div>' +
+      '</div>';
+    }
     var isState = leaf.type === "asset_state";
     // A 0/1 state metric: equality only, and the value is a state name.
     var isFlag = !isState && isBooleanMetric(leaf.metric);
@@ -1913,11 +2185,12 @@ async function openAutomationWizard(existing, opts) {
     var ratio = !isState && !!leaf && isWindowedRatioMetric(leaf.metric);
     if (isState) {
       // State leaves take dimension filters too (fieldDimensions — interface
-      // for the ifOper/ifAdmin/poe trio, tunnel for ipsecStatus, hostname on
-      // every field): same controls and pickers as a metric leaf, minus the
-      // aggregation select a current-state comparison has no use for. Absent
-      // on a pre-upgrade server's schema → no inputs, the old behavior.
-      var fDims = kind === "host" ? [] : ((s.fieldDimensions && s.fieldDimensions[leaf.field]) || []);
+      // for the ifOper/ifAdmin/poe trio, tunnel for ipsecStatus): same controls
+      // and pickers as a metric leaf, minus the aggregation select a
+      // current-state comparison has no use for. With filter rows available,
+      // the liftable dims render inline only as UNLIFTED LEFTOVERS (a stored
+      // value tgFilterLift couldn't raise into a row) — see tgInlineDims.
+      var fDims = kind === "host" ? [] : tgInlineDims((s.fieldDimensions && s.fieldDimensions[leaf.field]) || [], leaf.dimensionFilter);
       if (fDims.length) {
         var fDf = leaf.dimensionFilter || {};
         line2 =
@@ -1928,7 +2201,7 @@ async function openAutomationWizard(existing, opts) {
       }
     }
     if (!isState) {
-      var dims = kind === "host" ? [] : ((s.metricDimensions && s.metricDimensions[leaf.metric]) || []);
+      var dims = kind === "host" ? [] : tgInlineDims((s.metricDimensions && s.metricDimensions[leaf.metric]) || [], leaf.dimensionFilter);
       var df = leaf.dimensionFilter || {};
       var dimInputs = dims.map(function (d) { return dimControlHtml(d, df, leaf.metric); }).join("");
       // Averaging a flag would produce a duty cycle rather than a state, so a
@@ -1982,6 +2255,10 @@ async function openAutomationWizard(existing, opts) {
   }
   function tgCollectLeaf(rowEl, kind) {
     var what = rowEl.querySelector(".tgl-what").value;
+    if (what.indexOf("d:") === 0) {
+      var fEl = rowEl.querySelector(".tgl-dim");
+      return { type: "asset_filter", dim: what.slice(2), value: fEl ? fEl.value.trim() : "" };
+    }
     var op = rowEl.querySelector(".tgl-op").value;
     if (what.indexOf("f:") === 0) {
       var vEl = rowEl.querySelector(".tgl-value");
@@ -2071,7 +2348,9 @@ async function openAutomationWizard(existing, opts) {
         var what = t.value;
         var metric = what.slice(2);
         var leaf;
-        if (what.indexOf("f:") === 0) {
+        if (what.indexOf("d:") === 0) {
+          leaf = { type: "asset_filter", dim: metric, value: "" };
+        } else if (what.indexOf("f:") === 0) {
           leaf = { type: "asset_state", field: metric, operator: "==", value: "" };
         } else if (isBooleanMetric(metric)) {
           // A flag defaults to "is <the interesting state>" — an ordered
@@ -2280,7 +2559,12 @@ async function openAutomationWizard(existing, opts) {
       var kind = cat === "host" ? "host" : "asset";
       var root = panel.querySelector("#aw-trig-root > .scg-group");
       if (root) {
-        var tree = tgCollectGroup(root, kind);
+        // Fold filter rows (device identifiers / component names) into their
+        // group's condition leaves — the STORED trigger only ever carries
+        // dimensionFilter. Placement problems surface in validateStep3.
+        var compiled = tgCompile(tgCollectGroup(root, kind));
+        _tgFilterErrors = compiled.errors;
+        var tree = compiled.tree;
         var dEl = panel.querySelector("#tf-duration-min");
         var mins = dEl && dEl.value !== "" ? Number(dEl.value) : 0;
         if (isNaN(mins) || mins < 0) mins = 0;
@@ -2409,6 +2693,9 @@ async function openAutomationWizard(existing, opts) {
     return null;
   }
   function validateStep3() {
+    // Filter-row placement problems from the collect that just ran (Next/Save
+    // always collect before validating; the live sentence collects constantly).
+    if (_tgFilterErrors.length) return _tgFilterErrors[0];
     var tr = draft.trigger || {};
     if (tr.type === "composite" || tr.type === "asset_metric" || tr.type === "asset_state" || tr.type === "host_metric") {
       var leaves = tr.type === "composite" ? tgLeaves(tr) : [tr];
@@ -2601,7 +2888,7 @@ async function openAutomationWizard(existing, opts) {
       if (isComposite) {
         var kind = tr.kind === "host" ? "host" : "asset";
         var condTree = customReset.condition
-          ? JSON.parse(JSON.stringify(customReset.condition))
+          ? tgLift(JSON.parse(JSON.stringify(customReset.condition)))
           : { op: "and", children: [tgDefaultLeaf(kind)] };
         condExtra =
           '<div style="margin:6px 0 0 24px">' +
@@ -2664,6 +2951,9 @@ async function openAutomationWizard(existing, opts) {
     var tr = draft.trigger || {};
     var autoCb = panel.querySelector("#aw-reset-auto");
     var reset;
+    // Only the condition branch below repopulates these — clearing here keeps
+    // a mode switch from leaving a stale filter error blocking Save.
+    _rsFilterErrors = [];
     if (autoCb && autoCb.checked) {
       reset = { mode: "auto" };
       var hyst = panel.querySelector("#aw-hyst-enable");
@@ -2684,7 +2974,13 @@ async function openAutomationWizard(existing, opts) {
       } else if (mode === "condition") {
         var kind = tr.kind === "host" ? "host" : "asset";
         var root = panel.querySelector("#aw-reset-root > .scg-group");
-        if (root) reset.condition = tgCollectGroup(root, kind);
+        if (root) {
+          // Same filter-row folding the trigger tree gets (the stored reset
+          // condition carries dimensionFilter only).
+          var rc = tgCompile(tgCollectGroup(root, kind));
+          _rsFilterErrors = rc.errors;
+          reset.condition = rc.tree;
+        }
         var cs = panel.querySelector("#aw-crs-sustain-min");
         var csus = cs && cs.value !== "" ? Number(cs.value) : 0;
         if (!isNaN(csus) && csus > 0) reset.sustainSec = csus * 60;
@@ -2706,6 +3002,7 @@ async function openAutomationWizard(existing, opts) {
       if ((tr.operator === "<" || tr.operator === "<=") && r.clearThreshold < t) return "Clear threshold must be at or above the fire threshold (" + t + ").";
     }
     if (r.mode === "condition") {
+      if (_rsFilterErrors.length) return "Custom reset: " + _rsFilterErrors[0];
       if (tr.type !== "composite") return "A custom reset condition needs a multi-condition trigger — add a second trigger condition, or use the automatic reset.";
       if (!r.condition || !(r.condition.children || []).length) return "Custom reset: add at least one condition.";
       var leaves = tgLeaves(r.condition);
@@ -3191,11 +3488,15 @@ async function openAutomationWizard(existing, opts) {
     var root = panel && panel.querySelector("#aw-trig-root > .scg-group");
     if (!root) return;
     var hx = root.querySelector(":scope > div > .scg-base-remove");
-    var rows = root.querySelectorAll(":scope > .scg-children > .scr-row");
+    // Filter rows don't count toward "single condition" — the base tier is
+    // single when it holds ONE metric condition, however many identifier /
+    // name filters narrow it — and their own × always stays visible (a filter
+    // is removable regardless of how many conditions there are).
+    var rows = root.querySelectorAll(":scope > .scg-children > .scr-row:not([data-filter-row])");
     var groups = root.querySelectorAll(":scope > .scg-children > .scg-group");
     var single = rows.length === 1 && groups.length === 0;
     if (hx) hx.style.display = single ? "" : "none";
-    root.querySelectorAll(":scope > .scg-children > .scr-row > .scr-remove").forEach(function (b) {
+    root.querySelectorAll(":scope > .scg-children > .scr-row:not([data-filter-row]) > .scr-remove").forEach(function (b) {
       b.style.display = single ? "none" : "";
     });
   }
@@ -3319,7 +3620,9 @@ async function openAutomationWizard(existing, opts) {
       hx.style.marginLeft = "auto"; // right-aligned on the severity line
       hx.style.order = "1";          // ...which the wrapped combinator follows
       hx.addEventListener("click", function () {
-        var real = root.querySelector(".scg-children > .scr-row .scr-remove");
+        // The proxied × removes the CONDITION, never a filter row that happens
+        // to sit first in the group.
+        var real = root.querySelector(".scg-children > .scr-row:not([data-filter-row]) .scr-remove");
         if (real) real.click();
       });
       header.appendChild(hx);
@@ -3407,10 +3710,16 @@ async function openAutomationWizard(existing, opts) {
   function syncBandsToBase(panel) {
     var host = panel.querySelector("#aw-bands");
     if (!host || !host.querySelector(".aw-band")) return;
-    var rows = panel.querySelectorAll("#aw-trig-root .scr-row");
-    if (rows.length !== 1) return; // bands only apply to a single-metric trigger
     var kind = panel.querySelector("#aw-trigger-type").value === "host" ? "host" : "asset";
-    var base = tgCollectLeaf(rows[0], kind);
+    // Collect + COMPILE the base group so filter rows fold into the condition
+    // before tiers mirror it — a tier's locked row then shows the identifier /
+    // name filters the base carries, and adding a filter row doesn't read as a
+    // second condition that stops the mirroring.
+    var root = panel.querySelector("#aw-trig-root > .scg-group");
+    if (!root) return;
+    var leaves = tgLeaves(tgCompile(tgCollectGroup(root, kind)).tree);
+    if (leaves.length !== 1) return; // bands only apply to a single-metric trigger
+    var base = leaves[0];
     if (base.type === "asset_state") return;
     var sig = bandSampleSig(base);
     // Windowed-ratio triggers keep their tiers' hold boxes too (2026-08-20):
