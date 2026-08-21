@@ -3097,13 +3097,14 @@ async function buildAssetUpdatePatch(
     if (!_projection) {
       const overrideSources = await prisma.assetSource.findMany({
         where: { assetId: id },
-        select: { sourceKind: true, inferred: true, observed: true },
+        select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
       });
       _projection = projectAssetFromSources(
         overrideSources.map((s) => ({
           sourceKind: s.sourceKind,
           inferred: s.inferred,
           observed: s.observed as Record<string, unknown> | null,
+          lastSeen: s.lastSeen,
         })),
       );
     }

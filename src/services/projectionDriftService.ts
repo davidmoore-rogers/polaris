@@ -88,7 +88,7 @@ export async function detectAndLogDrift(
       }),
       prisma.assetSource.findMany({
         where: { assetId },
-        select: { sourceKind: true, inferred: true, observed: true },
+        select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
       }),
     ]);
 
@@ -99,6 +99,7 @@ export async function detectAndLogDrift(
         sourceKind: s.sourceKind,
         inferred: s.inferred,
         observed: s.observed as Record<string, unknown> | null,
+        lastSeen: s.lastSeen,
       })),
     );
 

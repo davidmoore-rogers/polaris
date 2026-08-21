@@ -681,3 +681,86 @@ describe("assetProjection — Azure Arc Kubernetes clusters", () => {
     expect(projected.ipAddress).toBeNull();
   });
 });
+
+describe("projectAssetFromSources — freshest same-kind row speaks for the kind", () => {
+  // fortigate-endpoint is keyed by MAC, so a device that changed NICs keeps
+  // one row per MAC on the same asset. The freshest row (lastSeen) must win
+  // the pick; before this, the first row in (unordered) list order did, so a
+  // stale NIC's blob could keep reverting ipAddress on every projection apply.
+  it("prefers the fortigate-endpoint row with the freshest lastSeen", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      {
+        sourceKind: "fortigate-endpoint",
+        inferred: false,
+        observed: { ipAddress: "10.1.1.50", hostname: "laptop-dock" },
+        lastSeen: new Date("2026-08-01T00:00:00Z"),
+      },
+      {
+        sourceKind: "fortigate-endpoint",
+        inferred: false,
+        observed: { ipAddress: "10.2.2.60", hostname: "laptop-wifi" },
+        lastSeen: new Date("2026-08-20T00:00:00Z"),
+      },
+    ]);
+    expect(projected.ipAddress).toBe("10.2.2.60");
+    expect(projected.hostname).toBe("laptop-wifi");
+    expect(provenance.ipAddress).toBe("fortigate-endpoint");
+  });
+
+  it("freshest-row order does not depend on list order", () => {
+    const fresh: AssetSourceForProjection = {
+      sourceKind: "fortigate-endpoint",
+      inferred: false,
+      observed: { ipAddress: "10.2.2.60" },
+      lastSeen: new Date("2026-08-20T00:00:00Z"),
+    };
+    const stale: AssetSourceForProjection = {
+      sourceKind: "fortigate-endpoint",
+      inferred: false,
+      observed: { ipAddress: "10.1.1.50" },
+      lastSeen: new Date("2026-08-01T00:00:00Z"),
+    };
+    expect(projectAssetFromSources([fresh, stale]).projected.ipAddress).toBe("10.2.2.60");
+    expect(projectAssetFromSources([stale, fresh]).projected.ipAddress).toBe("10.2.2.60");
+  });
+
+  it("keeps first-row behavior when lastSeen is absent (legacy callers)", () => {
+    const { projected } = projectAssetFromSources([
+      src("fortigate-endpoint", { ipAddress: "10.1.1.50" }),
+      src("fortigate-endpoint", { ipAddress: "10.2.2.60" }),
+    ]);
+    expect(projected.ipAddress).toBe("10.1.1.50");
+  });
+
+  it("a row WITH lastSeen beats rows without one", () => {
+    const { projected } = projectAssetFromSources([
+      src("fortigate-endpoint", { ipAddress: "10.1.1.50" }),
+      {
+        sourceKind: "fortigate-endpoint",
+        inferred: false,
+        observed: { ipAddress: "10.2.2.60" },
+        lastSeen: new Date("2026-08-20T00:00:00Z"),
+      },
+    ]);
+    expect(projected.ipAddress).toBe("10.2.2.60");
+  });
+
+  it("does not change cross-kind priority — infra mgmtIp still beats a fresher endpoint row", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      {
+        sourceKind: "fortiswitch",
+        inferred: false,
+        observed: { mgmtIp: "10.0.0.2" },
+        lastSeen: new Date("2026-08-01T00:00:00Z"),
+      },
+      {
+        sourceKind: "fortigate-endpoint",
+        inferred: false,
+        observed: { ipAddress: "10.2.2.60" },
+        lastSeen: new Date("2026-08-20T00:00:00Z"),
+      },
+    ]);
+    expect(projected.ipAddress).toBe("10.0.0.2");
+    expect(provenance.ipAddress).toBe("fortiswitch");
+  });
+});

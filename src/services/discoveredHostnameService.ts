@@ -53,6 +53,7 @@ export function projectHostnamesFromSourceRows(
       sourceKind: r.sourceKind,
       inferred: r.inferred,
       observed: r.observed,
+      lastSeen: r.lastSeen,
     };
     if (list) list.push(entry);
     else byAsset.set(r.assetId, [entry]);
@@ -75,7 +76,7 @@ export async function getDiscoveredHostnames(
   if (assetIds.length === 0) return new Map();
   const rows = await prisma.assetSource.findMany({
     where: { assetId: { in: assetIds } },
-    select: { assetId: true, sourceKind: true, inferred: true, observed: true },
+    select: { assetId: true, sourceKind: true, inferred: true, observed: true, lastSeen: true },
   });
   return projectHostnamesFromSourceRows(
     rows.map((r) => ({
@@ -83,6 +84,7 @@ export async function getDiscoveredHostnames(
       sourceKind: r.sourceKind,
       inferred: r.inferred,
       observed: r.observed as Record<string, unknown> | null,
+      lastSeen: r.lastSeen,
     })),
   );
 }

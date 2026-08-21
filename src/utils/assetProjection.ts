@@ -83,6 +83,16 @@ export interface AssetSourceForProjection {
   sourceKind: AssetSourceKind | string;
   inferred: boolean;
   observed: Record<string, unknown> | null;
+  /**
+   * Row freshness (AssetSource.lastSeen). Optional. When an asset carries
+   * SEVERAL rows of the same kind — a device that changed NICs keeps one
+   * `fortigate-endpoint` row per MAC, since that kind's externalId IS the
+   * MAC — the freshest row speaks for the kind; without this, the pick was
+   * whichever row the unordered query returned first, so a stale NIC's blob
+   * could keep reverting ipAddress/hostname on every projection apply.
+   * Callers that omit it keep first-row-in-list behavior.
+   */
+  lastSeen?: Date | null;
 }
 
 export interface ProjectedAsset {
@@ -560,9 +570,20 @@ function projectField<T extends string | number>(
 ): { value: T | null; source: AssetSourceKind | null } {
   for (const rule of rules) {
     if (rule.applies && !rule.applies(sources)) continue;
-    const candidate = sources.find(
-      (s) => s.sourceKind === rule.sourceKind && !s.inferred,
-    );
+    // Among rows of the rule's kind, the freshest (lastSeen) speaks for the
+    // kind. Ties — and callers that don't supply lastSeen — keep the first
+    // row in list order, the historical behavior.
+    let candidate: AssetSourceForProjection | undefined;
+    let candidateSeen = -1;
+    for (const s of sources) {
+      if (s.sourceKind !== rule.sourceKind || s.inferred) continue;
+      const t = s.lastSeen ? s.lastSeen.getTime() : 0;
+      const seen = Number.isFinite(t) ? t : 0;
+      if (!candidate || seen > candidateSeen) {
+        candidate = s;
+        candidateSeen = seen;
+      }
+    }
     if (!candidate) continue;
     const picked = rule.pick(candidate.observed);
     if (picked !== null && picked !== undefined && picked !== "") {

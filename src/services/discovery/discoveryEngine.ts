@@ -32,6 +32,7 @@ import { isFortinetIntegrationType } from "../../utils/pollingCompatibility.js";
 import { ENTRA_ASSET_TAG_PREFIX, AD_ASSET_TAG_PREFIX, AD_GUID_TAG_PREFIX, SID_TAG_PREFIX } from "../../utils/assetSourceTags.js";
 import type { DiscoveryResult, DiscoveryProgressCallback } from "../fortimanagerService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
+import { scoreDhcpClaim, claimBeats, type DhcpClaimScore } from "../../utils/dhcpClaimFreshness.js";
 import { bareFortinetDeviceName } from "../../utils/assetSourceLocation.js";
 import { refreshProjectionPriority } from "../assetSourcePriorityService.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
@@ -2768,7 +2769,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
         const fwSourceRows = await prisma.assetSource.findMany({
           where: { assetId: existingAsset.id },
-          select: { sourceKind: true, inferred: true, observed: true },
+          select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
         });
         // Sweep any stale fortigate-endpoint source — a newly-deployed
         // FortiGate is often first sighted as a DHCP client of an existing
@@ -2793,6 +2794,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             sourceKind: s.sourceKind,
             inferred: s.inferred,
             observed: s.observed as Record<string, unknown> | null,
+            lastSeen: s.lastSeen,
           })),
         );
 
@@ -3350,13 +3352,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
         const swSourceRows = await prisma.assetSource.findMany({
           where: { assetId: existingAsset.id },
-          select: { sourceKind: true, inferred: true, observed: true },
+          select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
         });
         const { projected: swProjected } = projectAssetFromSources(
           swSourceRows.map((s) => ({
             sourceKind: s.sourceKind,
             inferred: s.inferred,
             observed: s.observed as Record<string, unknown> | null,
+            lastSeen: s.lastSeen,
           })),
         );
 
@@ -3662,13 +3665,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
         const apSourceRows = await prisma.assetSource.findMany({
           where: { assetId: existingAsset.id },
-          select: { sourceKind: true, inferred: true, observed: true },
+          select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
         });
         const { projected: apProjected } = projectAssetFromSources(
           apSourceRows.map((s) => ({
             sourceKind: s.sourceKind,
             inferred: s.inferred,
             observed: s.observed as Record<string, unknown> | null,
+            lastSeen: s.lastSeen,
           })),
         );
 
@@ -4781,6 +4785,30 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         .filter(Boolean),
     );
 
+    // Per-(mac, gate) client freshness from device inventory — the FortiGate's
+    // OWN per-client last_seen (an is_online client counts as now). Feeds the
+    // multi-gate DHCP claim ranking below: two unexpired leases are both
+    // "live" to the DHCP monitor, but only the gate the client is actually
+    // behind keeps seeing it.
+    const invSeenByMacDevice = new Map<string, number>();
+    for (const d of result.deviceInventory || []) {
+      if (!d.macAddress || !d.device) continue;
+      const mac = d.macAddress.toUpperCase().replace(/-/g, ":");
+      const at = d.isOnline ? Date.parse(now) : Date.parse(d.lastSeen);
+      if (Number.isNaN(at)) continue;
+      const key = `${mac}|${d.device}`;
+      const prev = invSeenByMacDevice.get(key);
+      if (prev === undefined || at > prev) invSeenByMacDevice.set(key, at);
+    }
+
+    // Best standing DHCP claim per asset. An asset sighted by several gates
+    // this run (unexpired lease on the site it left + fresh lease where it
+    // moved, or a config-only static reservation beside a live lease) must
+    // take ipAddress / ipSource / learnedLocation — and the fortigate-endpoint
+    // source blob's gate — from the FRESHEST sighting, not from whichever
+    // entry iterates last. See utils/dhcpClaimFreshness.ts for the ranking.
+    const bestIpClaimByAsset = new Map<string, DhcpClaimScore>();
+
     for (const entry of result.dhcpEntries) {
       if (!entry.macAddress || !entry.ipAddress) continue;
       const normalized = entry.macAddress.toUpperCase().replace(/-/g, ":");
@@ -4810,6 +4838,22 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // client sighting is their only evidence.
       const isFortinetOwnedInfra = isInfraAsset && asset.fortinetTopology != null;
 
+      // Rank this entry's claim on the asset's address against the best claim
+      // seen so far this run. Only the winner stages ipAddress / ipSource /
+      // learnedLocation and names the fortigate-endpoint blob's gate — a
+      // losing entry still contributes its sighting, MAC row, and presence.
+      const claimScore = scoreDhcpClaim({
+        type: entry.type,
+        seenLeased: entry.seenLeased,
+        expireTime: entry.expireTime,
+        inventorySeenMs: entry.device
+          ? invSeenByMacDevice.get(`${normalized}|${entry.device}`)
+          : undefined,
+      });
+      const incumbentScore = bestIpClaimByAsset.get(asset.id);
+      const winsIpClaim = !incumbentScore || claimBeats(claimScore, incumbentScore);
+      if (winsIpClaim) bestIpClaimByAsset.set(asset.id, claimScore);
+
       if (entry.device) {
         sightingRows.push({
           assetId: asset.id,
@@ -4826,7 +4870,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // device-inventory. End-of-sync flush below upserts the row.
         if (!isInfraAsset) {
           fortigateEndpointAssetIds.add(asset.id);
-          noteEndpointGate(asset.id, entry.device);
+          if (winsIpClaim) noteEndpointGate(asset.id, entry.device);
         }
       }
 
@@ -4875,7 +4919,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           : {}),
       };
       if (leasePresence && !isFortinetOwnedInfra) bumpLastSeen(updateData, asset, new Date(now), "dhcp-lease");
-      if (!isInfraAsset) {
+      if (!isInfraAsset && winsIpClaim) {
         updateData.ipAddress = entry.ipAddress;
         updateData.ipSource = entry.device || integrationType;
         if (entry.device) updateData.learnedLocation = entry.device;
@@ -4889,7 +4933,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // Update in-memory so device inventory phase sees current state
       asset.macAddress = macList[0].mac;
       asset.macAddresses = macList;
-      if (!isInfraAsset) {
+      if (!isInfraAsset && winsIpClaim) {
         asset.ipAddress = entry.ipAddress;
         if (entry.device) asset.learnedLocation = entry.device;
       }
@@ -4944,21 +4988,45 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       }
     }
 
+    // Coalesce per asset before executing. Several DHCP entries for one asset
+    // (multi-gate claims, multi-NIC) previously pushed one update row EACH,
+    // and those raced inside batchSettled's concurrency window — the asset's
+    // final ipAddress was whichever write landed last, defeating the claim
+    // ranking above. Shallow-merge in iteration order (the ranked ip fields
+    // are only staged by the winning entry, and a later winner overrides an
+    // earlier best-so-far); the MAC list is cumulative in-memory, so the last
+    // one is the most complete.
+    const mergedAssetUpdates: Array<{ id: string; data: any; macs?: MacJsonEntry[] }> = [];
+    {
+      const byId = new Map<string, { id: string; data: any; macs?: MacJsonEntry[] }>();
+      for (const u of assetUpdates) {
+        const prev = byId.get(u.id);
+        if (!prev) {
+          const merged = { ...u };
+          byId.set(u.id, merged);
+          mergedAssetUpdates.push(merged);
+          continue;
+        }
+        prev.data = { ...prev.data, ...u.data };
+        if (u.macs) prev.macs = u.macs;
+      }
+    }
+
     // Batch-execute asset updates. After each successful update, reconcile
     // the MAC side table from the in-memory list the discovery sync built.
     // Keeping the reconcile inline (per-asset) instead of as a second
     // global pass means a failure on one asset's reconcile only affects
     // that asset's MAC table — the others stay consistent.
-    if (assetUpdates.length > 0) {
-      const results = await batchSettled(assetUpdates, async (u) => {
+    if (mergedAssetUpdates.length > 0) {
+      const results = await batchSettled(mergedAssetUpdates, async (u) => {
         const updated = await prisma.asset.update({ where: { id: u.id }, data: u.data });
         if (u.macs) await reconcileMacAddresses(u.id, u.macs);
         return updated;
       });
       for (let i = 0; i < results.length; i++) {
         if (results[i].status === "rejected") {
-          const entry = result.dhcpEntries![i];
-          syncLog("error", `Failed to update asset MAC/IP for ${entry?.macAddress} (${entry?.ipAddress}): ${(results[i] as PromiseRejectedResult).reason?.message || "Unknown error"}`);
+          const u = mergedAssetUpdates[i];
+          syncLog("error", `Failed to update asset MAC/IP for asset ${u?.id} (${(u?.data as any)?.ipAddress ?? "no ip staged"}): ${(results[i] as PromiseRejectedResult).reason?.message || "Unknown error"}`);
         }
       }
     }
@@ -5049,6 +5117,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (r.hostname && r.ipAddress) resHostnameToIp.set(r.hostname.toLowerCase(), r.ipAddress);
     }
 
+    // Freshest inventory claim per asset for the ipAddress write below — the
+    // Phase 6 rule applied to inventory-only MACs: several gates can report
+    // the same client (the site it left keeps a remembered-but-offline row),
+    // and without ranking the LAST row iterated wrote the IP. The gate whose
+    // per-client last_seen is freshest speaks for the address.
+    const bestInvIpSeenByAsset = new Map<string, number>();
+
     for (const inv of result.deviceInventory) {
       if (!inv.macAddress && !inv.ipAddress) continue;
       const normalizedMac = inv.macAddress ? inv.macAddress.toUpperCase().replace(/-/g, ":") : "";
@@ -5097,8 +5172,18 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         updateData.statusChangedAt = new Date(now);
         updateData.statusChangedBy = integrationLabel;
       }
-        if (!handledByDhcp && inv.ipAddress && inv.ipAddress !== existingAsset.ipAddress) {
-          updateData.ipAddress = inv.ipAddress;
+        if (!handledByDhcp && inv.ipAddress) {
+          // Record the claim even when the value already matches — otherwise a
+          // fresh row that agrees with the asset stakes no claim and a stale
+          // gate's differing row iterated later would still take the address.
+          const invClaimMs = invSeenValid ? invSeenAt.getTime() : 0;
+          const bestClaimMs = bestInvIpSeenByAsset.get(existingAsset.id);
+          if (bestClaimMs === undefined || invClaimMs > bestClaimMs) {
+            bestInvIpSeenByAsset.set(existingAsset.id, invClaimMs);
+            if (inv.ipAddress !== existingAsset.ipAddress) {
+              updateData.ipAddress = inv.ipAddress;
+            }
+          }
         }
         // Fortinet infrastructure (firewall/switch/AP) gets os/osVersion from
         // its own discovery loop via projection — canonical FortiOS strings
@@ -5761,7 +5846,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     // batchSettled so unchanged assets don't pay any DB cost.
     const allSourceRows = await prisma.assetSource.findMany({
       where: { assetId: { in: [...fortigateEndpointAssetIds] } },
-      select: { assetId: true, sourceKind: true, inferred: true, observed: true },
+      // lastSeen rides along so the projection can let the FRESHEST of
+      // several same-kind rows speak for the kind — an asset that changed
+      // NICs keeps one fortigate-endpoint row per MAC, and without the
+      // freshness cue the stale NIC's blob could win the pick and revert
+      // the ipAddress Phase 6 just corrected.
+      select: { assetId: true, sourceKind: true, inferred: true, observed: true, lastSeen: true },
     });
     const sourcesByAsset = new Map<string, typeof allSourceRows>();
     for (const r of allSourceRows) {
@@ -5781,6 +5871,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             sourceKind: s.sourceKind,
             inferred: s.inferred,
             observed: s.observed as Record<string, unknown> | null,
+            lastSeen: s.lastSeen,
           })),
         );
         const corrections: Record<string, unknown> = {};
@@ -6649,11 +6740,11 @@ async function syncArcDevices(
     },
   });
   const allSources = await prisma.assetSource.findMany({
-    select: { assetId: true, sourceKind: true, externalId: true, inferred: true, observed: true },
+    select: { assetId: true, sourceKind: true, externalId: true, inferred: true, observed: true, lastSeen: true },
   });
 
   const assetById = new Map<string, any>(allAssets.map((a: any) => [a.id, a]));
-  const sourcesByAssetId = new Map<string, { sourceKind: string; inferred: boolean; observed: Record<string, unknown> | null }[]>();
+  const sourcesByAssetId = new Map<string, { sourceKind: string; inferred: boolean; observed: Record<string, unknown> | null; lastSeen: Date | null }[]>();
   const assetByArmId = new Map<string, any>();
   const assetIdsWithArcSource = new Set<string>();
   // vmUuid → asset. Populated from existing arc rows AND from vCenter VM rows
@@ -6685,7 +6776,7 @@ async function syncArcDevices(
 
   for (const row of allSources) {
     const list = sourcesByAssetId.get(row.assetId);
-    const entry = { sourceKind: row.sourceKind, inferred: row.inferred, observed: row.observed as Record<string, unknown> | null };
+    const entry = { sourceKind: row.sourceKind, inferred: row.inferred, observed: row.observed as Record<string, unknown> | null, lastSeen: row.lastSeen };
     if (list) list.push(entry); else sourcesByAssetId.set(row.assetId, [entry]);
 
     const asset = assetById.get(row.assetId);
@@ -7277,13 +7368,14 @@ async function syncEntraDevices(
       }
       const sourceRows = await prisma.assetSource.findMany({
         where: { assetId: existing.id },
-        select: { sourceKind: true, inferred: true, observed: true },
+        select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
       });
       const { projected } = projectAssetFromSources(
         sourceRows.map((s) => ({
           sourceKind: s.sourceKind,
           inferred: s.inferred,
           observed: s.observed as Record<string, unknown> | null,
+          lastSeen: s.lastSeen,
         })),
       );
 
@@ -7480,13 +7572,14 @@ async function syncEntraDevices(
             }
             const dupSourceRows = await prisma.assetSource.findMany({
               where: { assetId: dupEntra.asset.id },
-              select: { sourceKind: true, inferred: true, observed: true },
+              select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
             });
             const { projected: dupProjected } = projectAssetFromSources(
               dupSourceRows.map((s) => ({
                 sourceKind: s.sourceKind,
                 inferred: s.inferred,
                 observed: s.observed as Record<string, unknown> | null,
+                lastSeen: s.lastSeen,
               })),
             );
 
@@ -8006,13 +8099,14 @@ async function syncActiveDirectoryDevices(
       }
       const sourceRows = await prisma.assetSource.findMany({
         where: { assetId: existing.id },
-        select: { sourceKind: true, inferred: true, observed: true },
+        select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
       });
       const { projected } = projectAssetFromSources(
         sourceRows.map((s) => ({
           sourceKind: s.sourceKind,
           inferred: s.inferred,
           observed: s.observed as Record<string, unknown> | null,
+          lastSeen: s.lastSeen,
         })),
       );
 
@@ -8509,10 +8603,10 @@ async function syncVcenterDevices(
     try {
       const sourceRows = await prisma.assetSource.findMany({
         where: { assetId: existing.id },
-        select: { sourceKind: true, inferred: true, observed: true },
+        select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
       });
       const { projected } = projectAssetFromSources(
-        sourceRows.map((s) => ({ sourceKind: s.sourceKind, inferred: s.inferred, observed: s.observed as Record<string, unknown> | null })),
+        sourceRows.map((s) => ({ sourceKind: s.sourceKind, inferred: s.inferred, observed: s.observed as Record<string, unknown> | null, lastSeen: s.lastSeen })),
       );
       const hostBefore = snapshotMaterialAssetFields(existing);
       const updateData: Record<string, unknown> = {
@@ -8671,10 +8765,10 @@ async function syncVcenterDevices(
       try {
         const sourceRows = await prisma.assetSource.findMany({
           where: { assetId: existing.id },
-          select: { sourceKind: true, inferred: true, observed: true },
+          select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
         });
         const { projected } = projectAssetFromSources(
-          sourceRows.map((s) => ({ sourceKind: s.sourceKind, inferred: s.inferred, observed: s.observed as Record<string, unknown> | null })),
+          sourceRows.map((s) => ({ sourceKind: s.sourceKind, inferred: s.inferred, observed: s.observed as Record<string, unknown> | null, lastSeen: s.lastSeen })),
         );
         const vmBefore = snapshotMaterialAssetFields(existing);
         const updateData: Record<string, unknown> = {

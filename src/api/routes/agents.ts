@@ -1066,12 +1066,13 @@ agentsRouter.post("/system-info", async (req, res, next) => {
     // syncDhcpSubnets but scoped to one asset.
     const allSources = await prisma.assetSource.findMany({
       where:  { assetId },
-      select: { sourceKind: true, inferred: true, observed: true },
+      select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
     });
     const projInput = allSources.map((s) => ({
       sourceKind: s.sourceKind,
       inferred:   s.inferred,
       observed:   s.observed as Record<string, unknown> | null,
+      lastSeen:   s.lastSeen,
     }));
     const { projectAssetFromSources } = await import("../../utils/assetProjection.js");
     const { projected } = projectAssetFromSources(projInput);
