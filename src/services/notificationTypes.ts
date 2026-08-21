@@ -329,6 +329,10 @@ const dimensionFilterSchema = z
     // *Pattern dimensions, and ANDs with sensorClass when both are set.
     sensorNamePattern: z.string().max(200).optional(),
     mountPathPattern: z.string().max(200).optional(),
+    // Which SD-WAN service RULE (sdwanRuleStatus / sdwanSelectedMember alert
+    // per ruleName dimension; this narrows to the named rule[s]). Substring-
+    // matched like every other *Pattern dimension.
+    sdwanRulePattern: z.string().max(200).optional(),
     healthCheck: z.string().max(200).optional(),
     link: z.string().max(200).optional(),
     tunnelName: z.string().max(200).optional(),
@@ -2246,6 +2250,8 @@ export const FIELD_DIMENSIONS: Record<string, string[]> = {
   ifAdminStatus: ["ifNamePattern"],
   poeStatus: ["ifNamePattern"],
   ipsecStatus: ["tunnelName"],
+  sdwanRuleStatus: ["sdwanRulePattern"],
+  sdwanSelectedMember: ["sdwanRulePattern"],
 };
 
 // ── Device-identifier dimensions ─────────────────────────────────────────────
@@ -2484,6 +2490,7 @@ export function buildSchemaCatalog() {
       manufacturerPattern: "on devices whose manufacturer matches {value}",
       modelPattern: "on devices whose model matches {value}",
       mountPathPattern: "on mounts matching {value}",
+      sdwanRulePattern: "on SD-WAN rules matching {value}",
       healthCheck: "for health check {value}",
       link: "on member {value}",
       tunnelName: "on tunnel {value}",

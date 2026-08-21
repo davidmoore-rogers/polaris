@@ -256,7 +256,8 @@ function makeAutomationSentences(s) {
     macPattern: "on devices whose MAC matches {value}",
     manufacturerPattern: "on devices whose manufacturer matches {value}",
     modelPattern: "on devices whose model matches {value}",
-    mountPathPattern: "on mounts matching {value}", healthCheck: "for health check {value}",
+    mountPathPattern: "on mounts matching {value}", sdwanRulePattern: "on SD-WAN rules matching {value}",
+    healthCheck: "for health check {value}",
     link: "on member {value}", tunnelName: "on tunnel {value}", widgetId: "for widget {value}",
     processNamePattern: "for processes matching {value}",
     // Mirrors the server's dimensionPhrases. Present as built-in fallbacks too so
@@ -451,7 +452,7 @@ function makeAutomationSentences(s) {
   var FORMULA_STATE_AGG = { latest: "latest", max: "any", min: "all", avg: "avg", median: "median" };
   var FORMULA_DIM = Object.assign({
     sensorClass: "class=", sensorNamePattern: "name~", ifNamePattern: "if~",
-    mountPathPattern: "mount~", healthCheck: "health=", link: "member=",
+    mountPathPattern: "mount~", sdwanRulePattern: "rule~", healthCheck: "health=", link: "member=",
     tunnelName: "tunnel=", widgetId: "widget=", processNamePattern: "process~",
     stateProbeId: "probe=", stateRowPattern: "row~", hostnamePattern: "host~",
     ipPattern: "ip~", macPattern: "mac~", manufacturerPattern: "mfr~", modelPattern: "model~",
@@ -1135,7 +1136,7 @@ async function openAutomationWizard(existing, opts) {
       resetSentence = _sent.resetSentence,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { hostnamePattern: "any device — click to pick a hostname, or type to filter", ipPattern: "click to pick an IP — a prefix like 10.4. or a CIDR like 10.4.0.0/16 also works", macPattern: "click to pick a MAC, or type one in any separator style", manufacturerPattern: "any manufacturer — click to pick, or type to filter", modelPattern: "any model — click to pick, or type to filter", ifNamePattern: "any interface — click to pick, or type to filter", sensorClass:"sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
+  var DIM_PLACEHOLDER = { hostnamePattern: "any device — click to pick a hostname, or type to filter", ipPattern: "click to pick an IP — a prefix like 10.4. or a CIDR like 10.4.0.0/16 also works", macPattern: "click to pick a MAC, or type one in any separator style", manufacturerPattern: "any manufacturer — click to pick, or type to filter", modelPattern: "any model — click to pick, or type to filter", sdwanRulePattern: "any SD-WAN rule — click to pick, or type to filter", ifNamePattern: "any interface — click to pick, or type to filter", sensorClass:"sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
   // populate and whether each is a closed enum (`strict` → select-only, e.g.
   // sensorClass) or a substring match (→ suggestions, typing still allowed);
@@ -1161,6 +1162,7 @@ async function openAutomationWizard(existing, opts) {
     ifNamePattern: { label: "Interface name", rep: "ifOperStatus" },
     tunnelName: { label: "IPsec tunnel name", rep: "ipsecStatus" },
     mountPathPattern: { label: "Storage mount", rep: "storageUsedPct" },
+    sdwanRulePattern: { label: "SD-WAN rule name", rep: "sdwanRuleStatus" },
   };
   function tgFilterLabel(dim) { return (TG_FILTER_META[dim] && TG_FILTER_META[dim].label) || dim; }
   /** Filter rows are offered only when the server publishes the device dims —

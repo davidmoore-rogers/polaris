@@ -1624,6 +1624,23 @@ describe("trigger filter rows", () => {
     expect(() => ruleInputSchema.parse(saved)).not.toThrow();
   });
 
+  it("folds an SD-WAN rule-name row into the sdwan state condition", async () => {
+    await openAtStep3("r-filter-sdwan");
+    await pickWhat(doc.querySelector("#aw-trig-root .scr-row") as unknown as Element, "f:sdwanRuleStatus");
+    (doc.querySelector("#aw-trig-root .tgl-value") as unknown as { value: string }).value = "down";
+    const r1 = await addRow();
+    await pickWhat(r1, "d:sdwanRulePattern");
+    (lastRow().querySelector(".tgl-dim") as unknown as { value: string }).value = "Internet-Traffic";
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.trigger.type).toBe("asset_state");
+    expect(saved.trigger.field).toBe("sdwanRuleStatus");
+    expect(saved.trigger.dimensionFilter).toEqual({ sdwanRulePattern: "Internet-Traffic" });
+    expect(() => ruleInputSchema.parse(saved)).not.toThrow();
+  });
+
   it("refuses an empty filter and a filter no condition in the group can take", async () => {
     await openAtStep3("r-filter-invalid");
     (doc.querySelector("#aw-trig-root .tgl-threshold") as unknown as { value: string }).value = "90";

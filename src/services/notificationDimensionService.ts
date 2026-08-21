@@ -28,6 +28,7 @@
  */
 
 import { prisma } from "../db.js";
+import type { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
 import { triggerDimensionApplicable, type RuleScope } from "./notificationTypes.js";
 import { loadScopeAssetIds } from "./notificationEngine.js";
@@ -78,7 +79,11 @@ export interface DimensionValuesResult {
   values: DimensionValueOption[];
   /** Devices the draft's scope resolves to (before the sample cap). */
   scopedAssets: number;
-  /** Devices actually queried — less than scopedAssets when the cap applied. */
+  /** Effective coverage: equals scopedAssets when every device that COULD
+   *  report the dimension was queried (candidateWhere narrowed the set under
+   *  the cap — the values list is complete); less than scopedAssets only when
+   *  the cap genuinely truncated, which is what tells the UI to disclose a
+   *  partial list. */
   sampledAssets: number;
   /** Of the sampled devices, how many reported ANY value for this dimension.
    *  0 with scopedAssets > 0 is the "selected devices report none of these" case. */
@@ -105,6 +110,17 @@ interface DimensionSource {
   noun: string;
   /** Closed value set (select-only) vs a substring/pattern field (suggestions). */
   strict: boolean;
+  /**
+   * Which assets can REPORT this dimension at all, as a cheap indexed Asset
+   * where — applied before the interactive sample cap whenever the scope
+   * exceeds it. Without it the cap sampled the scoped ids BLINDLY, and at
+   * fleet scale that answer was a lie: 250 of ~14,500 scoped devices almost
+   * never contains the few FortiGates that report SD-WAN, so the picker said
+   * "these devices report no health checks" about a fleet that does (prod
+   * 2026-08-21). Absent = every scoped asset is a candidate (the identity
+   * dimensions, where that is true).
+   */
+  candidateWhere?: Prisma.AssetWhereInput;
   pairs: (ids: string[], since: Date, narrow: DimensionNarrow) => Promise<ValuePair[]>;
   /** Human tail describing the narrowing that was applied ("of class temperature"),
    *  so the empty-state message says WHICH slice came back empty. */
@@ -134,6 +150,9 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
   sensorClass: {
     noun: "hardware sensors",
     strict: true,
+    // Sensor samples only come from polled devices — the doctrine the whole
+    // builder follows (values from monitored devices only).
+    candidateWhere: { monitored: true },
     pairs: async (ids, since) =>
       (await prisma.assetHardwareSensorSample.groupBy({
         by: ["sensorClass", "assetId"],
@@ -145,6 +164,7 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
   sensorNamePattern: {
     noun: "hardware sensors",
     strict: false,
+    candidateWhere: { monitored: true },
     narrowLabel: (n) => (n.sensorClass ? ` of class ${n.sensorClass}` : ""),
     pairs: async (ids, since, narrow) =>
       (await prisma.assetHardwareSensorSample.groupBy({
@@ -220,6 +240,7 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
     // names the gate instead of reading as "this device has no ports".
     noun: "monitored interfaces",
     strict: false,
+    candidateWhere: { monitoredInterfaces: { isEmpty: false } },
     pairs: async (ids) =>
       (await prisma.asset.findMany({
         where: { id: { in: ids } },
@@ -237,6 +258,7 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
     // to the mounts that actually keep history.
     noun: "monitored storage mounts",
     strict: false,
+    candidateWhere: { monitoredStorage: { isEmpty: false } },
     pairs: async (ids) =>
       (await prisma.asset.findMany({
         where: { id: { in: ids } },
@@ -246,6 +268,10 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
   healthCheck: {
     noun: "SD-WAN health checks",
     strict: false,
+    // SD-WAN SLA samples come only from FortiGate firewalls (collectSdwan-
+    // Fortinet) — the case that motivated candidateWhere: a fleet-wide scope's
+    // blind sample missed every gate and read as "no health checks".
+    candidateWhere: { assetType: "firewall" },
     pairs: async (ids, since) =>
       (await prisma.assetPerfSlaSample.groupBy({
         by: ["healthCheck", "assetId"],
@@ -255,6 +281,7 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
   link: {
     noun: "SD-WAN WAN members",
     strict: false,
+    candidateWhere: { assetType: "firewall" },
     narrowLabel: (n) => (n.healthCheck ? ` for health check ${n.healthCheck}` : ""),
     pairs: async (ids, since, narrow) =>
       (await prisma.assetPerfSlaSample.groupBy({
@@ -277,11 +304,25 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
     // gate instead of reading as "this gate has no tunnels".
     noun: "monitored IPsec tunnels",
     strict: false,
+    candidateWhere: { monitoredIpsecTunnels: { isEmpty: false } },
     pairs: async (ids) =>
       (await prisma.asset.findMany({
         where: { id: { in: ids } },
         select: { id: true, monitoredIpsecTunnels: true },
       })).flatMap((a) => a.monitoredIpsecTunnels.map((t) => ({ value: t, assetId: a.id }))),
+  },
+  // SD-WAN service rules (sdwanRuleStatus / sdwanSelectedMember alert per
+  // ruleName; this dimension narrows to the named rule). Current-state table
+  // delete-replaced per scrape, so `since` is unused — like the pin arrays.
+  sdwanRulePattern: {
+    noun: "SD-WAN rules",
+    strict: false,
+    candidateWhere: { assetType: "firewall" },
+    pairs: async (ids) =>
+      (await prisma.assetSdwanRule.findMany({
+        where: { assetId: { in: ids } },
+        select: { assetId: true, ruleName: true },
+      })).map((r) => ({ value: r.ruleName, assetId: r.assetId })),
   },
   // Which state probe (Manufacturer Profile → state widget). Strict: the stored
   // value is a registry id matched exactly by the engine, not a pattern, so free
@@ -290,6 +331,7 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
   stateProbeId: {
     noun: "state probes",
     strict: true,
+    candidateWhere: { monitored: true },
     labelOf: () => {
       const byId = new Map(listStateProbes().map((p) => [p.id, `${p.name} (${p.manufacturer})`]));
       return (value: string) => byId.get(value);
@@ -306,6 +348,7 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
   stateRowPattern: {
     noun: "state probe rows",
     strict: false,
+    candidateWhere: { monitored: true },
     narrowLabel: (n) => {
       if (!n.stateProbeId) return "";
       const probe = listStateProbes().find((p) => p.id === n.stateProbeId);
@@ -387,7 +430,7 @@ export async function listDimensionValues(
 
   const scopedIds = await loadScopeAssetIds(scope);
   // Deterministic subset so repeated opens of the picker agree with each other.
-  const sorted = [...scopedIds].sort();
+  let sorted = [...scopedIds].sort();
   const base = {
     metric,
     dimension,
@@ -400,13 +443,32 @@ export async function listDimensionValues(
     return { ...base, values: [], sampledAssets: 0, assetsWithData: 0, windowHours: RECENT_WINDOW_HOURS };
   }
 
+  // Narrow to the devices that can actually REPORT this dimension before the
+  // interactive cap bites (see candidateWhere). Only worth a roundtrip when
+  // the scope exceeds the cap — below it everything gets queried regardless.
+  // When the narrowed set fits under the cap, the answer is EXHAUSTIVE over
+  // every capable device, so sampledAssets reports the full scope and the
+  // wizard's "Sampled X of Y" partial-list disclosure stays silent — the
+  // per-noun line ("Reported by N of M devices — the rest report no …")
+  // remains true as stated.
+  let exhaustive = sorted.length <= ASSET_SAMPLE_CAP;
+  if (!exhaustive && source.candidateWhere) {
+    const rows = await prisma.asset.findMany({
+      where: { AND: [{ id: { in: sorted } }, source.candidateWhere] },
+      select: { id: true },
+    });
+    sorted = rows.map((r) => r.id).sort();
+    exhaustive = sorted.length <= ASSET_SAMPLE_CAP;
+  }
+
   // Built once per request, not per value.
   const labelOf = source.labelOf?.();
 
   const ids = sorted.slice(0, ASSET_SAMPLE_CAP);
+  const sampledAssets = exhaustive ? scopedIds.length : ids.length;
   const recent = foldValuePairs(await source.pairs(ids, hoursAgo(RECENT_WINDOW_HOURS), narrow), labelOf);
   if (recent.values.length > 0) {
-    return { ...base, ...recent, sampledAssets: ids.length, windowHours: RECENT_WINDOW_HOURS };
+    return { ...base, ...recent, sampledAssets, windowHours: RECENT_WINDOW_HOURS };
   }
 
   // Nothing in the recent window: widen once before telling the operator these
@@ -417,7 +479,7 @@ export async function listDimensionValues(
   return {
     ...base,
     ...older,
-    sampledAssets: fallbackIds.length,
+    sampledAssets: exhaustive && ids.length <= FALLBACK_ASSET_CAP ? scopedIds.length : fallbackIds.length,
     windowHours: FALLBACK_WINDOW_HOURS,
   };
 }

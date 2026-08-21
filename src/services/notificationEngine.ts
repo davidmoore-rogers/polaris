@@ -728,7 +728,9 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
     case "sdwanRuleStatus": case "sdwanSelectedMember": {
       const rows = await prisma.assetSdwanRule.findMany({ where: { assetId: { in: ids } }, select: { assetId: true, ruleName: true, status: true, selectedMember: true } });
       const col = trigger.field === "sdwanRuleStatus" ? "status" : "selectedMember";
-      return rows.map((r) => { const a = index.get(r.assetId); if (!a) return null; return mk(a, r.ruleName, r.ruleName, (r as any)[col]); }).filter(Boolean) as Reading[];
+      // sdwanRulePattern narrows to the named rule(s) — without it every rule
+      // on the gate is its own alerting dimension, which is the default.
+      return rows.filter((r) => substringMatch(r.ruleName, df.sdwanRulePattern)).map((r) => { const a = index.get(r.assetId); if (!a) return null; return mk(a, r.ruleName, r.ruleName, (r as any)[col]); }).filter(Boolean) as Reading[];
     }
     default: return [];
   }

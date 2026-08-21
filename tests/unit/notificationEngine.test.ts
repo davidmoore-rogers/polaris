@@ -275,11 +275,16 @@ describe("trigger dimension vocabulary (identifier + state-field dims)", () => {
     expect(fd.ifAdminStatus).toEqual(["ifNamePattern"]);
     expect(fd.poeStatus).toEqual(["ifNamePattern"]);
     expect(fd.ipsecStatus).toEqual(["tunnelName"]);
+    // The SD-WAN pair alerts per ruleName — this narrows to the named rule(s).
+    expect(fd.sdwanRuleStatus).toEqual(["sdwanRulePattern"]);
+    expect(fd.sdwanSelectedMember).toEqual(["sdwanRulePattern"]);
     expect(fd.monitorStatus).toBeUndefined();
   });
   it("triggerDimensionApplicable admits metric dims, field dims, and identifiers on any asset leaf", () => {
     expect(triggerDimensionApplicable("storageUsedPct", "mountPathPattern")).toBe(true);
     expect(triggerDimensionApplicable("ifOperStatus", "ifNamePattern")).toBe(true);
+    expect(triggerDimensionApplicable("sdwanRuleStatus", "sdwanRulePattern")).toBe(true);
+    expect(triggerDimensionApplicable("sdwanSelectedMember", "sdwanRulePattern")).toBe(true);
     expect(triggerDimensionApplicable("cpuPct", "hostnamePattern")).toBe(true);
     expect(triggerDimensionApplicable("ipsecStatus", "macPattern")).toBe(true);
     // Wrong pairings stay 400s at the dimension-values endpoint.
@@ -301,6 +306,10 @@ describe("trigger dimension vocabulary (identifier + state-field dims)", () => {
     expect(() => ruleInputSchema.parse({
       ...base,
       trigger: { type: "asset_state", field: "ipsecStatus", operator: "!=", value: "up", dimensionFilter: { tunnelName: "to-hq", modelPattern: "FGT-60F" } },
+    })).not.toThrow();
+    expect(() => ruleInputSchema.parse({
+      ...base,
+      trigger: { type: "asset_state", field: "sdwanSelectedMember", operator: "!=", value: "wan1", dimensionFilter: { sdwanRulePattern: "Internet", hostnamePattern: "BRANCH" } },
     })).not.toThrow();
   });
 });
