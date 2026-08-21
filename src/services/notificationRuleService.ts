@@ -20,6 +20,7 @@ import {
   resolveTierLadder,
   severityRank,
   hwSensorFilterMatches,
+  dimensionSubstringMatch,
   CHANGE_TYPE_ACTIONS,
   legacyMirrorOfV2,
   normalizeRuleToV2,
@@ -176,6 +177,15 @@ export async function getMetricSeverityTiers(
 ): Promise<MetricSeverityTier[]> {
   const rules = await findRulesMatchingAsset(assetId);
   const collected: MetricSeverityTier[] = [];
+  // A trigger carrying hostnamePattern only evaluates devices it matches —
+  // shading this asset's chart with a rule that filters it out would paint
+  // thresholds that can never fire here. Fetched once; rules is often empty
+  // but the extra findUnique is one indexed row.
+  const asset = rules.length
+    ? await prisma.asset.findUnique({ where: { id: assetId }, select: { hostname: true } })
+    : null;
+  const hostnameSelects = (df: { hostnamePattern?: string } | null | undefined): boolean =>
+    dimensionSubstringMatch(asset?.hostname, df?.hostnamePattern);
 
   for (const row of rules) {
     const v2 = normalizeRuleToV2(row as Parameters<typeof normalizeRuleToV2>[0]);
@@ -188,6 +198,7 @@ export async function getMetricSeverityTiers(
     };
 
     if (trigger.type === "asset_metric" && trigger.metric === metric) {
+      if (!hostnameSelects(trigger.dimensionFilter)) continue;
       if (metric === "hwSensorValue" && dimension && !hwSensorFilterMatches(trigger.dimensionFilter, dimension)) continue;
       for (const tier of resolveTierLadder(trigger.operator, trigger.threshold, ruleSeverity, trigger.forDurationSec ?? 0, v2.severityBands)) {
         push(tier.operator, tier.threshold, tier.severity as Severity);
@@ -198,6 +209,7 @@ export async function getMetricSeverityTiers(
     if (trigger.type === "composite") {
       for (const leaf of collectCompositeMetricLeaves(trigger)) {
         if (leaf.type !== "asset_metric" || leaf.metric !== metric) continue;
+        if (!hostnameSelects(leaf.dimensionFilter)) continue;
         if (metric === "hwSensorValue" && dimension && !hwSensorFilterMatches(leaf.dimensionFilter, dimension)) continue;
         push(leaf.operator, leaf.threshold, ruleSeverity);
       }

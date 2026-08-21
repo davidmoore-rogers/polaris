@@ -618,3 +618,71 @@ describe("makeAutomationSentences", () => {
     });
   });
 });
+
+// ── State-leaf dimension filters + hostnamePattern (2026-08) ────────────────
+// State fields (ifOperStatus …) always accepted a dimensionFilter at the API,
+// but the sentence never rendered it — a hand-written "interface down on wan"
+// rule read as plain "interface down". And hostnamePattern is the universal
+// device dimension every asset leaf now takes. Pin both surfaces.
+describe("state-leaf dimensions + hostnamePattern", () => {
+  const S = {
+    ...JSON.parse(JSON.stringify({
+      triggerTypes: [
+        { type: "asset_metric", label: "Device metric", scoped: true },
+        { type: "asset_state", label: "Device state", scoped: true },
+        { type: "composite", label: "Multiple conditions", scoped: true },
+      ],
+      metricMeta: { cpuPct: { label: "CPU usage", unit: "%" } },
+      fieldMeta: { ifOperStatus: { label: "Interface oper status" }, ipsecStatus: { label: "IPsec tunnel status" } },
+    })),
+  };
+
+  it("renders a state trigger's interface + hostname filters in the sentence", () => {
+    const s = make(S as never);
+    const out = s.triggerSentence({
+      type: "asset_state", field: "ifOperStatus", operator: "==", value: "down",
+      dimensionFilter: { ifNamePattern: "wan", hostnamePattern: "CORE-SW" },
+    });
+    expect(out).toContain("Interface oper status equals down");
+    expect(out).toContain("on interfaces matching wan");
+    expect(out).toContain("on devices whose hostname matches CORE-SW");
+  });
+
+  it("renders hostnamePattern on a metric trigger", () => {
+    const s = make(S as never);
+    const out = s.triggerSentence({
+      type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 90,
+      aggregation: "latest", dimensionFilter: { hostnamePattern: "db-" },
+    });
+    expect(out).toContain("CPU usage is at or above 90 %");
+    expect(out).toContain("on devices whose hostname matches db-");
+  });
+
+  it("renders state-leaf dimensions inside a composite tree phrase", () => {
+    const s = make(S as never);
+    const out = s.triggerSentence({
+      type: "composite", op: "or", children: [
+        { type: "asset_state", field: "ifOperStatus", operator: "==", value: "down", dimensionFilter: { ifNamePattern: "port1", hostnamePattern: "SW-A" } },
+        { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 95, aggregation: "latest", dimensionFilter: { hostnamePattern: "SW-B" } },
+      ],
+    });
+    expect(out).toContain("on interfaces matching port1 on devices whose hostname matches SW-A");
+    expect(out).toContain("on devices whose hostname matches SW-B");
+    expect(out).toContain(" OR ");
+  });
+
+  it("puts a state leaf's filters inside the formula term", () => {
+    const s = make(S as never);
+    const f = s.triggerFormula({
+      type: "asset_state", field: "ifOperStatus", operator: "==", value: "down",
+      dimensionFilter: { ifNamePattern: "wan", hostnamePattern: "CORE" },
+    });
+    expect(f.lines[0]).toBe('Interface oper status[if~"wan", host~"CORE"] == "down"');
+  });
+
+  it("a state leaf with no filter keeps its bare term", () => {
+    const s = make(S as never);
+    const f = s.triggerFormula({ type: "asset_state", field: "ipsecStatus", operator: "!=", value: "up" });
+    expect(f.lines[0]).toBe('IPsec tunnel status != "up"');
+  });
+});

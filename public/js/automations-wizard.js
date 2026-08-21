@@ -251,6 +251,7 @@ function makeAutomationSentences(s) {
   var DIM_PHRASE = Object.assign({
     sensorClass: "for sensors of class {value}", sensorNamePattern: "on sensors matching {value}",
     ifNamePattern: "on interfaces matching {value}",
+    hostnamePattern: "on devices whose hostname matches {value}",
     mountPathPattern: "on mounts matching {value}", healthCheck: "for health check {value}",
     link: "on member {value}", tunnelName: "on tunnel {value}", widgetId: "for widget {value}",
     processNamePattern: "for processes matching {value}",
@@ -276,7 +277,15 @@ function makeAutomationSentences(s) {
   function tgLeafPhrase(leaf) {
     if (!leaf || !leaf.type) return "…";
     if (leaf.type === "asset_state") {
-      return fieldLabel(leaf.field) + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + String(leaf.value == null || leaf.value === "" ? "…" : leaf.value);
+      var sOut = fieldLabel(leaf.field) + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + String(leaf.value == null || leaf.value === "" ? "…" : leaf.value);
+      // State leaves carry dimension filters too (interface for the ifOper
+      // trio, tunnel for ipsecStatus, hostname everywhere) — render them the
+      // same way a metric leaf does, or the filter is invisible in the sentence.
+      var sDf = leaf.dimensionFilter || {};
+      Object.keys(sDf).forEach(function (k) {
+        if (sDf[k]) sOut += " " + (DIM_PHRASE[k] || k + " = {value}").replace("{value}", sDf[k]);
+      });
+      return sOut;
     }
     if (isBooleanMetric(leaf.metric)) return stateLeafClause(leaf);
     var unit = leafUnit(leaf.metric, leaf.dimensionFilter); unit = unit ? " " + unit : "";
@@ -382,6 +391,12 @@ function makeAutomationSentences(s) {
       });
     } else if (tr.type === "asset_state") {
       out = "When <strong>" + escapeHtml(fieldLabel(tr.field)) + " " + escapeHtml(CMP_PHRASE[tr.operator] || tr.operator) + " " + escapeHtml(String(tr.value == null ? "…" : tr.value)) + "</strong>";
+      // Same dimension clauses a metric trigger renders — a state trigger can
+      // filter by interface / tunnel / hostname and the sentence must say so.
+      var sdf = tr.dimensionFilter || {};
+      Object.keys(sdf).forEach(function (k) {
+        if (sdf[k]) out += " " + escapeHtml((DIM_PHRASE[k] || k + " = {value}").replace("{value}", sdf[k]));
+      });
     } else if (tr.type === "event") {
       out = "When an audit event matching <strong>" + escapeHtml(tr.actionPattern || "…") + "</strong>" +
         (tr.resourceType ? " on <strong>" + escapeHtml(tr.resourceType) + "</strong> resources" : "") +
@@ -429,7 +444,7 @@ function makeAutomationSentences(s) {
     sensorClass: "class=", sensorNamePattern: "name~", ifNamePattern: "if~",
     mountPathPattern: "mount~", healthCheck: "health=", link: "member=",
     tunnelName: "tunnel=", widgetId: "widget=", processNamePattern: "process~",
-    stateProbeId: "probe=", stateRowPattern: "row~",
+    stateProbeId: "probe=", stateRowPattern: "row~", hostnamePattern: "host~",
   }, s.formulaDimensions || {});
 
   /** "15m" / "2h" / "45s" — the compact form, since a formula line is dense. */
@@ -460,7 +475,9 @@ function makeAutomationSentences(s) {
 
   /** The value side: `median(CPU usage[if~"wan"], 15m)`. */
   function formulaTerm(leaf) {
-    if (leaf.type === "asset_state") return fieldLabel(leaf.field);
+    // A state leaf's dimension filters (interface / tunnel / hostname) render
+    // inside the term like a metric's: `Interface oper status[if~"wan"]`.
+    if (leaf.type === "asset_state") return fieldLabel(leaf.field) + formulaDims(leaf, false);
     var df = leaf.dimensionFilter || {};
     var flag = isBooleanMetric(leaf.metric);
     var probeName = flag ? stateMapOf(leaf.metric, df).name : "";
@@ -959,7 +976,7 @@ async function openAutomationWizard(existing, opts) {
       resetSentence = _sent.resetSentence,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
-  var DIM_PLACEHOLDER = { ifNamePattern: "any interface — click to pick, or type to filter", sensorClass: "sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
+  var DIM_PLACEHOLDER = { hostnamePattern: "any device — click to pick a hostname, or type to filter", ifNamePattern: "any interface — click to pick, or type to filter", sensorClass:"sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
   // populate and whether each is a closed enum (`strict` → select-only, e.g.
   // sensorClass) or a substring match (→ suggestions, typing still allowed);
@@ -1549,6 +1566,42 @@ async function openAutomationWizard(existing, opts) {
     });
     return out;
   }
+  /**
+   * Re-pin each rendered leaf row's selects from the model, right after a tree's
+   * HTML is injected. In a browser this is a no-op (the parsed
+   * `<option selected>` markup already agrees); happy-dom — the wizard's test
+   * environment — mis-parses a mid-list selected option, which made a STORED
+   * asset_state trigger read back as a metric row and throw in tgCollectLeaf.
+   * Same idiom as renderBandCond's post-render assignments. DOM rows and
+   * tgLeaves() walk the same depth-first order by construction, so index i of
+   * one is index i of the other.
+   */
+  function pinTreeSelects(rootEl, tree) {
+    if (!rootEl || !tree) return;
+    var leaves = tgLeaves(tree);
+    rootEl.querySelectorAll(".scr-row").forEach(function (row, i) {
+      var leaf = leaves[i];
+      if (!leaf) return;
+      var what = row.querySelector(".tgl-what");
+      if (what) what.value = leaf.type === "asset_state" ? "f:" + leaf.field : "m:" + leaf.metric;
+      var op = row.querySelector(".tgl-op");
+      if (op && leaf.operator) op.value = leaf.operator;
+      var agg = row.querySelector(".tgl-agg");
+      if (agg && !agg.getAttribute("data-ratio")) agg.value = leaf.aggregation || "latest";
+      if (leaf.type === "asset_state") {
+        var v = row.querySelector("select.tgl-value");
+        if (v && leaf.value != null) v.value = String(leaf.value);
+      } else {
+        var flag = row.querySelector("select.tgl-flag");
+        var t = Number(leaf.threshold);
+        if (flag && (t === 0 || t === 1)) flag.value = String(t);
+      }
+      row.querySelectorAll("select.tgl-dim").forEach(function (el) {
+        var d = el.getAttribute("data-dim");
+        el.value = (leaf.dimensionFilter && leaf.dimensionFilter[d]) || "";
+      });
+    });
+  }
   function tgGroupOpOptions(sel) {
     return (tgMeta.groupOps || ["and", "or"]).map(function (o) {
       return '<option value="' + o + '"' + (o === sel ? " selected" : "") + '>' + escapeHtml((tgMeta.groupOpLabels || {})[o] || o) + '</option>';
@@ -1626,13 +1679,16 @@ async function openAutomationWizard(existing, opts) {
       '</span>' +
       '<span class="tgl-dim-cue" style="font-size:0.75rem;white-space:nowrap"></span>';
   }
-  /** The metric a dim control belongs to, read LIVE off its row so switching the
-   *  metric re-asks for that metric's values instead of reusing the old ones. */
+  /** The metric OR state field a dim control belongs to, read LIVE off its row
+   *  so switching the metric re-asks for that metric's values instead of
+   *  reusing the old ones. State fields ("f:") ask through the same
+   *  /dimension-values endpoint — the two namespaces share no name, so the
+   *  bare identifier is unambiguous server-side. */
   function dimMetricOf(el) {
     var row = el.closest(".scr-row");
     var what = row && row.querySelector(".tgl-what");
     var v = what ? String(what.value || "") : "";
-    return v.indexOf("m:") === 0 ? v.slice(2) : "";
+    return v.indexOf("m:") === 0 || v.indexOf("f:") === 0 ? v.slice(2) : "";
   }
   /** The row's current dimensionFilter, read live off its controls (mirrors
    *  tgCollectLeaf) — the narrowing input for sibling-dependent lists. */
@@ -1855,6 +1911,22 @@ async function openAutomationWizard(existing, opts) {
       '</div>';
     var line2 = "";
     var ratio = !isState && !!leaf && isWindowedRatioMetric(leaf.metric);
+    if (isState) {
+      // State leaves take dimension filters too (fieldDimensions — interface
+      // for the ifOper/ifAdmin/poe trio, tunnel for ipsecStatus, hostname on
+      // every field): same controls and pickers as a metric leaf, minus the
+      // aggregation select a current-state comparison has no use for. Absent
+      // on a pre-upgrade server's schema → no inputs, the old behavior.
+      var fDims = kind === "host" ? [] : ((s.fieldDimensions && s.fieldDimensions[leaf.field]) || []);
+      if (fDims.length) {
+        var fDf = leaf.dimensionFilter || {};
+        line2 =
+          '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
+            fDims.map(function (d) { return dimControlHtml(d, fDf, leaf.field); }).join("") +
+            (fDims.some(function (d) { return DIM_PICKERS[d]; }) ? '<span class="tgl-dim-note" style="flex-basis:100%;font-size:0.78rem"></span>' : "") +
+          '</div>';
+      }
+    }
     if (!isState) {
       var dims = kind === "host" ? [] : ((s.metricDimensions && s.metricDimensions[leaf.metric]) || []);
       var df = leaf.dimensionFilter || {};
@@ -1913,7 +1985,11 @@ async function openAutomationWizard(existing, opts) {
     var op = rowEl.querySelector(".tgl-op").value;
     if (what.indexOf("f:") === 0) {
       var vEl = rowEl.querySelector(".tgl-value");
-      return { type: "asset_state", field: what.slice(2), operator: op, value: vEl ? vEl.value : "" };
+      var sLeaf = { type: "asset_state", field: what.slice(2), operator: op, value: vEl ? vEl.value : "" };
+      var sDf = {};
+      rowEl.querySelectorAll(".tgl-dim").forEach(function (el) { var v = el.value.trim(); if (v) sDf[el.getAttribute("data-dim")] = v; });
+      if (Object.keys(sDf).length) sLeaf.dimensionFilter = sDf;
+      return sLeaf;
     }
     var leaf = {
       type: kind === "host" ? "host_metric" : "asset_metric",
@@ -2156,6 +2232,9 @@ async function openAutomationWizard(existing, opts) {
       html += '<div class="form-group"><label>Change type</label><select id="tf-changetype">' + optLabeled((def && def.changeTypes) || [], ch.changeType, changeLabel) + '</select></div>';
     }
     box.innerHTML = html;
+    // Stored selects must agree with the model before the first collection
+    // (refreshTriggerSentence collects) — see pinTreeSelects.
+    if (cat === "device" || cat === "host") pinTreeSelects(box.querySelector("#aw-trig-root"), tree);
     refreshTriggerSentence();
     refreshDimOptions(panel);
     syncDurationRequirement(panel);
@@ -2559,7 +2638,9 @@ async function openAutomationWizard(existing, opts) {
         });
       }
       // The reset-condition builder shares the trigger tree machinery
-      // (delegated once per panel; kind follows the trigger).
+      // (delegated once per panel; kind follows the trigger) — including the
+      // stored-select re-pin the trigger tree gets.
+      if (isComposite) pinTreeSelects(panel.querySelector("#aw-reset-root"), condTree);
       wireTgTree(panel, "#aw-reset-root", function () {
         return (draft.trigger && draft.trigger.kind) === "host" ? "host" : "asset";
       }, function () { refreshResetSentence(); refreshDimOptions(panel); });

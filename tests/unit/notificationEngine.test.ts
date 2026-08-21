@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { compareNum, compareValue, globToRegExp, readingMeets, interfaceIsPinned, tunnelIsPinned } from "../../src/services/notificationEngine.js";
+import { compareNum, compareValue, globToRegExp, readingMeets, interfaceIsPinned, tunnelIsPinned, applyHostnameDimension } from "../../src/services/notificationEngine.js";
 import { scopeMatchesAsset, type ScopeAsset } from "../../src/services/notificationRuleService.js";
 import { stripRegionPrefix } from "../../src/services/notificationService.js";
 import { ruleInputSchema, buildSchemaCatalog } from "../../src/services/notificationTypes.js";
@@ -219,5 +219,65 @@ describe("buildSchemaCatalog", () => {
     expect(types).toEqual(["asset_metric", "asset_state", "host_metric", "event", "change", "composite"]);
     const scoped = cat.triggerTypes.filter((t) => t.scoped).map((t) => t.type);
     expect(scoped).toEqual(["asset_metric", "asset_state", "change", "composite"]);
+  });
+});
+
+describe("applyHostnameDimension", () => {
+  const fleet = [
+    { id: "1", hostname: "CORE-SW-01" },
+    { id: "2", hostname: "db-server-2" },
+    { id: "3", hostname: null },
+  ];
+  it("narrows to devices whose hostname substring-matches, case-insensitively", () => {
+    expect(applyHostnameDimension(fleet, { hostnamePattern: "core" }).map((a) => a.id)).toEqual(["1"]);
+    expect(applyHostnameDimension(fleet, { hostnamePattern: "SERVER" }).map((a) => a.id)).toEqual(["2"]);
+  });
+  it("a device with no hostname never matches a pattern", () => {
+    expect(applyHostnameDimension(fleet, { hostnamePattern: "x" })).toEqual([]);
+  });
+  it("no pattern (or no filter at all) passes the set through untouched", () => {
+    expect(applyHostnameDimension(fleet, {})).toBe(fleet);
+    expect(applyHostnameDimension(fleet, null)).toBe(fleet);
+    expect(applyHostnameDimension(fleet, undefined)).toBe(fleet);
+    expect(applyHostnameDimension(fleet, { hostnamePattern: "" })).toBe(fleet);
+  });
+});
+
+describe("trigger dimension vocabulary (hostname + state fields)", () => {
+  it("every asset metric takes hostnamePattern, appended after its own dims", () => {
+    const catalog = buildSchemaCatalog();
+    const md = catalog.metricDimensions as Record<string, string[]>;
+    for (const m of ["cpuPct", "responseTimeMs", "probeLossPct", "storageUsedPct", "ifInBps", "hwSensorValue", "customStateValue"]) {
+      expect(md[m], m).toBeDefined();
+      expect(md[m][md[m].length - 1], m).toBe("hostnamePattern");
+    }
+    // The metric's own dimension stays the lead input.
+    expect(md.storageUsedPct).toEqual(["mountPathPattern", "hostnamePattern"]);
+    expect(md.ifInBps).toEqual(["ifNamePattern", "hostnamePattern"]);
+  });
+  it("state fields publish their dimension inputs (the wizard's fieldDimensions)", () => {
+    const fd = buildSchemaCatalog().fieldDimensions as Record<string, string[]>;
+    // The engine has honored these filters since the pin-gate work; the builder
+    // finally offers them (interface on the state trio, tunnel on ipsecStatus).
+    expect(fd.ifOperStatus).toEqual(["ifNamePattern", "hostnamePattern"]);
+    expect(fd.ifAdminStatus).toEqual(["ifNamePattern", "hostnamePattern"]);
+    expect(fd.poeStatus).toEqual(["ifNamePattern", "hostnamePattern"]);
+    expect(fd.ipsecStatus).toEqual(["tunnelName", "hostnamePattern"]);
+    expect(fd.monitorStatus).toEqual(["hostnamePattern"]);
+  });
+  it("ruleInputSchema accepts hostnamePattern on metric AND state triggers", () => {
+    const base = { name: "t", severity: "warning", scope: { allAssets: true }, messageTemplate: "{message}" };
+    expect(() => ruleInputSchema.parse({
+      ...base,
+      trigger: { type: "asset_metric", metric: "cpuPct", operator: ">=", threshold: 90, dimensionFilter: { hostnamePattern: "db-" } },
+    })).not.toThrow();
+    expect(() => ruleInputSchema.parse({
+      ...base,
+      trigger: { type: "asset_state", field: "ifOperStatus", operator: "==", value: "down", dimensionFilter: { ifNamePattern: "wan1", hostnamePattern: "CORE" } },
+    })).not.toThrow();
+    expect(() => ruleInputSchema.parse({
+      ...base,
+      trigger: { type: "asset_state", field: "ipsecStatus", operator: "!=", value: "up", dimensionFilter: { tunnelName: "to-hq" } },
+    })).not.toThrow();
   });
 });

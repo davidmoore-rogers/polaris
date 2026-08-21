@@ -29,7 +29,7 @@
 
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
-import { METRIC_DIMENSIONS, type RuleScope } from "./notificationTypes.js";
+import { METRIC_DIMENSIONS, FIELD_DIMENSIONS, type RuleScope } from "./notificationTypes.js";
 import { loadScopeAssetIds } from "./notificationEngine.js";
 import { listStateProbes } from "./manufacturerProfileService.js";
 
@@ -155,6 +155,19 @@ const DIMENSION_SOURCES: Record<string, DimensionSource> = {
           ...(narrow.sensorClass ? { sensorClass: narrow.sensorClass } : {}),
         },
       })).map((r) => ({ value: r.sensorName, assetId: r.assetId })),
+  },
+  hostnamePattern: {
+    // The scoped devices' own hostnames — Asset rows, not a sample table, so
+    // `since` is unused (a hostname has no cadence). One value per device by
+    // construction; the per-value counts still matter because the filter is a
+    // SUBSTRING and "SW-" legitimately selects a fleet.
+    noun: "device hostnames",
+    strict: false,
+    pairs: async (ids) =>
+      (await prisma.asset.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, hostname: true },
+      })).map((a) => ({ value: a.hostname, assetId: a.id })),
   },
   ifNamePattern: {
     // Reads the PIN SET (`Asset.monitoredInterfaces`), which is what every
@@ -324,7 +337,10 @@ export async function listDimensionValues(
   scope: RuleScope,
   narrow: DimensionNarrow = {},
 ): Promise<DimensionValuesResult> {
-  const applicable = METRIC_DIMENSIONS[metric];
+  // `metric` may also name an asset_state FIELD (ifOperStatus …) — the wizard's
+  // state leaves ask through the same endpoint, and the two namespaces are
+  // disjoint by construction (ASSET_METRICS vs ASSET_STATE_FIELDS share no name).
+  const applicable = METRIC_DIMENSIONS[metric] ?? FIELD_DIMENSIONS[metric];
   if (!applicable?.includes(dimension)) {
     throw new AppError(400, `"${dimension}" is not a dimension of metric "${metric}"`);
   }

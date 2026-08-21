@@ -1252,11 +1252,17 @@ describe("automation wizard DOM render", () => {
     const win = g.window as InstanceType<typeof Window>;
     await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
       id: "r-formula",
-      name: "Loss",
+      name: "CPU hot",
       description: null,
       enabled: true,
       severity: "warning",
-      trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 600 },
+      // A plain numeric metric, deliberately NOT a windowed ratio: a ratio row
+      // hides its aggregation control and always renders `loss(probes, …)`, so
+      // the latest↔aggregated axis this test exercises doesn't exist there.
+      // (It used probeLossPct before pinTreeSelects existed, and only passed
+      // because happy-dom misreported the stored metric select as a non-ratio
+      // neighbor — see the ENVIRONMENT NOTE below.)
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 5, forDurationSec: 600 },
       scope: { allAssets: true },
       reset: { mode: "auto" },
       cooldownSec: null,
@@ -1501,5 +1507,114 @@ describe("automation wizard DOM render", () => {
     expect(saved.severityBands.map((b: any) => [b.threshold, b.severity])).toEqual([[20, "serious"], [30, "critical"]]);
     expect(saved.trigger.windowSec).toBe(900);
     expect(saved.severityBands.map((b: any) => b.forDurationSec)).toEqual([300, 0]);
+  });
+});
+
+// ── State-leaf dimension inputs (interface / tunnel / hostname), 2026-08 ────
+// The engine has honored dimensionFilter on the state fields since the
+// pin-gate work (ifNamePattern on the ifOper/ifAdmin/poe trio, tunnelName on
+// ipsecStatus), but tgLeafRowHtml only rendered dimension controls for METRIC
+// leaves — so "Interface oper status is down on interfaces matching wan" was
+// expressible only through the raw API. These pin the new fieldDimensions
+// rendering + collection, plus the universal hostnamePattern dimension.
+describe("state-leaf dimension inputs", () => {
+  const BASE = {
+    description: null,
+    enabled: true,
+    severity: "warning",
+    trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 10, forDurationSec: 0 },
+    scope: { allAssets: true },
+    cooldownSec: null,
+    messageTemplate: null,
+    actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+    escalation: null,
+    reset: { mode: "auto" },
+    severityBands: null,
+    bandNotify: null,
+  };
+
+  async function openAtStep3(id: string) {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({ ...BASE, id, name: "state dims" });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(doc.querySelector("#aw-step-3.visible")).toBeTruthy();
+  }
+
+  /** Pick a state FIELD the way an operator would (same happy-dom re-pin dance
+   *  as pickMetric above — the change handler re-renders the row). */
+  async function pickField(field: string) {
+    const win = g.window as InstanceType<typeof Window>;
+    const sel = doc.querySelector("#aw-trig-root .tgl-what") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    sel.value = "f:" + field;
+    sel.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    const after = doc.querySelector("#aw-trig-root .tgl-what") as unknown as { value: string };
+    after.value = "f:" + field;
+  }
+
+  it("switching to Interface oper status renders interface + hostname dimension inputs", async () => {
+    await openAtStep3("r-state-dims-render");
+    // A metric leaf renders no state dims; cpuPct now carries the hostname input.
+    expect(doc.querySelector('#aw-trig-root .tgl-dim[data-dim="hostnamePattern"]')).toBeTruthy();
+    await pickField("ifOperStatus");
+    const ifInput = doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="ifNamePattern"]');
+    const hostInput = doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="hostnamePattern"]');
+    expect(ifInput).toBeTruthy();
+    expect(hostInput).toBeTruthy();
+    // No aggregation control on a state leaf — the row's second line is dims only.
+    expect(doc.querySelector("#aw-trig-root .tgl-agg")).toBeFalsy();
+  });
+
+  it("collects and saves a state trigger's dimension filter", async () => {
+    await openAtStep3("r-state-dims-save");
+    await pickField("ifOperStatus");
+    (doc.querySelector("#aw-trig-root .tgl-value") as unknown as { value: string }).value = "down";
+    (doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="ifNamePattern"]') as unknown as { value: string }).value = "wan";
+    (doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="hostnamePattern"]') as unknown as { value: string }).value = "CORE";
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.trigger.type).toBe("asset_state");
+    expect(saved.trigger.field).toBe("ifOperStatus");
+    expect(saved.trigger.dimensionFilter).toEqual({ ifNamePattern: "wan", hostnamePattern: "CORE" });
+    // The wire shape the wizard produced is one the server accepts verbatim.
+    expect(() => ruleInputSchema.parse(saved)).not.toThrow();
+  });
+
+  it("ipsecStatus offers the tunnel dimension; an untouched filter stores nothing", async () => {
+    await openAtStep3("r-state-dims-ipsec");
+    await pickField("ipsecStatus");
+    expect(doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="tunnelName"]')).toBeTruthy();
+    expect(doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="hostnamePattern"]')).toBeTruthy();
+    (doc.querySelector("#aw-trig-root .tgl-value") as unknown as { value: string }).value = "down";
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.trigger.field).toBe("ipsecStatus");
+    // Empty inputs must not stage an empty dimensionFilter object.
+    expect(saved.trigger.dimensionFilter).toBeUndefined();
+  });
+
+  it("a stored state trigger re-opens with its dimension filter in the inputs", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      ...BASE, id: "r-state-dims-reopen", name: "state dims stored",
+      trigger: { type: "asset_state", field: "ifOperStatus", operator: "==", value: "down", forDurationSec: 0, dimensionFilter: { ifNamePattern: "port1", hostnamePattern: "SW-A" } },
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect((doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="ifNamePattern"]') as unknown as { value: string }).value).toBe("port1");
+    expect((doc.querySelector('#aw-trig-root input.tgl-dim[data-dim="hostnamePattern"]') as unknown as { value: string }).value).toBe("SW-A");
   });
 });

@@ -297,6 +297,16 @@ export const CHANGE_TYPE_ACTIONS: Record<(typeof CHANGE_TYPES)[number], string> 
 const dimensionFilterSchema = z
   .object({
     ifNamePattern: z.string().max(200).optional(),
+    // The asset's own hostname, substring-matched — available on EVERY asset
+    // metric and asset-state field (appended in METRIC_DIMENSIONS /
+    // FIELD_DIMENSIONS below). It exists for composite trees that mix
+    // host-specific branches in ONE automation ("interface down on CORE-SW OR
+    // storage full on BACKUP-01"); a single-condition automation can say the
+    // same thing with a hostname rule on the Devices step, and the engine
+    // treats the two identically (the reading set narrows either way). Rides
+    // triggerSignature like every other dimension, so two automations on the
+    // same metric with different hostname filters never carve each other out.
+    hostnamePattern: z.string().max(200).optional(),
     // Closed enum — must stay in lockstep with HardwareSensorClass in
     // src/utils/hardwareSensors.ts. A class missing here is unselectable in the
     // wizard even once samples carry it, which is what makes "alert on optics"
@@ -2212,6 +2222,34 @@ export const METRIC_DIMENSIONS: Record<string, string[]> = {
   customWidgetValue: ["widgetId"],
   customStateValue: ["stateProbeId", "stateRowPattern"],
 };
+// Every asset metric additionally takes `hostnamePattern` (see the schema note
+// above) — appended last so the metric's own dimension stays the row's lead
+// input. Host metrics have no asset, so HOST_METRICS deliberately get nothing.
+for (const m of ASSET_METRICS) {
+  METRIC_DIMENSIONS[m] = [...(METRIC_DIMENSIONS[m] ?? []), "hostnamePattern"];
+}
+
+// Which dimensionFilter inputs apply per asset_state FIELD — the state twin of
+// METRIC_DIMENSIONS. The engine has honored ifNamePattern on the interface
+// state trio and tunnelName on ipsecStatus since the pin-gate work, but the
+// builder never rendered an input for them, so "Interface oper status is down
+// on interfaces matching wan" was expressible only through the raw API. The
+// SD-WAN pair carries no name filter because the engine has none for it (rules
+// alert per ruleName dimension already); every field takes hostnamePattern via
+// the shared asset filter.
+export const FIELD_DIMENSIONS: Record<string, string[]> = {
+  monitorStatus: ["hostnamePattern"],
+  status: ["hostnamePattern"],
+  consecutiveFailures: ["hostnamePattern"],
+  dependencySuppressed: ["hostnamePattern"],
+  quarantined: ["hostnamePattern"],
+  ifOperStatus: ["ifNamePattern", "hostnamePattern"],
+  ifAdminStatus: ["ifNamePattern", "hostnamePattern"],
+  poeStatus: ["ifNamePattern", "hostnamePattern"],
+  ipsecStatus: ["tunnelName", "hostnamePattern"],
+  sdwanRuleStatus: ["hostnamePattern"],
+  sdwanSelectedMember: ["hostnamePattern"],
+};
 
 /**
  * The catalog the builder UI reads from GET /notification-rules/schema, so the
@@ -2232,6 +2270,11 @@ export function buildSchemaCatalog() {
     fieldMeta: FIELD_META,
     changeTypeMeta: CHANGE_TYPE_META,
     metricDimensions: METRIC_DIMENSIONS,
+    // The asset_state twin — which dimension inputs each state field takes
+    // (interface for the ifOper/ifAdmin/poe trio, tunnel for ipsecStatus,
+    // hostname everywhere). Absent on a pre-upgrade server; the wizard treats
+    // that as "state leaves take no dimensions", the old behavior.
+    fieldDimensions: FIELD_DIMENSIONS,
     // Metrics whose reading is a 0/1 flag, so the builder renders a state picker
     // instead of a threshold box and hides the numeric-only surfaces (severity
     // bands, hysteresis, unit hints).
@@ -2348,6 +2391,7 @@ export function buildSchemaCatalog() {
       sensorClass: "for sensors of class {value}",
       sensorNamePattern: "on sensors matching {value}",
       ifNamePattern: "on interfaces matching {value}",
+      hostnamePattern: "on devices whose hostname matches {value}",
       mountPathPattern: "on mounts matching {value}",
       healthCheck: "for health check {value}",
       link: "on member {value}",

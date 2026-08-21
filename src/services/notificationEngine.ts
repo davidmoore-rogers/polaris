@@ -377,6 +377,24 @@ function substringMatch(haystack: string | null, needle?: string): boolean {
   return (haystack ?? "").toLowerCase().includes(needle.toLowerCase());
 }
 
+/**
+ * The `hostnamePattern` dimension: narrow the asset set to devices whose
+ * hostname substring-matches, BEFORE any sample query runs. Every asset_metric
+ * and asset_state trigger takes it (METRIC_DIMENSIONS / FIELD_DIMENSIONS) —
+ * it's the one dimension that names the device rather than a sub-asset, and it
+ * exists so a composite tree can mix host-specific branches in one automation.
+ * No pattern = no filtering (the dimension is optional, like every *Pattern).
+ * Exported for unit tests.
+ */
+export function applyHostnameDimension<T extends { hostname: string | null }>(
+  assets: T[],
+  df: { hostnamePattern?: string } | null | undefined,
+): T[] {
+  const pattern = df?.hostnamePattern;
+  if (!pattern) return assets;
+  return assets.filter((a) => substringMatch(a.hostname, pattern));
+}
+
 /** Reduce sample rows to the latest per dimension key, or aggregate over window. */
 function reduceReadings(
   rows: Array<{ assetId: string; timestamp: Date }>,
@@ -417,11 +435,15 @@ function reduceReadings(
 }
 
 async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "asset_metric" }>, assets: ScopeAssetRow[]): Promise<Reading[]> {
+  const df = trigger.dimensionFilter ?? {};
+  // hostnamePattern narrows the ASSET set before any sample query — every
+  // metric takes it (the one dimension that names the device rather than a
+  // sub-asset), which is what lets a composite tree mix host-specific branches.
+  assets = applyHostnameDimension(assets, df);
   const ids = assets.map((a) => a.id);
   if (ids.length === 0) return [];
   const index = new Map(assets.map((a) => [a.id, a]));
   const since = new Date(Date.now() - Math.max(trigger.windowSec * 1000, DEFAULT_LOOKBACK_MS));
-  const df = trigger.dimensionFilter ?? {};
   const agg = trigger.aggregation;
   const num = (b: bigint | null | undefined): number | null => (b === null || b === undefined ? null : Number(b));
 
@@ -643,9 +665,10 @@ function rateReadings(
 }
 
 async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asset_state" }>, assets: ScopeAssetRow[]): Promise<Reading[]> {
+  const df = trigger.dimensionFilter ?? {};
+  assets = applyHostnameDimension(assets, df); // same asset-set narrowing as the metric resolver
   const index = new Map(assets.map((a) => [a.id, a]));
   const ids = assets.map((a) => a.id);
-  const df = trigger.dimensionFilter ?? {};
   const mk = (a: ScopeAssetRow, dimKey: string, dimLabel: string, value: any): Reading => ({ assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey, dimLabel, value });
 
   switch (trigger.field) {
