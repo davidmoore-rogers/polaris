@@ -1,5 +1,5 @@
 /**
- * tests/unit/macAddressesPrimary.test.ts
+ * tests/unit/macAddresses.test.ts
  *
  * Primary-MAC selection: hardware-truth entries (Intune/agent/vCenter NICs)
  * outrank network sightings, so a dock, dongle, or randomized-Wi-Fi MAC kept
