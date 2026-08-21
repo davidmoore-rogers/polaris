@@ -54,6 +54,7 @@ import {
 import { persistAssetServices } from "../../services/serviceInventoryService.js";
 import { persistInterfaceRows } from "../../services/interfaceInventoryService.js";
 import { reconcileMacAddresses, reconcileInterfaceMacs } from "../../services/macAddressService.js";
+import { selectPrimaryMac } from "../../utils/macAddresses.js";
 import { logEvent } from "./events.js";
 import { buildFirmwareChangedEvent } from "../../services/eventLogService.js";
 import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
@@ -1132,7 +1133,9 @@ agentsRouter.post("/system-info", async (req, res, next) => {
         }
         merged.sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
         await reconcileMacAddresses(assetId, merged);
-        const primary = merged[0]?.mac ?? null;
+        // Hardware-truth entries (this polaris-agent row included) outrank
+        // sightings for the primary slot — see selectPrimaryMac.
+        const primary = selectPrimaryMac(merged) ?? merged[0]?.mac ?? null;
         if (primary && current.macAddress !== primary) {
           diff.macAddress = primary;
         }

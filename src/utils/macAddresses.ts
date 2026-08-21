@@ -58,6 +58,63 @@ export const MAC_ROW_SELECT = {
 export const INTERFACE_MAC_SOURCE = "monitor-interface";
 
 /**
+ * Sources whose MAC entries are HARDWARE TRUTH — the device's own NICs as
+ * reported by something running on (or configuring) the device itself: the
+ * Polaris Agent, Intune's hardware inventory, vCenter's vNIC config. Everything
+ * else in the MAC list is a network SIGHTING: what some gate or switch saw the
+ * device transmit as, which includes USB docks/adapters (the dock's MAC follows
+ * the dock, not the laptop), randomized Wi-Fi MACs, and ZTNA-relayed
+ * identities. Sightings are still identity evidence for matching — they just
+ * must not steal the PRIMARY MAC from the real NICs (see selectPrimaryMac) and
+ * must not have their source label overwritten by a later sighting of the same
+ * address (see isHardwareMacSource's call sites in discovery).
+ */
+export const HARDWARE_MAC_SOURCES: ReadonlySet<string> = new Set([
+  "polaris-agent",
+  "intune-ethernet",
+  "intune-wifi",
+  "vcenter-vnic",
+]);
+
+export function isHardwareMacSource(source: string | null | undefined): boolean {
+  return !!source && HARDWARE_MAC_SOURCES.has(source);
+}
+
+/**
+ * Pick the asset's PRIMARY MAC from its entry list.
+ *
+ * When the list carries at least one hardware-truth entry (see
+ * HARDWARE_MAC_SOURCES), the primary is chosen among those only — freshest
+ * lastSeen wins — so a dock, dongle, or randomized-Wi-Fi sighting can never
+ * displace the device's real NIC (prod 2026-08: a shared dock's MAC, kept
+ * fresh by ZTNA sightings on a remote gate, was re-promoted to primary every
+ * discovery run and dragged the fortigate-endpoint identity with it). Assets
+ * with no hardware-truth entry (printers, cameras, anything outside
+ * Intune/agent/vCenter coverage) keep the historical freshest-overall rule.
+ *
+ * Range rows (macEnd set — the interface-fold shape) are never primary: a
+ * range is a port block, not a device identity. Returns null only when the
+ * list holds no usable single-MAC entry.
+ */
+export function selectPrimaryMac(
+  macs: ReadonlyArray<Pick<MacJsonEntry, "mac" | "lastSeen" | "source" | "macEnd">> | null | undefined,
+): string | null {
+  if (!Array.isArray(macs) || macs.length === 0) return null;
+  const singles = macs.filter((m) => m && m.mac && !m.macEnd);
+  if (singles.length === 0) return null;
+  const hardware = singles.filter((m) => isHardwareMacSource(m.source));
+  const candidates = hardware.length > 0 ? hardware : singles;
+  let best = candidates[0];
+  let bestMs = Date.parse(best.lastSeen ?? "") || 0;
+  for (let i = 1; i < candidates.length; i++) {
+    const ms = Date.parse(candidates[i].lastSeen ?? "") || 0;
+    // Strictly-greater keeps the first entry on ties, so re-runs are stable.
+    if (ms > bestMs) { best = candidates[i]; bestMs = ms; }
+  }
+  return best.mac;
+}
+
+/**
  * Convert side-table rows to the JSON shape the legacy code expected.
  * Sorted by lastSeen desc so the first entry is always the most recently
  * seen MAC — mirrors `macList.sort((a,b) => new Date(b.lastSeen) - ...)`

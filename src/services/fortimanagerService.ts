@@ -12,6 +12,7 @@ import { logger } from "../utils/logger.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
 import { parseRangeFirstIp, isValidIpv4 } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
+import { inventorySwitchAttribution, INVENTORY_QUERY_FORMAT } from "../utils/inventoryLocality.js";
 import type { ApLldpNeighborSample } from "../utils/fortiapLldp.js";
 import { findFortiswitchUplinkPorts } from "../utils/fortiswitchCmdb.js";
 import { processDetectedDeviceRows, processArpRows } from "../utils/fortinetDetectedDevice.js";
@@ -1889,7 +1890,7 @@ async function fmgStepInventory(ctx: FmgDeviceCtx): Promise<void> {
           data: {
             target: [`/adom/${adom}/device/${deviceName}`],
             action: "get",
-            resource: "/api/v2/monitor/user/device/query?format=mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen",
+            resource: `/api/v2/monitor/user/device/query?format=${INVENTORY_QUERY_FORMAT}`,
           },
         }],
       };
@@ -1915,8 +1916,7 @@ async function fmgStepInventory(ctx: FmgDeviceCtx): Promise<void> {
             osVersion: client.os_version || "",
             hardwareVendor: client.hardware_vendor || "",
             interfaceName: client.interface || "",
-            switchName: client.switch_fortilink || client.fortiswitch || "",
-            switchPort: client.switch_port != null ? String(client.switch_port) : "",
+            ...inventorySwitchAttribution(client),
             apName: client.ap_name || client.fortiap || "",
             user: client.user || client.detected_user || "",
             isOnline: !!client.is_online,

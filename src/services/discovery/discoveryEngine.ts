@@ -107,8 +107,14 @@ import {
   MAC_ROW_SELECT,
   shapeMacRows,
   buildMacRowsForCreate,
+  selectPrimaryMac,
+  isHardwareMacSource,
   type MacJsonEntry,
 } from "../../utils/macAddresses.js";
+import {
+  buildArpMacDeviceIndex,
+  inventorySightingIsLocal,
+} from "../../utils/inventoryLocality.js";
 import { reconcileMacAddresses } from "../macAddressService.js";
 import { logger } from "../../utils/logger.js";
 
@@ -4754,6 +4760,26 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     syncLog("info", `Stale-row sweep: released ${releasedStaleVips} VIP reservation(s), ${releasedStaleDhcpReservations} DHCP reservation(s)`);
   }
 
+  // Per-run (MAC, gate) ARP index — the locality half of the device-inventory
+  // trust decision shared by Phase 6's claim corroboration and Phase 7's
+  // location writes. A FortiOS inventory entry is NOT proof the client is
+  // behind that gate: a ZTNA access-proxy session creates one on the gate the
+  // user connects THROUGH, MAC and all, with a fresh last_seen (prod 2026-08 —
+  // a roaming user's dock MAC held a live entry three sites away and won the
+  // asset's learned location every run). `inventorySightingIsLocal` admits an
+  // entry only on positive local evidence: FortiSwitch/FortiAP attribution on
+  // the row itself, or this ARP binding on the same gate.
+  const arpMacDeviceIndex = buildArpMacDeviceIndex(result.arpTable);
+
+  // Freshness (ms epoch) of the sighting that currently names each asset's
+  // fortigate-endpoint gate this run — shared between the Phase 6 DHCP path
+  // and the Phase 7 inventory path so the LATEST local sighting wins the gate
+  // name regardless of which pathway carried it, instead of whichever pathway
+  // (or gate) happened to iterate last. Only strictly-fresher evidence takes
+  // over, so a remembered-but-offline (but still local-attributed) inventory
+  // row can't out-name a currently-held lease.
+  const bestGateClaimMsByAsset = new Map<string, number>();
+
   // ══════════════════════════════════════════════════════════════════════════════
   // Phase 6 — Associate DHCP MACs with assets & cross-update reservations
   phaseMark("6");
@@ -4789,10 +4815,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     // OWN per-client last_seen (an is_online client counts as now). Feeds the
     // multi-gate DHCP claim ranking below: two unexpired leases are both
     // "live" to the DHCP monitor, but only the gate the client is actually
-    // behind keeps seeing it.
+    // behind keeps seeing it. LOCAL rows only: a ZTNA-relayed inventory entry
+    // must not vouch for a stale lease on its own gate — and the corroborating
+    // evidence here is deliberately switch/AP/ARP, never the lease itself,
+    // because this map's whole job is to corroborate leases.
     const invSeenByMacDevice = new Map<string, number>();
     for (const d of result.deviceInventory || []) {
       if (!d.macAddress || !d.device) continue;
+      if (!inventorySightingIsLocal(d, arpMacDeviceIndex)) continue;
       const mac = d.macAddress.toUpperCase().replace(/-/g, ":");
       const at = d.isOnline ? Date.parse(now) : Date.parse(d.lastSeen);
       if (Number.isNaN(at)) continue;
@@ -4870,7 +4900,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // device-inventory. End-of-sync flush below upserts the row.
         if (!isInfraAsset) {
           fortigateEndpointAssetIds.add(asset.id);
-          if (winsIpClaim) noteEndpointGate(asset.id, entry.device);
+          if (winsIpClaim && entry.device) {
+            noteEndpointGate(asset.id, entry.device);
+            // Record how fresh this naming is so Phase 7's inventory pass only
+            // takes the gate over with strictly newer local evidence: a
+            // currently-held lease counts as now, otherwise the gate's own
+            // per-client inventory last_seen when it corroborated the claim.
+            const dhcpGateMs = entry.seenLeased
+              ? Date.parse(now)
+              : invSeenByMacDevice.get(`${normalized}|${entry.device}`) ?? 0;
+            bestGateClaimMsByAsset.set(asset.id, dhcpGateMs);
+          }
         }
       }
 
@@ -4882,7 +4922,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const existingMac = macList.find((m: any) => m.mac === normalized);
       if (existingMac) {
         existingMac.lastSeen = now;
-        existingMac.source = entry.type;
+        // A sighting must not relabel a hardware-truth entry (intune-*/agent/
+        // vcenter-vnic): the source is what keeps the entry eligible as the
+        // PRIMARY MAC (selectPrimaryMac), and the device's real NIC showing up
+        // in a lease table doesn't stop it being the real NIC.
+        if (!isHardwareMacSource((existingMac as any).source)) existingMac.source = entry.type;
         if (matchingSubnet) {
           existingMac.subnetCidr = matchingSubnet.cidr;
           existingMac.subnetName = matchingSubnet.name;
@@ -4907,8 +4951,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
       // Queue asset update. macAddresses go to the side table via the
       // reconcile call inside batchSettled, not as a JSON column write.
+      // Primary MAC: hardware-truth entries (Intune/agent/vCenter NICs) win
+      // over sightings — see selectPrimaryMac.
+      const dhcpPrimaryMac = selectPrimaryMac(macList) ?? macList[0].mac;
       const updateData: Record<string, unknown> = {
-        macAddress: macList[0].mac,
+        macAddress: dhcpPrimaryMac,
         // A live lease must not pull a maintenance-window asset back to
         // "active" — that status is scheduler-owned until the window ends.
         ...(leasePresence && asset.status !== "maintenance"
@@ -4931,7 +4978,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       });
 
       // Update in-memory so device inventory phase sees current state
-      asset.macAddress = macList[0].mac;
+      asset.macAddress = dhcpPrimaryMac;
       asset.macAddresses = macList;
       if (!isInfraAsset && winsIpClaim) {
         asset.ipAddress = entry.ipAddress;
@@ -5149,6 +5196,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const invSeenAt = inv.isOnline ? new Date(now) : new Date(inv.lastSeen);
       const invSeenValid = !Number.isNaN(invSeenAt.getTime());
 
+      // May this row LOCATE the device? A ZTNA access-proxy session creates an
+      // inventory entry (MAC, hostname, fresh last_seen and all) on a gate the
+      // user merely connects THROUGH — so location-shaped writes below
+      // (learnedLocation, the IP claim, the MAC entry's device stamp, the
+      // endpoint-gate name) require positive local evidence: FortiSwitch/AP
+      // attribution on the row, or an ARP binding on the same gate this run.
+      // Non-local rows still contribute what they truly know: presence,
+      // OS/vendor fingerprints, the user sighting.
+      const invIsLocal = inventorySightingIsLocal(inv, arpMacDeviceIndex);
+
       if (existingAsset) {
         const invIsFortinetInfra = existingAsset.assetType === "firewall"
           || existingAsset.assetType === "switch"
@@ -5172,10 +5229,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         updateData.statusChangedAt = new Date(now);
         updateData.statusChangedBy = integrationLabel;
       }
-        if (!handledByDhcp && inv.ipAddress) {
+        if (!handledByDhcp && inv.ipAddress && invIsLocal) {
           // Record the claim even when the value already matches — otherwise a
           // fresh row that agrees with the asset stakes no claim and a stale
           // gate's differing row iterated later would still take the address.
+          // Local rows only: a ZTNA entry relays the client's IP from wherever
+          // it really is, and must not write it as this gate's sighting.
           const invClaimMs = invSeenValid ? invSeenAt.getTime() : 0;
           const bestClaimMs = bestInvIpSeenByAsset.get(existingAsset.id);
           if (bestClaimMs === undefined || invClaimMs > bestClaimMs) {
@@ -5205,7 +5264,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
         if (inv.osVersion && !invIsFortinetInfra) updateData.osVersion = inv.osVersion;
         if (inv.hardwareVendor && !existingAsset.manufacturer) updateData.manufacturer = inv.hardwareVendor;
-        if (inv.device && !existingAsset.learnedLocation) updateData.learnedLocation = inv.device;
+        if (inv.device && !existingAsset.learnedLocation && invIsLocal) updateData.learnedLocation = inv.device;
         if (switchConn) updateData.lastSeenSwitch = switchConn;
         if (apConn) updateData.lastSeenAp = apConn;
         // Baseline BEFORE the Object.assign below mutates existingAsset. The
@@ -5240,21 +5299,31 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         let macListForReconcile: MacJsonEntry[] | null = null;
         if (normalizedMac && !handledByDhcp) {
           const macList: MacJsonEntry[] = Array.isArray(existingAsset.macAddresses) ? [...(existingAsset.macAddresses as any)] : [];
+          // Evidence time, never run time: stamping `now` here made a
+          // remembered-but-offline (or ZTNA-relayed) row re-freshen its MAC
+          // entry every discovery run, which kept it winning the primary-MAC
+          // sort over the device's real NICs (prod 2026-08). Only-advance, so
+          // an old cached row can't move a fresher stamp backwards.
+          const macSeenMs = invSeenValid ? invSeenAt.getTime() : 0;
           const existingMac = macList.find((m) => m.mac === normalizedMac);
           if (existingMac) {
-            existingMac.lastSeen = now;
-            existingMac.source = "device-inventory";
-            if (inv.device) existingMac.device = inv.device;
+            if (macSeenMs > (Date.parse(existingMac.lastSeen) || 0)) {
+              existingMac.lastSeen = invSeenAt.toISOString();
+            }
+            // A sighting must not relabel a hardware-truth entry — the source
+            // keeps the entry eligible as primary (selectPrimaryMac).
+            if (!isHardwareMacSource(existingMac.source)) existingMac.source = "device-inventory";
+            if (inv.device && invIsLocal) existingMac.device = inv.device;
           } else {
             macList.push({
               mac: normalizedMac,
-              lastSeen: now,
+              lastSeen: invSeenValid ? invSeenAt.toISOString() : now,
               source: "device-inventory",
-              ...(inv.device ? { device: inv.device } : {}),
+              ...(inv.device && invIsLocal ? { device: inv.device } : {}),
             });
           }
           macList.sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
-          updateData.macAddress = macList[0].mac;
+          updateData.macAddress = selectPrimaryMac(macList) ?? macList[0].mac;
           // Update in-memory `existingAsset.macAddresses` for downstream sync
           // phases that read it before the next pre-load. Side-table reconcile
           // happens after the asset.update lands.
@@ -5277,7 +5346,19 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             inventoryAssets.push(`${existingAsset.hostname || normalizedMac} (updated)`);
             if (existingAsset.assetType !== "firewall" && existingAsset.assetType !== "switch" && existingAsset.assetType !== "access_point") {
               fortigateEndpointAssetIds.add(existingAsset.id);
-              noteEndpointGate(existingAsset.id, inv.device);
+              // Name the endpoint gate only from a LOCAL sighting, and only
+              // when it's strictly fresher than whatever named the gate so far
+              // this run (the DHCP path's claim, or another gate's inventory
+              // row) — a stale-but-local cached row must not out-name a
+              // currently-held lease, and a ZTNA relay must never name it.
+              if (invIsLocal && inv.device) {
+                const prevMs = bestGateClaimMsByAsset.get(existingAsset.id);
+                const gateMs = invSeenValid ? invSeenAt.getTime() : 0;
+                if (prevMs === undefined || gateMs > prevMs) {
+                  bestGateClaimMsByAsset.set(existingAsset.id, gateMs);
+                  noteEndpointGate(existingAsset.id, inv.device);
+                }
+              }
             }
           } catch (err: any) {
             syncLog("error", `Failed to update inventory asset ${existingAsset.hostname || normalizedMac}: ${err.message || "Unknown error"}`);
@@ -5300,10 +5381,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           const newAsset = await prisma.asset.create({
             data: {
               ipAddress: resolvedIp,
-              ipSource: inv.device || integrationType,
+              // Location-shaped fields only from a LOCAL sighting — a ZTNA
+              // relay's entry still creates the asset (the device is real),
+              // but must not claim it sits behind this gate.
+              ipSource: (invIsLocal ? inv.device : null) || integrationType,
               macAddress: normalizedMac || null,
               ...(normalizedMac
-                ? { macAddressRows: { create: buildMacRowsForCreate([{ mac: normalizedMac, lastSeen: now, source: "device-inventory", ...(inv.device ? { device: inv.device } : {}) }]) } }
+                ? { macAddressRows: { create: buildMacRowsForCreate([{ mac: normalizedMac, lastSeen: invSeenValid ? invSeenAt.toISOString() : now, source: "device-inventory", ...(inv.device && invIsLocal ? { device: inv.device } : {}) }]) } }
                 : {}),
               hostname: inv.hostname || null,
               manufacturer: inv.hardwareVendor || null,
@@ -5313,7 +5397,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               statusChangedBy: integrationLabel,
               os: inv.os || null,
               osVersion: inv.osVersion || null,
-              learnedLocation: inv.device || null,
+              learnedLocation: invIsLocal ? inv.device || null : null,
               lastSeenSwitch: switchConn,
               lastSeenAp: apConn,
               associatedUsers: userList,
@@ -5332,7 +5416,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           });
           if (newAsset.assetType !== "firewall" && newAsset.assetType !== "switch" && newAsset.assetType !== "access_point") {
             fortigateEndpointAssetIds.add(newAsset.id);
-            noteEndpointGate(newAsset.id, inv.device);
+            if (invIsLocal && inv.device) {
+              bestGateClaimMsByAsset.set(newAsset.id, invSeenValid ? invSeenAt.getTime() : 0);
+              noteEndpointGate(newAsset.id, inv.device);
+            }
           }
         } catch (err: any) {
           syncLog("error", `Failed to create inventory asset ${inv.hostname || normalizedMac || inv.ipAddress}: ${err.message || "Unknown error"}`);
@@ -5353,9 +5440,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
   if (result.inventoryDevices && result.inventoryDevices.length > 0) {
     const refreshedDevices = new Set(result.inventoryDevices);
+    // LOCAL rows only: a ZTNA-relayed inventory entry doesn't keep a device
+    // stamp alive, so stamps written before the locality gate existed (a dock
+    // MAC "on" a gate three sites away) heal here on the next cycle instead
+    // of surviving as long as the ZTNA session keeps recurring.
     const seenMacOnDevice = new Set<string>();
     for (const inv of result.deviceInventory || []) {
       if (!inv.macAddress || !inv.device) continue;
+      if (!inventorySightingIsLocal(inv, arpMacDeviceIndex)) continue;
       const mac = inv.macAddress.toUpperCase().replace(/-/g, ":");
       seenMacOnDevice.add(`${mac}|${inv.device}`);
     }
@@ -5641,7 +5733,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // ══════════════════════════════════════════════════════════════════════════════
 
   if (adoptionBudget && adoptionBudget.remaining > 0 && !signal?.aborted) {
-    const evidence = buildMacEvidenceIndex(result.arpTable || [], result.deviceInventory || []);
+    // Inventory evidence is locality-filtered: with overlapping RFC1918
+    // subnets, a ZTNA-relayed row can claim (this gate, <client's home IP>)
+    // for an address this gate ALSO serves — exactly the key a placeholder
+    // reservation here would adopt the wrong MAC from. ARP rows are local by
+    // construction and pass through unfiltered.
+    const evidence = buildMacEvidenceIndex(
+      result.arpTable || [],
+      (result.deviceInventory || []).filter((d) => inventorySightingIsLocal(d, arpMacDeviceIndex)),
+    );
     if (evidence.size > 0) {
       await runPlaceholderMacAdoption({
         integrationId,
@@ -7256,7 +7356,9 @@ async function syncEntraDevices(
         }
       }
       merged.sort((a: any, b: any) => new Date(b.lastSeen || 0).getTime() - new Date(a.lastSeen || 0).getTime());
-      const primary = merged[0]?.mac ?? null;
+      // Hardware-truth entries (these Intune rows included) outrank sightings
+      // for the primary slot — see selectPrimaryMac.
+      const primary = selectPrimaryMac(merged) ?? merged[0]?.mac ?? null;
       return { primary, merged };
     };
 
@@ -8736,7 +8838,8 @@ async function syncVcenterDevices(
         }
       }
       merged.sort((a: any, b: any) => new Date(b.lastSeen || 0).getTime() - new Date(a.lastSeen || 0).getTime());
-      return { primary: merged[0]?.mac ?? null, merged };
+      // vcenter-vnic rows are hardware truth — see selectPrimaryMac.
+      return { primary: selectPrimaryMac(merged) ?? merged[0]?.mac ?? null, merged };
     };
 
     // Match cascade: (1) vcenter-vm source by externalId → (2) vNIC MAC

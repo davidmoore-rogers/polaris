@@ -17,6 +17,7 @@ import { insecureTlsDispatcher } from "../utils/tlsDispatcher.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
 import { parseRangeFirstIp, isValidIpv4 } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
+import { inventorySwitchAttribution, INVENTORY_QUERY_FORMAT } from "../utils/inventoryLocality.js";
 import type {
   DiscoveredSubnet,
   DiscoveredDevice,
@@ -575,7 +576,7 @@ async function fgtChainInventory(ctx: FgtChainCtx): Promise<void> {
       // Step 3c: Device inventory (detected clients)
       try {
         const results = await fgRequest<any[]>(config, "GET", "/api/v2/monitor/user/device/query", {
-      query: { ...queryBase, format: "mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen" },
+      query: { ...queryBase, format: INVENTORY_QUERY_FORMAT },
       signal,
     });
 
@@ -587,6 +588,7 @@ async function fgtChainInventory(ctx: FgtChainCtx): Promise<void> {
         if (!mac && !ip) continue;
         if (!client.last_seen) continue;
 
+        const switchAttr = inventorySwitchAttribution(client);
         deviceInventory.push({
           device: deviceName,
           macAddress: mac,
@@ -596,8 +598,8 @@ async function fgtChainInventory(ctx: FgtChainCtx): Promise<void> {
           osVersion: client.os_version || "",
           hardwareVendor: client.hardware_vendor || "",
           interfaceName: client.interface || "",
-          switchName: client.switch_fortilink || client.fortiswitch || "",
-          switchPort: client.switch_port != null ? String(client.switch_port) : "",
+          switchName: switchAttr.switchName,
+          switchPort: switchAttr.switchPort,
           apName: client.ap_name || client.fortiap || "",
           user: client.user || client.detected_user || "",
           isOnline: !!client.is_online,
