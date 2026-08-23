@@ -7819,6 +7819,23 @@ function _hwReadingText(s) {
   var v = Math.round(raw * 1000) / 1000;
   return unit ? (v + " " + unit) : String(v);
 }
+// Past this many rows the table is capped and scrolls under a sticky header
+// instead of growing the System tab: a chassis publishes dozens of sensors
+// (a FortiGate-201G walk is 30+ TMP/VOL/FAN/PSU rows), and an unbounded table
+// pushed Storage, LLDP and every section below it off the panel entirely.
+var HW_SENSOR_SCROLL_ROWS = 10;
+// The cap is derived from the row box rather than a vh fraction so the same
+// number of rows is visible whatever the panel height: ~39px per 0.82rem row
+// (0.6rem padding x2 + line box + border) plus ~38px of header. Showing
+// exactly HW_SENSOR_SCROLL_ROWS rows leaves the next one visibly cut off,
+// which is what tells the operator there is more below.
+function _hwTableWrapper(rowCount) {
+  if (rowCount <= HW_SENSOR_SCROLL_ROWS) return { cls: "table-wrapper", style: "" };
+  return {
+    cls: "table-wrapper table-wrapper-modal-sticky",
+    style: "max-height:" + (HW_SENSOR_SCROLL_ROWS * 39 + 38) + "px",
+  };
+}
 function _hwStatusCell(s) {
   if (s.alarmStatus === "alarm") {
     return '<span style="color:var(--color-danger,#e5484d);font-weight:600">⚠ alarm</span>';
@@ -7887,21 +7904,26 @@ function _renderTemperatures(container, si, asset) {
     '<th data-col-id="status">Status</th>';
   var toggleHTML = "";
   if (hidden.length > 0) {
+    var hiddenWrap = _hwTableWrapper(hidden.length);
     toggleHTML =
       '<details class="asset-temp-hidden" style="margin-top:0.5rem;font-size:0.82rem">' +
         '<summary style="cursor:pointer;color:var(--color-text-tertiary);user-select:none">' +
           'Show ' + hidden.length + ' sensor' + (hidden.length === 1 ? '' : 's') + ' with no reading' +
         '</summary>' +
-        '<div class="table-wrapper" style="margin-top:0.4rem">' +
+        '<div class="' + hiddenWrap.cls + '" style="margin-top:0.4rem' +
+          (hiddenWrap.style ? ';' + hiddenWrap.style : '') + '">' +
           '<table class="data-table" style="font-size:0.82rem"><thead><tr>' + headCells +
           '</tr></thead><tbody>' + hiddenRows + '</tbody></table>' +
         '</div>' +
       '</details>';
   }
+  var wrap = _hwTableWrapper(latest.length);
   container.innerHTML =
     sensorStaleBanner +
-    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' + headCells +
-    '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<div class="' + wrap.cls + '"' + (wrap.style ? ' style="' + wrap.style + '"' : '') + '>' +
+      '<table class="data-table" style="font-size:0.82rem"><thead><tr>' + headCells +
+      '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    '</div>' +
     toggleHTML;
   if (typeof applyTableLayout === "function") {
     container.querySelectorAll("table").forEach(function (t) {
