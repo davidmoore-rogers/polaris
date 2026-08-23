@@ -1083,7 +1083,7 @@ async function openAutomationWizard(existing, opts) {
       scope: { allAssets: true },
       trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: null, forDurationSec: 0 },
       reset: null, // defaulted per trigger type on Step-4 entry
-      cooldownSec: null, messageTemplate: null,
+      cooldownSec: null, messageTemplate: null, requireAckNote: false,
       // The audit Event is an action now, present by default — a new
       // automation behaves like every existing one until someone removes it.
       actions: [{ type: "event" }], escalation: null,
@@ -3061,6 +3061,15 @@ async function openAutomationWizard(existing, opts) {
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">' + cardHelp + '</p>' +
         tokenPaletteHtml("aw-token-palette") +
         '<input type="text" id="aw-msg" class="tpl-field" value="' + escapeHtml(draft.messageTemplate || "") + '" placeholder="' + (isEC ? "{rule}: {value}" : "{asset} {metric} = {value} (threshold {threshold})") + '" style="width:100%;margin-top:4px">' +
+        // Belongs on this card, not on a Notify row: it is a property of the
+        // ALERT record — who may close it out and on what terms — and it is
+        // enforced on every acknowledge path (the Alerts tab, the phone, the
+        // emailed link, the push button), not just the ones that send email.
+        '<label style="display:block;margin:0.6rem 0 0;font-weight:400">' +
+          '<input type="checkbox" id="aw-require-ack-note"' + (draft.requireAckNote ? " checked" : "") + '> ' +
+          'Require a note when acknowledging' +
+        '</label>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 1.4rem">Acknowledging asks what the problem was and what the fix was, and won’t go through empty. Escalation still stops on acknowledge.</p>' +
       '</div>';
 
     // Per-severity action sections: with severity bands, each tier CAN get its
@@ -4074,6 +4083,7 @@ async function openAutomationWizard(existing, opts) {
       actions: draft.actions,
       cooldownSec: draft.cooldownSec,
       messageTemplate: draft.messageTemplate,
+      requireAckNote: draft.requireAckNote === true,
       escalation: draft.escalation,
       severityBands: bandsApplicable(draft.trigger) ? payloadBands() : null,
       bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
@@ -5124,6 +5134,8 @@ async function openAutomationWizard(existing, opts) {
     // The alert/event message rides the mandatory in-app card on this step.
     var msgEl = panel.querySelector("#aw-msg");
     if (msgEl) draft.messageTemplate = msgEl.value.trim() || null;
+    var ackNoteEl = panel.querySelector("#aw-require-ack-note");
+    if (ackNoteEl) draft.requireAckNote = ackNoteEl.checked;
     // The BASE severity section's chain is the rule-level escalation (the engine
     // resolves it for an alert sitting at the base severity).
     var baseSecC = panel.querySelector("#aw-actions") && panel.querySelector("#aw-actions").closest(".form-group");
@@ -5435,6 +5447,11 @@ async function openAutomationWizard(existing, opts) {
     var msgRow = draft.messageTemplate
       ? '<dt>Message</dt><dd><code style="font-size:0.8rem">' + escapeHtml(draft.messageTemplate) + '</code></dd>'
       : "";
+    // Only when ON: a review grid that lists every default reads as noise, and
+    // this one is off on every automation that predates the feature.
+    var ackNoteRow = draft.requireAckNote
+      ? '<dt>Acknowledging</dt><dd>requires a note</dd>'
+      : "";
     var resetRow = (draft.resetActions && draft.resetActions.length)
       ? '<dt>When it resets</dt><dd>' + draft.resetActions.map(function (a) { return escapeHtml(actionSummary(a)); }).join("<br>") + '</dd>'
       : '<dt>When it resets</dt><dd><span style="color:var(--color-text-tertiary)">nothing — the alert just clears</span></dd>';
@@ -5460,6 +5477,7 @@ async function openAutomationWizard(existing, opts) {
       '<dt>Trigger</dt><dd>' + triggerSentence(draft.trigger, draftLadder()) + '</dd>' +
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
       msgRow +
+      ackNoteRow +
       '<dt>Actions</dt><dd>' + (actionLines.length ? actionLines.join("<br>") : '<span style="color:var(--color-text-tertiary)">in-app alert only</span>') + '</dd>' +
       resetRow +
       bandsRow +
@@ -5578,6 +5596,7 @@ async function openAutomationWizard(existing, opts) {
       actions: draft.actions,
       cooldownSec: draft.cooldownSec,
       messageTemplate: draft.messageTemplate,
+      requireAckNote: draft.requireAckNote === true,
       channels: ["in_app"],
       emailComposition: null, // per-action composition in v2; rule-level field retired by the wizard
       escalation: draft.escalation,
@@ -5651,6 +5670,7 @@ function _awDraftFromRule(r) {
     reset: r.reset ? JSON.parse(JSON.stringify(r.reset)) : null,
     cooldownSec: r.cooldownSec != null ? r.cooldownSec : null,
     messageTemplate: r.messageTemplate != null ? r.messageTemplate : null,
+    requireAckNote: r.requireAckNote === true,
     actions: JSON.parse(JSON.stringify(Array.isArray(r.actions) ? r.actions : [])),
     escalation: esc ? JSON.parse(JSON.stringify(esc)) : null,
     severityBands: Array.isArray(r.severityBands) && r.severityBands.length ? JSON.parse(JSON.stringify(r.severityBands)) : null,

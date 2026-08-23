@@ -139,6 +139,16 @@ async function acknowledgeAndConfirm(d, url) {
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: "{}",
     });
+    // The alert's automation demands a note, and a tray button has no field to
+    // type one into. Open the ack PAGE (not the app) — the token is still
+    // unspent, the page has the textarea, and it needs no session, which
+    // matters on the phone that just buzzed. Read before the generic !res.ok
+    // branch below, which would otherwise send them to a login wall.
+    if (res.status === 400) {
+      var body = null;
+      try { body = await res.json(); } catch (e) { body = null; }
+      if (body && body.state === "note_required") return focusOrOpen(target.href);
+    }
     // Expired, spent, or forbidden: hand it to the app rather than swallowing.
     if (!res.ok) return focusOrOpen(url);
 

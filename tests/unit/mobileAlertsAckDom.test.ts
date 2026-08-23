@@ -110,4 +110,55 @@ describe("mobile alerts acknowledge", () => {
     const nested = document.querySelector(".list-item [data-ack]");
     expect(nested).toBeNull();
   });
+
+  it("stays ONE TAP when the automation doesn't demand a note", async () => {
+    const { acked } = await render();
+    ackButtons()[0]!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    // No sheet: this is the path for someone who just got paged.
+    expect(document.querySelector("#ack-note")).toBeNull();
+    expect(acked).toEqual([{ ids: ["n1"], note: undefined }]);
+  });
+
+  it("opens a note sheet — not window.prompt — when the automation requires one", async () => {
+    // prompt() is unstyled and some browsers suppress it outright in an
+    // installed PWA, which would leave the operator unable to acknowledge with
+    // no visible reason why. And without the sheet the server refuses the
+    // request, so the button would simply fail.
+    const alerts = [{ id: "n5", severity: "critical", message: "loss", assetId: "a1", assetHostname: "SW-1", triggeredAt: "2026-08-12T10:00:00Z", acknowledged: false, requireAckNote: true }];
+    g.window.prompt = vi.fn();
+    const { acked } = await render({ alerts });
+    expect(ackButtons()[0]!.dataset.noteRequired).toBe("1");
+    ackButtons()[0]!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(g.window.prompt).not.toHaveBeenCalled();
+    const ta = document.querySelector("#ack-note") as HTMLTextAreaElement;
+    expect(ta).toBeTruthy();
+    expect(ta.placeholder).toBe("What is the problem and what is the fix?");
+    expect(acked).toEqual([]); // nothing sent until the sheet is answered
+
+    // Empty submit is a correction, not a send.
+    (document.querySelector("#ack-note-ok") as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(acked).toEqual([]);
+    expect((document.querySelector("#ack-note-err") as HTMLElement).style.display).toBe("");
+
+    ta.value = "bad optic, swapped it";
+    (document.querySelector("#ack-note-ok") as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(acked).toEqual([{ ids: ["n5"], note: "bad optic, swapped it" }]);
+    expect(document.querySelector("#ack-note")).toBeNull(); // sheet closed
+  });
+
+  it("sends nothing when the note sheet is dismissed", async () => {
+    const alerts = [{ id: "n6", severity: "critical", message: "loss", assetId: "a1", assetHostname: "SW-1", triggeredAt: "2026-08-12T10:00:00Z", acknowledged: false, requireAckNote: true }];
+    const { acked } = await render({ alerts });
+    ackButtons()[0]!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    (document.querySelector(".scrim") as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(acked).toEqual([]);
+    // The button is left usable — it was never disabled.
+    expect((ackButtons()[0] as HTMLButtonElement).disabled).toBe(false);
+  });
 });

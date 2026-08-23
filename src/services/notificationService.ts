@@ -59,6 +59,42 @@ function regionScopeWhere(viewerRegionTags: string[]): Prisma.NotificationWhereI
   };
 }
 
+/**
+ * Include + flatten for the automation's acknowledge-note policy.
+ *
+ * Every list surface has to know whether acknowledging a row needs a note
+ * BEFORE the operator clicks (the modal marks the field required, the phone
+ * opens a note sheet instead of one-tapping), so it rides each row as a plain
+ * boolean rather than making the client fetch the automation. Rule-less rows
+ * — test alerts, and rows whose automation was deleted (ruleId is SetNull) —
+ * read false: there is no policy left to enforce, and refusing to let anyone
+ * close them out would be worse than a missing note.
+ */
+const ACK_POLICY_INCLUDE = { rule: { select: { requireAckNote: true } } } as const;
+
+type RowWithRulePolicy = { rule?: { requireAckNote: boolean } | null };
+
+export function withAckPolicy<T extends RowWithRulePolicy>(row: T): Omit<T, "rule"> & { requireAckNote: boolean } {
+  const { rule, ...rest } = row;
+  return { ...rest, requireAckNote: rule?.requireAckNote === true };
+}
+
+/**
+ * Does this batch need a note that wasn't supplied? Pure so the rule can be
+ * tested without a database — the count comes from one indexed query.
+ *
+ * A batch is refused WHOLE rather than partially applied: the route takes one
+ * shared note for every id, so "acknowledge the ones that don't need a note"
+ * would silently leave the important half of a selection open while reporting
+ * success.
+ */
+export function ackNoteProblem(needyCount: number, batchSize: number, note: string): string | null {
+  if (note.trim().length > 0 || needyCount <= 0) return null;
+  return needyCount === 1 && batchSize === 1
+    ? "This alert's automation requires a note when acknowledging — say what the problem is and what the fix was."
+    : `${needyCount} of these alerts come from automations that require a note when acknowledging.`;
+}
+
 export async function listNotifications(params: ListParams) {
   const { viewerRegionTags, filters = {}, sortBy = "triggeredAt", sortDir = "desc" } = params;
   const limit = Math.min(Math.max(params.limit ?? 50, 1), 500);
@@ -90,11 +126,12 @@ export async function listNotifications(params: ListParams) {
       orderBy: { [orderField]: sortDir === "asc" ? "asc" : "desc" },
       take: limit,
       skip: offset,
+      include: ACK_POLICY_INCLUDE,
     }),
     prisma.notification.count({ where }),
   ]);
 
-  return { notifications: rows, total, limit, offset };
+  return { notifications: rows.map(withAckPolicy), total, limit, offset };
 }
 
 /**
@@ -170,6 +207,18 @@ export async function acknowledgeNotifications(
     throw new AppError(400, "No notification ids provided");
   }
   const trimmed = (note ?? "").trim();
+  // The note policy lives on the automation, so it has to be enforced HERE
+  // rather than in the modal: this one function backs the Alerts tab, the
+  // mobile list, the emailed one-click link and the web-push action button,
+  // and three of those four can acknowledge without ever rendering a form.
+  // One indexed count, and only when no note was given.
+  if (trimmed.length === 0) {
+    const needy = await prisma.notification.count({
+      where: { id: { in: ids }, acknowledged: false, rule: { requireAckNote: true } },
+    });
+    const problem = ackNoteProblem(needy, ids.length, trimmed);
+    if (problem) throw new AppError(400, problem);
+  }
   const res = await prisma.notification.updateMany({
     where: { id: { in: ids }, acknowledged: false },
     data: {
@@ -224,8 +273,9 @@ export async function getAssetNotifications(assetId: string) {
       where: { assetId, cleared: false },
       orderBy: { triggeredAt: "desc" },
       take: 200,
+      include: ACK_POLICY_INCLUDE,
     }),
     findRulesMatchingAsset(assetId),
   ]);
-  return { active, matchingRules };
+  return { active: active.map(withAckPolicy), matchingRules };
 }

@@ -780,6 +780,66 @@ describe("automation wizard DOM render", () => {
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
   });
 
+  it("requiring a note to acknowledge rides the in-app alert card, and survives a save", async () => {
+    // The flag belongs to the ALERT record, so it lives on the mandatory in-app
+    // card beside the message template — not on a Notify row, where it would
+    // read as being about one email while it governs every acknowledge path.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-acknote",
+      name: "Loss",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      actions: [{ type: "event" }],
+    });
+    (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+
+    const box = doc.querySelector("#aw-inapp-card #aw-require-ack-note") as unknown as
+      { checked: boolean };
+    expect(box).toBeTruthy();
+    // Off for every automation that predates the feature.
+    expect(box.checked).toBe(false);
+    box.checked = true;
+
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const p = savedPayloads[0]! as Record<string, any>;
+    expect(p.requireAckNote).toBe(true);
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
+  it("carries a stored requireAckNote through a save from step 1 (never visiting the Actions step)", async () => {
+    // The wizard saves from the hydrated draft, so a field only collected on
+    // step 5 is exactly the kind that silently reverts to its default when an
+    // operator edits the name and saves.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-acknote2",
+      name: "Loss",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      requireAckNote: true,
+      actions: [{ type: "event" }],
+    });
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    expect((savedPayloads[0]! as Record<string, any>).requireAckNote).toBe(true);
+  });
+
   it("email customization is a checkbox: unchecked stores NO templates", async () => {
     doc.body.innerHTML = "";
     savedPayloads.length = 0;

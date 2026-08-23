@@ -54,6 +54,8 @@ const FN_NAMES = [
   "_loadAssetNotificationsTab",
   "_wireAssetAlertSelection",
   "_alertCountLabel",
+  "_ackPromptOpts",
+  "_promptAckNote",
   "_acknowledgeAssetAlert",
   "_clearAssetAlert",
   "_bulkAcknowledgeAssetAlerts",
@@ -116,7 +118,10 @@ beforeEach(() => {
   };
   // Owned by the suite, not by mount(), so a test can set its return value
   // before mounting without having it replaced underneath.
-  g.window.prompt = vi.fn(() => "");
+  // showPrompt, not window.prompt: the note dialog is a Polaris modal (the
+  // browser box is unstyled, dead in the installed PWA, and can't mark a field
+  // required — which requireAckNote needs).
+  g.showPrompt = vi.fn(async () => "");
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   new Function(SRC)();
 });
@@ -216,7 +221,7 @@ describe("asset Alerts tab — selection + bulk actions", () => {
 
   it("acknowledges the selection with one shared note", async () => {
     ctx.ackResult = () => ({ acknowledged: 2 });
-    (g.window.prompt as any).mockReturnValue("switch reboot");
+    (g.showPrompt as any).mockResolvedValue("switch reboot");
     await mount();
     const boxes = Array.from(document.querySelectorAll<HTMLInputElement>(".asset-alert-sel"));
     boxes[0].checked = true; boxes[0].dispatchEvent(new Event("change"));
@@ -229,7 +234,7 @@ describe("asset Alerts tab — selection + bulk actions", () => {
   });
 
   it("cancelling the note prompt sends nothing", async () => {
-    (g.window.prompt as any).mockReturnValue(null);
+    (g.showPrompt as any).mockResolvedValue(null);
     await mount();
     const all = document.getElementById("asset-alert-selall") as HTMLInputElement;
     all.checked = true;
@@ -237,6 +242,53 @@ describe("asset Alerts tab — selection + bulk actions", () => {
     (document.getElementById("asset-alert-bulk-ack") as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 0));
     expect(ctx.acked).toEqual([]);
+  });
+
+  it("asks for the note in a Polaris modal, with the same question the ack page asks", async () => {
+    await mount();
+    (document.querySelector(".asset-alert-ack") as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 0));
+    const opts = (g.showPrompt as any).mock.calls[0][1];
+    // The prompt text is a PLACEHOLDER, never a value: it must vanish on the
+    // first keystroke and an untouched box must submit as no note at all.
+    expect(opts.placeholder).toBe("What is the problem and what is the fix?");
+    expect(opts.value).toBeUndefined();
+    expect(opts.multiline).toBe(true);
+    expect(opts.maxLength).toBe(2000);
+  });
+
+  it("marks the note required when the alert's automation requires one", async () => {
+    await mount({ alerts: [{ id: "n9", severity: "critical", message: "loss", dimension: null, metric: "probeLossPct", triggeredAt: "2026-07-23T14:50:00Z", acknowledged: false, requireAckNote: true }] });
+    const btn = document.querySelector(".asset-alert-ack") as HTMLButtonElement;
+    expect(btn.dataset.noteRequired).toBe("1");
+    btn.click();
+    await new Promise((r) => setTimeout(r, 0));
+    const opts = (g.showPrompt as any).mock.calls[0][1];
+    expect(opts.required).toBe(true);
+    expect(opts.label).toMatch(/required/i);
+    expect(opts.requiredMessage).toBeTruthy();
+  });
+
+  it("leaves the note optional when no automation asks for one", async () => {
+    await mount();
+    (document.querySelector(".asset-alert-ack") as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect((g.showPrompt as any).mock.calls[0][1].required).toBe(false);
+  });
+
+  it("requires the note for a batch when ANY selected alert's automation does", async () => {
+    // The route takes ONE note for every id and refuses such a batch whole, so
+    // asking up front beats a 400 after the operator has closed the dialog.
+    await mount({ alerts: [
+      { id: "n1", severity: "warning", message: "a", dimension: null, triggeredAt: "2026-07-23T14:50:00Z", acknowledged: false },
+      { id: "n2", severity: "critical", message: "b", dimension: null, triggeredAt: "2026-07-23T14:49:00Z", acknowledged: false, requireAckNote: true },
+    ] });
+    const all = document.getElementById("asset-alert-selall") as HTMLInputElement;
+    all.checked = true;
+    all.dispatchEvent(new Event("change"));
+    (document.getElementById("asset-alert-bulk-ack") as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect((g.showPrompt as any).mock.calls[0][1].required).toBe(true);
   });
 
   it("does not stack a second handler on the bulk buttons when the tab reloads", async () => {

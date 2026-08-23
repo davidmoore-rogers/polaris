@@ -252,11 +252,17 @@ var _rulesPage = 1;
       actions: Array.isArray(r.actions) ? r.actions : [],
       cooldownSec: r.cooldownSec != null ? r.cooldownSec : null,
       messageTemplate: r.messageTemplate != null ? r.messageTemplate : null,
+      requireAckNote: r.requireAckNote === true,
       channels: r.channels || ["in_app"],
       emailComposition: r.emailComposition || null,
       escalation: r.escalation || null,
       severityBands: Array.isArray(r.severityBands) && r.severityBands.length ? r.severityBands : null,
       bandNotify: r.bandNotify || null,
+      // Omitting a nullable Json field CLEARS it server-side (jsonOrClear maps
+      // an absent value to null → Prisma.DbNull), so the enable toggle has to
+      // resend this or flipping a switch would delete the automation's reset
+      // actions.
+      resetActions: Array.isArray(r.resetActions) && r.resetActions.length ? r.resetActions : null,
     }, overrides || {});
   }
   window._ruleToInput = _ruleToInput;

@@ -230,6 +230,7 @@
             + '</button>'
             + (showAck
               ? '<button class="ack-btn" data-ack="' + escapeHtml(n.id) + '" aria-label="Acknowledge alert"'
+                + (n.requireAckNote ? ' data-note-required="1"' : "")
                 + ' style="flex:0 0 auto;align-self:center;margin-right:12px;padding:8px 12px;border-radius:20px;'
                 + 'border:1px solid var(--md-outline);background:transparent;color:var(--md-primary);font:inherit;font-size:13px;">Ack</button>'
               : '')
@@ -257,14 +258,69 @@
     },
   });
 
-  // Acknowledge from the phone. No note field: this is the one-tap path for
-  // someone who just got paged — the desktop tab and the emailed link both
-  // take a note when there's something to say.
-  function acknowledgeMobileAlert(btn, body, ctx) {
+  /* A note field, only when the automation demands one.
+   *
+   * The default stays ONE TAP — this is the path for someone who just got
+   * paged, and the desktop tab and the emailed link are where a note usually
+   * gets typed. But an automation with `requireAckNote` is refused server-side
+   * without one, so on those rows the tap opens a sheet instead of failing.
+   * Resolves to the note, or null if dismissed.
+   *
+   * A sheet rather than window.prompt(): prompt() is unstyled, and in an
+   * installed PWA some browsers suppress it outright — leaving the operator
+   * unable to acknowledge with no visible reason why.
+   */
+  function promptAckNoteSheet() {
+    return new Promise(function (resolve) {
+      var scrim = document.createElement("div");
+      scrim.className = "scrim";
+      var sheet = document.createElement("div");
+      sheet.className = "sheet";
+      sheet.innerHTML = ''
+        + '<div class="sheet-handle"></div>'
+        + '<h3 class="sheet-title" style="margin:0 0 4px;">Acknowledge alert</h3>'
+        + '<p style="margin:0 0 12px;color:var(--md-on-surface-variant);font-size:14px;">This alert’s automation requires a note.</p>'
+        + '<textarea id="ack-note" rows="3" maxlength="2000" placeholder="What is the problem and what is the fix?"'
+        + ' style="width:100%;box-sizing:border-box;font:inherit;font-size:15px;padding:10px;border-radius:8px;'
+        + 'border:1px solid var(--md-outline);background:var(--md-surface-cont-low);color:inherit;resize:vertical;"></textarea>'
+        + '<p id="ack-note-err" style="display:none;margin:6px 0 0;font-size:13px;color:var(--md-error);">A note is required.</p>'
+        + '<div style="display:flex;gap:12px;justify-content:flex-end;margin-top:16px;">'
+        + '  <button id="ack-note-cancel" style="padding:10px 16px;border-radius:20px;border:1px solid var(--md-outline);background:transparent;color:inherit;font:inherit;">Cancel</button>'
+        + '  <button id="ack-note-ok" style="padding:10px 16px;border-radius:20px;border:0;background:var(--md-primary);color:var(--md-on-primary);font:inherit;">Acknowledge</button>'
+        + '</div>';
+      document.body.appendChild(scrim);
+      document.body.appendChild(sheet);
+      var ta = sheet.querySelector("#ack-note");
+      var err = sheet.querySelector("#ack-note-err");
+      function close(val) {
+        scrim.remove();
+        sheet.remove();
+        resolve(val);
+      }
+      scrim.addEventListener("click", function () { close(null); });
+      sheet.querySelector("#ack-note-cancel").addEventListener("click", function () { close(null); });
+      sheet.querySelector("#ack-note-ok").addEventListener("click", function () {
+        var v = ta.value.trim();
+        if (!v) { err.style.display = ""; ta.focus(); return; }
+        close(v);
+      });
+      ta.addEventListener("input", function () { err.style.display = "none"; });
+      setTimeout(function () { try { ta.focus(); } catch (e) { /* keyboard may refuse */ } }, 50);
+    });
+  }
+
+  // Acknowledge from the phone — one tap, unless the alert's automation
+  // requires a note (see promptAckNoteSheet above).
+  async function acknowledgeMobileAlert(btn, body, ctx) {
+    var note;
+    if (btn.dataset.noteRequired === "1") {
+      note = await promptAckNoteSheet();
+      if (note === null) return; // dismissed
+    }
     btn.disabled = true;
     var old = btn.textContent;
     btn.textContent = "…";
-    api.alerts.acknowledge([btn.dataset.ack])
+    api.alerts.acknowledge([btn.dataset.ack], note || undefined)
       .then(function () {
         if (window.PolarisTabs && PolarisTabs.showSnackbar) PolarisTabs.showSnackbar("Alert acknowledged");
         return SUB_PAGES.alerts.render(body, ctx);

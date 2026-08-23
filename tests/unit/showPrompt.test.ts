@@ -26,7 +26,7 @@ const APP_SRC = readFileSync(resolve(__dirname, "../../public/js/app.js"), "utf8
 interface PromptOpts {
   title?: string; label?: string; placeholder?: string; value?: string;
   okLabel?: string; danger?: boolean; required?: boolean; multiline?: boolean;
-  maxLength?: number; help?: string;
+  maxLength?: number; help?: string; requiredMessage?: string;
 }
 
 let win: InstanceType<typeof Window>;
@@ -104,6 +104,37 @@ describe("showPrompt — required fields", () => {
     // Still cancellable, and still resolves null when it is.
     click('[data-prompt="cancel"]');
     await expect(p).resolves.toBeNull();
+  });
+
+  it("SAYS why a blank required field didn't submit", async () => {
+    // A red border alone reads as a button that did nothing, which is how
+    // "I clicked Acknowledge and nothing happened" starts.
+    const p = showPrompt("msg", { required: true, requiredMessage: "A note is required." });
+    click('[data-prompt="ok"]');
+    const err = doc.querySelector(".prompt-error") as unknown as { textContent: string; style: { display: string } };
+    expect(err.textContent).toBe("A note is required.");
+    expect(err.style.display).toBe("");
+    // …and it goes away as soon as they type.
+    input().value = "bad optic";
+    input().dispatchEvent(new win.Event("input", { bubbles: true }));
+    expect(err.style.display).toBe("none");
+    click('[data-prompt="ok"]');
+    await expect(p).resolves.toBe("bad optic");
+  });
+
+  it("falls back to a generic reason when the caller supplies none", async () => {
+    showPrompt("msg", { required: true });
+    click('[data-prompt="ok"]');
+    const err = doc.querySelector(".prompt-error") as unknown as { textContent: string };
+    expect(err.textContent.length).toBeGreaterThan(0);
+    click('[data-prompt="cancel"]');
+  });
+
+  it("shows no reason before a blank submit", () => {
+    showPrompt("msg", { required: true });
+    const err = doc.querySelector(".prompt-error") as unknown as { style: { display: string } };
+    expect(err.style.display).toBe("none");
+    click('[data-prompt="cancel"]');
   });
 
   it("clears the error flag on the next keystroke", async () => {

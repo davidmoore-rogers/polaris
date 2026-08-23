@@ -3840,6 +3840,14 @@ model NotificationRule {
   clearAfterSec    Int? // for clearBehavior=timed
   cooldownSec      Int? // suppress re-fire window (re-notify)
   messageTemplate  String?  @db.Text // tokens: {asset} {metric} {value} {threshold}
+  // Refuse to acknowledge an alert from this automation without a note.
+  // Per-automation because the demand is per-automation: "someone looked at
+  // it" is enough for a noisy interface flap, while a critical outage wants
+  // the operator to say what the problem was and what they did. Enforced
+  // SERVER-side in acknowledgeNotifications (and therefore on the emailed ack
+  // link and the web-push action too), not merely in the modal, because every
+  // one of those paths can acknowledge without ever rendering the form.
+  requireAckNote   Boolean  @default(false)
   channels         String[] @default(["in_app"])
   // Delivery targets — array of { channel, recipientTags?, addresses?,
   // webhookUrl?, webhookKind? }. In-app delivery stays implicit (every fire

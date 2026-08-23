@@ -1461,6 +1461,11 @@ const ruleInputBaseSchema = z.object({
   // Shared fields:
   cooldownSec: z.number().int().min(0).max(2592000).optional().nullable(),
   messageTemplate: z.string().max(2000).optional().nullable(),
+  // Acknowledging an alert from this automation requires a note. Rides the
+  // in-app alert card in the wizard because that is what it is about — the
+  // alert record — and is enforced in acknowledgeNotifications, so the emailed
+  // ack link and the push action obey it too.
+  requireAckNote: z.boolean().optional(),
   channels: z.array(z.string().max(50)).default(["in_app"]),
   emailComposition: emailCompositionSchema.optional().nullable(),
   // Accepts BOTH shapes: legacy email tiers (pre-wizard UI) and v2 tiers of
@@ -1493,6 +1498,8 @@ export interface RuleInput {
   actions: EscalatableAction[];
   cooldownSec: number | null;
   messageTemplate: string | null;
+  /** Refuse an acknowledgement with no note (enforced server-side). */
+  requireAckNote: boolean;
   channels: string[];
   emailComposition: EmailComposition | null;
   /** As posted (legacy email tiers OR v2 tiers-of-actions) — stored verbatim;
@@ -1610,6 +1617,7 @@ function normalizeRuleInputCore(raw: Omit<RuleInputRaw, "trigger">): Omit<RuleIn
     actions: raw.actions ?? targetsToNotifyActions(raw.targets, raw.emailComposition ?? null),
     cooldownSec: raw.cooldownSec ?? null,
     messageTemplate: raw.messageTemplate ?? null,
+    requireAckNote: raw.requireAckNote === true,
     channels: raw.channels,
     emailComposition: raw.emailComposition ?? null,
     escalation: raw.escalation ?? null,

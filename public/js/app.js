@@ -2328,7 +2328,7 @@ function showConfirm(message) {
  * action with no visible reason why.
  *
  * opts: { title, label, placeholder, value, okLabel, danger, required,
- *         multiline, maxLength, help }
+ *         requiredMessage, multiline, maxLength, help }
  */
 function showPrompt(message, opts) {
   opts = opts || {};
@@ -2351,6 +2351,7 @@ function showPrompt(message, opts) {
             '<label for="prompt-input" class="prompt-label"></label>' +
             field +
             '<p class="hint prompt-help" style="margin:0.35rem 0 0;display:none"></p>' +
+            '<p class="prompt-error" style="margin:0.35rem 0 0;font-size:0.82rem;color:var(--color-danger);display:none"></p>' +
           '</div>' +
         '</div>' +
         '<div class="modal-footer">' +
@@ -2399,12 +2400,17 @@ function showPrompt(message, opts) {
       resolve(val);
     }
 
+    var errEl = overlay.querySelector(".prompt-error");
     function submit() {
       var v = input.value.trim();
       if (opts.required && !v) {
         // Don't resolve — an empty required field is a correction, not a cancel.
+        // Say so: a red border alone reads as a button that did nothing, which
+        // is exactly how "I clicked Acknowledge and nothing happened" starts.
         input.focus();
         input.classList.add("input-error");
+        errEl.textContent = opts.requiredMessage || "This can't be left blank.";
+        errEl.style.display = "";
         return;
       }
       done(v);
@@ -2412,7 +2418,10 @@ function showPrompt(message, opts) {
 
     overlay.querySelector('[data-prompt="cancel"]').onclick = function () { done(null); };
     okBtn.onclick = submit;
-    input.addEventListener("input", function () { input.classList.remove("input-error"); });
+    input.addEventListener("input", function () {
+      input.classList.remove("input-error");
+      errEl.style.display = "none";
+    });
     // Enter submits a single-line field; a textarea keeps Enter for newlines.
     if (!opts.multiline) {
       input.addEventListener("keydown", function (e) {

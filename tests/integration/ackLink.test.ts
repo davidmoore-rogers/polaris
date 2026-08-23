@@ -126,6 +126,48 @@ d("ack links", () => {
     expect(res.body.acknowledgedBy).toBe(`${USERNAME} (ack link)`);
   });
 
+  it("refuses an empty note when the automation requires one, WITHOUT spending the token", async () => {
+    // The link has to survive a rejected submit: this is form validation, not
+    // a rejection, and a spent token would leave the recipient unable to
+    // acknowledge from their mail client at all.
+    const rule = await prisma.notificationRule.create({
+      data: {
+        name: "ack-test-require-note",
+        severity: "critical",
+        trigger: { type: "asset_metric", metric: "probeLossPct", aggregation: "latest", operator: ">=", threshold: 50 },
+        requireAckNote: true,
+      },
+    });
+    await prisma.notification.update({ where: { id: notificationId }, data: { ruleId: rule.id } });
+    const raw = await mintFor(userId);
+    try {
+      const empty = await request(app).post(`/ack/${raw}`).set("Accept", "application/json").send({});
+      expect(empty.status).toBe(400);
+      expect(empty.body).toMatchObject({ ok: false, state: "note_required" });
+      let after = await prisma.notification.findUnique({ where: { id: notificationId } });
+      expect(after?.acknowledged).toBe(false);
+      let tok = await prisma.notificationAckToken.findUnique({ where: { tokenHash: hashAckToken(raw) } });
+      expect(tok?.usedAt).toBeNull();
+
+      // The HTML surface re-renders the form rather than dead-ending.
+      const html = await request(app).post(`/ack/${raw}`).type("form").send({ confirm: "1", note: "  " });
+      expect(html.status).toBe(400);
+      expect(html.text).toMatch(/<form method="post"/);
+
+      // Same link, now with a note: it goes through.
+      const ok = await request(app).post(`/ack/${raw}`).type("form").send({ confirm: "1", note: "bad SFP, swapped it" });
+      expect(ok.status).toBe(200);
+      after = await prisma.notification.findUnique({ where: { id: notificationId } });
+      expect(after?.acknowledged).toBe(true);
+      expect(after?.acknowledgeNote).toBe("bad SFP, swapped it");
+      tok = await prisma.notificationAckToken.findUnique({ where: { tokenHash: hashAckToken(raw) } });
+      expect(tok?.usedAt).not.toBeNull();
+    } finally {
+      await prisma.notification.updateMany({ where: { ruleId: rule.id }, data: { ruleId: null } });
+      await prisma.notificationRule.delete({ where: { id: rule.id } });
+    }
+  });
+
   it("is single-use — a second POST reports the acknowledgement, not a failure", async () => {
     const raw = await mintFor(userId);
     await request(app).post(`/ack/${raw}`).type("form").send({ confirm: "1" });

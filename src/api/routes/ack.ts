@@ -107,6 +107,7 @@ function renderPage(appName: string, p: PageParts): string {
              border:1px solid #d1d5db; border-radius:6px; resize:vertical; }
   button { margin-top:12px; background:${accent}; color:#fff; border:0; border-radius:6px;
            padding:11px 18px; font:inherit; font-weight:600; cursor:pointer; }
+  .err { margin:8px 0 0; font-size:13px; color:#b91c1c; }
   .after { margin:16px 0 0; font-size:14px; }
   a { color:#2563eb; }
   .foot { color:#9ca3af; font-size:12px; margin:18px 0 0; text-align:center; }
@@ -116,6 +117,7 @@ function renderPage(appName: string, p: PageParts): string {
     .lead, table.facts th { color:#9ca3af; }
     textarea { background:#14161a; color:#e5e7eb; border-color:#3a4150; }
     .test { background:#312e81; color:#e0e7ff; }
+    .err { color:#fca5a5; }
   }
 </style>
 </head><body><div class="wrap">
@@ -135,12 +137,21 @@ function renderPage(appName: string, p: PageParts): string {
 </div></body></html>`;
 }
 
-/** Confirm form — the only state-changing control, and it POSTs. */
-function confirmForm(token: string, username: string): string {
+/**
+ * Confirm form — the only state-changing control, and it POSTs.
+ *
+ * `requireNote` mirrors the automation's own policy: the label says so, the
+ * textarea carries the HTML `required` attribute (which is all the enforcement
+ * a scripting-disabled mail-client browser needs to get right), and the server
+ * refuses an empty submit regardless. The placeholder is the same question the
+ * in-app modal asks, so the two surfaces prompt for the same thing.
+ */
+function confirmForm(token: string, username: string, requireNote: boolean, error?: string): string {
   return `<form method="post" action="/ack/${encodeURIComponent(token)}">
   <input type="hidden" name="confirm" value="1">
-  <label for="note">Add a note (optional)</label>
-  <textarea id="note" name="note" rows="2" maxlength="2000" placeholder="e.g. investigating — switch stack rebooting"></textarea>
+  <label for="note">${requireNote ? "Add a note (required)" : "Add a note (optional)"}</label>
+  <textarea id="note" name="note" rows="${requireNote ? 3 : 2}" maxlength="2000"${requireNote ? " required" : ""} placeholder="What is the problem and what is the fix?"></textarea>
+  ${error ? `<p class="err">${escapeHtml(error)}</p>` : ""}
   <button type="submit">Acknowledge as ${escapeHtml(username)}</button>
 </form>`;
 }
@@ -151,7 +162,22 @@ function pageFor(outcome: AckOutcome, appName: string, token: string, justAcked:
     case "valid":
       return justAcked
         ? { title: "Acknowledged", lead: `Recorded as ${outcome.username}. The alert stays visible in Polaris until it clears.`, alert: a, tone: "ok" }
-        : { title: "Acknowledge this alert?", alert: a, action: confirmForm(token, outcome.username ?? "you"), tone: "info" };
+        : {
+            title: "Acknowledge this alert?",
+            lead: outcome.requireNote ? "This automation asks for a note before it can be acknowledged." : undefined,
+            alert: a,
+            action: confirmForm(token, outcome.username ?? "you", outcome.requireNote === true),
+            tone: "info",
+          };
+    case "note_required":
+      // Recoverable, and the token is still live — re-render the same form with
+      // the reason, rather than sending the reader back to their mail client.
+      return {
+        title: "A note is needed",
+        alert: a,
+        action: confirmForm(token, outcome.username ?? "you", true, "Say what the problem is and what the fix was, then acknowledge."),
+        tone: "warn",
+      };
     case "already":
       return {
         title: "Already acknowledged",
@@ -175,6 +201,9 @@ function pageFor(outcome: AckOutcome, appName: string, token: string, justAcked:
 
 function statusFor(kind: AckOutcome["kind"]): number {
   if (kind === "unknown") return 404;
+  // 400, not 422: the submission is missing a required field, and the same
+  // request with a note in it succeeds.
+  if (kind === "note_required") return 400;
   if (kind === "forbidden") return 403;
   if (kind === "expired" || kind === "used") return 410;
   return 200;
@@ -224,7 +253,9 @@ ackRouter.post("/:token", async (req, res) => {
     const outcome = await redeemAckToken(token, note);
     const acked = outcome.kind === "valid" || outcome.kind === "already";
     if (wantsJson) {
-      // The service worker's Acknowledge button posts this way.
+      // The service worker's Acknowledge button posts this way. A
+      // "note_required" answer is its cue to open this page in a window
+      // instead — a push action has no text field to collect one from.
       res.status(statusFor(outcome.kind)).set("Cache-Control", "no-store").json({
         ok: acked,
         state: outcome.kind,

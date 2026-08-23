@@ -47,7 +47,11 @@ export type AckOutcomeKind =
   | "used"
   | "unknown"
   | "forbidden"
-  | "cleared";
+  | "cleared"
+  /** The automation requires a note and none was typed. Unlike every other
+   *  non-valid kind this one is RECOVERABLE and the token is NOT spent — the
+   *  page re-renders the form so the same link still works. */
+  | "note_required";
 
 export interface AckOutcome {
   kind: AckOutcomeKind;
@@ -64,6 +68,10 @@ export interface AckOutcome {
     acknowledgedAt: Date | null;
   };
   username?: string;
+  /** The automation refuses an acknowledgement with no note (NotificationRule
+   *  .requireAckNote). Drives the page's required-field copy, and the JSON
+   *  branch the push action reads. */
+  requireNote?: boolean;
 }
 
 /**
@@ -146,6 +154,7 @@ interface LoadedToken {
     acknowledgedBy: string | null;
     acknowledgedAt: Date | null;
     cleared: boolean;
+    rule: { requireAckNote: boolean } | null;
   };
 }
 
@@ -174,6 +183,9 @@ async function loadToken(raw: string): Promise<LoadedToken | null> {
           acknowledgedBy: true,
           acknowledgedAt: true,
           cleared: true,
+          // A rule-less alert (a test fire, or one whose automation was
+          // deleted — ruleId is SetNull) has no policy left to enforce.
+          rule: { select: { requireAckNote: true } },
         },
       },
     },
@@ -188,6 +200,7 @@ function outcomeFrom(kind: AckOutcomeKind, row: LoadedToken | null): AckOutcome 
   return {
     kind,
     username: row.username,
+    requireNote: row.notification.rule?.requireAckNote === true,
     alert: {
       id: n.id,
       message: n.message,
@@ -220,6 +233,15 @@ export async function redeemAckToken(raw: string, note?: string): Promise<AckOut
   if (!row) return { kind: "unknown" };
   const canAck = await userCanAcknowledge(row.userId);
   const kind = classifyAckToken(row, row.notification, canAck);
+  // A required note is checked AFTER the state machine (an already-acknowledged
+  // or expired link has a truer answer to give) and BEFORE the token is spent:
+  // this is form validation, not a rejection, so the link must survive it —
+  // otherwise a recipient who submits the form empty once can never
+  // acknowledge from their mail client at all. No audit Event for the same
+  // reason: they are about to retype and submit again.
+  if (kind === "valid" && row.notification.rule?.requireAckNote === true && (note ?? "").trim() === "") {
+    return outcomeFrom("note_required", row);
+  }
   if (kind !== "valid") {
     // An unknown token is attacker- and scanner-reachable, so it must never
     // write to a 7-day-retention audit log. A token we actually issued that

@@ -1552,7 +1552,7 @@ Listed alphabetically.
 
 **What it owns:** Triggered-notification read + lifecycle (View tab + asset tab): region-scoped listing, batch acknowledge/clear, the per-asset bundle, region-prefix stripping.
 
-**Public API:** `listNotifications`, `acknowledgeNotifications`, `clearNotifications`, `getAssetNotifications`, `stripRegionPrefix`, `REGION_TAG_PREFIX`.
+**Public API:** `listNotifications`, `acknowledgeNotifications`, `clearNotifications`, `getAssetNotifications`, `stripRegionPrefix`, `REGION_TAG_PREFIX`, plus the two pure helpers behind the acknowledge-note policy: `withAckPolicy(row)` (flattens the joined `rule.requireAckNote` onto a list row as a plain boolean and drops the join) and `ackNoteProblem(needyCount, batchSize, note)` (the refusal message, or null).
 
 **Cross-service deps:** `prisma`, `eventLogService.logEvent`, `notificationRuleService.findRulesMatchingAsset`.
 
@@ -1561,8 +1561,10 @@ Listed alphabetically.
 **Invariants:**
 - Region scope: empty viewer tags = unrestricted; else show rows whose snapshotted `regionTags` intersect the viewer's tags PLUS unscoped (empty regionTags) rows.
 - Acknowledge/clear are batch (`updateMany`, no per-row await) and always write an audit Event.
+- **`acknowledgeNotifications` is where the acknowledge-note policy is ENFORCED**, and it has to stay here: it is the single write path behind all four acknowledge surfaces (Alerts tab, mobile list, `/ack/:token` link, web-push action), and three of them can acknowledge without rendering a form. A note-less batch containing any alert whose rule sets `requireAckNote` throws 400 — refused WHOLE, because the route takes one shared note for every id and a partial success would leave the alerts that mattered open under a success toast. One indexed count, and only when no note was given, so the common path pays nothing.
+- Both list surfaces join that flag through `ACK_POLICY_INCLUDE` and flatten it with `withAckPolicy` — a rule-less row (test fire, or an automation since deleted: `Notification.ruleId` is SetNull) reads false, since there is no policy left to enforce.
 
-**When changing this:** Keep the region-scope rule in sync with `regionScopeService` (the viewer side) and the engine's `regionSnapshot` (the write side).
+**When changing this:** Keep the region-scope rule in sync with `regionScopeService` (the viewer side) and the engine's `regionSnapshot` (the write side). If you add another acknowledge surface, call this function — do not write `acknowledged` directly, or that surface silently opts out of the note policy and the audit Event.
 
 ---
 
@@ -1948,7 +1950,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** Every read and write of `NotificationAckToken` — the single-use one-click acknowledge links carried in alert emails and behind the web-push Acknowledge button.
 
-**Public API:** `mintAckTokens(reqs[])` (batched createMany at delivery fan-out), `inspectAckToken(raw)` (non-mutating — backs the inert GET), `redeemAckToken(raw, note?)`, `userCanAcknowledge(userId)`, the pure `classifyAckToken(token, notif, canAck, now)`, `pruneAckTokens(now?)`.
+**Public API:** `mintAckTokens(reqs[])` (batched createMany at delivery fan-out), `inspectAckToken(raw)` (non-mutating — backs the inert GET), `redeemAckToken(raw, note?)`, `userCanAcknowledge(userId)`, the pure `classifyAckToken(token, notif, canAck, now)`, `pruneAckTokens(now?)`. `AckOutcome` carries `requireNote` (the alert's automation demands a note) and the extra `note_required` kind.
 
 **Cross-service deps:** `notificationService.acknowledgeNotifications` (the acknowledgement itself — never a private write path), `eventLogService.logEvent`, `api/middleware/permissions.permissionOf` + `rankMeets`, `utils/ackToken` (pure format/digest).
 
@@ -1959,6 +1961,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - Only the digest is stored. The raw token exists in the delivered message and in `NotificationDelivery.meta.ack` (which no API echoes) — so a token can never be re-derived or re-sent, which is why each send mints fresh rather than reusing.
 - `classifyAckToken` reports `already` ahead of `used` / `expired` / `forbidden`: if the alert is acknowledged, the clicker's intent is satisfied and reporting a failure would be a lie.
 - Redemption is single-use but never errors on a second click — it reports who acknowledged and when.
+- `note_required` (the rule's `requireAckNote` with an empty note) is checked AFTER `classifyAckToken` and BEFORE the token is spent, and writes NO Event: it is form validation, so the link has to survive it — spending the token on a rejected submit would leave a recipient permanently unable to acknowledge from their mail client, and an Event per empty submit is noise about someone who is about to retype and click again.
 - An UNKNOWN token writes no Event (scanner- and attacker-reachable, and Events have 7-day retention); a token Polaris really issued that then fails writes `notification.ack_link.rejected` at warning.
 - Minting is batched. It runs on the alert fan-out path, so a per-recipient create — or an argon2 hash per recipient — would put seconds of latency into every large alert.
 

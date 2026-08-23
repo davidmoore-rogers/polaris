@@ -17947,14 +17947,18 @@ function _loadAssetNotificationsTab(assetId) {
           parts.push('<span style="font-size:0.82rem">' + escapeHtml(n.acknowledgedBy || "acknowledged") +
             (when ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">' + escapeHtml(when) + '</span>' : "") + '</span>');
         } else if (shape.canAck) {
-          parts.push('<button class="btn btn-sm btn-secondary asset-alert-ack" data-id="' + escapeHtml(n.id) + '">Acknowledge</button>');
+          // The automation's note policy rides the control that uses it, so
+          // the modal can mark the field required without a second fetch.
+          parts.push('<button class="btn btn-sm btn-secondary asset-alert-ack" data-id="' + escapeHtml(n.id) + '"' +
+            (n.requireAckNote ? ' data-note-required="1"' : "") + '>Acknowledge</button>');
         }
         if (shape.canClear) {
           parts.push('<button class="btn btn-sm btn-secondary asset-alert-clear" data-id="' + escapeHtml(n.id) + '">Clear</button>');
         }
         if (!parts.length) parts.push('<span style="color:var(--color-text-tertiary)">—</span>');
         var sel = shape.canSelect
-          ? '<td class="cb-col"><input type="checkbox" class="asset-alert-sel" data-id="' + escapeHtml(n.id) + '" aria-label="Select this alert"></td>'
+          ? '<td class="cb-col"><input type="checkbox" class="asset-alert-sel" data-id="' + escapeHtml(n.id) + '"' +
+            (n.requireAckNote ? ' data-note-required="1"' : "") + ' aria-label="Select this alert"></td>'
           : "";
         // The metric rides the cell title rather than a column of its own: it
         // is the same value on every row of one automation, so it identifies
@@ -18056,19 +18060,55 @@ function _alertCountLabel(n) {
 }
 
 /**
- * Acknowledge one alert from the asset's Alerts tab. The note is optional —
- * prompt() rather than a modal because this tab already lives inside the
- * asset slide-over, and a third stacked overlay to type one line is worse
- * than the browser's own box. Cancelling the prompt cancels the whole thing.
+ * Copy for the acknowledge modal, given how many alerts and whether the
+ * automation demands a note. Pure — the wording is the whole UI here.
+ *
+ * The question is a PLACEHOLDER, never a value: it greys out, disappears on
+ * the first keystroke, and an untouched box submits as no note at all. The
+ * emailed ack page's textarea asks the same thing (api/routes/ack.ts), so the
+ * two surfaces prompt for one thing — keep them in step.
+ */
+function _ackPromptOpts(count, required) {
+  return {
+    title: count === 1 ? "Acknowledge alert" : "Acknowledge " + _alertCountLabel(count),
+    label: required ? "Note (required)" : "Note (optional)",
+    placeholder: "What is the problem and what is the fix?",
+    help: required
+      ? "This alert's automation requires a note."
+      : "Anyone reading this alert later sees the note.",
+    multiline: true,
+    required: !!required,
+    requiredMessage: "A note is required to acknowledge this — say what the problem is and what the fix was.",
+    maxLength: 2000,
+    okLabel: "Acknowledge",
+  };
+}
+if (typeof window !== "undefined") window._ackPromptOpts = _ackPromptOpts;
+
+/** The one definition of the acknowledge dialog, shared by the single-row and
+ *  bulk paths — the `_promptQuarantineReason` pattern. Resolves to the note,
+ *  "" when left blank on an optional one, or null if cancelled. */
+function _promptAckNote(count, required) {
+  return showPrompt("", _ackPromptOpts(count, required));
+}
+
+/**
+ * Acknowledge one alert from the asset's Alerts tab.
+ *
+ * showPrompt, not window.prompt: the browser's box is unstyled, unreachable in
+ * the installed PWA, suppressed outright by some browsers — and it cannot mark
+ * a field required, which an automation with `requireAckNote` needs. It builds
+ * its own overlay, so it stacks over the asset slide-over without disturbing
+ * it. Cancelling (null, never "") cancels the whole thing.
  */
 async function _acknowledgeAssetAlert(btn, assetId) {
-  var note = window.prompt("Acknowledge this alert. Add a note (optional):", "");
+  var note = await _promptAckNote(1, btn.dataset.noteRequired === "1");
   if (note === null) return; // cancelled
   btn.disabled = true;
   var old = btn.textContent;
   btn.textContent = "…";
   try {
-    var res = await api.alerts.acknowledge([btn.dataset.id], note.trim() || undefined);
+    var res = await api.alerts.acknowledge([btn.dataset.id], note || undefined);
     // Report what the SERVER did, not what was asked for: the route skips rows
     // already acknowledged, and a success toast over a no-op is how "I clicked
     // it and nothing happened" starts.
@@ -18112,16 +18152,24 @@ async function _clearAssetAlert(btn, assetId) {
  * for the batch because the route takes one shared note by design — and
  * because nobody types a per-interface note for the twelve ports that went
  * down together.
+ *
+ * The note is required when ANY selected alert's automation requires one: the
+ * server refuses such a batch whole (it has one note to apply to all of them),
+ * so asking for it up front beats a 400 after the fact.
  */
 async function _bulkAcknowledgeAssetAlerts(ids, assetId, btn) {
   if (!ids.length) return;
-  var note = window.prompt("Acknowledge " + _alertCountLabel(ids.length) + ". Add a note (optional):", "");
+  var required = ids.some(function (id) {
+    var box = document.querySelector('.asset-alert-sel[data-id="' + id + '"]');
+    return !!(box && box.dataset.noteRequired === "1");
+  });
+  var note = await _promptAckNote(ids.length, required);
   if (note === null) return; // cancelled
   btn.disabled = true;
   var old = btn.textContent;
   btn.textContent = "…";
   try {
-    var res = await api.alerts.acknowledge(ids, note.trim() || undefined);
+    var res = await api.alerts.acknowledge(ids, note || undefined);
     var n = res && typeof res.acknowledged === "number" ? res.acknowledged : ids.length;
     showToast(n ? "Acknowledged " + _alertCountLabel(n) : "Nothing to acknowledge — already acknowledged", n ? "success" : "error");
     _loadAssetNotificationsTab(assetId);
