@@ -7,12 +7,41 @@
   margin-bottom: 0.75rem;
 }
 
+/* Right-hand end of the toolbar, in order: the viewer's region scope, the
+   Edit-regions toggle, then the save/discard group. The ordering is explicit
+   (`order`) and the toolbar's slack is absorbed by `.map-status` growing,
+   rather than by an `auto` left margin on each of them: all three show and
+   hide independently, and with several auto margins live at once the slack
+   splits between whichever happen to be visible instead of pushing the
+   group to the right edge. */
+
 /* Edit-regions toggle (label flips to "Done editing" while active) lives on
    the far right of the toolbar — operators reach for it last in the flow. */
 #map-edit-regions {
-  margin-left: auto;
   order: 99;
 }
+
+/* "My regions" - the region tags the signed-in operator is scoped to,
+   read-only. It answers "which regions am I assigned to?", which nothing
+   else on the page states; it is deliberately NOT a filter (the map already
+   shows every site the viewer may read). An empty scope means unrestricted,
+   which the strip says in words rather than rendering as a bare label. */
+.map-my-regions {
+  order: 98;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--color-text-tertiary);
+}
+/* An author `display` beats the UA sheet's `[hidden] { display: none }`, so
+   the attribute the markup ships with (and the pre-render state) needs its own
+   rule or the empty strip would still claim a toolbar gap. */
+.map-my-regions[hidden] { display: none; }
+.map-my-regions-label { white-space: nowrap; }
+.map-my-regions-all { font-style: italic; }
 
 /* Per-user map theme toggle. Visually a square icon button matching
    the topology modal's btn-icon convention; sits between the search
@@ -37,16 +66,21 @@
 }
 .map-theme-toggle:focus { outline: 2px solid var(--color-accent); outline-offset: 1px; }
 
+/* Grows to absorb the toolbar's slack so everything ordered after it anchors
+   right. `min-width: 0` keeps the long edit-mode instruction text wrapping
+   inside the flex line instead of overflowing it. */
 .map-status {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 0.85rem;
   color: var(--color-text-tertiary);
 }
 
-/* Save Regions + Discard Changes group sits on the right edge of the toolbar.
- * `margin-left: auto` consumes any free horizontal space ahead of it so the
- * group anchors right regardless of how long the status text is. */
+/* Save Regions + Discard Changes group sits on the right edge of the toolbar,
+ * after the region strip. Ordered last so it anchors right regardless of how
+ * long the status text is (see the #map-edit-regions note above). */
 .map-edit-actions {
-  margin-left: auto;
+  order: 100;
   display: flex;
   align-items: center;
   gap: 0.5rem;

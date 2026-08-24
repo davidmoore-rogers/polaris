@@ -79,6 +79,7 @@
     initMap();
     wireModal();
     wireRegionEditing();
+    renderMyRegions().catch(function () {});
 
     try {
       await loadSites();
@@ -2676,6 +2677,62 @@
     drawControl: null,
     polygonsByRegionId: {} // id → L.polygon
   };
+
+  // ---- "My regions" strip ---------------------------------------------------
+  // The signed-in operator's OWN region scope, rendered read-only at the right
+  // of the toolbar beside "Edit regions". Region tags decide which sites and
+  // assets a scoped operator is answerable for, and which alerts route to
+  // them, but until now no page said what a given operator's own scope was --
+  // the Users page shows it only to whoever can administer users.
+  //
+  // Display only: it is not a map filter. The map already renders exactly the
+  // sites the viewer's role may read, so narrowing to "my" regions would hide
+  // sites the operator is legitimately responsible for seeing.
+  async function renderMyRegions() {
+    var box = document.getElementById("map-my-regions");
+    if (!box) return;
+    var mine = Array.isArray(window.currentEffectiveRegions)
+      ? window.currentEffectiveRegions.slice().sort()
+      : [];
+
+    box.hidden = false;
+    if (mine.length === 0) {
+      // An empty effective scope means UNRESTRICTED, not "assigned to none" --
+      // a bare label with nothing after it would read as a broken widget, so
+      // the strip states the semantics.
+      box.innerHTML =
+        '<span class="map-my-regions-label">My regions:</span>' +
+        '<span class="map-my-regions-all" title="Your account is not scoped to any region, ' +
+        'so every site you can read is on the map.">all regions</span>';
+      return;
+    }
+
+    // Pill colors come from the map-region catalogue, whose GET is gated
+    // `mapRegions:read` -- a viewer holding only `deviceMap:read` gets the
+    // neutral hue rather than a failed strip (PolarisRegionPills.load swallows
+    // that, the same fallback a tag outside the catalogue already takes).
+    if (!window.PolarisRegionPills.isLoaded()) await window.PolarisRegionPills.load();
+    box.innerHTML =
+      '<span class="map-my-regions-label">My regions:</span>' +
+      window.PolarisRegionPills.html(mine, regionScopeSource);
+  }
+
+  // Why the viewer holds a given region -- their own account, their role, or an
+  // IdP group. /auth/me returns all three sets and the effective union; app.js
+  // keeps the account + role halves, so a tag in the union but in neither of
+  // those is group-derived (those are re-resolved live at each login and never
+  // persisted onto the user's own columns).
+  function regionScopeSource(name) {
+    var own  = Array.isArray(window.currentUserRegions) ? window.currentUserRegions : [];
+    var role = Array.isArray(window.currentRoleRegions) ? window.currentRoleRegions : [];
+    var from = [];
+    if (own.indexOf(name) !== -1) from.push("your account");
+    if (role.indexOf(name) !== -1) {
+      from.push("your role" + (window.currentUserRole ? " (" + window.currentUserRole + ")" : ""));
+    }
+    if (from.length === 0) from.push("your identity-provider groups");
+    return "Region scope from " + from.join(" and ");
+  }
 
   function wireRegionEditing() {
     var editBtn    = document.getElementById("map-edit-regions");
