@@ -13,10 +13,11 @@
  * initialized after the body build).
  */
 
-import { describe, it, expect, beforeAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Window } from "happy-dom";
+import { installAppOverlay } from "../fixtures/appOverlay.js";
 import { buildSchemaCatalog, ruleInputSchema } from "../../src/services/notificationTypes.js";
 import { dimensionPickerMeta } from "../../src/services/notificationDimensionService.js";
 import { fixSelects } from "../fixtures/happyDomSelects.js";
@@ -27,6 +28,8 @@ const g = globalThis as Record<string, unknown>;
 let doc: Window["document"];
 let toastErrors: string[];
 const savedPayloads: Record<string, unknown>[] = [];
+/** Export writes through downloadJson; captured rather than downloaded. */
+const downloads: { obj: unknown; filename: string }[] = [];
 
 beforeAll(() => {
   const win = new Window();
@@ -40,13 +43,25 @@ beforeAll(() => {
   g.showConfirm = async () => false;
   g.permAtLeast = () => true;
   g.closeModal = () => {};
+  // Mirror production: openModal creates ONE #modal-overlay and REUSES it,
+  // replacing .modal-body / .modal-footer on every call. A stub that appends a
+  // fresh overlay instead leaves two #aw-name / #aw-save in the document after a
+  // reopen (which is what the import flow does), and getElementById returns the
+  // FIRST — so the test would silently read the stale wizard and disagree with
+  // the browser.
   g.openModal = (title: string, body: string, footer: string) => {
-    const overlay = doc.createElement("div");
-    overlay.innerHTML =
-      '<div class="modal"><div class="modal-header"><h3>' + title + "</h3></div>" +
-      '<div class="modal-body">' + body + "</div>" +
-      '<div class="modal-footer">' + footer + "</div></div>";
-    doc.body.appendChild(overlay);
+    let overlay = doc.getElementById("modal-overlay");
+    if (!overlay) {
+      overlay = doc.createElement("div");
+      overlay.id = "modal-overlay";
+      overlay.innerHTML =
+        '<div class="modal"><div class="modal-header"><h3></h3></div>' +
+        '<div class="modal-body"></div><div class="modal-footer"></div></div>';
+      doc.body.appendChild(overlay);
+    }
+    overlay.querySelector(".modal-header h3").textContent = title;
+    overlay.querySelector(".modal-body").innerHTML = body;
+    overlay.querySelector(".modal-footer").innerHTML = footer;
   };
   g.api = {
     automations: {
@@ -92,6 +107,23 @@ beforeAll(() => {
   g._ruleRecipientUsers = null;
   g._looksLikeDeviceId = () => false;
 
+  // Export writes through api.js's downloadJson; capture instead of downloading.
+  // The wizard calls window.downloadJson, so it has to be on the happy-dom
+  // window — setting it on globalThis alone leaves the call undefined.
+  const captureDownload = (obj: unknown, filename: string) => { downloads.push({ obj, filename }); };
+  g.downloadJson = captureDownload;
+  (win as unknown as Record<string, unknown>).downloadJson = captureDownload;
+  // openCodeModal stacks a dialog via app.js's buildOverlay. Load the REAL one
+  // (sliced out of app.js) so the code editor is exercised against the overlay
+  // it actually gets in a browser.
+  g._trapFocus = () => () => {};
+  g._focusFirstIn = () => {};
+  // buildOverlay ends with requestAnimationFrame, which Node does not define —
+  // without this it throws AFTER appending the dialog but BEFORE the click
+  // handlers are attached, so the dialog renders and every button is inert.
+  g.requestAnimationFrame = (fn: () => void) => setTimeout(fn, 0);
+  installAppOverlay();
+
   // The devices-step tree builder lives in its own script, loaded BEFORE the
   // wizard on every page that carries it — the wizard reads
   // window.PolarisConditionBuilder while assembling the modal body, so a
@@ -100,6 +132,9 @@ beforeAll(() => {
   (0, eval)(cbSrc);
   const src = readFileSync(resolve(__dirname, "../../public/js/automations-wizard.js"), "utf8");
   (0, eval)(src);
+  // Export / import / view-code. Loaded on every page that loads the wizard.
+  const portSrc = readFileSync(resolve(__dirname, "../../public/js/automations-portability.js"), "utf8");
+  (0, eval)(portSrc);
 });
 
 describe("automation wizard DOM render", () => {
@@ -1914,5 +1949,256 @@ describe("trigger filter rows", () => {
         .map((r) => (r as unknown as { value: string }).value);
       expect(modes).toEqual(["timed", "manual"]);
     });
+  });
+});
+
+// ─── Export / import / view code ────────────────────────────────────────────
+
+describe("automation export / import / view code", () => {
+  const win = () => g.window as Window & typeof globalThis;
+
+  /** A complete stored automation. Opening in EDIT mode unlocks every step
+   *  (visited = 6), which is what makes the Summary step reachable in one jump —
+   *  a from-scratch draft has to be walked through Next, and exporting an
+   *  automation that already exists is the realistic case anyway. */
+  function storedRule(over?: Record<string, unknown>) {
+    return {
+      id: "r-export",
+      name: "Exportable",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: 80, forDurationSec: 0 },
+      scope: { allAssets: true },
+      reset: { mode: "manual" },
+      actions: [{ type: "event" }, { type: "notify", channelId: "c1", recipientUserIds: ["u1"] }],
+      cooldownSec: null,
+      messageTemplate: null,
+      requireAckNote: false,
+      ...(over || {}),
+    };
+  }
+
+  /** Open on the Summary step. */
+  async function openToSummary(existing?: unknown, opts?: unknown) {
+    await (g.openAutomationWizard as (r: unknown, o?: unknown) => Promise<void>)(existing || storedRule(), opts);
+    (doc.querySelector('.stepper-step[data-step="6"]') as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 60));
+  }
+
+  beforeEach(() => {
+    downloads.length = 0;
+    savedPayloads.length = 0;
+    // toastErrors accumulates across the whole file; these tests assert on it.
+    toastErrors.length = 0;
+    // buildOverlay removes its node on transitionend with a 400 ms fallback, so
+    // a dialog closed by the previous test is still in the document — and a
+    // plain querySelector would find that stale one instead of the live dialog.
+    doc.querySelectorAll(".modal-overlay").forEach((n) => n.remove());
+  });
+
+  /** The live stacked dialog: always the LAST overlay in the document. */
+  function inCode(sel: string): unknown {
+    const all = doc.querySelectorAll(".modal-overlay " + sel);
+    return all.length ? all[all.length - 1] : null;
+  }
+
+  it("step 1 offers Import when creating, and never when editing", async () => {
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)(null);
+    expect(toastErrors).toEqual([]);
+    expect(doc.querySelector("#aw-import-btn")).toBeTruthy();
+    expect(doc.querySelector("#aw-import-input")).toBeTruthy();
+
+    // Editing an existing automation must NOT offer to replace it wholesale.
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r1",
+      name: "Existing",
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: 80, forDurationSec: 0 },
+      scope: { allAssets: true },
+      reset: { mode: "manual" },
+      actions: [{ type: "event" }],
+    });
+    expect(doc.querySelector("#aw-import-btn")).toBeFalsy();
+  });
+
+  it("step 6 offers Export and View code", async () => {
+    await openToSummary();
+    expect(toastErrors).toEqual([]);
+    expect(doc.querySelector("#aw-export")).toBeTruthy();
+    expect(doc.querySelector("#aw-view-code")).toBeTruthy();
+  });
+
+  it("Export downloads a dependency-led file named after the automation, carrying no channel id", async () => {
+    await openToSummary();
+    (doc.querySelector("#aw-export") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(downloads.length).toBe(1);
+    expect(downloads[0]!.filename).toBe("Exportable.automation.json");
+    const file = downloads[0]!.obj as Record<string, unknown>;
+    // Dependencies come FIRST so they are what a human sees on opening the file.
+    expect(Object.keys(file).indexOf("dependencies")).toBeLessThan(Object.keys(file).indexOf("rule"));
+    expect(file.polarisAutomation).toBe(1);
+    const rule = file.rule as Record<string, unknown>;
+    expect(rule.name).toBe("Exportable");
+    // No delivery wiring, and the audit Event is explicit rather than omitted.
+    expect(rule.actions).toEqual([{ type: "event" }]);
+    expect(rule.enabled).toBeUndefined();
+    expect(JSON.stringify(file)).not.toContain('"c1"'); // the harness's channel id
+  });
+
+  it("View code shows the full stored body and can save it back through the one save path", async () => {
+    await openToSummary();
+    (doc.querySelector("#aw-view-code") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const ta = inCode("#aw-code-text") as unknown as { value: string } | null;
+    expect(ta).toBeTruthy();
+    const shown = JSON.parse(ta!.value) as Record<string, unknown>;
+    // Full fidelity, unlike the export: `enabled` is present ...
+    expect(shown.enabled).toBe(true);
+    // ... and the legacy mirror is NOT, or deleting `actions` here would let the
+    // server silently rebuild them from `targets`.
+    expect(shown.targets).toBeUndefined();
+    expect(shown.clearBehavior).toBeUndefined();
+
+    // An edit that removes nothing destructive saves straight through. It must
+    // NOT be treated as "no change" just because the destructive-field diff is
+    // empty — that would silently discard the operator's edit.
+    ta!.value = JSON.stringify({ ...shown, messageTemplate: "edited" });
+    (inCode("#aw-code-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(savedPayloads.length).toBe(1);
+    expect(savedPayloads[0]!.messageTemplate).toBe("edited");
+    // Editing an existing automation keeps its delivery wiring — the code view
+    // is full fidelity, unlike an export.
+    expect(JSON.stringify(savedPayloads[0]!.actions)).toContain("c1");
+  });
+
+  it("saving an unchanged body just closes, and a destructive edit needs a confirm", async () => {
+    await openToSummary();
+    (doc.querySelector("#aw-view-code") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    const ta = inCode("#aw-code-text") as unknown as { value: string };
+    const shown = JSON.parse(ta.value) as Record<string, unknown>;
+
+    // Untouched: nothing to save.
+    (inCode("#aw-code-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(savedPayloads.length).toBe(0);
+
+    // Deleting the action list is destructive, so it must be confirmed —
+    // showConfirm is stubbed false here, so nothing saves.
+    (doc.querySelector("#aw-view-code") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    const gutted: Record<string, unknown> = { ...shown };
+    delete gutted.actions;
+    (inCode("#aw-code-text") as { value: string }).value = JSON.stringify(gutted);
+    (inCode("#aw-code-save") as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(savedPayloads.length).toBe(0);
+  });
+
+  it("View code refuses invalid JSON in place instead of losing the edit", async () => {
+    await openToSummary();
+    (doc.querySelector("#aw-view-code") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    const ta = inCode("#aw-code-text") as unknown as { value: string };
+    ta.value = "{ not json";
+    (inCode("#aw-code-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const err = inCode("#aw-code-err") as unknown as { textContent: string; style: { display: string } };
+    expect(err.style.display).toBe("");
+    expect(err.textContent).toMatch(/Invalid JSON/);
+    // The textarea still holds the operator's text.
+    expect((inCode("#aw-code-text") as unknown as { value: string }).value).toBe("{ not json");
+    expect(savedPayloads.length).toBe(0);
+  });
+
+  it("an imported automation opens in import mode: name from the filename, created disabled", async () => {
+    const P = (g.window as unknown as { PolarisAutomationPortability: Record<string, unknown> }).PolarisAutomationPortability;
+    const parse = P.parseImportFile as (t: string, f: string, tt?: string[]) => Record<string, unknown>;
+    const fileText = JSON.stringify({
+      polarisAutomation: 1,
+      dependencies: [
+        { kind: "deliveryChannel", name: "NOC email" },     // the harness HAS this one
+        { kind: "deliveryChannel", name: "Teams NetOps" },  // and not this one
+      ],
+      rule: {
+        name: "name in the body is ignored",
+        severity: "serious",
+        trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: 77, forDurationSec: 0 },
+        scope: { allAssets: true },
+        reset: { mode: "manual" },
+        actions: [{ type: "event" }],
+      },
+    });
+    const parsed = parse(fileText, "Imported rule.automation.json", ["asset_metric", "event"]);
+
+    await (g.openAutomationWizard as (r: unknown, o?: unknown) => Promise<void>)(parsed.rule, {
+      import: true,
+      name: parsed.name,
+      importInfo: {
+        dependencies: parsed.dependencies,
+        needsDevices: parsed.needsDevices,
+        blankedDimensions: parsed.blankedDimensions,
+        problems: parsed.problems,
+      },
+    });
+    expect(toastErrors).toEqual([]);
+
+    // The filename wins over the name in the body.
+    expect((doc.querySelector("#aw-name") as unknown as { value: string }).value).toBe("Imported rule");
+    // The banner says it lands disabled, and splits present from missing.
+    const note = doc.querySelector("#aw-step-1 .aw-clone-note") as unknown as { textContent: string };
+    expect(note).toBeTruthy();
+    expect(note.textContent).toMatch(/disabled/);
+    expect(note.textContent).toMatch(/NOC email/);
+    expect(note.textContent).toMatch(/not in this install/);
+    expect(note.textContent).toMatch(/Teams NetOps/);
+    // Actions always needs review — an import never carries delivery wiring.
+    expect(note.textContent).toMatch(/Actions/);
+
+    // It saves as a CREATE, disabled, whatever the file said.
+    (doc.querySelector('.stepper-step[data-step="6"]') as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 40));
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(savedPayloads.length).toBe(1);
+    expect(savedPayloads[0]!.enabled).toBe(false);
+    expect(savedPayloads[0]!.name).toBe("Imported rule");
+  });
+
+  it("refuses to save a state-probe trigger whose probe was blanked (it would watch every probe)", async () => {
+    await (g.openAutomationWizard as (r: unknown, o?: unknown) => Promise<void>)(
+      {
+        name: "Probe rule",
+        severity: "warning",
+        trigger: {
+          type: "asset_metric",
+          metric: "customStateValue",
+          aggregation: "latest",
+          windowSec: 0,
+          operator: "==",
+          threshold: 1,
+          forDurationSec: 0,
+          dimensionFilter: {}, // the probe id did not survive the export
+        },
+        scope: { allAssets: true },
+        reset: { mode: "manual" },
+        actions: [{ type: "event" }],
+      },
+      { import: true, name: "Probe rule", importInfo: { dependencies: [], blankedDimensions: ["stateProbeId"] } },
+    );
+    toastErrors.length = 0;
+    (doc.querySelector('.stepper-step[data-step="6"]') as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 40));
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(savedPayloads.length).toBe(0);
+    expect(toastErrors.join(" ")).toMatch(/state probe/i);
   });
 });

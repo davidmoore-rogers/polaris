@@ -562,10 +562,80 @@ var _rulesPage = 1;
             // holding the full rule list (_rules is every row, not the page slice).
             onSelect: function () { openWizardFor(r, { clone: true, name: cloneName(r.name, _rules.map(function (x) { return x.name; })) }); },
           },
+        ].concat(portabilityMenuItems(r), [
           { separator: true },
           { label: "Delete", danger: true, onSelect: function () { confirmDeleteRule(r); } },
-        ], { label: "Actions for " + r.name });
+        ]), { label: "Actions for " + r.name });
       });
+    });
+  }
+
+  /** Catalogs for the export strip. The list page holds channels and the
+   *  schema; the rest are best-effort, and an id that cannot be resolved is
+   *  reported in the file as an id rather than dropped. */
+  function portabilityCatalogs() {
+    return {
+      channels: _ruleChannels || [],
+      scripts: _awScripts || [],
+      users: _ruleRecipientUsers || [],
+      stateProbes: (_ruleSchema && _ruleSchema.stateProbes) || [],
+      tags: _ruleTagList || [],
+      assetTypes: _ruleAssetTypes || [],
+    };
+  }
+
+  /** The leading separator belongs to these items, so a page without the
+   *  portability module renders one rule before Delete rather than two.
+   *  Export / View code re-serialize a row the caller can already read, so they
+   *  are offered at read level; the code editor gates its own Save on fullwrite. */
+  function portabilityMenuItems(r) {
+    var P = window.PolarisAutomationPortability;
+    if (!P) return [];
+    return [
+      { separator: true },
+      {
+        label: "View code",
+        title: "See and edit this automation as JSON",
+        onSelect: function () { openCodeFor(r); },
+      },
+      {
+        label: "Export",
+        title: "Download this automation as a portable file",
+        onSelect: function () { exportRule(r); },
+      },
+    ];
+  }
+
+  function exportRule(r) {
+    var P = window.PolarisAutomationPortability;
+    if (!P) return;
+    // _ruleToInput is the tested row -> ruleInput converter; the strip then
+    // removes every install-specific reference and names it as a dependency.
+    var file = P.buildExportFile(_ruleToInput(r), portabilityCatalogs(), {
+      polarisVersion: (window.polarisVersion || undefined),
+    });
+    var deps = (file.dependencies || []).length;
+    window.downloadJson(file, P.filenameForExport(r.name));
+    showToast(deps
+      ? "Exported. The file lists " + deps + " thing" + (deps === 1 ? "" : "s") + " it needs \u2014 delivery wiring is not included."
+      : "Exported.", "success");
+  }
+
+  function openCodeFor(r) {
+    var P = window.PolarisAutomationPortability;
+    if (!P) return;
+    P.openCodeModal({
+      title: "Code for \u201c" + r.name + "\u201d",
+      body: _ruleToInput(r),
+      canSave: canEditRules,
+      onSave: canEditRules ? async function (edited) {
+        // Route the edit through _ruleToInput as well: it normalises every
+        // field explicitly, which is what keeps a PUT (a full replace) from
+        // clearing a nullable JSON column the operator never touched.
+        await api.automations.update(r.id, _ruleToInput(edited));
+        showToast("Automation saved", "success");
+        loadRules();
+      } : null,
     });
   }
 
