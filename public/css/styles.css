@@ -4942,6 +4942,32 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   color: var(--color-text-tertiary);
 }
 
+/* Devices-step match preview (wizard step 2). A FIXED-height well: the
+   debounced preview swaps "Checking…" for a count plus a result table on every
+   edit of the condition tree, and letting that content resize the step made the
+   modal jump under the operator's cursor mid-edit. The head (count / status)
+   sits at the top and the matched-device list scrolls inside the body, so the
+   box occupies the same height whatever the preview returns — including before
+   the first one has run. Deliberately unstyled otherwise: a border would draw a
+   visible empty frame in the states that fill less than the reserved height. */
+.aw-preview-box {
+  display: flex;
+  flex-direction: column;
+  height: 232px;
+}
+.aw-preview-head {
+  flex: 0 0 auto;
+  margin: 0 0 4px;
+  font-size: 0.85rem;
+}
+.aw-preview-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.aw-preview-body tbody td { padding: 0.4rem 0.75rem; }
+.aw-preview-muted { color: var(--color-text-tertiary); }
+
 /* Step-5 review summary card (label/value rows, setup.html's review-grid
    promoted). */
 .review-grid {

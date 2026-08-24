@@ -1693,7 +1693,9 @@ async function openAutomationWizard(existing, opts) {
       '<div id="aw-cond-wrap" style="display:' + (allAssets ? "none" : "block") + '">' +
         '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Build the filter from conditions and nested groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move a condition into another group or reorder groups.</p>' +
         '<div id="aw-cond-root">' + condBuilder.groupHtml(root, 0) + '</div>' +
-        '<div id="aw-scope-preview" style="margin-top:0.75rem"></div>' +
+        // Fixed-height (see .aw-preview-box): the debounced reload must not
+        // resize the step under the operator's cursor.
+        '<div id="aw-scope-preview" class="aw-preview-box" style="margin-top:0.75rem">' + scopePreviewHtml('<span class="aw-preview-muted">Checking…</span>') + '</div>' +
       '</div>';
   }
   function wireStep2() {
@@ -1736,6 +1738,13 @@ async function openAutomationWizard(existing, opts) {
     }
     return condBuilder.validate(sc.condition);
   }
+  // One shell for every preview state — "Checking…", a result, an error — so the
+  // box's height comes from the CSS rather than from what came back. Head holds
+  // the count line (which may wrap); the matched-device list scrolls in the body.
+  function scopePreviewHtml(headHtml, bodyHtml) {
+    return '<p class="aw-preview-head">' + headHtml + '</p>' +
+      '<div class="aw-preview-body' + (bodyHtml ? ' table-wrapper' : '') + '">' + (bodyHtml || "") + '</div>';
+  }
   function scheduleScopePreview() {
     if (scopePreviewTimer) clearTimeout(scopePreviewTimer);
     scopePreviewTimer = setTimeout(runScopePreview, 400);
@@ -1744,7 +1753,7 @@ async function openAutomationWizard(existing, opts) {
     var box = document.getElementById("aw-scope-preview");
     if (!box) return;
     collectStep2();
-    box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">Checking…</p>';
+    box.innerHTML = scopePreviewHtml('<span class="aw-preview-muted">Checking…</span>');
     try {
       var res = await api.automations.preview({ scope: draft.scope });
       var rows = (res.matches || []).slice(0, 15).map(function (m) {
@@ -1755,13 +1764,17 @@ async function openAutomationWizard(existing, opts) {
       // stated rather than hidden: the filter does select them, and event and
       // change triggers fire on them.
       var un = res.unmonitoredCount || 0;
-      box.innerHTML = '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> monitored device(s) match this filter.' +
-          (un ? ' <span style="color:var(--color-text-tertiary)">(+' + un + ' unmonitored — only event and change triggers fire on those.)</span>' : "") +
-        '</p>' +
-        (rows ? '<div class="table-wrapper" style="max-height:180px;overflow:auto"><table><tbody>' + rows + '</tbody></table></div>' +
-          (res.totalEvaluated > 15 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 15) + ' more.</p>' : "") : "");
+      // The "first 15" note rides the head rather than trailing the list: in a
+      // scrolling body it would sit below the fold, i.e. exactly where an
+      // operator wondering whether the list is complete can't see it.
+      box.innerHTML = scopePreviewHtml(
+        '<strong>' + res.totalEvaluated + '</strong> monitored device(s) match this filter.' +
+          (un ? ' <span class="aw-preview-muted">(+' + un + ' unmonitored — only event and change triggers fire on those.)</span>' : "") +
+          (res.totalEvaluated > 15 ? ' <span class="aw-preview-muted">Showing the first 15.</span>' : ""),
+        rows ? '<table><tbody>' + rows + '</tbody></table>' : ""
+      );
     } catch (err) {
-      box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">' + escapeHtml(err.message || "Preview unavailable") + '</p>';
+      box.innerHTML = scopePreviewHtml('<span class="aw-preview-muted">' + escapeHtml(err.message || "Preview unavailable") + '</span>');
     }
   }
 
