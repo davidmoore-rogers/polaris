@@ -414,6 +414,15 @@ describe("buildSchemaCatalog v2 additions", () => {
     expect(cat.resetModes).toEqual(["manual", "auto", "timed", "condition"]);
     expect(cat.resetModesByTriggerType.event).toEqual(["timed", "manual"]);
     expect(cat.resetModesByTriggerType.composite).toEqual(["auto", "condition", "timed", "manual"]);
+    // Every continuous trigger offers "condition", and it leads the non-auto
+    // modes because that's the order the wizard renders the radios in.
+    expect(cat.resetModesByTriggerType.asset_metric).toEqual(["auto", "condition", "timed", "manual"]);
+    expect(cat.resetModesByTriggerType.asset_state).toEqual(["auto", "condition", "timed", "manual"]);
+    expect(cat.resetModesByTriggerType.host_metric).toEqual(["auto", "condition", "timed", "manual"]);
+    // Per-dimension alerting vocabulary the reset step's note is built from.
+    expect(cat.stateFieldDimensions.ifOperStatus).toEqual(["ifNamePattern"]);
+    expect(cat.stateFieldDimensions.monitorStatus).toBeUndefined();
+    expect(cat.dimensionNouns.ifNamePattern).toBe("interface");
     expect(cat.actionTypes.map((a: { type: string }) => a.type)).toEqual(["notify", "api_call", "script", "event"]);
     expect(cat.inverseComparators[">="]).toBe("<");
     expect(cat.comparatorPhrases[">="]).toBe("is at or above");
@@ -555,13 +564,61 @@ describe("condition-mode reset", () => {
     expect(legacyMirrorOfV2({ mode: "condition", condition: resetTree } as any, []).clearBehavior).toBe("auto");
   });
 
-  it("rejects condition reset without a tree, and on non-composite triggers", () => {
+  it("rejects condition reset without a tree", () => {
     expect(() =>
       ruleInputSchema.parse({ name: "x", trigger: compositeAnd, reset: { mode: "condition" } }),
     ).toThrow(/requires a condition tree/);
+  });
+
+  // The composite-only restriction was lifted 2026-08: a custom reset tree is
+  // just a more expressive spelling of "the trigger is no longer true", and the
+  // wizard seeds it with the trigger inverted on every continuous trigger.
+  it("accepts a condition reset on a single metric trigger", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "x", trigger: metricTrigger,
+      reset: { mode: "condition", condition: resetTree, sustainSec: 300 },
+    });
+    expect(parsed.reset).toMatchObject({ mode: "condition", condition: resetTree, sustainSec: 300 });
+  });
+
+  it("accepts a condition reset on a single asset_state trigger", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "x",
+      trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
+      reset: { mode: "condition", condition: resetTree },
+    });
+    expect(parsed.reset.mode).toBe("condition");
+  });
+
+  it("still refuses one on event/change — an instant has no condition to recover", () => {
     expect(() =>
-      ruleInputSchema.parse({ name: "x", trigger: metricTrigger, reset: { mode: "condition", condition: resetTree } }),
-    ).toThrow(/composite/);
+      ruleInputSchema.parse({
+        name: "x", trigger: { type: "event", actionPattern: "integration.*" },
+        reset: { mode: "condition", condition: resetTree },
+      }),
+    ).toThrow(/continuous condition/);
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x", trigger: { type: "change", changeType: "sdwan_failover" },
+        reset: { mode: "condition", condition: resetTree },
+      }),
+    ).toThrow(/continuous condition/);
+  });
+
+  it("enforces kind coherence on a SINGLE trigger too (host trigger, device leaf)", () => {
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x", trigger: { type: "host_metric", metric: "cpuPct", operator: ">=", threshold: 90 },
+        reset: { mode: "condition", condition: resetTree },
+      }),
+    ).toThrow(/match the trigger's kind/);
+    // …and the mirror: a device trigger can't recover on a Polaris-host reading.
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x", trigger: metricTrigger,
+        reset: { mode: "condition", condition: { op: "and", children: [hostLeaf] } },
+      }),
+    ).toThrow(/match the trigger's kind/);
   });
 
   it("rejects a reset tree whose leaves mismatch the trigger kind", () => {

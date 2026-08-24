@@ -22,6 +22,8 @@ let make: (s: Record<string, unknown>) => {
   compactDuration: (sec: number) => string;
   leafUnit: (metric: string, df?: Record<string, string>) => string;
   isTriggerScoped: (tr: Record<string, unknown> | null) => boolean;
+  invertedLeaf: (tr: Record<string, unknown> | null, reset?: Record<string, unknown>) => Record<string, unknown> | null;
+  invertedTree: (node: Record<string, unknown> | null) => Record<string, unknown> | null;
 };
 
 beforeAll(() => {
@@ -236,6 +238,71 @@ describe("makeAutomationSentences", () => {
     const tr = { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 };
     s.invertedLeaf(tr, { mode: "auto", clearThreshold: 75 });
     expect(tr).toEqual({ type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 });
+  });
+
+  // ── invertedTree: the seed for a custom reset condition ──────────────────
+  describe("invertedTree", () => {
+    const leaf = (metric: string, operator: string, threshold: number) => ({
+      type: "asset_metric", metric, operator, threshold, aggregation: "latest", windowSec: 0,
+    });
+
+    it("flips a single leaf's comparator and keeps how it is measured", () => {
+      const s = make(SCHEMA as never);
+      const out = s.invertedTree({ op: "and", children: [{ ...leaf("cpuPct", ">=", 90), aggregation: "avg", windowSec: 300 }] });
+      expect(out).toEqual({
+        op: "or",
+        children: [{ type: "asset_metric", metric: "cpuPct", operator: "<", threshold: 90, aggregation: "avg", windowSec: 300 }],
+      });
+    });
+
+    it("applies De Morgan: AND of two becomes OR of the two inverted", () => {
+      const s = make(SCHEMA as never);
+      const out = s.invertedTree({ op: "and", children: [leaf("cpuPct", ">=", 90), leaf("memPct", ">", 80)] }) as any;
+      expect(out.op).toBe("or");
+      expect(out.children.map((c: any) => [c.metric, c.operator, c.threshold])).toEqual([
+        ["cpuPct", "<", 90],
+        ["memPct", "<=", 80],
+      ]);
+    });
+
+    it("recurses into nested groups, flipping each level", () => {
+      const s = make(SCHEMA as never);
+      const out = s.invertedTree({
+        op: "or",
+        children: [leaf("cpuPct", ">=", 90), { op: "and", children: [leaf("memPct", ">", 80)] }],
+      }) as any;
+      expect(out.op).toBe("and");
+      expect(out.children[1].op).toBe("or");
+      expect(out.children[1].children[0].operator).toBe("<=");
+    });
+
+    it("flips a 0/1 flag's VALUE rather than its comparator", () => {
+      // Same rule invertedLeaf follows for the reset sentence: "is OK" reads as a
+      // state to look for, "is not Alarm" as a double negative.
+      const s = make(STATE_SCHEMA as never);
+      const out = s.invertedTree({
+        op: "and",
+        children: [{ type: "asset_metric", metric: "customStateValue", operator: "==", threshold: 1, aggregation: "latest", windowSec: 0 }],
+      }) as any;
+      expect(out.children[0].operator).toBe("==");
+      expect(out.children[0].threshold).toBe(0);
+    });
+
+    it("does not mutate the tree it was handed", () => {
+      const s = make(SCHEMA as never);
+      const tree = { op: "and", children: [leaf("cpuPct", ">=", 90)] };
+      s.invertedTree(tree);
+      expect(tree).toEqual({ op: "and", children: [leaf("cpuPct", ">=", 90)] });
+    });
+
+    it("copies a leaf it cannot invert through instead of dropping it", () => {
+      // Leaving a visible condition the operator can fix beats silently
+      // narrowing the tree they asked to have seeded.
+      const s = make(SCHEMA as never);
+      const odd = { type: "mystery", foo: 1 };
+      const out = s.invertedTree({ op: "and", children: [odd] }) as any;
+      expect(out.children[0]).toEqual(odd);
+    });
   });
 
   it("names a probeless boolean metric's states from the metric-wide labels", () => {

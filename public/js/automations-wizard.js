@@ -631,6 +631,31 @@ function makeAutomationSentences(s) {
   }
 
   /**
+   * A whole condition tree inverted — the seed for a custom reset condition, so
+   * an operator starts from what the automatic reset would have done and edits
+   * from there instead of from a blank row.
+   *
+   * De Morgan, not a wrapper: NOT(A AND B) is (NOT A) OR (NOT B), so the group
+   * operator flips at every level alongside each leaf's comparator. That is also
+   * why it stays expressible — the tree vocabulary is and/or only, and inverting
+   * an and/or tree yields another and/or tree.
+   *
+   * A leaf that has nothing to invert (no comparator to flip) is copied through
+   * untouched rather than dropped: leaving a condition the operator can see and
+   * fix beats silently narrowing the tree they asked to be seeded.
+   */
+  function invertedTree(node) {
+    if (!node || !Array.isArray(node.children)) return node;
+    return {
+      op: node.op === "and" ? "or" : "and",
+      children: node.children.map(function (c) {
+        if (c && c.type === undefined && Array.isArray(c.children)) return invertedTree(c);
+        return invertedLeaf(c) || JSON.parse(JSON.stringify(c));
+      }),
+    };
+  }
+
+  /**
    * The part an operator can't read off the clause. Two cases are worth saying
    * out loud:
    *
@@ -699,7 +724,7 @@ function makeAutomationSentences(s) {
     fieldLabel: fieldLabel, changeLabel: changeLabel, humanDuration: humanDuration,
     tgLeafPhrase: tgLeafPhrase, tgTreePhrase: tgTreePhrase,
     triggerSentence: triggerSentence, severityLadderPhrase: severityLadderPhrase, resetSentence: resetSentence,
-    invertedLeaf: invertedLeaf, resetCaveat: resetCaveat,
+    invertedLeaf: invertedLeaf, invertedTree: invertedTree, resetCaveat: resetCaveat,
     triggerFormula: triggerFormula, compactDuration: compactDuration,
     CMP_PHRASE: CMP_PHRASE, INV_CMP: INV_CMP, AGG_PHRASE: AGG_PHRASE, DIM_PHRASE: DIM_PHRASE,
   };
@@ -1133,7 +1158,7 @@ async function openAutomationWizard(existing, opts) {
       // phrase the trigger sentence uses.
       tgLeafPhrase = _sent.tgLeafPhrase,
       triggerSentence = _sent.triggerSentence, triggerFormula = _sent.triggerFormula,
-      resetSentence = _sent.resetSentence,
+      resetSentence = _sent.resetSentence, invertedTree = _sent.invertedTree,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
   var DIM_PLACEHOLDER = { hostnamePattern: "any device — click to pick a hostname, or type to filter", ipPattern: "click to pick an IP — a prefix like 10.4. or a CIDR like 10.4.0.0/16 also works", macPattern: "click to pick a MAC, or type one in any separator style", manufacturerPattern: "any manufacturer — click to pick, or type to filter", modelPattern: "any model — click to pick, or type to filter", sdwanRulePattern: "any SD-WAN rule — click to pick, or type to filter", ifNamePattern: "any interface — click to pick, or type to filter", sensorClass:"sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
@@ -2647,6 +2672,18 @@ async function openAutomationWizard(existing, opts) {
     })(node);
     return aggregated;
   }
+  /** The trigger's measurement window in seconds — the widest window any of its
+   *  aggregated leaves carries, 0 when every leaf reads `latest`. Reset leaves
+   *  inherit it (see collectStep4): they answer the same question about the same
+   *  device, so measuring them over a different period would be a third time
+   *  knob nobody asked for. */
+  function triggerWindowSec(tr) {
+    if (!tr) return 0;
+    var leaves = tr.type === "composite" ? tgLeaves(tr) : [tr];
+    var win = 0;
+    leaves.forEach(function (l) { if (tgLeafAggregated(l)) win = Math.max(win, Number(l.windowSec) || 0); });
+    return win;
+  }
   /** Minutes to show in the duration field for a stored trigger: an aggregated
    *  leaf's window, else the sustain (which is what `latest` triggers carry). */
   function triggerDurationMinutes(tr) {
@@ -2826,13 +2863,40 @@ async function openAutomationWizard(existing, opts) {
 
   // ── Step 4: Reset conditions ───────────────────────────────────────────
   // Default: a checked "Reset when the trigger is no longer true" checkbox
-  // (= auto mode, with hysteresis/sustain extras). Unchecking reveals the
-  // other modes — composite triggers additionally get "custom conditions"
-  // (the same AND/OR builder, stored as reset mode "condition").
-  // Event/change triggers keep the plain timed/manual radios.
+  // (= auto mode, with hysteresis/sustain extras). Unchecking reveals the other
+  // modes, led by "custom conditions" — the same AND/OR builder the trigger step
+  // uses, stored as reset mode "condition" and SEEDED with the trigger inverted,
+  // so the starting point is what the checkbox that was just unchecked did.
+  // Event/change triggers have no continuous condition and keep the plain
+  // timed/manual radios (TRIGGER_TYPES_WITH_RESET_CONDITIONS, server-side).
   function defaultResetFor(triggerType) {
     var d = (s.resetDefaults && s.resetDefaults[triggerType]) || { mode: "auto" };
     return JSON.parse(JSON.stringify(d));
+  }
+  /** The dimensions a trigger reports per — [] when it alerts once per device.
+   *  Composite is always per-device (its leaves fold ANY-dimension). */
+  function triggerDimensions(tr) {
+    if (!tr || !tr.type) return [];
+    if (tr.type === "asset_metric") return (s.metricDimensions && s.metricDimensions[tr.metric]) || [];
+    if (tr.type === "asset_state") return (s.stateFieldDimensions && s.stateFieldDimensions[tr.field]) || [];
+    return [];
+  }
+  function isTriggerPerDimension(tr) { return triggerDimensions(tr).length > 0; }
+  /** "interface" / "sensor" / … for the reset step's per-dimension note. */
+  function perDimensionNoun(tr) {
+    var dims = triggerDimensions(tr);
+    for (var i = 0; i < dims.length; i++) {
+      var n = s.dimensionNouns && s.dimensionNouns[dims[i]];
+      if (n) return n;
+    }
+    return "reading";
+  }
+  /** The custom-reset tree an untouched draft starts from: the trigger's own
+   *  condition, inverted (De Morgan for a composite). Falls back to a blank
+   *  condition row only when there is nothing invertible to seed from. */
+  function seededResetTree(tr, kind) {
+    var seed = invertedTree(triggerToTree(tr, kind));
+    return seed && (seed.children || []).length ? seed : { op: "and", children: [tgDefaultLeaf(kind)] };
   }
   function resetRadioHtml(m, reset, extra) {
     var meta = (s.resetModeMeta || {})[m] || { label: m };
@@ -2850,9 +2914,17 @@ async function openAutomationWizard(existing, opts) {
     var tr = draft.trigger || {};
     var modes = (s.resetModesByTriggerType && s.resetModesByTriggerType[tr.type]) || ["auto", "timed", "manual"];
     if (!draft.reset || modes.indexOf(draft.reset.mode) === -1) draft.reset = defaultResetFor(tr.type);
+    // A reset condition is written in the trigger's kind (device vs Polaris
+    // host), so switching the trigger between the two on step 3 leaves a tree
+    // the server would refuse. Drop it and re-seed from the new trigger rather
+    // than making the operator hand-fix leaves they never chose.
+    if (draft.reset.condition) {
+      var wantHostLeaves = tr.kind === "host" || tr.type === "host_metric";
+      var stale = tgLeaves(draft.reset.condition).some(function (l) { return wantHostLeaves !== (l.type === "host_metric"); });
+      if (stale) delete draft.reset.condition;
+    }
     var reset = draft.reset;
     var isEC = tr.type === "event" || tr.type === "change";
-    var isComposite = tr.type === "composite";
     // A 0/1 flag has no dead band between "firing" and "clear", so the
     // hysteresis control below would be meaningless on one — it resets when the
     // flag flips back. (resetSentence makes the same exclusion.)
@@ -2868,8 +2940,11 @@ async function openAutomationWizard(existing, opts) {
         '<div class="aw-sentence" id="aw-reset-sentence">…</div>' + radios + cooldownHtml;
     } else {
       var autoOn = reset.mode === "auto";
-      var customModes = (isComposite ? ["condition"] : []).concat(["timed", "manual"]);
-      var selCustom = customModes.indexOf(reset.mode) !== -1 ? reset.mode : customModes[customModes.length - 1];
+      // Non-auto modes in the server's own order, which puts "condition" first:
+      // unchecking the box lands on the trigger-inverted tree, i.e. the editable
+      // spelling of what was just unchecked, instead of on "manually only".
+      var customModes = modes.filter(function (m) { return m !== "auto"; });
+      var selCustom = customModes.indexOf(reset.mode) !== -1 ? reset.mode : customModes[0];
       var customReset = { mode: autoOn ? selCustom : reset.mode, afterSec: reset.afterSec, condition: reset.condition, sustainSec: reset.sustainSec };
 
       var unit = numeric ? leafUnit(tr.metric, tr.dimensionFilter) : "";
@@ -2887,15 +2962,23 @@ async function openAutomationWizard(existing, opts) {
       }
 
       var condExtra = "";
-      if (isComposite) {
-        var kind = tr.kind === "host" ? "host" : "asset";
+      if (customModes.indexOf("condition") !== -1) {
+        var kind = tr.kind === "host" || tr.type === "host_metric" ? "host" : "asset";
+        // Seeded with the trigger INVERTED (severity bands ignored — a ladder's
+        // tiers all recover at tier 0, so the base condition is the one there is
+        // anything to invert). That is the same clause the automatic reset uses,
+        // so a stored automation reads identically until the operator edits it —
+        // which is the point: the seed is a starting position, not a new default.
         var condTree = customReset.condition
           ? tgLift(JSON.parse(JSON.stringify(customReset.condition)))
-          : { op: "and", children: [tgDefaultLeaf(kind)] };
+          : seededResetTree(tr, kind);
         condExtra =
           '<div style="margin:6px 0 0 24px">' +
             '<div id="aw-reset-root">' + tgGroupHtml(condTree, 0, kind) + '</div>' +
             '<div style="font-size:0.85rem;margin-top:4px">Must stay true for <input type="number" id="aw-crs-sustain-min" min="0" value="' + Math.round((reset.mode === "condition" ? (reset.sustainSec || 0) : 0) / 60) + '" style="width:80px"> min (0 = reset immediately)</div>' +
+            (isTriggerPerDimension(tr)
+              ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:6px 0 0">This automation alerts per ' + escapeHtml(perDimensionNoun(tr)) + '. A reset condition on the same ' + escapeHtml(perDimensionNoun(tr)) + ' clears each alert on its own; one on anything else (CPU, memory, device status) is read for the whole device, so it clears all of them together.</p>'
+              : "") +
             '<p style="font-size:0.78rem;color:var(--color-warning,#d97706);margin:6px 0 0">If the trigger and reset conditions can both be true at once, the automation can clear and re-fire in a loop — set a re-notify cooldown below.</p>' +
           '</div>';
       }
@@ -2908,7 +2991,7 @@ async function openAutomationWizard(existing, opts) {
       panel.innerHTML = '<h3 style="margin:0 0 0.25rem">How should its alerts reset?</h3>' +
         '<div class="aw-sentence" id="aw-reset-sentence">…</div>' +
         '<div class="form-group" style="margin-bottom:0.5rem"><label style="font-weight:600"><input type="checkbox" id="aw-reset-auto"' + (autoOn ? " checked" : "") + '> Reset when the trigger is no longer true</label>' +
-        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 24px">The alert clears automatically once the condition recovers. Uncheck for timed/manual resets' + (isComposite ? " or a custom reset condition" : "") + '.</p></div>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 24px">The alert clears automatically once the condition recovers. Uncheck to write your own reset conditions, or to reset on a timer or by hand.</p></div>' +
         '<div id="aw-auto-extras" style="display:' + (autoOn ? "block" : "none") + ';margin:0 0 0.6rem 24px">' + autoExtras + '</div>' +
         '<div id="aw-reset-custom" style="display:' + (autoOn ? "none" : "block") + '">' + customRadios + '</div>' +
         cooldownHtml;
@@ -2928,10 +3011,15 @@ async function openAutomationWizard(existing, opts) {
       }
       // The reset-condition builder shares the trigger tree machinery
       // (delegated once per panel; kind follows the trigger) — including the
-      // stored-select re-pin the trigger tree gets.
-      if (isComposite) pinTreeSelects(panel.querySelector("#aw-reset-root"), condTree);
+      // stored-select re-pin the trigger tree gets. Unguarded: the tree renders
+      // for every trigger that offers a reset condition now, not just composites.
+      // A host_metric trigger carries no `kind` (only a composite does), so the
+      // host test has to cover both or the builder would offer device metrics
+      // for a Polaris-host automation's reset and the save would be refused.
+      pinTreeSelects(panel.querySelector("#aw-reset-root"), condTree);
       wireTgTree(panel, "#aw-reset-root", function () {
-        return (draft.trigger && draft.trigger.kind) === "host" ? "host" : "asset";
+        var t = draft.trigger || {};
+        return t.kind === "host" || t.type === "host_metric" ? "host" : "asset";
       }, function () { refreshResetSentence(); refreshDimOptions(panel); });
       refreshDimOptions(panel);
     }
@@ -2974,7 +3062,7 @@ async function openAutomationWizard(existing, opts) {
         var mins = am && am.value !== "" ? Number(am.value) : 60;
         reset.afterSec = (isNaN(mins) || mins < 1 ? 60 : mins) * 60;
       } else if (mode === "condition") {
-        var kind = tr.kind === "host" ? "host" : "asset";
+        var kind = tr.kind === "host" || tr.type === "host_metric" ? "host" : "asset";
         var root = panel.querySelector("#aw-reset-root > .scg-group");
         if (root) {
           // Same filter-row folding the trigger tree gets (the stored reset
@@ -2982,6 +3070,17 @@ async function openAutomationWizard(existing, opts) {
           var rc = tgCompile(tgCollectGroup(root, kind));
           _rsFilterErrors = rc.errors;
           reset.condition = rc.tree;
+          // A reset condition is MEASURED the way the trigger is — the reset step
+          // has no window control of its own, and adding one would be a second
+          // minutes field next to "must stay true for", i.e. exactly the
+          // measurement-window-vs-hold-clock confusion business rule 29c exists
+          // to remove. tgCollectLeaf always writes windowSec 0 (step 3 stamps it
+          // from its duration field), so without this an aggregated reset leaf
+          // was refused by validateStep4 with a message naming a field that
+          // isn't on the step — reachable on a composite reset since that
+          // builder shipped, and on every trigger now that the seed carries the
+          // trigger's own aggregation.
+          tgStampWindows(reset.condition, triggerWindowSec(tr));
         }
         var cs = panel.querySelector("#aw-crs-sustain-min");
         var csus = cs && cs.value !== "" ? Number(cs.value) : 0;
@@ -3005,13 +3104,37 @@ async function openAutomationWizard(existing, opts) {
     }
     if (r.mode === "condition") {
       if (_rsFilterErrors.length) return "Custom reset: " + _rsFilterErrors[0];
-      if (tr.type !== "composite") return "A custom reset condition needs a multi-condition trigger — add a second trigger condition, or use the automatic reset.";
+      // event/change fire on an instant and carry no reading, so there is nothing
+      // for a reset condition to watch — the server rejects the same shape.
+      if (tr.type === "event" || tr.type === "change") return "A custom reset condition needs a trigger with a continuous condition — an " + tr.type + " automation resets on a timer or by hand.";
       if (!r.condition || !(r.condition.children || []).length) return "Custom reset: add at least one condition.";
       var leaves = tgLeaves(r.condition);
       if (!leaves.length) return "Custom reset: add at least one condition.";
+      // Reset leaves are measured over the TRIGGER's window (collectStep4), so an
+      // averaged reset condition under a trigger that reads the current value has
+      // no period to average over. tgValidateLeaf's generic message points at
+      // "Sustained for (minutes)", which on this step doesn't exist — and on a
+      // `latest` trigger that field is the sustain clock, not a window, so
+      // setting it wouldn't help either. Say what actually fixes it.
+      var win = triggerWindowSec(draft.trigger);
+      for (var k = 0; k < leaves.length; k++) {
+        if (win <= 0 && tgLeafAggregated(leaves[k])) {
+          return "Reset condition " + (k + 1) + ': "' + leaves[k].aggregation + '" measures over a period, and a reset condition is measured over the same period as the trigger — this trigger reads the current value, so choose "latest" here or make the trigger an averaged one.';
+        }
+      }
       for (var i = 0; i < leaves.length; i++) {
         var p = tgValidateLeaf(leaves[i], "Reset condition " + (i + 1));
         if (p) return p;
+      }
+      // Kind coherence, mirroring validateRuleV2: a Polaris-host trigger recovers
+      // on host readings and a device trigger on device readings. The builder
+      // only offers the trigger's own kind, so this catches a stored rule edited
+      // after its trigger kind changed rather than fresh input.
+      var wantHost = tr.type === "host_metric" || (tr.type === "composite" && tr.kind === "host");
+      for (var j = 0; j < leaves.length; j++) {
+        if (wantHost !== (leaves[j].type === "host_metric")) {
+          return "Reset conditions must watch the same thing the trigger does — " + (wantHost ? "Polaris-host" : "device") + " readings.";
+        }
       }
     }
     return null;
