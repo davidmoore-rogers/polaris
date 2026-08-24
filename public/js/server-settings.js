@@ -6633,17 +6633,32 @@ function openCredentialTestModal(state) {
   var title = "Test Credential" + (state.name ? " — " + state.name : "");
   var body =
     '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin:0 0 0.75rem">' +
-      'Pick an asset to test this ' + escapeHtml(typeLabel) + ' credential against. The asset\'s IP supplies the host; ' +
-      'its monitor settings are ignored — the form values you entered are what gets exercised.' +
+      'Pick an asset to test this ' + escapeHtml(typeLabel) + ' credential against, or type an address directly — ' +
+      'useful for a device that isn\'t onboarded yet. Either way the host is all that is borrowed; ' +
+      'monitor settings are ignored — the form values you entered are what gets exercised.' +
       (state.type === 'http'
         ? ' The response body comes back below, so you can pick your <strong>Expected content</strong> string out of what the device actually returns. A per-asset path override is not applied here — this tests the credential.'
         : '') +
     '</p>' +
-    '<div class="form-group"><label>Search asset</label>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal">' +
+        '<input type="radio" name="cred-test-mode" value="asset" checked>' +
+        '<span>Choose an existing asset</span>' +
+      '</label>' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal;margin-top:0.25rem">' +
+        '<input type="radio" name="cred-test-mode" value="manual">' +
+        '<span>Enter an IP or hostname</span>' +
+      '</label>' +
+    '</div>' +
+    '<div class="form-group" data-test-mode="asset"><label>Search asset</label>' +
       '<input type="search" id="f-cred-test-search" autocomplete="off" spellcheck="false" placeholder="hostname, IP, or MAC (min 2 chars)">' +
       '<div id="f-cred-test-results" style="margin-top:0.25rem;max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:4px;display:none"></div>' +
     '</div>' +
-    '<div id="f-cred-test-selected" style="display:none;padding:0.6rem 0.75rem;border:1px solid var(--color-border);border-radius:4px;margin-bottom:0.75rem;background:var(--color-surface-alt,rgba(127,127,127,0.05))"></div>' +
+    '<div id="f-cred-test-selected" data-test-mode="asset" style="display:none;padding:0.6rem 0.75rem;border:1px solid var(--color-border);border-radius:4px;margin-bottom:0.75rem;background:var(--color-surface-alt,rgba(127,127,127,0.05))"></div>' +
+    '<div class="form-group" data-test-mode="manual" style="display:none"><label>IP address or hostname</label>' +
+      '<input type="text" id="f-cred-test-host" autocomplete="off" spellcheck="false" placeholder="10.20.30.40">' +
+      '<p class="hint">Just the host — no scheme, port or path. Those come from the credential itself, so a pasted URL is refused rather than silently trimmed down to something that dials differently from what you typed. Nothing is saved; this only picks the target for one probe.</p>' +
+    '</div>' +
     '<div id="f-cred-test-result" style="display:none"></div>';
   var footer =
     (state.fromList ? '' : '<button class="btn btn-secondary" id="btn-cred-test-back" style="margin-right:auto">&larr; Back</button>') +
@@ -6658,15 +6673,57 @@ function openCredentialTestModal(state) {
   var searchInput   = document.getElementById("f-cred-test-search");
   var resultsBox    = document.getElementById("f-cred-test-results");
   var selectedBox   = document.getElementById("f-cred-test-selected");
+  var hostInput     = document.getElementById("f-cred-test-host");
   var resultBox     = document.getElementById("f-cred-test-result");
   var runBtn        = document.getElementById("btn-cred-test-run");
   var backBtn       = document.getElementById("btn-cred-test-back");
+  var modeRadios    = document.querySelectorAll('input[name="cred-test-mode"]');
+
+  function testMode() {
+    for (var i = 0; i < modeRadios.length; i++) {
+      if (modeRadios[i].checked) return modeRadios[i].value;
+    }
+    return "asset";
+  }
+
+  /**
+   * Run Test is enabled by whichever half the current mode actually uses, so
+   * switching modes can't leave it enabled on the strength of the other half's
+   * input — which would post an assetId the operator had already navigated away
+   * from.
+   */
+  function syncRunEnabled() {
+    runBtn.disabled = testMode() === "asset"
+      ? !selectedAsset
+      : !(hostInput.value || "").trim();
+  }
+
+  for (var mi = 0; mi < modeRadios.length; mi++) {
+    modeRadios[mi].addEventListener("change", function () {
+      var mode = testMode();
+      var groups = document.querySelectorAll("[data-test-mode]");
+      for (var i = 0; i < groups.length; i++) {
+        var forMode = groups[i].getAttribute("data-test-mode");
+        // The selected-asset card is only ever shown when something is selected,
+        // so restoring it on a mode flip has to respect that too.
+        var wanted = forMode === mode && (groups[i].id !== "f-cred-test-selected" || !!selectedAsset);
+        groups[i].style.display = wanted ? "" : "none";
+      }
+      syncRunEnabled();
+      var focusEl = mode === "asset" ? searchInput : hostInput;
+      setTimeout(function () { focusEl.focus(); }, 0);
+    });
+  }
+  hostInput.addEventListener("input", syncRunEnabled);
+  hostInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !runBtn.disabled) { e.preventDefault(); runBtn.click(); }
+  });
 
   function setSelected(hit) {
     selectedAsset = hit;
     if (!hit) {
       selectedBox.style.display = "none";
-      runBtn.disabled = true;
+      syncRunEnabled();
       return;
     }
     selectedBox.innerHTML =
@@ -6681,7 +6738,7 @@ function openCredentialTestModal(state) {
     resultsBox.style.display = "none";
     resultsBox.innerHTML = "";
     searchInput.value = hit.title || "";
-    runBtn.disabled = false;
+    syncRunEnabled();
   }
 
   function renderResults(hits) {
@@ -6711,7 +6768,7 @@ function openCredentialTestModal(state) {
       // operator started typing again — clear the previous selection
       selectedAsset = null;
       selectedBox.style.display = "none";
-      runBtn.disabled = true;
+      syncRunEnabled();
     }
     clearTimeout(searchTimer);
     if (q.length < 2) {
@@ -6750,13 +6807,20 @@ function openCredentialTestModal(state) {
   setTimeout(function () { searchInput.focus(); }, 0);
 
   runBtn.addEventListener("click", async function () {
-    if (!selectedAsset) return;
+    var mode = testMode();
+    var typedHost = (hostInput.value || "").trim();
+    if (mode === "asset" ? !selectedAsset : !typedHost) return;
     runBtn.disabled = true;
     var origLabel = runBtn.textContent;
     runBtn.textContent = "Testing…";
     resultBox.style.display = "block";
     resultBox.innerHTML = '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin:0.75rem 0 0">Running probe…</p>';
-    var body = { assetId: selectedAsset.id, type: state.type, config: state.config };
+    // Send exactly ONE target. The server prefers assetId when both arrive, but
+    // sending only what the current mode selected keeps the audited hostSource
+    // honest about what the operator actually aimed at.
+    var body = { type: state.type, config: state.config };
+    if (mode === "asset") body.assetId = selectedAsset.id;
+    else body.host = typedHost;
     if (state.id) body.id = state.id;
     try {
       var res = await api.credentials.test(body);
@@ -6782,7 +6846,7 @@ function openCredentialTestModal(state) {
         '</div>';
     } finally {
       runBtn.textContent = origLabel;
-      runBtn.disabled = !selectedAsset;
+      syncRunEnabled();
     }
   });
 
