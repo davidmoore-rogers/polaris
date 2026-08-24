@@ -26,7 +26,12 @@
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
-import { type HttpCheckConfig, normalizeHttpPath } from "../utils/httpCheck.js";
+import {
+  type HttpCheckConfig,
+  normalizeHttpPath,
+  resolveHttpAuthMode,
+  HTTP_AUTH_MODES,
+} from "../utils/httpCheck.js";
 
 export type CredentialType = "snmp" | "winrm" | "ssh" | "restapi" | "http";
 
@@ -364,12 +369,46 @@ function validateHttpConfig(config: Record<string, unknown>): void {
       throw new AppError(400, `HTTP check ${flag} must be a boolean`);
     }
   }
-  // Basic auth needs both halves. A username with no password would send an
-  // empty credential and read as an auth failure the operator can't explain.
+  // ── Auth mode ─────────────────────────────────────────────────────────────
+  // Validated against the mode the probe will actually resolve, not against
+  // whatever fields happen to be filled in, so the form cannot save a
+  // credential that authenticates differently from how it reads.
+  if (config.authMode !== undefined && config.authMode !== null) {
+    if (typeof config.authMode !== "string" || !(HTTP_AUTH_MODES as readonly string[]).includes(config.authMode)) {
+      throw new AppError(400, `HTTP check auth mode must be one of: ${HTTP_AUTH_MODES.join(", ")}`);
+    }
+  }
   const hasUser = typeof config.username === "string" && config.username.length > 0;
   const hasPass = typeof config.password === "string" && config.password.length > 0;
+  const authMode = resolveHttpAuthMode(config as HttpCheckConfig);
+
+  if (authMode === "bearer" && !(typeof config.apiToken === "string" && config.apiToken.length > 0)) {
+    throw new AppError(400, "HTTP check bearer auth needs an API token");
+  }
+  if ((authMode === "basic" || authMode === "digest") && !(hasUser && hasPass)) {
+    // Named per mode: "basic auth needs..." on a digest credential sends the
+    // operator looking for a field that isn't the one they got wrong.
+    throw new AppError(400, `HTTP check ${authMode} auth needs both a username and a password`);
+  }
+  // A half-filled pair is a mistake in every mode — including "none", where it
+  // means the operator typed a credential and then chose not to send it.
   if (hasUser !== hasPass) {
-    throw new AppError(400, "HTTP check basic auth needs both a username and a password");
+    throw new AppError(400, "HTTP check auth needs both a username and a password");
+  }
+
+  // Drop the carriers this mode does not send. This runs on the MERGED config
+  // (validateConfig is called after mergeConfigPreservingSecrets on both the
+  // create and update paths), which is the only place it can work: blanking a
+  // secret in the request body means "keep the stored value" to the merge, so
+  // a client-side clear would preserve the very credential it appears to
+  // remove. Without this, switching a credential from Bearer to Digest leaves
+  // the old token sealed in the row — invisible in the form, and live again
+  // the moment anyone switches the mode back.
+  config.authMode = authMode;
+  if (authMode !== "bearer") delete config.apiToken;
+  if (authMode !== "basic" && authMode !== "digest") {
+    delete config.username;
+    delete config.password;
   }
 }
 

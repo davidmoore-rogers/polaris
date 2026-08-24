@@ -86,12 +86,49 @@ export interface HttpCheckConfig {
   failOnMismatch?: boolean;
   /** Default false, matching the restapi credential (self-signed device certs). */
   verifyTls?: boolean;
+  /**
+   * Which auth scheme to present. ABSENT is not "none" — it means the row
+   * predates this field, and `resolveHttpAuthMode` infers the pre-existing
+   * behaviour from whichever carrier is populated. See that function.
+   */
+  authMode?: HttpAuthMode;
   /** Sent as `Authorization: Bearer <token>`. Sealed at rest. */
   apiToken?: string;
-  /** With `password`, sent as HTTP Basic. Ignored when `apiToken` is set. */
+  /** With `password`, sent as HTTP Basic or Digest per `authMode`. */
   username?: string;
   /** Sealed at rest. */
   password?: string;
+}
+
+/**
+ * How the check authenticates.
+ *
+ * "digest" is the reason this is an explicit field rather than an inference:
+ * Basic and Digest are carried by the same username/password pair, so once
+ * Digest exists there is nothing in the stored config that could distinguish
+ * them. Guessing — try Basic, fall back on a 401 — would send the password in
+ * cleartext to any device that answers a Digest challenge, which is precisely
+ * the exposure Digest exists to avoid.
+ */
+export type HttpAuthMode = "none" | "bearer" | "basic" | "digest";
+
+export const HTTP_AUTH_MODES: readonly HttpAuthMode[] = ["none", "bearer", "basic", "digest"];
+
+/**
+ * Resolve the effective auth mode, defaulting a credential saved before the
+ * field existed to exactly what it used to do: `apiToken` won over a
+ * username/password pair, and neither meant unauthenticated. Every consumer
+ * (validation, the probe, the Test Connection diagnostics) reads the mode
+ * through here so a stored row cannot mean one thing to the validator and
+ * another to the socket.
+ */
+export function resolveHttpAuthMode(config: HttpCheckConfig): HttpAuthMode {
+  const declared = config.authMode;
+  if (declared && (HTTP_AUTH_MODES as readonly string[]).includes(declared)) return declared;
+  if (typeof config.apiToken === "string" && config.apiToken) return "bearer";
+  if (typeof config.username === "string" && config.username &&
+      typeof config.password === "string" && config.password) return "basic";
+  return "none";
 }
 
 /**
@@ -191,6 +228,17 @@ export interface HttpProbeDiagnostics {
   excerptTruncated: boolean;
   /** The current expectation's verdict; null when none is configured yet. */
   matched: boolean | null;
+  /**
+   * Auth schemes the device offered in `WWW-Authenticate`, when it challenged.
+   * Null when it never did. This is the single most useful thing a failing
+   * probe can report: "you configured Basic and it asked for Digest" is
+   * otherwise indistinguishable from a wrong password, since both arrive as a
+   * bare 401. Scheme names only — no realm, no nonce, nothing carrying a
+   * credential.
+   */
+  authRequested: string[] | null;
+  /** True when a Digest challenge was answered and the request re-sent. */
+  digestNegotiated: boolean;
 }
 
 /** Trim a body down to what the test modal will show. Pure. */

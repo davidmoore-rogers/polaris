@@ -76,3 +76,62 @@ describe("http credential validation — rejected shapes", () => {
     expect(() => check({ useHttps: 1 })).toThrow(/must be a boolean/);
   });
 });
+
+/**
+ * Auth mode. The load-bearing case is BACK-COMPAT: a credential saved before
+ * `authMode` existed must keep authenticating exactly as it did, because the
+ * alternative is a fleet of checks that silently stop sending their credential
+ * and start reporting every device as 401/down.
+ */
+describe("http credential validation — auth mode", () => {
+  it("stamps the inferred mode onto a pre-authMode bearer credential", () => {
+    expect(check({ apiToken: "t0ken" }).authMode).toBe("bearer");
+  });
+  it("stamps the inferred mode onto a pre-authMode basic credential", () => {
+    expect(check({ username: "monitor", password: "s3cret" }).authMode).toBe("basic");
+  });
+  it("stamps none when there was never any credential", () => {
+    expect(check({}).authMode).toBe("none");
+  });
+  it("accepts digest with both halves", () => {
+    const c = check({ authMode: "digest", username: "root", password: "pass" });
+    expect(c.authMode).toBe("digest");
+    expect(c.username).toBe("root");
+    expect(c.password).toBe("pass");
+  });
+  it("rejects digest with no password — naming digest, not basic", () => {
+    expect(() => check({ authMode: "digest", username: "root" }))
+      .toThrow(/digest auth needs both a username and a password/);
+  });
+  it("rejects bearer with no token", () => {
+    expect(() => check({ authMode: "bearer" })).toThrow(/bearer auth needs an API token/);
+  });
+  it("rejects an unknown mode", () => {
+    expect(() => check({ authMode: "ntlm" })).toThrow(/auth mode must be one of/);
+  });
+
+  // The strip runs on the MERGED config, so it is the only thing that can
+  // actually remove a stored secret — blanking the field in the request body
+  // means "keep the stored value" to mergeConfigPreservingSecrets.
+  it("strips the bearer token when the mode is digest", () => {
+    const c = check({ authMode: "digest", username: "u", password: "p", apiToken: "stale" });
+    expect(c.apiToken).toBeUndefined();
+  });
+  it("strips the username/password pair when the mode is bearer", () => {
+    const c = check({ authMode: "bearer", apiToken: "t", username: "u", password: "p" });
+    expect(c.username).toBeUndefined();
+    expect(c.password).toBeUndefined();
+  });
+  it("strips every carrier when the mode is none", () => {
+    const c = check({ authMode: "none", apiToken: "t", username: "u", password: "p" });
+    expect(c.apiToken).toBeUndefined();
+    expect(c.username).toBeUndefined();
+    expect(c.password).toBeUndefined();
+  });
+  it("keeps the check definition intact while stripping auth", () => {
+    const c = check({ authMode: "none", apiToken: "t", path: "/healthz", expectBody: "OK", port: 8443 });
+    expect(c.path).toBe("/healthz");
+    expect(c.expectBody).toBe("OK");
+    expect(c.port).toBe(8443);
+  });
+});

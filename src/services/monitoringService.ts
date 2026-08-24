@@ -37,7 +37,14 @@ import {
   describeHttpTarget,
   evaluateHttpCheck,
   resolveHttpTarget,
+  resolveHttpAuthMode,
 } from "../utils/httpCheck.js";
+import {
+  parseDigestChallenge,
+  buildDigestAuthorization,
+  authSchemesOffered,
+  newCnonce,
+} from "../utils/digestAuth.js";
 import { URL } from "node:url";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as snmp from "net-snmp";
@@ -3176,6 +3183,15 @@ async function probeRestApiCredential(config: Record<string, unknown>, start: nu
  *    cap is reached. Without the teardown a device streaming at the check path
  *    would hold a monitor worker for the whole probe timeout, once per interval.
  */
+/** One completed HTTP exchange, before any check semantics are applied. */
+interface RawHttpExchange {
+  statusCode: number;
+  wwwAuthenticate: string | null;
+  contentType: string | null;
+  body: string;
+  truncated: boolean;
+}
+
 async function probeHttp(
   host: string,
   config: Record<string, unknown>,
@@ -3187,93 +3203,184 @@ async function probeHttp(
   const cfg = config as HttpCheckConfig;
   const target = resolveHttpTarget(cfg, pathOverride);
   const reqFn = target.useHttps ? httpsRequest : httpRequest;
+  const authMode = resolveHttpAuthMode(cfg);
 
-  const headers: Record<string, string> = { "Accept": "*/*" };
-  if (typeof cfg.apiToken === "string" && cfg.apiToken) {
-    headers["Authorization"] = "Bearer " + cfg.apiToken;
-  } else if (typeof cfg.username === "string" && cfg.username && typeof cfg.password === "string" && cfg.password) {
-    headers["Authorization"] = "Basic " + Buffer.from(`${cfg.username}:${cfg.password}`).toString("base64");
+  /**
+   * Issue exactly one GET and resolve with the exchange, or with an error
+   * string when the transport never produced a response. Factored out of the
+   * probe body because Digest needs the same request issued twice — once to
+   * collect the challenge, once carrying the answer.
+   */
+  const issueOnce = (
+    extraAuth: string | null,
+    perRequestTimeoutMs: number,
+  ): Promise<{ exchange?: RawHttpExchange; error?: string }> => {
+    const headers: Record<string, string> = { "Accept": "*/*" };
+    if (extraAuth) headers["Authorization"] = extraAuth;
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (r: { exchange?: RawHttpExchange; error?: string }) => {
+        if (settled) return;
+        settled = true;
+        resolve(r);
+      };
+      const req = reqFn({
+        hostname: host,
+        port:     target.port,
+        path:     target.path,
+        method:   "GET",
+        headers,
+        rejectUnauthorized: cfg.verifyTls === true,
+        timeout:  perRequestTimeoutMs,
+      } as any, (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        let truncated = false;
+        const done = () => {
+          // Node collapses repeated response headers into a single comma-joined
+          // string for www-authenticate (set-cookie is the lone exception),
+          // which is exactly the shape the challenge parser already handles.
+          const wa = res.headers?.["www-authenticate"] as string | string[] | undefined;
+          const ctype = res.headers?.["content-type"];
+          settle({
+            exchange: {
+              statusCode:      res.statusCode || 0,
+              wwwAuthenticate: Array.isArray(wa) ? wa.join(", ") : typeof wa === "string" ? wa : null,
+              contentType:     typeof ctype === "string" ? ctype : null,
+              body:            Buffer.concat(chunks).toString("utf8"),
+              truncated,
+            },
+          });
+        };
+        res.on("data", (chunk: Buffer) => {
+          if (truncated) return;
+          size += chunk.length;
+          if (size >= MAX_BODY_BYTES) {
+            // Keep the slice that fits so a match sitting just under the cap is
+            // still found, then stop: `done` runs now rather than on "end",
+            // because destroying the response means "end" may never arrive.
+            truncated = true;
+            chunks.push(chunk.subarray(0, Math.max(0, MAX_BODY_BYTES - (size - chunk.length))));
+            try { res.destroy(); } catch {}
+            try { req.destroy(); } catch {}
+            done();
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on("end", done);
+        // A connection reset mid-body is a failed check, not a partial success.
+        res.on("error", (err: any) => settle({ error: err?.message || "HTTP response error" }));
+      });
+      req.on("timeout", () => { try { req.destroy(); } catch {}; settle({ error: "HTTP check timed out" }); });
+      req.on("error",   (err) => settle({ error: err.message || "HTTP check error" }));
+      req.end();
+    });
+  };
+
+  // Bearer and Basic are computable up front. Digest is not — its response hash
+  // is keyed on a server-issued nonce, so the first request goes out bare and
+  // the challenge comes back on the 401.
+  let preAuth: string | null = null;
+  if (authMode === "bearer" && typeof cfg.apiToken === "string" && cfg.apiToken) {
+    preAuth = "Bearer " + cfg.apiToken;
+  } else if (authMode === "basic" &&
+             typeof cfg.username === "string" && cfg.username &&
+             typeof cfg.password === "string" && cfg.password) {
+    preAuth = "Basic " + Buffer.from(`${cfg.username}:${cfg.password}`).toString("base64");
   }
 
-  return await new Promise<ProbeResult>((resolve) => {
-    let resolved = false;
-    const finishOnce = (r: ProbeResult) => {
-      if (resolved) return;
-      resolved = true;
-      resolve(r);
-    };
-    const req = reqFn({
-      hostname: host,
-      port:     target.port,
-      path:     target.path,
-      method:   "GET",
-      headers,
-      rejectUnauthorized: cfg.verifyTls === true,
-      timeout:  timeoutMs,
-    } as any, (res) => {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      let truncated = false;
-      const evaluate = () => {
-        const body = Buffer.concat(chunks).toString("utf8");
-        const outcome = evaluateHttpCheck({
-          statusCode: res.statusCode || 0,
-          body,
-          config:     cfg,
-          truncated,
+  const first = await issueOnce(preAuth, timeoutMs);
+  if (first.error || !first.exchange) return finish(start, false, first.error || "HTTP check failed");
+
+  let exchange = first.exchange;
+  let digestNegotiated = false;
+  let authNote: string | null = null;
+
+  // ── Digest handshake ──────────────────────────────────────────────────────
+  // Re-fire exactly ONCE. A server that rejects a correctly-computed response
+  // will reject it again, so retrying past this turns a wrong password into a
+  // request amplifier against the device.
+  if (authMode === "digest" && exchange.statusCode === 401) {
+    const challenge = parseDigestChallenge(exchange.wwwAuthenticate);
+    if (!challenge) {
+      // Named rather than left as a bare 401: a device that answers with Basic
+      // only, or with a malformed challenge, is a configuration finding.
+      const offered = authSchemesOffered(exchange.wwwAuthenticate);
+      authNote = offered.length
+        ? `Device requested ${offered.join("/")} auth, not Digest`
+        : "Device returned 401 with no Digest challenge";
+    } else {
+      try {
+        const auth = buildDigestAuthorization({
+          challenge,
+          username: String(cfg.username || ""),
+          password: String(cfg.password || ""),
+          method:   "GET",
+          // The request-URI must be byte-identical to the request line, or the
+          // HA2 hash is computed over something the server never saw.
+          uri:      target.path,
+          cnonce:   newCnonce(),
+          nc:       1,
         });
-        // Diagnostics only when a caller asked for them (the operator-driven
-        // Test Connection path). The monitor hot path passes no out-param, so
-        // it never builds an excerpt or a URL string.
-        if (out) {
-          const ex = bodyExcerpt(body);
-          const ctype = res.headers?.["content-type"];
-          out.diag = {
-            url:                describeHttpTarget(host, target),
-            statusCode:         res.statusCode || 0,
-            contentType:        typeof ctype === "string" ? ctype : null,
-            bytesRead:          Buffer.byteLength(body),
-            bodyTruncatedAtCap: truncated,
-            excerpt:            ex.text,
-            excerptTruncated:   ex.truncated,
-            matched:            outcome.matched,
-          };
+        // Keep the whole exchange inside the caller's timeout budget rather
+        // than granting a fresh one — two full timeouts would let a slow device
+        // hold a monitor worker for twice the configured probe window.
+        const remaining = Math.max(1000, Math.round(timeoutMs - (performance.now() - start)));
+        const second = await issueOnce(auth, remaining);
+        if (second.error || !second.exchange) {
+          return finish(start, false, second.error || "HTTP check failed");
         }
-        // On the failOnMismatch=false path the outcome carries an error string
-        // alongside ok:true. ProbeResult has no slot for "succeeded, but note
-        // this", so the note is dropped here rather than being smuggled into a
-        // success — the operator's own choice was that a mismatch is not a
-        // failure, and a success carrying failure text would confuse the
-        // status pill and the alert email alike. It stays visible on the
-        // Test Connection modal, which reports the outcome directly.
-        if (!outcome.ok) return finishOnce(finish(start, false, outcome.error));
-        finishOnce(finish(start, true));
-      };
-      res.on("data", (chunk: Buffer) => {
-        if (truncated) return;
-        size += chunk.length;
-        if (size >= MAX_BODY_BYTES) {
-          // Keep the slice that fits so a match sitting just under the cap is
-          // still found, then stop: `evaluate` runs now rather than on "end",
-          // because destroying the response means "end" may never arrive.
-          truncated = true;
-          chunks.push(chunk.subarray(0, Math.max(0, MAX_BODY_BYTES - (size - chunk.length))));
-          try { res.destroy(); } catch {}
-          try { req.destroy(); } catch {}
-          evaluate();
-          return;
-        }
-        chunks.push(chunk);
-      });
-      res.on("end", evaluate);
-      // A connection reset mid-body is a failed check, not a partial success:
-      // resolve through `finish` so the reason names the transport.
-      res.on("error", (err: any) => finishOnce(finish(start, false, err?.message || "HTTP response error")));
-    });
-    req.on("timeout", () => { try { req.destroy(); } catch {}; finishOnce(finish(start, false, "HTTP check timed out")); });
-    req.on("error",   (err) => finishOnce(finish(start, false, err.message || "HTTP check error")));
-    req.end();
+        exchange = second.exchange;
+        digestNegotiated = true;
+      } catch (err: any) {
+        // Thrown by buildDigestAuthorization for a qop/algorithm it refuses to
+        // guess at. Surfacing the reason beats a second opaque 401.
+        authNote = err?.message || "Digest authentication failed";
+      }
+    }
+  }
+
+  const outcome = evaluateHttpCheck({
+    statusCode: exchange.statusCode,
+    body:       exchange.body,
+    config:     cfg,
+    truncated:  exchange.truncated,
   });
+
+  // Diagnostics only when a caller asked for them (the operator-driven Test
+  // Connection path). The monitor hot path passes no out-param, so it never
+  // builds an excerpt or a URL string.
+  if (out) {
+    const ex = bodyExcerpt(exchange.body);
+    const offered = authSchemesOffered(exchange.wwwAuthenticate ?? first.exchange.wwwAuthenticate);
+    out.diag = {
+      url:                describeHttpTarget(host, target),
+      statusCode:         exchange.statusCode,
+      contentType:        exchange.contentType,
+      bytesRead:          Buffer.byteLength(exchange.body),
+      bodyTruncatedAtCap: exchange.truncated,
+      excerpt:            ex.text,
+      excerptTruncated:   ex.truncated,
+      matched:            outcome.matched,
+      authRequested:      offered.length ? offered : null,
+      digestNegotiated,
+    };
+  }
+
+  // On the failOnMismatch=false path the outcome carries an error string
+  // alongside ok:true. ProbeResult has no slot for "succeeded, but note this",
+  // so the note is dropped here rather than being smuggled into a success —
+  // the operator's own choice was that a mismatch is not a failure, and a
+  // success carrying failure text would confuse the status pill and the alert
+  // email alike. It stays visible on the Test Connection modal, which reports
+  // the outcome directly.
+  if (!outcome.ok) {
+    // `authNote` explains WHY the status is 401 when the digest handshake
+    // could not be completed; without it the operator sees only the code.
+    return finish(start, false, authNote ? `${outcome.error} — ${authNote}` : outcome.error);
+  }
+  return finish(start, true);
 }
 
 /**

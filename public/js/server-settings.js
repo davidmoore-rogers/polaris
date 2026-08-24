@@ -6502,6 +6502,7 @@ async function openCredentialModal(id, initialState) {
     else if (t === "restapi") host.innerHTML = credRestApiForm(cfg);
     else if (t === "http")    host.innerHTML = credHttpForm(cfg);
     if (t === "snmp") wireSnmpVersionToggle();
+    if (t === "http") wireHttpAuthModeToggle();
   }
   document.getElementById("f-cred-type").addEventListener("change", function () {
     // Switching type discards the config from the old type — there's no
@@ -6591,10 +6592,30 @@ function credHttpDiagnosticsHTML(diag, cfg) {
   var size = diag.bytesRead + ' bytes' +
     (diag.bodyTruncatedAtCap ? ' (device sent more — read capped)' : '');
 
+  // What the device ASKED for. A 401 is otherwise indistinguishable between
+  // "wrong password" and "you configured Basic and it wants Digest" — and the
+  // second is the common case on cameras and other embedded devices.
+  var authRow = "";
+  if (diag.authRequested && diag.authRequested.length) {
+    var selected = httpAuthModeOf(cfg || {});
+    var offered = diag.authRequested.join(", ");
+    var mismatch = diag.statusCode === 401 &&
+      selected !== "none" &&
+      diag.authRequested.map(function (s) { return String(s).toLowerCase(); }).indexOf(selected) === -1;
+    authRow = row("Device requested", offered +
+      (mismatch
+        ? ' — this credential is set to "' + selected + '". Switch Authentication to match.'
+        : ''));
+  }
+  if (diag.digestNegotiated) {
+    authRow += row("Digest", "challenge answered, request re-sent");
+  }
+
   return '<div style="margin-top:0.75rem;padding:0.75rem;border:1px solid var(--color-border);border-radius:4px">' +
       '<div style="font-weight:600;font-size:0.85rem">Response</div>' +
       row("Requested", diag.url) +
       row("Status", diag.statusCode) +
+      authRow +
       (diag.contentType ? row("Content-Type", diag.contentType) : "") +
       row("Body size", size) +
       verdict +
@@ -6934,6 +6955,7 @@ function credRestApiForm(cfg) {
  */
 function credHttpForm(cfg) {
   var mode = cfg.matchMode === "regex" ? "regex" : "contains";
+  var authMode = httpAuthModeOf(cfg);
   // failOnMismatch defaults TRUE server-side, so an absent value must render as
   // checked — otherwise the form would show the loose reading while the stored
   // credential enforces the strict one.
@@ -6986,18 +7008,57 @@ function credHttpForm(cfg) {
       '</label>' +
       '<p class="hint">Only applies with HTTPS. Off by default — device management certs are usually self-signed.</p>' +
     '</div>' +
-    '<div class="form-group"><label>Bearer token <span class="hint" style="font-weight:normal">(optional)</span></label>' +
-      '<input type="password" id="f-http-token" value="' + escapeHtml(cfg.apiToken || "") + '">' +
-      '<p class="hint">Sent as <code>Authorization: Bearer &lt;token&gt;</code>. Most health endpoints need nothing here.</p>' +
+    '<div class="form-group"><label>Authentication</label>' +
+      '<select id="f-http-authmode" style="max-width:280px">' +
+        '<option value="none"' +   (authMode === "none"   ? " selected" : "") + '>None</option>' +
+        '<option value="bearer"' + (authMode === "bearer" ? " selected" : "") + '>Bearer token</option>' +
+        '<option value="basic"' +  (authMode === "basic"  ? " selected" : "") + '>Basic</option>' +
+        '<option value="digest"' + (authMode === "digest" ? " selected" : "") + '>Digest</option>' +
+      '</select>' +
+      '<p class="hint">Basic and Digest carry the same username and password, so this has to be stated rather than guessed: trying Basic first would send the password in cleartext to a device that wanted Digest. Embedded devices — cameras, PDUs, older BMCs — commonly require Digest, and Axis OS 11+ disables Basic by default.</p>' +
     '</div>' +
-    '<div class="form-group"><label>Basic auth username <span class="hint" style="font-weight:normal">(optional)</span></label>' +
+    '<div class="form-group" data-http-auth="bearer"><label>Bearer token</label>' +
+      '<input type="password" id="f-http-token" value="' + escapeHtml(cfg.apiToken || "") + '">' +
+      '<p class="hint">Sent as <code>Authorization: Bearer &lt;token&gt;</code>.</p>' +
+    '</div>' +
+    '<div class="form-group" data-http-auth="basic digest"><label>Username</label>' +
       '<input type="text" id="f-http-user" value="' + escapeHtml(cfg.username || "") + '">' +
     '</div>' +
-    '<div class="form-group"><label>Basic auth password</label>' +
+    '<div class="form-group" data-http-auth="basic digest"><label>Password</label>' +
       '<input type="password" id="f-http-pass" value="' + escapeHtml(cfg.password || "") + '">' +
-      '<p class="hint">Ignored when a bearer token is set.</p>' +
     '</div>'
   );
+}
+
+/**
+ * Mirror of resolveHttpAuthMode in src/utils/httpCheck.ts. A credential saved
+ * before the auth-mode field existed carries no `authMode`, and must render as
+ * whatever it has always DONE — bearer when a token is set, basic when a
+ * username/password pair is — rather than as "None", which would misreport an
+ * authenticating credential and then strip its auth on the next save.
+ */
+function httpAuthModeOf(cfg) {
+  var declared = cfg.authMode;
+  if (declared === "none" || declared === "bearer" || declared === "basic" || declared === "digest") return declared;
+  if (cfg.apiToken) return "bearer";
+  if (cfg.username && cfg.password) return "basic";
+  return "none";
+}
+
+/** Show only the carrier fields the selected auth mode actually sends. */
+function wireHttpAuthModeToggle() {
+  var sel = document.getElementById("f-http-authmode");
+  if (!sel) return;
+  function sync() {
+    var mode = sel.value;
+    var groups = document.querySelectorAll("[data-http-auth]");
+    for (var i = 0; i < groups.length; i++) {
+      var modes = (groups[i].getAttribute("data-http-auth") || "").split(" ");
+      groups[i].style.display = modes.indexOf(mode) === -1 ? "none" : "";
+    }
+  }
+  sel.addEventListener("change", sync);
+  sync();
 }
 
 function readCredentialForm(type) {
@@ -7049,10 +7110,16 @@ function readCredentialForm(type) {
       caseSensitive:  document.getElementById("f-http-casesensitive").checked,
       failOnMismatch: document.getElementById("f-http-failonmismatch").checked,
       verifyTls:      document.getElementById("f-http-verifytls").checked,
+      authMode:       document.getElementById("f-http-authmode").value,
       apiToken:       document.getElementById("f-http-token").value,
       username:       (document.getElementById("f-http-user").value || "").trim(),
       password:       document.getElementById("f-http-pass").value,
     };
+    // NOTE: the carriers the selected mode does not send are stripped
+    // SERVER-side (validateHttpConfig), not here. Blanking a secret field in
+    // this payload means "keep the stored value" to
+    // mergeConfigPreservingSecrets, so clearing it client-side would silently
+    // preserve exactly the credential it looks like it is removing.
     // Blank port / status mean "use the default" and "any 2xx" — send null
     // rather than 0 or "", which the validator would reject as out of range.
     var hp = num(document.getElementById("f-http-port").value);
