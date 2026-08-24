@@ -4339,6 +4339,15 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   color: var(--color-text-primary);
   letter-spacing: 0.2px;
   user-select: none;
+  /* One line, always. The title carries qualifiers (asset-type filter, minimum
+     severity tier) that can outrun a quarter-width widget, and the article's
+     height is a fixed pixel value — a wrapped header would steal a line from
+     the chart below it. min-width:0 is what lets a flex item ellipsize; the
+     full text rides the element's title attribute. */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .dashboard-widget-title[draggable="true"] { cursor: grab; }
 .dashboard-widget-title[draggable="true"]:active { cursor: grabbing; }

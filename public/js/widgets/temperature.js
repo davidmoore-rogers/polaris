@@ -38,6 +38,10 @@
     type: "temperature",
     category: "Monitoring",
     label: "Highest Temperature",
+    // Under the "Minimum severity" filter the widget lists the ALERTING rows
+    // (sorted severity-first), not the fleet's top values — so the header drops
+    // the superlative and gains the tier instead.
+    severityLabel: "Temperature",
     description: "Hottest hardware temperature sensors across monitored assets, per sensor.",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
