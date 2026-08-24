@@ -1066,6 +1066,22 @@ export const escalationSchema = z
 export const RESET_MODES = ["manual", "auto", "timed", "condition"] as const;
 export type ResetMode = (typeof RESET_MODES)[number];
 
+/**
+ * Trigger types a custom reset CONDITION tree can be attached to: the ones that
+ * evaluate a continuous reading, so "what has to become true again" is a
+ * question with an answer. `event` / `change` fire on an instant and carry no
+ * reading to recover — they reset on a timer or by hand.
+ *
+ * Owned here (not spelled out at each call site) because three places have to
+ * agree on it: validateRuleV2, the wizard-facing `resetModesByTriggerType`
+ * catalog, and the engine's decision to run the reset-tree pass at all.
+ */
+export const TRIGGER_TYPES_WITH_RESET_CONDITIONS = ["asset_metric", "asset_state", "host_metric", "composite"] as const;
+
+export function triggerTypeAllowsResetCondition(type: string): boolean {
+  return (TRIGGER_TYPES_WITH_RESET_CONDITIONS as readonly string[]).includes(type);
+}
+
 export const resetSchema = z
   .object({
     mode: z.enum(RESET_MODES).default("manual"),
@@ -1080,8 +1096,10 @@ export const resetSchema = z
     afterSec: z.number().int().min(1).max(2592000).optional().nullable(),
     // condition only — a custom AND/OR reset tree (same leaf vocabulary as the
     // composite trigger). While the alert is firing, this tree is the sole
-    // recovery authority. v1-restricted to composite triggers of the same
-    // kind (validateRuleV2); per-dimension single triggers keep auto/hysteresis.
+    // recovery authority. Allowed on ANY continuous trigger (single metric /
+    // state as well as composite), restricted to leaves of the trigger's own
+    // kind by validateRuleV2; the wizard seeds it with the trigger INVERTED so
+    // the starting point is what the automatic reset would have done.
     condition: triggerConditionGroupSchema.optional().nullable(),
   })
   .strict();
@@ -1638,13 +1656,19 @@ function validateRuleV2(
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "afterSec"], message: "timed reset requires afterSec" });
   }
   if (reset.mode === "condition") {
+    // A custom reset tree needs a trigger with a CONTINUOUS condition to
+    // recover from: event/change fire on an instant and carry no reading, so
+    // there would be nothing for the tree to watch (their reset modes are
+    // timed/manual only). Every other trigger type is eligible — a single
+    // metric/state trigger as much as a composite, since the tree is just a
+    // more expressive spelling of "the trigger is no longer true".
     if (!reset.condition) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "condition"], message: "condition reset requires a condition tree" });
-    } else if (trigger && trigger.type !== "composite") {
+    } else if (trigger && !triggerTypeAllowsResetCondition(trigger.type)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["reset", "condition"],
-        message: "a custom reset condition requires a multi-condition (composite) trigger — single-condition automations use the automatic reset (optionally with a clear threshold)",
+        message: `a custom reset condition needs a trigger with a continuous condition — an ${trigger.type} trigger resets on a timer or by hand`,
       });
     } else {
       const stats = triggerConditionStats(reset.condition);
@@ -1654,9 +1678,14 @@ function validateRuleV2(
       if (stats.leaves > 10) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "condition"], message: "at most 10 conditions per reset tree" });
       }
-      if (trigger?.type === "composite") {
+      // Kind coherence: a Polaris-host trigger recovers on host readings and a
+      // device trigger on device readings. Mixing them has the engine resolve a
+      // leaf against assets that can never report it, so the tree reads as
+      // permanently false — an alert that could only ever be cleared by hand.
+      if (trigger) {
+        const triggerIsHost = trigger.type === "host_metric" || (trigger.type === "composite" && trigger.kind === "host");
         const badLeaf = collectTriggerLeaves(reset.condition).find((l) =>
-          trigger.kind === "host" ? l.type !== "host_metric" : l.type === "host_metric",
+          triggerIsHost ? l.type !== "host_metric" : l.type === "host_metric",
         );
         if (badLeaf) {
           ctx.addIssue({
@@ -2148,6 +2177,42 @@ export const METRIC_DIMENSIONS: Record<string, string[]> = {
 };
 
 /**
+ * Which asset-STATE fields the engine reports per dimension rather than once
+ * per device — the state-side counterpart of METRIC_DIMENSIONS. Derived from the
+ * resolvers in notificationEngine: the interface trio walks AssetInterface rows,
+ * ipsecStatus the tunnels, the SD-WAN pair the rules, and everything else
+ * (monitorStatus, status, quarantined …) is one reading for the whole asset.
+ *
+ * The builder renders no dimensionFilter inputs for a state leaf, so unlike
+ * METRIC_DIMENSIONS this isn't a form-field list — it exists so a surface can
+ * ask "does this trigger raise one alert per interface?", which is what decides
+ * whether a custom reset condition clears one alert or all of them.
+ */
+export const STATE_FIELD_DIMENSIONS: Record<string, string[]> = {
+  ifOperStatus: ["ifNamePattern"],
+  ifAdminStatus: ["ifNamePattern"],
+  poeStatus: ["ifNamePattern"],
+  ipsecStatus: ["tunnelName"],
+  sdwanRuleStatus: ["healthCheck"],
+  sdwanSelectedMember: ["healthCheck"],
+};
+
+/** What one dimension of a reading IS, in an operator's words — so a surface can
+ *  say "one alert per interface" without hardcoding the vocabulary. */
+export const DIMENSION_NOUNS: Record<string, string> = {
+  ifNamePattern: "interface",
+  sensorClass: "sensor",
+  sensorNamePattern: "sensor",
+  mountPathPattern: "storage mount",
+  healthCheck: "SD-WAN health check",
+  link: "WAN member",
+  tunnelName: "IPsec tunnel",
+  widgetId: "custom widget",
+  stateProbeId: "state probe",
+  stateRowPattern: "state-probe row",
+};
+
+/**
  * The catalog the builder UI reads from GET /notification-rules/schema, so the
  * frontend renders the right inputs per trigger type without hardcoding. The
  * `*Meta` maps add display labels / units / valid values / applicable dimension
@@ -2166,6 +2231,12 @@ export function buildSchemaCatalog() {
     fieldMeta: FIELD_META,
     changeTypeMeta: CHANGE_TYPE_META,
     metricDimensions: METRIC_DIMENSIONS,
+    // Per-dimension alerting vocabulary — which state fields report per
+    // dimension, and what one dimension is called. The reset step reads both to
+    // say whether a custom reset condition clears one alert or every alert on
+    // the device (see the resolveResetTruths note in notificationEngine).
+    stateFieldDimensions: STATE_FIELD_DIMENSIONS,
+    dimensionNouns: DIMENSION_NOUNS,
     // Metrics whose reading is a 0/1 flag, so the builder renders a state picker
     // instead of a threshold box and hides the numeric-only surfaces (severity
     // bands, hysteresis, unit hints).
@@ -2217,16 +2288,21 @@ export function buildSchemaCatalog() {
     resetModes: RESET_MODES,
     resetModeMeta: {
       auto: { label: "Automatically", help: "Clears when the condition recovers — optionally with a separate clear threshold (hysteresis) and a recovered-for duration." },
-      condition: { label: "When custom conditions are met", help: "Clears when a separate AND/OR condition tree becomes true (multi-condition triggers only). While the alert is active, the reset conditions are the only recovery authority — set a re-notify cooldown if the trigger and reset conditions can both be true at once." },
+      condition: { label: "When custom conditions are met", help: "Clears when a separate AND/OR condition tree becomes true. Starts as the trigger inverted — edit it to recover on a different value, a different metric, or several at once. While the alert is active these conditions are the only recovery authority, so set a re-notify cooldown if the trigger and reset conditions can both be true at once." },
       timed: { label: "After a fixed time", help: "Clears after the configured duration, even without a recovery reading." },
       manual: { label: "Manually only", help: "Stays active until someone clears it." },
     },
     // Which reset modes make sense per trigger type (event/change have no
-    // continuous condition to auto-clear) + the wizard's default per type.
+    // continuous condition to auto-clear, hence no "auto" and no "condition"
+    // — see TRIGGER_TYPES_WITH_RESET_CONDITIONS) + the wizard's default per
+    // type. Order is the order the wizard renders the non-auto radios in, so
+    // "condition" leads: unchecking "reset when the trigger is no longer true"
+    // lands on the trigger-inverted tree, which is the customizable spelling of
+    // the box that was just unchecked.
     resetModesByTriggerType: {
-      asset_metric: ["auto", "timed", "manual"],
-      asset_state: ["auto", "timed", "manual"],
-      host_metric: ["auto", "timed", "manual"],
+      asset_metric: ["auto", "condition", "timed", "manual"],
+      asset_state: ["auto", "condition", "timed", "manual"],
+      host_metric: ["auto", "condition", "timed", "manual"],
       event: ["timed", "manual"],
       change: ["timed", "manual"],
       composite: ["auto", "condition", "timed", "manual"],

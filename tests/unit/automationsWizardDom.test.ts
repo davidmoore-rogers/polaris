@@ -19,6 +19,7 @@ import { resolve } from "node:path";
 import { Window } from "happy-dom";
 import { buildSchemaCatalog, ruleInputSchema } from "../../src/services/notificationTypes.js";
 import { dimensionPickerMeta } from "../../src/services/notificationDimensionService.js";
+import { fixSelects } from "../fixtures/happyDomSelects.js";
 
 vi.mock("../../src/db.js", () => ({ prisma: {} }));
 
@@ -1439,5 +1440,170 @@ describe("automation wizard DOM render", () => {
     expect(saved.severityBands.map((b: any) => [b.threshold, b.severity])).toEqual([[20, "serious"], [30, "critical"]]);
     expect(saved.trigger.windowSec).toBe(900);
     expect(saved.severityBands.every((b: any) => !b.forDurationSec)).toBe(true);
+  });
+
+  // ── Step 4: custom reset conditions on a single trigger ──────────────────
+  // Unchecking "reset when the trigger is no longer true" used to leave only
+  // timed/manual on a single-condition automation — the custom-condition builder
+  // was composite-only. It is now offered everywhere a trigger has a continuous
+  // condition, and SEEDED with the trigger inverted so the operator edits a real
+  // starting position instead of filling in a blank row.
+  describe("reset conditions", () => {
+    /** The option the RENDERED markup marks selected — what a real browser would
+     *  report as the select's value. happy-dom reports a neighbouring option, so
+     *  reading `.value` here tests the DOM engine rather than the wizard. */
+    const selectedOpt = (sel: string) =>
+      (doc.querySelector(sel + " option[selected]") as unknown as { value: string } | null)?.value;
+
+    /** Open the wizard on a stored rule and land on step 4 with the stored
+     *  trigger intact.
+     *
+     *  The `fixSelects` call in the middle is load-bearing. Step 3 renders during
+     *  open and its delegated handlers collect it, so the `<option selected>` bug
+     *  rewrites the draft's TRIGGER before any assertion runs — a storageUsedPct
+     *  rule arrives at step 4 as memPct — which is exactly the input the reset
+     *  step branches on. The MARKUP is correct (built from the stored rule), so
+     *  repairing step 3's selects and letting one input event re-run the panel's
+     *  own collect restores the draft. */
+    async function openOnStep4(rule: Record<string, unknown>): Promise<void> {
+      const win = g.window as InstanceType<typeof Window>;
+      doc.body.innerHTML = "";
+      savedPayloads.length = 0;
+      await (g.openAutomationWizard as (r: unknown) => Promise<void>)(rule);
+      fixSelects(doc.querySelector("#aw-step-3")!);
+      const anyInput = doc.querySelector("#aw-step-3 input") as unknown as { dispatchEvent: (e: unknown) => void } | null;
+      if (anyInput) anyInput.dispatchEvent(new win.Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+      (doc.querySelector('.stepper-step[data-step="4"]') as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const metricRule = (extra: Record<string, unknown> = {}) => ({
+      id: "r-reset",
+      name: "CPU",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">=", threshold: 90, forDurationSec: 0 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.invalid"] }],
+      ...extra,
+    });
+    const uncheckAuto = () => {
+      const win = g.window as InstanceType<typeof Window>;
+      const cb = doc.querySelector("#aw-reset-auto") as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
+      cb.checked = false;
+      cb.dispatchEvent(new win.Event("change", { bubbles: true }));
+    };
+
+    it("offers custom conditions on a SINGLE metric trigger, seeded with the trigger inverted", async () => {
+      await openOnStep4(metricRule());
+      expect(toastErrors).toEqual([]);
+      // The radio exists even while auto is checked (the whole custom block is
+      // rendered hidden), and "condition" leads — so unchecking lands on it.
+      const modes = Array.from(doc.querySelectorAll('#aw-reset-custom input[name="aw-reset-mode"]'))
+        .map((r) => (r as unknown as { value: string }).value);
+      expect(modes).toEqual(["condition", "timed", "manual"]);
+      const condRadio = doc.querySelector('#aw-reset-custom input[name="aw-reset-mode"][value="condition"]') as unknown as { checked: boolean };
+      expect(condRadio.checked).toBe(true);
+
+      // The seed: ONE leaf, the trigger's own metric, comparator flipped, and the
+      // same aggregation/window (a reset measured differently from the trigger
+      // would be a different question).
+      const leaves = doc.querySelectorAll("#aw-reset-root .scr-row");
+      expect(leaves).toHaveLength(1);
+      expect(selectedOpt("#aw-reset-root .tgl-what")).toBe("m:cpuPct");
+      expect(selectedOpt("#aw-reset-root .tgl-op")).toBe("<"); // >= flipped
+      expect((doc.querySelector("#aw-reset-root .tgl-threshold") as unknown as { value: string }).value).toBe("90");
+      expect(selectedOpt("#aw-reset-root .tgl-agg")).toBe("avg");
+      // The group operator flips too — De Morgan, so the one-leaf AND becomes OR.
+      expect(selectedOpt("#aw-reset-root > .scg-group > div > .scg-op")).toBe("or");
+    });
+
+    it("saves the seeded tree as reset.mode=condition once auto is unchecked", async () => {
+      await openOnStep4(metricRule());
+      fixSelects(doc.querySelector("#aw-reset-root")!); // happy-dom select bug; the markup is correct
+      uncheckAuto();
+      (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(toastErrors).toEqual([]);
+      const p = savedPayloads[0]! as Record<string, any>;
+      expect(p.reset.mode).toBe("condition");
+      expect(p.reset.condition.op).toBe("or"); // De Morgan on the one-leaf AND
+      expect(p.reset.condition.children).toHaveLength(1);
+      expect(p.reset.condition.children[0]).toMatchObject({ type: "asset_metric", metric: "cpuPct", operator: "<", threshold: 90 });
+      // The reset leaf inherits the TRIGGER's measurement window — the reset step
+      // has no window control, and an aggregated leaf with windowSec 0 used to be
+      // refused with a message naming a field that isn't on the step.
+      expect(p.reset.condition.children[0].aggregation).toBe("avg");
+      expect(p.reset.condition.children[0].windowSec).toBe(300);
+      // Round-trips through the real server schema — the composite-only refusal
+      // is gone, and a single trigger's reset tree now validates.
+      expect(() => ruleInputSchema.parse(p)).not.toThrow();
+    });
+
+    it("a stored reset condition is kept verbatim, not re-seeded from the trigger", async () => {
+      // The seed is a starting position. Once the operator has edited it, a
+      // re-render must not quietly put the trigger's own clause back.
+      await openOnStep4(metricRule({
+        reset: {
+          mode: "condition",
+          condition: { op: "and", children: [{ type: "asset_metric", metric: "cpuPct", operator: "<", threshold: 60, aggregation: "avg", windowSec: 300 }] },
+          sustainSec: 600,
+        },
+      }));
+      expect((doc.querySelector("#aw-reset-root .tgl-threshold") as unknown as { value: string }).value).toBe("60");
+      expect((doc.querySelector("#aw-crs-sustain-min") as unknown as { value: string }).value).toBe("10");
+      expect((doc.querySelector("#aw-reset-auto") as unknown as { checked: boolean }).checked).toBe(false);
+    });
+
+    it("says whether a reset condition clears one alert or the whole device's", async () => {
+      // A per-mount automation raises one alert per mount, and the reset tree
+      // resolves dimension-first with a per-asset fallback — so which one an
+      // operator gets depends on what they put in the tree. Said out loud,
+      // because nothing on the step shows it.
+      await openOnStep4(metricRule({
+        trigger: { type: "asset_metric", metric: "storageUsedPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: 80, forDurationSec: 0 },
+      }));
+      const cond = doc.querySelector('#aw-reset-custom .aw-reset-extra[data-mode="condition"]')!;
+      expect(cond.textContent).toContain("alerts per storage mount");
+      // A device-wide trigger has no such note to make.
+      await openOnStep4(metricRule());
+      const cond2 = doc.querySelector('#aw-reset-custom .aw-reset-extra[data-mode="condition"]')!;
+      expect(cond2.textContent).not.toContain("alerts per");
+    });
+
+    it("an event trigger still gets only timed/manual", async () => {
+      // Built by DRIVING the trigger step to "event" rather than by opening a
+      // stored event rule: the option-before bug means step 3 renders its fields
+      // for the wrong category during open, so `#tf-action` doesn't exist and the
+      // panel's own collect throws instead of producing an event trigger. Picking
+      // the category here re-renders the fields, which is the path a real
+      // operator takes anyway.
+      const win = g.window as InstanceType<typeof Window>;
+      doc.body.innerHTML = "";
+      savedPayloads.length = 0;
+      await (g.openAutomationWizard as (r: unknown) => Promise<void>)(metricRule());
+      const typeSel = doc.querySelector("#aw-trigger-type") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+      typeSel.value = "event";
+      typeSel.dispatchEvent(new win.Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+      typeSel.value = "event"; // the re-render re-introduces the parse bug
+      const action = doc.querySelector("#tf-action") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+      action.value = "integration.discover.*";
+      action.dispatchEvent(new win.Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+      (doc.querySelector('.stepper-step[data-step="4"]') as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+
+      // No "reset when the trigger is no longer true" checkbox at all, and no
+      // condition builder — an instant has no condition to recover from.
+      expect(doc.querySelector("#aw-reset-auto")).toBeFalsy();
+      expect(doc.querySelector("#aw-reset-root")).toBeFalsy();
+      const modes = Array.from(doc.querySelectorAll('input[name="aw-reset-mode"]'))
+        .map((r) => (r as unknown as { value: string }).value);
+      expect(modes).toEqual(["timed", "manual"]);
+    });
   });
 });

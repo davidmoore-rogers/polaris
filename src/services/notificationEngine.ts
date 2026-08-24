@@ -974,10 +974,15 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
   // Every asset the scope resolved this tick (incl. suppressed/shadowed);
   // null for host rules, which have no asset scope to leave.
   let scopeIds: Set<string> | null = null;
+  // The assets this tick actually evaluated (scope minus suppressed / carved
+  // out / not-answering). Hoisted out of the branch below because a custom
+  // reset condition resolves its own leaves against them.
+  let activeAssets: ScopeAssetRow[] = [];
 
   if (trigger.type === "host_metric") {
     const r = await resolveHostMetricReading(trigger);
     readings = r ? [r] : [];
+    activeAssets = [HOST_PSEUDO_ASSET];
   } else if (trigger.type === "asset_metric" || trigger.type === "asset_state") {
     const assets = await loadScopeAssets(rule.scope);
     scopeIds = new Set(assets.map((a) => a.id));
@@ -994,6 +999,7 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
       else if (needsAnswering && !assetIsAnsweringProbes(a)) notAnsweringIds.add(a.id);
       else active.push(a);
     }
+    activeAssets = active;
     readings = trigger.type === "asset_metric"
       ? await resolveAssetMetricReadings(trigger, active)
       : await resolveAssetStateReadings(trigger, active);
@@ -1012,6 +1018,12 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
   // met-since map — not one shared conditionMetSince — decide which severity
   // has actually earned its time. Null for non-banded rules (unchanged path).
   const tiers = hasBands ? tierLadderFor(rule) : null;
+  // Custom reset conditions: while an alert is firing, this tree is the SOLE
+  // recovery authority — the trigger going false does not clear it and the
+  // trigger re-meeting does not cancel its sustain timer. Owned by the
+  // dedicated pass after this loop, which is why the firing branches below
+  // hand recovery off rather than acting on the trigger's own reading.
+  const resetTree = rule.reset.mode === "condition" ? (rule.reset.condition ?? null) : null;
 
   for (const reading of readings) {
     const key = `${reading.assetId || ""}|${reading.dimKey}`;
@@ -1067,10 +1079,12 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
           // Re-met mid-recovery: cancel the clear-sustain timer (transition-only
           // write — a steadily-firing condition costs nothing per tick). Also
           // where a climbing-but-not-yet-sustained tier's run is persisted.
-          await prisma.notificationRuleState.update({
-            where: { id: st.id },
-            data: { recoveredSince: null, ...(hasBands ? { bandMetSince: metSinceJson(metSince) } : {}) },
-          });
+          // Under a custom reset condition `recoveredSince` is the RESET tree's
+          // sustain timer, not this trigger's, so the trigger re-meeting must
+          // not cancel it (parity with the composite path's same contract).
+          const data: Prisma.NotificationRuleStateUpdateInput = resetTree ? {} : { recoveredSince: null };
+          if (hasBands) data.bandMetSince = metSinceJson(metSince);
+          if (Object.keys(data).length) await prisma.notificationRuleState.update({ where: { id: st.id }, data });
         } // same band / firing without a pending recovery → already active; suppress
       }
     } else {
@@ -1078,7 +1092,10 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
       if (st && st.state === "pending") {
         await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, bandMetSince: Prisma.DbNull } });
       } else if (st && st.state === "firing") {
-        if (rule.reset.mode !== "auto") {
+        if (resetTree) {
+          // The reset tree owns recovery — the trigger falling away is not
+          // itself evidence the alert should clear. Handled after this loop.
+        } else if (rule.reset.mode !== "auto") {
           // manual re-arms the state; timed waits for its sweep — same as ever.
           await recover(rule, st, reading, now);
         } else if (!recoveredMeets(trigger, rule.reset, reading.value)) {
@@ -1200,6 +1217,45 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     await clearVanishedStates(rule, states, seen, scopeIds, handled, assetsWithReadings);
   }
 
+  // ── Custom reset conditions ──────────────────────────────────────────────
+  // Recovery for a condition-reset rule is decided HERE rather than in the
+  // readings loop, because the reset tree is the sole authority and its leaves
+  // need not be the trigger's metric at all: a firing alert whose trigger
+  // stopped reporting entirely must still be able to clear.
+  //
+  // Firing rows are re-read from the DB rather than taken from `states`, which
+  // is a pre-loop snapshot the sweeps above have since invalidated — a row this
+  // tick cleared as superseded / out-of-scope must not then be "recovered", and
+  // a row that only just fired must not be recovered in the same tick it fired.
+  if (resetTree) {
+    const firing = (await prisma.notificationRuleState.findMany({ where: { ruleId: rule.id, state: "firing" } }))
+      // A suppressed asset (maintenance / dependency-down) is frozen, not
+      // recovering — same contract as every other path.
+      .filter((st) => !(st.assetId && suppressedIds.has(st.assetId)));
+    // Resolve the tree against the FIRING assets only — usually a handful out of
+    // the whole scope, and the leaves are separate queries per sample table, so
+    // handing them 2000 asset ids to answer a question about three alerts is the
+    // difference between a free pass and a fleet-wide scan every 60s. (Same
+    // narrowing the composite path does.)
+    const firingAssetIds = new Set(firing.map((st) => st.assetId ?? ""));
+    const resetAssets = trigger.type === "host_metric"
+      ? activeAssets // the host pseudo-asset; host leaf resolvers ignore the list anyway
+      : activeAssets.filter((a) => firingAssetIds.has(a.id));
+    if (firing.length > 0 && resetAssets.length > 0) {
+      const resetLeaves = collectLeafRefs(resetTree);
+      const truthAt = await resolveResetTruths(resetLeaves, resetAssets);
+      const readingByKey = new Map(readings.map((r) => [`${r.assetId || ""}|${r.dimKey}`, r]));
+      for (const st of firing) {
+        const assetId = st.assetId ?? "";
+        const recovered = evalTriggerTree(resetTree, (leafId) => truthAt(leafId, assetId, st.dimensionKey));
+        // The trigger's own reading when there is one (it carries hostname/tags
+        // for the reset actions' template), else a reading rebuilt from the row.
+        const reading = readingByKey.get(`${assetId}|${st.dimensionKey}`) ?? readingFromState(st);
+        await applySustainedRecovery(rule, st, recovered, now, reading, { fireResolvedFirst: hasBands });
+      }
+    }
+  }
+
   // Timed auto-clear: firing states past their timer, even without an explicit
   // recovery reading (e.g. the asset stopped reporting).
   if (rule.reset.mode === "timed" && rule.reset.afterSec) {
@@ -1296,18 +1352,90 @@ function leafTruthByAsset(leaf: CompositeLeaf, readings: Reading[]): Map<string,
   return out;
 }
 
+/** Per-(asset, dimension) truths — one entry per reading, no ANY fold. The
+ *  dimension-aware half of a reset tree's lookup (see resolveResetTruths). */
+function leafTruthByAssetDim(leaf: CompositeLeaf, readings: Reading[]): Map<string, LeafTruth> {
+  const out = new Map<string, LeafTruth>();
+  const leafTrigger = leaf as unknown as Trigger;
+  for (const r of readings) {
+    const key = `${r.assetId || ""}|${r.dimKey}`;
+    if (out.has(key)) continue; // a resolver yields at most one reading per (asset, dimension)
+    const met = readingMeets(leafTrigger, r.value);
+    out.set(key, {
+      met,
+      witness: met ? { dimLabel: r.dimLabel, value: r.value } : null,
+      sample: { dimLabel: r.dimLabel, value: r.value },
+      hasReading: true,
+    });
+  }
+  return out;
+}
+
+/**
+ * A reset tree's truths, resolved DIMENSION-FIRST with a per-asset fallback.
+ *
+ * A composite trigger alerts once per device, so its leaves only ever need the
+ * per-asset ANY fold. A reset tree can sit on a PER-DIMENSION single trigger,
+ * where the firing alert belongs to one interface / sensor / mount — and the
+ * seeded reset (the trigger inverted) is a leaf on that same dimension space.
+ * Reading it per-asset would clear every pinned port on a switch the moment one
+ * of them recovered, so the lookup tries the firing row's own dimension first.
+ *
+ * The fallback is what makes a MIXED tree work: a leaf on another dimension
+ * space (CPU, whose dimKey is "") reports nothing at `assetId|port2`, so it
+ * falls through to the ANY fold and contributes its device-wide truth. So
+ * "clear port2 when port2's error rate drops AND the box's CPU is under 70"
+ * evaluates each half where that half actually lives.
+ *
+ * One query pass, folded twice — identical leaves still share their resolver.
+ */
+async function resolveResetTruths(
+  leaves: LeafRef[],
+  assets: ScopeAssetRow[],
+): Promise<(leafId: string, assetId: string, dimKey: string) => LeafTruth | undefined> {
+  const byResolverKey = new Map<string, Promise<Reading[]>>();
+  const byAsset = new Map<string, Map<string, LeafTruth>>();
+  const byAssetDim = new Map<string, Map<string, LeafTruth>>();
+  for (const { leafId, leaf } of leaves) {
+    const key = JSON.stringify(leaf);
+    let p = byResolverKey.get(key);
+    if (!p) {
+      p = resolveOneLeafReadings(leaf, assets);
+      byResolverKey.set(key, p);
+    }
+    const readings = await p;
+    byAsset.set(leafId, leafTruthByAsset(leaf, readings));
+    byAssetDim.set(leafId, leafTruthByAssetDim(leaf, readings));
+  }
+  return (leafId, assetId, dimKey) =>
+    byAssetDim.get(leafId)?.get(`${assetId}|${dimKey}`) ?? byAsset.get(leafId)?.get(assetId);
+}
+
+/** Where a tree walk gets each leaf's truth. Keyed by tree-path leafId so the
+ *  same walker serves the per-asset fold (composite triggers) and the
+ *  dimension-aware fold (a reset tree over a per-dimension single trigger). */
+type LeafTruthLookup = (leafId: string) => LeafTruth | undefined;
+
+function evalTriggerTree(
+  node: { op: "and" | "or"; children: (TriggerConditionGroup | CompositeLeaf)[] },
+  lookup: LeafTruthLookup,
+  prefix = "",
+): boolean {
+  const results = node.children.map((c, i) => {
+    const id = prefix ? `${prefix}.${i}` : String(i);
+    if (isTriggerLeaf(c)) return lookup(id)?.met === true; // no reading ⇒ false (never fire on absent evidence)
+    return evalTriggerTree(c as TriggerConditionGroup, lookup, id);
+  });
+  return node.op === "and" ? results.every(Boolean) : results.some(Boolean);
+}
+
 function evalTriggerTreeForAsset(
   node: { op: "and" | "or"; children: (TriggerConditionGroup | CompositeLeaf)[] },
   assetId: string,
   truths: Map<string, Map<string, LeafTruth>>,
   prefix = "",
 ): boolean {
-  const results = node.children.map((c, i) => {
-    const id = prefix ? `${prefix}.${i}` : String(i);
-    if (isTriggerLeaf(c)) return truths.get(id)?.get(assetId)?.met === true; // no reading ⇒ false (never fire on absent evidence)
-    return evalTriggerTreeForAsset(c as TriggerConditionGroup, assetId, truths, id);
-  });
-  return node.op === "and" ? results.every(Boolean) : results.some(Boolean);
+  return evalTriggerTree(node, (leafId) => truths.get(leafId)?.get(assetId), prefix);
 }
 
 interface CompositeOutcome {
@@ -1368,11 +1496,15 @@ const HOST_PSEUDO_ASSET: ScopeAssetRow = {
  *  per-reading sustain block exactly. */
 async function applySustainedRecovery(
   rule: DbRule,
-  st: { id: string; notificationId: string | null; recoveredSince: Date | null },
+  st: { id: string; notificationId: string | null; recoveredSince: Date | null; firingSeverity?: string | null },
   recovered: boolean,
   now: Date,
   /** Carried purely so the reset actions have a device to talk about. */
   reading?: Reading,
+  /** `fireResolvedFirst`: run the severity-band resolved actions before the
+   *  clear, exactly as the auto path does. Only meaningful on a banded rule
+   *  (bands need a numeric single trigger, so composites never set it). */
+  opts?: { fireResolvedFirst?: boolean },
 ): Promise<void> {
   if (!recovered) {
     if (st.recoveredSince) {
@@ -1380,13 +1512,19 @@ async function applySustainedRecovery(
     }
     return;
   }
+  const clear = async (): Promise<void> => {
+    if (opts?.fireResolvedFirst && reading) {
+      await fireResolved(rule, reading, { ...st, firingSeverity: st.firingSeverity ?? null }, now);
+    }
+    await recover(rule, st, reading, now);
+  };
   const sustainSec = rule.reset.sustainSec ?? 0;
   if (sustainSec <= 0) {
-    await recover(rule, st, reading, now);
+    await clear();
   } else if (!st.recoveredSince) {
     await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: now } });
   } else if (now.getTime() - st.recoveredSince.getTime() >= sustainSec * 1000) {
-    await recover(rule, st, reading, now);
+    await clear();
   }
   // else: recovered but not sustained long enough yet — keep firing.
 }
