@@ -110,6 +110,30 @@ export async function startUninstall(input: StartUninstallInput): Promise<void> 
   }));
 }
 
+/**
+ * Statuses an upgrade may be kicked off from. `active` is the healthy case.
+ *
+ * `upgrade_failed` is here because it means "the OLD binary is still running":
+ * every failure path leaves `agent.conf` untouched and either never reached
+ * the host or refused before swapping the binary, so the row is exactly as
+ * upgradeable as an active one. Excluding it made one unreachable moment
+ * permanent — a laptop asleep during a fan-out dropped out of
+ * `upgradeAllOutdated`'s filter (no later build ever retried it) AND out of
+ * the per-asset retry (the panel's own "Retry Upgrade" button 409'd), leaving
+ * uninstall/reinstall as the only way back onto the current agent.
+ *
+ * Everything else stays refused: the in-flight states (`pending`/`uploading`/
+ * `enrolling`/`upgrading`/`uninstalling`) would race work already running on
+ * the host, `failed` never completed an install to upgrade, and `revoked` has
+ * no working bearer for the new binary to come back on.
+ */
+export const UPGRADEABLE_INSTALL_STATUSES = ["active", "upgrade_failed"] as const;
+
+/** True when an agent in this installStatus can be sent an upgrade. */
+export function canUpgradeFromStatus(status: string | null | undefined): boolean {
+  return (UPGRADEABLE_INSTALL_STATUSES as readonly string[]).includes(status ?? "");
+}
+
 export interface StartUpgradeInput {
   managedAgentId: string;
   credentialId?:  string; // defaults to ManagedAgent.installCredentialId
@@ -120,8 +144,10 @@ export interface StartUpgradeInput {
 
 /**
  * Fire-and-forget upgrade kickoff. Refuses synchronously (throws) when
- * the agent is already at manifest.currentVersion or no binaries are
- * staged. Otherwise transitions installStatus → "upgrading" and dispatches
+ * the agent is already at manifest.currentVersion, no binaries are staged,
+ * or the row isn't in an UPGRADEABLE_INSTALL_STATUSES state (so a previously
+ * failed upgrade IS retryable from here). Otherwise transitions
+ * installStatus → "upgrading" and dispatches
  * the platform-specific upgrade path. The agent's bearer + cert pin
  * survive — we don't touch agent.conf; only the binary is replaced.
  */
@@ -131,8 +157,8 @@ export async function startUpgrade(input: StartUpgradeInput): Promise<{ fromVers
     include: { asset: true },
   });
   if (!row) throw new AppError(404, "Managed agent not found");
-  if (row.installStatus !== "active") {
-    throw new AppError(409, `Agent installStatus is "${row.installStatus}"; only active agents can upgrade.`);
+  if (!canUpgradeFromStatus(row.installStatus)) {
+    throw new AppError(409, `Agent installStatus is "${row.installStatus}"; only active or upgrade_failed agents can upgrade.`);
   }
 
   const manifest = await loadManifest();
@@ -191,8 +217,10 @@ export async function startUpgrade(input: StartUpgradeInput): Promise<{ fromVers
 }
 
 /**
- * Fan out `startUpgrade` to every ManagedAgent whose installStatus is
- * "active" but whose agentVersion lags the current manifest. Bounded
+ * Fan out `startUpgrade` to every ManagedAgent whose agentVersion lags the
+ * current manifest and whose installStatus is upgradeable — "active" plus
+ * "upgrade_failed", so a host that missed the last build's fan-out is picked
+ * up by the next one rather than stranded. Bounded
  * concurrency (Promise pool of POOL_SIZE) — the SSH/WinRM connections
  * are the per-host bottleneck and higher parallelism risks tripping
  * concurrent-connection limits on the target hosts (Windows WinRM caps
@@ -226,7 +254,10 @@ export async function upgradeAllOutdated(actor: string): Promise<UpgradeAllResul
   }
   const eligible = await prisma.managedAgent.findMany({
     where: {
-      installStatus: "active",
+      // Includes `upgrade_failed` (see UPGRADEABLE_INSTALL_STATUSES): a host
+      // that missed one fan-out is retried by the next build instead of being
+      // stranded on its old binary forever.
+      installStatus: { in: [...UPGRADEABLE_INSTALL_STATUSES] },
       NOT: { agentVersion: currentVersion },
     },
     select: { id: true, assetId: true, agentVersion: true },

@@ -1166,10 +1166,14 @@
       var actions = "";
       if (canManage) {
         var btns = [];
-        // Upgrade — only meaningful for an active, lagging agent.
-        if (a.outOfDate && a.installStatus === "active") {
+        // Upgrade — meaningful for any lagging agent the server will accept an
+        // upgrade for. `outOfDate` already encodes that (it gates on the same
+        // upgradeable-status set the route does), so a host whose last upgrade
+        // failed gets the button back instead of needing a reinstall.
+        if (a.outOfDate) {
+          var upLabel = a.installStatus === "upgrade_failed" ? "Retry upgrade" : "Upgrade";
           btns.push('<button class="btn btn-secondary agent-act" data-act="upgrade" data-id="' + escapeHtml(a.assetId) +
-            '" style="padding:2px 8px;font-size:0.75rem">Upgrade</button>');
+            '" style="padding:2px 8px;font-size:0.75rem">' + upLabel + '</button>');
         }
         // Reinstall — needs the stored install credential. Carries the OS +
         // current privilege tier so the Linux reinstall dialog can offer the

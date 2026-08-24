@@ -398,9 +398,20 @@ build auto-prune + boot-time auto-build are layered on top.
   credentialId?, actor})` — SSH/WinRM-driven binary swap that preserves
   agent.conf. Transitions installStatus active → upgrading → active.
   Emits `agent.upgrade_kickoff`, `agent.upgrade_succeeded`,
-  `agent.upgrade_failed`. The bulk path lives in
+  `agent.upgrade_failed`. Which statuses may start one is the exported
+  `UPGRADEABLE_INSTALL_STATUSES` / `canUpgradeFromStatus` in the same file
+  — `active` **plus `upgrade_failed`**, since every failure path leaves the
+  old binary and agent.conf in place. THREE readers must keep using that
+  predicate rather than testing `=== "active"`: the guard here,
+  `upgradeAllOutdated`'s Prisma filter, and the `outOfDate` flags on
+  `/server-settings/agents/installed` + `/installed-summary` (the latter
+  gates the Upgrade-all button and supplies its confirm count). When they
+  disagreed, one unreachable moment was permanent: the row left the
+  fan-out's filter AND its own Retry Upgrade button 409'd, leaving
+  uninstall/reinstall as the only route back to a current agent.
+  The bulk path lives in
   `upgradeAllOutdated(actor)` (same file) — Promise pool of 4 over every
-  active ManagedAgent whose agentVersion lags `manifest.currentVersion`.
+  upgradeable ManagedAgent whose agentVersion lags `manifest.currentVersion`.
   Called from both the operator-initiated `POST
   /server-settings/agents/upgrade-all` and the post-build auto-upgrade
   hook in `finalizeBuild` (agentBuildService.ts) gated on
@@ -451,8 +462,13 @@ build auto-prune + boot-time auto-build are layered on top.
   Upgrade-all line, Clean-up button, Auto-build toggle, × cancel buttons
   on in-flight + queued rows.
 - `public/js/assets.js:assetAgentSubpanelHTML` — Upgrade button on
-  active agents; Retry Upgrade on `upgrade_failed`. `_isTransientAgentState`
+  active agents; Retry Upgrade on `upgrade_failed` (which the route now
+  accepts). `_isTransientAgentState`
   includes `"upgrading"` so the existing 3s poll picks it up.
+- `public/js/agent-build.js` installed-agents rows — the per-row Upgrade
+  button keys on `outOfDate` alone (the server already folds the
+  upgradeable-status test into that flag) and relabels to "Retry upgrade"
+  on an `upgrade_failed` row.
 - `src/api/routes/agents.ts:agentsBinaryRouter` — `GET /api/v1/agents/binary/:filename`
   serves binaries the Build command produced. Whitelist-checked against
   the current manifest's `binaries` map.
@@ -2524,7 +2540,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** Fire-and-forget remote install / uninstall / upgrade of the Polaris Agent over SSH (Linux/macOS/Windows) or WinRM (Windows): resolves credentials, mints an enrollment token, uploads the binary + a rendered `agent.conf`, runs platform scripts, and drives the ManagedAgent lifecycle (pending → uploading → enrolling → active | failed).
 
-**Public API:** `startInstall`, `startUninstall`, `startUpgrade`, `upgradeAllOutdated`, `renderAgentConf`, `inferOwnServerUrl`, `inferOwnServerUrlSync`, `AGENT_SERVER_URL_SETTING_KEY`, `StartInstallInput`, `StartUninstallInput`, `StartUpgradeInput`, `UpgradeAllResult`
+**Public API:** `startInstall`, `startUninstall`, `startUpgrade`, `upgradeAllOutdated`, `UPGRADEABLE_INSTALL_STATUSES`, `canUpgradeFromStatus`, `renderAgentConf`, `inferOwnServerUrl`, `inferOwnServerUrlSync`, `AGENT_SERVER_URL_SETTING_KEY`, `StartInstallInput`, `StartUninstallInput`, `StartUpgradeInput`, `UpgradeAllResult`
 
 **Cross-service deps:** `credentialService.getCredential`, `agentTokenService.mintEnrollmentToken`, `agentBuildService.getInventory`, `certInfo.getServerCertHostnames`, `publicUrl` port helper, `utils/agentUnit` (`linuxServiceBlock`/`normalizePrivilegeTier`/`AgentPrivilegeTier` — the privilege-tier → systemd unit mapping; re-exported from here), `logEvent`, `prisma`, WinRM helper.
 

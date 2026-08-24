@@ -2139,6 +2139,7 @@ router.get("/agents/installed-summary", async (_req, res, next) => {
   try {
     const { prisma } = await import("../../db.js");
     const { getInventory } = await import("../../services/agentBuildService.js");
+    const { canUpgradeFromStatus } = await import("../../services/agentInstallService.js");
     const inv = await getInventory();
     // Pull every ManagedAgent row regardless of installStatus so we can
     // partition into active / upgrading / upgrade_failed without a
@@ -2146,10 +2147,18 @@ router.get("/agents/installed-summary", async (_req, res, next) => {
     const rows = await prisma.managedAgent.findMany({
       select: { agentVersion: true, installStatus: true },
     });
+    const current = inv.manifest?.currentVersion ?? null;
     const histogram = new Map<string, number>();
     let totalActive = 0;
     let upgrading = 0;
     let upgradeFailed = 0;
+    // `outOfDate` is counted over the SAME set upgradeAllOutdated targets —
+    // lagging AND upgradeable, so it includes upgrade_failed rows. It gates
+    // the Upgrade-all button and supplies its confirm-dialog count, both of
+    // which would otherwise understate (or hide entirely) the retry work a
+    // fan-out is about to do. A failed-and-lagging row deliberately shows in
+    // both this count and `upgradeFailed`: it is genuinely both things.
+    let outOfDate = 0;
     for (const r of rows) {
       if (r.installStatus === "active") {
         totalActive++;
@@ -2160,11 +2169,13 @@ router.get("/agents/installed-summary", async (_req, res, next) => {
       } else if (r.installStatus === "upgrade_failed") {
         upgradeFailed++;
       }
-    }
-    const current = inv.manifest?.currentVersion ?? null;
-    let outOfDate = 0;
-    for (const [v, n] of histogram) {
-      if (current && v !== current) outOfDate += n;
+      // `?? "unknown"` keeps the pre-existing reading that a row with no
+      // reported version is lagging (the fan-out's own filter agrees — it
+      // selects on version-is-not-current, not version-is-known).
+      if (current && canUpgradeFromStatus(r.installStatus) &&
+          (r.agentVersion ?? "unknown") !== current) {
+        outOfDate++;
+      }
     }
     res.json({
       totalActive,
@@ -2196,6 +2207,7 @@ router.get("/agents/installed", async (_req, res, next) => {
     const { prisma } = await import("../../db.js");
     const { decodeCapEff } = await import("../../utils/capEff.js");
     const { getInventory } = await import("../../services/agentBuildService.js");
+    const { canUpgradeFromStatus } = await import("../../services/agentInstallService.js");
     const inv = await getInventory();
     const currentVersion = inv.manifest?.currentVersion ?? null;
     const rows = await prisma.managedAgent.findMany({
@@ -2239,7 +2251,11 @@ router.get("/agents/installed", async (_req, res, next) => {
       installedBy:          r.installedBy,
       hasInstallCredential: !!r.installCredentialId,
       lastSeenAt:           r.lastSeenAt,
-      outOfDate:            !!(currentVersion && r.installStatus === "active" &&
+      // Upgradeable-and-lagging, which includes "upgrade_failed" — those rows
+      // ARE out of date (the old binary is still running) and are retried by
+      // both upgrade-all and the per-row Upgrade button, so hiding the badge
+      // was the one place the fleet list disagreed with what upgrade acts on.
+      outOfDate:            !!(currentVersion && canUpgradeFromStatus(r.installStatus) &&
                                r.agentVersion && r.agentVersion !== currentVersion),
     }));
     res.json({ currentVersion, agents });
@@ -2247,8 +2263,9 @@ router.get("/agents/installed", async (_req, res, next) => {
 });
 
 /**
- * Bulk-upgrade every active ManagedAgent whose agentVersion lags the
- * current manifest. Logic lives in `upgradeAllOutdated` in
+ * Bulk-upgrade every ManagedAgent whose agentVersion lags the current
+ * manifest and whose installStatus is upgradeable (active + upgrade_failed).
+ * Logic lives in `upgradeAllOutdated` in
  * agentInstallService so the same path is reachable from the post-build
  * auto-upgrade hook.
  */
