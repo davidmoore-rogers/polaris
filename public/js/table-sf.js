@@ -934,6 +934,14 @@ function setupColumnLayout(tableEl, options) {
   }
 
   var FIXED_COL_W = 20;
+  // Floor under EVERY width this helper writes. A column may be squeezed to a
+  // 5px sliver — enough to see it's still there, and enough to grab its own
+  // resize handle and pull it back out — but never to 0px, which reads as "the
+  // column is gone" and leaves the operator nothing to drag. Deliberately far
+  // below anything readable: the point is existence, not legibility, so an
+  // operator packing many columns into one screen can park the ones they don't
+  // need at a sliver instead of hiding them outright.
+  var MIN_COL_W = 5;
   var widths = {};
   var hidden = {};
 
@@ -967,19 +975,45 @@ function setupColumnLayout(tableEl, options) {
     }
   });
 
+  // Below this a column is mostly padding: the 1rem horizontal cell padding on
+  // each side plus borders is ~33px, and a table cell's border box can't render
+  // narrower than its own padding — so a column dragged to the MIN_COL_W sliver
+  // would stop dead around 33px with the floor looking broken. Those columns
+  // get their padding dropped (below) so the width a column is given is the
+  // width it renders at.
+  var NARROW_COL_W = 36;
+
+  // One generated stylesheet per table, carrying both position-dependent rules:
+  // hidden columns, and padding-free narrow ones. nth-child indexes are DISPLAY
+  // positions — a reordered table's cells sit at different offsets than their
+  // authored ones. Written only on change: this runs on every resize-drag frame
+  // (from applyWidths), and replacing a stylesheet's text invalidates style for
+  // the whole table.
   function rewriteHideStyle() {
     var rules = [];
     var sel = 'table[data-sf-table-id="' + tableId + '"]';
-    // nth-child indexes are DISPLAY positions — a reordered table's cells sit
-    // at different offsets than their authored ones.
     displayIds().forEach(function (id, pos) {
-      if (!hidden[id]) return;
       var n = pos + 1;
-      rules.push(sel + ' > thead > tr > :nth-child(' + n + ') { display: none; }');
-      rules.push(sel + ' > tbody > tr > :nth-child(' + n + ') { display: none; }');
-      rules.push(sel + ' > colgroup > col:nth-child(' + n + ') { display: none; }');
+      if (hidden[id]) {
+        rules.push(sel + ' > thead > tr > :nth-child(' + n + ') { display: none; }');
+        rules.push(sel + ' > tbody > tr > :nth-child(' + n + ') { display: none; }');
+        rules.push(sel + ' > colgroup > col:nth-child(' + n + ') { display: none; }');
+        return;
+      }
+      // Utility columns (cb/fav) already carry their own tight padding.
+      if (noResize[id]) return;
+      // The rendered width, not the stored base: the fit pass stretches
+      // columns, and it owns the auto-fill column's width outright.
+      var w = parseFloat(cols[srcIdxOf[id]].style.width) || 0;
+      if (!w || w >= NARROW_COL_W) return;
+      rules.push(sel + ' > thead > tr > :nth-child(' + n + '),');
+      // overflow:hidden as well: a header's filter control and a cell's button
+      // group have their own intrinsic widths, and at a sliver they'd paint
+      // over the neighboring column instead of being clipped by it.
+      rules.push(sel + ' > tbody > tr > :nth-child(' + n + ') { padding-left: 1px; padding-right: 1px; overflow: hidden; }');
     });
-    styleEl.textContent = rules.join("\n");
+    var text = rules.join("\n");
+    if (styleEl.textContent !== text) styleEl.textContent = text;
   }
 
   // Source index of the rightmost visible, resizable (non-utility) column —
@@ -1008,7 +1042,7 @@ function setupColumnLayout(tableEl, options) {
       } else {
         var w = widths[id];
         if (typeof w === "number" && w > 0) {
-          cols[i].style.width = w + "px";
+          cols[i].style.width = Math.max(MIN_COL_W, w) + "px";
           anyWidth = true;
         } else {
           cols[i].style.width = "";
@@ -1021,10 +1055,14 @@ function setupColumnLayout(tableEl, options) {
       if (handle) handle.style.display = (i === lastIdx) ? "none" : "";
     });
     tableEl.style.tableLayout = anyWidth ? "fixed" : "";
+    rewriteHideStyle();
     scheduleColumnFit();
   }
 
-  var MIN_LAST_COL_W = 40;
+  // NOT a floor (that's MIN_COL_W) — the width handed to a column that was
+  // never measurable, so it lands somewhere readable rather than at the sliver
+  // an operator would have had to choose deliberately.
+  var UNMEASURED_COL_W = 40;
   var fitScheduled = false;
 
   /**
@@ -1106,12 +1144,13 @@ function setupColumnLayout(tableEl, options) {
         var base = baseWidthOf(flex[k]);
         // A zero base means the column was never measurable (nothing seeded,
         // nothing saved) — scaling it keeps it at 0px, i.e. invisible. Give it
-        // the 40px floor instead; the last column absorbs the difference.
-        var w = base > 0 ? Math.floor(base * scale) : MIN_LAST_COL_W;
+        // a readable default instead; the last column absorbs the difference.
+        var w = base > 0 ? Math.floor(base * scale) : UNMEASURED_COL_W;
         setColWidth(flex[k], w);
         assigned += w;
       }
-      setColWidth(flex[flex.length - 1], Math.max(MIN_LAST_COL_W, budget - assigned));
+      setColWidth(flex[flex.length - 1], Math.max(MIN_COL_W, budget - assigned));
+      rewriteHideStyle();
       return;
     }
 
@@ -1130,13 +1169,14 @@ function setupColumnLayout(tableEl, options) {
       others += bw;
     });
     var target = Math.floor(availW - fixedSum - others);
-    if (target < MIN_LAST_COL_W) {
+    if (target < MIN_COL_W) {
       // Crushed: no leftover to fill. Use the column's saved/measured width
-      // (40px floor) instead of letting it collapse.
+      // (MIN_COL_W floor) instead of letting it collapse.
       var savedW = widths[colIds[lastIdx]];
-      target = Math.max(MIN_LAST_COL_W, (typeof savedW === "number" && savedW > 0) ? savedW : 0);
+      target = Math.max(MIN_COL_W, (typeof savedW === "number" && savedW > 0) ? savedW : 0);
     }
     setColWidth(lastIdx, target);
+    rewriteHideStyle();
   }
   function scheduleColumnFit() {
     if (typeof requestAnimationFrame !== "function") { fitColumnsToContainer(); return; }
@@ -1196,7 +1236,6 @@ function setupColumnLayout(tableEl, options) {
       var id = colIds[i];
       var startX = e.clientX;
       var startW = widths[id] || ths[i].getBoundingClientRect().width;
-      var MIN_W = 40;
       // Divider behavior: a drag only affects the column on each side of the
       // handle. Find the next visible, resizable column to the right — the
       // "right neighbor" we trade width with (skip hidden / fixed columns).
@@ -1217,12 +1256,12 @@ function setupColumnLayout(tableEl, options) {
       function onMove(ev) {
         var dx = ev.clientX - startX;
         if (startWNext != null) {
-          // Clamp so neither the dragged column nor its neighbor goes below MIN_W.
-          var d = Math.max(-(startW - MIN_W), Math.min(startWNext - MIN_W, dx));
+          // Clamp so neither the dragged column nor its neighbor goes below MIN_COL_W.
+          var d = Math.max(-(startW - MIN_COL_W), Math.min(startWNext - MIN_COL_W, dx));
           widths[id] = Math.round(startW + d);
           widths[nId] = Math.round(startWNext - d);
         } else {
-          widths[id] = Math.max(MIN_W, Math.round(startW + dx));
+          widths[id] = Math.max(MIN_COL_W, Math.round(startW + dx));
         }
         applyWidths();
       }
@@ -1597,7 +1636,7 @@ function setupColumnLayout(tableEl, options) {
           // is a measurement artifact — see the fixedW seed above).
           if (noResize[id] || fixedW[id]) return;
           var v = p.widths[id];
-          if (typeof v === "number" && v > 0) widths[id] = v;
+          if (typeof v === "number" && v > 0) widths[id] = Math.max(MIN_COL_W, v);
         });
       }
       // Apply `shown` (un-hide) before `hidden` (hide). `hidden` is pre-seeded

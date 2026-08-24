@@ -163,3 +163,81 @@ describe("column fit — spending the leftover width", () => {
     expect(colWidths().reduce((a, b) => a + b, 0)).toBe(AVAIL);
   });
 });
+
+/**
+ * The 5px floor (MIN_COL_W). Every column stays draggable down to a sliver —
+ * wide enough to see it's there and to grab its own resize handle — and no
+ * column this helper writes a width for can reach 0px, which would read as the
+ * column having disappeared with nothing left to pull back out.
+ */
+describe("column fit — the 5px minimum width", () => {
+  it("lets a drag squeeze a column to the sliver, and clamps there", () => {
+    // Stretched render is hostname 220 / ip 440. Dragging 300px left would take
+    // hostname to -80; it stops at 5 and the neighbor absorbs exactly 215.
+    layout.setPrefs({ widths: { hostname: 100, ip: 200, created: 100 } });
+    dragHandle("hostname", -300);
+
+    expect(widthOf("hostname")).toBe(5);
+    expect(widthOf("ip")).toBe(655);
+    expect(colWidths().reduce((a, b) => a + b, 0)).toBe(AVAIL);
+  });
+
+  it("clamps the right-hand neighbor at the sliver too", () => {
+    layout.setPrefs({ widths: { hostname: 100, ip: 200, created: 100 } });
+    dragHandle("hostname", 1000);
+
+    expect(widthOf("ip")).toBe(5);
+    expect(widthOf("hostname")).toBe(655);
+  });
+
+  it("raises a saved sub-floor width to the floor rather than honoring it", () => {
+    // A hand-edited or pre-floor saved pref must not seed a 1px base for the
+    // fit pass to scale from.
+    layout.setPrefs({ widths: { hostname: 1, ip: 200, created: 100 } });
+
+    expect(layout.getPrefs().widths.hostname).toBe(5);
+  });
+
+  it("keeps the crushed auto-fill column at the floor, never at 0px", () => {
+    layout.setPrefs({ widths: { hostname: 500, ip: 500, created: 1 } });
+
+    // Over-committed: no leftover for the last column, so it falls back to its
+    // own saved width — itself floored.
+    expect(widthOf("created")).toBe(5);
+  });
+});
+
+/**
+ * A cell's border box can't render narrower than its own padding (1rem each
+ * side ≈ 33px with borders), so the sliver is only real if the padding comes
+ * off with it. Those rules ride the same generated per-table stylesheet the
+ * hidden-column rules use.
+ */
+describe("column fit — padding on sliver-width columns", () => {
+  function generatedCss(): string {
+    const el = doc.querySelector('head style[id^="sf-style-"]');
+    return el ? String(el.textContent) : "";
+  }
+
+  it("drops the cell padding on a column squeezed under the threshold", () => {
+    layout.setPrefs({ widths: { hostname: 100, ip: 200, created: 100 } });
+    expect(generatedCss()).not.toContain("padding-left");
+
+    dragHandle("hostname", -300);   // hostname → 5px
+
+    // hostname is display position 3 (cb, badge, hostname, ...).
+    expect(generatedCss()).toContain(":nth-child(3),");
+    expect(generatedCss()).toContain("padding-left: 1px; padding-right: 1px; overflow: hidden;");
+    // Its 655px neighbor keeps its padding.
+    expect(generatedCss()).not.toContain(":nth-child(4),");
+  });
+
+  it("restores the padding when the column is widened again", () => {
+    layout.setPrefs({ widths: { hostname: 100, ip: 200, created: 100 } });
+    dragHandle("hostname", -300);
+    expect(generatedCss()).toContain("padding-left: 1px");
+
+    dragHandle("hostname", 300);
+    expect(generatedCss()).not.toContain("padding-left");
+  });
+});
