@@ -9,13 +9,26 @@
  * "restapi" credentials carry a baseUrl + bearer token pair so manually-
  * created assets can be probed via the same REST-API path FMG/FortiGate-
  * discovered firewalls use through their integration's stored token.
+ *
+ * "http" credentials are the odd one out: they carry almost no secret at all
+ * (an optional bearer token or basic password) and instead describe an HTTP GET
+ * HEALTH CHECK — scheme, port, path, the status code that counts as up, and the
+ * string the response body must contain. They live here rather than in a table
+ * of their own because a check is a per-STREAM selectable thing, and the
+ * credential store is already exactly that: pickable at the asset,
+ * class-override and integration tiers, sealed at rest by the db.ts extension,
+ * masked at the API boundary, and testable from the Test Connection modal. One
+ * "GET /healthz expect OK" row therefore covers a whole fleet; the single
+ * device whose endpoint sits elsewhere overrides just the path via
+ * `Asset.httpCheckPath`. The check semantics are in utils/httpCheck.ts.
  */
 
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
+import { type HttpCheckConfig, normalizeHttpPath } from "../utils/httpCheck.js";
 
-export type CredentialType = "snmp" | "winrm" | "ssh" | "restapi";
+export type CredentialType = "snmp" | "winrm" | "ssh" | "restapi" | "http";
 
 export interface SnmpV2cConfig {
   version: "v2c";
@@ -105,7 +118,15 @@ export interface RestApiConfig {
   verifyTls?: boolean;
 }
 
-export type CredentialConfig = SnmpConfig | WinRmConfig | SshConfig | RestApiConfig;
+/**
+ * HTTP-check credential. The shape lives in utils/httpCheck.ts (shared with the
+ * probe and its unit tests) rather than being redeclared here — this is the
+ * same type, re-exported under the credential vocabulary so callers reading
+ * this file can find it.
+ */
+export type { HttpCheckConfig } from "../utils/httpCheck.js";
+
+export type CredentialConfig = SnmpConfig | WinRmConfig | SshConfig | RestApiConfig | HttpCheckConfig;
 
 export interface CredentialRecord {
   id: string;
@@ -139,6 +160,12 @@ const SECRET_FIELDS_BY_TYPE: Record<CredentialType, string[]> = {
   winrm:   ["password"],
   ssh:     ["password", "privateKey", "passphrase"],
   restapi: ["apiToken"],
+  // An http check's auth is optional (plenty of health endpoints are
+  // unauthenticated) but when present it is a real credential, so both carriers
+  // mask and seal. `expectBody` deliberately does NOT — it is the thing the
+  // operator needs to see and edit on every visit to the form, and masking it
+  // would make the check un-reviewable.
+  http:    ["apiToken", "password"],
 };
 
 function secretFieldsFor(type: string): string[] {
@@ -276,11 +303,82 @@ function validateRestApiConfig(config: Record<string, unknown>): void {
   }
 }
 
+/**
+ * Validate an HTTP-check credential. Unlike the other types there is no
+ * required secret — an unauthenticated `GET /healthz` is a perfectly good check
+ * — so the required-field checks are about the CHECK being meaningful and about
+ * failing at save time rather than on every probe tick:
+ *
+ *  - the regex is COMPILED here, because an invalid pattern stored on a
+ *    credential would otherwise fail once per asset per interval forever, with
+ *    the operator finding out from the probe error column instead of the form
+ *    they typed it into.
+ *  - `path` is canonicalized (leading slash) so the stored value is what the
+ *    request line will actually carry.
+ *  - `caseSensitive` / `failOnMismatch` are only meaningful alongside an
+ *    `expectBody`; a lone toggle is accepted rather than rejected (harmless,
+ *    and rejecting it would 400 a form the operator is mid-way through).
+ */
+function validateHttpConfig(config: Record<string, unknown>): void {
+  if (config.useHttps !== undefined && typeof config.useHttps !== "boolean") {
+    throw new AppError(400, "HTTP check useHttps must be a boolean");
+  }
+  if (config.port !== undefined && config.port !== null) {
+    const p = Number(config.port);
+    if (!Number.isInteger(p) || p < 1 || p > 65535) {
+      throw new AppError(400, "HTTP check port must be between 1 and 65535");
+    }
+    config.port = p;
+  }
+  if (config.path !== undefined && config.path !== null && typeof config.path !== "string") {
+    throw new AppError(400, "HTTP check path must be a string");
+  }
+  // Canonicalize so the stored value equals the request line. A blank path is
+  // stored as "/" here (unlike Asset.httpCheckPath, where blank means "no
+  // override") — this IS the definition, so it has to name a path.
+  config.path = normalizeHttpPath(typeof config.path === "string" ? config.path : null);
+
+  if (config.expectStatus !== undefined && config.expectStatus !== null) {
+    const s = Number(config.expectStatus);
+    if (!Number.isInteger(s) || s < 100 || s > 599) {
+      throw new AppError(400, "HTTP check expected status must be a status code between 100 and 599");
+    }
+    config.expectStatus = s;
+  }
+  const mode = config.matchMode;
+  if (mode !== undefined && mode !== null && mode !== "contains" && mode !== "regex") {
+    throw new AppError(400, 'HTTP check matchMode must be "contains" or "regex"');
+  }
+  if (config.expectBody !== undefined && config.expectBody !== null && typeof config.expectBody !== "string") {
+    throw new AppError(400, "HTTP check expected content must be a string");
+  }
+  const expectBody = typeof config.expectBody === "string" ? config.expectBody : "";
+  if (mode === "regex" && expectBody) {
+    try { new RegExp(expectBody); }
+    catch (err: any) {
+      throw new AppError(400, `HTTP check regex is invalid: ${err?.message || "unparseable"}`);
+    }
+  }
+  for (const flag of ["caseSensitive", "failOnMismatch", "verifyTls"]) {
+    if (config[flag] !== undefined && typeof config[flag] !== "boolean") {
+      throw new AppError(400, `HTTP check ${flag} must be a boolean`);
+    }
+  }
+  // Basic auth needs both halves. A username with no password would send an
+  // empty credential and read as an auth failure the operator can't explain.
+  const hasUser = typeof config.username === "string" && config.username.length > 0;
+  const hasPass = typeof config.password === "string" && config.password.length > 0;
+  if (hasUser !== hasPass) {
+    throw new AppError(400, "HTTP check basic auth needs both a username and a password");
+  }
+}
+
 export function validateConfig(type: CredentialType, config: Record<string, unknown>): void {
   if (type === "snmp")    return validateSnmpConfig(config);
   if (type === "winrm")   return validateWinRmConfig(config);
   if (type === "ssh")     return validateSshConfig(config);
   if (type === "restapi") return validateRestApiConfig(config);
+  if (type === "http")    return validateHttpConfig(config);
   throw new AppError(400, `Unknown credential type "${type}"`);
 }
 
@@ -325,8 +423,8 @@ export async function getCredential(id: string, opts?: { revealSecrets?: boolean
 export async function createCredential(input: SaveCredentialInput): Promise<CredentialRecord> {
   const name = normalizeName(input.name);
   if (!name) throw new AppError(400, "Credential name is required");
-  if (input.type !== "snmp" && input.type !== "winrm" && input.type !== "ssh" && input.type !== "restapi") {
-    throw new AppError(400, "Credential type must be snmp, winrm, ssh, or restapi");
+  if (input.type !== "snmp" && input.type !== "winrm" && input.type !== "ssh" && input.type !== "restapi" && input.type !== "http") {
+    throw new AppError(400, "Credential type must be snmp, winrm, ssh, restapi, or http");
   }
   if (!input.config || typeof input.config !== "object") {
     throw new AppError(400, "Credential config is required");

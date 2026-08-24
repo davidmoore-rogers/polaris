@@ -798,6 +798,16 @@ model Asset {
   // Per-stream method set enforced by utils/pollingCompatibility STREAM_METHODS.
   processesPolling    String?
   eventLogPolling     String?
+  // Per-asset request path for the "http" response-time method, overriding the
+  // `path` on the selected http Credential. The credential carries the SHAPE of
+  // the check (scheme, port, expected status, expected body, auth) so one row
+  // covers a fleet; this is the escape hatch for the device whose health
+  // endpoint lives somewhere else. null / "" = no override (use the
+  // credential's path) — NOT "/", so blanking the field returns the device to
+  // the credential rather than silently repointing it at the web root. Only
+  // read when responseTimePolling resolves to "http"; see utils/httpCheck.ts
+  // resolveHttpTarget, the single resolution point.
+  httpCheckPath       String?
   // Slice 7 — custom-widget cadence. When the asset's manufacturer has at
   // least one ManufacturerCustomWidget AND this resolves to a non-"disabled"
   // method, collectCustomWidgets fires on the heavy loop. Compatible methods:

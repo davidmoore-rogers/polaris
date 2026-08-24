@@ -214,7 +214,7 @@ const CreateAssetSchema = z.object({
 // apply to the asset's source. Includes "disabled" (universally allowed
 // opt-out) and "agent" (Polaris Agent; allowed on AD/Entra/WinServer/Manual
 // sources, ignored on fortimanager/fortigate).
-const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
+const PollingMethodEnum = z.enum(["rest_api", "http", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Unlike create (min(1)), update accepts "" — blanking the IP Address field
@@ -253,6 +253,11 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   interfacesPolling:     PollingMethodEnum.nullable().optional(),
   lldpPolling:           PollingMethodEnum.nullable().optional(),
   storagePolling:        PollingMethodEnum.nullable().optional(),
+  // Per-asset request path for the "http" response-time check, overriding the
+  // path on the selected HTTP Check credential. Blank clears the override (see
+  // the trim below) — it does NOT mean "/", so emptying the box returns the
+  // device to the credential's path rather than repointing it at the web root.
+  httpCheckPath:         z.string().max(1024).nullable().optional(),
   // Per-asset cadence overrides for the System tab. Null falls back to the
   // resolved tier-3 cadence (cpuMemory / temperature / system-info).
   cpuMemoryIntervalSec:   z.number().int().min(15).max(86400).nullable().optional(),
@@ -3116,6 +3121,14 @@ async function validateAssetUpdate(id: string, existing: ExistingAssetForUpdate,
       // (UpdateAssetSchema's polling enum currently excludes "vcenter", so
       // through THIS route the rejection happens at the schema — this guard
       // is defense in depth for the monitor-settings pathway shape.)
+      // "http" is one GET returning a status code and a body — there is no CPU
+      // figure, interface list, sensor reading or mount table in that, so it is
+      // response-time-only. Rejected here rather than left to fall through at
+      // resolution time for the reason the whole block exists: a silently
+      // ignored setting reads to the operator as a broken save.
+      if (value === "http" && name !== "responseTimePolling") {
+        throw new AppError(400, `HTTP Check polling only applies to the Response Time stream (field: ${name})`);
+      }
       if (value === "vcenter") {
         if (name !== "cpuMemoryPolling") {
           throw new AppError(400, `vCenter polling only applies to the CPU/Memory stream (field: ${name})`);
@@ -3175,6 +3188,11 @@ async function buildAssetUpdatePatch(
   // Notes: empty string clears to null (notes are operator-only — an
   // emptied box is an intentional clear, not "not provided").
   if (typeof input.notes === "string") data.notes = input.notes.trim() || null;
+  // HTTP-check path override: empty string clears to null. Stored null rather
+  // than "" so "no override" has one representation in the column — the probe's
+  // resolveHttpTarget treats both as absent, but a column carrying "" would
+  // read as a configured value in exports and the edit form alike.
+  if (typeof input.httpCheckPath === "string") data.httpCheckPath = input.httpCheckPath.trim() || null;
   // Discovery projection (lazy, computed at most once) — needed when a
   // pin-clear reverts hostname or ipAddress to the projected value.
   let _projection: ReturnType<typeof projectAssetFromSources> | null = null;

@@ -1,0 +1,13 @@
+-- Per-asset request-path override for the "http" response-time polling method.
+--
+-- The check definition itself lives on an http-typed Credential (scheme, port,
+-- expected status, expected body, auth) so one row describes a fleet-wide
+-- health check and stays selectable at the asset / class-override /
+-- integration tiers. This column is the escape hatch for the one device whose
+-- health endpoint sits at a different path than the rest of its class.
+--
+-- Nullable with no default on purpose: NULL means "no override, use the
+-- credential's path", which is a different statement from "/" (the web root).
+-- A default of '/' would silently repoint every asset at the root the moment
+-- an operator picked the http method.
+ALTER TABLE "assets" ADD COLUMN IF NOT EXISTS "httpCheckPath" TEXT;

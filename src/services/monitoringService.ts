@@ -29,6 +29,15 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
+import {
+  type HttpCheckConfig,
+  type HttpProbeDiagnostics,
+  MAX_BODY_BYTES,
+  bodyExcerpt,
+  describeHttpTarget,
+  evaluateHttpCheck,
+  resolveHttpTarget,
+} from "../utils/httpCheck.js";
 import { URL } from "node:url";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as snmp from "net-snmp";
@@ -1559,7 +1568,7 @@ export async function resolveMonitorSettingsWithProvenance(
  */
 async function loadClassOverrideStreamCredential(
   credentialId: string | null,
-  expectedType: "snmp" | "winrm" | "ssh" | "restapi",
+  expectedType: "snmp" | "winrm" | "ssh" | "restapi" | "http",
 ): Promise<{ type: string; config: unknown } | null> {
   if (!credentialId) return null;
   const cred = await prisma.credential.findUnique({ where: { id: credentialId } });
@@ -1707,15 +1716,36 @@ export async function probeAsset(
 
     // AD-discovered Windows hosts often have no IP yet (only dnsName/hostname),
     // and WinRM/SSH resolve FQDNs fine — fall back so the probe can still run
-    // when the polling method is one that doesn't need an IPv4 literal.
+    // when the polling method is one that doesn't need an IPv4 literal. "http"
+    // is in that set for a reason beyond DNS resolution: a TLS check against a
+    // name is the check an operator means (the cert and any vhost routing are
+    // keyed on the hostname), so a name is not merely tolerated here, it is
+    // preferable when the asset has one and no IP.
     const adFallback = asset.dnsName || asset.hostname;
     const targetIp =
       asset.ipAddress ||
-      ((polling === "winrm" || polling === "ssh") ? adFallback : null);
+      ((polling === "winrm" || polling === "ssh" || polling === "http") ? adFallback : null);
     if (!targetIp) return finish(start, false, "Asset has no IP address");
 
     if (polling === "icmp") {
       return await probeIcmp(targetIp, start, timeoutMs);
+    }
+    if (polling === "http") {
+      // Same credential chain as snmp/winrm/ssh: the per-stream response-time
+      // credential wins, then the asset default, then the class-override tier.
+      // There is deliberately NO integration fallback and no bare default —
+      // unlike ICMP, an HTTP check has nothing to do without a definition (which
+      // path? expecting what?), so a missing credential is an error naming the
+      // fix rather than a silent GET of "/" that would report a login page as
+      // healthy.
+      if (effectiveRTCred?.type === "http") {
+        return await probeHttp(targetIp, effectiveRTCred.config as Record<string, unknown>, start, timeoutMs, asset.httpCheckPath);
+      }
+      const classCred = await loadClassOverrideStreamCredential(effective.responseTimeCredentialId, "http");
+      if (classCred) {
+        return await probeHttp(targetIp, classCred.config as Record<string, unknown>, start, timeoutMs, asset.httpCheckPath);
+      }
+      return finish(start, false, "HTTP check polling requires an HTTP Check credential — select one on the asset's Monitoring tab");
     }
     if (polling === "rest_api") {
       // Fortinet-discovered firewalls reuse the integration's stored API token.
@@ -3122,6 +3152,131 @@ async function probeRestApiCredential(config: Record<string, unknown>, start: nu
 }
 
 /**
+ * HTTP-check probe — one GET against the asset's own IP, up/down decided by the
+ * status code and optionally by a string the response body must carry. The
+ * check definition comes from an `http` Credential; `pathOverride` is the
+ * asset's `httpCheckPath`. All the decision logic is the pure
+ * `evaluateHttpCheck` (utils/httpCheck.ts) — this function owns only the socket.
+ *
+ * Three transport decisions worth stating, because each is the difference
+ * between a check that means something and one that reads healthy while the
+ * device is broken:
+ *
+ *  - `netGuard` is deliberately NOT applied. Every other outbound-HTTP path in
+ *    Polaris (automation api_call actions, webhooks) SSRF-checks its target
+ *    because the URL is attacker-influenced config pointed at arbitrary hosts.
+ *    Here the target is the monitored asset's own address, which is private by
+ *    definition — the same address SNMP, SSH and WinRM probes already dial —
+ *    so a guard that rejects RFC1918 would reject the entire feature.
+ *
+ *  - Redirects are not followed (see the httpCheck.ts header): a 302 to a login
+ *    page is how an HTTP health check lies about a device being up.
+ *
+ *  - The body is capped at MAX_BODY_BYTES and the request is torn down once the
+ *    cap is reached. Without the teardown a device streaming at the check path
+ *    would hold a monitor worker for the whole probe timeout, once per interval.
+ */
+async function probeHttp(
+  host: string,
+  config: Record<string, unknown>,
+  start: number,
+  timeoutMs: number,
+  pathOverride?: string | null,
+  out?: { diag?: HttpProbeDiagnostics },
+): Promise<ProbeResult> {
+  const cfg = config as HttpCheckConfig;
+  const target = resolveHttpTarget(cfg, pathOverride);
+  const reqFn = target.useHttps ? httpsRequest : httpRequest;
+
+  const headers: Record<string, string> = { "Accept": "*/*" };
+  if (typeof cfg.apiToken === "string" && cfg.apiToken) {
+    headers["Authorization"] = "Bearer " + cfg.apiToken;
+  } else if (typeof cfg.username === "string" && cfg.username && typeof cfg.password === "string" && cfg.password) {
+    headers["Authorization"] = "Basic " + Buffer.from(`${cfg.username}:${cfg.password}`).toString("base64");
+  }
+
+  return await new Promise<ProbeResult>((resolve) => {
+    let resolved = false;
+    const finishOnce = (r: ProbeResult) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(r);
+    };
+    const req = reqFn({
+      hostname: host,
+      port:     target.port,
+      path:     target.path,
+      method:   "GET",
+      headers,
+      rejectUnauthorized: cfg.verifyTls === true,
+      timeout:  timeoutMs,
+    } as any, (res) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let truncated = false;
+      const evaluate = () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        const outcome = evaluateHttpCheck({
+          statusCode: res.statusCode || 0,
+          body,
+          config:     cfg,
+          truncated,
+        });
+        // Diagnostics only when a caller asked for them (the operator-driven
+        // Test Connection path). The monitor hot path passes no out-param, so
+        // it never builds an excerpt or a URL string.
+        if (out) {
+          const ex = bodyExcerpt(body);
+          const ctype = res.headers?.["content-type"];
+          out.diag = {
+            url:                describeHttpTarget(host, target),
+            statusCode:         res.statusCode || 0,
+            contentType:        typeof ctype === "string" ? ctype : null,
+            bytesRead:          Buffer.byteLength(body),
+            bodyTruncatedAtCap: truncated,
+            excerpt:            ex.text,
+            excerptTruncated:   ex.truncated,
+            matched:            outcome.matched,
+          };
+        }
+        // On the failOnMismatch=false path the outcome carries an error string
+        // alongside ok:true. ProbeResult has no slot for "succeeded, but note
+        // this", so the note is dropped here rather than being smuggled into a
+        // success — the operator's own choice was that a mismatch is not a
+        // failure, and a success carrying failure text would confuse the
+        // status pill and the alert email alike. It stays visible on the
+        // Test Connection modal, which reports the outcome directly.
+        if (!outcome.ok) return finishOnce(finish(start, false, outcome.error));
+        finishOnce(finish(start, true));
+      };
+      res.on("data", (chunk: Buffer) => {
+        if (truncated) return;
+        size += chunk.length;
+        if (size >= MAX_BODY_BYTES) {
+          // Keep the slice that fits so a match sitting just under the cap is
+          // still found, then stop: `evaluate` runs now rather than on "end",
+          // because destroying the response means "end" may never arrive.
+          truncated = true;
+          chunks.push(chunk.subarray(0, Math.max(0, MAX_BODY_BYTES - (size - chunk.length))));
+          try { res.destroy(); } catch {}
+          try { req.destroy(); } catch {}
+          evaluate();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on("end", evaluate);
+      // A connection reset mid-body is a failed check, not a partial success:
+      // resolve through `finish` so the reason names the transport.
+      res.on("error", (err: any) => finishOnce(finish(start, false, err?.message || "HTTP response error")));
+    });
+    req.on("timeout", () => { try { req.destroy(); } catch {}; finishOnce(finish(start, false, "HTTP check timed out")); });
+    req.on("error",   (err) => finishOnce(finish(start, false, err.message || "HTTP check error")));
+    req.end();
+  });
+}
+
+/**
  * Run a one-shot probe against `host` with the given credential type + config,
  * without touching the asset row or writing samples. Used by the credential
  * Test Connection flow in Server Settings → Credentials, where the operator
@@ -3130,8 +3285,13 @@ async function probeRestApiCredential(config: Record<string, unknown>, start: nu
  */
 export async function probeCredentialAgainstHost(
   host: string,
-  type: "snmp" | "winrm" | "ssh" | "icmp" | "restapi",
+  type: "snmp" | "winrm" | "ssh" | "icmp" | "restapi" | "http",
   config: Record<string, unknown>,
+  // `http` only: filled with the request line, status, content-type and a body
+  // excerpt so the operator can TAILOR the check against what the device
+  // actually returns. Nothing else populates it, and the monitor hot path never
+  // passes it — see probeHttp.
+  out?: { diag?: HttpProbeDiagnostics },
 ): Promise<ProbeResult> {
   const start = performance.now();
   // restapi uses config.baseUrl directly, so a missing host on the asset
@@ -3148,6 +3308,11 @@ export async function probeCredentialAgainstHost(
     if (type === "winrm")   return await probeWinRm(host, config, start, timeoutMs);
     if (type === "ssh")     return await probeSsh(host, config, start, timeoutMs);
     if (type === "restapi") return await probeRestApiCredential(config, start, timeoutMs);
+    // No pathOverride: the Test Connection modal tests the CREDENTIAL, and the
+    // asset it borrows a host from is just a routable target — honouring that
+    // asset's httpCheckPath would test a path the credential doesn't define and
+    // report the result as if it did.
+    if (type === "http")    return await probeHttp(host, config, start, timeoutMs, null, out);
     return finish(start, false, `Unsupported credential type "${type}"`);
   } catch (err: any) {
     return finish(start, false, err?.message || "Probe failed");
