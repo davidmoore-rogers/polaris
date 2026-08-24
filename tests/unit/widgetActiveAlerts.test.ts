@@ -1,0 +1,244 @@
+/**
+ * tests/unit/widgetActiveAlerts.test.ts
+ *
+ * Unit tests for the Active Alerts widget's render (public/js/widgets/
+ * activeAlerts.js). Same harness as widgetTopNHeaderCounts.test.ts: index.js is
+ * eval'd first so the widget finds its PolarisWidgets helpers, then the widget
+ * module registers itself and is pulled back off the registry.
+ *
+ * The property under test is the widget's promise — AN ACTIVE ALERT APPEARS IN
+ * IT — and the three things that used to break it:
+ *   • the row cap was 25 with no control, and it slices a severity-DESC list,
+ *     so a screenful of criticals made every serious/warning alert on the fleet
+ *     invisible while the header still read "Warning and up". Where the cap
+ *     bites must now be STATED.
+ *   • per-port alerts of one automation share a rule, a minute and a message
+ *     template, so without Notification.dimension they differ in nothing.
+ *   • an alert is a prompt to go look at a device, so the row links to it —
+ *     except an alert about Polaris itself, which has no device to open.
+ */
+
+import { describe, it, expect, beforeAll } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import { Window } from "happy-dom";
+
+interface AlertRow {
+  id: string;
+  assetId?: string | null;
+  hostname?: string | null;
+  dimension?: string | null;
+  message?: string;
+  severity: string;
+  ruleName?: string | null;
+  acknowledged?: boolean;
+  acknowledgedBy?: string | null;
+  raisedAt?: string;
+}
+interface Cfg { minSeverity?: string; rowLimit?: number | null }
+interface WidgetModule {
+  type: string;
+  defaultConfig: Cfg & Record<string, unknown>;
+  renderInstance: (el: unknown, config: Cfg, data: unknown, ctx: { onUnmount: (fn: () => void) => void }) => void;
+  renderConfig: (el: unknown, config: Cfg, onChange: (k: string, v: unknown) => void) => void;
+}
+
+let mod: WidgetModule;
+const g = globalThis as Record<string, unknown>;
+let doc: Window["document"];
+
+beforeAll(() => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const win = new Window();
+  doc = win.document;
+  g.window = win;
+  g.document = doc;
+  g.escapeHtml = (s: unknown) =>
+    String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  // app.js's relative-time helper; the widget only prints its output.
+  g.timeAgo = () => "5m ago";
+  (0, eval)(readFileSync(resolve(here, "../../public/js/widgets/index.js"), "utf8"));
+  // The widget references `PolarisWidgets` bare (a browser global), so hoist
+  // what index.js hung off `window` onto the eval scope's global.
+  g.PolarisWidgets = (win as unknown as { PolarisWidgets: unknown }).PolarisWidgets;
+  (0, eval)(readFileSync(resolve(here, "../../public/js/widgets/activeAlerts.js"), "utf8"));
+  const W = win as unknown as { PolarisWidgets: { getByType: (t: string) => WidgetModule } };
+  mod = W.PolarisWidgets.getByType("activeAlerts");
+});
+
+/** A widget shell with the header the pills + export button land in. */
+function mountWidget() {
+  const article = doc.createElement("article");
+  article.className = "dashboard-widget";
+  article.setAttribute("data-type", "activeAlerts");
+  article.innerHTML =
+    '<div class="dashboard-widget-header"><h3 class="dashboard-widget-title">Active Alerts</h3></div>' +
+    '<div class="body"></div>';
+  doc.body.appendChild(article);
+  return article.querySelector(".body") as unknown as HTMLElement;
+}
+
+/** Render one payload and hand back the body + a teardown for its 30s timer. */
+function render(rows: AlertRow[], total: number | null, config: Cfg = {}) {
+  const el = mountWidget();
+  const cleanups: Array<() => void> = [];
+  mod.renderInstance(el, config, { rows, total }, { onUnmount: (fn) => cleanups.push(fn) });
+  cleanups.forEach((fn) => fn());  // stop the refresh interval
+  return el;
+}
+
+const alert = (o: Partial<AlertRow> & { id: string; severity: string }): AlertRow => ({
+  assetId: "asset-" + o.id, hostname: "sw-1", message: "m", ruleName: "Interface down",
+  acknowledged: false, raisedAt: "2026-08-24T00:00:00Z", ...o,
+});
+
+const rowsOf = (el: HTMLElement) => Array.from(el.querySelectorAll(".recent-item")) as any[];
+const noteText = (el: HTMLElement) => {
+  const p = el.querySelector(".widget-overflow-note");
+  return p ? (p as any).textContent : null;
+};
+
+describe("severity filtering", () => {
+  it("keeps every tier at or above the configured minimum", () => {
+    // The reported symptom: "Warning and up" was set and serious alerts were
+    // missing. Serious outranks warning, so it must never be filtered out here.
+    const el = render([
+      alert({ id: "crit", severity: "critical" }),
+      alert({ id: "ser", severity: "serious" }),
+      alert({ id: "warn", severity: "warning" }),
+      alert({ id: "note", severity: "notice" }),
+    ], 4, { minSeverity: "warning", rowLimit: 100 });
+    expect(rowsOf(el)).toHaveLength(3);
+    expect(el.textContent).toContain("serious");
+    expect(el.textContent).not.toContain("notice");
+  });
+
+  it("says the tier when the filter is what emptied it", () => {
+    const el = render([alert({ id: "n", severity: "notice" })], 1, { minSeverity: "critical" });
+    expect((el.querySelector(".empty-state") as any).textContent).toContain("critical");
+  });
+
+  it("reads 'No active alerts' when there is genuinely nothing", () => {
+    const el = render([], 0, { minSeverity: "warning" });
+    expect((el.querySelector(".empty-state") as any).textContent).toBe("No active alerts");
+  });
+});
+
+describe("row limit + overflow note", () => {
+  const many = (n: number, severity = "critical") =>
+    Array.from({ length: n }, (_, i) => alert({ id: "a" + i, severity }));
+
+  it("defaults a widget carrying no rowLimit key to DEFAULT_ROWS", () => {
+    const el = render(many(60), 60, { minSeverity: "warning" });
+    expect(rowsOf(el)).toHaveLength(50);
+  });
+
+  it("honors a raised row limit", () => {
+    const el = render(many(60), 60, { minSeverity: "warning", rowLimit: 100 });
+    expect(rowsOf(el)).toHaveLength(60);
+  });
+
+  it("honors a lowered row limit", () => {
+    const el = render(many(60), 60, { minSeverity: "warning", rowLimit: 10 });
+    expect(rowsOf(el)).toHaveLength(10);
+  });
+
+  it("states where the CLIENT clip stops", () => {
+    const el = render(many(40), 40, { minSeverity: "warning", rowLimit: 10 });
+    expect(noteText(el)).toBe("Showing 10 of 40 at this severity — raise Row limit to see the rest.");
+  });
+
+  it("states where the SERVER cap stops, which is what hid the lower tiers", () => {
+    // 100 fetched out of 214 uncleared: the feed is severity-DESC, so the 114
+    // it never sent are the LEAST severe — exactly the serious/warning alerts
+    // an operator goes looking for. Silence here reads as "there are none".
+    const el = render(many(100), 214, { minSeverity: "warning", rowLimit: 100 });
+    expect(noteText(el)).toBe("Showing 100 of 214 active alerts — raise Row limit to fetch more.");
+  });
+
+  it("says nothing when the whole set is on screen", () => {
+    const el = render(many(3), 3, { minSeverity: "warning", rowLimit: 50 });
+    expect(noteText(el)).toBeNull();
+  });
+
+  it("survives a payload with no total (a pre-upgrade cached response)", () => {
+    const el = render(many(3), null, { minSeverity: "warning", rowLimit: 50 });
+    expect(rowsOf(el)).toHaveLength(3);
+    expect(noteText(el)).toBeNull();
+  });
+});
+
+describe("row contents", () => {
+  it("prints the dimension, so two ports of one automation are tellable apart", () => {
+    const el = render([
+      alert({ id: "a", severity: "serious", dimension: "port2" }),
+      alert({ id: "b", severity: "serious", dimension: "port10" }),
+    ], 2, { minSeverity: "warning", rowLimit: 50 });
+    const dims = Array.from(el.querySelectorAll(".dash-alert-dim")).map((d: any) => d.textContent);
+    expect(dims).toEqual(["port2", "port10"]);
+  });
+
+  it("omits the dimension element for a whole-device alert", () => {
+    const el = render([alert({ id: "a", severity: "critical", dimension: null })], 1, { minSeverity: "warning" });
+    expect(el.querySelector(".dash-alert-dim")).toBeNull();
+  });
+
+  it("links the row to the asset's details, keeping the href as the fallback", () => {
+    const el = render([alert({ id: "a", severity: "critical", assetId: "asset-9" })], 1, { minSeverity: "warning" });
+    const row = rowsOf(el)[0];
+    expect(row.tagName.toLowerCase()).toBe("a");
+    expect(row.getAttribute("data-asset-id")).toBe("asset-9");
+    expect(row.getAttribute("href")).toBe("/assets.html#view=asset:asset-9");
+    expect(row.getAttribute("class")).toContain("recent-item-link");
+  });
+
+  it("leaves an alert about Polaris itself unlinked — there is no device page", () => {
+    // A host_metric rule or a system-scoped event alert carries no assetId.
+    const el = render([alert({ id: "a", severity: "critical", assetId: null, hostname: "Polaris server" })], 1,
+      { minSeverity: "warning" });
+    const row = rowsOf(el)[0];
+    expect(row.tagName.toLowerCase()).toBe("div");
+    expect(row.hasAttribute("data-asset-id")).toBe(false);
+  });
+
+  it("keeps an acknowledged alert listed, dimmed, and says who has it", () => {
+    const el = render([alert({ id: "a", severity: "critical", acknowledged: true, acknowledgedBy: "jsmith" })], 1,
+      { minSeverity: "warning" });
+    const row = rowsOf(el)[0];
+    expect(row.getAttribute("style")).toContain("opacity:.6");
+    expect(row.textContent).toContain("ack");
+    expect(row.querySelector(".widget-pill-neutral").getAttribute("title")).toBe("Acknowledged by jsmith");
+  });
+});
+
+describe("gear config", () => {
+  it("offers a row limit seeded at the default, and warns that the cap is severity-ordered", () => {
+    const el = mountWidget();
+    const changes: Array<[string, unknown]> = [];
+    mod.renderConfig(el, {}, (k, v) => changes.push([k, v]));
+    const sel = el.querySelector('[data-k="rowLimit"]') as any;
+    const selected = Array.from(sel.querySelectorAll("option"))
+      .filter((o: any) => o.hasAttribute("selected")).map((o: any) => o.getAttribute("value"));
+    expect(selected).toEqual(["50"]);
+    // The hint is what makes a low limit's behaviour predictable.
+    expect(el.textContent).toContain("most-severe-first");
+    // …and the minimum-severity control still follows it.
+    expect(el.querySelector("[data-minsev]")).toBeTruthy();
+  });
+
+  it("writes rowLimit as a number", () => {
+    const el = mountWidget();
+    const changes: Array<[string, unknown]> = [];
+    mod.renderConfig(el, { rowLimit: 50 }, (k, v) => changes.push([k, v]));
+    const sel = el.querySelector('[data-k="rowLimit"]') as any;
+    sel.value = "100";
+    sel.dispatchEvent(new (doc.defaultView as any).Event("change"));
+    expect(changes).toEqual([["rowLimit", 100]]);
+  });
+
+  it("ships a defaultConfig carrying the row limit", () => {
+    expect(mod.defaultConfig.rowLimit).toBe(50);
+    expect(mod.defaultConfig.minSeverity).toBe("warning");
+  });
+});

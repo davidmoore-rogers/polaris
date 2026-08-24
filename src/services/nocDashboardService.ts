@@ -1029,13 +1029,31 @@ export async function getRecentReboots(sinceHours = 72, limit: number | null = 2
 
 export interface AlertRow {
   id: string;
+  /** The alerting asset, for the widget's click-through to its details
+   *  slide-in. Null on a host/system-scoped alert (one about Polaris itself)
+   *  and on an alert whose asset has since been deleted. */
+  assetId: string | null;
   hostname: string | null;
+  /** The sub-asset the alert is ABOUT — a port, sensor, mount or tunnel
+   *  (Notification.dimension). Null for whole-device / composite / event
+   *  alerts. Carried because one per-interface automation raises one alert per
+   *  pinned port, same minute and same message template: without it a switch
+   *  that loses its uplinks fills the widget with rows that differ in nothing. */
+  dimension: string | null;
   message: string;
   severity: string;
   raisedAt: Date;
   ruleName: string | null;
   acknowledged: boolean;
   acknowledgedBy: string | null;
+}
+
+export interface ActiveAlerts {
+  alerts: AlertRow[];
+  /** Uncleared alerts matching the filter BEFORE the row cap — so the widget
+   *  can say "30 of 214" instead of silently ending at its limit. Free: the
+   *  ordering already requires fetching the whole set. */
+  total: number;
 }
 
 /**
@@ -1060,24 +1078,38 @@ export interface AlertRow {
  * covered by @@index([cleared, acknowledged]).
  *
  * `assetHostname` is snapshotted on the Notification, so a row still names its
- * device after the asset is deleted. Host/system-scoped alerts (assetId null)
- * drop out under an asset filter, mirroring the Event-sourced feeds.
+ * device after the asset is deleted.
+ *
+ * An asset filter (region / type / gate) narrows to its id set but KEEPS the
+ * assetId-null rows — an alert about Polaris itself (a host_metric rule, a
+ * system-scoped event) belongs on every wallboard, because no asset filter can
+ * say anything about it and a Polaris outage matters in every region. These
+ * used to drop out "mirroring the Event-sourced feeds", but that analogy was
+ * weak: those feeds are per-asset by construction, so they have no such rows.
+ *
+ * `total` is the uncleared count before the cap. The widget's whole promise is
+ * that an active alert appears in it, so where the cap bites has to be visible
+ * — one automation on a switch raises one alert per pinned port, and a fleet
+ * losing a gate can produce hundreds in a minute.
  */
-export async function getRecentAlerts(limit: number | null = 30, assetIds: string[] | null = null): Promise<AlertRow[]> {
+export async function getRecentAlerts(limit: number | null = 100, assetIds: string[] | null = null): Promise<ActiveAlerts> {
   const rows = await prisma.notification.findMany({
     where: {
       cleared: false,
-      ...(assetIds ? { assetId: { in: assetIds } } : {}),
+      ...(assetIds ? { OR: [{ assetId: { in: assetIds } }, { assetId: null }] } : {}),
     },
     select: {
-      id: true, assetHostname: true, message: true, severity: true, triggeredAt: true,
+      id: true, assetId: true, assetHostname: true, dimension: true, message: true,
+      severity: true, triggeredAt: true,
       acknowledged: true, acknowledgedBy: true, rule: { select: { name: true } },
     },
     orderBy: { triggeredAt: "desc" },
   });
   const out: AlertRow[] = rows.map((n) => ({
     id: n.id,
+    assetId: n.assetId ?? null,
     hostname: n.assetHostname ?? null,
+    dimension: n.dimension ?? null,
     message: n.message,
     severity: n.severity,
     raisedAt: n.triggeredAt,
@@ -1087,9 +1119,22 @@ export async function getRecentAlerts(limit: number | null = 30, assetIds: strin
   }));
   out.sort((a, b) => {
     const d = (ALERT_SEVERITY_RANK[b.severity] ?? 0) - (ALERT_SEVERITY_RANK[a.severity] ?? 0);
-    return d !== 0 ? d : b.raisedAt.getTime() - a.raisedAt.getTime();
+    if (d !== 0) return d;
+    const t = b.raisedAt.getTime() - a.raisedAt.getTime();
+    if (t !== 0) return t;
+    // Same automation, same minute, one alert per port: order the dimension
+    // NUMERICALLY so port2 precedes port10 (the asset Alerts tab's tiebreak).
+    return compareDimensions(a.dimension, b.dimension);
   });
-  return limit === null ? out : out.slice(0, limit);
+  return { alerts: limit === null ? out : out.slice(0, limit), total: out.length };
+}
+
+/** Natural-order compare for a dimension label (port2 < port10). Nulls last. */
+function compareDimensions(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
 export interface SiteWithIssues {
@@ -1311,7 +1356,18 @@ const NOC_FEEDS: Record<NocFeedName, {
   stalePolls:       { gate: "assets", empty: [], run: (L, ids) => getStalePolls(3, L(50), ids) },
   sitesWithIssues:  { gate: "assets", empty: [], run: (L, ids) => getSitesWithIssues(L(25), ids) },
   recentReboots:    { gate: "events", empty: [], run: (L, ids) => getRecentReboots(72, L(20), ids) },
-  activeAlerts:     { gate: "alerts",  empty: [], run: (L, ids) => getRecentAlerts(L(30), ids) },
+  activeAlerts: {
+    gate: "alerts",
+    empty: { alerts: [], total: 0 },
+    run: (L, ids) => getRecentAlerts(L(100), ids),
+    // activeAlertsTotal is the TRUE uncleared count (pre-cap) for the widget's
+    // overflow cue; activeAlerts[] stays the capped list (legacy key unchanged,
+    // so a pre-upgrade cached payload / kiosk token reads the same shape).
+    flatten: (v) => {
+      const d = v as ActiveAlerts;
+      return { activeAlerts: d.alerts, activeAlertsTotal: d.total };
+    },
+  },
 };
 
 // 10s: below the frontend's 15s memo, so a widget's own refresh timer never

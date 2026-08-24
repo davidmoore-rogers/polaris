@@ -3941,6 +3941,24 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   font-family: var(--font-mono);
   color: var(--color-text-secondary);
 }
+/* The sub-asset an alert was raised for (Notification.dimension) — a port,
+   sensor, mount or tunnel. Monospace because it's an identifier, and sized down
+   so it reads as a qualifier on the hostname beside it rather than a second
+   name. Overrides .recent-item-title span, which paints every child white. */
+.recent-item-title .dash-alert-dim {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+/* "Showing 25 of 214 …" under a capped widget list. Centered and quiet: it's a
+   statement about the view, not another row. */
+.widget-overflow-note {
+  padding: 8px 0 0;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+}
 .dash-alert-source { color: var(--color-text-secondary); }
 .dash-alert-expand {
   padding: 8px 4px 4px 24px;
