@@ -1815,6 +1815,28 @@ export async function probeAsset(
       }
       return finish(start, false, "No SSH credential selected");
     }
+    // RETIRED METHOD SAFETY NET. "http" was a polling method until 2026-08 and
+    // is now a manufacturer custom widget. A stored value can still arrive here
+    // because `assertPollingCompatible` validates WRITES only — nothing
+    // re-checks what is already in the DB, and the value can sit in a JSON tier
+    // (manualMonitorSettings, Integration.config per-class blocks) that no
+    // migration realistically reaches. Falling through to the unknown-method
+    // failure below would fail every probe on those assets, i.e. silently
+    // false-down them fleet-wide. ICMP is the honest substitute: it is the
+    // universal response-time fallback and gives up/down without content, which
+    // is the closest thing to what the operator had configured.
+    // The cast is load-bearing: `PollingMethod` no longer includes "http", so
+    // the compiler is certain this branch is dead. It is not — the value comes
+    // from the DATABASE, which the type system has no say over. This is exactly
+    // the case where a narrowed union describes intent rather than reality.
+    if ((polling as string) === "http") {
+      logger.warn(
+        { assetId: asset.id, hostname: asset.hostname },
+        'Asset still configured for the retired "http" polling method — probing over ICMP instead. ' +
+        "Re-point the Response Time stream; the HTTP check now lives on a manufacturer custom widget.",
+      );
+      return await probeIcmp(targetIp, start, timeoutMs);
+    }
     return finish(start, false, `Unknown polling method "${polling}"`);
   } catch (err: any) {
     return finish(start, false, err?.message || "Unknown probe error");
