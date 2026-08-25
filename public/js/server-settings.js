@@ -7117,10 +7117,10 @@ function credHttpForm(cfg) {
     '<div class="form-group"><label>Authentication</label>' +
       '<select id="f-http-authmode" style="max-width:280px">' +
         '<option value="bearer"' + (authMode === "bearer" ? " selected" : "") + '>Bearer token</option>' +
-        '<option value="basic"' +  (authMode === "basic"  ? " selected" : "") + '>Basic</option>' +
-        '<option value="digest"' + (authMode === "digest" ? " selected" : "") + '>Digest</option>' +
+        '<option value="basic"' +  (authMode === "basic"  ? " selected" : "") + '>Basic (cleartext)</option>' +
+        '<option value="digest"' + (authMode === "digest" ? " selected" : "") + '>Digest (encrypted)</option>' +
       '</select>' +
-      '<p class="hint">Basic and Digest carry the same username and password, so this has to be stated rather than guessed: trying Basic first would send the password in cleartext to a device that wanted Digest. Embedded devices — cameras, PDUs, older BMCs — commonly require Digest, and Axis OS 11+ disables Basic by default.</p>' +
+      '<p class="hint">Basic and Digest carry the same username and password, so this has to be stated rather than guessed: trying Basic first would send the password in cleartext to a device that wanted Digest. Embedded devices — cameras, PDUs, older BMCs — commonly require Digest, and Axis OS 11+ disables Basic by default. Note the labels describe the CREDENTIAL only: Digest protects the password (the device is sent a hash, never the password itself) but leaves the rest of the exchange readable, so tick <strong>Use HTTPS</strong> on the check if the path or response matters too.</p>' +
     '</div>' +
     '<div class="form-group" data-http-auth="bearer"><label>Bearer token</label>' +
       '<input type="password" id="f-http-token" value="' + escapeHtml(cfg.apiToken || "") + '">' +
