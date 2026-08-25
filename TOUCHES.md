@@ -48,7 +48,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 **Readers** (files that consume it):
 - `public/js/assets.js` — Status pill renderer colors by monitorStatus (green/amber/blue/red/grey)
-- `public/js/assets.js` — intermittency-bar client-side replay engine reads monitorStatus to color per-sample cells
+- `public/js/assets.js` — the intermittency bar's `_intermittencyStates` (pure, unit-tested) replays this machine client-side to color per-sample cells. Failures are literal (amber, red on the Nth consecutive miss); successes come from the machine, so the exit from `down` is blue until `failureThreshold` consecutive successes confirm the device. Pre-window state is assumed `up`
 - `src/services/monitoringService.ts:runMonitorPass()` — Heavy-cadence suppression gate: telemetry/systemInfo only run when monitorStatus==="up" AND !dependencySuppressed; probe interval doubles when dependencySuppressed (parent down)
 - `src/services/monitoringService.ts:resolveProbeIntervalSec()` — the counters ALSO drive probe spacing (business rule 30): an asset mid-confirmation (`0 < cf < failureThreshold && cs === 0`, or the recovery mirror) is re-probed at `fastConfirmIntervalSec` instead of a full interval, floored at `max(probeTimeoutMs, 5s)` and overridden by the dependency-suppressed 2×. Shared by `computeDueWork` and the pg-boss publisher in `src/jobs/monitorAssets.ts` — both candidate selects must carry `consecutiveFailures` + `consecutiveSuccesses`
 - `src/services/dependencyTreeService.ts` — reconcileDependencySuppression() reads monitorStatus to evaluate "all-down" suppression — only the confirmed-down edge propagates (warning/recovering do NOT)
@@ -70,7 +70,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 **When changing this:**
 - Verify every state assignment matches the rules above (no bypass paths).
-- Check assets.js intermittency-bar replay logic replays the five-state machine forward correctly (must use same failureThreshold).
+- Check assets.js intermittency-bar replay logic (`_intermittencyStates`) replays the five-state machine forward correctly (must use the same failureThreshold in BOTH directions) — in particular that the down→recovering→up run still renders blue, since that is the only surface showing it per-sample.
 - Confirm monitor.status_changed Event audit trail only has →up / →warning / →down transitions (never →recovering, →unknown, or same-state per-poll repeats = bug).
 - Test manual /probe-now against a down asset — should advance consecutiveSuccesses and possibly transition to recovering within one call.
 - Check Map topology endpoint colors match asset list Status pills (monitorStatusToHealth must be consistent).
