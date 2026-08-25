@@ -39,6 +39,7 @@ vi.mock("../../src/services/eventLogService.js", () => ({ logEvent: vi.fn(async 
 
 import {
   resolveDownThreshold,
+  previewDownDetectionRemoval,
   describeDownDetectionFor,
   countPassiveAssets,
   invalidateDownDetectionCache,
@@ -207,5 +208,49 @@ describe("degraded paths", () => {
     ruleRows = [{ id: "base", name: "b", createdAt: new Date(), trigger: downTrigger(3), scope: { allAssets: true } }];
     assetRows = [asset("a1")];
     expect(await resolveDownThreshold("a1")).toBe(3);
+  });
+});
+
+describe("removal impact — the blind-fleet guard", () => {
+  // Deleting the last automation covering a device makes it Passive. Nothing
+  // else can warn about that: the thing that would normally alert about a fleet
+  // nobody is judging IS the automation being deleted.
+  it("counts the devices that would be left with NO down detection", async () => {
+    ruleRows = [{ id: "base", name: "Asset down", createdAt: new Date(), trigger: downTrigger(3), scope: { allAssets: true } }];
+    assetRows = [asset("a1"), asset("a2"), asset("a3")];
+    const impact = await previewDownDetectionRemoval("base");
+    expect(impact).toMatchObject({ isDownDetection: true, governs: 3, wouldFallBackToAnother: 0, wouldBecomePassive: 3 });
+    expect(impact.sampleHostnames).toContain("host-a1");
+  });
+
+  it("devices a BROADER automation still covers are not counted as passive", async () => {
+    ruleRows = [
+      { id: "base", name: "Asset down", createdAt: new Date(), trigger: downTrigger(10), scope: { allAssets: true } },
+      { id: "sw", name: "Switches", createdAt: new Date(), trigger: downTrigger(2), scope: { assetTypes: ["switch"] } },
+    ];
+    assetRows = [asset("a1"), asset("a2")];
+    // The narrow rule governs both switches, but the all-assets rule catches
+    // them if it goes — nobody goes dark, so no warning is warranted.
+    const impact = await previewDownDetectionRemoval("sw");
+    expect(impact).toMatchObject({ governs: 2, wouldFallBackToAnother: 2, wouldBecomePassive: 0 });
+  });
+
+  it("removing the BROAD rule leaves only the devices the narrow one misses", async () => {
+    ruleRows = [
+      { id: "base", name: "Asset down", createdAt: new Date(), trigger: downTrigger(3), scope: { allAssets: true } },
+      { id: "sw", name: "Switches", createdAt: new Date(), trigger: downTrigger(2), scope: { assetTypes: ["switch"] } },
+    ];
+    assetRows = [asset("a1"), asset("srv", { assetType: "server" })];
+    const impact = await previewDownDetectionRemoval("base");
+    // The switch is governed by the narrower rule, so `base` governs only the
+    // server — and that server is the one that would go dark.
+    expect(impact).toMatchObject({ governs: 1, wouldFallBackToAnother: 0, wouldBecomePassive: 1 });
+    expect(impact.sampleHostnames).toEqual(["host-srv"]);
+  });
+
+  it("reports isDownDetection:false for an automation that does not define down", async () => {
+    ruleRows = [{ id: "cpu", name: "cpu", createdAt: new Date(), trigger: { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90, aggregation: "avg", windowSec: 300, forDurationSec: 0 }, scope: { allAssets: true } }];
+    assetRows = [asset("a1")];
+    expect(await previewDownDetectionRemoval("cpu")).toMatchObject({ isDownDetection: false, wouldBecomePassive: 0 });
   });
 });

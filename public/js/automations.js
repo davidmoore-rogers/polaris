@@ -458,11 +458,24 @@ var _rulesPage = 1;
     return parts.length ? parts.join("; ") : "n/a";
   }
 
+  /** Does this automation DEFINE down (business rule 34)? Delegates to the
+   *  shared sentence factory so the list and the wizard cannot disagree about
+   *  what counts as a down-detection automation. */
+  function _isDownDetectionRule(r) {
+    var f = typeof sentences === "function" ? sentences() : null;
+    if (f && f.isDownDetectionTrigger) return f.isDownDetectionTrigger(r.trigger);
+    return false;
+  }
   function renderRules() {
     var tbody = document.getElementById("rules-tbody");
     var data = _rules.map(function (r) {
       return Object.assign({}, r, {
-        triggerType: r.trigger && r.trigger.type ? r.trigger.type : "",
+        // "down detection" rather than the raw "asset_state" for an automation
+        // that DEFINES down: it is a different kind of thing from a rule that
+        // merely reads a state column, and an operator needs to find the set.
+        // Computed into the row data BEFORE TableSF sees it, so the column
+        // filters and sorts on it for free.
+        triggerType: _isDownDetectionRule(r) ? "down detection" : (r.trigger && r.trigger.type ? r.trigger.type : ""),
         devicesSummary: devicesSummary(r),
         triggerSummary: triggerSummary(r),
         resetSummary: resetSummary(r),
@@ -536,6 +549,15 @@ var _rulesPage = 1;
         var r = _rules.find(function (x) { return x.id === cb.dataset.id; });
         if (!r) return;
         var desired = cb.checked;
+        // Disabling is a removal as far as down detection is concerned — the
+        // resolver only reads ENABLED rules.
+        if (!desired) {
+          var warn = await downDetectionRemovalWarning(r.id);
+          if (warn && !(await showConfirm('Disable automation "' + r.name + '"?' + warn))) {
+            cb.checked = true;
+            return;
+          }
+        }
         cb.disabled = true;
         try {
           await api.automations.update(r.id, _ruleToInput(r, { enabled: desired }));
@@ -575,8 +597,38 @@ var _rulesPage = 1;
     });
   }
 
+  /**
+   * The extra warning a down-detection automation earns before it is deleted or
+   * disabled: taking away the LAST automation covering a device makes it
+   * Passive — still polled, never declared down again. That is a legitimate
+   * choice but it has to be a deliberate one, and it is the one change nothing
+   * else can warn about, because the thing that would normally alert about a
+   * blind fleet is the automation being removed.
+   *
+   * Best-effort: a failed lookup must not block the operator from managing
+   * their own automations, so it degrades to the plain confirmation.
+   */
+  async function downDetectionRemovalWarning(ruleId) {
+    var impact;
+    try { impact = await api.automations.removalImpact(ruleId); }
+    catch (_e) { return ""; }
+    if (!impact || !impact.isDownDetection || !impact.wouldBecomePassive) return "";
+    var n = impact.wouldBecomePassive;
+    var msg = " " + n + " device" + (n === 1 ? "" : "s") + " would be left with NO down detection" +
+      " — Polaris keeps polling " + (n === 1 ? "it" : "them") + " but will never declare " +
+      (n === 1 ? "it" : "them") + " down again";
+    if (impact.sampleHostnames && impact.sampleHostnames.length) {
+      msg += " (e.g. " + impact.sampleHostnames.slice(0, 3).join(", ") + ")";
+    }
+    if (impact.wouldFallBackToAnother) {
+      msg += ". Another " + impact.wouldFallBackToAnother + " would fall back to a broader automation";
+    }
+    return msg + ".";
+  }
+
   async function confirmDeleteRule(r) {
-    var ok = await showConfirm('Delete automation "' + r.name + '"? Its firing state is dropped; existing alerts are kept.');
+    var extra = await downDetectionRemovalWarning(r.id);
+    var ok = await showConfirm('Delete automation "' + r.name + '"? Its firing state is dropped; existing alerts are kept.' + extra);
     if (!ok) return;
     try { await api.automations.delete(r.id); showToast("Automation deleted", "success"); loadRules(); }
     catch (err) { showToast(err.message || "Delete failed", "error"); }

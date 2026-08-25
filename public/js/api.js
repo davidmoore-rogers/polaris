@@ -874,6 +874,9 @@ const api = {
     create:  (body)    => request("POST", "/automations", body),
     update:  (id, b)   => request("PUT", `/automations/${id}`, b),
     delete:  (id)      => request("DELETE", `/automations/${id}`),
+    // How many devices deleting/disabling this automation would leave with NO
+    // down detection at all — the delete/disable confirmation reads it.
+    removalImpact: (id) => request("GET", `/automations/${id}/removal-impact`),
   },
   automationScripts: {
     list:    ()      => request("GET", "/automations/scripts"),

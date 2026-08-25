@@ -17997,7 +17997,17 @@ function _assetNotificationsTabHTML() {
         (shape.canClear ? '<button class="btn btn-sm btn-secondary" id="asset-alert-bulk-clear" disabled>Clear selected</button>' : "") +
       '</div>'
     : "";
-  return '<div class="section-block">' +
+  // Down detection FIRST: "which automation decides this device is down?" is
+  // the question an operator opens this tab with once the count lives on
+  // automations, and the answer is not in either table below — the governing
+  // automation may not have fired, and a PASSIVE device has no automation at
+  // all. Filled in asynchronously by _paintAssetDownDetectionPanel.
+  var downBlock = '<div class="section-block">' +
+    '<h4 style="margin:0 0 0.5rem">Down detection</h4>' +
+    '<p class="hint" id="asset-down-detection-panel">Resolving…</p>' +
+  '</div>';
+
+  return downBlock + '<div class="section-block">' +
     '<h4 style="margin:0 0 0.5rem">Active alerts <span id="asset-notif-active-count" style="color:var(--color-text-tertiary);font-weight:400"></span></h4>' +
     bulkBar +
     // Self-bounding sticky header (max-height set here, no JS sizer — see the
@@ -18061,7 +18071,55 @@ function _sortAssetAlerts(active) {
   });
 }
 
+/**
+ * Answer "which automation decides this device is Down, and at what count?" —
+ * the question this tab is opened with now that the number lives on
+ * automations rather than in Monitor Settings.
+ *
+ * Neither table below answers it: the governing automation may not have fired,
+ * and a PASSIVE device has no automation at all. The passive case gets the
+ * loudest treatment and a way out, because it is the state where Polaris will
+ * never tell anyone this device went down.
+ */
+function _paintAssetDownDetectionPanel(assetId) {
+  var el = document.getElementById("asset-down-detection-panel");
+  if (!el) return;
+  api.assets.effectiveMonitorSettings(assetId).then(function (eff) {
+    var el2 = document.getElementById("asset-down-detection-panel");
+    if (!el2) return;
+    var dd = eff && eff.downDetection;
+    if (!dd) { el2.textContent = "Could not resolve which automation decides Down for this device."; return; }
+    if (dd.passive) {
+      var canEdit = permAtLeast("automationManagement", "fullwrite");
+      el2.innerHTML =
+        '<strong style="color:var(--color-warning)">Passive</strong> — no down-detection automation covers this device. ' +
+        'Polaris records its polls but will never declare it Warning or Down, and no alert will ever be raised about it going offline.' +
+        (canEdit ? ' <a href="/automations.html">Create a down-detection automation &rarr;</a>' : '');
+      return;
+    }
+    var calc = window.PolarisMonitorDownAfter && window.PolarisMonitorDownAfter.calc;
+    var resolved = eff.resolved || {};
+    var txt = "Down for this device is decided by ";
+    txt += dd.automationName ? "<strong>" + escapeHtml(dd.automationName) + "</strong>" : "an automation";
+    txt += " — <strong>" + dd.missedPolls + " missed poll" + (dd.missedPolls === 1 ? "" : "s") + "</strong>";
+    if (calc) {
+      var c = calc(dd.missedPolls, resolved.intervalSeconds, resolved.probeTimeoutMs);
+      txt += ", ≈ " + window.PolarisMonitorDownAfter.human(c.realSec) + " at this device's " + c.interval + "s poll interval";
+    }
+    txt += ".";
+    if (dd.conflict) {
+      txt += ' <span style="color:var(--color-warning)">Another equally-specific automation asks for ' +
+        dd.conflict.counts.filter(function (n) { return n !== dd.conflict.chosen; }).join(" / ") +
+        ' — Polaris uses the smaller count. Narrow one of the two device filters to make the choice explicit.</span>';
+    }
+    el2.innerHTML = txt;
+  }).catch(function () {
+    var el3 = document.getElementById("asset-down-detection-panel");
+    if (el3) el3.textContent = "Could not resolve which automation decides Down for this device.";
+  });
+}
 function _loadAssetNotificationsTab(assetId) {
+  _paintAssetDownDetectionPanel(assetId);
   var sentencesReady = _assetRuleSentences();
   api.assets.alerts(assetId).then(function (data) {
     var active = _sortAssetAlerts((data && data.active) || []);

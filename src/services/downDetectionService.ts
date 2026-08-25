@@ -430,6 +430,60 @@ export async function countPassiveAssets(): Promise<number> {
 }
 
 /**
+ * What happens to down detection if this automation goes away — the answer the
+ * delete/disable confirmation needs.
+ *
+ * Deleting the last automation covering a device makes it PASSIVE: Polaris
+ * keeps polling it and never declares it down again. That is a legitimate
+ * choice, but it must be a deliberate one, and it is exactly the change nothing
+ * else can warn about — the thing that would normally alert about a blind fleet
+ * is the automation being deleted.
+ *
+ * Answers three numbers: how many devices this rule currently GOVERNS, how many
+ * would fall through to a broader automation (fine), and how many would be left
+ * with nothing at all (the number worth a confirmation).
+ *
+ * Deliberately builds its own view rather than reading the cached snapshot's
+ * winners: "who would win INSTEAD" is a different question from "who wins", and
+ * it only runs when an operator opens a confirm dialog.
+ */
+export async function previewDownDetectionRemoval(ruleId: string): Promise<{
+  isDownDetection: boolean;
+  governs: number;
+  wouldFallBackToAnother: number;
+  wouldBecomePassive: number;
+  sampleHostnames: string[];
+}> {
+  const empty = { isDownDetection: false, governs: 0, wouldFallBackToAnother: 0, wouldBecomePassive: 0, sampleHostnames: [] };
+
+  const rows = await prisma.notificationRule.findMany({
+    where: { enabled: true },
+    select: { id: true, name: true, createdAt: true, trigger: true, scope: true },
+  });
+  const rules = rows.map(toDownRule).filter((r): r is DownRule => r !== null);
+  if (!rules.some((r) => r.id === ruleId)) return empty;
+
+  const survivors = rules.filter((r) => r.id !== ruleId);
+  const assets = await prisma.asset.findMany({ where: { monitored: true }, select: DOWN_SCOPE_SELECT });
+
+  let governs = 0;
+  let fallback = 0;
+  let passive = 0;
+  const samples: string[] = [];
+  for (const a of assets) {
+    const before = pickDownWinner(rules, a as ScopeAsset);
+    if (!before || before.ruleId !== ruleId) continue;
+    governs += 1;
+    if (pickDownWinner(survivors, a as ScopeAsset)) fallback += 1;
+    else {
+      passive += 1;
+      if (samples.length < 5) samples.push(a.hostname ?? a.id);
+    }
+  }
+  return { isDownDetection: true, governs, wouldFallBackToAnother: fallback, wouldBecomePassive: passive, sampleHostnames: samples };
+}
+
+/**
  * Drop the snapshot so the next resolve rebuilds. Called unconditionally from
  * rule create/update/delete — an update can turn a rule INTO or OUT of a
  * down-detection rule, so gating on "was it one?" would be a bug waiting to

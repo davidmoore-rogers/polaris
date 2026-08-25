@@ -20,6 +20,7 @@ import { requirePermission, hasPermission } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
 import { ruleInputSchema, previewInputSchema, buildSchemaCatalog, allRuleActionRefs, scopeSchema, type RuleInput } from "../../services/notificationTypes.js";
 import { listRules, createRule, updateRule, deleteRule, listScopeOptions } from "../../services/notificationRuleService.js";
+import { previewDownDetectionRemoval } from "../../services/downDetectionService.js";
 import { previewRule } from "../../services/notificationEngine.js";
 import { listDimensionValues, dimensionPickerMeta } from "../../services/notificationDimensionService.js";
 import { listRecipientUsers } from "../../services/notificationRecipientService.js";
@@ -162,6 +163,23 @@ function assertScriptActionPermission(req: Request, input: RuleInput): void {
     throw new AppError(403, "Attaching script actions requires Full Read-Write on Automation Scripts (automationScripts)");
   }
 }
+
+// What removing this automation would do to down detection. Backs the
+// delete/disable confirmation: taking away the last automation covering a
+// device makes it PASSIVE — still polled, never declared down again — and that
+// is the one change nothing else can warn about, because the thing that would
+// normally alert about a blind fleet IS the automation being deleted.
+//
+// Declared before "/:id" so the literal path isn't captured by it. Read-level
+// gate: it only counts devices, and the operator seeing it is already looking
+// at the automation.
+notificationRulesRouter.get("/:id/removal-impact", requirePermission("automationManagement", "read"), async (req, res, next) => {
+  try {
+    res.json(await previewDownDetectionRemoval(req.params.id as string));
+  } catch (err) {
+    next(err);
+  }
+});
 
 notificationRulesRouter.post("/", requirePermission("automationManagement", "fullwrite"), async (req, res, next) => {
   try {
