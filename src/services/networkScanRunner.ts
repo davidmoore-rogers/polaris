@@ -477,6 +477,20 @@ export async function runScan(runId: string, actor: string): Promise<void> {
 
     const icmpEnabled = methods.some((m) => m.type === "icmp");
 
+    // ── The counters mean ONE thing for the whole run ────────────────────
+    // `totalTargets` is the address count after exclusions, written once and
+    // never rewritten; `scannedCount` counts addresses FULLY processed, so it
+    // rises monotonically to totalTargets; `hitCount` counts responders.
+    //
+    // That matters because the two stages cover different sets. An earlier
+    // shape re-pointed the counters at the identification pass — resetting
+    // totalTargets to the live count — which made the wizard's "N of M" jump
+    // backwards mid-run and, on a sweep where nothing answered, left the
+    // finished row reading "0 of 0 scanned" after sweeping a whole /29.
+    // A dead address is fully processed the moment its ping fails (nothing
+    // else will touch it); a live one is not fully processed until
+    // identification has run, so it is counted there.
+
     // ── Stage 1: liveness ────────────────────────────────────────────────
     // Without ICMP every address goes to identification, which is the
     // operator's choice to make: a range where ICMP is firewalled off is
@@ -487,8 +501,15 @@ export async function runScan(runId: string, actor: string): Promise<void> {
       await mapSettledWithConcurrency(addresses, SCAN_PING_CONCURRENCY, async (address) => {
         if (aborted) return;
         const res = await pingHost(address, SCAN_PING_TIMEOUT_MS);
-        if (res.success) live.push({ address, icmpAnswered: true });
-        writer.bump(1, res.success ? 1 : 0);
+        if (res.success) {
+          live.push({ address, icmpAnswered: true });
+          // A responder, but not yet fully processed — stage 2 counts it as
+          // scanned. It is already a HIT: identifyAddress always returns one
+          // for an address whose ICMP answered.
+          writer.bump(0, 1);
+        } else {
+          writer.bump(1, 0);
+        }
         const now = Date.now();
         await writer.flush(now);
         // Cancel is checked on the throttle tick rather than per address so a
@@ -499,25 +520,12 @@ export async function runScan(runId: string, actor: string): Promise<void> {
         }
       });
       candidates = live;
-      // The ping stage counted every address as scanned; identification
-      // re-counts only the live ones, so reset rather than double-count.
-      progress.scannedCount = addresses.length;
-      progress.hitCount = live.length;
     } else {
       candidates = addresses.map((address) => ({ address, icmpAnswered: false }));
-      progress.scannedCount = 0;
-      progress.hitCount = 0;
     }
 
     // ── Stage 2: identification ──────────────────────────────────────────
     if (!aborted) {
-      // With ICMP on, the counters now track the identification pass over the
-      // live set, which is what the wizard's "N of M" should read.
-      if (icmpEnabled) { progress.scannedCount = 0; progress.hitCount = 0; }
-      await prisma.networkScanRun
-        .update({ where: { id: runId }, data: { totalTargets: candidates.length, scannedCount: 0, hitCount: 0 } })
-        .catch(() => {});
-
       await mapSettledWithConcurrency(candidates, SCAN_IDENTIFY_CONCURRENCY, async (candidate) => {
         if (aborted) return;
         let hit: ScanHit | null = null;
@@ -533,7 +541,9 @@ export async function runScan(runId: string, actor: string): Promise<void> {
           if (hits.length < SCAN_MAX_HITS) hits.push(hit);
           else hitsTruncated = true;
         }
-        writer.bump(1, hit ? 1 : 0);
+        // Scanned now (stage 1 deliberately didn't count these); the hit was
+        // already counted there when ICMP is what found it.
+        writer.bump(1, !icmpEnabled && hit ? 1 : 0);
         const now = Date.now();
         await writer.flush(now);
         if (now - lastCancelCheck > SCAN_PROGRESS_FLUSH_MS) {
