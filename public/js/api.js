@@ -597,6 +597,7 @@ const api = {
     resetMonitorOverride: (id)  => request("POST", `/assets/${id}/monitor-override/reset`),
     effectiveMonitorSettings: (id) => request("GET", `/assets/${id}/effective-monitor-settings`),
     snmpWalk:             (id, body, signal) => request("POST", `/assets/${id}/snmp-walk`, body, signal),
+    quarantineAvailability: ()  => request("GET", "/assets/quarantine-availability"),
     quarantine:           (id, reason) => request("POST", `/assets/${id}/quarantine`, reason !== undefined ? { reason } : {}),
     unquarantine:         (id)  => request("DELETE", `/assets/${id}/quarantine`),
     verifyQuarantine:     (id)  => request("POST", `/assets/${id}/quarantine/verify`),

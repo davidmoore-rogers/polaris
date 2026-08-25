@@ -67,10 +67,16 @@ function endpoint(over: Partial<AssetRow> = {}): AssetRow {
   return { id: "a1", hostname: "wks-01", status: "active", assetType: "workstation", macAddress: "aa:bb:cc:dd:ee:ff", ...over };
 }
 
-/** Re-eval the builders with the two permission gates set independently. */
-function withPerms(assets: boolean, quarantine: boolean) {
+/**
+ * Re-eval the builders with the two permission gates set independently, plus
+ * the install-wide quarantine-push availability probe (`pushQuarantine` on some
+ * enabled Fortinet integration). It defaults to available because that is also
+ * what an unanswered probe reads as — the gate fails open.
+ */
+function withPerms(assets: boolean, quarantine: boolean, pushEnabled = true) {
   g.canManageAssets = () => assets;
   g.canQuarantineAssets = () => quarantine;
+  g._quarantinePushAvailable = () => pushEnabled;
   (0, eval)(fnSrc("_quarantineMenuItems"));
   (0, eval)(fnSrc("_assetMenuItems"));
   assetMenuItems = g._assetMenuItems;
@@ -98,6 +104,22 @@ describe("_quarantineMenuItems — permission gate", () => {
     withPerms(true, false);
     expect(quarantineMenuItems(endpoint())).toEqual([]);
     expect(quarantineMenuItems(endpoint({ status: "quarantined" }))).toEqual([]);
+  });
+
+  it("offers NOTHING when no integration has quarantine push enabled", () => {
+    // config.pushQuarantine is per-integration and off by default; with it off
+    // everywhere the push resolves to zero targets and 502s with "0/0
+    // FortiGate(s) accepted the push", so the verb is withheld.
+    withPerms(true, true, false);
+    expect(quarantineMenuItems(endpoint())).toEqual([]);
+  });
+
+  it("still offers Release with push disabled", () => {
+    // releaseQuarantine unpushes from the targets recorded on the asset without
+    // consulting the toggle, so an asset quarantined before an operator turned
+    // push off must stay releasable.
+    withPerms(true, true, false);
+    expect(labels(quarantineMenuItems(endpoint({ status: "quarantined" })))).toEqual(["Release quarantine"]);
   });
 
   it("keeps quarantine out of the row menu entirely when the key is missing", () => {
