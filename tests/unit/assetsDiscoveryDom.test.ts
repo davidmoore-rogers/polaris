@@ -125,7 +125,9 @@ describe("PolarisAssetDiscovery — namespace", () => {
     const D = load();
     expect(typeof D.open).toBe("function");
     expect(typeof D.openList).toBe("function");
-    expect(D.STEPS).toEqual(["Name", "Targets", "Methods", "Run", "Results", "Monitoring", "Summary"]);
+    // "Monitor", not "Monitoring": seven steps wrap onto a second row in a
+    // .modal-wide stepper, and the shorter label keeps that row readable.
+    expect(D.STEPS).toEqual(["Name", "Targets", "Methods", "Run", "Results", "Monitor", "Summary"]);
     expect(D.METHOD_ORDER).toEqual(["icmp", "snmp", "restapi", "ssh", "winrm"]);
   });
 
@@ -183,6 +185,37 @@ describe("PolarisAssetDiscovery — shell", () => {
     await D.open({ id: "s1", name: "x", targets: [{ kind: "cidr", value: "10.4.0.0/29" }], methods: [{ type: "icmp" }] });
     (doc.querySelector('#nd-stepper .stepper-step[data-step="7"]') as HTMLElement).click();
     expect(activeStep()).toBe("7");
+  });
+});
+
+describe("PolarisAssetDiscovery — layout parity with the automations wizard", () => {
+  it("leads every step with an h3 question, then the controls", async () => {
+    // The automations wizard puts the question and its one-line explanation at
+    // the TOP of each step; this wizard shipped with the explanation trailing
+    // the form, which read as a different product. Pinned per step because it
+    // is the kind of thing a later edit re-orders without noticing.
+    const D = load();
+    await D.open({
+      id: "s1", name: "x",
+      targets: [{ kind: "cidr", value: "10.4.0.0/29" }],
+      methods: [{ type: "icmp" }],
+    });
+    for (const n of [1, 2, 3, 5, 6, 7]) {
+      (doc.querySelector(`#nd-stepper .stepper-step[data-step="${n}"]`) as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 0));
+      const panel = doc.getElementById(`nd-step-${n}`)!;
+      const first = panel.firstElementChild as HTMLElement | null;
+      expect(first?.tagName, `step ${n} does not open with a heading`).toBe("H3");
+      // …and the heading is followed by the explanation, not by a control.
+      expect((first!.nextElementSibling as HTMLElement | null)?.tagName, `step ${n} heading has no explanation`).toBe("P");
+    }
+  });
+
+  it("keeps the label short enough for a wrapped stepper row", () => {
+    // Seven steps overflow a .modal-wide row at any label length, so the
+    // stepper wraps (styles.css) — which only reads well if the labels are
+    // short. "Monitoring" was the one that pushed it.
+    for (const label of load().STEPS) expect(label.length).toBeLessThanOrEqual(8);
   });
 });
 

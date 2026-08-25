@@ -60,7 +60,7 @@
 (function () {
   "use strict";
 
-  var STEPS = ["Name", "Targets", "Methods", "Run", "Results", "Monitoring", "Summary"];
+  var STEPS = ["Name", "Targets", "Methods", "Run", "Results", "Monitor", "Summary"];
 
   /** Which credential type each method draws from. ICMP draws from none. */
   var METHOD_META = {
@@ -95,6 +95,16 @@
       hits: [],
       selected: [],
     };
+  }
+
+  /**
+   * Every step leads with a question and one line of explanation, then the
+   * controls — the automations wizard's shape (`<h3>` + tertiary `<p>`), so the
+   * two builders read as one product rather than two.
+   */
+  function stepHead(question, explain) {
+    return '<h3 style="margin:0 0 0.25rem">' + escapeHtml(question) + '</h3>' +
+      '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">' + explain + '</p>';
   }
 
   function canWrite() { return permAtLeast("networkScan", "write"); }
@@ -177,7 +187,20 @@
     function step1Html() {
       var P = portability();
       var showImport = !editing && !importing && P && canWrite();
-      return '' +
+      // Inline button + explanation, the automations wizard's import row shape.
+      var importRow = showImport
+        ? '<div style="display:flex;align-items:center;gap:0.5rem;margin:0 0 1rem;flex-wrap:wrap">' +
+            '<button type="button" class="btn btn-secondary" id="nd-import-btn">Import from file…</button>' +
+            '<span style="font-size:0.8rem;color:var(--color-text-tertiary);flex:1 1 16rem">Start from an exported Discovery. ' +
+              'Read in your browser — nothing is uploaded — and the file’s name becomes this Discovery’s name.</span>' +
+            '<input type="file" id="nd-import-input" accept=".json,.discovery.json,application/json" style="display:none">' +
+          '</div>'
+        : "";
+      return stepHead("What is this discovery?",
+          'Name it and describe what it sweeps. A Discovery reports what <em>answers</em> — it creates nothing on ' +
+          'its own, so you choose what to add on the Results step.') +
+        (importing ? importNoteHtml() : "") +
+        importRow +
         '<div class="form-group">' +
           '<label for="nd-name">Name</label>' +
           '<input type="text" id="nd-name" class="form-input" maxlength="200" placeholder="e.g. Ashfield management VLAN" value="' + escapeHtml(draft.name || "") + '">' +
@@ -185,17 +208,7 @@
         '<div class="form-group">' +
           '<label for="nd-desc">Description <span class="hint" style="margin:0">(optional)</span></label>' +
           '<textarea id="nd-desc" class="form-input" rows="2" maxlength="2000">' + escapeHtml(draft.description || "") + '</textarea>' +
-        '</div>' +
-        (showImport
-          ? '<div class="form-group" style="border-top:1px solid var(--color-border);padding-top:0.75rem">' +
-              '<button type="button" class="btn btn-secondary" id="nd-import-btn">Import from file…</button>' +
-              '<input type="file" id="nd-import-input" accept=".json,.discovery.json,application/json" style="display:none">' +
-              '<p class="hint" style="margin:0.35rem 0 0 0">Reads a <code>.discovery.json</code> in your browser — nothing is uploaded. The file\'s name becomes the Discovery\'s name.</p>' +
-            '</div>'
-          : "") +
-        (importing ? importNoteHtml() : "") +
-        '<p class="hint" style="margin-top:1rem">A <strong>Discovery</strong> sweeps the addresses you name and reports what answers. ' +
-          'It creates nothing on its own — you choose what to add on step 5.</p>';
+        '</div>';
     }
 
     function importNoteHtml() {
@@ -272,13 +285,15 @@
 
     function step2Html() {
       return '' +
-        '<p class="hint" style="margin-top:0">Which addresses should Polaris sweep? Overlapping targets are fine — they are de-duplicated.</p>' +
+        stepHead("Which addresses?",
+          'Subnets, ranges or single addresses. Overlapping targets are fine — they are de-duplicated — and loopback, ' +
+          'link-local (including the cloud-metadata address), multicast and reserved addresses are always excluded, ' +
+          'whatever you type.') +
         '<div id="nd-targets">' + draft.targets.map(targetRowHtml).join("") + '</div>' +
         '<button type="button" class="btn btn-secondary btn-sm" id="nd-add-target">+ Add target</button>' +
         '<div class="aw-preview-box" id="nd-target-preview" style="margin-top:1rem">' + previewShell("Enter a target to see what it covers.", "") + '</div>' +
         '<p class="hint" style="margin-top:0.75rem;color:var(--color-warning)">' +
-          'An active scan is visible to intrusion-detection systems. Loopback, link-local (including the cloud-metadata address), ' +
-          'multicast and reserved addresses are always excluded, whatever you type.' +
+          'An active scan is visible to intrusion-detection systems — more so than anything else Polaris does.' +
         '</p>';
     }
 
@@ -434,7 +449,9 @@
 
     function step3Html() {
       return '' +
-        '<p class="hint" style="margin-top:0">Which methods should Polaris try, and in what order? The order below is the order they are tried.</p>' +
+        stepHead("How should Polaris ask?",
+          'Methods are tried top to bottom, and each method’s credentials in the order you list them — the first ' +
+          'that answers wins, and the rest are not attempted.') +
         '<div id="nd-methods">' + METHOD_ORDER.map(methodCardHtml).join("") + '</div>' +
         '<p class="hint" style="margin-top:0.75rem">Leaving <strong>ICMP</strong> off sends every address straight to the credentialed methods — ' +
           'right for a range where ping is firewalled off, and much slower on a wide one.</p>';
@@ -508,7 +525,9 @@
 
       if (!run) {
         panel.innerHTML =
-          '<p class="hint" style="margin-top:0">Starting the scan saves the Discovery first, so it can be re-run later.</p>' +
+          stepHead("Run the scan",
+            'Starting saves the Discovery first, so you can re-run it later. You can close this window once it is ' +
+            'going — the scan keeps running, and reopening this step picks it back up.') +
           (canRun
             ? '<button type="button" class="btn btn-primary" id="nd-run-btn">Save &amp; start scan</button>'
             : '<p class="hint" style="color:var(--color-warning)">You don\'t have permission to run a Discovery.</p>') +
@@ -523,6 +542,8 @@
       var pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
       var live = run.status === "running" || run.status === "queued";
       panel.innerHTML =
+        stepHead("Run the scan",
+          'The scan keeps running if you close this window; reopening this step picks it back up.') +
         '<div id="nd-run-status">' +
           '<p style="margin:0 0 0.35rem 0">' +
             (live ? '<span class="query-spinner"></span> ' : "") +
@@ -643,7 +664,9 @@
       if (!panel) return;
       var hits = draft.hits || [];
       if (!hits.length) {
-        panel.innerHTML = '<p class="hint" style="margin-top:0">Nothing answered yet. ' +
+        panel.innerHTML = stepHead("What answered?",
+            'Choose which responders to add to inventory.') +
+          '<p class="hint" style="margin-top:0">Nothing answered yet. ' +
           (draft.runId ? "If the scan has finished, nothing on those addresses responded to the methods you chose." : "Run the scan on the previous step.") + '</p>';
         return;
       }
@@ -660,8 +683,10 @@
         '</tr>';
       }).join("");
       panel.innerHTML =
-        '<p style="margin-top:0"><strong>' + hits.length + '</strong> responder' + (hits.length === 1 ? "" : "s") + '. ' +
-          'Addresses already in inventory were skipped, so everything here is new.</p>' +
+        stepHead("What answered?",
+          'Choose which responders to add to inventory. Addresses an asset already carries were skipped before any ' +
+          'packet was sent, so everything listed here is new.') +
+        '<p style="margin-top:0"><strong>' + hits.length + '</strong> responder' + (hits.length === 1 ? "" : "s") + '.</p>' +
         '<div style="margin-bottom:0.5rem">' +
           '<button type="button" class="btn btn-secondary btn-sm" id="nd-sel-all">Select all</button> ' +
           '<button type="button" class="btn btn-secondary btn-sm" id="nd-sel-none">Select none</button> ' +
@@ -723,17 +748,19 @@
       if (!panel) return;
       var groups = selectedGroups();
       var keys = Object.keys(groups);
+      var head = stepHead("What should be monitored?",
+        'Grouped by what answered, because that is what decides which pins are even possible.');
       if (!keys.length) {
-        panel.innerHTML = '<p class="hint" style="margin-top:0">Select some responders on the previous step to choose what to monitor on them.</p>';
+        panel.innerHTML = head +
+          '<p class="hint" style="margin-top:0">Select some responders on the previous step to choose what to monitor on them.</p>';
         return;
       }
       if (!amonAvailable()) {
-        panel.innerHTML = '<p class="hint" style="margin-top:0;color:var(--color-warning)">' +
+        panel.innerHTML = head + '<p class="hint" style="margin-top:0;color:var(--color-warning)">' +
           'The monitoring selection builder failed to load — reload the page. You can still add the devices without pins.</p>';
         return;
       }
-      panel.innerHTML = '<p class="hint" style="margin-top:0">Grouped by what answered, because that decides what can be pinned.</p>' +
-        keys.map(groupSectionHtml).join("");
+      panel.innerHTML = head + keys.map(groupSectionHtml).join("");
       keys.forEach(wireGroup);
     }
 
@@ -898,6 +925,8 @@
       if (!panel) return;
       var P = portability();
       panel.innerHTML =
+        stepHead("Review &amp; finish",
+          'Save the Discovery so it can be re-run, export it as a file, or add the responders you selected.') +
         '<dl class="review-grid">' +
           '<dt>Name</dt><dd>' + escapeHtml(draft.name || "—") + '</dd>' +
           '<dt>Targets</dt><dd>' + escapeHtml(draft.targets.map(function (t) { return t.value; }).filter(Boolean).join(", ") || "—") + '</dd>' +

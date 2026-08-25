@@ -4870,6 +4870,14 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   justify-content: center;
   gap: 0;
   margin-bottom: 1.25rem;
+  /* Wrap rather than clip. A 6-step stepper fills a .modal-wide row almost
+     exactly (6 circles + 5 connectors + labels ~= 626px of 632px usable), so a
+     SEVENTH step overflows at any label length — and the sticky header's
+     negative margins meant that overflow was invisibly cut off rather than
+     scrollable. A no-op for the 4- and 6-step wizards; row-gap only applies
+     once there IS a second row. */
+  flex-wrap: wrap;
+  row-gap: 0.5rem;
 }
 /* Pinned while a long step scrolls — same pattern as .modal-body > .page-tabs. */
 .modal-body > .stepper {
