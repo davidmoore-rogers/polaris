@@ -45,6 +45,8 @@ import { logger } from "../utils/logger.js";
 import { pointInPolygon, type LatLng } from "../utils/geo.js";
 import { buildCidrMatcher } from "../utils/cidr.js";
 import { controllerIdentityKeys, readFirewallDeviceName } from "../utils/fortinetParentKey.js";
+import { buildRegionHierarchy, type RegionHierarchy } from "../utils/regionHierarchy.js";
+import { createTtlCache } from "../utils/ttlCache.js";
 
 const SETTING_KEY = "mapRegions";
 const TAG_PREFIX = "region:";
@@ -99,27 +101,83 @@ export interface ReconcileSummary extends Record<string, unknown> {
 
 // --- Persistence helpers ---
 
-async function loadAll(): Promise<MapRegion[]> {
-  const row = await prisma.setting.findUnique({ where: { key: SETTING_KEY } });
-  if (!row?.value) return [];
+/**
+ * Advisory-lock class id for the mapRegions blob. Follows the existing
+ * sequence: the retention prune uses 0x504c5253 ("PLRS") and subnet writes
+ * 0x504c5254 ("PLRT") — see PRUNE_LOCK_CLASSID in monitoringService and
+ * SUBNET_LOCK_CLASSID in subnetService.
+ */
+const REGION_LOCK_CLASSID = 0x504c5255; // "PLRU" — mapRegions blob write lock
+
+/** Prisma client or interactive-transaction client. */
+type RegionDb = Pick<typeof prisma, "setting">;
+
+/**
+ * Serialize one read-modify-write of the mapRegions blob against every other
+ * region writer.
+ *
+ * EVERY region mutation is a read-modify-write of a SINGLE JSON blob — load the
+ * whole array, change one element, write the whole array back — so two writers
+ * that overlap both read the same starting array and the second one's write
+ * silently discards the first one's edit. That is not a theoretical race: the
+ * map's edit mode saves every changed polygon at once with Promise.all, so
+ * dragging three regions and clicking Save reliably lost two of them while all
+ * three PUTs returned 200 and the UI reported "3 regions saved".
+ *
+ * Same medicine as subnet overlap (business rule 20a): the check-then-write is
+ * only as strong as whatever serializes the two halves. The lock is taken as
+ * the FIRST statement in the transaction, before the read whose result the
+ * write depends on, and releases at end of transaction so there is no unlock
+ * path to leak.
+ *
+ * One lock for the whole blob rather than one per region, because the unit
+ * being rewritten IS the whole blob — a per-region lock would serialize nothing.
+ */
+async function withRegionBlobLock<T>(fn: (db: RegionDb) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${REGION_LOCK_CLASSID}::int, hashtext(${SETTING_KEY})::int)`;
+    return fn(tx as unknown as RegionDb);
+  });
+}
+
+/**
+ * Load the blob along with its `Setting.updatedAt`, which the hierarchy cache
+ * uses as a free, exact version stamp — no content hashing needed.
+ */
+async function loadAllWithVersion(db: RegionDb = prisma): Promise<{ regions: MapRegion[]; version: string }> {
+  const row = await db.setting.findUnique({
+    where: { key: SETTING_KEY },
+    select: { value: true, updatedAt: true },
+  });
+  const version = row?.updatedAt ? new Date(row.updatedAt).toISOString() : "none";
+  if (!row?.value) return { regions: [], version };
   const val = row.value as unknown;
-  if (!Array.isArray(val)) return [];
+  if (!Array.isArray(val)) return { regions: [], version };
   // Legacy regions pre-date the color field — back-fill at read time with a
   // random palette pick so the UI has something to render. Persist back on
   // the next write through updateRegion; we deliberately don't write here
   // (a read shouldn't mutate the Setting blob).
-  return (val as Partial<MapRegion>[]).map((r) => ({
+  const regions = (val as Partial<MapRegion>[]).map((r) => ({
     ...(r as MapRegion),
     color: typeof r.color === "string" && HEX_COLOR_RE.test(r.color) ? r.color.toLowerCase() : randomTagColor(),
   }));
+  return { regions, version };
 }
 
-async function persistAll(regions: MapRegion[]): Promise<void> {
-  await prisma.setting.upsert({
+async function loadAll(db: RegionDb = prisma): Promise<MapRegion[]> {
+  return (await loadAllWithVersion(db)).regions;
+}
+
+async function persistAll(regions: MapRegion[], db: RegionDb = prisma): Promise<void> {
+  await db.setting.upsert({
     where: { key: SETTING_KEY },
     update: { value: regions as any },
     create: { key: SETTING_KEY, value: regions as any },
   });
+  // Invalidation lives HERE rather than at the three CRUD call sites so a
+  // future write path cannot forget it. Levels are global: editing one polygon
+  // can re-level an entire ancestor chain, so any write invalidates everything.
+  invalidateRegionHierarchy();
 }
 
 // --- Validation ---
@@ -530,6 +588,97 @@ async function dropAllProvenance(regionId: string): Promise<void> {
   await prisma.regionTagAssignment.deleteMany({ where: { regionId } });
 }
 
+// --- Derived nesting levels ---
+
+/** A region decorated with its DERIVED place in the containment forest. */
+export interface MapRegionWithLevel extends MapRegion {
+  /** 1 = contains no other region. May have gaps on an uneven tree. */
+  level: number;
+  /** 0 = top-level. Always gap-free — route on this, not on `level`. */
+  depth: number;
+  parentId: string | null;
+  childIds: string[];
+  /** Outermost first (root → parent). */
+  ancestorIds: string[];
+}
+
+/**
+ * The hierarchy is DERIVED on read and cached per blob version — never written
+ * into the `mapRegions` blob. A persisted level would be a second source of
+ * truth that a restore, a backup import or a hand-edited Setting could silently
+ * desynchronize, and the drift would be invisible because nothing would
+ * recompute to compare. See `src/utils/regionHierarchy.ts`.
+ *
+ * Keyed on `Setting.updatedAt`, so a stale entry is unreachable even before the
+ * TTL fires — the TTL is only a memory bound. `persistAll` invalidates.
+ */
+const REGION_HIERARCHY_TTL_MS = 5 * 60_000;
+const _hierarchyCache = createTtlCache<{ regions: MapRegion[]; hierarchy: RegionHierarchy }>({
+  ttlMs: REGION_HIERARCHY_TTL_MS,
+  maxEntries: 4,
+});
+
+/** Drop the cached containment forest. Called by every write via `persistAll`. */
+export function invalidateRegionHierarchy(): void {
+  _hierarchyCache.invalidate();
+}
+
+/** The region list plus its containment forest, cached per blob version. */
+export async function getRegionHierarchy(): Promise<{ regions: MapRegion[]; hierarchy: RegionHierarchy }> {
+  const { regions, version } = await loadAllWithVersion();
+  return _hierarchyCache.getOrCompute(version, async () => ({
+    regions,
+    hierarchy: buildRegionHierarchy(regions.map((r) => ({ id: r.id, polygon: r.polygon }))),
+  }));
+}
+
+/**
+ * Name-sorted regions decorated with their derived level/depth/parent.
+ *
+ * A SEPARATE function from `listRegions`, deliberately: `reconcileMapRegions`
+ * and `notificationRuleService.listScopeOptions` both call `listRegions`, and if
+ * the plain read path returned decorated objects then any future code that
+ * round-tripped one back through `persistAll` would write derived fields into
+ * the blob — the exact failure deriving-on-read exists to prevent.
+ */
+export async function listRegionsWithLevels(): Promise<MapRegionWithLevel[]> {
+  const { regions, hierarchy } = await getRegionHierarchy();
+  return regions
+    .map((r) => {
+      const node = hierarchy.byId[r.id];
+      return {
+        ...r,
+        level: node?.level ?? 1,
+        depth: node?.depth ?? 0,
+        parentId: node?.parentId ?? null,
+        childIds: node?.childIds ?? [],
+        ancestorIds: node?.ancestorIds ?? [],
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Which regions' levels MOVED between two hierarchies. Pure.
+ *
+ * Exists because editing one polygon can re-level an entire ancestor chain —
+ * changing who gets paged for regions the operator never touched. Without an
+ * audit trail built from this, that change is completely invisible.
+ */
+export function diffRegionLevels(
+  before: RegionHierarchy,
+  after: RegionHierarchy,
+): Array<{ regionId: string; from: number | null; to: number | null }> {
+  const out: Array<{ regionId: string; from: number | null; to: number | null }> = [];
+  const ids = new Set([...Object.keys(before.byId), ...Object.keys(after.byId)]);
+  for (const id of Array.from(ids).sort()) {
+    const from = before.byId[id]?.level ?? null;
+    const to = after.byId[id]?.level ?? null;
+    if (from !== to) out.push({ regionId: id, from, to });
+  }
+  return out;
+}
+
 // --- Public API ---
 
 export async function listRegions(): Promise<MapRegion[]> {
@@ -543,25 +692,38 @@ export async function getRegion(id: string): Promise<MapRegion | null> {
 }
 
 export async function createRegion(input: SaveRegionInput): Promise<MapRegion> {
+  // Shape validation needs no lock and should reject before we queue behind
+  // another writer.
   const name = validateName(input.name);
   const polygon = validatePolygon(input.polygon);
   const color = input.color !== undefined ? validateColor(input.color) : randomTagColor();
-  const all = await loadAll();
-  if (all.some((r) => r.name.toLowerCase() === name.toLowerCase())) {
-    throw new AppError(409, `A region named "${name}" already exists`);
-  }
-  const now = new Date().toISOString();
-  const created: MapRegion = {
-    id: randomUUID(),
-    name,
-    polygon,
-    color,
-    createdBy: input.actor ?? null,
-    createdAt: now,
-    updatedAt: now,
-  };
-  all.push(created);
-  await persistAll(all);
+
+  // The duplicate-name check and the append are one atomic read-modify-write:
+  // unlocked, two concurrent creates both read the array without the other's
+  // row, and the second write discards the first region entirely.
+  const created = await withRegionBlobLock(async (db) => {
+    const all = await loadAll(db);
+    if (all.some((r) => r.name.toLowerCase() === name.toLowerCase())) {
+      throw new AppError(409, `A region named "${name}" already exists`);
+    }
+    const now = new Date().toISOString();
+    const row: MapRegion = {
+      id: randomUUID(),
+      name,
+      polygon,
+      color,
+      createdBy: input.actor ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    all.push(row);
+    await persistAll(all, db);
+    return row;
+  });
+
+  // Best-effort registry mirroring, deliberately OUTSIDE the lock: it writes a
+  // different table, swallows its own failures, and holding the blob lock
+  // across it would serialize every region write behind a Tag upsert.
   await upsertTagRegistry(name);
   return created;
 }
@@ -570,48 +732,62 @@ export async function updateRegion(
   id: string,
   input: SaveRegionInput,
 ): Promise<{ region: MapRegion; previousName: string; renamed: boolean; polygonChanged: boolean }> {
-  const all = await loadAll();
-  const idx = all.findIndex((r) => r.id === id);
-  if (idx === -1) throw new AppError(404, `Region ${id} not found`);
-  const existing = all[idx]!;
+  // THE lost-update site. Everything from the read to the write is one atomic
+  // section: the map's edit mode saves every changed polygon at once via
+  // Promise.all, so unlocked, N concurrent PUTs each read the array before the
+  // others wrote and only the last one's edit survived — while every request
+  // returned 200 and the UI said "N regions saved".
+  const result = await withRegionBlobLock(async (db) => {
+    const all = await loadAll(db);
+    const idx = all.findIndex((r) => r.id === id);
+    if (idx === -1) throw new AppError(404, `Region ${id} not found`);
+    const existing = all[idx]!;
 
-  const name = input.name !== undefined ? validateName(input.name) : existing.name;
-  const polygon = input.polygon !== undefined ? validatePolygon(input.polygon) : existing.polygon;
-  const color = input.color !== undefined ? validateColor(input.color) : existing.color;
+    const name = input.name !== undefined ? validateName(input.name) : existing.name;
+    const polygon = input.polygon !== undefined ? validatePolygon(input.polygon) : existing.polygon;
+    const color = input.color !== undefined ? validateColor(input.color) : existing.color;
 
-  const renamed = name.toLowerCase() !== existing.name.toLowerCase();
-  if (renamed && all.some((r, i) => i !== idx && r.name.toLowerCase() === name.toLowerCase())) {
-    throw new AppError(409, `A region named "${name}" already exists`);
+    const renamed = name.toLowerCase() !== existing.name.toLowerCase();
+    if (renamed && all.some((r, i) => i !== idx && r.name.toLowerCase() === name.toLowerCase())) {
+      throw new AppError(409, `A region named "${name}" already exists`);
+    }
+
+    const polygonChanged =
+      input.polygon !== undefined && JSON.stringify(polygon) !== JSON.stringify(existing.polygon);
+
+    const updated: MapRegion = {
+      ...existing,
+      name,
+      polygon,
+      color,
+      updatedAt: new Date().toISOString(),
+    };
+    all[idx] = updated;
+    await persistAll(all, db);
+    return { region: updated, previousName: existing.name, renamed, polygonChanged };
+  });
+
+  // Registry mirroring stays outside the lock — see createRegion.
+  if (result.renamed) {
+    await deleteTagRegistry(result.previousName);
+    await upsertTagRegistry(result.region.name);
   }
 
-  const polygonChanged =
-    input.polygon !== undefined && JSON.stringify(polygon) !== JSON.stringify(existing.polygon);
-
-  const updated: MapRegion = {
-    ...existing,
-    name,
-    polygon,
-    color,
-    updatedAt: new Date().toISOString(),
-  };
-  all[idx] = updated;
-  await persistAll(all);
-
-  if (renamed) {
-    await deleteTagRegistry(existing.name);
-    await upsertTagRegistry(name);
-  }
-
-  return { region: updated, previousName: existing.name, renamed, polygonChanged };
+  return result;
 }
 
 export async function deleteRegion(id: string): Promise<MapRegion> {
-  const all = await loadAll();
-  const idx = all.findIndex((r) => r.id === id);
-  if (idx === -1) throw new AppError(404, `Region ${id} not found`);
-  const removed = all[idx]!;
-  const next = all.slice(0, idx).concat(all.slice(idx + 1));
-  await persistAll(next);
+  // Same read-modify-write, same lock. Unlocked, a delete that overlaps an edit
+  // to a DIFFERENT region resurrects the deleted one or discards the edit,
+  // depending on which write lands second.
+  const removed = await withRegionBlobLock(async (db) => {
+    const all = await loadAll(db);
+    const idx = all.findIndex((r) => r.id === id);
+    if (idx === -1) throw new AppError(404, `Region ${id} not found`);
+    const row = all[idx]!;
+    await persistAll(all.slice(0, idx).concat(all.slice(idx + 1)), db);
+    return row;
+  });
   await deleteTagRegistry(removed.name);
   return removed;
 }

@@ -37,6 +37,7 @@ import {
   type EmailComposition,
   type EscalationV2Config,
   type ResetConfig,
+  type RepeatConfig,
   type AutomationAction,
   type EscalatableAction,
   ruleHasAnyEscalation,
@@ -123,6 +124,9 @@ interface DbRule {
   bandNotify: BandNotify | null;
   /** Actions to run when the alert ENDS; null = nothing happens on reset. */
   resetActions: AutomationAction[] | null;
+  /** Re-send while unhandled; null = never repeats. Read by ruleWantsContext —
+   *  a repeat-only rule still needs its templateCtx snapshot. */
+  repeat: RepeatConfig | null;
 }
 
 /** Best-effort action fan-out — never breaks rule evaluation. (executeActions
@@ -862,7 +866,13 @@ function round2(n: number): string {
  *  ANY escalation chain counts — rule-level, per-action, band-level, or
  *  band-per-action — since the sweep renders from the templateCtx snapshot. */
 function ruleWantsContext(rule: DbRule): boolean {
-  return !!(rule.emailComposition || ruleHasAnyEscalation(rule));
+  // `repeat` is in here for a reason that is easy to miss: the sweep renders a
+  // reminder from Notification.templateCtx, and without this a repeat-only
+  // automation snapshots nothing — so every reminder would fall back to the
+  // minimal context built from the row and silently lose {value}, {threshold},
+  // {trigger.summary} and every {asset.*} token. The reminder would not look
+  // like the email it is reminding you about.
+  return !!(rule.emailComposition || ruleHasAnyEscalation(rule) || rule.repeat);
 }
 
 function ruleWantsAssetDetail(rule: DbRule): boolean {
@@ -2444,6 +2454,7 @@ export async function evaluateAllNotificationRules(): Promise<void> {
       severityBands: v2.severityBands,
       bandNotify: v2.bandNotify,
       resetActions: v2.resetActions,
+      repeat: v2.repeat,
     };
   });
 
@@ -2632,7 +2643,7 @@ async function computeCarveOut(
 function draftRuleForPreview(input: PreviewRuleInput, trigger: DbRule["trigger"]): DbRule {
   return {
     id: "", name: input.name, description: input.description ?? null, severity: input.severity,
-    trigger, scope: input.scope, resetActions: input.resetActions ?? null,
+    trigger, scope: input.scope, resetActions: input.resetActions ?? null, repeat: input.repeat ?? null,
     reset: input.reset, actions: input.actions, cooldownSec: input.cooldownSec ?? null,
     messageTemplate: input.messageTemplate ?? null,
     emailComposition: input.emailComposition, escalation: normalizeEscalationToV2(input.escalation),

@@ -15,6 +15,7 @@ import { logEvent } from "./events.js";
 import { AppError } from "../../utils/errors.js";
 import { probeCredentialAgainstHost } from "../../services/monitoringService.js";
 import type { HttpProbeDiagnostics } from "../../utils/httpCheck.js";
+import { normalizeProbeTarget } from "../../utils/probeTarget.js";
 
 const router = Router();
 
@@ -37,11 +38,28 @@ const UpdateSchema = z.object({
 // credential as configured in the form, not what the asset would normally
 // use). When `id` is set, masked secrets in `config` are filled in from the
 // stored credential so editing without retyping the password still works.
+// The target is EITHER an asset (borrow its address) or a hand-typed host.
+// Both are accepted because the two answer different questions: an asset test
+// exercises the credential against real inventory, while a typed host is what
+// you need before the device is onboarded — or when it will never be an asset
+// at all (a staging box, a vendor's demo unit, a loopback stub). `assetId` stays
+// first-class and unchanged; `host` is validated by normalizeProbeTarget.
 const TestSchema = z.object({
-  assetId: z.string().uuid("assetId must be a UUID"),
+  assetId: z.string().uuid("assetId must be a UUID").optional(),
+  host:    z.string().min(1).max(300).optional(),
   type:    CredentialTypeEnum,
   config:  z.record(z.unknown()),
   id:      z.string().uuid().optional(),
+  // `http` only: the check to exercise (path / expected status / expected body
+  // / TLS). It is supplied per-test rather than read off the credential because
+  // the credential carries authentication only — and supplying it here is what
+  // lets an operator dial a check in against a real device before saving it to
+  // a manufacturer widget.
+  check:   z.record(z.unknown()).optional(),
+}).refine((v) => !!v.assetId || !!v.host || v.type === "restapi", {
+  // restapi is the exception it has always been: the credential carries its own
+  // baseUrl, so it needs no target of either kind.
+  message: "Provide either an assetId or a host to test against",
 });
 
 // GET /credentials — any authenticated session may list (secrets masked)
@@ -126,13 +144,34 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
   try {
     const input = TestSchema.parse(req.body);
 
-    const asset = await credentialService.getTestAssetTarget(input.assetId);
-    const host = asset.ipAddress || asset.dnsName || asset.hostname;
-    // restapi credentials carry their own baseUrl, so a host on the asset is
-    // optional — the credential is tested against its own URL. Every other
-    // type still needs a routable target.
-    if (!host && input.type !== "restapi") {
-      throw new AppError(400, "Asset has no IP, DNS name, or hostname to test against");
+    // Resolve the target. An assetId wins when both are sent, so a stale `host`
+    // left in a request body can never redirect a probe the operator aimed at
+    // an asset.
+    let asset: Awaited<ReturnType<typeof credentialService.getTestAssetTarget>> | null = null;
+    let host: string | null | undefined;
+    let hostSource: "asset" | "manual";
+
+    if (input.assetId) {
+      hostSource = "asset";
+      asset = await credentialService.getTestAssetTarget(input.assetId);
+      host = asset.ipAddress || asset.dnsName || asset.hostname;
+      // restapi credentials carry their own baseUrl, so a host on the asset is
+      // optional — the credential is tested against its own URL. Every other
+      // type still needs a routable target.
+      if (!host && input.type !== "restapi") {
+        throw new AppError(400, "Asset has no IP, DNS name, or hostname to test against");
+      }
+    } else {
+      hostSource = "manual";
+      // A typed target is validated rather than salvaged — see probeTarget.ts.
+      // The refusal is returned as a test RESULT, not a 4xx, so the modal renders
+      // it inline next to the field the operator just typed in.
+      const target = normalizeProbeTarget(input.host);
+      if (target.error && input.type !== "restapi") {
+        res.json({ success: false, responseTimeMs: 0, error: target.error, host: null });
+        return;
+      }
+      host = target.host;
     }
 
     let config = input.config || {};
@@ -148,8 +187,12 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
       );
     }
 
+    // The check definition is validated with the same function the widget uses,
+    // so a check cannot pass here and be rejected when it is saved.
+    const check: Record<string, unknown> = { ...(input.check || {}) };
     try {
       credentialService.validateConfig(input.type, config);
+      if (input.type === "http") credentialService.validateHttpCheckDefinition(check);
     } catch (err: any) {
       // Surface validation errors as the test result rather than a 4xx so
       // the modal renders them inline like a probe failure.
@@ -167,8 +210,13 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
     // a string the operator has to pick OUT of the response, and pass/fail
     // alone gives them nothing to pick from. Nothing else fills this.
     const probeOut: { diag?: HttpProbeDiagnostics } = {};
-    const result = await probeCredentialAgainstHost(host || "", input.type, config, probeOut);
-    const label = asset.hostname || asset.ipAddress || asset.id;
+    const result = await probeCredentialAgainstHost(host || "", input.type, config, probeOut, check);
+    // A typed target has no asset to name, so the host IS the label. Keeping the
+    // asset's own label when there is one means the audit trail reads the same
+    // as it always has for the inventory path.
+    const label = asset
+      ? (asset.hostname || asset.ipAddress || asset.id)
+      : (host || "(no target)");
     logEvent({
       action: "credential.tested",
       resourceType: "credential",
@@ -183,7 +231,11 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
       // and every syslog forward, and the operator who needs it is already
       // looking at it in the modal. Only the shape of the answer is audited.
       details: {
-        assetId: input.assetId, host, type: input.type,
+        // `hostSource` is audited because the two are materially different acts:
+        // an asset test is aimed at known inventory, a manual one at an address
+        // the operator chose freely. Reviewing "who probed what from Polaris"
+        // needs to be able to tell them apart.
+        assetId: input.assetId ?? null, host, hostSource, type: input.type,
         ...(probeOut.diag
           ? { httpStatus: probeOut.diag.statusCode, httpUrl: probeOut.diag.url, httpMatched: probeOut.diag.matched }
           : {}),

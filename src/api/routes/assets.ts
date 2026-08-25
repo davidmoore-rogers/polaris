@@ -20,7 +20,12 @@ import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen, EXCLUDED_LIFECYCLE_STATUSES } from "../../utils/assetInvariants.js";
 import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistory } from "../../services/assetIpHistoryService.js";
 import { getSightingsForAsset, getSightingSettings, updateSightingSettings } from "../../services/assetSightingService.js";
-import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
+import {
+  quarantineAsset,
+  releaseQuarantine,
+  verifyAssetQuarantine,
+  getQuarantinePushAvailability,
+} from "../../services/assetQuarantineService.js";
 import { syncDescriptionsOnSave } from "../../services/descriptionSyncService.js";
 import { cidrContains } from "../../utils/cidr.js";
 import { buildIpContexts, type IpContext } from "../../services/subnetService.js";
@@ -214,7 +219,7 @@ const CreateAssetSchema = z.object({
 // apply to the asset's source. Includes "disabled" (universally allowed
 // opt-out) and "agent" (Polaris Agent; allowed on AD/Entra/WinServer/Manual
 // sources, ignored on fortimanager/fortigate).
-const PollingMethodEnum = z.enum(["rest_api", "http", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
+const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Unlike create (min(1)), update accepts "" — blanking the IP Address field
@@ -254,7 +259,7 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   lldpPolling:           PollingMethodEnum.nullable().optional(),
   storagePolling:        PollingMethodEnum.nullable().optional(),
   // Per-asset request path for the "http" response-time check, overriding the
-  // path on the selected HTTP Check credential. Blank clears the override (see
+  // path used by an HTTP-check widget. Blank clears the override (see
   // the trim below) — it does NOT mean "/", so emptying the box returns the
   // device to the credential's path rather than repointing it at the web root.
   httpCheckPath:         z.string().max(1024).nullable().optional(),
@@ -1089,6 +1094,24 @@ router.get("/agent-install-scripts", requirePermission("assets", "read"), async 
     res.json({ scripts: AGENT_INSTALL_SCRIPTS });
   } catch (err) { next(err); }
 });
+
+// GET /api/v1/assets/quarantine-availability — is quarantine push configured
+// on ANY enabled FortiManager / FortiGate integration? Drives whether the
+// frontends offer the quarantine verbs at all (row menu, bulk bar, details
+// tab): with the per-integration toggle off fleet-wide a push can only fail
+// with "0/0 FortiGate(s) accepted the push". MUST stay above GET /:id so the
+// literal path isn't captured as an asset id. Gated on the quarantine key at
+// read level — the callers already hold `assetsQuarantine:write`, and the
+// answer says nothing about any individual integration.
+router.get(
+  "/quarantine-availability",
+  requirePermission("assetsQuarantine", "read"),
+  async (_req, res, next) => {
+    try {
+      res.json(await getQuarantinePushAvailability());
+    } catch (err) { next(err); }
+  },
+);
 
 // GET /api/v1/assets/:id — get single asset (all authenticated users)
 router.get("/:id", requirePermission("assets", "read"), async (req, res, next) => {
@@ -3121,14 +3144,10 @@ async function validateAssetUpdate(id: string, existing: ExistingAssetForUpdate,
       // (UpdateAssetSchema's polling enum currently excludes "vcenter", so
       // through THIS route the rejection happens at the schema — this guard
       // is defense in depth for the monitor-settings pathway shape.)
-      // "http" is one GET returning a status code and a body — there is no CPU
-      // figure, interface list, sensor reading or mount table in that, so it is
-      // response-time-only. Rejected here rather than left to fall through at
-      // resolution time for the reason the whole block exists: a silently
-      // ignored setting reads to the operator as a broken save.
-      if (value === "http" && name !== "responseTimePolling") {
-        throw new AppError(400, `HTTP Check polling only applies to the Response Time stream (field: ${name})`);
-      }
+      // NOTE: the "http" polling method was retired (2026-08) — the HTTP check
+      // it performed is now a manufacturer custom widget, so there is no
+      // per-stream guard for it here any more. The schema enum rejects the
+      // value outright.
       if (value === "vcenter") {
         if (name !== "cpuMemoryPolling") {
           throw new AppError(400, `vCenter polling only applies to the CPU/Memory stream (field: ${name})`);

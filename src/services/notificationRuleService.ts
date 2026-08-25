@@ -30,6 +30,7 @@ import {
 } from "./notificationTypes.js";
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
 import { listRegions } from "./mapRegionService.js";
+import { regionLevelIndex } from "./regionHierarchyService.js";
 import { ipInCidr } from "../utils/cidr.js";
 import { scopeCidrOf, type ScopeConditionAsset } from "./notificationTypes.js";
 
@@ -257,6 +258,11 @@ export async function listScopeOptions(): Promise<{
   models: string[];
   subnets: { id: string; name: string; cidr: string }[];
   regions: string[];
+  /** How deep region NESTING goes right now (1 = nothing is nested). The two
+   *  recipient pickers use it to decide how many "Asset's L<n> Region Users"
+   *  entries to offer — rides this payload for the same reason the region names
+   *  do, since GET /map/regions is gated `mapRegions:read`. */
+  regionLevels: { maxLevel: number };
   roles: { id: string; name: string }[];
 }> {
   // MONITORED devices only. These lists exist to be picked from, and a
@@ -267,7 +273,7 @@ export async function listScopeOptions(): Promise<{
   // event and change triggers fire on them. The subnet list is IPAM, not
   // inventory, so it is unfiltered by the same reasoning.
   const monitoredOnly = { monitored: true } as const;
-  const [mfrRows, modelRows, subnets, regions, roles] = await Promise.all([
+  const [mfrRows, modelRows, subnets, regions, regionMaxLevel, roles] = await Promise.all([
     prisma.asset.findMany({
       select: { manufacturer: true },
       distinct: ["manufacturer"],
@@ -291,6 +297,12 @@ export async function listScopeOptions(): Promise<{
     // would silently degrade to free text. This endpoint is already behind
     // automationManagement:read, which the wizard has by definition.
     listRegions().catch(() => []),
+    // Nesting depth for the level-scoped recipient entries. Falls back to a
+    // flat catalogue on failure, which makes the pickers offer no level
+    // entries at all rather than offering ones that resolve to nobody.
+    regionLevelIndex()
+      .then((ix) => ix.maxLevel)
+      .catch(() => 1),
     // Roles for the recipient picker's role tokens. Ids, not names: a rename
     // must never silently reroute an automation. Rides this payload for the
     // same reason regions do — GET /roles is gated `roles:read`, which an
@@ -304,6 +316,7 @@ export async function listScopeOptions(): Promise<{
     // Bare names — how User/Role/GroupMapping.regionTags store them. The
     // `region:` prefix exists only on ASSET tags.
     regions: regions.map((r) => r.name).filter((n) => !!n && n.trim() !== "").sort(),
+    regionLevels: { maxLevel: regionMaxLevel },
     roles,
   };
 }
@@ -488,6 +501,7 @@ export async function createRule(input: RuleInput, actor?: string) {
       severityBands: (input.severityBands ?? undefined) as any,
       bandNotify: (input.bandNotify ?? undefined) as any,
       resetActions: (input.resetActions ?? undefined) as any,
+      repeat: (input.repeat ?? undefined) as any,
       createdBy: actor ?? null,
     },
   });
@@ -552,6 +566,7 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
       severityBands: jsonOrClear(input.severityBands),
       bandNotify: jsonOrClear(input.bandNotify),
       resetActions: jsonOrClear(input.resetActions),
+      repeat: jsonOrClear(input.repeat),
     },
   });
   // The trigger now describes a different condition — the old state rows (and

@@ -10,23 +10,28 @@
  * created assets can be probed via the same REST-API path FMG/FortiGate-
  * discovered firewalls use through their integration's stored token.
  *
- * "http" credentials are the odd one out: they carry almost no secret at all
- * (an optional bearer token or basic password) and instead describe an HTTP GET
- * HEALTH CHECK — scheme, port, path, the status code that counts as up, and the
- * string the response body must contain. They live here rather than in a table
- * of their own because a check is a per-STREAM selectable thing, and the
- * credential store is already exactly that: pickable at the asset,
- * class-override and integration tiers, sealed at rest by the db.ts extension,
- * masked at the API boundary, and testable from the Test Connection modal. One
- * "GET /healthz expect OK" row therefore covers a whole fleet; the single
- * device whose endpoint sits elsewhere overrides just the path via
- * `Asset.httpCheckPath`. The check semantics are in utils/httpCheck.ts.
+ * "http" credentials carry AUTHENTICATION ONLY — bearer token, basic, or digest
+ * (utils/httpCheck.ts). They used to carry the whole HTTP health check as well
+ * (path, expected status, expected body), but that half moved to a manufacturer
+ * custom widget in 2026-08 because the two vary on different axes: a login is
+ * per-vendor or per-site, while "which path, expecting what" is per-vendor and
+ * model. Sharing one row meant a second path needed a second copy of the same
+ * password, and rotating the password meant editing every path.
+ *
+ * There is no "none" mode: an unauthenticated check is a widget with no
+ * credential attached, not a credential that authenticates nothing.
  */
 
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
-import { type HttpCheckConfig, normalizeHttpPath } from "../utils/httpCheck.js";
+import {
+  type HttpCheckConfig,
+  normalizeHttpPath,
+  resolveHttpAuthMode,
+  HTTP_CREDENTIAL_AUTH_MODES,
+  type HttpAuthConfig,
+} from "../utils/httpCheck.js";
 
 export type CredentialType = "snmp" | "winrm" | "ssh" | "restapi" | "http";
 
@@ -304,22 +309,87 @@ function validateRestApiConfig(config: Record<string, unknown>): void {
 }
 
 /**
- * Validate an HTTP-check credential. Unlike the other types there is no
- * required secret — an unauthenticated `GET /healthz` is a perfectly good check
- * — so the required-field checks are about the CHECK being meaningful and about
- * failing at save time rather than on every probe tick:
+ * Validate an `http` CREDENTIAL — which since 2026-08 carries authentication
+ * and nothing else. The check definition it used to hold (path, expected
+ * status, expected body, TLS verification) moved to a manufacturer custom
+ * widget; `validateHttpCheckDefinition` below validates that half wherever it
+ * now appears.
  *
- *  - the regex is COMPILED here, because an invalid pattern stored on a
- *    credential would otherwise fail once per asset per interval forever, with
- *    the operator finding out from the probe error column instead of the form
- *    they typed it into.
- *  - `path` is canonicalized (leading slash) so the stored value is what the
- *    request line will actually carry.
- *  - `caseSensitive` / `failOnMismatch` are only meaningful alongside an
- *    `expectBody`; a lone toggle is accepted rather than rejected (harmless,
- *    and rejecting it would 400 a form the operator is mid-way through).
+ * "none" is not an accepted mode here. A credential exists to authenticate, so
+ * one that authenticates nothing is an empty row that still reads as
+ * configuration — and an unauthenticated check is already expressible by a
+ * widget selecting no credential at all, which is the same outcome without the
+ * misleading artefact.
  */
 function validateHttpConfig(config: Record<string, unknown>): void {
+  if (config.authMode === undefined || config.authMode === null || config.authMode === "") {
+    throw new AppError(400, `HTTP credential requires an authentication type: ${HTTP_CREDENTIAL_AUTH_MODES.join(", ")}`);
+  }
+  if (typeof config.authMode !== "string" ||
+      !(HTTP_CREDENTIAL_AUTH_MODES as readonly string[]).includes(config.authMode)) {
+    throw new AppError(400, `HTTP credential auth type must be one of: ${HTTP_CREDENTIAL_AUTH_MODES.join(", ")}`);
+  }
+  const authMode = config.authMode as string;
+  const hasUser = typeof config.username === "string" && config.username.length > 0;
+  const hasPass = typeof config.password === "string" && config.password.length > 0;
+
+  if (authMode === "bearer" && !(typeof config.apiToken === "string" && config.apiToken.length > 0)) {
+    throw new AppError(400, "HTTP credential bearer auth needs an API token");
+  }
+  if ((authMode === "basic" || authMode === "digest") && !(hasUser && hasPass)) {
+    // Named per mode: "basic auth needs..." on a digest credential sends the
+    // operator looking for a field that isn't the one they got wrong.
+    throw new AppError(400, `HTTP credential ${authMode} auth needs both a username and a password`);
+  }
+
+  // Drop the carriers this mode does not send, and every field left over from
+  // the pre-split shape. This runs on the MERGED config (validateConfig is
+  // called after mergeConfigPreservingSecrets on both the create and update
+  // paths), which is the only place a stored secret can actually be removed:
+  // blanking a secret in the request body means "keep the stored value" to the
+  // merge, so a client-side clear would preserve the very credential it appears
+  // to delete.
+  if (authMode !== "bearer") delete config.apiToken;
+  if (authMode !== "basic" && authMode !== "digest") {
+    delete config.username;
+    delete config.password;
+  }
+  for (const stale of CHECK_DEFINITION_FIELDS) delete config[stale];
+}
+
+/**
+ * Fields that used to live on an `http` credential and now belong to the check
+ * definition. Stripped on the next save of any credential still carrying them —
+ * the values are not migrated, because the credential had no manufacturer or
+ * model to attribute a widget to and guessing one would invent configuration
+ * nobody wrote.
+ */
+const CHECK_DEFINITION_FIELDS = [
+  "useHttps", "port", "path", "expectStatus", "expectBody",
+  "matchMode", "caseSensitive", "failOnMismatch", "verifyTls",
+] as const;
+
+/**
+ * Validate a CHECK DEFINITION — the half that answers "which request, and what
+ * answer counts as healthy". Shared by the manufacturer custom widget (where it
+ * is stored) and the credential Test Connection flow (where it is supplied ad
+ * hoc), so a check cannot be accepted in one place and rejected in the other.
+ *
+ * Mutates its argument to canonicalize, matching validateConfig's convention:
+ *
+ *  - the regex is COMPILED here, because an invalid pattern would otherwise
+ *    fail once per asset per interval forever, with the operator finding out
+ *    from a probe error column instead of the form they typed it into.
+ *  - `path` is canonicalized (leading slash) so the stored value is what the
+ *    request line will actually carry.
+ *  - `caseSensitive` is only meaningful alongside an `expectBody`; a lone
+ *    toggle is accepted rather than rejected (harmless, and rejecting it would
+ *    400 a form the operator is mid-way through).
+ *  - `failOnMismatch` is STRIPPED. A mismatch now always fails (see
+ *    utils/httpCheck.ts), so a stored `false` would silently mean something the
+ *    UI can no longer express and the evaluator no longer honours.
+ */
+export function validateHttpCheckDefinition(config: Record<string, unknown>): void {
   if (config.useHttps !== undefined && typeof config.useHttps !== "boolean") {
     throw new AppError(400, "HTTP check useHttps must be a boolean");
   }
@@ -359,18 +429,15 @@ function validateHttpConfig(config: Record<string, unknown>): void {
       throw new AppError(400, `HTTP check regex is invalid: ${err?.message || "unparseable"}`);
     }
   }
-  for (const flag of ["caseSensitive", "failOnMismatch", "verifyTls"]) {
+  for (const flag of ["caseSensitive", "verifyTls"]) {
     if (config[flag] !== undefined && typeof config[flag] !== "boolean") {
       throw new AppError(400, `HTTP check ${flag} must be a boolean`);
     }
   }
-  // Basic auth needs both halves. A username with no password would send an
-  // empty credential and read as an auth failure the operator can't explain.
-  const hasUser = typeof config.username === "string" && config.username.length > 0;
-  const hasPass = typeof config.password === "string" && config.password.length > 0;
-  if (hasUser !== hasPass) {
-    throw new AppError(400, "HTTP check basic auth needs both a username and a password");
-  }
+  // Retired knob — see the doc comment. Dropped rather than rejected so an
+  // existing widget re-saves cleanly instead of 400-ing on a field the form
+  // never sent.
+  delete config.failOnMismatch;
 }
 
 export function validateConfig(type: CredentialType, config: Record<string, unknown>): void {

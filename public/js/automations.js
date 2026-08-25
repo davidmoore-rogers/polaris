@@ -253,6 +253,11 @@ var _rulesPage = 1;
       cooldownSec: r.cooldownSec != null ? r.cooldownSec : null,
       messageTemplate: r.messageTemplate != null ? r.messageTemplate : null,
       requireAckNote: r.requireAckNote === true,
+      // MANDATORY. This function backs the list row's enable/disable toggle,
+      // which PUTs the whole record; an omitted nullable Json field is cleared
+      // server-side by jsonOrClear, so leaving this out would delete the
+      // operator's repeat config every time they flipped the switch.
+      repeat: r.repeat || null,
       channels: r.channels || ["in_app"],
       emailComposition: r.emailComposition || null,
       escalation: r.escalation || null,

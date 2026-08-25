@@ -37,7 +37,15 @@ import {
   describeHttpTarget,
   evaluateHttpCheck,
   resolveHttpTarget,
+  resolveHttpAuthMode,
+  type HttpAuthConfig,
 } from "../utils/httpCheck.js";
+import {
+  parseDigestChallenge,
+  buildDigestAuthorization,
+  authSchemesOffered,
+  newCnonce,
+} from "../utils/digestAuth.js";
 import { URL } from "node:url";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as snmp from "net-snmp";
@@ -1725,29 +1733,17 @@ export async function probeAsset(
     const adFallback = asset.dnsName || asset.hostname;
     const targetIp =
       asset.ipAddress ||
-      ((polling === "winrm" || polling === "ssh" || polling === "http") ? adFallback : null);
+      ((polling === "winrm" || polling === "ssh") ? adFallback : null);
     if (!targetIp) return finish(start, false, "Asset has no IP address");
 
     if (polling === "icmp") {
       return await probeIcmp(targetIp, start, timeoutMs);
     }
-    if (polling === "http") {
-      // Same credential chain as snmp/winrm/ssh: the per-stream response-time
-      // credential wins, then the asset default, then the class-override tier.
-      // There is deliberately NO integration fallback and no bare default —
-      // unlike ICMP, an HTTP check has nothing to do without a definition (which
-      // path? expecting what?), so a missing credential is an error naming the
-      // fix rather than a silent GET of "/" that would report a login page as
-      // healthy.
-      if (effectiveRTCred?.type === "http") {
-        return await probeHttp(targetIp, effectiveRTCred.config as Record<string, unknown>, start, timeoutMs, asset.httpCheckPath);
-      }
-      const classCred = await loadClassOverrideStreamCredential(effective.responseTimeCredentialId, "http");
-      if (classCred) {
-        return await probeHttp(targetIp, classCred.config as Record<string, unknown>, start, timeoutMs, asset.httpCheckPath);
-      }
-      return finish(start, false, "HTTP check polling requires an HTTP Check credential — select one on the asset's Monitoring tab");
-    }
+    // NOTE: there is no `polling === "http"` branch. The HTTP check was retired
+    // as a polling method (2026-08) and is now a manufacturer custom widget —
+    // `probeHttp` below is still the engine, but the widget collector calls it,
+    // not this dispatch, and its result lands in AssetStateSample rather than
+    // moving monitorStatus. See utils/pollingCompatibility.ts.
     if (polling === "rest_api") {
       // Fortinet-discovered firewalls reuse the integration's stored API token.
       // (Managed FortiSwitches/FortiAPs are dispatched earlier, above, since
@@ -1819,6 +1815,28 @@ export async function probeAsset(
         return await probeSsh(targetIp, { username, password, port: 22 }, start, timeoutMs);
       }
       return finish(start, false, "No SSH credential selected");
+    }
+    // RETIRED METHOD SAFETY NET. "http" was a polling method until 2026-08 and
+    // is now a manufacturer custom widget. A stored value can still arrive here
+    // because `assertPollingCompatible` validates WRITES only — nothing
+    // re-checks what is already in the DB, and the value can sit in a JSON tier
+    // (manualMonitorSettings, Integration.config per-class blocks) that no
+    // migration realistically reaches. Falling through to the unknown-method
+    // failure below would fail every probe on those assets, i.e. silently
+    // false-down them fleet-wide. ICMP is the honest substitute: it is the
+    // universal response-time fallback and gives up/down without content, which
+    // is the closest thing to what the operator had configured.
+    // The cast is load-bearing: `PollingMethod` no longer includes "http", so
+    // the compiler is certain this branch is dead. It is not — the value comes
+    // from the DATABASE, which the type system has no say over. This is exactly
+    // the case where a narrowed union describes intent rather than reality.
+    if ((polling as string) === "http") {
+      logger.warn(
+        { assetId: asset.id, hostname: asset.hostname },
+        'Asset still configured for the retired "http" polling method — probing over ICMP instead. ' +
+        "Re-point the Response Time stream; the HTTP check now lives on a manufacturer custom widget.",
+      );
+      return await probeIcmp(targetIp, start, timeoutMs);
     }
     return finish(start, false, `Unknown polling method "${polling}"`);
   } catch (err: any) {
@@ -3177,104 +3195,207 @@ async function probeRestApiCredential(config: Record<string, unknown>, start: nu
  *    cap is reached. Without the teardown a device streaming at the check path
  *    would hold a monitor worker for the whole probe timeout, once per interval.
  */
-async function probeHttp(
+/** One completed HTTP exchange, before any check semantics are applied. */
+interface RawHttpExchange {
+  statusCode: number;
+  wwwAuthenticate: string | null;
+  contentType: string | null;
+  body: string;
+  truncated: boolean;
+}
+
+export async function probeHttp(
   host: string,
   config: Record<string, unknown>,
   start: number,
   timeoutMs: number,
   pathOverride?: string | null,
   out?: { diag?: HttpProbeDiagnostics },
+  // The AUTH half, from an `http` Credential. Separate from `config` (the check
+  // definition) since 2026-08: the check lives on a manufacturer widget and the
+  // login on a credential, so one login can serve many checks and vice versa.
+  // Absent = unauthenticated, which is a widget with no credential selected.
+  auth?: Record<string, unknown> | null,
 ): Promise<ProbeResult> {
   const cfg = config as HttpCheckConfig;
+  const authCfg = (auth || {}) as HttpAuthConfig;
   const target = resolveHttpTarget(cfg, pathOverride);
   const reqFn = target.useHttps ? httpsRequest : httpRequest;
+  const authMode = resolveHttpAuthMode(authCfg);
 
-  const headers: Record<string, string> = { "Accept": "*/*" };
-  if (typeof cfg.apiToken === "string" && cfg.apiToken) {
-    headers["Authorization"] = "Bearer " + cfg.apiToken;
-  } else if (typeof cfg.username === "string" && cfg.username && typeof cfg.password === "string" && cfg.password) {
-    headers["Authorization"] = "Basic " + Buffer.from(`${cfg.username}:${cfg.password}`).toString("base64");
+  /**
+   * Issue exactly one GET and resolve with the exchange, or with an error
+   * string when the transport never produced a response. Factored out of the
+   * probe body because Digest needs the same request issued twice — once to
+   * collect the challenge, once carrying the answer.
+   */
+  const issueOnce = (
+    extraAuth: string | null,
+    perRequestTimeoutMs: number,
+  ): Promise<{ exchange?: RawHttpExchange; error?: string }> => {
+    const headers: Record<string, string> = { "Accept": "*/*" };
+    if (extraAuth) headers["Authorization"] = extraAuth;
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (r: { exchange?: RawHttpExchange; error?: string }) => {
+        if (settled) return;
+        settled = true;
+        resolve(r);
+      };
+      const req = reqFn({
+        hostname: host,
+        port:     target.port,
+        path:     target.path,
+        method:   "GET",
+        headers,
+        rejectUnauthorized: cfg.verifyTls === true,
+        timeout:  perRequestTimeoutMs,
+      } as any, (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        let truncated = false;
+        const done = () => {
+          // Node collapses repeated response headers into a single comma-joined
+          // string for www-authenticate (set-cookie is the lone exception),
+          // which is exactly the shape the challenge parser already handles.
+          const wa = res.headers?.["www-authenticate"] as string | string[] | undefined;
+          const ctype = res.headers?.["content-type"];
+          settle({
+            exchange: {
+              statusCode:      res.statusCode || 0,
+              wwwAuthenticate: Array.isArray(wa) ? wa.join(", ") : typeof wa === "string" ? wa : null,
+              contentType:     typeof ctype === "string" ? ctype : null,
+              body:            Buffer.concat(chunks).toString("utf8"),
+              truncated,
+            },
+          });
+        };
+        res.on("data", (chunk: Buffer) => {
+          if (truncated) return;
+          size += chunk.length;
+          if (size >= MAX_BODY_BYTES) {
+            // Keep the slice that fits so a match sitting just under the cap is
+            // still found, then stop: `done` runs now rather than on "end",
+            // because destroying the response means "end" may never arrive.
+            truncated = true;
+            chunks.push(chunk.subarray(0, Math.max(0, MAX_BODY_BYTES - (size - chunk.length))));
+            try { res.destroy(); } catch {}
+            try { req.destroy(); } catch {}
+            done();
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on("end", done);
+        // A connection reset mid-body is a failed check, not a partial success.
+        res.on("error", (err: any) => settle({ error: err?.message || "HTTP response error" }));
+      });
+      req.on("timeout", () => { try { req.destroy(); } catch {}; settle({ error: "HTTP check timed out" }); });
+      req.on("error",   (err) => settle({ error: err.message || "HTTP check error" }));
+      req.end();
+    });
+  };
+
+  // Bearer and Basic are computable up front. Digest is not — its response hash
+  // is keyed on a server-issued nonce, so the first request goes out bare and
+  // the challenge comes back on the 401.
+  let preAuth: string | null = null;
+  if (authMode === "bearer" && typeof authCfg.apiToken === "string" && authCfg.apiToken) {
+    preAuth = "Bearer " + authCfg.apiToken;
+  } else if (authMode === "basic" &&
+             typeof authCfg.username === "string" && authCfg.username &&
+             typeof authCfg.password === "string" && authCfg.password) {
+    preAuth = "Basic " + Buffer.from(`${authCfg.username}:${authCfg.password}`).toString("base64");
   }
 
-  return await new Promise<ProbeResult>((resolve) => {
-    let resolved = false;
-    const finishOnce = (r: ProbeResult) => {
-      if (resolved) return;
-      resolved = true;
-      resolve(r);
-    };
-    const req = reqFn({
-      hostname: host,
-      port:     target.port,
-      path:     target.path,
-      method:   "GET",
-      headers,
-      rejectUnauthorized: cfg.verifyTls === true,
-      timeout:  timeoutMs,
-    } as any, (res) => {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      let truncated = false;
-      const evaluate = () => {
-        const body = Buffer.concat(chunks).toString("utf8");
-        const outcome = evaluateHttpCheck({
-          statusCode: res.statusCode || 0,
-          body,
-          config:     cfg,
-          truncated,
+  const first = await issueOnce(preAuth, timeoutMs);
+  if (first.error || !first.exchange) return finish(start, false, first.error || "HTTP check failed");
+
+  let exchange = first.exchange;
+  let digestNegotiated = false;
+  let authNote: string | null = null;
+
+  // ── Digest handshake ──────────────────────────────────────────────────────
+  // Re-fire exactly ONCE. A server that rejects a correctly-computed response
+  // will reject it again, so retrying past this turns a wrong password into a
+  // request amplifier against the device.
+  if (authMode === "digest" && exchange.statusCode === 401) {
+    const challenge = parseDigestChallenge(exchange.wwwAuthenticate);
+    if (!challenge) {
+      // Named rather than left as a bare 401: a device that answers with Basic
+      // only, or with a malformed challenge, is a configuration finding.
+      const offered = authSchemesOffered(exchange.wwwAuthenticate);
+      authNote = offered.length
+        ? `Device requested ${offered.join("/")} auth, not Digest`
+        : "Device returned 401 with no Digest challenge";
+    } else {
+      try {
+        const auth = buildDigestAuthorization({
+          challenge,
+          username: String(authCfg.username || ""),
+          password: String(authCfg.password || ""),
+          method:   "GET",
+          // The request-URI must be byte-identical to the request line, or the
+          // HA2 hash is computed over something the server never saw.
+          uri:      target.path,
+          cnonce:   newCnonce(),
+          nc:       1,
         });
-        // Diagnostics only when a caller asked for them (the operator-driven
-        // Test Connection path). The monitor hot path passes no out-param, so
-        // it never builds an excerpt or a URL string.
-        if (out) {
-          const ex = bodyExcerpt(body);
-          const ctype = res.headers?.["content-type"];
-          out.diag = {
-            url:                describeHttpTarget(host, target),
-            statusCode:         res.statusCode || 0,
-            contentType:        typeof ctype === "string" ? ctype : null,
-            bytesRead:          Buffer.byteLength(body),
-            bodyTruncatedAtCap: truncated,
-            excerpt:            ex.text,
-            excerptTruncated:   ex.truncated,
-            matched:            outcome.matched,
-          };
+        // Keep the whole exchange inside the caller's timeout budget rather
+        // than granting a fresh one — two full timeouts would let a slow device
+        // hold a monitor worker for twice the configured probe window.
+        const remaining = Math.max(1000, Math.round(timeoutMs - (performance.now() - start)));
+        const second = await issueOnce(auth, remaining);
+        if (second.error || !second.exchange) {
+          return finish(start, false, second.error || "HTTP check failed");
         }
-        // On the failOnMismatch=false path the outcome carries an error string
-        // alongside ok:true. ProbeResult has no slot for "succeeded, but note
-        // this", so the note is dropped here rather than being smuggled into a
-        // success — the operator's own choice was that a mismatch is not a
-        // failure, and a success carrying failure text would confuse the
-        // status pill and the alert email alike. It stays visible on the
-        // Test Connection modal, which reports the outcome directly.
-        if (!outcome.ok) return finishOnce(finish(start, false, outcome.error));
-        finishOnce(finish(start, true));
-      };
-      res.on("data", (chunk: Buffer) => {
-        if (truncated) return;
-        size += chunk.length;
-        if (size >= MAX_BODY_BYTES) {
-          // Keep the slice that fits so a match sitting just under the cap is
-          // still found, then stop: `evaluate` runs now rather than on "end",
-          // because destroying the response means "end" may never arrive.
-          truncated = true;
-          chunks.push(chunk.subarray(0, Math.max(0, MAX_BODY_BYTES - (size - chunk.length))));
-          try { res.destroy(); } catch {}
-          try { req.destroy(); } catch {}
-          evaluate();
-          return;
-        }
-        chunks.push(chunk);
-      });
-      res.on("end", evaluate);
-      // A connection reset mid-body is a failed check, not a partial success:
-      // resolve through `finish` so the reason names the transport.
-      res.on("error", (err: any) => finishOnce(finish(start, false, err?.message || "HTTP response error")));
-    });
-    req.on("timeout", () => { try { req.destroy(); } catch {}; finishOnce(finish(start, false, "HTTP check timed out")); });
-    req.on("error",   (err) => finishOnce(finish(start, false, err.message || "HTTP check error")));
-    req.end();
+        exchange = second.exchange;
+        digestNegotiated = true;
+      } catch (err: any) {
+        // Thrown by buildDigestAuthorization for a qop/algorithm it refuses to
+        // guess at. Surfacing the reason beats a second opaque 401.
+        authNote = err?.message || "Digest authentication failed";
+      }
+    }
+  }
+
+  const outcome = evaluateHttpCheck({
+    statusCode: exchange.statusCode,
+    body:       exchange.body,
+    config:     cfg,
+    truncated:  exchange.truncated,
   });
+
+  // Diagnostics only when a caller asked for them (the operator-driven Test
+  // Connection path). The monitor hot path passes no out-param, so it never
+  // builds an excerpt or a URL string.
+  if (out) {
+    const ex = bodyExcerpt(exchange.body);
+    const offered = authSchemesOffered(exchange.wwwAuthenticate ?? first.exchange.wwwAuthenticate);
+    out.diag = {
+      url:                describeHttpTarget(host, target),
+      statusCode:         exchange.statusCode,
+      contentType:        exchange.contentType,
+      bytesRead:          Buffer.byteLength(exchange.body),
+      bodyTruncatedAtCap: exchange.truncated,
+      excerpt:            ex.text,
+      excerptTruncated:   ex.truncated,
+      matched:            outcome.matched,
+      authRequested:      offered.length ? offered : null,
+      digestNegotiated,
+    };
+  }
+
+  // An outcome can in principle carry error text alongside ok:true; ProbeResult
+  // has no slot for "succeeded, but note this", so such a note is dropped here
+  // rather than being smuggled into a success. The Test Connection modal reports
+  // the outcome directly and so still shows it.
+  if (!outcome.ok) {
+    // `authNote` explains WHY the status is 401 when the digest handshake
+    // could not be completed; without it the operator sees only the code.
+    return finish(start, false, authNote ? `${outcome.error} — ${authNote}` : outcome.error);
+  }
+  return finish(start, true);
 }
 
 /**
@@ -3293,6 +3414,11 @@ export async function probeCredentialAgainstHost(
   // actually returns. Nothing else populates it, and the monitor hot path never
   // passes it — see probeHttp.
   out?: { diag?: HttpProbeDiagnostics },
+  // `http` only: the check definition to exercise. It no longer lives on the
+  // credential (that is auth only), so the Test Connection flow supplies one
+  // straight from its form — which is also what lets a check be dialled in
+  // against a real device BEFORE it is saved onto a manufacturer widget.
+  check?: Record<string, unknown> | null,
 ): Promise<ProbeResult> {
   const start = performance.now();
   // restapi uses config.baseUrl directly, so a missing host on the asset
@@ -3309,11 +3435,13 @@ export async function probeCredentialAgainstHost(
     if (type === "winrm")   return await probeWinRm(host, config, start, timeoutMs);
     if (type === "ssh")     return await probeSsh(host, config, start, timeoutMs);
     if (type === "restapi") return await probeRestApiCredential(config, start, timeoutMs);
-    // No pathOverride: the Test Connection modal tests the CREDENTIAL, and the
-    // asset it borrows a host from is just a routable target — honouring that
-    // asset's httpCheckPath would test a path the credential doesn't define and
-    // report the result as if it did.
-    if (type === "http")    return await probeHttp(host, config, start, timeoutMs, null, out);
+    // `config` is the credential (auth only); the CHECK comes from the caller,
+    // because since the split there is nothing on the credential that says
+    // which request to make. No pathOverride: the modal tests the check it was
+    // handed, and the asset it may have borrowed a host from is just a routable
+    // target — honouring that asset's httpCheckPath would test a different path
+    // and report the result as if it were this one.
+    if (type === "http")    return await probeHttp(host, check || {}, start, timeoutMs, null, out, config);
     return finish(start, false, `Unsupported credential type "${type}"`);
   } catch (err: any) {
     return finish(start, false, err?.message || "Probe failed");
@@ -9919,6 +10047,14 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
   });
   if (widgets.length === 0) return;
 
+  // Two transports now live in this pass. An "http" widget names a request
+  // rather than an OID, so it neither needs an SNMP credential nor obeys the
+  // SNMP polling gate below — gating it there would make an HTTP check depend
+  // on whether the device also answers SNMP, which is exactly the coupling the
+  // move away from a polling method was meant to remove.
+  const httpWidgets = widgets.filter((w: any) => w.widgetType === "http");
+  const snmpWidgets = widgets.filter((w: any) => w.widgetType !== "http");
+
   const effective = await resolveMonitorSettings({
     ...asset,
     discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
@@ -9934,10 +10070,15 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
   // + timeout. The full per-tier hierarchy for these two fields can land
   // alongside a UI for editing them.
   const polling = (asset.customWidgetPolling ?? effective.cpuMemoryPolling) as string | null;
-  if (!polling || polling === "disabled" || polling !== "snmp") return;
+  const snmpEnabled = !!polling && polling !== "disabled" && polling === "snmp";
 
+  // An HTTP check is the one transport happy to dial a NAME rather than an IP:
+  // a TLS check against a name is the check an operator means, since the cert
+  // and any vhost routing are keyed on it.
   const host = asset.ipAddress;
-  if (!host) return;
+  const httpHost = asset.ipAddress || asset.dnsName || asset.hostname;
+  if (!host && !httpHost) return;
+  if (!snmpEnabled && httpWidgets.length === 0) return;
 
   // Credential resolution mirrors the telemetry path: per-stream asset
   // credential wins, then the asset's generic monitor credential, then
@@ -9952,7 +10093,10 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
       snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(direct, asset.discoveredByIntegration);
     } catch { snmpCfg = null; }
   }
-  if (!snmpCfg) return;
+  // A missing SNMP credential no longer aborts the whole pass — it only means
+  // the SNMP half has nothing to authenticate with.
+  const runSnmp = snmpEnabled && !!snmpCfg && !!host && snmpWidgets.length > 0;
+  if (!runSnmp && httpWidgets.length === 0) return;
 
   await ensureRegistryLoaded();
   const scope = { manufacturer: asset.manufacturer, model: asset.model };
@@ -9964,10 +10108,13 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
   const stateRows: Array<{
     probeId: string; rowKey: string; rowLabel: string; value: number; rawValue: string | null;
   }> = [];
+  if (runSnmp) {
   try {
-    await withSnmpSession(host, snmpCfg, async (session) => {
-      for (const w of widgets) {
+    await withSnmpSession(host as string, snmpCfg as Record<string, unknown>, async (session) => {
+      for (const w of snmpWidgets) {
         try {
+          // http widgets carry no OID and are collected by their own pass.
+          if (!w.symbol) continue;
           const oid = resolveOidSync(w.symbol, scope);
           if (!oid) continue;
           if (w.widgetType === "state" && w.stateMap) {
@@ -10058,9 +10205,67 @@ async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
       }
     }, timeoutMs);
   } catch (err) {
-    // Session-level failure — log and move on; lastCustomWidgetAt stays stale.
+    // Session-level failure — log and move on. Deliberately NOT a return: an
+    // http widget on the same profile must still be collected when the SNMP
+    // agent is down, which is half the point of having the check at all.
     logger.debug({ err, assetId }, "Custom widget SNMP session failed");
-    return;
+  }
+  }
+
+  // ── HTTP checks ───────────────────────────────────────────────────────────
+  // Each widget contributes TWO rows: a 0/1 pass/fail to AssetStateSample —
+  // alertable through the existing `customStateValue` metric with no engine
+  // change — and the round-trip time as a scalar gauge, so a slow-but-passing
+  // endpoint is visible before it starts failing.
+  //
+  // The 0/1 is always written, pass or fail. That is the opposite of the state
+  // PROBE rule (which drops an unreadable row, because 0 there is a positive
+  // claim of health about hardware that may not exist): here a failed request
+  // IS the reading, and dropping it would make an outage indistinguishable from
+  // a device nobody checked. The response-time gauge is written only on success
+  // — a failed request has no meaningful duration to chart.
+  if (httpWidgets.length > 0 && httpHost) {
+    const httpTimeoutMs = asset.customWidgetTimeoutMs ?? effective.cpuMemoryTimeoutMs;
+    await Promise.all(httpWidgets.map(async (w: any) => {
+      try {
+        const check = (w.httpCheck ?? {}) as Record<string, unknown>;
+        // The credential is read per widget rather than from the asset chain:
+        // it belongs to the CHECK, which is a property of the manufacturer
+        // profile, not of how this particular asset is monitored.
+        let auth: Record<string, unknown> | null = null;
+        if (w.credentialId) {
+          const cred = await prisma.credential.findUnique({
+            where:  { id: w.credentialId },
+            select: { config: true, type: true },
+          });
+          if (cred?.type === "http") auth = cred.config as Record<string, unknown>;
+        }
+        const started = performance.now();
+        const res = await probeHttp(
+          httpHost,
+          check,
+          started,
+          httpTimeoutMs,
+          // Per-asset path override — the escape hatch for the single device
+          // whose endpoint sits somewhere else. Model targeting covers the rest.
+          asset.httpCheckPath,
+          undefined,
+          auth,
+        );
+        stateRows.push({
+          probeId:  w.id,
+          rowKey:   "",
+          rowLabel: w.name,
+          value:    res.success ? 1 : 0,
+          rawValue: res.success ? null : ((res as any).error ?? "check failed"),
+        });
+        if (res.success) {
+          samples.push({ widgetId: w.id, kind: "scalar", value: res.responseTimeMs });
+        }
+      } catch (err) {
+        logger.debug({ err, assetId, widgetId: w.id }, "HTTP check widget failed");
+      }
+    }));
   }
 
   if (samples.length === 0 && stateRows.length === 0) return;

@@ -1486,7 +1486,9 @@ function _assetsUpdateBulkBar() {
     var hasQuarantined = selected.some(function (a) { return a.status === "quarantined"; });
     var bQ  = document.getElementById("assets-bulk-quarantine-btn");
     var bUQ = document.getElementById("assets-bulk-unquarantine-btn");
-    if (bQ)  bQ.style.display  = count > 0 && hasQuarantineable ? "" : "none";
+    // Quarantine (but not Release) additionally needs push enabled on some
+    // integration — see _quarantinePushAvailable().
+    if (bQ)  bQ.style.display  = count > 0 && hasQuarantineable && _quarantinePushAvailable() ? "" : "none";
     if (bUQ) bUQ.style.display = count > 0 && hasQuarantined    ? "" : "none";
   }
 }
@@ -1630,6 +1632,39 @@ function _renderLeaseBody(r, ctx) {
   '</div>';
 }
 
+// ─── Quarantine push availability ───────────────────────────────────────────
+//
+// Quarantine push is per-integration (`config.pushQuarantine`, the DHCP-Push-
+// style toggle on the Quarantine Push tab of the FortiManager / FortiGate
+// integration) and OFF by default. With it off, quarantineAsset() skips every
+// sighting's integration, lands on zero targets and throws a 502 reading
+// "0/0 FortiGate(s) accepted the push" — a device-shaped failure for what is
+// really an unconfigured feature. So the verbs are hidden instead of offered:
+// GET /assets/quarantine-availability answers whether ANY enabled Fortinet
+// integration carries the toggle.
+//
+// `null` means "not answered yet or the probe failed" and reads as AVAILABLE:
+// fail-open, because the fetch resolves in the first moment of the page while
+// the affordances are only built on a click/panel-open, and hiding a verb an
+// operator needs on a transient error is worse than surfacing the push's own
+// error. Release is never gated — releaseQuarantine unpushes from the targets
+// recorded on the asset without consulting the toggle, so an asset quarantined
+// before push was switched off must stay releasable.
+var _qtnPushEnabled = null;
+
+function _quarantinePushAvailable() { return _qtnPushEnabled !== false; }
+
+if (typeof userReady !== "undefined" && userReady && typeof userReady.then === "function") {
+  userReady.then(function () {
+    // Only roles that can act on it ask — the route is read-gated on the same
+    // key, so a viewer without it would just collect a 403 per page load.
+    if (!canQuarantineAssets()) return null;
+    return api.assets.quarantineAvailability().then(function (r) {
+      _qtnPushEnabled = !!(r && r.pushEnabled);
+    });
+  }).catch(function () { _qtnPushEnabled = null; });
+}
+
 /**
  * Quarantine verbs for one asset row, as row-context-menu items (0 or 1 of them).
  *
@@ -1646,6 +1681,8 @@ function _renderLeaseBody(r, ctx) {
  *  - Fortinet infrastructure (firewall / switch / access point) can never be
  *    quarantined: blocking the device that enforces the block would lock the
  *    operator out of their own network.
+ *  - No enabled Fortinet integration has quarantine push turned on → nothing
+ *    to push to, so no verb (_quarantinePushAvailable).
  */
 /**
  * Every verb offered for one asset row, in menu order:
@@ -1734,6 +1771,9 @@ function _quarantineMenuItems(a) {
     }];
   }
   if (a.assetType === 'firewall' || a.assetType === 'switch' || a.assetType === 'access_point') return [];
+  // No enabled integration has quarantine push turned on — the verb can only
+  // 502 with "0/0 FortiGate(s) accepted the push".
+  if (!_quarantinePushAvailable()) return [];
   return [{
     label: "Quarantine…",
     danger: true,
@@ -3033,7 +3073,6 @@ function assetHaInfo(asset) {
 // on this page) so the Assets table stays self-contained.
 var _MONITORED_VIA_LABELS = {
   agent:    "Agent",
-  http:     "HTTP Check",
   snmp:     "SNMP",
   ssh:      "SSH",
   winrm:    "WinRM",
@@ -3627,11 +3666,12 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   // credential, or a cache that hasn't loaded) the placeholder falls back to "/"
   // rather than the modal blocking on a fetch to caption one field.
   var httpCheckPath = (asset && asset.httpCheckPath) || "";
+  // The placeholder used to show the selected credential's own path. The check
+  // definition no longer lives on a credential, and the widget that owns the
+  // path is chosen by manufacturer + model rather than by anything on this
+  // form, so there is nothing cheap to caption it with — "/" is the honest
+  // fallback rather than a value copied from the wrong place.
   var httpCredPathHint = "";
-  (function () {
-    var cred = (_credentialCache.list || []).filter(function (c) { return c.id === rtCredId; })[0];
-    if (cred && cred.type === "http" && cred.config && cred.config.path) httpCredPathHint = cred.config.path;
-  })();
 
   // Per-stream MIB IDs (null = Automatic).
   var rtMibId   = (asset && asset.responseTimeMibId)  || "";
@@ -3736,17 +3776,19 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   // cadence with Interfaces at the asset tier (Asset row has no separate
   // lldpIntervalSec / storageIntervalSec columns); their subtabs link to
   // Interfaces for those inputs.
-  // Per-asset request-path override for the HTTP Check method. Rendered inside
-  // the Response Time subtab and shown only while that stream resolves to
-  // "http" (refreshStreamCred). Placeholder shows the credential's own path so
-  // the operator can see what they'd be overriding; blank means "no override",
-  // which is why the hint says so explicitly — an empty box next to a URL-ish
-  // placeholder otherwise reads as "requests /".
+  // Per-asset request-path override for HTTP-check WIDGETS. The "http" polling
+  // method it was built for is gone (2026-08) — the check now lives on a
+  // manufacturer custom widget — but the escape hatch it provides is still
+  // wanted: model targeting covers "this model answers elsewhere", and this
+  // covers the single device that does. It is therefore always visible rather
+  // than gated on a polling method, since no stream setting implies it any more.
+  // Blank means "no override", which the hint says explicitly — an empty box
+  // next to a URL-ish placeholder otherwise reads as "requests /".
   function httpPathInput() {
-    return '<div class="form-group" id="f-httpCheckPath-wrap" style="display:none;margin-top:0.5rem">' +
+    return '<div class="form-group" id="f-httpCheckPath-wrap" style="margin-top:0.5rem">' +
       '<label>HTTP check path override</label>' +
       '<input type="text" id="f-httpCheckPath" maxlength="1024" value="' + escapeHtml(httpCheckPath) + '" placeholder="' + escapeHtml(httpCredPathHint || "/") + '" style="max-width:360px">' +
-      '<p class="hint">Overrides the path on the selected HTTP Check credential, for a device whose health endpoint sits somewhere else. Leave blank to use the credential\'s path.</p>' +
+      '<p class="hint">Overrides the path used by any HTTP-check widget on this device\'s manufacturer profile, for a device whose health endpoint sits somewhere else. Leave blank to use the widget\'s own path.</p>' +
     '</div>';
   }
   function bodyResponseTime() {
@@ -4067,10 +4109,6 @@ function _credTypeForPolling(method) {
   if (method === "winrm")    return "winrm";
   if (method === "ssh")      return "ssh";
   if (method === "rest_api") return "restapi";
-  // The http method's whole definition (path, expected status, expected body,
-  // auth) lives on its credential, so unlike the others this picker is not
-  // optional — without a selection the probe has nothing to request.
-  if (method === "http")     return "http";
   return null;
 }
 
@@ -4143,13 +4181,6 @@ async function _wireMonitorEditTab(asset) {
     // MIB sub-row appears only when the stream is set to SNMP. Streams that
     // don't carry a MIB picker (storage) have no wrap div to toggle.
     if (mibWrap && streamDef.mibId) mibWrap.style.display = (method === "snmp") ? "flex" : "none";
-    // HTTP-check path override lives on the Response Time subtab only, and only
-    // while that stream is on the http method. Hidden rather than removed so a
-    // typed-then-reconsidered value survives a method flip-flop before save.
-    if (streamDef.pollId === "f-responseTimePolling") {
-      var httpWrap = document.getElementById("f-httpCheckPath-wrap");
-      if (httpWrap) httpWrap.style.display = (method === "http") ? "block" : "none";
-    }
   }
 
   function refresh() {
@@ -5104,7 +5135,10 @@ async function openViewModal(id) {
     // Gated on assetsQuarantine, NOT assets — see canQuarantineAssets() in
     // app.js. A role may hold either key without the other, and every route the
     // tab calls checks the quarantine key.
-    if (canQuarantineAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ))) {
+    // ...and only offered on a not-yet-quarantined asset when quarantine push
+    // is enabled somewhere (_quarantinePushAvailable); an already-quarantined
+    // asset keeps the tab regardless so Release + the push targets stay visible.
+    if (canQuarantineAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ && _quarantinePushAvailable()))) {
       tabs.push({ key: "quarantine", label: a.status === "quarantined" ? "Quarantine ⚠" : "Quarantine", html: _assetQuarantineTabHTML(a) });
     }
     // Events tab — audit history scoped to this asset (resourceType=asset,
@@ -10001,7 +10035,6 @@ function _probeMethodLabel(a) {
     case "winrm":    return "WinRM";
     case "ssh":      return "SSH";
     case "icmp":     return "ICMP ping";
-    case "http":     return "HTTP check";
     default:         return polling;
   }
 }
@@ -10084,7 +10117,7 @@ function _assetMonitorStreamSource(asset, stream) {
   // operator a quick visual confirmation of which credential the probe is
   // about to use without opening the edit modal.
   var cred = asset.monitorCredential;
-  if ((resolved === "snmp" || resolved === "winrm" || resolved === "ssh" || resolved === "rest_api" || resolved === "http") && cred && cred.name) {
+  if ((resolved === "snmp" || resolved === "winrm" || resolved === "ssh" || resolved === "rest_api") && cred && cred.name) {
     polling += " · " + cred.name;
   }
   return { polling: polling, source: sourceName };
@@ -19818,7 +19851,7 @@ function _monsetOpenOverrideEditor(existing) {
   // sub-rows rendered by _classStreamSubtabHTML. Sub-row visibility rules:
   //   - credential row for a credtype shows when the picked method needs that
   //     credtype (snmp → snmp credrow, ssh → ssh credrow, winrm → winrm
-  //     credrow, http → HTTP Check credrow; rest_api / icmp / disabled → no
+  //     credrow; rest_api / icmp / disabled → no
   //     credrow)
   //   - MIB row shows when picked method is snmp
   var STREAMS_FULL = ["responseTime", "cpuMemory", "temperature", "interfaces", "lldp", "storage"];
@@ -19826,7 +19859,6 @@ function _monsetOpenOverrideEditor(existing) {
     if (method === "snmp")  return "snmp";
     if (method === "ssh")   return "ssh";
     if (method === "winrm") return "winrm";
-    if (method === "http")  return "http";
     return null;
   }
   function _ovPollFieldFor(streamKey) {
@@ -19845,7 +19877,7 @@ function _monsetOpenOverrideEditor(existing) {
       var pollEl = document.getElementById(pollId);
       var method = pollEl ? pollEl.value : "";
       // Per-credtype rows are siblings: <pollId>-credrow-<credtype>
-      ["snmp", "ssh", "winrm", "http"].forEach(function (credType) {
+      ["snmp", "ssh", "winrm"].forEach(function (credType) {
         var row = document.getElementById(pollId + "-credrow-" + credType);
         if (!row) return;
         row.style.display = (_credtypeForMethod(method) === credType) ? "" : "none";

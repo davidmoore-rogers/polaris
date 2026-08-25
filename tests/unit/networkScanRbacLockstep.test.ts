@@ -26,7 +26,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { FUNCTION_KEYS } from "../../src/api/middleware/permissions.js";
 
-const MIGRATION = resolve(__dirname, "../../prisma/migrations/20260825000000_network_scan/migration.sql");
+const MIGRATION = resolve(__dirname, "../../prisma/migrations/20260825040000_network_scan/migration.sql");
 const sql = () => readFileSync(MIGRATION, "utf8");
 
 /** The level the migration seeds for a role name, read out of the UPDATE blocks. */

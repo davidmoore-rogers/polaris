@@ -60,14 +60,35 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
+/**
+ * Since the 2026-08 split, the credential carries AUTH and the check definition
+ * is supplied separately (it lives on a manufacturer widget, or comes from the
+ * Test Connection form). These cases predate that and were written as one blob,
+ * so the helper divides it the way the two owners now do — which keeps each
+ * test asserting exactly what it always did.
+ */
+const AUTH_KEYS = new Set(["authMode", "apiToken", "username", "password"]);
+
+function splitConfig(config: Record<string, unknown>) {
+  const auth: Record<string, unknown> = {};
+  const check: Record<string, unknown> = { port };
+  for (const [k, v] of Object.entries(config)) {
+    if (AUTH_KEYS.has(k)) auth[k] = v;
+    else check[k] = v;
+  }
+  return { auth, check };
+}
+
 function probe(config: Record<string, unknown>) {
-  return probeCredentialAgainstHost("127.0.0.1", "http", { port, ...config });
+  const { auth, check } = splitConfig(config);
+  return probeCredentialAgainstHost("127.0.0.1", "http", auth, undefined, check);
 }
 
 /** Same probe, capturing the operator-facing diagnostics. */
 async function probeWithDiag(config: Record<string, unknown>) {
   const out: { diag?: HttpProbeDiagnostics } = {};
-  const result = await probeCredentialAgainstHost("127.0.0.1", "http", { port, ...config }, out);
+  const { auth, check } = splitConfig(config);
+  const result = await probeCredentialAgainstHost("127.0.0.1", "http", auth, out, check);
   return { result, diag: out.diag };
 }
 
@@ -106,9 +127,12 @@ describe("http probe — content match", () => {
     expect(r.success).toBe(false);
     expect(r.error).toContain("Expected text not found");
   });
-  it("failOnMismatch:false keeps a mismatched 200 up", async () => {
+  // The `failOnMismatch` escape hatch is gone — a mismatch always fails. A
+  // stored value cannot re-open it, which is the property worth pinning: the
+  // field is stripped on save, so anything still carrying one is a legacy row.
+  it("a mismatched 200 fails even with a leftover failOnMismatch:false", async () => {
     const r = await probe({ path: "/degraded", expectBody: "OK", failOnMismatch: false });
-    expect(r.success).toBe(true);
+    expect(r.success).toBe(false);
   });
   it("regex mode matches against the real body", async () => {
     expect((await probe({ path: "/healthz", expectBody: "^Status:\\s+OK$", matchMode: "regex" })).success).toBe(true);
@@ -205,14 +229,19 @@ describe("http probe — Test Connection diagnostics (tailoring the check)", () 
     expect(diag?.matched).toBe(null);
   });
 
-  it("reports the match verdict separately from pass/fail, which is what lets the two disagree", async () => {
-    // failOnMismatch:false is exactly the case where the probe passes and the
-    // content did not match. The operator has to be able to see both.
-    const { result, diag } = await probeWithDiag({
-      path: "/degraded", expectBody: "OK", failOnMismatch: false,
-    });
-    expect(result.success).toBe(true);
-    expect(diag?.matched).toBe(false);
+  it("distinguishes 'expectation failed' from 'no expectation set'", async () => {
+    // `matched` is three-valued for the modal's benefit: false means the string
+    // was looked for and missing, null means nothing was configured yet. Those
+    // need different messages — the second is the state every operator is in on
+    // their first test, and rendering it as a failed match would send them
+    // hunting for a problem with the device.
+    const missed = await probeWithDiag({ path: "/degraded", expectBody: "OK" });
+    expect(missed.result.success).toBe(false);
+    expect(missed.diag?.matched).toBe(false);
+
+    const unset = await probeWithDiag({ path: "/degraded" });
+    expect(unset.result.success).toBe(true);
+    expect(unset.diag?.matched).toBeNull();
   });
 
   it("reports diagnostics on a FAILING status too — that response is the diagnosis", async () => {

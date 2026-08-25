@@ -30,6 +30,9 @@ import { resolve } from "node:path";
 const assetsSrc = readFileSync(resolve(__dirname, "../../public/js/assets.js"), "utf8");
 const appSrc = readFileSync(resolve(__dirname, "../../public/js/app.js"), "utf8");
 const assetsHtml = readFileSync(resolve(__dirname, "../../public/assets.html"), "utf8");
+const mobileSrc = readFileSync(resolve(__dirname, "../../public/js/mobile/asset-detail.js"), "utf8");
+const apiSrc = readFileSync(resolve(__dirname, "../../public/js/api.js"), "utf8");
+const assetsRouteSrc = readFileSync(resolve(__dirname, "../../src/api/routes/assets.ts"), "utf8");
 
 describe("quarantine reason dialog", () => {
   // Three desktop paths can start a quarantine — the row menu, the bulk bar and
@@ -98,3 +101,112 @@ describe("quarantine UI gates", () => {
   });
 });
 
+describe("quarantine push availability gates", () => {
+  // `config.pushQuarantine` is per-integration and off by default; with it off
+  // everywhere a push resolves to zero targets and 502s with "0/0 FortiGate(s)
+  // accepted the push". Every surface that OFFERS a quarantine therefore checks
+  // availability first — and no surface that RELEASES one does, because
+  // releaseQuarantine unpushes from the targets recorded on the asset without
+  // consulting the toggle.
+  it("assets.js caches the answer and fails open", () => {
+    expect(assetsSrc).toMatch(/function _quarantinePushAvailable\(\) \{ return _qtnPushEnabled !== false; \}/);
+    // Fetched once per page load behind the quarantine key, and a failed probe
+    // returns to the fail-open null rather than latching "unavailable".
+    expect(assetsSrc).toMatch(/if \(!canQuarantineAssets\(\)\) return null;[\s\S]{0,200}quarantineAvailability\(\)/);
+    expect(assetsSrc).toMatch(/catch\(function \(\) \{ _qtnPushEnabled = null; \}\)/);
+  });
+
+  it("the row menu withholds Quarantine but never Release", () => {
+    // The function is ~20 lines; a generous slice keeps the assertion off
+    // any brace-matching cleverness.
+    const fn = assetsSrc.split("function _quarantineMenuItems(a) {")[1]!.slice(0, 1200);
+    const releaseAt = fn.indexOf("Release quarantine");
+    const gateAt = fn.indexOf("_quarantinePushAvailable()");
+    expect(gateAt).toBeGreaterThan(-1);
+    // The gate sits AFTER the already-quarantined early return.
+    expect(gateAt).toBeGreaterThan(releaseAt);
+  });
+
+  it("the bulk bar gates Quarantine and not Release", () => {
+    expect(assetsSrc).toMatch(/bQ\.style\.display\s*=\s*count > 0 && hasQuarantineable && _quarantinePushAvailable\(\)/);
+    const unq = assetsSrc.match(/bUQ\.style\.display.*/)![0];
+    expect(unq).not.toContain("_quarantinePushAvailable");
+  });
+
+  it("the details tab still shows for an already-quarantined asset", () => {
+    // ...so Release and the recorded push targets stay reachable after an
+    // operator turns the toggle off.
+    expect(assetsSrc).toMatch(
+      /if \(canQuarantineAssets\(\) && \(a\.status === "quarantined" \|\| \(hasMac && !isInfraQ && _quarantinePushAvailable\(\)\)\)\)/,
+    );
+  });
+
+  it("the mobile sheet gates its Quarantine button the same way", () => {
+    expect(mobileSrc).toMatch(/if \(hasMac && !isInfra && quarantinePushAvailable\(\)\)/);
+    expect(mobileSrc).toMatch(/function quarantinePushAvailable\(\) \{ return _qtnPushEnabled !== false; \}/);
+    // Release is rendered before that branch and must stay ungated.
+    const html = mobileSrc.split("function quarantineButtonHtml(asset) {")[1]!.slice(0, 1200);
+    expect(html.indexOf("Release Quarantine")).toBeLessThan(html.indexOf("quarantinePushAvailable()"));
+  });
+
+  it("the API client points at the route, which is declared above GET /:id", () => {
+    expect(apiSrc).toContain('request("GET", "/assets/quarantine-availability")');
+    // Express matches in declaration order — below /:id the literal path would
+    // be swallowed as an asset id.
+    expect(assetsRouteSrc.indexOf('"/quarantine-availability"')).toBeGreaterThan(-1);
+    expect(assetsRouteSrc.indexOf('"/quarantine-availability"'))
+      .toBeLessThan(assetsRouteSrc.indexOf('router.get("/:id"'));
+  });
+});
+
+describe("quarantine RBAC defaults", () => {
+  // Quarantine is its own function key rather than a level of `assets`, so the
+  // built-in matrices are the only thing that decides who can reach it out of
+  // the box. Asset admins are the intended default holder — containing a device
+  // is asset work — while the network/user roles get read (they can see the
+  // Quarantine tab's state, not push). Pinned against the seed because a role
+  // matrix is a wall of JSON where a dropped key reads as `none` and silently
+  // takes the feature away from the role it exists for.
+  const seed = readFileSync(
+    resolve(__dirname, "../../prisma/migrations/20260524000000_roles_table_cutover/migration.sql"),
+    "utf8",
+  );
+  const matrixFor = (role: string) => {
+    const after = seed.split(`'${role}',`)[1]!;
+    return after.slice(0, after.indexOf("::jsonb"));
+  };
+
+  it("seeds assetsadmin with quarantine write", () => {
+    expect(matrixFor("assetsadmin")).toContain('"assetsQuarantine":"write"');
+  });
+
+  it("seeds admin with fullwrite and the read-only roles with read", () => {
+    expect(matrixFor("admin")).toContain('"assetsQuarantine":"fullwrite"');
+    for (const role of ["readonly", "networkadmin", "user"]) {
+      expect(matrixFor(role), role).toContain('"assetsQuarantine":"read"');
+    }
+  });
+
+  it("every quarantine route gates on the key, never on assets", () => {
+    // Includes the availability probe the frontends read: a route that answered
+    // to `assets:read` would hand the fleet's quarantine posture to any viewer.
+    for (const path of [
+      '"/:id/quarantine-status"',
+      '"/:id/quarantine"',
+      '"/:id/quarantine/verify"',
+      '"/bulk-quarantine"',
+      '"/bulk-quarantine/release"',
+      '"/quarantine-availability"',
+    ]) {
+      // EVERY declaration of the path, not just the first — /:id/quarantine is
+      // both the POST that pushes and the DELETE that releases.
+      let at = assetsRouteSrc.indexOf(path);
+      expect(at, path).toBeGreaterThan(-1);
+      while (at > -1) {
+        // The gate rides the same route declaration, within a couple of lines.
+        expect(assetsRouteSrc.slice(at, at + 260), path).toContain('requirePermission("assetsQuarantine"');
+        at = assetsRouteSrc.indexOf(path, at + 1);
+      }
+    }
+  });
+});

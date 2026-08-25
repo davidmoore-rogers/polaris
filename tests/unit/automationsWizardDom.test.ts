@@ -488,6 +488,106 @@ describe("automation wizard DOM render", () => {
     expect(() => ruleInputSchema.parse(p)).not.toThrow();
   });
 
+  it("repeat control: hydrates from a stored rule and round-trips through save", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-rep",
+      name: "Repeating alert",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.com"] }],
+      repeat: { everyMin: 20, stopOn: "clear", stopAfterHours: 8 },
+    });
+    expect(toastErrors).toEqual([]);
+
+    // Step 5 renders the control checked, with the stored values.
+    // Edit mode unlocks every step, so jump via the stepper.
+    (doc.querySelectorAll("#aw-stepper .stepper-step")[4] as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 10));
+    const on = doc.querySelector("#aw-repeat-on") as unknown as { checked: boolean } | null;
+    const every = doc.querySelector("#aw-repeat-every") as unknown as { value: string } | null;
+    const stopOn = doc.querySelector("#aw-repeat-stopon") as unknown as { value: string } | null;
+    const after = doc.querySelector("#aw-repeat-stopafter") as unknown as { value: string } | null;
+    expect(on?.checked).toBe(true);
+    expect(every?.value).toBe("20");
+    expect(stopOn?.value).toBe("clear");
+    expect(after?.value).toBe("8");
+
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const payload = savedPayloads[0]! as Record<string, any>;
+    expect(payload.repeat).toEqual({ everyMin: 20, stopOn: "clear", stopAfterHours: 8 });
+    expect(() => ruleInputSchema.parse(payload)).not.toThrow();
+  });
+
+  it("repeat control: omits stopAfterHours when blank, which is the unbounded default", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-rep2",
+      name: "Unbounded",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.com"] }],
+      repeat: { everyMin: 15, stopOn: "acknowledge" },
+    });
+    // Edit mode unlocks every step, so jump via the stepper.
+    (doc.querySelectorAll("#aw-stepper .stepper-step")[4] as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 10));
+    const after = doc.querySelector("#aw-repeat-stopafter") as unknown as { value: string } | null;
+    expect(after?.value).toBe("");
+
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    const payload = savedPayloads[0]! as Record<string, any>;
+    expect(payload.repeat).toEqual({ everyMin: 15, stopOn: "acknowledge" });
+    expect(payload.repeat).not.toHaveProperty("stopAfterHours");
+  });
+
+  it("repeat control: an automation that does not repeat saves repeat: null", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-norep",
+      name: "No reminders",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.com"] }],
+    });
+    // Edit mode unlocks every step, so jump via the stepper.
+    (doc.querySelectorAll("#aw-stepper .stepper-step")[4] as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 10));
+    const on = doc.querySelector("#aw-repeat-on") as unknown as { checked: boolean } | null;
+    expect(on?.checked).toBe(false);
+    // The fields stay hidden until it is turned on.
+    const fields = doc.querySelector("#aw-repeat-fields") as unknown as { hidden: boolean } | null;
+    expect(fields?.hidden).toBe(true);
+
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect((savedPayloads[0] as Record<string, any>).repeat).toBeNull();
+  });
+
   it("action rows fold to their summary, closed by default — and a row you ADD opens", async () => {
     doc.body.innerHTML = "";
     savedPayloads.length = 0;

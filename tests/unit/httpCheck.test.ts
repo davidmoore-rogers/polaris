@@ -147,19 +147,19 @@ describe("evaluateHttpCheck", () => {
     expect(r.error).toContain("Expected text not found");
   });
 
-  it("failOnMismatch:false keeps the probe up but preserves the mismatch as evidence", () => {
-    const r = evaluateHttpCheck({
-      statusCode: 200, body: "nope", config: { expectBody: "OK", failOnMismatch: false },
+  // There used to be a `failOnMismatch` escape hatch that let a mismatch pass.
+  // It is gone: the check is a widget that records an outcome and an automation
+  // decides what "down" means, so a mismatch recorded as a PASS would make
+  // `expectBody` decorative — nothing downstream could tell the two apart. A
+  // laxer rule is expressed by leaving `expectBody` empty instead.
+  it("a mismatch always fails, and a leftover failOnMismatch cannot re-open it", () => {
+    const legacy = evaluateHttpCheck({
+      statusCode: 200, body: "nope",
+      config: { expectBody: "OK", failOnMismatch: false } as any,
     });
-    expect(r.ok).toBe(true);
-    expect(r.matched).toBe(false);
-    expect(r.error).toContain("Expected text not found");
-  });
-
-  it("an ABSENT failOnMismatch is the strict reading, not the loose one", () => {
-    // Defaults matter here: a stored credential written before the toggle
-    // existed must enforce the check, not silently ignore it.
-    expect(evaluateHttpCheck({ statusCode: 200, body: "nope", config: { expectBody: "OK" } }).ok).toBe(false);
+    expect(legacy.ok).toBe(false);
+    expect(legacy.matched).toBe(false);
+    expect(legacy.error).toContain("Expected text not found");
   });
 
   it("a match on an accepted status is a plain success", () => {

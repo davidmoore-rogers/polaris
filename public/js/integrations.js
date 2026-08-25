@@ -11,7 +11,6 @@
 
 var _POLLING_LABELS = {
   rest_api: "REST API",
-  http:     "HTTP Check",
   snmp:     "SNMP",
   winrm:    "WinRM",
   ssh:      "SSH",
@@ -34,19 +33,18 @@ var _POLLING_LABELS = {
 // discovered first can be vCenter-merged; the backend enforces the actual
 // requirement (a vcenter-vm source on the asset) at save time. The stream
 // gate below limits the method to CPU/Memory.
-// "http" (an operator-defined HTTP GET health check, definition stored on an
-// http-typed Credential) is on every source — the question "does this thing
-// still serve its page" applies to appliances and hosts alike. The stream gate
-// below limits it to Response Time.
+// The "http" method was RETIRED (2026-08): the HTTP GET health check it ran is
+// now a manufacturer custom widget, keyed by manufacturer + optional model
+// rather than by credential. Mirrors src/utils/pollingCompatibility.ts.
 var _POLLING_COMPAT = {
-  fortimanager:    ["rest_api", "http", "snmp", "ssh", "icmp", "disabled"],
-  fortigate:       ["rest_api", "http", "snmp", "ssh", "icmp", "disabled"],
-  activedirectory: ["http", "icmp", "winrm", "ssh", "disabled", "vcenter"],
-  entraid:         ["http", "icmp", "winrm", "ssh", "disabled", "vcenter"],
-  windowsserver:   ["http", "icmp", "winrm", "ssh", "disabled", "vcenter"],
-  azurearc:        ["http", "icmp", "winrm", "ssh", "disabled", "vcenter"],
-  vcenter:         ["http", "icmp", "snmp", "winrm", "ssh", "disabled", "vcenter"],
-  manual:          ["rest_api", "http", "snmp", "winrm", "ssh", "icmp", "disabled", "vcenter"],
+  fortimanager:    ["rest_api", "snmp", "ssh", "icmp", "disabled"],
+  fortigate:       ["rest_api", "snmp", "ssh", "icmp", "disabled"],
+  activedirectory: ["icmp", "winrm", "ssh", "disabled", "vcenter"],
+  entraid:         ["icmp", "winrm", "ssh", "disabled", "vcenter"],
+  windowsserver:   ["icmp", "winrm", "ssh", "disabled", "vcenter"],
+  azurearc:        ["icmp", "winrm", "ssh", "disabled", "vcenter"],
+  vcenter:         ["icmp", "snmp", "winrm", "ssh", "disabled", "vcenter"],
+  manual:          ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "vcenter"],
 };
 
 // Per-stream method restriction — mirrors STREAM_METHODS in
@@ -97,12 +95,6 @@ function _streamAllowedMethods(source, stream) {
   // isMethodValidForStream (pollingCompatibility.ts).
   if (stream !== "cpuMemory") {
     allowed = allowed.filter(function (m) { return m !== "vcenter"; });
-  }
-  // "http" is responseTime-only — same method-level guard, same file. An HTTP
-  // GET returns a status code and a body; there is no CPU figure, interface
-  // list, sensor reading or mount table in that.
-  if (stream !== "responseTime") {
-    allowed = allowed.filter(function (m) { return m !== "http"; });
   }
   return allowed;
 }
@@ -1616,10 +1608,8 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
   // source there.
   var credRows = "";
   if (showStreamCredentials) {
-    ["snmp", "ssh", "winrm", "http"].forEach(function (credType) {
-      var label = credType === "winrm" ? "WinRM"
-        : credType === "http" ? "HTTP Check"
-        : credType.toUpperCase();
+    ["snmp", "ssh", "winrm"].forEach(function (credType) {
+      var label = credType === "winrm" ? "WinRM" : credType.toUpperCase();
       var rows = credentials.filter(function (c) { return c.type === credType; });
       // Pre-select the saved credential only when it actually exists in this
       // credtype's list — guards against the saved value belonging to a
@@ -3649,7 +3639,7 @@ function _wireStreamCredentialPickerVisibility(rootEl) {
     var pollId = sel.id;
     if (!pollId) return;
     var value = sel.value || "";
-    ["snmp", "ssh", "winrm", "http"].forEach(function (credType) {
+    ["snmp", "ssh", "winrm"].forEach(function (credType) {
       var row = document.getElementById(pollId + "-credrow-" + credType);
       if (!row) return;
       row.style.display = (value === credType) ? "" : "none";
@@ -4017,7 +4007,6 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
     var credType = method === "snmp" ? "snmp"
       : method === "ssh"   ? "ssh"
       : method === "winrm" ? "winrm"
-      : method === "http"  ? "http"
       : null;
     if (!credType) return null;
     var credEl = document.getElementById(tierId(pollField) + "-cred-" + credType);

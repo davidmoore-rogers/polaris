@@ -1,9 +1,10 @@
 /**
  * src/utils/httpCheck.ts
  *
- * Pure evaluation core for the "http" polling method — an HTTP GET against a
- * device that decides "up" from the STATUS CODE and, optionally, from a string
- * the response body must contain. Everything here is side-effect free so the
+ * Pure evaluation core for the HTTP CHECK — an HTTP GET against a device whose
+ * result is decided by the STATUS CODE and, optionally, by a string the response
+ * body must contain. It ran as a polling method until 2026-08 and is now a
+ * manufacturer custom widget (business rule 33). Everything here is side-effect free so the
  * decision can be unit-tested without a socket; `probeHttp` in
  * monitoringService.ts owns the transport and calls `evaluateHttpCheck` with
  * what came back.
@@ -13,13 +14,17 @@
  * Neither proves the thing the device exists to do still works: a web server
  * that has lost its backend still completes the TCP handshake and still
  * returns 200 — with an error page in the body. So the body match is the
- * load-bearing half of this method, and `failOnMismatch` (default TRUE) is what
- * makes it load-bearing: a 200 whose body doesn't match reads as DOWN, with the
- * reason naming the content that was missing rather than a generic failure.
- * Operators who want reachability-only semantics turn that toggle off and get
- * the mismatch recorded in the probe's error text while the probe still
- * succeeds — a deliberate middle state, not a no-op: it keeps the evidence
- * without alerting on it.
+ * load-bearing half of this check: a 200 whose body doesn't match FAILS, with
+ * the reason naming the content that was missing rather than a generic failure.
+ *
+ * There was a `failOnMismatch` toggle that let a mismatch pass anyway. It made
+ * sense while this drove `monitorStatus` and an operator might want
+ * reachability-only semantics — but the check is a manufacturer widget now: it
+ * records an outcome and an automation decides what "down" means. A mismatch
+ * recorded as a PASS would make "expected content" decorative, since nothing
+ * downstream could tell the two apart. So a mismatch always fails, and an
+ * operator who wants a laxer rule simply leaves `expectBody` empty and judges
+ * on the status code.
  *
  * ── Deliberate non-features ──────────────────────────────────────────────────
  * REDIRECTS ARE NOT FOLLOWED. A 302 to a login page is the single most common
@@ -56,12 +61,38 @@ export const MAX_EXCERPT_CHARS = 4 * 1024;
 export type HttpMatchMode = "contains" | "regex";
 
 /**
- * The check definition. Stored on an `http`-typed Credential (so it is
- * selectable at the asset / class-override / integration tiers and its
- * `apiToken` / `password` are sealed at rest), except for `path`, which an
- * asset may override via `Asset.httpCheckPath` — one credential describes the
- * shape of the check, a per-device path handles the device whose health
- * endpoint sits somewhere else.
+ * The AUTHENTICATION half — what an `http`-typed Credential stores, and all it
+ * stores.
+ *
+ * Split out from the check definition in 2026-08, when the HTTP check moved
+ * from a polling method to a manufacturer custom widget. The two halves vary on
+ * different axes and belong to different owners: a login is per-vendor (or
+ * per-site), while "which path, expecting what" is per-vendor-and-model. Keeping
+ * them on one row meant a second path needed a second copy of the same
+ * password, and changing the password meant editing every path.
+ */
+export interface HttpAuthConfig {
+  /**
+   * Which auth scheme to present. ABSENT is not "none" — it means the row
+   * predates this field, and `resolveHttpAuthMode` infers the pre-existing
+   * behaviour from whichever carrier is populated. See that function.
+   */
+  authMode?: HttpAuthMode;
+  /** Sent as `Authorization: Bearer <token>`. Sealed at rest. */
+  apiToken?: string;
+  /** With `password`, sent as HTTP Basic or Digest per `authMode`. */
+  username?: string;
+  /** Sealed at rest. */
+  password?: string;
+}
+
+/**
+ * The CHECK definition — which request to make and what answer counts as
+ * healthy. Owned by a `ManufacturerCustomWidget` with `widgetType: "http"`
+ * (keyed by manufacturer + optional model), and accepted ad hoc by the
+ * credential Test Connection flow so a check can be dialled in before it is
+ * saved anywhere. `Asset.httpCheckPath` overrides just the path, for the one
+ * device whose endpoint sits somewhere else.
  */
 export interface HttpCheckConfig {
   /** https when true, http otherwise. Default false (plain HTTP). */
@@ -82,16 +113,53 @@ export interface HttpCheckConfig {
   matchMode?: HttpMatchMode;
   /** Default false — `contains` and `regex` both fold case unless this is on. */
   caseSensitive?: boolean;
-  /** Default TRUE — a content mismatch fails the probe. See header note. */
-  failOnMismatch?: boolean;
   /** Default false, matching the restapi credential (self-signed device certs). */
   verifyTls?: boolean;
-  /** Sent as `Authorization: Bearer <token>`. Sealed at rest. */
-  apiToken?: string;
-  /** With `password`, sent as HTTP Basic. Ignored when `apiToken` is set. */
-  username?: string;
-  /** Sealed at rest. */
-  password?: string;
+}
+
+/**
+ * How the check authenticates.
+ *
+ * "digest" is the reason this is an explicit field rather than an inference:
+ * Basic and Digest are carried by the same username/password pair, so once
+ * Digest exists there is nothing in the stored config that could distinguish
+ * them. Guessing — try Basic, fall back on a 401 — would send the password in
+ * cleartext to any device that answers a Digest challenge, which is precisely
+ * the exposure Digest exists to avoid.
+ */
+export type HttpAuthMode = "none" | "bearer" | "basic" | "digest";
+
+/**
+ * Modes an `http` CREDENTIAL may be saved with. "none" is deliberately absent:
+ * a credential exists to authenticate, and a credential that authenticates
+ * nothing is an empty row that reads as configuration. Unauthenticated checks
+ * are expressed by a widget selecting NO credential at all, which is the same
+ * outcome without the misleading artefact.
+ */
+export const HTTP_CREDENTIAL_AUTH_MODES: readonly HttpAuthMode[] = ["bearer", "basic", "digest"];
+
+/**
+ * Every mode the PROBE can execute. "none" stays here because it is the state
+ * of a widget with no credential attached — the probe must be able to express
+ * "send no Authorization header".
+ */
+export const HTTP_AUTH_MODES: readonly HttpAuthMode[] = ["none", "bearer", "basic", "digest"];
+
+/**
+ * Resolve the effective auth mode, defaulting a credential saved before the
+ * field existed to exactly what it used to do: `apiToken` won over a
+ * username/password pair, and neither meant unauthenticated. Every consumer
+ * (validation, the probe, the Test Connection diagnostics) reads the mode
+ * through here so a stored row cannot mean one thing to the validator and
+ * another to the socket.
+ */
+export function resolveHttpAuthMode(config: HttpAuthConfig): HttpAuthMode {
+  const declared = config.authMode;
+  if (declared && (HTTP_AUTH_MODES as readonly string[]).includes(declared)) return declared;
+  if (typeof config.apiToken === "string" && config.apiToken) return "bearer";
+  if (typeof config.username === "string" && config.username &&
+      typeof config.password === "string" && config.password) return "basic";
+  return "none";
 }
 
 /**
@@ -191,6 +259,17 @@ export interface HttpProbeDiagnostics {
   excerptTruncated: boolean;
   /** The current expectation's verdict; null when none is configured yet. */
   matched: boolean | null;
+  /**
+   * Auth schemes the device offered in `WWW-Authenticate`, when it challenged.
+   * Null when it never did. This is the single most useful thing a failing
+   * probe can report: "you configured Basic and it asked for Digest" is
+   * otherwise indistinguishable from a wrong password, since both arrive as a
+   * bare 401. Scheme names only — no realm, no nonce, nothing carrying a
+   * credential.
+   */
+  authRequested: string[] | null;
+  /** True when a Digest challenge was answered and the request re-sent. */
+  digestNegotiated: boolean;
 }
 
 /** Trim a body down to what the test modal will show. Pure. */
@@ -215,11 +294,7 @@ export function describeHttpTarget(host: string, target: ResolvedHttpTarget): st
 export interface HttpCheckOutcome {
   /** Whether the probe counts as a success. */
   ok: boolean;
-  /**
-   * Populated whenever something was off — INCLUDING on `ok: true`, which is
-   * the `failOnMismatch: false` content-mismatch case. The probe path surfaces
-   * it as the probe's error text so the evidence survives without alerting.
-   */
+  /** Populated whenever something was off. */
   error?: string;
   /** true/false when a body expectation existed, null when none did. */
   matched: boolean | null;
@@ -264,8 +339,9 @@ export function evaluateHttpCheck(args: {
     ? `the first ${Math.floor(MAX_BODY_BYTES / 1024)} KB of the response body`
     : "the response body";
   const kind = config.matchMode === "regex" ? "pattern" : "text";
-  const detail = `Expected ${kind} not found in ${where} (HTTP ${statusCode})`;
-  // failOnMismatch defaults to true — an absent value is the strict reading.
-  if (config.failOnMismatch === false) return { ok: true, error: detail, matched: false };
-  return { ok: false, error: detail, matched: false };
+  return {
+    ok: false,
+    error: `Expected ${kind} not found in ${where} (HTTP ${statusCode})`,
+    matched: false,
+  };
 }

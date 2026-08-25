@@ -398,6 +398,7 @@ model Credential {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  customWidgets                   ManufacturerCustomWidget[] @relation("ManufacturerCustomWidgetCredential")
   assets                          Asset[]                @relation("AssetMonitorCred") // default credential back-relation
   rtAssets                        Asset[]                @relation("AssetRTCred")
   cpuMemoryAssets                 Asset[]                @relation("AssetCpuMemCred")
@@ -3349,11 +3350,32 @@ model ManufacturerCustomWidget {
   profileId      String
   profile        ManufacturerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
   name           String // operator-set label, e.g. "Connected Wireless Clients"
-  symbol         String
-  mibId          String
-  mib            MibFile             @relation("ManufacturerCustomWidgetMib", fields: [mibId], references: [id])
+  // symbol + mibId are SNMP concepts and are NULL on an "http" widget, which
+  // names a request rather than an OID. They remain required for every other
+  // widgetType — enforced in manufacturerProfileService rather than by the
+  // column, because the requirement is per-widgetType and a DB constraint
+  // cannot express that.
+  symbol         String?
+  mibId          String?
+  mib            MibFile?            @relation("ManufacturerCustomWidgetMib", fields: [mibId], references: [id])
   type           String              @default("scalar") // "scalar" | "table" (auto-detected; operator can override)
-  widgetType     String // "gauge" | "line" | "table" | "state"
+  widgetType     String // "gauge" | "line" | "table" | "state" | "http"
+  // -- HTTP checks (widgetType = "http") -----------------------------------
+  // The check DEFINITION (useHttps / port / path / expectStatus / expectBody /
+  // matchMode / caseSensitive / failOnMismatch / verifyTls), validated by
+  // credentialService.validateHttpCheckDefinition -- the same function the Test
+  // Connection flow uses, so a check cannot pass a test and then be rejected on
+  // save. It lives here rather than on a Credential because a check varies by
+  // vendor AND MODEL while a login varies by vendor or site; sharing one row
+  // made a second path need a second copy of the same password.
+  httpCheck      Json?
+  // The `http`-typed Credential supplying authentication. NULL = unauthenticated,
+  // which is how an open health endpoint is expressed (the credential type has
+  // no "none" mode for exactly this reason). SetNull rather than Cascade: losing
+  // a credential must not silently delete the check that used it -- the widget
+  // should survive and fail loudly until a new credential is chosen.
+  credentialId   String?
+  credential     Credential?         @relation("ManufacturerCustomWidgetCredential", fields: [credentialId], references: [id], onDelete: SetNull)
   transform      String?
   displayOptions Json                @default("{}")
   order          Int                 @default(0)
@@ -3988,6 +4010,20 @@ model NotificationRule {
   // seeds this from the trigger's notify actions as they are created, so new
   // automations tell the same people it recovered.
   resetActions Json?
+  // Re-send this alert's notifications while it stays unhandled:
+  // { everyMin, stopOn: "acknowledge" | "clear", stopAfterHours? }.
+  //
+  // Only escalation TIERS could repeat before this — the engine's initial fire
+  // sent once and never revisited it, so an alert nobody looked at went quiet.
+  // Swept by the same escalateNotifications tick, keyed REPEAT_STATE_KEY in
+  // Notification.escalationState.
+  //
+  // Deliberately NO maxRepeats: the operator asked for unbounded, and the
+  // optional stopAfterHours is the escape hatch. Repeats re-run NOTIFY actions
+  // only (REPEATABLE_ACTION_TYPES) — unbounded re-execution of a
+  // ticket-creating webhook or a registry script is not symmetric with an extra
+  // email. NULL = never repeats, which is every pre-feature automation.
+  repeat Json?
   createdBy    String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
