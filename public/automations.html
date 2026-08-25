@@ -105,13 +105,15 @@
       </div>
 
       <!-- ─── Address Book tab ──────────────────────────────────────────────
-           Named email addresses alerts can route to, each optionally owning a
-           set of devices. Gated by the ownership-dimensioned contacts key:
-           read browses, write adds + curates your own rows. The recipient
-           picker in the automation wizard renders this same list. -->
+           Every address an alert can route to. Gated by the ownership-
+           dimensioned contacts key: read browses, write adds + curates your
+           own rows. The panel is rendered by PolarisAddressBook.renderTab as
+           the SAME two panes (People / Regions) the recipient picker in the
+           automation wizard opens — one renderer, so the page that manages
+           recipients can't show less than the modal that picks them. -->
       <div class="page-tab-panel" id="auto-tab-contacts">
         <p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">
-          Email addresses Polaris can send alerts to, whether or not the recipient has a Polaris account — a distribution list, an on-call rotation, a vendor NOC. Give an entry a <strong>device filter</strong> and an automation's <strong>Notify</strong> action can route to “the contacts responsible for the triggering device” instead of a hand-picked list.
+          Everyone and everywhere Polaris can send an alert: address-book <strong>contacts</strong> (an address with no Polaris account — a distribution list, an on-call rotation, a vendor NOC), <strong>Polaris user accounts</strong>, your organization's <strong>directory</strong> where an integration opted in, and the <strong>regions</strong> drawn on the Device Map. Give a contact a <strong>device filter</strong> and an automation's <strong>Notify</strong> action can route to “the contacts responsible for the triggering device” instead of a hand-picked list.
         </p>
         <div id="contacts-list"><p class="empty-state">Loading...</p></div>
       </div>
