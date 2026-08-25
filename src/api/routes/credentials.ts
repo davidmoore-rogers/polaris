@@ -190,8 +190,15 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
     // The check definition is validated with the same function the widget uses,
     // so a check cannot pass here and be rejected when it is saved.
     const check: Record<string, unknown> = { ...(input.check || {}) };
+    // An `http` test with an EMPTY config is testing an unauthenticated check —
+    // the state of a widget with no credential attached, which is a legitimate
+    // and common thing to want to try. Validating it as a credential would
+    // demand an authMode and make that untestable, so the credential half is
+    // validated only when the caller actually supplied one.
+    const skipCredentialValidation =
+      input.type === "http" && Object.keys(config).length === 0;
     try {
-      credentialService.validateConfig(input.type, config);
+      if (!skipCredentialValidation) credentialService.validateConfig(input.type, config);
       if (input.type === "http") credentialService.validateHttpCheckDefinition(check);
     } catch (err: any) {
       // Surface validation errors as the test result rather than a 4xx so
