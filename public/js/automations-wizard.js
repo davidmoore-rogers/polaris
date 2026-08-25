@@ -1146,7 +1146,7 @@ async function openAutomationWizard(existing, opts) {
       scope: { allAssets: true },
       trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: null, forDurationSec: 0 },
       reset: null, // defaulted per trigger type on Step-4 entry
-      cooldownSec: null, messageTemplate: null, requireAckNote: false,
+      cooldownSec: null, messageTemplate: null, requireAckNote: false, repeat: null,
       // The audit Event is an action now, present by default — a new
       // automation behaves like every existing one until someone removes it.
       actions: [{ type: "event" }], escalation: null,
@@ -3405,6 +3405,104 @@ async function openAutomationWizard(existing, opts) {
     return bits.length ? " — " + bits.join(", ") : "";
   }
 
+  /** Server-published caps + copy vocabulary for the repeat control. */
+  function repeatMeta() {
+    return (s && s.repeatMeta) || { minEveryMin: 5, maxEveryMin: 1440, unbounded: true, maxStopAfterHours: 720 };
+  }
+
+  /**
+   * "Repeat this notification until it's handled".
+   *
+   * Three things the copy has to state because none of them can be inferred:
+   * reminders re-send NOTIFICATIONS only (API calls and scripts run once, at
+   * the first fire); cooldown limits how often a NEW alert fires and does not
+   * limit reminders; and reminders cannot be exercised from the Test-delivery
+   * button, because a test Notification carries ruleId null on purpose so the
+   * sweep can't enlist it.
+   */
+  function repeatControlHtml() {
+    var m = repeatMeta();
+    var r = draft.repeat || null;
+    return '' +
+      '<label style="display:block;margin:0.6rem 0 0;font-weight:400">' +
+        '<input type="checkbox" id="aw-repeat-on"' + (r ? " checked" : "") + '> ' +
+        'Repeat this notification until it’s handled' +
+      '</label>' +
+      '<div id="aw-repeat-fields" style="margin:4px 0 0 1.4rem"' + (r ? "" : ' hidden') + '>' +
+        '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+          '<span style="font-size:0.85rem">Re-send every</span>' +
+          '<input type="number" id="aw-repeat-every" class="input" min="' + m.minEveryMin + '" max="' + m.maxEveryMin + '" ' +
+                 'value="' + escapeHtml(r && r.everyMin != null ? String(r.everyMin) : "15") + '" style="width:5rem">' +
+          '<span style="font-size:0.85rem">minutes, until</span>' +
+          '<select id="aw-repeat-stopon" class="input" style="width:auto">' +
+            '<option value="acknowledge"' + (!r || r.stopOn !== "clear" ? " selected" : "") + '>Acknowledged</option>' +
+            '<option value="clear"' + (r && r.stopOn === "clear" ? " selected" : "") + '>Cleared only</option>' +
+          '</select>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap">' +
+          '<span style="font-size:0.85rem">…and give up after</span>' +
+          '<input type="number" id="aw-repeat-stopafter" class="input" min="1" max="' + m.maxStopAfterHours + '" ' +
+                 'placeholder="never" value="' + escapeHtml(r && r.stopAfterHours != null ? String(r.stopAfterHours) : "") + '" style="width:5rem">' +
+          '<span style="font-size:0.85rem">hours (optional)</span>' +
+        '</div>' +
+        '<p id="aw-repeat-note" style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0"></p>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0">' +
+          'Reminders re-send the notifications only — API calls and scripts run once, when the alert first fires. ' +
+          'Cooldown limits how often a <em>new</em> alert fires; it does not limit reminders. ' +
+          'The Test delivery button can’t exercise reminders.' +
+        '</p>' +
+      '</div>';
+  }
+
+  /** The live volume line + the two conditional warnings. */
+  function syncRepeatNote() {
+    var panel = document.getElementById("aw-step-5");
+    if (!panel) return;
+    var on = panel.querySelector("#aw-repeat-on");
+    var fields = panel.querySelector("#aw-repeat-fields");
+    if (fields) fields.hidden = !(on && on.checked);
+    var note = panel.querySelector("#aw-repeat-note");
+    if (!note || !on || !on.checked) return;
+
+    var every = Number((panel.querySelector("#aw-repeat-every") || {}).value) || 0;
+    var stopAfter = Number((panel.querySelector("#aw-repeat-stopafter") || {}).value) || 0;
+    var bits = [];
+    if (every >= 1) {
+      var perDay = Math.round((24 * 60) / every);
+      // Per RECIPIENT, because the count is unknowable client-side the moment a
+      // dynamic pill is in play.
+      bits.push("Every " + every + " minutes = about <strong>" + perDay + " per day, per recipient</strong>" +
+        (stopAfter ? ", stopping after " + stopAfter + " hour" + (stopAfter === 1 ? "" : "s") + "." : ", until someone acknowledges or the alert clears."));
+      if (draftHasDynamicRecipient()) bits.push("× everyone those recipients resolve to at fire time.");
+    }
+    // Manual reset means nothing clears it on its own, so "until it's handled"
+    // really does mean forever.
+    if (draft.reset && draft.reset.mode === "manual") {
+      bits.push('<span style="color:var(--color-warning)">This automation only clears when someone clears it by hand, so reminders will not stop on their own.</span>');
+    }
+    if (draftHasAnyEscalation()) {
+      bits.push("This automation also escalates; a reminder and an escalation can arrive in the same minute.");
+    }
+    note.innerHTML = bits.join(" ");
+  }
+
+  /** Does any notify action route to a recipient resolved at fire time? */
+  function draftHasDynamicRecipient() {
+    return (draft.actions || []).some(function (a) {
+      return a && a.type === "notify" && (a.recipientDeviceRegion || a.recipientAssetContacts ||
+        a.recipientAllUsers || a.recipientAllRegions || (a.recipientDeviceRegionLevels || []).length);
+    });
+  }
+
+  function draftHasAnyEscalation() {
+    if (draft.escalation && (draft.escalation.tiers || []).length) return true;
+    if ((draft.actions || []).some(function (a) { return a && a.escalation && (a.escalation.tiers || []).length; })) return true;
+    return ((draft.severityBands || []).some(function (b) {
+      return (b && b.escalation && (b.escalation.tiers || []).length) ||
+        (b && (b.actions || []).some(function (a) { return a && a.escalation && (a.escalation.tiers || []).length; }));
+    }));
+  }
+
   function actionSummary(a) {
     if (a.type === "notify") {
       var ch = chanById(a.channelId);
@@ -3451,6 +3549,7 @@ async function openAutomationWizard(existing, opts) {
           'Require a note when acknowledging' +
         '</label>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 1.4rem">Acknowledging asks what the problem was and what the fix was, and won’t go through empty. Escalation still stops on acknowledge.</p>' +
+        repeatControlHtml() +
       '</div>';
 
     // Per-severity action sections: with severity bands, each tier CAN get its
@@ -3624,6 +3723,17 @@ async function openAutomationWizard(existing, opts) {
       refreshMirrorNote(panel);
     });
 
+    var repToggle = panel.querySelector("#aw-repeat-on");
+    if (repToggle) {
+      ["#aw-repeat-on", "#aw-repeat-every", "#aw-repeat-stopon", "#aw-repeat-stopafter"].forEach(function (sel) {
+        var el = panel.querySelector(sel);
+        if (el) el.addEventListener(el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input", function () {
+          if (sel === "#aw-repeat-on") { collectStep5(); }
+          syncRepeatNote();
+        });
+      });
+      syncRepeatNote();
+    }
     var perSevCb = panel.querySelector("#aw-band-actions-multi");
     if (perSevCb) {
       perSevCb.addEventListener("change", function () {
@@ -5586,6 +5696,27 @@ async function openAutomationWizard(existing, opts) {
     if (msgEl) draft.messageTemplate = msgEl.value.trim() || null;
     var ackNoteEl = panel.querySelector("#aw-require-ack-note");
     if (ackNoteEl) draft.requireAckNote = ackNoteEl.checked;
+    // Repeat-until-handled, also a property of the alert record.
+    var repOn = panel.querySelector("#aw-repeat-on");
+    if (repOn) {
+      if (!repOn.checked) {
+        draft.repeat = null;
+      } else {
+        var every = Number((panel.querySelector("#aw-repeat-every") || {}).value);
+        var stopOnEl = panel.querySelector("#aw-repeat-stopon");
+        var afterRaw = (panel.querySelector("#aw-repeat-stopafter") || {}).value;
+        var rep = {
+          everyMin: isNaN(every) ? 0 : every,
+          stopOn: stopOnEl && stopOnEl.value === "clear" ? "clear" : "acknowledge",
+        };
+        // Blank means unbounded, which is the default the operator asked for —
+        // so the key is omitted rather than sent as 0.
+        if (afterRaw !== "" && afterRaw != null && !isNaN(Number(afterRaw))) {
+          rep.stopAfterHours = Number(afterRaw);
+        }
+        draft.repeat = rep;
+      }
+    }
     // The BASE severity section's chain is the rule-level escalation (the engine
     // resolves it for an alert sitting at the base severity).
     var baseSecC = panel.querySelector("#aw-actions") && panel.querySelector("#aw-actions").closest(".form-group");
@@ -5902,6 +6033,12 @@ async function openAutomationWizard(existing, opts) {
     var ackNoteRow = draft.requireAckNote
       ? '<dt>Acknowledging</dt><dd>requires a note</dd>'
       : "";
+    var repeatRow = draft.repeat
+      ? '<dt>Reminders</dt><dd>every ' + escapeHtml(String(draft.repeat.everyMin)) + ' min until ' +
+          (draft.repeat.stopOn === "clear" ? "cleared" : "acknowledged") +
+          (draft.repeat.stopAfterHours ? ", giving up after " + escapeHtml(String(draft.repeat.stopAfterHours)) + "h" : " — no limit") +
+        '</dd>'
+      : "";
     var resetRow = (draft.resetActions && draft.resetActions.length)
       ? '<dt>When it resets</dt><dd>' + draft.resetActions.map(function (a) { return escapeHtml(actionSummary(a)); }).join("<br>") + '</dd>'
       : '<dt>When it resets</dt><dd><span style="color:var(--color-text-tertiary)">nothing — the alert just clears</span></dd>';
@@ -5928,6 +6065,7 @@ async function openAutomationWizard(existing, opts) {
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
       msgRow +
       ackNoteRow +
+      repeatRow +
       '<dt>Actions</dt><dd>' + (actionLines.length ? actionLines.join("<br>") : '<span style="color:var(--color-text-tertiary)">in-app alert only</span>') + '</dd>' +
       resetRow +
       bandsRow +
@@ -6057,6 +6195,7 @@ async function openAutomationWizard(existing, opts) {
       // Reset actions: the wizard's mirror markers are wizard-only, and the
       // server schema is strict.
       resetActions: draft.resetActions && draft.resetActions.length ? stripMirrorMarks(draft.resetActions) : null,
+      repeat: draft.repeat || null,
     };
   }
 
@@ -6157,6 +6296,7 @@ function _awDraftFromRule(r) {
     // undefined (never set) vs null (deliberately off) matters: a NEW draft
     // seeds its reset list from the trigger, a stored rule shows what it saved.
     resetActions: Array.isArray(r.resetActions) && r.resetActions.length ? JSON.parse(JSON.stringify(r.resetActions)) : null,
+    repeat: r.repeat ? JSON.parse(JSON.stringify(r.repeat)) : null,
     // Per-severity actions are opt-in on the Actions step; a stored rule opts in
     // iff any band actually carries its own actions/escalation.
     bandActionsPerSeverity: (Array.isArray(r.severityBands) ? r.severityBands : []).some(function (b) {

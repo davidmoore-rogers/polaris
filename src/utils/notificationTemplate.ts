@@ -87,6 +87,8 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{asset.tags}", label: "Asset tags", description: "Asset tags, comma-joined", group: "asset" },
   { token: "{escalation.tier}", label: "Escalation tier", description: "Escalation tier number (empty on the initial email)", group: "escalation" },
   { token: "{escalation.elapsed}", label: "Escalation elapsed", description: "Time since the notification fired (e.g. 1h 30m)", group: "escalation" },
+  { token: "{repeat.attempt}", label: "Reminder number", description: "Which reminder this is (empty on the initial notification)", group: "escalation" },
+  { token: "{repeat.elapsed}", label: "Reminder elapsed", description: "Time since the alert fired, on a reminder (e.g. 1h 30m)", group: "escalation" },
 ];
 
 /** Escape a string for safe embedding in HTML text/attribute content. */
@@ -174,6 +176,9 @@ export interface TemplateContextParts {
   assetDetail?: AssetTemplateDetail | null;
   escalationTier?: number;
   escalationElapsed?: string;
+  /** Which reminder this is; empty on the initial notification. */
+  repeatAttempt?: number;
+  repeatElapsed?: string;
 }
 
 const str = (v: string | null | undefined): string => v ?? "";
@@ -265,6 +270,12 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     // substituted per recipient at delivery-expansion time.
     "escalation.tier": parts.escalationTier !== undefined ? String(parts.escalationTier) : "",
     "escalation.elapsed": str(parts.escalationElapsed),
+    // Present-but-EMPTY on the initial send, exactly like the escalation pair
+    // above. The renderer leaves an unknown token in place, so a subject
+    // containing {repeat.attempt} would print the literal braces on the first
+    // email if these keys were absent. The sweep's repeat pass supplies them.
+    "repeat.attempt": parts.repeatAttempt !== undefined ? String(parts.repeatAttempt) : "",
+    "repeat.elapsed": str(parts.repeatElapsed),
   };
 }
 

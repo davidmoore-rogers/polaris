@@ -441,6 +441,10 @@ export interface ExpandDeliveriesOptions {
   /** Escalation provenance (tier/attempt) — stamped into every row's meta so
    *  the View tab's "Escalated" marker and audits can attribute the send. */
   escalation?: { tier: number; attempt: number };
+  /** Repeat provenance (attempt) — a SEPARATE meta key from `escalation`, so a
+   *  reminder is never mistaken for an escalation by anything reading the
+   *  delivery history. */
+  repeat?: { attempt: number };
 }
 
 export async function expandDeliveries(
@@ -448,7 +452,7 @@ export async function expandDeliveries(
   targets: DeliveryTarget[] | undefined,
   opts: ExpandDeliveriesOptions = {},
 ): Promise<number> {
-  const { scopeRegionTags, assetRegionTags, assetContactEmails, composedEmail, escalation } = opts;
+  const { scopeRegionTags, assetRegionTags, assetContactEmails, composedEmail, escalation, repeat } = opts;
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -478,10 +482,17 @@ export async function expandDeliveries(
     const key = `${channelId}|${transport}|${target}`;
     if (seen.has(key)) return;
     seen.add(key);
-    const withEsc = escalation
-      ? ({ ...(meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {}), escalation } as Prisma.InputJsonValue)
+    // Fold in whichever provenance is present, and keep meta strictly
+    // undefined when neither is — so every pre-feature path still writes a
+    // byte-identical row.
+    const provenance = escalation || repeat
+      ? ({
+          ...(meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {}),
+          ...(escalation ? { escalation } : {}),
+          ...(repeat ? { repeat } : {}),
+        } as Prisma.InputJsonValue)
       : meta;
-    rows.push({ notificationId, channelId, transport, target, meta: withEsc ?? undefined });
+    rows.push({ notificationId, channelId, transport, target, meta: provenance ?? undefined });
     rowAck.push(ackFor ?? null);
   };
 

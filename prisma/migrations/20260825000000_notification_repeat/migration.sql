@@ -1,0 +1,30 @@
+-- Repeat an alert's notifications while it stays unhandled.
+--
+-- Only escalation TIERS could repeat before this: escalationTierV2Schema has
+-- carried repeatEveryMin / maxRepeats since escalation v2, but the engine's
+-- fire() sends the base actions exactly once and never revisits them. So an
+-- alert nobody acknowledged simply went quiet after its first email, and the
+-- only way to fake a reminder was an escalation tier pointed at the same
+-- recipients — which arrives labelled "[ESCALATION n]" and is conceptually a
+-- different thing.
+--
+-- Shape: { everyMin: 5..1440, stopOn: "acknowledge" | "clear",
+--          stopAfterHours?: 1..720 | null }.
+--
+-- A RULE-level field, not per-action, for the same reason requireAckNote is:
+-- the repeat is a property of the alert RECORD, and two actions on one
+-- automation must not be able to disagree about when it is "handled". Not
+-- folded into the existing `escalation` JSON either — escalationSchema.tiers is
+-- .min(1), so a repeat-only automation would need a fake tier and every
+-- `tiers.length > 0` test across allEscalationsOf / ruleHasAnyEscalation /
+-- escalationChainsForSeverity would start lying.
+--
+-- Deliberately NO maxRepeats. Unbounded-until-handled is the requested
+-- behaviour; stopAfterHours is an optional, blank-by-default escape hatch so a
+-- holiday-weekend surprise doesn't need an emergency edit to a live automation.
+--
+-- NULL is the pre-feature behaviour and stays that way on every existing row —
+-- nothing retroactively starts re-sending. Deliberately NOT seeded into the
+-- baseline automations either: unbounded email out of the box is a bad default
+-- for a fresh install.
+ALTER TABLE "notification_rules" ADD COLUMN "repeat" JSONB;

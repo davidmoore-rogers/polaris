@@ -22,6 +22,25 @@
  * always-composed, "[ESCALATION n]" default-subject prefix) reproduces the
  * pre-v2 emails byte-for-byte.
  *
+ * REPEATS: the same sweep also re-sends an alert's own notifications while it
+ * stays unhandled (`NotificationRule.repeat`). Only escalation TIERS could
+ * repeat before — the engine's fire() sends the base actions once and never
+ * revisits them, so an alert nobody acknowledged went quiet after one email.
+ * Reused rather than given its own job because this function already owns
+ * unhandled-detection, the maintenance/dependency suppression pause, per-key
+ * state on escalationState, templateCtx rendering and batched state writes; a
+ * second job would re-load every enabled rule and re-query the unhandled set
+ * every minute for nothing.
+ *
+ * Two properties of a repeat differ from a tier, deliberately: it re-runs
+ * NOTIFY actions only (REPEATABLE_ACTION_TYPES — unbounded re-execution of a
+ * ticket-creating webhook or a registry script is not symmetric with an extra
+ * email), and it is UNBOUNDED unless the operator sets `stopAfterHours`, which
+ * is why it cannot reuse tierIsDue (that resolves maxRepeats ?? 5).
+ *
+ * Repeats land on the 60s tick, so real spacing is everyMin + up to 60s of
+ * jitter. That is fine at a 5-minute floor — don't "fix" the drift.
+ *
  * Rendering context = the fire-time Notification.templateCtx snapshot (exact
  * fire-time metric/asset values, survives asset deletion) plus the live
  * {escalation.tier}/{escalation.elapsed} tokens. Per-tier progress lives on
@@ -43,6 +62,10 @@ import { executeActions } from "./automationActionService.js";
 import { scopeRegionTagsOf } from "./notificationRecipientService.js";
 import {
   normalizeRuleToV2,
+  effectiveActionsForSeverity,
+  REPEAT_STATE_KEY,
+  REPEATABLE_ACTION_TYPES,
+  type RepeatConfig,
   normalizeEscalationToV2,
   escalationChainsForSeverity,
   escalationTierStateKey,
@@ -69,6 +92,8 @@ interface EscalationRule {
   escalation: EscalationV2Config | null;
   /** Severity bands — band-level chains + per-band-action chains. */
   severityBands: SeverityBand[] | null;
+  /** Re-send while unhandled; null = never repeats. */
+  repeat: RepeatConfig | null;
 }
 
 /** Every escalation chain a rule can present — rule-level, per-action,
@@ -124,7 +149,59 @@ export function tierIsDue(
   return now.getTime() - new Date(tierState.lastSentAt).getTime() >= tier.repeatEveryMin * 60_000;
 }
 
-/** One sweep pass. Returns the number of tier executions (tiers that ran ≥1 action). */
+/**
+ * Is a repeat due now?
+ *
+ * A SIBLING of tierIsDue rather than a reuse of it, and that matters: tierIsDue
+ * resolves `tier.maxRepeats ?? DEFAULT_MAX_REPEATS`, so driving repeats through
+ * a synthetic tier would silently stop after 5 — exactly the cap this feature
+ * was asked NOT to have.
+ *
+ * The initial notification IS the first send, so repeat #1 is due one interval
+ * after `startAt` (band-entry when banded, else the fire time) and each
+ * subsequent one an interval after the last.
+ */
+export function repeatIsDue(
+  repeat: { everyMin: number; stopAfterHours?: number | null },
+  startAt: Date,
+  state: TierState | undefined,
+  now: Date,
+): boolean {
+  if (repeat.stopAfterHours && now.getTime() - startAt.getTime() >= repeat.stopAfterHours * 3_600_000) {
+    return false;
+  }
+  const since = state ? new Date(state.lastSentAt).getTime() : startAt.getTime();
+  return now.getTime() - since >= repeat.everyMin * 60_000;
+}
+
+/**
+ * The fire-time token context a follow-up renders from. Shared by the tier and
+ * repeat passes so a reminder can't end up describing the alert differently
+ * from an escalation of the same alert.
+ *
+ * Pre-feature notifications (and any rule that snapshotted none) fall back to a
+ * minimal context built from the row — see ruleWantsContext in the engine,
+ * which is why `repeat` had to be threaded into DbRule.
+ */
+function followUpContext(
+  n: { templateCtx: unknown; assetHostname: string | null; severity: string; triggeredAt: Date; message: string },
+  rule: EscalationRule,
+): Record<string, string> {
+  return n.templateCtx && typeof n.templateCtx === "object"
+    ? (n.templateCtx as Record<string, string>)
+    : buildTemplateContext({
+        asset: n.assetHostname ?? "",
+        severity: n.severity,
+        time: n.triggeredAt,
+        link: notificationsPageUrl(),
+        message: n.message,
+        ruleName: rule.name,
+        ruleDescription: rule.description,
+      });
+}
+
+/** One sweep pass. Returns the number of follow-up executions (escalation tiers
+ *  plus repeats) that ran at least one action. */
 export async function runEscalationSweep(now = new Date()): Promise<number> {
   // Escalation rules are few — load enabled rules and filter in memory (same
   // posture as the engine's per-tick rule load). Normalize through the v2
@@ -134,7 +211,7 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
     select: {
       id: true, name: true, description: true, scope: true, emailComposition: true, severity: true,
       escalation: true, targets: true, clearBehavior: true, clearAfterSec: true, reset: true, actions: true,
-      severityBands: true,
+      severityBands: true, repeat: true,
     },
   });
   const rules = new Map<string, EscalationRule>();
@@ -150,18 +227,27 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
       actions: v2.actions,
       escalation: v2.escalation,
       severityBands: v2.severityBands,
+      repeat: v2.repeat,
     };
-    // Include the rule if ANY chain exists (rule-level, per-action, or band).
-    if (allEscalationsOf(rule).length > 0) rules.set(r.id, rule);
+    // Include the rule if ANY chain exists (rule-level, per-action, or band)
+    // OR it repeats — a repeat-only automation has no chains at all.
+    if (allEscalationsOf(rule).length > 0 || rule.repeat) rules.set(r.id, rule);
   }
   if (rules.size === 0) return 0;
 
   // Candidates: uncleared notifications of escalation rules past the earliest
   // tier delay (across tier 0 + every band). Bounded by the active-unhandled
   // set, not fleet size.
-  const minAfterMin = Math.min(
+  // Both kinds of follow-up contribute a delay. Math.min() of NOTHING is
+  // Infinity, and `new Date(now - Infinity)` is an Invalid Date that makes the
+  // Prisma filter useless — reachable as soon as a repeat-only rule is the only
+  // rule, so the empty case is guarded rather than assumed away.
+  const dueMins = [
     ...Array.from(rules.values()).flatMap((r) => allEscalationsOf(r).flatMap((e) => e.tiers.map((t) => t.afterMin))),
-  );
+    ...Array.from(rules.values()).flatMap((r) => (r.repeat ? [r.repeat.everyMin] : [])),
+  ];
+  if (dueMins.length === 0) return 0;
+  const minAfterMin = Math.min(...dueMins);
   const notifs = await prisma.notification.findMany({
     where: {
       cleared: false,
@@ -198,18 +284,23 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
 
   const stateUpdates: { id: string; state: EscalationState }[] = [];
   let tierRuns = 0;
+  let repeatRuns = 0;
 
   for (const n of notifs) {
     const rule = rules.get(n.ruleId!);
     if (!rule) continue;
+    // SUPPRESSION FIRST. It applies to both kinds of follow-up, and the chain
+    // check below used to sit above it with an early `continue` — which a
+    // repeat-only automation (no chains at all) would hit, silently disabling
+    // the whole feature. Nothing may early-continue between the two passes.
+    if (n.assetId && suppressedAssetIds.has(n.assetId)) continue; // silenced — resumes post-window
+
     // Value-driven escalation: the alert's CURRENT band (its severity) selects
     // which chains apply — the band's level chain + its actions' chains (empty
     // band → the base actions' chains, matching the engine's action fallback).
     // The engine resets escalationState on every band change, so a newly-
     // entered band's tiers start their timers fresh.
     const chains = escalationChainsForSeverity(rule, n.severity);
-    if (chains.length === 0) continue;
-    if (n.assetId && suppressedAssetIds.has(n.assetId)) continue; // silenced — resumes post-window
 
     const state = stateOf(n.escalationState);
     // Timers run from band-entry when banded (bandSince), else the fire time.
@@ -229,17 +320,7 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
 
         // Context: fire-time snapshot + live escalation tokens. Pre-feature
         // notifications (no templateCtx) get a minimal context from the row.
-        const base = n.templateCtx && typeof n.templateCtx === "object"
-          ? (n.templateCtx as Record<string, string>)
-          : buildTemplateContext({
-              asset: n.assetHostname ?? "",
-              severity: n.severity,
-              time: n.triggeredAt,
-              link: notificationsPageUrl(),
-              message: n.message,
-              ruleName: rule.name,
-              ruleDescription: rule.description,
-            });
+        const base = followUpContext(n, rule);
         const prev = state.tiers[tierKey];
         const attempt = (prev?.count ?? 0) + 1;
         const ctx: Record<string, string> = {
@@ -274,10 +355,58 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
       }
     }
 
+    // ── Repeat pass ────────────────────────────────────────────────────────
+    // Independent of the chains above: an automation may repeat, escalate, or
+    // both, and at everyMin 15 with a tier at afterMin 30 the T+30 sweep sends
+    // BOTH. The reminder is deliberately NOT suppressed in that sweep —
+    // skipping it would drift the clock and make "every 15 minutes" a lie. The
+    // wizard warns about the pairing at authoring time instead.
+    if (rule.repeat) {
+      // stopOn mirrors escalation's: "acknowledge" stops on ack OR clear (the
+      // query already excludes cleared), "clear" ignores acknowledgement.
+      const stopsOnAck = rule.repeat.stopOn !== "clear";
+      const prevRepeat = state.tiers[REPEAT_STATE_KEY];
+      if (!(stopsOnAck && n.acknowledged) && repeatIsDue(rule.repeat, startAt, prevRepeat, now)) {
+        const attempt = (prevRepeat?.count ?? 0) + 1;
+        const ctx: Record<string, string> = {
+          ...followUpContext(n, rule),
+          "repeat.attempt": String(attempt),
+          "repeat.elapsed": formatElapsed(now.getTime() - n.triggeredAt.getTime()),
+        };
+        // NOTIFY only — see REPEATABLE_ACTION_TYPES. validateRuleV2 refuses a
+        // repeat on an automation with no notify action anywhere, so an empty
+        // list here means the alert is in a band whose own actions are all
+        // api_call/script, which is a real state and simply sends nothing.
+        const repeatable = new Set<string>(REPEATABLE_ACTION_TYPES);
+        const actions = effectiveActionsForSeverity(rule, n.severity).filter((a) => repeatable.has(a.type));
+        if (actions.length > 0) {
+          const { executed } = await executeActions(n.id, actions, ctx, {
+            scopeRegionTags: scopeRegionTagsOf(rule.scope),
+            assetRegionTags: n.regionTags,
+            assetId: n.assetId,
+            ruleId: rule.id,
+            ruleName: rule.name,
+            ruleEmailComposition: rule.emailComposition,
+            repeat: { attempt },
+            actor: "system:notification-repeat",
+          });
+          if (executed > 0) {
+            state.tiers[REPEAT_STATE_KEY] = {
+              firstSentAt: prevRepeat?.firstSentAt ?? now.toISOString(),
+              lastSentAt: now.toISOString(),
+              count: attempt,
+            };
+            dirty = true;
+            repeatRuns++;
+          }
+        }
+      }
+    }
+
     if (dirty) stateUpdates.push({ id: n.id, state });
   }
 
-  if (tierRuns === 0) return 0;
+  if (tierRuns === 0 && repeatRuns === 0) return 0;
 
   await prisma.$transaction(
     stateUpdates.map((u) =>
@@ -285,15 +414,31 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
     ),
   );
 
-  await logEvent({
-    action: "notification.escalated",
-    resourceType: "notification",
-    actor: "system:notification-escalation",
-    level: "info",
-    message: `Escalation: ${tierRuns} tier run(s) executed for ${stateUpdates.length} unhandled notification(s)`,
-    details: { tierRuns, notifications: stateUpdates.length },
-  }).catch(() => {});
+  if (tierRuns > 0) {
+    await logEvent({
+      action: "notification.escalated",
+      resourceType: "notification",
+      actor: "system:notification-escalation",
+      level: "info",
+      message: `Escalation: ${tierRuns} tier run(s) executed for ${stateUpdates.length} unhandled notification(s)`,
+      details: { tierRuns, notifications: stateUpdates.length },
+    }).catch(() => {});
+  }
 
-  logger.debug({ tierRuns, notifications: stateUpdates.length }, "escalation sweep");
-  return tierRuns;
+  // A SEPARATE action from notification.escalated on purpose: sharing one
+  // string would inflate every "how much did we escalate?" query and make a
+  // reminder indistinguishable from an escalation in the audit log.
+  if (repeatRuns > 0) {
+    await logEvent({
+      action: "notification.repeated",
+      resourceType: "notification",
+      actor: "system:notification-repeat",
+      level: "info",
+      message: `Reminders: ${repeatRuns} unhandled alert(s) re-notified`,
+      details: { repeatRuns },
+    }).catch(() => {});
+  }
+
+  logger.debug({ tierRuns, repeatRuns, notifications: stateUpdates.length }, "escalation sweep");
+  return tierRuns + repeatRuns;
 }
