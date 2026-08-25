@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Doc-drift guard for the project-memory files (CLAUDE.md, ARCHITECTURE.md,
-// TOUCHES.md, TEMPLATES.md). Catches the *mechanically-checkable* drift that
+// BUSINESS-RULES.md, TOUCHES.md, TEMPLATES.md). Catches the *mechanically-checkable* drift that
 // accumulated badly before the 2026-05 docs overhaul — it CANNOT judge whether
 // prose is still accurate, only structural coverage + reference hygiene.
 //
@@ -16,10 +16,10 @@
 //   2. Every Prisma model in schema.prisma is named in ARCHITECTURE.md.
 //   3. Every src/ service, job, route, util (and route/middleware) file is
 //      named somewhere in ARCHITECTURE.md. (Skips `_`-prefixed helpers + .d.ts.)
-//   4. Every concrete src/ or public/ file path referenced in the four docs
+//   4. Every concrete src/ or public/ file path referenced in the five docs
 //      exists on disk. (Templated paths like `<type>Service.ts` are ignored.)
 //   5. No lowercase `touches.md` / `primaries.md` references survive in the
-//      four docs (the files are TOUCHES.md / TEMPLATES.md).
+//      five docs (the files are TOUCHES.md / TEMPLATES.md).
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -30,7 +30,7 @@ const r = (p) => join(ROOT, p);
 const read = (p) => readFileSync(r(p), "utf8");
 const exists = (p) => existsSync(r(p));
 
-const DOCS = ["CLAUDE.md", "ARCHITECTURE.md", "TOUCHES.md", "TEMPLATES.md"];
+const DOCS = ["CLAUDE.md", "ARCHITECTURE.md", "BUSINESS-RULES.md", "TOUCHES.md", "TEMPLATES.md"];
 const failures = [];
 const fail = (check, msg) => failures.push({ check, msg });
 
