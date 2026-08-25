@@ -22,17 +22,6 @@
  * always-composed, "[ESCALATION n]" default-subject prefix) reproduces the
  * pre-v2 emails byte-for-byte.
  *
- * HIGHEST TIER WINS: a person several tiers of ONE chain would reach is paged
- * only at the LAST of them (greatest afterMin) — the earlier tiers drop them,
- * so someone who belongs to two regions named on two different tiers gets one
- * page, at the higher escalation, instead of one per tier. Chains are
- * independent ladders (the level chain and each per-action chain), so the
- * suppression never crosses between them, and the alert's OWN first
- * notification — the engine's fire — is never suppressed: escalation is what
- * repeats, not the page that opened the incident. The trade-off is deliberate
- * and worth knowing: if the alert is acknowledged (or cleared) before that
- * higher tier comes due, the suppressed recipient is never paged at all.
- *
  * Rendering context = the fire-time Notification.templateCtx snapshot (exact
  * fire-time metric/asset values, survives asset deletion) plus the live
  * {escalation.tier}/{escalation.elapsed} tokens. Per-tier progress lives on
@@ -51,10 +40,8 @@ import {
 import { logEvent } from "./eventLogService.js";
 import { isSuppressedForNotifications } from "./notificationEngine.js";
 import { executeActions } from "./automationActionService.js";
-import { scopeRegionTagsOf, resolveReachableUserIds } from "./notificationRecipientService.js";
+import { scopeRegionTagsOf } from "./notificationRecipientService.js";
 import {
-  actionsToTargets,
-  higherEscalationTiers,
   normalizeRuleToV2,
   normalizeEscalationToV2,
   escalationChainsForSeverity,
@@ -211,39 +198,6 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
 
   const stateUpdates: { id: string; state: EscalationState }[] = [];
   let tierRuns = 0;
-  let suppressedTotal = 0;
-
-  // "Highest tier wins" (see the header): who a LATER tier of this same chain
-  // will reach, so the tier running now can drop them.
-  //
-  // Memoized per (rule, chain, tier, region snapshot) for the pass — one rule's
-  // alerts on assets in the same region share an answer, so a 200-alert outage
-  // resolves this a handful of times rather than 200. Promises are cached, not
-  // values, so concurrent lookups of one key coalesce.
-  const EMPTY_REACH: ReadonlySet<string> = new Set<string>();
-  const reachMemo = new Map<string, Promise<Set<string>>>();
-  const laterTierReach = async (
-    ruleId: string,
-    chain: { key: string; escalation: EscalationV2Config },
-    idx: number,
-    ctx: { scopeRegionTags?: string[]; assetRegionTags?: string[] },
-  ): Promise<ReadonlySet<string>> => {
-    const later = higherEscalationTiers(chain.escalation.tiers, idx);
-    if (later.length === 0) return EMPTY_REACH;
-    const key = [
-      ruleId,
-      chain.key,
-      idx,
-      [...(ctx.assetRegionTags ?? [])].sort().join(","),
-      [...(ctx.scopeRegionTags ?? [])].sort().join(","),
-    ].join("|");
-    let pending = reachMemo.get(key);
-    if (!pending) {
-      pending = resolveReachableUserIds(later.flatMap((t) => actionsToTargets(t.actions)), ctx);
-      reachMemo.set(key, pending);
-    }
-    return await pending;
-  };
 
   for (const n of notifs) {
     const rule = rules.get(n.ruleId!);
@@ -257,8 +211,6 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
     if (chains.length === 0) continue;
     if (n.assetId && suppressedAssetIds.has(n.assetId)) continue; // silenced — resumes post-window
 
-    const scopeRegions = scopeRegionTagsOf(rule.scope);
-    const regionCtx = { scopeRegionTags: scopeRegions, assetRegionTags: n.regionTags };
     const state = stateOf(n.escalationState);
     // Timers run from band-entry when banded (bandSince), else the fire time.
     const startAt = state.bandSince ? new Date(state.bandSince) : n.triggeredAt;
@@ -296,28 +248,21 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
           "escalation.elapsed": formatElapsed(now.getTime() - n.triggeredAt.getTime()),
         };
 
-        const excludeUserIds = await laterTierReach(rule.id, chain, idx, regionCtx);
-
-        const { executed, suppressed } = await executeActions(n.id, tier.actions, ctx, {
-          ...regionCtx,
+        const { executed } = await executeActions(n.id, tier.actions, ctx, {
+          scopeRegionTags: scopeRegionTagsOf(rule.scope),
+          assetRegionTags: n.regionTags,
           assetId: n.assetId,
           ruleId: rule.id,
           ruleName: rule.name,
           ruleEmailComposition: rule.emailComposition,
           escalation: { tier: idx + 1, attempt },
-          ...(excludeUserIds.size > 0 ? { excludeUserIds } : {}),
           actor: "system:notification-escalation",
         });
-        suppressedTotal += suppressed;
 
-        // A tier counts as sent when something actually ran — a tier whose
+        // A tier counts as sent only when something actually ran — a tier whose
         // recipients resolved empty / channel is disabled retries next sweep
-        // (same behavior as the pre-v2 sweep) — OR when the only reason it sent
-        // nothing is that a higher tier owns every person on it. Without that
-        // second arm a tier whose audience is a subset of a later tier's (the
-        // ordinary "escalate to a wider group" ladder) would resolve to zero
-        // recipients and be retried every 60s for the life of the alert.
-        if (executed > 0 || suppressed > 0) {
+        // (same behavior as the pre-v2 sweep).
+        if (executed > 0) {
           state.tiers[tierKey] = {
             firstSentAt: prev?.firstSentAt ?? now.toISOString(),
             lastSentAt: now.toISOString(),
@@ -346,9 +291,9 @@ export async function runEscalationSweep(now = new Date()): Promise<number> {
     actor: "system:notification-escalation",
     level: "info",
     message: `Escalation: ${tierRuns} tier run(s) executed for ${stateUpdates.length} unhandled notification(s)`,
-    details: { tierRuns, notifications: stateUpdates.length, suppressedRecipients: suppressedTotal },
+    details: { tierRuns, notifications: stateUpdates.length },
   }).catch(() => {});
 
-  logger.debug({ tierRuns, notifications: stateUpdates.length, suppressedRecipients: suppressedTotal }, "escalation sweep");
+  logger.debug({ tierRuns, notifications: stateUpdates.length }, "escalation sweep");
   return tierRuns;
 }

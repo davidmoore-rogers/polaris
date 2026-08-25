@@ -63,11 +63,6 @@ export interface ActionExecContext {
   ruleEmailComposition?: EmailComposition | null;
   /** Set by the escalation sweep: stamps delivery meta + audit details. */
   escalation?: { tier: number; attempt: number };
-  /** Set by the escalation sweep: users a HIGHER tier of this chain will
-   *  reach, dropped from this tier's user-routed notify recipients so a person
-   *  named by several tiers is paged once, at the highest of them. Only notify
-   *  actions consult it — api_call and script are not routed to people. */
-  excludeUserIds?: ReadonlySet<string>;
   /** Audit actor; defaults to "system:automation". */
   actor?: string;
 }
@@ -77,20 +72,16 @@ export interface ActionExecContext {
  * a single action's failure — failures are recorded as warning Events and the
  * remaining actions still run. Returns per-action counts: `executed` = actions
  * that produced at least one delivery row / script run (the escalation sweep
- * uses this to decide whether a tier counts as sent), and `suppressed` = how
- * many recipients excludeUserIds removed — which is what lets the sweep read a
- * tier that delivered NOTHING because a higher tier owns all of its people as
- * done rather than as a failure to retry forever.
+ * uses this to decide whether a tier counts as sent).
  */
 export async function executeActions(
   notificationId: string,
   actions: AutomationAction[],
   ctx: Record<string, string>,
   exec: ActionExecContext,
-): Promise<{ executed: number; failed: number; suppressed: number }> {
+): Promise<{ executed: number; failed: number }> {
   let executed = 0;
   let failed = 0;
-  let suppressed = 0;
 
   // Address-book contacts owning the triggering asset. Resolved AT MOST ONCE
   // per fire and only when an action actually asks for them — several notify
@@ -116,18 +107,13 @@ export async function executeActions(
     try {
       if (action.type === "notify") {
         const composed = composeForNotify(action.emailComposition ?? null, exec, ctx);
-        // Out-param only when there is an exclusion to report — a normal fire
-        // allocates nothing and expandDeliveries skips the bookkeeping.
-        const suppressedOut = exec.excludeUserIds?.size ? { count: 0 } : undefined;
         const rows = await expandDeliveries(notificationId, actionsToTargets([action]), {
           scopeRegionTags: exec.scopeRegionTags,
           assetRegionTags: exec.assetRegionTags,
           ...(action.recipientAssetContacts ? { assetContactEmails: await assetContactEmails() } : {}),
           composedEmail: composed,
           escalation: exec.escalation,
-          ...(exec.excludeUserIds?.size ? { excludeUserIds: exec.excludeUserIds, suppressedOut } : {}),
         });
-        suppressed += suppressedOut?.count ?? 0;
         if (rows > 0) executed++;
       } else if (action.type === "api_call") {
         await enqueueApiCall(notificationId, action, ctx, exec);
@@ -181,7 +167,7 @@ export async function executeActions(
       }).catch(() => {});
     }
   }
-  return { executed, failed, suppressed };
+  return { executed, failed };
 }
 
 /**
