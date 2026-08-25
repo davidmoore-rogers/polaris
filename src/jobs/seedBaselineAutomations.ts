@@ -38,21 +38,45 @@
  * page. All are event triggers with timed reset + a cooldown — the engine's
  * event-tail cooldown + timed-clear passes keep them storm-proof.
  *
+ * The V3 DOWN-DETECTION SET is different in kind from the first two: it is
+ * COMPUTED from live data rather than a static array. Down stopped being a
+ * monitor-settings value (business rule 34) and became the covering
+ * automation's missed-poll count, so V3 reads each install's effective
+ * pre-cutover thresholds and mirrors them into automations — one all-assets
+ * rule at the dominant value, plus a narrower rule per asset class that
+ * differed — then retires the pre-cutover "Asset down" row IF the operator
+ * never touched it. An edited row is kept and flagged instead, because it
+ * still governs its devices (at the default count) and the operator needs to
+ * be told that number is now theirs to set.
+ *
  * To force a re-seed of a set (e.g. to restore a deleted baseline rule), run:
  *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsSeededAt';   -- widget set
  *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsV2SeededAt'; -- event set
- * then restart. (This resurrects that ENTIRE set, including rules you deleted.)
+ *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsV3SeededAt'; -- down detection
+ * then restart. (This resurrects that ENTIRE set, including rules you deleted.
+ * For V3 that means re-deriving the thresholds from the settings tiers, which
+ * are dormant but still stored — and it will NOT re-retire an Asset down rule
+ * it already removed.)
  */
 
 import { logger } from "../utils/logger.js";
 import { runInstrumentedJob } from "./_metrics.js";
 import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
 import { ruleInputSchema } from "../services/notificationTypes.js";
-import { createRule } from "../services/notificationRuleService.js";
+import { createRule, deleteRule } from "../services/notificationRuleService.js";
+import { prisma } from "../db.js";
+import { logEvent } from "../services/eventLogService.js";
+import { resolveMonitorSettings } from "../services/monitoringService.js";
+import { DEFAULT_MISSED_POLLS } from "../services/notificationTypes.js";
+import { invalidateDownDetectionCache } from "../services/downDetectionService.js";
 
 const MARKER_KEY = "seedBaselineAutomationsSeededAt";
 const MARKER_KEY_V2 = "seedBaselineAutomationsV2SeededAt";
+const MARKER_KEY_V3 = "seedBaselineAutomationsV3SeededAt";
 const SEED_ACTOR = "system:seed-baseline-automations";
+/** The name the pre-cutover baseline row carries — the only fingerprint the
+ *  V3 retire step has, alongside createdBy. */
+const V1_ASSET_DOWN_NAME = "Asset down";
 
 // Raw input bodies (what a POST to /automations looks like). ruleInputSchema
 // fills every default (enabled, channels=["in_app"], aggregation, etc.) and
@@ -64,7 +88,9 @@ const BASELINE_RULES: Record<string, unknown>[] = [
     description:
       "Fires when a monitored asset stops responding. Mirrors the dashboard's Down Assets widget. Baseline example — edit or delete freely.",
     severity: "critical",
-    trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
+    // Explicit count so a fresh install has a working down-detection
+    // automation even if the V3 pass below fails for any reason.
+    trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down", missedPolls: 3 },
     scope: { allAssets: true },
     reset: { mode: "auto" },
     messageTemplate: "{asset} is down",
@@ -347,12 +373,227 @@ async function seedRuleSet(markerKey: string, ruleBodies: Record<string, unknown
   return { created, skipped: false };
 }
 
+interface ClassThreshold {
+  assetType: string;
+  threshold: number;
+  count: number;
+  integrations: Set<string>;
+  conflict?: boolean;
+}
+
+/**
+ * V3 — mirror each install's PRE-CUTOVER down thresholds into automations.
+ *
+ * Down used to be `failureThreshold` on the monitor-settings tiers. It is now
+ * the covering automation's `missedPolls` (business rule 34), so an install
+ * that had tuned a class away from the default would silently change its
+ * time-to-down on upgrade unless the old numbers are carried forward. This
+ * reads the EFFECTIVE threshold for every monitored asset and emits:
+ *
+ *   - one all-assets automation at the DOMINANT value (the one covering the
+ *     most devices), and
+ *   - one `assetTypes:[t]` automation per class whose value differs, which
+ *     outranks the all-assets rule on scopeRank and so reproduces the override.
+ *
+ * Deliberately NOT built on seedRuleSet: that takes a static array of bodies,
+ * while this set is computed from live data. Keeping them separate leaves the
+ * V1/V2 sets structurally untouched.
+ *
+ * KNOWN GAP, stated rather than papered over: `scopeRank` does not rank
+ * `integrationIds`, so if two integrations carry DIFFERENT thresholds for the
+ * same asset class this cannot express it — both rules would tie. It takes the
+ * more-sensitive value (matching the resolver's own tiebreak) and records the
+ * conflict in the log and the audit trail. Adding a ladder rung to make one
+ * seed work would change business rule 18 for every install.
+ */
+async function seedDownDetectionV3(): Promise<{ created: number; skipped: boolean }> {
+  if (await hasRunMarker(MARKER_KEY_V3)) return { created: 0, skipped: true };
+
+  const assets = await prisma.asset.findMany({
+    where: { monitored: true },
+    select: {
+      id: true, assetType: true, discoveredByIntegrationId: true,
+      discoveredByIntegration: { select: { type: true } },
+      monitorIntervalSec: true, probeTimeoutMs: true, responseTimePolling: true,
+      // The resolver's AssetMonitorContext reads these too — selected rather
+      // than cast past, so a future field addition fails the build here.
+      cpuMemoryIntervalSec: true, temperatureIntervalSec: true, systemInfoIntervalSec: true,
+    },
+  });
+
+  // Effective threshold per asset. Sequential is fine: resolveMonitorSettings
+  // memoizes on (integrationId, assetType), so the DB reads are per distinct
+  // CLASS, not per asset.
+  const byClass = new Map<string, ClassThreshold>();
+  const fleet = new Map<number, number>();
+  for (const a of assets) {
+    let threshold = DEFAULT_MISSED_POLLS;
+    try {
+      const eff = await resolveMonitorSettings({
+        ...a,
+        discoveredByIntegrationType: a.discoveredByIntegration?.type ?? null,
+      } as Parameters<typeof resolveMonitorSettings>[0]);
+      if (Number.isFinite(eff.failureThreshold) && eff.failureThreshold > 0) threshold = eff.failureThreshold;
+    } catch (err) {
+      logger.warn({ err, assetId: a.id }, "V3 seed: could not resolve a threshold, using the default");
+    }
+    fleet.set(threshold, (fleet.get(threshold) ?? 0) + 1);
+    const klass = a.assetType ?? "other";
+    const prev = byClass.get(klass);
+    if (!prev) {
+      byClass.set(klass, { assetType: klass, threshold, count: 1, integrations: new Set([a.discoveredByIntegrationId ?? "manual"]) });
+    } else {
+      prev.count += 1;
+      prev.integrations.add(a.discoveredByIntegrationId ?? "manual");
+      // Two integrations disagreeing about one class: take the more sensitive
+      // value, the same tiebreak the runtime resolver uses.
+      if (threshold !== prev.threshold) {
+        prev.threshold = Math.min(threshold, prev.threshold);
+        prev.conflict = true;
+      }
+    }
+  }
+
+  // Dominant fleet-wide value; ties go to the smaller (again matching the
+  // resolver). An install with no monitored assets keeps the default.
+  let dominant = DEFAULT_MISSED_POLLS;
+  let bestCount = -1;
+  for (const [threshold, count] of fleet) {
+    if (count > bestCount || (count === bestCount && threshold < dominant)) {
+      dominant = threshold;
+      bestCount = count;
+    }
+  }
+
+  const bodies: Record<string, unknown>[] = [
+    {
+      name: V1_ASSET_DOWN_NAME,
+      description:
+        'Fires when a monitored asset stops responding. THIS AUTOMATION DEFINES what "down" means for every device it ' +
+        "covers: a device is down after this many polls in a row with no answer. A device covered by no down automation " +
+        "is never called down — it is still polled and charted, Polaris just renders no verdict. Baseline — edit or delete freely.",
+      severity: "critical",
+      trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down", missedPolls: dominant },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      messageTemplate: "{asset} is down",
+    },
+  ];
+  const conflicts: { assetType: string; integrations: string[]; chosen: number }[] = [];
+  for (const c of byClass.values()) {
+    if (c.conflict) conflicts.push({ assetType: c.assetType, integrations: [...c.integrations], chosen: c.threshold });
+    if (c.threshold === dominant) continue;
+    bodies.push({
+      name: `Asset down — ${c.assetType}`,
+      description:
+        `Carries forward the ${c.threshold}-missed-poll threshold this install had configured for ${c.assetType} ` +
+        "devices before the count moved onto automations. More specific than the all-assets rule, so it wins for these devices.",
+      severity: "critical",
+      trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down", missedPolls: c.threshold },
+      scope: { assetTypes: [c.assetType] },
+      reset: { mode: "auto" },
+      messageTemplate: "{asset} is down",
+    });
+  }
+
+  // CREATE FIRST, retire second. The reverse order leaves a window with zero
+  // down-detection automations — every monitored asset flips to passive. A
+  // momentary duplicate is strictly preferable to a momentarily blind fleet.
+  let created = 0;
+  for (const raw of bodies) {
+    try {
+      await createRule(ruleInputSchema.parse(raw), SEED_ACTOR);
+      created += 1;
+    } catch (err) {
+      logger.warn({ err, rule: (raw as { name?: string }).name }, "Failed to seed down-detection automation");
+    }
+  }
+
+  const retired = await retirePristineAssetDownRule(created > 0);
+
+  if (conflicts.length) {
+    logger.warn({ conflicts }, "V3 seed: an asset class carried different thresholds across integrations — took the more sensitive value");
+    for (const c of conflicts) {
+      await logEvent({
+        action: "automation.seed.threshold_conflict",
+        level: "warning",
+        resourceType: "notification-rule",
+        resourceName: `Asset down — ${c.assetType}`,
+        actor: SEED_ACTOR,
+        message:
+          `Your ${c.assetType} devices had different missed-poll thresholds across integrations. Polaris carried the ` +
+          `more sensitive one (${c.chosen}) into one automation. To restore the per-integration difference, add a ` +
+          "narrower down-detection automation scoped by tag or subnet.",
+        details: { assetType: c.assetType, integrations: c.integrations, chosen: c.chosen },
+      });
+    }
+  }
+
+  await stampRunMarker(MARKER_KEY_V3, { created, retired, dominant, conflicts: conflicts.length });
+  invalidateDownDetectionCache();
+  return { created, skipped: false };
+}
+
+/**
+ * Retire the pre-cutover "Asset down" row — but ONLY if the operator never
+ * touched it. `updatedAt === createdAt` holds exactly on an untouched row and
+ * is bumped by any save, INCLUDING a bare enable/disable toggle, which counts
+ * as the operator having made a decision about this rule.
+ *
+ * Deleted via the SERVICE, not prisma.delete: deleteRule soft-clears the rule's
+ * active notifications first, which would otherwise sit in every alert feed
+ * forever once the cascade drops their state rows.
+ *
+ * An EDITED row is kept and flagged. It still matches isDownDetectionTrigger, so
+ * it keeps governing its devices at DEFAULT_MISSED_POLLS — exactly the behaviour
+ * it had before — but the operator has to be told the number is now theirs.
+ */
+async function retirePristineAssetDownRule(safeToRetire: boolean): Promise<boolean> {
+  const old = await prisma.notificationRule.findFirst({
+    where: { name: V1_ASSET_DOWN_NAME, createdBy: SEED_ACTOR },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, createdAt: true, updatedAt: true },
+  });
+  if (!old) return false;
+  // Never retire the old rule when the replacement failed to save — that would
+  // leave the fleet with no down detection at all.
+  if (!safeToRetire) {
+    logger.warn({ ruleId: old.id }, "V3 seed: replacement automations failed to save — leaving the existing Asset down rule in place");
+    return false;
+  }
+  if (old.updatedAt.getTime() !== old.createdAt.getTime()) {
+    logger.info({ ruleId: old.id }, 'Baseline "Asset down" was edited by an operator — left in place');
+    await logEvent({
+      action: "automation.seed.v3_retained",
+      level: "warning",
+      resourceType: "notification-rule",
+      resourceId: old.id,
+      resourceName: V1_ASSET_DOWN_NAME,
+      actor: SEED_ACTOR,
+      message:
+        'Your edited "Asset down" automation was left untouched. It now DEFINES when a device is down, and it carries ' +
+        `no missed-poll count — so it governs its devices at the default of ${DEFAULT_MISSED_POLLS}. Edit it to set the count you want.`,
+      details: { ruleId: old.id },
+    });
+    return false;
+  }
+  await deleteRule(old.id, SEED_ACTOR);
+  return true;
+}
+
 export async function seedBaselineAutomations(): Promise<{ created: number; skipped: boolean }> {
   // Independent markers: a pre-V2 install has the first marker stamped and
   // still picks up the event set; a fresh install seeds both.
   const v1 = await seedRuleSet(MARKER_KEY, BASELINE_RULES);
   const v2 = await seedRuleSet(MARKER_KEY_V2, EVENT_BASELINE_RULES);
-  return { created: v1.created + v2.created, skipped: v1.skipped && v2.skipped };
+  // V3 runs LAST so a fresh install's just-created V1 "Asset down" row is the
+  // pristine one it retires — wasteful by a single create, but it keeps the
+  // marker contract (a shipped set never changes) intact.
+  const v3 = await seedDownDetectionV3();
+  return {
+    created: v1.created + v2.created + v3.created,
+    skipped: v1.skipped && v2.skipped && v3.skipped,
+  };
 }
 
 /** Exported for the seed unit test (glob-vs-fixture pinning). */

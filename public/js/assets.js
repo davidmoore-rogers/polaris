@@ -3683,14 +3683,18 @@ function assetMonitoringFormHTML(asset, managedAgent) {
       '<p class="hint">Range 100..60000 ms; default is 5000 ms. Inherits from the resolved tier when blank.</p>' +
     '</div>';
   }
-  function failureThresholdInput() {
-    // Per-asset failure threshold isn't a column on Asset — it resolves from
-    // the class / integration / manual tier. Render the input read-only here
-    // with a hint so operators see it in the right place but edit it at the
-    // tier where it lives.
+  function declaringDownHint() {
+    // How many missed polls make this device Down is the covering
+    // down-detection automation's number (business rule 34), so the old
+    // "edit it at the tier where it lives" pointer would now send operators to
+    // a field that no longer exists. Filled in asynchronously by
+    // _populateAssetMonitorTierBadges, which is the one place that already has
+    // the per-asset answer — and which names the automation, since "3 missed
+    // polls" without saying WHOSE 3 is the question this panel exists to
+    // answer.
     return '<div class="form-group">' +
-      '<label>Failure Threshold</label>' +
-      '<p class="hint">Inherited from the resolved tier. Edit at the integration\'s Monitoring tab or via the Monitoring Settings button (Assets page).</p>' +
+      '<label>Declaring Down</label>' +
+      '<p class="hint" id="f-down-detection">Resolving…</p>' +
     '</div>';
   }
 
@@ -3716,7 +3720,7 @@ function assetMonitoringFormHTML(asset, managedAgent) {
       httpPathInput() +
       intervalInput("f-monitorInterval", "Poll Interval Override (seconds)", interval, 5, 86400, "Minimum 5 seconds. Inherits from the resolved tier when blank.") +
       probeTimeoutInput() +
-      failureThresholdInput();
+      declaringDownHint();
   }
   function bodyCpuMemory() {
     return streamPollingBlock("telemetry", "f-cpuMemoryPolling", "f-cpuMemoryCredential", "f-telemetryMib", pollingCurrent.cpuMemoryPolling, telCredId, telMibId, _autoMibNames.telemetry) +
@@ -4168,6 +4172,44 @@ async function _wireMonitorEditTab(asset) {
  * "(from class override: 60s)" badge next to each cadence/timeout label.
  * Best-effort — failure leaves the badges blank.
  */
+/**
+ * Name the automation that decides this device is Down, and the count it asks
+ * for — plus the resulting wall-clock time, using this asset's OWN resolved
+ * interval and timeout (which is why this lives beside the tier-badge walk:
+ * that fetch already has both halves).
+ *
+ * Three states, and the passive one is the reason this isn't just a number:
+ * a device no automation covers is never declared Down at all, and printing a
+ * threshold for it would be a lie.
+ */
+function _paintDownDetectionHint(eff, asset) {
+  var el = document.getElementById("f-down-detection");
+  if (!el) return;
+  var dd = eff && eff.downDetection;
+  if (!dd) { el.textContent = "Could not resolve which automation decides Down for this device."; return; }
+  if (dd.passive) {
+    el.innerHTML = "<strong>Passive</strong> — no down-detection automation covers this device. " +
+      "Polaris records its polls but will never declare it Warning or Down. " +
+      '<a href="/automations.html">Manage down detection &rarr;</a>';
+    return;
+  }
+  var calc = window.PolarisMonitorDownAfter && window.PolarisMonitorDownAfter.calc;
+  var resolved = eff.resolved || {};
+  var txt = "Down after <strong>" + dd.missedPolls + " missed poll" + (dd.missedPolls === 1 ? "" : "s") + "</strong>";
+  if (calc) {
+    var c = calc(dd.missedPolls, resolved.intervalSeconds, resolved.probeTimeoutMs);
+    txt += " ≈ " + window.PolarisMonitorDownAfter.human(c.realSec) +
+      " at this device's " + c.interval + "s poll interval";
+  }
+  if (dd.automationName) txt += ", set by <strong>" + escapeHtml(dd.automationName) + "</strong>";
+  txt += ".";
+  if (dd.conflict) {
+    txt += " <span style=\"color:var(--color-warning)\">Another equally-specific automation asks for " +
+      dd.conflict.counts.filter(function (n) { return n !== dd.conflict.chosen; }).join(" / ") +
+      " — Polaris uses the smaller count. Narrow one of the two device filters to make the choice explicit.</span>";
+  }
+  el.innerHTML = txt;
+}
 async function _populateAssetMonitorTierBadges(asset) {
   var eff;
   try { eff = await api.assets.effectiveMonitorSettings(asset.id); } catch (e) { return; }
@@ -4177,6 +4219,8 @@ async function _populateAssetMonitorTierBadges(asset) {
   // re-evaluation immediately for any slots already in the DOM.
   _effectiveResolvedByAssetId.set(asset.id, eff.resolved);
   _updateStaleBannersFromEffective(asset.id, asset);
+
+  _paintDownDetectionHint(eff, asset);
 
   function tierLabel(tier) {
     if (tier === "asset")       return null; // own override — no badge needed; the input itself IS the value
@@ -10527,10 +10571,15 @@ async function _renderIntermittencyBar(assetId, effP) {
       (effP || api.assets.effectiveMonitorSettings(assetId)).catch(function () { return null; }),
     ]);
     allSamples = (results[0] && Array.isArray(results[0].samples)) ? results[0].samples : [];
+    // The count comes from the covering down-detection automation now, not
+    // from the settings tier (business rule 34) — and `passive` means there is
+    // no count at all, so no sample can be "the Nth consecutive failure that
+    // makes it Down". Rendering red there would assert a verdict Polaris
+    // deliberately never reaches.
+    var ddInfo = results[1] && results[1].downDetection;
+    if (ddInfo && ddInfo.passive) threshold = null;
+    else if (ddInfo && Number.isFinite(ddInfo.missedPolls)) threshold = ddInfo.missedPolls;
     if (results[1] && results[1].resolved) {
-      if (Number.isFinite(results[1].resolved.failureThreshold)) {
-        threshold = results[1].resolved.failureThreshold;
-      }
       // Populate the shared cache so stale-banner slots see the resolved
       // class/integration cadence as soon as this fetch lands (covers the
       // case where the response-time chart loads before the System tab is
@@ -10548,8 +10597,9 @@ async function _renderIntermittencyBar(assetId, effP) {
   // machine): each block reflects that single sample's outcome so the bar
   // reads literally. A success is green immediately — no recovery smear.
   // A failure is yellow (warning); once it's the Nth consecutive failure
-  // (N = failureThreshold, the same count the pill uses to declare down) it
-  // flips red and stays red while the run continues. Worked examples at
+  // (N = the covering automation's missed-poll count, the same number the pill
+  // uses to declare down) it flips red and stays red while the run continues.
+  // A PASSIVE device has no such count, so its failures stay amber. Worked examples at
   // threshold 3: one missed poll → green, yellow, green; a device going down
   // → green, yellow, yellow, red. We still walk the FULL hour and slice the
   // trailing 30 so the consecutive-failure counter is warmed up across the
@@ -10563,7 +10613,9 @@ async function _renderIntermittencyBar(assetId, effP) {
       status = "up";
     } else {
       cf += 1;
-      status = (cf >= threshold) ? "down" : "warning";
+      // threshold === null is the passive case: no automation defines Down for
+      // this device, so a failed poll is amber and never escalates to red.
+      status = (threshold != null && cf >= threshold) ? "down" : "warning";
     }
     return { timestamp: s.timestamp, status: status };
   });
@@ -19153,7 +19205,6 @@ function _credentialOptionsForAny(selectedId) {
 
 var MON_TIER_DEFAULTS = {
   intervalSeconds:           60,
-  failureThreshold:          3,
   // Dormant since 2026-08-19 (the fast-confirm re-probe was removed; in-run
   // resolution is the ICMP loss sampler's job and feeds packet loss only). Kept
   // to mirror the server's floor so a stored value still renders as inherited.
@@ -19564,7 +19615,6 @@ async function _monsetSaveManual() {
   // _classStreamSubtabHTML(isPrimary=false) shape.
   var body = {
     intervalSeconds:           _monsetReadField("f-manual-mon-intervalSeconds",           MON_TIER_DEFAULTS.intervalSeconds),
-    failureThreshold:          _monsetReadField("f-manual-mon-failureThreshold",          MON_TIER_DEFAULTS.failureThreshold),
     // Fast-confirm re-probe cadence (business rule 30). The input itself is
     // rendered by the SHARED _classStreamSubtabHTML from integrations.js, so the
     // manual tier picks it up with no markup of its own.
@@ -19639,7 +19689,6 @@ function _monsetOverrideSummary(o) {
   var parts  = [];
   var labels = {
     intervalSeconds:           "probe",
-    failureThreshold:          "threshold",
     // Dormant field — kept in the label map so an install that stored this
     // override before 2026-08-19 still gets a readable summary chip for it.
     fastConfirmIntervalSec:    "confirm-reprobe",
@@ -19844,7 +19893,6 @@ async function _monsetSaveOverride(existing) {
   // numeric inputs — see numInput() inside that helper).
   var fields = {
     intervalSeconds:           readOptional("monset-ov-intervalSeconds"),
-    failureThreshold:          readOptional("monset-ov-failureThreshold"),
     probeTimeoutMs:            readOptional("monset-ov-probeTimeoutMs"),
     cpuMemoryTimeoutMs:        readOptional("monset-ov-cpuMemoryTimeoutMs"),
     temperatureTimeoutMs:      readOptional("monset-ov-temperatureTimeoutMs"),

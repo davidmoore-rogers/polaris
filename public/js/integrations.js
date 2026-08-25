@@ -1450,7 +1450,7 @@ function _isWsSrvRichType(t) {
 // dispatch and queue carve-out. Persisted today so the operator's choice
 // survives the cutover.
 var _ALL_STREAMS = [
-  { key: "responseTime", label: "Response Time", pollField: "responseTimePolling", mibStreamKey: "responseTime", intervalField: "intervalSeconds",            timeoutField: "probeTimeoutMs",       hasFailure: true },
+  { key: "responseTime", label: "Response Time", pollField: "responseTimePolling", mibStreamKey: "responseTime", intervalField: "intervalSeconds",            timeoutField: "probeTimeoutMs" },
   { key: "cpuMemory",    label: "CPU/Memory",    pollField: "cpuMemoryPolling",    mibStreamKey: "telemetry",    intervalField: "cpuMemoryIntervalSeconds",   timeoutField: "cpuMemoryTimeoutMs"   },
   { key: "temperature",  label: "Hardware Sensors", pollField: "temperaturePolling",  mibStreamKey: "temperature",  intervalField: "temperatureIntervalSeconds", timeoutField: "temperatureTimeoutMs" },
   { key: "interfaces",   label: "Interfaces",    pollField: "interfacesPolling",   mibStreamKey: "interfaces",   intervalField: "systemInfoIntervalSeconds",  timeoutField: "systemInfoTimeoutMs", sharesCadenceWith: null },
@@ -1502,9 +1502,8 @@ function _classSettingsOverlay(flatSettings, classStreams) {
     if (Object.prototype.hasOwnProperty.call(cell, "timeoutMs")        && cell.timeoutMs        != null) out[fields.timeout]  = cell.timeoutMs;
     if (fields.mib && Object.prototype.hasOwnProperty.call(cell, "mibId")            && cell.mibId  != null) out[fields.mib]      = cell.mibId;
     if (fields.cred && Object.prototype.hasOwnProperty.call(cell, "credentialId")    && cell.credentialId != null) out[fields.cred] = cell.credentialId;
-    if (fields.failure && Object.prototype.hasOwnProperty.call(cell, "failureThreshold") && cell.failureThreshold != null) out[fields.failure] = cell.failureThreshold;
   }
-  pickStream("responseTime", { poll: "responseTimePolling", interval: "intervalSeconds",            timeout: "probeTimeoutMs",       mib: "responseTimeMibId", cred: "responseTimeCredentialId", failure: "failureThreshold" });
+  pickStream("responseTime", { poll: "responseTimePolling", interval: "intervalSeconds",            timeout: "probeTimeoutMs",       mib: "responseTimeMibId", cred: "responseTimeCredentialId" });
   pickStream("cpuMemory",    { poll: "cpuMemoryPolling",    interval: "cpuMemoryIntervalSeconds",   timeout: "cpuMemoryTimeoutMs",   mib: "cpuMemoryMibId",    cred: "cpuMemoryCredentialId" });
   pickStream("temperature",  { poll: "temperaturePolling",  interval: "temperatureIntervalSeconds", timeout: "temperatureTimeoutMs", mib: "temperatureMibId",  cred: "temperatureCredentialId" });
   pickStream("interfaces",   { poll: "interfacesPolling",   interval: "systemInfoIntervalSeconds",  timeout: "systemInfoTimeoutMs",  mib: "interfacesMibId",   cred: "interfacesCredentialId" });
@@ -1683,26 +1682,22 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
       numInput(stream.timeoutField, "Timeout (ms)", settings[stream.timeoutField], timeoutDefault, 100, 120000, timeoutHint, stream.key === "responseTime");
   }
 
-  // Failure threshold lives only on the Response Time subtab.
+  // How many missed polls make a device Down is NOT set here any more: it
+  // belongs to the down-detection automation covering each device (business
+  // rule 34), most specific wins. This card still owns the two numbers that
+  // decide how LONG each missed poll takes — the interval above and the probe
+  // timeout — so the note explains the split rather than leaving the operator
+  // to wonder where the threshold went.
   var failureHtml = "";
-  if (stream.hasFailure) {
-    // Two stored numbers (how many confirmations, how fast) plus a DERIVED entry
-    // for the thing operators actually think in — "declare Down after N seconds
-    // without an answer". The duration isn't persisted: it writes
-    // failureThreshold, so there's one source of truth and no second setting to
-    // disagree with it (SolarWinds' warning-period idiom over Nagios-style
-    // counting; both express the same product). The container catches bubbled
-    // input events so the readout tracks any of the three fields live.
-    var daCalc = window._polarisMonDownAfterCalc(
-      settings.failureThreshold != null ? settings.failureThreshold : 3,
-      settings[stream.intervalField] != null ? settings[stream.intervalField] : 60,
-      settings.probeTimeoutMs != null ? settings.probeTimeoutMs : 5000);
-    failureHtml = '<div class="mon-downafter-group" data-mon-idprefix="' + escapeHtml(isPrimary ? "f-mon-" : idPrefix) + '" oninput="window._polarisMonDownAfterSync &amp;&amp; window._polarisMonDownAfterSync(this, event)">' +
-      '<div class="form-group"><label>Declare Down after (seconds without an answer)</label>' +
-        '<input type="number" class="mon-downafter-input" min="5" max="3600" step="1" style="width:140px" value="' + daCalc.realSec + '">' +
-        '<p class="hint mon-downafter-note">' + escapeHtml(daCalc.note) + '</p>' +
-      '</div>' +
-      numInput("failureThreshold", "Failure threshold (consecutive misses)", settings.failureThreshold, 3, 1, 100, "Consecutive failed probes before the asset is marked Down — and successes needed to recover back to Up. Each miss after the first waits a full poll interval, so this multiplies the interval above.", false) +
+  if (stream.key === "responseTime") {
+    failureHtml = '<div class="form-group" style="padding:0.5rem 0.65rem;background:var(--color-bg-tertiary);border-radius:var(--radius-sm)">' +
+      '<label style="margin:0 0 0.25rem 0">Declaring Down</label>' +
+      '<p class="hint" style="margin:0">How many missed polls make a device <strong>Down</strong> is set by the ' +
+        '<strong>asset-down automation</strong> that covers it — most specific wins. This card sets how OFTEN Polaris ' +
+        'polls and how long it waits for an answer; those two decide how long each missed poll takes, not how many ' +
+        'of them count.<br>' +
+        'A device no down-detection automation covers is <strong>Passive</strong>: still polled and charted, never ' +
+        'declared Down. <a href="/automations.html">Manage down detection &rarr;</a></p>' +
     '</div>';
   }
 
@@ -1750,66 +1745,11 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
     mibHtml;
 }
 
-/**
- * Keep the derived "Declare Down after" field and the two stored fields
- * (failureThreshold + the stream's poll interval) in agreement, and state the real
- * resulting time in the hint. Called from the group container's inline oninput
- * (input events bubble) and once after render.
- *
- * Duration edited  → writes failureThreshold = round(duration / effective spacing).
- * Anything else    → recomputes the duration from the stored pair.
- *
- * "Effective spacing" applies the same floors the server does
- * (monitoringService.resolveProbeIntervalSec): never tighter than the probe
- * timeout, never tighter than the 5s probe-loop tick. Showing the floor here is
- * the point — an operator with a 30s SNMP timeout should see that their 10s
- * confirmation re-probe is really 30s before they wonder why Down took 90.
- */
-/**
- * The "Declare Down after" arithmetic now lives in
- * public/js/monitor-down-after.js (window.PolarisMonitorDownAfter.calc, with the
- * _polarisMonDownAfterCalc alias kept). It is shared with the automations wizard
- * now that the missed-poll COUNT belongs to the down-detection automation rather
- * than to these cards (business rule 34), and the wizard's DOM tests cannot eval
- * this file.
- */
-/**
- * Keep the derived "Declare Down after" field and the two stored fields
- * (failureThreshold + the stream's poll interval) in agreement. Called from the
- * group container's inline oninput — input events bubble, so editing any of the
- * three refreshes the readout.
- *
- * Duration edited → writes failureThreshold = round(duration / effective spacing).
- * Anything else   → recomputes the duration from the stored pair.
- * The duration is never persisted: it exists so operators can think in seconds
- * while there stays exactly one stored source of truth.
- */
-window._polarisMonDownAfterSync = function (group, ev) {
-  if (!group) return;
-  var prefix = group.getAttribute("data-mon-idprefix") || "";
-  var thrEl  = document.getElementById(prefix + "failureThreshold");
-  var intEl  = document.getElementById(prefix + "intervalSeconds");
-  var toEl   = document.getElementById(prefix + "probeTimeoutMs");
-  var durEl  = group.querySelector(".mon-downafter-input");
-  var note   = group.querySelector(".mon-downafter-note");
-  if (!thrEl || !intEl || !durEl) return;
-  var timeoutMs = toEl ? Number(toEl.value) : 5000;
-  var fromDuration = !!(ev && ev.target === durEl);
-  var thr = Number(thrEl.value);
-  if (fromDuration) {
-    // A single confirmation is the floor — "Down on the first miss" is a
-    // legitimate, if twitchy, choice.
-    var pre = window._polarisMonDownAfterCalc(thr, Number(intEl.value), timeoutMs);
-    var want = Number(durEl.value);
-    // Invert realSec = interval × (thr - 1) + timeout. A duration at or below
-    // the timeout means one miss is enough.
-    thr = Math.min(100, Math.max(1, Math.round((Math.max(0, (want > 0 ? want : pre.realSec) - pre.timeoutSec)) / pre.interval) + 1));
-    thrEl.value = String(thr);
-  }
-  var calc = window._polarisMonDownAfterCalc(thr, Number(intEl.value), timeoutMs);
-  if (!fromDuration) durEl.value = String(calc.realSec);
-  if (note) note.textContent = calc.note;
-};
+// _polarisMonDownAfterSync is gone with the fields it kept in sync: the
+// missed-poll count moved to the down-detection automation (business rule 34),
+// and the derived duration it wrote back has nothing left to write to here.
+// The arithmetic itself lives on in public/js/monitor-down-after.js, which the
+// automations wizard and the asset surfaces read.
 
 // Renders the inside of one class subtab (e.g. FortiSwitch) — the optional
 // "direct polling" / "discovery defaults" header content first, then the
@@ -1832,7 +1772,7 @@ function _classSubtabBodyHTML(opts) {
   // per-class block lives at opts.<klass>MonitorConfig.streams.<stream>.
   // Each stream's cells become the same keys the legacy `settings`
   // object carried: `<pollField>` / `<intervalField>` / `<timeoutField>` /
-  // `<mibStreamKey>MibId` / `failureThreshold`. Empty fields fall back to
+  // `<mibStreamKey>MibId`. Empty fields fall back to
   // the flat baseline so legacy integrations that haven't been migrated
   // yet still render their familiar starting values.
   var perClassSettings = _classSettingsOverlay(settings, opts.classStreams);
@@ -3901,7 +3841,6 @@ function _readIntegrationCadenceForm() {
   }
   var out = {
     intervalSeconds:           n("intervalSeconds"),
-    failureThreshold:          n("failureThreshold"),
     probeTimeoutMs:            n("probeTimeoutMs"),
     cpuMemoryTimeoutMs:        n("cpuMemoryTimeoutMs"),
     temperatureTimeoutMs:      n("temperatureTimeoutMs"),
@@ -4007,7 +3946,6 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
     if (opts.intervalSeconds  !== undefined) out.intervalSeconds  = opts.intervalSeconds;
     if (opts.timeoutMs        !== undefined) out.timeoutMs        = opts.timeoutMs;
     if (opts.mibId            !== undefined) out.mibId            = opts.mibId;
-    if (opts.failureThreshold !== undefined) out.failureThreshold = opts.failureThreshold;
     return out;
   }
   var streams = {
@@ -4017,7 +3955,6 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
       intervalSeconds:  numVal("intervalSeconds"),
       timeoutMs:        numVal("probeTimeoutMs"),
       mibId:            mibVal("responseTime"),
-      failureThreshold: numVal("failureThreshold"),
     }),
     cpuMemory: cell({
       polling:         pollVal("cpuMemoryPolling"),

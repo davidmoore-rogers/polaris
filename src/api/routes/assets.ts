@@ -46,6 +46,7 @@ import {
   resolveMonitorSettings,
   resolveMonitorSettingsWithProvenance,
 } from "../../services/monitoringService.js";
+import { describeDownDetectionFor } from "../../services/downDetectionService.js";
 import { getArpEntryRetentionDays } from "../../services/sampleRetentionService.js";
 import { getCredential } from "../../services/credentialService.js";
 import { resolveConnectionPath } from "../../services/connectionPathService.js";
@@ -1255,7 +1256,29 @@ router.get("/:id/effective-monitor-settings", requirePermission("assets", "read"
           pollInterval: asset.discoveredByIntegration.pollInterval,
         }
       : null;
-    res.json({ ...result, mibLookup, integration: integrationInfo });
+    // WHICH AUTOMATION DECIDES THIS DEVICE IS DOWN. The missed-poll count is no
+    // longer a settings value (business rule 34), so the modal that used to
+    // point operators at "the tier where it lives" has to point at the
+    // automation instead — and for a device no automation covers, say that
+    // plainly rather than rendering a threshold nobody applies. `passive: true`
+    // is that case. Derived, never stored; the resolver reads its cached
+    // snapshot so this costs no query in the steady state.
+    const downCoverage = await describeDownDetectionFor(id);
+    const downDetection = downCoverage
+      ? {
+          passive:      downCoverage.passive,
+          missedPolls:  downCoverage.winner?.threshold ?? null,
+          automationId: downCoverage.winner?.ruleId ?? null,
+          automationName: downCoverage.winner?.ruleName ?? null,
+          // A tie is two equally-specific automations asking for different
+          // counts on this device — surfaced so the modal can say which one
+          // won rather than leaving the operator to guess.
+          conflict:     downCoverage.conflict
+            ? { ruleIds: downCoverage.conflict.ruleIds, counts: downCoverage.conflict.counts, chosen: downCoverage.conflict.chosen }
+            : null,
+        }
+      : null;
+    res.json({ ...result, mibLookup, integration: integrationInfo, downDetection });
   } catch (err) {
     next(err);
   }

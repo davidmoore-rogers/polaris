@@ -66,7 +66,15 @@ const PollingMethodEnum = z.enum(["rest_api", "http", "snmp", "winrm", "ssh", "i
 // pick up the linkage on next deploy.
 const TierSettingsSchema = z.object({
   intervalSeconds:            z.number().int().min(1).max(86400),
-  failureThreshold:           z.number().int().min(1).max(100),
+  // DORMANT (business rule 34). The missed-poll count belongs to the covering
+  // down-detection automation now, not to this tier — recordProbeResult no
+  // longer reads it. Optional rather than removed, and still PERSISTED, for the
+  // fastConfirmIntervalSec reasons (see monitoringService's dormant-column
+  // note): a client that still sends it must not 400, dropping it would be an
+  // irreversible migration for no gain, and the V3 seed reads each install's
+  // pre-cutover value to mirror it forward into automations. Nothing renders
+  // it — the three settings cards lost the field in the same change.
+  failureThreshold:           z.number().int().min(1).max(100).nullable().optional(),
   // Fast-confirm re-probe cadence (business rule 30). Nullable/optional rather
   // than required so a pre-feature client's PUT doesn't 400 — absent means
   // "inherit the floor" (10s). The 5s minimum is the probe loop's own tick;
