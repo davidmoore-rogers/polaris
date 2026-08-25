@@ -1024,6 +1024,8 @@ Failures are visible three ways: a red `lastError` on the card, a `server.backup
 
 A backup is a complete copy of the database. If `POLARIS_SECRET_KEY` is set (see *Secrets at rest* below), device and integration credentials inside it are already encrypted — but everything else, including password hashes and your whole IP-space inventory, is not. Use a passphrase, and store it somewhere other than the Polaris host.
 
+**If you enable address-book directory sync** (Integrations → an Entra ID or Active Directory integration → **Directory**), this matters more than it otherwise would: that feature writes every matching person in your directory into the Polaris database — name, email address, job title, department and phone number — so each backup, and each off-host copy of one, then contains a copy of your employee roster. It is off by default. Treat enabling it as a decision for whoever owns your directory and your data-retention policy, not just for whoever administers Polaris.
+
 ### Restoring
 
 Restore through **Server Settings → Maintenance → Restore** rather than by hand. On a TimescaleDB install, Polaris wraps the restore in the procedure Timescale requires:
