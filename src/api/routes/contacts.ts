@@ -2,10 +2,11 @@
  * src/api/routes/contacts.ts — address-book CRUD + unified recipient search.
  *
  * Mounted at /api/v1/contacts.
- *   GET    /                contacts:read    (list)
+ *   GET    /                contacts:read    (list, paginated + server-side search)
  *   GET    /search          contacts:read    (users ∪ contacts, typeahead-ranked)
  *   POST   /preview         contacts:read    (dry-run a contact's device filter)
  *   GET    /filter-schema   contacts:read    (device-filter builder vocabulary)
+ *   GET    /:id             contacts:read    (one row)
  *   POST   /                contacts:write   (create — createdBy stamped to the caller)
  *   PUT    /:id             contacts:write   (edit own; fullwrite edits anyone's)
  *   DELETE /:id             contacts:write   (delete own; fullwrite deletes anyone's)
@@ -32,6 +33,8 @@ import { listScopeOptions } from "../../services/notificationRuleService.js";
 import { listAssetTypes } from "../../services/assetTypeService.js";
 import { listAssetTags } from "../../services/tagAssignmentService.js";
 import {
+  CONTACT_PAGE_DEFAULT,
+  CONTACT_PAGE_MAX,
   createContact,
   deleteContact,
   getContact,
@@ -62,11 +65,30 @@ const contactInputSchema = z.object({
 
 const previewInputSchema = z.object(filterInputFields);
 
+// z.coerce because these arrive as query strings. The limit is capped here AND
+// in the service: a route is not the only caller, and an uncapped page size is
+// how a paginated endpoint quietly becomes an unpaginated one again.
+const listQuerySchema = z.object({
+  q: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(CONTACT_PAGE_MAX).optional().default(CONTACT_PAGE_DEFAULT),
+  offset: z.coerce.number().int().min(0).optional().default(0),
+});
+
 export const contactsRouter = Router();
 
-contactsRouter.get("/", requirePermission("contacts", "read"), async (_req, res, next) => {
+/**
+ * One page of the address book. `q` filters on email or name SERVER-side.
+ *
+ * Paginated because this table is no longer necessarily hand-sized: the caller
+ * used to receive every row and filter in the browser, which made the cost of
+ * opening the page grow with the whole table. `total` is the unpaged count, so
+ * the pager can say how many matched without the payload carrying them.
+ */
+contactsRouter.get("/", requirePermission("contacts", "read"), async (req, res, next) => {
   try {
-    res.json({ contacts: await listContacts() });
+    const query = listQuerySchema.parse(req.query);
+    const page = await listContacts(query);
+    res.json({ contacts: page.contacts, total: page.total, limit: query.limit, offset: query.offset });
   } catch (err) { next(err); }
 });
 
@@ -121,6 +143,23 @@ contactsRouter.get("/filter-schema", requirePermission("contacts", "read"), asyn
         tags,
       },
     });
+  } catch (err) { next(err); }
+});
+
+/**
+ * One row by id. Declared after every literal path above so "search",
+ * "preview" and "filter-schema" are not captured as ids.
+ *
+ * Exists because the alternative the address book was using is re-fetching the
+ * ENTIRE list to find one row by id -- which was merely wasteful against a
+ * curated table and is untenable against a paginated one, where the row being
+ * edited may not even be on the page that was loaded.
+ */
+contactsRouter.get("/:id", requirePermission("contacts", "read"), async (req, res, next) => {
+  try {
+    const contact = await getContact(req.params.id as string);
+    if (!contact) throw new AppError(404, "Contact not found");
+    res.json({ contact });
   } catch (err) { next(err); }
 });
 

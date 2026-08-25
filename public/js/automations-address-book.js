@@ -520,22 +520,27 @@
     ];
   }
 
-  function matchesTerm(c, lower) {
-    if (!lower) return true;
-    return String(c.email || "").toLowerCase().indexOf(lower) >= 0 ||
-      String(c.name || "").toLowerCase().indexOf(lower) >= 0;
-  }
+  // How many CONTACT rows one page of the People tab asks for. The server caps
+  // at 200 regardless; this is the number the "showing N of M" hint is about.
+  var AB_PAGE_SIZE = 50;
 
   async function loadTabPeople() {
     var box = document.getElementById("ab-tab-results");
     if (!box) return;
     var term = _tab.term;
-    var lower = term.toLowerCase();
     var contacts;
     var entries;
+    var total = 0;
     try {
-      var res = await Promise.all([api.contacts.list(), api.contacts.search(term, true)]);
-      contacts = ((res[0] && res[0].contacts) || []).filter(function (c) { return matchesTerm(c, lower); });
+      // The search term goes to the SERVER for both halves. This used to pull
+      // every contact and filter in the browser, which made each keystroke cost
+      // the whole table.
+      var res = await Promise.all([
+        api.contacts.list({ q: term, limit: AB_PAGE_SIZE }),
+        api.contacts.search(term, true),
+      ]);
+      contacts = (res[0] && res[0].contacts) || [];
+      total = (res[0] && typeof res[0].total === "number") ? res[0].total : contacts.length;
       entries = (res[1] && res[1].entries) || [];
     } catch (err) {
       if (term !== _tab.term) return;
@@ -572,9 +577,14 @@
       hint = '<p class="hint" style="margin:8px 0 0">No contacts yet — every row above is a Polaris account. ' +
         "Add a contact to route alerts to an address that has no Polaris account — a distribution list, " +
         "an on-call rotation, a vendor NOC.</p>";
+    } else if (total > contacts.length) {
+      // A real count now, not a guess from a truncated array: the server
+      // reports how many matched across every page, so the operator learns
+      // whether narrowing the search will actually help.
+      hint = '<p class="hint" style="margin:8px 0 0">Showing ' + contacts.length + ' of ' + total +
+        ' matching contacts — narrow the search to see the rest.</p>';
     } else if (entries.length >= 50) {
-      // searchAddressBook caps at 50 — say so rather than let a truncated list
-      // read as "that's everyone".
+      // The users ∪ directory half is still capped at 50 by searchAddressBook.
       hint = '<p class="hint" style="margin:8px 0 0">Showing the first 50 matches — narrow the search to see more.</p>';
     }
     box.innerHTML = abTable(tabPeopleCols(), rows, hint);
@@ -620,9 +630,10 @@
     host.addEventListener("click", async function (ev) {
       var ed = ev.target.closest && ev.target.closest("[data-ab-edit]");
       if (ed) {
-        var row = ((await api.contacts.list()).contacts || []).find(function (x) {
-          return x.id === ed.getAttribute("data-ab-edit");
-        });
+        // One row by id. Re-reading the whole list to find it was merely
+        // wasteful before; against a paginated list it is also wrong, since the
+        // row being edited need not be on the page that was fetched.
+        var row = (await api.contacts.get(ed.getAttribute("data-ab-edit"))).contact;
         if (row) { await openEditor(row); loadTabPeople(); }
         return;
       }
@@ -897,7 +908,7 @@
         var ed = ev.target.closest && ev.target.closest("[data-ab-pedit]");
         if (ed) {
           var id = ed.getAttribute("data-ab-pedit");
-          var row = ((await api.contacts.list()).contacts || []).find(function (x) { return x.id === id; });
+          var row = (await api.contacts.get(id)).contact;
           if (row) { await openEditor(row); load(q("#ab-pick-search").value.trim()); }
         }
       });

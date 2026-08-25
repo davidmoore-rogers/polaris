@@ -99,10 +99,24 @@ beforeAll(() => {
 
   g.api = {
     contacts: {
-      list: async () => ({ contacts }),
+      // Contact filtering + paging is the SERVER's job (GET /contacts?q=), so
+      // the stub has to do it: the tab no longer filters what it is handed.
+      // `total` is the unpaged match count, which is what the truncation hint
+      // reads — returning contacts.length would make the hint untestable.
+      list: async (params?: { q?: string; limit?: number }) => {
+        const term = String(params?.q ?? "").toLowerCase();
+        const matched = term
+          ? contacts.filter((c) =>
+              String(c.email ?? "").toLowerCase().includes(term) ||
+              String(c.name ?? "").toLowerCase().includes(term))
+          : contacts;
+        const limit = params?.limit ?? 50;
+        return { contacts: matched.slice(0, limit), total: matched.length, limit, offset: 0 };
+      },
+      get: async (id: string) => ({ contact: contacts.find((c) => c.id === id) ?? null }),
       // Filters on the query the way searchAddressBook does (email or name
-      // contains), so a test can tell the client-side half of the tab's
-      // filtering from the server's.
+      // contains), so a test can tell the users/directory half of the tab's
+      // results from the contacts half.
       search: async (q: string) => ({
         entries: searchEntries.filter((e) => {
           const term = String(q ?? "").toLowerCase();

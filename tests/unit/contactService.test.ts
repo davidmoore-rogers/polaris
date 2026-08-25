@@ -24,6 +24,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const prismaMock = vi.hoisted(() => ({
   contact: {
     findMany: vi.fn(),
+    count: vi.fn(),
     findUnique: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
@@ -44,7 +45,9 @@ vi.mock("../../src/services/eventLogService.js", () => ({ logEvent: vi.fn() }));
 import {
   bumpContactCache,
   conditionMeansAllDevices,
+  CONTACT_PAGE_MAX,
   createContact,
+  listContacts,
   normalizeContactCondition,
   normalizeContactEmail,
   previewContactAssets,
@@ -473,5 +476,92 @@ describe("previewContactAssets", () => {
       assetIds: ["pinned"],
     });
     expect(out.matchCount).toBe(2);
+  });
+});
+
+describe("listContacts (paging + server-side search)", () => {
+  it("returns a page plus the UNPAGED total", async () => {
+    // total is what the "showing N of M" hint reads. Returning contacts.length
+    // instead would make a truncated page indistinguishable from a complete one.
+    prismaMock.contact.findMany.mockResolvedValue([contactRow()]);
+    prismaMock.contact.count.mockResolvedValue(4210);
+
+    const page = await listContacts({ limit: 1 });
+    expect(page.contacts).toHaveLength(1);
+    expect(page.total).toBe(4210);
+  });
+
+  it("pushes the search term into SQL rather than filtering in memory", async () => {
+    prismaMock.contact.findMany.mockResolvedValue([]);
+    prismaMock.contact.count.mockResolvedValue(0);
+
+    await listContacts({ q: "night", limit: 25, offset: 50 });
+    const args = prismaMock.contact.findMany.mock.calls.at(-1)![0];
+    expect(args.where.OR).toEqual([
+      { email: { contains: "night", mode: "insensitive" } },
+      { name: { contains: "night", mode: "insensitive" } },
+    ]);
+    expect(args.take).toBe(25);
+    expect(args.skip).toBe(50);
+    // The count must use the SAME predicate, or the pager reports a total for
+    // a different question than the page answers.
+    expect(prismaMock.contact.count.mock.calls.at(-1)![0].where).toEqual(args.where);
+  });
+
+  it("clamps the page size, so an uncapped caller cannot un-paginate the table", async () => {
+    prismaMock.contact.findMany.mockResolvedValue([]);
+    prismaMock.contact.count.mockResolvedValue(0);
+
+    await listContacts({ limit: 100_000 });
+    expect(prismaMock.contact.findMany.mock.calls.at(-1)![0].take).toBe(CONTACT_PAGE_MAX);
+
+    await listContacts({ limit: 0, offset: -5 });
+    const args = prismaMock.contact.findMany.mock.calls.at(-1)![0];
+    expect(args.take).toBe(1);
+    expect(args.skip).toBe(0);
+  });
+
+  it("treats a blank query as no predicate at all", async () => {
+    prismaMock.contact.findMany.mockResolvedValue([]);
+    prismaMock.contact.count.mockResolvedValue(0);
+    await listContacts({ q: "   " });
+    expect(prismaMock.contact.findMany.mock.calls.at(-1)![0].where).toEqual({});
+  });
+});
+
+describe("address-book reads are bounded", () => {
+  it("searchAddressBook filters contacts in SQL and bounds what it fetches", async () => {
+    // The regression this guards: reading the whole table and Zod-validating
+    // every stored filter blob on each keystroke of the recipient typeahead.
+    prismaMock.user.findMany.mockResolvedValue([]);
+    prismaMock.contact.findMany.mockResolvedValue([]);
+
+    await searchAddressBook("noc", { limit: 10 });
+    const args = prismaMock.contact.findMany.mock.calls.at(-1)![0];
+    expect(args.where.OR).toEqual([
+      { email: { contains: "noc", mode: "insensitive" } },
+      { name: { contains: "noc", mode: "insensitive" } },
+    ]);
+    expect(args.take).toBe(21); // limit * 2 + 1, so dedupe cannot short the page
+    // Only the five columns a typeahead entry needs — no JSON filter blobs.
+    expect(Object.keys(args.select).sort()).toEqual(
+      ["createdBy", "description", "email", "id", "name"],
+    );
+  });
+
+  it("the fire path loads only contacts that could own a device", async () => {
+    // A contact with no filter and no pins can never match a triggering asset,
+    // so the alert path must not pay to load it. Without this the cost of every
+    // alert would scale with the size of the address book.
+    prismaMock.contact.findMany.mockResolvedValue([]);
+    await resolveContactsForAsset("a1");
+
+    const args = prismaMock.contact.findMany.mock.calls.at(-1)![0];
+    expect(args.where.OR).toHaveLength(3);
+    expect(args.where.OR).toContainEqual({ assetIds: { isEmpty: false } });
+    // The two JSON columns are matched as DB-NULL, not JSON-null: the writers
+    // pass `undefined` for "no filter", which leaves the column SQL NULL.
+    expect(args.where.OR.filter((c: Record<string, unknown>) => "assetCondition" in c || "assetCriteria" in c))
+      .toHaveLength(2);
   });
 });

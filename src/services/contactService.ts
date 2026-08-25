@@ -37,6 +37,7 @@
  */
 
 import { prisma } from "../db.js";
+import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
 import { createTtlCache } from "../utils/ttlCache.js";
 import {
@@ -300,8 +301,8 @@ function resolveWrittenFilter(input: ContactFilterInput): {
 
 // ─── Cache ──────────────────────────────────────────────────────────────────
 
-// Fire-time resolution reads every contact on each alert; without this the
-// delivery expansion would re-read the table per notification. 30s mirrors the
+// Fire-time resolution reads the contact table on each alert; without this the
+// delivery expansion would re-read it per notification. 30s mirrors the
 // recipient user index next door.
 const CONTACT_CACHE_TTL_MS = 30_000;
 const _contactCache = createTtlCache<ContactRow[]>({ ttlMs: CONTACT_CACHE_TTL_MS, maxEntries: 1 });
@@ -311,18 +312,100 @@ export function bumpContactCache(): void {
   _contactCache.invalidate();
 }
 
-function loadContacts(): Promise<ContactRow[]> {
+/**
+ * The only contacts `resolveContactsForAsset` can possibly return: those
+ * carrying a device filter (a condition tree or a legacy criteria blob) or at
+ * least one explicit pin.
+ *
+ * The narrowing is a correctness-preserving bound, not a micro-optimization. A
+ * contact with no filter and no pins owns no devices, so it can never match a
+ * triggering asset -- loading it costs a row, a JSON parse and a
+ * criteriaToCondition fold to reach a foregone conclusion. That was invisible
+ * while the address book was hand-curated and tens of rows deep. It stops being
+ * invisible the moment a bulk source can put thousands of address-only rows in
+ * the table, at which point the alert fire path would scale with the size of the
+ * company rather than with the number of people who actually own equipment.
+ *
+ * `assetIds: { isEmpty: false }` covers the pin case; the two JSON columns are
+ * DB-NULL (not JSON-null) on an unfiltered row, because the writers pass
+ * `undefined` rather than a null literal.
+ */
+function loadFilterCarryingContacts(): Promise<ContactRow[]> {
   return _contactCache.getOrCompute("", async () => {
-    const rows = await prisma.contact.findMany({ orderBy: { email: "asc" } });
+    const rows = await prisma.contact.findMany({
+      where: {
+        OR: [
+          { assetCondition: { not: Prisma.DbNull } },
+          { assetCriteria: { not: Prisma.DbNull } },
+          { assetIds: { isEmpty: false } },
+        ],
+      },
+      orderBy: { email: "asc" },
+    });
     return rows.map(rowToContact);
   });
 }
 
 // ─── CRUD ───────────────────────────────────────────────────────────────────
 
-export async function listContacts(): Promise<ContactRow[]> {
-  const rows = await prisma.contact.findMany({ orderBy: [{ name: "asc" }, { email: "asc" }] });
-  return rows.map(rowToContact);
+/** One page of the address book, plus the unpaged total the pager needs. */
+export interface ContactPage {
+  contacts: ContactRow[];
+  /** Rows matching the query across ALL pages -- not `contacts.length`. */
+  total: number;
+}
+
+export interface ListContactsOptions {
+  /** Substring match on email or name, case-insensitive. Blank = everything. */
+  q?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+export const CONTACT_PAGE_DEFAULT = 50;
+export const CONTACT_PAGE_MAX = 200;
+
+/**
+ * The shared substring predicate. `mode: "insensitive"` compiles to ILIKE, which
+ * the trigram indexes on `lower(email)` / `lower(name)` serve -- without them
+ * this is a sequential scan, and paginating would bound the payload without
+ * bounding the work.
+ */
+function contactSearchWhere(q: string) {
+  if (!q) return {};
+  return {
+    OR: [
+      { email: { contains: q, mode: "insensitive" as const } },
+      { name: { contains: q, mode: "insensitive" as const } },
+    ],
+  };
+}
+
+/**
+ * One page of the address book, filtered SERVER-side.
+ *
+ * Both halves used to be the caller's problem: this returned every row and the
+ * browser filtered in JavaScript. That is fine for a curated list and untenable
+ * for a table a bulk source can grow without bound -- the payload carries two
+ * JSON blobs per row and `rowToContact` re-validates both, so the cost of
+ * "show me the address book" grew with the whole table, on every keystroke.
+ */
+export async function listContacts(opts: ListContactsOptions = {}): Promise<ContactPage> {
+  const q = String(opts.q ?? "").trim();
+  const limit = Math.min(Math.max(Math.trunc(opts.limit ?? CONTACT_PAGE_DEFAULT), 1), CONTACT_PAGE_MAX);
+  const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+  const where = contactSearchWhere(q);
+
+  const [rows, total] = await Promise.all([
+    prisma.contact.findMany({
+      where,
+      orderBy: [{ name: "asc" }, { email: "asc" }],
+      take: limit,
+      skip: offset,
+    }),
+    prisma.contact.count({ where }),
+  ]);
+  return { contacts: rows.map(rowToContact), total };
 }
 
 export async function getContact(id: string): Promise<ContactRow | null> {
@@ -536,7 +619,7 @@ async function resolveAssetIdsForCondition(cond: ScopeConditionGroup): Promise<S
  * Mirrors reconcileTagsForAsset, which does the same thing for managed tags.
  */
 export async function resolveContactsForAsset(assetId: string): Promise<ContactRow[]> {
-  const contacts = await loadContacts();
+  const contacts = await loadFilterCarryingContacts();
   if (contacts.length === 0) return [];
 
   // Pinned-only contacts need no asset load at all.
@@ -599,7 +682,26 @@ export async function searchAddressBook(
   const limit = opts.limit ?? 50;
   const q = String(query ?? "").trim().toLowerCase();
 
-  const [users, contacts] = await Promise.all([listRecipientUsers(), listContacts()]);
+  // The contacts half is resolved in SQL, and deliberately does NOT go through
+  // listContacts / rowToContact: a typeahead entry needs five scalar columns,
+  // whereas rowToContact re-validates both JSON filter blobs per row through
+  // Zod. Reading the whole table and validating filters nobody asked about, on
+  // every keystroke, is the exact cost this endpoint cannot carry once the
+  // table can hold a whole company.
+  //
+  // `limit * 2 + 1` rather than `limit`: users and contacts are merged and then
+  // deduped by address, so fetching exactly `limit` contacts could leave the
+  // page short after a dedupe drops the ones that are also Polaris accounts.
+  // The `+ 1` is what makes "there are more" detectable by the caller.
+  const [users, contactRows] = await Promise.all([
+    listRecipientUsers(),
+    prisma.contact.findMany({
+      where: contactSearchWhere(q),
+      select: { id: true, email: true, name: true, description: true, createdBy: true },
+      orderBy: [{ name: "asc" }, { email: "asc" }],
+      take: limit * 2 + 1,
+    }),
+  ]);
 
   const entries: AddressBookEntry[] = [];
   for (const u of users) {
@@ -613,7 +715,7 @@ export async function searchAddressBook(
       kind: "person",
     });
   }
-  for (const c of contacts) {
+  for (const c of contactRows) {
     entries.push({
       source: "contact",
       id: c.id,
@@ -654,6 +756,11 @@ export async function searchAddressBook(
     return true;
   });
 
+  // Still applied in JS, but over a bounded set and for one reason only: the
+  // USER half is an unfiltered cached index, so it is the half that still needs
+  // matching. Contacts arrived pre-filtered by SQL and directory hits were
+  // matched upstream; re-testing them here is harmless and keeps one definition
+  // of what "matches" means across the three sources.
   const filtered = q
     ? deduped.filter(
         (e) => e.email.toLowerCase().includes(q) || (e.name ?? "").toLowerCase().includes(q),

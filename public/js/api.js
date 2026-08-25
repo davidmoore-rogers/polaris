@@ -903,7 +903,11 @@ const api = {
     run:     (id)    => request("GET", `/automations/scripts/runs/${id}`),
   },
   contacts: {
-    list:    ()      => request("GET", "/contacts"),
+    // Paginated + server-side searched. `params` = { q, limit, offset }; the
+    // response carries { contacts, total, limit, offset }. Callers must read
+    // `total` rather than `contacts.length` to know how many matched.
+    list:    (params) => request("GET", "/contacts" + toQuery(params || {})),
+    get:     (id)    => request("GET", `/contacts/${id}`),
     // Unified recipient typeahead: Polaris users ∪ address-book contacts.
     // `directory` additionally queries the opted-in AD/Entra integrations
     // (live lookup, nothing persisted).

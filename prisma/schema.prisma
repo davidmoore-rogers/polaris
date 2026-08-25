@@ -4291,6 +4291,9 @@ model Contact {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
+  // Substring search on email/name is served by GIN trigram indexes created in
+  // migration 20260825050000_contacts_search_indexes -- Prisma cannot express a
+  // functional lower(...) gin_trgm_ops index, so they live only in SQL.
   @@map("contacts")
 }
 
