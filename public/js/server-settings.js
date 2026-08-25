@@ -7118,9 +7118,18 @@ function credHttpForm(cfg) {
       '<select id="f-http-authmode" style="max-width:280px">' +
         '<option value="bearer"' + (authMode === "bearer" ? " selected" : "") + '>Bearer token</option>' +
         '<option value="basic"' +  (authMode === "basic"  ? " selected" : "") + '>Basic (cleartext)</option>' +
-        '<option value="digest"' + (authMode === "digest" ? " selected" : "") + '>Digest (encrypted)</option>' +
+        '<option value="digest"' + (authMode === "digest" ? " selected" : "") + '>Digest (hashed)</option>' +
       '</select>' +
-      '<p class="hint">Basic and Digest carry the same username and password, so this has to be stated rather than guessed: trying Basic first would send the password in cleartext to a device that wanted Digest. Embedded devices — cameras, PDUs, older BMCs — commonly require Digest, and Axis OS 11+ disables Basic by default. Note the labels describe the CREDENTIAL only: Digest protects the password (the device is sent a hash, never the password itself) but leaves the rest of the exchange readable, so tick <strong>Use HTTPS</strong> on the check if the path or response matters too.</p>' +
+      '<p class="hint">Basic and Digest carry the same username and password, so this has to be stated rather than guessed: trying Basic first would send the password in cleartext to a device that wanted Digest. Embedded devices — cameras, PDUs, older BMCs — commonly require Digest, and Axis OS 11+ disables Basic by default. "Hashed" describes the credential only — Digest sends a hash of the password plus a server nonce, never the password itself, though the username still goes in the clear.</p>' +
+      // Shown for bearer alone, via the same data-http-auth mechanism that
+      // shows/hides the carrier fields. The exposure is real but conditional:
+      // HTTPS is configured per CHECK on the widget, not on the credential, so
+      // the warning names where to go rather than implying it can be fixed here.
+      '<div class="alert alert-warning" data-http-auth="bearer" style="padding:0.6rem 0.75rem;border-radius:6px;background:rgba(214,137,16,0.12);border:1px solid var(--color-warning,#d68910);color:var(--color-text);font-size:0.82rem;margin-bottom:0.75rem">' +
+        '<strong>The token is sent in cleartext</strong> unless the assets using this credential are checked over HTTPS. ' +
+        'Bearer tokens ride the <code>Authorization</code> header verbatim, so anyone on the path can read and reuse one. ' +
+        'HTTPS is set per check — tick <strong>Use HTTPS</strong> on the HTTP-check widget under Manufacturer Profiles → Custom Widgets.' +
+      '</div>' +
     '</div>' +
     '<div class="form-group" data-http-auth="bearer"><label>Bearer token</label>' +
       '<input type="password" id="f-http-token" value="' + escapeHtml(cfg.apiToken || "") + '">' +
